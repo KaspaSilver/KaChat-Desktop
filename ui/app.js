@@ -6768,6 +6768,8 @@ function setActiveAppTab(tab) {
     screen.hidden = screen.dataset.appTabScreen !== screenTab;
   });
   if (!isChats) {
+    // Leaving Chats ends a selection, so coming back does not find Cancel and Select All waiting.
+    if (chatSelectionModeActive) setChatSelectionMode(false);
     if (conversation) conversation.hidden = true;
     if (detailEmptyState) detailEmptyState.hidden = true;
     if (groupChatScreen) groupChatScreen.hidden = true;
@@ -17922,7 +17924,11 @@ function setChatToolRowsForGroupsTab(isGroups) {
   // The Group Chats tab now uses the same Select control as the Chats tab (multi-select
   // groups to mark read / delete). New groups are created with the floating + button, so
   // the old "New Group" header row is retired.
-  if (selectRow) selectRow.hidden = false;
+  // Select sits in the topbar every tab shares but only ever acts on the chats list, so it shows
+  // only while Chats is on screen. This runs on every chat list render, including ones triggered
+  // by incoming messages while another tab is open, so it must not simply unhide the control.
+  // The body class is setActiveAppTab's own record of that (and is safe during boot).
+  if (selectRow) selectRow.hidden = !document.body.classList.contains("chats-tab");
   if (actionsRow) actionsRow.hidden = true;
   if (!isGroups && listEl) listEl.hidden = true;
 }
