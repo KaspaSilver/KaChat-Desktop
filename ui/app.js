@@ -4089,7 +4089,7 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
     await connectAndRefresh({ quiet: true });
     showCopyToast(mode === "custom" ? "Connected to your node" : "Connected automatically");
   } catch (error) {
-    if (errorEl) { errorEl.textContent = `Could not connect: ${error.message}`; errorEl.hidden = false; }
+    if (errorEl) { errorEl.textContent = `Could not connect: ${describeConnectError(error)}`; errorEl.hidden = false; }
     setStatus("Connection failed");
   } finally {
     button.disabled = false;
@@ -9334,6 +9334,25 @@ function hostFromEndpoint(endpoint) {
   } catch {
     return endpoint;
   }
+}
+
+/// A message for a failed connection that is never the word "undefined".
+///
+/// The node client is WASM: it rejects with bare strings and with JsValues that have no `.message`,
+/// so reading `.message` straight off it printed "Could not connect: undefined" - which tells the
+/// person reading it nothing at all, least of all that the usual cause is a browser refusing an
+/// insecure ws:// node or an unreachable resolver.
+function describeConnectError(error) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error.trim();
+  const message = error?.message ? String(error.message) : "";
+  if (message && message !== "undefined") return message;
+  try {
+    const json = JSON.stringify(error);
+    if (json && json !== "{}" && json !== "null") return json;
+  } catch { /* not serialisable */ }
+  return "the node client gave no detail. This is usually a blocked ws:// node (a page served over"
+    + " https can only reach wss://) or a resolver that could not be reached.";
 }
 
 function renderConnectionStatus() {

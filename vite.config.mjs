@@ -27,6 +27,15 @@ function nextcloudProxy() {
   const mount = (server) => {
     server.middlewares.use("/nc-proxy", (req, res) => {
         // connect strips the "/nc-proxy" mount prefix, so req.url is "/<origin>/<path>?<query>".
+        // "Are you there?" - answered before anything else, so a healthy deployment does not have
+        // to report its own liveness check as a console error. See engine/endpoints.js.
+        if ((req.url || "") === "/__probe") {
+          res.statusCode = 200;
+          res.setHeader("content-type", "text/plain");
+          res.setHeader("cache-control", "no-store");
+          res.end("kachat-proxy");
+          return;
+        }
         const match = /^\/([^/]+)(\/.*)?$/.exec(req.url || "");
         let origin = null;
         try {

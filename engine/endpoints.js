@@ -59,6 +59,21 @@ let overrides = loadStored();
 // headers, so direct browser fetches degrade into a wall of red CORS noise the moment a
 // balance-lookup burst trips its limiter. Server-side forwarding has no CORS at all.
 const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$/i;
+/// Where the proxy lives, relative to wherever the app is served from.
+///
+/// The published site sits under /desktop/, so the proxy is at /desktop/nc-proxy/ - a root-absolute
+/// /nc-proxy/ 404s there. Vite substitutes BASE_URL at build time; every other caller of the proxy
+/// already goes through it (see nextcloud.js, kns.js), and this one did not.
+function proxyRoot() {
+  let base = "/";
+  try { base = import.meta.env.BASE_URL || "/"; } catch { base = "/"; }
+  return `${base}nc-proxy/`;
+}
+
+/// What the proxy answers a probe with, so "the proxy is here" is a 200 rather than an error the
+/// browser console reports in red on a perfectly healthy deployment.
+const PROBE_REPLY = "kachat-proxy";
+
 function installIndexerProxy() {
   if (typeof window === "undefined" || typeof window.fetch !== "function" || window.__kasiaProxyInstalled) return;
   window.__kasiaProxyInstalled = true;
@@ -75,17 +90,17 @@ function installIndexerProxy() {
   //
   // Asked rather than assumed, because the answer differs per deployment: the dev server and the
   // preview server behind kachat.app both have it, a plain static host serving the built files
-  // does not, and a file:// open has no server at all. /nc-proxy with an unparseable target is a
-  // 400 with a known body; anything else - a 404, an SPA fallback page, a network error - means no
-  // proxy, and requests go direct exactly as before.
+  // does not, and a file:// open has no server at all. The proxy answers __probe with a known
+  // string; anything else - a 404, an SPA fallback page, a network error - means no proxy, and
+  // requests go direct exactly as before.
   let probe = null;
   const proxyAvailable = () => {
     if (!probe) {
       probe = (async () => {
         try {
-          const response = await nativeFetch("/nc-proxy/__probe", { cache: "no-store" });
-          if (response.status !== 400) return false;
-          return (await response.text()).trim() === "Bad proxy target";
+          const response = await nativeFetch(`${proxyRoot()}__probe`, { cache: "no-store" });
+          if (!response.ok) return false;
+          return (await response.text()).trim() === PROBE_REPLY;
         } catch { return false; }
       })();
     }
@@ -102,7 +117,7 @@ function installIndexerProxy() {
       if (rawUrl) {
         const parsed = new URL(rawUrl, window.location.origin);
         if (INDEXER_PROXY_HOST_RE.test(parsed.hostname)) {
-          const proxied = `/nc-proxy/${encodeURIComponent(parsed.origin)}${parsed.pathname}${parsed.search}`;
+          const proxied = `${proxyRoot()}${encodeURIComponent(parsed.origin)}${parsed.pathname}${parsed.search}`;
           return proxyAvailable().then((ok) => {
             if (!ok) return nativeFetch(input, init);
             if (typeof input === "string" || input instanceof URL) return nativeFetch(proxied, init);
