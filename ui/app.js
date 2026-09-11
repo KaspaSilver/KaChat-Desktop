@@ -17373,10 +17373,31 @@ const GROUP_UNREAD_KEY = "kachat-group-unread-v1";
 
 function loadGroupMsgAll() { try { return JSON.parse(localStorage.getItem(GROUP_MSG_KEY) || "{}") || {}; } catch { return {}; } }
 function saveGroupMsgAll(all) { try { localStorage.setItem(GROUP_MSG_KEY, JSON.stringify(all)); } catch {} }
+/// System lines - "X was added", a photo or name change - last ten minutes.
+///
+/// They exist to tell you what just happened, and after that they are clutter in a thread you
+/// scroll back through. iOS and Android both drop them at the same age.
+const GROUP_SYSTEM_MESSAGE_LIFETIME_MS = 10 * 60 * 1000;
+
+function isExpiredGroupSystemMessage(message, now = Date.now()) {
+  if (!message?.system) return false;
+  return now - Number(message.createdAt || 0) > GROUP_SYSTEM_MESSAGE_LIFETIME_MS;
+}
+
 function groupMessages(groupId) {
   const all = loadGroupMsgAll();
   const list = all?.[engine.address || ""]?.[groupId];
   return Array.isArray(list) ? list : [];
+}
+
+/// Drops expired system lines from storage for one group. Called as a thread renders, so they
+/// never build up - the same trigger iOS uses.
+function pruneExpiredGroupSystemMessages(groupId) {
+  const list = groupMessages(groupId);
+  if (!list.length) return;
+  const kept = list.filter((message) => !isExpiredGroupSystemMessage(message));
+  if (kept.length === list.length) return;
+  saveGroupMessages(groupId, kept);
 }
 function saveGroupMessages(groupId, list) {
   const all = loadGroupMsgAll();
@@ -17468,6 +17489,8 @@ function maybeNotifyGroupIncoming(groupId, senderAddress, text, id, createdAt) {
   if (learnedAt && Number(createdAt || 0) > 0 && Number(createdAt) < learnedAt - 120_000) return;
   // A hidden member's messages are filtered out of the thread; they must not ping either.
   if (isGroupMemberHidden(groupId, senderAddress)) return;
+  // Muted is the softer one: their messages stay in the thread, they just stop pinging.
+  if (isGroupMemberMuted(groupId, senderAddress)) return;
   if (textMentionsMe(text)) { maybeRecordGroupMention(groupId, senderAddress, text, id, createdAt); return; }
   if (mode !== "all" && !isReplyToMyGroupMessage(text)) return;
   if (!groupOsPingAllowed(groupId)) return;
@@ -17620,10 +17643,14 @@ async function sendGroupReaction(groupId, targetMessage, emoji) {
   await attempt();
 }
 
-// --- hidden group members (per wallet, per group): filters a member's messages from view ---
-// (iOS also has mute + mentions-only, but those are notification-only and desktop pushes no
-// group notifications, so they'd be dead UI here — hide is the one that actually does something.)
+// --- hidden and muted group members (per wallet, per group) ---
+//
+// Two different things, as on iOS and Android. HIDE filters a member's messages out of the thread;
+// they are still stored and come back on unhide. MUTE leaves their messages exactly where they are
+// and only stops them pinging you. The note that used to sit here said mute would be dead UI
+// because desktop had no group notifications - it has had them for a while now.
 const GROUP_HIDDEN_MEMBERS_KEY = "kachat-group-hidden-members-v1";
+const GROUP_MUTED_MEMBERS_KEY = "kachat-group-muted-members-v1";
 function loadGroupHiddenAll() { try { return JSON.parse(localStorage.getItem(GROUP_HIDDEN_MEMBERS_KEY) || "{}") || {}; } catch { return {}; } }
 function saveGroupHiddenAll(all) { try { localStorage.setItem(GROUP_HIDDEN_MEMBERS_KEY, JSON.stringify(all)); } catch {} }
 function groupHiddenMembersFor(groupId) {
@@ -17631,6 +17658,22 @@ function groupHiddenMembersFor(groupId) {
   return Array.isArray(list) ? list : [];
 }
 function isGroupMemberHidden(groupId, address) { return groupHiddenMembersFor(groupId).includes(address); }
+function loadGroupMutedAll() { try { return JSON.parse(localStorage.getItem(GROUP_MUTED_MEMBERS_KEY) || "{}") || {}; } catch { return {}; } }
+function saveGroupMutedAll(all) { try { localStorage.setItem(GROUP_MUTED_MEMBERS_KEY, JSON.stringify(all)); } catch {} }
+function groupMutedMembersFor(groupId) {
+  const list = loadGroupMutedAll()?.[engine.address || ""]?.[groupId];
+  return Array.isArray(list) ? list : [];
+}
+function isGroupMemberMuted(groupId, address) { return groupMutedMembersFor(groupId).includes(address); }
+function setGroupMemberMuted(groupId, address, muted) {
+  const all = loadGroupMutedAll();
+  const wallet = engine.address || "";
+  if (!all[wallet]) all[wallet] = {};
+  const current = new Set(Array.isArray(all[wallet][groupId]) ? all[wallet][groupId] : []);
+  if (muted) current.add(address); else current.delete(address);
+  all[wallet][groupId] = [...current];
+  saveGroupMutedAll(all);
+}
 function setGroupMemberHidden(groupId, address, hidden) {
   const all = loadGroupHiddenAll();
   const wallet = engine.address || "";
@@ -18089,6 +18132,7 @@ function deleteGroupMessageLocal(message) {
 
 function renderGroupMessages() {
   if (!activeGroupId || !groupMessageArea) return;
+  pruneExpiredGroupSystemMessages(activeGroupId);
   // Hidden members' messages are filtered out of the view (see the avatar menu). Reaction
   // envelopes are applied as pills at ingest, never shown as bubbles — filter any that reached
   // storage (e.g. via a group-history restore that didn't intercept) so they don't leak as raw JSON.
@@ -18703,6 +18747,12 @@ function openGroupManage(groupId) {
           <span>${escapeHtml(shortAddress(m.address))}</span>
         </span>
         ${m.isAdmin ? `<span class="group-member-admin-badge">Admin</span>` : ``}
+        ${m.address === engine.address ? `` : (() => {
+          const muted = isGroupMemberMuted(groupId, m.address);
+          return `<button type="button" class="group-member-mute-btn${muted ? " on" : ""}" data-group-mute-member="${escapeHtml(m.address)}" title="${muted ? "Unmute notifications from this member" : "Mute notifications from this member"}" aria-label="${muted ? "Unmute member" : "Mute member"}" aria-pressed="${muted}">${muted
+            ? `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="m17 9 4 6M21 9l-4 6"/></svg>`
+            : `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>`}</button>`;
+        })()}
         ${isAdmin && !m.isAdmin ? `<button type="button" class="group-member-resend-btn" data-group-resend-member="${escapeHtml(m.address)}" title="Resend invite to this member" aria-label="Resend invite"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg></button>` : ``}
         ${canRemove ? `<button type="button" class="group-member-remove-btn" data-group-remove-member="${escapeHtml(m.address)}" title="Remove from group" aria-label="Remove from group"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ``}
       </div>`;
@@ -19470,6 +19520,16 @@ groupManageBody?.addEventListener("click", async (event) => {
     return;
   }
   // Resend an invite to ONE member (admin) — targeted retry.
+  const muteMember = event.target.closest("[data-group-mute-member]");
+  if (muteMember && activeGroupId) {
+    const address = muteMember.dataset.groupMuteMember;
+    const nowMuted = !isGroupMemberMuted(activeGroupId, address);
+    setGroupMemberMuted(activeGroupId, address, nowMuted);
+    openGroupManage(activeGroupId);
+    showCopyToast(nowMuted ? "Muted. Their messages still show in the thread." : "Unmuted.");
+    return;
+  }
+
   const resendOne = event.target.closest("[data-group-resend-member]");
   if (resendOne && activeGroupId) {
     const mgr = getGroupManager();

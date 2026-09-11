@@ -8685,6 +8685,14 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .group-member-resend-btn:hover { background: var(--surface-2); }
 .group-member-resend-btn:disabled { opacity: .5; cursor: default; }
+/* Mute a member's notifications without hiding their messages - the softer of the two controls
+   on a member row. Teal when on, so the state reads at a glance down a roster. */
+.group-member-mute-btn {
+  flex: 0 0 auto; width: 30px; height: 30px; display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.group-member-mute-btn:hover { background: var(--surface-2); color: var(--text); }
+.group-member-mute-btn.on { color: var(--kaspa); }
 .group-member-remove-btn {
   flex: 0 0 auto;
   width: 30px;
