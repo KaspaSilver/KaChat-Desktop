@@ -13,8 +13,9 @@ const ENDPOINTS_KEY = "kachat-endpoints-v1";
 export const ENDPOINT_DEFAULTS = Object.freeze({
   kaspaApi: "https://api.kaspa.org",
   // KaChat's own indexer (kachat.duckdns.org) is now the default chat/message + group-chat
-  // indexer, matching iOS/Android. In the Vite dev browser it's routed through the same-origin
-  // dev proxy (see vite.config.mjs / installDevIndexerProxy) in case any endpoint lacks CORS.
+  // indexer, matching iOS/Android. In a browser it is routed through the same-origin proxy when the
+  // server hosting the page has one (see vite.config.mjs / installIndexerProxy), because the
+  // indexer sends no CORS headers of its own.
   kasiaIndexer: "https://kachat.duckdns.org",
   kapostIndexer: "https://kachat.duckdns.org",
   broadcastIndexer: "https://kachat.duckdns.org",
@@ -52,23 +53,45 @@ let overrides = loadStored();
 // vite.config.mjs), which forwards it server-side where CORS does not apply. Wrapping fetch once —
 // rather than rewriting URLs in getEndpoint() — covers ALL call sites (sync.js, group-indexer.js,
 // messages.js, kaposts.js, broadcasts.js, and the settings input path) and keeps the URLs real
-// https:// everywhere else, so normalizeBaseUrl and native/packaged builds (which have no CORS)
-// still hit the host directly. No-op outside dev.
+// https:// everywhere else, so normalizeBaseUrl and any deployment without the proxy still hit the
+// host directly.
 // api.kaspa.org rides through the proxy too: its RATE-LIMIT/error responses carry no CORS
 // headers, so direct browser fetches degrade into a wall of red CORS noise the moment a
 // balance-lookup burst trips its limiter. Server-side forwarding has no CORS at all.
 const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$/i;
-function installDevIndexerProxy() {
-  // NOTE: Vite string-replaces the literal token `import.meta.env.DEV` at transform time.
-  // Optional chaining (import.meta?.env?.DEV) does NOT match that token, so it would be
-  // left to evaluate at runtime where `import.meta.env` doesn't exist — silently yielding
-  // false and disabling the proxy. Keep this as the exact literal token.
-  let dev = false;
-  try { dev = Boolean(import.meta.env.DEV); } catch { dev = false; }
-  if (!dev || typeof window === "undefined" || typeof window.fetch !== "function" || window.__kasiaDevProxyInstalled) return;
-  window.__kasiaDevProxyInstalled = true;
-  console.info("[kachat] indexer dev-proxy active — indexer requests routed through /nc-proxy");
+function installIndexerProxy() {
+  if (typeof window === "undefined" || typeof window.fetch !== "function" || window.__kasiaProxyInstalled) return;
+  window.__kasiaProxyInstalled = true;
   const nativeFetch = window.fetch.bind(window);
+
+  // Is this page being served by something that carries the /nc-proxy handler?
+  //
+  // It used to be gated on import.meta.env.DEV, on the assumption that anything else was a
+  // packaged build talking to the network directly, where CORS does not apply. That assumption was
+  // wrong the moment the app was published as a website: the production build served at
+  // kachat.app is a browser page like any other, the indexer sends no Access-Control-Allow-Origin,
+  // and every request it made was refused. The proxy was mounted on the preview server all along -
+  // only the client half of it was switched off.
+  //
+  // Asked rather than assumed, because the answer differs per deployment: the dev server and the
+  // preview server behind kachat.app both have it, a plain static host serving the built files
+  // does not, and a file:// open has no server at all. /nc-proxy with an unparseable target is a
+  // 400 with a known body; anything else - a 404, an SPA fallback page, a network error - means no
+  // proxy, and requests go direct exactly as before.
+  let probe = null;
+  const proxyAvailable = () => {
+    if (!probe) {
+      probe = (async () => {
+        try {
+          const response = await nativeFetch("/nc-proxy/__probe", { cache: "no-store" });
+          if (response.status !== 400) return false;
+          return (await response.text()).trim() === "Bad proxy target";
+        } catch { return false; }
+      })();
+    }
+    return probe;
+  };
+
   window.fetch = (input, init) => {
     try {
       // Cover every fetch input shape: string, URL instance (sync.js builds these - a URL has
@@ -80,15 +103,18 @@ function installDevIndexerProxy() {
         const parsed = new URL(rawUrl, window.location.origin);
         if (INDEXER_PROXY_HOST_RE.test(parsed.hostname)) {
           const proxied = `/nc-proxy/${encodeURIComponent(parsed.origin)}${parsed.pathname}${parsed.search}`;
-          if (typeof input === "string" || input instanceof URL) return nativeFetch(proxied, init);
-          return nativeFetch(new Request(proxied, input), init);
+          return proxyAvailable().then((ok) => {
+            if (!ok) return nativeFetch(input, init);
+            if (typeof input === "string" || input instanceof URL) return nativeFetch(proxied, init);
+            return nativeFetch(new Request(proxied, input), init);
+          });
         }
       }
     } catch { /* fall through to native fetch */ }
     return nativeFetch(input, init);
   };
 }
-installDevIndexerProxy();
+installIndexerProxy();
 
 function persist() {
   try { localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(overrides)); } catch {}
