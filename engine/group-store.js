@@ -79,6 +79,12 @@ export class GroupManager {
     if (roots[key] === root) return;
     roots[key] = root;
     record.previousRootsHex = roots;
+    // A key we did not have a moment ago just arrived, and the message scan has already walked
+    // past everything it could not read - the cursor advances on every row, decoded or not, so
+    // ciphertext skipped for want of this key would never be asked for again. Dropping the
+    // cursors makes the next sweep re-walk from the start and pick it all up. Re-reading is
+    // cheap and idempotent: the app dedupes on msg_id and txid.
+    record.cursors = {};
     this._put(record);
   }
 
@@ -588,11 +594,15 @@ export class GroupManager {
         }
         return roots;
       })(),
+      // Joining a group, or having its roster change, can make history readable that was not a
+      // moment ago - and the scan advances its cursor past anything it could not decode. Re-walk
+      // once from the start so that history is actually asked for. Idempotent: the app dedupes on
+      // msg_id and txid.
+      cursors: isNewEpoch ? {} : (existing?.cursors || {}),
       // device_id is preserved across updates; counter resets only when the epoch advances.
       deviceIdHex: existing?.deviceIdHex || G.bytesToHex(G.generateDeviceId()),
       msgCounter: isNewEpoch ? 0 : (existing?.msgCounter || 0),
       members: roster,
-      cursors: existing?.cursors || {},
       // A recovered admin group already has its recovery invite on chain for this epoch.
       selfInviteEpoch: isAdminRecord ? payload.epoch : existing?.selfInviteEpoch,
       // Group photo isn't carried in the root (separate gctl_photo control) — preserve it.

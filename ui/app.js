@@ -17536,14 +17536,67 @@ function maybeRecordGroupMention(groupId, senderAddress, text, id, createdAt) {
   });
 }
 
+/// Are these two rows the same message?
+///
+/// A group message can arrive by several routes carrying DIFFERENT identifiers. The chain scan
+/// knows its msg_id and its txid. A message you just sent starts with neither and is patched with
+/// both once the broadcast returns - but only if it returns. An archive restored from a phone
+/// carries whichever of the two that platform stored.
+///
+/// The old check picked ONE id per row by priority - msgIdHex, else txId, else the local uuid -
+/// and compared those. Two rows describing the same message but identified by different fields
+/// never matched, so every one of them appeared twice. Comparing on any identifier the two rows
+/// actually share is what closes that.
+function groupMessagesAreSame(a, b) {
+  if (a.msgIdHex && b.msgIdHex) return a.msgIdHex === b.msgIdHex;
+  if (a.txId && b.txId) return a.txId === b.txId;
+  return Boolean(a.id) && a.id === b.id;
+}
+
 function appendGroupMessage(groupId, message) {
   const list = groupMessages(groupId);
-  const key = message.msgIdHex || message.txId || message.id;
-  if (key && list.some((m) => (m.msgIdHex || m.txId || m.id) === key)) return false;
+  const existing = list.find((m) => groupMessagesAreSame(m, message));
+  if (existing) {
+    // Same message by a route that knows an id this row is missing. Fill it in rather than
+    // dropping it on the floor: next time it arrives by the OTHER route, the rows match.
+    let changed = false;
+    if (!existing.msgIdHex && message.msgIdHex) { existing.msgIdHex = message.msgIdHex; changed = true; }
+    if (!existing.txId && message.txId) { existing.txId = message.txId; changed = true; }
+    if (changed) saveGroupMessages(groupId, list);
+    return false;
+  }
   list.push(message);
   list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   saveGroupMessages(groupId, list);
   return true;
+}
+
+/// Collapses duplicates already sitting in storage, keeping the earliest copy and folding the
+/// others' identifiers into it.
+///
+/// A repair pass, not a safeguard: the append above stops new ones. This is for the threads that
+/// already doubled up while the old check was in place, which no amount of correct behaviour from
+/// here on would clean up by itself.
+function dedupeStoredGroupMessages(groupId) {
+  const list = groupMessages(groupId);
+  if (list.length < 2) return 0;
+  const kept = [];
+  let removed = 0;
+  for (const message of list) {
+    const existing = kept.find((m) => groupMessagesAreSame(m, message));
+    if (!existing) { kept.push(message); continue; }
+    if (!existing.msgIdHex && message.msgIdHex) existing.msgIdHex = message.msgIdHex;
+    if (!existing.txId && message.txId) existing.txId = message.txId;
+    // A confirmed copy beats a pending one that never got patched.
+    if (message.status === MESSAGE_STATUSES.CONFIRMED && existing.status !== MESSAGE_STATUSES.CONFIRMED) {
+      existing.status = message.status;
+    }
+    removed += 1;
+  }
+  if (!removed) return 0;
+  kept.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  saveGroupMessages(groupId, kept);
+  return removed;
 }
 
 // Number of OTHER members (excludes self) — the fan-out count for admin control sends.
@@ -18133,6 +18186,7 @@ function deleteGroupMessageLocal(message) {
 function renderGroupMessages() {
   if (!activeGroupId || !groupMessageArea) return;
   pruneExpiredGroupSystemMessages(activeGroupId);
+  dedupeStoredGroupMessages(activeGroupId);
   // Hidden members' messages are filtered out of the view (see the avatar menu). Reaction
   // envelopes are applied as pills at ingest, never shown as bubbles — filter any that reached
   // storage (e.g. via a group-history restore that didn't intercept) so they don't leak as raw JSON.
