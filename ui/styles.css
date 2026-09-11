@@ -104,9 +104,12 @@ button { cursor: pointer; }
   align-items: center;
   gap: 14px;
   padding: 10px 20px;
-  border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
+/* The line under the topbar belongs over the chats list, not across the whole window: on the
+   right is a conversation whose own header is an overlay, and a rule cutting across it made the
+   two read as separate apps stacked on top of each other. */
+.app-sidebar { border-top: 1px solid var(--line); }
 
 .app-topbar-brand {
   display: flex;
@@ -686,19 +689,12 @@ button { cursor: pointer; }
   border-radius: 999px;
 }
 
-/* Global notification bell */
-.topbar-notif-button {
-  position: relative; width: 34px; height: 34px; padding: 0; border-radius: 999px;
-  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
-  display: grid; place-items: center; cursor: pointer;
-}
-.topbar-notif-button:hover { background: rgba(255,255,255,.06); }
-.topbar-notif-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-/* Unread indicator: a plain red DOT (no count) — matches the mobile bells. */
-.topbar-notif-badge {
-  position: absolute; top: -1px; right: -1px; width: 10px; height: 10px;
-  border-radius: 999px; background: #e0245e;
-  border: 2px solid var(--panel, #101419);
+/* Global notifications: a row on Profile, where the phones keep it, rather than a bell in the
+   topbar - it lists wallet activity and KaPosts pings, which is Profile's business, and the topbar
+   is shared by every screen. Unread shows as a plain red dot, no count, matching the mobile bells. */
+.profile-row-with-badge { display: inline-flex; align-items: center; gap: 8px; }
+.profile-notif-badge {
+  width: 9px; height: 9px; border-radius: 999px; background: #e0245e; flex: 0 0 auto;
 }
 .notif-center-card { max-width: 460px; }
 .notif-center-header-actions { display: flex; align-items: center; gap: 10px; }
@@ -1043,6 +1039,8 @@ button { cursor: pointer; }
   justify-items: center;
   text-align: center;
   padding: 2px 0 0;
+  /* Containing block for the floating header above. */
+  position: relative;
 }
 
 .back-button {
@@ -2228,14 +2226,26 @@ button { cursor: pointer; }
 
 /* Conversation header: avatar centered above the (always kaspa: address)
    title, back button and copy button pinned to the corners. */
+/* Height of the floating chat header, so the thread below can reserve exactly that much. */
+:root { --chat-header-h: 84px; }
+
+/* The header floats over the thread rather than sitting in a row above it, the way the phones do
+   it: messages pass under a translucent bar instead of being cut off by an opaque one, and the
+   thread keeps the full height of the pane. */
 .conversation-header {
-  position: relative;
-  width: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 6;
   min-width: 0;
   display: block;
-  min-height: 84px;
+  min-height: var(--chat-header-h);
   padding: 4px 0 14px;
   border-bottom: 1px solid var(--surface-2);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
 }
 
 .conversation-header .back-button {
@@ -2254,9 +2264,12 @@ button { cursor: pointer; }
 }
 
 .conversation-identity {
-  width: calc(100% - 96px);
+  /* Shrink to what it actually shows. It used to span the header's full width, so a click on any
+     empty part of the bar opened chat info - the avatar and the name are the target. */
+  width: auto;
+  max-width: calc(100% - 96px);
   min-width: 0;
-  margin: 0 48px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2321,10 +2334,15 @@ button { cursor: pointer; }
   min-height: 0;
   max-height: none;
   margin: 0;
-  padding: 14px 2px 10px;
+  /* Top inset clears the floating header: content scrolls under it, but can always be scrolled
+     out from behind it. */
+  padding: calc(var(--chat-header-h) + 12px) 2px 10px;
   align-content: safe end;
   overflow-y: auto;
 }
+/* Selection mode's toolbar is the first thing in flow once the header floats, so it needs the
+   same clearance. */
+.message-selection-toolbar { margin-top: var(--chat-header-h); }
 
 .conversation-empty {
   align-self: center;
@@ -2339,8 +2357,8 @@ button { cursor: pointer; }
 }
 
 @media (max-width: 620px) {
+  :root { --chat-header-h: 78px; }
   .conversation-header {
-    min-height: 78px;
     padding-bottom: 12px;
   }
   .conversation-header .back-button { width: 36px; height: 36px; }
@@ -7882,6 +7900,8 @@ body.session-logged-out [data-account-rename-modal] {
   height: 100%;
   max-width: 900px;
   margin: 0 auto;
+  /* Containing block for the floating header, same as .conversation-view's. */
+  position: relative;
 }
 .group-chat-header .group-chat-heading {
   display: flex;
@@ -7909,6 +7929,10 @@ body.session-logged-out [data-account-rename-modal] {
   min-height: 0;
   max-height: none;
   align-content: start;
+  /* Inherits .message-area's top inset for the floating header; align-content: start means the
+     thread grows downward from it, so the inset has to be real space rather than scroll padding
+     that the content would sit on top of. */
+  padding-top: calc(var(--chat-header-h) + 12px);
 }
 .group-message-sender {
   font-size: 11.5px;
