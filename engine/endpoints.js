@@ -99,8 +99,14 @@ function installIndexerProxy() {
       probe = (async () => {
         try {
           const response = await nativeFetch(`${proxyRoot()}__probe`, { cache: "no-store" });
-          if (!response.ok) return false;
-          return (await response.text()).trim() === PROBE_REPLY;
+          const body = (await response.text()).trim();
+          // Two ways the proxy identifies itself, because a server can be older than the page it
+          // is serving: the current one answers a probe with a known string, and every version
+          // before that answered an unparseable target with 400 "Bad proxy target". Accepting both
+          // means a deployment mid-update proxies rather than falling back to direct requests that
+          // CORS then refuses.
+          if (response.ok) return body === PROBE_REPLY;
+          return response.status === 400 && body === "Bad proxy target";
         } catch { return false; }
       })();
     }

@@ -156,6 +156,15 @@ function nextcloudProxy() {
 
 export default defineConfig({
   plugins: [nextcloudProxy()],
+  // The Kaspa SDK is wasm-bindgen output, and its generated glue checks that an object handed
+  // across the boundary is an instance of the expected class - reporting the constructor's NAME
+  // when it is not. Minification renames classes, so on the built site `new Resolver()` arrived as
+  // `object constructor \`e\` does not match expected class \`Resolver\`` and automatic node
+  // selection could not connect at all. Dev was fine because dev does not minify, which is exactly
+  // why this only ever appeared on the published site.
+  esbuild: {
+    keepNames: true,
+  },
   server: {
     // Vite rejects unknown Host headers by default; allow access via the
     // DuckDNS domain fronted by Nginx Proxy Manager.
