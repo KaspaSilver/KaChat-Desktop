@@ -355,8 +355,38 @@ async function uploadBackup(payloadJson) {
  * downloadBackupFile, and an undecryptable/unreadable/foreign/wrong-schema
  * body throws out of exportBackupPayload.
  */
+/// Is this truncation the FILE being short, or the transfer losing its tail?
+///
+/// It matters, because the two need opposite handling and look identical from the download alone.
+/// A lost tail must abort and leave the server untouched. A file that is genuinely short is
+/// damaged goods that will fail identically forever - and since every backup reads the remote
+/// before writing, refusing to proceed would mean this device could never repair it.
+///
+/// The server knows its own file's size. If it matches what arrived, nothing was lost in
+/// transit and the stored file really is that short.
+async function repairableTruncation(error) {
+  const received = Number(error?.truncatedLength || 0);
+  if (!received) return false;
+  const info = await fetchBackupInfo();
+  const serverSize = Number(info?.size || 0);
+  if (!serverSize) return false;
+  // Characters against bytes: a multi-byte character makes the string shorter than the file, never
+  // longer, so "arrived at least as long as the file" is the safe form of the comparison.
+  return received >= serverSize;
+}
+
 async function runBackup() {
-  const existingRemoteJson = await downloadBackupFile(BACKUP_FILENAME);
+  let existingRemoteJson = null;
+  try {
+    existingRemoteJson = await downloadBackupFile(BACKUP_FILENAME);
+  } catch (error) {
+    if (!(await repairableTruncation(error))) throw error;
+    // The stored file is short, not the transfer. Keep a copy under a dated name - it cannot be
+    // parsed, but it is still the user's data and this is the only copy - then carry on as though
+    // the server had nothing, which lets this backup replace it with a whole file.
+    await preserveDamagedBackup().catch(() => {});
+    existingRemoteJson = null;
+  }
   const payload = await deps.exportBackupPayload(existingRemoteJson);
   let newETag = await uploadBackup(payload);
   if (!newETag) {
@@ -368,6 +398,27 @@ async function runBackup() {
   // If both captures failed the stored ETag is cleared, and the watcher re-imports our own
   // upload once — which the txId/id dedupe in importPhoneArchive makes a harmless no-op.
   rememberBackupETag(newETag);
+}
+
+/// Copies a damaged backup aside before it is overwritten, under a dated name.
+///
+/// WebDAV COPY rather than MOVE: if the copy fails the original is still there, and the backup
+/// that follows is free to overwrite it either way.
+async function preserveDamagedBackup() {
+  const davRoot = `${apiBase()}/remote.php/dav/files/${nc.username}`;
+  const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const source = `${davRoot}/${folder}/${BACKUP_FILENAME}`;
+  const destinationPath = `/remote.php/dav/files/${nc.username}/${folder}/kachat-backup-damaged-${stamp}.json`;
+  await fetch(source, {
+    method: "COPY",
+    headers: {
+      Authorization: authHeader(),
+      // Absolute path on the same host; Nextcloud accepts a path-only Destination.
+      Destination: destinationPath,
+      Overwrite: "F",
+    },
+  });
 }
 
 async function fetchBackupInfo() {
@@ -421,10 +472,14 @@ async function downloadBackupFile(filename) {
   // body cannot end with }, whatever compression it arrived under.
   const trimmed = text.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    throw transientError(
+    const error = transientError(
       `The backup file arrived incomplete (${text.length.toLocaleString()} characters, ending mid-file). `
       + "Nothing on the server was changed, so trying again is safe."
     );
+    // Carried so the backup path can ask the one question that settles it: is the file on the
+    // server this size, or did the transfer lose the tail? See repairableTruncation().
+    error.truncatedLength = text.length;
+    throw error;
   }
   return text;
 }
