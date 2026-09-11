@@ -7459,6 +7459,28 @@ body.session-logged-out [data-account-rename-modal] {
   stroke-linecap: round; stroke-linejoin: round;
 }
 
+/* Drafts list: a preview line, when it was saved, and how many posts it would be. */
+.kaposts-draft-row {
+  display: flex; align-items: stretch; gap: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.kaposts-draft-open {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+  padding: 12px 4px 12px 12px; border: 0; background: transparent; cursor: pointer;
+  color: var(--text); font: inherit; text-align: left;
+}
+.kaposts-draft-open:hover { background: rgba(255,255,255,.04); }
+.kaposts-draft-preview {
+  font-size: 13.5px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.kaposts-draft-meta { font-size: 11.5px; color: var(--muted); }
+.kaposts-draft-delete {
+  flex: 0 0 auto; width: 38px; border: 0; background: transparent; cursor: pointer;
+  color: var(--muted); font-size: 20px; line-height: 1;
+}
+.kaposts-draft-delete:hover { color: #ff6b6b; }
+
 /* New Group: photo beside the name - the two things that identify a group, together. */
 .group-identity-row { display: flex; align-items: center; gap: 14px; }
 .group-identity-row .group-name-input { flex: 1; min-width: 0; }

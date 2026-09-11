@@ -1714,6 +1714,7 @@ function renderComposerThreadUi() {
 }
 
 function openComposer(quoteTarget = null) {
+  editingDraftId = null;
   // Posting costs KAS — with a confirmed-zero chatting balance, show the funding
   // popup (QR + address + copy) instead of a composer that could never submit.
   if (deps.isChattingBalanceZero?.()) {
@@ -1740,11 +1741,28 @@ function openComposer(quoteTarget = null) {
   composerInput.focus();
 }
 
-function closeComposer() {
+async function closeComposer({ keepDraft = null } = {}) {
+  // Closing with unfinished writing in the box is the moment a draft is worth anything. Asked
+  // rather than assumed in both directions: saving silently fills the list with abandoned
+  // half-sentences, and discarding silently is how people lose what they were writing.
+  const hasContent = [String(composerInput?.value || ""), ...composerThreadSegments].some((s) => s.trim());
+  let save = keepDraft;
+  if (save === null && hasContent) {
+    save = await deps.confirmDialog?.({
+      title: "Save as draft?",
+      message: "Keep what you have written to finish later. Discarding cannot be undone.",
+      confirmLabel: "Save Draft",
+      destructive: false,
+    }) ?? false;
+  }
+  if (save) saveDraftFromComposer();
+
   composerEl.hidden = true;
   composerQuoteTarget = null;
   composerThreadSegments = [];
+  editingDraftId = null;
   renderComposerThreadUi();
+  if (save) renderAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,7 +1825,7 @@ function renderPanel() {
   const restorePanelScroll = () => { panelBodyEl.scrollTop = previousTop; };
   const titles = {
     profile: "Profile", notifications: "Notifications", engagement: "Post Activity",
-    bookmarks: "Bookmarks", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
+    bookmarks: "Bookmarks", drafts: "Drafts", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
   };
   panelTitleEl.textContent = titles[panel.type === "list" ? panel.kind : panel.type] || "Panel";
 
@@ -1961,6 +1979,11 @@ function renderPanel() {
       panelBodyEl.innerHTML = bookmarks.length === 0
         ? `<div class="no-results-card"><strong>No bookmarks yet</strong><span>Tap the bookmark icon on any post to save it here.</span></div>`
         : bookmarks.map((post) => postCellHtml(post, { inThread: true })).join("");
+      restorePanelScroll();
+      return;
+    }
+    if (panel.kind === "drafts") {
+      panelBodyEl.innerHTML = draftsPanelHtml();
       restorePanelScroll();
       return;
     }
@@ -2478,6 +2501,106 @@ function handlePopoverAction(action, post) {
 /// with them: a follow made on this device is in localStorage the instant it is tapped, while the
 /// indexer may not have caught up on it yet.
 // ---------------------------------------------------------------------------
+// Post drafts (iOS KaPostsDraftStore)
+// ---------------------------------------------------------------------------
+
+const KAPOSTS_DRAFTS_KEY = "kachat-kaposts-drafts-v1";
+
+/// Saved drafts, newest first. Local and unsynced on purpose, exactly as on iOS: a draft is
+/// unfinished writing, and putting it on chain or in a shared backup publishes something the
+/// writer never decided to publish.
+let kapostDrafts = [];
+/// The draft currently open in the composer, so saving again updates it rather than piling up a
+/// second copy of the same unfinished post.
+let editingDraftId = null;
+
+function loadDrafts() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(deps.accountScopedKey(KAPOSTS_DRAFTS_KEY)) || "[]");
+    kapostDrafts = Array.isArray(raw) ? raw : [];
+  } catch {
+    kapostDrafts = [];
+  }
+}
+
+function saveDrafts() {
+  try {
+    localStorage.setItem(deps.accountScopedKey(KAPOSTS_DRAFTS_KEY), JSON.stringify(kapostDrafts));
+  } catch { /* a full quota is not worth losing the composer over */ }
+}
+
+/// One line for the list: the first segment with anything in it.
+function draftPreview(draft) {
+  const segments = [draft?.text || "", ...(draft?.threadSegments || [])];
+  return (segments.find((segment) => segment.trim()) || "").trim();
+}
+
+/// Everything this draft would post, for the "3 posts" count on its row.
+function draftSegmentCount(draft) {
+  return [draft?.text || "", ...(draft?.threadSegments || [])].filter((segment) => segment.trim()).length;
+}
+
+/// Saves what is in the composer, or updates the draft it was opened from. Returns the draft, or
+/// null when there was nothing worth keeping.
+function saveDraftFromComposer() {
+  const text = String(composerInput?.value || "");
+  const threadSegments = [...composerThreadSegments];
+  if (![text, ...threadSegments].some((segment) => segment.trim())) return null;
+  const draft = {
+    id: editingDraftId || nowId(),
+    text,
+    threadSegments,
+    quotedRemoteId: composerQuoteTarget?.remoteId || null,
+    savedAt: Date.now(),
+  };
+  kapostDrafts = [draft, ...kapostDrafts.filter((entry) => entry.id !== draft.id)];
+  saveDrafts();
+  return draft;
+}
+
+function deleteDraft(id) {
+  const before = kapostDrafts.length;
+  kapostDrafts = kapostDrafts.filter((entry) => entry.id !== id);
+  if (kapostDrafts.length !== before) saveDrafts();
+}
+
+/// Reopens a draft in the composer. The draft stays saved until the post actually goes out -
+/// losing it the moment it is opened would mean a reader who changed their mind has nothing left.
+function openDraft(id) {
+  const draft = kapostDrafts.find((entry) => entry.id === id);
+  if (!draft) return;
+  const quoted = draft.quotedRemoteId
+    ? allPostLists().find((post) => post.remoteId === draft.quotedRemoteId) || null
+    : null;
+  openComposer(quoted);
+  editingDraftId = draft.id;
+  composerThreadSegments = [...(draft.threadSegments || [])];
+  composerInput.value = draft.text || "";
+  composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+  renderComposerThreadUi();
+  composerInput.focus();
+}
+
+function draftsPanelHtml() {
+  if (!kapostDrafts.length) {
+    return `<div class="no-results-card"><strong>No drafts</strong>`
+      + `<span>Close the composer with something written and you'll be offered a draft.</span></div>`;
+  }
+  return kapostDrafts.map((draft) => {
+    const count = draftSegmentCount(draft);
+    const meta = [formatRelativeTime(draft.savedAt), count > 1 ? `${count} posts` : ""].filter(Boolean).join(" · ");
+    return `
+      <div class="kaposts-draft-row">
+        <button class="kaposts-draft-open" type="button" data-kaposts-open-draft="${deps.escapeHtml(draft.id)}">
+          <span class="kaposts-draft-preview">${deps.escapeHtml(draftPreview(draft))}</span>
+          <span class="kaposts-draft-meta">${deps.escapeHtml(meta)}</span>
+        </button>
+        <button class="kaposts-draft-delete" type="button" data-kaposts-delete-draft="${deps.escapeHtml(draft.id)}" aria-label="Delete draft">&times;</button>
+      </div>`;
+  }).join("");
+}
+
+// ---------------------------------------------------------------------------
 // Post translation (iOS PostTranslationService)
 // ---------------------------------------------------------------------------
 
@@ -2668,6 +2791,8 @@ export function refreshKaPostsFeed() {
 
 export function resetKaPostsForAccount() {
   loadPrefs();
+  loadDrafts();
+  editingDraftId = null;
   localPosts = [];
   remotePosts = [];
   pendingNewPosts = [];
@@ -2851,6 +2976,7 @@ export function initKaPosts(dependencies) {
   popoverEl = document.querySelector("[data-kaposts-popover]");
 
   loadPrefs();
+  loadDrafts();
 
   // Feed tab switching
   tabsEl?.addEventListener("click", (event) => {
@@ -2907,7 +3033,7 @@ export function initKaPosts(dependencies) {
       closePopover();
     }
   });
-  document.querySelector("[data-kaposts-composer-cancel]")?.addEventListener("click", closeComposer);
+  document.querySelector("[data-kaposts-composer-cancel]")?.addEventListener("click", () => { closeComposer(); });
   document.querySelector("[data-kaposts-thread-back]")?.addEventListener("click", () => {
     threadStack.pop();
     replyTargetId = null;
@@ -2941,7 +3067,11 @@ export function initKaPosts(dependencies) {
     const segments = text ? [...composerThreadSegments, text] : [...composerThreadSegments];
     if (!segments.length) return;
     const quoteTarget = composerQuoteTarget;
-    closeComposer();
+    // The post is on its way, so the draft it came from has served its purpose. Explicit
+    // keepDraft: false, because closeComposer would otherwise ask whether to keep writing that
+    // is already being sent.
+    if (editingDraftId) deleteDraft(editingDraftId);
+    closeComposer({ keepDraft: false });
     if (quoteTarget) scheduleQuote(quoteTarget, segments[0]);
     else if (segments.length > 1) scheduleThread(segments);
     else schedulePost(segments[0]);
@@ -3129,6 +3259,18 @@ export function initKaPosts(dependencies) {
     const mentionTap = event.target.closest("[data-kaposts-mention]");
     if (mentionTap) {
       openMentionProfile(mentionTap.dataset.kapostsMention);
+      return;
+    }
+
+    const openDraftBtn = event.target.closest("[data-kaposts-open-draft]");
+    if (openDraftBtn) {
+      openDraft(openDraftBtn.dataset.kapostsOpenDraft);
+      return;
+    }
+    const deleteDraftBtn = event.target.closest("[data-kaposts-delete-draft]");
+    if (deleteDraftBtn) {
+      deleteDraft(deleteDraftBtn.dataset.kapostsDeleteDraft);
+      renderAll();
       return;
     }
 

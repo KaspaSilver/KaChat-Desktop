@@ -17157,6 +17157,8 @@ queueMicrotask(async () => {
     isChattingBalanceZero,
     showFundingGate: showFundingGateModal,
     showToast: showCopyToast,
+    // The app's own overlay rather than the browser's - see ui/dialogs.js.
+    confirmDialog,
     appendEngineLog,
     explorerTxUrl,
     // Background activity pings (Settings > Notifications > KaPosts).
