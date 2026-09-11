@@ -6776,6 +6776,7 @@ function setActiveAppTab(tab) {
   // On Chats the topbar narrows to the chats list and the conversation takes the full height
   // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
   document.body.classList.toggle("chats-tab", isChats);
+  publishDockHeight();
   appTabScreens.forEach((screen) => {
     screen.hidden = screen.dataset.appTabScreen !== screenTab;
   });
@@ -6936,6 +6937,25 @@ function hubVisibleTabs() {
   return dockPrefs.hub.filter(tabAllowed);
 }
 
+/// Publishes the dock's real height, so the chats list can reserve exactly that much.
+///
+/// On Chats the dock is the list's own bottom section rather than a pill floating over it, and the
+/// list has to end precisely where the section starts - a row half-hidden behind it is the thing
+/// this arrangement exists to avoid. The height is not a constant worth hardcoding: it moves with
+/// how many tabs are in the dock, with the label text, and with the safe-area inset.
+function publishDockHeight() {
+  const tabbar = document.querySelector(".sidebar-tabbar");
+  if (!tabbar) return;
+  const height = Math.round(tabbar.getBoundingClientRect().height);
+  if (height > 0) document.documentElement.style.setProperty("--dock-h", `${height}px`);
+}
+
+window.addEventListener("resize", publishDockHeight);
+if (typeof ResizeObserver === "function") {
+  const dockEl = document.querySelector(".sidebar-tabbar");
+  if (dockEl) new ResizeObserver(publishDockHeight).observe(dockEl);
+}
+
 function applyDockLayout() {
   const tabbar = document.querySelector(".sidebar-tabbar");
   if (!tabbar) return;
@@ -6956,6 +6976,7 @@ function applyDockLayout() {
 
   renderHubGrid();
   renderDockEditor();
+  publishDockHeight();
 
   // Apps lives in either the dock OR the Profile view, never both. Once it holds a dock slot,
   // drop the redundant "Apps" row from Profile; bring it back when it moves into the Hub.

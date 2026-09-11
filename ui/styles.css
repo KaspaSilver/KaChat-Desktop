@@ -356,17 +356,28 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
    it made the list's width depend on the dock's - which, now that the dock is sized FROM the list,
    would be circular. The list is back to a plain clamp. */
 @media (min-width: 860px) {
+  /* Not a pill floating over the list - the list's own bottom section. Flush to the corner, the
+     full width of the pane, opaque, with a rule along the top. A floating pill leaves chat rows
+     showing around and behind it, which reads as something dropped on the list rather than part
+     of it. */
   body.chats-tab .sidebar-tabbar {
-    left: 12px;
+    left: 0;
     right: auto;
+    bottom: 0;
     transform: none;
-    /* The list, less its own inset and the room the compose button needs beside it. */
-    width: calc(var(--sidebar-w) - 24px - 70px);
+    width: var(--sidebar-w);
     max-width: none;
+    border: 0;
+    border-top: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    border-radius: 0;
+    background: #0a0d11;
+    box-shadow: none;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
   }
-  /* Tabs share whatever width that leaves, the way they already do on a narrow window - including
-     the label clipping, since "Kaspa Hub" does not fit a fifth of a narrow list. */
-  body.chats-tab .sidebar-tab { flex: 1 1 0; width: auto; min-width: 0; padding: 8px 2px 9px; }
+  /* Tabs share the pane's width, with the same label clipping the narrow layout already uses -
+     "Kaspa Hub" does not fit a fifth of a narrow list otherwise. */
+  body.chats-tab .sidebar-tab { flex: 1 1 0; width: auto; min-width: 0; padding: 6px 2px 5px; }
   body.chats-tab .sidebar-tab > span:last-child {
     max-width: 100%;
     overflow: hidden;
@@ -374,13 +385,19 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
     white-space: nowrap;
   }
 
-  /* Nothing floats over the conversation any more, so it reserves nothing. The list keeps the
-     reservation, since the dock is now its own. */
+  /* Nothing floats over the conversation any more, so it reserves nothing at all. */
   body.chats-tab .app-body { padding-bottom: 0; }
+  /* The pane reserves exactly the section's height, so no row is ever behind it. --dock-h is
+     measured (see publishDockHeight) rather than guessed: the height moves with the tab count,
+     the labels and the safe-area inset. */
+  body.chats-tab .app-sidebar {
+    margin-bottom: 0;
+    padding-bottom: var(--dock-h, 86px);
+  }
 
-  /* Compose sits beside the dock in that corner, centred on it. */
-  body.chats-tab .new-chat-fab { bottom: 35px; right: 16px; }
-  body.chats-tab .sidebar-scroll { padding-bottom: 24px; }
+  /* Compose sits above the section, at the list's bottom-right. */
+  body.chats-tab .new-chat-fab { bottom: calc(var(--dock-h, 86px) + 16px); right: 20px; }
+  body.chats-tab .sidebar-scroll { padding-bottom: 88px; }
 }
 
 /* Narrow fallback: below 860px, only one of sidebar/detail is visible at a time,
