@@ -67,6 +67,21 @@ export class GroupManager {
     saveAll(all);
     return record;
   }
+  /// Records a retired epoch's root without touching the current epoch.
+  ///
+  /// A non-admin has no other way back to pre-rotation messages: re-deriving an arbitrary epoch
+  /// needs the group seed, which only the admin holds.
+  _archivePreviousRoot(record, epoch, rootHex) {
+    const root = String(rootHex || "");
+    if (!root || !record) return;
+    const key = String(epoch);
+    const roots = { ...(record.previousRootsHex || {}) };
+    if (roots[key] === root) return;
+    roots[key] = root;
+    record.previousRootsHex = roots;
+    this._put(record);
+  }
+
   deleteGroup(groupId) {
     const { all, bucket } = this._bucket();
     delete bucket[groupId];
@@ -508,8 +523,16 @@ export class GroupManager {
     // seedless re-import against the recovery invite.
     if (this.isGroupTombstoned(groupId)) return null;
     const existing = this.getGroup(groupId);
-    // Replay guard: never apply an epoch strictly older than what we hold.
-    if (existing && payload.epoch < existing.currentEpoch) return null;
+    // A root for an OLDER epoch is not an attack to drop on the floor - it is history this device
+    // may no longer hold. Archiving it is strictly additive: currentEpoch and the current root are
+    // untouched, so there is no downgrade. It is also what makes re-walking the control stream
+    // actually repair a thread - without it a refresh re-downloads pre-rotation ciphertext it
+    // still has no key for, which is why refreshing appeared to do nothing. iOS archives it in
+    // archivePreviousRoot; Android in completeJoin.
+    if (existing && payload.epoch < existing.currentEpoch) {
+      this._archivePreviousRoot(existing, payload.epoch, payload.group_root_epoch);
+      return null;
+    }
 
     // Admin self-recovery: a self-addressed root carries the group seed. Trust it only if it
     // re-derives the SIGNED group_id + blinding_key (that binding is what authenticates the
@@ -553,6 +576,18 @@ export class GroupManager {
       // later epoch rotation - an add/remove must not reset the backfill floor and re-arm a
       // flood of banners for messages already read.
       learnedAtMs: existing?.learnedAtMs || Date.now(),
+      // Retired epochs' roots, so pre-rotation messages stay readable. Carried across rebuilds -
+      // losing them would put those messages permanently out of reach for a non-admin - and the
+      // root we are replacing right now is added to them. Waiting for that older root to come
+      // round again on the control stream would be leaving it to chance; we are holding it at
+      // exactly this moment, and keeping it costs one hex string.
+      previousRootsHex: (() => {
+        const roots = { ...(existing?.previousRootsHex || {}) };
+        if (isNewEpoch && existing?.groupRootEpochHex && existing.currentEpoch != null) {
+          roots[String(existing.currentEpoch)] = existing.groupRootEpochHex;
+        }
+        return roots;
+      })(),
       // device_id is preserved across updates; counter resets only when the epoch advances.
       deviceIdHex: existing?.deviceIdHex || G.bytesToHex(G.generateDeviceId()),
       msgCounter: isNewEpoch ? 0 : (existing?.msgCounter || 0),
@@ -601,6 +636,8 @@ export class GroupManager {
       let rootHex = null;
       if (parsed.epoch === record.currentEpoch) rootHex = record.groupRootEpochHex;
       else if (record.groupSeedHex) rootHex = G.bytesToHex(G.deriveGroupRootEpoch(G.hexToBytes(record.groupSeedHex), G.hexToBytes(record.groupId), parsed.epoch));
+      // Last resort for a non-admin: a retired root archived when its rotation arrived.
+      else rootHex = record.previousRootsHex?.[String(parsed.epoch)] || null;
       if (!rootHex) return null;
       let plaintext;
       try { plaintext = G.openGroupMessage(parsed, { groupId: G.hexToBytes(record.groupId), groupRootEpoch: G.hexToBytes(rootHex) }); }
