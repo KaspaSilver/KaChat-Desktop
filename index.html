@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=346" />
+  <link rel="stylesheet" href="./ui/styles.css?v=347" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -54,10 +54,6 @@
 
   <main id="app" class="kachat-shell" aria-label="KaChat web shell">
     <header class="app-topbar">
-      <div class="app-topbar-brand">
-        <img class="app-topbar-logo" src="./ui/assets/kachat-logo.png" alt="KaChat" width="36" height="36" />
-        <span class="app-topbar-title">KaChat</span>
-      </div>
       <div class="toolbar-health-cluster">
         <button class="service-health-button" data-service-health-button data-open-connection-status type="button" aria-label="Service status. Open Connection Status" title="Open Connection Status">
           <span class="service-health-led busy" data-service-health-led aria-hidden="true"></span>
@@ -66,6 +62,10 @@
       <div class="toolbar-balance" data-toolbar-balance title="Current wallet balance">
         <img class="toolbar-balance-logo" src="./ui/assets/kaspa-logo.png" alt="" aria-hidden="true" width="15" height="15" />
         <span data-toolbar-balance-value>-- KAS</span>
+      </div>
+      <div class="topbar-select-cluster" data-topbar-select-cluster>
+        <button type="button" class="chat-select-all" data-chat-select-all hidden>Select All</button>
+        <button type="button" class="chat-select-toggle" data-chat-select-toggle>Select</button>
       </div>
     </header>
 
@@ -85,11 +85,6 @@
             </span>
           </button>
         </nav>
-
-        <div class="chat-select-row">
-          <button type="button" class="chat-select-all" data-chat-select-all hidden>Select All</button>
-          <button type="button" class="chat-select-toggle" data-chat-select-toggle>Select</button>
-        </div>
 
         <div class="group-actions-row" data-group-actions-row hidden>
           <button type="button" class="new-group-button" data-new-group>
@@ -2757,7 +2752,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=366"></script>
+  <script type="module" src="./ui/app.js?v=367"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

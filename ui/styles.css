@@ -102,6 +102,7 @@ button { cursor: pointer; }
   position: relative;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 14px;
   padding: 10px 20px;
   flex: 0 0 auto;
@@ -111,25 +112,15 @@ button { cursor: pointer; }
    two read as separate apps stacked on top of each other. */
 .app-sidebar { border-top: 1px solid var(--line); }
 
-.app-topbar-brand {
+/* Status light at one end, Select at the other, and the balance centred between them - it is
+   absolutely positioned (see .toolbar-balance), so it stays on the bar's true centre rather than
+   wherever the two beside it leave room. */
+.topbar-select-cluster {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex: 0 0 auto;
-}
-
-.app-topbar-logo {
-  width: 36px;
-  height: 36px;
-  display: block;
-  flex: 0 0 auto;
-}
-
-.app-topbar-title {
-  font-weight: 800;
-  letter-spacing: -.02em;
-  font-size: 18px;
-  white-space: nowrap;
+  justify-content: flex-end;
+  gap: 14px;
+  justify-self: end;
 }
 
 .app-body {
@@ -4803,14 +4794,6 @@ body.session-logged-out [data-account-rename-modal] {
 }
 
 /* Select toggle row, directly above the search bar. */
-.chat-select-row {
-  display: flex;
-  justify-content: flex-end;
-  gap: 16px;
-  padding: 10px 18px 0;
-  flex: 0 0 auto;
-}
-
 .chat-select-toggle,
 .chat-select-all {
   border: 0;

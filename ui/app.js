@@ -6765,6 +6765,10 @@ function setActiveAppTab(tab) {
   const isChats = screenTab === "chats";
   if (appSidebar) appSidebar.hidden = !isChats;
   if (newChatFab) newChatFab.hidden = !isChats;
+  // Select lives in the topbar now, which every tab shares - but it only ever acts on the chats
+  // list, so it goes away with it.
+  const selectCluster = document.querySelector("[data-topbar-select-cluster]");
+  if (selectCluster) selectCluster.hidden = !isChats;
   appTabScreens.forEach((screen) => {
     screen.hidden = screen.dataset.appTabScreen !== screenTab;
   });
@@ -17819,7 +17823,7 @@ function totalGroupUnread() {
 // --- element refs ---
 const groupListEl = document.querySelector("[data-group-list]");
 const groupActionsRow = document.querySelector("[data-group-actions-row]");
-const chatSelectRow = document.querySelector(".chat-select-row");
+const chatSelectRow = document.querySelector("[data-topbar-select-cluster]");
 const groupCreateModal = document.querySelector("[data-group-create-modal]");
 const groupCreateTitle = document.querySelector("[data-group-create-title]");
 const groupNameInput = document.querySelector("[data-group-name-input]");
@@ -17858,7 +17862,7 @@ const groupManageBody = document.querySelector("[data-group-manage-body]");
 function setChatToolRowsForGroupsTab(isGroups) {
   // Queries the DOM directly (rather than the module-tail consts) so this stays safe
   // when renderChats runs during the synchronous boot, before those consts initialize.
-  const selectRow = document.querySelector(".chat-select-row");
+  const selectRow = document.querySelector("[data-topbar-select-cluster]");
   const actionsRow = document.querySelector("[data-group-actions-row]");
   const listEl = document.querySelector("[data-group-list]");
   // The Group Chats tab now uses the same Select control as the Chats tab (multi-select
