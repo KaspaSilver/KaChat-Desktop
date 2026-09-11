@@ -2088,6 +2088,7 @@ function promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { p
 
   contact.relationshipState = "established";
   contact.updatedAt = Date.now();
+  noteConversationActivated(contact, conversationEntry);
   conversationEntry.updatedAt = Date.now();
   conversationEntry.lastActivityAt = Math.max(
     Number(conversationEntry.lastActivityAt || 0),
@@ -3211,6 +3212,44 @@ async function refreshBalanceOnly({ quiet = true } = {}) {
   }
 }
 
+/// A conversation just became real - re-read everything the peer sent before it did.
+///
+/// The sweep only ever asks the indexer for contacts it already has a relationship with, so
+/// everything a peer sent BEFORE that was true was never requested. Not dropped and not
+/// undecryptable - incoming messages are ECIES-sealed to our own key with the ephemeral pubkey
+/// carried in the message, so our private key alone always opens them - just never asked for. And
+/// the cursor only moves forward, so once it is past those blocks nothing ever rewinds it.
+///
+/// Hooked to the transition rather than to the Accept button, because there are five ways a
+/// conversation becomes established: accepting their request, their response handshake landing,
+/// a reciprocal message arriving, the restore-parity pass finding our own past acceptance, and an
+/// archive import carrying both directions. Android takes the same approach in
+/// noteConversationActivated, and iOS in recoverPreRelationshipHistory.
+///
+/// Once per contact, ever: the flag persists, so this is a one-off catch-up rather than a
+/// from-genesis re-read on every launch. Re-reading is safe regardless - knownTxids and the
+/// per-conversation dedup make it idempotent, and a deleted conversation is still tombstoned.
+function noteConversationActivated(contact, conversationEntry) {
+  if (!contact || !conversationEntry) return;
+  if (contact.historyRescannedAt) return;
+  contact.historyRescannedAt = Date.now();
+  conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: 0 };
+  // Fire and forget: the caller is a UI action or a sync loop, neither of which should block on a
+  // full-history fetch.
+  Promise.resolve().then(async () => {
+    try {
+      await syncOneConversation(conversationEntry, { quiet: true, catchUp: true });
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      renderChats();
+    } catch (error) {
+      // Leave the flag set: the ordinary sweep still runs, and retrying from genesis on every
+      // launch would be worse than missing a window once.
+      appendEngineLog(`Could not load earlier messages for ${shortAddress(contact.address)}: ${error.message}`);
+    }
+  });
+}
+
 /// Conversations with a sync already in flight.
 ///
 /// Several paths now fetch the same conversation - the 5s sweep, the 2s poll for the chat on
@@ -3357,6 +3396,7 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
       contact.peerConversationId = request.conversationId || contact.peerConversationId || "";
       if (wasOutgoingRequest) {
         contact.relationshipState = "established";
+        if (conversationEntry) noteConversationActivated(contact, conversationEntry);
         for (const existingMessage of conversationEntry?.messages || []) {
           if (existingMessage.messageType === "handshake" && existingMessage.direction === "outgoing" && existingMessage.status !== MESSAGE_STATUSES.FAILED) {
             applyMessagePatch(existingMessage, { status: MESSAGE_STATUSES.CONFIRMED, note: "Handshake completed", confirmations: Math.max(1, Number(existingMessage.confirmations || 0)) });
@@ -3440,6 +3480,7 @@ async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
     } else if (contact.relationshipState !== "established") {
       contact.relationshipState = "established"; // we provably handshook them — never a stranger
       if (!contact.handshakeTxid) contact.handshakeTxid = hs.txid;
+      if (conversationEntry) noteConversationActivated(contact, conversationEntry);
     }
     if (!conversationEntry) {
       conversationEntry = createConversation({ contactId: contact.id, createdAt: hs.createdAt });
@@ -12089,25 +12130,7 @@ messageArea.addEventListener("click", async (event) => {
       persistState();
       refreshSubscriptionAddresses({ restart: true });
       renderMessages(conversationEntry);
-      // Everything they sent before we accepted has to become readable now, and the ordinary
-      // sync will never ask for it: the sweep skips an unaccepted stranger entirely, so their
-      // history was never fetched, and the cursor only ever moves forward - once it is past
-      // those blocks nothing rewinds it. Reset it and re-read from genesis, once, at the moment
-      // the relationship becomes real. iOS does the same thing in recoverPreRelationshipHistory.
-      //
-      // Nothing is unrecoverable: contextual messages are stateless ECIES whose ephemeral public
-      // key travels inside the on-chain payload, so the whole history re-derives after the fact.
-      // knownTxids makes the re-read idempotent.
-      setStatus("Loading earlier messages…");
-      try {
-        conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: 0 };
-        await syncOneConversation(conversationEntry, { quiet: true, catchUp: true });
-        persistState();
-        renderMessages(conversationEntry);
-        renderChats();
-      } catch (error) {
-        appendEngineLog(`Could not load earlier messages: ${error.message}`);
-      }
+      noteConversationActivated(contact, conversationEntry);
       setStatus("Communication request accepted");
     } else {
       button.disabled = false;
@@ -14191,6 +14214,7 @@ function importPhoneChatArchive(json) {
       if (hasOutgoing && hasIncoming) {
         contact.relationshipState = "established";
         contact.updatedAt = Date.now();
+        noteConversationActivated(contact, conversationEntry);
       }
     }
   }
