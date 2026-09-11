@@ -4,10 +4,6 @@
      of it reserve this; the chats list deliberately runs underneath it and pads its scroll
      content by the same amount instead. */
   --dock-inset: 124px;
-  /* The dock pill's own width, republished by publishDockWidth() whenever the dock or the window
-     changes. This fallback is the full five-tab pill, so a stylesheet that loads before the script
-     errs on the side of too much room rather than an overlap. */
-  --dock-width: 498px;
   /* The chats list's width, shared with the bar that sits over it. */
   --sidebar-w: clamp(300px, 34%, 620px);
   --topbar-h: 56px;
@@ -351,23 +347,40 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .new-chat-fab:hover { filter: brightness(1.05); }
 .new-chat-fab .person-plus-icon { width: 27px; height: 27px; }
 
-/* Wide enough for the pane to stand BESIDE the dock instead of sharing its horizontal band.
-   The dock is a pill centred in the window, so its left edge is at (100vw - dock)/2; holding the
-   pane's right edge 14px short of that keeps the two apart, and then the rows are free to run to
-   the very bottom of the window with no dead strip and nothing hidden behind the dock.
+/* On Chats, the dock moves into the chats list - bottom-left, sized to the list, sharing that
+   corner with the compose button. The point is the other side: with nothing of the dock over the
+   conversation, the thread gets the whole right half of the window, top to bottom.
 
-   1140px is where that stops being possible: below it, (50vw - half the dock - 14px) falls under
-   the pane's own 300px minimum, so narrowing far enough to clear the dock would make the chat list
-   too cramped to read. There the pane keeps its width and its bottom padding instead. */
-@media (min-width: 1140px) {
-  :root { --sidebar-w: min(clamp(300px, 34%, 620px), calc(50vw - var(--dock-width) / 2 - 14px)); }
-  .app-sidebar {
-    flex: 0 0 auto;
-    padding-bottom: 0;
+   This replaces an arrangement where the dock stayed centred in the window and the list was
+   narrowed to stand clear of it. That cost list width to protect a strip of the conversation, and
+   it made the list's width depend on the dock's - which, now that the dock is sized FROM the list,
+   would be circular. The list is back to a plain clamp. */
+@media (min-width: 860px) {
+  body.chats-tab .sidebar-tabbar {
+    left: 12px;
+    right: auto;
+    transform: none;
+    /* The list, less its own inset and the room the compose button needs beside it. */
+    width: calc(var(--sidebar-w) - 24px - 70px);
+    max-width: none;
   }
-  /* Only the compose button is over the list now, not the dock. */
-  .sidebar-scroll { padding-bottom: 110px; }
-  .new-chat-fab { bottom: 35px; }
+  /* Tabs share whatever width that leaves, the way they already do on a narrow window - including
+     the label clipping, since "Kaspa Hub" does not fit a fifth of a narrow list. */
+  body.chats-tab .sidebar-tab { flex: 1 1 0; width: auto; min-width: 0; padding: 8px 2px 9px; }
+  body.chats-tab .sidebar-tab > span:last-child {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Nothing floats over the conversation any more, so it reserves nothing. The list keeps the
+     reservation, since the dock is now its own. */
+  body.chats-tab .app-body { padding-bottom: 0; }
+
+  /* Compose sits beside the dock in that corner, centred on it. */
+  body.chats-tab .new-chat-fab { bottom: 35px; right: 16px; }
+  body.chats-tab .sidebar-scroll { padding-bottom: 24px; }
 }
 
 /* Narrow fallback: below 860px, only one of sidebar/detail is visible at a time,
