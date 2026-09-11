@@ -8,6 +8,9 @@
      changes. This fallback is the full five-tab pill, so a stylesheet that loads before the script
      errs on the side of too much room rather than an overlap. */
   --dock-width: 498px;
+  /* The chats list's width, shared with the bar that sits over it. */
+  --sidebar-w: clamp(300px, 34%, 620px);
+  --topbar-h: 56px;
   --bg: #070a0d;
   --panel: #101419;
   --panel-2: #151a21;
@@ -93,24 +96,43 @@ button { cursor: pointer; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Containing block for the bar above, which is out of the flow. */
+  position: relative;
 }
 
 /* Step 101 — full-window desktop layout: top toolbar strip, left sidebar
    (chat list), right detail pane (open conversation), replacing the old
    fixed-size "phone mockup" card. */
+/* Status, balance and Select belong to the chats list, so on Chats the bar is exactly as wide as
+   the list and everything to its right is the conversation's - which now starts at the very top of
+   the window instead of below a strip it never used. Off the Chats tab there is no list, so the bar
+   spans as it always did and the screen below reserves its height. */
 .app-topbar {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 300;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
   padding: 10px 20px;
-  flex: 0 0 auto;
+  min-height: var(--topbar-h);
+  box-sizing: border-box;
 }
-/* The line under the topbar belongs over the chats list, not across the whole window: on the
-   right is a conversation whose own header is an overlay, and a rule cutting across it made the
-   two read as separate apps stacked on top of each other. */
-.app-sidebar { border-top: 1px solid var(--line); }
+body.chats-tab .app-topbar {
+  right: auto;
+  width: var(--sidebar-w);
+  /* The dividing line runs under the bar and stops where the list does. Across the whole window it
+     cut through the conversation, whose own header is an overlay, and made the two read as
+     separate apps stacked on each other. */
+  border-bottom: 1px solid var(--line);
+}
+.app-body { padding-top: var(--topbar-h); }
+body.chats-tab .app-body { padding-top: 0; }
+body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
+
 
 /* Status light at one end, Select at the other, and the balance centred between them - it is
    absolutely positioned (see .toolbar-balance), so it stays on the bar's true centre rather than
@@ -136,8 +158,8 @@ button { cursor: pointer; }
 .app-sidebar {
   /* Wider chats list: its right edge sits roughly halfway between the old 280px and
      the page centre (responsive, capped so it never dominates a small window). */
-  flex: 0 0 clamp(300px, 34%, 620px);
-  width: clamp(300px, 34%, 620px);
+  flex: 0 0 var(--sidebar-w);
+  width: var(--sidebar-w);
   min-width: 300px;
   display: flex;
   flex-direction: column;
@@ -338,9 +360,9 @@ button { cursor: pointer; }
    the pane's own 300px minimum, so narrowing far enough to clear the dock would make the chat list
    too cramped to read. There the pane keeps its width and its bottom padding instead. */
 @media (min-width: 1140px) {
+  :root { --sidebar-w: min(clamp(300px, 34%, 620px), calc(50vw - var(--dock-width) / 2 - 14px)); }
   .app-sidebar {
     flex: 0 0 auto;
-    width: min(clamp(300px, 34%, 620px), calc(50vw - var(--dock-width) / 2 - 14px));
     padding-bottom: 0;
   }
   /* Only the compose button is over the list now, not the dock. */
@@ -356,6 +378,10 @@ button { cursor: pointer; }
    the tab bar during that specific drill-down (placeholder tabs keep it). */
 @media (max-width: 859px) {
   .app-sidebar { flex: 1 1 auto; width: 100%; min-width: 0; border-right: 0; }
+  /* One column at a time down here, so the bar has the width of whatever is on screen. */
+  body.chats-tab .app-topbar { right: 0; width: auto; }
+  body.chats-tab .app-body { padding-top: var(--topbar-h); }
+  body.chats-tab .app-sidebar { padding-top: 0; }
   .app-detail { display: none; }
   .app-body.detail-active .app-sidebar { display: none; }
   .app-body.detail-active .app-detail { display: flex; flex: 1 1 auto; width: 100%; }

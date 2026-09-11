@@ -6773,6 +6773,9 @@ function setActiveAppTab(tab) {
   // list, so it goes away with it.
   const selectCluster = document.querySelector("[data-topbar-select-cluster]");
   if (selectCluster) selectCluster.hidden = !isChats;
+  // On Chats the topbar narrows to the chats list and the conversation takes the full height
+  // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
+  document.body.classList.toggle("chats-tab", isChats);
   appTabScreens.forEach((screen) => {
     screen.hidden = screen.dataset.appTabScreen !== screenTab;
   });
