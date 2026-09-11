@@ -2333,12 +2333,20 @@ function loadDeletedContactMap() {
     const raw = JSON.parse(localStorage.getItem(accountScopedKey(DELETED_CONTACTS_KEY)) || "[]");
     if (Array.isArray(raw)) {
       const map = {};
-      for (const address of raw) if (address) map[String(address)] = 0;
+      for (const address of raw) if (address) map[String(address)] = { at: 0, txIds: null };
       return map;
     }
     if (raw && typeof raw === "object") {
       const map = {};
-      for (const [address, at] of Object.entries(raw)) if (address) map[String(address)] = Number(at) || 0;
+      for (const [address, value] of Object.entries(raw)) {
+        if (!address) continue;
+        // Older shape: a bare number. Newer: { at, txIds }.
+        if (value && typeof value === "object") {
+          map[String(address)] = { at: Number(value.at) || 0, txIds: Array.isArray(value.txIds) ? value.txIds.map(String) : null };
+        } else {
+          map[String(address)] = { at: Number(value) || 0, txIds: null };
+        }
+      }
       return map;
     }
   } catch {}
@@ -2355,23 +2363,32 @@ function loadDeletedContactAddresses() {
 
 /// Tombstone these addresses, stamped so later traffic can still get through.
 ///
-/// The stamp is the later of the wall clock and the newest block time actually seen in that
-/// conversation. iOS learned this from Android: on a device whose clock runs behind the chain, a
-/// wall-clock-only stamp can land BEFORE history that is already on chain, so deleting would fail
-/// to suppress the very messages it was meant to. Taking the max can only over-suppress by the
-/// clock skew, and only for traffic from before the deletion.
+/// The stamp lives in the indexer's BLOCK-TIME clock, not the wall clock, and the two are not
+/// interchangeable. Mixing them is what Android hit first: a device whose clock runs ahead of the
+/// chain stamps a tombstone in the future, and a genuinely new re-handshake arriving before the
+/// clocks converge is dropped as history. So the stamp is the newest block time actually seen in
+/// the conversation; the wall clock is only the fallback for a conversation with nothing in it,
+/// where there is no history to suppress anyway.
+///
+/// `txIds` are the ids mined at exactly that instant. Kaspa's per-sender block_time is not
+/// strictly monotonic, so a new handshake can share the deletion instant with the last message we
+/// had - a comparison on time alone cannot tell them apart and drops the new one.
 function recordDeletedContactAddresses(addresses) {
   const map = loadDeletedContactMap();
-  const now = Date.now();
   for (const address of addresses || []) {
     if (!address) continue;
     const contact = (state.contacts || []).find((entry) => entry.address === address);
     const conversationEntry = contact
       ? (state.conversations || []).find((entry) => entry.contactId === contact.id)
       : null;
-    const newestSeen = (conversationEntry?.messages || [])
-      .reduce((max, message) => Math.max(max, Number(message.blockTime || message.createdAt || 0)), 0);
-    map[String(address)] = Math.max(now, newestSeen);
+    const messages = conversationEntry?.messages || [];
+    const blockTimeOf = (message) => Number(message.blockTime || 0);
+    const newestSeen = messages.reduce((max, message) => Math.max(max, blockTimeOf(message)), 0);
+    const at = newestSeen > 0 ? newestSeen : Date.now();
+    map[String(address)] = {
+      at,
+      txIds: messages.filter((message) => blockTimeOf(message) === at).map((message) => String(message.txid || "")).filter(Boolean),
+    };
   }
   saveDeletedContactMap(map);
 }
@@ -2393,15 +2410,25 @@ function clearDeletedContactAddress(address) {
 ///
 /// A blockTime of 0 means "no time in hand" and counts as pre-deletion, i.e. still suppressed -
 /// the conservative choice, since that is the re-serve case.
-function isContactDeletedAsOf(address, blockTime) {
+function isContactDeletedAsOf(address, txId, blockTime) {
   const map = loadDeletedContactMap();
   const key = String(address || "");
   if (!(key in map)) return false;
-  const deletedAt = map[key];
-  if (!deletedAt) return true;
+  const { at, txIds } = map[key];
+  if (!at) return true;
   const time = Number(blockTime || 0);
   if (!time) return true;
-  return time <= deletedAt;
+  if (time < at) return true;
+  if (time === at) {
+    // Same instant as the deletion: suppress only what was already ours then. A tombstone written
+    // before the ids were recorded (txIds null) has a stamp that could genuinely BE a message of
+    // ours, so it suppresses; an empty list means the conversation held nothing at that instant,
+    // so anything sharing it is new.
+    if (!txIds) return true;
+    const id = String(txId || "");
+    return id ? txIds.includes(id) : true;
+  }
+  return false;
 }
 
 function buildFullyRestoredState() {
@@ -3369,7 +3396,7 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
     // A deleted chat must not walk back in when the handshake scan is reset - a seed import, a
     // parser bump, a wallet switch - and re-serves history the user already threw away. Anything
     // sent since the deletion is a fresh request and is let through.
-    if (isContactDeletedAsOf(request.sender, request.blockTime)) continue;
+    if (isContactDeletedAsOf(request.sender, request.txid, request.blockTime)) continue;
     let contact = state.contacts.find((entry) => entry.address === request.sender);
     let conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
     let wasOutgoingRequest = false;
