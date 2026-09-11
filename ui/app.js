@@ -1404,12 +1404,16 @@ const conversationAvatarInitials = document.querySelector("[data-conversation-av
 const conversationAvatarImage = document.querySelector("[data-conversation-avatar-image]");
 const conversationBio = document.querySelector("[data-conversation-bio]");
 
-// Shows the contact's KNS primary-domain bio under the name in the open chat.
-function updateConversationBio(contact) {
+/// The chat header shows a face and a name, and nothing else.
+///
+/// It used to carry the contact's KNS bio under the name. A bio is a paragraph - it ran the width
+/// of the thread, wrapped to a second line for anyone with more to say, and pushed the header down
+/// over the messages it floats above. It is still on the contact's profile, which is where a
+/// paragraph belongs; this keeps it out of a bar that has to stay small.
+function updateConversationBio() {
   if (!conversationBio) return;
-  const bio = engine.peekKnsAddressProfile?.(contact?.address)?.profile?.bio;
-  if (bio) { conversationBio.textContent = bio; conversationBio.hidden = false; }
-  else { conversationBio.textContent = ""; conversationBio.hidden = true; }
+  conversationBio.textContent = "";
+  conversationBio.hidden = true;
 }
 
 // Shared by the conversation header and (via avatarHtmlFor) the sidebar row
