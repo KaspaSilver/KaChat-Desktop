@@ -15808,11 +15808,12 @@ function renderSetupExtra(kind) {
     }
     setupExtraEl.appendChild(list);
   } else if (kind === "node") {
-    // Desktop connects to KaChat's own node by default; "own node" lets the user paste a
-    // trusted endpoint instead. Those are the only two, here and in Node Connection.
+    // The same two the Node Connection dialog offers, worded for someone who has not met either
+    // yet. Recommended is ours because it needs nothing; Best is their own because nobody else
+    // sees what they ask it.
     const opts = [
-      { key: "auto", title: "Use KaChat's Node", badge: "Recommended", sub: "Connects to the node KaChat runs. No setup needed." },
-      { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Enter a node address you trust for the most reliable, private connection.", input: true },
+      { key: "auto", title: "Use KaChat's Node", badge: "Recommended", sub: "Connects to the node KaChat runs. Nothing to set up." },
+      { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Your own Kaspa wRPC endpoint. Nobody else sees what you ask it, and nothing depends on KaChat's node staying up.", input: true },
     ];
     let current = accountShellPrefs.nodeChoice;
     if (current !== "auto" && current !== "own") current = "auto"; // normalize legacy/default
@@ -15826,17 +15827,28 @@ function renderSetupExtra(kind) {
       row.querySelector("strong").textContent = o.title;
       row.querySelector("small").textContent = o.sub;
       if (o.badge) row.querySelector(".setup-node-badge").textContent = o.badge;
-      row.addEventListener("click", () => { accountShellPrefs.nodeChoice = o.key; persistAccountShellPreferences(); renderSetupStep(); });
+      row.addEventListener("click", () => {
+        accountShellPrefs.nodeChoice = o.key;
+        persistAccountShellPreferences();
+        applySetupNodeChoice();
+        renderSetupStep();
+      });
       list.appendChild(row);
       if (o.input && current === o.key) {
         const input = document.createElement("input");
         input.type = "text";
         input.className = "field-input setup-node-input";
-        input.placeholder = "host:port or grpcs://host";
+        // wRPC, not gRPC: this placeholder used to show the phones' grpcs://host:port form, which
+        // this client cannot speak at all.
+        input.placeholder = "wss://your-node.duckdns.org";
         input.value = accountShellPrefs.nodeAddress || "";
         input.autocomplete = "off";
         input.spellcheck = false;
-        input.addEventListener("input", () => { accountShellPrefs.nodeAddress = input.value.trim(); persistAccountShellPreferences(); });
+        input.addEventListener("input", () => {
+          accountShellPrefs.nodeAddress = input.value.trim();
+          persistAccountShellPreferences();
+          applySetupNodeChoice();
+        });
         list.appendChild(input);
       }
     }
@@ -15857,6 +15869,25 @@ function renderSetupExtra(kind) {
       setupExtraEl.appendChild(box);
     }
   }
+}
+
+/// Makes the wizard's node choice actually take effect.
+///
+/// It used to store nodeChoice and nodeAddress in preferences that nothing ever read, so choosing
+/// "Connect Your Own Node" during setup and typing an address did nothing at all - the app went on
+/// using the default, and the only place that really decided was the Node Connection dialog.
+///
+/// A half-typed URL is ignored rather than committed: the connection to a custom node is strict,
+/// so writing "wss://" the moment it is typed would leave someone on a node that cannot answer,
+/// mid-sentence.
+function applySetupNodeChoice() {
+  if (accountShellPrefs.nodeChoice !== "own") {
+    if (getEndpointOverride("trustedNode").trim()) setEndpoint("trustedNode", "");
+    return;
+  }
+  const url = String(accountShellPrefs.nodeAddress || "").trim();
+  const usable = /^wss?:\/\/[^\s/]+/i.test(url);
+  setEndpoint("trustedNode", usable ? url : "");
 }
 
 function renderSetupStep() {
