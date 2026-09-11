@@ -1239,7 +1239,7 @@
               <span class="node-mode-radio" aria-hidden="true"></span>
               <span class="node-mode-copy">
                 <strong>Automatic</strong>
-                <small>KaChat picks a healthy public node and keeps a warm backup ready. If your node stops responding, it switches to a good one right away.</small>
+                <small>Connects to KaChat's own node, and falls back to a healthy public one if it is ever unreachable. A warm backup is kept ready either way, so a node that stops responding is switched out right away.</small>
               </span>
             </div>
             <div class="node-mode-card" role="button" tabindex="0" data-node-mode="custom">
@@ -2752,7 +2752,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=379"></script>
+  <script type="module" src="./ui/app.js?v=380"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

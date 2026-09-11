@@ -2,6 +2,16 @@ import { NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
 
 const NODE_REGISTRY_KEY = "kachat.browser.node-registry.v1";
+/// KaChat's own node: the default every Automatic client tries first.
+///
+/// A browser served over https can only open wss://, which the public resolver does not reliably
+/// hand out - a node we run and can point at with a name is the way that is guaranteed. Users can
+/// still choose their own in Node Connection > Custom, which takes priority over this.
+export const DEFAULT_NODE = "wss://node.kachat.duckdns.org";
+
+/// How long a failed default node is left alone before it is tried again.
+const DEFAULT_NODE_RETRY_AFTER_MS = 10 * 60 * 1000;
+
 const DIRECT_CONNECT_TIMEOUT_MS = 8000;
 const RESOLVER_CONNECT_TIMEOUT_MS = 15000;
 const STANDBY_DIRECT_TIMEOUT_MS = 6000;
@@ -102,6 +112,19 @@ function recordSuccess(endpoint, latencyMs, { setLastGood = true } = {}) {
   if (setLastGood) registry.lastGoodEndpoint = endpoint;
   registry.updatedAt = now();
   saveRegistry(registry);
+}
+
+/// Has this endpoint failed recently enough that dialling it again is just a wasted wait?
+///
+/// Only "recently": a node that was down ten minutes ago is worth another try, and a node that has
+/// since succeeded is not skipped at all.
+function recentlyFailed(registry, endpoint) {
+  const record = registry?.endpoints?.[endpoint];
+  if (!record) return false;
+  const failedAt = Number(record.lastFailureAt || 0);
+  if (!failedAt) return false;
+  if (Number(record.lastSuccessAt || 0) > failedAt) return false;
+  return now() - failedAt < DEFAULT_NODE_RETRY_AFTER_MS;
 }
 
 function recordFailure(endpoint, error) {
@@ -248,13 +271,35 @@ export async function createRpc(kaspa, log = () => {}) {
     });
   }
 
-  // Automatic mode: last-good first, then the community resolver scan — no baked-in preferred
-  // node (a forced default meant every Automatic user piled onto one endpoint, and a client
-  // that couldn't reach it — LAN NAT-hairpin, region blocks — paid a failed dial on every
-  // connect before falling through).
+  // Automatic mode tries KaChat's own node first, then last-good, then the community resolver.
+  //
+  // A baked-in preferred node was deliberately removed once before, for two reasons that both
+  // still stand: everyone piles onto one endpoint, and a client that cannot reach it pays a failed
+  // dial on every single connect before falling through. What changed is that the endpoint is now
+  // OURS - piling on is the point, we can see the load, and the browser needs a wss:// endpoint
+  // that the public resolver does not reliably hand out.
+  //
+  // The second objection is answered rather than ignored: a node that has failed recently is
+  // skipped for a while (see recentlyFailed), so a client that genuinely cannot reach it stops
+  // paying for the attempt instead of paying forever. And the fallbacks below are untouched, so
+  // our node being down degrades to the old behaviour rather than breaking anything.
+  if (DEFAULT_NODE && !recentlyFailed(registry, DEFAULT_NODE)) {
+    try {
+      return await connectCandidate(kaspa, {
+        endpoint: DEFAULT_NODE,
+        timeoutMs: DIRECT_CONNECT_TIMEOUT_MS,
+        log,
+        role: "primary",
+        singleShot: true,
+      });
+    } catch (error) {
+      log(`KaChat's node did not answer: ${error?.message || error}`);
+    }
+  }
+
   const lastGoodEndpoint = registry.lastGoodEndpoint;
 
-  if (lastGoodEndpoint) {
+  if (lastGoodEndpoint && lastGoodEndpoint !== DEFAULT_NODE) {
     try {
       return await connectCandidate(kaspa, {
         endpoint: lastGoodEndpoint,
