@@ -3100,9 +3100,9 @@ function updateArchitectureDetails() {
         : `Primary active · standby ${connection.standby || "unavailable"}`
       : connection.failover && connection.failover !== "idle"
         ? `Failover ${connection.failover}`
-        : registry.lastGoodEndpoint
-          ? "Last-good-first · resolver fallback"
-          : "Resolver discovery · persistent scoring enabled";
+        : getEndpointOverride("trustedNode").trim()
+          ? "Your own node · no fallback"
+          : "KaChat's node · no fallback";
   }
   if (standbyStatus) {
     standbyStatus.textContent = standbyReady
@@ -3992,32 +3992,10 @@ document.querySelector("[data-connection-reconnect]")?.addEventListener("click",
   finally { button.disabled = false; renderConnectionStatus(); }
 });
 
-// "Scan for a Better Node": force a fresh primary (re-resolves in Automatic mode) and
-// warm a new standby, so the user can manually hop to a fast, healthy node.
-document.querySelector("[data-connection-scan]")?.addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = "Scanning…";
-  try {
-    setStatus("Scanning for a healthy node…");
-    if (!engine.kaspa) await engine.loadWasm();
-    await engine.connect({ force: true });
-    await engine.ensureStandby?.();
-    await connectAndRefresh({ quiet: true });
-    showCopyToast("Reconnected to a healthy node");
-  } catch (error) {
-    setStatus("Scan failed");
-    showCopyToast(`Scan failed. ${error.message}`);
-  } finally {
-    button.disabled = false;
-    button.textContent = label;
-    renderConnectionStatus();
-  }
-});
-
-// Node-selection cards: Automatic (resolver) vs Custom (a specific wRPC URL). The
-// selection is staged in the UI and only committed to the trustedNode endpoint on Apply.
+// Node-selection cards: KaChat's own node vs a specific wRPC URL of the user's. Those are the only
+// two, and the selection is staged in the UI and only committed to the trustedNode endpoint on
+// Apply. "auto" is still the stored name for the first of them - it is what an empty trustedNode
+// has always meant, and renaming the value would invalidate everyone's saved setting for nothing.
 let selectedNodeMode = null;
 function currentSavedNodeMode() {
   return getEndpointOverride("trustedNode").trim() ? "custom" : "auto";
@@ -4078,9 +4056,9 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
       setStatus("Checking your node…");
       await engine.verifyNode(url);
     }
-    // Leaving a custom node for Automatic: forget that node entirely, otherwise Automatic would
-    // immediately reconnect to it via last-good / the standby pool. The user asked for it to be
-    // removed and only auto-discovered nodes used.
+    // Leaving a custom node: forget it entirely. It no longer has a way back in - there is no
+    // last-good chain or standby pool any more - but a stale entry in the registry is still worth
+    // clearing, since the user asked for that node to be gone.
     if (mode !== "custom") {
       const previousCustom = getEndpointOverride("trustedNode").trim();
       // Purge both the URL the user typed AND the URL we're actually connected on — the WASM
@@ -4089,7 +4067,7 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
       if (previousCustom) engine.forgetNode?.(previousCustom);
       if (liveEndpoint) engine.forgetNode?.(liveEndpoint);
     }
-    setEndpoint("trustedNode", url); // "" clears the override, returning to Automatic
+    setEndpoint("trustedNode", url); // "" clears the override, returning to KaChat's node
     setStatus(mode === "custom" ? "Connecting to your node…" : "Finding a healthy node…");
     await engine.connect({ force: true });
     await connectAndRefresh({ quiet: true });
@@ -9099,7 +9077,7 @@ contactsNextcloudSyncButton?.addEventListener("click", async () => {
 
 // Connectivity endpoint fields (Kaspa REST API, KNS API, Push Indexer, Trusted
 // Node) persist through the endpoint registry. Blank = default; Trusted Node
-// blank = auto-search resolver. Takes effect on the next request/reconnect.
+// blank = KaChat's own node. Takes effect on the next request/reconnect.
 function loadEndpointInputs() {
   document.querySelectorAll("[data-endpoint]").forEach((input) => {
     const key = input.dataset.endpoint;
@@ -15830,10 +15808,10 @@ function renderSetupExtra(kind) {
     }
     setupExtraEl.appendChild(list);
   } else if (kind === "node") {
-    // Desktop connects via auto-discovery (wRPC resolver) by default; "own node"
-    // lets the user paste a trusted endpoint.
+    // Desktop connects to KaChat's own node by default; "own node" lets the user paste a
+    // trusted endpoint instead. Those are the only two, here and in Node Connection.
     const opts = [
-      { key: "auto", title: "Auto Search for Nodes", badge: "Recommended", sub: "Automatically finds and connects to public Kaspa nodes over wRPC. No setup needed." },
+      { key: "auto", title: "Use KaChat's Node", badge: "Recommended", sub: "Connects to the node KaChat runs. No setup needed." },
       { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Enter a node address you trust for the most reliable, private connection.", input: true },
     ];
     let current = accountShellPrefs.nodeChoice;

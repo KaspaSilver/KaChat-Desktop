@@ -9,13 +9,7 @@ const NODE_REGISTRY_KEY = "kachat.browser.node-registry.v1";
 /// still choose their own in Node Connection > Custom, which takes priority over this.
 export const DEFAULT_NODE = "wss://node.kachat.duckdns.org";
 
-/// How long a failed default node is left alone before it is tried again.
-const DEFAULT_NODE_RETRY_AFTER_MS = 10 * 60 * 1000;
-
 const DIRECT_CONNECT_TIMEOUT_MS = 8000;
-const RESOLVER_CONNECT_TIMEOUT_MS = 15000;
-const STANDBY_DIRECT_TIMEOUT_MS = 6000;
-const STANDBY_RESOLVER_TIMEOUT_MS = 9000;
 const MAX_FAILOVER_EVENTS = 24;
 
 const CONNECTION_ERROR_PATTERNS = [
@@ -114,19 +108,6 @@ function recordSuccess(endpoint, latencyMs, { setLastGood = true } = {}) {
   saveRegistry(registry);
 }
 
-/// Has this endpoint failed recently enough that dialling it again is just a wasted wait?
-///
-/// Only "recently": a node that was down ten minutes ago is worth another try, and a node that has
-/// since succeeded is not skipped at all.
-function recentlyFailed(registry, endpoint) {
-  const record = registry?.endpoints?.[endpoint];
-  if (!record) return false;
-  const failedAt = Number(record.lastFailureAt || 0);
-  if (!failedAt) return false;
-  if (Number(record.lastSuccessAt || 0) > failedAt) return false;
-  return now() - failedAt < DEFAULT_NODE_RETRY_AFTER_MS;
-}
-
 function recordFailure(endpoint, error) {
   if (!endpoint) return;
   const registry = loadRegistry();
@@ -158,12 +139,13 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/// Every connection names its endpoint now - ours or the user's - so there is no resolver branch
+/// left. Good riddance to it: constructing a Resolver is what broke the built site, since the
+/// minifier renamed the class out from under wasm-bindgen's own type check.
 function makeRpc(kaspa, { endpoint = "" } = {}) {
-  const { RpcClient, Resolver, Encoding } = kaspa;
-  if (endpoint) {
-    return new RpcClient({ url: endpoint, encoding: Encoding?.Borsh, networkId: NETWORK_ID });
-  }
-  return new RpcClient({ resolver: new Resolver(), encoding: Encoding?.Borsh, networkId: NETWORK_ID });
+  const { RpcClient, Encoding } = kaspa;
+  if (!endpoint) throw new Error("No node endpoint to connect to.");
+  return new RpcClient({ url: endpoint, encoding: Encoding?.Borsh, networkId: NETWORK_ID });
 }
 
 async function connectCandidate(kaspa, {
@@ -254,12 +236,9 @@ export function getNodeRegistrySnapshot() {
 }
 
 export async function createRpc(kaspa, log = () => {}) {
-  const registry = loadRegistry();
-
-  // A user-configured custom node (Node Connection > Custom) is authoritative and
-  // STRICT: connect only to it. If it is unreachable we throw rather than silently
-  // falling back to a public node, so the user always knows when their own node is
-  // down. Automatic mode (no trusted node) uses last-good + the resolver pool below.
+  // A user-configured custom node (Node Connection > Custom) is authoritative and STRICT: connect
+  // only to it. If it is unreachable we throw rather than silently falling back, so the user always
+  // knows when their own node is down.
   const trustedNode = getEndpoint("trustedNode");
   if (trustedNode) {
     return connectCandidate(kaspa, {
@@ -271,90 +250,29 @@ export async function createRpc(kaspa, log = () => {}) {
     });
   }
 
-  // Automatic mode tries KaChat's own node first, then last-good, then the community resolver.
+  // No node was chosen, so KaChat's own is used - and only that one. There is no pool to scan, no
+  // last-known-good to fall back to and no resolver: exactly two endpoints can ever be connected
+  // to, ours and one the user typed, and which of the two is in force is never a surprise.
   //
-  // A baked-in preferred node was deliberately removed once before, for two reasons that both
-  // still stand: everyone piles onto one endpoint, and a client that cannot reach it pays a failed
-  // dial on every single connect before falling through. What changed is that the endpoint is now
-  // OURS - piling on is the point, we can see the load, and the browser needs a wss:// endpoint
-  // that the public resolver does not reliably hand out.
-  //
-  // The second objection is answered rather than ignored: a node that has failed recently is
-  // skipped for a while (see recentlyFailed), so a client that genuinely cannot reach it stops
-  // paying for the attempt instead of paying forever. And the fallbacks below are untouched, so
-  // our node being down degrades to the old behaviour rather than breaking anything.
-  if (DEFAULT_NODE && !recentlyFailed(registry, DEFAULT_NODE)) {
-    try {
-      return await connectCandidate(kaspa, {
-        endpoint: DEFAULT_NODE,
-        timeoutMs: DIRECT_CONNECT_TIMEOUT_MS,
-        log,
-        role: "primary",
-        singleShot: true,
-      });
-    } catch (error) {
-      log(`KaChat's node did not answer: ${error?.message || error}`);
-    }
-  }
-
-  const lastGoodEndpoint = registry.lastGoodEndpoint;
-
-  if (lastGoodEndpoint && lastGoodEndpoint !== DEFAULT_NODE) {
-    try {
-      return await connectCandidate(kaspa, {
-        endpoint: lastGoodEndpoint,
-        timeoutMs: DIRECT_CONNECT_TIMEOUT_MS,
-        log,
-        role: "primary",
-        singleShot: true,
-      });
-    } catch (error) {
-      log(`Last-known-good RPC failed: ${error?.message || error}`);
-      log("Falling back to the Rusty Kaspa resolver...");
-    }
-  }
-
+  // Strict on purpose, the same way a custom node is strict. Falling back to some other node when
+  // ours is unreachable would mean the app quietly moves you onto a stranger's node without
+  // saying so; failing loudly is the honest behaviour, and the dialog can then say what is wrong.
   return connectCandidate(kaspa, {
-    timeoutMs: RESOLVER_CONNECT_TIMEOUT_MS,
+    endpoint: DEFAULT_NODE,
+    timeoutMs: DIRECT_CONNECT_TIMEOUT_MS,
     log,
     role: "primary",
+    singleShot: true,
   });
 }
 
-export async function createStandbyRpc(kaspa, primaryEndpoint = "", log = () => {}) {
-  const registry = getNodeRegistrySnapshot();
-  const directCandidates = registry.endpoints
-    .map((entry) => entry.endpoint)
-    .filter((endpoint) => endpoint && endpoint !== primaryEndpoint && !endpoint.includes("resolver"))
-    .slice(0, 3);
-
-  for (const endpoint of directCandidates) {
-    try {
-      return await connectCandidate(kaspa, {
-        endpoint,
-        timeoutMs: STANDBY_DIRECT_TIMEOUT_MS,
-        log,
-        role: "standby",
-        excludedEndpoints: [primaryEndpoint],
-      });
-    } catch (error) {
-      log(`Standby candidate failed (${endpoint}): ${error?.message || error}`);
-    }
-  }
-
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      return await connectCandidate(kaspa, {
-        timeoutMs: STANDBY_RESOLVER_TIMEOUT_MS,
-        log,
-        role: "standby",
-        excludedEndpoints: [primaryEndpoint],
-      });
-    } catch (error) {
-      log(`Standby resolver attempt ${attempt} failed: ${error?.message || error}`);
-    }
-  }
-
+/// There is no second node to warm any more.
+///
+/// A standby existed to keep a spare from the resolver pool connected, so a failing primary could
+/// be swapped out instantly. With exactly one node in play - ours, or the user's own - there is
+/// nothing to swap to: the reconnect loop retrying the one node IS the recovery. Kept as a stub
+/// rather than deleted so every caller does not have to learn that.
+export async function createStandbyRpc() {
   return null;
 }
 

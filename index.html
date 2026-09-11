@@ -1238,8 +1238,8 @@
             <div class="node-mode-card" role="button" tabindex="0" data-node-mode="auto">
               <span class="node-mode-radio" aria-hidden="true"></span>
               <span class="node-mode-copy">
-                <strong>Automatic</strong>
-                <small>Connects to KaChat's own node, and falls back to a healthy public one if it is ever unreachable. A warm backup is kept ready either way, so a node that stops responding is switched out right away.</small>
+                <strong>KaChat Node</strong>
+                <small>The node KaChat runs, and the one everyone uses unless they choose otherwise. If it is ever unreachable KaChat says so and keeps retrying rather than moving you onto somebody else's node.</small>
               </span>
             </div>
             <div class="node-mode-card" role="button" tabindex="0" data-node-mode="custom">
@@ -1261,7 +1261,6 @@
           <p class="settings-group-label">Actions</p>
           <div class="settings-list-card">
             <button class="settings-list-row" type="button" data-connection-reconnect><span class="settings-row-copy"><strong>Reconnect</strong><small>Drop and re-establish the current connection.</small></span></button>
-            <button class="settings-list-row" type="button" data-connection-scan><span class="settings-row-copy"><strong>Scan for a Better Node</strong><small>Re-check nodes and switch to a fast, healthy one.</small></span></button>
           </div>
         </section>
 
@@ -2752,7 +2751,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=380"></script>
+  <script type="module" src="./ui/app.js?v=381"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>
