@@ -819,7 +819,11 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .search-wrap {
-  margin: 0 18px 12px;
+  /* Top margin because the Select row that used to sit here moved into the topbar and took the
+     breathing room with it - the field ended up against the tab bar's rule. Horizontal margin is
+     12px, not 18px, so its edges line up with the chat rows below rather than sitting 6px inside
+     them. */
+  margin: 14px 12px 12px;
   height: 44px;
   display: flex;
   align-items: center;
@@ -4834,6 +4838,16 @@ body.session-logged-out [data-account-rename-modal] {
 }
 
 .chats-tab-button.active { color: var(--kaspa-ink); }
+
+/* These had no focus style, so keyboard focus fell back to the browser's blue rectangle - the one
+   thing on the screen not drawn by this app. The same teal ring every other focusable control
+   here uses, and still only on :focus-visible, so it appears for keyboard users and not on a
+   click. */
+.chats-tab-button:focus-visible {
+  outline: 2px solid rgba(98,244,208,.72);
+  outline-offset: -3px;
+  border-radius: 12px;
+}
 
 .chats-tab-button::after {
   content: "";
