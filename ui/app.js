@@ -10504,6 +10504,9 @@ function createDeliveryStatusIcon(message) {
 }
 
 function renderMessages(conversationEntry) {
+  // The header's name and bio were written just before this; re-measure so the thread's top inset
+  // matches whatever height they came out at.
+  syncChatHeaderInsets();
   hydrateConversationMessages(conversationEntry);
   // Cross-device placeholders never render: they carry no readable content (an outgoing tx
   // from another device whose text never synced into an archive this device has seen).
@@ -18187,8 +18190,39 @@ function deleteGroupMessageLocal(message) {
   renderGroupList();
 }
 
+/// Keeps each thread's top inset equal to its own header's real height.
+///
+/// The header floats over the thread, so the messages below have to reserve exactly its height or
+/// the first one sits behind it. A single CSS constant could not do that: the group header carries
+/// a member-count line the 1:1 header usually does not, so it is visibly taller, and a long name
+/// that wraps changes either of them again. Measured instead, and re-measured whenever a header
+/// resizes.
+function syncChatHeaderInsets() {
+  // Queries the DOM directly rather than the module-tail consts: renderMessages can run during
+  // the synchronous boot, before those consts initialize, and touching one then is a TDZ throw.
+  const pairs = [
+    [".conversation-view > .conversation-header", "[data-message-area]"],
+    [".group-chat-header", "[data-group-message-area]"],
+  ].map(([h, a]) => [document.querySelector(h), document.querySelector(a)]);
+  for (const [header, area] of pairs) {
+    if (!header || !area) continue;
+    const height = Math.round(header.getBoundingClientRect().height);
+    if (height > 0) area.style.paddingTop = `${height + 12}px`;
+  }
+}
+
+if (typeof ResizeObserver === "function") {
+  const headerObserver = new ResizeObserver(syncChatHeaderInsets);
+  for (const selector of [".conversation-view > .conversation-header", ".group-chat-header"]) {
+    const el = document.querySelector(selector);
+    if (el) headerObserver.observe(el);
+  }
+}
+window.addEventListener("resize", syncChatHeaderInsets);
+
 function renderGroupMessages() {
   if (!activeGroupId || !groupMessageArea) return;
+  syncChatHeaderInsets();
   pruneExpiredGroupSystemMessages(activeGroupId);
   dedupeStoredGroupMessages(activeGroupId);
   // Hidden members' messages are filtered out of the view (see the avatar menu). Reaction
