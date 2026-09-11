@@ -2918,10 +2918,16 @@ function openOnchainConfirm({ conversationId, text }) {
 // down, or null when the text isn't a file envelope at all.
 function sniffInlineFileMime(text) {
   const head = String(text || "").slice(0, 2048).trimStart();
-  if (!head.startsWith("{") || !/"type"\s*:\s*"file"/.test(head)) return null;
+  if (!head.startsWith("{")) return null;
   const mime = head.match(/"mimeType"\s*:\s*"([^"]+)"/);
-  if (mime) return mime[1].replace(/\\\//g, "/");
   const dataUrl = head.match(/"content"\s*:\s*"data:([^;",]+)/);
+  // Either mark is enough. Requiring "type":"file" in the window was the bug this comment already
+  // described but the code did not implement: when `content` is serialised FIRST, its multi-MB
+  // base64 pushes every other key past any window, so the envelope was declared "not a file" and
+  // the raw JSON went straight into the chat list. A `content` that is a data: URL is a media
+  // envelope whatever else the object says.
+  if (!dataUrl && !/"type"\s*:\s*"file"/.test(head)) return null;
+  if (mime) return mime[1].replace(/\\\//g, "/");
   return dataUrl ? dataUrl[1].replace(/\\\//g, "/") : "";
 }
 
@@ -13826,6 +13832,18 @@ function parseReplyEnvelope(text) { return memoizedEnvelopeParse("reply", text, 
 // Receivers (including our own render path) detect an image purely by
 // sniffing decrypted content, exactly as iOS/Android do — there is no
 // wire-level flag. Guards against parsing arbitrary long text as JSON.
+/// A media envelope's mime type: what it declares, or what its own data: URL says.
+///
+/// `mimeType` is the field every KaChat client writes, but it is not the only place the answer
+/// lives - a data: URL names its type in the first few characters. Reading the URL when the field
+/// is missing costs nothing and is the difference between a photo and a wall of base64.
+function envelopeMimeType(parsed, content) {
+  const declared = String(parsed?.mimeType || "").trim();
+  if (declared) return declared.toLowerCase();
+  const fromUrl = /^data:([^;,]+)/.exec(String(content || ""));
+  return fromUrl ? fromUrl[1].trim().toLowerCase() : "";
+}
+
 function parseImageEnvelopeUncached(text) {
   const trimmed = String(text || "").trim();
   // 8MB cap: group/Nextcloud photos can far exceed the on-chain payload sizes the
@@ -13834,10 +13852,10 @@ function parseImageEnvelopeUncached(text) {
   try {
     const parsed = JSON.parse(trimmed);
     if (!parsed || parsed.type !== "file") return null;
-    const mimeType = String(parsed.mimeType || "");
-    if (!mimeType.startsWith("image/")) return null;
     const content = String(parsed.content || "");
     if (!content.startsWith("data:")) return null;
+    const mimeType = envelopeMimeType(parsed, content);
+    if (!mimeType.startsWith("image/")) return null;
     return { name: String(parsed.name || "photo.jpg"), size: Number(parsed.size || 0), mimeType, content };
   } catch {
     return null;
@@ -13854,10 +13872,10 @@ function parseAudioEnvelopeUncached(text) {
   try {
     const parsed = JSON.parse(trimmed);
     if (!parsed || parsed.type !== "file") return null;
-    const mimeType = String(parsed.mimeType || "");
-    if (!mimeType.startsWith("audio/")) return null;
     const content = String(parsed.content || "");
     if (!content.startsWith("data:")) return null;
+    const mimeType = envelopeMimeType(parsed, content);
+    if (!mimeType.startsWith("audio/")) return null;
     return { name: String(parsed.name || "audio.webm"), size: Number(parsed.size || 0), mimeType, content, duration: Number(parsed.duration || 0) };
   } catch {
     return null;
