@@ -18,6 +18,12 @@ function nextcloudProxy() {
   // filenames, so a returning visitor could be handed a stale module. `vite build` + `vite preview`
   // hashes every asset (permanent cache-busting, no hand-maintained ?v= numbers) and this hook is
   // what lets Nextcloud keep working there.
+  // Connection-scoped headers, which belong to one hop and must not be relayed to the next.
+  const HOP_BY_HOP = [
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+  ];
+
   const mount = (server) => {
     server.middlewares.use("/nc-proxy", (req, res) => {
         // connect strips the "/nc-proxy" mount prefix, so req.url is "/<origin>/<path>?<query>".
@@ -50,6 +56,13 @@ function nextcloudProxy() {
         // The browser's origin/referer would confuse some reverse-proxy setups — drop them.
         delete headers.origin;
         delete headers.referer;
+        // Hop-by-hop headers describe THIS connection, not the message, and a proxy must not
+        // relay them (RFC 9110 7.6.1). Passing them on is what truncated large downloads: a
+        // Nextcloud backup answered with `transfer-encoding: chunked` had that header copied onto
+        // our own response, so Node was told the body was already framed while it was also doing
+        // its own framing, and the stream ended early - a 6MB archive arriving as ~5.8MB of
+        // unterminated JSON.
+        for (const hop of HOP_BY_HOP) delete headers[hop];
         // Link-preview scrape (x-preview): use a crawler User-Agent so sites emit their og:image /
         // og:title the way they do for Facebook/Slack unfurlers (a plain browser UA increasingly
         // gets a login/consent wall). Mirrors iOS LinkPreviewService's facebookexternalhit UA.
@@ -108,6 +121,7 @@ function nextcloudProxy() {
               }
               const mask404 = soft404 && upstreamRes.statusCode === 404;
               const responseHeaders = { ...upstreamRes.headers };
+              for (const hop of HOP_BY_HOP) delete responseHeaders[hop];
               if (mask404) responseHeaders["x-upstream-status"] = "404";
               res.writeHead(mask404 ? 200 : status, responseHeaders);
               upstreamRes.pipe(res);

@@ -412,6 +412,20 @@ async function downloadBackupFile(filename) {
   if (!text.trim()) {
     throw transientError("The server returned an empty response for the backup file. The backup was left untouched.");
   }
+  // A download cut short mid-flight is the failure this file is most exposed to: the archive is
+  // megabytes of one JSON object, and losing the tail leaves something that looks like a corrupt
+  // backup rather than an incomplete transfer. It is worth telling those two apart, because the
+  // advice is opposite - one is "try again", the other is "your backup is gone".
+  //
+  // Cheap and encoding-agnostic: one JSON object must start with { and end with }. A truncated
+  // body cannot end with }, whatever compression it arrived under.
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    throw transientError(
+      `The backup file arrived incomplete (${text.length.toLocaleString()} characters, ending mid-file). `
+      + "Nothing on the server was changed, so trying again is safe."
+    );
+  }
   return text;
 }
 
