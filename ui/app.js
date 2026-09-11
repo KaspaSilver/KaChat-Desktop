@@ -6710,13 +6710,16 @@ document.querySelectorAll("[data-close-spending-send]").forEach((b) => b.addEven
 const UI_SPOT_TAB_KEY = "kachat-ui-spot-tab-v1";
 
 function restoreLastAppTab() {
+  let tab = "chats";
   try {
-    const tab = localStorage.getItem(UI_SPOT_TAB_KEY);
-    if (tab && tab !== "chats" && document.querySelector(`.sidebar-tab[data-app-tab="${tab}"]`)) {
-      setActiveAppTab(tab);
-      applyDockLayout(); // falls back to chats if this account hides that tab
-    }
+    const saved = localStorage.getItem(UI_SPOT_TAB_KEY);
+    if (saved && document.querySelector(`.sidebar-tab[data-app-tab="${saved}"]`)) tab = saved;
   } catch { /* restoring the spot is best-effort */ }
+  // Always applied, Chats included. Skipping Chats because the markup "already shows it" left the
+  // layout state setActiveAppTab owns (the chats-tab body class, the dock height) unset until the
+  // first tab switch, so a refresh on Chats came up in the old full-width layout.
+  setActiveAppTab(tab);
+  applyDockLayout(); // falls back to chats if this account hides that tab
 }
 
 /// The Hub section on screen, or null for the Hub's own grid.
