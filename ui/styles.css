@@ -2233,10 +2233,20 @@ button { cursor: pointer; }
   display: block;
   min-height: var(--chat-header-h);
   padding: 4px 0 14px;
-  border-bottom: 1px solid var(--surface-2);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  /* Nothing behind it. A tinted, blurred panel is still a panel - it hid the top of the thread
+     just as an opaque bar did, only less honestly. The controls float over the messages and the
+     messages stay readable through the gaps. */
+  background: transparent;
+  /* The bar itself is not a target: only the two controls in it are, so a click on the empty
+     space between them lands on whatever message is underneath. */
+  pointer-events: none;
+}
+.conversation-header .back-button,
+.conversation-header .conversation-identity { pointer-events: auto; }
+/* Readable over whatever happens to be behind, without a panel to do it with. */
+.conversation-header .conversation-identity h1,
+.conversation-header .conversation-bio {
+  text-shadow: 0 1px 10px var(--bg), 0 0 4px var(--bg);
 }
 
 .conversation-header .back-button {
@@ -2256,8 +2266,10 @@ button { cursor: pointer; }
 
 .conversation-identity {
   /* Shrink to what it actually shows. It used to span the header's full width, so a click on any
-     empty part of the bar opened chat info - the avatar and the name are the target. */
-  width: auto;
+     empty part of the bar opened chat info - the avatar and the name are the target. `auto` was
+     not enough: this is a block-level flex container, and a block with width auto fills its line,
+     so the button stayed full width and kept swallowing those clicks. */
+  width: fit-content;
   max-width: calc(100% - 96px);
   min-width: 0;
   margin: 0 auto;
