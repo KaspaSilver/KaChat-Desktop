@@ -7185,9 +7185,13 @@ document.querySelectorAll("[data-dock-hub-grid], [data-dock-preview]").forEach((
 
 applyDockLayout();
 
-// --- What's-new wizard (once per install) ---------------------------------
+// --- Dock guide (opened from Help, never on its own) -----------------------
+//
+// This used to appear by itself on first launch as "What's new in 4.0". A modal that greets you
+// before you have done anything is asking you to read release notes as the price of entry, and it
+// went on saying 4.0 into 4.1. The pages themselves are still useful, so they stayed - as a guide
+// in Help, where somebody goes when they actually want them.
 
-const DOCK_WIZARD_DISMISSED_KEY = "kachat-dock-wizard-dismissed-v1";
 const DOCK_WIZARD_PAGES = [
   { title: "Meet KaPosts", body: "A social feed built on Kaspa — post, follow, and discover, fully on-chain. It lives in your dock now." },
   { title: "Meet Kaspa Hub", body: "Your dock holds five items. Everything else lives one click away in Kaspa Hub, which is always in the dock." },
@@ -7207,24 +7211,12 @@ function renderDockWizard() {
     dotsEl.innerHTML = DOCK_WIZARD_PAGES
       .map((_, i) => `<span class="${i === dockWizardPage ? "active" : ""}"></span>`).join("");
   }
-  if (nextBtn) nextBtn.textContent = dockWizardPage === DOCK_WIZARD_PAGES.length - 1 ? "Get Started" : "Next";
+  if (nextBtn) nextBtn.textContent = dockWizardPage === DOCK_WIZARD_PAGES.length - 1 ? "Done" : "Next";
 }
 
 function dismissDockWizard() {
-  localStorage.setItem(DOCK_WIZARD_DISMISSED_KEY, "1");
   const backdrop = document.querySelector("[data-dock-wizard]");
   if (backdrop) backdrop.hidden = true;
-}
-
-function maybeShowDockWizard() {
-  if (localStorage.getItem(DOCK_WIZARD_DISMISSED_KEY)) return;
-  if (!engine.address) return;
-  // Child Mode skips the what's-new wizard - it opens with KaPosts, which Child Mode hides.
-  if (isChildModeEnabled()) return;
-  dockWizardPage = 0;
-  renderDockWizard();
-  const backdrop = document.querySelector("[data-dock-wizard]");
-  if (backdrop) backdrop.hidden = false;
 }
 
 document.querySelector("[data-dock-wizard-skip]")?.addEventListener("click", dismissDockWizard);
@@ -17340,7 +17332,6 @@ queueMicrotask(async () => {
 
   // Per-account dock prefs may differ from the pre-login defaults rendered at load.
   reloadDockPrefsForAccount();
-  window.setTimeout(maybeShowDockWizard, 1200);
 
   // A page reload mid-setup doesn't dodge an onboarding run. Two persisted
   // markers drive the re-present, and BOTH re-present as an onboarding run
