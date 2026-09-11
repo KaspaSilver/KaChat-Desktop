@@ -28,6 +28,7 @@ import {
   submitKaPostUnquote,
   submitKaPostVote,
 } from "../engine/kaposts.js";
+import { getEndpoint } from "../engine/endpoints.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
@@ -53,6 +54,17 @@ let activePanel = null;
 let myContentPosts = []; // own posts+replies fetched for share/notification resolution
 let localPosts = [];      // newest first, optimistic
 let remotePosts = [];
+/// Posts the feed has fetched but not shown yet, behind the "Show N new posts" pill.
+///
+/// The feed is not rewritten under a reader's finger. Something arriving while you are three
+/// screens down and pushing everything you were reading off the bottom is the behaviour this
+/// avoids; the pill sits at the top until you ask for it. Matches iOS's pendingNewPosts.
+let pendingNewPosts = [];
+let newPostsCheckTimer = null;
+let checkingForNewPosts = false;
+/// iOS uses 60s, and asks for page ONE only - this answers "is there anything new", not "fetch
+/// everything I missed", and tapping the pill does a proper refresh anyway.
+const NEW_POSTS_CHECK_INTERVAL_MS = 60_000;
 let feedLoading = false;
 let feedError = null;
 let prefs = { following: [], muted: [], blocked: [] };
@@ -442,6 +454,64 @@ async function syncFollowingFromChain() {
   }
 }
 
+/// Asks whether anything newer than the top of the loaded feed exists, without touching what is
+/// on screen.
+async function checkForNewPosts() {
+  if (!deps || checkingForNewPosts || feedLoading || !remotePosts.length) return;
+  if (deps.kaPostsSuppressed?.()) return;
+  checkingForNewPosts = true;
+  try {
+    const result = await fetchFeedPage(null);
+    const known = new Set(remotePosts.map((post) => post.remoteId).filter(Boolean));
+    const pendingIds = new Set(pendingNewPosts.map((post) => post.remoteId).filter(Boolean));
+    const fresh = result.posts
+      .map(mapRemotePost)
+      .filter(Boolean)
+      .filter((post) => post.remoteId && !known.has(post.remoteId) && !pendingIds.has(post.remoteId));
+    if (fresh.length) {
+      pendingNewPosts = [...fresh, ...pendingNewPosts];
+      renderAll();
+    }
+  } catch { /* the next tick asks again; a missed check costs nothing */ }
+  finally {
+    checkingForNewPosts = false;
+  }
+}
+
+/// Folds the held-back posts into the feed and goes back to the top.
+function showPendingNewPosts() {
+  if (!pendingNewPosts.length) return;
+  const known = new Set(remotePosts.map((post) => post.remoteId).filter(Boolean));
+  remotePosts = [...pendingNewPosts.filter((post) => !known.has(post.remoteId)), ...remotePosts];
+  pendingNewPosts = [];
+  renderAll();
+  document.querySelector("[data-kaposts-feed]")?.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/// Only while the feed is actually on screen, the way iOS ties its check to the view's lifetime -
+/// nothing polls in the background for a tab nobody is looking at.
+function startNewPostsCheck() {
+  if (newPostsCheckTimer) return;
+  newPostsCheckTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    checkForNewPosts();
+  }, NEW_POSTS_CHECK_INTERVAL_MS);
+}
+
+function stopNewPostsCheck() {
+  if (!newPostsCheckTimer) return;
+  window.clearInterval(newPostsCheckTimer);
+  newPostsCheckTimer = null;
+}
+
+function newPostsPillHtml() {
+  if (!pendingNewPosts.length) return "";
+  const count = pendingNewPosts.length;
+  return `<button class="kaposts-new-pill" type="button" data-kaposts-show-new>`
+    + `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`
+    + `<span>Show ${count} new post${count === 1 ? "" : "s"}</span></button>`;
+}
+
 async function loadFeed() {
   syncFollowingFromChain();
   // The KaPosts tab can be clicked before initKaPosts has run (startup awaits storage/engine
@@ -457,6 +527,7 @@ async function loadFeed() {
     const result = await fetchFeedPage(null);
     if (generation !== feedGeneration) return;
     remotePosts = result.posts.map(mapRemotePost).filter(Boolean);
+    pendingNewPosts = [];
     seedPager(feedPager, result.posts, result.pagination);
   } catch (error) {
     if (generation !== feedGeneration) return;
@@ -897,8 +968,9 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
           </button>
         </div>
-        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(post.text)}</div>
+        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(postDisplayText(post))}</div>
         ${foldText ? `<button class="kaposts-show-more" type="button" data-kaposts-open="${post.id}">Show more</button>` : ""}
+        ${translateAffordanceHtml(post)}
         ${quotedHtml}
         ${deliveryHtml}
         <div class="kaposts-actions">
@@ -948,7 +1020,7 @@ function renderFeed({ resetScroll = false } = {}) {
       </div>`;
   } else {
     renderedFeedIds = new Set(posts.map((post) => post.id));
-    feedEl.innerHTML = posts.map((post) => postCellHtml(post)).join("");
+    feedEl.innerHTML = newPostsPillHtml() + posts.map((post) => postCellHtml(post)).join("");
   }
   // While page one is in flight the status line owns the loading state — no sentinel yet, or
   // it would fire a second request for the same page.
@@ -2405,12 +2477,188 @@ function handlePopoverAction(action, post) {
 /// Create Chat merges this with both indexer follow lists, the way iOS merges KaPostsFollowStore
 /// with them: a follow made on this device is in localStorage the instant it is tapped, while the
 /// indexer may not have caught up on it yet.
+// ---------------------------------------------------------------------------
+// Post translation (iOS PostTranslationService)
+// ---------------------------------------------------------------------------
+
+/// Per-post translation state, keyed the way iOS keys it: by post id when there is one, else by
+/// the text itself so an unsent or local-only post still has somewhere to hold its result.
+///
+/// Values are { status, text, sourceName, reason } where status is one of "translating",
+/// "translated", "failed" or "unavailable". "failed" is retryable - a dropped connection, a server
+/// briefly away - and "unavailable" is terminal for this post and this reader: the pair is not
+/// served, the post was too long, or it was already in their language. Saying which matters,
+/// because one invites a second tap and the other makes it pointless.
+const kapostTranslations = new Map();
+const kapostShowingOriginal = new Set();
+let kapostLanguages = null;
+let kapostLanguagesUrl = "";
+
+function translationServiceUrl() {
+  return String(getEndpoint("kapostIndexer") || "").replace(/\/+$/, "");
+}
+
+/// The reader's language, as a bare code: "pt-BR" is a Portuguese reader.
+function readerLanguage() {
+  const raw = String(navigator.language || "en");
+  return raw.split("-")[0].toLowerCase();
+}
+
+function translationKeyFor(post) {
+  return post?.id || `text:${String(post?.text || "").slice(0, 120)}`;
+}
+
+/// What the service can actually translate. Cached per service URL, and a failure to answer is not
+/// treated as "nothing is supported" - the link is offered anyway and the real request decides,
+/// which is what iOS does. A deployment that has not built this endpoint yet should not silently
+/// remove the feature.
+async function ensureTranslationLanguages() {
+  const base = translationServiceUrl();
+  if (!base) return null;
+  if (kapostLanguages && kapostLanguagesUrl === base) return kapostLanguages;
+  try {
+    const response = await fetch(`${base}/translate/languages`, { headers: { Accept: "application/json" } });
+    if (!response.ok) return null;
+    const json = await response.json();
+    kapostLanguages = {
+      source: new Set((json?.source || []).map(String)),
+      target: new Set((json?.target || []).map(String)),
+    };
+    kapostLanguagesUrl = base;
+    return kapostLanguages;
+  } catch {
+    return null;
+  }
+}
+
+/// Is this post worth offering to translate?
+///
+/// iOS asks a real language detector first and only offers when the detected language differs from
+/// the reader's. A browser has no such detector it can rely on, so this deliberately asks less and
+/// lets the SERVER decide: anything with enough text to detect gets the offer, and a post that
+/// comes back already in the reader's language is marked unavailable so the offer disappears and
+/// does not come back. One wasted request, once, per post that did not need translating - against
+/// guessing with a character-frequency heuristic and being wrong about somebody's language.
+function canOfferTranslation(post) {
+  if (!translationServiceUrl()) return false;
+  const text = String(post?.text || "").trim();
+  if (text.length < 8) return false;
+  const state = kapostTranslations.get(translationKeyFor(post));
+  if (state?.status === "unavailable") return false;
+  const languages = kapostLanguages;
+  if (languages && kapostLanguagesUrl === translationServiceUrl()) {
+    if (!languages.target.has(readerLanguage())) return false;
+  }
+  return true;
+}
+
+async function translatePost(post) {
+  const key = translationKeyFor(post);
+  const existing = kapostTranslations.get(key);
+  if (existing?.status === "translating") return;
+  const base = translationServiceUrl();
+  if (!base) return;
+
+  kapostTranslations.set(key, { status: "translating" });
+  kapostShowingOriginal.delete(key);
+  renderAll();
+
+  await ensureTranslationLanguages();
+  const target = readerLanguage();
+
+  try {
+    const body = { target, posts: [post.id ? { id: post.id, text: post.text } : { text: post.text }] };
+    const response = await fetch(`${base}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+      // Generous, because the FIRST request for a language pair can make the server load that
+      // pair's model. Everyone after is answered from its cache; only the reader who asked first
+      // ever waits, and a short timeout turned that one reader's wait into an error.
+      signal: AbortSignal.timeout ? AbortSignal.timeout(45_000) : undefined,
+    });
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json())?.error || message; } catch {}
+      // 4xx is the server saying this will never work; 5xx and the rest are worth another tap.
+      const terminal = response.status >= 400 && response.status < 500;
+      kapostTranslations.set(key, terminal ? { status: "unavailable", reason: message } : { status: "failed" });
+      renderAll();
+      return;
+    }
+    const entry = (await response.json())?.translations?.[0];
+    if (!entry || entry.error) {
+      kapostTranslations.set(key, { status: "unavailable", reason: entry?.error || "Translation unavailable" });
+    } else if (entry.untranslated || !entry.text || entry.source === target) {
+      // Already in the reader's language. Terminal: no amount of tapping changes it, and the
+      // offer should stop appearing on this post.
+      kapostTranslations.set(key, { status: "unavailable", reason: "Already in your language" });
+    } else {
+      kapostTranslations.set(key, {
+        status: "translated",
+        text: String(entry.text),
+        sourceName: languageDisplayName(entry.source),
+      });
+    }
+  } catch {
+    kapostTranslations.set(key, { status: "failed" });
+  }
+  renderAll();
+}
+
+/// "ru" -> "Russian", in the reader's own language, falling back to the code itself.
+function languageDisplayName(code) {
+  const raw = String(code || "").trim();
+  if (!raw) return "another language";
+  try {
+    const names = new Intl.DisplayNames([navigator.language || "en"], { type: "language" });
+    return names.of(raw) || raw;
+  } catch {
+    return raw;
+  }
+}
+
+/// The line under a post's text: an offer, a progress note, or where the text came from.
+function translateAffordanceHtml(post) {
+  const key = translationKeyFor(post);
+  const state = kapostTranslations.get(key);
+  const id = deps.escapeHtml(String(post.id || ""));
+  const link = (label) => `<button class="kaposts-translate-link" type="button" data-kaposts-translate="${id}">${deps.escapeHtml(label)}</button>`;
+
+  if (!state) return canOfferTranslation(post) ? link("Translate post") : "";
+  if (state.status === "translating") return `<span class="kaposts-translate-note">Translating…</span>`;
+  if (state.status === "failed") return link("Translation unavailable - try again");
+  if (state.status === "unavailable") return `<span class="kaposts-translate-note">${deps.escapeHtml(state.reason || "Translation unavailable")}</span>`;
+  if (kapostShowingOriginal.has(key)) {
+    return `<button class="kaposts-translate-link" type="button" data-kaposts-show-translation="${id}">Show translation</button>`;
+  }
+  return `<span class="kaposts-translate-note">Translated from ${deps.escapeHtml(state.sourceName || "another language")}`
+    + ` · <button class="kaposts-translate-link" type="button" data-kaposts-show-original="${id}">Show original</button></span>`;
+}
+
+/// The text a post should render with: its translation, unless the reader asked for the original.
+function postDisplayText(post) {
+  const key = translationKeyFor(post);
+  const state = kapostTranslations.get(key);
+  if (state?.status !== "translated" || kapostShowingOriginal.has(key)) return post.text;
+  return state.text;
+}
+
 export function kaPostsFollowingAddresses() {
   return [...(prefs.following || [])];
 }
 
+/// Stops the new-posts check when the tab is left, mirroring how iOS tears its check down with the
+/// view. Exported so the tab switch can call it the way it already calls stopBroadcastPolling.
+export function stopKaPostsPolling() {
+  stopNewPostsCheck();
+}
+
 export function refreshKaPostsFeed() {
   if (!deps) return;
+  // Opening the tab is what arms the check, and it only runs while the tab is the one on screen -
+  // nothing polls a feed nobody is looking at.
+  startNewPostsCheck();
   if (remotePosts.length > 0 && Date.now() - lastFeedLoadAt < FEED_FRESH_MS) {
     renderFeed();
     return;
@@ -2422,6 +2670,10 @@ export function resetKaPostsForAccount() {
   loadPrefs();
   localPosts = [];
   remotePosts = [];
+  pendingNewPosts = [];
+  // Another account's translations are not this one's, and the state is keyed by post id.
+  kapostTranslations.clear();
+  kapostShowingOriginal.clear();
   myContentPosts = [];
   threadStack = [];
   activePanel = null;
@@ -2877,6 +3129,30 @@ export function initKaPosts(dependencies) {
     const mentionTap = event.target.closest("[data-kaposts-mention]");
     if (mentionTap) {
       openMentionProfile(mentionTap.dataset.kapostsMention);
+      return;
+    }
+
+    if (event.target.closest("[data-kaposts-show-new]")) {
+      showPendingNewPosts();
+      return;
+    }
+
+    const translate = event.target.closest("[data-kaposts-translate]");
+    if (translate) {
+      const p = findPost(translate.dataset.kapostsTranslate);
+      if (p) translatePost(p);
+      return;
+    }
+    const showOriginal = event.target.closest("[data-kaposts-show-original]");
+    if (showOriginal) {
+      const p = findPost(showOriginal.dataset.kapostsShowOriginal);
+      if (p) { kapostShowingOriginal.add(translationKeyFor(p)); renderAll(); }
+      return;
+    }
+    const showTranslation = event.target.closest("[data-kaposts-show-translation]");
+    if (showTranslation) {
+      const p = findPost(showTranslation.dataset.kapostsShowTranslation);
+      if (p) { kapostShowingOriginal.delete(translationKeyFor(p)); renderAll(); }
       return;
     }
 

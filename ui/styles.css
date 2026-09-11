@@ -7435,6 +7435,30 @@ body.session-logged-out [data-account-rename-modal] {
 .create-chat-picker-check { flex: 0 0 auto; color: #30d158; font-weight: 900; }
 .create-chat-picker-empty { margin: 8px 2px; color: var(--muted); font-size: 12.5px; }
 
+/* Post translation: an offer, a progress note, or where the text came from. Sits directly under a
+   post's text, quiet enough that it reads as a footnote rather than an action bar. */
+.kaposts-translate-link {
+  border: 0; background: transparent; padding: 0; cursor: pointer;
+  color: var(--kaspa-ink); font: inherit; font-size: 12.5px; font-weight: 650;
+}
+.kaposts-translate-link:hover { text-decoration: underline; }
+.kaposts-translate-note { display: inline-block; margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+
+/* "Show N new posts": posts that arrived while you were reading wait behind this instead of being
+   pushed into the feed under your finger. */
+.kaposts-new-pill {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  width: fit-content; margin: 0 auto 12px; padding: 9px 16px;
+  border: 0; border-radius: 999px; cursor: pointer;
+  background: var(--kaspa); color: #06110f; font: inherit; font-size: 13.5px; font-weight: 750;
+  box-shadow: 0 10px 26px rgba(0,0,0,.32);
+}
+.kaposts-new-pill:hover { filter: brightness(1.05); }
+.kaposts-new-pill svg {
+  width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
 /* New Group: photo beside the name - the two things that identify a group, together. */
 .group-identity-row { display: flex; align-items: center; gap: 14px; }
 .group-identity-row .group-name-input { flex: 1; min-width: 0; }

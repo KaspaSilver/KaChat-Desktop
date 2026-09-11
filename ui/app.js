@@ -1,6 +1,6 @@
 import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses } from "./kaposts.js";
+import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling } from "./kaposts.js";
 import { fetchFollowList, requesterPubkeyFor, kaspaAddressFromPubkey } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
@@ -6778,6 +6778,7 @@ function setActiveAppTab(tab) {
   updateDetailActiveClass();
   if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummary(); }
   if (screenTab === "kaposts") refreshKaPostsFeed();
+  else stopKaPostsPolling();
   if (screenTab === "broadcasts") refreshBroadcasts();
   else stopBroadcastPolling();
   if (screenTab === "portfolio") refreshPortfolio();
