@@ -2684,6 +2684,144 @@ const kapostShowingOriginal = new Set();
 let kapostLanguages = null;
 let kapostLanguagesUrl = "";
 
+/// Terminal verdicts, keyed "<txid>:<target>" -> reason.
+///
+/// Persisted, because the alternative is what this fixes: the map above lives in memory, so every
+/// reload forgot that the server had already answered "already in your language" and the offer
+/// came back on a post that will never need translating. Only the short reason is stored - a
+/// translated 25,000-character post has no business in localStorage.
+const KAPOSTS_TRANSLATION_VERDICTS_KEY = "kachat-kaposts-translation-verdicts-v1";
+const KAPOSTS_VERDICT_LIMIT = 500;
+let kapostTerminalVerdicts = {};
+
+function loadTranslationVerdicts() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(deps.accountScopedKey(KAPOSTS_TRANSLATION_VERDICTS_KEY)) || "{}");
+    kapostTerminalVerdicts = raw && typeof raw === "object" ? raw : {};
+  } catch { kapostTerminalVerdicts = {}; }
+}
+
+function saveTranslationVerdicts() {
+  try {
+    const entries = Object.entries(kapostTerminalVerdicts);
+    // Oldest out first past the cap: this only ever grows otherwise, and a reader who scrolls for
+    // months should not carry every verdict they have ever collected.
+    if (entries.length > KAPOSTS_VERDICT_LIMIT) {
+      kapostTerminalVerdicts = Object.fromEntries(entries.slice(entries.length - KAPOSTS_VERDICT_LIMIT));
+    }
+    localStorage.setItem(deps.accountScopedKey(KAPOSTS_TRANSLATION_VERDICTS_KEY), JSON.stringify(kapostTerminalVerdicts));
+  } catch { /* a full quota costs the memo, not the translation */ }
+}
+
+/// The post's TRANSACTION id plus the reader's language. A local session post has no txid, so its
+/// verdict stays in memory - there is nothing stable to file it under.
+function verdictKeyFor(post) {
+  const txId = /^[0-9a-f]{64}$/i.test(String(post?.remoteId || "")) ? String(post.remoteId).toLowerCase() : null;
+  return txId ? `${txId}:${readerLanguage()}` : null;
+}
+
+function rememberTerminalVerdict(post, reason) {
+  const key = verdictKeyFor(post);
+  if (!key) return;
+  kapostTerminalVerdicts[key] = String(reason || "Translation unavailable");
+  saveTranslationVerdicts();
+}
+
+function rememberedVerdict(post) {
+  const key = verdictKeyFor(post);
+  return key ? kapostTerminalVerdicts[key] || null : null;
+}
+
+// --- Language detection -------------------------------------------------------------------
+// Offering to translate a post that is already in the reader's language is the one failure worth
+// engineering against: it is wrong on every render, for every reader, on most of the feed. iOS
+// asks NLLanguageRecognizer offline before offering; the browser's equivalent is the built-in
+// LanguageDetector, which only recent Chromium has - so this ASKS where it can, and lets the
+// server settle it (once, now remembered) where it cannot.
+const KAPOSTS_MIN_DETECT_LETTERS = 12;      // iOS minimumLetters: below this it is guesswork
+const KAPOSTS_MIN_DETECT_CONFIDENCE = 0.55; // iOS minimumConfidence
+const KAPOSTS_DETECT_CACHE_LIMIT = 400;     // iOS detectionCache.countLimit
+/// stripped text -> language code, or "" for "could not tell". Keyed by content, like iOS.
+const kapostDetected = new Map();
+const kapostDetecting = new Set();
+let kapostDetectorPromise = null;
+let kapostDetectRepaintTimer = null;
+
+/// URLs and @mentions go first: a post that is mostly a link otherwise identifies as whatever
+/// language the URL's letters resemble (iOS strippedForDetection).
+function strippedForDetection(text) {
+  return String(text || "").replace(/https?:\/\/\S+/g, " ").replace(/@[A-Za-z0-9._-]+/g, " ");
+}
+
+function detectableLetterCount(text) {
+  const matched = String(text || "").match(/\p{L}/gu);
+  return matched ? matched.length : 0;
+}
+
+/// The browser's detector, or null where there isn't one. Created once and shared.
+function ensureLanguageDetector() {
+  if (kapostDetectorPromise) return kapostDetectorPromise;
+  const Detector = typeof window !== "undefined" ? window.LanguageDetector : null;
+  if (!Detector || typeof Detector.create !== "function") {
+    kapostDetectorPromise = Promise.resolve(null);
+    return kapostDetectorPromise;
+  }
+  kapostDetectorPromise = (async () => {
+    try {
+      // A model that has to download first reports "downloadable"; creating it then would pull a
+      // model in the background for a convenience feature, so only a ready one is used.
+      if (typeof Detector.availability === "function") {
+        const availability = await Detector.availability();
+        if (availability !== "available") return null;
+      }
+      return await Detector.create();
+    } catch { return null; }
+  })();
+  return kapostDetectorPromise;
+}
+
+/// One repaint per burst. Detection resolves per post, and a feed of fifty would otherwise
+/// re-render fifty times.
+function scheduleDetectionRepaint() {
+  if (kapostDetectRepaintTimer) return;
+  kapostDetectRepaintTimer = setTimeout(() => {
+    kapostDetectRepaintTimer = null;
+    renderAll();
+  }, 60);
+}
+
+/// Fills the detection cache for a post, then schedules the repaint that reveals or withholds its
+/// Translate link. Rendering is synchronous and detection is not, hence cache-first.
+function detectLanguageSoon(post) {
+  const stripped = strippedForDetection(post?.text);
+  if (kapostDetected.has(stripped) || kapostDetecting.has(stripped)) return;
+  if (detectableLetterCount(stripped) < KAPOSTS_MIN_DETECT_LETTERS) {
+    kapostDetected.set(stripped, "");
+    scheduleDetectionRepaint();
+    return;
+  }
+  kapostDetecting.add(stripped);
+  ensureLanguageDetector().then(async (detector) => {
+    let code = "";
+    if (detector) {
+      try {
+        const results = await detector.detect(stripped);
+        const best = (Array.isArray(results) ? results : [])
+          .find((row) => row?.detectedLanguage && row.detectedLanguage !== "und");
+        if (best && Number(best.confidence) >= KAPOSTS_MIN_DETECT_CONFIDENCE) {
+          code = String(best.detectedLanguage).split("-")[0].toLowerCase();
+        }
+      } catch { code = ""; }
+    }
+    if (kapostDetected.size > KAPOSTS_DETECT_CACHE_LIMIT) kapostDetected.clear();
+    kapostDetected.set(stripped, code);
+    kapostDetecting.delete(stripped);
+    scheduleDetectionRepaint();
+  }).catch(() => {
+    kapostDetecting.delete(stripped);
+  });
+}
+
 function translationServiceUrl() {
   return String(getEndpoint("kapostIndexer") || "").replace(/\/+$/, "");
 }
@@ -2735,10 +2873,23 @@ function canOfferTranslation(post) {
   if (text.length < 8) return false;
   const state = kapostTranslations.get(translationKeyFor(post));
   if (state?.status === "unavailable") return false;
+  // A verdict this reader already collected, from any earlier session: the post was already in
+  // their language, or the pair is not served. Settled questions stay settled.
+  if (rememberedVerdict(post)) return false;
   const languages = kapostLanguages;
   if (languages && kapostLanguagesUrl === translationServiceUrl()) {
     if (!languages.target.has(readerLanguage())) return false;
   }
+  // Nothing to offer if the post is already written in the reader's language. Withheld rather
+  // than shown-then-retracted while the answer is pending: a link that appears and vanishes is
+  // the same wrong affordance, just briefly. Where the browser has no detector this resolves to
+  // "could not tell" immediately and the server settles it on the first tap, once.
+  const detected = kapostDetected.get(strippedForDetection(text));
+  if (detected === undefined) {
+    detectLanguageSoon(post);
+    return false;
+  }
+  if (detected && detected === readerLanguage()) return false;
   return true;
 }
 
@@ -2779,16 +2930,23 @@ async function translatePost(post) {
       // 4xx is the server saying this will never work; 5xx and the rest are worth another tap.
       const terminal = response.status >= 400 && response.status < 500;
       kapostTranslations.set(key, terminal ? { status: "unavailable", reason: message } : { status: "failed" });
+      if (terminal) rememberTerminalVerdict(post, message);
       renderAll();
       return;
     }
     const entry = (await response.json())?.translations?.[0];
     if (!entry || entry.error) {
-      kapostTranslations.set(key, { status: "unavailable", reason: entry?.error || "Translation unavailable" });
+      const reason = entry?.error || "Translation unavailable";
+      kapostTranslations.set(key, { status: "unavailable", reason });
+      rememberTerminalVerdict(post, reason);
     } else if (entry.untranslated || !entry.text || entry.source === target) {
       // Already in the reader's language. Terminal: no amount of tapping changes it, and the
-      // offer should stop appearing on this post.
+      // offer should stop appearing on this post - in this session and every later one.
       kapostTranslations.set(key, { status: "unavailable", reason: "Already in your language" });
+      rememberTerminalVerdict(post, "Already in your language");
+      // The server just said what the post's language is; believe it, so every other copy of this
+      // text on screen stops offering too.
+      if (entry.source) kapostDetected.set(strippedForDetection(post.text), String(entry.source).split("-")[0].toLowerCase());
     } else {
       kapostTranslations.set(key, {
         status: "translated",
@@ -2872,6 +3030,11 @@ export function resetKaPostsForAccount() {
   // Another account's translations are not this one's, and the state is keyed by post id.
   kapostTranslations.clear();
   kapostShowingOriginal.clear();
+  // Verdicts are stored per account, so the new one reads its own. Detection is keyed by text,
+  // not by account, but the feed is about to be replaced anyway.
+  loadTranslationVerdicts();
+  kapostDetected.clear();
+  kapostDetecting.clear();
   myContentPosts = [];
   threadStack = [];
   activePanel = null;
@@ -3050,6 +3213,7 @@ export function initKaPosts(dependencies) {
 
   loadPrefs();
   loadDrafts();
+  loadTranslationVerdicts();
 
   // Feed tab switching
   tabsEl?.addEventListener("click", (event) => {
