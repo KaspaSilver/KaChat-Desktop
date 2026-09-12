@@ -2694,7 +2694,13 @@ async function translatePost(post) {
   const target = readerLanguage();
 
   try {
-    const body = { target, posts: [post.id ? { id: post.id, text: post.text } : { text: post.text }] };
+    // The service's id is the post's TRANSACTION id (64 hex), which is what it caches by. post.id
+    // is the local render id - "remote-<txid>" for a fetched post - so sending it got every
+    // translation refused with "Invalid post id. Must be 64 hex characters." A local session post
+    // has no txid yet; sending no id at all is how iOS handles that, and the post is still
+    // translated, just not cached for the next reader.
+    const txId = /^[0-9a-f]{64}$/i.test(String(post.remoteId || "")) ? String(post.remoteId) : null;
+    const body = { target, posts: [txId ? { id: txId, text: post.text } : { text: post.text }] };
     const response = await fetch(`${base}/translate`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
