@@ -886,9 +886,6 @@ const profileBalance = document.querySelector("[data-profile-balance]");
 const profileInitial = document.querySelector("[data-profile-initial]");
 const profileKnsEmptyCta = document.querySelector("[data-profile-kns-empty-cta]");
 const profileKnsOwned = document.querySelector("[data-profile-kns-owned]");
-const profileKnsDomain = document.querySelector("[data-profile-kns-domain]");
-const profileKnsBio = document.querySelector("[data-profile-kns-bio]");
-const profileKnsLinks = document.querySelector("[data-profile-kns-links]");
 const profileQr = document.querySelector("[data-profile-qr]");
 const profileQrCard = document.querySelector("[data-profile-qr-card]");
 const profileQrOverlay = document.querySelector("[data-profile-qr-overlay]");
@@ -4126,6 +4123,9 @@ async function refreshOwnKnsProfile() {
   ]);
   if (engine.address !== address) return; // account switched mid-fetch
   updateProfileHero(info, profileInfo);
+  // Before the primary-domain branch below: Your Domains lists everything this account owns, and
+  // an account with domains but no primary set still owns them (iOS yourDomainsSection).
+  setProfileDomains(info);
 
   if (!info?.primaryDomain) {
     profileKnsEmptyCta.hidden = false;
@@ -4137,39 +4137,8 @@ async function refreshOwnKnsProfile() {
 
   profileKnsEmptyCta.hidden = true;
   profileKnsOwned.hidden = false;
-  if (profileKnsDomain) profileKnsDomain.textContent = info.primaryDomain;
   ownKnsAssetId = info.primaryInscriptionId || null;
   ownKnsProfileFields = profileInfo?.profile || null;
-
-  const profile = profileInfo?.profile;
-  if (profileKnsBio) {
-    if (profile?.bio) { profileKnsBio.textContent = profile.bio; profileKnsBio.hidden = false; }
-    else profileKnsBio.hidden = true;
-  }
-  if (profileKnsLinks) {
-    profileKnsLinks.replaceChildren();
-    const linkDefs = [
-      ["website", "Website", KNSProfileLinkBuilder.websiteUrl],
-      ["x", "X", KNSProfileLinkBuilder.xUrl],
-      ["telegram", "Telegram", KNSProfileLinkBuilder.telegramUrl],
-      ["discord", "Discord", KNSProfileLinkBuilder.discordUrl],
-      ["github", "GitHub", KNSProfileLinkBuilder.githubUrl],
-      ["contactEmail", "Email", KNSProfileLinkBuilder.emailUrl],
-    ];
-    for (const [field, label, builder] of linkDefs) {
-      const raw = profile?.[field];
-      if (!raw) continue;
-      const href = builder(raw);
-      if (!href) continue;
-      const link = document.createElement("a");
-      link.className = "chat-info-social-link";
-      link.href = href;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = label;
-      profileKnsLinks.appendChild(link);
-    }
-  }
 }
 
 // The KNS indexer can lag a few seconds behind a freshly revealed domain, so a
@@ -5644,20 +5613,75 @@ function saveSpendingBalCacheEntries(updates) {
   } catch { /* cache is best-effort */ }
 }
 
+function setSpendingUnlocking(active) {
+  const el = document.querySelector("[data-spending-unlocking]");
+  if (el) el.hidden = !active;
+}
+
+/// The whole-account spending total, under the active address's own balance.
+///
+/// Shown whenever it is known, INCLUDING when it equals the balance above it: on an account whose
+/// funds all sit on the current address the two are the same number, and hiding the line exactly
+/// then reads as the feature being missing rather than as "nothing else to add" (iOS
+/// spendingTotalText).
+function setSpendingTotal(kas) {
+  const el = document.querySelector("[data-spending-total]");
+  if (!el) return;
+  el.hidden = kas == null;
+  el.textContent = kas == null ? "" : `Total: ${kas} KAS`;
+}
+
+let spendingTotalToken = 0;
+async function refreshSpendingTotal() {
+  const token = ++spendingTotalToken;
+  if (!activeAccountMnemonic() || !engine.kaspa) { setSpendingTotal(null); return; }
+  const state = getSpendingState();
+  const hidden = new Set(state.hidden);
+  const addresses = [];
+  for (let i = 0; i <= state.maxIndex; i += 1) {
+    // Same membership rule as the Manage Addresses list: hidden addresses are out, except the
+    // primary, which can never be hidden.
+    if (hidden.has(i) && i !== state.activeIndex) continue;
+    const addr = deriveSpendingAddressAt(i);
+    if (addr) addresses.push(addr);
+  }
+  if (!addresses.length) { setSpendingTotal(null); return; }
+  try {
+    // ONE batched UTXO call for every address - the same call the Manage Addresses list makes,
+    // rather than a round trip per address.
+    const byAddress = await spendingBalancesBatchSompi(addresses);
+    if (token !== spendingTotalToken) return;
+    let sompi = 0;
+    for (const value of byAddress.values()) sompi += Number(value) || 0;
+    setSpendingTotal(trimKas8(sompi / 1e8));
+  } catch {
+    // An unreachable node costs the total line, not the balance above it.
+    if (token === spendingTotalToken) setSpendingTotal(null);
+  }
+}
+
 async function refreshSpendingSummary() {
   const mnemonic = activeAccountMnemonic();
   if (!mnemonic || !engine.kaspa) {
     activeSpendingAddress = null;
     if (spendingBalanceEl) spendingBalanceEl.textContent = "-- KAS";
+    setSpendingUnlocking(false);
+    setSpendingTotal(null);
     return;
   }
   const address = deriveSpendingAddressAt(getActiveSpendingIndex());
   if (!address) {
     activeSpendingAddress = null;
     if (spendingBalanceEl) spendingBalanceEl.textContent = "-- KAS";
+    // Said in the row rather than left as a bare "-- KAS": the keychain is still unlocking, and
+    // the alternative iOS rejected was showing some other address in this one's place.
+    setSpendingUnlocking(true);
+    setSpendingTotal(null);
     return;
   }
   activeSpendingAddress = address;
+  setSpendingUnlocking(false);
+  refreshSpendingTotal();
   // Paint the last-known balance immediately; the live number replaces it when it lands.
   const cached = loadSpendingBalCache()[address];
   if (spendingBalanceEl) spendingBalanceEl.textContent = cached?.kas != null ? `${cached.kas} KAS` : "…";
@@ -7305,10 +7329,56 @@ document.querySelector("[data-open-help-screen]")?.addEventListener("click", () 
 document.querySelector("[data-close-help-screen]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = true;
 });
+// Your Domains, following the same overlay pattern. READ-ONLY on desktop: iOS's list also offers
+// set-primary, inscribe and transfer, and desktop has no set-primary path at all (kns-write.js
+// builds create and transfer payloads only), so this shows what the account owns rather than
+// offering actions that would fail.
+const domainsScreenEl = document.querySelector("[data-domains-screen]");
+let ownKnsDomains = [];
+let ownKnsPrimaryDomain = "";
+
+function setProfileDomains(info) {
+  ownKnsDomains = Array.isArray(info?.allDomains) ? info.allDomains : [];
+  ownKnsPrimaryDomain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
+  renderProfileDomains();
+}
+
+function renderProfileDomains() {
+  const countEl = document.querySelector("[data-profile-domains-count]");
+  // Blank rather than "0" until a lookup has actually answered - a zero that is really "not asked
+  // yet" is worse than no number at all.
+  if (countEl) countEl.textContent = ownKnsDomains.length ? String(ownKnsDomains.length) : "";
+  const listEl = document.querySelector("[data-profile-domains-list]");
+  if (!listEl) return;
+  if (!ownKnsDomains.length) {
+    listEl.innerHTML = '<p class="spending-address-empty">No domains yet. Create a KNS profile to register one.</p>';
+    return;
+  }
+  listEl.innerHTML = ownKnsDomains.map((domain) => {
+    const created = domain.createdAt ? new Date(domain.createdAt).toLocaleDateString() : "";
+    const isPrimary = Boolean(ownKnsPrimaryDomain) && domain.fullName === ownKnsPrimaryDomain;
+    return `<div class="chat-info-domain-row">`
+      + `<strong>${escapeHtml(domain.fullName)}</strong>`
+      + `<span class="profile-domain-meta">`
+      + (isPrimary ? `<span class="profile-domain-primary">Primary</span>` : "")
+      + (created ? `<span>${escapeHtml(created)}</span>` : "")
+      + `</span></div>`;
+  }).join("");
+}
+
+document.querySelector("[data-open-domains-screen]")?.addEventListener("click", () => {
+  renderProfileDomains();
+  if (domainsScreenEl) domainsScreenEl.hidden = false;
+});
+document.querySelector("[data-close-domains-screen]")?.addEventListener("click", () => {
+  if (domainsScreenEl) domainsScreenEl.hidden = true;
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (appsScreenEl && !appsScreenEl.hidden) appsScreenEl.hidden = true;
   else if (helpScreenEl && !helpScreenEl.hidden) helpScreenEl.hidden = true;
+  else if (domainsScreenEl && !domainsScreenEl.hidden) domainsScreenEl.hidden = true;
 });
 
 document.querySelector("[data-help-welcome]")?.addEventListener("click", () => {

@@ -619,56 +619,77 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   stroke-linejoin: round;
 }
 
-.profile-dropdown { padding: 0; overflow: hidden; }
-
-.profile-dropdown-toggle {
-  width: 100%;
+/* Address rows (Chatting / Spending). The text block is a button because tapping the title and
+   balance is what copies the address - iOS folded the old Copy row into it, leaving two circles. */
+.profile-address-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 16px;
+  gap: 18px;
+  padding: 14px 16px;
+}
+
+.profile-address-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  /* Fixed width so Send and Manage land in the same column on both rows regardless of how long
+     the title or the balance text is (iOS pins this block to 140pt for the same reason). */
+  width: 148px;
+  flex: 0 0 auto;
   border: 0;
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-weight: 650;
   text-align: left;
+  cursor: pointer;
 }
 
-.profile-dropdown-balance { margin-left: auto; color: var(--kaspa-ink); font-weight: 700; font-size: 14px; }
+.profile-address-title { font-weight: 650; font-size: 14px; }
+.profile-address-balance { color: var(--kaspa-ink); font-weight: 700; font-size: 13px; }
+.profile-address-note,
+.profile-address-total { color: var(--muted); font-size: 11.5px; }
 
-.profile-dropdown-toggle .architecture-badge { margin-left: auto; }
+.profile-address-actions { display: flex; align-items: center; gap: 14px; margin-left: auto; }
 
-.profile-dropdown-chevron {
-  width: 16px;
-  height: 16px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  color: var(--muted);
-  transition: transform .15s ease;
+.profile-address-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--surface-2);
+  color: var(--kaspa-ink);
+  cursor: pointer;
   flex: 0 0 auto;
 }
 
-.profile-dropdown-toggle[aria-expanded="true"] .profile-dropdown-chevron { transform: rotate(180deg); }
+.profile-address-icon:hover { border-color: rgba(98,244,208,.3); }
 
-.profile-dropdown-body { border-top: 1px solid var(--line); }
-
-.profile-dropdown-row {
-  display: block;
-  width: 100%;
-  padding: 13px 16px;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  font: inherit;
+.profile-address-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.profile-dropdown-row + .profile-dropdown-row { border-top: 1px solid var(--surface-2); }
-.profile-dropdown-row:hover { background: var(--surface-1); }
+/* Trailing cluster on a row that carries a value beside its chevron (Your Domains). */
+.profile-row-trailing { display: inline-flex; align-items: center; gap: 8px; }
+.profile-domains-count { color: var(--muted); font-weight: 650; font-size: 13px; }
+
+.profile-domains-list { display: flex; flex-direction: column; }
+.profile-domain-meta { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.profile-domain-primary {
+  color: var(--kaspa-ink);
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
 
 .profile-about-row {
   display: flex;
@@ -6671,11 +6692,24 @@ body.session-logged-out [data-account-rename-modal] {
   height: 110px; background: linear-gradient(135deg, rgba(98,244,208,.5), rgba(98,244,208,.1));
   background-size: cover; background-position: center;
 }
-.profile-hero-row { display: flex; align-items: flex-start; gap: 14px; padding: 0 16px 14px; margin-top: -26px; }
+/* Avatar and the KNS affordance share the row that overlaps the banner; the name and bio sit
+   below it, full width - iOS profileHeroSection's arrangement. */
+.profile-hero-top { display: flex; align-items: flex-end; gap: 14px; padding: 0 16px; margin-top: -26px; }
+.profile-hero-kns {
+  margin-left: auto;
+  padding: 0 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--kaspa-ink);
+  font: inherit;
+  font-weight: 700;
+  font-size: 13.5px;
+  cursor: pointer;
+}
 .profile-hero-avatar { width: 64px; height: 64px; border: 3px solid var(--panel); border-radius: 50%; overflow: hidden; background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .profile-hero-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .profile-hero-avatar svg { width: 30px; height: 30px; fill: none; stroke: var(--kaspa-ink); stroke-width: 1.6; }
-.profile-hero-meta { display: flex; flex-direction: column; gap: 3px; padding-top: 38px; min-width: 0; }
+.profile-hero-meta { display: flex; flex-direction: column; gap: 4px; padding: 10px 16px 14px; min-width: 0; }
 .profile-hero-meta strong { font-size: 18px; }
 .profile-hero-bio { color: var(--muted); font-size: 13px; }
 .profile-apps-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
