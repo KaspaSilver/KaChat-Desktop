@@ -1352,18 +1352,31 @@ async function submitWithUtxoRetry(op) {
   }
 }
 
-// First segment = top-level post, each following segment = reply to the PREVIOUS one.
-// Threads submit sequentially right away (each segment needs the previous txid) - no 5s undo;
-// the optimistic root carries pending/sent/failed for the whole chain.
+// First segment = top-level post, each following segment = reply to the PREVIOUS one. Segments
+// submit sequentially once the countdown runs out (each one needs the previous txid), and the
+// optimistic root carries pending/sent/failed for the whole chain.
+//
+// Same 5s hold as a single post. A thread used to submit the instant it was composed - the one
+// compose action with no undo window at all, and the one where a mistake costs the most to fix,
+// since every segment is its own transaction.
 function scheduleThread(segments) {
   if (!segments.length) return;
   if (segments.length === 1) { schedulePost(segments[0]); return; }
   const post = makeLocalPost(segments[0]);
   post.isThreadRoot = true;
   localPosts.unshift(post);
-  threadRemainders.set(post.id, { rootText: segments[0], segments: segments.slice(1), parentTxId: null });
-  renderAll();
-  continueThread(post.id);
+  const key = `post:${post.id}`;
+  scheduleUndoable(key, () => {
+    // The remainder ledger is written HERE rather than up front, on purpose: it is what Retry
+    // resumes from, so an undone thread must leave nothing behind for a later retry to pick up.
+    threadRemainders.set(post.id, { rootText: segments[0], segments: segments.slice(1), parentTxId: null });
+    continueThread(post.id);
+  }, () => {
+    localPosts = localPosts.filter((p) => p.id !== post.id);
+    // Back the way the composer held it: every segment but the last is a stacked segment, and the
+    // last is whatever was in the editor when Post All was pressed.
+    restoreComposerDraft(segments[segments.length - 1], { segments: segments.slice(0, -1) });
+  }, "Posting thread");
 }
 
 async function continueThread(localId) {
