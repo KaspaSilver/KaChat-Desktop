@@ -8380,6 +8380,51 @@ body.session-logged-out [data-account-rename-modal] {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+
+/* The badge is its own button now (a button cannot nest inside another), so it needs the resets
+   the wrapping button used to provide. */
+.chat-info-avatar-edit { padding: 0; cursor: pointer; }
+.chat-info-avatar-wrap { position: relative; display: inline-flex; }
+
+/* Bled to the card's edges by cancelling its padding (.chat-info-header-card: 22px 16px). */
+.chat-info-banner {
+  width: auto;
+  height: 96px;
+  margin: -22px -16px 6px;
+  border-radius: 18px 18px 0 0;
+  background-color: rgba(98,244,208,.12);
+  background-size: cover;
+  background-position: center;
+}
+
+.chat-info-name-row { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
+.chat-info-name-pencil {
+  border: 0;
+  background: transparent;
+  color: var(--kaspa-ink);
+  padding: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.chat-info-name-pencil svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-info-domains-block { display: flex; flex-direction: column; }
+.chat-info-domains-card { padding: 0; overflow: hidden; }
+/* The domain rows are buttons (copy on tap), so they need the button resets the rule they share
+   with the read-only version does not carry. */
+.chat-info-domain-row { cursor: pointer; }
+
+.group-manage-row[disabled] { opacity: .55; cursor: default; }
+.group-manage-row[disabled]:hover { background: var(--surface-2, rgba(255,255,255,0.04)); }
 .chat-info-remove-photo {
   display: block;
   margin: 8px auto 0;

@@ -11005,6 +11005,9 @@ function openChatInfo() {
     if (chatInfoAvatarImage) { chatInfoAvatarImage.hidden = true; chatInfoAvatarImage.src = ""; }
   }
   if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
+  // iOS titles this screen with the contact's name rather than a generic label.
+  const chatInfoTitle = document.querySelector("[data-chat-info-title]");
+  if (chatInfoTitle) chatInfoTitle.textContent = displayNameForAddress(contact) || "Chat Info";
   if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
@@ -11056,6 +11059,14 @@ async function refreshChatInfoKnsSections(contact) {
     engine.fetchKnsAddressProfile(contact.address).catch(() => null),
   ]);
   if (token !== chatInfoRequestToken || chatInfoContactId !== contact.id) return;
+
+  renderChatInfoDomains(info);
+  const banner = document.querySelector("[data-chat-info-banner]");
+  const bannerUrl = profileInfo?.profile?.bannerUrl || "";
+  if (banner) {
+    banner.hidden = !bannerUrl;
+    banner.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : "";
+  }
 
   const profile = profileInfo?.profile;
   // A user-assigned photo overrides KNS, so never let a late KNS fetch replace it.
@@ -11159,6 +11170,59 @@ function refreshContactAvatars(contact) {
   }
   renderChats();
 }
+
+/// The contact's KNS domains, primary first then alphabetical - a stable order that does not
+/// jump around as the cache refreshes (iOS sortedKNSDomains). Copy-on-tap, the same idiom the
+/// Address and Aliases rows already use.
+function renderChatInfoDomains(info) {
+  const block = document.querySelector("[data-chat-info-domains-block]");
+  const list = document.querySelector("[data-chat-info-domains]");
+  if (!block || !list) return;
+  const domains = Array.isArray(info?.allDomains) ? [...info.allDomains] : [];
+  if (!domains.length) {
+    block.hidden = true;
+    list.replaceChildren();
+    return;
+  }
+  const primary = info?.explicitPrimaryDomain || info?.primaryDomain || "";
+  domains.sort((a, b) => {
+    const aPrimary = a.fullName === primary;
+    const bPrimary = b.fullName === primary;
+    if (aPrimary !== bPrimary) return aPrimary ? -1 : 1;
+    return String(a.fullName).toLowerCase().localeCompare(String(b.fullName).toLowerCase());
+  });
+  list.innerHTML = domains.map((domain) => `
+      <button type="button" class="chat-info-domain-row" data-chat-info-copy-domain="${escapeHtml(domain.fullName)}" title="Copy domain">
+        <strong>${escapeHtml(domain.fullName)}</strong>
+        ${domain.fullName === primary ? `<span class="profile-domain-primary">Primary</span>` : ``}
+      </button>`).join("");
+  block.hidden = false;
+}
+
+// Tapping the photo previews it; the camera badge below picks a new one. With no photo there is
+// nothing to enlarge, so the tap does nothing rather than opening an empty overlay.
+document.querySelector("[data-chat-info-avatar-preview]")?.addEventListener("click", () => {
+  const src = chatInfoAvatarImage && !chatInfoAvatarImage.hidden ? chatInfoAvatarImage.src : "";
+  if (src) openPhotoPreview(src);
+});
+
+// The pencil focuses the name field, so it works as the affordance it looks like rather than
+// being decoration beside the real target.
+document.querySelector("[data-chat-info-name-edit]")?.addEventListener("click", () => {
+  chatInfoNameInput?.focus();
+  chatInfoNameInput?.select();
+});
+
+// Delegated once on the overlay: the domain rows are re-rendered on every KNS refresh, and a
+// listener per render would stack up.
+chatInfoOverlay?.addEventListener("click", async (event) => {
+  const domainRow = event.target.closest("[data-chat-info-copy-domain]");
+  if (!domainRow) return;
+  try {
+    await copyTextToClipboard(domainRow.dataset.chatInfoCopyDomain);
+    showCopyToast("Domain copied to clipboard.");
+  } catch (error) { appendEngineLog(error.message); }
+});
 
 chatInfoPhotoPick?.addEventListener("click", () => chatInfoPhotoInput?.click());
 chatInfoPhotoInput?.addEventListener("change", async () => {
@@ -19030,6 +19094,9 @@ function openGroupManage(groupId) {
       </details>
     </div>
     <div class="group-manage-section">
+      <button type="button" class="group-manage-row" data-group-refresh><span class="group-manage-row-icon">${icResend}</span> Refresh Messages</button>
+    </div>
+    <div class="group-manage-section">
       <details class="group-members-details">
         <summary class="group-manage-section-title group-members-summary"><span class="group-manage-row-icon">${icBell}</span> Notifications</summary>
         ${notifyRows}
@@ -19648,6 +19715,24 @@ groupVoiceCancelBtn?.addEventListener("click", cancelGroupVoice);
 })();
 
 groupManageBody?.addEventListener("click", async (event) => {
+  // Pull anything this group is missing (iOS "Refresh Messages"). The engine syncs every group
+  // in one pass - there is no per-group fetch - which is a superset of what this row promises,
+  // so running it is honest rather than approximate. catchUp suppresses banners, because a
+  // manual backfill is not new mail arriving.
+  const refreshRow = event.target.closest("[data-group-refresh]");
+  if (refreshRow) {
+    if (refreshRow.disabled) return;
+    refreshRow.disabled = true;
+    try {
+      const changed = await syncGroupsNow({ catchUp: true });
+      showCopyToast(changed ? "Group messages refreshed." : "No new group messages.");
+    } catch {
+      showCopyToast("Could not refresh right now.");
+    } finally {
+      refreshRow.disabled = false;
+    }
+    return;
+  }
   // Per-group notification mode: all messages / mentions only / muted.
   const notifyRow = event.target.closest("[data-group-notify-mode]");
   if (notifyRow && activeGroupId) {

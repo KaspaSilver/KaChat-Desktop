@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=356" />
+  <link rel="stylesheet" href="./ui/styles.css?v=357" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -2672,23 +2672,38 @@
     <div class="account-overlay-card">
       <header class="account-overlay-header">
         <button class="chat-info-header-button" type="button" data-chat-info-cancel>Cancel</button>
-        <h2 class="account-overlay-title">Chat Info</h2>
+        <h2 class="account-overlay-title" data-chat-info-title>Chat Info</h2>
         <button class="chat-info-header-button accent" type="button" data-chat-info-save>Save</button>
       </header>
       <div class="account-overlay-body">
         <div class="profile-card chat-info-header-card">
-          <button type="button" class="chat-info-avatar-button" data-chat-info-photo-pick aria-label="Set contact photo">
-            <span class="chat-info-avatar" data-chat-info-avatar aria-hidden="true">
-              <span data-chat-info-avatar-initials></span>
-              <img class="chat-info-avatar-image" data-chat-info-avatar-image alt="" hidden />
-            </span>
-            <span class="chat-info-avatar-edit" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L16 8h4v11H4z"/><circle cx="12" cy="13" r="3.3"/></svg>
-            </span>
-          </button>
+          <!-- The contact's KNS banner, bled to the card's edges (iOS ChatInfoView's header
+               section leads with it when the profile has one). -->
+          <div class="chat-info-banner" data-chat-info-banner hidden></div>
+          <!-- Avatar and camera badge are SEPARATE buttons: tapping the photo previews it,
+               the badge picks a new one. A button cannot contain another button, hence the
+               wrapper the badge positions against. -->
+          <span class="chat-info-avatar-wrap">
+            <button type="button" class="chat-info-avatar-button" data-chat-info-avatar-preview aria-label="View contact photo">
+              <span class="chat-info-avatar" data-chat-info-avatar aria-hidden="true">
+                <span data-chat-info-avatar-initials></span>
+                <img class="chat-info-avatar-image" data-chat-info-avatar-image alt="" hidden />
+              </span>
+            </button>
+            <button type="button" class="chat-info-avatar-edit" data-chat-info-photo-pick aria-label="Set contact photo">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L16 8h4v11H4z"/><circle cx="12" cy="13" r="3.3"/></svg>
+            </button>
+          </span>
           <input type="file" accept="image/*" hidden data-chat-info-photo-input />
           <button type="button" class="chat-info-remove-photo" data-chat-info-remove-photo hidden>Remove Photo</button>
-          <input class="chat-info-name-input" data-chat-info-name-input type="text" placeholder="Name" maxlength="48" autocomplete="off" aria-label="Contact name" />
+          <!-- A bare field styled like a heading reads as a label rather than something you can
+               change; the pencil is what says otherwise, and it focuses the field (iOS). -->
+          <span class="chat-info-name-row">
+            <input class="chat-info-name-input" data-chat-info-name-input type="text" placeholder="Name" maxlength="48" autocomplete="off" aria-label="Contact name" />
+            <button type="button" class="chat-info-name-pencil" data-chat-info-name-edit aria-label="Edit name">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </button>
+          </span>
           <span class="chat-info-address-caption" data-chat-info-address-caption></span>
           <div class="chat-info-profile-extra" data-chat-info-profile-section hidden>
             <p class="chat-info-bio" data-chat-info-bio hidden></p>
@@ -2701,6 +2716,13 @@
           <canvas width="512" height="512" data-chat-info-qr></canvas>
           <span class="chat-info-address-mono" data-chat-info-address-mono></span>
         </button>
+
+        <!-- Every domain this contact owns, primary first. Hidden at zero domains; iOS disables
+             its KNS Domains row in that case for the same reason. -->
+        <div class="chat-info-domains-block" data-chat-info-domains-block hidden>
+          <p class="profile-section-label">KNS Domains</p>
+          <div class="settings-list-card chat-info-domains-card" data-chat-info-domains></div>
+        </div>
 
         <p class="profile-section-label">Aliases</p>
         <div class="settings-list-card chat-info-aliases-card">
@@ -2780,7 +2802,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=392"></script>
+  <script type="module" src="./ui/app.js?v=393"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>
