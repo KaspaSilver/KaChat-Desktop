@@ -1,7 +1,7 @@
 import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling } from "./kaposts.js";
-import { fetchFollowList, requesterPubkeyFor, kaspaAddressFromPubkey } from "../engine/kaposts.js";
+import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress } from "./coldstorage.js";
@@ -10214,7 +10214,7 @@ async function loadCreateChatPicker() {
     const pubkey = requesterPubkeyFor(engine);
     if (pubkey) {
       for (const wantFollowers of [false, true]) {
-        const raw = await fetchFollowList({ engine, pubkey, followers: wantFollowers, limit: 500 });
+        const raw = await fetchFollowListAll({ engine, pubkey, followers: wantFollowers });
         for (const item of raw || []) {
           const rowPubkey = item?.userPublicKey || item?.publicKey || item?.pubkey
             || item?.followedPubkey || item?.followerPubkey || item?.user || "";

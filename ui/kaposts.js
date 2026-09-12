@@ -9,6 +9,7 @@ import {
   KAPOSTS_POST_CHARACTER_LIMIT,
   fetchFollowingFeed,
   fetchFollowList,
+  fetchFollowListAll,
   fetchGlobalFeed,
   fetchKaPostNotifications,
   fetchKaPostUserDetails,
@@ -436,7 +437,7 @@ async function syncFollowingFromChain() {
   try {
     const pubkey = safeRequesterPubkey();
     if (!pubkey) { followingChainSynced = false; return; }
-    const raw = await fetchFollowList({ engine: deps.engine, pubkey, followers: false, limit: 500 });
+    const raw = await fetchFollowListAll({ engine: deps.engine, pubkey, followers: false });
     const merged = new Set(prefs.following);
     for (const item of raw || []) {
       const rowPubkey = item?.userPublicKey || item?.publicKey || item?.pubkey || item?.followedPubkey || item?.user || "";
@@ -449,8 +450,11 @@ async function syncFollowingFromChain() {
       savePrefs();
       renderAll();
     }
-  } catch {
-    followingChainSynced = false; // network miss — retry on the next feed load
+  } catch (error) {
+    followingChainSynced = false; // network miss - retry on the next feed load
+    // Logged rather than swallowed: when this failed silently, the Following tab rendered
+    // "Nothing here yet" with nothing anywhere saying the follow list had never loaded.
+    deps.appendEngineLog?.(`KaPosts follow-list sync failed: ${error?.message || error}`);
   }
 }
 

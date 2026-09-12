@@ -241,12 +241,39 @@ export async function fetchPostEngagement({ engine, postId, type = "all", limit 
 
 /** Who `pubkey` follows (followers=false) or who follows them (followers=true). The list
  *  endpoints wrap items under "posts" (verified live) — tolerate the other plausible keys. */
-export async function fetchFollowList({ engine, pubkey, followers = false, limit = 100 } = {}) {
+/// One page of a follow list. The indexer rejects any limit above 100 outright
+/// (400 INVALID_LIMIT), so an over-large ask is clamped rather than thrown away: callers treat a
+/// failure here as "follows nobody", which is indistinguishable from a real empty list.
+export async function fetchFollowList({ engine, pubkey, followers = false, limit = 100, before = null } = {}) {
   const path = followers ? "get-users-followers" : "get-users-following";
   const json = await kapostGet(path, {
-    requesterPubkey: requesterPubkeyFor(engine), userPubkey: pubkey, limit,
+    requesterPubkey: requesterPubkeyFor(engine),
+    userPubkey: pubkey,
+    limit: Math.max(1, Math.min(100, Number(limit) || 100)),
+    before,
   });
   return json?.posts || json?.users || json?.following || json?.followers || [];
+}
+
+/// Every page of a follow list, not just the first (iOS KaPostsFollowStore.syncFromChain).
+///
+/// Asking for the whole list in one request was the bug: `limit: 500` is over the indexer's cap,
+/// so the request 400d, the caller's catch swallowed it, and the local follow set stayed empty -
+/// which the Following tab renders as "Nothing here yet" even while the server returns posts.
+/// Pages of 100 with the server's own cursor, capped well beyond any real follow list.
+export async function fetchFollowListAll({ engine, pubkey, followers = false, maxPages = 10 } = {}) {
+  const path = followers ? "get-users-followers" : "get-users-following";
+  const requesterPubkey = requesterPubkeyFor(engine);
+  const rows = [];
+  let before = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    const json = await kapostGet(path, { requesterPubkey, userPubkey: pubkey, limit: 100, before });
+    rows.push(...(json?.posts || json?.users || json?.following || json?.followers || []));
+    const next = nextPageCursor(json?.pagination);
+    if (!next) break;
+    before = next;
+  }
+  return rows;
 }
 
 export async function fetchKaPostUserDetails({ engine, pubkey } = {}) {
