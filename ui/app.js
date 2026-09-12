@@ -43,7 +43,7 @@ import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
-import { confirmText, promptText } from "./dialogs.js";
+import { confirmText, promptText, confirmDialog } from "./dialogs.js";
 
 // Step 25 shell:
 // - Keeps KaspaEngine modules intact.
