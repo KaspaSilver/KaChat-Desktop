@@ -8980,3 +8980,30 @@ body.session-logged-out [data-account-rename-modal] {
      level would mean sitting on top of two tabs. */
   .new-chat-fab { bottom: calc(var(--dock-inset) + 16px); }
 }
+
+/* KaPosts conversation context: ancestors above the post you opened, rendered as real cells and
+   chained by a rail down the avatar column (X's conversation view). Drawn on the row rather than
+   beside it, so each post keeps the full width every other cell has. */
+.kaposts-ancestors { display: flex; flex-direction: column; }
+.kaposts-ancestor { position: relative; }
+.kaposts-ancestor::before {
+  content: "";
+  position: absolute;
+  left: 30px;
+  top: 52px;
+  bottom: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+/* Replies expanded in place under a comment, rather than opening their own thread. */
+.kaposts-inline-replies {
+  margin-left: 18px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+}
+.kaposts-inline-note { color: var(--muted); font-size: 12.5px; margin: 6px 0 8px; }
+
+/* The thread's Reply button, in place of the old reply bar. */
+.kaposts-thread-reply { width: 100%; margin: 6px 0 12px; }

@@ -10,6 +10,8 @@ import {
   fetchFollowingFeed,
   fetchFollowList,
   fetchFollowListAll,
+  fetchPost,
+  fetchThread,
   fetchGlobalFeed,
   fetchKaPostNotifications,
   fetchKaPostUserDetails,
@@ -42,7 +44,6 @@ let deps = null; // { engine, escapeHtml, shortAddress, accountScopedKey, showTo
 // DOM
 let feedEl, statusEl, tabsEl, threadEl, threadRootEl, threadRepliesEl, toastsEl;
 let composerEl, composerInput, composerMeter, composerSubmit, composerTitle, composerQuote;
-let replyInput, replyMeter, replySend;
 
 // State
 let activeFeedTab = "feed";
@@ -79,8 +80,8 @@ let panelOverThread = false;
 let pendingThreadScrollRemoteId = null;
 let threadHighlightRemoteId = null;
 let threadHighlightTimer = 0;
-let replyTargetId = null; // in-thread: which comment the reply bar targets (null = the root post)
 let composerQuoteTarget = null; // post being quoted, when the composer is a quote composer
+let composerReplyTarget = null; // post being replied to, when the composer is a reply composer
 let countdownTicker = null;
 let savedFeedScroll = 0;
 
@@ -687,6 +688,76 @@ async function loadOwnContentIntoResolutionPool() {
  * resolves from what is already loaded, then from own posts+replies; when it still cannot be
  * found, the reply's own thread opens as before.
  */
+// Ancestor chains from get-thread, keyed by the post's txid and held root first.
+//
+// Desktop's upward context used to be the navigation stack - i.e. only what you had tapped
+// through to get here - so a reply opened from a profile, a link or a notification had nothing
+// above it at all, and no way to reach the post it answered.
+const fetchedAncestors = new Map();
+/// Posts whose long text the reader expanded in place (Show more), by local id.
+const expandedPostIds = new Set();
+/// Comments whose reply chain is expanded inline in the thread, by local id.
+const expandedCommentIds = new Set();
+/// Comment local id -> "loading" | "loaded" | "failed", so an expander can say which it is
+/// instead of spinning on an empty list forever.
+const commentReplyState = new Map();
+
+/// Pulls one comment's replies into its own comments array, for inline expansion.
+///
+/// Reading a conversation used to mean opening each reply as its own thread and tapping Back for
+/// every level; expanding in place keeps you where you are.
+async function loadCommentReplies(comment) {
+  if (!comment?.remoteId || commentReplyState.get(comment.id) === "loading") return;
+  commentReplyState.set(comment.id, "loading");
+  renderThread();
+  try {
+    const page = await fetchReplies({ engine: deps.engine, postId: comment.remoteId, limit: 50 });
+    const replies = (page?.posts || []).map(mapRemotePost).filter(Boolean);
+    mutatePost(comment.id, (target) => {
+      const known = new Set(target.comments.map((entry) => entry.remoteId).filter(Boolean));
+      target.comments = [...target.comments, ...replies.filter((reply) => !known.has(reply.remoteId))];
+    });
+    commentReplyState.set(comment.id, "loaded");
+    resolvePosterIdentities(replies.map((reply) => reply.posterAddress), () => renderThread());
+  } catch {
+    commentReplyState.set(comment.id, "failed");
+  }
+  renderThread();
+}
+
+/// One post from the indexer by txid, mapped and merged into the resolution pool so every later
+/// findPostByRemoteId resolves it.
+async function indexerPost(txId) {
+  if (!txId) return null;
+  try {
+    const raw = await fetchPost({ engine: deps.engine, id: String(txId) });
+    const mapped = raw ? mapRemotePost(raw) : null;
+    if (mapped) mergeIntoResolutionPool([mapped]);
+    return mapped;
+  } catch { return null; }
+}
+
+/// The complete chain above a post, fetched once per post and rendered as real cells.
+async function loadAncestorsFor(post) {
+  const remoteId = post?.remoteId;
+  if (!remoteId || !post.parentRemoteId || fetchedAncestors.has(remoteId)) return;
+  // Claimed before the await: renderThread runs many times while this is in flight, and each
+  // would otherwise start its own fetch of the same chain.
+  fetchedAncestors.set(remoteId, []);
+  try {
+    const { ancestors } = await fetchThread({ engine: deps.engine, id: remoteId });
+    const mapped = (ancestors || []).map(mapRemotePost).filter(Boolean);
+    if (!mapped.length) return;
+    mergeIntoResolutionPool(mapped);
+    fetchedAncestors.set(remoteId, mapped);
+    resolvePosterIdentities(mapped.map((entry) => entry.posterAddress), () => renderThread());
+    renderThread();
+  } catch {
+    // Unclaimed, so opening the post again retries rather than showing no context forever.
+    fetchedAncestors.delete(remoteId);
+  }
+}
+
 async function openResolvedPost(post, { parentRemoteIdHint = null, ownContentLoaded = false } = {}) {
   const parentId = post.parentRemoteId || parentRemoteIdHint || null;
   if (!parentId || parentId === post.remoteId) {
@@ -699,6 +770,9 @@ async function openResolvedPost(post, { parentRemoteIdHint = null, ownContentLoa
     await loadOwnContentIntoResolutionPool();
     parent = findPostByRemoteId(parentId);
   }
+  // The indexer answers a single id now, so a parent outside every loaded list is one request
+  // away rather than unreachable.
+  if (!parent) parent = await indexerPost(parentId);
   closePanel();
   if (parent) openThread(parent, { scrollToRemoteId: post.remoteId });
   else openThread(post);
@@ -712,6 +786,8 @@ async function openResolvedPost(post, { parentRemoteIdHint = null, ownContentLoa
 async function resolveAndOpenPost(txId, { parentRemoteIdHint = null } = {}) {
   let post = findPostByRemoteId(txId);
   let ownContentLoaded = false;
+  // One request for the exact id, before re-fetching whole feeds in the hope it falls inside one.
+  if (!post) post = await indexerPost(txId);
   if (!post) {
     await loadFeed();
     post = findPostByRemoteId(txId);
@@ -944,7 +1020,10 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
   const isMine = post.posterAddress === deps.engine.address;
   const isFollowing = prefs.following.includes(post.posterAddress);
   const isLong = post.text.length > 280 || (post.text.match(/\n/g) || []).length >= 8;
-  const foldText = !inThread && isLong;
+  // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
+  // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
+  // all. Opening the post is what tapping the post itself is for.
+  const foldText = !inThread && isLong && !expandedPostIds.has(post.id);
   const commentCount = Math.max(post.remoteReplyCount || 0, post.comments.filter((c) => !isHiddenAuthor(c.posterAddress)).length);
 
   const deliveryHtml = post.delivery === "pending"
@@ -973,12 +1052,12 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
           </button>
         </div>
         <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(postDisplayText(post))}</div>
-        ${foldText ? `<button class="kaposts-show-more" type="button" data-kaposts-open="${post.id}">Show more</button>` : ""}
+        ${!inThread && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${post.id}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
         ${quotedHtml}
         ${deliveryHtml}
         <div class="kaposts-actions">
-          <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${post.id}"` : `data-kaposts-open="${post.id}"`} title="${replyInline ? "Reply" : "Replies"}">
+          <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${post.id}"` : `data-kaposts-open="${post.id}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}
           </button>
           <button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${post.id}" title="Repost">
@@ -1058,17 +1137,6 @@ function appendFeedRows() {
   return ordered.length;
 }
 
-function updateReplyContext() {
-  const chip = document.querySelector("[data-kaposts-reply-context]");
-  const label = document.querySelector("[data-kaposts-reply-context-label]");
-  if (!chip) return;
-  const target = replyTargetId ? findPost(replyTargetId) : null;
-  const topId = threadStack[threadStack.length - 1];
-  const isNested = target && target.id !== topId;
-  chip.hidden = !isNested;
-  if (isNested && label) label.textContent = `Replying to ${posterName(target.posterAddress)}`;
-}
-
 /**
  * The feed, the thread and the panel are `flex: 1` SIBLINGS in one scroller, so any two of
  * them visible at once produce a stacked split view with two back headers. Exactly one wins,
@@ -1103,7 +1171,6 @@ function renderThread() {
   syncSurfaces(post);
   if (!showThread) clearPagerSentinel("thread");
   if (!post || !threadRootEl) return;
-  if (replyTargetId && !findPost(replyTargetId)) replyTargetId = null;
   const scroller = kapostsScrollEl();
   const previousTop = scroller?.scrollTop || 0;
   // Thread segments are the author's own continuation - they render as a connected section
@@ -1112,25 +1179,55 @@ function renderThread() {
   const chainIds = new Set(chain.map((segment) => segment.remoteId).filter(Boolean));
   const comments = post.comments.filter((c) => !isHiddenAuthor(c.posterAddress)
     && !(c.remoteId && chainIds.has(c.remoteId)));
-  updateReplyContext();
   if (threadRootEl) {
-    threadRootEl.innerHTML = postCellHtml(post, { inThread: true, isRoot: true, replyInline: true })
+    // Ancestors render as the posts they are - full cells, every action live - connected to the
+    // post below by a rail down the avatar column, the way X draws a conversation. Tapping one
+    // opens it.
+    const ancestors = fetchedAncestors.get(post.remoteId) || [];
+    const ancestorsHtml = ancestors.length
+      ? `<div class="kaposts-ancestors">${ancestors
+          .map((entry) => `<div class="kaposts-ancestor">${postCellHtml(entry, { inThread: true, replyInline: true })}</div>`)
+          .join("")}</div>`
+      : "";
+    // "Thread" is what an author calls their OWN continuation; once the chain carries other
+    // people's replies it is a conversation, and calling it a thread credits them to the author.
+    const isSelfThread = chain.every((segment) => segment.posterAddress === post.posterAddress);
+    threadRootEl.innerHTML = ancestorsHtml
+      + postCellHtml(post, { inThread: true, isRoot: true, replyInline: true })
       + (chain.length ? `
       <div class="kaposts-thread-chain">
-        <div class="kaposts-thread-chain-header">Thread · ${chain.length + 1} posts</div>
+        <div class="kaposts-thread-chain-header">${isSelfThread ? "Thread" : "Conversation"} · ${chain.length + 1} posts</div>
         ${chain.map((segment) => `<div class="kaposts-thread-chain-item">${postCellHtml(segment, { inThread: true, replyInline: true })}</div>`).join("")}
       </div>` : "");
   }
   if (threadRepliesEl) {
     threadRepliesEl.innerHTML = `
       <div class="kaposts-thread-replies">
-        ${comments.map((comment) => `
+        ${comments.map((comment) => {
+          const nested = (comment.comments || []).filter((c) => !isHiddenAuthor(c.posterAddress));
+          const expanded = expandedCommentIds.has(comment.id);
+          const state = commentReplyState.get(comment.id);
+          const hasReplies = (comment.remoteReplyCount || 0) > 0 || nested.length > 0;
+          // Expands in place rather than opening its own thread. The empty case says which it is:
+          // a count that is a whole subtree while get-replies returns direct replies only would
+          // otherwise spin on "Loading" forever.
+          const nestedHtml = !expanded ? "" : `
+            <div class="kaposts-inline-replies">
+              ${nested.length
+                ? nested.map((reply) => `<div class="kaposts-thread-reply">${postCellHtml(reply, { inThread: true, replyInline: true })}</div>`).join("")
+                : state === "loading"
+                  ? `<p class="kaposts-inline-note">Loading replies…</p>`
+                  : state === "failed"
+                    ? `<p class="kaposts-inline-note">Could not load replies.</p>`
+                    : `<p class="kaposts-inline-note">No replies</p>`}
+            </div>`;
+          return `
           <div class="kaposts-thread-reply">
             ${postCellHtml(comment, { inThread: true, replyInline: true })}
-            ${comment.remoteReplyCount > 0 || comment.comments.length > 0
-              ? `<button class="kaposts-show-more" type="button" data-kaposts-open="${comment.id}">View replies</button>`
-              : ""}
-          </div>`).join("")}
+            ${hasReplies ? `<button class="kaposts-show-more" type="button" data-kaposts-expand-replies="${comment.id}">${expanded ? "Hide replies" : `View ${Math.max(comment.remoteReplyCount || 0, nested.length)} ${Math.max(comment.remoteReplyCount || 0, nested.length) === 1 ? "reply" : "replies"}`}</button>` : ""}
+            ${nestedHtml}
+          </div>`;
+        }).join("")}
       </div>`;
     const pager = threadPagers.get(post.id);
     mountPagerSentinel("thread", threadRepliesEl, pager, () => loadMoreThreadReplies(post.id));
@@ -1312,20 +1409,30 @@ function probeThreadRoots(posts) {
 async function loadSelfThreadChain(post) {
   if (!post?.remoteId) return;
   const chain = [];
-  let current = (post.comments || [])
-    .filter((c) => c.remoteId && c.posterAddress === post.posterAddress)
-    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))[0] || null;
+  let candidates = (post.comments || [])
+    .filter((c) => c.remoteId && !isHiddenAuthor(c.posterAddress))
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   let hops = 0;
-  while (current && hops < 25) {
+  while (hops < 25) {
+    // An UNBRANCHED continuation is the conversation, whoever wrote it: a back-and-forth between
+    // two people is one thread to read, and following only the root author's replies left every
+    // other message behind a tap - one tap down per message, and as many back to leave.
+    //
+    // With SEVERAL replies there is a real branch, and picking one would hide the others, so that
+    // case keeps the old rule (the author's own continuation, which they wrote deliberately) and
+    // everything else stays in the replies list below.
+    const current = candidates.length === 1
+      ? candidates[0]
+      : candidates.filter((reply) => reply.posterAddress === post.posterAddress)[0] || null;
+    if (!current || !current.remoteId) break;
     chain.push(current);
     hops += 1;
-    if (!current.remoteId) break;
     let page = null;
     try { page = await fetchReplies({ engine: deps.engine, postId: current.remoteId, limit: 25 }); }
     catch { break; }
-    current = (page?.posts || []).map(mapRemotePost).filter(Boolean)
-      .filter((reply) => reply.posterAddress === post.posterAddress)
-      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))[0] || null;
+    candidates = (page?.posts || []).map(mapRemotePost).filter(Boolean)
+      .filter((reply) => reply.remoteId && !isHiddenAuthor(reply.posterAddress))
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   }
   threadChains.set(post.id, chain);
   if (chain.length) threadRootProbe.set(post.remoteId, true);
@@ -1571,6 +1678,8 @@ async function openThread(post, { scrollToRemoteId = null } = {}) {
   panelOverThread = false;
   threadStack.push(post.id);
   renderThread();
+  // The real chain above this post, not just the levels you happened to tap through.
+  loadAncestorsFor(post);
   if (!post.remoteId) return;
   const generation = ++threadGeneration;
   const pager = makePager({ pageSize: PAGER_THREAD_PAGE_SIZE });
@@ -1656,7 +1765,14 @@ async function submitReply(parent, text) {
   }, () => {
     mutatePost(parent.id, (p) => { p.comments = p.comments.filter((c) => c.id !== comment.id); });
     renderThread();
-    restoreReplyDraft(text);
+    // An undone reply reopens the composer it was written in, with its parent attached - the
+    // reply bar it used to be put back into no longer exists.
+    openComposer(null, { replyTarget: parent });
+    if (composerInput) {
+      composerInput.value = text;
+      composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+      composerInput.focus();
+    }
   });
 }
 
@@ -1719,17 +1835,22 @@ function renderComposerThreadUi() {
         <button type="button" class="kaposts-thread-segment-remove" data-kaposts-thread-remove="${index}" aria-label="Remove segment">×</button>
       </div>`).join("");
   }
-  // The + appears once you type (and never while quoting - quotes stay single-post).
-  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || !trimmed;
-  if (composerTitle && !composerQuoteTarget) {
+  // The + appears once you type, and never while quoting or replying - both are one post about
+  // one other post, so neither stacks into a thread.
+  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || !trimmed;
+  if (composerTitle && !composerQuoteTarget && !composerReplyTarget) {
     composerTitle.textContent = composerThreadSegments.length ? "New Thread" : "New Post";
   }
   if (composerSubmit) {
-    composerSubmit.textContent = total > 1 ? `Post All (${total})` : "Post";
+    // Reply mode keeps its own wording: this runs on every keystroke, and would otherwise reset
+    // the button to "Post" the moment anything re-rendered the composer.
+    composerSubmit.textContent = composerReplyTarget ? "Reply" : (total > 1 ? `Post All (${total})` : "Post");
     composerSubmit.disabled = total === 0;
   }
   if (composerInput) {
-    composerInput.placeholder = composerThreadSegments.length ? "Add another post" : "What's happening on Kaspa?";
+    composerInput.placeholder = composerReplyTarget
+      ? "Post your reply"
+      : (composerThreadSegments.length ? "Add another post" : "What's happening on Kaspa?");
   }
 }
 
@@ -1763,24 +1884,7 @@ function restoreComposerDraft(text, { quoted = null, segments = [] } = {}) {
 /// at the field's CSS max-height so the two cannot disagree; past that it scrolls, because a reply
 /// box that keeps growing pushes the post being replied to off the screen (iOS caps it at 92pt for
 /// exactly that reason).
-const REPLY_MAX_HEIGHT_PX = 140;
-function autoGrowReply() {
-  if (!replyInput) return;
-  replyInput.style.height = "auto";
-  replyInput.style.height = `${Math.min(replyInput.scrollHeight, REPLY_MAX_HEIGHT_PX)}px`;
-}
-
-/// An undone comment goes straight back into the reply bar, which is still on screen - no
-/// composer involved, exactly as iOS puts it back into replyText.
-function restoreReplyDraft(text) {
-  const value = String(text || "");
-  if (!replyInput || !value.trim()) return;
-  replyInput.value = value;
-  replyInput.dispatchEvent(new Event("input", { bubbles: true }));
-  replyInput.focus();
-}
-
-function openComposer(quoteTarget = null) {
+function openComposer(quoteTarget = null, { replyTarget = null } = {}) {
   editingDraftId = null;
   // Posting costs KAS — with a confirmed-zero chatting balance, show the funding
   // popup (QR + address + copy) instead of a composer that could never submit.
@@ -1788,8 +1892,14 @@ function openComposer(quoteTarget = null) {
     deps.showFundingGate?.();
     return;
   }
-  composerQuoteTarget = quoteTarget;
-  composerTitle.textContent = quoteTarget ? "Quote Post" : "New Post";
+  // Replying is a composer now, not a bar under the thread: the whole screen to write in, with
+  // the post being answered rendered below - the same card a quote shows.
+  composerReplyTarget = replyTarget;
+  quoteTarget = replyTarget || quoteTarget;
+  composerQuoteTarget = replyTarget ? null : quoteTarget;
+  composerTitle.textContent = replyTarget ? "Reply to Post" : (quoteTarget ? "Quote Post" : "New Post");
+  if (composerSubmit) composerSubmit.textContent = replyTarget ? "Reply" : "Post";
+  if (composerInput) composerInput.placeholder = replyTarget ? "Post your reply" : "What's happening on Kaspa?";
   composerInput.value = "";
   composerSubmit.disabled = true;
   composerMeter.hidden = true;
@@ -1826,6 +1936,9 @@ async function closeComposer({ keepDraft = null } = {}) {
 
   composerEl.hidden = true;
   composerQuoteTarget = null;
+  // Cleared with the rest: a reply composer closed and reopened as a new post would otherwise
+  // still submit as a reply to whatever it was last pointed at.
+  composerReplyTarget = null;
   composerThreadSegments = [];
   editingDraftId = null;
   renderComposerThreadUi();
@@ -2618,6 +2731,9 @@ function saveDraftFromComposer() {
     text,
     threadSegments,
     quotedRemoteId: composerQuoteTarget?.remoteId || null,
+    // Separate from quotedRemoteId rather than one id plus a kind, so drafts saved before replies
+    // had a composer still reopen as the quotes they were.
+    replyRemoteId: composerReplyTarget?.remoteId || null,
     savedAt: Date.now(),
   };
   kapostDrafts = [draft, ...kapostDrafts.filter((entry) => entry.id !== draft.id)];
@@ -2633,13 +2749,18 @@ function deleteDraft(id) {
 
 /// Reopens a draft in the composer. The draft stays saved until the post actually goes out -
 /// losing it the moment it is opened would mean a reader who changed their mind has nothing left.
-function openDraft(id) {
+async function openDraft(id) {
   const draft = kapostDrafts.find((entry) => entry.id === id);
   if (!draft) return;
-  const quoted = draft.quotedRemoteId
-    ? allPostLists().find((post) => post.remoteId === draft.quotedRemoteId) || null
-    : null;
-  openComposer(quoted);
+  // A draft keeps only the ID of the post it was about (never a stale copy of someone else's
+  // post), so resolve it here - loaded lists first, then the indexer. Until get-post existed this
+  // lookup could not be done at all, so a quote draft reopened as a plain post and lost its
+  // source; the same resolution now brings a reply draft back with the post it answers.
+  const sourceId = draft.replyRemoteId || draft.quotedRemoteId || null;
+  let source = sourceId ? allPostLists().find((post) => post.remoteId === sourceId) || null : null;
+  if (sourceId && !source) source = await indexerPost(sourceId);
+  if (draft.replyRemoteId) openComposer(null, { replyTarget: source });
+  else openComposer(source);
   editingDraftId = draft.id;
   composerThreadSegments = [...(draft.threadSegments || [])];
   composerInput.value = draft.text || "";
@@ -3201,11 +3322,7 @@ export function initKaPosts(dependencies) {
   composerSubmit = document.querySelector("[data-kaposts-composer-submit]");
   composerTitle = document.querySelector("[data-kaposts-composer-title]");
   composerQuote = document.querySelector("[data-kaposts-composer-quote]");
-  replyInput = document.querySelector("[data-kaposts-reply-input]");
-  replyMeter = document.querySelector("[data-kaposts-reply-meter]");
-  replySend = document.querySelector("[data-kaposts-reply-send]");
   attachMentionAutocomplete(composerInput);
-  attachMentionAutocomplete(replyInput);
   panelEl = document.querySelector("[data-kaposts-panel]");
   panelTitleEl = document.querySelector("[data-kaposts-panel-title]");
   panelBodyEl = document.querySelector("[data-kaposts-panel-body]");
@@ -3273,7 +3390,6 @@ export function initKaPosts(dependencies) {
   document.querySelector("[data-kaposts-composer-cancel]")?.addEventListener("click", () => { closeComposer(); });
   document.querySelector("[data-kaposts-thread-back]")?.addEventListener("click", () => {
     threadStack.pop();
-    replyTargetId = null;
     // Leaving the thread retires any unspent reply-landing scroll target.
     pendingThreadScrollRemoteId = null;
     threadHighlightRemoteId = null;
@@ -3304,12 +3420,14 @@ export function initKaPosts(dependencies) {
     const segments = text ? [...composerThreadSegments, text] : [...composerThreadSegments];
     if (!segments.length) return;
     const quoteTarget = composerQuoteTarget;
+    const replyTarget = composerReplyTarget;
     // The post is on its way, so the draft it came from has served its purpose. Explicit
     // keepDraft: false, because closeComposer would otherwise ask whether to keep writing that
     // is already being sent.
     if (editingDraftId) deleteDraft(editingDraftId);
     closeComposer({ keepDraft: false });
-    if (quoteTarget) scheduleQuote(quoteTarget, segments[0]);
+    if (replyTarget) submitReply(replyTarget, segments[0]);
+    else if (quoteTarget) scheduleQuote(quoteTarget, segments[0]);
     else if (segments.length > 1) scheduleThread(segments);
     else schedulePost(segments[0]);
   });
@@ -3331,22 +3449,13 @@ export function initKaPosts(dependencies) {
     renderComposerThreadUi();
   });
 
-  replyInput?.addEventListener("input", () => { updateMeter(replyInput, replyMeter); autoGrowReply(); });
-  replySend?.addEventListener("click", () => {
-    if (deps.isChattingBalanceZero?.()) {
-      deps.showFundingGate?.();
-      return;
-    }
-    const text = replyInput.value.trim();
+  // The thread's Reply button: opens the composer for the post on screen. openComposer carries
+  // the zero-balance gate the old bar had, so a confirmed 0 balance shows the funding card
+  // instead of a composer that could not submit.
+  document.querySelector("[data-kaposts-thread-reply]")?.addEventListener("click", () => {
     const topId = threadStack[threadStack.length - 1];
-    const target = (replyTargetId ? findPost(replyTargetId) : null) || (topId ? findPost(topId) : null);
-    if (!text || !target || !target.remoteId) return;
-    replyInput.value = "";
-    updateMeter(replyInput, replyMeter);
-    autoGrowReply(); // a sent reply leaves the box grown to its old size otherwise
-    replyTargetId = null;
-    updateReplyContext();
-    submitReply(target, text);
+    const target = topId ? findPost(topId) : null;
+    if (target) openComposer(null, { replyTarget: target });
   });
 
   // Delegated feed/thread/toast interactions
@@ -3378,16 +3487,11 @@ export function initKaPosts(dependencies) {
 
     const replyTo = event.target.closest("[data-kaposts-reply-to]");
     if (replyTo) {
-      // Reply to a comment right here - no need to drill into its own thread first.
-      replyTargetId = replyTo.dataset.kapostsReplyTo;
-      updateReplyContext();
-      replyInput?.focus();
-      return;
-    }
-    if (event.target.closest("[data-kaposts-reply-context-clear]")) {
-      replyTargetId = null;
-      updateReplyContext();
-      replyInput?.focus();
+      // Replying opens the composer for THAT post - the root, or any comment in the thread -
+      // with the post being answered rendered below the editor. This replaces the bar plus its
+      // "Replying to" chip, where the thing you were answering was off screen while you typed.
+      const target = findPost(replyTo.dataset.kapostsReplyTo);
+      if (target) openComposer(null, { replyTarget: target });
       return;
     }
 
@@ -3577,6 +3681,30 @@ export function initKaPosts(dependencies) {
       resolveAndOpenPost(openRemote.dataset.kapostsOpenRemote, {
         parentRemoteIdHint: openRemote.dataset.kapostsOpenRemoteParent || null,
       });
+      return;
+    }
+
+    const expand = event.target.closest("[data-kaposts-expand]");
+    if (expand) {
+      const id = expand.dataset.kapostsExpand;
+      if (expandedPostIds.has(id)) expandedPostIds.delete(id);
+      else expandedPostIds.add(id);
+      renderAll();
+      return;
+    }
+
+    const expandReplies = event.target.closest("[data-kaposts-expand-replies]");
+    if (expandReplies) {
+      const id = expandReplies.dataset.kapostsExpandReplies;
+      if (expandedCommentIds.has(id)) {
+        expandedCommentIds.delete(id);
+        renderThread();
+      } else {
+        expandedCommentIds.add(id);
+        const comment = findPost(id);
+        if (comment) loadCommentReplies(comment);
+        else renderThread();
+      }
       return;
     }
 

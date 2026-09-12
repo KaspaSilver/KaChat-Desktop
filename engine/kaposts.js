@@ -217,6 +217,32 @@ export async function fetchReplies({ engine, postId, limit = 100, before = null 
   return { posts: filterKaChatPosts(json?.replies), pagination: json?.pagination || null };
 }
 
+/// One post by id, any age, any author (`get-post?id=`).
+///
+/// This is what makes a reply thread complete. A reply's parent is on chain, but every other read
+/// endpoint is a feed or a list, so the context above a post could only ever be what happened to
+/// be loaded - which is nothing at all for a post opened from a profile or a shared link.
+///
+/// Deliberately NOT run through filterKaChatPosts: the feeds drop posts without the KaChat marker
+/// because they are another client's content, but a parent IS the context the reader asked for,
+/// and a hole in a thread is worse than a Kasia-origin post inside it.
+export async function fetchPost({ engine, id } = {}) {
+  const json = await kapostGet("get-post", { id, requesterPubkey: requesterPubkeyFor(engine) });
+  return json?.post || null;
+}
+
+/// A post plus its whole ancestor chain, root first (`get-thread?id=`).
+///
+/// Preferred over walking parentPostId upward one fetch at a time: the chain renders above the
+/// post already on screen, so a round trip per level is a visible stall on a deep thread.
+export async function fetchThread({ engine, id } = {}) {
+  const json = await kapostGet("get-thread", { id, requesterPubkey: requesterPubkeyFor(engine) });
+  return {
+    ancestors: Array.isArray(json?.ancestors) ? json.ancestors : [],
+    post: json?.post || null,
+  };
+}
+
 /** The requester's notification stream — actions on OUR content; ids are the ACTION's txids. */
 export async function fetchKaPostNotifications({ engine, limit = 100, before = null } = {}) {
   const json = await kapostGet("get-notifications", {
