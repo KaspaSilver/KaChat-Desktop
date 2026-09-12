@@ -1265,6 +1265,7 @@ function schedulePost(text) {
     renderAll();
   }, () => {
     localPosts = localPosts.filter((p) => p.id !== post.id);
+    restoreComposerDraft(text);
   });
 }
 
@@ -1420,6 +1421,7 @@ function scheduleQuote(target, text) {
     renderAll();
   }, () => {
     localPosts = localPosts.filter((p) => p.id !== post.id);
+    restoreComposerDraft(text, { quoted: target });
   });
 }
 
@@ -1641,6 +1643,7 @@ async function submitReply(parent, text) {
   }, () => {
     mutatePost(parent.id, (p) => { p.comments = p.comments.filter((c) => c.id !== comment.id); });
     renderThread();
+    restoreReplyDraft(text);
   });
 }
 
@@ -1715,6 +1718,53 @@ function renderComposerThreadUi() {
   if (composerInput) {
     composerInput.placeholder = composerThreadSegments.length ? "Add another post" : "What's happening on Kaspa?";
   }
+}
+
+/// Puts an undone draft back where it was written, so the five seconds are a chance to fix
+/// something rather than a chance to lose it (iOS restoreDraft).
+function restoreComposerDraft(text, { quoted = null, segments = [] } = {}) {
+  const value = String(text || "");
+  if (!value.trim()) return;
+  openComposer(quoted);
+  // openComposer refuses to open on a confirmed-zero chatting balance (it shows the funding gate
+  // instead). Undo must not be the thing that loses the writing, so keep it as a draft.
+  if (composerEl.hidden) {
+    kapostDrafts = [{
+      id: nowId(), text: value, threadSegments: [...segments],
+      quotedRemoteId: quoted?.remoteId || null, savedAt: Date.now(),
+    }, ...kapostDrafts];
+    saveDrafts();
+    deps.showToast?.("Saved as a draft");
+    renderAll();
+    return;
+  }
+  composerThreadSegments = [...segments];
+  composerInput.value = value;
+  composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+  renderComposerThreadUi();
+  composerInput.focus();
+}
+
+/// The reply bar grows with what is being typed instead of staying one line tall and scrolling
+/// its own middle out of view - the same rule the chat and group composers already follow. Capped
+/// at the field's CSS max-height so the two cannot disagree; past that it scrolls, because a reply
+/// box that keeps growing pushes the post being replied to off the screen (iOS caps it at 92pt for
+/// exactly that reason).
+const REPLY_MAX_HEIGHT_PX = 140;
+function autoGrowReply() {
+  if (!replyInput) return;
+  replyInput.style.height = "auto";
+  replyInput.style.height = `${Math.min(replyInput.scrollHeight, REPLY_MAX_HEIGHT_PX)}px`;
+}
+
+/// An undone comment goes straight back into the reply bar, which is still on screen - no
+/// composer involved, exactly as iOS puts it back into replyText.
+function restoreReplyDraft(text) {
+  const value = String(text || "");
+  if (!replyInput || !value.trim()) return;
+  replyInput.value = value;
+  replyInput.dispatchEvent(new Event("input", { bubbles: true }));
+  replyInput.focus();
 }
 
 function openComposer(quoteTarget = null) {
@@ -3104,7 +3154,7 @@ export function initKaPosts(dependencies) {
     renderComposerThreadUi();
   });
 
-  replyInput?.addEventListener("input", () => updateMeter(replyInput, replyMeter));
+  replyInput?.addEventListener("input", () => { updateMeter(replyInput, replyMeter); autoGrowReply(); });
   replySend?.addEventListener("click", () => {
     if (deps.isChattingBalanceZero?.()) {
       deps.showFundingGate?.();
@@ -3116,6 +3166,7 @@ export function initKaPosts(dependencies) {
     if (!text || !target || !target.remoteId) return;
     replyInput.value = "";
     updateMeter(replyInput, replyMeter);
+    autoGrowReply(); // a sent reply leaves the box grown to its old size otherwise
     replyTargetId = null;
     updateReplyContext();
     submitReply(target, text);
