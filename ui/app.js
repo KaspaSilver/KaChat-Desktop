@@ -2249,11 +2249,10 @@ function migrateLegacyContacts(legacyContacts) {
 // re-applied, so an old chat's recency could sit at "just now" forever. Pull any recency that
 // rests only on a reaction back to the newest real message; the next history sync re-applies
 // the reaction with its true block time and restores it if it really was the latest event.
-const REACTION_TIME_REPAIR_KEY = "kachat-reaction-time-repair-v1";
 function repairInflatedReactionRecency(conversations) {
   let flagKey = null;
   try {
-    flagKey = accountScopedKey(REACTION_TIME_REPAIR_KEY);
+    flagKey = accountScopedKey("kachat-reaction-time-repair-v1");
     if (localStorage.getItem(flagKey)) return conversations;
   } catch { return conversations; }
   // The reaction event itself does not survive a reload (normalizeConversation drops it), but the
@@ -13166,7 +13165,7 @@ function refreshSettingsCaptions() {
   // they exist, and fills this in on the next visit.
   try { if (photo) photo.textContent = PHOTO_QUALITY_PRESETS.find((p) => p.id === getPhotoQualityPresetId())?.name || ""; } catch {}
   const cacheCaption = document.querySelector("[data-cache-total-caption]");
-  if (cacheCaption) cacheCaption.textContent = formatCacheBytes(cacheCategories().reduce((sum, c) => sum + c.bytes, 0));
+  try { if (cacheCaption) cacheCaption.textContent = formatCacheBytes(cacheCategories().reduce((sum, c) => sum + c.bytes, 0)); } catch {}
 }
 
 function showSettingsCategory(index) {
@@ -13224,12 +13223,12 @@ showSettingsCategory(null);
 // Cache (iOS CacheSettingsPage): what the app holds that it could fetch again, by category,
 // with a way to drop any of it. Nothing here is user data.
 // ---------------------------------------------------------------------------
-const CACHE_CATEGORIES = [
+function cacheCategoryDefs() { return [
   { id: "broadcasts", title: "Broadcast History", detail: "Messages and reactions from public broadcast channels.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
   { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
   { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
   { id: "kns", title: "KNS Profiles", detail: "Names and profile details looked up for addresses.", match: (k) => k.startsWith("kachat-kns-") && k.includes("cache") },
-];
+]; }
 function formatCacheBytes(bytes) {
   if (!(bytes > 0)) return "0 KB";
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -13238,7 +13237,7 @@ function formatCacheBytes(bytes) {
 function cacheCategories() {
   const keys = [];
   try { for (let i = 0; i < localStorage.length; i += 1) keys.push(localStorage.key(i)); } catch {}
-  return CACHE_CATEGORIES.map((category) => {
+  return cacheCategoryDefs().map((category) => {
     const owned = keys.filter((k) => k && category.match(k));
     let bytes = 0;
     for (const key of owned) { try { bytes += (key.length + (localStorage.getItem(key) || "").length) * 2; } catch {} }
