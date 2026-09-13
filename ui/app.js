@@ -39,6 +39,7 @@ import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpo
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
+import { normalizeDomainLabel } from "../engine/kns.js";
 // Imported, not written as string paths: Vite only rewrites and emits the assets it can SEE, and
 // a path inside a string is invisible to it - so these 404'd on the built site (a broken-image
 // icon in the notification and on the KAS mark).
@@ -7255,11 +7256,6 @@ function applyDockLayout() {
   renderDockEditor();
   publishDockHeight();
 
-  // Apps lives in either the dock OR the Profile view, never both. Once it holds a dock slot,
-  // drop the redundant "Apps" row from Profile; bring it back when it moves into the Hub.
-  const profileAppsRow = document.querySelector("[data-open-apps-screen]");
-  if (profileAppsRow) profileAppsRow.hidden = visible.includes("apps");
-
   // A tab that just left the dock must not stay on screen with nothing selected, and a Hub
   // section that just moved INTO the dock must not render inside the Hub as well.
   if (hubSection && !hubVisibleTabs().includes(hubSection)) {
@@ -7463,46 +7459,6 @@ document.querySelectorAll("[data-dock-hub-grid], [data-dock-preview]").forEach((
 applyDockLayout();
 
 // --- Dock guide (opened from Help, never on its own) -----------------------
-//
-// This used to appear by itself on first launch as "What's new in 4.0". A modal that greets you
-// before you have done anything is asking you to read release notes as the price of entry, and it
-// went on saying 4.0 into 4.1. The pages themselves are still useful, so they stayed - as a guide
-// in Help, where somebody goes when they actually want them.
-
-const DOCK_WIZARD_PAGES = [
-  { title: "Meet KaPosts", body: "A social feed built on Kaspa — post, follow, and discover, fully on-chain. It lives in your dock now." },
-  { title: "Meet Kaspa Hub", body: "Your dock holds five items. Everything else lives one click away in Kaspa Hub, which is always in the dock." },
-  { title: "Make it yours", body: "Move features between your dock and Kaspa Hub from Settings → Customization → Customize Dock. Each account keeps its own layout." },
-];
-let dockWizardPage = 0;
-
-function renderDockWizard() {
-  const backdrop = document.querySelector("[data-dock-wizard]");
-  const pageEl = document.querySelector("[data-dock-wizard-page]");
-  const dotsEl = document.querySelector("[data-dock-wizard-dots]");
-  const nextBtn = document.querySelector("[data-dock-wizard-next]");
-  if (!backdrop || !pageEl) return;
-  const page = DOCK_WIZARD_PAGES[dockWizardPage];
-  pageEl.innerHTML = `<h3>${page.title}</h3><p>${page.body}</p>`;
-  if (dotsEl) {
-    dotsEl.innerHTML = DOCK_WIZARD_PAGES
-      .map((_, i) => `<span class="${i === dockWizardPage ? "active" : ""}"></span>`).join("");
-  }
-  if (nextBtn) nextBtn.textContent = dockWizardPage === DOCK_WIZARD_PAGES.length - 1 ? "Done" : "Next";
-}
-
-function dismissDockWizard() {
-  const backdrop = document.querySelector("[data-dock-wizard]");
-  if (backdrop) backdrop.hidden = true;
-}
-
-document.querySelector("[data-dock-wizard-skip]")?.addEventListener("click", dismissDockWizard);
-document.querySelector("[data-dock-wizard-next]")?.addEventListener("click", () => {
-  if (dockWizardPage >= DOCK_WIZARD_PAGES.length - 1) { dismissDockWizard(); return; }
-  dockWizardPage += 1;
-  renderDockWizard();
-});
-
 // Step 104 — Profile screen mockup wiring. QR buttons reveal the existing
 // real QR card; address dropdowns expand/collapse. The list of unimplemented
 // stubs this comment used to carry is long gone: KNS, spending addresses,
@@ -7630,15 +7586,8 @@ document.addEventListener("keydown", (event) => {
 // Both follow the full-screen overlay pattern of the address screens: back
 // button and Escape close them. The Help rows launch the existing guides
 // (setup guide modals sit below the 1500 z-band, so close Help first).
-const appsScreenEl = document.querySelector("[data-apps-screen]");
 const helpScreenEl = document.querySelector("[data-help-screen]");
 
-document.querySelector("[data-open-apps-screen]")?.addEventListener("click", () => {
-  if (appsScreenEl) appsScreenEl.hidden = false;
-});
-document.querySelector("[data-close-apps-screen]")?.addEventListener("click", () => {
-  if (appsScreenEl) appsScreenEl.hidden = true;
-});
 document.querySelector("[data-open-help-screen]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = false;
 });
@@ -7781,8 +7730,7 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
   if (event.target.closest("[data-domains-inscribe]")) {
     // The registration wizard's domain step is iOS's Inscribe Domain sheet; the funding check
     // still runs underneath but does not stand in the way of someone who owns domains already.
-    document.querySelector("[data-open-kns-register]")?.click();
-    showKnsWizardStep("domain");
+    openKnsProfileWizard({ startAt: "domain" });
   }
 });
 
@@ -7797,7 +7745,6 @@ document.querySelector("[data-close-domains-screen]")?.addEventListener("click",
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (appsScreenEl && !appsScreenEl.hidden) appsScreenEl.hidden = true;
   else if (helpScreenEl && !helpScreenEl.hidden) helpScreenEl.hidden = true;
   else if (domainsScreenEl && !domainsScreenEl.hidden) domainsScreenEl.hidden = true;
 });
@@ -7808,14 +7755,7 @@ document.querySelector("[data-help-welcome]")?.addEventListener("click", () => {
 });
 document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = true;
-  document.querySelector("[data-open-kns-register]")?.click();
-});
-document.querySelector("[data-help-dock]")?.addEventListener("click", () => {
-  if (helpScreenEl) helpScreenEl.hidden = true;
-  dockWizardPage = 0;
-  renderDockWizard();
-  const backdrop = document.querySelector("[data-dock-wizard]");
-  if (backdrop) backdrop.hidden = false;
+  openKnsProfileWizard();
 });
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
@@ -10082,21 +10022,15 @@ document.querySelector("[data-save-photo-quality]")?.addEventListener("click", (
 // Domain" or "Save Profile" is pressed — see engine/kns-write.js.
 
 const knsRegisterModal = document.querySelector("[data-kns-register-modal]");
-const knsWizardSteps = {
-  funding: document.querySelector('[data-kns-step="funding"]'),
-  domain: document.querySelector('[data-kns-step="domain"]'),
-  details: document.querySelector('[data-kns-step="details"]'),
-  done: document.querySelector('[data-kns-step="done"]'),
-};
-let knsWizardState = { assetId: null, domain: null, availability: null };
-
-function showKnsWizardStep(name) {
-  for (const [key, el] of Object.entries(knsWizardSteps)) if (el) el.hidden = key !== name;
-}
-
-function closeKnsRegisterModal() {
-  if (knsRegisterModal) knsRegisterModal.hidden = true;
-}
+// ---------------------------------------------------------------------------
+// Create KNS Profile wizard (iOS KNSCreateProfileFlowView): a fork first - do you already have
+// a domain? - then either bring one over or buy one, then banner, avatar, details, done. Every
+// step ends with the same Previous / Next bar. `existing` is set when re-entering on a profile
+// that already has a domain, so the steps show what is inscribed and only new writes are paid.
+// ---------------------------------------------------------------------------
+const KNS_WIZARD_MIN_FUNDING_KAS = 50;
+const knsWizardBodyEl = document.querySelector("[data-kns-wizard-body]");
+let knsWizard = null;
 
 function knsStatusMessage(status) {
   return {
@@ -10112,117 +10046,481 @@ function knsStatusMessage(status) {
   }[status] || status;
 }
 
-document.querySelector("[data-open-kns-register]")?.addEventListener("click", async () => {
-  if (!knsRegisterModal) return;
-  knsWizardState = { assetId: null, domain: null, availability: null };
-  const errorEl = document.querySelector("[data-kns-funding-error]");
-  const balanceEl = document.querySelector("[data-kns-current-balance]");
-  const continueBtn = document.querySelector("[data-kns-funding-continue]");
-  const minBalanceEl = document.querySelector("[data-kns-min-balance]");
-  if (minBalanceEl) minBalanceEl.textContent = String(engine.knsEconomics().minRegistrationBalanceKas);
-  if (errorEl) errorEl.hidden = true;
-  if (balanceEl) balanceEl.textContent = "Checking…";
-  if (continueBtn) continueBtn.disabled = true;
-  document.querySelector("[data-kns-domain-label]").value = "";
-  document.querySelector("[data-kns-domain-quote]").hidden = true;
-  document.querySelector("[data-kns-register-submit]").disabled = true;
-  document.querySelectorAll('[data-kns-step="details"] [data-kns-field]').forEach((el) => { el.value = ""; });
-  showKnsWizardStep("funding");
-  knsRegisterModal.hidden = false;
+function formatKnsKas(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value ?? "");
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
 
+function closeKnsRegisterModal() {
+  if (knsRegisterModal) knsRegisterModal.hidden = true;
+  const wrote = Boolean(knsWizard?.wroteSomething);
+  knsWizard = null;
+  if (wrote) { engine.clearKnsCache(engine.address); refreshOwnKnsProfileUntilResolved(); }
+}
+
+function openKnsProfileWizard({ startAt = null } = {}) {
+  if (!knsRegisterModal || !knsWizardBodyEl) return;
+  if (!engine.address) { showCopyToast("Generate or import a wallet first."); return; }
+  const existing = ownKnsAssetId ? {
+    assetId: ownKnsAssetId,
+    domainName: ownKnsPrimaryDomain || null,
+    profile: ownKnsProfileFields || {},
+  } : null;
+  knsWizard = {
+    step: startAt || "haveDomain",
+    existing,
+    assetId: existing?.assetId || null,
+    domainName: existing?.domainName || null,
+    wroteSomething: false,
+    foundDomains: [],
+    scanning: false,
+    balanceKas: null,
+    fundingError: "",
+    domain: { input: "", feeTiers: null, availability: null, checking: false, submitting: false, checkError: "", feeError: "", submitError: "", progress: "", timer: null },
+    image: { blob: null, dataUrl: null, submitting: false, error: "" },
+    details: { values: null, statuses: {}, submitting: false, progress: "", error: "" },
+  };
+  knsRegisterModal.hidden = false;
+  renderKnsWizard();
+  if (knsWizard.step === "domain") loadKnsWizardFeeTiers();
+}
+
+function setKnsWizardStep(step) {
+  if (!knsWizard) return;
+  knsWizard.step = step;
+  knsWizard.image = { blob: null, dataUrl: null, submitting: false, error: "" };
+  renderKnsWizard();
+  if (step === "domain") loadKnsWizardFeeTiers();
+}
+
+// Where Previous goes (iOS Step.previous).
+function knsWizardPrevious() {
+  const w = knsWizard;
+  if (!w) return null;
+  return {
+    needsFunding: "haveDomain", domain: "haveDomain", transferExistingDomain: "haveDomain",
+    pickDomain: "transferExistingDomain", domainConfirmed: "pickDomain",
+    banner: "domainConfirmed", avatar: "banner", details: "avatar",
+  }[w.step] || null;
+}
+
+function knsWizardBar({ nextTitle = "Next", nextEnabled = true, backEnabled = true } = {}) {
+  const previous = knsWizardPrevious();
+  return `<div class="setup-guide-nav kns-wizard-nav">
+    <button type="button" class="secondary-button setup-guide-back" data-kns-wizard-back ${previous && backEnabled ? "" : "disabled"}>Previous</button>
+    <button type="button" class="primary-button setup-guide-next" data-kns-wizard-next ${nextEnabled ? "" : "disabled"}>${escapeHtml(nextTitle)}</button>
+  </div>`;
+}
+
+function renderKnsWizard() {
+  const w = knsWizard;
+  if (!w || !knsWizardBodyEl) return;
+  const address = engine.address || "";
+  let html = "";
+  switch (w.step) {
+    case "haveDomain":
+      html = `<div class="kns-wizard-center">
+        <div class="kns-wizard-icon">@</div>
+        <h3>Do you already have a domain?</h3>
+        <p class="field-hint">A KNS domain is your name on Kaspa. If you own one already, you can bring it here instead of buying another.</p>
+        <div class="kns-wizard-choices">
+          <button type="button" class="primary-button full" data-kns-wizard-action="have-yes">Yes, I have one</button>
+          <button type="button" class="secondary-button full accent" data-kns-wizard-action="have-no">No, I need one</button>
+        </div>
+      </div>`;
+      break;
+    case "checkingFunds":
+      html = `<div class="kns-wizard-center"><span class="kaposts-spinner" aria-hidden="true"></span><p class="field-hint">Checking your chatting address balance...</p></div>`;
+      break;
+    case "needsFunding":
+      html = `<div class="kns-wizard-center">
+        <div class="kns-wizard-icon warn">⚠</div>
+        <h3>Please fund your chatting address with at least ${KNS_WIZARD_MIN_FUNDING_KAS} Kaspa to continue.</h3>
+        <p class="kns-wizard-label">Current balance</p>
+        <p class="kns-wizard-balance">${escapeHtml(formatKnsKas(w.balanceKas ?? 0))} KAS</p>
+        <p class="kns-wizard-label">Chatting address</p>
+        <button type="button" class="kns-wizard-address" data-kns-wizard-action="copy-address">${escapeHtml(address)}</button>
+        <button type="button" class="linklike-button" data-kns-wizard-action="show-qr">Show QR Code</button>
+        ${w.fundingError ? `<p class="field-error">${escapeHtml(w.fundingError)}</p>` : ""}
+        <div class="kns-wizard-choices">
+          <button type="button" class="primary-button full" data-kns-wizard-action="check-again">Check Again</button>
+          <button type="button" class="linklike-button muted" data-kns-wizard-action="have-yes">It's ok, I already have a domain</button>
+        </div>
+      </div>`;
+      break;
+    case "domain": {
+      const d = w.domain;
+      const label = normalizeDomainLabel(d.input);
+      const full = label ? `${label}.kas` : "";
+      let fee = null;
+      if (label && d.feeTiers) {
+        try { fee = d.availability?.isReservedDomain ? 0 : Number(knsRegistrationAmounts(label, d.feeTiers, { isReservedDomain: false }).revealAmountKas); } catch { fee = null; }
+      }
+      const canSubmit = !d.submitting && !d.checking && label && d.availability?.available === true && fee != null;
+      let status = "";
+      if (d.checking) status = `<p class="field-hint"><span class="kaposts-spinner small" aria-hidden="true"></span> Checking availability...</p>`;
+      else if (d.checkError) status = `<p class="field-error">${escapeHtml(d.checkError)}</p>`;
+      else if (d.availability) status = `<p class="field-hint ${d.availability.available ? "ok" : "bad"}">${d.availability.available ? `${escapeHtml(d.availability.domain)} can be inscribed.` : "This domain is not available."}</p>`;
+      html = `<div class="kns-wizard-form">
+        <h3>First let's create your identity with a domain name</h3>
+        <button type="button" class="linklike-button" data-kns-wizard-action="transfer-existing">I already have a domain somewhere else</button>
+        <input class="field-input" type="text" data-kns-wizard-domain placeholder="name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63" value="${escapeHtml(d.input)}" ${d.submitting ? "disabled" : ""} />
+        <p class="field-hint">${full ? escapeHtml(full) : "Use lowercase letters, numbers, and hyphen."}</p>
+        ${status}
+        ${fee != null ? `<div class="kns-wizard-row"><span>Service fee</span><span>${escapeHtml(formatKnsKas(fee))} KAS</span></div>` : ""}
+        ${d.feeError ? `<p class="field-error">${escapeHtml(d.feeError)}</p>` : ""}
+        ${d.submitting ? `<p class="field-hint"><span class="kaposts-spinner small" aria-hidden="true"></span> ${escapeHtml(d.progress || "Submitting inscription... this could take a few minutes while it confirms on-chain.")}</p>` : ""}
+        ${d.submitError ? `<p class="field-error">${escapeHtml(d.submitError)}</p>` : ""}
+        <button type="button" class="primary-button full" data-kns-wizard-action="inscribe-domain" ${canSubmit ? "" : "disabled"}>Inscribe Domain</button>
+        ${w.existing?.domainName ? `<button type="button" class="linklike-button muted" data-kns-wizard-action="skip-domain" ${d.submitting ? "disabled" : ""}>Skip - Continue with ${escapeHtml(w.existing.domainName)}</button>` : ""}
+      </div>`;
+      break;
+    }
+    case "transferExistingDomain": {
+      const n = w.foundDomains.length;
+      html = `<div class="kns-wizard-center">
+        <h3>Send your domain here</h3>
+        <p class="field-hint">Transfer your domain to this address so your identity is connected to KaChat.</p>
+        <canvas class="kns-wizard-qr" data-kns-wizard-qr width="220" height="220"></canvas>
+        <p class="kns-wizard-label">Chatting address</p>
+        <button type="button" class="kns-wizard-address" data-kns-wizard-action="copy-address">${escapeHtml(address)}</button>
+        <button type="button" class="linklike-button" data-kns-wizard-action="refresh-domains" ${w.scanning ? "disabled" : ""}>${w.scanning ? "Checking..." : "↻ Refresh"}</button>
+        <p class="field-hint">${n ? `${n} domain${n === 1 ? "" : "s"} found on this address.` : "No domains on this address yet."}</p>
+        ${knsWizardBar()}
+      </div>`;
+      break;
+    }
+    case "pickDomain":
+      html = `<div class="kns-wizard-form">
+        <h3 class="centered">Which domain should this profile use?</h3>
+        ${w.foundDomains.length
+          ? `<div class="kns-wizard-list">${w.foundDomains.map((d) => `<button type="button" class="kns-wizard-list-row" data-kns-wizard-pick="${escapeHtml(d.inscriptionId || d.fullName)}"><strong>${escapeHtml(d.fullName)}</strong><span>›</span></button>`).join("")}</div>`
+          : `<div class="kns-wizard-center"><div class="kns-wizard-icon muted">⌕</div><strong>No domains on this address yet</strong><p class="field-hint">Go back and use Refresh once the transfer lands.</p></div>`}
+        ${knsWizardBar({ nextEnabled: false })}
+      </div>`;
+      break;
+    case "domainConfirmed":
+      html = `<div class="kns-wizard-center">
+        <div class="kns-wizard-icon ok">✓</div>
+        <h3>You are now known as ${escapeHtml(w.domainName || "")}</h3>
+        ${knsWizardBar()}
+      </div>`;
+      break;
+    case "banner":
+    case "avatar": {
+      const isBanner = w.step === "banner";
+      const img = w.image;
+      const existingUrl = isBanner ? w.existing?.profile?.bannerUrl : w.existing?.profile?.avatarUrl;
+      const preview = img.dataUrl || existingUrl || "";
+      html = `<div class="kns-wizard-center">
+        <h3>${isBanner ? "Let's set up a profile banner" : "Let's inscribe your avatar photo"}</h3>
+        <p class="field-hint">${isBanner ? "Add a banner image to your profile, or skip for now." : "Add a profile photo, or skip for now."}</p>
+        <button type="button" class="kns-wizard-photo ${isBanner ? "banner" : "avatar"}" data-kns-wizard-action="choose-photo" ${img.submitting ? "disabled" : ""}>
+          ${preview ? `<img src="${escapeHtml(preview)}" alt="" />` : `<span class="kns-wizard-photo-placeholder">＋<small>Choose Photo</small></span>`}
+        </button>
+        <input type="file" accept="image/*" hidden data-kns-wizard-file />
+        ${img.error ? `<p class="field-error">${escapeHtml(img.error)}</p>` : ""}
+        ${img.submitting ? `<p class="field-hint">This could take a few minutes while it confirms on-chain.</p>` : ""}
+        <button type="button" class="primary-button full" data-kns-wizard-action="inscribe-image" ${img.blob && !img.submitting ? "" : "disabled"}>${img.submitting ? "Inscribing…" : "Inscribe"}</button>
+        ${knsWizardBar({ nextEnabled: !img.submitting, backEnabled: !img.submitting })}
+      </div>`;
+      break;
+    }
+    case "details": {
+      const d = w.details;
+      if (!d.values) {
+        const p = w.existing?.profile || {};
+        d.values = { bio: p.bio || "", website: p.website || "", x: p.x || "", telegram: p.telegram || "", discord: p.discord || "", github: p.github || "", contactEmail: p.contactEmail || "" };
+        d.original = { ...d.values };
+      }
+      const field = (label, key, multiline = false) => {
+        const st = d.statuses[key];
+        const mark = st === "submitting" ? `<span class="kaposts-spinner small" aria-hidden="true"></span>` : st === "done" ? `<span class="kns-wizard-done">✓</span>` : "";
+        const control = multiline
+          ? `<textarea class="field-input" rows="3" data-kns-wizard-field="${key}" ${d.submitting ? "disabled" : ""}>${escapeHtml(d.values[key])}</textarea>`
+          : `<input class="field-input" type="text" data-kns-wizard-field="${key}" value="${escapeHtml(d.values[key])}" ${d.submitting ? "disabled" : ""} />`;
+        return `<label class="field-label compact kns-wizard-field"><span class="kns-wizard-field-head">${label} ${mark}</span>${control}</label>`;
+      };
+      html = `<div class="kns-wizard-form">
+        <h3>Let's add more details about yourself</h3>
+        <p class="field-hint">You need at least 2 KAS to fill in all fields.</p>
+        ${field("Bio", "bio", true)}${field("Website", "website")}${field("X (Twitter)", "x")}${field("Telegram", "telegram")}${field("Discord", "discord")}${field("GitHub", "github")}${field("Contact Email", "contactEmail")}
+        ${d.submitting ? `<p class="field-hint"><span class="kaposts-spinner small" aria-hidden="true"></span> ${escapeHtml(d.progress)}<br>This could take a few minutes while it confirms on-chain.</p>` : ""}
+        ${d.error ? `<p class="field-error">${escapeHtml(d.error)}</p>` : ""}
+        ${knsWizardBar({ nextEnabled: !d.submitting, backEnabled: !d.submitting })}
+      </div>`;
+      break;
+    }
+    case "finished":
+      html = `<div class="kns-wizard-center">
+        <div class="kns-wizard-icon">🎉</div>
+        <h3>You have now finished your KNS profile creation!</h3>
+        <button type="button" class="primary-button full" data-kns-wizard-action="done">Done</button>
+      </div>`;
+      break;
+  }
+  knsWizardBodyEl.innerHTML = html;
+  const qr = knsWizardBodyEl.querySelector("[data-kns-wizard-qr]");
+  if (qr && address) engine.drawQrFor(qr, address, { dark: "#06110f", light: "#ffffff" }).catch(() => {});
+  if (w.step === "domain") knsWizardBodyEl.querySelector("[data-kns-wizard-domain]")?.focus();
+}
+
+async function knsWizardCheckFunding() {
+  const w = knsWizard;
+  if (!w) return;
+  setKnsWizardStep("checkingFunds");
   try {
     await ensureRuntimes({ quiet: true });
-    if (!engine.address) throw new Error("Generate or import a wallet first.");
     const balance = await engine.balance();
-    if (balanceEl) balanceEl.textContent = `${balance.totalKas} KAS`;
-    const minBalance = engine.knsEconomics().minRegistrationBalanceKas;
     const kas = Number(balance.totalKas);
-    if (Number.isFinite(kas) && kas < minBalance) {
-      if (errorEl) { errorEl.textContent = `You need at least ${minBalance} KAS to safely complete registration.`; errorEl.hidden = false; }
-    } else if (continueBtn) {
-      continueBtn.disabled = false;
-    }
+    if (!knsWizard || knsWizard !== w) return;
+    w.balanceKas = kas;
+    w.fundingError = "";
+    setKnsWizardStep(Number.isFinite(kas) && kas >= KNS_WIZARD_MIN_FUNDING_KAS ? "domain" : "needsFunding");
   } catch (error) {
-    if (errorEl) { errorEl.textContent = error.message || "Could not check your balance."; errorEl.hidden = false; }
+    if (!knsWizard || knsWizard !== w) return;
+    w.balanceKas = 0;
+    w.fundingError = error?.message || "Could not check your balance.";
+    setKnsWizardStep("needsFunding");
   }
-});
+}
 
-document.querySelectorAll("[data-close-kns-register]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    closeKnsRegisterModal();
-    await refreshOwnKnsProfileUntilResolved();
-  });
-});
-
-document.querySelector("[data-kns-funding-continue]")?.addEventListener("click", () => {
-  showKnsWizardStep("domain");
-});
-
-document.querySelector("[data-kns-check-availability]")?.addEventListener("click", async () => {
-  const input = document.querySelector("[data-kns-domain-label]");
-  const quoteEl = document.querySelector("[data-kns-domain-quote]");
-  const errorEl = document.querySelector("[data-kns-domain-error]");
-  const submitBtn = document.querySelector("[data-kns-register-submit]");
-  if (errorEl) errorEl.hidden = true;
-  if (quoteEl) quoteEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
-  const rawLabel = input?.value || "";
-  if (!rawLabel.trim()) {
-    if (errorEl) { errorEl.textContent = "Enter a domain name."; errorEl.hidden = false; }
-    return;
-  }
+// Re-reads the domains on the chatting address, past the cache: the point of Refresh is to see
+// a transfer that just landed.
+async function knsWizardScanDomains() {
+  const w = knsWizard;
+  if (!w || w.scanning) return;
+  w.scanning = true;
+  renderKnsWizard();
   try {
-    const availability = await engine.checkKnsDomainAvailability(rawLabel);
-    if (!availability.available) {
-      if (errorEl) { errorEl.textContent = `${availability.domain} is already taken.`; errorEl.hidden = false; }
+    engine.clearKnsCache(engine.address);
+    const info = await engine.fetchKnsAddressInfo(engine.address);
+    if (knsWizard !== w) return;
+    w.foundDomains = info?.allDomains || [];
+  } catch { if (knsWizard === w) w.foundDomains = []; }
+  if (knsWizard !== w) return;
+  w.scanning = false;
+  renderKnsWizard();
+}
+
+async function loadKnsWizardFeeTiers() {
+  const w = knsWizard;
+  if (!w || w.domain.feeTiers) return;
+  try {
+    const tiers = await engine.fetchKnsFeeTiers();
+    if (knsWizard !== w) return;
+    w.domain.feeTiers = tiers;
+    w.domain.feeError = "";
+  } catch (error) {
+    if (knsWizard !== w) return;
+    w.domain.feeError = error?.message || "Could not load fees.";
+  }
+  if (w.step === "domain") renderKnsWizard();
+}
+
+function scheduleKnsWizardAvailability() {
+  const w = knsWizard;
+  if (!w) return;
+  const d = w.domain;
+  if (d.timer) clearTimeout(d.timer);
+  d.submitError = "";
+  d.availability = null;
+  const raw = d.input.trim();
+  if (!raw) { d.checkError = ""; d.checking = false; renderKnsWizardDomainStatus(); return; }
+  const label = normalizeDomainLabel(raw);
+  if (!label) { d.checkError = "Use lowercase letters, numbers, and hyphen."; d.checking = false; renderKnsWizardDomainStatus(); return; }
+  d.checkError = "";
+  d.checking = true;
+  renderKnsWizardDomainStatus();
+  d.timer = window.setTimeout(async () => {
+    try {
+      const result = await engine.checkKnsDomainAvailability(`${label}.kas`);
+      if (knsWizard !== w || d.input.trim() !== raw) return;
+      d.availability = result;
+      d.checkError = "";
+    } catch (error) {
+      if (knsWizard !== w || d.input.trim() !== raw) return;
+      d.availability = null;
+      d.checkError = error?.message || "Could not check availability.";
+    }
+    d.checking = false;
+    renderKnsWizardDomainStatus();
+  }, 350);
+}
+// The domain step re-renders around the input rather than replacing it, so typing is never
+// interrupted: the field keeps focus and its caret.
+function renderKnsWizardDomainStatus() {
+  const input = knsWizardBodyEl?.querySelector("[data-kns-wizard-domain]");
+  const caret = input ? input.selectionStart : null;
+  renderKnsWizard();
+  const next = knsWizardBodyEl?.querySelector("[data-kns-wizard-domain]");
+  if (next && caret != null) { next.focus(); try { next.setSelectionRange(caret, caret); } catch {} }
+}
+
+async function knsWizardInscribeDomain() {
+  const w = knsWizard;
+  if (!w) return;
+  const d = w.domain;
+  const label = normalizeDomainLabel(d.input);
+  if (!label) { d.submitError = "Invalid domain label"; renderKnsWizard(); return; }
+  d.submitting = true;
+  d.submitError = "";
+  d.progress = "";
+  renderKnsWizard();
+  try {
+    const result = await engine.inscribeKnsDomain(label, {
+      onStatus: (event) => { if (knsWizard === w) { d.progress = knsStatusMessage(event.status); renderKnsWizard(); } },
+    });
+    if (knsWizard !== w) return;
+    w.wroteSomething = true;
+    w.domainName = result.domain;
+    w.assetId = result.assetId || null;
+    d.submitting = false;
+    engine.clearKnsCache(engine.address);
+    if (!w.assetId) {
+      try { const info = await engine.fetchKnsAddressInfo(engine.address); w.assetId = info?.allDomains?.find((x) => x.fullName === result.domain)?.inscriptionId || info?.primaryInscriptionId || null; } catch {}
+    }
+    setKnsWizardStep("domainConfirmed");
+  } catch (error) {
+    if (knsWizard !== w) return;
+    d.submitting = false;
+    d.submitError = error?.message || "Registration failed.";
+    renderKnsWizard();
+  }
+}
+
+async function knsWizardInscribeImage() {
+  const w = knsWizard;
+  if (!w || !w.image.blob || w.image.submitting) return;
+  const isBanner = w.step === "banner";
+  const img = w.image;
+  if (!w.assetId) { img.error = "Domain isn't confirmed yet. Try again shortly."; renderKnsWizard(); return; }
+  img.submitting = true;
+  img.error = "";
+  renderKnsWizard();
+  try {
+    const { imageUrl } = await engine.uploadKnsProfileImage(w.assetId, isBanner ? "banner" : "avatar", img.blob);
+    await engine.submitKnsProfileField(w.assetId, isBanner ? "bannerUrl" : "avatarUrl", imageUrl);
+    if (knsWizard !== w) return;
+    w.wroteSomething = true;
+    if (w.existing) { w.existing.profile = { ...(w.existing.profile || {}), [isBanner ? "bannerUrl" : "avatarUrl"]: imageUrl }; }
+    img.submitting = false;
+    img.blob = null;
+    setKnsWizardStep(isBanner ? "avatar" : "details");
+  } catch (error) {
+    if (knsWizard !== w) return;
+    img.submitting = false;
+    img.error = error?.message || "Inscribing the image failed.";
+    renderKnsWizard();
+  }
+}
+
+const KNS_WIZARD_FIELD_NAMES = { bio: "Bio", website: "Website", x: "X", telegram: "Telegram", discord: "Discord", github: "GitHub", contactEmail: "Email" };
+async function knsWizardSubmitDetails() {
+  const w = knsWizard;
+  if (!w) return;
+  const d = w.details;
+  if (!w.assetId) { setKnsWizardStep("finished"); return; }
+  const toSubmit = Object.entries(d.values || {})
+    .filter(([key, value]) => d.statuses[key] !== "done" && value.trim() !== (d.original?.[key] || ""))
+    .map(([key, value]) => [key, value.trim()]);
+  if (!toSubmit.length) { setKnsWizardStep("finished"); return; }
+  try { engine.validateKnsProfileFields(Object.fromEntries(toSubmit)); }
+  catch (error) { d.error = error.message; renderKnsWizard(); return; }
+  d.submitting = true;
+  d.error = "";
+  renderKnsWizard();
+  for (const [key, value] of toSubmit) {
+    d.statuses[key] = "submitting";
+    d.progress = `Inscribing ${KNS_WIZARD_FIELD_NAMES[key] || key}...`;
+    renderKnsWizard();
+    try {
+      await engine.submitKnsProfileField(w.assetId, key, value);
+      if (knsWizard !== w) return;
+      d.statuses[key] = "done";
+      w.wroteSomething = true;
+    } catch (error) {
+      if (knsWizard !== w) return;
+      d.submitting = false;
+      delete d.statuses[key];
+      d.error = `Failed to inscribe ${KNS_WIZARD_FIELD_NAMES[key] || key}: ${error?.message || "unknown error"}`;
+      renderKnsWizard();
       return;
     }
-    const feeTiers = await engine.fetchKnsFeeTiers();
-    const label = availability.domain.replace(/\.kas$/, "");
-    const { commitAmountKas, revealAmountKas } = knsRegistrationAmounts(label, feeTiers, { isReservedDomain: availability.isReservedDomain });
-    knsWizardState.availability = availability;
-    if (quoteEl) {
-      quoteEl.hidden = false;
-      quoteEl.innerHTML = `<strong>${availability.domain}</strong> is available.<br>Estimated cost: ~${commitAmountKas} KAS (registration fee ~${revealAmountKas} KAS + network fees).`;
-    }
-    if (submitBtn) submitBtn.disabled = false;
-  } catch (error) {
-    if (errorEl) { errorEl.textContent = error.message || "Could not check availability."; errorEl.hidden = false; }
+  }
+  d.submitting = false;
+  setKnsWizardStep("finished");
+}
+
+knsWizardBodyEl?.addEventListener("input", (event) => {
+  const w = knsWizard;
+  if (!w) return;
+  const domainInput = event.target.closest("[data-kns-wizard-domain]");
+  if (domainInput) { w.domain.input = domainInput.value; scheduleKnsWizardAvailability(); return; }
+  const field = event.target.closest("[data-kns-wizard-field]");
+  if (field && w.details.values) w.details.values[field.dataset.knsWizardField] = field.value;
+});
+knsWizardBodyEl?.addEventListener("change", async (event) => {
+  const w = knsWizard;
+  const fileInput = event.target.closest("[data-kns-wizard-file]");
+  if (!w || !fileInput) return;
+  const file = fileInput.files?.[0];
+  fileInput.value = "";
+  if (!file) return;
+  const picked = await readKnsImageFile(file, null);
+  if (knsWizard !== w || !picked) return;
+  w.image.blob = picked.blob;
+  w.image.dataUrl = picked.dataUrl;
+  w.image.error = "";
+  renderKnsWizard();
+});
+knsWizardBodyEl?.addEventListener("click", async (event) => {
+  const w = knsWizard;
+  if (!w) return;
+  const pick = event.target.closest("[data-kns-wizard-pick]");
+  if (pick) {
+    const domain = w.foundDomains.find((d) => (d.inscriptionId || d.fullName) === pick.dataset.knsWizardPick);
+    if (domain) { w.assetId = domain.inscriptionId || null; w.domainName = domain.fullName; setKnsWizardStep("domainConfirmed"); }
+    return;
+  }
+  if (event.target.closest("[data-kns-wizard-back]")) {
+    const previous = knsWizardPrevious();
+    if (previous) setKnsWizardStep(previous);
+    return;
+  }
+  if (event.target.closest("[data-kns-wizard-next]")) {
+    if (w.step === "transferExistingDomain") setKnsWizardStep("pickDomain");
+    else if (w.step === "domainConfirmed") setKnsWizardStep("banner");
+    else if (w.step === "banner") setKnsWizardStep("avatar");
+    else if (w.step === "avatar") setKnsWizardStep("details");
+    else if (w.step === "details") knsWizardSubmitDetails();
+    return;
+  }
+  const action = event.target.closest("[data-kns-wizard-action]")?.dataset.knsWizardAction;
+  if (!action) return;
+  switch (action) {
+    case "have-yes": case "transfer-existing": setKnsWizardStep("transferExistingDomain"); knsWizardScanDomains(); break;
+    case "have-no": case "check-again": knsWizardCheckFunding(); break;
+    case "copy-address":
+      try { await copyTextToClipboard(engine.address); showCopyToast(addressCopiedToastText(engine.address)); } catch {}
+      break;
+    case "show-qr":
+      openChattingAddressScreen({ address: engine.address, balanceText: `${formatKnsKas(w.balanceKas ?? 0)} KAS`, subtitle: `Send around ${KNS_WIZARD_MIN_FUNDING_KAS} Kaspa to this address to have enough for full KNS profile creation and chatting for a while` });
+      break;
+    case "refresh-domains": knsWizardScanDomains(); break;
+    case "inscribe-domain": knsWizardInscribeDomain(); break;
+    case "skip-domain":
+      if (w.existing?.domainName) { w.domainName = w.existing.domainName; w.assetId = w.existing.assetId; setKnsWizardStep("domainConfirmed"); }
+      break;
+    case "choose-photo": knsWizardBodyEl.querySelector("[data-kns-wizard-file]")?.click(); break;
+    case "inscribe-image": knsWizardInscribeImage(); break;
+    case "done": w.wroteSomething = true; closeKnsRegisterModal(); break;
   }
 });
 
-document.querySelector("[data-kns-register-submit]")?.addEventListener("click", async () => {
-  const input = document.querySelector("[data-kns-domain-label]");
-  const errorEl = document.querySelector("[data-kns-domain-error]");
-  const progressEl = document.querySelector("[data-kns-register-progress]");
-  const submitBtn = document.querySelector("[data-kns-register-submit]");
-  const checkBtn = document.querySelector("[data-kns-check-availability]");
-  if (errorEl) errorEl.hidden = true;
-  if (progressEl) { progressEl.hidden = false; progressEl.textContent = "Starting…"; }
-  if (submitBtn) submitBtn.disabled = true;
-  if (checkBtn) checkBtn.disabled = true;
-  try {
-    const result = await engine.inscribeKnsDomain(input?.value || "", {
-      onStatus: (event) => { if (progressEl) progressEl.textContent = knsStatusMessage(event.status); },
-    });
-    knsWizardState.assetId = result.assetId;
-    knsWizardState.domain = result.domain;
-    document.querySelector("[data-kns-registered-domain]").textContent = result.domain;
-    engine.clearKnsCache(engine.address);
-    showKnsWizardStep("details");
-  } catch (error) {
-    if (errorEl) { errorEl.textContent = error.message || "Registration failed."; errorEl.hidden = false; }
-    if (progressEl) progressEl.hidden = true;
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
-    if (checkBtn) checkBtn.disabled = false;
-  }
-});
-
-document.querySelector("[data-kns-details-skip]")?.addEventListener("click", async () => {
-  closeKnsRegisterModal();
-  await refreshOwnKnsProfileUntilResolved();
-});
+document.querySelector("[data-open-kns-register]")?.addEventListener("click", () => openKnsProfileWizard());
+document.querySelectorAll("[data-close-kns-register]").forEach((button) => button.addEventListener("click", closeKnsRegisterModal));
 
 // --- KNS profile editor (for an already-registered domain) -------------------
 
@@ -10399,12 +10697,9 @@ document.querySelectorAll("[data-close-kns-editor]").forEach((button) => {
 });
 
 // iOS-style "setup guide" — an in-app walkthrough opened from the editor (stacks on top of it).
-const knsGuideModal = document.querySelector("[data-kns-guide-modal]");
 document.querySelector("[data-open-kns-guide]")?.addEventListener("click", () => {
-  if (knsGuideModal) knsGuideModal.hidden = false;
-});
-document.querySelectorAll("[data-close-kns-guide]").forEach((button) => {
-  button.addEventListener("click", () => { if (knsGuideModal) knsGuideModal.hidden = true; });
+  if (knsEditorModal) knsEditorModal.hidden = true;
+  openKnsProfileWizard();
 });
 
 document.querySelector("[data-kns-editor-save]")?.addEventListener("click", async () => {
@@ -10486,57 +10781,6 @@ document.querySelector("[data-kns-editor-save]")?.addEventListener("click", asyn
     showCopyToast(`KNS profile update failed: ${error?.message || "unknown error"}`);
   } finally {
     if (saveBtn) saveBtn.disabled = false;
-  }
-});
-
-document.querySelector("[data-kns-details-save]")?.addEventListener("click", async () => {
-  const errorEl = document.querySelector("[data-kns-details-error]");
-  const progressEl = document.querySelector("[data-kns-details-progress]");
-  const saveBtn = document.querySelector("[data-kns-details-save]");
-  if (errorEl) errorEl.hidden = true;
-  if (!knsWizardState.assetId) {
-    if (errorEl) { errorEl.textContent = "Domain isn't confirmed yet. Try again from your Profile screen shortly."; errorEl.hidden = false; }
-    return;
-  }
-  const fields = {};
-  document.querySelectorAll('[data-kns-step="details"] [data-kns-field]').forEach((el) => {
-    fields[el.dataset.knsField] = el.value;
-  });
-  let validated;
-  try {
-    validated = engine.validateKnsProfileFields(fields);
-  } catch (error) {
-    if (errorEl) { errorEl.textContent = error.message; errorEl.hidden = false; }
-    return;
-  }
-  const changed = Object.fromEntries(Object.entries(validated).filter(([, v]) => v));
-  if (!Object.keys(changed).length) {
-    showKnsWizardStep("done");
-    return;
-  }
-
-  if (progressEl) { progressEl.hidden = false; progressEl.textContent = "Starting…"; }
-  if (saveBtn) saveBtn.disabled = true;
-  try {
-    const results = await engine.submitKnsProfileFields(knsWizardState.assetId, changed, {
-      onStatus: (event) => {
-        if (!progressEl) return;
-        const label = KNS_PROFILE_FIELD_EDIT_ORDER.includes(event.key) ? event.key : "";
-        progressEl.textContent = `${label ? `${label}: ` : ""}${knsStatusMessage(event.status) || event.status}`;
-      },
-    });
-    const failed = results.filter((r) => !r.ok);
-    if (failed.length && errorEl) {
-      errorEl.textContent = `Some fields failed: ${failed.map((f) => f.key).join(", ")}. You can retry from your Profile screen.`;
-      errorEl.hidden = false;
-    }
-    engine.clearKnsCache(engine.address);
-    showKnsWizardStep("done");
-  } catch (error) {
-    if (errorEl) { errorEl.textContent = error.message || "Saving profile details failed."; errorEl.hidden = false; }
-  } finally {
-    if (saveBtn) saveBtn.disabled = false;
-    if (progressEl) progressEl.hidden = true;
   }
 });
 

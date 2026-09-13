@@ -9624,3 +9624,47 @@ body.session-logged-out [data-account-rename-modal] {
 .resync-picker-copy small { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .cache-total-row { justify-content: space-between; }
 .field-hint.accent { color: var(--kaspa-ink, var(--kaspa)); }
+
+/* Profile title row: the bell sits top-right like the iOS toolbar, with a red unread dot. */
+.profile-title-row { margin-bottom: 12px; }
+.profile-bell-button { position: relative; }
+.profile-bell-dot { position: absolute; top: 7px; right: 7px; }
+
+/* Create KNS Profile wizard (iOS KNSCreateProfileFlowView). */
+.kns-wizard-modal { max-width: 460px; }
+.kns-wizard-modal .modal-header { display: flex; align-items: center; justify-content: space-between; }
+.kns-wizard-title { margin: 0; font-size: 17px; }
+.kns-wizard-close, .kns-wizard-close-spacer { min-width: 52px; }
+.kns-wizard-body { display: grid; gap: 12px; max-height: min(70vh, 640px); overflow-y: auto; padding: 4px 2px 2px; }
+.kns-wizard-center { display: grid; justify-items: center; text-align: center; gap: 12px; padding: 12px 8px 4px; }
+.kns-wizard-center h3, .kns-wizard-form h3 { margin: 0; font-size: 21px; line-height: 1.3; }
+.kns-wizard-form h3.centered { text-align: center; }
+.kns-wizard-form { display: grid; gap: 12px; padding: 6px 2px 2px; }
+.kns-wizard-icon { width: 72px; height: 72px; border-radius: 999px; display: grid; place-items: center; font-size: 34px; font-weight: 800; background: rgba(98,244,208,.12); color: var(--kaspa); }
+.kns-wizard-icon.warn { color: var(--kaspa); }
+.kns-wizard-icon.ok { background: rgba(52,199,89,.14); color: #34c759; }
+.kns-wizard-icon.muted { background: var(--surface-2); color: var(--muted); }
+.kns-wizard-choices { display: grid; gap: 10px; width: 100%; margin-top: 8px; }
+.secondary-button.accent { background: rgba(98,244,208,.14); color: var(--kaspa-ink, var(--kaspa)); border-color: transparent; }
+.linklike-button.muted { color: var(--muted); }
+.kns-wizard-label { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.kns-wizard-balance { margin: 0; font-size: 22px; font-weight: 800; }
+.kns-wizard-address { border: 0; background: transparent; color: var(--text); font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; cursor: pointer; padding: 0 8px; }
+.kns-wizard-qr { width: 220px; height: 220px; padding: 12px; border-radius: 16px; background: #fff; }
+.kns-wizard-row { display: flex; justify-content: space-between; padding: 10px 12px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--line); }
+.kns-wizard-row span:last-child { color: var(--muted); }
+.kns-wizard-list { display: grid; gap: 10px; }
+.kns-wizard-list-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text); font-size: 15px; cursor: pointer; text-align: left; }
+.kns-wizard-list-row span { color: var(--muted); }
+.kns-wizard-photo { display: grid; place-items: center; overflow: hidden; border: 0; background: var(--surface-2); cursor: pointer; padding: 0; }
+.kns-wizard-photo.avatar { width: 200px; height: 200px; border-radius: 999px; }
+.kns-wizard-photo.banner { width: 200px; height: 110px; border-radius: 14px; }
+.kns-wizard-photo img { width: 100%; height: 100%; object-fit: cover; }
+.kns-wizard-photo-placeholder { display: grid; justify-items: center; gap: 4px; font-size: 32px; color: var(--kaspa); }
+.kns-wizard-photo-placeholder small { font-size: 13px; }
+.kns-wizard-nav { width: 100%; margin-top: 8px; }
+.kns-wizard-field-head { display: inline-flex; align-items: center; gap: 8px; }
+.kns-wizard-done { color: #34c759; font-weight: 800; }
+.field-hint.ok { color: #34c759; }
+.field-hint.bad { color: #ff6b6b; }
+.kaposts-spinner.small { width: 12px; height: 12px; border-width: 2px; vertical-align: middle; }
