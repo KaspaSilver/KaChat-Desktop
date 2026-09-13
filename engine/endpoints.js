@@ -21,8 +21,11 @@ export const ENDPOINT_DEFAULTS = Object.freeze({
   broadcastIndexer: "https://kachat.duckdns.org",
   pushIndexer: "https://kachat.duckdns.org",
   knsApi: "https://api.knsdomains.org/mainnet/api/v1",
+  translationService: "https://kachat.duckdns.org",
   trustedNode: "",
 });
+// iOS AppSettings.defaultTrustedNodeAddress: the node "Default (Recommended)" connects to.
+export const DEFAULT_TRUSTED_NODE = "grpcs://toccata.kaspium.io";
 
 // Retired / superseded chat-indexer defaults. Drop any stored override still pointing at one of
 // these so it falls back to the current default (kachat.duckdns.org): indexer.kasia.fyi is offline,
@@ -114,28 +117,57 @@ function installIndexerProxy() {
   };
 
   window.fetch = (input, init) => {
+    let rawUrl = "";
     try {
       // Cover every fetch input shape: string, URL instance (sync.js builds these - a URL has
       // no .url property, so it used to silently bypass the proxy), and Request.
-      const rawUrl = typeof input === "string" ? input
+      rawUrl = typeof input === "string" ? input
         : (input instanceof URL) ? input.href
         : (input && input.url) || "";
       if (rawUrl) {
         const parsed = new URL(rawUrl, window.location.origin);
         if (INDEXER_PROXY_HOST_RE.test(parsed.hostname)) {
           const proxied = `${proxyRoot()}${encodeURIComponent(parsed.origin)}${parsed.pathname}${parsed.search}`;
-          return proxyAvailable().then((ok) => {
+          return traceApiCall(rawUrl, init, () => proxyAvailable().then((ok) => {
             if (!ok) return nativeFetch(input, init);
             if (typeof input === "string" || input instanceof URL) return nativeFetch(proxied, init);
             return nativeFetch(new Request(proxied, input), init);
-          });
+          }));
         }
       }
     } catch { /* fall through to native fetch */ }
-    return nativeFetch(input, init);
+    return traceApiCall(rawUrl, init, () => nativeFetch(input, init));
   };
 }
 installIndexerProxy();
+
+// Verbose API Logging (iOS Diagnostics): every indexer/API request with its method, status and
+// timing, handed to whatever log sink the app registers. Off, nothing here runs - failed and slow
+// requests are still reported by their own callers.
+let verboseApiLogging = false;
+let apiLogSink = null;
+const API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|knsdomains\.org$/i;
+export function setVerboseApiLogging(enabled, sink = null) {
+  verboseApiLogging = Boolean(enabled);
+  if (sink) apiLogSink = sink;
+}
+export function isVerboseApiLogging() { return verboseApiLogging; }
+function traceApiCall(rawUrl, init, run) {
+  if (!verboseApiLogging || !apiLogSink || !rawUrl) return run();
+  let host = "";
+  try { host = new URL(rawUrl, window.location.origin).hostname; } catch { host = ""; }
+  if (!API_HOST_RE.test(host)) return run();
+  const method = String(init?.method || "GET").toUpperCase();
+  const started = performance.now();
+  const shortUrl = rawUrl.length > 160 ? `${rawUrl.slice(0, 157)}...` : rawUrl;
+  return run().then((response) => {
+    apiLogSink(`[API] ${method} ${shortUrl} -> ${response?.status ?? "?"} in ${Math.round(performance.now() - started)}ms`);
+    return response;
+  }, (error) => {
+    apiLogSink(`[API] ${method} ${shortUrl} -> failed after ${Math.round(performance.now() - started)}ms: ${error?.message || error}`);
+    throw error;
+  });
+}
 
 function persist() {
   try { localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(overrides)); } catch {}

@@ -35,7 +35,8 @@ import {
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
 import { KNSProfileLinkBuilder } from "../engine/kns.js";
-import { getEndpoint, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS } from "../engine/endpoints.js";
+import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging } from "../engine/endpoints.js";
+import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
 // Imported, not written as string paths: Vite only rewrites and emits the assets it can SEE, and
@@ -442,6 +443,7 @@ function initSecurityToggle(toggle, key) {
 }
 initSecurityToggle(document.querySelector("[data-pref-password-seed]"), "passwordForSeed");
 initSecurityToggle(document.querySelector("[data-pref-password-login]"), "passwordForLogin");
+initSecurityToggle(document.querySelector("[data-pref-password-spending-key]"), "passwordForSpendingKey");
 refreshPasswordStatus();
 document.querySelector("[data-change-password]")?.addEventListener("click", async () => {
   if (hasAppPassword() && !(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
@@ -648,20 +650,20 @@ function closeAccountActionMenu() {
   accountActionMenuTarget = null;
 }
 
-function toggleAccountActionMenu(button, account) {
-  if (!accountActionMenu) return;
-  const reopeningSame = accountActionMenuTarget?.button === button;
+// Half sheet rather than a menu, like every other chooser (iOS): Delete gets a line saying
+// what it takes with it, which a menu of bare verbs cannot.
+async function toggleAccountActionMenu(button, account) {
   closeAccountActionMenu();
-  if (reopeningSame) return;
-
-  const rect = button.getBoundingClientRect();
-  const menuWidth = accountActionMenu.offsetWidth || 168;
-  const left = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
-  accountActionMenu.style.top = `${rect.bottom + 6}px`;
-  accountActionMenu.style.left = `${left}px`;
-  accountActionMenu.hidden = false;
-  button.setAttribute("aria-expanded", "true");
-  accountActionMenuTarget = { button, account };
+  const choice = await chooseDialog({
+    title: account.name,
+    message: shortAddress(account.address),
+    options: [
+      { id: "rename", title: "Rename", subtitle: "Gives this account a name of your own." },
+      { id: "delete", title: "Delete", subtitle: "Removes this account and its local data from this device.", destructive: true },
+    ],
+  });
+  if (choice === "rename") openSavedAccountRename(account);
+  else if (choice === "delete") openSavedAccountDelete(account);
 }
 
 accountActionMenu?.addEventListener("click", (event) => {
@@ -712,7 +714,7 @@ const accountDeleteCopy = document.querySelector("[data-account-delete-copy]");
 function openSavedAccountDelete(account) {
   pendingSavedAccountRemoval = account;
   if (accountDeleteCopy) {
-    accountDeleteCopy.textContent = `This removes ${account.name} (${shortAddress(account.address)}) and its local data from this device. Make sure you have backed up the private key or recovery phrase.`;
+    accountDeleteCopy.textContent = `Deletes ${account.name} (${shortAddress(account.address)}) and its local data from this device.`;
   }
   if (accountDeleteModal) accountDeleteModal.hidden = false;
 }
@@ -1699,8 +1701,7 @@ function shouldNotifyKaPostsAction(contentType, voteType) {
     case "reply": return accountShellPrefs.kaPostsNotifyComments ?? true;
     case "quote": return accountShellPrefs.kaPostsNotifyReposts ?? true;
     case "follow": return accountShellPrefs.kaPostsNotifyFollows ?? true;
-    // Being @mentioned always pings — deliberate, not the unknown-kind fallback.
-    case "mention": return true;
+    case "mention": return accountShellPrefs.kaPostsNotifyMentions ?? true;
     default: return true;
   }
 }
@@ -9206,9 +9207,13 @@ document.querySelector("[data-spending-address-actions]")?.addEventListener("cli
 });
 
 // Export a specific spending address's private key (derived from the account phrase at its index).
-document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("click", () => {
+document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("click", async () => {
   const mnemonic = activeAccountMnemonic();
   if (!mnemonic) { showCopyToast("This account has no recovery phrase, so private keys aren't available."); return; }
+  if (accountShellPrefs.passwordForSpendingKey && hasAppPassword()) {
+    const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view this address's private key." });
+    if (!ok) return;
+  }
   try {
     const spending = engine.deriveSpendingWallet(mnemonic, spendingDetailIndex, activeAccountPassphrase());
     const key = String(spending?.privateKeyHex || "").trim();
@@ -9649,18 +9654,73 @@ function loadEndpointInputs() {
     input.value = getEndpointOverride(key) || ENDPOINT_DEFAULTS[key] || "";
   });
 }
+function endpointFieldError(key, message) {
+  const el = document.querySelector(`[data-endpoint-error="${key}"]`);
+  if (!el) return;
+  el.textContent = message || "";
+  el.hidden = !message;
+}
 document.querySelectorAll("[data-endpoint]").forEach((input) => {
+  if (input.readOnly || input.dataset.endpoint === "trustedNode") return;
+  input.addEventListener("input", () => {
+    endpointFieldError(input.dataset.endpoint, /^http:\/\//i.test(input.value.trim()) ? "Use https. Unencrypted connections are not supported." : "");
+  });
   input.addEventListener("change", () => {
-    setEndpoint(input.dataset.endpoint, input.value.trim());
+    const value = input.value.trim();
+    // iOS: an unencrypted URL is refused outright, not saved and quietly used.
+    if (/^http:\/\//i.test(value)) { endpointFieldError(input.dataset.endpoint, "Use https. Unencrypted connections are not supported."); return; }
+    if (value && !/^https:\/\//i.test(value)) { endpointFieldError(input.dataset.endpoint, "Enter a full https:// URL."); return; }
+    endpointFieldError(input.dataset.endpoint, "");
+    setEndpoint(input.dataset.endpoint, value);
     loadEndpointInputs();
     showCopyToast("Connection setting saved");
   });
 });
 loadEndpointInputs();
 
+// Kaspa Node picker (iOS NodeChoice): Default (Recommended), Automatic Scan, every saved
+// address, and the current custom value when it is none of those.
+function nodeChoiceLooksValid(value) {
+  const v = String(value || "").trim();
+  if (!v) return true;
+  if (/^(wss?|grpcs?):\/\/\S+$/i.test(v)) return true;
+  return /^[a-z0-9.-]+(:\d{2,5})?$/i.test(v);
+}
+function renderNodeChoice() {
+  const select = document.querySelector("[data-node-choice]");
+  if (!select) return;
+  const current = getEndpointOverride("trustedNode").trim();
+  const saved = loadSavedNodes();
+  const options = [
+    { value: DEFAULT_TRUSTED_NODE, label: "Default (Recommended)" },
+    { value: "", label: "Automatic Scan" },
+    ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address })),
+  ];
+  if (current && !options.some((o) => o.value === current)) options.push({ value: current, label: current });
+  select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
+  select.value = current;
+  const note = document.querySelector("[data-node-choice-note]");
+  if (note) note.hidden = !current;
+}
+document.querySelector("[data-node-choice]")?.addEventListener("change", (event) => {
+  const value = String(event.target.value || "").trim();
+  const errorEl = document.querySelector("[data-node-choice-error]");
+  if (!nodeChoiceLooksValid(value)) {
+    if (errorEl) { errorEl.textContent = "Enter a node as host:port or a wss:// / grpcs:// URL."; errorEl.hidden = false; }
+    return;
+  }
+  if (errorEl) errorEl.hidden = true;
+  setEndpoint("trustedNode", value);
+  loadEndpointInputs();
+  renderNodeChoice();
+  showCopyToast(value ? "Connected only to this node from the next reconnect." : "Automatic node scan enabled.");
+});
+
 document.querySelector("[data-reset-connection-defaults]")?.addEventListener("click", () => {
   resetEndpoints();
   loadEndpointInputs();
+  renderNodeChoice();
+  document.querySelectorAll("[data-endpoint-error]").forEach((el) => { el.hidden = true; });
   if (indexerUrlInput) { indexerUrlInput.value = ENDPOINT_DEFAULTS.kasiaIndexer; localStorage.setItem(INDEXER_URL_KEY, indexerUrlInput.value); }
   showCopyToast("Connection settings reset to defaults");
 });
@@ -9729,6 +9789,7 @@ function renderSavedNodes() {
     useBtn.addEventListener("click", () => {
       setEndpoint("trustedNode", entry.address);
       loadEndpointInputs();
+      renderNodeChoice();
       showCopyToast("Trusted Node set");
     });
 
@@ -9751,6 +9812,7 @@ function renderSavedNodes() {
       next.splice(index, 1);
       persistSavedNodes(next);
       renderSavedNodes();
+      renderNodeChoice();
     });
 
     actions.append(useBtn, copyBtn, deleteBtn);
@@ -9772,6 +9834,7 @@ function addSavedNodeFromInputs() {
   }
   next.push({ label, address });
   persistSavedNodes(next);
+  renderNodeChoice();
   setSavedNodeError("");
   if (labelInput) labelInput.value = "";
   addressInput.value = "";
@@ -12844,8 +12907,20 @@ function setSettingsBackBar(visible, label) {
   if (labelEl) labelEl.textContent = label || "Settings";
 }
 
+function refreshSettingsCaptions() {
+  const child = document.querySelector("[data-child-mode-caption]");
+  if (child) child.textContent = isChildModeEnabled() ? "On" : "Off";
+  const photo = document.querySelector("[data-photo-quality-current]");
+  // The presets are declared further down the module; the hub renders once at load, before
+  // they exist, and fills this in on the next visit.
+  try { if (photo) photo.textContent = PHOTO_QUALITY_PRESETS.find((p) => p.id === getPhotoQualityPresetId())?.name || ""; } catch {}
+  const cacheCaption = document.querySelector("[data-cache-total-caption]");
+  if (cacheCaption) cacheCaption.textContent = formatCacheBytes(cacheCategories().reduce((sum, c) => sum + c.bytes, 0));
+}
+
 function showSettingsCategory(index) {
   if (!settingsScreenEl || !settingsHubEl) return;
+  refreshSettingsCaptions();
   const inCategory = Number.isInteger(index);
   settingsSubscreenParentIndex = null;
   settingsHubEl.hidden = inCategory;
@@ -12863,6 +12938,8 @@ function showSettingsSubscreen(name, parentIndex) {
   if (name === "child-mode") renderChildModeSettingsPage();
   // The retention window is per account, so the checkmark is only right once the page opens.
   if (name === "retention") refreshRetentionSelectionUi();
+  if (name === "cache") renderCachePage();
+  if (name === "connection-settings") renderNodeChoice();
   settingsSubscreenParentIndex = Number.isInteger(parentIndex) && parentIndex >= 0 ? parentIndex : null;
   settingsHubEl.hidden = true;
   settingsGroupsEls.forEach((group) => { group.hidden = group !== target; });
@@ -12891,6 +12968,71 @@ settingsScreenEl?.addEventListener("click", (event) => {
   }
 });
 showSettingsCategory(null);
+
+// ---------------------------------------------------------------------------
+// Cache (iOS CacheSettingsPage): what the app holds that it could fetch again, by category,
+// with a way to drop any of it. Nothing here is user data.
+// ---------------------------------------------------------------------------
+const CACHE_CATEGORIES = [
+  { id: "broadcasts", title: "Broadcast History", detail: "Messages and reactions from public broadcast channels.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
+  { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
+  { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
+  { id: "kns", title: "KNS Profiles", detail: "Names and profile details looked up for addresses.", match: (k) => k.startsWith("kachat-kns-") && k.includes("cache") },
+];
+function formatCacheBytes(bytes) {
+  if (!(bytes > 0)) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function cacheCategories() {
+  const keys = [];
+  try { for (let i = 0; i < localStorage.length; i += 1) keys.push(localStorage.key(i)); } catch {}
+  return CACHE_CATEGORIES.map((category) => {
+    const owned = keys.filter((k) => k && category.match(k));
+    let bytes = 0;
+    for (const key of owned) { try { bytes += (key.length + (localStorage.getItem(key) || "").length) * 2; } catch {} }
+    return { ...category, keys: owned, bytes };
+  });
+}
+function clearCacheCategory(category) {
+  for (const key of category.keys) { try { localStorage.removeItem(key); } catch {} }
+}
+function renderCachePage() {
+  const listEl = document.querySelector("[data-cache-list]");
+  const totalEl = document.querySelector("[data-cache-total]");
+  const clearAll = document.querySelector("[data-cache-clear-all]");
+  if (!listEl) return;
+  const categories = cacheCategories();
+  const total = categories.reduce((sum, c) => sum + c.bytes, 0);
+  if (totalEl) totalEl.textContent = formatCacheBytes(total);
+  if (clearAll) clearAll.disabled = total <= 0;
+  listEl.innerHTML = categories.map((c) => `
+    <button class="settings-list-row" type="button" data-cache-category="${c.id}" ${c.bytes > 0 ? "" : "disabled"}>
+      <span class="settings-row-copy"><strong>${escapeHtml(c.title)}</strong><small>${escapeHtml(c.detail)}</small></span>
+      <span class="settings-dropdown-caption">${escapeHtml(formatCacheBytes(c.bytes))}</span>
+    </button>`).join("");
+  refreshSettingsCaptions();
+}
+document.querySelector("[data-cache-list]")?.addEventListener("click", async (event) => {
+  const row = event.target.closest("[data-cache-category]");
+  if (!row || row.disabled) return;
+  const category = cacheCategories().find((c) => c.id === row.dataset.cacheCategory);
+  if (!category) return;
+  const ok = await confirmDialog({ title: `Clear ${category.title}?`, message: `${formatCacheBytes(category.bytes)} freed. ${category.detail}`, confirmLabel: "Clear", destructive: true });
+  if (!ok) return;
+  clearCacheCategory(category);
+  renderCachePage();
+  showCopyToast(`${category.title} cleared.`);
+});
+document.querySelector("[data-cache-clear-all]")?.addEventListener("click", async () => {
+  const categories = cacheCategories();
+  const total = categories.reduce((sum, c) => sum + c.bytes, 0);
+  const ok = await confirmDialog({ title: "Clear All Cache?", message: `Frees ${formatCacheBytes(total)}. Your messages, contacts and keys are not touched.`, confirmLabel: "Clear All", destructive: true });
+  if (!ok) return;
+  categories.forEach(clearCacheCategory);
+  renderCachePage();
+  showCopyToast("Cache cleared.");
+});
 
 // ---------------------------------------------------------------------------
 // App-wide settings from the signed-out landing screen (iOS: the accounts
@@ -17781,7 +17923,128 @@ document.querySelector("[data-chatting-picker-confirm-switch]")?.addEventListene
 
 const importAccountModal = document.querySelector("[data-import-account-modal]");
 const importNameInput = document.querySelector("[data-import-name]");
-const importPhraseInput = document.querySelector("[data-import-phrase]");
+const importPhraseInput = null; // the textarea gave way to the numbered slot grid below
+const importSeedGrid = document.querySelector("[data-import-seed-grid]");
+const importSeedSuggestions = document.querySelector("[data-import-seed-suggestions]");
+const importSeedCount = document.querySelector("[data-import-seed-count]");
+let importWordCount = 24;
+let importWords = Array(24).fill("");
+let importActiveSlot = 0;
+
+function importSeedSlots() { return importWords.slice(0, importWordCount); }
+function importSeedPhrase() { return importSeedSlots().map((w) => w.trim().toLowerCase()).filter(Boolean).join(" "); }
+function importSeedAllValid() { return importSeedSlots().every((w) => isBip39Word(w)); }
+function updateImportSeedState() {
+  const filled = importSeedSlots().filter((w) => isBip39Word(w)).length;
+  if (importSeedCount) {
+    importSeedCount.textContent = `${filled}/${importWordCount}`;
+    importSeedCount.classList.toggle("complete", importSeedAllValid());
+  }
+  importSeedGrid?.querySelectorAll("[data-import-slot]").forEach((input) => {
+    const i = Number(input.dataset.importSlot);
+    const word = importWords[i] || "";
+    input.classList.toggle("invalid", Boolean(word) && !isBip39Word(word) && i !== importActiveSlot);
+    input.classList.toggle("active", i === importActiveSlot);
+  });
+  const name = String(importNameInput?.value || "").trim();
+  if (importContinueBtn) importContinueBtn.disabled = !(name && importSeedAllValid());
+  renderImportSeedSuggestions();
+}
+function renderImportSeedSuggestions() {
+  if (!importSeedSuggestions) return;
+  const current = String(importWords[importActiveSlot] || "").toLowerCase();
+  const matches = current ? bip39Matches(current, 30) : [];
+  importSeedSuggestions.innerHTML = matches.map((w) => `<button type="button" class="seed-suggestion" data-seed-suggest="${w}"><b>${escapeHtml(current)}</b>${escapeHtml(w.slice(current.length))}</button>`).join("");
+}
+function renderImportSeedGrid() {
+  if (!importSeedGrid) return;
+  importSeedGrid.replaceChildren();
+  for (let i = 0; i < importWordCount; i += 1) {
+    const cell = document.createElement("label");
+    cell.className = "seed-grid-cell seed-entry-cell";
+    cell.innerHTML = `<span class="seed-grid-index">${i + 1}</span><input type="text" class="seed-entry-input" data-import-slot="${i}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="latin" />`;
+    cell.querySelector("input").value = importWords[i] || "";
+    importSeedGrid.appendChild(cell);
+  }
+  updateImportSeedState();
+}
+function focusImportSlot(i) {
+  importActiveSlot = Math.max(0, Math.min(importWordCount - 1, i));
+  const input = importSeedGrid?.querySelector(`[data-import-slot="${importActiveSlot}"]`);
+  input?.focus();
+  updateImportSeedState();
+}
+function commitImportWord(word) {
+  importWords[importActiveSlot] = word;
+  const input = importSeedGrid?.querySelector(`[data-import-slot="${importActiveSlot}"]`);
+  if (input) input.value = word;
+  if (importActiveSlot < importWordCount - 1) focusImportSlot(importActiveSlot + 1);
+  else updateImportSeedState();
+}
+function resetImportSeedGrid() {
+  importWords = Array(24).fill("");
+  importActiveSlot = 0;
+  renderImportSeedGrid();
+}
+document.querySelectorAll("[data-import-word-count]").forEach((button) => button.addEventListener("click", () => {
+  importWordCount = Number(button.dataset.importWordCount) === 12 ? 12 : 24;
+  document.querySelectorAll("[data-import-word-count]").forEach((b) => b.classList.toggle("active", b === button));
+  if (importActiveSlot >= importWordCount) importActiveSlot = importWordCount - 1;
+  renderImportSeedGrid();
+}));
+importSeedGrid?.addEventListener("focusin", (event) => {
+  const input = event.target.closest("[data-import-slot]");
+  if (input) { importActiveSlot = Number(input.dataset.importSlot); updateImportSeedState(); }
+});
+importSeedGrid?.addEventListener("input", (event) => {
+  const input = event.target.closest("[data-import-slot]");
+  if (!input) return;
+  const i = Number(input.dataset.importSlot);
+  const raw = String(input.value || "").toLowerCase();
+  // A whole phrase pasted into any slot fills forward from there.
+  const parts = raw.split(/[^a-z]+/).filter(Boolean);
+  if (parts.length > 1) {
+    parts.forEach((word, offset) => { if (i + offset < 24) importWords[i + offset] = word; });
+    if (parts.length >= 12 && i === 0 && (parts.length === 12 || parts.length === 24)) {
+      importWordCount = parts.length;
+      document.querySelectorAll("[data-import-word-count]").forEach((b) => b.classList.toggle("active", Number(b.dataset.importWordCount) === importWordCount));
+    }
+    renderImportSeedGrid();
+    focusImportSlot(Math.min(importWordCount - 1, i + parts.length));
+    return;
+  }
+  const clean = raw.replace(/[^a-z]/g, "");
+  if (clean !== input.value) input.value = clean;
+  importWords[i] = clean;
+  importActiveSlot = i;
+  // Auto-commit once the letters can only be one word (iOS), e.g. "zoo".
+  const matches = clean ? bip39Matches(clean, 2) : [];
+  if (matches.length === 1 && matches[0] === clean) { commitImportWord(clean); return; }
+  updateImportSeedState();
+});
+importSeedGrid?.addEventListener("keydown", (event) => {
+  const input = event.target.closest("[data-import-slot]");
+  if (!input) return;
+  const i = Number(input.dataset.importSlot);
+  if (event.key === " " || event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
+    const current = String(input.value || "").toLowerCase();
+    if (!current) { if (event.key !== "Tab") event.preventDefault(); return; }
+    event.preventDefault();
+    const word = isBip39Word(current) ? current : (bip39Matches(current, 1)[0] || current);
+    importActiveSlot = i;
+    commitImportWord(word);
+  } else if (event.key === "Backspace" && !input.value && i > 0) {
+    event.preventDefault();
+    focusImportSlot(i - 1);
+  }
+});
+importSeedSuggestions?.addEventListener("mousedown", (event) => {
+  const chip = event.target.closest("[data-seed-suggest]");
+  if (!chip) return;
+  event.preventDefault(); // keep focus on the grid
+  commitImportWord(chip.dataset.seedSuggest);
+});
+document.querySelector("[data-import-name]")?.addEventListener("input", updateImportSeedState);
 const importAccountError = document.querySelector("[data-import-account-error]");
 const importContinueBtn = document.querySelector("[data-import-continue]");
 const importPassphraseInput = document.querySelector("[data-import-passphrase]");
@@ -17887,7 +18150,7 @@ function openImportAccountModal() {
   if (importAccountError) { importAccountError.hidden = true; importAccountError.textContent = ""; }
   if (importPassphraseError) importPassphraseError.hidden = true;
   if (importNameInput) importNameInput.value = "Imported Account";
-  if (importPhraseInput) importPhraseInput.value = "";
+  resetImportSeedGrid();
   if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
   renderImportSourceList();
   showImportStep("source");
@@ -17903,7 +18166,7 @@ importAccountModal?.addEventListener("click", (event) => { if (event.target === 
 
 document.querySelector("[data-import-source-continue]")?.addEventListener("click", () => {
   showImportStep("form");
-  queueMicrotask(() => importPhraseInput?.focus());
+  queueMicrotask(() => focusImportSlot(0));
 });
 
 // `resetState: false` is used only by the chatting-address switch: that is a
@@ -17989,16 +18252,18 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", fa
 // passphrase step), then advance to the optional passphrase screen.
 importContinueBtn?.addEventListener("click", async () => {
   const name = String(importNameInput?.value || "").trim();
-  const phrase = String(importPhraseInput?.value || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const phrase = importSeedPhrase();
   const words = phrase.split(" ").filter(Boolean);
   if (importAccountError) importAccountError.hidden = true;
   if (!name) { showImportError("Enter an account name."); return; }
-  if (![12, 24].includes(words.length)) { showImportError("Recovery phrase must contain exactly 12 or 24 words."); return; }
+  if (words.length !== importWordCount || !importSeedAllValid()) { showImportError(`Enter all ${importWordCount} recovery words.`); return; }
   importContinueBtn.disabled = true;
   try {
     if (!engine.kaspa) await ensureRuntimes();
+    // The checksum is checked here (iOS advanceToPassphrase) so a mistake surfaces before the
+    // passphrase step rather than after it.
     try { new engine.kaspa.Mnemonic(phrase); }
-    catch { showImportError("Invalid recovery phrase — check the words and their order."); return; }
+    catch { showImportError("This recovery phrase is invalid. Double-check the words - the last word encodes a checksum, so one wrong word fails validation."); return; }
     pendingImport = { name, recoveryPhrase: phrase, family: selectedImportSourceFamily() };
     if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
     if (importPassphraseError) importPassphraseError.hidden = true;
@@ -18088,7 +18353,16 @@ function hideRevealedRecoveryPhrase() {
   stopRecoveryViewTimer();
   if (recoveryPhraseBox) { recoveryPhraseBox.hidden = true; recoveryPhraseBox.textContent = ""; }
   if (revealRecoveryButton) revealRecoveryButton.hidden = false;
+  const copyKey = document.querySelector("[data-copy-seed-privatekey]");
+  if (copyKey) copyKey.hidden = true;
 }
+document.querySelector("[data-copy-seed-privatekey]")?.addEventListener("click", async () => {
+  if (!engine.privateKeyHex) { showCopyToast("Private key unavailable."); return; }
+  await copyTextToClipboard(engine.privateKeyHex);
+  showCopyToast("Private key hex copied. Clipboard will clear in 30s.");
+  if (privateKeyClipboardTimer) window.clearTimeout(privateKeyClipboardTimer);
+  privateKeyClipboardTimer = window.setTimeout(() => { copyTextToClipboard(" ").catch(() => {}); }, 30_000);
+});
 
 function renderRecoveryCountdown() {
   const label = recoveryPhraseBox?.querySelector("[data-recovery-countdown]");
@@ -18103,7 +18377,19 @@ function revealRecoveryPhraseAfterHold() {
   }
 
   stopRecoveryViewTimer();
-  recoveryPhraseBox.textContent = account.mnemonic;
+  recoveryPhraseBox.replaceChildren();
+  const grid = document.createElement("div");
+  grid.className = "seed-grid";
+  account.mnemonic.split(/\s+/).filter(Boolean).forEach((word, index) => {
+    const cell = document.createElement("div");
+    cell.className = "seed-grid-cell";
+    cell.innerHTML = `<span class="seed-grid-index">${index + 1}.</span><span class="seed-grid-word"></span>`;
+    cell.querySelector(".seed-grid-word").textContent = word;
+    grid.appendChild(cell);
+  });
+  recoveryPhraseBox.appendChild(grid);
+  const copyKey = document.querySelector("[data-copy-seed-privatekey]");
+  if (copyKey) copyKey.hidden = !engine.privateKeyHex;
   const countdown = document.createElement("span");
   countdown.className = "recovery-countdown";
   countdown.dataset.recoveryCountdown = "";
@@ -18155,6 +18441,8 @@ function cancelRecoveryHold(event) {
 function closeRecoveryModal() {
   resetRecoveryHold();
   stopRecoveryViewTimer();
+  const copyKey = document.querySelector("[data-copy-seed-privatekey]");
+  if (copyKey) copyKey.hidden = true;
   if (recoveryModal) recoveryModal.hidden = true;
   if (recoveryPhraseBox) { recoveryPhraseBox.hidden = true; recoveryPhraseBox.textContent = ""; }
   if (revealRecoveryButton) revealRecoveryButton.hidden = false;
@@ -18223,34 +18511,146 @@ document.querySelector("[data-confirm-logout]")?.addEventListener("click", async
 // rest maps 1:1 — drop incoming messages, reset each conversation's sync cursor to 0 and the
 // handshake scan, then run a silent backfill sweep.
 async function dangerWipeAndResyncIncoming() {
-  if (!await confirmText("Wipe and re-sync incoming messages?\n\nThis removes all incoming messages on this device, then re-syncs them from the blockchain. Your account info and sent messages are preserved.")) return;
-  let removed = 0;
-  for (const conversationEntry of state.conversations || []) {
-    const before = (conversationEntry.messages || []).length;
-    conversationEntry.messages = (conversationEntry.messages || []).filter((message) => message.direction !== "incoming");
-    removed += before - conversationEntry.messages.length;
-    conversationEntry.unreadCount = 0;
-    conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: 0, lastSyncAt: 0 };
+  if (resyncRun.phase === "running") return;
+  const choice = await chooseDialog({
+    title: "Wipe and re-sync incoming messages",
+    options: [
+      { id: "all", title: "All Chats", subtitle: "Removes every incoming message locally, then re-syncs them from the blockchain. Sent messages and account info are kept.", destructive: true },
+      { id: "select", title: "Select Chats...", subtitle: "Pick which chats to wipe and re-sync. Everything else is left alone." },
+      { id: "cancel", title: "Cancel", subtitle: "Leave your messages as they are." },
+    ],
+  });
+  if (choice === "all") runIncomingResync(null);
+  else if (choice === "select") openResyncChatPicker();
+}
+
+// Picker for the scoped re-sync (iOS ResyncChatPickerView): 1:1 chats in chat-list order.
+const resyncPickerModal = document.querySelector("[data-resync-picker-modal]");
+let resyncPickerSelection = new Set();
+function resyncPickerCandidates() {
+  return sortedConversations().filter((entry) => entry.type !== "group" && contactForConversation(entry));
+}
+function renderResyncPicker() {
+  const listEl = document.querySelector("[data-resync-picker-list]");
+  const confirm = document.querySelector("[data-resync-picker-confirm]");
+  const selectAll = document.querySelector("[data-resync-select-all]");
+  if (!listEl) return;
+  const candidates = resyncPickerCandidates();
+  if (!candidates.length) {
+    listEl.innerHTML = '<p class="spending-address-empty">No chats to re-sync.</p>';
+  } else {
+    listEl.innerHTML = candidates.map((entry) => {
+      const contact = contactForConversation(entry);
+      const checked = resyncPickerSelection.has(entry.id);
+      return `<label class="resync-picker-row"><input type="checkbox" data-resync-pick="${escapeHtml(entry.id)}" ${checked ? "checked" : ""}><span class="resync-picker-copy"><strong>${escapeHtml(contactDisplayName(contact))}</strong><small>${escapeHtml(shortAddress(contact.address))}</small></span></label>`;
+    }).join("");
   }
-  // Reset the incoming-handshake scan so requests re-sync from the start too.
-  handshakeSyncState = { walletAddress: engine.address || "", cursor: 0, parserVersion: 3, processedTxids: [], declinedTxids: [] };
-  persistHandshakeSyncState();
-  pendingInitialCatchUp = true; // the re-sync is a silent backfill, not live traffic
-  persistState();
-  renderChats();
-  if (activeConversationId) {
-    const active = (state.conversations || []).find((entry) => entry.id === activeConversationId);
-    if (active) renderMessages(active);
+  const n = resyncPickerSelection.size;
+  if (confirm) { confirm.disabled = n === 0; confirm.textContent = `Re-sync ${n} ${n === 1 ? "Chat" : "Chats"}`; }
+  if (selectAll) { selectAll.disabled = !candidates.length; selectAll.textContent = candidates.length && n === candidates.length ? "Deselect All" : "Select All"; }
+}
+function openResyncChatPicker() {
+  resyncPickerSelection = new Set();
+  renderResyncPicker();
+  if (resyncPickerModal) resyncPickerModal.hidden = false;
+}
+function closeResyncChatPicker() { if (resyncPickerModal) resyncPickerModal.hidden = true; }
+document.querySelector("[data-resync-picker-list]")?.addEventListener("change", (event) => {
+  const box = event.target.closest("[data-resync-pick]");
+  if (!box) return;
+  if (box.checked) resyncPickerSelection.add(box.dataset.resyncPick); else resyncPickerSelection.delete(box.dataset.resyncPick);
+  renderResyncPicker();
+});
+document.querySelector("[data-resync-select-all]")?.addEventListener("click", () => {
+  const candidates = resyncPickerCandidates();
+  resyncPickerSelection = resyncPickerSelection.size === candidates.length ? new Set() : new Set(candidates.map((c) => c.id));
+  renderResyncPicker();
+});
+document.querySelector("[data-resync-picker-cancel]")?.addEventListener("click", closeResyncChatPicker);
+document.querySelector("[data-resync-picker-confirm]")?.addEventListener("click", () => {
+  const picked = [...resyncPickerSelection];
+  if (!picked.length) return;
+  closeResyncChatPicker();
+  runIncomingResync(picked);
+});
+
+// Blocking progress (iOS IncomingResyncProgressModal): no way out while it runs - leaving
+// mid-flow would strand chats wiped but not yet re-synced.
+const resyncRun = { phase: "idle", fraction: 0, stage: "", chats: 0, messages: 0, error: "", scope: null };
+function renderResyncProgress() {
+  const modal = document.querySelector("[data-resync-progress-modal]");
+  const body = document.querySelector("[data-resync-progress-body]");
+  if (!modal || !body) return;
+  modal.hidden = resyncRun.phase === "idle";
+  if (resyncRun.phase === "idle") return;
+  const percent = Math.round(resyncRun.fraction * 100);
+  if (resyncRun.phase === "running") {
+    body.innerHTML = `<div class="progress-card-icon">↻</div><h2>Re-syncing Messages</h2>
+      <div class="progress-track"><div class="progress-fill" style="width:${percent}%"></div></div>
+      <div class="progress-meta"><span>${escapeHtml(resyncRun.stage)}</span><span>${percent}%</span></div>
+      <p class="field-hint">Please keep the app open. Leaving now could leave chats without their history.</p>`;
+  } else if (resyncRun.phase === "success") {
+    body.innerHTML = `<div class="progress-card-icon ok">✓</div><h2>Re-sync Complete</h2>
+      <p class="field-hint">Re-synced ${resyncRun.messages} incoming ${resyncRun.messages === 1 ? "message" : "messages"} across ${resyncRun.chats} ${resyncRun.chats === 1 ? "chat" : "chats"}.</p>
+      <div class="modal-actions"><button class="primary-button full" type="button" data-resync-done>Done</button></div>`;
+  } else {
+    body.innerHTML = `<div class="progress-card-icon warn">⚠</div><h2>Re-sync Failed</h2>
+      <p class="field-hint">${escapeHtml(resyncRun.error || "Something went wrong.")}</p>
+      <div class="modal-actions stacked"><button class="primary-button full" type="button" data-resync-retry>Try Again</button><button class="secondary-button full" type="button" data-resync-done>Close</button></div>`;
   }
-  showCopyToast(`Removed ${removed} incoming message${removed === 1 ? "" : "s"} — re-syncing…`);
+}
+document.querySelector("[data-resync-progress-modal]")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-resync-done]")) { resyncRun.phase = "idle"; renderResyncProgress(); return; }
+  if (event.target.closest("[data-resync-retry]")) runIncomingResync(resyncRun.scope);
+});
+async function runIncomingResync(conversationIds) {
+  if (resyncRun.phase === "running") return;
+  Object.assign(resyncRun, { phase: "running", fraction: 0, stage: "Wiping incoming messages...", chats: 0, messages: 0, error: "", scope: conversationIds });
+  renderResyncProgress();
+  await new Promise((resolve) => window.setTimeout(resolve, 30));
   try {
+    const all = conversationIds == null;
+    const targets = (state.conversations || []).filter((entry) => all ? entry.type !== "group" : conversationIds.includes(entry.id));
+    for (const conversationEntry of targets) {
+      conversationEntry.messages = (conversationEntry.messages || []).filter((message) => message.direction !== "incoming");
+      conversationEntry.unreadCount = 0;
+      conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: 0, lastSyncAt: 0 };
+    }
+    if (all) {
+      // Reset the incoming-handshake scan so requests re-sync from the start too.
+      handshakeSyncState = { walletAddress: engine.address || "", cursor: 0, parserVersion: 3, processedTxids: [], declinedTxids: [] };
+      persistHandshakeSyncState();
+    }
+    pendingInitialCatchUp = true; // the re-sync is a silent backfill, not live traffic
+    persistState();
+    renderChats();
+    if (activeConversationId) {
+      const active = (state.conversations || []).find((entry) => entry.id === activeConversationId);
+      if (active) renderMessages(active);
+    }
     await ensureRuntimes({ quiet: true });
-    await refreshAllConversations({ quiet: true });
-    showCopyToast("Re-sync complete");
+    let added = 0;
+    if (all) {
+      resyncRun.stage = "Re-syncing handshakes...";
+      resyncRun.fraction = 0.1;
+      renderResyncProgress();
+      try { added += await syncIncomingHandshakeRequests({ quiet: true }); } catch (error) { appendEngineLog(`Re-sync handshakes failed: ${error.message}`); }
+    }
+    for (let i = 0; i < targets.length; i += 1) {
+      resyncRun.stage = `Re-syncing chat ${i + 1} of ${targets.length}`;
+      resyncRun.fraction = 0.1 + 0.9 * (i / Math.max(1, targets.length));
+      renderResyncProgress();
+      added += await syncOneConversation(targets[i], { quiet: true, catchUp: true });
+    }
+    persistState();
+    renderChats();
+    pendingInitialCatchUp = false;
+    Object.assign(resyncRun, { phase: "success", fraction: 1, chats: targets.length, messages: added });
   } catch (error) {
     appendEngineLog(`Danger Zone re-sync failed: ${error.message}`);
-    showCopyToast("Re-sync will continue in the background");
+    Object.assign(resyncRun, { phase: "failure", error: error?.message || "Re-sync failed." });
   }
+  renderResyncProgress();
 }
 
 // iOS: "This removes local account data and messages." Desktop equivalent: remove the active
@@ -18282,6 +18682,89 @@ async function dangerWipeCurrentAccount() {
   }
 }
 
+// Chat History (iOS chatHistoryPage): the same archive file every device shares, saved to a
+// file here rather than a share sheet; import merges a file through the blocking restore modal.
+function exportChatHistoryFile() {
+  try {
+    const archive = buildLocalChatArchive();
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadBlob(`kachat-chat-history-${stamp}.json`, "application/json", JSON.stringify(archive, null, 2));
+    showCopyToast("Chat history exported.");
+  } catch (error) {
+    appendEngineLog(`Chat history export failed: ${error.message}`);
+    showCopyToast(error.message || "Export failed.");
+  }
+}
+const historyRestore = { phase: "idle", summary: null, error: "" };
+function renderHistoryRestore() {
+  const modal = document.querySelector("[data-history-restore-modal]");
+  const body = document.querySelector("[data-history-restore-body]");
+  if (!modal || !body) return;
+  modal.hidden = historyRestore.phase === "idle";
+  if (historyRestore.phase === "idle") return;
+  if (historyRestore.phase === "running") {
+    body.innerHTML = `<div class="progress-card-icon">↻</div><h2>Restoring Backup</h2>
+      <div class="progress-track"><div class="progress-fill indeterminate"></div></div>
+      <p class="field-hint">Please keep the app open. Leaving now could corrupt your chat history.</p>`;
+  } else if (historyRestore.phase === "success") {
+    const s = historyRestore.summary || {};
+    body.innerHTML = `<div class="progress-card-icon ok">✓</div><h2>Restore Complete</h2>
+      <p class="field-hint">Restored ${s.messages || 0} ${s.messages === 1 ? "message" : "messages"} across ${s.conversations || 0} ${s.conversations === 1 ? "chat" : "chats"}${s.groups ? ` and ${s.groups} ${s.groups === 1 ? "group" : "groups"}` : ""}.</p>
+      <div class="modal-actions"><button class="primary-button full" type="button" data-history-restore-done>Done</button></div>`;
+  } else {
+    body.innerHTML = `<div class="progress-card-icon warn">⚠</div><h2>Restore Failed</h2>
+      <p class="field-hint">${escapeHtml(historyRestore.error || "Something went wrong.")}</p>
+      <div class="modal-actions"><button class="secondary-button full" type="button" data-history-restore-done>Close</button></div>`;
+  }
+}
+document.querySelector("[data-history-restore-modal]")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-history-restore-done]")) { historyRestore.phase = "idle"; renderHistoryRestore(); }
+});
+document.querySelector("[data-chat-history-file]")?.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  const ok = await confirmDialog({ title: "Restore from Backup", message: "Messages from the file are merged into this device's chat history. Nothing is deleted.", confirmLabel: "Restore" });
+  if (!ok) return;
+  historyRestore.phase = "running";
+  renderHistoryRestore();
+  await new Promise((resolve) => window.setTimeout(resolve, 50));
+  try {
+    const text = await file.text();
+    const summary = importPhoneChatArchive(text);
+    Object.assign(historyRestore, { phase: "success", summary });
+    refreshAllConversations({ quiet: true }).catch(() => {});
+  } catch (error) {
+    appendEngineLog(`Chat history import failed: ${error.message}`);
+    Object.assign(historyRestore, { phase: "failure", error: error?.message || "Failed to open archive." });
+  }
+  renderHistoryRestore();
+});
+
+// Diagnostics archive (iOS DiagnosticsSettingsPage): app/device info, connection settings,
+// local message counts and recent logs. No keys, phrases or message content.
+function exportDiagnosticsFile() {
+  try {
+    const conversations = state.conversations || [];
+    let incoming = 0, outgoing = 0;
+    for (const entry of conversations) for (const m of entry.messages || []) { if (m.direction === "incoming") incoming += 1; else outgoing += 1; }
+    const logLines = String(engineLog?.textContent || "").split("\n").filter(Boolean).slice(0, 400);
+    const archive = {
+      exportedAt: new Date().toISOString(),
+      app: { name: "KaChat Desktop", version: APP_VERSION, userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine },
+      account: { chattingAddress: engine.address ? `${engine.address.slice(0, 16)}…${engine.address.slice(-6)}` : null, chatsPrivacy: chatsPrivacyEnabled() },
+      connection: { endpoints: getEndpoints(), explorer: currentExplorer().displayName, runtime: window.__kaspaEngineStep || null },
+      counts: { contacts: (state.contacts || []).length, conversations: conversations.length, incomingMessages: incoming, outgoingMessages: outgoing },
+      logs: logLines,
+    };
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    downloadBlob(`kachat-diagnostics-${stamp}.json`, "application/json", JSON.stringify(archive, null, 2));
+    showCopyToast("Diagnostics archive exported.");
+  } catch (error) {
+    showCopyToast(`Diagnostics export failed: ${error.message}`);
+  }
+}
+
 // The desktop's broadest reset (no iOS iCloud analogue): erase every saved account and all
 // KaChat-owned local data, then reload to a clean first-run state.
 async function dangerWipeEverything() {
@@ -18304,15 +18787,17 @@ async function dangerWipeEverything() {
 
 const DANGER_ZONE_ACTIONS = {
   resync: dangerWipeAndResyncIncoming,
-  "remove-account": dangerWipeCurrentAccount,
   "wipe-all": dangerWipeEverything,
+  "export-history": exportChatHistoryFile,
+  "import-history": () => document.querySelector("[data-chat-history-file]")?.click(),
+  "diagnostics-export": exportDiagnosticsFile,
 };
 Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
   document.querySelectorAll(`[data-shell-action="${action}"]`).forEach((button) => button.addEventListener("click", handler));
 });
 
 // Remaining shell-action buttons with no dedicated handler yet show a placeholder toast.
-document.querySelectorAll('[data-shell-action]:not([data-shell-action="logout"]):not([data-shell-action="view-recovery"]):not([data-shell-action="resync"]):not([data-shell-action="remove-account"]):not([data-shell-action="wipe-all"])').forEach((button) => button.addEventListener("click", () => {
+document.querySelectorAll('[data-shell-action]:not([data-shell-action="logout"]):not([data-shell-action="view-recovery"]):not([data-shell-action="resync"]):not([data-shell-action="wipe-all"]):not([data-shell-action="export-history"]):not([data-shell-action="import-history"]):not([data-shell-action="diagnostics-export"])').forEach((button) => button.addEventListener("click", () => {
   const label = button.querySelector("strong")?.textContent?.trim() || "This control";
   showCopyToast(`${label} frame ready`);
 }));
@@ -18355,7 +18840,10 @@ const prefBindings = [
   ["[data-pref-kaposts-notify-follows]", "kaPostsNotifyFollows", true],
   ["[data-pref-kaposts-notify-dislikes]", "kaPostsNotifyDislikes", true],
   ["[data-pref-kaposts-notify-comments]", "kaPostsNotifyComments", true],
+  ["[data-pref-kaposts-notify-mentions]", "kaPostsNotifyMentions", true],
+  ["[data-pref-verbose-api-logging]", "verboseApiLogging", false],
 ];
+setVerboseApiLogging(Boolean(accountShellPrefs.verboseApiLogging), appendEngineLog);
 prefBindings.forEach(([selector, key, fallback]) => {
   const input = document.querySelector(selector);
   if (!input) return;
@@ -18365,6 +18853,7 @@ prefBindings.forEach(([selector, key, fallback]) => {
     persistAccountShellPreferences();
     if (key === "estimateFees") scheduleFeeEstimate();
     if (key === "showSetupGuides") refreshSetupGuideRow();
+    if (key === "verboseApiLogging") setVerboseApiLogging(input.checked, appendEngineLog);
     if (key === "photoApprovalForNewContacts") {
       // Apply to the open thread immediately, and re-sync the Chat Info toggle that mirrors it.
       const conv = (state.conversations || []).find((entry) => entry.id === activeConversationId);

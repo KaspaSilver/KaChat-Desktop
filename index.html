@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=369" />
+  <link rel="stylesheet" href="./ui/styles.css?v=370" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -855,6 +855,8 @@
                 <span class="settings-dropdown-value" data-currency-current>US Dollar (USD)</span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
+              <div class="settings-toggle-row"><span><strong>Show Fee Estimate</strong><small>Show an estimated transaction cost before sending.</small></span><label class="switch-control"><input type="checkbox" data-pref-estimate-fees><span></span></label></div>
+              <div class="settings-toggle-row"><span><strong>Show Setup Guides</strong><small>Keeps the Welcome Guide reachable from your profile.</small></span><label class="switch-control"><input type="checkbox" data-pref-show-setup-guides checked><span></span></label></div>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="dock">
                 <span class="settings-row-copy"><strong>Customize Dock</strong><small>Choose which tabs appear in your dock.</small></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
@@ -943,12 +945,16 @@
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Password for Seed Phrase</strong><small>Require your password to reveal the seed phrase or private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-seed><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Password for Account Login</strong><small>Require your password when signing in to a saved account.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-login><span></span></label></div>
+              <div class="settings-toggle-row"><span><strong>Password for Address Private Keys</strong><small>Require your password to reveal a spending address's private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-spending-key><span></span></label></div>
               <button class="settings-list-row" type="button" data-change-password><span class="settings-row-copy"><strong>Change Password</strong><small data-password-status>No password set</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Child Mode</strong><small>Limit KaChat to Chats, Portfolio and Cold Storage.</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <div class="settings-toggle-row"><span><strong>Chats Payment Privacy</strong><small>Payments in your chats travel between fresh private addresses instead of your public chatting address. Stored per account.</small></span><label class="switch-control"><input type="checkbox" data-chats-privacy-toggle checked><span></span></label></div>
+              <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Child Mode</strong><small>Limit KaChat to Chats, Portfolio and Cold Storage.</small></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
               <div class="settings-toggle-row"><span><strong>Save account on this device</strong><small>Encrypted key storage arrives in the next security phase.</small></span><label class="switch-control"><input type="checkbox" data-pref-save-account checked><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Keep me signed in</strong><small>Restore the active account when KaChat opens.</small></span><label class="switch-control"><input type="checkbox" data-pref-keep-signed-in checked><span></span></label></div>
             </div>
+            <div class="settings-list-card" data-chats-privacy-card>
+              <div class="settings-toggle-row"><span><strong>Chats Payment Privacy</strong></span><label class="switch-control"><input type="checkbox" data-chats-privacy-toggle checked><span></span></label></div>
+            </div>
+            <p class="settings-group-footer" data-chats-privacy-footer>On: Anytime you receive Kaspa KaChat will do its best make sure the Kaspa goes to a fresh address not tied to your chatting identity. Sending Kaspa KaChat will always make sure it comes out of your primary spend address which is never associated with your chatting identity.<br><br>Off: All Kaspa will flow in and out of your chatting address<br><br>This setting belongs to this account alone - your other accounts keep their own.</p>
           </section>
 
           <!-- Security sub-screen: Child Mode (ui/childmode.js renders the stateful page). -->
@@ -976,30 +982,90 @@
           <!-- Connection sub-screens. -->
           <section class="settings-group" data-settings-subscreen="connection-settings">
             <p class="settings-group-label">Connection Settings</p>
+            <p class="settings-group-label">KaChat Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
                   <label class="field-label compact">Indexer URL
                     <input class="field-input" type="url" data-endpoint="kasiaIndexer" placeholder="https://kachat.duckdns.org" autocomplete="off" spellcheck="false" />
                   </label>
+                  <p class="field-hint danger" data-endpoint-error="kasiaIndexer" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">Message indexer service for chat functionality</p>
+            <p class="settings-group-label">KaPost Indexer</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
                   <label class="field-label compact">KaPost Indexer URL
                     <input class="field-input" type="url" data-endpoint="kapostIndexer" autocomplete="off" spellcheck="false" />
                   </label>
+                  <p class="field-hint danger" data-endpoint-error="kapostIndexer" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">K social network indexer that powers KaPosts feeds</p>
+            <p class="settings-group-label">Translation Service</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
+                  <label class="field-label compact">Translation Service URL
+                    <input class="field-input" type="url" data-endpoint="translationService" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <p class="field-hint danger" data-endpoint-error="translationService" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">Translates KaPosts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one.</p>
+            <p class="settings-group-label">Broadcast Indexer</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
                   <label class="field-label compact">Broadcast Indexer URL
                     <input class="field-input" type="url" data-endpoint="broadcastIndexer" autocomplete="off" spellcheck="false" />
                   </label>
+                  <p class="field-hint danger" data-endpoint-error="broadcastIndexer" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">KaChat broadcast history indexer for #kaspa and #kachat-bugs</p>
+            <p class="settings-group-label">Push Registration</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
                   <label class="field-label compact">Push Indexer URL
-                    <input class="field-input" type="url" data-endpoint="pushIndexer" autocomplete="off" spellcheck="false" placeholder="https://kachat.duckdns.org" />
+                    <input class="field-input" type="url" data-endpoint="pushIndexer" placeholder="https://kachat.duckdns.org" autocomplete="off" spellcheck="false" />
                   </label>
+                  <p class="field-hint danger" data-endpoint-error="pushIndexer" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">Used only for push registration and updates</p>
+            <p class="settings-group-label">Kaspa Name Service</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
                   <label class="field-label compact">KNS API URL
-                    <input class="field-input" type="url" data-endpoint="knsApi" autocomplete="off" spellcheck="false" />
+                    <input class="field-input" type="url" data-endpoint="knsApi" autocomplete="off" spellcheck="false" readonly />
                   </label>
+                  <p class="field-hint danger" data-endpoint-error="knsApi" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">KNS domain resolution service</p>
+            <p class="settings-group-label">Kaspa Explorer API</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
                   <label class="field-label compact">Kaspa REST API URL
                     <input class="field-input" type="url" data-endpoint="kaspaApi" autocomplete="off" spellcheck="false" />
                   </label>
-                  <label class="field-label compact">Trusted Node
-                    <input class="field-input" type="text" data-endpoint="trustedNode" placeholder="wss://your-node.duckdns.org (leave empty to auto-search)" autocomplete="off" spellcheck="false" />
+                  <p class="field-hint danger" data-endpoint-error="kaspaApi" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">REST API for transaction history and balance lookups</p>
+            <p class="settings-group-label">Kaspa Node</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
+                  <label class="field-label compact">Kaspa Node
+                    <select class="field-input" data-node-choice></select>
                   </label>
-                  <p class="field-hint">Leave a field blank to use its default. Trusted Node empty = auto-search over wRPC.</p>
+                  <input type="text" data-endpoint="trustedNode" hidden aria-hidden="true" />
+                  <p class="field-hint danger" data-node-choice-error hidden></p>
+                  <p class="field-hint accent" data-node-choice-note hidden>Connected only to this node</p>
+              </div>
+            </div>
+            <p class="settings-group-footer">Automatic Scan discovers and connects to the best available nodes. Choosing a specific node connects only to it, without falling back to others. Doesn't affect the Indexer/KNS/REST API URLs above. Add custom addresses to the IP Address Book below to select them here.</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
                   <button class="danger-button subtle full" type="button" data-reset-connection-defaults>Reset to Defaults</button>
               </div>
             </div>
@@ -1018,7 +1084,7 @@
               </div>
               <div class="saved-node-list" data-saved-nodes-list></div>
             </div>
-            <p class="settings-group-footer">Save your own node addresses here, then use one to fill the Trusted Node field above.</p>
+            <p class="settings-group-footer">Save your own node addresses here, then pick one under Kaspa Node above.</p>
           </section>
 
           <section class="settings-group" data-settings-subscreen="explorer">
@@ -1027,17 +1093,7 @@
                   <button class="settings-dropdown-row settings-select-row" type="button" data-explorer-option="kaspaStream">kaspa.stream</button>
                   <button class="settings-dropdown-row settings-select-row" type="button" data-explorer-option="kaspaOrg">explorer.kaspa.org</button>
             </div>
-          </section>
-
-          <section class="settings-group">
-            <p class="settings-group-label">Chats</p>
-            <div class="settings-list-card">
-              <div class="settings-toggle-row"><span><strong>Show Fee Estimate</strong><small>Show an estimated transaction cost before sending.</small></span><label class="switch-control"><input type="checkbox" data-pref-estimate-fees><span></span></label></div>
-              <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-copy"><strong>Quick Reactions</strong><small data-quick-reactions-preview>👍 ❤️ 😂 😮 😢 🙏</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong><small>Photos from someone you have not added or replied to wait behind a tap. Chat Info can always show a single contact's photos.</small></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
-              <button class="settings-list-row" type="button" data-open-photo-quality><span class="settings-row-copy"><strong>Photo Quality</strong><small>Resolution and compression for photos you send.</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-            </div>
-            <p class="settings-group-footer">On: you receive payments on fresh private addresses shared with each contact, and payments you send are funded from your private addresses. Off: you receive on your public chatting address and send from it. Either way, payments you send arrive on a fresh address whenever the recipient shares one.</p>
+            <p class="settings-group-footer">Used to build "view transaction" links throughout the app.</p>
           </section>
 
           <section class="settings-group">
@@ -1065,9 +1121,11 @@
               <div class="settings-page-form">
                   <div class="settings-toggle-row"><span><strong>Message Notifications</strong><small>Desktop notification when a contact messages you and the chat isn't focused.</small></span><label class="switch-control"><input type="checkbox" data-pref-chat-notifications checked><span></span></label></div>
                   <div class="settings-toggle-row"><span><strong>Play sound</strong></span><label class="switch-control"><input type="checkbox" data-pref-notification-sound checked><span></span></label></div>
-                  <p class="field-hint">Per-contact notification overrides live in each chat's info screen.</p>
               </div>
             </div>
+            <p class="settings-group-footer">Used when a contact has no custom notification mode set.</p>
+            <p class="settings-group-label">Per Contact</p>
+            <div class="settings-list-card"><div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small>Set per-contact notification mode in each chat's info screen: Off, No Sound, or Sound.</small></span></div></div>
           </section>
 
           <section class="settings-group" data-settings-subscreen="notifications-wallet">
@@ -1089,9 +1147,19 @@
                   <div class="settings-toggle-row"><span><strong>Follows</strong></span><label class="switch-control"><input type="checkbox" data-pref-kaposts-notify-follows checked><span></span></label></div>
                   <div class="settings-toggle-row"><span><strong>Dislikes</strong></span><label class="switch-control"><input type="checkbox" data-pref-kaposts-notify-dislikes checked><span></span></label></div>
                   <div class="settings-toggle-row"><span><strong>Comments</strong></span><label class="switch-control"><input type="checkbox" data-pref-kaposts-notify-comments checked><span></span></label></div>
+                  <div class="settings-toggle-row"><span><strong>Mentions</strong></span><label class="switch-control"><input type="checkbox" data-pref-kaposts-notify-mentions checked><span></span></label></div>
               </div>
             </div>
-            <p class="settings-group-footer">Choose which KaPosts activity sends a notification. Quotes of your posts count as reposts.</p>
+            <p class="settings-group-footer">Choose which KaPosts activity reaches you. Anything switched off sends no notification and does not appear in the KaPosts bell. Quotes of your posts count as reposts.</p>
+          </section>
+
+          <section class="settings-group">
+            <p class="settings-group-label">Chats</p>
+            <div class="settings-list-card">
+              <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-copy"><strong>Quick Reactions</strong><small data-quick-reactions-preview>👍 ❤️ 😂 😮 😢 🙏</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+              <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong><small>Photos from someone you have not added or replied to wait behind a tap. Chat Info can always show a single contact's photos.</small></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
+              <button class="settings-list-row" type="button" data-open-photo-quality><span class="settings-row-copy"><strong>Photo Quality</strong><small>Resolution and compression for photos you send.</small></span><span class="settings-dropdown-caption" data-photo-quality-current></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+            </div>
           </section>
 
           <section class="settings-group">
@@ -1107,6 +1175,7 @@
 
           <section class="settings-group">
             <p class="settings-group-label">Storage</p>
+            <p class="settings-group-label">On This Device</p>
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Store encrypted messages locally</strong><small>Required for browser history and future cross-device backup.</small></span><label class="switch-control"><input type="checkbox" data-pref-store-messages checked><span></span></label></div>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="retention">
@@ -1115,6 +1184,18 @@
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
               <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Local storage used</strong><small data-local-storage-used>Calculating…</small></span></div>
+            </div>
+            <p class="settings-group-footer">How long messages are kept on this device, and how much space they use. Applies before any cloud storage.</p>
+            <div class="settings-list-card">
+              <button class="settings-list-row" type="button" data-settings-open-subscreen="cache">
+                <span class="settings-row-copy"><strong>Cache</strong></span>
+                <span class="settings-dropdown-caption" data-cache-total-caption></span>
+                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+              </button>
+            </div>
+            <p class="settings-group-footer">Images and files the app can always download again. Clearing them frees space and loses nothing.</p>
+            <p class="settings-group-label">Cloud Storage</p>
+            <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="nextcloud">
                 <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M17.5 18.5h-11a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 16.5 9a4.75 4.75 0 0 1 1 9.4z"/></svg></span>
                 <span class="settings-row-copy"><strong>Nextcloud</strong><small>Send large media, and back up chats to one file your phone shares.</small></span>
@@ -1124,6 +1205,19 @@
           </section>
 
           <!-- Storage sub-screens. -->
+          <section class="settings-group" data-settings-subscreen="cache">
+            <p class="settings-group-label">Cache</p>
+            <div class="settings-list-card">
+              <div class="settings-list-row settings-info-row cache-total-row"><strong>Total</strong><strong data-cache-total>…</strong></div>
+            </div>
+            <p class="settings-group-footer">Everything here is downloaded or generated again when it is needed, so clearing it costs a little data and nothing else.</p>
+            <p class="settings-group-label">What's Cached</p>
+            <div class="settings-list-card" data-cache-list></div>
+            <div class="settings-list-card danger-list-card">
+              <button class="settings-list-row danger-row" type="button" data-cache-clear-all><span class="settings-row-copy"><strong>Clear All Cache</strong></span></button>
+            </div>
+          </section>
+
           <section class="settings-group" data-settings-subscreen="retention">
             <p class="settings-group-label">Message retention</p>
             <div class="settings-list-card">
@@ -1148,6 +1242,7 @@
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-shell-action="export-history"><span class="settings-row-icon">⇧</span><span class="settings-row-copy"><strong>Export Chat History</strong></span></button>
               <button class="settings-list-row" type="button" data-shell-action="import-history"><span class="settings-row-icon">⇩</span><span class="settings-row-copy"><strong>Import Chat History</strong></span></button>
+              <input type="file" accept=".json,application/json" hidden data-chat-history-file />
               <button class="settings-list-row" type="button" data-recover-conversations>
                 <span class="settings-row-icon">◈</span>
                 <span class="settings-row-copy"><strong>Recover Conversations from Blockchain</strong><small>Rebuilds contacts from on-chain handshake data using this wallet's seed alone.</small></span>
@@ -1158,15 +1253,19 @@
           <section class="settings-group">
             <p class="settings-group-label">Diagnostics</p>
             <div class="settings-list-card">
-              <button class="settings-list-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon">◉</span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong><small>No private keys, recovery phrases, or decrypted messages.</small></span></button>
+              <button class="settings-list-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon">◉</span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong></span></button>
             </div>
+            <p class="settings-group-footer">Exports app/device info, connection settings, local message counts, and recent app logs as a file — for troubleshooting with support. No private keys, seed phrases, or decrypted message content are included.</p>
+            <div class="settings-list-card">
+              <div class="settings-toggle-row"><span><strong>Verbose API Logging</strong></span><label class="switch-control"><input type="checkbox" data-pref-verbose-api-logging><span></span></label></div>
+            </div>
+            <p class="settings-group-footer">Logs every indexer request with full connection and timing detail. Leave off for normal use: failed and slow requests are always logged, and heavy logging slows the app down.</p>
           </section>
 
           <section class="settings-group danger-zone-group">
             <p class="settings-group-label">Danger Zone</p>
             <div class="settings-list-card danger-list-card">
               <button class="settings-list-row danger-row" type="button" data-shell-action="resync"><span class="settings-row-icon">↻</span><span class="settings-row-copy"><strong>Wipe and re-sync incoming messages</strong></span></button>
-              <button class="settings-list-row danger-row" type="button" data-shell-action="remove-account"><span class="settings-row-icon">⊗</span><span class="settings-row-copy"><strong>Wipe account &amp; messages</strong></span></button>
               <button class="settings-list-row danger-row" type="button" data-shell-action="wipe-all"><span class="settings-row-icon">⌫</span><span class="settings-row-copy"><strong>Wipe all saved accounts &amp; local data</strong></span></button>
             </div>
           </section>
@@ -1575,6 +1674,7 @@
       </div>
 
       <div data-import-step="source" hidden>
+        <h3 class="passphrase-question-title import-source-title">Where is this seed phrase from?</h3>
         <p class="field-hint">Different wallets store your Kaspa on different address paths. Pick where this seed phrase comes from so KaChat finds your funds and domains.</p>
         <div class="import-source-list" data-import-source-list></div>
         <div class="modal-actions">
@@ -1587,10 +1687,17 @@
         <label class="field-label">Account Name
           <input class="field-input" data-import-name type="text" value="Imported Account" maxlength="48" autocomplete="off" />
         </label>
-        <label class="field-label">Recovery Phrase
-          <textarea class="field-input recovery-input" data-import-phrase rows="5" spellcheck="false" autocomplete="off" placeholder="Enter all 12 or 24 words in order"></textarea>
-        </label>
-        <p class="field-hint">The phrase must be a valid 12- or 24-word Kaspa recovery phrase. Invalid words, checksum, or length will be rejected.</p>
+        <div class="settings-segmented full seed-count-segmented" role="group" aria-label="Seed phrase length">
+          <button type="button" class="settings-segmented-option" data-import-word-count="12">12 words</button>
+          <button type="button" class="settings-segmented-option active" data-import-word-count="24">24 words</button>
+        </div>
+        <div class="seed-entry-head">
+          <span class="field-hint">Enter your recovery phrase</span>
+          <span class="seed-entry-count" data-import-seed-count>0/24</span>
+        </div>
+        <div class="seed-grid seed-entry-grid" data-import-seed-grid></div>
+        <div class="seed-entry-suggestions" data-import-seed-suggestions></div>
+        <p class="field-hint">Type each word, or paste the whole phrase into any slot. Only real recovery words are accepted.</p>
         <p class="field-error" data-import-account-error hidden></p>
         <div class="modal-actions">
           <button class="secondary-button" type="button" data-close-import-account>Cancel</button>
@@ -1650,9 +1757,33 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" data-resync-picker-modal hidden>
+    <section class="contact-modal resync-picker-modal" role="dialog" aria-modal="true" aria-label="Select Chats">
+      <div class="modal-header">
+        <div><p class="modal-kicker">Wipe and re-sync</p><h2>Select Chats</h2></div>
+        <button type="button" class="linklike-button" data-resync-select-all>Select All</button>
+      </div>
+      <div class="resync-picker-list" data-resync-picker-list></div>
+      <p class="field-hint">Only the selected chats have their incoming messages wiped and re-synced. Sent messages and all other chats are untouched.</p>
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-resync-picker-cancel>Cancel</button>
+        <button class="primary-button" type="button" data-resync-picker-confirm disabled>Re-sync 0 Chats</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop progress-blocking" data-resync-progress-modal hidden>
+    <section class="contact-modal progress-card" role="dialog" aria-modal="true" aria-label="Re-syncing Messages" data-resync-progress-body></section>
+  </div>
+
+  <div class="modal-backdrop progress-blocking" data-history-restore-modal hidden>
+    <section class="contact-modal progress-card" role="dialog" aria-modal="true" aria-label="Restoring Backup" data-history-restore-body></section>
+  </div>
+
   <div class="modal-backdrop" data-recovery-modal hidden>
     <section class="contact-modal recovery-modal recovery-hold-modal" role="dialog" aria-modal="true" aria-label="Seed phrase">
       <button class="modal-close recovery-close" type="button" data-close-recovery aria-label="Close">×</button>
+      <div class="security-warning-card"><strong>Security Warning</strong><p class="field-hint">Anyone with your seed phrase can access your account. Never share it with anyone.</p></div>
 
       <button class="recovery-hold-target" type="button" data-reveal-recovery aria-label="Tap to reveal seed phrase">
         <img class="recovery-eye-icon" src="./ui/assets/seed-eye-hidden.png" alt="" aria-hidden="true">
@@ -1662,9 +1793,10 @@
         </span>
       </button>
 
-      <div class="recovery-phrase-box" data-recovery-phrase hidden></div>
+      <div class="recovery-phrase-box recovery-phrase-grid-box" data-recovery-phrase hidden></div>
 
       <div class="modal-actions recovery-actions">
+        <button class="secondary-button" type="button" data-copy-seed-privatekey hidden>Copy Private Key Hex</button>
         <button class="primary-button" type="button" data-close-recovery>Done</button>
       </div>
     </section>
@@ -2107,6 +2239,7 @@
         <div><p class="modal-kicker">Saved account</p><h2>Rename Account</h2></div>
         <button class="modal-close" type="button" data-close-account-rename aria-label="Close">×</button>
       </div>
+      <p class="field-hint">Enter a new name for this saved account.</p>
       <label class="field-label">
         Account Name
         <input class="field-input" name="accountName" type="text" maxlength="48" autocomplete="off" required />
@@ -2971,7 +3104,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=407"></script>
+  <script type="module" src="./ui/app.js?v=408"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

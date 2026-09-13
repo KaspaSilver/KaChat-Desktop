@@ -3558,7 +3558,9 @@ function detectLanguageSoon(post) {
 }
 
 function translationServiceUrl() {
-  return String(getEndpoint("kapostIndexer") || "").replace(/\/+$/, "");
+  // Settings > Connection > Translation Service (iOS): its own endpoint, defaulting to the
+  // KaPost indexer's box.
+  return String(getEndpoint("translationService") || getEndpoint("kapostIndexer") || "").replace(/\/+$/, "");
 }
 
 /// The reader's language, as a bare code: "pt-BR" is a Portuguese reader.
