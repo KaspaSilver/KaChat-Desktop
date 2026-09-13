@@ -1177,7 +1177,8 @@ function ensureVoiceRecorder() {
     maxDurationSeconds: () => (deps.isNextcloudMediaSendActive?.() ? VOICE_MAX_DURATION_SECONDS : ONCHAIN_VOICE_MAX_SECONDS),
     onElapsed: (elapsed) => {
       voiceRecordedSeconds = elapsed;
-      if (voiceTimeEl) voiceTimeEl.textContent = `Recording... ${Math.floor(elapsed)}s`;
+      const el = voicePanelEl?.querySelector("[data-broadcast-voice-time]");
+      if (el) el.textContent = deps.formatRecordingTime ? deps.formatRecordingTime(elapsed) : `${Math.floor(elapsed)}s`;
     },
     onFinish: handleVoiceRecordingFinished,
   });
@@ -1200,15 +1201,31 @@ async function startVoiceRecording() {
     return;
   }
   voiceRecordedSeconds = 0;
-  if (voiceTimeEl) voiceTimeEl.textContent = "Recording... 0s";
-  if (voicePanelEl) voicePanelEl.hidden = false;
+  deps.voicePreview?.clear(voicePanelEl);
+  if (deps.voicePreview) deps.voicePreview.render(voicePanelEl, "recording", { prefix: "broadcast-voice", seconds: 0 });
+  else if (voicePanelEl) voicePanelEl.hidden = false;
 }
 
+// Stop hands the recording to the preview bar (play/pause, length, trash, Send); Send is what
+// sends it - the same bar the 1:1 and group composers use.
+let voicePreviewChannel = null;
 async function handleVoiceRecordingFinished({ blob, mimeType, cancelled }) {
-  if (voicePanelEl) voicePanelEl.hidden = true;
   const channel = voiceRecordingChannel;
   voiceRecordingChannel = null;
-  if (cancelled || !blob || !channel) return;
+  if (cancelled || !blob || !channel) { deps.voicePreview?.clear(voicePanelEl); if (voicePanelEl) voicePanelEl.hidden = true; return; }
+  if (!deps.voicePreview) { await sendBroadcastVoice({ blob, mimeType, channel }); return; }
+  voicePreviewChannel = channel;
+  deps.voicePreview.set(voicePanelEl, { blob, mimeType, seconds: Math.round(Number(voiceRecordedSeconds) || 0) }, "broadcast-voice");
+}
+async function sendBroadcastVoicePreview() {
+  const entry = deps.voicePreview?.get(voicePanelEl);
+  const channel = voicePreviewChannel;
+  voicePreviewChannel = null;
+  deps.voicePreview?.clear(voicePanelEl);
+  if (!entry || !channel) return;
+  await sendBroadcastVoice({ blob: entry.blob, mimeType: entry.mimeType, channel });
+}
+async function sendBroadcastVoice({ blob, mimeType, channel }) {
   // With Nextcloud media send on, the bytes go to the server and the room gets the share link
   // (an audio card on every client). Otherwise, or when the upload fails, the note goes on
   // chain in the same envelope 1:1 and group voice notes use - if it is short enough.
@@ -1815,8 +1832,15 @@ export function initBroadcasts(dependencies) {
   });
 
   voiceBtn?.addEventListener("click", startVoiceRecording);
-  document.querySelector("[data-broadcast-voice-stop]")?.addEventListener("click", () => voiceRecorder?.stop(false));
-  document.querySelector("[data-broadcast-voice-cancel]")?.addEventListener("click", () => voiceRecorder?.stop(true));
+  voicePanelEl?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-broadcast-voice-stop]")) { voiceRecorder?.stop(false); return; }
+    if (event.target.closest("[data-broadcast-voice-send]")) { sendBroadcastVoicePreview(); return; }
+    if (event.target.closest("[data-broadcast-voice-play]")) { deps.voicePreview?.toggle(voicePanelEl); return; }
+    if (event.target.closest("[data-broadcast-voice-cancel]")) {
+      if (voiceRecorder?.isRecording()) voiceRecorder.stop(true);
+      else { voicePreviewChannel = null; deps.voicePreview?.clear(voicePanelEl); if (voicePanelEl) voicePanelEl.hidden = true; }
+    }
+  });
 
   const screen = document.querySelector('[data-app-tab-screen="broadcasts"]');
   screen?.addEventListener("click", async (event) => {

@@ -1,6 +1,6 @@
 import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount } from "./kaposts.js";
+import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
@@ -959,14 +959,26 @@ function buildInternalLinkCard(link) {
   card.type = "button";
   card.className = "message-link-card internal-link-card";
   const isPost = link.kind === "kapost";
+  // A shared post shows its author and text once the post resolves (iOS
+  // KaPostLinkPreviewCache); until then, and for room invites, the glyph card.
+  let entry = null;
+  if (isPost) {
+    entry = peekKaPostLinkPreview(link.txId);
+    if (!entry) resolveKaPostLinkPreview(link.txId).then((resolved) => { if (resolved) scheduleActiveThreadRerender(); }).catch(() => {});
+  }
   const icon = isPost
     ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>'
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>';
-  card.innerHTML = `<span class="internal-link-icon">${icon}</span>
+  const eyebrow = isPost ? (entry?.action === "reply" ? "KaPosts reply" : entry?.action === "quote" ? "KaPosts quote" : "KaPosts") : "Broadcast Room";
+  const title = isPost ? (entry?.authorName || "KaPosts post") : `#${link.channel}`;
+  const subtitle = isPost
+    ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
+    : "Tap to open this KaChat broadcast room.";
+  card.innerHTML = `<span class="internal-link-icon ${entry?.avatarHtml ? "avatar" : ""}">${entry?.avatarHtml || icon}</span>
     <span class="message-link-card-meta">
-      <span class="message-link-card-site">${isPost ? "KaPosts" : "Broadcast Room"}</span>
-      <strong>${isPost ? "KaPosts post" : `#${escapeHtml(link.channel)}`}</strong>
-      <small>${isPost ? "Tap to open this post in KaChat." : "Tap to open this KaChat broadcast room."}</small>
+      <span class="message-link-card-site">${escapeHtml(eyebrow)}</span>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(subtitle)}</small>
     </span>`;
   card.addEventListener("click", (event) => { event.stopPropagation(); openKaChatInternalLink(link); });
   return card;
@@ -11744,6 +11756,32 @@ function messageTypeCapsule(message, { hasPaymentCard = false } = {}) {
   return capsule;
 }
 
+// Long threads render their newest window only (150 rows, growing by 150 as you scroll up or
+// press "Show earlier messages"): building thousands of bubbles on every sync tick was what
+// made a busy chat stutter. The window resets when the thread changes.
+const MESSAGE_WINDOW_STEP = 150;
+const messageWindowByThread = new Map();
+function messageWindowFor(key, isThreadSwitch) {
+  if (isThreadSwitch) messageWindowByThread.delete(key);
+  return messageWindowByThread.get(key) || MESSAGE_WINDOW_STEP;
+}
+function buildLoadEarlierButton(hiddenCount, onLoad) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-load-earlier";
+  button.textContent = `Show earlier messages (${hiddenCount.toLocaleString()} more)`;
+  button.addEventListener("click", (event) => { event.stopPropagation(); onLoad(); });
+  return button;
+}
+// Grows the window while keeping the reader on the same row: the distance from the bottom is
+// what stays constant when rows are added above.
+function extendMessageWindow(area, key, rerender) {
+  const distanceFromBottom = area.scrollHeight - area.scrollTop;
+  messageWindowByThread.set(key, (messageWindowByThread.get(key) || MESSAGE_WINDOW_STEP) + MESSAGE_WINDOW_STEP);
+  rerender();
+  area.scrollTop = area.scrollHeight - distanceFromBottom;
+}
+
 function renderMessages(conversationEntry) {
   // The header's name and bio were written just before this; re-measure so the thread's top inset
   // matches whatever height they came out at.
@@ -11807,8 +11845,17 @@ function renderMessages(conversationEntry) {
     }
   }
 
+  const windowKey = `c:${conversationEntry.id}`;
+  const windowSize = messageWindowFor(windowKey, isThreadSwitch);
+  const hiddenCount = Math.max(0, messages.length - windowSize);
+  const windowed = hiddenCount ? messages.slice(hiddenCount) : messages;
+  messageArea.dataset.hiddenCount = String(hiddenCount);
+  if (hiddenCount) {
+    messageArea.appendChild(buildLoadEarlierButton(hiddenCount, () => extendMessageWindow(messageArea, windowKey, () => renderMessages(conversationEntry))));
+  }
+
   let lastDayKey = "";
-  messages.forEach((message, index) => {
+  windowed.forEach((message, index) => {
     // "Today"/"Yesterday"/date pill whenever the calendar day changes (iOS parity).
     const dayKey = new Date(Number(message.createdAt) || Date.now()).toDateString();
     if (dayKey !== lastDayKey) {
@@ -11830,7 +11877,7 @@ function renderMessages(conversationEntry) {
     const avatarSlot = document.createElement("span");
     avatarSlot.className = "message-avatar-slot";
     if (message.direction === "incoming") {
-      const nextMessage = messages[index + 1];
+      const nextMessage = windowed[index + 1];
       const isLastInGroup = !nextMessage || nextMessage.direction !== message.direction;
       if (isLastInGroup && requestContact) avatarSlot.innerHTML = avatarHtmlFor(requestContact, "message-avatar");
     } else {
@@ -12127,6 +12174,17 @@ function renderMessages(conversationEntry) {
   // Keep an open chess board in sync with newly-arrived moves/invites/resigns.
   refreshChessOverlay();
 }
+
+messageArea?.addEventListener("scroll", () => {
+  if (messageArea.scrollTop > 60 || Number(messageArea.dataset.hiddenCount || 0) === 0) return;
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  if (!conversationEntry) return;
+  extendMessageWindow(messageArea, `c:${conversationEntry.id}`, () => renderMessages(conversationEntry));
+}, { passive: true });
+groupMessageArea?.addEventListener("scroll", () => {
+  if (groupMessageArea.scrollTop > 60 || Number(groupMessageArea.dataset.hiddenCount || 0) === 0 || !activeGroupId) return;
+  extendMessageWindow(groupMessageArea, `g:${activeGroupId}`, renderGroupMessages);
+}, { passive: true });
 
 function openConversation(conversationId) {
   messageSelectionMode = false;
@@ -19572,9 +19630,14 @@ queueMicrotask(async () => {
     renderTextWithLinks,
     buildLinkPreviewCard,
     isPreviewableUrl,
-    // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer.
+    // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer, and the
+    // same preview bar before anything is sent.
     createVoiceRecorder,
     formatRecordingTime,
+    voicePreview: {
+      render: renderVoicePanel, set: setVoicePreview, clear: clearVoicePreview,
+      toggle: toggleVoicePreviewPlayback, get: (panel) => voicePreviews.get(panel),
+    },
     isNextcloudMediaSendActive,
     uploadNextcloudMedia,
     // Reactions: identical wire parser and fixed tapback set across all clients.
@@ -20990,8 +21053,16 @@ function renderGroupMessages() {
     }
     return;
   }
+  const groupWindowKey = `g:${activeGroupId}`;
+  const groupWindowSize = messageWindowFor(groupWindowKey, isThreadSwitch);
+  const groupHiddenCount = Math.max(0, msgs.length - groupWindowSize);
+  const windowed = groupHiddenCount ? msgs.slice(groupHiddenCount) : msgs;
+  groupMessageArea.dataset.hiddenCount = String(groupHiddenCount);
+  if (groupHiddenCount) {
+    groupMessageArea.appendChild(buildLoadEarlierButton(groupHiddenCount, () => extendMessageWindow(groupMessageArea, groupWindowKey, renderGroupMessages)));
+  }
   let lastDayKey = "";
-  msgs.forEach((message, index) => {
+  windowed.forEach((message, index) => {
     // Day separator when the calendar day changes.
     const dayKey = new Date(Number(message.createdAt) || Date.now()).toDateString();
     if (dayKey !== lastDayKey) {
@@ -21048,7 +21119,7 @@ function renderGroupMessages() {
     if (incoming) {
       // Sender name now lives in the card header on every message (broadcast-room style),
       // so the old first-in-run sender label is gone.
-      const next = msgs[index + 1];
+      const next = windowed[index + 1];
       const lastInRun = !next || next.senderAddress !== message.senderAddress || next.direction !== message.direction;
       if (lastInRun) {
         avatarSlot.innerHTML = memberAvatarHtml(message.senderAddress, "message-avatar");

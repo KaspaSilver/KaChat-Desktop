@@ -2995,6 +2995,44 @@ function notificationParentTxId(n) {
 }
 
 /** Deep-open a post/comment by txid from OUTSIDE this module (the global bell center). */
+// What a shared post link shows before it is opened (iOS KaPostLinkPreviewCache): the author,
+// a snippet, and whether it is a reply or a quote. Resolved once per post id.
+const kaPostLinkPreviews = new Map();
+const kaPostLinkPreviewPending = new Map();
+function kaPostLinkPreviewEntry(post) {
+  if (!post) return null;
+  const text = String(post.text || "").replace(/\s+/g, " ").trim();
+  return {
+    authorName: posterName(post.posterAddress),
+    authorAddress: post.posterAddress,
+    avatarHtml: posterAvatarHtml(post.posterAddress),
+    snippet: text.length > 140 ? `${text.slice(0, 137).trimEnd()}...` : text,
+    action: post.parentRemoteId ? "reply" : post.quoted ? "quote" : "post",
+  };
+}
+export function peekKaPostLinkPreview(txId) {
+  const id = String(txId || "");
+  if (!id || !deps) return null;
+  if (kaPostLinkPreviews.has(id)) return kaPostLinkPreviews.get(id);
+  const local = findPostByRemoteId(id);
+  if (local) { const entry = kaPostLinkPreviewEntry(local); kaPostLinkPreviews.set(id, entry); return entry; }
+  return null;
+}
+export async function resolveKaPostLinkPreview(txId) {
+  const id = String(txId || "");
+  if (!id || !deps) return null;
+  const known = peekKaPostLinkPreview(id);
+  if (known) return known;
+  if (kaPostLinkPreviewPending.has(id)) return kaPostLinkPreviewPending.get(id);
+  const promise = indexerPost(id).then((post) => {
+    const entry = kaPostLinkPreviewEntry(post);
+    if (entry) kaPostLinkPreviews.set(id, entry);
+    return entry;
+  }).finally(() => kaPostLinkPreviewPending.delete(id));
+  kaPostLinkPreviewPending.set(id, promise);
+  return promise;
+}
+
 export function openKaPostFromNotification(txId) {
   if (!deps) return;
   if (txId) resolveAndOpenPost(txId);
