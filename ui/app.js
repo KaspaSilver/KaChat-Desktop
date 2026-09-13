@@ -4214,7 +4214,8 @@ document.querySelector("[data-connection-reconnect]")?.addEventListener("click",
 // has always meant, and renaming the value would invalidate everyone's saved setting for nothing.
 let selectedNodeMode = null;
 function currentSavedNodeMode() {
-  return getEndpointOverride("trustedNode").trim() ? "custom" : "auto";
+  if (getEndpointOverride("trustedNode").trim()) return "custom";
+  return getEndpointOverride("nodeScan").trim() === "1" ? "scan" : "auto";
 }
 function renderNodeModeCards() {
   if (selectedNodeMode == null) selectedNodeMode = currentSavedNodeMode();
@@ -4262,7 +4263,7 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
   if (errorEl) errorEl.hidden = true;
   const label = button.textContent;
   button.disabled = true;
-  button.textContent = mode === "custom" ? "Checking your node…" : "Reconnecting…";
+  button.textContent = mode === "custom" ? "Checking your node…" : mode === "scan" ? "Scanning…" : "Reconnecting…";
   try {
     if (!engine.kaspa) await engine.loadWasm();
     if (mode === "custom") {
@@ -4284,11 +4285,11 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
       if (liveEndpoint) engine.forgetNode?.(liveEndpoint);
     }
     setEndpoint("trustedNode", url); // "" clears the override, returning to KaChat's node
-    if (mode !== "custom") setEndpoint("nodeScan", "");
-    setStatus(mode === "custom" ? "Connecting to your node…" : "Finding a healthy node…");
+    setEndpoint("nodeScan", mode === "scan" ? "1" : "");
+    setStatus(mode === "custom" ? "Connecting to your node…" : mode === "scan" ? "Scanning public nodes…" : "Connecting to KaChat's node…");
     await engine.connect({ force: true });
     await connectAndRefresh({ quiet: true });
-    showCopyToast(mode === "custom" ? "Connected to your node" : "Connected automatically");
+    showCopyToast(mode === "custom" ? "Connected to your node" : mode === "scan" ? "Connected to a scanned public node" : "Connected to KaChat's node");
   } catch (error) {
     if (errorEl) { errorEl.textContent = `Could not connect: ${describeConnectError(error)}`; errorEl.hidden = false; }
     setStatus("Connection failed");
@@ -17886,11 +17887,12 @@ function renderSetupExtra(kind) {
     // yet. Recommended is ours because it needs nothing; Best is their own because nobody else
     // sees what they ask it.
     const opts = [
-      { key: "auto", title: "Use KaChat's Node", badge: "Recommended", sub: "Connects to the node KaChat runs. Nothing to set up." },
+      { key: "auto", title: "Use KaChat's Node", badge: "Recommended", sub: "Connects to the node KaChat runs. Nothing to set up. If it is ever down, public nodes are scanned automatically." },
+      { key: "scan", title: "Automatic Node Scan", sub: "The Kaspa public node resolver picks a healthy public node for you, the way kaspa-ng does. KaChat's node is the fallback." },
       { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Your own Kaspa wRPC endpoint. Nobody else sees what you ask it, and nothing depends on KaChat's node staying up.", input: true },
     ];
     let current = accountShellPrefs.nodeChoice;
-    if (current !== "auto" && current !== "own") current = "auto"; // normalize legacy/default
+    if (current !== "auto" && current !== "own" && current !== "scan") current = "auto"; // normalize legacy/default
     const list = document.createElement("div");
     list.className = "setup-choice-list";
     for (const o of opts) {
@@ -17955,7 +17957,10 @@ function renderSetupExtra(kind) {
 /// so writing "wss://" the moment it is typed would leave someone on a node that cannot answer,
 /// mid-sentence.
 function applySetupNodeChoice() {
-  if (accountShellPrefs.nodeChoice !== "own") {
+  const choice = accountShellPrefs.nodeChoice;
+  // The scan flag belongs to the two hosted choices; a custom node is strict and ignores it.
+  setEndpoint("nodeScan", choice === "scan" ? "1" : "");
+  if (choice !== "own") {
     if (getEndpointOverride("trustedNode").trim()) setEndpoint("trustedNode", "");
     return;
   }
