@@ -36,52 +36,50 @@ export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, source
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
 // matching iOS's Compound UTXOs. A plain self-send that leaves a tiny change output gets rejected
-// by Kaspa's KIP-9 storage-mass rule (why the earlier attempt failed) - so this is a true sweep:
-// two passes - probe the fee for a near-full self-send, then send exactly (total - fee) so the
-// generator emits one output and folds any sub-dust remainder into the fee.
-export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, log }));
+// by Kaspa's KIP-9 storage-mass rule, so the transaction is assembled by hand with exactly one
+// output of (total - fee); more than 80 coins are compounded in chunks of 80.
+export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, log }));
 }
-async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, log }) {
+// One all-schnorr-input transaction tops out near the standard mass ceiling around ~85 inputs.
+const MAX_INPUTS_PER_SWEEP = 80;
+async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, log }) {
   const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
   let { entries } = withRpc
     ? await withRpc(fetchUtxos, { retries: 1, label: "Compound UTXO fetch" })
     : await fetchUtxos(rpc);
   if (!entries || entries.length === 0) throw new Error("No UTXOs to compound.");
   entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
-  const total = entries.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
 
-  // Pass 1: fee for a self-send of ~95% of the balance (leaves ample headroom the generator covers).
-  const probe = await kaspa.createTransactions({
-    entries,
-    outputs: [{ address: sourceAddress, amount: total - (total / 20n) }],
-    priorityFee: 0n,
-    changeAddress: sourceAddress,
-    networkId: NETWORK_ID,
-  });
-  const feeSompi = BigInt(probe.summary?.fees ?? 0n);
-  const amount = total - feeSompi;
-  if (amount <= 0n) throw new Error("Balance too low to compound after network fees.");
-
-  // Pass 2: send exactly (total - fee) to self -> single output, sub-dust remainder folded into fee.
-  const result = await kaspa.createTransactions({
-    entries,
-    outputs: [{ address: sourceAddress, amount }],
-    priorityFee: 0n,
-    changeAddress: sourceAddress,
-    networkId: NETWORK_ID,
-  });
+  // Built by hand, never through the generator: asking it for (total - fee) left it a few
+  // hundred sompi of change, which it dutifully emitted as a second output - and an output that
+  // small has a KIP-9 storage mass far past the maximum, so every compound of a healthy balance
+  // died with "Storage mass exceeds maximum". Exactly one output of (total - fee) per
+  // transaction means no change can exist. Same approach as sendMaxKaspaNow below.
+  const chunks = [];
+  for (let i = 0; i < entries.length; i += MAX_INPUTS_PER_SWEEP) chunks.push(entries.slice(i, i + MAX_INPUTS_PER_SWEEP));
   const txids = [];
-  for (const pending of result.transactions) {
-    await pending.sign([signingKeyArg(privateKey)]);
-    const submitSigned = (activeRpc) => pending.submit(activeRpc);
-    const txid = withRpc
-      ? await withRpc(submitSigned, { retries: 1, label: "Compound broadcast" })
-      : await submitSigned(rpc);
+  for (const [index, chunk] of chunks.entries()) {
+    const total = chunk.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+    const draft = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n);
+    const floorFeeSompi = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
+    // The displayed policy fee is what the whole compound pays when it fits one transaction;
+    // a chunked compound pays each chunk's own network floor.
+    let fee = chunks.length === 1 && totalFeeSompi != null ? BigInt(totalFeeSompi) : floorFeeSompi;
+    if (fee < floorFeeSompi) fee = floorFeeSompi;
+    const amount = total - fee;
+    if (amount <= 0n) throw new Error("Balance too low to compound after network fees.");
+    const tx = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount }], 0n);
+    const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+    const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+    const response = withRpc
+      ? await withRpc(submit, { retries: 1, label: "Compound broadcast" })
+      : await submit(rpc);
+    const txid = response?.transactionId || signed.id;
     txids.push(txid);
-    log("Compound txid:", txid);
+    log(`Compound txid (${index + 1}/${chunks.length}):`, txid);
   }
-  return { result, txids };
+  return { txids };
 }
 
 // True "Max" send to a recipient: probe the exact fee for spending every input, then send

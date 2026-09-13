@@ -8483,9 +8483,11 @@ const sendKaspaController = makeSendController({
   sendFn: ({ destination, amountKas, feeKas, selectedOutpoints }) => {
     const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null;
     if (sendKaspaCompound) {
+      // The displayed policy fee is what the compound pays, same as a Max send.
+      const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
       return sendKaspaSourceIndex == null
-        ? engine.compoundUtxos()
-        : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase() });
+        ? engine.compoundUtxos({ totalFeeKas })
+        : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), totalFeeKas });
     }
     if (sendKaspaMaxMode) {
       const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());

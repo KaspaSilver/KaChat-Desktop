@@ -922,7 +922,7 @@ export class KaspaEngine {
   }
 
   // Compound: sweep every UTXO at the chatting address into one (self-send, no change).
-  async compoundUtxos() {
+  async compoundUtxos({ totalFeeKas = null } = {}) {
     this.requireWallet();
     await this.connect();
     return sweepAllToSelf({
@@ -931,6 +931,7 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       privateKey: this.privateKey,
       sourceAddress: this.address,
+      totalFeeSompi: totalFeeKas != null ? this.kaspa.kaspaToSompi(String(totalFeeKas)) : null,
       log: this.log,
     });
   }
@@ -987,7 +988,7 @@ export class KaspaEngine {
   }
 
   // Compound: sweep every UTXO at a spending address into one (self-send, no change).
-  async compoundSpending({ mnemonic, index, passphrase = "" }) {
+  async compoundSpending({ mnemonic, index, passphrase = "", totalFeeKas = null }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
@@ -997,6 +998,7 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       privateKey: spending.privateKey,
       sourceAddress: spending.address,
+      totalFeeSompi: totalFeeKas != null ? this.kaspa.kaspaToSompi(String(totalFeeKas)) : null,
       log: this.log,
     });
   }
