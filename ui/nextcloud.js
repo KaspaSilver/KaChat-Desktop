@@ -305,6 +305,54 @@ function backupFolderPath() {
   return nc?.backupFolder || DEFAULT_BACKUP_FOLDER;
 }
 
+/** Looks for a folder on the server that already holds a KaChat backup - the default path
+ *  first, then any top-level folder with "kachat" in its name (any case), then one level down
+ *  inside those - and adopts the first one found as the backup folder. With a backup in hand,
+ *  Automatic Sync is switched on and the one-time restore runs, so a device that connects to an
+ *  existing backup starts from the phone's history instead of an empty folder. */
+async function adoptExistingBackupFolder() {
+  if (!nc || nc.backupFolderScanned) return;
+  const hasBackup = async (path) => {
+    try {
+      const listing = await listFolder(path);
+      return listing.some((f) => !f.isDirectory && (f.name === BACKUP_FILENAME || f.name === LEGACY_DESKTOP_BACKUP_FILENAME));
+    } catch { return false; }
+  };
+  const candidates = [DEFAULT_BACKUP_FOLDER];
+  try {
+    const root = await listFolder("");
+    for (const entry of root) {
+      if (entry.isDirectory && /kachat/i.test(entry.name) && !candidates.includes(entry.name)) candidates.push(entry.name);
+    }
+    for (const folder of [...candidates]) {
+      try {
+        const inner = await listFolder(folder);
+        for (const entry of inner) {
+          if (entry.isDirectory && /kachat/i.test(entry.name)) candidates.push(`${folder}/${entry.name}`);
+        }
+      } catch { /* not listable - skip */ }
+    }
+  } catch { /* the root could not be listed; the default path still gets checked */ }
+  let found = null;
+  for (const path of candidates) {
+    if (await hasBackup(path)) { found = path; break; }
+  }
+  if (!nc) return;
+  nc.backupFolderScanned = true;
+  if (found) {
+    const changed = (nc.backupFolder || DEFAULT_BACKUP_FOLDER) !== found;
+    if (changed) nc.backupFolder = found;
+    if (!nc.autoBackup) nc.autoBackup = true;
+    saveState();
+    renderSettings();
+    armAutoBackup();
+    deps.showToast?.(changed ? `Found your KaChat backup in "${found}" - syncing with it.` : "Found your KaChat backup - syncing with it.");
+    scheduleAutoRestoreIfNeeded();
+  } else {
+    saveState();
+  }
+}
+
 // --- Media send (photos/voice upload + share link instead of on-chain bytes) ---
 
 export function isNextcloudMediaSendActive() {
@@ -455,6 +503,27 @@ function transientError(message) {
   return error;
 }
 
+/** Reads a response body while reporting bytes received (and the total when the server says),
+ *  so a multi-megabyte archive is seen arriving rather than the bar sitting still. */
+async function readBodyWithProgress(response, onProgress) {
+  if (!onProgress || !response.body?.getReader) return response.text();
+  const total = Number(response.headers.get("Content-Length")) || 0;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    try { onProgress({ received, total }); } catch {}
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(merged);
+}
+
 /** Downloads one backup file from the configured folder; null when it doesn't exist (404).
  *
  *  A WebDAV GET of the backup file is NEVER legitimately HTML: a 2xx HTML body is a
@@ -464,7 +533,7 @@ function transientError(message) {
  *  hiccup as a foreign file — and on the upload path it would abort the merge with the same
  *  misleading message. Mirrors iOS NextcloudService.performBackupDownload's mimeType guard and
  *  its empty-body check. */
-async function downloadBackupFile(filename) {
+async function downloadBackupFile(filename, { onProgress = null } = {}) {
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const url = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(filename)}`;
   const response = await fetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
@@ -472,7 +541,7 @@ async function downloadBackupFile(filename) {
   if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
   if (!response.ok) throw new Error(`Backup download failed (HTTP ${response.status}).`);
   const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
-  const text = await response.text();
+  const text = await readBodyWithProgress(response, onProgress);
   if (contentType.includes("html") || /^\s*(<!doctype html|<html[\s>])/i.test(text)) {
     throw transientError("The server sent a web page instead of the backup file (a sign-in, proxy or maintenance page). The backup was left untouched.");
   }
@@ -1105,7 +1174,15 @@ async function runRestore() {
     // Primary: the shared cross-device archive. A pre-4.0 desktop-only file may still be
     // sitting next to it — read as a fallback for the desktop half. A missing file (404) is
     // fine as long as one of them exists.
-    let sharedJson = await downloadBackupFile(BACKUP_FILENAME);
+    const formatMb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    let sharedJson = await downloadBackupFile(BACKUP_FILENAME, {
+      onProgress: ({ received, total }) => {
+        const share = total > 0 ? Math.min(1, received / total) : 0;
+        advanceRestore(0.10 + 0.12 * share, total > 0
+          ? `Downloading backup… ${formatMb(received)} of ${formatMb(total)}`
+          : `Downloading backup… ${formatMb(received)}`);
+      },
+    });
     advanceRestore(0.22, "Downloading backup…");
     // A hiccup on the legacy probe must not sink a restore whose real file already downloaded.
     let legacyJson = sharedJson
@@ -1569,6 +1646,9 @@ function wireSettings() {
         renderSettings();
         armAutoBackup();
         deps.showToast?.("Nextcloud connected.");
+        // A backup the phone already keeps on this server is the point of connecting: find its
+        // folder and pick it up, rather than sitting on an empty default.
+        adoptExistingBackupFolder().catch(() => {});
       } catch (error) {
         button.textContent = "Connect";
         button.disabled = !ncConnectFormValid();
@@ -1792,4 +1872,6 @@ export function initNextcloud(dependencies) {
 
   renderSettings();
   armAutoBackup();
+  // A connection saved before the folder scan existed gets it once.
+  if (nc && !nc.backupFolderScanned) adoptExistingBackupFolder().catch(() => {});
 }
