@@ -9668,3 +9668,71 @@ body.session-logged-out [data-account-rename-modal] {
 .field-hint.ok { color: #34c759; }
 .field-hint.bad { color: #ff6b6b; }
 .kaposts-spinner.small { width: 12px; height: 12px; border-width: 2px; vertical-align: middle; }
+
+/* ChangeNOW Swap (iOS SwapView). */
+.swap-tab-bar { margin: 0 0 12px; }
+.swap-page { display: grid; gap: 12px; position: relative; }
+.swap-card { padding: 14px 16px; }
+.swap-card-row { display: flex; align-items: center; gap: 12px; }
+.swap-amount-input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font-size: 22px; font-weight: 700; outline: none; }
+.swap-amount-static { flex: 1; min-width: 0; font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.swap-coin-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; background: var(--surface-2); border: 0; color: var(--text); font-size: 13px; font-weight: 800; white-space: nowrap; }
+.swap-coin-badge.pickable { cursor: pointer; }
+.swap-coin-badge svg { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.swap-coin-icon { width: 20px; height: 20px; border-radius: 999px; object-fit: cover; flex: 0 0 auto; }
+.swap-coin-icon.text { display: inline-grid; place-items: center; color: #fff; font-size: 7px; font-weight: 800; letter-spacing: -.02em; }
+.swap-action-row { display: flex; align-items: center; gap: 12px; }
+.swap-flip { width: 40px; height: 40px; border-radius: 999px; border: 0; background: var(--kaspa); color: #000; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; }
+.swap-flip svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.swap-go { flex: 1; height: 40px; border: 0; border-radius: 999px; background: var(--kaspa); color: #000; font-weight: 800; cursor: pointer; }
+.swap-go.disabled { background: var(--surface-2); color: var(--muted); cursor: default; }
+.swap-payout-input { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+.swap-address-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; }
+.swap-address-copy { display: grid; gap: 2px; min-width: 0; }
+.swap-address-copy small { color: var(--muted); font-size: 11px; }
+.swap-address-copy strong { font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; }
+.swap-address-copy b.used { color: #ff9f0a; font-size: 10.5px; }
+.swap-address-copy b.unused { color: #34c759; font-size: 10.5px; }
+.swap-rate-card { display: grid; gap: 4px; padding: 12px 14px; font-size: 12px; color: var(--muted); }
+.swap-rate-card .bad { color: #ff6b6b; }
+.swap-result-card { display: grid; gap: 10px; justify-items: start; }
+.swap-result-link { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 700; cursor: pointer; padding: 0; }
+.swap-qr { width: 180px; height: 180px; padding: 12px; border-radius: 12px; background: #fff; justify-self: center; cursor: pointer; }
+.swap-mono-button { border: 0; background: transparent; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; text-align: left; word-break: break-all; cursor: pointer; padding: 0; }
+.swap-mono-button.light { color: var(--text); }
+.swap-result-card small, .swap-details small { color: var(--muted); font-size: 12px; }
+.swap-result-actions, .swap-details-actions { display: flex; justify-content: space-between; width: 100%; gap: 12px; }
+.swap-powered { text-align: center; font-size: 12px; color: var(--kaspa-ink); text-decoration: underline; }
+.swap-disclaimer-overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.6); border-radius: 18px; z-index: 5; padding: 16px; }
+.swap-disclaimer-card { max-width: 340px; display: grid; gap: 14px; padding: 24px; border-radius: 20px; background: var(--surface-1); border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.swap-disclaimer-actions { display: flex; justify-content: space-between; }
+.linklike-button.strong { font-weight: 800; }
+.swap-history-list { display: grid; gap: 12px; }
+.swap-history-item { display: flex; align-items: center; gap: 8px; }
+.swap-history-row { flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; margin: 0; text-align: left; cursor: pointer; color: var(--text); }
+.swap-history-copy { display: grid; gap: 4px; min-width: 0; }
+.swap-history-copy strong { font-size: 14px; }
+.swap-history-copy small { color: var(--muted); font-size: 12px; }
+.swap-history-delete { width: 32px; height: 32px; border: 0; background: transparent; color: #ff6b6b; cursor: pointer; display: grid; place-items: center; }
+.swap-history-delete svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.swap-status { font-weight: 800; font-size: 12.5px; }
+.swap-status.ok { color: #34c759; }
+.swap-status.bad { color: #ff6b6b; }
+.swap-status.warn { color: #ff9f0a; }
+.swap-sheet { max-width: 440px; display: grid; gap: 10px; }
+.swap-sheet-header { display: flex; align-items: center; justify-content: space-between; }
+.swap-sheet-header h2 { margin: 0; font-size: 17px; }
+.swap-picker-list { display: grid; gap: 2px; max-height: 50vh; overflow-y: auto; }
+.swap-picker-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 10px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); text-align: left; cursor: pointer; font-size: 14px; }
+.swap-picker-row span { flex: 1; }
+.swap-picker-row.indented { padding-left: 38px; }
+.swap-picker-row.generate { color: var(--kaspa-ink); font-weight: 700; border-bottom: 0; }
+.swap-picker-row.address { justify-content: space-between; }
+.swap-picker-row.address .swap-address-copy { flex: 1; }
+.swap-address-kas { font-weight: 700; font-size: 13px; }
+.swap-check { width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: var(--kaspa); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.swap-chevron { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: var(--muted); stroke-width: 2; transition: transform .2s; }
+.swap-chevron.open { transform: rotate(180deg); }
+.swap-details { display: grid; gap: 8px; justify-items: start; }
+.swap-details-head { display: grid; gap: 4px; }
+.swap-details-status { display: flex; justify-content: space-between; width: 100%; align-items: center; }

@@ -6705,8 +6705,14 @@ async function spendingBalancesBatchSompi(addresses) {
 let spendingGenerateBusy = false;
 spendingGenerateBtn?.addEventListener("click", async () => {
   closeSpendingActionsMenu();
-  if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return; }
-  if (spendingGenerateBusy) return;
+  await revealNextSpendingAddress();
+});
+// Reveals the next never-used spending address and returns its index (iOS
+// WalletManager.generateNextSpendingAddress). Shared by Manage Addresses' Generate and the
+// swap payout picker's Generate New Address.
+async function revealNextSpendingAddress({ toast = true } = {}) {
+  if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
+  if (spendingGenerateBusy) return null;
   spendingGenerateBusy = true;
   try {
     const state = getSpendingState();
@@ -6754,11 +6760,12 @@ spendingGenerateBtn?.addEventListener("click", async () => {
       saveSpendingState({ maxIndex: readyIndex, hidden: Array.from(hiddenSet) });
     }
     renderSpendingList();
-    showCopyToast(`Spending address #${readyIndex} is ready.`);
+    if (toast) showCopyToast(`Spending address #${readyIndex} is ready.`);
+    return readyIndex;
   } finally {
     spendingGenerateBusy = false;
   }
-});
+}
 
 // Send All Kaspa to the primary spending address: sweep every non-primary
 // spending address that holds a balance into the primary one (matches iOS's
@@ -19466,7 +19473,31 @@ queueMicrotask(async () => {
     currencyCode: () => selectedCurrency.toUpperCase(),
     formatFiatValue,
   });
-  initSwaps({ engine, escapeHtml, accountScopedKey, showToast: showCopyToast, appendEngineLog });
+  initSwaps({
+    engine, escapeHtml, shortAddress, accountScopedKey, showToast: showCopyToast, appendEngineLog,
+    explorerAddressUrl, addressCopiedToastText, copyTextToClipboard,
+    currencySymbol: () => currencyMeta().symbol.trim(),
+    currencyCode: () => selectedCurrency.toUpperCase(),
+    // Swap payouts land on a fresh spending address (iOS SwapService): the picker lists the
+    // wallet's spending addresses with their used flags, and can reveal a new one.
+    listSpendingAddresses: async () => {
+      if (!activeAccountMnemonic()) return [];
+      const state = getSpendingState();
+      const hidden = new Set(state.hidden.map(Number));
+      const entries = [];
+      for (let i = 0; i <= state.maxIndex; i += 1) {
+        const address = deriveSpendingAddressAt(i);
+        if (!address) continue;
+        const usage = await spendingUsageFor(address);
+        entries.push({ index: i, address, label: spendingLabelFor(state, i), kas: usage.kas, used: usage.used, hidden: hidden.has(i) && i !== state.activeIndex });
+      }
+      return entries;
+    },
+    nextFreshSpendingIndex: () => { const st = getSpendingState(); return Math.max(st.maxIndex, st.activeIndex) + 1; },
+    spendingAddressAt: (index) => deriveSpendingAddressAt(index),
+    revealNextSpendingAddress: () => revealNextSpendingAddress({ toast: false }),
+    openSpendingAddresses: () => openSpendingManageScreen(),
+  });
   initNextcloud({
     accountScopedKey, escapeHtml, appendEngineLog,
     showToast: showCopyToast,
