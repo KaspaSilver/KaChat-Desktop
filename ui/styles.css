@@ -8176,6 +8176,27 @@ body.session-logged-out [data-account-rename-modal] {
   margin: 4px 2px 0;
 }
 .group-manage-empty { color: var(--muted); font-size: 13px; padding: 8px 4px; margin: 0; }
+/* Group Info's notification switches (iOS's two toggles), shaped like .settings-toggle-row so
+   they sit in the same visual family as the 1:1 Chat Info controls. */
+.group-manage-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  border-radius: 12px;
+  font-size: 15px;
+  color: var(--text);
+}
+/* Silent already means never, so the mentions rule underneath it is moot. Greyed rather than
+   hidden, so the setting stays where you left it and returns when silent goes back off. */
+.group-manage-toggle-row.is-disabled { opacity: .45; }
+.group-manage-toggle-row.is-disabled .switch-control { pointer-events: none; }
+/* The member row opens that member's User Info, so it has to look like it does something. */
+.group-member-line[data-group-member-profile] { cursor: pointer; }
+.group-member-line[data-group-member-profile]:hover { border-color: rgba(98,244,208,.35); }
 /* Hidden Users summary shares the members-dropdown look but with a leading icon */
 .group-members-summary .group-manage-row-icon { margin-right: 2px; }
 /* Collapsible members dropdown (collapsed by default) */

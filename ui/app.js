@@ -11005,7 +11005,43 @@ function openChatInfo() {
   if (!activeConversationId) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const contact = contactForConversation(conversationEntry);
-  if (!conversationEntry || !contact || !chatInfoOverlay) return;
+  if (!conversationEntry || !contact) return;
+  openChatInfoFor(contact, conversationEntry, { title: "Chat Info", showsNotifications: true });
+}
+
+/// iOS's "User Info": this same screen opened for someone who may not be a 1:1 thread of yours -
+/// a group member you have never messaged. Per-contact notification settings are hidden there
+/// (iOS passes showsNotificationSettings: false), because they describe a conversation.
+///
+/// Creates the contact when there is not one yet, exactly as iOS's getOrCreateContact does, so
+/// the name you type here has a record to save into. No CONVERSATION is created, so looking at a
+/// group member does not put an empty chat in your list.
+function openChatInfoForAddress(address) {
+  if (!address) return;
+  let contact = state.contacts.find((entry) => entry.address === address);
+  if (!contact) {
+    const createdAt = Date.now();
+    const name = groupSenderLabel(address) || shortAddress(address);
+    contact = {
+      id: nowId(),
+      name,
+      nameIsCustom: false,
+      address,
+      avatar: initialsFor(name),
+      createdAt,
+      updatedAt: createdAt,
+      relationshipState: "legacy-manual",
+      handshakeTxid: "",
+    };
+    state.contacts.push(contact);
+    persistState();
+  }
+  const conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id) || null;
+  openChatInfoFor(contact, conversationEntry, { title: "User Info", showsNotifications: false });
+}
+
+function openChatInfoFor(contact, conversationEntry, { title = "Chat Info", showsNotifications = true } = {}) {
+  if (!contact || !chatInfoOverlay) return;
 
   chatInfoContactId = contact.id;
   chatInfoContactAddress = contact.address;
@@ -11020,22 +11056,27 @@ function openChatInfo() {
     if (chatInfoAvatarImage) { chatInfoAvatarImage.hidden = true; chatInfoAvatarImage.src = ""; }
   }
   if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
-  // "Chat Info", as iOS titles it. The contact's name is the heading of the card immediately
-  // below, so putting it in the bar as well said the same thing twice.
+  // "Chat Info", as iOS titles it - or "User Info" when opened for a group member. The contact's
+  // name is the heading of the card immediately below, so putting it in the bar as well said the
+  // same thing twice.
   const chatInfoTitle = document.querySelector("[data-chat-info-title]");
-  if (chatInfoTitle) chatInfoTitle.textContent = "Chat Info";
+  if (chatInfoTitle) chatInfoTitle.textContent = title;
+  // Per-contact notification settings describe a 1:1 thread, which User Info may not have.
+  const notificationsRow = document.querySelector('[data-chat-info-sheet="notifications"]');
+  if (notificationsRow) notificationsRow.hidden = !showsNotifications;
   if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
   if (chatInfoAdded) chatInfoAdded.textContent = contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : "—";
 
-  const messages = conversationEntry.messages || [];
+  // There is no conversation at all when this is User Info for someone never messaged.
+  const messages = conversationEntry?.messages || [];
   const sent = messages.filter((message) => message.direction === "outgoing").length;
   const received = messages.filter((message) => message.direction === "incoming").length;
   if (chatInfoSent) chatInfoSent.textContent = String(sent);
   if (chatInfoReceived) chatInfoReceived.textContent = String(received);
   if (chatInfoTotal) chatInfoTotal.textContent = String(messages.length);
-  const last = lastMessageFor(conversationEntry);
+  const last = conversationEntry ? lastMessageFor(conversationEntry) : null;
   if (chatInfoLastMessage) {
     // Under a day reads as a relative time; past that iOS counts whole days, which stays
     // legible where a bare date does not tell you how long it has been.
@@ -19186,13 +19227,15 @@ function openGroupManage(groupId) {
   if (!g || !groupManageBody) return;
   const isAdmin = Boolean(g.isAdmin);
   const memberRows = g.members.map((m) => {
-    const canRemove = isAdmin && m.address !== g.adminAddress;
+    // iOS offers both per-member actions for everyone EXCEPT yourself - a co-admin included, who
+    // can just as easily need a re-invite or need removing. Keying resend off "is not an admin"
+    // and removal off the group's admin address left a second admin with neither control.
+    const canManageMember = isAdmin && m.address !== engine.address;
     return `
-      <div class="group-member-line">
+      <div class="group-member-line" data-group-member-profile="${escapeHtml(m.address)}" title="View user info">
         ${memberAvatarHtml(m.address, "chat-avatar")}
         <span class="group-member-line-meta">
           <strong>${escapeHtml(groupSenderLabel(m.address))}</strong>
-          <span>${escapeHtml(shortAddress(m.address))}</span>
         </span>
         ${m.isAdmin ? `<span class="group-member-admin-badge">Admin</span>` : ``}
         ${m.address === engine.address ? `` : (() => {
@@ -19201,8 +19244,8 @@ function openGroupManage(groupId) {
             ? `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="m17 9 4 6M21 9l-4 6"/></svg>`
             : `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>`}</button>`;
         })()}
-        ${isAdmin && !m.isAdmin ? `<button type="button" class="group-member-resend-btn" data-group-resend-member="${escapeHtml(m.address)}" title="Resend invite to this member" aria-label="Resend invite"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg></button>` : ``}
-        ${canRemove ? `<button type="button" class="group-member-remove-btn" data-group-remove-member="${escapeHtml(m.address)}" title="Remove from group" aria-label="Remove from group"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ``}
+        ${canManageMember ? `<button type="button" class="group-member-resend-btn" data-group-resend-member="${escapeHtml(m.address)}" title="Resend invite to this member" aria-label="Resend invite"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg></button>` : ``}
+        ${canManageMember ? `<button type="button" class="group-member-remove-btn" data-group-remove-member="${escapeHtml(m.address)}" title="Remove from group" aria-label="Remove from group"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ``}
       </div>`;
   }).join("");
   // Hidden members: whose messages are filtered from your view, with an Unhide control. Shown as
@@ -19228,14 +19271,21 @@ function openGroupManage(groupId) {
   // same three choices the 1:1 Chat Info offers plus mentions). Sits on the group's info screen,
   // where the 1:1 notification toggle lives for a contact.
   const notifyMode = getGroupNotify(groupId);
-  const notifyRows = [
-    ["all", "All messages"],
-    ["mentions", "Only when I'm mentioned"],
-    ["muted", "Mute this group"],
-  ].map(([value, label]) => `
-      <button type="button" class="group-manage-row" data-group-notify-mode="${value}" aria-pressed="${notifyMode === value ? "true" : "false"}">
-        <span class="group-manage-row-icon">${notifyMode === value ? "✓" : "&nbsp;"}</span> ${escapeHtml(label)}
-      </button>`).join("");
+  // iOS offers two switches - Silent Group Chat, and Only Notify if I'm Mentioned, the latter
+  // greyed out while silent is on (never already answers the finer question). Those are the same
+  // three reachable states this screen has always stored, so "all"/"mentions"/"muted" is
+  // untouched underneath and nothing needs migrating.
+  const isSilent = notifyMode === "muted";
+  const isMentionsOnly = notifyMode === "mentions";
+  const notifyRows = `
+      <div class="group-manage-toggle-row">
+        <span>Silent Group Chat</span>
+        <label class="switch-control"><input type="checkbox" data-group-notify-silent${isSilent ? " checked" : ""}><span></span></label>
+      </div>
+      <div class="group-manage-toggle-row${isSilent ? " is-disabled" : ""}">
+        <span>Only Notify if I'm Mentioned</span>
+        <label class="switch-control"><input type="checkbox" data-group-notify-mentions${isMentionsOnly ? " checked" : ""}${isSilent ? " disabled" : ""}><span></span></label>
+      </div>`;
   groupManageBody.innerHTML = `
     <div class="group-manage-section group-photo-section">
       <div class="group-photo-avatar${isAdmin ? " editable" : ""}"${isAdmin ? " data-group-photo-edit" : ""}${isAdmin ? ` title="Change group photo"` : ""}>
@@ -19276,9 +19326,10 @@ function openGroupManage(groupId) {
       <p class="group-manage-footer">Resends the group invite to every member (or use a member's ↻ to resend just theirs) — use this if someone didn't receive the group. Adding members rotates the group key, so new members see messages from when they join onward.</p>
     </div>` : ``}
     <div class="group-manage-section">
-      ${isAdmin
-        ? `<button type="button" class="group-manage-danger" data-group-delete>Delete Group</button>`
-        : `<button type="button" class="group-manage-danger" data-group-leave>Leave Group</button>`}
+      <!-- iOS shows Delete Group to everyone, admin or not. A non-admin was being offered "Leave
+           Group" for an action that ran the identical local delete underneath - two names for one
+           thing, and the one a non-admin saw implied the group would hear about it. -->
+      <button type="button" class="group-manage-danger" data-group-delete>Delete Group</button>
     </div>`;
   if (groupManageScreen) groupManageScreen.hidden = false;
 }
@@ -19898,21 +19949,24 @@ groupManageBody?.addEventListener("click", async (event) => {
     }
     return;
   }
-  // Per-group notification mode: all messages / mentions only / muted.
-  const notifyRow = event.target.closest("[data-group-notify-mode]");
-  if (notifyRow && activeGroupId) {
-    const mode = notifyRow.dataset.groupNotifyMode;
+  // Per-group notifications as iOS's two switches. They write the same three stored modes, and
+  // the state is read back off BOTH boxes so either one moving lands on the right mode.
+  const notifyToggle = event.target.closest("[data-group-notify-silent],[data-group-notify-mentions]");
+  if (notifyToggle && activeGroupId) {
+    const silentEl = groupManageBody.querySelector("[data-group-notify-silent]");
+    const mentionsEl = groupManageBody.querySelector("[data-group-notify-mentions]");
+    const silent = Boolean(silentEl?.checked);
+    const mode = silent ? "muted" : (mentionsEl?.checked ? "mentions" : "all");
     setGroupNotify(activeGroupId, mode);
-    // Move the checkmark in place rather than re-rendering the screen, so the open
-    // Notifications dropdown (a <details>) does not snap shut on every choice.
-    groupManageBody.querySelectorAll("[data-group-notify-mode]").forEach((row) => {
-      const selected = row.dataset.groupNotifyMode === mode;
-      row.setAttribute("aria-pressed", selected ? "true" : "false");
-      const icon = row.querySelector(".group-manage-row-icon");
-      if (icon) icon.innerHTML = selected ? "✓" : "&nbsp;";
-    });
+    // Silent already means never, so the finer rule underneath it is moot - iOS disables it
+    // rather than leaving a switch that looks live but changes nothing. Updated in place so the
+    // open Notifications dropdown (a <details>) does not snap shut on every change.
+    if (mentionsEl) {
+      mentionsEl.disabled = silent;
+      mentionsEl.closest(".group-manage-toggle-row")?.classList.toggle("is-disabled", silent);
+    }
     if (mode === "muted") {
-      showCopyToast("Muted. This group will not notify you.");
+      showCopyToast("Silent. This group will not notify you.");
     } else {
       const granted = await ensureNotificationPermission();
       if (!granted) showCopyToast("Allow notifications in your browser to receive them.");
@@ -20042,7 +20096,18 @@ groupManageBody?.addEventListener("click", async (event) => {
     }
     return;
   }
-  const target = event.target.closest("[data-group-remove-member],[data-group-add-member],[data-group-rename],[data-group-delete],[data-group-leave]");
+  // Tapping a member opens their User Info, as iOS does - the one interaction this screen was
+  // missing entirely. Chat Info's overlay shares this screen's z-index but sits later in the
+  // document, so it paints ON TOP and closing it returns you to Group Info, which is where iOS's
+  // sheet returns to as well. Clicks that landed on one of the row's own controls (mute, resend,
+  // remove) belong to those branches, so they are left alone here.
+  const memberProfile = event.target.closest("[data-group-member-profile]");
+  if (memberProfile && !event.target.closest("button")) {
+    openChatInfoForAddress(memberProfile.dataset.groupMemberProfile);
+    return;
+  }
+
+  const target = event.target.closest("[data-group-remove-member],[data-group-add-member],[data-group-rename],[data-group-delete]");
   if (!target || !activeGroupId) return;
   const mgr = getGroupManager();
   if (!mgr) return;
@@ -20077,21 +20142,13 @@ groupManageBody?.addEventListener("click", async (event) => {
       openGroupChat(activeGroupId);
       setStatus("Group renamed");
     } else if (target.dataset.groupDelete != null) {
-      if (!await confirmText("Delete this group from this device? Members you invited keep their copy.")) return;
+      if (!await confirmText("This removes the group and its messages from this device. This cannot be undone, and other members won't be notified.")) return;
       const id = activeGroupId;
       closeGroupManage();
       closeGroupChat();
       mgr.deleteGroup(id);
       renderGroupList();
       setStatus("Group deleted");
-    } else if (target.dataset.groupLeave != null) {
-      if (!await confirmText("Leave this group? You will stop receiving its messages on this device.")) return;
-      const id = activeGroupId;
-      closeGroupManage();
-      closeGroupChat();
-      mgr.deleteGroup(id);
-      renderGroupList();
-      setStatus("Left group");
     }
   } catch (error) {
     setStatus(`Group action failed: ${error.message}`);
