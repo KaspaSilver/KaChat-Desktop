@@ -3369,9 +3369,15 @@ function sortedConversations() {
     .sort((a, b) => Number(b.pinned) - Number(a.pinned) || conversationRecency(b) - conversationRecency(a));
 }
 
+// While Node Connection is scanning, the latest log line is mirrored under its button.
+let nodeScanTraceActive = false;
 function appendEngineLog(message) {
-  if (!engineLog) return;
   const line = typeof message === "string" ? message : JSON.stringify(message, null, 2);
+  if (nodeScanTraceActive) {
+    const trace = document.querySelector("[data-node-scan-trace]");
+    if (trace) { trace.textContent = line; trace.hidden = false; }
+  }
+  if (!engineLog) return;
   engineLog.textContent = `${line}\n${engineLog.textContent}`.trim();
 }
 
@@ -4420,6 +4426,9 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
   const label = button.textContent;
   button.disabled = true;
   button.textContent = mode === "custom" ? "Checking your node…" : "Scanning…";
+  const trace = document.querySelector("[data-node-scan-trace]");
+  if (trace) { trace.textContent = mode === "custom" ? "Checking your node…" : "Asking the public node resolver…"; trace.hidden = false; }
+  nodeScanTraceActive = true;
   try {
     if (!engine.kaspa) await engine.loadWasm();
     if (mode === "custom") {
@@ -4450,6 +4459,8 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
     if (errorEl) { errorEl.textContent = `Could not connect: ${describeConnectError(error)}`; errorEl.hidden = false; }
     setStatus("Connection failed");
   } finally {
+    nodeScanTraceActive = false;
+    if (trace) trace.hidden = true;
     button.disabled = false;
     button.textContent = label;
     renderConnectionStatus();
@@ -8053,7 +8064,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 2;
+const APP_BUILD = 3;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;

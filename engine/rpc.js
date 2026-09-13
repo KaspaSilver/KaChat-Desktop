@@ -237,31 +237,85 @@ export function getNodeRegistrySnapshot() {
 /// node and connect to it, up to a few times since each answer may be a different node. Only
 /// TLS endpoints are usable from a page served over https, so ws:// answers are skipped there.
 const RESOLVER_ATTEMPTS = 6;
-const RESOLVER_TIMEOUT_MS = 10000;
+// The SDK's resolver asks several seed servers in turn; a slow path abroad can take longer than
+// ten seconds before it answers at all, and abandoning it early just restarted the wait.
+const RESOLVER_TIMEOUT_MS = 20000;
+// Nodes the public resolver hands out, kept as a direct fallback for when the RESOLVER itself
+// cannot be reached from where the reader is (its seed servers blocked or unreachable) even
+// though the nodes can. Same public pool, no house node; refreshed from the resolver's own
+// answers whenever it works.
+const PUBLIC_NODE_SEEDS = [
+  "wss://isla.kaspa.red/kaspa/mainnet/wrpc/borsh",
+  "wss://kate.kaspa.red/kaspa/mainnet/wrpc/borsh",
+  "wss://emma.kaspa.stream/kaspa/mainnet/wrpc/borsh",
+  "wss://lola.kaspa.blue/kaspa/mainnet/wrpc/borsh",
+  "wss://vivi.kaspa.blue/kaspa/mainnet/wrpc/borsh",
+];
+const SEEN_NODES_KEY = "kachat-public-nodes-seen";
+function rememberPublicNode(url) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const list = JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]");
+    const next = [url, ...list.filter((u) => u !== url)].slice(0, 12);
+    localStorage.setItem(SEEN_NODES_KEY, JSON.stringify(next));
+  } catch { /* storage is a nicety */ }
+}
+function knownPublicNodes() {
+  let remembered = [];
+  if (typeof localStorage !== "undefined") {
+    try { remembered = JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]"); } catch { remembered = []; }
+  }
+  const all = [...remembered, ...PUBLIC_NODE_SEEDS].filter((u, i, arr) => u && arr.indexOf(u) === i);
+  // Shuffled, so a pool of readers does not all pile onto the first name in the list.
+  for (let i = all.length - 1; i > 0; i -= 1) { const j = Math.floor(Math.random() * (i + 1)); [all[i], all[j]] = [all[j], all[i]]; }
+  return all;
+}
 async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [] } = {}) {
   if (typeof kaspa.Resolver !== "function") throw new Error("This build of the Kaspa SDK has no node resolver.");
   const resolver = new kaspa.Resolver();
   const secure = typeof location !== "undefined" && location.protocol === "https:";
   const tried = new Set(excludedEndpoints.map((u) => String(u || "").toLowerCase()));
   let lastError = null;
+  let resolverAnswered = false;
   for (let attempt = 1; attempt <= RESOLVER_ATTEMPTS; attempt += 1) {
     let url = "";
     try {
+      log(`Asking the public node resolver (attempt ${attempt} of ${RESOLVER_ATTEMPTS})...`);
       url = String(await withTimeout(resolver.getUrl(kaspa.Encoding?.Borsh, NETWORK_ID), RESOLVER_TIMEOUT_MS, "Public node resolver") || "").trim();
     } catch (error) {
       lastError = normalizeRpcError(error, "Public node resolver");
       log(`Public node resolver did not answer (attempt ${attempt}): ${lastError.message}`);
+      // Two silent attempts in a row: the resolver is the problem, not the nodes. Go direct.
+      if (!resolverAnswered && attempt >= 2) break;
       continue;
     }
     if (!url) { lastError = new Error("The public node resolver returned no node."); continue; }
+    resolverAnswered = true;
     if (secure && !/^wss:\/\//i.test(url)) { log(`Resolver offered ${url}, unusable from an https page; asking again.`); continue; }
     if (tried.has(url.toLowerCase())) continue;
     tried.add(url.toLowerCase());
     try {
-      return await connectCandidate(kaspa, { endpoint: url, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS, log, role: "primary", singleShot: true });
+      const rpc = await connectCandidate(kaspa, { endpoint: url, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS, log, role: "primary", singleShot: true });
+      rememberPublicNode(url);
+      return rpc;
     } catch (error) {
       lastError = error;
       log(`Scanned node ${url} failed: ${error?.message || error}`);
+    }
+  }
+  // The resolver could not be reached, or nothing it offered answered: try the public nodes
+  // the app already knows about, directly. Still the public pool - never a house node.
+  const direct = knownPublicNodes().filter((u) => !tried.has(u.toLowerCase()) && (!secure || /^wss:\/\//i.test(u)));
+  if (direct.length) log(`${resolverAnswered ? "No resolver node answered" : "The public node resolver is unreachable from here"}; trying ${direct.length} known public nodes directly...`);
+  for (const url of direct) {
+    tried.add(url.toLowerCase());
+    try {
+      const rpc = await connectCandidate(kaspa, { endpoint: url, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS, log, role: "primary", singleShot: true });
+      rememberPublicNode(url);
+      return rpc;
+    } catch (error) {
+      lastError = error;
+      log(`Known public node ${url} failed: ${error?.message || error}`);
     }
   }
   throw lastError || new Error("No public node could be reached.");

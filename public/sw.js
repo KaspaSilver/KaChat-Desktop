@@ -21,11 +21,17 @@ self.addEventListener("activate", (event) => {
   })());
 });
 
+// The app's base path (the published site lives under /desktop/), read from where this worker
+// was registered rather than assumed to be the root.
+function appBase() {
+  try { return new URL(self.registration.scope).pathname; } catch { return "/"; }
+}
+
 function isCacheable(request, url) {
   if (request.method !== "GET") return false;
   if (url.origin !== self.location.origin) return false;
-  if (url.pathname.startsWith("/nc-proxy/")) return false;
-  if (url.pathname === "/sw.js") return false;
+  if (url.pathname.startsWith(`${appBase()}nc-proxy/`) || url.pathname.includes("/nc-proxy/")) return false;
+  if (url.pathname === `${appBase()}sw.js`) return false;
   return true;
 }
 
@@ -35,7 +41,7 @@ self.addEventListener("fetch", (event) => {
   try { url = new URL(request.url); } catch { return; }
   if (!isCacheable(request, url)) return; // the network handles it, untouched
 
-  const hashedAsset = url.pathname.startsWith("/assets/");
+  const hashedAsset = url.pathname.startsWith(`${appBase()}assets/`);
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     if (hashedAsset) {
@@ -56,7 +62,7 @@ self.addEventListener("fetch", (event) => {
       const cached = await cache.match(request, { ignoreSearch: request.mode === "navigate" });
       if (cached) return cached;
       if (request.mode === "navigate") {
-        const shell = await cache.match("/", { ignoreSearch: true });
+        const shell = await cache.match(appBase(), { ignoreSearch: true });
         if (shell) return shell;
       }
       throw error;
@@ -75,7 +81,7 @@ self.addEventListener("notificationclick", (event) => {
     if (client) {
       try { client = (await client.focus()) || client; } catch { /* focus can be refused */ }
     } else if (self.clients.openWindow) {
-      client = await self.clients.openWindow("/");
+      client = await self.clients.openWindow(appBase());
     }
     if (client) {
       try { client.postMessage({ type: "kachat:notification-click", data }); } catch { /* best-effort */ }

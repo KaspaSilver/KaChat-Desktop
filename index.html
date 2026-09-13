@@ -6,7 +6,7 @@
   <title>KaChat Desktop</title>
   <link rel="stylesheet" href="./ui/styles.css?v=385" />
   <meta name="theme-color" content="#070a0d" />
-  <link rel="manifest" href="/manifest.json" />
+  <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
   <link rel="apple-touch-icon" href="./ui/assets/kachat-logo.png" />
@@ -1424,6 +1424,8 @@
           <div class="node-mode-actions">
             <button type="button" class="primary-button" data-node-apply>Apply and Reconnect</button>
           </div>
+          <!-- What the scan is doing right now, so "Scanning…" is never a black box. -->
+          <p class="field-hint node-scan-trace" data-node-scan-trace hidden></p>
         </section>
 
         <section class="settings-group">

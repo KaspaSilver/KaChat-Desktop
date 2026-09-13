@@ -10060,3 +10060,6 @@ html.standalone .ios-install-hint { display: none; }
 
 /* Delivery mark in a broadcast message head: sits on the baseline row next to the time. */
 .broadcast-message-head .broadcast-delivery-icon { align-self: center; margin: 0 0 0 2px; width: 15px; height: 15px; }
+
+/* Node Connection: the scan narrates itself under the button. */
+.node-scan-trace { margin: 8px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
