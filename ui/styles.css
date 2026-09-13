@@ -9746,3 +9746,8 @@ body.session-logged-out [data-account-rename-modal] {
 .portfolio-empty-state { display: grid; gap: 4px; }
 .portfolio-empty-state strong { color: var(--text); font-size: 15px; }
 .cold-txs-failed { display: grid; gap: 8px; justify-items: start; }
+
+/* Unread badges on hub tiles and dock tabs (iOS AppTabBadge): a capsule, red, top-right. */
+.sidebar-tab { position: relative; }
+.sidebar-tab-badge, .hub-tile-badge { position: absolute; top: 6px; right: 10px; min-width: 20px; height: 20px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: 999px; background: #e0245e; color: #fff; font-size: 11px; font-weight: 800; line-height: 1; }
+.hub-tile-badge { top: -6px; right: -6px; }

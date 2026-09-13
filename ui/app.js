@@ -1,6 +1,6 @@
 import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling } from "./kaposts.js";
+import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
@@ -4046,6 +4046,7 @@ function unreadNotifCount() {
   return globalNotifications.filter((n) => n.timestamp > notifCenterLastSeenAt).length;
 }
 function updateNotifBadge() {
+  try { refreshTabBadges(); } catch {}
   const badge = document.querySelector("[data-notif-badge]");
   if (!badge) return;
   // A plain red dot, not a number — "there is something unread" is the whole signal.
@@ -7038,6 +7039,8 @@ function setActiveAppTab(tab) {
     hubSection = null;
   }
   const screenTab = tab === "hub" && hubSection ? hubSection : tab;
+  // Opening a tab clears its count, so the badges are worth re-reading on every switch.
+  window.setTimeout(() => { try { refreshTabBadges(); } catch {} }, 0);
   try { localStorage.setItem(UI_SPOT_TAB_KEY, screenTab); } catch { /* best-effort */ }
   sidebarTabButtons.forEach((button) => {
     const active = button.dataset.appTab === tab;
@@ -7283,10 +7286,43 @@ function applyDockLayout() {
 const hubGrid = document.querySelector("[data-hub-grid]");
 const hubEmpty = document.querySelector("[data-hub-empty]");
 
+function tabUnreadCount(tab) {
+  try {
+    if (tab === "profile") return unreadNotifCount();
+    if (tab === "kaposts") return kaPostsUnseenCount();
+    if (tab === "broadcasts") return globalNotifications.filter((n) => n.source === "broadcast" && n.timestamp > notifCenterLastSeenAt).length;
+  } catch {}
+  return 0;
+}
+function tabBadgeLabel(count) { return count > 99 ? "99+" : String(count); }
+// Dock tabs carry the same badge as the hub tiles (iOS AppTabBadge on both).
+function refreshTabBadges() {
+  for (const tab of ["profile", "kaposts", "broadcasts"]) {
+    const count = tabUnreadCount(tab);
+    const button = document.querySelector(`.sidebar-tab[data-app-tab="${tab}"]`);
+    if (button) {
+      let badge = button.querySelector(".sidebar-tab-badge");
+      if (count > 0) {
+        if (!badge) { badge = document.createElement("span"); badge.className = "sidebar-tab-badge"; button.appendChild(badge); }
+        badge.textContent = tabBadgeLabel(count);
+      } else if (badge) badge.remove();
+    }
+    const tile = hubGrid?.querySelector(`[data-hub-tile="${tab}"]`);
+    if (tile) {
+      let badge = tile.querySelector(".hub-tile-badge");
+      if (count > 0) {
+        if (!badge) { badge = document.createElement("span"); badge.className = "hub-tile-badge"; tile.appendChild(badge); }
+        badge.textContent = tabBadgeLabel(count);
+      } else if (badge) badge.remove();
+    }
+  }
+}
 function hubTileMarkup(tab) {
+  const count = tabUnreadCount(tab);
   return `<button class="hub-tile" type="button" data-hub-tile="${tab}">
     <span class="hub-tile-icon" aria-hidden="true">${tabIconMarkup(tab)}</span>
     <span class="hub-tile-label">${escapeHtml(tabFullName(tab))}</span>
+    ${count > 0 ? `<span class="hub-tile-badge">${tabBadgeLabel(count)}</span>` : ""}
   </button>`;
 }
 

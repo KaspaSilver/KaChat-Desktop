@@ -1,3 +1,4 @@
+import { confirmDialog } from "./dialogs.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -993,7 +994,7 @@ function renderRestoreOverlay() {
   if (restore.phase === "confirm") {
     title.textContent = "Restore from Backup";
     body.innerHTML = `
-      <p class="field-hint">Chat history from every device merges into this one. Nothing is deleted: the merge only adds messages this device is missing.</p>
+      <p class="field-hint">Messages from the server backup are merged into this device's chat history. Nothing is deleted.</p>
       <p class="field-hint">Any desktop settings stored in the backup replace this device's.</p>`;
     actions.innerHTML = `
       <button class="secondary-button" type="button" data-nc-restore-cancel>Cancel</button>
@@ -1002,13 +1003,13 @@ function renderRestoreOverlay() {
   }
 
   if (restore.phase === "running") {
-    title.textContent = "Restoring";
+    title.textContent = "Restoring Backup";
     const percent = Math.round(restore.fraction * 100);
     body.innerHTML = `
       <p class="field-hint" style="margin:0;">${deps.escapeHtml(restore.stage)}</p>
       ${bar(percent)}
       <p class="field-hint" style="margin:0;font-variant-numeric:tabular-nums;">${percent}%</p>
-      <p class="field-hint">Keep this window open until the restore finishes.</p>`;
+      <p class="field-hint">Please keep the app open. Leaving now could corrupt your chat history.</p>`;
     actions.innerHTML = "";
     return;
   }
@@ -1181,35 +1182,73 @@ async function runRestore() {
 // Settings UI (renders into [data-nextcloud-settings])
 // ---------------------------------------------------------------------------
 
+let lastBackupInfo = undefined; // undefined = not asked yet, null = none on the server
+
+function ncConnectFormValid() {
+  const server = String(settingsEl?.querySelector("[data-nc-server]")?.value || "").trim();
+  const username = String(settingsEl?.querySelector("[data-nc-username]")?.value || "").trim();
+  const password = String(settingsEl?.querySelector("[data-nc-password]")?.value || "").trim();
+  return Boolean(server && username && password);
+}
+function refreshConnectFormState() {
+  if (!settingsEl || nc) return;
+  const server = String(settingsEl.querySelector("[data-nc-server]")?.value || "").trim().toLowerCase();
+  const httpsError = settingsEl.querySelector("[data-nc-https-error]");
+  if (httpsError) httpsError.hidden = !server.startsWith("http://");
+  const button = settingsEl.querySelector("[data-nc-connect]");
+  if (button && button.textContent !== "Connecting…") button.disabled = !ncConnectFormValid();
+}
+
 function renderSettings() {
   if (!settingsEl) return;
   if (!nc) {
     settingsEl.innerHTML = `
+      <p class="settings-group-label">Server</p>
       <div class="settings-list-card nc-connect-card">
         <label class="field-label">Server<input class="field-input" type="text" data-nc-server placeholder="cloud.example.com" autocomplete="off" spellcheck="false" /></label>
+        <p class="field-error" data-nc-https-error hidden>Use https. Unencrypted connections are not supported.</p>
         <label class="field-label">Username<input class="field-input" type="text" data-nc-username autocomplete="off" spellcheck="false" /></label>
         <label class="field-label">App password<span class="password-field-wrap"><input class="field-input" type="password" data-nc-password autocomplete="off" /><button class="password-eye-btn" type="button" data-eye-toggle aria-label="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.3 12.3C4.4 7.7 8 5.2 12 5.2s7.6 2.5 9.7 7.1a.9.9 0 0 1 0 .8c-2.1 4.6-5.7 7.1-9.7 7.1s-7.6-2.5-9.7-7.1a.9.9 0 0 1 0-.8Z"/><circle cx="12" cy="12.7" r="3.1"/></svg></button></span></label>
-        <p class="field-hint">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions. No server CORS setup needed — the app's own dev server proxies Nextcloud traffic.</p>
         <p class="field-error" data-nc-connect-error hidden></p>
-        <button class="primary-button" type="button" data-nc-connect>Connect</button>
-      </div>`;
+        <button class="primary-button full" type="button" data-nc-connect disabled>Connect</button>
+      </div>
+      <p class="settings-group-footer">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions — don't use your account password. KaChat stores it on this device.</p>`;
     updateComposerButton();
     return;
   }
 
   const host = (() => { try { return new URL(nc.server).host; } catch { return nc.server; } })();
+  const lastSynced = Number(nc.lastAutoBackup || 0);
+  const restoreDisabled = restore.phase === "running" || lastBackupInfo === null;
   settingsEl.innerHTML = `
+    <p class="settings-group-label">Connected Account</p>
     <div class="settings-list-card">
-      <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Connected</strong><small>${deps.escapeHtml(nc.username)}@${deps.escapeHtml(host)}</small></span></div>
-      <button class="settings-list-row" type="button" data-nc-pick-start><span class="settings-row-copy"><strong>Start Folder</strong><small>${deps.escapeHtml(nc.startFolder || "All Files")}</small></span></button>
-      <div class="settings-toggle-row"><span><strong>Send Media via Nextcloud</strong><small>Photos and voice notes upload full-quality to your server and send as links; the file sits unencrypted behind an unguessable link, while the message itself stays end-to-end encrypted. Off = media embeds in the encrypted on-chain payload.</small></span><label class="switch-control"><input type="checkbox" data-nc-media-send ${nc.mediaSend ? "checked" : ""}><span></span></label></div>
-      <div class="settings-toggle-row"><span><strong>Automatic Sync</strong><small>Keeps this device level with your phone: uploads a few seconds after new messages, and pulls in whatever your other devices wrote, checking every few seconds while a chat is open. Pauses when this window is hidden.</small></span><label class="switch-control"><input type="checkbox" data-nc-auto ${nc.autoBackup ? "checked" : ""}><span></span></label></div>
-      <button class="settings-list-row" type="button" data-nc-pick-backup><span class="settings-row-copy"><strong>Backup Folder</strong><small>${deps.escapeHtml(nc.backupFolder || `${DEFAULT_BACKUP_FOLDER} (default)`)}</small></span></button>
-      <button class="settings-list-row" type="button" data-nc-backup-now><span class="settings-row-copy"><strong>Back Up Messages Now</strong><small data-nc-backup-status>Checking last backup…</small></span></button>
-      <button class="settings-list-row" type="button" data-nc-restore><span class="settings-row-copy"><strong>Restore from Backup</strong><small>Merges ${deps.escapeHtml(BACKUP_FILENAME)} back into this device's chat history, whichever device wrote it.</small></span></button>
-      <p class="field-hint">One backup, shared across your devices: iPhone, Android and desktop all read and write <strong>${deps.escapeHtml(BACKUP_FILENAME)}</strong> in this folder, in the same format. Every backup merges with what is already there, so no device can erase another's history. The file is encrypted; only devices signed in with this wallet's recovery phrase can read it.</p>
-      <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong><small>Removes the stored app password from this device.</small></span></button>
-    </div>`;
+      <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Server</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(host)}</span></div>
+      <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Username</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.username)}</span></div>
+    </div>
+    <div class="settings-list-card">
+      <button class="settings-list-row" type="button" data-nc-pick-start><span class="settings-row-copy"><strong>Start Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.startFolder || "All Files")}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+    </div>
+    <p class="settings-group-footer">"Send from Nextcloud" in chats opens this folder first.</p>
+    <p class="settings-group-label">Chat Media</p>
+    <div class="settings-list-card">
+      <div class="settings-toggle-row"><span><strong>Send Media via Nextcloud</strong></span><label class="switch-control"><input type="checkbox" data-nc-media-send ${nc.mediaSend ? "checked" : ""}><span></span></label></div>
+    </div>
+    <p class="settings-group-footer">When on, photos and voice messages you send in private chats upload in full quality to this server's KaChat/Media folder, and the chat carries a share link instead — recipients see a normal media bubble. The message with the link stays end-to-end encrypted, but the files themselves are stored unencrypted on your server and are reachable by anyone who has the unguessable link. When off, media is embedded in the encrypted on-chain payload as before.</p>
+    <p class="settings-group-label">Message Backup</p>
+    <div class="settings-list-card">
+      <div class="settings-toggle-row"><span><strong>Automatic Sync</strong><small>Automatic sync works with one cloud service at a time.</small></span><label class="switch-control"><input type="checkbox" data-nc-auto ${nc.autoBackup ? "checked" : ""}><span></span></label></div>
+      ${lastSynced > 0 ? `<div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Last synced</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(new Date(lastSynced).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }))}</span></div>` : ""}
+      <button class="settings-list-row" type="button" data-nc-pick-backup><span class="settings-row-copy"><strong>Backup Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.backupFolder || `${DEFAULT_BACKUP_FOLDER} (default)`)}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+      <button class="settings-list-row" type="button" data-nc-backup-now><span class="settings-row-copy"><strong>Back Up Messages Now</strong></span></button>
+      <button class="settings-list-row" type="button" data-nc-restore ${restoreDisabled ? "disabled" : ""}><span class="settings-row-copy"><strong>Restore from Backup</strong></span></button>
+      <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small data-nc-backup-status>Checking last backup…</small></span></div>
+    </div>
+    <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history.</p>
+    <div class="settings-list-card danger-list-card">
+      <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
+    </div>
+    <p class="settings-group-footer">Disconnecting removes the stored app password from this device. Nothing changes on your Nextcloud server.</p>`;
   updateComposerButton();
   refreshBackupStatusLine();
 }
@@ -1218,10 +1257,13 @@ async function refreshBackupStatusLine() {
   const line = settingsEl?.querySelector("[data-nc-backup-status]");
   if (!line || !nc) return;
   const info = await fetchBackupInfo();
+  lastBackupInfo = info || null;
   const current = settingsEl?.querySelector("[data-nc-backup-status]");
   if (!current) return;
-  if (!info) { current.textContent = "No backup in this folder yet."; return; }
-  const when = info.modified ? info.modified.toLocaleString() : "unknown time";
+  const restoreBtn = settingsEl?.querySelector("[data-nc-restore]");
+  if (restoreBtn) restoreBtn.disabled = !info || restore.phase === "running";
+  if (!info) { current.textContent = "No backup on this server yet."; return; }
+  const when = info.modified ? info.modified.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "unknown time";
   const size = info.size ? ` · ${(info.size / 1024).toFixed(1)} KB` : "";
   current.textContent = `Last backup: ${when}${size}`;
 }
@@ -1474,7 +1516,13 @@ function buildModals() {
 function wireSettings() {
   settingsEl?.addEventListener("click", async (event) => {
     if (event.target.closest("[data-nc-connect]")) {
-      const server = normalizedServer(settingsEl.querySelector("[data-nc-server]")?.value);
+      const rawServer = String(settingsEl.querySelector("[data-nc-server]")?.value || "").trim();
+      const errorEl0 = settingsEl.querySelector("[data-nc-connect-error]");
+      if (rawServer.toLowerCase().startsWith("http://")) {
+        if (errorEl0) { errorEl0.textContent = "Use https. Unencrypted connections are not supported."; errorEl0.hidden = false; }
+        return;
+      }
+      const server = normalizedServer(rawServer);
       const username = String(settingsEl.querySelector("[data-nc-username]")?.value || "").trim();
       const appPassword = String(settingsEl.querySelector("[data-nc-password]")?.value || "").trim();
       const errorEl = settingsEl.querySelector("[data-nc-connect-error]");
@@ -1492,13 +1540,15 @@ function wireSettings() {
         armAutoBackup();
         deps.showToast?.("Nextcloud connected.");
       } catch (error) {
-        button.disabled = false;
         button.textContent = "Connect";
+        button.disabled = !ncConnectFormValid();
         showError(corsHint(error));
       }
       return;
     }
     if (event.target.closest("[data-nc-disconnect]")) {
+      const ok = await confirmDialog({ title: "Disconnect Nextcloud", message: "The app password is removed from this device. You can reconnect any time.", confirmLabel: "Disconnect", destructive: true });
+      if (!ok) return;
       nc = null;
       syncDirty = false;
       lastAutoSyncAt = 0;
@@ -1537,6 +1587,10 @@ function wireSettings() {
     // The restore itself lives in the blocking overlay (confirm -> progress -> result), so the
     // user cannot navigate away mid-import and the merge is never a toast-only affair.
     if (event.target.closest("[data-nc-restore]")) { openRestoreOverlay(); return; }
+  });
+
+  settingsEl?.addEventListener("input", (event) => {
+    if (event.target.matches("[data-nc-server], [data-nc-username], [data-nc-password]")) refreshConnectFormState();
   });
 
   settingsEl?.addEventListener("change", (event) => {
