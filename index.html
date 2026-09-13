@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=358" />
+  <link rel="stylesheet" href="./ui/styles.css?v=359" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -536,9 +536,14 @@
               <strong>Post</strong>
             </div>
             <div data-kaposts-thread-root></div>
-            <!-- Replying opens the composer, where the post being answered renders below the
-                 editor - instead of a bar with that post scrolled off above it. -->
-            <button class="primary-button kaposts-thread-reply" type="button" data-kaposts-thread-reply>Reply</button>
+            <!-- X's shape: a small reply box directly under the post you opened, with every
+                 reply below it. Replying to a specific REPLY still opens the composer, where
+                 that reply renders under the editor. -->
+            <div class="kaposts-reply-bar kaposts-reply-inline">
+              <textarea class="kaposts-reply-input" data-kaposts-reply-input rows="1" placeholder="Post your reply"></textarea>
+              <span class="kaposts-meter" data-kaposts-reply-meter hidden></span>
+              <button class="primary-button kaposts-reply-send" type="button" data-kaposts-reply-send>Reply</button>
+            </div>
             <div class="kaposts-thread-replies-host" data-kaposts-thread-replies></div>
           </div>
           <div class="kaposts-panel" data-kaposts-panel hidden>
@@ -2796,7 +2801,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=395"></script>
+  <script type="module" src="./ui/app.js?v=396"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

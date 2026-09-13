@@ -80,6 +80,7 @@ let panelOverThread = false;
 let pendingThreadScrollRemoteId = null;
 let threadHighlightRemoteId = null;
 let threadHighlightTimer = 0;
+let replyInput, replyMeter, replySend;
 let composerQuoteTarget = null; // post being quoted, when the composer is a quote composer
 let composerReplyTarget = null; // post being replied to, when the composer is a reply composer
 let countdownTicker = null;
@@ -1765,13 +1766,20 @@ async function submitReply(parent, text) {
   }, () => {
     mutatePost(parent.id, (p) => { p.comments = p.comments.filter((c) => c.id !== comment.id); });
     renderThread();
-    // An undone reply reopens the composer it was written in, with its parent attached - the
-    // reply bar it used to be put back into no longer exists.
-    openComposer(null, { replyTarget: parent });
-    if (composerInput) {
-      composerInput.value = text;
-      composerInput.dispatchEvent(new Event("input", { bubbles: true }));
-      composerInput.focus();
+    // Back where it was written: the inline box when it answered the open post, the composer
+    // when it answered one of the replies.
+    const topId = threadStack[threadStack.length - 1];
+    if (replyInput && parent.id === topId) {
+      replyInput.value = text;
+      replyInput.dispatchEvent(new Event("input", { bubbles: true }));
+      replyInput.focus();
+    } else {
+      openComposer(null, { replyTarget: parent });
+      if (composerInput) {
+        composerInput.value = text;
+        composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+        composerInput.focus();
+      }
     }
   });
 }
@@ -1884,6 +1892,15 @@ function restoreComposerDraft(text, { quoted = null, segments = [] } = {}) {
 /// at the field's CSS max-height so the two cannot disagree; past that it scrolls, because a reply
 /// box that keeps growing pushes the post being replied to off the screen (iOS caps it at 92pt for
 /// exactly that reason).
+/// The inline reply box grows with what is typed, then scrolls - a box that keeps growing pushes
+/// the post being answered off the screen.
+const REPLY_MAX_HEIGHT_PX = 140;
+function autoGrowReply() {
+  if (!replyInput) return;
+  replyInput.style.height = "auto";
+  replyInput.style.height = `${Math.min(replyInput.scrollHeight, REPLY_MAX_HEIGHT_PX)}px`;
+}
+
 function openComposer(quoteTarget = null, { replyTarget = null } = {}) {
   editingDraftId = null;
   // Posting costs KAS — with a confirmed-zero chatting balance, show the funding
@@ -3322,6 +3339,10 @@ export function initKaPosts(dependencies) {
   composerSubmit = document.querySelector("[data-kaposts-composer-submit]");
   composerTitle = document.querySelector("[data-kaposts-composer-title]");
   composerQuote = document.querySelector("[data-kaposts-composer-quote]");
+  replyInput = document.querySelector("[data-kaposts-reply-input]");
+  replyMeter = document.querySelector("[data-kaposts-reply-meter]");
+  replySend = document.querySelector("[data-kaposts-reply-send]");
+  attachMentionAutocomplete(replyInput);
   attachMentionAutocomplete(composerInput);
   panelEl = document.querySelector("[data-kaposts-panel]");
   panelTitleEl = document.querySelector("[data-kaposts-panel-title]");
@@ -3449,13 +3470,22 @@ export function initKaPosts(dependencies) {
     renderComposerThreadUi();
   });
 
-  // The thread's Reply button: opens the composer for the post on screen. openComposer carries
-  // the zero-balance gate the old bar had, so a confirmed 0 balance shows the funding card
-  // instead of a composer that could not submit.
-  document.querySelector("[data-kaposts-thread-reply]")?.addEventListener("click", () => {
+  // The inline reply box under the post you opened (X's shape). Replying to a specific reply
+  // still opens the composer - see the data-kaposts-reply-to handler.
+  replyInput?.addEventListener("input", () => { updateMeter(replyInput, replyMeter); autoGrowReply(); });
+  replySend?.addEventListener("click", () => {
+    if (deps.isChattingBalanceZero?.()) {
+      deps.showFundingGate?.();
+      return;
+    }
+    const text = replyInput.value.trim();
     const topId = threadStack[threadStack.length - 1];
     const target = topId ? findPost(topId) : null;
-    if (target) openComposer(null, { replyTarget: target });
+    if (!text || !target || !target.remoteId) return;
+    replyInput.value = "";
+    updateMeter(replyInput, replyMeter);
+    autoGrowReply(); // a sent reply leaves the box grown to its old size otherwise
+    submitReply(target, text);
   });
 
   // Delegated feed/thread/toast interactions
@@ -3709,6 +3739,21 @@ export function initKaPosts(dependencies) {
     }
 
     const open = event.target.closest("[data-kaposts-open]");
-    if (open) { const p = findPost(open.dataset.kapostsOpen); if (p) openThread(p); return; }
+    if (open) {
+      const post = findPost(open.dataset.kapostsOpen);
+      if (post) {
+        // Close the panel FIRST: its rows live in activePanel, and a thread rendering over a
+        // still-open profile left the profile on screen - which read as the tap doing nothing
+        // but scrolling the profile back to the top.
+        closePanel();
+        openThread(post);
+      } else {
+        // The local id belongs to a list this lookup does not search (a profile's own rows once
+        // its panel has closed). The txid on the cell always resolves.
+        const remoteId = open.closest("[data-kaposts-remote-id]")?.dataset.kapostsRemoteId;
+        if (remoteId) resolveAndOpenPost(remoteId);
+      }
+      return;
+    }
   });
 }

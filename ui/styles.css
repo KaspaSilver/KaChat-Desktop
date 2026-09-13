@@ -9005,5 +9005,18 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .kaposts-inline-note { color: var(--muted); font-size: 12.5px; margin: 6px 0 8px; }
 
-/* The thread's Reply button, in place of the old reply bar. */
-.kaposts-thread-reply { width: 100%; margin: 6px 0 12px; }
+/* Seamless thread column (X): the posts above and below the one you opened are rows in one
+   continuous surface, not a stack of cards. Cards are for the FEED, where each post is its own
+   item; inside a conversation the boxes fight the thread line that is meant to connect them. */
+.kaposts-thread .kaposts-cell,
+.kaposts-ancestor .kaposts-cell,
+.kaposts-thread-chain-item .kaposts-cell {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 2px;
+}
+/* One hairline between rows instead of a border around each. */
+.kaposts-ancestor + .kaposts-ancestor,
+.kaposts-thread-chain-item + .kaposts-thread-chain-item { border-top: 1px solid var(--line); }
+.kaposts-thread-chain-item { border-left: 0; margin-left: 0; }
