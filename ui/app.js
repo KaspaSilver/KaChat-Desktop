@@ -13109,6 +13109,12 @@ async function runEngineSendPipeline(conversationId, messageId) {
   } catch (error) {
     updateMessageStatus(conversationId, messageId, { status: MESSAGE_STATUSES.FAILED });
     setStatus(`Message failed: ${error.message}`);
+    // iOS "Failed to Send": the reason, in front of you, rather than a status line nobody reads.
+    alertDialog({
+      title: "Failed to Send",
+      message: `${error.message || "Unknown error"}\n\nPlease check your network connection and try again.`,
+      confirmLabel: "OK",
+    });
   }
 }
 
@@ -13282,6 +13288,7 @@ function refreshPaymentUnitUi() {
     paymentConversionLabel.hidden = !label;
   }
 }
+document.querySelector("[data-payment-back]")?.addEventListener("click", () => activateComposerMode("message"));
 paymentUnitToggle?.addEventListener("click", () => {
   if (!(paymentPrice > 0)) return;
   const input = composer?.elements?.message;

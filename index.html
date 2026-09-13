@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=366" />
+  <link rel="stylesheet" href="./ui/styles.css?v=367" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -219,10 +219,6 @@
                 <button type="button" data-handshake-warning-send>Send Handshake</button>
               </div>
               <div class="composer-plus-menu" data-composer-plus-menu hidden>
-                <button type="button" data-composer-mode="message">
-                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6.5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7.2L7.5 21v-3.5H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"/><path d="M7 10h10M7 13.5h7"/></svg></span>
-                  <strong>Send Text</strong>
-                </button>
                 <button type="button" data-composer-mode="kas">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><g transform="translate(24 0) scale(-1 1)"><circle cx="12" cy="12" r="9"/><path d="M9 7.5v9M15.5 7.5 11 12l4.5 4.5"/></g></svg></span>
                   <strong>Send KAS</strong>
@@ -307,6 +303,11 @@
                   <div class="composer-field-wrap">
                     <!-- Payment mode only (iOS paymentField): the unit toggle leads, the live
                          conversion and Max trail the amount. -->
+                    <!-- iOS composerQuickActions: the way back out of payment mode. -->
+                    <button class="payment-back" type="button" data-payment-back aria-label="Send message" title="Send message">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7.2L7.5 21v-3.5H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"/><path d="M7 10h10M7 13.5h7"/></svg>
+                      <span>Send message</span>
+                    </button>
                     <button class="payment-unit-toggle" type="button" data-payment-unit-toggle aria-label="Switch between KAS and fiat"></button>
                     <textarea class="composer-input" name="message" placeholder="Message" autocomplete="off" rows="1"></textarea>
                     <span class="payment-conversion" data-payment-conversion hidden></span>
@@ -2933,7 +2934,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=404"></script>
+  <script type="module" src="./ui/app.js?v=405"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

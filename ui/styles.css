@@ -3671,7 +3671,14 @@ body.session-logged-out [data-account-rename-modal] {
 }
 /* Payment-mode controls (iOS paymentField). The field wrap is a two-column grid normally;
    in payment mode it gains the toggle, conversion label and Max around the amount. */
-.composer.payment-mode .composer-field-wrap { grid-template-columns: 30px minmax(0, 1fr) auto auto 38px; column-gap: 6px; }
+.composer.payment-mode .composer-field-wrap { grid-template-columns: auto 30px minmax(0, 1fr) auto auto 38px; column-gap: 6px; }
+.composer:not(.payment-mode) .payment-back { display: none !important; }
+.payment-back {
+  display: inline-flex; align-items: center; gap: 5px; align-self: center; margin-left: 4px;
+  border: 1px solid rgba(98,244,208,.35); border-radius: 999px; background: rgba(98,244,208,.12);
+  color: var(--kaspa-ink); font-weight: 700; font-size: 12px; padding: 5px 10px; cursor: pointer; white-space: nowrap;
+}
+.payment-back svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .composer.payment-mode .composer-inline-tools { display: none; }
 .composer-field-wrap { grid-template-columns: minmax(0, 1fr) auto 38px; }
 .composer-inline-tools { display: inline-flex; align-items: center; gap: 2px; align-self: center; padding-right: 2px; }
