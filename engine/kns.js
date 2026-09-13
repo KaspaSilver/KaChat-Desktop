@@ -300,9 +300,16 @@ const profileFailureCounts = new Map();
 const pendingFetches = new Map();
 const pendingProfileFetches = new Map();
 
-function backoffFor(address, attemptMap, failureMap) {
+export function isKnsEntryFresh(entry, maxAgeMs = MIN_REFRESH_INTERVAL_MS) {
+  return Boolean(entry) && Date.now() - Number(entry.fetchedAt || 0) < maxAgeMs;
+}
+
+function backoffFor(address, attemptMap, failureMap, cached = null) {
   const last = attemptMap.get(address);
-  if (!last) return true;
+  // The attempt log lives in memory, so after a reload every address looked "never tried" and
+  // the whole contact list was refetched on the spot - the persisted cache answers the same
+  // question: anything fetched within the debounce window is not due yet.
+  if (!last) return !isKnsEntryFresh(cached);
   const failures = failureMap.get(address) || 0;
   const backoff = Math.min(MAX_BACKOFF_INTERVAL_MS, MIN_REFRESH_INTERVAL_MS * 2 ** failures);
   return Date.now() - last >= backoff;
@@ -488,10 +495,10 @@ export async function getAddressProfile(address, options) {
 // within its backoff window.
 export async function refreshIfNeeded(addresses, options = {}) {
   const eligible = (addresses || []).filter((address) =>
-    !pendingFetches.has(address) && backoffFor(address, lastAttemptAt, failureCounts));
+    !pendingFetches.has(address) && backoffFor(address, lastAttemptAt, failureCounts, domainCache[address]));
   await Promise.all(eligible.map((address) => fetchAddressInfo(address, options)));
   const eligibleProfiles = (addresses || []).filter((address) =>
-    !pendingProfileFetches.has(address) && backoffFor(address, lastProfileAttemptAt, profileFailureCounts));
+    !pendingProfileFetches.has(address) && backoffFor(address, lastProfileAttemptAt, profileFailureCounts, profileCache[address]));
   await Promise.all(eligibleProfiles.map((address) => fetchAddressProfile(address, options)));
   return eligible.length + eligibleProfiles.length;
 }

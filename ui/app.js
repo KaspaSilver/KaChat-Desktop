@@ -39,7 +39,7 @@ import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpo
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
-import { normalizeDomainLabel } from "../engine/kns.js";
+import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 // Imported, not written as string paths: Vite only rewrites and emits the assets it can SEE, and
 // a path inside a string is invisible to it - so these 404'd on the built site (a broken-image
 // icon in the notification and on the KAS mark).
@@ -4243,21 +4243,35 @@ function updateProfileHero(info, profileInfo) {
   const bannerUrl = profileInfo?.profile?.bannerUrl || "";
   if (bannerEl) bannerEl.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : "";
   const avatarUrl = profileInfo?.profile?.avatarUrl || "";
-  if (avatarEl) {
+  // Same image as last paint: leave the element alone rather than reloading it (a cache-first
+  // paint followed by a refresh would otherwise flash the avatar twice).
+  if (avatarEl && avatarEl.dataset.avatarUrl === avatarUrl) { /* unchanged */ } else if (avatarEl) {
+    avatarEl.dataset.avatarUrl = avatarUrl;
     avatarEl.innerHTML = avatarUrl
       ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
       : `<svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>`;
   }
 }
 
-async function refreshOwnKnsProfile() {
+// Paints first from the persisted KNS cache, so the profile is on screen the moment the tab
+// opens, and only goes to the indexer when the cache is missing, older than the debounce
+// window, or a write just cleared it (`force` for callers that know the data changed).
+async function refreshOwnKnsProfile({ force = false } = {}) {
   if (!engine.address || !profileKnsOwned || !profileKnsEmptyCta) return;
   const address = engine.address;
+  const cachedInfo = engine.peekKnsAddressInfo(address);
+  const cachedProfile = engine.peekKnsAddressProfile(address);
+  if (cachedInfo) applyOwnKnsProfile(cachedInfo, cachedProfile);
+  if (!force && isKnsEntryFresh(cachedInfo) && isKnsEntryFresh(cachedProfile)) return;
   const [info, profileInfo] = await Promise.all([
-    engine.fetchKnsAddressInfo(address).catch(() => null),
-    engine.fetchKnsAddressProfile(address).catch(() => null),
+    engine.fetchKnsAddressInfo(address).catch(() => cachedInfo),
+    engine.fetchKnsAddressProfile(address).catch(() => cachedProfile),
   ]);
   if (engine.address !== address) return; // account switched mid-fetch
+  applyOwnKnsProfile(info, profileInfo);
+}
+
+function applyOwnKnsProfile(info, profileInfo) {
   updateProfileHero(info, profileInfo);
   // Before the primary-domain branch below: Your Domains lists everything this account owns, and
   // an account with domains but no primary set still owns them (iOS yourDomainsSection).
