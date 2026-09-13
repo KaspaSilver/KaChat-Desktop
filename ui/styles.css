@@ -9650,7 +9650,8 @@ body.session-logged-out [data-account-rename-modal] {
 .kns-wizard-label { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .kns-wizard-balance { margin: 0; font-size: 22px; font-weight: 800; }
 .kns-wizard-address { border: 0; background: transparent; color: var(--text); font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; cursor: pointer; padding: 0 8px; }
-.kns-wizard-qr { width: 220px; height: 220px; padding: 12px; border-radius: 16px; background: #fff; }
+/* QRCode.toCanvas writes a 512px inline size onto the canvas; the card size has to win. */
+.kns-wizard-qr { width: 220px !important; height: 220px !important; max-width: 100%; padding: 12px; border-radius: 16px; background: #fff; box-sizing: border-box; }
 .kns-wizard-row { display: flex; justify-content: space-between; padding: 10px 12px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--line); }
 .kns-wizard-row span:last-child { color: var(--muted); }
 .kns-wizard-list { display: grid; gap: 10px; }
@@ -9697,7 +9698,7 @@ body.session-logged-out [data-account-rename-modal] {
 .swap-rate-card .bad { color: #ff6b6b; }
 .swap-result-card { display: grid; gap: 10px; justify-items: start; }
 .swap-result-link { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 700; cursor: pointer; padding: 0; }
-.swap-qr { width: 180px; height: 180px; padding: 12px; border-radius: 12px; background: #fff; justify-self: center; cursor: pointer; }
+.swap-qr { width: 180px !important; height: 180px !important; max-width: 100%; padding: 12px; border-radius: 12px; background: #fff; justify-self: center; cursor: pointer; box-sizing: border-box; }
 .swap-mono-button { border: 0; background: transparent; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; text-align: left; word-break: break-all; cursor: pointer; padding: 0; }
 .swap-mono-button.light { color: var(--text); }
 .swap-result-card small, .swap-details small { color: var(--muted); font-size: 12px; }
@@ -9769,3 +9770,6 @@ body.session-logged-out [data-account-rename-modal] {
 .spending-actions-pill { width: 100%; margin: 12px 0 4px; }
 .spending-total { padding: 10px 16px 6px; }
 .spending-address-row.active { border-color: var(--card-border, var(--line)); background: var(--surface-1, rgba(255, 255, 255, .04)); }
+
+.kns-wizard-body > * { min-width: 0; }
+.kns-wizard-center, .kns-wizard-form { max-width: 100%; overflow-wrap: anywhere; }
