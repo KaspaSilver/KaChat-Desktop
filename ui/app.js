@@ -8052,8 +8052,11 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
+// Bumped by one on every push, so About says exactly which build is running.
+const APP_BUILD = 1;
+const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
-if (profileVersionEl) profileVersionEl.textContent = APP_VERSION;
+if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 
 const DONATE_DOMAIN = "kachat.kas";
 let donateResolving = false;
@@ -19430,7 +19433,7 @@ function exportDiagnosticsFile() {
     const logLines = String(engineLog?.textContent || "").split("\n").filter(Boolean).slice(0, 400);
     const archive = {
       exportedAt: new Date().toISOString(),
-      app: { name: "KaChat Desktop", version: APP_VERSION, userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine },
+      app: { name: "KaChat Desktop", version: APP_VERSION_LABEL, userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine },
       account: { chattingAddress: engine.address ? `${engine.address.slice(0, 16)}…${engine.address.slice(-6)}` : null, chatsPrivacy: chatsPrivacyEnabled() },
       connection: { endpoints: getEndpoints(), explorer: currentExplorer().displayName, runtime: window.__kaspaEngineStep || null },
       counts: { contacts: (state.contacts || []).length, conversations: conversations.length, incomingMessages: incoming, outgoingMessages: outgoing },
