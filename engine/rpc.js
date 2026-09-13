@@ -292,24 +292,15 @@ export async function createRpc(kaspa, log = () => {}) {
     singleShot: true,
   });
 
-  // Automatic Scan: the public resolver picks the node, KaChat's own is the fallback.
-  if (getEndpoint("nodeScan") === "1") {
-    try { return await connectViaResolver(kaspa, { log }); }
-    catch (error) {
-      log(`Automatic scan found no usable public node (${error?.message || error}); trying KaChat's node.`);
-      return connectDefault();
-    }
-  }
-
-  // Default: KaChat's own node first. When it is unreachable the scan takes over rather than
-  // leaving the app dark - the same automatic pick kaspa-ng's web build makes - and the log and
-  // the Node Connection dialog say which node is in use.
-  try { return await connectDefault(); }
+  // Automatic Scan is the hosted mode: the Kaspa public node resolver picks the node, the way
+  // kaspa-ng's web build does, and KaChat's own node is the quiet fallback when no public node
+  // can be reached. The log and Node Connection say which one is in use.
+  try { return await connectViaResolver(kaspa, { log }); }
   catch (error) {
-    log(`KaChat's node is unreachable (${error?.message || error}); scanning public nodes.`);
-    try { return await connectViaResolver(kaspa, { log, excludedEndpoints: [DEFAULT_NODE] }); }
-    catch (scanError) {
-      throw new Error(`${error?.message || error} No public node could be reached either (${scanError?.message || scanError}).`);
+    log(`Automatic scan found no usable public node (${error?.message || error}); trying KaChat's node.`);
+    try { return await connectDefault(); }
+    catch (fallbackError) {
+      throw new Error(`No public node could be reached (${error?.message || error}), and KaChat's node failed too (${fallbackError?.message || fallbackError}).`);
     }
   }
 }

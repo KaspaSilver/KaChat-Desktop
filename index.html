@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=383" />
+  <link rel="stylesheet" href="./ui/styles.css?v=384" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -1402,24 +1402,17 @@
         <section class="settings-group">
           <p class="settings-group-label">Node Selection</p>
           <div class="node-mode-cards" data-node-mode-cards>
-            <div class="node-mode-card" role="button" tabindex="0" data-node-mode="auto">
-              <span class="node-mode-radio" aria-hidden="true"></span>
-              <span class="node-mode-copy">
-                <strong>KaChat Node</strong>
-                <small>The node KaChat runs, and the one everyone uses unless they choose otherwise. If it is ever unreachable, KaChat scans the public Kaspa nodes and connects to a healthy one automatically, and the log says which. Settings › Connection can put the scan first instead.</small>
-              </span>
-            </div>
             <div class="node-mode-card" role="button" tabindex="0" data-node-mode="scan">
               <span class="node-mode-radio" aria-hidden="true"></span>
               <span class="node-mode-copy">
-                <strong>Automatic Node Scan</strong>
-                <small>The Kaspa public node resolver picks a healthy public node for you, the way kaspa-ng does, and KaChat's node is the fallback. Best when KaChat's node is far from you or often busy.</small>
+                <strong>Automatic Node Scan</strong> <span class="node-mode-badge">Recommended</span>
+                <small>The Kaspa public node resolver picks a healthy public node for you, the way kaspa-ng does. Nothing to set up; KaChat's own node is the fallback if no public node answers.</small>
               </span>
             </div>
             <div class="node-mode-card" role="button" tabindex="0" data-node-mode="custom">
               <span class="node-mode-radio" aria-hidden="true"></span>
               <span class="node-mode-copy">
-                <strong>Custom Node</strong>
+                <strong>Custom Node</strong> <span class="node-mode-badge">Best</span>
                 <small>Your own Kaspa wRPC endpoint. On the same router/LAN as your node: use its local IP with port 17110 — e.g. ws://192.168.1.50:17110. From outside your network through a TLS reverse proxy: wss://your-domain (no port).</small>
                 <input class="node-mode-input" type="text" placeholder="wss://your-node.duckdns.org" autocomplete="off" spellcheck="false" data-custom-node-url disabled />
               </span>
@@ -2952,7 +2945,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=430"></script>
+  <script type="module" src="./ui/app.js?v=431"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

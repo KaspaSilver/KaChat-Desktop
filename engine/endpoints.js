@@ -23,8 +23,8 @@ export const ENDPOINT_DEFAULTS = Object.freeze({
   knsApi: "https://api.knsdomains.org/mainnet/api/v1",
   translationService: "https://kachat.duckdns.org",
   trustedNode: "",
-  // "1" = Automatic Scan: the public node resolver picks the node and KaChat's own is the
-  // fallback. "" = Default: KaChat's node first, the resolver only when it is unreachable.
+  // Retired: the hosted mode is always the public-node scan with KaChat's node as fallback. The
+  // key stays so an older stored value does not surface as an unknown endpoint.
   nodeScan: "",
 });
 // The node "Default (Recommended)" connects to. iOS talks gRPC to toccata.kaspium.io; a browser

@@ -9816,3 +9816,5 @@ body.session-logged-out [data-account-rename-modal] {
 .voice-player-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .voice-player.outgoing .voice-player-time { color: rgba(6,17,15,.75); }
 .message-link-audio.voice-player { margin-top: 8px; }
+
+.node-mode-badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(98,244,208,.16); color: var(--kaspa-ink, var(--kaspa)); font-size: 10.5px; font-weight: 800; vertical-align: middle; }
