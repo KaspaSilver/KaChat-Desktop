@@ -4,7 +4,7 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
-import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress } from "./coldstorage.js";
+import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts } from "./nextcloud.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
@@ -5900,6 +5900,16 @@ async function spendingAddressHasHistory(address, { timeoutMs = 0 } = {}) {
   } catch { return false; }
 }
 
+// Everything the visible spending addresses hold, together (iOS "Total Balance"). The chatting
+// address is deliberately not folded in.
+function updateSpendingTotalBalance(entries) {
+  const totalEl = document.querySelector("[data-spending-total-balance]");
+  if (!totalEl) return;
+  const known = entries.filter((e) => e.kas != null && Number.isFinite(Number(e.kas)));
+  if (!known.length) { totalEl.textContent = "-- KAS"; return; }
+  totalEl.textContent = `${trimKas8(known.reduce((sum, e) => sum + (Number(e.kas) || 0), 0))} KAS`;
+}
+
 async function renderSpendingList() {
   if (!spendingListEl) return;
   if (!activeAccountMnemonic()) {
@@ -5932,6 +5942,7 @@ async function renderSpendingList() {
   spendingListEl.innerHTML = items
     .map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${balCache[it.address].kas} KAS` : "…", balCache[it.address]?.used ?? null, false, reservedAddresses.has(it.address)))
     .join("");
+  updateSpendingTotalBalance(items.map((it) => ({ kas: balCache[it.address]?.kas != null ? Number(balCache[it.address].kas) : null })));
   // Enrich with live balance + used-state, then order: primary first → funded → rest.
   // Balances arrive in ONE batched node call (the per-address loop this replaces fired one
   // round trip per row); history checks run only for zero-balance rows, 4 at a time, so a
@@ -5952,6 +5963,7 @@ async function renderSpendingList() {
     }
     return { ...it, kas, totalKas, used: kas > 0 ? true : (balCache[it.address]?.used ?? null) };
   });
+  updateSpendingTotalBalance(enriched);
   const pendingUsed = enriched.filter((e) => e.kas === 0 && e.used == null);
   for (let base = 0; base < pendingUsed.length; base += 4) {
     await Promise.all(pendingUsed.slice(base, base + 4).map(async (e) => {
@@ -5982,10 +5994,7 @@ async function renderSpendingList() {
   // the group) → fresh/unused last.
   const rank = (e) => (e.index === primaryIndex ? 0 : (e.kas > 0 || domainOwning.has(e.address)) ? 1 : 2);
   enriched.sort((a, b) => rank(a) - rank(b) || a.index - b.index);
-  // Everything the visible spending addresses hold, together (iOS "Total Balance"). The
-  // chatting address is deliberately not folded in.
-  const totalEl = document.querySelector("[data-spending-total-balance]");
-  if (totalEl) totalEl.textContent = `${trimKas8(enriched.reduce((sum, e) => sum + (Number(e.kas) || 0), 0))} KAS`;
+  updateSpendingTotalBalance(enriched);
   spendingListEl.innerHTML = enriched
     .map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} KAS` : "-- KAS", e.used, domainOwning.has(e.address), reservedAddresses.has(e.address)))
     .join("");
@@ -8614,8 +8623,22 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
         amountEl.textContent = `${info.isOutgoing ? "-" : "+"}${sompiToKasDisplay(info.amountSompi)} KAS`;
         row.append(amountEl);
       }
+      const trailing = document.createElement("span");
+      trailing.className = "manage-address-row-trailing";
+      trailing.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>';
+      row.append(trailing);
+      // Tapping a transaction asks what to do with it (iOS): Open in Explorer, or Add to
+      // Portfolio when it moved money for this address. Opening the explorer outright left
+      // Add to Portfolio with nowhere to live.
       row.addEventListener("click", () => {
-        if (tx.transaction_id) window.open(explorerTxUrl(tx.transaction_id), "_blank", "noopener,noreferrer");
+        if (!tx.transaction_id) return;
+        openTransactionActionsSheet({
+          txId: tx.transaction_id,
+          outgoing: Boolean(info?.isOutgoing),
+          amountSompi: info ? Number(info.amountSompi) : null,
+          blockTime: tx.block_time ? Number(tx.block_time) : null,
+          sourceAddress: address,
+        });
       });
       listEl.appendChild(row);
     }
@@ -9164,6 +9187,22 @@ document.addEventListener("click", async (event) => {
   const copy = event.target.closest("[data-copy-public-key]");
   if (!copy) return;
   try { await copyTextToClipboard(copy.dataset.copyPublicKey); showCopyToast("Public key copied"); } catch {}
+});
+
+document.querySelector("[data-spending-address-actions]")?.addEventListener("click", async () => {
+  if (!spendingDetailAddress) return;
+  const choice = await chooseDialog({
+    title: "Address Actions",
+    message: shortAddress(spendingDetailAddress),
+    options: [
+      { id: "private", title: "View Private Key", subtitle: "The key that spends this address. Never share it." },
+      { id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." },
+      { id: "explorer", title: "View in Explorer", subtitle: "Opens this address on your chosen block explorer." },
+    ],
+  });
+  if (choice === "private") document.querySelector("[data-spending-detail-privatekey]")?.click();
+  else if (choice === "copy") { try { await copyTextToClipboard(spendingDetailAddress); showCopyToast(addressCopiedToastText(spendingDetailAddress)); } catch {} }
+  else if (choice === "explorer") window.open(explorerAddressUrl(spendingDetailAddress), "_blank", "noopener,noreferrer");
 });
 
 // Export a specific spending address's private key (derived from the account phrase at its index).

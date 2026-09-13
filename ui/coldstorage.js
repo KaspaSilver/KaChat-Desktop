@@ -648,7 +648,7 @@ function confirmColdPortfolioAdd() {
     timestamp: d.timestamp,
     notes: d.notes?.trim() ? d.notes.trim() : null,
     sourceTxId: tx.txId,
-    sourceAddress: detailEntries.find((e) => e.index === activeAddressIndex)?.address ?? null,
+    sourceAddress: coldSheet.sourceAddress || detailEntries.find((e) => e.index === activeAddressIndex)?.address || null,
   });
   closeColdActionsSheet();
   deps.showToast?.(`Added to ${d.portfolioName}.`);
@@ -742,6 +742,18 @@ function openColdSheet(spec) {
 }
 
 function openColdActionsSheet() { openColdSheet({ kind: "actions" }); }
+
+/// The transaction sheet for any address screen (chatting address, spending addresses): Open in
+/// Explorer, and Add to Portfolio when the transaction moved money for `sourceAddress`. The
+/// portfolio row records that address, so the cold-storage entry lookup is not used for it.
+export function openTransactionActionsSheet({ txId, outgoing = false, amountSompi = null, blockTime = null, sourceAddress = null }) {
+  if (!txId) return;
+  openColdSheet({
+    kind: "transaction",
+    tx: { txId, outgoing: Boolean(outgoing), amountSompi: amountSompi != null ? Number(amountSompi) : null, blockTime: blockTime != null ? Number(blockTime) : null },
+    sourceAddress: sourceAddress || null,
+  });
+}
 
 function closeColdActionsSheet() {
   const modal = modalsEl?.querySelector("[data-cold-actions-modal]");
@@ -1949,7 +1961,7 @@ function buildModals() {
       const tx = coldSheet.tx;
       // One portfolio still gets the details step - that is where the type, the price and the
       // date are confirmed, and skipping it would record guesses. What it skips is the CHOICE.
-      openColdSheet({ kind: "portfolio-pick", tx, portfolios, duplicates });
+      openColdSheet({ kind: "portfolio-pick", tx, portfolios, duplicates, sourceAddress: coldSheet.sourceAddress || null });
       if (portfolios.length === 1) openColdPortfolioDetails(portfolios[0].id);
       return;
     }

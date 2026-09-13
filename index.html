@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=368" />
+  <link rel="stylesheet" href="./ui/styles.css?v=369" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -2260,22 +2260,27 @@
           <button class="chatting-address-back" type="button" data-close-manage-address aria-label="Back">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
           </button>
-          <span class="chatting-address-balance" data-manage-address-balance>-- KAS</span>
+          <span class="chatting-address-balance">Chatting Address</span>
           <div class="manage-address-toolbar">
-            <!-- iOS Address Actions: View Private Key / View Public Key / View in Explorer, in a sheet
-                 that says what each is. The explorer link element stays for the code that sets it. -->
-            <button type="button" class="manage-address-icon-button" data-open-address-actions aria-label="Address Actions" title="Address Actions">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
-            </button>
             <a data-manage-address-explorer-link href="#" target="_blank" rel="noopener noreferrer" hidden aria-hidden="true"></a>
             <button type="button" data-open-privatekey hidden aria-hidden="true"></button>
           </div>
         </header>
 
+        <div class="spending-detail-balance">
+          <span class="spending-detail-balance-label">Balance</span>
+          <span class="spending-detail-balance-value" data-manage-address-balance>-- KAS</span>
+        </div>
+
         <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Manage address view">
           <button type="button" class="settings-segmented-option active" data-manage-address-tab="transactions">Transaction History</button>
           <button type="button" class="settings-segmented-option" data-manage-address-tab="utxos">UTXOs</button>
         </div>
+
+        <!-- iOS: one labelled button instead of unlabelled glyphs in the bar. Opens the same
+             Address Actions sheet as Manage Addresses: View Private Key / View Public Key /
+             View in Explorer, each saying what it does. -->
+        <button type="button" class="address-actions-pill" data-open-address-actions>Address Actions</button>
 
         <div class="manage-address-body">
           <div data-manage-address-panel="transactions">
@@ -2443,12 +2448,8 @@
         </button>
         <span class="chatting-address-balance" data-spending-detail-title>Spending</span>
         <div class="manage-address-toolbar">
-          <button type="button" class="manage-address-icon-button" data-spending-detail-privatekey aria-label="Export private key">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-          </button>
-          <a class="manage-address-icon-button" data-spending-detail-explorer href="#" target="_blank" rel="noopener noreferrer" aria-label="View address in explorer">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
-          </a>
+          <button type="button" data-spending-detail-privatekey hidden aria-hidden="true"></button>
+          <a data-spending-detail-explorer href="#" target="_blank" rel="noopener noreferrer" hidden aria-hidden="true"></a>
         </div>
       </header>
 
@@ -2463,6 +2464,7 @@
         <button type="button" class="settings-segmented-option" data-spending-detail-tab="utxos">UTXOs</button>
         <button type="button" class="settings-segmented-option" data-spending-detail-tab="kns">KNS Domains</button>
       </div>
+      <button type="button" class="address-actions-pill" data-spending-address-actions>Address Actions</button>
 
       <div class="manage-address-body">
         <div data-spending-detail-panel="transactions">
@@ -2969,7 +2971,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=406"></script>
+  <script type="module" src="./ui/app.js?v=407"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

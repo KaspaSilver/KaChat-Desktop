@@ -9579,3 +9579,10 @@ body.session-logged-out [data-account-rename-modal] {
 .spending-privacy-row .funded { display: inline-flex; align-items: center; gap: 6px; color: var(--kaspa-ink); font-weight: 700; font-size: 13px; }
 .spending-privacy-row .funded b { padding: 2px 8px; border-radius: 999px; background: rgba(98,244,208,.15); font-size: 11px; }
 .spending-privacy-row svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* iOS "Address Actions": one labelled capsule under the tabs on the chatting and spending address
+   screens, the same button Manage Addresses has at its foot. */
+.address-actions-pill { display: block; width: calc(100% - 32px); margin: 4px 16px 10px; padding: 13px 16px; border: 0; border-radius: 999px; background: var(--kaspa); color: #000; font-size: 14px; font-weight: 700; text-align: center; cursor: pointer; }
+.address-actions-pill:hover { filter: brightness(1.05); }
+.manage-address-row-trailing { display: inline-flex; margin-left: 8px; color: var(--kaspa); flex: 0 0 auto; }
+.manage-address-row-trailing svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
