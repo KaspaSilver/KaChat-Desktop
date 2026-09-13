@@ -20634,6 +20634,15 @@ function openMsgContextMenu({ x, y, reaction, items }) {
       b.addEventListener("click", () => { cleanup(); reaction.onPick(emoji); });
       row.append(b);
     }
+    // "+" into the full emoji picker (iOS QuickReactionBarView's more button), so any emoji
+    // can be a reaction, not only the six quick ones.
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "msg-context-reactions-more";
+    more.setAttribute("aria-label", "More reactions");
+    more.textContent = "+";
+    more.addEventListener("click", () => { cleanup(); openEmojiReactionPicker({ onPick: (emoji) => reaction.onPick(emoji) }); });
+    row.append(more);
     menu.append(row);
   }
 

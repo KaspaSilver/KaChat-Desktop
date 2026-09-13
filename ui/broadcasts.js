@@ -961,22 +961,7 @@ function appendReactionUi(el, m) {
   const myEntry = perReactor[myAddress];
   const myCurrentEmoji = myEntry && !myEntry.removed ? myEntry.emoji : null;
 
-  // Hover quick-reaction bar — same fixed emoji set as 1:1/iOS/Android.
-  const bar = document.createElement("div");
-  bar.className = "message-reaction-bar";
-  const barPill = document.createElement("div");
-  barPill.className = "message-reaction-bar-pill";
-  for (const emoji of (typeof deps.quickReactionEmojis === "function" ? deps.quickReactionEmojis() : deps.quickReactionEmojis) || []) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = emoji;
-    button.dataset.broadcastReact = m.txId;
-    button.dataset.emoji = emoji;
-    if (emoji === myCurrentEmoji) button.classList.add("active");
-    barPill.append(button);
-  }
-  bar.append(barPill);
-  el.append(bar);
+  // No hover bar: reacting is the right-click menu (and double-click), like everywhere else.
 
   // Aggregated chips under the bubble; clicking your own active emoji removes it.
   const entries = Object.values(perReactor).filter((entry) => !entry.removed);
