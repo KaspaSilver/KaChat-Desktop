@@ -9736,3 +9736,12 @@ body.session-logged-out [data-account-rename-modal] {
 .swap-details { display: grid; gap: 8px; justify-items: start; }
 .swap-details-head { display: grid; gap: 4px; }
 .swap-details-status { display: flex; justify-content: space-between; width: 100%; align-items: center; }
+
+/* Portfolio transaction editor (iOS PortfolioTransactionEditor) and empty state. */
+.portfolio-editor-unit-row { display: flex; align-items: center; gap: 8px; }
+.portfolio-editor-unit-row input { flex: 1; min-width: 0; }
+.portfolio-editor-unit-row em { font-style: normal; color: var(--muted); font-size: 13px; }
+.portfolio-editor-total { flex-direction: row; justify-content: space-between; align-items: center; padding: 10px 12px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--line); }
+.portfolio-editor-total strong { color: var(--text); font-size: 15px; }
+.portfolio-empty-state { display: grid; gap: 4px; }
+.portfolio-empty-state strong { color: var(--text); font-size: 15px; }

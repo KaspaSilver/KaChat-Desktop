@@ -48,7 +48,7 @@ function isPricePending(notes) {
 
 const RANGES = [
   { days: 1, label: "1D" },
-  { days: 7, label: "7D" },
+  { days: 7, label: "1W" },
   { days: 30, label: "1M" },
   { days: 90, label: "3M" },
   { days: 365, label: "1Y" },
@@ -78,6 +78,8 @@ let view = "main";         // "main" | "price" | "value" | "hashrate" — which 
 /// What the mining estimate has been typed into. Held here rather than in the DOM so the figure
 /// survives the re-render each keystroke triggers.
 let hashrateInput = "";
+const HASHRATE_RANGES = [{ days: 30, label: "1M" }, { days: 90, label: "3M" }, { days: 365, label: "1Y" }, { days: 0, label: "All" }];
+let hashrateRangeDays = 90;
 /// The converter's two fields. Only the one being TYPED IN is authoritative - the other is
 /// derived - so a rounded value can never be fed back through the rate and drift (iOS
 /// KasConverterCard keeps the same rule).
@@ -119,7 +121,7 @@ function refreshSelectionUi() {
   const del = rootEl?.querySelector("[data-portfolio-delete-selected]");
   if (all) all.textContent = total > 0 && selectedTxIds.size === total ? "Deselect All" : "Select All";
   if (del) {
-    del.textContent = `Delete (${selectedTxIds.size})`;
+    del.textContent = `Delete Selected (${selectedTxIds.size})`;
     del.disabled = selectedTxIds.size === 0;
   }
 }
@@ -271,6 +273,17 @@ function fmtFiat(value) {
     minimumFractionDigits: 2, maximumFractionDigits: 2,
   });
   return `${sign}${currencySymbol()}${magnitude}`;
+}
+
+// iOS PortfolioFormat.compactCurrency: $2.4B rather than every digit of a market cap.
+function fmtCompactFiat(value) {
+  const v = Math.abs(Number(value) || 0);
+  const sign = Number(value) < 0 ? "-" : "";
+  const units = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]];
+  for (const [size, suffix] of units) {
+    if (v >= size) return `${sign}${currencySymbol()}${(v / size).toLocaleString(undefined, { maximumFractionDigits: v / size >= 100 ? 0 : 1 })}${suffix}`;
+  }
+  return fmtFiat(Number(value) || 0);
 }
 
 // iOS PortfolioFormat.price: 5 decimals under a unit, else 2.
@@ -503,10 +516,25 @@ function transactionRowHtml(tx) {
 }
 
 // Two tappable squares (KAS price | portfolio value) that open the full-screen chart screens.
+function todayChange(transactions) {
+  const series = computeValueHistory(transactions, sevenDayHistory);
+  if (!series.length) return null;
+  const [latestTs, latestValue] = series[series.length - 1];
+  const dayAgo = latestTs - 86_400_000;
+  let base = null;
+  for (let i = series.length - 1; i >= 0; i -= 1) { if (series[i][0] <= dayAgo) { base = series[i]; break; } }
+  if (!base) return null;
+  const amount = latestValue - base[1];
+  return { amount, percent: base[1] === 0 ? 0 : (amount / base[1]) * 100 };
+}
+
 function squaresHtml(summary) {
   const change = price?.change24h ?? null;
   const pPos = (change ?? 0) >= 0;
-  const plPos = summary.totalPL >= 0;
+  // The last 24 hours, not all-time P&L: a number that only grows over the life of the
+  // portfolio says nothing about today, and it sat next to the Kaspa card's 24h figure.
+  const today = todayChange(activePortfolio().transactions || []);
+  const plPos = (today?.amount ?? 0) >= 0;
   return `
     <div class="portfolio-squares">
       <button class="portfolio-square" type="button" data-portfolio-open="price">
@@ -525,7 +553,9 @@ function squaresHtml(summary) {
           <span class="portfolio-square-chev">›</span>
         </div>
         <div class="portfolio-square-value">${fmtFiat(summary.currentValue)}</div>
-        <div class="portfolio-square-change ${plPos ? "gain" : "loss"}">${plPos ? "↑" : "↓"} ${Math.abs(summary.totalPLPercent).toFixed(2)}%</div>
+        ${today
+          ? `<div class="portfolio-square-change ${plPos ? "gain" : "loss"}">${plPos ? "↑" : "↓"} ${Math.abs(today.percent).toFixed(2)}%</div>`
+          : `<div class="portfolio-square-change muted">24h change not available yet</div>`}
       </button>
     </div>`;
 }
@@ -570,7 +600,7 @@ function renderCardModal() {
     const count = (portfolio.transactions || []).length;
     body.innerHTML = `
       ${head(`Delete ${portfolio.name}?`)}
-      <p class="field-hint">This removes the portfolio and its ${count} transaction${count === 1 ? "" : "s"}. It cannot be undone.</p>
+      <p class="field-hint">'${deps.escapeHtml(portfolio.name)}' and its ${count} transaction${count === 1 ? "" : "s"} will be deleted. This can't be undone.</p>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-portfolio-card-back>Cancel</button>
         <button class="primary-button danger" type="button" data-portfolio-card-delete-confirm>Delete</button>
@@ -591,7 +621,7 @@ function renderCardModal() {
       <button type="button" class="cold-action-row cold-action-row-danger" data-portfolio-card-mode="delete">
         <span class="cold-action-copy"><strong>Delete ${deps.escapeHtml(portfolio.name)}</strong><small>Removes it and everything recorded in it.</small></span>
       </button>` : `
-      <p class="field-hint">This is your only portfolio, so it cannot be deleted or reordered.</p>`}
+      <p class="field-hint">This is your only portfolio, so it can't be deleted or reordered.</p>`}
     </div>`;
 }
 
@@ -685,16 +715,16 @@ function renderPortfolioActionSheet() {
   if (!body) return;
   const rows = actionSheetMode === "add"
     ? [
-        { action: "tx", title: "Add Transaction", subtitle: "Record a buy or a sell yourself." },
-        { action: "address", title: "Add Kaspa Address", subtitle: "Imports every transaction an address has, priced at the day each happened." },
+        { action: "tx", title: "Add Transaction", subtitle: "Record a buy or a sell by hand." },
+        { action: "address", title: "Add Kaspa Address", subtitle: "Track an address's balance as part of this portfolio." },
       ]
     : [
-        { action: "import", title: "Import CSV", subtitle: "Reads a CoinMarketCap transaction history file." },
-        { action: "export", title: "Export CSV", subtitle: "Writes this portfolio out in the same format." },
+        { action: "import", title: "Import CSV", subtitle: "Read transactions in from a file." },
+        { action: "export", title: "Export CSV", subtitle: "Write this portfolio's transactions out to a file." },
       ];
   body.innerHTML = `
     <div class="modal-header">
-      <div><p class="modal-kicker">Portfolio</p><h2>${actionSheetMode === "add" ? "Add" : "Import / Export"}</h2></div>
+      <div><p class="modal-kicker">Portfolio</p><h2>${actionSheetMode === "add" ? "Add" : "Import or Export"}</h2></div>
       <button class="modal-close" type="button" data-portfolio-action-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">
@@ -801,7 +831,7 @@ function renderReorderModal() {
           </span>
         </div>`).join("")}
     </div>
-    <p class="field-hint">The order here is the order the cards appear in. Transactions stay where they are.</p>
+    <p class="field-hint">Move a portfolio up or down to change the order its card appears in.</p>
     <div class="modal-actions">
       <button class="secondary-button" type="button" data-portfolio-reorder-close>Cancel</button>
       <button class="primary-button" type="button" data-portfolio-reorder-save>Done</button>
@@ -815,10 +845,8 @@ function marketStatsHtml() {
   if (!stats) return "";
   return `
     <div class="profile-card portfolio-summary">
-      <div class="portfolio-summary-grid">
-        <div class="portfolio-stat"><span class="portfolio-stat-label">Market Cap</span><span class="portfolio-stat-value">${fmtFiat(stats.marketCap)}</span></div>
-        ${stats.rank ? `<div class="portfolio-stat right"><span class="portfolio-stat-label">Rank</span><span class="portfolio-stat-value">#${stats.rank}</span></div>` : ""}
-      </div>
+      ${stats.rank ? statRowHtml("Rank", `#${stats.rank}`) : ""}
+      ${statRowHtml("Market Cap", fmtCompactFiat(stats.marketCap))}
     </div>`;
 }
 
@@ -865,15 +893,23 @@ function hashrateViewHtml() {
         <span class="portfolio-hashrate-ico" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M6.37 17.9C1.86 11.11 12.89 1.86 18.78 7.48"/><path d="M8.3 7.59 17.21 18.2"/></svg>
         </span>
-        <span class="portfolio-detail-name">Network Hashrate</span>
+        <span class="portfolio-detail-name">Kaspa Network</span>
       </div>
       <div class="portfolio-detail-date" data-portfolio-hashrate-date hidden></div>
       <div class="portfolio-detail-price-row">
         <span class="portfolio-detail-price" data-portfolio-hashrate-value>${stats ? formatHashrate(stats.currentHashrate) : "—"}</span>
       </div>
-      ${stats && stats.history.length >= 2
-        ? bigChartSvg(stats.history, { height: 240, chart: "hashrate" })
-        : `<div class="portfolio-chart-empty">Network history is still loading.</div>`}
+      ${(() => {
+        const all = stats?.history || [];
+        const cutoff = hashrateRangeDays > 0 ? Date.now() - hashrateRangeDays * 86_400_000 : 0;
+        const ranged = cutoff ? all.filter((pt) => pt[0] >= cutoff) : all;
+        return ranged.length >= 2
+          ? bigChartSvg(ranged, { height: 240, chart: "hashrate" })
+          : `<div class="portfolio-chart-empty">Network history is still loading.</div>`;
+      })()}
+      <div class="portfolio-ranges portfolio-ranges-wide">
+        ${HASHRATE_RANGES.map((r) => `<button class="portfolio-range${r.days === hashrateRangeDays ? " active" : ""}" type="button" data-portfolio-hashrate-range="${r.days}">${r.label}</button>`).join("")}
+      </div>
     </div>
 
     ${stats?.blockRewardKas ? `
@@ -902,7 +938,7 @@ function hashrateViewHtml() {
 
     <div class="profile-card portfolio-about">
       <p class="profile-card-label">About Hashrate</p>
-      <p class="portfolio-about-text">Hashrate is how much computing work the whole network is doing every second. It is the clearest measure of how much it would cost to attack Kaspa: the higher it goes, the more hardware someone would have to out-spend to rewrite history. It also sets mining difficulty, which adjusts so blocks keep arriving about ten times a second whatever the hashrate does.</p>
+      <p class="portfolio-about-text">Hashrate is how much computing power miners are pointing at Kaspa. A higher hashrate means more work securing the chain, and it moves with mining profitability rather than with the price directly. Figures come from the Kaspa REST API set in Connection Settings, at one sample per day.</p>
     </div>`;
 }
 
@@ -945,7 +981,7 @@ function priceViewHtml() {
           <input type="text" inputmode="decimal" data-portfolio-conv-fiat value="${deps.escapeHtml(converterFiat)}" />
         </label>
       </div>
-      ${price ? "" : `<p class="field-hint">Waiting for a price…</p>`}
+      <p class="field-hint">${price?.price > 0 ? `1 KAS = ${deps.escapeHtml(currencySymbol())}${deps.escapeHtml(Number(price.price).toFixed(8).replace(/0+$/, "").replace(/\.$/, ""))}` : "Waiting for a price..."}</p>
     </div>
 
     ${marketStatsHtml()}
@@ -1036,7 +1072,7 @@ function render() {
       <div class="kaposts-header-actions">
         ${selecting ? `
           <button class="cold-inline-link" type="button" data-portfolio-select-all>${selectedTxIds.size === transactions.length && transactions.length > 0 ? "Deselect All" : "Select All"}</button>
-          <button class="cold-inline-link portfolio-select-delete" type="button" data-portfolio-delete-selected ${selectedTxIds.size === 0 ? "disabled" : ""}>Delete (${selectedTxIds.size})</button>` : ""}
+          <button class="cold-inline-link portfolio-select-delete" type="button" data-portfolio-delete-selected ${selectedTxIds.size === 0 ? "disabled" : ""}>Delete Selected (${selectedTxIds.size})</button>` : ""}
         <button class="cold-inline-link" type="button" data-portfolio-select-toggle ${!selecting && transactions.length === 0 ? "disabled" : ""}>${selecting ? "Done" : "Select"}</button>
         <button class="kaposts-icon-button" type="button" data-portfolio-refresh title="Refresh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
@@ -1066,7 +1102,7 @@ function render() {
         </div>
       </div>
       ${transactions.length === 0
-        ? `<div class="portfolio-chart-empty">No transactions yet — add your first buy, import a CSV, or add a Kaspa address.</div>`
+        ? `<div class="portfolio-chart-empty portfolio-empty-state"><strong>No Transactions Yet</strong><span>Add a buy or sell to start tracking your portfolio</span></div>`
         : transactions.map(transactionRowHtml).join("")}
     </div>
     ${loading ? `<div class="portfolio-chart-empty">Refreshing…</div>` : ""}`;
@@ -1146,22 +1182,36 @@ function toDatetimeLocal(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function trimmedNumber(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  return n.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+}
+function setEditorType(type) {
+  modalsEl.querySelector("[data-portfolio-editor-type]").value = type;
+  modalsEl.querySelectorAll("[data-portfolio-editor-type-option]").forEach((b) => b.classList.toggle("active", b.dataset.portfolioEditorTypeOption === type));
+  updateEditorHint();
+}
 function openTxEditor(txId) {
   const portfolio = activePortfolio();
   const tx = txId ? (portfolio.transactions || []).find((t) => t.id === txId) : null;
   editingTx = { id: tx?.id || null };
   const backdrop = modalsEl.querySelector("[data-portfolio-editor-modal]");
   modalsEl.querySelector("[data-portfolio-editor-title]").textContent = tx ? "Edit Transaction" : "Add Transaction";
-  modalsEl.querySelector("[data-portfolio-editor-type]").value = tx?.type === "sell" ? "sell" : "buy";
-  modalsEl.querySelector("[data-portfolio-editor-amount]").value = tx ? String(tx.amountKas) : "";
-  modalsEl.querySelector("[data-portfolio-editor-fiat]").value = tx && tx.fiatValue ? String(tx.fiatValue) : "";
+  modalsEl.querySelector("[data-portfolio-editor-amount]").value = tx && tx.amountKas > 0 ? trimmedNumber(tx.amountKas) : "";
+  // A new transaction is prefilled with the live price - recording a trade that just happened
+  // needs no lookup - and stays editable for backdated entries (iOS).
+  modalsEl.querySelector("[data-portfolio-editor-price]").value = tx && tx.amountKas > 0
+    ? trimmedNumber((Number(tx.fiatValue) || 0) / tx.amountKas)
+    : (price?.price > 0 ? trimmedNumber(price.price) : "");
+  modalsEl.querySelector("[data-portfolio-editor-fee]").value = "";
   modalsEl.querySelector("[data-portfolio-editor-date]").value = toDatetimeLocal(tx?.timestamp ?? Date.now());
   const notes = isPricePending(tx?.notes) ? "" : (tx?.notes || "");
   modalsEl.querySelector("[data-portfolio-editor-notes]").value = notes;
-  const fiatLabel = modalsEl.querySelector("[data-portfolio-editor-fiat-label]");
-  if (fiatLabel) fiatLabel.textContent = `Total Value (${currencyCode().toUpperCase()})`;
+  modalsEl.querySelectorAll("[data-portfolio-editor-symbol]").forEach((el) => { el.textContent = currencySymbol(); });
   modalsEl.querySelector("[data-portfolio-editor-delete]").hidden = !tx;
-  updateEditorHint();
+  modalsEl.querySelector("[data-portfolio-editor-save]").textContent = tx ? "Save" : "Add";
+  setEditorType(tx?.type === "sell" ? "sell" : "buy");
   backdrop.hidden = false;
 }
 
@@ -1170,29 +1220,33 @@ function closeTxEditor() {
   modalsEl.querySelector("[data-portfolio-editor-modal]").hidden = true;
 }
 
-/** "≈ $0.12345 / KAS" helper under the fiat field, plus a one-click "use current price" fill. */
+/** Quantity, price per coin and fee, as iOS records them; the ledger stores the total. */
+function editorValues() {
+  const num = (sel) => Number(String(modalsEl.querySelector(sel)?.value || "").replace(",", "."));
+  const quantity = num("[data-portfolio-editor-amount]");
+  const pricePerCoin = num("[data-portfolio-editor-price]");
+  const fee = num("[data-portfolio-editor-fee]") || 0;
+  const isBuy = modalsEl.querySelector("[data-portfolio-editor-type]")?.value !== "sell";
+  const valid = quantity > 0 && pricePerCoin > 0;
+  const total = valid ? (isBuy ? quantity * pricePerCoin + fee : quantity * pricePerCoin - fee) : null;
+  return { quantity, pricePerCoin, fee, isBuy, valid, total };
+}
 function updateEditorHint() {
-  const amount = Number(modalsEl.querySelector("[data-portfolio-editor-amount]")?.value);
-  const fiat = Number(modalsEl.querySelector("[data-portfolio-editor-fiat]")?.value);
-  const hint = modalsEl.querySelector("[data-portfolio-editor-hint]");
-  if (!hint) return;
-  if (Number.isFinite(amount) && amount > 0 && Number.isFinite(fiat) && fiat > 0) {
-    hint.textContent = `≈ ${fmtPrice(fiat / amount)} / KAS`;
-  } else if (price && Number.isFinite(amount) && amount > 0) {
-    hint.textContent = `At current price: ${fmtFiat(amount * price.price)}`;
-  } else {
-    hint.textContent = "";
-  }
+  const v = editorValues();
+  const label = modalsEl.querySelector("[data-portfolio-editor-total-label]");
+  const total = modalsEl.querySelector("[data-portfolio-editor-total]");
+  const save = modalsEl.querySelector("[data-portfolio-editor-save]");
+  if (label) label.textContent = v.isBuy ? "Total Spent" : "Total Received";
+  if (total) total.textContent = fmtFiat(v.total ?? 0);
+  if (save) save.disabled = !v.valid;
 }
 
 function saveTxEditor() {
-  const amount = Number(modalsEl.querySelector("[data-portfolio-editor-amount]")?.value);
-  if (!Number.isFinite(amount) || amount <= 0) {
-    deps.showToast?.("Enter a KAS amount.");
-    return;
-  }
-  const type = modalsEl.querySelector("[data-portfolio-editor-type]")?.value === "sell" ? "sell" : "buy";
-  const fiatValue = Number(modalsEl.querySelector("[data-portfolio-editor-fiat]")?.value) || 0;
+  const v = editorValues();
+  if (!v.valid) return;
+  const amount = v.quantity;
+  const type = v.isBuy ? "buy" : "sell";
+  const fiatValue = v.total;
   const dateRaw = modalsEl.querySelector("[data-portfolio-editor-date]")?.value;
   const timestamp = dateRaw ? new Date(dateRaw).getTime() : Date.now();
   const notes = modalsEl.querySelector("[data-portfolio-editor-notes]")?.value?.trim() || null;
@@ -1253,6 +1307,7 @@ function parseHeaderUtcOffsetMinutes(header) {
 function exportCsv() {
   const portfolio = activePortfolio();
   const rows = [...(portfolio.transactions || [])].sort((a, b) => a.timestamp - b.timestamp);
+  if (!rows.length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return; }
   const pad = (n) => String(n).padStart(2, "0");
   let csv = "Date (UTC+0:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes\n";
   for (const tx of rows) {
@@ -1264,14 +1319,18 @@ function exportCsv() {
     const notes = String(tx.notes || "").replace(/"/g, '""');
     csv += `"${date}","KAS","${tx.type === "sell" ? "sell" : "buy"}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
   }
-  const blob = new Blob([csv], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  try {
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch {
+    deps.showToast?.("Export failed. Couldn't write the CSV file");
+  }
 }
 
 /** Same replace-by-timestamp dedup as iOS: a row whose timestamp exactly matches an existing
@@ -1736,34 +1795,37 @@ function buildModals() {
           <button class="modal-close" type="button" data-portfolio-editor-close aria-label="Close">×</button>
         </div>
         <div class="portfolio-editor-body">
+          <div class="settings-segmented full" role="group" aria-label="Type">
+            <button type="button" class="settings-segmented-option active" data-portfolio-editor-type-option="buy">Buy</button>
+            <button type="button" class="settings-segmented-option" data-portfolio-editor-type-option="sell">Sell</button>
+          </div>
+          <input type="hidden" data-portfolio-editor-type value="buy" />
           <label class="portfolio-editor-field">
-            <span>Type</span>
-            <select data-portfolio-editor-type>
-              <option value="buy">Buy</option>
-              <option value="sell">Sell</option>
-            </select>
+            <span>Quantity</span>
+            <span class="portfolio-editor-unit-row"><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-amount /><em>KAS</em></span>
           </label>
           <label class="portfolio-editor-field">
-            <span>Amount (KAS)</span>
-            <input type="number" step="any" min="0" placeholder="0.0" data-portfolio-editor-amount />
+            <span>Price Per Coin</span>
+            <span class="portfolio-editor-unit-row"><em data-portfolio-editor-symbol>$</em><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-price /></span>
           </label>
           <label class="portfolio-editor-field">
-            <span data-portfolio-editor-fiat-label>Total Value (USD)</span>
-            <input type="number" step="any" min="0" placeholder="0.00" data-portfolio-editor-fiat />
+            <span>Fee (optional)</span>
+            <span class="portfolio-editor-unit-row"><em data-portfolio-editor-symbol>$</em><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-fee /></span>
           </label>
-          <p class="portfolio-editor-hint" data-portfolio-editor-hint></p>
           <label class="portfolio-editor-field">
             <span>Date</span>
             <input type="datetime-local" data-portfolio-editor-date />
           </label>
           <label class="portfolio-editor-field">
-            <span>Notes</span>
-            <input type="text" maxlength="120" placeholder="Optional" data-portfolio-editor-notes />
+            <span>Notes (optional)</span>
+            <input type="text" maxlength="120" placeholder="Notes (optional)" data-portfolio-editor-notes />
           </label>
+          <div class="portfolio-editor-field portfolio-editor-total"><span data-portfolio-editor-total-label>Total Spent</span><strong data-portfolio-editor-total>$0.00</strong></div>
+          <button class="danger-button subtle full" type="button" data-portfolio-editor-delete hidden>Delete Transaction</button>
         </div>
         <div class="modal-actions portfolio-editor-actions">
-          <button class="secondary-button" type="button" data-portfolio-editor-delete hidden>Delete</button>
-          <button class="primary-button" type="button" data-portfolio-editor-save>Save</button>
+          <button class="secondary-button" type="button" data-portfolio-editor-close>Cancel</button>
+          <button class="primary-button" type="button" data-portfolio-editor-save disabled>Add</button>
         </div>
       </div>
     </div>
@@ -1919,8 +1981,10 @@ function buildModals() {
     }
     if (event.target.closest("[data-portfolio-editor-close]")) { closeTxEditor(); return; }
     if (event.target.closest("[data-portfolio-editor-save]")) { saveTxEditor(); return; }
+    const typeOption = event.target.closest("[data-portfolio-editor-type-option]");
+    if (typeOption) { setEditorType(typeOption.dataset.portfolioEditorTypeOption); return; }
     if (event.target.closest("[data-portfolio-editor-delete]")) {
-      if (editingTx?.id && await confirmOverlay({ title: "Delete transaction?", message: "This removes it from the portfolio. It cannot be undone." })) {
+      if (editingTx?.id && await confirmOverlay({ title: "Delete Transaction?", message: "This can't be undone." })) {
         const portfolio = activePortfolio();
         portfolio.transactions = (portfolio.transactions || []).filter((t) => t.id !== editingTx.id);
         saveState();
@@ -1953,7 +2017,7 @@ function buildModals() {
   });
 
   modalsEl.addEventListener("input", (event) => {
-    if (event.target.closest("[data-portfolio-editor-amount], [data-portfolio-editor-fiat]")) updateEditorHint();
+    if (event.target.closest("[data-portfolio-editor-amount], [data-portfolio-editor-price], [data-portfolio-editor-fee]")) updateEditorHint();
     if (event.target.closest("[data-portfolio-import-address]")) handleImportInputChange(event.target.value);
   });
 
@@ -1968,9 +2032,10 @@ function buildModals() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    const text = await file.text();
-    const imported = importCsvText(text);
-    deps.showToast?.(imported > 0 ? `Imported ${imported} row${imported === 1 ? "" : "s"}.` : "No KAS rows found in that CSV.");
+    let imported = 0;
+    try { imported = importCsvText(await file.text()); }
+    catch { deps.showToast?.("Import failed. Check the CSV format"); return; }
+    deps.showToast?.(imported > 0 ? `Imported ${imported} transaction${imported === 1 ? "" : "s"}` : "Import failed. Check the CSV format");
   });
 }
 
@@ -2246,6 +2311,8 @@ export function initPortfolio(dependencies) {
     const unit = event.target.closest("[data-portfolio-hashrate-unit]");
     if (unit) { hashrateUnit = unit.dataset.portfolioHashrateUnit; render(); return; }
 
+    const hashrateRange = event.target.closest("[data-portfolio-hashrate-range]");
+    if (hashrateRange) { hashrateRangeDays = Number(hashrateRange.dataset.portfolioHashrateRange) || 0; render(); return; }
     const range = event.target.closest("[data-portfolio-range]");
     if (range) {
       rangeDays = Number(range.dataset.portfolioRange) || 7;
