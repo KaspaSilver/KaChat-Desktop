@@ -1280,9 +1280,15 @@ function buildTapToLoadCard(url, conversationEntry) {
   return card;
 }
 
-function buildLinkPreviewCard(url) {
+function buildLinkPreviewCard(url, { autoLoad = false, outgoing = false } = {}) {
   const nextcloud = nextcloudShareDownloadUrl(url);
-  if (nextcloud) return buildNextcloudRevealCard(url, nextcloud.downloadUrl);
+  if (nextcloud) {
+    const reveal = buildNextcloudRevealCard(url, nextcloud.downloadUrl);
+    if (outgoing) reveal.dataset.outgoing = "1";
+    // Your own media, and an accepted contact's, shows itself; the tap gate is for strangers.
+    if (autoLoad) queueMicrotask(() => probeNextcloudMedia(reveal, url, nextcloud.downloadUrl));
+    return reveal;
+  }
   if (isDirectImageUrl(url)) {
     const img = document.createElement("img");
     img.className = "message-link-image";
@@ -1314,6 +1320,104 @@ function buildLinkPreviewCard(url) {
   }
   resolveLinkPreview(url).then(() => scheduleActiveThreadRerender());
   return null;
+}
+
+// The voice bubble every audio message uses (iOS AudioBubble): a play/pause circle, a 40-bar
+// waveform that fills as playback advances, and the length. The bars come from decoding the
+// audio when the bytes are readable (on-chain data: URLs, same-origin blobs); a file the browser
+// cannot read cross-origin gets a steady placeholder pattern instead of nothing.
+const VOICE_WAVEFORM_BARS = 40;
+const voiceWaveformCache = new Map(); // src -> { samples, duration }
+function placeholderWaveform() {
+  return Array.from({ length: VOICE_WAVEFORM_BARS }, (_, i) => 0.25 + 0.35 * Math.abs(Math.sin(i * 0.9)) + 0.15 * Math.abs(Math.cos(i * 2.3)));
+}
+async function decodeWaveform(src) {
+  if (voiceWaveformCache.has(src)) return voiceWaveformCache.get(src);
+  try {
+    const response = await fetch(src);
+    const bytes = await response.arrayBuffer();
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const buffer = await ctx.decodeAudioData(bytes);
+    try { await ctx.close(); } catch {}
+    const data = buffer.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / VOICE_WAVEFORM_BARS));
+    const samples = [];
+    for (let i = 0; i < VOICE_WAVEFORM_BARS; i += 1) {
+      let sum = 0;
+      const start = i * step;
+      for (let j = start; j < start + step && j < data.length; j += 1) sum += data[j] * data[j];
+      samples.push(Math.sqrt(sum / step));
+    }
+    const peak = Math.max(...samples, 0.0001);
+    const decoded = { samples: samples.map((v) => Math.max(0.12, v / peak)), duration: buffer.duration };
+    voiceWaveformCache.set(src, decoded);
+    return decoded;
+  } catch { return null; }
+}
+function buildVoicePlayer(src, { outgoing = false, durationHint = null } = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = `voice-player${outgoing ? " outgoing" : ""}`;
+  wrap.innerHTML = `<button type="button" class="voice-player-toggle" aria-label="Play">
+      <svg class="voice-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg>
+      <svg class="voice-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+    </button>
+    <span class="voice-player-body"><span class="voice-waveform"></span><small class="voice-player-time">--:--</small></span>`;
+  const audio = document.createElement("audio");
+  audio.preload = "metadata";
+  audio.src = src;
+  wrap.append(audio);
+  const wave = wrap.querySelector(".voice-waveform");
+  const time = wrap.querySelector(".voice-player-time");
+  const toggle = wrap.querySelector(".voice-player-toggle");
+  let known = Number(durationHint) > 0 ? Number(durationHint) : null;
+  const drawBars = (samples) => {
+    wave.innerHTML = samples.map((v) => `<i style="height:${Math.round(Math.max(4, v * 24))}px"></i>`).join("");
+  };
+  drawBars(placeholderWaveform());
+  const fmt = (secs) => `${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, "0")}`;
+  const total = () => (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : known);
+  const paint = () => {
+    const dur = total();
+    const bars = wave.children;
+    const progress = dur ? Math.min(1, audio.currentTime / dur) : 0;
+    for (let i = 0; i < bars.length; i += 1) bars[i].classList.toggle("played", (i + 0.5) / bars.length <= progress && !audio.paused);
+    if (!audio.paused && dur) time.textContent = `${fmt(audio.currentTime)} / ${fmt(dur)}`;
+    else time.textContent = dur ? fmt(dur) : "--:--";
+    wrap.classList.toggle("playing", !audio.paused && !audio.ended);
+    toggle.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
+  };
+  decodeWaveform(src).then((decoded) => {
+    if (!decoded) return;
+    if (!known && Number.isFinite(decoded.duration) && decoded.duration > 0) known = decoded.duration;
+    drawBars(decoded.samples);
+    paint();
+  });
+  audio.addEventListener("loadedmetadata", paint);
+  audio.addEventListener("durationchange", paint);
+  audio.addEventListener("timeupdate", paint);
+  audio.addEventListener("play", paint);
+  audio.addEventListener("pause", paint);
+  audio.addEventListener("ended", () => { audio.currentTime = 0; paint(); });
+  audio.addEventListener("error", () => { time.textContent = "Unavailable"; });
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    // One voice at a time, like iOS: starting this one pauses any other.
+    if (audio.paused) {
+      document.querySelectorAll(".voice-player audio").forEach((other) => { if (other !== audio && !other.paused) other.pause(); });
+      audio.play().catch(() => { time.textContent = "Failed to play audio."; });
+    } else audio.pause();
+  });
+  wave.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const dur = total();
+    if (!dur) return;
+    const rect = wave.getBoundingClientRect();
+    audio.currentTime = Math.max(0, Math.min(dur, ((event.clientX - rect.left) / rect.width) * dur));
+    paint();
+  });
+  paint();
+  return wrap;
 }
 
 function buildNextcloudRevealCard(shareUrl, downloadUrl) {
@@ -1358,13 +1462,9 @@ function probeNextcloudMedia(placeholder, shareUrl, downloadUrl) {
 
   const settleAudio = () => {
     if (settled) return;
-    const audio = document.createElement("audio");
-    audio.className = "message-link-audio";
-    audio.controls = true;
-    audio.preload = "metadata";
-    audio.addEventListener("click", (event) => event.stopPropagation());
-    audio.src = downloadUrl;
-    settle(audio);
+    const player = buildVoicePlayer(downloadUrl, { outgoing: placeholder.dataset.outgoing === "1" });
+    player.classList.add("message-link-audio");
+    settle(player);
   };
 
   const tryImage = () => {
@@ -12052,12 +12152,7 @@ function renderMessages(conversationEntry) {
     } else if (audioEnvelope) {
       const audioWrap = document.createElement("div");
       audioWrap.className = "message-audio-bubble";
-      const player = document.createElement("audio");
-      player.controls = true;
-      player.preload = "metadata";
-      player.src = audioEnvelope.content;
-      player.addEventListener("click", (event) => event.stopPropagation());
-      audioWrap.append(player);
+      audioWrap.append(buildVoicePlayer(audioEnvelope.content, { outgoing: message.direction !== "incoming", durationHint: audioEnvelope.duration }));
       bubble.append(audioWrap);
     } else {
       const text = document.createElement("span");
@@ -12093,7 +12188,7 @@ function renderMessages(conversationEntry) {
         || (previewable && (linkPreviewCache.has(previewable) || approvedPreviewUrls.has(previewable)));
       const card = internalLink
         ? buildInternalLinkCard(internalLink)
-        : previewable ? (autoFetch ? buildLinkPreviewCard(previewable) : buildTapToLoadCard(previewable, conversationEntry)) : null;
+        : previewable ? (autoFetch ? buildLinkPreviewCard(previewable, { autoLoad: true, outgoing: message.direction !== "incoming" }) : buildTapToLoadCard(previewable, conversationEntry)) : null;
       // A link-only message renders as just the preview card (no chat bubble, timestamp below),
       // matching iOS. With a caption or other text, show the text bubble + card beneath it.
       const linkOnly = card && !replyEnvelope && (internalLink
@@ -19673,6 +19768,7 @@ queueMicrotask(async () => {
     // progressive Nextcloud video→audio→img→attachment probe).
     renderTextWithLinks,
     buildLinkPreviewCard,
+    buildVoicePlayer,
     isPreviewableUrl,
     // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer, and the
     // same preview bar before anything is sent.
@@ -21206,12 +21302,7 @@ function renderGroupMessages() {
     } else if (audioEnvelope) {
       const audioWrap = document.createElement("div");
       audioWrap.className = "message-audio-bubble";
-      const player = document.createElement("audio");
-      player.controls = true;
-      player.preload = "metadata";
-      player.src = audioEnvelope.content;
-      player.addEventListener("click", (event) => event.stopPropagation());
-      audioWrap.append(player);
+      audioWrap.append(buildVoicePlayer(audioEnvelope.content, { outgoing: message.direction !== "incoming", durationHint: audioEnvelope.duration }));
       bubble.append(audioWrap);
     } else {
       const text = document.createElement("span");
@@ -21220,7 +21311,7 @@ function renderGroupMessages() {
       const linkUrls = renderTextWithMentions(text, bodyText);
       const internalLink = firstInternalLinkIn(bodyText);
       const previewable = internalLink ? null : (linkUrls || []).find(isPreviewableUrl);
-      const card = internalLink ? buildInternalLinkCard(internalLink) : previewable ? buildLinkPreviewCard(previewable) : null;
+      const card = internalLink ? buildInternalLinkCard(internalLink) : previewable ? buildLinkPreviewCard(previewable, { autoLoad: message.direction !== "incoming", outgoing: message.direction !== "incoming" }) : null;
       const linkOnly = card && !replyEnvelope && (internalLink
         ? String(bodyText).trim() === internalLink.raw
         : (linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));

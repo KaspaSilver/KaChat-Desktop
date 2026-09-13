@@ -9797,3 +9797,22 @@ body.session-logged-out [data-account-rename-modal] {
 
 /* The + menu's Send KAS row carries the real Kaspa mark, not a drawn stand-in. */
 .composer-plus-menu .mode-icon-kaspa img { width: 26px; height: 26px; border-radius: 999px; object-fit: contain; display: block; }
+
+/* Voice bubble (iOS AudioBubble): play circle, waveform that fills with playback, length. */
+.voice-player { display: flex; align-items: center; gap: 10px; min-width: 220px; max-width: 320px; padding: 4px 2px; }
+.voice-player audio { display: none; }
+.voice-player-toggle { width: 34px; height: 34px; flex: 0 0 auto; border: 0; border-radius: 999px; background: var(--kaspa); color: #06110f; display: grid; place-items: center; cursor: pointer; }
+.voice-player-toggle svg { width: 18px; height: 18px; fill: currentColor; }
+.voice-player .voice-pause { display: none; }
+.voice-player.playing .voice-pause { display: block; }
+.voice-player.playing .voice-play { display: none; }
+.voice-player-body { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.voice-waveform { display: flex; align-items: center; gap: 2px; height: 24px; cursor: pointer; }
+.voice-waveform i { flex: 1 1 0; min-width: 2px; border-radius: 999px; background: rgba(255,255,255,.35); transition: background .12s; }
+.voice-waveform i.played { background: var(--kaspa); }
+.voice-player.outgoing .voice-waveform i { background: rgba(6,17,15,.35); }
+.voice-player.outgoing .voice-waveform i.played { background: #06110f; }
+.voice-player.outgoing .voice-player-toggle { background: #06110f; color: var(--kaspa); }
+.voice-player-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.voice-player.outgoing .voice-player-time { color: rgba(6,17,15,.75); }
+.message-link-audio.voice-player { margin-top: 8px; }

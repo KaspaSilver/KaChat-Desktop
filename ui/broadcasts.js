@@ -752,12 +752,16 @@ function buildMessageElement(m) {
   } else if (audioEnvelope) {
     const audioWrap = document.createElement("div");
     audioWrap.className = "message-audio-bubble";
-    const player = document.createElement("audio");
-    player.controls = true;
-    player.preload = "metadata";
-    player.src = audioEnvelope.content;
-    player.addEventListener("click", (event) => event.stopPropagation());
-    audioWrap.append(player);
+    if (deps.buildVoicePlayer) {
+      audioWrap.append(deps.buildVoicePlayer(audioEnvelope.content, { outgoing: mine, durationHint: audioEnvelope.duration }));
+    } else {
+      const player = document.createElement("audio");
+      player.controls = true;
+      player.preload = "metadata";
+      player.src = audioEnvelope.content;
+      player.addEventListener("click", (event) => event.stopPropagation());
+      audioWrap.append(player);
+    }
     el.append(audioWrap);
   } else {
     const body = document.createElement("div");
