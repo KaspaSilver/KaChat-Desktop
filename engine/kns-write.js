@@ -677,7 +677,7 @@ export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFA
   const message = `{"domainId":"${trimmedId}","timestamp":${Date.now()}}`;
   const utf8Bytes = new TextEncoder().encode(message);
   const modes = [
-    () => engine.kaspa.signMessage({ message, privateKey: engine.privateKey }),
+    () => engine.kaspa.signMessage({ message, privateKey: engine.privateKeyHex || engine.privateKey }),
     async () => {
       if (utf8Bytes.length !== 32) throw new Error("message is not 32 bytes");
       return rawSchnorrSignDigest(engine.kaspa, engine.privateKey, utf8Bytes);
@@ -713,7 +713,7 @@ export async function uploadKnsProfileImage({ engine, assetId, uploadType, blob,
   const message = JSON.stringify({ assetId, uploadType });
   const utf8Bytes = new TextEncoder().encode(message);
   const modes = [
-    () => engine.kaspa.signMessage({ message, privateKey: engine.privateKey }),
+    () => engine.kaspa.signMessage({ message, privateKey: engine.privateKeyHex || engine.privateKey }),
     async () => {
       if (utf8Bytes.length !== 32) throw new Error("message is not 32 bytes");
       return rawSchnorrSignDigest(engine.kaspa, engine.privateKey, utf8Bytes);
