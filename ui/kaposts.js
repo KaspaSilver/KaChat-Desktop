@@ -1177,7 +1177,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
   const deliveryHtml = post.delivery === "pending"
     ? `<div class="kaposts-delivery pending" title="Posting"><span class="kaposts-spinner" aria-label="Posting"></span></div>`
     : post.delivery === "failed"
-      ? `<div class="kaposts-delivery failed"><button type="button" data-kaposts-retry="${post.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>Retry</button></div>`
+      ? `<div class="kaposts-delivery failed" title="${deps.escapeHtml(post.failureReason || "Could not post")}"><button type="button" data-kaposts-retry="${post.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>Retry</button>${post.failureReason ? `<span class="kaposts-failure-reason">${deps.escapeHtml(post.failureReason)}</span>` : ""}</div>`
       : sentCheck
         ? `<div class="kaposts-delivery sent" data-kaposts-sent-check="${post.timestamp + 60_000}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>`
         : "";
@@ -1565,8 +1565,9 @@ function schedulePost(text) {
       const txid = await submitKaPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text) });
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
-      mutatePost(post.id, (p) => { p.delivery = "failed"; });
+      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost submit failed: ${error.message}`);
+      deps.showToast?.(`Post failed: ${error?.message || error}`);
     }
     renderAll();
   }, () => {
@@ -1724,8 +1725,9 @@ async function continueThread(localId) {
     threadRemainders.delete(localId);
     mutatePost(localId, (p) => { p.delivery = "sent"; });
   } catch (error) {
-    mutatePost(localId, (p) => { p.delivery = "failed"; });
+    mutatePost(localId, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
     deps.appendEngineLog?.(`KaPost thread submit failed (resumable): ${error.message}`);
+    deps.showToast?.(`Post failed: ${error?.message || error}`);
   }
   renderAll();
 }
@@ -1744,8 +1746,9 @@ function scheduleQuote(target, text) {
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
       showActionToast("Quote posted to the network", txid);
     } catch (error) {
-      mutatePost(post.id, (p) => { p.delivery = "failed"; });
+      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost quote failed: ${error.message}`);
+      deps.showToast?.(`Quote failed: ${error?.message || error}`);
     }
     renderAll();
   }, () => {
@@ -2019,8 +2022,10 @@ function retryPost(post) {
         ? await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey })
         : await submitKaPost({ engine: deps.engine, text: post.text, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
-    } catch {
-      mutatePost(post.id, (p) => { p.delivery = "failed"; });
+    } catch (error) {
+      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+      deps.appendEngineLog?.(`KaPost retry failed: ${error?.message || error}`);
+      deps.showToast?.(`Post failed: ${error?.message || error}`);
     }
     renderAll();
   })();
