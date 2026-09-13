@@ -65,6 +65,12 @@ function nextcloudProxy() {
         // The browser's origin/referer would confuse some reverse-proxy setups — drop them.
         delete headers.origin;
         delete headers.referer;
+        // Never relay cookies in either direction. Nextcloud answers the first (cookie-less,
+        // Basic-auth) call by setting a session cookie; the browser stored it for THIS origin and
+        // sent it back on every later proxied request, so WebDAV saw a session cookie next to
+        // Basic auth, treated the call as a browser session without a CSRF token, and answered
+        // 401 - right after a successful connect. An API client authenticates per request.
+        delete headers.cookie;
         // Hop-by-hop headers describe THIS connection, not the message, and a proxy must not
         // relay them (RFC 9110 7.6.1). Passing them on is what truncated large downloads: a
         // Nextcloud backup answered with `transfer-encoding: chunked` had that header copied onto
@@ -131,6 +137,7 @@ function nextcloudProxy() {
               const mask404 = soft404 && upstreamRes.statusCode === 404;
               const responseHeaders = { ...upstreamRes.headers };
               for (const hop of HOP_BY_HOP) delete responseHeaders[hop];
+              delete responseHeaders["set-cookie"];
               if (mask404) responseHeaders["x-upstream-status"] = "404";
               res.writeHead(mask404 ? 200 : status, responseHeaders);
               upstreamRes.pipe(res);
