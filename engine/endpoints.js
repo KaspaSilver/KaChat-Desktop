@@ -27,8 +27,10 @@ export const ENDPOINT_DEFAULTS = Object.freeze({
   // fallback. "" = Default: KaChat's node first, the resolver only when it is unreachable.
   nodeScan: "",
 });
-// iOS AppSettings.defaultTrustedNodeAddress: the node "Default (Recommended)" connects to.
-export const DEFAULT_TRUSTED_NODE = "grpcs://toccata.kaspium.io";
+// The node "Default (Recommended)" connects to. iOS talks gRPC to toccata.kaspium.io; a browser
+// can only open wRPC over WebSocket, so the desktop's default is KaChat's own wRPC node (see
+// engine/rpc.js DEFAULT_NODE). Kept as the one place that name is spelled out for the UI.
+export const DEFAULT_TRUSTED_NODE = "wss://node.kachat.duckdns.org";
 
 // Retired / superseded chat-indexer defaults. Drop any stored override still pointing at one of
 // these so it falls back to the current default (kachat.duckdns.org): indexer.kasia.fyi is offline,

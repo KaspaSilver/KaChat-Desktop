@@ -35,7 +35,7 @@ import {
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
 import { KNSProfileLinkBuilder } from "../engine/kns.js";
-import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging } from "../engine/endpoints.js";
+import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, setVerboseApiLogging } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
@@ -9758,7 +9758,8 @@ loadEndpointInputs();
 function nodeChoiceLooksValid(value) {
   const v = String(value || "").trim();
   if (!v) return true;
-  if (/^(wss?|grpcs?):\/\/\S+$/i.test(v)) return true;
+  // wRPC only: a browser cannot speak the phones' gRPC form.
+  if (/^wss?:\/\/\S+$/i.test(v)) return true;
   return /^[a-z0-9.-]+(:\d{2,5})?$/i.test(v);
 }
 // Default = KaChat's own node, with the public-node scan as the fallback when it is down.
@@ -9772,7 +9773,7 @@ function renderNodeChoice() {
   const current = custom || (getEndpointOverride("nodeScan").trim() === "1" ? NODE_CHOICE_SCAN : "");
   const saved = loadSavedNodes();
   const options = [
-    { value: "", label: "Default (Recommended)" },
+    { value: "", label: "Default (Recommended) · node.kachat.duckdns.org" },
     { value: NODE_CHOICE_SCAN, label: "Automatic Scan" },
     ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address })),
   ];
@@ -9789,7 +9790,8 @@ document.querySelector("[data-node-choice]")?.addEventListener("change", async (
   const value = String(event.target.value || "").trim();
   const errorEl = document.querySelector("[data-node-choice-error]");
   const scan = value === NODE_CHOICE_SCAN;
-  const custom = scan ? "" : value;
+  // A bare host or host:port from the address book is a wRPC endpoint over TLS.
+  const custom = scan ? "" : (value && !/^wss?:\/\//i.test(value) ? `wss://${value}` : value);
   if (custom && !nodeChoiceLooksValid(custom)) {
     if (errorEl) { errorEl.textContent = "Enter a node as host:port or a wss:// URL."; errorEl.hidden = false; }
     return;
