@@ -3311,7 +3311,9 @@ function updateArchitectureDetails() {
         ? `Failover ${connection.failover}`
         : getEndpointOverride("trustedNode").trim()
           ? "Your own node · no fallback"
-          : "KaChat's node · no fallback";
+          : getEndpointOverride("nodeScan").trim() === "1"
+            ? "Public node scan · KaChat's node as fallback"
+            : "KaChat's node · public node scan as fallback";
   }
   if (standbyStatus) {
     standbyStatus.textContent = standbyReady
@@ -4282,6 +4284,7 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
       if (liveEndpoint) engine.forgetNode?.(liveEndpoint);
     }
     setEndpoint("trustedNode", url); // "" clears the override, returning to KaChat's node
+    if (mode !== "custom") setEndpoint("nodeScan", "");
     setStatus(mode === "custom" ? "Connecting to your node…" : "Finding a healthy node…");
     await engine.connect({ force: true });
     await connectAndRefresh({ quiet: true });
@@ -9757,34 +9760,48 @@ function nodeChoiceLooksValid(value) {
   if (/^(wss?|grpcs?):\/\/\S+$/i.test(v)) return true;
   return /^[a-z0-9.-]+(:\d{2,5})?$/i.test(v);
 }
+// Default = KaChat's own node, with the public-node scan as the fallback when it is down.
+// Automatic Scan = the public resolver picks the node (kaspa-ng's web behaviour), KaChat's node
+// as the fallback. A saved or custom address connects only to that node.
+const NODE_CHOICE_SCAN = "__scan__";
 function renderNodeChoice() {
   const select = document.querySelector("[data-node-choice]");
   if (!select) return;
-  const current = getEndpointOverride("trustedNode").trim();
+  const custom = getEndpointOverride("trustedNode").trim();
+  const current = custom || (getEndpointOverride("nodeScan").trim() === "1" ? NODE_CHOICE_SCAN : "");
   const saved = loadSavedNodes();
   const options = [
-    { value: DEFAULT_TRUSTED_NODE, label: "Default (Recommended)" },
-    { value: "", label: "Automatic Scan" },
+    { value: "", label: "Default (Recommended)" },
+    { value: NODE_CHOICE_SCAN, label: "Automatic Scan" },
     ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address })),
   ];
-  if (current && !options.some((o) => o.value === current)) options.push({ value: current, label: current });
+  if (custom && !options.some((o) => o.value === custom)) options.push({ value: custom, label: custom });
   select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
   select.value = current;
   const note = document.querySelector("[data-node-choice-note]");
-  if (note) note.hidden = !current;
+  if (note) {
+    note.hidden = !current;
+    note.textContent = custom ? "Connected only to this node" : "Public nodes are picked automatically; KaChat's node is the fallback";
+  }
 }
-document.querySelector("[data-node-choice]")?.addEventListener("change", (event) => {
+document.querySelector("[data-node-choice]")?.addEventListener("change", async (event) => {
   const value = String(event.target.value || "").trim();
   const errorEl = document.querySelector("[data-node-choice-error]");
-  if (!nodeChoiceLooksValid(value)) {
-    if (errorEl) { errorEl.textContent = "Enter a node as host:port or a wss:// / grpcs:// URL."; errorEl.hidden = false; }
+  const scan = value === NODE_CHOICE_SCAN;
+  const custom = scan ? "" : value;
+  if (custom && !nodeChoiceLooksValid(custom)) {
+    if (errorEl) { errorEl.textContent = "Enter a node as host:port or a wss:// URL."; errorEl.hidden = false; }
     return;
   }
   if (errorEl) errorEl.hidden = true;
-  setEndpoint("trustedNode", value);
+  setEndpoint("nodeScan", scan ? "1" : "");
+  setEndpoint("trustedNode", custom);
   loadEndpointInputs();
   renderNodeChoice();
-  showCopyToast(value ? "Connected only to this node from the next reconnect." : "Automatic node scan enabled.");
+  showCopyToast(custom ? "Connecting only to this node…" : scan ? "Scanning public nodes…" : "Connecting to KaChat's node…");
+  try { await engine.connect({ force: true }); await connectAndRefresh({ quiet: true }); }
+  catch (error) { showCopyToast(`Could not connect: ${describeConnectError(error)}`); }
+  renderConnectionStatus();
 });
 
 document.querySelector("[data-reset-connection-defaults]")?.addEventListener("click", () => {

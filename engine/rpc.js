@@ -139,9 +139,9 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/// Every connection names its endpoint now - ours or the user's - so there is no resolver branch
-/// left. Good riddance to it: constructing a Resolver is what broke the built site, since the
-/// minifier renamed the class out from under wasm-bindgen's own type check.
+/// Every connection names its endpoint - ours, the user's, or one the public resolver handed out
+/// a moment earlier. (Constructing a Resolver once broke the built site because the minifier
+/// renamed the class; esbuild keeps class names now, so it is safe again.)
 function makeRpc(kaspa, { endpoint = "" } = {}) {
   const { RpcClient, Encoding } = kaspa;
   if (!endpoint) throw new Error("No node endpoint to connect to.");
@@ -235,6 +235,40 @@ export function getNodeRegistrySnapshot() {
   };
 }
 
+/// Automatic scan (what kaspa-ng's web build does): ask the Kaspa public node resolver for a
+/// node and connect to it, up to a few times since each answer may be a different node. Only
+/// TLS endpoints are usable from a page served over https, so ws:// answers are skipped there.
+const RESOLVER_ATTEMPTS = 4;
+const RESOLVER_TIMEOUT_MS = 10000;
+async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [] } = {}) {
+  if (typeof kaspa.Resolver !== "function") throw new Error("This build of the Kaspa SDK has no node resolver.");
+  const resolver = new kaspa.Resolver();
+  const secure = typeof location !== "undefined" && location.protocol === "https:";
+  const tried = new Set(excludedEndpoints.map((u) => String(u || "").toLowerCase()));
+  let lastError = null;
+  for (let attempt = 1; attempt <= RESOLVER_ATTEMPTS; attempt += 1) {
+    let url = "";
+    try {
+      url = String(await withTimeout(resolver.getUrl(kaspa.Encoding?.Borsh, NETWORK_ID), RESOLVER_TIMEOUT_MS, "Public node resolver") || "").trim();
+    } catch (error) {
+      lastError = normalizeRpcError(error, "Public node resolver");
+      log(`Public node resolver did not answer (attempt ${attempt}): ${lastError.message}`);
+      continue;
+    }
+    if (!url) { lastError = new Error("The public node resolver returned no node."); continue; }
+    if (secure && !/^wss:\/\//i.test(url)) { log(`Resolver offered ${url}, unusable from an https page; asking again.`); continue; }
+    if (tried.has(url.toLowerCase())) continue;
+    tried.add(url.toLowerCase());
+    try {
+      return await connectCandidate(kaspa, { endpoint: url, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS, log, role: "primary", singleShot: true });
+    } catch (error) {
+      lastError = error;
+      log(`Scanned node ${url} failed: ${error?.message || error}`);
+    }
+  }
+  throw lastError || new Error("No public node could be reached.");
+}
+
 export async function createRpc(kaspa, log = () => {}) {
   // A user-configured custom node (Node Connection > Custom) is authoritative and STRICT: connect
   // only to it. If it is unreachable we throw rather than silently falling back, so the user always
@@ -250,20 +284,34 @@ export async function createRpc(kaspa, log = () => {}) {
     });
   }
 
-  // No node was chosen, so KaChat's own is used - and only that one. There is no pool to scan, no
-  // last-known-good to fall back to and no resolver: exactly two endpoints can ever be connected
-  // to, ours and one the user typed, and which of the two is in force is never a surprise.
-  //
-  // Strict on purpose, the same way a custom node is strict. Falling back to some other node when
-  // ours is unreachable would mean the app quietly moves you onto a stranger's node without
-  // saying so; failing loudly is the honest behaviour, and the dialog can then say what is wrong.
-  return connectCandidate(kaspa, {
+  const connectDefault = () => connectCandidate(kaspa, {
     endpoint: DEFAULT_NODE,
     timeoutMs: DIRECT_CONNECT_TIMEOUT_MS,
     log,
     role: "primary",
     singleShot: true,
   });
+
+  // Automatic Scan: the public resolver picks the node, KaChat's own is the fallback.
+  if (getEndpoint("nodeScan") === "1") {
+    try { return await connectViaResolver(kaspa, { log }); }
+    catch (error) {
+      log(`Automatic scan found no usable public node (${error?.message || error}); trying KaChat's node.`);
+      return connectDefault();
+    }
+  }
+
+  // Default: KaChat's own node first. When it is unreachable the scan takes over rather than
+  // leaving the app dark - the same automatic pick kaspa-ng's web build makes - and the log and
+  // the Node Connection dialog say which node is in use.
+  try { return await connectDefault(); }
+  catch (error) {
+    log(`KaChat's node is unreachable (${error?.message || error}); scanning public nodes.`);
+    try { return await connectViaResolver(kaspa, { log, excludedEndpoints: [DEFAULT_NODE] }); }
+    catch (scanError) {
+      throw new Error(`${error?.message || error} No public node could be reached either (${scanError?.message || scanError}).`);
+    }
+  }
 }
 
 /// There is no second node to warm any more.
