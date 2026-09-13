@@ -21743,6 +21743,82 @@ groupMemberPicker?.addEventListener("click", (event) => {
   btn.classList.toggle("selected", groupCreateSelected.has(address));
   updateGroupCreateSubmit();
 });
+// Adding members is real on-chain work - one transaction per member for the key announcement
+// and one more for the new root, per member added - so it runs behind a blocking progress
+// screen that names each step, ends with a summary, and reopens the group with the new roster.
+const groupAddRun = { phase: "idle", groupId: null, members: [], index: 0, stage: "", fraction: 0, added: [], failed: [], error: "" };
+function renderGroupAddProgress() {
+  const modal = document.querySelector("[data-group-add-progress-modal]");
+  const body = document.querySelector("[data-group-add-progress-body]");
+  if (!modal || !body) return;
+  modal.hidden = groupAddRun.phase === "idle";
+  if (groupAddRun.phase === "idle") return;
+  const r = groupAddRun;
+  const percent = Math.round(r.fraction * 100);
+  if (r.phase === "running") {
+    const who = r.members[r.index] ? groupSenderLabel(r.members[r.index]) : "";
+    body.innerHTML = `<div class="progress-card-icon">👥</div><h2>Adding Members</h2>
+      <p class="field-hint">${escapeHtml(who)}${r.members.length > 1 ? ` (${r.index + 1} of ${r.members.length})` : ""}</p>
+      <div class="progress-track"><div class="progress-fill" style="width:${percent}%"></div></div>
+      <div class="progress-meta"><span>${escapeHtml(r.stage)}</span><span>${percent}%</span></div>
+      <p class="field-hint">Please keep the app open. Each member added rotates the group key and sends it to everyone, which costs a small network fee per transaction.</p>`;
+  } else if (r.phase === "success") {
+    body.innerHTML = `<div class="progress-card-icon ok">✓</div><h2>Members Added</h2>
+      <p class="field-hint">Added ${r.added.length} member${r.added.length === 1 ? "" : "s"}. The group key was rotated and sent to everyone, so ${r.added.length === 1 ? "they" : "they"} can read messages from now on.</p>
+      <div class="modal-actions"><button class="primary-button full" type="button" data-group-add-done>Done</button></div>`;
+  } else {
+    body.innerHTML = `<div class="progress-card-icon warn">⚠</div><h2>Add Members</h2>
+      <p class="field-hint">${r.failed.length} member${r.failed.length === 1 ? "" : "s"} could not be added. Please try again.${r.error ? `<br><small>${escapeHtml(r.error)}</small>` : ""}</p>
+      ${r.added.length ? `<p class="field-hint">${r.added.length} ${r.added.length === 1 ? "was" : "were"} added successfully.</p>` : ""}
+      <div class="modal-actions stacked"><button class="primary-button full" type="button" data-group-add-retry>Try Again</button><button class="secondary-button full" type="button" data-group-add-done>Close</button></div>`;
+  }
+}
+function finishGroupAddRun() {
+  const groupId = groupAddRun.groupId;
+  groupAddRun.phase = "idle";
+  renderGroupAddProgress();
+  renderGroupList();
+  if (groupId) { openGroupChat(groupId); openGroupManage(groupId); }
+}
+document.querySelector("[data-group-add-progress-modal]")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-group-add-done]")) { finishGroupAddRun(); return; }
+  if (event.target.closest("[data-group-add-retry]")) runGroupAddMembers(groupAddRun.groupId, [...groupAddRun.failed]);
+});
+async function runGroupAddMembers(groupId, members) {
+  const mgr = getGroupManager();
+  if (!mgr || !members.length || groupAddRun.phase === "running") return;
+  Object.assign(groupAddRun, { phase: "running", groupId, members, index: 0, stage: "Preparing", fraction: 0, added: [], failed: [], error: "" });
+  renderGroupAddProgress();
+  for (let i = 0; i < members.length; i += 1) {
+    const address = members[i];
+    groupAddRun.index = i;
+    groupAddRun.stage = "Preparing";
+    renderGroupAddProgress();
+    try {
+      await mgr.addMember(groupId, address, {
+        onProgress: ({ stage, done, total }) => {
+          groupAddRun.stage = stage;
+          const within = total > 0 ? done / total : 0;
+          groupAddRun.fraction = (i + within) / members.length;
+          renderGroupAddProgress();
+        },
+      });
+      // iMessage-style membership line for the admin (other members get theirs on the rotation).
+      const epAdd = mgr.getGroup(groupId)?.currentEpoch;
+      appendGroupSystemMessage(groupId, `${groupSenderLabel(address)} was added to the group chat`, Date.now(), `sys:${groupId}:${epAdd}:add:${address}`);
+      groupAddRun.added.push(address);
+    } catch (error) {
+      appendEngineLog(`Add member failed for ${address}: ${error.message}`);
+      groupAddRun.failed.push(address);
+      groupAddRun.error = error?.message || "";
+    }
+  }
+  groupAddRun.fraction = 1;
+  groupAddRun.phase = groupAddRun.failed.length ? "failure" : "success";
+  renderGroupAddProgress();
+  setStatus(groupAddRun.failed.length ? "Some members could not be added" : "Group updated");
+}
+
 groupCreateSubmit?.addEventListener("click", async () => {
   const mgr = getGroupManager();
   if (!mgr) { setStatus("Load a wallet first."); return; }
@@ -21759,16 +21835,8 @@ groupCreateSubmit?.addEventListener("click", async () => {
       const hasPhoto = Boolean(rec?.photoHex);
       if (!await confirmText(`Add ${members.length} member${members.length === 1 ? "" : "s"} to the group?${await groupOpFeeHint(groupModalTargetId, { controlTx: members.length * (2 * finalOthers + 1), photoTx: hasPhoto ? members.length * finalOthers : 0 })}`)) { updateGroupCreateSubmit(); return; }
       setStatus("Adding member(s) to the group…");
-      for (const address of members) {
-        await mgr.addMember(groupModalTargetId, address);
-        // iMessage-style membership line for the admin (other members get theirs on the rotation).
-        const epAdd = mgr.getGroup(groupModalTargetId)?.currentEpoch;
-        appendGroupSystemMessage(groupModalTargetId, `${groupSenderLabel(address)} was added to the group chat`, Date.now(), `sys:${groupModalTargetId}:${epAdd}:add:${address}`);
-      }
       closeGroupCreate();
-      if (activeGroupId === groupModalTargetId) { openGroupChat(groupModalTargetId); openGroupManage(groupModalTargetId); }
-      renderGroupList();
-      setStatus("Group updated");
+      runGroupAddMembers(groupModalTargetId, members);
     } else {
       const name = String(groupNameInput?.value || "").trim();
       if (!name) { updateGroupCreateSubmit(); return; }

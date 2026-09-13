@@ -323,14 +323,17 @@ export class GroupManager {
   }
 
   // --- membership changes (admin), each bumps the epoch and re-distributes ---
-  async addMember(groupId, address) {
+  // `onProgress({ stage, done, total })` reports each on-chain step of the key rotation, so a
+  // screen can show that real work (one transaction per member, twice) is happening.
+  async addMember(groupId, address, { onProgress = null } = {}) {
     const record = this._requireAdmin(groupId);
     const addr = String(address || "").trim();
     if (record.members.some((m) => m.address === addr)) return record;
     if (record.members.length >= 50) throw new Error("A group can have at most 50 members.");
+    onProgress?.({ stage: "Looking up the new member's key", done: 0, total: 1 });
     const xOnlyPubKeyHex = await this.engine.xOnlyPubKeyForAddress(addr);
     record.members.push({ address: addr, xOnlyPubKeyHex, isAdmin: false });
-    return this._rotateEpoch(record, "add");
+    return this._rotateEpoch(record, "add", onProgress);
   }
   async removeMember(groupId, address) {
     const record = this._requireAdmin(groupId);
@@ -349,7 +352,7 @@ export class GroupManager {
     return record;
   }
 
-  async _rotateEpoch(record, reason) {
+  async _rotateEpoch(record, reason, onProgress = null) {
     const groupSeed = G.hexToBytes(record.groupSeedHex);
     const groupId = G.hexToBytes(record.groupId);
     const newEpoch = record.currentEpoch + 1;
@@ -360,14 +363,29 @@ export class GroupManager {
     // Announce, then hand out the new root (removed members never get it).
     const epochPayload = G.buildSignedEpochPayload({ groupId, epoch: newEpoch, reason, adminPrivateKey: this.engine.privateKeyHex });
     const epochJson = JSON.stringify(epochPayload);
-    for (const member of record.members) {
-      if (member.address === this.walletAddress) continue;
+    const others = record.members.filter((m) => m.address !== this.walletAddress);
+    // Two transactions per member (the epoch announcement, then the new root) plus the photo
+    // when the group has one - the bar is fed per transaction.
+    const total = others.length * 2 + (record.photoHex ? others.length : 0);
+    let done = 0;
+    let index = 0;
+    for (const member of others) {
+      index += 1;
+      onProgress?.({ stage: `Announcing the new group key (${index} of ${others.length})`, done, total });
       const encryptedHex = await this.engine.encryptGroupControl(member.address, epochJson);
       await this.engine.sendGroupPayload(G.buildControlPayload({ recipientXOnlyPubKey: member.xOnlyPubKeyHex, encryptedHex }));
+      done += 1;
     }
+    onProgress?.({ stage: `Sending the new group key to ${others.length} member${others.length === 1 ? "" : "s"}`, done, total });
     await this._distributeRoot(record, newEpoch);
+    done += others.length;
     // A newly-added member should also receive the current group photo (root doesn't carry it).
-    if (record.photoHex) { try { await this._distributePhoto(record); } catch {} }
+    if (record.photoHex) {
+      onProgress?.({ stage: "Sending the group photo", done, total });
+      try { await this._distributePhoto(record); } catch {}
+      done += others.length;
+    }
+    onProgress?.({ stage: "Done", done: total, total });
     return record;
   }
 
