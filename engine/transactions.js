@@ -73,7 +73,7 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
   });
   const txids = [];
   for (const pending of result.transactions) {
-    await pending.sign([privateKey]);
+    await pending.sign([signingKeyArg(privateKey)]);
     const submitSigned = (activeRpc) => pending.submit(activeRpc);
     const txid = withRpc
       ? await withRpc(submitSigned, { retries: 1, label: "Compound broadcast" })
@@ -128,7 +128,7 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
   if (amount <= 0n) throw new Error("Balance too low after network fees.");
 
   const tx = kaspa.createTransaction(entries, [{ address: destinationAddress, amount }], 0n);
-  const signed = kaspa.signTransaction(tx, [privateKey], true);
+  const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
   const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
   const response = withRpc
     ? await withRpc(submit, { retries: 1, label: "Max send broadcast" })
@@ -175,6 +175,25 @@ async function sendKaspaWithUtxoRetry(params) {
   throw lastError;
 }
 
+// The SDK takes a private key as "a string or an instance of PrivateKey". The string form can
+// never go stale, so a live key object is handed over as its hex; a dead one (freed, or minted
+// by another module instance) cannot produce hex and goes through as-is for the SDK to judge.
+function signingKeyArg(privateKey) {
+  if (typeof privateKey === "string") return privateKey;
+  try {
+    const hex = privateKey?.__wbg_ptr ? String(privateKey.toString()) : "";
+    return /^[0-9a-f]{64}$/i.test(hex) ? hex : privateKey;
+  } catch {
+    return privateKey;
+  }
+}
+
+function describeKey(privateKey) {
+  if (typeof privateKey === "string") return "key: hex string";
+  if (!privateKey) return "key: missing";
+  return `key: ${privateKey.constructor?.name || typeof privateKey} ptr=${privateKey.__wbg_ptr ?? "n/a"}`;
+}
+
 async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas || "").trim();
@@ -216,8 +235,14 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   log("Transaction summary:", result.summary);
 
   const txids = [];
+  const signer = signingKeyArg(privateKey);
   for (const pending of result.transactions) {
-    await pending.sign([privateKey]);
+    try {
+      await pending.sign([signer]);
+    } catch (error) {
+      log("Signing failed:", describeKey(privateKey), String(error));
+      throw error;
+    }
     const submitSignedTransaction = (activeRpc) => pending.submit(activeRpc);
     const txid = withRpc
       ? await withRpc(submitSignedTransaction, { retries: 1, label: "Transaction broadcast" })

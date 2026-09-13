@@ -815,6 +815,30 @@ export class KaspaEngine {
     return this.setWallet(importPrivateKey(this.kaspa, hex));
   }
 
+  /**
+   * The signing key, guaranteed usable by the SDK. wasm-bindgen objects can die under the app:
+   * a freed one has __wbg_ptr 0, and one minted by another module instance is not an instance
+   * of this SDK's class - either way the SDK answers "Invalid PrivateKey (must be a string or an
+   * instance of PrivateKey)" at signing time. The hex survives both, so a dead object is rebuilt
+   * from it here rather than surfacing as a failed send.
+   */
+  get privateKey() {
+    const key = this._privateKey;
+    if (!key) return null;
+    const sdk = this.kaspa;
+    const dead = sdk && (!(key instanceof sdk.PrivateKey) || !key.__wbg_ptr);
+    if (dead && this.privateKeyHex) {
+      this.log?.("Signing key object was stale; rebuilt from hex.");
+      this._privateKey = new sdk.PrivateKey(this.privateKeyHex);
+      return this._privateKey;
+    }
+    return key;
+  }
+
+  set privateKey(value) {
+    this._privateKey = value || null;
+  }
+
   setWallet(wallet) {
     const previousAddress = this.address;
     this.privateKey = wallet.privateKey;
