@@ -316,7 +316,9 @@ export async function fetchKaPostUserDetails({ engine, pubkey } = {}) {
 const KAPOST_ACTION_AMOUNT_KAS = "0.2";
 
 function signKaPostString(engine, message) {
-  const signature = engine.kaspa.signMessage({ message, privateKey: engine.privateKey });
+  // The hex form of the key can never go stale or fail the SDK's class check; the object is the
+  // fallback for a session that has no hex (see engine.privateKey's rebuild rule).
+  const signature = engine.kaspa.signMessage({ message, privateKey: engine.privateKeyHex || engine.privateKey });
   return String(signature).toLowerCase();
 }
 

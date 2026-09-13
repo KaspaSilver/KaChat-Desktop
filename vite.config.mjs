@@ -183,8 +183,23 @@ export default defineConfig({
   // `object constructor \`e\` does not match expected class \`Resolver\`` and automatic node
   // selection could not connect at all. Dev was fine because dev does not minify, which is exactly
   // why this only ever appeared on the published site.
+  // Vite 8 bundles and minifies with rolldown/oxc, and the `esbuild.keepNames` that used to do
+  // this is ignored there - so on the built site the class names were mangled again and every
+  // object handed to the SDK failed its cast: `new Resolver()` (automatic node scan) and, seen
+  // as "Invalid PrivateKey (must be a string or an instance of PrivateKey)", signMessage for
+  // KaPosts, KNS and group actions. Both the transform and the minifier are told to keep names.
   esbuild: {
     keepNames: true,
+  },
+  oxc: {
+    keepNames: true,
+  },
+  build: {
+    rolldownOptions: {
+      output: {
+        keepNames: true,
+      },
+    },
   },
   server: {
     // Vite rejects unknown Host headers by default; allow access via the
