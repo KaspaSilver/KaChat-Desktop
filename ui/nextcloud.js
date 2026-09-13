@@ -163,6 +163,21 @@ async function verifyCredentials(server, username, appPassword) {
   if (!response.ok) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
   const decoded = await response.json();
   if (!decoded?.ocs?.data) throw new Error("Unexpected response from the Nextcloud server.");
+  return String(decoded.ocs.data.id || "").trim();
+}
+
+/** The user id the files paths are built on - the id Nextcloud reported at connect time, or the
+ *  login as typed for connections stored before that was recorded. */
+function davUser() {
+  return encodeURIComponent(nc?.userId || nc?.username || "");
+}
+/** For an older connection that never recorded the id, ask once and keep it. */
+async function ensureDavUser() {
+  if (!nc || nc.userId) return;
+  try {
+    const id = await verifyCredentials(nc.server, nc.username, nc.appPassword);
+    if (id) { nc.userId = id; saveState(); }
+  } catch { /* the request that follows reports its own error */ }
 }
 
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "bmp", "tiff"]);
@@ -185,7 +200,8 @@ function classifyEntry(entry) {
 /** Depth-1 PROPFIND folder listing. The multistatus includes the listed folder ITSELF —
  *  excluded here at any depth (the "folder inside itself forever" bug class). */
 async function listFolder(relativePath = "") {
-  const davBasePath = `/remote.php/dav/files/${nc.username}`;
+  await ensureDavUser();
+  const davBasePath = `/remote.php/dav/files/${davUser()}`;
   const listedPath = relativePath.split("/").filter(Boolean).join("/");
   const url = `${apiBase()}${davBasePath}${listedPath ? "/" + listedPath.split("/").map(encodeURIComponent).join("/") : ""}`;
   const response = await fetch(url, {
@@ -201,7 +217,7 @@ async function listFolder(relativePath = "") {
       </d:propfind>`,
     cache: "no-store",
   });
-  if (response.status === 401) throw new Error("Nextcloud rejected the stored app password — reconnect in Settings.");
+  if (response.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (response.status !== 207) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
 
   const xml = new DOMParser().parseFromString(await response.text(), "application/xml");
@@ -209,9 +225,9 @@ async function listFolder(relativePath = "") {
   for (const responseNode of xml.getElementsByTagNameNS("DAV:", "response")) {
     const hrefNode = responseNode.getElementsByTagNameNS("DAV:", "href")[0];
     const decoded = decodeURIComponent(hrefNode?.textContent?.trim() || "");
-    const baseIndex = decoded.indexOf(davBasePath);
+    const baseIndex = decoded.indexOf(decodeURIComponent(davBasePath));
     if (baseIndex === -1) continue;
-    const relative = decoded.slice(baseIndex + davBasePath.length).replace(/^\/+|\/+$/g, "");
+    const relative = decoded.slice(baseIndex + decodeURIComponent(davBasePath).length).replace(/^\/+|\/+$/g, "");
     if (!relative || relative === listedPath) continue; // the listed folder itself
 
     const isDirectory = responseNode.getElementsByTagNameNS("DAV:", "collection").length > 0;
@@ -248,7 +264,7 @@ async function createPublicShareLink(relativePath) {
     body,
     cache: "no-store",
   });
-  if (response.status === 401) throw new Error("Nextcloud rejected the stored app password — reconnect in Settings.");
+  if (response.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (response.ok) {
     const decoded = await response.json().catch(() => null);
     const url = decoded?.ocs?.data?.url;
@@ -300,7 +316,7 @@ async function ensureFolder(davRoot, parts) {
   for (const part of parts) {
     url = `${url}/${encodeURIComponent(part)}`;
     const mkcol = await fetch(url, { method: "MKCOL", headers: { Authorization: authHeader() } });
-    if (mkcol.status === 401) throw new Error("Nextcloud rejected the stored app password — reconnect in Settings.");
+    if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
     if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the media folder (HTTP ${mkcol.status}).`);
   }
   return url;
@@ -311,7 +327,7 @@ export async function uploadNextcloudMedia(blob, filename, contentType) {
   if (!nc) throw new Error("Nextcloud is not connected.");
   const safeName = String(filename || "file").replace(/[^\w.\-]+/g, "_");
   const unique = `${Math.random().toString(36).slice(2, 10)}_${safeName}`;
-  const davRoot = `${apiBase()}/remote.php/dav/files/${nc.username}`;
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = await ensureFolder(davRoot, ["KaChat", "Media"]);
   const put = await fetch(`${folderURL}/${encodeURIComponent(unique)}`, {
     method: "PUT",
@@ -327,10 +343,10 @@ export async function uploadNextcloudMedia(blob, filename, contentType) {
  *  null when the header is missing (some proxies strip it; runBackup then recovers it with a
  *  follow-up PROPFIND). */
 async function uploadBackup(payloadJson) {
-  const davRoot = `${apiBase()}/remote.php/dav/files/${nc.username}`;
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}`;
   const mkcol = await fetch(folderURL, { method: "MKCOL", headers: { Authorization: authHeader() } });
-  if (mkcol.status === 401) throw new Error("Nextcloud rejected the stored app password — reconnect in Settings.");
+  if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the backup folder (HTTP ${mkcol.status}).`);
 
   const put = await fetch(`${folderURL}/${BACKUP_FILENAME}`, {
@@ -406,11 +422,11 @@ async function runBackup() {
 /// WebDAV COPY rather than MOVE: if the copy fails the original is still there, and the backup
 /// that follows is free to overwrite it either way.
 async function preserveDamagedBackup() {
-  const davRoot = `${apiBase()}/remote.php/dav/files/${nc.username}`;
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const source = `${davRoot}/${folder}/${BACKUP_FILENAME}`;
-  const destinationPath = `/remote.php/dav/files/${nc.username}/${folder}/kachat-backup-damaged-${stamp}.json`;
+  const destinationPath = `/remote.php/dav/files/${davUser()}/${folder}/kachat-backup-damaged-${stamp}.json`;
   await fetch(source, {
     method: "COPY",
     headers: {
@@ -449,7 +465,7 @@ function transientError(message) {
  *  misleading message. Mirrors iOS NextcloudService.performBackupDownload's mimeType guard and
  *  its empty-body check. */
 async function downloadBackupFile(filename) {
-  const davRoot = `${apiBase()}/remote.php/dav/files/${nc.username}`;
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const url = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(filename)}`;
   const response = await fetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
   if (response.status === 404) return null;
@@ -518,7 +534,7 @@ function parseETagFromMultistatus(xmlText) {
  *  null = no backup file yet (404); throws on any other failure. */
 async function fetchBackupETag() {
   if (!nc) return null;
-  const davRoot = `${apiBase()}/remote.php/dav/files/${nc.username}`;
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const url = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(BACKUP_FILENAME)}`;
   const response = await fetch(url, {
     method: "PROPFIND",
@@ -1547,8 +1563,8 @@ function wireSettings() {
       button.disabled = true;
       button.textContent = "Connecting…";
       try {
-        await verifyCredentials(server, username, appPassword);
-        nc = { server, username, appPassword, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
+        const userId = await verifyCredentials(server, username, appPassword);
+        nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
         saveState();
         renderSettings();
         armAutoBackup();
@@ -1637,7 +1653,7 @@ const KASPA_ADDRESS_RE = /(kaspa:[a-z0-9]{20,}|kaspatest:[a-z0-9]{20,})/i;
 // case still works without a successful PROPFIND.
 async function listAddressBookIds() {
   try {
-    const home = `${apiBase()}/remote.php/dav/addressbooks/users/${encodeURIComponent(nc.username)}/`;
+    const home = `${apiBase()}/remote.php/dav/addressbooks/users/${davUser()}/`;
     const response = await fetch(home, {
       method: "PROPFIND",
       headers: { Authorization: authHeader(), Depth: "1", "Content-Type": "application/xml" },
@@ -1688,7 +1704,7 @@ async function syncContactsFromNextcloud() {
   const seen = new Set();
   const entries = [];
   for (const bookId of bookIds) {
-    const url = `${apiBase()}/remote.php/dav/addressbooks/users/${encodeURIComponent(nc.username)}/${encodeURIComponent(bookId)}/?export`;
+    const url = `${apiBase()}/remote.php/dav/addressbooks/users/${davUser()}/${encodeURIComponent(bookId)}/?export`;
     const response = await fetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
     if (!response.ok) continue;
     for (const entry of parseVCardContacts(await response.text())) {
