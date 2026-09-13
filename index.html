@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=365" />
+  <link rel="stylesheet" href="./ui/styles.css?v=366" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -343,11 +343,23 @@
                   </span>
                 </button>
               </div>
+              <div class="message-selection-toolbar" data-group-selection-toolbar hidden>
+                <button class="selection-cancel" type="button" data-group-cancel-selection>Cancel</button>
+                <strong data-group-selection-count>0 selected</strong>
+                <button class="selection-delete" type="button" data-group-delete-selected disabled>Delete</button>
+              </div>
               <div class="message-area group-message-area" data-group-message-area>
                 <div class="message-empty group-message-empty" data-group-message-empty hidden></div>
               </div>
               <div class="composer-shell group-composer-shell">
                 <p class="group-readonly-note" data-group-readonly-note hidden>You are no longer a member of this group.</p>
+                <div class="chat-funding-gate" data-group-funding-gate hidden>
+                  <strong>Fund your chatting address to start chatting</strong>
+                  <canvas width="320" height="320" data-group-funding-gate-qr></canvas>
+                  <button type="button" class="chat-funding-gate-address" data-group-funding-gate-address title="Copy address"></button>
+                  <button type="button" class="secondary-button" data-group-funding-gate-copy>Copy Address</button>
+                </div>
+                <div class="broadcast-fee-row"><span class="fee-pill" data-group-fee hidden>fee: -- KAS</span></div>
 
                 <div class="composer-plus-menu" data-group-plus-menu hidden>
                   <button type="button" data-group-compose="photo">
@@ -370,7 +382,7 @@
 
                 <div class="reply-banner" data-group-reply-banner hidden>
                   <div class="reply-banner-body">
-                    <strong>Replying to</strong>
+                    <strong data-group-reply-title>Replying to</strong>
                     <span data-group-reply-preview></span>
                   </div>
                   <button type="button" data-group-cancel-reply aria-label="Cancel reply">×</button>
@@ -388,6 +400,11 @@
                   <button class="composer-tool composer-plus" type="button" data-group-plus aria-label="More message options">+</button>
                   <div class="composer-field-wrap">
                     <textarea class="composer-input" name="message" placeholder="Message" autocomplete="off" rows="1" data-group-composer-input></textarea>
+                    <!-- iOS keeps camera and mic inside the group's input bubble. -->
+                    <span class="composer-inline-tools">
+                      <button type="button" class="composer-inline-tool" data-group-camera aria-label="Take Photo" title="Take Photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.1-1.6A1 1 0 0 1 9.6 4h4.8a1 1 0 0 1 .8.4L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg></button>
+                      <button type="button" class="composer-inline-tool" data-group-mic aria-label="Record Voice Message" title="Record Voice Message"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg></button>
+                    </span>
                     <button class="composer-send" type="submit" aria-label="Send message">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/></svg>
                     </button>
@@ -2916,7 +2933,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=403"></script>
+  <script type="module" src="./ui/app.js?v=404"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

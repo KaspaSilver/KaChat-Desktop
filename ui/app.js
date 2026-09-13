@@ -15628,7 +15628,7 @@ function setReactionSendStatus(key, status, { retry = null, rerender = null } = 
         reactionSendStatus.delete(key);
         try { rerender?.(); } catch {}
       }
-    }, 60_000);
+    }, 600_000);
   }
   try { rerender?.(); } catch {}
 }
@@ -18672,17 +18672,26 @@ function openGroupMemberMenu(address, x, y) {
     b.addEventListener("click", () => { menu.remove(); fn(); });
     menu.append(b);
   };
+  // iOS GroupChatDetailView.avatarButton: View Profile / Open Chat / Copy Address / Pay in Kaspa /
+  // Mute or Unmute User / Hide User.
+  add("View Profile", () => openChatInfoForAddress(address));
+  if (address !== engine.address) add("Open Chat", () => openOrCreateOneToOne(address));
+  add("Copy Address", () => copyTextToClipboard(address).then(() => showCopyToast(addressCopiedToastText(address))).catch(() => {}));
   if (address !== engine.address) {
-    add("Message", () => openOrCreateOneToOne(address));
-    add("Copy Address", () => copyTextToClipboard(address).then(() => showCopyToast(addressCopiedToastText(address))).catch(() => {}));
+    add("Pay in Kaspa", () => openChatWithAddressForKaspa({ address, name: groupSenderLabel(address) }));
+    const muted = activeGroupId && isGroupMemberMuted(activeGroupId, address);
+    add(muted ? "Unmute User" : "Mute User", () => {
+      if (!activeGroupId) return;
+      setGroupMemberMuted(activeGroupId, address, !muted);
+      showCopyToast(muted ? "User unmuted." : "User muted.");
+    });
     const hidden = activeGroupId && isGroupMemberHidden(activeGroupId, address);
-    add(hidden ? "Unhide messages" : "Hide messages", () => {
+    add(hidden ? "Unhide User" : "Hide User", () => {
       if (!activeGroupId) return;
       setGroupMemberHidden(activeGroupId, address, !hidden);
       renderGroupMessages();
+      if (!hidden) showCopyToast("User hidden.");
     }, !hidden);
-  } else {
-    add("Copy Address", () => copyTextToClipboard(address).then(() => showCopyToast(addressCopiedToastText(address))).catch(() => {}));
   }
   document.body.append(menu);
   const vw = window.innerWidth, vh = window.innerHeight;
@@ -18843,11 +18852,12 @@ function renderGroupList() {
   groupListEl.innerHTML = groups.map((g) => {
     const msgs = groupMessages(g.groupId);
     const last = msgs[msgs.length - 1];
+    const opened = openedGroupIds();
     const preview = last
       ? `${last.direction === "local" ? "You: " : ""}${groupPreviewText(last.text)}`
       : `${g.members.length} member${g.members.length === 1 ? "" : "s"}`;
     const time = last ? formatTime(last.createdAt) : "";
-    const unread = groupUnreadFor(g.groupId);
+    const unread = (!g.isAdmin && !opened.has(g.groupId)) ? Math.max(1, groupUnreadFor(g.groupId)) : groupUnreadFor(g.groupId);
     const selected = selectedGroupIds.has(g.groupId);
     return `
       <button class="chat-row group-row${chatSelectionModeActive ? " selecting" : ""}${selected ? " selected" : ""}${g.groupId === activeGroupId ? " active" : ""}" type="button" data-group-open="${escapeHtml(g.groupId)}">
@@ -18864,10 +18874,117 @@ function renderGroupList() {
 }
 
 // --- group thread (shares the right-side detail pane with the 1:1 conversation view) ---
+// Zero-balance gate for the group composer (iOS zeroBalanceGateCard): reading stays usable,
+// composing is blocked, and the card says where to send the KAS.
+let groupFundingGateQrDrawnFor = null;
+function syncGroupFundingGate() {
+  const gate = document.querySelector("[data-group-funding-gate]");
+  if (!gate) return;
+  const kas = Number(currentBalanceKas);
+  const gated = Boolean(activeGroupId) && Boolean(engine.address) && Number.isFinite(kas) && kas === 0;
+  gate.hidden = !gated;
+  groupComposer?.classList.toggle("composer-gated", gated);
+  if (groupComposerInput) groupComposerInput.disabled = gated;
+  if (!gated) return;
+  const addressEl = gate.querySelector("[data-group-funding-gate-address]");
+  if (addressEl) addressEl.textContent = engine.address;
+  const canvas = gate.querySelector("[data-group-funding-gate-qr]");
+  if (canvas && groupFundingGateQrDrawnFor !== engine.address) {
+    groupFundingGateQrDrawnFor = engine.address;
+    engine.drawQrFor(canvas, engine.address, { dark: "#06110f", light: "#ffffff" })
+      .then(() => { canvas.style.width = "160px"; canvas.style.height = "160px"; })
+      .catch(() => { groupFundingGateQrDrawnFor = null; });
+  }
+}
+document.querySelector("[data-group-funding-gate]")?.addEventListener("click", async (event) => {
+  if (!event.target.closest("[data-group-funding-gate-address], [data-group-funding-gate-copy]") || !engine.address) return;
+  try { await copyTextToClipboard(engine.address); showCopyToast(addressCopiedToastText(engine.address)); } catch {}
+});
+
+// The group fee pill (iOS feeBubble): estimated for the encrypted envelope while typing, tap
+// to set a fee that rides on the next message, hidden with Show Fee Estimate off.
+let groupFeeEstimateKas = null;
+let groupFeeOverrideKas = null;
+let groupFeeTimer = null;
+let groupFeeToken = 0;
+function renderGroupFeePill(feeKas, { estimating = false } = {}) {
+  const pill = document.querySelector("[data-group-fee]");
+  if (!pill) return;
+  pill.classList.toggle("estimating", estimating);
+  if (estimating && feeKas == null) pill.textContent = "fee: -------- KAS";
+  else if (feeKas == null) pill.textContent = "fee: -- KAS";
+  else pill.textContent = `fee: ${formatKasExact(feeKas)} KAS`;
+  pill.hidden = false;
+}
+function hideGroupFeePill() {
+  if (groupFeeTimer) window.clearTimeout(groupFeeTimer);
+  groupFeeTimer = null;
+  groupFeeEstimateKas = null;
+  const pill = document.querySelector("[data-group-fee]");
+  if (pill) pill.hidden = true;
+}
+function scheduleGroupFeeEstimate() {
+  const text = String(groupComposerInput?.value || "").trim();
+  if (!activeGroupId || !text || !accountShellPrefs.estimateFees) { hideGroupFeePill(); return; }
+  if (groupFeeOverrideKas != null) { renderGroupFeePill(groupFeeOverrideKas); return; }
+  if (groupFeeTimer) window.clearTimeout(groupFeeTimer);
+  const token = ++groupFeeToken;
+  renderGroupFeePill(groupFeeEstimateKas, { estimating: true });
+  groupFeeTimer = window.setTimeout(async () => {
+    try {
+      // The sealed group envelope carries the ciphertext plus its headers; the comm estimate
+      // with headroom is close enough for a pill.
+      const feeKas = await engine.estimateMessageFee(estimateCommPayloadBytes(text) + 160);
+      if (token !== groupFeeToken) return;
+      groupFeeEstimateKas = feeKas == null ? null : String(feeKas);
+      renderGroupFeePill(groupFeeEstimateKas);
+    } catch {
+      if (token === groupFeeToken) renderGroupFeePill(null);
+    }
+  }, 450);
+}
+document.querySelector("[data-group-fee]")?.addEventListener("click", async () => {
+  const pill = document.querySelector("[data-group-fee]");
+  if (!pill || pill.classList.contains("estimating")) return;
+  const current = groupFeeOverrideKas ?? groupFeeEstimateKas;
+  if (current == null) return;
+  const typed = await promptDialog({
+    title: "Adjust Network Fee",
+    label: "Fee (KAS)",
+    message: "If the network is busy, a higher fee can help your transaction confirm faster.",
+    initial: formatKasExact(current),
+    confirmLabel: "Save",
+  });
+  if (typed == null) return;
+  const normalized = String(typed).trim().replace(",", ".");
+  if (normalized === "" || normalized === "0") { groupFeeOverrideKas = null; scheduleGroupFeeEstimate(); return; }
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value < 0) { showCopyToast("Enter a fee in KAS."); return; }
+  groupFeeOverrideKas = normalized;
+  renderGroupFeePill(groupFeeOverrideKas);
+});
+
+// Groups you were invited to and have never opened count as unread (iOS unreadCount: a
+// never-opened non-admin group is at least one), so an invite with no messages yet still badges.
+const GROUP_OPENED_KEY = "kachat-group-opened-v1";
+function openedGroupIds() {
+  try { return new Set(JSON.parse(localStorage.getItem(accountScopedKey(GROUP_OPENED_KEY)) || "[]")); } catch { return new Set(); }
+}
+function markGroupOpened(groupId) {
+  const ids = openedGroupIds();
+  if (ids.has(groupId)) return;
+  ids.add(groupId);
+  try { localStorage.setItem(accountScopedKey(GROUP_OPENED_KEY), JSON.stringify([...ids])); } catch {}
+}
+
 function openGroupChat(groupId) {
   const mgr = getGroupManager();
   const g = mgr && mgr.getGroup(groupId);
   if (!g) return;
+  markGroupOpened(groupId);
+  groupFeeOverrideKas = null;
+  hideGroupFeePill();
+  if (groupSelectionMode) { groupSelectionMode = false; selectedGroupMessageKeys.clear(); updateGroupSelectionUi(); }
   // Take over the detail pane: clear any open 1:1 and hide its empty state. Setting
   // activeGroupId first means setActiveConversationId(null) treats the group as the pane
   // owner (keeps conversation-open/detail-active on for the narrow-layout collapse).
@@ -18881,6 +18998,7 @@ function openGroupChat(groupId) {
   if (groupReadonlyNote) groupReadonlyNote.hidden = amMember;
   if (groupComposer) groupComposer.hidden = !amMember;
   renderGroupMessages();
+  syncGroupFundingGate();
   if (detailEmptyState) detailEmptyState.hidden = true;
   if (conversation) conversation.hidden = true;
   if (groupChatScreen) groupChatScreen.hidden = false;
@@ -18895,6 +19013,7 @@ function openGroupChat(groupId) {
 }
 function closeGroupChat() {
   const wasOpen = Boolean(activeGroupId);
+  if (groupSelectionMode) { groupSelectionMode = false; selectedGroupMessageKeys.clear(); updateGroupSelectionUi(); }
   try { cancelGroupVoice(); cancelGroupReply(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto(); } catch { /* not ready */ }
   activeGroupId = null;
   if (groupChatScreen) groupChatScreen.hidden = true;
@@ -18922,7 +19041,7 @@ function jumpToGroupMessage(targetKey) {
   if (!groupMessageArea || !targetKey) return;
   let row = null;
   try { row = groupMessageArea.querySelector(`[data-group-msg-key="${CSS.escape(targetKey)}"]`); } catch { row = null; }
-  if (!row) return;
+  if (!row) { showCopyToast("Original message not available."); return; }
   row.scrollIntoView({ behavior: "smooth", block: "center" });
   row.classList.add("message-row-highlight");
   window.setTimeout(() => row.classList.remove("message-row-highlight"), 1600);
@@ -19158,15 +19277,85 @@ function openGroupMessageMenu(message, x, y) {
   const items = [];
   items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startGroupReply(message) });
   if (isText) {
-    items.push({ label: "Copy", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(decodeGroupMentions(plain)).then(() => showCopyToast("Copied")).catch(() => {}) });
+    items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(decodeGroupMentions(plain)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
+  }
+  if (message.txId) {
+    items.push({ label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(message.txId), "_blank", "noopener,noreferrer") });
+  }
+  // The pill shows WHICH emoji are on the bubble; it has no room to say how many or from whom.
+  // In a group that is the interesting question.
+  const reactionRows = key ? groupReactionsFor(activeGroupId, key) : [];
+  if (reactionRows.length) {
+    items.push({
+      label: `Reactions (${reactionRows.length})`, icon: MSG_MENU_ICONS.info,
+      onClick: () => showReactionsSheet({
+        entries: reactionRows.map((entry) => ({ emoji: entry.emoji, reactorAddress: entry.reactorAddress })),
+        nameFor: (address) => groupSenderLabel(address),
+        avatarFor: (address) => memberAvatarHtml(address, "chat-avatar reactions-sheet-avatar"),
+      }),
+    });
   }
   if (message.direction === "local" && message.status === MESSAGE_STATUSES.FAILED) {
-    items.push({ label: "Retry send", icon: MSG_MENU_ICONS.retry, onClick: () => { deleteGroupMessageLocal(message); sendGroupWire(message.text); } });
+    items.push({ label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: () => retryGroupMessage(message) });
   }
+  items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterGroupSelection(key) });
   items.push({ label: "Delete for me", icon: MSG_MENU_ICONS.trash, danger: true, onClick: () => deleteGroupMessageLocal(message) });
   const reaction = key ? { current, onPick: (emoji) => sendGroupReaction(activeGroupId, message, emoji) } : null;
   openMsgContextMenu({ x, y, reaction, items });
 }
+
+// Select mode for group messages (iOS enterSelectMode): entered from a message's menu with that
+// message pre-selected; the header shows Cancel, a count and a trash that asks first.
+let groupSelectionMode = false;
+const selectedGroupMessageKeys = new Set();
+function updateGroupSelectionUi() {
+  const toolbar = document.querySelector("[data-group-selection-toolbar]");
+  const count = document.querySelector("[data-group-selection-count]");
+  const del = document.querySelector("[data-group-delete-selected]");
+  if (toolbar) toolbar.hidden = !groupSelectionMode;
+  if (count) count.textContent = `${selectedGroupMessageKeys.size} selected`;
+  if (del) del.disabled = selectedGroupMessageKeys.size === 0;
+  groupMessageArea?.classList.toggle("selection-mode", groupSelectionMode);
+}
+function enterGroupSelection(initialKey = null) {
+  groupSelectionMode = true;
+  selectedGroupMessageKeys.clear();
+  if (initialKey) selectedGroupMessageKeys.add(initialKey);
+  updateGroupSelectionUi();
+  renderGroupMessages();
+}
+function exitGroupSelection() {
+  groupSelectionMode = false;
+  selectedGroupMessageKeys.clear();
+  updateGroupSelectionUi();
+  if (activeGroupId) renderGroupMessages();
+}
+function toggleGroupSelected(key) {
+  if (!key) return;
+  if (selectedGroupMessageKeys.has(key)) selectedGroupMessageKeys.delete(key); else selectedGroupMessageKeys.add(key);
+  updateGroupSelectionUi();
+  let row = null;
+  try { row = groupMessageArea?.querySelector(`[data-group-msg-key="${CSS.escape(key)}"]`); } catch { row = null; }
+  const on = selectedGroupMessageKeys.has(key);
+  row?.classList.toggle("selected", on);
+  row?.querySelector(".message-bubble")?.classList.toggle("selected", on);
+}
+document.querySelector("[data-group-cancel-selection]")?.addEventListener("click", exitGroupSelection);
+document.querySelector("[data-group-delete-selected]")?.addEventListener("click", async () => {
+  const count = selectedGroupMessageKeys.size;
+  if (!count || !activeGroupId) return;
+  const confirmed = await confirmDialog({
+    title: `Delete ${count} Message${count === 1 ? "" : "s"}?`,
+    message: "This only deletes the message from this device - other members still have their own copy, and the encrypted transaction remains permanently on the Kaspa blockchain, visible to anyone but unreadable without your keys. This cannot be undone.",
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!confirmed) return;
+  const keys = new Set(selectedGroupMessageKeys);
+  saveGroupMessages(activeGroupId, groupMessages(activeGroupId).filter((m) => !keys.has(groupMsgKey(m))));
+  exitGroupSelection();
+  renderGroupList();
+});
 
 // Remove a group message from THIS device only (other members keep their copy; the on-chain
 // tx stays) — matches iOS's local group-message delete.
@@ -19314,7 +19503,9 @@ function renderGroupMessages() {
       const quote = document.createElement("div");
       quote.className = "message-reply-quote";
       const label = document.createElement("strong");
-      label.textContent = "Reply";
+      label.textContent = replyEnvelope.replyToSender
+        ? (replyEnvelope.replyToSender === engine.address ? "You" : groupSenderLabel(replyEnvelope.replyToSender))
+        : "Reply";
       const preview = document.createElement("span");
       preview.textContent = decodeGroupMentions(replyEnvelope.replyToPreview) || "Message";
       quote.append(label, preview);
@@ -19397,7 +19588,24 @@ function renderGroupMessages() {
       bubble.append(pill);
     }
 
-    bubble.addEventListener("contextmenu", (event) => { event.preventDefault(); openGroupMessageMenu(message, event.clientX, event.clientY); });
+    bubble.addEventListener("contextmenu", (event) => { event.preventDefault(); if (!groupSelectionMode) openGroupMessageMenu(message, event.clientX, event.clientY); });
+    // Double-click: the quick-reaction bar (iOS double-tap), "+" into the full picker.
+    bubble.addEventListener("dblclick", (event) => {
+      if (groupSelectionMode || !key) return;
+      event.preventDefault();
+      const current = groupReactionsFor(activeGroupId, key).find((e) => e.reactorAddress === engine.address)?.emoji || null;
+      openQuickReactionBarFor({
+        anchor: bubble, alignRight: !incoming, current,
+        onReact: (emoji) => sendGroupReaction(activeGroupId, message, emoji),
+        onReply: () => startGroupReply(message),
+      });
+    });
+    if (groupSelectionMode) {
+      selector.innerHTML = '<svg viewBox="0 0 20 20"><path d="m5.1 10.1 3.1 3.1 6.7-7"/></svg>';
+      bubble.classList.add("selectable");
+      if (selectedGroupMessageKeys.has(key)) { bubble.classList.add("selected"); row.classList.add("selected"); }
+      row.addEventListener("click", () => toggleGroupSelected(key));
+    }
 
     if (detachedLinkCard) {
       const stack = document.createElement("div");
@@ -19519,7 +19727,11 @@ function renderGroupMemberPicker(excludeAddresses = []) {
   if (!groupMemberPicker) return;
   const all = eligibleGroupContacts(excludeAddresses);
   if (!all.length) {
-    groupMemberPicker.innerHTML = `<p class="group-picker-empty">No contacts to add yet. Start a 1:1 chat with someone first, then you can add them to a group.</p>`;
+    // iOS AddGroupMembersView: nobody at all, or everybody is already in.
+    const anyone = eligibleGroupContacts([]).length > 0;
+    groupMemberPicker.innerHTML = `<p class="group-picker-empty">${groupModalMode === "add" && anyone
+      ? "Everyone in your contacts is already in this group."
+      : "You have no contacts yet. Paste an address or a .kas domain to invite someone."}</p>`;
     return;
   }
   // Filter by the search box (name, nickname, or address). Selection persists across
@@ -19529,7 +19741,7 @@ function renderGroupMemberPicker(excludeAddresses = []) {
     ? all.filter((row) => row.name.toLowerCase().includes(query) || row.address.toLowerCase().includes(query))
     : all;
   if (!rows.length) {
-    groupMemberPicker.innerHTML = `<p class="group-picker-empty">No matches.</p>`;
+    groupMemberPicker.innerHTML = `<p class="group-picker-empty">No contacts match your search.</p>`;
     return;
   }
   groupMemberPicker.innerHTML = rows.map((row) => {
@@ -19559,6 +19771,7 @@ function updateGroupCreateSubmit() {
   if (!groupCreateSubmit) return;
   if (groupModalMode === "add") {
     groupCreateSubmit.disabled = groupCreateSelected.size < 1;
+    groupCreateSubmit.textContent = groupCreateSelected.size ? `Add (${groupCreateSelected.size})` : "Add";
   } else {
     const name = String(groupNameInput?.value || "").trim();
     groupCreateSubmit.disabled = !(name && groupCreateSelected.size >= 1);
@@ -19646,12 +19859,12 @@ function openGroupAddMember(groupId) {
   groupModalMode = "add";
   groupModalTargetId = groupId;
   groupCreateSelected.clear();
-  if (groupCreateTitle) groupCreateTitle.textContent = "Add Member";
+  if (groupCreateTitle) groupCreateTitle.textContent = "Add Members";
   if (groupCreateSubmit) groupCreateSubmit.textContent = "Add";
   if (groupNameInput) { groupNameInput.value = ""; groupNameInput.hidden = true; }
   const identityRow = document.querySelector("[data-group-identity-row]");
   if (identityRow) identityRow.hidden = true;
-  if (groupPickerHint) groupPickerHint.textContent = "Adding a member issues a fresh group key to everyone.";
+  if (groupPickerHint) groupPickerHint.textContent = "New members can read messages from the moment they're added, not earlier history.";
   if (groupCreateError) groupCreateError.hidden = true;
   if (groupMemberSearch) groupMemberSearch.value = "";
   groupPickerExclude = g.members.map((m) => m.address);
@@ -20214,6 +20427,12 @@ groupListEl?.addEventListener("click", (event) => {
 });
 document.querySelector("[data-group-chat-back]")?.addEventListener("click", closeGroupChat);
 document.querySelector("[data-open-group-manage]")?.addEventListener("click", () => { if (activeGroupId) openGroupManage(activeGroupId); });
+document.querySelector(".group-chat-header")?.addEventListener("click", (event) => {
+  if (event.target.closest("button") || !activeGroupId || !groupMessageArea) return;
+  groupMessageArea.scrollTo({ top: 0, behavior: "smooth" });
+  const first = groupMessageArea.querySelector("[data-group-msg-key]");
+  if (first) { first.classList.add("message-row-highlight"); window.setTimeout(() => first.classList.remove("message-row-highlight"), 1600); }
+});
 document.querySelector("[data-group-manage-back]")?.addEventListener("click", closeGroupManage);
 
 // --- group composer: reply, @mentions, photo, voice (mirrors the 1:1 composer) ---
@@ -20241,6 +20460,8 @@ function autoGrowGroupComposer() {
 
 function startGroupReply(message) {
   groupReplyTarget = message;
+  const title = document.querySelector("[data-group-reply-title]");
+  if (title) title.textContent = `Replying to ${message.direction === "incoming" ? groupSenderLabel(message.senderAddress) : "yourself"}`;
   if (groupReplyPreview) groupReplyPreview.textContent = decodeGroupMentions(replyPreviewTextFor(message)) || "Message";
   if (groupReplyBanner) groupReplyBanner.hidden = false;
   groupComposerInput?.focus();
@@ -20347,7 +20568,7 @@ async function retryGroupMessage(message) {
 
 // Optimistic group send: the bubble appears instantly (pending), then flips to a delivered
 // checkmark or a failed+retry state — so a slow/failed broadcast never leaves the feed blank.
-async function sendGroupWire(text) {
+async function sendGroupWire(text, { feeKas = null } = {}) {
   const mgr = getGroupManager();
   if (!mgr || !activeGroupId) return false;
   const gid = activeGroupId;
@@ -20360,7 +20581,7 @@ async function sendGroupWire(text) {
   if (activeGroupId === gid) renderGroupMessages();
   renderGroupList();
   try {
-    const res = await mgr.sendGroupMessage(gid, text);
+    const res = await mgr.sendGroupMessage(gid, text, { feeKas: feeKas || "0" });
     // Patch the same row so a later sync of our own message dedupes by msgId (no duplicate).
     patchGroupMessage(gid, localId, { txId: res?.txid || null, msgIdHex: res?.msgIdHex || null, status: MESSAGE_STATUSES.CONFIRMED });
     if (activeGroupId === gid) renderGroupMessages();
@@ -20378,11 +20599,24 @@ groupComposer?.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!activeGroupId || !getGroupManager()) return;
   const raw = String(groupComposerInput?.value || "").trim();
+  if (Number(currentBalanceKas) === 0) { syncGroupFundingGate(); return; }
   // A staged photo sends on Send (with the typed caption as a following message, if any).
   if (groupPendingPhoto) {
     const { attachment, fileName } = groupPendingPhoto;
     clearGroupPendingPhoto();
-    sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
+    // "Send Media via Nextcloud": the full-quality original goes to the server and the group
+    // gets its share link; any failure falls back to the on-chain envelope.
+    if (isNextcloudMediaSendActive() && attachment.originalBlob) {
+      try {
+        const url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
+        sendGroupWire(url);
+      } catch (error) {
+        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+        sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
+      }
+    } else {
+      sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
+    }
   }
   if (!raw) return;
   const encoded = encodeGroupMentions(raw);
@@ -20401,10 +20635,14 @@ groupComposer?.addEventListener("submit", async (event) => {
   groupDraftMentions.clear();
   cancelGroupReply();
   closeGroupMentions();
+  const feeKas = groupFeeOverrideKas;
+  groupFeeOverrideKas = null;
+  hideGroupFeePill();
   // Optimistic: the bubble is already in the feed. On failure it shows a "Retry" affordance,
   // so we don't restore the draft (that would double up the message).
-  sendGroupWire(wire);
+  sendGroupWire(wire, { feeKas });
 });
+groupComposerInput?.addEventListener("input", scheduleGroupFeeEstimate);
 
 // Enter sends, Shift+Enter is a newline; keep the box auto-growing.
 groupComposerInput?.addEventListener("keydown", (event) => {
@@ -20419,13 +20657,30 @@ groupCancelReplyBtn?.addEventListener("click", cancelGroupReply);
 
 // Plus-menu (Photo / Voice).
 function closeGroupPlusMenu() { if (groupPlusMenu) groupPlusMenu.hidden = true; }
-groupPlusButton?.addEventListener("click", () => { if (groupPlusMenu) groupPlusMenu.hidden = !groupPlusMenu.hidden; });
+// The old dropdown is retired in favour of the Send sheet below; the markup stays for the
+// data-group-compose rows that other code may still target.
 groupPlusMenu?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-group-compose]");
   if (!btn) return;
   closeGroupPlusMenu();
   if (btn.dataset.groupCompose === "photo") groupPhotoInput?.click();
   else if (btn.dataset.groupCompose === "voice") startGroupVoice();
+});
+document.querySelector("[data-group-camera]")?.addEventListener("click", () => { closeGroupPlusMenu(); groupPhotoInput?.click(); });
+document.querySelector("[data-group-mic]")?.addEventListener("click", () => { closeGroupPlusMenu(); startGroupVoice(); });
+// The "+" (iOS plusSheet): a sheet titled Send, each row saying what it does.
+groupPlusButton?.addEventListener("click", async (event) => {
+  event.stopPropagation();
+  closeGroupPlusMenu();
+  const choice = await chooseDialog({
+    title: "Send",
+    options: [
+      { id: "photo", title: "Send Photo", subtitle: "Pick an image from your library." },
+      { id: "voice", title: "Send Audio Message", subtitle: "Record a voice message and send it to the group." },
+    ],
+  });
+  if (choice === "photo") groupPhotoInput?.click();
+  else if (choice === "voice") startGroupVoice();
 });
 
 // Photo send.
@@ -20499,6 +20754,15 @@ async function finishGroupVoice(send) {
   if (!send || !groupVoiceChunks.length || !activeGroupId) { groupVoiceChunks = []; return; }
   const blob = new Blob(groupVoiceChunks, { type: groupVoiceMime || "audio/webm" });
   groupVoiceChunks = [];
+  if (isNextcloudMediaSendActive()) {
+    try {
+      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, groupVoiceMime || "audio/webm");
+      await sendGroupWire(url);
+      return;
+    } catch (error) {
+      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+    }
+  }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
   if (!dataUrl.startsWith("data:")) return;
   await sendGroupWire(JSON.stringify({ type: "file", name: "voice.webm", size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }));
@@ -20560,10 +20824,31 @@ groupManageBody?.addEventListener("click", async (event) => {
   if (refreshRow) {
     if (refreshRow.disabled) return;
     refreshRow.disabled = true;
+    // Blocking progress (iOS GroupRefreshProgressModal): the repair re-reads the whole group
+    // from the chain, which takes real time; a spinner in a row read as the button doing nothing.
+    const modal = document.createElement("div");
+    modal.className = "modal-backdrop group-refresh-backdrop";
+    modal.innerHTML = `
+      <section class="contact-modal group-refresh-modal" role="dialog" aria-modal="true" aria-label="Refresh Messages">
+        <div class="group-refresh-body">
+          <span class="kaposts-spinner group-refresh-spinner" aria-hidden="true"></span>
+          <h2>Rebuilding this group</h2>
+          <p class="field-hint">Re-reading roster and epoch keys, then every member's messages</p>
+          <p class="field-hint">Re-reading the whole group from the chain, the same way importing your seed phrase does. Leaving now would stop it partway.</p>
+        </div>
+      </section>`;
+    document.body.appendChild(modal);
     try {
       const changed = await syncGroupsNow({ catchUp: true });
-      showCopyToast(changed ? "Group messages refreshed." : "No new group messages.");
+      const recovered = Number(changed) || 0;
+      modal.querySelector(".group-refresh-body").innerHTML = `
+        <span class="group-refresh-check" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></span>
+        <h2>Refresh complete</h2>
+        <p class="field-hint">${recovered > 0 ? `Recovered ${recovered} message${recovered === 1 ? "" : "s"} this device had not been able to read.` : "No new messages were recovered."}</p>
+        <div class="modal-actions"><button class="primary-button" type="button" data-group-refresh-done>Done</button></div>`;
+      modal.querySelector("[data-group-refresh-done]")?.addEventListener("click", () => modal.remove());
     } catch {
+      modal.remove();
       showCopyToast("Could not refresh right now.");
     } finally {
       refreshRow.disabled = false;
@@ -20702,7 +20987,7 @@ groupManageBody?.addEventListener("click", async (event) => {
     const rec = mgr.getGroup(activeGroupId);
     const others = groupOtherMemberCount(rec);
     const hasPhoto = Boolean(rec?.photoHex);
-    if (!await confirmText(`Resend the group invite to all members?${await groupOpFeeHint(activeGroupId, { controlTx: others + 1, photoTx: hasPhoto ? others : 0 })}`)) return;
+    if (!await confirmText(`Resend the group invite to every member? Use this if someone didn't receive the group.${await groupOpFeeHint(activeGroupId, { controlTx: others + 1, photoTx: hasPhoto ? others : 0 })}`)) return;
     resend.disabled = true;
     setStatus("Resending invites…");
     try {
@@ -20751,10 +21036,16 @@ groupManageBody?.addEventListener("click", async (event) => {
       openGroupAddMember(activeGroupId);
     } else if (target.dataset.groupRename != null) {
       const current = mgr.getGroup(activeGroupId)?.name || "";
-      const name = String(await promptText("Rename group — every member will see the new name.", current) || "").trim();
-      if (!name || name === current) return;
+      // One alert with the field in it (iOS): the name, the consequence and the fee together.
       const others = groupOtherMemberCount(mgr.getGroup(activeGroupId));
-      if (!await confirmText(`Rename the group to "${name}"? Every member is notified.${await groupOpFeeHint(activeGroupId, { controlTx: others + 1 })}`)) return;
+      const name = String(await promptDialog({
+        title: "Rename Group",
+        label: "Name",
+        message: `Every member will see the new name.${await groupOpFeeHint(activeGroupId, { controlTx: others + 1 })}`,
+        initial: current,
+        confirmLabel: "Rename",
+      }) || "").trim();
+      if (!name || name === current) return;
       setStatus("Renaming group…");
       const prevName = mgr.getGroup(activeGroupId)?.name;
       await mgr.renameGroup(activeGroupId, name);
@@ -20763,7 +21054,13 @@ groupManageBody?.addEventListener("click", async (event) => {
       openGroupChat(activeGroupId);
       setStatus("Group renamed");
     } else if (target.dataset.groupDelete != null) {
-      if (!await confirmText("This removes the group and its messages from this device. This cannot be undone, and other members won't be notified.")) return;
+      const groupName = mgr.getGroup(activeGroupId)?.name || "Group";
+      if (!await confirmDialog({
+        title: `Delete "${groupName}"`,
+        message: "This removes the group and its messages from this device. This cannot be undone, and other members won't be notified.",
+        confirmLabel: "Delete",
+        destructive: true,
+      })) return;
       const id = activeGroupId;
       closeGroupManage();
       closeGroupChat();

@@ -443,7 +443,7 @@ export class GroupManager {
   }
 
   // --- send a message ---
-  async sendGroupMessage(groupId, plaintext) {
+  async sendGroupMessage(groupId, plaintext, { feeKas = "0" } = {}) {
     const record = this.getGroup(groupId);
     if (!record) throw new Error("Group not found.");
     if (!record.groupRootEpochHex) throw new Error("No group key for the current epoch.");
@@ -464,7 +464,7 @@ export class GroupManager {
       counter,
     });
     const msgIdHex = G.bytesToHex(G.buildMsgId(G.hexToBytes(record.deviceIdHex), counter));
-    const result = await this.engine.sendGroupPayload(payload);
+    const result = await this.engine.sendGroupPayload(payload, { feeKas: String(feeKas || "0") });
     return { txid: result?.txids?.[0] || null, counter, epoch: record.currentEpoch, msgIdHex };
   }
 

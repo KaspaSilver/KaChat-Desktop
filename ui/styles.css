@@ -6673,6 +6673,20 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-reply-bar.gated .broadcast-voice-btn { pointer-events: none; }
 .broadcast-message .message-reply-quote.clickable { cursor: pointer; }
 .broadcast-room { position: relative; }
+/* Group select mode (iOS enterSelectMode): the same toolbar and row checks as 1:1. */
+.group-message-area.selection-mode .message-row { cursor: pointer; }
+.group-message-area.selection-mode .message-selector { display: inline-grid; }
+.group-composer-shell .broadcast-fee-row { margin-bottom: 4px; }
+.group-message-area.selection-mode .message-bubble { pointer-events: none; }
+/* Refresh Messages progress (iOS GroupRefreshProgressModal). */
+.group-refresh-backdrop { z-index: 3050; }
+.group-refresh-modal { max-width: 420px; }
+.group-refresh-body { display: grid; justify-items: center; gap: 10px; text-align: center; padding: 8px 0; }
+.group-refresh-body h2 { margin: 0; font-size: 17px; }
+.group-refresh-spinner { width: 28px; height: 28px; border-width: 3px; }
+.group-refresh-check { width: 40px; height: 40px; color: #34c759; }
+.group-refresh-check svg { width: 40px; height: 40px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.group-refresh-body .modal-actions { justify-content: center; }
 .broadcast-scroll-bottom { bottom: 96px; }
 /* (No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
    stated once, beside the Popular header in the channel list.) */
