@@ -111,3 +111,39 @@ function showIosInstallHint() {
   document.body.append(hint);
 }
 window.addEventListener("load", () => window.setTimeout(showIosInstallHint, 1500));
+
+// ---- Phone keyboards that fit the field ----------------------------------------------------
+// iOS capitalises and autocorrects everything typed unless told otherwise, which mangles
+// addresses, domains, node URLs, seed words and API keys; and a KAS amount deserves the number
+// pad. The app renders many of its fields from templates, so the hints are applied when a field
+// is about to be focused (pointerdown lands before focus, when iOS reads them) and once at boot.
+const NO_CAPS_HINT = /kaspa:|\.kas\b|wss?:\/\/|https?:\/\/|host|node|channel|domain|seed|passphrase|api key|search|cloud\.|address|recipient|payout|url|\bname\b/i;
+const NO_CAPS_ATTR = /address|recipient|node|domain|seed|url|payout|api|search|query|join|import|custom|passphrase|password/i;
+const AMOUNT_HINT = /^0([.,]0+)?$/;
+const AMOUNT_ATTR = /amount|fee|price|quantity|tip|hashrate/i;
+function applyKeyboardHints(el) {
+  if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
+  if (el.dataset.kbHinted) return;
+  el.dataset.kbHinted = "1";
+  const type = (el.type || "text").toLowerCase();
+  if (["checkbox", "radio", "file", "range", "hidden", "color", "number", "date"].includes(type)) return;
+  const attrs = [...el.attributes].map((a) => a.name).join(" ");
+  const text = `${el.placeholder || ""} ${el.className || ""} ${el.name || ""} ${attrs}`;
+  const isComposer = /composer|chess-chat|reply-input|notes|bio|display-name|group-name|account-name|utxoName|contact name/i.test(text)
+    && !/join-input|api key/i.test(text);
+  if (!isComposer && (type === "search" || type === "url" || type === "email" || NO_CAPS_HINT.test(text) || NO_CAPS_ATTR.test(attrs))) {
+    if (!el.hasAttribute("autocapitalize")) el.setAttribute("autocapitalize", "none");
+    if (!el.hasAttribute("autocorrect")) el.setAttribute("autocorrect", "off");
+    if (!el.hasAttribute("spellcheck")) el.setAttribute("spellcheck", "false");
+  }
+  if (type === "text" && !el.hasAttribute("inputmode") && (AMOUNT_HINT.test((el.placeholder || "").trim()) || AMOUNT_ATTR.test(attrs) || /amount/i.test(el.className || ""))) {
+    el.setAttribute("inputmode", "decimal");
+  }
+}
+if (coarseMedia.matches) {
+  document.addEventListener("pointerdown", (event) => {
+    const field = event.target instanceof Element ? event.target.closest("input, textarea") : null;
+    if (field) applyKeyboardHints(field);
+  }, { capture: true, passive: true });
+  window.addEventListener("load", () => document.querySelectorAll("input, textarea").forEach(applyKeyboardHints));
+}
