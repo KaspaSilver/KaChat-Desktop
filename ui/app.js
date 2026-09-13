@@ -4013,9 +4013,13 @@ const notifOverlay = document.querySelector("[data-notif-overlay]");
 let globalNotifications = [];
 let notifCenterLastSeenAt = 0;
 const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Broadcast", wallet: "Wallet" };
+// The Profile bell is for broadcasts and for Kaspa arriving on your addresses (chatting,
+// spending, cold storage). KaPosts has its own bell inside KaPosts, and group @mentions ping
+// the chat itself, so neither lands here.
+const NOTIF_CENTER_SOURCES = new Set(["broadcast", "wallet"]);
 
 function loadNotifCenter() {
-  try { globalNotifications = JSON.parse(localStorage.getItem(accountScopedKey(NOTIF_CENTER_KEY)) || "[]"); }
+  try { globalNotifications = JSON.parse(localStorage.getItem(accountScopedKey(NOTIF_CENTER_KEY)) || "[]").filter((n) => NOTIF_CENTER_SOURCES.has(n?.source)); }
   catch { globalNotifications = []; }
   if (!Array.isArray(globalNotifications)) globalNotifications = [];
   notifCenterLastSeenAt = Number(localStorage.getItem(accountScopedKey(NOTIF_CENTER_SEEN_KEY)) || 0) || 0;
@@ -4027,7 +4031,7 @@ function persistNotifCenter() {
 }
 function recordGlobalNotification(item) {
   const id = String(item?.id || "");
-  if (!id || globalNotifications.some((n) => n.id === id)) return;
+  if (!id || !NOTIF_CENTER_SOURCES.has(item?.source) || globalNotifications.some((n) => n.id === id)) return;
   globalNotifications.unshift({
     id,
     source: item.source || "kaposts",
@@ -4057,7 +4061,7 @@ function renderNotifCenter() {
   const list = document.querySelector("[data-notif-list]");
   if (!list) return;
   if (!globalNotifications.length) {
-    list.innerHTML = `<div class="notif-center-empty">No notifications yet</div>`;
+    list.innerHTML = `<div class="notif-center-empty">No notifications yet<small>Broadcast activity and Kaspa arriving on your addresses show up here.</small></div>`;
     return;
   }
   list.innerHTML = globalNotifications.map((n) => `

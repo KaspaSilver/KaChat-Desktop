@@ -9751,3 +9751,4 @@ body.session-logged-out [data-account-rename-modal] {
 .sidebar-tab { position: relative; }
 .sidebar-tab-badge, .hub-tile-badge { position: absolute; top: 6px; right: 10px; min-width: 20px; height: 20px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: 999px; background: #e0245e; color: #fff; font-size: 11px; font-weight: 800; line-height: 1; }
 .hub-tile-badge { top: -6px; right: -6px; }
+.notif-center-empty small { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
