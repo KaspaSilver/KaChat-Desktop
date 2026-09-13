@@ -10057,3 +10057,6 @@ html.standalone .ios-install-hint { display: none; }
      room to type. */
   .composer-inline-tool[data-composer-camera], .composer-inline-tool[data-composer-mic] { display: none; }
 }
+
+/* Delivery mark in a broadcast message head: sits on the baseline row next to the time. */
+.broadcast-message-head .broadcast-delivery-icon { align-self: center; margin: 0 0 0 2px; width: 15px; height: 15px; }

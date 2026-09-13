@@ -708,13 +708,18 @@ function buildMessageElement(m) {
   const time = document.createElement("span");
   time.textContent = new Date(m.blockTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   head.append(sender, time);
-  if (m.status === "pending") {
+  // Your own messages carry the same delivery mark as 1:1 and group bubbles: a clock while the
+  // transaction is on its way, a green check once it is on the network, red if it failed.
+  if (mine && deps.createDeliveryStatusIcon) {
+    const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : "confirmed";
+    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status });
+    if (icon) { icon.classList.add("broadcast-delivery-icon"); head.append(icon); }
+  } else if (m.status === "pending") {
     const badge = document.createElement("span");
     badge.className = "broadcast-pending";
     badge.textContent = "sending…";
     head.append(badge);
-  }
-  if (m.status === "failed") {
+  } else if (m.status === "failed") {
     const badge = document.createElement("span");
     badge.className = "broadcast-failed";
     badge.textContent = "failed";
