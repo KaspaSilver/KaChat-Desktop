@@ -114,6 +114,19 @@ export function promptDialog({ title, label = "", message = "", kicker = null, i
   });
 }
 
+/// A message with one button: resolves once dismissed.
+export function alertDialog({ title, message = "", kicker = null, confirmLabel = "OK" } = {}) {
+  return new Promise((resolve) => {
+    settle = () => resolve(true);
+    present(`
+      ${headerHtml(kicker, title)}
+      ${bodyHtml(message)}
+      <div class="modal-actions">
+        <button class="primary-button" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
+      </div>`);
+  });
+}
+
 /// One of several named options, resolved as the chosen option's `id`, or null when cancelled.
 /// Replaces the pattern of listing options in a prompt and asking for a number.
 export function chooseDialog({ title, message = "", kicker = null, options = [] } = {}) {
@@ -124,7 +137,7 @@ export function chooseDialog({ title, message = "", kicker = null, options = [] 
       ${bodyHtml(message)}
       <div class="cold-action-rows">
         ${options.map((option) => `
-          <button type="button" class="cold-action-row" data-app-dialog-choice="${escape(option.id)}">
+          <button type="button" class="cold-action-row${option.destructive ? " cold-action-row-danger" : ""}" data-app-dialog-choice="${escape(option.id)}">
             <span class="cold-action-copy">
               <strong>${escape(option.title)}</strong>
               ${option.subtitle ? `<small>${escape(option.subtitle)}</small>` : ""}

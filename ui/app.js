@@ -1,7 +1,7 @@
 import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling } from "./kaposts.js";
-import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey } from "../engine/kaposts.js";
+import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress } from "./coldstorage.js";
@@ -43,7 +43,7 @@ import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
-import { confirmText, promptText, confirmDialog } from "./dialogs.js";
+import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog } from "./dialogs.js";
 
 // Step 25 shell:
 // - Keeps KaspaEngine modules intact.
@@ -11553,6 +11553,12 @@ function importNextcloudContacts(entries) {
 // into KAS-send mode. Powers the KaPosts "Tip" button — tip a poster without leaving for the
 // wallet screen. No-op with a toast if the address is missing/invalid or is your own.
 async function openChatWithAddressForKaspa({ address, name } = {}) {
+  return openChatWithAddress({ address, name, paymentMode: true });
+}
+
+// Open (creating if needed) the 1:1 conversation with `address`, the way iOS's KaPosts
+// startChat does: the contact is auto-added without a custom name so KNS keeps naming them.
+async function openChatWithAddress({ address, name, paymentMode = false } = {}) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean)) { showCopyToast("This poster has no valid Kaspa address."); return; }
   if (clean === engine.address) { showCopyToast("That's your own address."); return; }
@@ -11577,7 +11583,7 @@ async function openChatWithAddressForKaspa({ address, name } = {}) {
   renderChats();
   setActiveAppTab("chats");
   openConversation(conversationEntry.id);
-  await activateComposerMode("kas");
+  if (paymentMode) await activateComposerMode("kas");
 }
 
 // --- KaPosts quick tip modal ------------------------------------------------
@@ -17504,6 +17510,8 @@ queueMicrotask(async () => {
     showToast: showCopyToast,
     // The app's own overlay rather than the browser's - see ui/dialogs.js.
     confirmDialog,
+    chooseDialog,
+    alertDialog,
     appendEngineLog,
     explorerTxUrl,
     // Background activity pings (Settings > Notifications > KaPosts).
@@ -17516,6 +17524,17 @@ queueMicrotask(async () => {
     // "Tip" button on a post: quick Send-Kaspa-style modal, direct send through the chat
     // payment rules (matches iOS's KaPostTipSheet).
     tipUser: (address, name) => openTipModal({ address, name }),
+    startChat: (address, name) => openChatWithAddress({ address, name }),
+    // Routes to the Profile tab's KNS editor rather than a second copy of it.
+    editKnsProfile: () => document.querySelector("[data-open-kns-editor]")?.click(),
+    showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
+    // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
+    // signature of the right width, so the estimate is for the bytes that will actually go.
+    estimatePostFeeKas: (text) => {
+      const b64 = kapostsUtf8ToBase64(KAPOSTS_MARKER + String(text || ""));
+      const payload = KAPOSTS_PROTOCOL.postPayload("0".repeat(66), "0".repeat(128), b64, "[]");
+      return engine.estimateMessageFee(new TextEncoder().encode(payload).length);
+    },
     // Feed the global notification center (top-bar bell) from the KaPosts notification stream.
     recordGlobalNotification: (item) => recordGlobalNotification(item),
     // Your saved name for a contact wins over their KNS domain everywhere a poster is named

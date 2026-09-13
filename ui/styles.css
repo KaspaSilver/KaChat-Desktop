@@ -6030,10 +6030,27 @@ body.session-logged-out [data-account-rename-modal] {
   border: 1px solid var(--line); border-radius: 12px; padding: 10px; cursor: pointer;
 }
 .kaposts-quote-embed strong { font-size: 12.5px; }
-.kaposts-quote-embed span { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.kaposts-delivery { color: var(--muted); font-size: 12px; }
+.kaposts-quote-embed > span:not(.kaposts-quote-head), .kaposts-composer-quote > span:not(.kaposts-quote-head) { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+/* The quoted author's face, name and time (iOS quotedPostCard). */
+.kaposts-quote-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.kaposts-quote-head .kaposts-avatar { width: 20px; height: 20px; }
+.kaposts-quote-head .kaposts-avatar svg { width: 12px; height: 12px; }
+.kaposts-quote-head strong { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kaposts-quote-head .kaposts-cell-time { font-size: 11.5px; }
+
+/* Delivery: spinner while submitting, green check for a minute once it is on the network, red
+   Retry when it didn't go through (iOS deliveryStatus row). */
+.kaposts-delivery { display: flex; align-items: center; min-height: 16px; color: var(--muted); font-size: 12px; }
+.kaposts-delivery svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-delivery.sent { color: #34c759; }
 .kaposts-delivery.failed { color: #ff6b6b; }
-.kaposts-delivery.failed button { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 700; cursor: pointer; }
+.kaposts-delivery.failed button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent; color: #ff6b6b; font-weight: 800; font-size: 12px; cursor: pointer; padding: 0; }
+.kaposts-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.18); border-top-color: var(--muted);
+  animation: kaposts-spin .8s linear infinite;
+}
+@keyframes kaposts-spin { to { transform: rotate(360deg); } }
 
 .kaposts-actions { display: flex; align-items: center; justify-content: space-between; max-width: 340px; }
 .kaposts-action {
@@ -6063,13 +6080,33 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-thread-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .kaposts-thread-replies { display: flex; flex-direction: column; gap: 8px; padding-left: 18px; border-left: 2px solid var(--line); margin-left: 20px; }
 .kaposts-reply-bar { display: flex; align-items: flex-end; gap: 8px; }
+/* Zero-balance gate: greyed, and a click opens the funding card instead of the keyboard. */
+.kaposts-reply-bar.gated { opacity: .45; cursor: pointer; }
+.kaposts-reply-bar.gated .kaposts-reply-input, .kaposts-reply-bar.gated .kaposts-reply-send { pointer-events: none; }
+.kaposts-inline-retry { border: 0; background: transparent; padding: 0; color: var(--kaspa-ink); font-weight: 700; font-size: 12.5px; cursor: pointer; }
+.kaposts-pager-failure {
+  display: flex; flex-direction: column; align-items: center; gap: 3px; width: 100%;
+  border: 0; background: transparent; color: var(--text); font: inherit; padding: 10px 0; cursor: pointer;
+}
+.kaposts-pager-failure strong { font-size: 13.5px; }
+.kaposts-pager-failure .kaposts-pager-error { color: var(--muted); font-size: 12px; }
+.kaposts-pager-retry-hint { color: var(--kaspa-ink); font-weight: 700; font-size: 12.5px; }
 .kaposts-reply-input {
   flex: 1; resize: none; min-height: 42px; max-height: 140px;
   border-radius: 14px; border: 1px solid var(--line); background: var(--surface-1);
   color: var(--text); padding: 10px 14px; font: inherit; font-size: 14px;
 }
-.kaposts-meter { color: #ffa726; font-size: 11px; font-weight: 800; }
+/* iOS KaPostCharacterMeter: a ring filling toward the limit, orange with a live count in the
+   final 10%, red at the wall. */
+.kaposts-meter { display: inline-flex; align-items: center; gap: 6px; color: var(--kaspa-ink); font-size: 11px; font-weight: 800; }
+.kaposts-meter.near { color: #ffa726; }
 .kaposts-meter.over { color: #e53935; }
+.kaposts-meter-ring { width: 20px; height: 20px; transform: rotate(-90deg); }
+.kaposts-meter-ring circle { fill: none; stroke-width: 2.5; }
+.kaposts-meter-ring .track { stroke: rgba(255,255,255,.18); }
+.kaposts-meter-ring .fill { stroke: currentColor; stroke-linecap: round; transition: stroke-dashoffset .15s ease-out; }
+.kaposts-meter-count { font-variant-numeric: tabular-nums; }
+.kaposts-composer-fee { margin-right: auto; align-self: center; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .kaposts-toasts {
   position: sticky; bottom: 8px; display: flex; flex-direction: column; align-items: center; gap: 8px;
@@ -6083,6 +6120,7 @@ body.session-logged-out [data-account-rename-modal] {
   box-shadow: 0 8px 22px var(--shadow);
 }
 .kaposts-toast button { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 800; cursor: pointer; }
+.kaposts-toast-view { color: var(--kaspa-ink); font-weight: 800; text-decoration: underline; }
 
 .kaposts-composer-backdrop {
   position: fixed; inset: 0; z-index: 60;
@@ -6259,6 +6297,36 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-popover button:last-child { border-bottom: 0; }
 .kaposts-popover button:hover { background: var(--surface-2); }
 .kaposts-popover button.danger { color: #ff6b6b; }
+/* Rows that say what happens, not just the verb (iOS ActionSheetRow), and the header/URL line
+   a half sheet gives room to. */
+.kaposts-popover { min-width: 220px; max-width: 300px; }
+.kaposts-popover .kaposts-pop-row { display: flex; flex-direction: column; gap: 2px; }
+.kaposts-popover .kaposts-pop-row strong { font-size: 13.5px; font-weight: 700; }
+.kaposts-popover .kaposts-pop-row small { font-size: 12px; font-weight: 500; color: var(--muted); }
+.kaposts-popover .kaposts-pop-row.danger strong { color: #ff6b6b; }
+.kaposts-pop-title { padding: 12px 16px 6px; font-size: 14px; font-weight: 800; text-align: center; }
+.kaposts-pop-url {
+  padding: 12px 16px 8px; font-size: 12px; font-weight: 600; color: var(--muted); text-align: center;
+  overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* Feed empty states (iOS emptyState(for:)) and the explicit older-history tap under them. */
+.kaposts-empty { padding-top: 48px; padding-bottom: 32px; }
+.kaposts-empty-icon { width: 44px; height: 44px; margin: 0 auto 6px; fill: none; stroke: var(--muted); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-load-older {
+  width: 100%; padding: 12px 0; border: 0; background: transparent;
+  color: var(--kaspa-ink); font-weight: 700; font-size: 14px; cursor: pointer;
+}
+.kaposts-feed-refresh {
+  flex: 0 0 auto; width: 38px; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; border-bottom: 3px solid transparent;
+}
+.kaposts-feed-refresh:hover { color: var(--kaspa-ink); }
+.kaposts-feed-refresh svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* The comments section header and its empty line (iOS "Comments" / "Comments (N)"). */
+.kaposts-comments-header { padding: 10px 16px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.kaposts-comments-empty { margin: 0; padding: 20px 16px; font-size: 14px; color: var(--muted); }
 
 .kaposts-screen { position: relative; }
 .kaposts-more svg { width: 16px; height: 16px; }
@@ -6274,7 +6342,8 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-profile-row .kaposts-avatar { width: 64px; height: 64px; border: 3px solid var(--panel); }
 .kaposts-profile-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 26px; }
 .kaposts-profile-meta strong { font-size: 17px; }
-.kaposts-profile-bio { color: var(--muted); font-size: 13px; }
+.kaposts-profile-bio { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+.kaposts-bio-more { align-self: flex-start; border: 0; background: transparent; padding: 0; color: var(--kaspa-ink); font-weight: 700; font-size: 13px; cursor: pointer; }
 .kaposts-profile-counts { color: var(--muted); font-size: 13px; }
 .kaposts-profile-counts b { color: var(--text); }
 .kaposts-count-link { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; }
@@ -6282,6 +6351,17 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-count-link:hover:not([disabled]) b { color: var(--kaspa-ink, var(--text)); }
 .kaposts-count-link[disabled] { cursor: default; }
 .kaposts-profile-row .kaposts-follow { padding-top: 30px; }
+.kaposts-profile-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-top: 30px; }
+.kaposts-profile-actions .kaposts-follow { margin-left: 0; padding-top: 0; }
+/* "Chat" opens the 1:1 thread; "Edit KNS Profile" routes to the same editor the Profile tab uses. */
+.kaposts-profile-chat, .kaposts-edit-kns {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid rgba(98,244,208,.35); border-radius: 999px; background: rgba(98,244,208,.12);
+  color: var(--kaspa-ink); font-weight: 700; font-size: 12.5px; padding: 6px 12px; cursor: pointer;
+}
+.kaposts-profile-chat:hover, .kaposts-edit-kns:hover { background: rgba(98,244,208,.2); }
+.kaposts-profile-chat svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-edit-kns { margin: 0 14px 12px; align-self: flex-start; }
 .kaposts-profile-tabs { margin-top: 2px; }
 
 .kaposts-notification-row {
@@ -6292,6 +6372,19 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-notification-row.openable { cursor: pointer; }
 .kaposts-notification-row.openable:hover { border-color: rgba(98,244,208,.3); }
 .kaposts-notification-row .kaposts-avatar { width: 38px; height: 38px; }
+/* The kind badge on the actor's avatar (iOS Item.Kind icon + tint). */
+.kaposts-notification-avatar { position: relative; flex-shrink: 0; }
+.kaposts-notification-kind {
+  position: absolute; right: -4px; bottom: -4px; width: 18px; height: 18px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--panel); border: 1.5px solid var(--panel); color: var(--muted);
+}
+.kaposts-notification-kind svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-notification-kind.kind-like { color: #ff453a; }
+.kaposts-notification-kind.kind-like svg { fill: currentColor; }
+.kaposts-notification-kind.kind-dislike { color: #ff9f0a; }
+.kaposts-notification-kind.kind-reply, .kaposts-notification-kind.kind-follow, .kaposts-notification-kind.kind-mention { color: var(--kaspa-ink); }
+.kaposts-notification-kind.kind-quote, .kaposts-notification-kind.kind-repost { color: #34c759; }
 .kaposts-notification-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; }
 .kaposts-notification-snippet { color: var(--muted); font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .kaposts-view-link { flex-shrink: 0; border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 800; font-size: 12.5px; text-decoration: underline; cursor: pointer; }
@@ -6316,6 +6409,46 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-rail-item svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 .kaposts-rail-item:hover { background: var(--surface-2); }
 .kaposts-rail-item.active { font-weight: 850; color: var(--kaspa-ink); }
+/* Unseen-activity count on the bell (iOS KaPostsNotificationCenter badge). A count rather than
+   a dot: in here you are one click from the list, so how many are waiting is worth knowing. */
+.kaposts-rail-item { position: relative; }
+.kaposts-rail-badge {
+  margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  background: #e5484d; color: #fff; font-size: 10.5px; font-weight: 800; line-height: 18px; text-align: center;
+}
+
+/* Search (iOS KaPostsSearchView) */
+.kaposts-search-root { display: flex; flex-direction: column; gap: 10px; }
+.kaposts-search-scope { display: flex; padding: 3px; border-radius: 10px; background: var(--surface-2); }
+.kaposts-search-scope button {
+  flex: 1; border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  font-weight: 700; font-size: 13px; padding: 7px 0; cursor: pointer;
+}
+.kaposts-search-scope button.active { background: var(--surface-1); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.kaposts-search-input {
+  width: 100%; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-1);
+  color: var(--text); padding: 10px 14px; font: inherit; font-size: 14px;
+}
+.kaposts-search-results { display: flex; flex-direction: column; gap: 8px; }
+.kaposts-search-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: var(--surface-1);
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.kaposts-search-row:hover { border-color: rgba(98,244,208,.3); }
+.kaposts-search-row .kaposts-avatar { width: 36px; height: 36px; flex-shrink: 0; }
+.kaposts-search-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.kaposts-search-row-main strong { font-size: 14px; }
+.kaposts-search-row-main small { font-size: 11.5px; color: var(--muted); }
+.kaposts-search-snippet { font-size: 13.5px; color: var(--muted); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.kaposts-search-chevron { width: 14px; height: 14px; flex-shrink: 0; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-search-depth {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  border: 0; background: transparent; color: var(--text); padding: 12px 4px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.kaposts-search-depth small { color: var(--muted); font-size: 11.5px; }
+.kaposts-search-depth[disabled] { opacity: .6; cursor: default; }
+.kaposts-search-keep { margin: 8px auto 0; }
 .kaposts-rail-post { margin: 12px 8px 6px; border-radius: 999px; padding: 12px 0; font-weight: 800; }
 .kaposts-rail-refresh { margin-left: 12px; }
 .kaposts-content {
@@ -6854,6 +6987,29 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-link { color: var(--kaspa-ink); text-decoration: underline; cursor: pointer; word-break: break-all; }
 .kaposts-mention { color: var(--kaspa-ink); font-weight: 600; cursor: pointer; }
 .kaposts-mention:hover { text-decoration: underline; }
+
+/* KaChat markdown (ui/kaposts-markdown.js). Underline and strikethrough have to combine, so they
+   are text-decoration-line values rather than competing text-decoration shorthands. */
+.kaposts-md-b { font-weight: 700; }
+.kaposts-md-i { font-style: italic; }
+.kaposts-md-u { text-decoration-line: underline; }
+.kaposts-md-s { text-decoration-line: line-through; }
+.kaposts-md-u.kaposts-md-s, .kaposts-link.kaposts-md-s { text-decoration-line: underline line-through; }
+.kaposts-md-sub { font-size: .86em; color: var(--muted); }
+/* A [label](url) inside a quote card: styled like a link, but the card is the button. */
+.kaposts-md-linktext { color: var(--kaspa-ink); text-decoration-line: underline; }
+
+.kaposts-md-toolbar { display: flex; flex-wrap: wrap; gap: 2px; margin-top: -4px; }
+.kaposts-md-toolbar button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 34px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--text); cursor: pointer; padding: 0;
+}
+.kaposts-md-toolbar button:hover { background: rgba(255,255,255,.07); }
+.kaposts-md-toolbar button:active { background: rgba(98,244,208,.16); }
+.kaposts-md-toolbar svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-md-glyph { font-size: 14.5px; line-height: 1; font-family: Georgia, "Times New Roman", serif; }
+.kaposts-md-glyph.kaposts-md-small { font-size: 11px; font-family: inherit; font-weight: 600; }
 
 /* Clickable @mention inside a chat/group bubble — opens a 1:1 with that person. */
 .chat-mention { color: var(--kaspa-ink); font-weight: 600; cursor: pointer; }

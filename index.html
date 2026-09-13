@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=362" />
+  <link rel="stylesheet" href="./ui/styles.css?v=363" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -494,21 +494,25 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.25 12 11.204 3.045c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75"/></svg>
               <span>Feed</span>
             </button>
-            <button class="kaposts-rail-item" type="button" data-kaposts-rail="notifications">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>
-              <span>Notifications</span>
-            </button>
             <button class="kaposts-rail-item" type="button" data-kaposts-rail="profile">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>
               <span>Profile</span>
             </button>
-            <button class="kaposts-rail-item" type="button" data-kaposts-rail="bookmarks">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z"/></svg>
-              <span>Bookmarks</span>
+            <button class="kaposts-rail-item" type="button" data-kaposts-rail="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+              <span>Search</span>
+            </button>
+            <button class="kaposts-rail-item" type="button" data-kaposts-rail="notifications">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>
+              <span>Notifications</span>
             </button>
             <button class="kaposts-rail-item" type="button" data-kaposts-rail="drafts">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z"/><path d="M19.5 14.25v4.125c0 1.243-1.007 2.25-2.25 2.25H5.625a2.25 2.25 0 0 1-2.25-2.25V6.375c0-1.243 1.007-2.25 2.25-2.25h4.125"/></svg>
               <span>Drafts</span>
+            </button>
+            <button class="kaposts-rail-item" type="button" data-kaposts-rail="bookmarks">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z"/></svg>
+              <span>Bookmarks</span>
             </button>
             <button class="kaposts-rail-item" type="button" data-kaposts-rail="muted">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z"/></svg>
@@ -525,6 +529,10 @@
             <button class="kaposts-feed-tab" type="button" data-kaposts-feed-tab="following">Following</button>
             <button class="kaposts-feed-tab active" type="button" data-kaposts-feed-tab="feed">Feed</button>
             <button class="kaposts-feed-tab" type="button" data-kaposts-feed-tab="popular">Popular</button>
+            <!-- Pull-to-refresh has no desktop gesture; this is the same reload on a button. -->
+            <button class="kaposts-feed-refresh" type="button" data-kaposts-refresh aria-label="Refresh" title="Refresh">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
+            </button>
           </div>
           <div class="kaposts-feed-status" data-kaposts-status hidden></div>
           <div class="kaposts-feed" data-kaposts-feed></div>
@@ -573,7 +581,22 @@
             <!-- Already-stacked thread segments (X-style), numbered and removable. -->
             <div class="kaposts-thread-segments" data-kaposts-thread-segments hidden></div>
             <textarea class="kaposts-composer-input" data-kaposts-composer-input placeholder="What's happening on Kaspa?"></textarea>
+            <!-- iOS MarkdownFormattingToolbar: the syntax is only discoverable if you already know
+                 it, so the buttons write the markers for you. Order runs from the formatting people
+                 reach for most to the least. -->
+            <div class="kaposts-md-toolbar" data-kaposts-md-toolbar role="toolbar" aria-label="Formatting">
+              <button type="button" data-kaposts-md="bold" aria-label="Bold" title="Bold"><span class="kaposts-md-glyph kaposts-md-b">B</span></button>
+              <button type="button" data-kaposts-md="italic" aria-label="Italic" title="Italic"><span class="kaposts-md-glyph kaposts-md-i">I</span></button>
+              <button type="button" data-kaposts-md="underline" aria-label="Underline" title="Underline"><span class="kaposts-md-glyph kaposts-md-u">U</span></button>
+              <button type="button" data-kaposts-md="strikethrough" aria-label="Strikethrough" title="Strikethrough"><span class="kaposts-md-glyph kaposts-md-s">S</span></button>
+              <button type="button" data-kaposts-md="bulletList" aria-label="Bulleted list" title="Bulleted list"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="5" cy="17" r="1.2" fill="currentColor" stroke="none"/><path d="M9 7h11M9 12h11M9 17h11"/></svg></button>
+              <button type="button" data-kaposts-md="numberedList" aria-label="Numbered list" title="Numbered list"><svg viewBox="0 0 24 24" aria-hidden="true"><text x="2.5" y="9.2" font-size="7.5" font-weight="700" fill="currentColor" stroke="none">1</text><text x="2.5" y="19.2" font-size="7.5" font-weight="700" fill="currentColor" stroke="none">2</text><path d="M10 7h10M10 17h10"/></svg></button>
+              <button type="button" data-kaposts-md="subtext" aria-label="Small text" title="Small text"><span class="kaposts-md-glyph kaposts-md-small">Aa</span></button>
+              <button type="button" data-kaposts-md="link" aria-label="Link" title="Link"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5a4 4 0 0 0 5.66 0l2.84-2.84a4 4 0 0 0-5.66-5.66l-1.42 1.42"/><path d="M14 10.5a4 4 0 0 0-5.66 0L5.5 13.34a4 4 0 0 0 5.66 5.66l1.42-1.42"/></svg></button>
+            </div>
             <div class="kaposts-composer-threadbar">
+              <!-- Live network-fee estimate while typing (Settings > Show Fee Estimate). -->
+              <span class="kaposts-composer-fee" data-kaposts-composer-fee hidden></span>
               <button class="kaposts-thread-add" type="button" data-kaposts-thread-add hidden title="Stack this text as a thread segment and keep writing">＋ Add to thread</button>
             </div>
             <div class="kaposts-composer-quote" data-kaposts-composer-quote hidden></div>
@@ -2864,7 +2887,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=400"></script>
+  <script type="module" src="./ui/app.js?v=401"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

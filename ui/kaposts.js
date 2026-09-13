@@ -32,6 +32,7 @@ import {
   submitKaPostVote,
 } from "../engine/kaposts.js";
 import { getEndpoint } from "../engine/endpoints.js";
+import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
@@ -339,8 +340,11 @@ function pagerFooterHtml(pager, key) {
     return `<span class="kaposts-pager-spinner" aria-hidden="true"></span><span>Loading more…</span>`;
   }
   if (pager.error) {
-    return `<span class="kaposts-pager-error">${deps.escapeHtml(pager.error)}</span>
-            <button type="button" data-kaposts-pager-retry="${deps.escapeHtml(key)}">Retry</button>`;
+    return `<button type="button" class="kaposts-pager-failure" data-kaposts-pager-retry="${deps.escapeHtml(key)}">
+              <strong>Couldn't load more</strong>
+              <span class="kaposts-pager-error">${deps.escapeHtml(pager.error)}</span>
+              <span class="kaposts-pager-retry-hint">Tap to retry</span>
+            </button>`;
   }
   if (pager.stalled) {
     return `<button type="button" data-kaposts-pager-retry="${deps.escapeHtml(key)}">Load more</button>`;
@@ -396,7 +400,10 @@ function mapRemotePost(post) {
     const quotedText = post.quote.referencedMessage ? decodePostContent({ postContent: post.quote.referencedMessage }) : null;
     const quotedAddress = kaspaAddressFromPubkey(deps.engine, post.quote.referencedSenderPubkey);
     if (quotedText !== null && quotedAddress) {
-      quoted = { remoteId: post.quote.referencedContentId || null, text: stripKaChatMarker(quotedText), posterAddress: quotedAddress };
+      quoted = {
+        remoteId: post.quote.referencedContentId || null, text: stripKaChatMarker(quotedText), posterAddress: quotedAddress,
+        timestamp: Number(post.quote.timestamp) || null,
+      };
     }
   }
   return {
@@ -441,6 +448,8 @@ async function syncFollowingFromChain() {
     if (!pubkey) { followingChainSynced = false; return; }
     const raw = await fetchFollowListAll({ engine: deps.engine, pubkey, followers: false });
     const merged = new Set(prefs.following);
+    // A stale self-follow (an early build let you follow yourself) inflates your own count.
+    merged.delete(deps.engine.address);
     for (const item of raw || []) {
       const rowPubkey = item?.userPublicKey || item?.publicKey || item?.pubkey || item?.followedPubkey || item?.user || "";
       const address = item?.address || kaspaAddressFromPubkey(deps.engine, rowPubkey) || "";
@@ -547,7 +556,37 @@ async function loadFeed() {
       renderStatus();
       renderFeed({ resetScroll: true });
       refreshVisiblePosterNames();
+      deepenPopularRanking();
     }
+  }
+}
+
+// Popular ranks over a real window of history, not over whatever page one happened to hold:
+// with one page loaded, "most popular" meant "the most-liked of the last few dozen posts", and
+// a genuinely big post from last week never appeared. Sweeps up to POPULAR_RANKING_DEPTH posts
+// (or POPULAR_SWEEP_MAX_PASSES pager runs - a muted stretch of history can return two visible
+// rows for a whole pass, so depth alone is not a bound) before trusting its own order. Runs only
+// while Popular is on screen; a tab switch bumps feedGeneration, which this checks between passes.
+const POPULAR_RANKING_DEPTH = 300;
+const POPULAR_SWEEP_MAX_PASSES = 4;
+let popularDeepening = false;
+async function deepenPopularRanking() {
+  if (activeFeedTab !== "popular" || popularDeepening || !feedPager) return;
+  popularDeepening = true;
+  try {
+    let passes = 0;
+    while (remotePosts.length < POPULAR_RANKING_DEPTH && passes < POPULAR_SWEEP_MAX_PASSES) {
+      passes += 1;
+      const generation = feedGeneration;
+      if (activeFeedTab !== "popular" || !feedPager.hasMore || feedPager.stalled || feedPager.error || feedPager.loading) return;
+      const before = remotePosts.length;
+      await loadMoreFeed();
+      if (generation !== feedGeneration) return;
+      if (remotePosts.length <= before) return; // a pass that added nothing would loop forever
+      renderFeed(); // the order is only right once the whole window is in
+    }
+  } finally {
+    popularDeepening = false;
   }
 }
 
@@ -584,7 +623,7 @@ function visibleFeedPosts() {
   ].filter((p) => !isHiddenAuthor(p.posterAddress));
   if (activeFeedTab === "following") return combined.filter((p) => prefs.following.includes(p.posterAddress));
   if (activeFeedTab === "popular") {
-    return [...combined].sort((a, b) => (b.likes + b.reposts + b.dislikes) - (a.likes + a.reposts + a.dislikes));
+    return [...combined].sort((a, b) => engagementScore(b) - engagementScore(a));
   }
   return combined;
 }
@@ -838,7 +877,11 @@ async function resolveAndOpenPost(txId, { parentRemoteIdHint = null } = {}) {
   if (post) {
     await openResolvedPost(post, { parentRemoteIdHint, ownContentLoaded });
   } else {
-    deps.showToast?.("Post not found — it may be older than the feed window.");
+    deps.alertDialog?.({
+      title: "This post could not be loaded",
+      message: "It may have been removed, or the network may be unreachable.",
+      confirmLabel: "Back",
+    });
   }
 }
 
@@ -958,7 +1001,9 @@ function escapeWithMentions(rawText) {
 async function mentionedPubkeysFor(text) {
   const domains = [];
   const seenDomains = new Set();
-  for (const m of String(text || "").matchAll(MENTION_PATTERN)) {
+  // Scanned on the RENDERED text, as iOS does, so `**@alice**` still notifies alice: the mention
+  // regex wants whitespace or line start before the "@", and the bold markers would hide that.
+  for (const m of renderKaPostsMarkdown(text).text.matchAll(MENTION_PATTERN)) {
     const domain = m[2].toLowerCase().replace(/\.kas$/, "");
     if (domain && !seenDomains.has(domain)) { seenDomains.add(domain); domains.push(domain); }
   }
@@ -991,8 +1036,78 @@ async function openMentionProfile(domain) {
   }
 }
 
-function linkifyPostText(text) {
-  const value = String(text || "");
+// Style classes for one markdown span. Mentions are never styled (an identity always looks the
+// same), which the caller enforces by not asking for classes inside a mention.
+function markdownClassList(style) {
+  const classes = [];
+  if (style.bold) classes.push("kaposts-md-b");
+  if (style.italic) classes.push("kaposts-md-i");
+  if (style.underline) classes.push("kaposts-md-u");
+  if (style.strikethrough) classes.push("kaposts-md-s");
+  if (style.subtext) classes.push("kaposts-md-sub");
+  return classes;
+}
+
+// Post text ready to render: KaChat markdown applied (see ui/kaposts-markdown.js), bare URLs and
+// @mentions made clickable. Markdown runs FIRST, because it decides what the text actually reads
+// as (markers gone, bullets and numbers materialised) and the URL/mention offsets have to be into
+// that string, not the source. Its spans are then layered over the same offsets.
+//
+// An explicit [label](url) wins over whatever the URL detector made of the same characters; a
+// span crossing a mention styles the pieces either side of it, never the mention itself.
+function linkifyPostText(text, { interactive = true } = {}) {
+  const rendered = renderKaPostsMarkdown(String(text || ""));
+  const value = rendered.text;
+  if (!rendered.hasFormatting) return interactive ? linkifyPlainText(value) : deps.escapeHtml(value);
+
+  const urls = [];
+  for (const match of value.matchAll(URL_PATTERN)) {
+    urls.push({ start: match.index, end: match.index + match[0].length, url: match[0] });
+  }
+  const mentions = [];
+  for (const m of value.matchAll(MENTION_PATTERN)) {
+    const at = m.index + (m[1] || "").length;
+    const end = at + 1 + m[2].length;
+    // A mention inside a bare URL is part of the URL, as the plain path already treats it.
+    if (urls.some((u) => at >= u.start && at < u.end)) continue;
+    mentions.push({ start: at, end, domain: m[2] });
+  }
+  const boundaries = new Set([0, value.length]);
+  for (const r of [...urls, ...mentions, ...rendered.spans]) { boundaries.add(r.start); boundaries.add(r.end); }
+  const cuts = [...boundaries].filter((n) => n >= 0 && n <= value.length).sort((a, b) => a - b);
+
+  let out = "";
+  for (let k = 0; k + 1 < cuts.length; k += 1) {
+    const a = cuts[k];
+    const b = cuts[k + 1];
+    if (b <= a) continue;
+    const piece = deps.escapeHtml(value.slice(a, b));
+    const mention = mentions.find((m) => a >= m.start && b <= m.end);
+    if (mention) {
+      out += interactive
+        ? `<span class="kaposts-mention" data-kaposts-mention="${deps.escapeHtml(mention.domain.toLowerCase())}">${piece}</span>`
+        : piece;
+      continue;
+    }
+    const span = rendered.spans.find((sp) => a >= sp.start && b <= sp.end);
+    const url = urls.find((u) => a >= u.start && b <= u.end);
+    const classes = span ? markdownClassList(span.style) : [];
+    const href = span?.style.link || url?.url || null;
+    if (href && interactive) {
+      out += `<span class="kaposts-link ${classes.join(" ")}" data-kaposts-link="${deps.escapeHtml(href)}">${piece}</span>`;
+    } else if (href) {
+      out += `<span class="kaposts-md-linktext ${classes.join(" ")}">${piece}</span>`;
+    } else if (classes.length) {
+      out += `<span class="${classes.join(" ")}">${piece}</span>`;
+    } else {
+      out += piece;
+    }
+  }
+  return out;
+}
+
+// The pre-markdown path, kept for the overwhelmingly common plain post: URLs and mentions only.
+function linkifyPlainText(value) {
   let result = "";
   let last = 0;
   for (const match of value.matchAll(URL_PATTERN)) {
@@ -1005,6 +1120,13 @@ function linkifyPostText(text) {
   return result;
 }
 
+// A quoted post's text for a preview card: markdown styling applied, but nothing tappable. The
+// card is itself a button through to the quoted post, and a tappable link inside it would compete
+// with that (iOS KaPostCellView.markdownPreview).
+function markdownPreviewHtml(text) {
+  return linkifyPostText(text, { interactive: false });
+}
+
 const ICONS = {
   comment: `<svg viewBox="0 0 24 24"><path d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm3.75 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm3.75 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM21 12c0 4.556-4.03 8.25-9 8.25a9.76 9.76 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z"/></svg>`,
   repost: `<svg viewBox="0 0 24 24"><path d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3"/></svg>`,
@@ -1015,7 +1137,24 @@ const ICONS = {
   tip: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.25"/><path d="M13.8 9.4c-.4-.7-1.1-1.15-2-1.15-1.24 0-2.05.83-2.05 1.83 0 1 .8 1.5 2.05 1.8 1.25.3 2.05.8 2.05 1.8 0 1-.81 1.84-2.05 1.84-.9 0-1.6-.45-2-1.15M11.85 6.7v10.6"/></svg>`,
 };
 
-function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false, openByRemote = false } = {}) {
+// The head of a quoted-post card: a small avatar, the author's bold name and when they posted,
+// so the quote reads as the post it is rather than a bare paragraph.
+const sentCheckTimers = new Set();
+function scheduleSentCheckExpiry(postId, at) {
+  if (sentCheckTimers.has(postId)) return;
+  sentCheckTimers.add(postId);
+  setTimeout(() => { sentCheckTimers.delete(postId); renderAll(); }, Math.max(0, at - Date.now()) + 50);
+}
+
+function quoteCardHeadHtml(quoted) {
+  return `<span class="kaposts-quote-head">
+    ${posterAvatarHtml(quoted.posterAddress)}
+    <strong>${deps.escapeHtml(posterName(quoted.posterAddress))}</strong>
+    ${quoted.timestamp ? `<span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(quoted.timestamp))}</span>` : ""}
+  </span>`;
+}
+
+function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false, openByRemote = false, truncates = false } = {}) {
   const name = posterName(post.posterAddress);
   const time = formatRelativeTime(post.timestamp);
   const isMine = post.posterAddress === deps.engine.address;
@@ -1024,19 +1163,29 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
   // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
   // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
   // all. Opening the post is what tapping the post itself is for.
-  const foldText = !inThread && isLong && !expandedPostIds.has(post.id);
+  // Ancestors fold too (iOS truncates: true): the focal post owns the screen, and the chain
+  // above it is context you can expand or tap into, not a wall to scroll past.
+  const foldText = (!inThread || truncates) && isLong && !expandedPostIds.has(post.id);
   const commentCount = Math.max(post.remoteReplyCount || 0, post.comments.filter((c) => !isHiddenAuthor(c.posterAddress)).length);
 
+  // Delivery: a spinner while submitting, a green check for the first minute once the K
+  // transaction is on the network, red Retry when it didn't go through. Only session posts
+  // carry a delivery state; feed rows arrive as "sent" with an old timestamp and show nothing.
+  const sentCheck = post.delivery === "sent" && post.remoteId && localPosts.some((p) => p.id === post.id)
+    && Date.now() - post.timestamp < 60_000;
+  if (sentCheck) scheduleSentCheckExpiry(post.id, post.timestamp + 60_000);
   const deliveryHtml = post.delivery === "pending"
-    ? `<div class="kaposts-delivery">Posting…</div>`
+    ? `<div class="kaposts-delivery pending" title="Posting"><span class="kaposts-spinner" aria-label="Posting"></span></div>`
     : post.delivery === "failed"
-      ? `<div class="kaposts-delivery failed">Failed to post. <button type="button" data-kaposts-retry="${post.id}">Retry</button></div>`
-      : "";
+      ? `<div class="kaposts-delivery failed"><button type="button" data-kaposts-retry="${post.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>Retry</button></div>`
+      : sentCheck
+        ? `<div class="kaposts-delivery sent" data-kaposts-sent-check="${post.timestamp + 60_000}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>`
+        : "";
 
   const quotedHtml = post.quoted
     ? `<div class="kaposts-quote-embed" ${post.quoted.remoteId ? `data-kaposts-open-remote="${deps.escapeHtml(post.quoted.remoteId)}"` : ""}>
-         <strong>${deps.escapeHtml(posterName(post.quoted.posterAddress))}</strong>
-         <span>${deps.escapeHtml(post.quoted.text || "Reposted")}</span>
+         ${quoteCardHeadHtml(post.quoted)}
+         <span>${post.quoted.text ? markdownPreviewHtml(post.quoted.text) : "Reposted"}</span>
        </div>`
     : "";
 
@@ -1053,7 +1202,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
           </button>
         </div>
         <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(postDisplayText(post))}</div>
-        ${!inThread && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${post.id}">${foldText ? "Show more" : "Show less"}</button>` : ""}
+        ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${post.id}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
         ${quotedHtml}
         ${deliveryHtml}
@@ -1061,14 +1210,14 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
           <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${post.id}"` : `data-kaposts-open="${post.id}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}
           </button>
-          <button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${post.id}" title="Repost">
-            ${countdownOrIconHtml(`repost:${post.id}`, ICONS.repost)}${post.reposts > 0 ? `<span>${post.reposts}</span>` : ""}
-          </button>
           <button class="kaposts-action${post.likedByMe ? " active-like" : ""}" type="button" data-kaposts-like="${post.id}" title="Like">
             ${countdownOrIconHtml(`like:${post.id}`, ICONS.like)}${post.likes > 0 ? `<span>${post.likes}</span>` : ""}
           </button>
           <button class="kaposts-action${post.dislikedByMe ? " active-dislike" : ""}" type="button" data-kaposts-dislike="${post.id}" title="Dislike">
             ${countdownOrIconHtml(`dislike:${post.id}`, ICONS.dislike)}${post.dislikes > 0 ? `<span>${post.dislikes}</span>` : ""}
+          </button>
+          <button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${post.id}" title="Repost">
+            ${countdownOrIconHtml(`repost:${post.id}`, ICONS.repost)}${post.reposts > 0 ? `<span>${post.reposts}</span>` : ""}
           </button>
           <button class="kaposts-action${post.bookmarkedByMe ? " active-bookmark" : ""}" type="button" data-kaposts-bookmark="${post.id}" title="${post.bookmarkedByMe ? "Remove Bookmark" : "Bookmark"}">${ICONS.bookmark}</button>
           ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${post.id}" title="Copy share link">${ICONS.share}</button>` : ""}
@@ -1079,9 +1228,31 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
     </article>`;
 }
 
+// A post's popularity score. Every interaction counts - a post people argue with is popular in
+// the same sense a post people like is - including comments, which the cell already shows.
 function engagementScore(post) {
-  return (post.likes || 0) + (post.reposts || 0) + (post.dislikes || 0);
+  const comments = Math.max(post.remoteReplyCount || 0, (post.comments || []).length);
+  return (post.likes || 0) + (post.reposts || 0) + (post.dislikes || 0) + comments;
 }
+
+// iOS emptyStateIcon/Title/Body per feed tab.
+const FEED_EMPTY_STATES = {
+  following: {
+    icon: `<svg class="kaposts-empty-icon" viewBox="0 0 24 24"><path d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z"/></svg>`,
+    title: "Nothing from people you follow",
+    body: "Posts from accounts you follow will show up here.",
+  },
+  feed: {
+    icon: `<svg class="kaposts-empty-icon" viewBox="0 0 24 24"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg>`,
+    title: "No posts yet",
+    body: "Be the first - tap the pencil to write a post.",
+  },
+  popular: {
+    icon: `<svg class="kaposts-empty-icon" viewBox="0 0 24 24"><path d="M15.362 5.214A8.252 8.252 0 0 1 12 21 8.25 8.25 0 0 1 6.038 7.047 8.287 8.287 0 0 0 9 9.601a8.983 8.983 0 0 1 3.361-6.867 8.21 8.21 0 0 0 3 2.48Z"/><path d="M12 18a3.75 3.75 0 0 0 .495-7.468 5.99 5.99 0 0 0-1.925 3.547 5.975 5.975 0 0 1-2.133-1.001A3.75 3.75 0 0 0 12 18Z"/></svg>`,
+    title: "Nothing trending yet",
+    body: "The most liked, reposted and talked-about posts will show up here.",
+  },
+};
 
 /**
  * Full repaint. Keeps the scroll position by default — a like or a countdown tick calls
@@ -1095,13 +1266,17 @@ function renderFeed({ resetScroll = false } = {}) {
   const posts = visibleFeedPosts();
   if (posts.length === 0 && !feedLoading && !feedError) {
     renderedFeedIds = new Set();
+    // Everything fetched so far was filtered away (all muted, or - on Following - none of it
+    // from accounts you follow) while the server still has older pages. No auto-sentinel here:
+    // with nothing on screen it would walk the whole history unattended, so this stays a tap.
+    const canLoadOlder = feedPager && !feedPager.loading && feedPager.hasMore && feedPager.cursor;
     feedEl.innerHTML = `
-      <div class="no-results-card">
-        <strong>${activeFeedTab === "following" ? "Nothing here yet" : "No posts yet"}</strong>
-        <span>${activeFeedTab === "following"
-          ? "Follow people from their posts and their content shows up here."
-          : "Be the first to post something on the Kaspa network."}</span>
-      </div>`;
+      <div class="no-results-card kaposts-empty">
+        ${FEED_EMPTY_STATES[activeFeedTab].icon}
+        <strong>${FEED_EMPTY_STATES[activeFeedTab].title}</strong>
+        <span>${FEED_EMPTY_STATES[activeFeedTab].body}</span>
+      </div>
+      ${canLoadOlder ? `<button class="kaposts-load-older" type="button" data-kaposts-load-older>Load older posts</button>` : ""}`;
   } else {
     renderedFeedIds = new Set(posts.map((post) => post.id));
     feedEl.innerHTML = newPostsPillHtml() + posts.map((post) => postCellHtml(post)).join("");
@@ -1166,7 +1341,16 @@ function currentThreadPost() {
   return topId ? findPost(topId) : null;
 }
 
+function syncReplyBarGate() {
+  const replyBar = replyInput?.closest(".kaposts-reply-bar");
+  if (!replyBar) return;
+  const gated = Boolean(deps?.isChattingBalanceZero?.());
+  replyBar.classList.toggle("gated", gated);
+  if (replyInput) replyInput.readOnly = gated;
+}
+
 function renderThread() {
+  syncReplyBarGate();
   const post = currentThreadPost();
   const showThread = Boolean(post);
   syncSurfaces(post);
@@ -1187,7 +1371,7 @@ function renderThread() {
     const ancestors = fetchedAncestors.get(post.remoteId) || [];
     const ancestorsHtml = ancestors.length
       ? `<div class="kaposts-ancestors">${ancestors
-          .map((entry) => `<div class="kaposts-ancestor">${postCellHtml(entry, { inThread: true, replyInline: true })}</div>`)
+          .map((entry) => `<div class="kaposts-ancestor" data-kaposts-ancestor="${entry.id}">${postCellHtml(entry, { inThread: true, replyInline: true, truncates: true })}</div>`)
           .join("")}</div>`
       : "";
     // "Thread" is what an author calls their OWN continuation; once the chain carries other
@@ -1202,7 +1386,13 @@ function renderThread() {
       </div>` : "");
   }
   if (threadRepliesEl) {
+    // An unbranched exchange is rendered in full ABOVE, and its members are filtered out of
+    // this list - so "no comments yet" would contradict the replies the reader can already see.
+    const emptyCommentsHtml = comments.length ? "" : `
+      <p class="kaposts-comments-empty">${chain.length ? "Every reply is in the conversation above." : "No comments yet - be the first to reply."}</p>`;
     threadRepliesEl.innerHTML = `
+      <div class="kaposts-comments-header">${comments.length ? `Comments (${comments.length})` : "Comments"}</div>
+      ${emptyCommentsHtml}
       <div class="kaposts-thread-replies">
         ${comments.map((comment) => {
           const nested = (comment.comments || []).filter((c) => !isHiddenAuthor(c.posterAddress));
@@ -1219,7 +1409,7 @@ function renderThread() {
                 : state === "loading"
                   ? `<p class="kaposts-inline-note">Loading replies…</p>`
                   : state === "failed"
-                    ? `<p class="kaposts-inline-note">Could not load replies.</p>`
+                    ? `<p class="kaposts-inline-note">Could not load replies. <button type="button" class="kaposts-inline-retry" data-kaposts-retry-replies="${comment.id}">Retry</button></p>`
                     : `<p class="kaposts-inline-note">No replies</p>`}
             </div>`;
           return `
@@ -1295,15 +1485,33 @@ function toastLabelFor(key) {
   return "Posting";
 }
 
+const actionToasts = [];
+function showActionToast(text, txId = null) {
+  const toast = { text, txId };
+  actionToasts.push(toast);
+  renderToasts();
+  setTimeout(() => {
+    const index = actionToasts.indexOf(toast);
+    if (index >= 0) actionToasts.splice(index, 1);
+    renderToasts();
+  }, 4000);
+}
+
 function renderToasts() {
   if (!toastsEl) return;
   const parts = [];
+  for (const toast of actionToasts) {
+    parts.push(`
+      <div class="kaposts-toast kaposts-toast-action">
+        <span>${deps.escapeHtml(toast.text)}</span>
+        ${toast.txId && deps.explorerTxUrl ? `<a class="kaposts-toast-view" href="${deps.escapeHtml(deps.explorerTxUrl(toast.txId))}" target="_blank" rel="noopener">View</a>` : ""}
+      </div>`);
+  }
   for (const [key, pending] of pendingActions) {
     const seconds = Math.max(0, Math.ceil((pending.deadline - Date.now()) / 1000));
     parts.push(`
       <div class="kaposts-toast">
-        <span class="kaposts-countdown" data-kaposts-countdown="${deps.escapeHtml(key)}">${seconds}</span>
-        <span>${deps.escapeHtml(pending.label || toastLabelFor(key))}</span>
+        <span>${deps.escapeHtml(pending.label || toastLabelFor(key))} in <span class="kaposts-countdown" data-kaposts-countdown="${deps.escapeHtml(key)}">${seconds}</span>s</span>
         <button type="button" data-kaposts-undo="${deps.escapeHtml(key)}">Undo</button>
       </div>`);
   }
@@ -1534,7 +1742,7 @@ function scheduleQuote(target, text) {
         engine: deps.engine, text, contentId: target.remoteId, quotedAuthorPubkey: target.posterPubkey,
       });
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
-      deps.showToast?.("Quote posted to the network");
+      showActionToast("Quote posted to the network", txid);
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; });
       deps.appendEngineLog?.(`KaPost quote failed: ${error.message}`);
@@ -1546,27 +1754,40 @@ function scheduleQuote(target, text) {
   });
 }
 
-/** Same optimistic-now / submit-after-the-countdown rule as toggleVote. */
+/**
+ * Same optimistic-now / submit-after-the-countdown rule as toggleVote. Already reposted means
+ * the countdown ends in the fork's `unquote` counter-action, which nets the repost out on the
+ * indexer (the chain keeps both transactions) - iOS performUnrepost.
+ */
 function scheduleRepost(target) {
   const key = `repost:${target.id}`;
   if (pendingActions.has(key)) { cancelUndoable(key); return; }
   const wasReposted = (findPost(target.id) || target).repostedByMe === true;
-  if (!wasReposted) {
+  if (wasReposted) {
+    mutatePost(target.id, (p) => { p.repostedByMe = false; p.reposts = Math.max(0, (p.reposts || 0) - 1); });
+  } else {
     mutatePost(target.id, (p) => { p.repostedByMe = true; p.reposts = (p.reposts || 0) + 1; });
-    renderAll();
   }
+  renderAll();
   scheduleUndoable(key, async () => {
     try {
-      await submitKaPostQuote({ engine: deps.engine, text: "", contentId: target.remoteId, quotedAuthorPubkey: target.posterPubkey });
-      deps.showToast?.("Repost posted to the network");
+      if (wasReposted) {
+        const txid = await submitKaPostUnquote({ engine: deps.engine, contentId: target.remoteId });
+        showActionToast("Repost removed on the network", txid);
+      } else {
+        const txid = await submitKaPostQuote({ engine: deps.engine, text: "", contentId: target.remoteId, quotedAuthorPubkey: target.posterPubkey });
+        showActionToast("Repost posted to the network", txid);
+      }
     } catch (error) {
-      deps.appendEngineLog?.(`KaPost repost failed: ${error.message}`);
+      deps.appendEngineLog?.(`KaPost ${wasReposted ? "unrepost" : "repost"} failed: ${error.message}`);
     }
   }, () => {
-    if (!wasReposted) {
+    if (wasReposted) {
+      mutatePost(target.id, (p) => { p.repostedByMe = true; p.reposts = (p.reposts || 0) + 1; });
+    } else {
       mutatePost(target.id, (p) => { p.repostedByMe = false; p.reposts = Math.max(0, (p.reposts || 0) - 1); });
     }
-  });
+  }, wasReposted ? "Removing repost" : "Reposting");
 }
 
 function playVoteBurst(postId, kind) {
@@ -1635,8 +1856,8 @@ function toggleVote(post, kind) {
     if (!post.remoteId || !post.posterPubkey) return;
     try {
       const vote = wasSet ? "unvote" : (kind === "like" ? "upvote" : "downvote");
-      await submitKaPostVote({ engine: deps.engine, postId: post.remoteId, vote, authorPubkey: post.posterPubkey });
-      deps.showToast?.(wasSet ? "Vote removed on the network" : `${kind === "like" ? "Like" : "Dislike"} posted to the network`);
+      const txid = await submitKaPostVote({ engine: deps.engine, postId: post.remoteId, vote, authorPubkey: post.posterPubkey });
+      showActionToast(wasSet ? "Vote removed on the network" : `${kind === "like" ? "Like" : "Dislike"} posted to the network`, txid);
     } catch (error) {
       deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
     }
@@ -1662,7 +1883,7 @@ function toggleFollow(post) {
   renderAll();
   if (!post.posterPubkey) return;
   submitKaPostFollow({ engine: deps.engine, follow: willFollow, followedPubkey: post.posterPubkey })
-    .then(() => deps.showToast?.(willFollow ? "Follow posted to the network" : "Unfollow posted to the network"))
+    .then((txid) => showActionToast(willFollow ? "Follow posted to the network" : "Unfollow posted to the network", txid))
     .catch((error) => deps.appendEngineLog?.(`KaPost follow failed: ${error.message}`));
 }
 
@@ -1809,18 +2030,51 @@ function retryPost(post) {
 // Composer + meter
 // ---------------------------------------------------------------------------
 
+// iOS KaPostCharacterMeter: a ring filling toward the 25,000-character limit, visible from the
+// first character, orange with a live remaining count in the final 10%, red at the wall.
 function updateMeter(input, meter, submit = null) {
-  const count = input.value.length;
   const limit = KAPOSTS_POST_CHARACTER_LIMIT;
+  if (input.value.length > limit) input.value = input.value.slice(0, limit);
+  const count = input.value.length;
   const remaining = limit - count;
-  const nearLimit = count / limit >= 0.9;
-  meter.hidden = count === 0 || !nearLimit;
-  if (nearLimit) {
-    meter.textContent = String(remaining);
-    meter.classList.toggle("over", remaining <= 0);
-  }
-  if (count > limit) input.value = input.value.slice(0, limit);
+  const progress = Math.min(1, count / limit);
+  const nearLimit = progress >= 0.9;
+  meter.hidden = count === 0;
+  meter.classList.toggle("near", nearLimit && remaining > 0);
+  meter.classList.toggle("over", remaining <= 0);
+  const circumference = 2 * Math.PI * 8;
+  meter.innerHTML = `
+    ${nearLimit ? `<span class="kaposts-meter-count">${remaining}</span>` : ""}
+    <svg class="kaposts-meter-ring" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="8" class="track"/>
+      <circle cx="10" cy="10" r="8" class="fill" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${(circumference * (1 - progress)).toFixed(2)}"/>
+    </svg>`;
   if (submit) submit.disabled = input.value.trim().length === 0;
+  if (input === composerInput) scheduleComposerFeeEstimate();
+}
+
+// Live network-fee estimate while typing (Settings > Show Fee Estimate), matching the chat
+// composer's behaviour. Debounced: the estimate asks the node, and typing is faster than that.
+let composerFeeTimer = null;
+let composerFeeToken = 0;
+function scheduleComposerFeeEstimate() {
+  const row = composerEl?.querySelector("[data-kaposts-composer-fee]");
+  if (!row) return;
+  const text = String(composerInput?.value || "").trim();
+  if (!text || !deps.showFeeEstimate?.() || !deps.estimatePostFeeKas) { row.hidden = true; return; }
+  if (composerFeeTimer) clearTimeout(composerFeeTimer);
+  const token = ++composerFeeToken;
+  composerFeeTimer = setTimeout(async () => {
+    try {
+      const feeKas = await deps.estimatePostFeeKas(text);
+      if (token !== composerFeeToken) return;
+      if (feeKas == null) { row.hidden = true; return; }
+      row.textContent = `Est. fee: ${Number(feeKas).toFixed(8)} KAS`;
+      row.hidden = false;
+    } catch {
+      if (token === composerFeeToken) row.hidden = true;
+    }
+  }, 450);
 }
 
 // Thread segments stacked in the composer (X-style "+"), oldest first.
@@ -1828,6 +2082,17 @@ let composerThreadSegments = [];
 
 function composerSegmentsEl() { return document.querySelector("[data-kaposts-thread-segments]"); }
 function composerThreadAddEl() { return document.querySelector("[data-kaposts-thread-add]"); }
+
+// Applies a toolbar button to whatever is selected in the composer, then restores focus and puts
+// the selection where the edit says it belongs (inside fresh markers, or over the link target).
+function applyComposerFormatting(action) {
+  if (!composerInput) return;
+  const edit = applyKaPostsMarkdownAction(action, composerInput.value, composerInput.selectionStart, composerInput.selectionEnd);
+  composerInput.value = edit.text;
+  composerInput.focus();
+  composerInput.setSelectionRange(edit.selectionStart, edit.selectionEnd);
+  composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 function renderComposerThreadUi() {
   const listEl = composerSegmentsEl();
@@ -1858,7 +2123,9 @@ function renderComposerThreadUi() {
   if (composerInput) {
     composerInput.placeholder = composerReplyTarget
       ? "Post your reply"
-      : (composerThreadSegments.length ? "Add another post" : "What's happening on Kaspa?");
+      : composerQuoteTarget
+        ? "Add a comment"
+        : (composerThreadSegments.length ? "Add another post" : "What's happening on Kaspa?");
   }
 }
 
@@ -1916,7 +2183,7 @@ function openComposer(quoteTarget = null, { replyTarget = null } = {}) {
   composerQuoteTarget = replyTarget ? null : quoteTarget;
   composerTitle.textContent = replyTarget ? "Reply to Post" : (quoteTarget ? "Quote Post" : "New Post");
   if (composerSubmit) composerSubmit.textContent = replyTarget ? "Reply" : "Post";
-  if (composerInput) composerInput.placeholder = replyTarget ? "Post your reply" : "What's happening on Kaspa?";
+  if (composerInput) composerInput.placeholder = replyTarget ? "Post your reply" : quoteTarget ? "Add a comment" : "What's happening on Kaspa?";
   composerInput.value = "";
   composerSubmit.disabled = true;
   composerMeter.hidden = true;
@@ -1924,8 +2191,8 @@ function openComposer(quoteTarget = null, { replyTarget = null } = {}) {
   if (quoteTarget) {
     composerQuote.hidden = false;
     composerQuote.innerHTML = `
-      <strong>${deps.escapeHtml(posterName(quoteTarget.posterAddress))}</strong>
-      <span>${deps.escapeHtml(quoteTarget.text)}</span>`;
+      ${quoteCardHeadHtml(quoteTarget)}
+      <span>${markdownPreviewHtml(quoteTarget.text)}</span>`;
   } else {
     composerQuote.hidden = true;
     composerQuote.innerHTML = "";
@@ -1942,12 +2209,17 @@ async function closeComposer({ keepDraft = null } = {}) {
   const hasContent = [String(composerInput?.value || ""), ...composerThreadSegments].some((s) => s.trim());
   let save = keepDraft;
   if (save === null && hasContent) {
-    save = await deps.confirmDialog?.({
-      title: "Save as draft?",
-      message: "Keep what you have written to finish later. Discarding cannot be undone.",
-      confirmLabel: "Save Draft",
-      destructive: false,
-    }) ?? false;
+    // iOS ComposerCloseOptionsSheet: each choice says what happens to the post. Closing the
+    // chooser itself (Escape, backdrop) keeps you in the composer with nothing lost.
+    const choice = await deps.chooseDialog?.({
+      title: "Save this post?",
+      options: [
+        { id: "save", title: "Save Draft", subtitle: "Keep it in Drafts to finish later." },
+        { id: "discard", title: "Discard", subtitle: "Throw this away.", destructive: true },
+      ],
+    });
+    if (choice == null) return;
+    save = choice === "save";
   }
   if (save) saveDraftFromComposer();
 
@@ -1967,6 +2239,7 @@ async function closeComposer({ keepDraft = null } = {}) {
 // ---------------------------------------------------------------------------
 
 function syncRailActive() {
+  syncRailBadge();
   const current = !activePanel
     ? "feed"
     : activePanel.type === "list"
@@ -2021,17 +2294,29 @@ function renderPanel() {
   const previousTop = panelBodyEl.scrollTop || 0;
   const restorePanelScroll = () => { panelBodyEl.scrollTop = previousTop; };
   const titles = {
-    profile: "Profile", notifications: "Notifications", engagement: "Post Activity",
+    profile: "Profile", notifications: "Notifications", engagement: "Post Activity", search: "Search",
     bookmarks: "Bookmarks", drafts: "Drafts", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
   };
   panelTitleEl.textContent = titles[panel.type === "list" ? panel.kind : panel.type] || "Panel";
+
+  if (panel.type === "search") {
+    renderSearchPanel(panel);
+    return;
+  }
 
   if (panel.type === "profile") {
     const address = panel.address;
     const profile = deps.engine.peekKnsAddressProfile?.(address)?.profile || null;
     const isMine = address === deps.engine.address;
     const isFollowing = prefs.following.includes(address);
-    const feedItems = panel.tab === "replies" ? (panel.replies || []) : (panel.posts || []);
+    // Your own profile merges session posts the indexer has not stamped yet (still pending, or
+    // too fresh), newest first - a post you just made belongs on your own Posts tab.
+    const remoteItems = panel.tab === "replies" ? (panel.replies || []) : (panel.posts || []);
+    const feedItems = isMine && panel.tab !== "replies"
+      ? [...remoteItems, ...localPosts.filter((post) => post.posterAddress === address && !post.quoted
+          && !remoteItems.some((row) => row.remoteId && row.remoteId === post.remoteId))]
+          .sort((a, b) => b.timestamp - a.timestamp)
+      : remoteItems;
     panelBodyEl.innerHTML = `
       <div class="kaposts-profile-hero">
         <div class="kaposts-profile-banner"${profile?.bannerUrl ? ` style="background-image:url('${deps.escapeHtml(profile.bannerUrl)}')"` : ""}></div>
@@ -2039,14 +2324,21 @@ function renderPanel() {
           ${posterAvatarHtml(address)}
           <div class="kaposts-profile-meta">
             <strong>${deps.escapeHtml(posterName(address))}</strong>
-            ${profile?.bio ? `<span class="kaposts-profile-bio">${deps.escapeHtml(profile.bio)}</span>` : ""}
+            ${profile?.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
             <span class="kaposts-profile-counts">
-              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followingCount ?? "–"}</b> Following</button>&nbsp;&nbsp;
+              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${isMine ? prefs.following.filter((a) => a !== address).length : (panel.details?.followingCount ?? "–")}</b> Following</button>&nbsp;&nbsp;
               <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? "–"}</b> Followers</button>
             </span>
           </div>
-          ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-profile-follow>${isFollowing ? "Following" : "Follow"}</button>` : ""}
+          ${!isMine ? `<span class="kaposts-profile-actions">
+            <button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-profile-follow>${isFollowing ? "Following" : "Follow"}</button>
+            <button class="kaposts-profile-chat" type="button" data-kaposts-profile-chat title="Open a chat with ${deps.escapeHtml(posterName(address))}">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155"/></svg>
+              Chat
+            </button>
+          </span>` : ""}
         </div>
+        ${isMine ? `<button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns>Edit KNS Profile</button>` : ""}
       </div>
       <div class="kaposts-feed-tabs kaposts-profile-tabs">
         <button class="kaposts-feed-tab${panel.tab !== "replies" ? " active" : ""}" type="button" data-kaposts-profile-tab="posts">Posts</button>
@@ -2056,9 +2348,13 @@ function renderPanel() {
         ${panel.loading && feedItems.length === 0
           ? `<div class="kaposts-feed-status">Loading…</div>`
           : feedItems.length === 0
-            ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong></div>`
+            ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong><span>${panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here."}</span></div>`
             : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
       </div>`;
+    // More appears only when the three-line clamp actually hid something.
+    const bioEl = panelBodyEl.querySelector("[data-kaposts-profile-bio]");
+    const bioMore = panelBodyEl.querySelector("[data-kaposts-bio-more]");
+    if (bioEl && bioMore) bioMore.hidden = !(bioEl.scrollHeight > bioEl.clientHeight + 1);
     const profileTab = panel.tab === "replies" ? "replies" : "posts";
     mountPagerSentinel(
       `profile-${profileTab}`,
@@ -2079,14 +2375,16 @@ function renderPanel() {
       : items.length === 0
         ? `<div class="no-results-card"><strong>Nothing yet</strong><span>When someone likes, replies to or shares your posts, it shows up here.</span></div>`
         : items.map((item) => `
-            <div class="kaposts-notification-row${item.targetTxId ? " openable" : ""}" ${item.targetTxId ? `data-kaposts-open-remote="${deps.escapeHtml(item.targetTxId)}"` : ""}${item.parentTxId ? ` data-kaposts-open-remote-parent="${deps.escapeHtml(item.parentTxId)}"` : ""}>
-              ${posterAvatarHtml(item.actorAddress)}
+            <div class="kaposts-notification-row openable" data-kaposts-notification="${deps.escapeHtml(item.id)}">
+              <span class="kaposts-notification-avatar">
+                ${posterAvatarHtml(item.actorAddress)}
+                <span class="kaposts-notification-kind kind-${item.kind}">${NOTIFICATION_KIND_ICONS[item.kind] || NOTIFICATION_KIND_ICONS.other}</span>
+              </span>
               <div class="kaposts-notification-main">
                 <span><strong>${deps.escapeHtml(posterName(item.actorAddress))}</strong> ${deps.escapeHtml(item.action)}</span>
                 ${item.snippet ? `<span class="kaposts-notification-snippet">${deps.escapeHtml(item.snippet)}</span>` : ""}
                 <span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(item.timestamp))}</span>
               </div>
-              <a class="kaposts-view-link" href="${deps.escapeHtml(deps.explorerTxUrl(item.id))}" target="_blank" rel="noopener">View</a>
             </div>`).join("")
     }</div>`;
     mountPagerSentinel(
@@ -2103,8 +2401,12 @@ function renderPanel() {
     const lists = panel.lists || { likes: [], dislikes: [], reposts: [], quotes: [] };
     const tab = panel.tab || "likes";
     const rows = lists[tab] || [];
+    const activityPost = findPost(panel.postId);
     const tabLabel = (key, label) => {
-      const count = (lists[key] || []).length;
+      const loaded = (lists[key] || []).length;
+      const count = key === "likes" ? Math.max(activityPost?.likes || 0, loaded)
+        : key === "dislikes" ? Math.max(activityPost?.dislikes || 0, loaded)
+        : loaded;
       return count > 0 ? `${label} (${count})` : label;
     };
     panelBodyEl.innerHTML = `
@@ -2148,15 +2450,21 @@ function renderPanel() {
       panel.loading && rows.length === 0
         ? `<div class="kaposts-feed-status">Loading…</div>`
         : rows.length === 0
-          ? `<div class="no-results-card"><strong>${panel.mode === "followers" ? "No followers yet" : "Not following anyone yet"}</strong></div>`
+          ? `<div class="no-results-card"><strong>${panel.mode === "followers" ? "No followers yet" : "Not following anyone yet"}</strong><span>${panel.mode === "followers" ? "When someone follows you, they'll show up here." : "Accounts you follow will show up here."}</span></div>`
           : rows.map((row) => {
               const isMe = row.address === deps.engine.address;
               const isFollowing = prefs.following.includes(row.address);
+              // Unfollow in the Following list; Follow Back (or Unfollow) in the Followers list.
+              // Rows stay in place after a toggle so it's reversible.
+              const label = isFollowing ? "Unfollow" : (panel.mode === "followers" ? "Follow Back" : "Follow");
               return `
               <div class="kaposts-notification-row openable" data-kaposts-follow-list-row data-address="${deps.escapeHtml(row.address)}" data-pubkey="${deps.escapeHtml(row.pubkey || "")}">
                 ${posterAvatarHtml(row.address)}
-                <div class="kaposts-notification-main"><span><strong>${deps.escapeHtml(posterName(row.address))}</strong></span></div>
-                ${isMe ? "" : `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow-list-follow data-address="${deps.escapeHtml(row.address)}" data-pubkey="${deps.escapeHtml(row.pubkey || "")}">${isFollowing ? "Following" : "Follow"}</button>`}
+                <div class="kaposts-notification-main">
+                  <span><strong>${deps.escapeHtml(posterName(row.address))}</strong></span>
+                  ${row.timestamp ? `<span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(row.timestamp))}</span>` : ""}
+                </div>
+                ${isMe ? "" : `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow-list-follow data-address="${deps.escapeHtml(row.address)}" data-pubkey="${deps.escapeHtml(row.pubkey || "")}">${label}</button>`}
               </div>`;
             }).join("")
     }</div>`;
@@ -2172,9 +2480,10 @@ function renderPanel() {
       // Bookmarks are a local flag on already-loaded posts — the indexer has no bookmark
       // endpoint and no cursor to follow, so this list grows as the feed pages in rather
       // than paging itself.
-      const bookmarks = allPostLists().filter((p) => p.bookmarkedByMe && !isHiddenAuthor(p.posterAddress));
+      const bookmarks = allPostLists().filter((p) => p.bookmarkedByMe && !isHiddenAuthor(p.posterAddress))
+        .sort((a, b) => b.timestamp - a.timestamp);
       panelBodyEl.innerHTML = bookmarks.length === 0
-        ? `<div class="no-results-card"><strong>No bookmarks yet</strong><span>Tap the bookmark icon on any post to save it here.</span></div>`
+        ? `<div class="no-results-card"><strong>No bookmarks yet</strong><span>Tap the bookmark on any post to save it here.</span></div>`
         : bookmarks.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("");
       restorePanelScroll();
       return;
@@ -2186,7 +2495,9 @@ function renderPanel() {
     }
     const addresses = panel.kind === "muted" ? prefs.muted : prefs.blocked;
     panelBodyEl.innerHTML = addresses.length === 0
-      ? `<div class="no-results-card"><strong>No ${panel.kind} users</strong><span>Their posts hide everywhere in KaPosts.</span></div>`
+      ? `<div class="no-results-card"><strong>No ${panel.kind} accounts</strong><span>${panel.kind === "muted"
+          ? "Accounts you mute disappear from your feeds but can still interact with you."
+          : "Blocked accounts are removed everywhere and can't interact with you."}</span></div>`
       : addresses.map((address) => `
           <div class="kaposts-notification-row">
             ${posterAvatarHtml(address)}
@@ -2197,6 +2508,198 @@ function renderPanel() {
           </div>`).join("");
     restorePanelScroll();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Search (iOS KaPostsSearchView)
+// ---------------------------------------------------------------------------
+//
+// CLIENT-SIDE, because the K indexer has no search endpoint - every one of its routes is a feed
+// or a lookup by id. So this pages the global feed and filters what comes back, which has one
+// honest consequence worth stating in the UI rather than hiding: it searches as far back as it
+// has paged, not the whole chain. "Keep looking" / "Search older posts" is how the user asks it
+// to go further, and it says how far it has got.
+//
+// People are derived from the authors of the posts it scans, which is what makes "only people
+// who have posted" true by construction: an address is only ever offered because a post of
+// theirs was read.
+
+function openSearchPanel() {
+  rememberFeedScroll();
+  panelGeneration += 1;
+  clearPanelPagerSentinels();
+  activePanel = beginPanel({
+    type: "search", scope: "posts", query: "", scanned: [], loadFailed: false,
+    pager: makePager(),
+  });
+  renderPanel();
+  syncRailActive();
+  // One page up front so the first search has something to answer with.
+  loadMoreSearch();
+  panelBodyEl?.querySelector("[data-kaposts-search-input]")?.focus();
+}
+
+function loadMoreSearch() {
+  const panel = activePanel;
+  if (panel?.type !== "search" || !panel.pager) return;
+  const generation = panelGeneration;
+  panel.pager.error = null;
+  panel.pager.stalled = false;
+  panel.pager.unproductive = 0;
+  panel.loadFailed = false;
+  const known = new Set(panel.scanned.map((post) => post.remoteId));
+  return runPager(panel.pager, {
+    fetchPage: async (before, limit) => {
+      const result = await fetchFeedPage(before, limit);
+      return { items: result.posts, pagination: result.pagination };
+    },
+    absorb: (fresh) => {
+      const mapped = fresh.map(mapRemotePost).filter((post) => post && post.remoteId && !known.has(post.remoteId));
+      mapped.forEach((post) => known.add(post.remoteId));
+      panel.scanned = [...panel.scanned, ...mapped];
+      renderSearchResults(panel);
+      // Warm the names for whoever just arrived, so People rows are not a wall of addresses.
+      resolvePosterIdentities(mapped.map((post) => post.posterAddress), () => {
+        if (activePanel === panel) renderSearchResults(panel);
+      });
+      // Every scanned post counts as progress here - the search's own filter is the query,
+      // not the pager's visibility rule.
+      return mapped.length;
+    },
+    isStale: () => generation !== panelGeneration || activePanel !== panel,
+    onUpdate: () => {
+      if (activePanel === panel) {
+        if (panel.pager.error) { panel.loadFailed = true; panel.pager.error = null; }
+        renderSearchResults(panel);
+      }
+    },
+  });
+}
+
+function searchQuery(panel) {
+  return String(panel.query || "").trim().toLowerCase();
+}
+
+function matchingSearchPosts(panel) {
+  const query = searchQuery(panel);
+  if (!query) return [];
+  return panel.scanned.filter((post) => {
+    if (isHiddenAuthor(post.posterAddress)) return false;
+    if (post.text.toLowerCase().includes(query)) return true;
+    // A post also matches on WHO wrote it, so searching a name finds their posts without
+    // having to switch tabs to find them first.
+    return posterName(post.posterAddress).toLowerCase().includes(query);
+  });
+}
+
+// One row per author, with how many of their scanned posts matched - so the list is ordered
+// by who is actually active on this term rather than by whoever posted most recently.
+function matchingSearchPeople(panel) {
+  const query = searchQuery(panel);
+  if (!query) return [];
+  const counts = new Map();
+  const pubkeys = new Map();
+  for (const post of panel.scanned) {
+    if (!post.posterAddress || isHiddenAuthor(post.posterAddress)) continue;
+    counts.set(post.posterAddress, (counts.get(post.posterAddress) || 0) + 1);
+    if (post.posterPubkey && !pubkeys.has(post.posterAddress)) pubkeys.set(post.posterAddress, post.posterPubkey);
+  }
+  return [...counts.entries()]
+    .filter(([address]) => posterName(address).toLowerCase().includes(query) || address.toLowerCase().includes(query))
+    .map(([address, postCount]) => ({ address, postCount, pubkey: pubkeys.get(address) || null }))
+    .sort((a, b) => (a.postCount === b.postCount
+      ? posterName(a.address).localeCompare(posterName(b.address))
+      : b.postCount - a.postCount));
+}
+
+// The shell (scope picker + field) is built once per panel so typing never loses focus; only
+// the results box below it is rebuilt.
+function renderSearchPanel(panel) {
+  clearPanelPagerSentinels();
+  if (!panelBodyEl.querySelector("[data-kaposts-search-root]")) {
+    panelBodyEl.innerHTML = `
+      <div class="kaposts-search-root" data-kaposts-search-root>
+        <div class="kaposts-search-scope" role="tablist">
+          <button type="button" data-kaposts-search-scope="posts">Posts</button>
+          <button type="button" data-kaposts-search-scope="people">People</button>
+        </div>
+        <input class="kaposts-search-input" type="search" data-kaposts-search-input placeholder="Posts and people" autocomplete="off" spellcheck="false" />
+        <div class="kaposts-search-results" data-kaposts-search-results></div>
+      </div>`;
+  }
+  const input = panelBodyEl.querySelector("[data-kaposts-search-input]");
+  if (input && input.value !== panel.query) input.value = panel.query;
+  renderSearchResults(panel);
+}
+
+function renderSearchResults(panel) {
+  const root = panelBodyEl?.querySelector("[data-kaposts-search-root]");
+  const results = root?.querySelector("[data-kaposts-search-results]");
+  if (!root || !results || activePanel !== panel) return;
+  root.querySelectorAll("[data-kaposts-search-scope]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.kapostsSearchScope === panel.scope);
+  });
+  const query = searchQuery(panel);
+  const loading = Boolean(panel.pager?.loading);
+  const hasMore = Boolean(panel.pager?.hasMore);
+  const scannedCount = panel.scanned.length;
+
+  if (!query) {
+    results.innerHTML = `
+      <div class="no-results-card kaposts-empty">
+        <svg class="kaposts-empty-icon" viewBox="0 0 24 24"><path d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+        <strong>Search KaPosts</strong>
+        <span>Find posts by what they say, and people by their name or domain. Only people who have posted appear.</span>
+      </div>`;
+    return;
+  }
+
+  // Says how deep the search has gone, and offers to go deeper. Shown under the results rather
+  // than only when empty: a handful of hits does not mean there are no more.
+  const depthFooter = hasMore
+    ? `<button class="kaposts-search-depth" type="button" data-kaposts-search-more ${loading ? "disabled" : ""}>
+         <span>${loading ? "Reading older posts" : "Search older posts"}</span>
+         <small>${scannedCount} read</small>
+       </button>`
+    : panel.loadFailed
+      ? `<p class="kaposts-inline-note">Could not read any further just now.</p>`
+      : "";
+
+  const rows = panel.scope === "people" ? matchingSearchPeople(panel) : matchingSearchPosts(panel);
+  if (rows.length === 0 && !loading) {
+    results.innerHTML = `
+      <div class="no-results-card kaposts-empty">
+        <strong>Nothing found yet</strong>
+        <span>${hasMore
+          ? `Searched the most recent ${scannedCount} posts. Older ones have not been read yet.`
+          : "Searched every post available."}</span>
+        ${hasMore ? `<button class="primary-button kaposts-search-keep" type="button" data-kaposts-search-more>Keep looking</button>` : ""}
+      </div>`;
+    return;
+  }
+  if (rows.length === 0) {
+    results.innerHTML = `<p class="kaposts-inline-note">Reading posts…</p>`;
+    return;
+  }
+  results.innerHTML = (panel.scope === "people"
+    ? rows.map((person) => `
+        <button type="button" class="kaposts-search-row kaposts-search-person" data-kaposts-search-person="${deps.escapeHtml(person.address)}" data-kaposts-search-pubkey="${deps.escapeHtml(person.pubkey || "")}">
+          ${posterAvatarHtml(person.address)}
+          <span class="kaposts-search-row-main">
+            <strong>${deps.escapeHtml(posterName(person.address))}</strong>
+            <small>${person.postCount === 1 ? "1 post found" : `${person.postCount} posts found`}</small>
+          </span>
+          <svg class="kaposts-search-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8.25 4.5 7.5 7.5-7.5 7.5"/></svg>
+        </button>`)
+    : rows.map((post) => `
+        <button type="button" class="kaposts-search-row kaposts-search-post" data-kaposts-search-post="${deps.escapeHtml(post.remoteId)}">
+          <span class="kaposts-search-row-main">
+            <strong>${deps.escapeHtml(posterName(post.posterAddress))}</strong>
+            <span class="kaposts-search-snippet">${markdownPreviewHtml(post.text)}</span>
+            <small>${deps.escapeHtml(formatRelativeTime(post.timestamp))}</small>
+          </span>
+        </button>`)
+  ).join("") + depthFooter;
 }
 
 async function openPosterProfile(address, pubkey) {
@@ -2275,7 +2778,17 @@ async function openFollowListPanel({ address, pubkey, mode, parent }) {
       const rowAddress = item?.address || kaspaAddressFromPubkey(deps.engine, rowPubkey) || "";
       if (!rowAddress || seen.has(rowAddress)) continue;
       seen.add(rowAddress);
-      rows.push({ address: rowAddress, pubkey: rowPubkey });
+      const timestamp = Number(item?.timestamp || item?.createdAt || item?.followedAt) || null;
+      rows.push({ address: rowAddress, pubkey: rowPubkey, timestamp });
+    }
+    // Your own Following list also carries follows made on this device that the indexer has
+    // not reported yet, as a tail (iOS localOnlyEntries).
+    if (mode === "following" && address === deps.engine.address) {
+      for (const followed of [...prefs.following].sort()) {
+        if (followed === deps.engine.address || seen.has(followed)) continue;
+        seen.add(followed);
+        rows.push({ address: followed, pubkey: null, timestamp: null });
+      }
     }
     panel.rows = rows;
     panel.loading = false;
@@ -2333,6 +2846,48 @@ function loadMoreProfile(tab) {
 const KAPOSTS_SEEN_NOTIFS_KEY = "kachat-kaposts-seen-notifications-v1";
 const KAPOSTS_NOTIF_POLL_MS = 90_000;
 let kaPostsNotifPollTimer = 0;
+
+// Unseen KaPosts activity, per account (iOS KaPostsNotificationCenter). Bumped by the poller
+// for every arrival that passes the same filters as a ping, cleared the moment the list opens:
+// opening the list IS seeing them. Capped in the label rather than the stored value, so the
+// real number survives a long absence and only its rendering is abbreviated.
+const KAPOSTS_UNSEEN_KEY = "kachat-kaposts-unseen-v1";
+function loadUnseenKaPostsCount() {
+  try { return Math.max(0, Number(localStorage.getItem(deps.accountScopedKey(KAPOSTS_UNSEEN_KEY))) || 0); }
+  catch { return 0; }
+}
+function saveUnseenKaPostsCount(count) {
+  try { localStorage.setItem(deps.accountScopedKey(KAPOSTS_UNSEEN_KEY), String(Math.max(0, count | 0))); }
+  catch {}
+}
+function recordUnseenKaPostsArrivals(count) {
+  if (count <= 0) return;
+  saveUnseenKaPostsCount(loadUnseenKaPostsCount() + count);
+  syncRailBadge();
+}
+function markAllKaPostsNotificationsSeen() {
+  if (loadUnseenKaPostsCount() === 0) return;
+  saveUnseenKaPostsCount(0);
+  syncRailBadge();
+}
+export function kaPostsUnseenCount() {
+  return deps ? loadUnseenKaPostsCount() : 0;
+}
+function syncRailBadge() {
+  const button = document.querySelector('[data-kaposts-rail="notifications"]');
+  if (!button || !deps) return;
+  const count = loadUnseenKaPostsCount();
+  let badge = button.querySelector("[data-kaposts-rail-badge]");
+  if (!count) { badge?.remove(); button.setAttribute("aria-label", "Notifications"); return; }
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "kaposts-rail-badge";
+    badge.setAttribute("data-kaposts-rail-badge", "");
+    button.appendChild(badge);
+  }
+  badge.textContent = count > 99 ? "99+" : String(count);
+  button.setAttribute("aria-label", `Notifications, ${count} unseen`);
+}
 
 function loadSeenKaPostNotificationIds() {
   try { return JSON.parse(localStorage.getItem(deps.accountScopedKey(KAPOSTS_SEEN_NOTIFS_KEY)) || "[]"); }
@@ -2396,6 +2951,8 @@ async function pollKaPostNotificationsForPings() {
     fresh.push({ n, actorAddress });
   }
   saveSeenKaPostNotificationIds(seen);
+  // Counted only while the list is closed: with it open, the rows are already in front of you.
+  if (activePanel?.type !== "notifications") recordUnseenKaPostsArrivals(fresh.length);
 
   for (const { n, actorAddress } of fresh.slice(0, 5)) {
     const text = stripKaChatMarker(n.postContent ? (decodePostContent({ postContent: n.postContent }) || "") : "").trim();
@@ -2451,9 +3008,24 @@ function startKaPostsNotificationPolling() {
 }
 
 /** One indexer notification -> one panel row, or null when it must not be shown. */
+// The kind badge on a notification's avatar (iOS Item.Kind.icon/tint).
+const NOTIFICATION_KIND_ICONS = {
+  like: `<svg viewBox="0 0 24 24"><path d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z"/></svg>`,
+  dislike: `<svg viewBox="0 0 24 24"><path d="M7.5 15h2.25m8.024-9.75c.011.05.028.1.052.148.591 1.2.924 2.55.924 3.977a8.96 8.96 0 0 1-.999 4.125m.023-8.25c-.076-.365.183-.75.575-.75h.908c.889 0 1.713.518 1.972 1.368.339 1.11.521 2.287.521 3.507 0 1.553-.295 3.036-.831 4.398-.306.774-1.086 1.227-1.918 1.227h-1.053c-.472 0-.745-.556-.5-.96a8.95 8.95 0 0 0 .303-.54m.023-8.25H16.48a4.5 4.5 0 0 1-1.423-.23l-3.114-1.04a4.5 4.5 0 0 0-1.423-.23H6.504c-.618 0-1.217.247-1.605.729A11.95 11.95 0 0 0 2.25 12c0 .434.023.863.068 1.285C2.427 14.306 3.346 15 4.372 15h3.126c.618 0 .991.724.725 1.282A7.471 7.471 0 0 0 7.5 19.5a2.25 2.25 0 0 0 2.25 2.25.75.75 0 0 0 .75-.75v-.633c0-.573.11-1.14.322-1.672.304-.76.93-1.33 1.653-1.715a9.04 9.04 0 0 0 2.86-2.4c.498-.634 1.226-1.08 2.032-1.08h.384"/></svg>`,
+  reply: `<svg viewBox="0 0 24 24"><path d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>`,
+  quote: `<svg viewBox="0 0 24 24"><path d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3"/></svg>`,
+  repost: `<svg viewBox="0 0 24 24"><path d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3"/></svg>`,
+  follow: `<svg viewBox="0 0 24 24"><path d="M19 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM4 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 10.374 21c-2.331 0-4.512-.645-6.374-1.766Z"/></svg>`,
+  mention: `<svg viewBox="0 0 24 24"><path d="M16.5 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm0 0c0 1.657 1.007 3 2.25 3S21 13.657 21 12a9 9 0 1 0-2.636 6.364"/></svg>`,
+  other: `<svg viewBox="0 0 24 24"><path d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>`,
+};
+
 function mapNotificationRow(n) {
   const actorAddress = kaspaAddressFromPubkey(deps.engine, n.userPublicKey);
   if (!actorAddress || actorAddress === deps.engine.address || isHiddenAuthor(actorAddress)) return null;
+  // Settings > Notifications > KaPosts: anything switched off sends no notification and does
+  // not appear in this list either.
+  if (deps.shouldNotifyKaPostsAction && !deps.shouldNotifyKaPostsAction(n.contentType, n.voteType)) return null;
   const text = stripKaChatMarker(n.postContent ? (decodePostContent({ postContent: n.postContent }) || "") : "").trim();
   let action = "interacted with your post";
   let targetTxId = n.contentId || null;
@@ -2464,7 +3036,11 @@ function mapNotificationRow(n) {
     targetTxId = text ? n.id : n.contentId;
   } else if (n.contentType === "follow") { action = "followed you"; targetTxId = null; }
   else if (n.contentType === "mention") { action = "mentioned you in a post"; targetTxId = n.contentId || n.id; }
+  const kind = n.contentType === "vote" ? (n.voteType === "downvote" ? "dislike" : "like")
+    : n.contentType === "quote" ? (text ? "quote" : "repost")
+    : ["reply", "follow", "mention"].includes(n.contentType) ? n.contentType : "other";
   return {
+    kind,
     id: n.id, actorAddress, action, snippet: text || null,
     timestamp: Number(n.timestamp) || Date.now(),
     targetTxId, parentTxId: notificationParentTxId(n),
@@ -2480,6 +3056,9 @@ async function openNotificationsPanel() {
   const panel = activePanel;
   renderPanel();
   syncRailActive();
+  // Opening the list IS seeing them - cleared on open rather than on close so the badge does
+  // not sit there while you read.
+  markAllKaPostsNotificationsSeen();
   try {
     const page = await fetchKaPostNotifications({ engine: deps.engine, limit: PAGER_THREAD_PAGE_SIZE });
     if (activePanel !== panel || generation !== panelGeneration) return;
@@ -2647,20 +3226,38 @@ function openPopover(anchor, itemsHtml) {
   popoverEl.style.top = `${rect.bottom - screenRect.top + 6}px`;
 }
 
+// A menu row that says what happens, not just the verb (iOS ActionSheetRow).
+function popoverRowHtml({ action, id, title, subtitle, danger = false, extra = "" }) {
+  return `<button type="button" class="kaposts-pop-row${danger ? " danger" : ""}" data-kaposts-pop="${action}" data-kaposts-pop-id="${id}" ${extra}>
+    <strong>${deps.escapeHtml(title)}</strong>${subtitle ? `<small>${deps.escapeHtml(subtitle)}</small>` : ""}
+  </button>`;
+}
+
+// iOS RepostActionsSheet: when the post is already reposted the first row offers to take it back.
 function openRepostPopover(anchor, post) {
+  const isReposted = post.repostedByMe === true;
   openPopover(anchor, `
-    <button type="button" data-kaposts-pop="repost" data-kaposts-pop-id="${post.id}">Repost</button>
-    <button type="button" data-kaposts-pop="quote" data-kaposts-pop-id="${post.id}">Quote</button>`);
+    <div class="kaposts-pop-title">${isReposted ? "Reposted" : "Repost"}</div>
+    ${popoverRowHtml({
+      action: "repost", id: post.id,
+      title: isReposted ? "Undo Repost" : "Repost",
+      subtitle: isReposted ? "Removes it from your profile." : "Shares it to your followers as-is.",
+      danger: isReposted,
+    })}
+    ${popoverRowHtml({ action: "quote", id: post.id, title: "Quote", subtitle: "Adds your own words above it." })}`);
 }
 
 function openMorePopover(anchor, post) {
   const isMine = post.posterAddress === deps.engine.address;
   // Bookmark and Share are their own buttons on every post's action bar (matches iOS), so the
   // ⋯ menu is just Post Activity, Mute, and Block.
+  // The name is in the label ("Mute alice"), as iOS words it: a bare "Mute" on a busy feed
+  // leaves you checking which post the menu came from.
+  const name = posterName(post.posterAddress);
   openPopover(anchor, `
     ${post.remoteId ? `<button type="button" data-kaposts-pop="activity" data-kaposts-pop-id="${post.id}">Post Activity</button>` : ""}
-    ${!isMine ? `<button type="button" data-kaposts-pop="mute" data-kaposts-pop-id="${post.id}">Mute</button>` : ""}
-    ${!isMine ? `<button type="button" data-kaposts-pop="block" data-kaposts-pop-id="${post.id}" class="danger">Block</button>` : ""}`);
+    ${!isMine ? `<button type="button" data-kaposts-pop="mute" data-kaposts-pop-id="${post.id}">Mute ${deps.escapeHtml(name)}</button>` : ""}
+    ${!isMine ? `<button type="button" data-kaposts-pop="block" data-kaposts-pop-id="${post.id}" class="danger">Block ${deps.escapeHtml(name)}</button>` : ""}`);
 }
 
 function handlePopoverAction(action, post) {
@@ -3159,6 +3756,7 @@ export function refreshKaPostsFeed() {
 }
 
 export function resetKaPostsForAccount() {
+  syncRailBadge();
   loadPrefs();
   loadDrafts();
   editingDraftId = null;
@@ -3368,6 +3966,11 @@ export function initKaPosts(dependencies) {
   });
 
   document.querySelector("[data-kaposts-refresh]")?.addEventListener("click", () => loadFeed());
+  feedEl?.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-kaposts-load-older]")) return;
+    if (feedPager) { feedPager.stalled = false; feedPager.unproductive = 0; feedPager.error = null; }
+    loadMoreFeed();
+  });
   document.querySelector("[data-kaposts-compose]")?.addEventListener("click", () => openComposer());
   // X-style persistent rail: the sections are always visible on the left.
   document.querySelectorAll("[data-kaposts-rail]").forEach((button) => {
@@ -3379,6 +3982,7 @@ export function initKaPosts(dependencies) {
       panelOverThread = false;
       pendingThreadScrollRemoteId = null;
       if (key === "feed") closePanel();
+      else if (key === "search") openSearchPanel();
       else if (key === "notifications") openNotificationsPanel();
       else if (key === "profile") openPosterProfile(deps.engine.address, safeRequesterPubkey());
       else {
@@ -3393,6 +3997,27 @@ export function initKaPosts(dependencies) {
       syncRailActive();
     });
   });
+  panelBodyEl?.addEventListener("input", (event) => {
+    if (!event.target.matches("[data-kaposts-search-input]") || activePanel?.type !== "search") return;
+    activePanel.query = event.target.value;
+    renderSearchResults(activePanel);
+  });
+  panelBodyEl?.addEventListener("click", (event) => {
+    const panel = activePanel;
+    if (panel?.type !== "search") return;
+    const scope = event.target.closest("[data-kaposts-search-scope]");
+    if (scope) { panel.scope = scope.dataset.kapostsSearchScope; renderSearchResults(panel); return; }
+    if (event.target.closest("[data-kaposts-search-more]")) { loadMoreSearch(); return; }
+    const postRow = event.target.closest("[data-kaposts-search-post]");
+    if (postRow) {
+      // A TXID rather than the post itself: resolved through the same path a shared link
+      // takes, which knows how to find a post that is not in the loaded feed.
+      resolveAndOpenPost(postRow.dataset.kapostsSearchPost);
+      return;
+    }
+    const personRow = event.target.closest("[data-kaposts-search-person]");
+    if (personRow) openPosterProfile(personRow.dataset.kapostsSearchPerson, personRow.dataset.kapostsSearchPubkey || null);
+  });
   document.querySelector("[data-kaposts-panel-back]")?.addEventListener("click", () => {
     // A follow list opened from a profile returns to that profile; everything else closes to the feed.
     if (activePanel?.type === "followList" && activePanel.parent?.address) {
@@ -3404,7 +4029,7 @@ export function initKaPosts(dependencies) {
   });
   document.addEventListener("click", (event) => {
     if (!popoverEl || popoverEl.hidden) return;
-    if (!popoverEl.contains(event.target) && !event.target.closest("[data-kaposts-more], [data-kaposts-repost], [data-kaposts-link]")) {
+    if (!popoverEl.contains(event.target) && !event.target.closest("[data-kaposts-more], [data-kaposts-repost], [data-kaposts-link], [data-kaposts-notification]")) {
       closePopover();
     }
   });
@@ -3435,6 +4060,25 @@ export function initKaPosts(dependencies) {
     // Runs AFTER updateMeter: the meter disables Post on empty input, but with stacked
     // thread segments "Post All (n)" must stay enabled - the thread UI has the final say.
     renderComposerThreadUi();
+  });
+  // The formatting toolbar (iOS MarkdownFormattingToolbar). Every button toggles, and every one
+  // writes the same markers a person could have typed by hand, so the two ways of formatting a
+  // post produce identical text. mousedown is swallowed so the click never steals focus from the
+  // textarea: the selection it acts on has to still be there when the click lands.
+  const mdToolbar = document.querySelector("[data-kaposts-md-toolbar]");
+  mdToolbar?.addEventListener("mousedown", (event) => { if (event.target.closest("button")) event.preventDefault(); });
+  mdToolbar?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-kaposts-md]");
+    if (!button || !composerInput) return;
+    applyComposerFormatting(button.dataset.kapostsMd);
+  });
+  // The desktop shortcuts people already have in their fingers; iOS has no hardware keys here.
+  composerInput?.addEventListener("keydown", (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+    const action = { b: "bold", i: "italic", u: "underline" }[event.key.toLowerCase()];
+    if (!action) return;
+    event.preventDefault();
+    applyComposerFormatting(action);
   });
   composerSubmit?.addEventListener("click", () => {
     const text = composerInput.value.trim();
@@ -3473,6 +4117,15 @@ export function initKaPosts(dependencies) {
   // The inline reply box under the post you opened (X's shape). Replying to a specific reply
   // still opens the composer - see the data-kaposts-reply-to handler.
   replyInput?.addEventListener("input", () => { updateMeter(replyInput, replyMeter); autoGrowReply(); });
+  // The zero-balance gate: a reply costs KAS, so with a confirmed 0 balance the bar greys and
+  // a click on it presents the funding card instead of the keyboard. Reading is untouched.
+  const replyBar = replyInput?.closest(".kaposts-reply-bar");
+  replyBar?.addEventListener("click", (event) => {
+    if (!replyBar.classList.contains("gated")) return;
+    event.preventDefault();
+    replyInput.blur();
+    deps.showFundingGate?.();
+  }, true);
   replySend?.addEventListener("click", () => {
     if (deps.isChattingBalanceZero?.()) {
       deps.showFundingGate?.();
@@ -3494,9 +4147,13 @@ export function initKaPosts(dependencies) {
     const link = event.target.closest("[data-kaposts-link]");
     if (link) {
       event.stopPropagation();
+      // iOS LinkActionsSheet: the link itself gets room to be read, because deciding whether
+      // to open a link IS reading it.
+      const href = link.dataset.kapostsLink;
       openPopover(link, `
-        <button type="button" data-kaposts-link-open="${deps.escapeHtml(link.dataset.kapostsLink)}">Open Link</button>
-        <button type="button" data-kaposts-link-copy="${deps.escapeHtml(link.dataset.kapostsLink)}">Copy Link</button>`);
+        <div class="kaposts-pop-url">${deps.escapeHtml(href)}</div>
+        <button type="button" class="kaposts-pop-row" data-kaposts-link-open="${deps.escapeHtml(href)}"><strong>Open Link</strong><small>Opens in your browser.</small></button>
+        <button type="button" class="kaposts-pop-row" data-kaposts-link-copy="${deps.escapeHtml(href)}"><strong>Copy Link</strong><small>Copies the address to your clipboard.</small></button>`);
       // Scrolling locks while the link menu is up - click away (or pick an option) to release.
       setKaPostsScrollLock(true);
       return;
@@ -3580,6 +4237,17 @@ export function initKaPosts(dependencies) {
     }
 
     const profileFollow = event.target.closest("[data-kaposts-profile-follow]");
+    const profileChat = event.target.closest("[data-kaposts-profile-chat]");
+    if (profileChat && activePanel?.type === "profile") {
+      deps.startChat?.(activePanel.address, posterName(activePanel.address));
+      return;
+    }
+    if (event.target.closest("[data-kaposts-edit-kns]")) { deps.editKnsProfile?.(); return; }
+    if (event.target.closest("[data-kaposts-bio-more]") && activePanel?.type === "profile") {
+      const bio = deps.engine.peekKnsAddressProfile?.(activePanel.address)?.profile?.bio || "";
+      deps.alertDialog?.({ title: "Bio", message: bio, confirmLabel: "Done" });
+      return;
+    }
     if (profileFollow && activePanel?.type === "profile") {
       toggleFollow({ posterAddress: activePanel.address, posterPubkey: activePanel.pubkey });
       renderPanel();
@@ -3706,6 +4374,38 @@ export function initKaPosts(dependencies) {
 
     const retry = event.target.closest("[data-kaposts-retry]");
     if (retry) { const p = findPost(retry.dataset.kapostsRetry); if (p) retryPost(p); return; }
+    const retryReplies = event.target.closest("[data-kaposts-retry-replies]");
+    if (retryReplies) {
+      const comment = findPost(retryReplies.dataset.kapostsRetryReplies);
+      if (comment) { commentReplyState.delete(comment.id); loadCommentReplies(comment); }
+      return;
+    }
+
+    const notificationRow = event.target.closest("[data-kaposts-notification]");
+    if (notificationRow && activePanel?.type === "notifications") {
+      const item = (activePanel.items || []).find((row) => String(row.id) === notificationRow.dataset.kapostsNotification);
+      if (!item) return;
+      // One tap, two possible destinations - a menu that names both, headed by who did it, so
+      // "open the post" and "open the transaction" never compete for the same row.
+      openPopover(notificationRow, `
+        <div class="kaposts-pop-title">${deps.escapeHtml(posterName(item.actorAddress))}</div>
+        ${item.targetTxId ? `<button type="button" class="kaposts-pop-row" data-kaposts-notif-open="${deps.escapeHtml(item.targetTxId)}" data-kaposts-notif-parent="${deps.escapeHtml(item.parentTxId || "")}"><strong>Open in KaPosts</strong><small>Goes to the post this is about, in the app.</small></button>` : ""}
+        <button type="button" class="kaposts-pop-row" data-kaposts-notif-explorer="${deps.escapeHtml(deps.explorerTxUrl(item.id))}"><strong>View in Explorer</strong><small>Opens the transaction on your chosen block explorer.</small></button>`);
+      event.stopPropagation();
+      return;
+    }
+    const notifOpen = event.target.closest("[data-kaposts-notif-open]");
+    if (notifOpen) {
+      closePopover();
+      resolveAndOpenPost(notifOpen.dataset.kapostsNotifOpen, { parentRemoteIdHint: notifOpen.dataset.kapostsNotifParent || null });
+      return;
+    }
+    const notifExplorer = event.target.closest("[data-kaposts-notif-explorer]");
+    if (notifExplorer) {
+      closePopover();
+      window.open(notifExplorer.dataset.kapostsNotifExplorer, "_blank", "noopener");
+      return;
+    }
 
     const openRemote = event.target.closest("[data-kaposts-open-remote]");
     if (openRemote) {
@@ -3745,6 +4445,17 @@ export function initKaPosts(dependencies) {
     const open = event.target.closest("[data-kaposts-open]");
     if (open) {
       const post = findPost(open.dataset.kapostsOpen);
+      // An ancestor you already walked down through is a level of THIS stack: unwind to it
+      // rather than pushing a copy, so Back afterwards goes where it went before (iOS
+      // jumpToAncestor). A rung resolved from the loaded tree, never navigated to, starts a
+      // fresh stack there.
+      if (post && open.closest("[data-kaposts-ancestor]")) {
+        pendingThreadScrollRemoteId = null;
+        const index = threadStack.indexOf(post.id);
+        threadStack = index >= 0 ? threadStack.slice(0, index) : [];
+        openThread(post);
+        return;
+      }
       if (post) {
         // Close the panel FIRST: its rows live in activePanel, and a thread rendering over a
         // still-open profile left the profile on screen - which read as the tap doing nothing
