@@ -19463,7 +19463,7 @@ queueMicrotask(async () => {
   initColdStorage({
     engine, escapeHtml, shortAddress, accountScopedKey,
     showToast: showCopyToast, appendEngineLog,
-    explorerAddressUrl, explorerTxUrl,
+    explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
     txDirectionForAddress: manageAddressTxDirection,
     // Fiat toggle in the send flow: live KAS price in the user's selected currency,
     // plus the same symbol/format helpers the manage-address send screen uses.

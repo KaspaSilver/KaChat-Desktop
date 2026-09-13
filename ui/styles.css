@@ -9745,3 +9745,4 @@ body.session-logged-out [data-account-rename-modal] {
 .portfolio-editor-total strong { color: var(--text); font-size: 15px; }
 .portfolio-empty-state { display: grid; gap: 4px; }
 .portfolio-empty-state strong { color: var(--text); font-size: 15px; }
+.cold-txs-failed { display: grid; gap: 8px; justify-items: start; }

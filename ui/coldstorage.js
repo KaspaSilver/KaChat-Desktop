@@ -394,7 +394,7 @@ function renderDetail() {
     const aActive = (a.balanceSompi || 0) > 0 || detailDomainOwning.has(a.address);
     const bActive = (b.balanceSompi || 0) > 0 || detailDomainOwning.has(b.address);
     if (aActive !== bActive) return aActive ? -1 : 1;
-    return a.index - b.index;
+    return b.index - a.index;
   });
 
   const busyLabel = detailBusy === "generate" ? "Generating…" : detailBusy === "discover" ? "Discovering…" : detailBusy === "refresh" ? "Refreshing…" : null;
@@ -717,7 +717,7 @@ function renderColdActionsSheet() {
       ? `<div class="cold-actions-busy">
            <span class="initial-sync-spinner" aria-hidden="true"></span>
            <strong>Discovering addresses</strong>
-           <p>Checks the first thousand addresses whatever the gaps, in one sweep.</p>
+           <p>Checks the first thousand addresses whatever the gaps, then keeps going while it keeps finding.</p>
            <button type="button" class="cold-inline-link" data-cold-actions-close>Close and Keep Scanning</button>
          </div>`
       : `<div class="cold-action-rows">
@@ -917,7 +917,7 @@ function toggleVisibilityRow(index, address) {
 
 function addressTxRowsHtml(entry) {
   if (addrTxs.state === "loading" && !addrTxs.txs.length) return '<div class="manage-address-empty">Loading…</div>';
-  if (addrTxs.state === "error") return `<div class="manage-address-empty">Could not load transaction history: ${deps.escapeHtml(addrTxs.error || "")}</div>`;
+  if (addrTxs.state === "error") return `<div class="manage-address-empty cold-txs-failed"><span>Could not load transactions.</span><button type="button" class="cold-inline-link" data-cold-txs-retry>Try Again</button></div>`;
   if (!addrTxs.txs.length) return '<div class="manage-address-empty">No transactions yet.</div>';
   return addrTxs.txs.map((tx) => {
     const info = deps.txDirectionForAddress(tx, entry.address);
@@ -2212,7 +2212,7 @@ function openQrModal(account, entry) {
     title: displayLabelFor(account, entry.index),
     payload: entry.address,
     copyLabel: "Copy Address",
-    copyToast: "Address copied to clipboard.",
+    copyToast: deps.addressCopiedToastText ? deps.addressCopiedToastText(entry.address) : "Address copied to clipboard.",
   });
 }
 
@@ -2601,7 +2601,7 @@ async function beginImport(kpubRaw) {
   }
   const label = await promptModal({
     kicker: "Cold Storage",
-    title: "Import Cold Storage Account",
+    title: "Name This Account",
     message: "Give this account a name so you can recognize it.",
     label: "Name",
     initial: `Cold Storage ${accounts.length + 1}`,
@@ -2681,7 +2681,7 @@ async function handleAddressAction(action, index) {
   if (!account || !entry) return;
   if (action === "copy") {
     navigator.clipboard?.writeText(entry.address);
-    deps.showToast?.("Address copied to clipboard.");
+    deps.showToast?.(deps.addressCopiedToastText ? deps.addressCopiedToastText(entry.address) : "Address copied to clipboard.");
   } else if (action === "qr") {
     openQrModal(account, entry);
   } else if (action === "hide") {
@@ -2944,6 +2944,7 @@ export function initColdStorage(dependencies) {
       toggleVisibilityRow(Number(visRow.dataset.coldVisRow), visRow.dataset.address || "");
       return;
     }
+    if (event.target.closest("[data-cold-txs-retry]")) { if (activeAddressIndex !== null) openAddressScreen(activeAddressIndex); return; }
     if (event.target.closest("[data-cold-paste]")) { pasteImport(); return; }
     if (event.target.closest("[data-cold-scan]")) { startScan(); return; }
     if (event.target.closest("[data-cold-remove]")) { removeActiveAccount(); return; }
