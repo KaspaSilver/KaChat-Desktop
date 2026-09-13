@@ -1101,12 +1101,21 @@ function renderRestoreOverlay() {
 
   if (restore.phase === "success") {
     title.textContent = "Restore Complete";
-    const summary = restore.summary || { messages: 0, conversations: 0, groups: 0 };
+    const summary = restore.summary || { messages: 0, conversations: 0, groups: 0, held: null };
     const groups = summary.groups
       ? `<p class="field-hint">Recovered ${summary.groups} group${summary.groups === 1 ? "" : "s"}.</p>` : "";
+    const held = summary.held;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const heldLine = held && (held.messages || held.conversations)
+      ? `<p class="field-hint">The backup holds ${plural(held.messages, "message")} across ${plural(held.conversations, "chat")}.</p>`
+      : "";
+    const mergedLine = summary.messages > 0
+      ? `<p class="field-hint">${plural(summary.messages, "message")} in ${plural(summary.conversations, "chat")} ${summary.messages === 1 ? "was" : "were"} new to this device and ${summary.messages === 1 ? "has" : "have"} been merged in.</p>`
+      : `<p class="field-hint">This device already had every message in it, so nothing needed merging.</p>`;
     body.innerHTML = `
       ${bar(100)}
-      <p class="field-hint">Merged ${summary.messages} message${summary.messages === 1 ? "" : "s"} from ${summary.conversations} chat${summary.conversations === 1 ? "" : "s"}.</p>
+      ${heldLine}
+      ${mergedLine}
       ${groups}`;
     actions.innerHTML = `<button class="primary-button" type="button" data-nc-restore-close>Done</button>`;
     return;
@@ -1127,6 +1136,17 @@ function archiveConversationCount(plainJson) {
     const parsed = JSON.parse(plainJson);
     return Array.isArray(parsed?.conversations) ? parsed.conversations.length : 0;
   } catch { return 0; }
+}
+/** What the backup file holds, before merging: the merge only counts what was NEW to this
+ *  device, and a device that already synced its chats from the chain merges almost nothing -
+ *  which read as a failed restore. */
+function archiveTotals(plainJson) {
+  try {
+    const parsed = JSON.parse(plainJson);
+    const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
+    const messages = conversations.reduce((sum, c) => sum + (Array.isArray(c?.messages) ? c.messages.length : 0), 0);
+    return { conversations: conversations.length, messages };
+  } catch { return { conversations: 0, messages: 0 }; }
 }
 
 /** Splits a shared archive into per-batch archives so the import reports honest progress.
@@ -1212,7 +1232,7 @@ async function runRestore() {
     advanceRestore(0.46, `Restoring messages… 0 of ${totalConversations} chat${totalConversations === 1 ? "" : "s"}`);
     await nextFrame();
 
-    const summary = { conversations: 0, messages: 0, groups: 0 };
+    const summary = { conversations: 0, messages: 0, groups: 0, held: sharedJson ? archiveTotals(sharedJson) : { conversations: 0, messages: 0 } };
     if (sharedJson) {
       const split = splitArchiveForProgress(sharedJson);
       if (!split) {
