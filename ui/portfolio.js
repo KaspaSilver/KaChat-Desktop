@@ -26,6 +26,7 @@ import {
 import { validateMainnetAddress } from "../engine/utils.js";
 import { looksLikeDomain, resolveDomain } from "../engine/kns.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
+import { saveFile } from "./save-file.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
@@ -1352,7 +1353,7 @@ function parseHeaderUtcOffsetMinutes(header) {
   return sign * (Math.abs(hours) * 60 + minutes);
 }
 
-function exportCsv() {
+async function exportCsv() {
   const portfolio = activePortfolio();
   const rows = [...(portfolio.transactions || [])].sort((a, b) => a.timestamp - b.timestamp);
   if (!rows.length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return; }
@@ -1368,14 +1369,7 @@ function exportCsv() {
     csv += `"${date}","KAS","${tx.type === "sell" ? "sell" : "buy"}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
   }
   try {
-    const blob = new Blob([csv], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    await saveFile(`kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`, "text/csv", csv);
   } catch {
     deps.showToast?.("Export failed. Couldn't write the CSV file");
   }

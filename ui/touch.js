@@ -109,3 +109,35 @@ export function onContextGesture(el, handler, options) {
   el.addEventListener("contextmenu", handler);
   attachLongPress(el, handler, options);
 }
+
+/**
+ * Double-tap on touch, calling `handler` with a contextmenu-shaped event (clientX/Y, target,
+ * preventDefault). iPhone Safari does not raise `dblclick` for two taps on an ordinary element,
+ * so the desktop double-click (quick reactions on a bubble) needs this to exist on a phone.
+ */
+export function attachDoubleTap(el, handler) {
+  if (!el) return;
+  let lastTap = 0;
+  let lastX = 0;
+  let lastY = 0;
+  el.addEventListener("pointerup", (event) => {
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    const now = performance.now();
+    const near = Math.abs(event.clientX - lastX) < 24 && Math.abs(event.clientY - lastY) < 24;
+    if (now - lastTap < 320 && near) {
+      lastTap = 0;
+      handler({ clientX: event.clientX, clientY: event.clientY, target: event.target, pointerType: event.pointerType, preventDefault() {}, stopPropagation() {} });
+      return;
+    }
+    lastTap = now;
+    lastX = event.clientX;
+    lastY = event.clientY;
+  }, { passive: true });
+}
+
+/** Double-click on a desktop, double-tap on touch, one handler. */
+export function onDoubleGesture(el, handler) {
+  if (!el) return;
+  el.addEventListener("dblclick", handler);
+  attachDoubleTap(el, handler);
+}

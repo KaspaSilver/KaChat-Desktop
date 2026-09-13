@@ -46,7 +46,8 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet } from "./dialogs.js";
-import { onContextGesture } from "./touch.js";
+import { onContextGesture, onDoubleGesture } from "./touch.js";
+import { saveFile } from "./save-file.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
 // Step 25 shell:
@@ -3093,15 +3094,8 @@ function rawMessageText(message) {
 }
 
 function downloadBlob(filename, type, content) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Download on a desktop, the share sheet on a phone (ui/save-file.js).
+  saveFile(filename, type, content).catch(() => setStatus("Could not save the file."));
 }
 
 function csvEscape(value) {
@@ -12292,7 +12286,7 @@ function renderMessages(conversationEntry) {
     // Double-click opens the quick-reaction bar (iOS double-tap): the six quick emoji, a "+"
     // into the full picker, and a reply shortcut - an explicit choice between reacting and
     // replying rather than jumping straight into reply mode.
-    bubble.addEventListener("dblclick", (event) => {
+    onDoubleGesture(bubble, (event) => {
       if (messageSelectionMode || isPendingHandshakeRequest) return;
       event.preventDefault();
       openQuickReactionBar(conversationEntry, message, bubble);
@@ -15670,8 +15664,17 @@ function formatRecordingTime(seconds) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function voiceFileName(mimeType) {
+  const mime = String(mimeType || "").toLowerCase();
+  if (mime.includes("mp4") || mime.includes("aac") || mime.includes("m4a")) return "voice.m4a";
+  if (mime.includes("ogg")) return "voice.ogg";
+  if (mime.includes("mpeg") || mime.includes("mp3")) return "voice.mp3";
+  return "voice.webm";
+}
 function pickVoiceMimeType() {
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+  // Safari (iPhone included) records AAC in an MP4 container and nothing else; the iOS app plays
+  // that natively and the desktop <audio> element does too.
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
   for (const candidate of candidates) {
     if (window.MediaRecorder?.isTypeSupported?.(candidate)) return candidate;
   }
@@ -15847,7 +15850,7 @@ async function sendChatVoicePreview() {
     const conversationId = activeConversationId;
     setStatus("Uploading voice note to Nextcloud…");
     try {
-      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, mimeType);
+      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(mimeType).split(".").pop()}`, mimeType);
       queueConversationMessage(conversationId, url);
       setStatus("Voice note sent via Nextcloud.");
       return;
@@ -15866,7 +15869,7 @@ async function sendChatVoicePreview() {
 
   const envelope = JSON.stringify({
     type: "file",
-    name: "voice-message.webm",
+    name: voiceFileName(mimeType).replace("voice.", "voice-message."),
     size: blob.size,
     mimeType,
     content: dataUrl,
@@ -19804,6 +19807,7 @@ queueMicrotask(async () => {
   initBroadcasts({
     engine,
     escapeHtml,
+    voiceFileName,
     shortAddress,
     accountScopedKey,
     isChattingBalanceZero,
@@ -21414,7 +21418,7 @@ function renderGroupMessages() {
 
     onContextGesture(bubble, (event) => { event.preventDefault(); if (!groupSelectionMode) openGroupMessageMenu(message, event.clientX, event.clientY); });
     // Double-click: the quick-reaction bar (iOS double-tap), "+" into the full picker.
-    bubble.addEventListener("dblclick", (event) => {
+    onDoubleGesture(bubble, (event) => {
       if (groupSelectionMode || !key) return;
       event.preventDefault();
       const current = groupReactionsFor(activeGroupId, key).find((e) => e.reactorAddress === engine.address)?.emoji || null;
@@ -22669,7 +22673,7 @@ async function sendGroupVoicePreview() {
   clearVoicePreview(groupVoicePanel);
   if (isNextcloudMediaSendActive()) {
     try {
-      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, groupVoiceMime || "audio/webm");
+      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(groupVoiceMime).split(".").pop()}`, groupVoiceMime || "audio/webm");
       await sendGroupWire(url);
       return;
     } catch (error) {
@@ -22678,7 +22682,7 @@ async function sendGroupVoicePreview() {
   }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
   if (!dataUrl.startsWith("data:")) return;
-  await sendGroupWire(JSON.stringify({ type: "file", name: "voice.webm", size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }));
+  await sendGroupWire(JSON.stringify({ type: "file", name: voiceFileName(groupVoiceMime), size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }));
 }
 groupVoicePanel?.addEventListener("click", (event) => {
   if (event.target.closest("[data-group-voice-stop]")) { finishGroupVoice(true); return; }

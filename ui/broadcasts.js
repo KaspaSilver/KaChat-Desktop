@@ -20,7 +20,7 @@ import {
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
-import { onContextGesture } from "./touch.js";
+import { onContextGesture, onDoubleGesture } from "./touch.js";
 
 const CHANNELS_KEY = "kachat-broadcast-channels-v1";        // account-scoped: ["name", ...]
 const HIDDEN_KEY = "kachat-broadcast-hidden-v1";            // account-scoped: { [channel]: [address, ...] }
@@ -800,7 +800,7 @@ function buildMessageElement(m) {
     openBroadcastMessageMenu(m, event.clientX, event.clientY);
   });
   // Double-click: the quick-reaction bar (iOS double-tap), with "+" into the full picker.
-  el.addEventListener("dblclick", (event) => {
+  onDoubleGesture(el, (event) => {
     if (m.status) return;
     event.preventDefault();
     const perReactor = reactionsFor(activeChannel)[m.txId] || {};
@@ -1236,7 +1236,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel }) {
   // chain in the same envelope 1:1 and group voice notes use - if it is short enough.
   if (deps.isNextcloudMediaSendActive?.()) {
     try {
-      const url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, mimeType);
+      const url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.${(deps.voiceFileName?.(mimeType) || "voice.webm").split(".").pop()}`, mimeType);
       await sendBroadcastText(channel, url);
       renderChannelList();
       return;
@@ -1253,7 +1253,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel }) {
   });
   if (!dataUrl.startsWith("data:")) { deps.showToast?.("Could not process the recording."); return; }
   const durationSec = Math.round(Number(voiceRecordedSeconds) || 0);
-  const envelope = JSON.stringify({ type: "file", name: "voice.webm", size: blob.size, mimeType: mimeType || "audio/webm", content: dataUrl, duration: durationSec });
+  const envelope = JSON.stringify({ type: "file", name: deps.voiceFileName?.(mimeType) || "voice.webm", size: blob.size, mimeType: mimeType || "audio/webm", content: dataUrl, duration: durationSec });
   try {
     await sendBroadcastText(channel, envelope, { feeKas: feeOverrideKas });
     feeOverrideKas = null;
