@@ -1277,6 +1277,16 @@ function updateComposerButton() {
 // Picker modal (media send + folder selection, one modal, in-place navigation)
 // ---------------------------------------------------------------------------
 
+let pickerOnPicked = null;
+/// "Send from Nextcloud" for a composer other than the 1:1 one (group chats): the picked
+/// file's share link goes to `onPicked` instead of the default stager.
+export function openNextcloudMediaPicker({ onPicked = null } = {}) {
+  if (!nc) { deps.showToast?.("Connect Nextcloud in Settings → Storage first."); return false; }
+  pickerOnPicked = onPicked;
+  openPicker("media");
+  return true;
+}
+
 function openPicker(mode) {
   pickerMode = mode;
   pickerOpen = true;
@@ -1289,6 +1299,7 @@ function openPicker(mode) {
 
 function closePicker() {
   pickerOpen = false;
+  pickerOnPicked = null;
   const modal = modalsEl?.querySelector("[data-nc-picker-modal]");
   if (modal) modal.hidden = true;
 }
@@ -1401,11 +1412,14 @@ async function pickMediaFile(path) {
   if (cell) cell.hidden = false;
   try {
     const url = await createPublicShareLink(path);
+    // Stage the link in the composer for review instead of auto-sending — the user presses
+    // send themselves (matches iOS/Android). A group composer hands in its own stager, read
+    // before closePicker drops it.
+    const stage = pickerOnPicked || deps.stageComposerText;
+    pickerOnPicked = null;
     pickerSharingPath = null;
     closePicker();
-    // Stage the link in the composer for review instead of auto-sending — the user presses
-    // send themselves (matches iOS/Android).
-    deps.stageComposerText?.(url);
+    stage?.(url);
   } catch (error) {
     pickerSharingPath = null;
     if (cell) cell.hidden = true;

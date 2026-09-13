@@ -6,7 +6,7 @@ import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroad
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
-import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts } from "./nextcloud.js";
+import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker } from "./nextcloud.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
@@ -22153,15 +22153,28 @@ document.querySelector("[data-group-mic]")?.addEventListener("click", () => { cl
 groupPlusButton?.addEventListener("click", async (event) => {
   event.stopPropagation();
   closeGroupPlusMenu();
-  const choice = await chooseDialog({
-    title: "Send",
-    options: [
-      { id: "photo", title: "Send Photo", subtitle: "Pick an image from your library." },
-      { id: "voice", title: "Send Audio Message", subtitle: "Record a voice message and send it to the group." },
-    ],
-  });
+  // "Send from Nextcloud" joins the sheet once a server is connected (iOS plusSheet).
+  const options = [];
+  if (isNextcloudConnected()) options.push({ id: "nextcloud", title: "Send from Nextcloud", subtitle: "Pick a file from your connected server." });
+  options.push(
+    { id: "photo", title: "Send Photo", subtitle: "Pick an image from your library." },
+    { id: "voice", title: "Send Audio Message", subtitle: "Record a voice message and send it to the group." },
+  );
+  const choice = await chooseDialog({ title: "Send", options });
   if (choice === "photo") groupPhotoInput?.click();
   else if (choice === "voice") startGroupVoice();
+  else if (choice === "nextcloud") {
+    openNextcloudMediaPicker({
+      onPicked: (url) => {
+        // The share link lands in the group composer for review; Send is still yours to press.
+        if (!groupComposerInput) return;
+        const current = groupComposerInput.value;
+        groupComposerInput.value = current ? `${current.replace(/\s+$/, "")} ${url}` : url;
+        groupComposerInput.focus();
+        groupComposerInput.dispatchEvent(new Event("input", { bubbles: true }));
+      },
+    });
+  }
 });
 
 // Photo send.

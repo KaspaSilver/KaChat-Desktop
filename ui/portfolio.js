@@ -78,6 +78,54 @@ let view = "main";         // "main" | "price" | "value" | "hashrate" — which 
 /// What the mining estimate has been typed into. Held here rather than in the DOM so the figure
 /// survives the re-render each keystroke triggers.
 let hashrateInput = "";
+
+// Thousands grouping for a number being typed (iOS DecimalInputFormat): a six-figure hashrate
+// arrives as "1200000" and has to be counted by eye. Regrouped after every keystroke, handed
+// back ungrouped to whatever computes with it; the fraction is left exactly as typed.
+const DECIMAL_SEPARATORS = (() => {
+  try {
+    const parts = new Intl.NumberFormat(undefined).formatToParts(1234.5);
+    return {
+      group: parts.find((p) => p.type === "group")?.value || ",",
+      decimal: parts.find((p) => p.type === "decimal")?.value || ".",
+    };
+  } catch { return { group: ",", decimal: "." }; }
+})();
+function groupDecimalInput(text) {
+  const { group, decimal } = DECIMAL_SEPARATORS;
+  const normalized = String(text ?? "").split(group).join("");
+  const idx = normalized.indexOf(decimal);
+  const whole = idx >= 0 ? normalized.slice(0, idx) : normalized;
+  const fraction = idx >= 0 ? normalized.slice(idx + 1) : null;
+  const digits = whole.replace(/\D/g, "");
+  if (!digits) return normalized;
+  let formatted;
+  try { formatted = BigInt(digits).toLocaleString(undefined); } catch { formatted = digits; }
+  if (fraction !== null) return `${formatted}${decimal}${fraction}`;
+  return normalized.endsWith(decimal) ? `${formatted}${decimal}` : formatted;
+}
+// A canonical "1234.5" (toFixed output) in the locale's grouped form.
+function groupedFromCanonical(text) {
+  return groupDecimalInput(String(text ?? "").replace(".", DECIMAL_SEPARATORS.decimal));
+}
+function decimalInputValue(text) {
+  const { group, decimal } = DECIMAL_SEPARATORS;
+  const bare = String(text ?? "").split(group).join("").replace(decimal, ".").replace(",", ".");
+  const n = Number(bare);
+  return Number.isFinite(n) ? n : null;
+}
+// Rewrites the field grouped while keeping the caret on the same digit.
+function regroupField(input) {
+  const before = input.value;
+  const caret = input.selectionStart ?? before.length;
+  const digitsBefore = before.slice(0, caret).replace(/[^\d]/g, "").length;
+  const after = groupDecimalInput(before);
+  if (after === before) return;
+  input.value = after;
+  let pos = 0, seen = 0;
+  while (pos < after.length && seen < digitsBefore) { if (/\d/.test(after[pos])) seen += 1; pos += 1; }
+  try { input.setSelectionRange(pos, pos); } catch {}
+}
 const HASHRATE_RANGES = [{ days: 30, label: "1M" }, { days: 90, label: "3M" }, { days: 365, label: "1Y" }, { days: 0, label: "All" }];
 let hashrateRangeDays = 90;
 /// The converter's two fields. Only the one being TYPED IN is authoritative - the other is
@@ -737,7 +785,7 @@ function renderPortfolioActionSheet() {
 
 /// What was typed, in H/s, using the unit the picker has selected.
 function typedHashrateHs() {
-  const amount = Number(String(hashrateInput).replace(",", "."));
+  const amount = decimalInputValue(hashrateInput);
   if (!Number.isFinite(amount) || amount <= 0) return null;
   return amount * (HASHRATE_UNITS.find((u) => u.key === hashrateUnit)?.scale ?? 1e12);
 }
@@ -2205,7 +2253,8 @@ export function initPortfolio(dependencies) {
     if (target.matches("[data-portfolio-conv-kas]") || target.matches("[data-portfolio-conv-fiat]")) {
       const typingKas = target.matches("[data-portfolio-conv-kas]");
       const rate = price?.price;
-      const amount = Number(String(target.value).replace(",", "."));
+      regroupField(target);
+      const amount = decimalInputValue(target.value);
       const other = rootEl.querySelector(typingKas ? "[data-portfolio-conv-fiat]" : "[data-portfolio-conv-kas]");
       if (typingKas) converterKas = target.value; else converterFiat = target.value;
       // Only the field being typed in is authoritative; the other is derived. Writing a rounded
@@ -2216,12 +2265,13 @@ export function initPortfolio(dependencies) {
         return;
       }
       const derived = typingKas ? amount * rate : amount / rate;
-      const text = typingKas ? derived.toFixed(2) : derived.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+      const text = groupedFromCanonical(typingKas ? derived.toFixed(2) : derived.toFixed(8).replace(/0+$/, "").replace(/\.$/, ""));
       if (other) other.value = text;
       if (typingKas) converterFiat = text; else converterKas = text;
       return;
     }
     if (target.matches("[data-portfolio-hashrate-input]")) {
+      regroupField(target);
       hashrateInput = target.value;
       const stats = peekNetworkStats();
       const daily = estimateDailyKas({
