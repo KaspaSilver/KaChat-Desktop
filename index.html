@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=359" />
+  <link rel="stylesheet" href="./ui/styles.css?v=360" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -2703,77 +2703,140 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
             </button>
           </span>
+          <!-- Exactly ONE line sits under the name, as on iOS: the address while the contact owns
+               no KNS domain, their bio once they have one, and a short note about profile data
+               otherwise. Showing all three stacked was the old shape. -->
           <span class="chat-info-address-caption" data-chat-info-address-caption></span>
-          <div class="chat-info-profile-extra" data-chat-info-profile-section hidden>
-            <p class="chat-info-bio" data-chat-info-bio hidden></p>
-            <div class="chat-info-social-links" data-chat-info-social-links></div>
-          </div>
+          <p class="chat-info-bio" data-chat-info-bio hidden title="Click to expand"></p>
+          <!-- The profile's links live behind a disclosure (iOS's "More Info" DisclosureGroup).
+               Seven always-open rows pushed everything below them off the card for a contact who
+               had filled them all in. -->
+          <details class="chat-info-more" data-chat-info-more hidden>
+            <summary class="chat-info-more-summary">More Info</summary>
+            <div class="chat-info-more-rows" data-chat-info-social-links></div>
+          </details>
         </div>
 
-        <p class="profile-section-label">Address</p>
-        <button class="profile-card chat-info-qr-card" type="button" data-chat-info-copy-address>
-          <canvas width="512" height="512" data-chat-info-qr></canvas>
-          <span class="chat-info-address-mono" data-chat-info-address-mono></span>
-        </button>
-
-        <!-- Every domain this contact owns, primary first. Hidden at zero domains; iOS disables
-             its KNS Domains row in that case for the same reason. -->
-        <div class="chat-info-domains-block" data-chat-info-domains-block hidden>
-          <p class="profile-section-label">KNS Domains</p>
-          <div class="settings-list-card chat-info-domains-card" data-chat-info-domains></div>
+        <!-- One row per section, each opening its own sheet (iOS's infoCard list). The screen had
+             grown to six stacked blocks - a QR, a domain list, two alias reveals, two pickers and
+             a stats card - which is a lot of scrolling to reach any one of them. -->
+        <div class="settings-list-card chat-info-rows">
+          <button class="chat-info-row" type="button" data-chat-info-sheet="address">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/></svg>
+            <span class="chat-info-row-title">Address</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="domains" data-chat-info-domains-row disabled>
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 -2.2A9 9 0 1 0 17.5 19"/></svg>
+            <span class="chat-info-row-title">KNS Domains</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="aliases">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h14M5 15h14M10 4 8 20M16 4l-2 16"/></svg>
+            <span class="chat-info-row-title">Aliases</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="notifications">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true" data-chat-info-bell><path d="M18 15v-4a6 6 0 1 0-12 0v4l-2 3h16zM10 21h4"/></svg>
+            <span class="chat-info-row-title">Notifications</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="photos">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L16 8h4v11H4z"/><circle cx="12" cy="13" r="3.3"/></svg>
+            <span class="chat-info-row-title">Photos</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="info">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+            <span class="chat-info-row-title">Info</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
         </div>
+      </div>
 
-        <p class="profile-section-label">Aliases</p>
-        <div class="settings-list-card chat-info-aliases-card">
-          <div class="chat-info-alias-row">
-            <strong>Receiving alias</strong>
-            <button class="chat-info-alias-value" type="button" data-chat-info-alias-receiving title="Tap to reveal, then click to copy">••••••••••••</button>
-            <button class="chat-info-alias-eye" type="button" data-chat-info-alias-receiving-eye aria-label="Reveal receiving alias">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
-          </div>
-          <div class="chat-info-alias-row">
-            <strong>Sending alias</strong>
-            <button class="chat-info-alias-value" type="button" data-chat-info-alias-sending title="Tap to reveal, then click to copy">••••••••••••</button>
-            <button class="chat-info-alias-eye" type="button" data-chat-info-alias-sending-eye aria-label="Reveal sending alias">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
-          </div>
-        </div>
-        <p class="chat-info-alias-footer">These identify this conversation's messages on the network. Receiving is the alias on messages this contact sends you. Sending is the alias on messages you send them. Useful when building tools that message this chat.</p>
+      <!-- iOS presents each section as a half sheet over Chat Info; this layer is its desktop
+           equivalent, covering the card rather than the whole window so the screen underneath
+           stays visible the way a detent sheet does. -->
+      <div class="chat-info-sheet" data-chat-info-sheet-overlay hidden role="dialog" aria-modal="true">
+        <div class="chat-info-sheet-card">
+          <header class="chat-info-sheet-header">
+            <h3 class="chat-info-sheet-title" data-chat-info-sheet-title></h3>
+            <a class="chat-info-sheet-link" data-chat-info-explorer-link target="_blank" rel="noopener noreferrer" hidden>View in Explorer</a>
+            <button class="icon-button" type="button" data-chat-info-sheet-close aria-label="Close">✕</button>
+          </header>
+          <div class="chat-info-sheet-body">
+            <section data-chat-info-panel="address" hidden>
+              <button class="profile-card chat-info-qr-card" type="button" data-chat-info-copy-address>
+                <canvas width="512" height="512" data-chat-info-qr></canvas>
+                <span class="chat-info-address-mono" data-chat-info-address-mono></span>
+              </button>
+            </section>
 
-        <p class="profile-section-label">Notifications</p>
-        <div class="settings-list-card">
-          <div class="settings-toggle-row">
-            <span><strong>Incoming Notifications</strong><small>How this one contact's messages arrive. Default follows the setting in Settings &gt; Notifications.</small></span>
-            <select class="settings-select" data-chat-info-notify>
-              <option value="default">Default</option>
-              <option value="sound">Sound</option>
-              <option value="noSound">No Sound</option>
-              <option value="off">Off</option>
-            </select>
-          </div>
-        </div>
+            <section data-chat-info-panel="domains" hidden>
+              <div class="settings-list-card chat-info-domains-card" data-chat-info-domains></div>
+            </section>
 
-        <p class="profile-section-label">Photos</p>
-        <div class="settings-list-card">
-          <div class="settings-toggle-row">
-            <span><strong>Photo Display</strong><small>On: photos from this contact appear automatically. Off: photos stay hidden until you tap to view each one.</small></span>
-            <label class="switch-control"><input type="checkbox" data-chat-info-photos><span></span></label>
-          </div>
-        </div>
+            <section data-chat-info-panel="aliases" hidden>
+              <div class="settings-list-card chat-info-aliases-card">
+                <div class="chat-info-alias-row">
+                  <strong>Receiving alias</strong>
+                  <button class="chat-info-alias-value" type="button" data-chat-info-alias-receiving title="Click to reveal, then click to copy">••••••••••••</button>
+                  <button class="chat-info-alias-eye" type="button" data-chat-info-alias-receiving-eye aria-label="Reveal receiving alias">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                  </button>
+                </div>
+                <div class="chat-info-alias-row">
+                  <strong>Sending alias</strong>
+                  <button class="chat-info-alias-value" type="button" data-chat-info-alias-sending title="Click to reveal, then click to copy">••••••••••••</button>
+                  <button class="chat-info-alias-eye" type="button" data-chat-info-alias-sending-eye aria-label="Reveal sending alias">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                  </button>
+                </div>
+              </div>
+              <p class="chat-info-alias-footer">These identify this conversation's messages on the network. Receiving is the alias on messages this contact sends you. Sending is the alias on messages you send them. Useful when building tools that message this chat.</p>
+            </section>
 
-        <p class="profile-section-label">Info</p>
-        <div class="profile-card chat-info-stats-card">
-          <div class="profile-about-row"><strong>Added</strong><span data-chat-info-added>—</span></div>
-          <div class="profile-about-row"><strong>Last Message</strong><span data-chat-info-last-message>—</span></div>
-          <div class="profile-about-row" data-chat-info-chess-row hidden><strong>Chess</strong><span data-chat-info-chess>—</span></div>
-          <div class="chat-info-stats-row">
-            <div class="chat-info-stat"><strong data-chat-info-sent>0</strong><small>Sent</small></div>
-            <div class="chat-info-stat-divider" aria-hidden="true"></div>
-            <div class="chat-info-stat"><strong data-chat-info-received>0</strong><small>Received</small></div>
-            <div class="chat-info-stat-divider" aria-hidden="true"></div>
-            <div class="chat-info-stat"><strong data-chat-info-total>0</strong><small>Total</small></div>
+            <section data-chat-info-panel="notifications" hidden>
+              <div class="settings-list-card">
+                <div class="settings-toggle-row">
+                  <span><strong>Incoming Notifications</strong><small>How this one contact's messages arrive. Default follows the setting in Settings &gt; Notifications.</small></span>
+                  <select class="settings-select" data-chat-info-notify>
+                    <option value="default" data-chat-info-notify-default>Default</option>
+                    <option value="off">Off</option>
+                    <option value="noSound">No Sound</option>
+                    <option value="sound">Sound</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section data-chat-info-panel="photos" hidden>
+              <div class="settings-list-card">
+                <div class="settings-toggle-row">
+                  <span><strong>Photos</strong><small>Automatic follows Settings &gt; Chats. Always Show renders this contact's photos straight away; Always Hide keeps them behind a tap.</small></span>
+                  <select class="settings-select" data-chat-info-photos>
+                    <option value="auto" data-chat-info-photos-auto>Automatic</option>
+                    <option value="always">Always Show</option>
+                    <option value="manual">Always Hide</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section data-chat-info-panel="info" hidden>
+              <div class="profile-card chat-info-stats-card">
+                <div class="profile-about-row"><strong>Added</strong><span data-chat-info-added>—</span></div>
+                <div class="profile-about-row"><strong>Last Message</strong><span data-chat-info-last-message>—</span></div>
+                <div class="profile-about-row" data-chat-info-chess-row hidden><strong>Chess Stats</strong><span data-chat-info-chess>—</span></div>
+                <div class="chat-info-stats-row">
+                  <div class="chat-info-stat"><strong data-chat-info-sent>0</strong><small>Sent</small></div>
+                  <div class="chat-info-stat-divider" aria-hidden="true"></div>
+                  <div class="chat-info-stat"><strong data-chat-info-received>0</strong><small>Received</small></div>
+                  <div class="chat-info-stat-divider" aria-hidden="true"></div>
+                  <div class="chat-info-stat"><strong data-chat-info-total>0</strong><small>Total</small></div>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
       </div>
@@ -2801,7 +2864,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=397"></script>
+  <script type="module" src="./ui/app.js?v=398"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

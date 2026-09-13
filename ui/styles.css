@@ -8418,6 +8418,120 @@ body.session-logged-out [data-account-rename-modal] {
 }
 
 .chat-info-domains-block { display: flex; flex-direction: column; }
+
+/* --- Chat Info: section rows + their sheets (iOS infoCard list + half sheets) --------------- */
+.chat-info-rows { padding: 0; overflow: hidden; margin-top: 14px; }
+.chat-info-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-info-row:last-child { border-bottom: 0; }
+.chat-info-row:hover:not(:disabled) { background: var(--surface-1); }
+/* Disabled rather than hidden, so the list keeps the same shape for every contact. */
+.chat-info-row:disabled { opacity: .38; cursor: default; }
+.chat-info-row-icon {
+  width: 19px; height: 19px; flex: 0 0 auto;
+  fill: none; stroke: var(--kaspa-ink); stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+/* The address glyph is a QR block, which reads as solid squares rather than an outline. */
+.chat-info-row[data-chat-info-sheet="address"] .chat-info-row-icon { fill: var(--kaspa-ink); stroke: none; }
+.chat-info-row-title { flex: 1; min-width: 0; }
+.chat-info-row-chevron {
+  width: 15px; height: 15px; flex: 0 0 auto;
+  fill: none; stroke: var(--muted); stroke-width: 2.2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* The sheet is absolutely positioned against the Chat Info card, so it needs that card to be a
+   containing block. Scoped to this overlay rather than added to .account-overlay-card, which is
+   shared with every other overlay in the app. Without it the sheet resolved against the viewport
+   and spanned the whole window instead of the card. */
+[data-chat-info-overlay] .account-overlay-card { position: relative; }
+
+.chat-info-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(4,6,8,.55);
+  border-radius: 24px;
+}
+.chat-info-sheet-card {
+  width: 100%;
+  max-height: 88%;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #12171d, #0d1116);
+  border-top: 1px solid rgba(98,244,208,.16);
+  border-radius: 20px 20px 24px 24px;
+  box-shadow: 0 -18px 50px rgba(0,0,0,.5);
+}
+.chat-info-sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.chat-info-sheet-title { margin: 0; font-size: 16px; font-weight: 800; flex: 1; min-width: 0; }
+.chat-info-sheet-link { color: var(--kaspa-ink); font-size: 12.5px; font-weight: 600; text-decoration: none; }
+.chat-info-sheet-link:hover { text-decoration: underline; }
+.chat-info-sheet-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px 24px; }
+.chat-info-sheet-body .profile-section-label:first-child { margin-top: 0; }
+
+/* The bio sits under the name capped at five lines, expanding on click (iOS). */
+.chat-info-bio {
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+.chat-info-bio.expanded { -webkit-line-clamp: unset; overflow: visible; }
+
+.chat-info-more { width: 100%; margin-top: 10px; }
+.chat-info-more-summary {
+  cursor: pointer;
+  color: var(--kaspa-ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  list-style: none;
+  text-align: center;
+}
+.chat-info-more-summary::-webkit-details-marker { display: none; }
+.chat-info-more-summary::after { content: " ⌄"; }
+.chat-info-more[open] .chat-info-more-summary::after { content: " ⌃"; }
+.chat-info-more-rows { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; text-align: left; }
+.chat-info-more-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13.5px; }
+.chat-info-more-row > strong { flex: 0 0 auto; font-weight: 600; }
+.chat-info-more-row > a { color: var(--kaspa-ink); text-decoration: none; text-align: right; word-break: break-word; }
+.chat-info-more-row > a:hover { text-decoration: underline; }
+.chat-info-more-row > span { color: var(--muted); text-align: right; word-break: break-word; }
+
+.chat-info-domain-icon {
+  width: 15px; height: 15px; flex: 0 0 auto;
+  fill: none; stroke: var(--muted); stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+/* The primary's star is filled, so it reads at a glance against the outlined @ glyphs. */
+.chat-info-domain-icon.primary { fill: var(--kaspa-ink); stroke: var(--kaspa-ink); }
+.chat-info-domain-verified { width: 14px; height: 14px; flex: 0 0 auto; fill: var(--kaspa-ink); }
+.chat-info-domain-verified .check { fill: none; stroke: #06110f; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
 .chat-info-domains-card { padding: 0; overflow: hidden; }
 /* The domain rows are buttons (copy on tap), so they need the button resets the rule they share
    with the read-only version does not carry. */

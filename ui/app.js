@@ -1470,7 +1470,7 @@ const chatInfoChess = document.querySelector("[data-chat-info-chess]");
 const chatInfoSent = document.querySelector("[data-chat-info-sent]");
 const chatInfoReceived = document.querySelector("[data-chat-info-received]");
 const chatInfoTotal = document.querySelector("[data-chat-info-total]");
-const chatInfoProfileSection = document.querySelector("[data-chat-info-profile-section]");
+const chatInfoMore = document.querySelector("[data-chat-info-more]");
 const chatInfoBio = document.querySelector("[data-chat-info-bio]");
 const chatInfoSocialLinks = document.querySelector("[data-chat-info-social-links]");
 let chatInfoRequestToken = 0;
@@ -1527,13 +1527,26 @@ chatInfoAliasSending?.addEventListener("click", async () => {
 });
 
 function refreshChatInfoContactControls() {
-  if (chatInfoNotifyToggle) chatInfoNotifyToggle.value = getContactNotifyOverride(chatInfoContactAddress) || "default";
-  // Shows the EFFECTIVE state: a contact left on "auto" reads as off while the global
-  // photo-approval setting is holding their photos back, so the toggle never claims photos
-  // are showing when they are not.
+  if (chatInfoNotifyToggle) {
+    chatInfoNotifyToggle.value = getContactNotifyOverride(chatInfoContactAddress) || "default";
+    // iOS spells out what Default currently resolves to, so the row never just says "Default"
+    // and leaves you to go to Settings to find out what that means.
+    const option = chatInfoNotifyToggle.querySelector("[data-chat-info-notify-default]");
+    if (option) option.textContent = `Default (${defaultIncomingNotifyMode() === "noSound" ? "No Sound" : "Sound"})`;
+  }
+  // Three states, matching iOS's PhotoAutoDisplayMode: Automatic follows the global approval
+  // setting, Always Show and Always Hide are per-contact overrides. The old two-state switch
+  // could not say "follow the default" at all - flipping it on and then off again left the
+  // contact pinned to an override that no longer tracked the setting it came from.
   if (chatInfoPhotosToggle) {
-    const contact = (state.contacts || []).find((entry) => entry.address === chatInfoContactAddress);
-    chatInfoPhotosToggle.checked = shouldAutoDisplayPhotosFrom(contact || { address: chatInfoContactAddress });
+    chatInfoPhotosToggle.value = getContactPhotos(chatInfoContactAddress);
+    const auto = chatInfoPhotosToggle.querySelector("[data-chat-info-photos-auto]");
+    if (auto) {
+      const contact = (state.contacts || []).find((entry) => entry.address === chatInfoContactAddress);
+      const shows = (accountShellPrefs.photoApprovalForNewContacts ?? true) === false
+        || isAcceptedContact(contact || { address: chatInfoContactAddress });
+      auto.textContent = `Automatic (${shows ? "Show" : "Hidden"})`;
+    }
   }
 }
 chatInfoNotifyToggle?.addEventListener("change", async () => {
@@ -1549,10 +1562,12 @@ chatInfoNotifyToggle?.addEventListener("change", async () => {
 });
 chatInfoPhotosToggle?.addEventListener("change", () => {
   if (!chatInfoContactAddress) return;
-  // Turning it ON is an explicit "I trust this contact's photos" ("always"), which also
-  // overrides the global approval gate for them — the same role iOS's .alwaysShow override
-  // plays. Turning it OFF is "never auto-render" ("manual"), as before.
-  setContactPref(chatInfoContactAddress, "photos", chatInfoPhotosToggle.checked ? "always" : "manual");
+  // "auto" stores nothing, for the same reason "default" does on the notification row: an
+  // override that happens to match today's default would quietly stop following it the next
+  // time that default changed.
+  const choice = String(chatInfoPhotosToggle.value || "auto");
+  setContactPref(chatInfoContactAddress, "photos", choice === "auto" ? undefined : choice);
+  refreshChatInfoContactControls();
   const conv = state.conversations.find((entry) => entry.id === activeConversationId);
   if (conv && contactForConversation(conv)?.address === chatInfoContactAddress) renderMessages(conv);
 });
@@ -11005,9 +11020,10 @@ function openChatInfo() {
     if (chatInfoAvatarImage) { chatInfoAvatarImage.hidden = true; chatInfoAvatarImage.src = ""; }
   }
   if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
-  // iOS titles this screen with the contact's name rather than a generic label.
+  // "Chat Info", as iOS titles it. The contact's name is the heading of the card immediately
+  // below, so putting it in the bar as well said the same thing twice.
   const chatInfoTitle = document.querySelector("[data-chat-info-title]");
-  if (chatInfoTitle) chatInfoTitle.textContent = displayNameForAddress(contact) || "Chat Info";
+  if (chatInfoTitle) chatInfoTitle.textContent = "Chat Info";
   if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
@@ -11020,7 +11036,19 @@ function openChatInfo() {
   if (chatInfoReceived) chatInfoReceived.textContent = String(received);
   if (chatInfoTotal) chatInfoTotal.textContent = String(messages.length);
   const last = lastMessageFor(conversationEntry);
-  if (chatInfoLastMessage) chatInfoLastMessage.textContent = last ? formatRelativeTime(last.createdAt) : "—";
+  if (chatInfoLastMessage) {
+    // Under a day reads as a relative time; past that iOS counts whole days, which stays
+    // legible where a bare date does not tell you how long it has been.
+    if (!last) chatInfoLastMessage.textContent = "—";
+    else {
+      const elapsed = Date.now() - Number(last.createdAt || 0);
+      if (elapsed < 86_400_000) chatInfoLastMessage.textContent = formatRelativeTime(last.createdAt);
+      else {
+        const days = Math.max(1, Math.floor(elapsed / 86_400_000));
+        chatInfoLastMessage.textContent = `${days} day${days === 1 ? "" : "s"} ago`;
+      }
+    }
+  }
 
   // Chess record — only shown once this contact has actually played (matches iOS).
   if (chatInfoChessRow) {
@@ -11028,7 +11056,7 @@ function openChatInfo() {
     const hasChessHistory = engine.address && chessMsgs.some((m) => { const e = Chess.parseChessEnvelope(Chess.unwrapReplyText(m.text)); return e && e.kind === "invite"; });
     if (hasChessHistory) {
       const rec = Chess.chessRecord(chessMsgs, engine.address, contact.address);
-      if (chatInfoChess) chatInfoChess.textContent = `${rec.wins}W · ${rec.losses}L`;
+      if (chatInfoChess) chatInfoChess.textContent = `${rec.wins}W - ${rec.losses}L`;
       chatInfoChessRow.hidden = false;
     } else {
       chatInfoChessRow.hidden = true;
@@ -11043,7 +11071,9 @@ function openChatInfo() {
     });
   }
 
-  if (chatInfoProfileSection) chatInfoProfileSection.hidden = true;
+  // Cleared to the address line until the KNS lookup answers, so the previous contact's bio
+  // never sits under this contact's name for the moment before the fetch lands.
+  renderChatInfoProfile(contact, null, []);
   refreshChatInfoKnsSections(contact);
 
   chatInfoOverlay.hidden = false;
@@ -11081,42 +11111,73 @@ async function refreshChatInfoKnsSections(contact) {
       chatInfoAvatarInitials.hidden = false;
     }
   }
-  if (chatInfoProfileSection && profile) {
-    const hasDetail = ["bio", "x", "website", "telegram", "discord", "contactEmail", "github", "redirectUrl"]
-      .some((key) => Boolean(profile[key]));
-    if (hasDetail) {
-      if (chatInfoBio) {
-        if (profile.bio) { chatInfoBio.textContent = profile.bio; chatInfoBio.hidden = false; }
-        else chatInfoBio.hidden = true;
-      }
-      if (chatInfoSocialLinks) {
-        chatInfoSocialLinks.replaceChildren();
-        const linkDefs = [
-          ["website", "Website", KNSProfileLinkBuilder.websiteUrl],
-          ["x", "X", KNSProfileLinkBuilder.xUrl],
-          ["telegram", "Telegram", KNSProfileLinkBuilder.telegramUrl],
-          ["discord", "Discord", KNSProfileLinkBuilder.discordUrl],
-          ["github", "GitHub", KNSProfileLinkBuilder.githubUrl],
-          ["contactEmail", "Email", KNSProfileLinkBuilder.emailUrl],
-          ["redirectUrl", "Redirect", KNSProfileLinkBuilder.websiteUrl],
-        ];
-        for (const [field, label, builder] of linkDefs) {
-          const raw = profile[field];
-          if (!raw) continue;
-          const href = builder(raw);
-          if (!href) continue;
-          const link = document.createElement("a");
-          link.className = "chat-info-social-link";
-          link.href = href;
-          link.target = "_blank";
-          link.rel = "noopener noreferrer";
-          link.textContent = label;
-          chatInfoSocialLinks.appendChild(link);
-        }
-      }
-      chatInfoProfileSection.hidden = false;
+  renderChatInfoProfile(contact, profile, Array.isArray(info?.allDomains) ? info.allDomains : []);
+}
+
+/// The profile's links, in iOS's order, as label + value rows behind "More Info".
+const CHAT_INFO_PROFILE_LINKS = [
+  ["x", "X", (value) => KNSProfileLinkBuilder.xUrl(value)],
+  ["website", "Website", (value) => KNSProfileLinkBuilder.websiteUrl(value)],
+  ["telegram", "Telegram", (value) => KNSProfileLinkBuilder.telegramUrl(value)],
+  ["discord", "Discord", (value) => KNSProfileLinkBuilder.discordUrl(value)],
+  ["contactEmail", "Email", (value) => KNSProfileLinkBuilder.emailUrl(value)],
+  ["github", "GitHub", (value) => KNSProfileLinkBuilder.githubUrl(value)],
+  ["redirectUrl", "Redirect", (value) => KNSProfileLinkBuilder.websiteUrl(value)],
+];
+
+/// The one line under the contact's name, plus the "More Info" disclosure.
+///
+/// iOS shows exactly ONE of three things there: the address while the contact owns no KNS
+/// domain, their bio once they have one, and otherwise a short note saying whether there is any
+/// on-chain profile data at all. The links sit behind the disclosure rather than in a row of
+/// chips, so each one keeps the label that says what it is.
+function renderChatInfoProfile(contact, profile, domains) {
+  const bioText = String(profile?.bio || "").trim();
+  const links = CHAT_INFO_PROFILE_LINKS.filter(([field]) => Boolean(profile?.[field]));
+
+  if (chatInfoAddressCaption && chatInfoBio) {
+    if (!domains.length) {
+      chatInfoAddressCaption.textContent = shortAddress(contact.address);
+      chatInfoAddressCaption.hidden = false;
+      chatInfoBio.hidden = true;
+    } else if (bioText) {
+      chatInfoBio.textContent = bioText;
+      chatInfoBio.classList.remove("expanded");
+      chatInfoBio.hidden = false;
+      chatInfoAddressCaption.hidden = true;
+    } else {
+      chatInfoAddressCaption.textContent = links.length
+        ? "On-chain profile data available."
+        : "No on-chain profile data yet.";
+      chatInfoAddressCaption.hidden = false;
+      chatInfoBio.hidden = true;
     }
   }
+
+  if (!chatInfoMore || !chatInfoSocialLinks) return;
+  chatInfoSocialLinks.replaceChildren();
+  for (const [field, label, builder] of links) {
+    const raw = profile[field];
+    const href = builder(raw);
+    const row = document.createElement("div");
+    row.className = "chat-info-more-row";
+    const name = document.createElement("strong");
+    name.textContent = label;
+    row.appendChild(name);
+    // A field KNS stored as something unlinkable still shows its value - iOS falls back to
+    // plain text there rather than dropping the row, so you can still read what is set.
+    const value = document.createElement(href ? "a" : "span");
+    if (href) {
+      value.href = href;
+      value.target = "_blank";
+      value.rel = "noopener noreferrer";
+    }
+    value.textContent = raw;
+    row.appendChild(value);
+    chatInfoSocialLinks.appendChild(row);
+  }
+  chatInfoMore.hidden = links.length === 0;
+  if (!links.length) chatInfoMore.open = false;
 }
 
 function closeChatInfo() {
@@ -11152,6 +11213,67 @@ document.querySelector("[data-open-chat-info]")?.addEventListener("click", openC
 document.querySelector("[data-chat-info-cancel]")?.addEventListener("click", closeChatInfo);
 document.querySelector("[data-chat-info-save]")?.addEventListener("click", saveChatInfo);
 
+// --- Chat Info section sheets ---------------------------------------------------------------
+// iOS presents each section as a half sheet over Chat Info; this is the desktop equivalent.
+const chatInfoSheetOverlay = document.querySelector("[data-chat-info-sheet-overlay]");
+const chatInfoSheetTitle = document.querySelector("[data-chat-info-sheet-title]");
+const chatInfoExplorerLink = document.querySelector("[data-chat-info-explorer-link]");
+const CHAT_INFO_SHEET_TITLES = {
+  address: "Address",
+  domains: "KNS Domains",
+  aliases: "Aliases",
+  notifications: "Notifications",
+  photos: "Photos",
+  info: "Info",
+};
+
+function openChatInfoSheet(name) {
+  if (!chatInfoSheetOverlay) return;
+  for (const panel of chatInfoSheetOverlay.querySelectorAll("[data-chat-info-panel]")) {
+    panel.hidden = panel.dataset.chatInfoPanel !== name;
+  }
+  if (chatInfoSheetTitle) chatInfoSheetTitle.textContent = CHAT_INFO_SHEET_TITLES[name] || "";
+  // iOS puts "View in Explorer" in the Address sheet's header, where it has something to point
+  // at; on the other sheets there is nothing for it to open.
+  if (chatInfoExplorerLink) {
+    const showsExplorer = name === "address" && Boolean(chatInfoContactAddress);
+    chatInfoExplorerLink.hidden = !showsExplorer;
+    if (showsExplorer) chatInfoExplorerLink.href = explorerAddressUrl(chatInfoContactAddress);
+  }
+  chatInfoSheetOverlay.hidden = false;
+}
+
+function closeChatInfoSheet() {
+  if (chatInfoSheetOverlay) chatInfoSheetOverlay.hidden = true;
+}
+
+// Delegated: the rows live inside the overlay and a disabled row (no KNS domains) must not open
+// anything, which is what the `disabled` check is for.
+chatInfoOverlay?.addEventListener("click", (event) => {
+  const row = event.target.closest("[data-chat-info-sheet]");
+  if (!row || row.disabled) return;
+  openChatInfoSheet(row.dataset.chatInfoSheet);
+});
+document.querySelector("[data-chat-info-sheet-close]")?.addEventListener("click", closeChatInfoSheet);
+// Clicking the dimmed area outside the sheet dismisses it, the way a detent sheet does.
+chatInfoSheetOverlay?.addEventListener("click", (event) => {
+  if (event.target === chatInfoSheetOverlay) closeChatInfoSheet();
+});
+// Capture phase: the sheet is the topmost layer, so Escape has to close IT and leave Chat Info
+// open behind it, rather than letting an earlier-registered handler close the whole screen.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!chatInfoSheetOverlay || chatInfoSheetOverlay.hidden) return;
+  closeChatInfoSheet();
+  event.stopImmediatePropagation();
+  event.preventDefault();
+}, true);
+// Chat Info opens fresh every time, so a sheet left open must not still be up on the next visit.
+document.querySelector("[data-open-chat-info]")?.addEventListener("click", closeChatInfoSheet);
+
+// iOS caps the bio at five lines and expands it on tap.
+chatInfoBio?.addEventListener("click", () => chatInfoBio.classList.toggle("expanded"));
+
 // Re-render the open chat info avatar + every avatar of this contact across the app.
 function refreshContactAvatars(contact) {
   if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
@@ -11171,32 +11293,62 @@ function refreshContactAvatars(contact) {
   renderChats();
 }
 
+/// Bare, lowercased domain key (".kas" stripped) - `/primary-name` and `/assets` do not agree on
+/// whether the suffix is present, so compare without it (iOS normalizedDomainKey).
+function normalizedDomainKey(raw) {
+  const trimmed = String(raw || "").trim().toLowerCase();
+  if (!trimmed) return null;
+  return trimmed.endsWith(".kas") ? trimmed.slice(0, -4) : trimmed;
+}
+
+/// Which domain wears the Primary badge. Prefers the inscription id the reverse lookup returns -
+/// an exact on-chain asset id - and falls back to name matching (iOS isPrimaryDomain).
+///
+/// This used to compare raw names, which badged nothing at all whenever the two KNS endpoints
+/// disagreed about the ".kas" suffix: the contact's actual primary then looked like any other
+/// domain in the list.
+function isPrimaryChatInfoDomain(domain, info) {
+  const inscriptionId = String(info?.primaryInscriptionId || "").trim();
+  if (inscriptionId) return domain.inscriptionId === inscriptionId;
+  const primaryKey = normalizedDomainKey(info?.explicitPrimaryDomain || info?.primaryDomain);
+  if (!primaryKey) return false;
+  return normalizedDomainKey(domain.fullName) === primaryKey;
+}
+
 /// The contact's KNS domains, primary first then alphabetical - a stable order that does not
-/// jump around as the cache refreshes (iOS sortedKNSDomains). Copy-on-tap, the same idiom the
+/// jump around as the cache refreshes (iOS sortedKNSDomains). Copy-on-click, the same idiom the
 /// Address and Aliases rows already use.
 function renderChatInfoDomains(info) {
-  const block = document.querySelector("[data-chat-info-domains-block]");
+  const row = document.querySelector("[data-chat-info-domains-row]");
   const list = document.querySelector("[data-chat-info-domains]");
-  if (!block || !list) return;
+  if (!list) return;
   const domains = Array.isArray(info?.allDomains) ? [...info.allDomains] : [];
+  // iOS DISABLES its KNS Domains row at zero domains rather than hiding it, so the screen keeps
+  // the same shape for every contact instead of resizing as lookups land.
+  if (row) row.disabled = domains.length === 0;
   if (!domains.length) {
-    block.hidden = true;
     list.replaceChildren();
     return;
   }
-  const primary = info?.explicitPrimaryDomain || info?.primaryDomain || "";
   domains.sort((a, b) => {
-    const aPrimary = a.fullName === primary;
-    const bPrimary = b.fullName === primary;
+    const aPrimary = isPrimaryChatInfoDomain(a, info);
+    const bPrimary = isPrimaryChatInfoDomain(b, info);
     if (aPrimary !== bPrimary) return aPrimary ? -1 : 1;
     return String(a.fullName).toLowerCase().localeCompare(String(b.fullName).toLowerCase());
   });
-  list.innerHTML = domains.map((domain) => `
+  list.innerHTML = domains.map((domain) => {
+    const primary = isPrimaryChatInfoDomain(domain, info);
+    const icon = primary
+      ? `<path d="m12 3 2.6 5.6 6.4.8-4.7 4.3 1.2 6.3L12 17l-5.5 3 1.2-6.3L3 9.4l6.4-.8z"/>`
+      : `<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 -2.2A9 9 0 1 0 17.5 19"/>`;
+    return `
       <button type="button" class="chat-info-domain-row" data-chat-info-copy-domain="${escapeHtml(domain.fullName)}" title="Copy domain">
+        <svg class="chat-info-domain-icon${primary ? " primary" : ""}" viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>
         <strong>${escapeHtml(domain.fullName)}</strong>
-        ${domain.fullName === primary ? `<span class="profile-domain-primary">Primary</span>` : ``}
-      </button>`).join("");
-  block.hidden = false;
+        ${domain.isVerified ? `<svg class="chat-info-domain-verified" viewBox="0 0 24 24" role="img" aria-label="Verified"><path d="m12 2.2 2.3 2 3.1-.4 1 3 2.7 1.5-1.2 2.9 1.2 2.9-2.7 1.5-1 3-3.1-.4-2.3 2-2.3-2-3.1.4-1-3-2.7-1.5L4.1 11 2.9 8.3l2.7-1.5 1-3 3.1.4z"/><path class="check" d="m8.7 12.1 2.2 2.2 4.4-4.6"/></svg>` : ``}
+        ${primary ? `<span class="profile-domain-primary">Primary</span>` : ``}
+      </button>`;
+  }).join("");
 }
 
 // Tapping the photo previews it; the camera badge below picks a new one. With no photo there is
