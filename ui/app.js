@@ -13108,14 +13108,31 @@ async function runEngineSendPipeline(conversationId, messageId) {
     });
   } catch (error) {
     updateMessageStatus(conversationId, messageId, { status: MESSAGE_STATUSES.FAILED });
-    setStatus(`Message failed: ${error.message}`);
+    const reason = describeThrown(error);
+    setStatus(`Message failed: ${reason}`);
+    appendEngineLog(`Message send failed: ${reason}`);
     // iOS "Failed to Send": the reason, in front of you, rather than a status line nobody reads.
     alertDialog({
       title: "Failed to Send",
-      message: `${error.message || "Unknown error"}\n\nPlease check your network connection and try again.`,
+      message: `${reason}\n\nPlease check your network connection and try again.`,
       confirmLabel: "OK",
     });
   }
+}
+
+// The WASM SDK and the RPC layer throw strings and plain objects as often as Errors; "Unknown
+// error" told nobody anything. This reads whatever was thrown.
+function describeThrown(error) {
+  if (error == null) return "Unknown error";
+  if (typeof error === "string") return error || "Unknown error";
+  if (error instanceof Error) return error.message || error.name || "Unknown error";
+  if (typeof error === "object") {
+    const candidate = error.message || error.error || error.reason || error.detail;
+    if (typeof candidate === "string" && candidate) return candidate;
+    try { const text = JSON.stringify(error); if (text && text !== "{}") return text; } catch {}
+    try { return String(error); } catch {}
+  }
+  return String(error);
 }
 
 function queueConversationMessage(conversationId, text, { feeOverrideKas = null } = {}) {
