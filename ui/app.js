@@ -11073,7 +11073,7 @@ function openChatInfo() {
 
   // Cleared to the address line until the KNS lookup answers, so the previous contact's bio
   // never sits under this contact's name for the moment before the fetch lands.
-  renderChatInfoProfile(contact, null, []);
+  renderChatInfoProfile(contact, null, [], null);
   refreshChatInfoKnsSections(contact);
 
   chatInfoOverlay.hidden = false;
@@ -11111,7 +11111,12 @@ async function refreshChatInfoKnsSections(contact) {
       chatInfoAvatarInitials.hidden = false;
     }
   }
-  renderChatInfoProfile(contact, profile, Array.isArray(info?.allDomains) ? info.allDomains : []);
+  renderChatInfoProfile(
+    contact,
+    profile,
+    Array.isArray(info?.allDomains) ? info.allDomains : [],
+    profileInfo?.domainName || info?.primaryDomain || null,
+  );
 }
 
 /// The profile's links, in iOS's order, as label + value rows behind "More Info".
@@ -11131,20 +11136,28 @@ const CHAT_INFO_PROFILE_LINKS = [
 /// domain, their bio once they have one, and otherwise a short note saying whether there is any
 /// on-chain profile data at all. The links sit behind the disclosure rather than in a row of
 /// chips, so each one keeps the label that says what it is.
-function renderChatInfoProfile(contact, profile, domains) {
+function renderChatInfoProfile(contact, profile, domains, domainName = null) {
   const bioText = String(profile?.bio || "").trim();
   const links = CHAT_INFO_PROFILE_LINKS.filter(([field]) => Boolean(profile?.[field]));
+  // Owning a KNS identity is NOT the same as /assets returning a domain list. The reverse lookup
+  // can name the contact's domain while the asset list comes back empty - /assets keeps only
+  // VERIFIED domains, and a throttled request returns nothing at all - so trust either signal.
+  const hasKnsIdentity = domains.length > 0 || Boolean(domainName);
 
   if (chatInfoAddressCaption && chatInfoBio) {
-    if (!domains.length) {
-      chatInfoAddressCaption.textContent = shortAddress(contact.address);
-      chatInfoAddressCaption.hidden = false;
-      chatInfoBio.hidden = true;
-    } else if (bioText) {
+    // The bio wins whenever there IS one. Gating it on the domain list meant a contact with a
+    // perfectly good profile showed their raw address instead: their name resolves through the
+    // reverse lookup, but an empty /assets list said "no domains" and sent this straight to the
+    // address branch. That is exactly what Chat Info looked like for a .kas contact.
+    if (bioText) {
       chatInfoBio.textContent = bioText;
       chatInfoBio.classList.remove("expanded");
       chatInfoBio.hidden = false;
       chatInfoAddressCaption.hidden = true;
+    } else if (!hasKnsIdentity) {
+      chatInfoAddressCaption.textContent = shortAddress(contact.address);
+      chatInfoAddressCaption.hidden = false;
+      chatInfoBio.hidden = true;
     } else {
       chatInfoAddressCaption.textContent = links.length
         ? "On-chain profile data available."

@@ -8398,15 +8398,26 @@ body.session-logged-out [data-account-rename-modal] {
 }
 
 .chat-info-name-row { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
+/* The pencil is the ONLY thing saying the name above it can be changed, so it has to read as a
+   button rather than a glyph sitting next to some text: a tinted circle that responds to hover.
+   As a bare transparent stroke it looked like decoration and people did not try clicking it. */
 .chat-info-name-pencil {
-  border: 0;
-  background: transparent;
+  border: 1px solid rgba(98,244,208,.35);
+  background: rgba(98,244,208,.12);
   color: var(--kaspa-ink);
-  padding: 4px;
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   cursor: pointer;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
+  transition: background .15s ease, border-color .15s ease;
 }
+.chat-info-name-pencil:hover { background: rgba(98,244,208,.22); border-color: rgba(98,244,208,.6); }
+.chat-info-name-pencil:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
 .chat-info-name-pencil svg {
   width: 15px;
   height: 15px;
