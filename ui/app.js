@@ -35,7 +35,7 @@ import {
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
 import { KNSProfileLinkBuilder } from "../engine/kns.js";
-import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, setVerboseApiLogging } from "../engine/endpoints.js";
+import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
@@ -1040,12 +1040,10 @@ let linkPreviewRerenderTimer = null;
 // Fetch a page through the same-origin /nc-proxy dev middleware (browsers can't read cross-origin
 // HTML directly). `x-preview: 1` asks the proxy to use a crawler UA so more sites emit og:image.
 async function proxiedFetchHtml(url) {
-  let dev = false;
-  try { dev = Boolean(import.meta.env.DEV); } catch { dev = false; }
-  if (!dev) return null; // no proxy outside the dev server
-  const parsed = new URL(url);
-  const proxied = `${import.meta.env.BASE_URL}nc-proxy/${encodeURIComponent(parsed.origin)}${parsed.pathname === "/" ? "" : parsed.pathname}${parsed.search}`;
-  const res = await fetch(proxied, { headers: { Accept: "text/html,application/xhtml+xml", "x-preview": "1" } });
+  // The relay exists on the dev server, the preview server and the Docker build alike; it used
+  // to be gated on "dev server", which left the built site with no previews at all.
+  if (!(await isProxyAvailable())) return null;
+  const res = await fetch(proxiedUrl(url), { headers: { Accept: "text/html,application/xhtml+xml", "x-preview": "1" } });
   if (!res.ok) return null;
   const type = res.headers.get("content-type") || "";
   if (!/text\/html|xml/i.test(type)) return null;
@@ -1078,13 +1076,9 @@ async function fetchOpenGraph(url) {
 async function fetchYouTubeMeta(url, id) {
   const image = `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
   let title = "";
-  let dev = false;
-  try { dev = Boolean(import.meta.env.DEV); } catch { dev = false; }
-  if (dev) {
+  if (await isProxyAvailable()) {
     try {
-      const oe = new URL(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
-      const proxied = `${import.meta.env.BASE_URL}nc-proxy/${encodeURIComponent(oe.origin)}${oe.pathname}${oe.search}`;
-      const res = await fetch(proxied, { headers: { Accept: "application/json" } });
+      const res = await fetch(proxiedUrl(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`), { headers: { Accept: "application/json" } });
       if (res.ok) { const d = await res.json(); title = String(d.title || ""); }
     } catch { /* oEmbed unreachable — keep the thumbnail-only card */ }
   }
@@ -1136,6 +1130,32 @@ function scheduleActiveThreadRerender() {
 }
 
 // Rich card: thumbnail (optional) + site + title + description, linking out.
+const PROXIED_IMAGE_HOST_RE = /(^|\.)(cdninstagram\.com|fbcdn\.net|instagram\.com|facebook\.com)$/i;
+const previewImageBlobs = new Map(); // image url -> blob: url, so re-renders do not refetch
+async function loadPreviewImage(img, imageUrl, pageUrl) {
+  let host = "";
+  try { host = new URL(imageUrl).hostname; } catch { host = ""; }
+  if (!PROXIED_IMAGE_HOST_RE.test(host)) { img.src = imageUrl; return; }
+  if (previewImageBlobs.has(imageUrl)) { img.src = previewImageBlobs.get(imageUrl); return; }
+  if (!(await isProxyAvailable())) { img.src = imageUrl; return; }
+  const attempt = async (headers) => {
+    const res = await fetch(proxiedUrl(imageUrl), { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    if (!blob.size || !/^image\//i.test(blob.type || "")) throw new Error("not an image");
+    return URL.createObjectURL(blob);
+  };
+  try {
+    let src;
+    try { src = await attempt({ "x-preview-image": "1", "x-preview-referer": pageUrl }); }
+    catch { src = await attempt({ "x-preview-image": "crawler" }); }
+    previewImageBlobs.set(imageUrl, src);
+    img.src = src;
+  } catch {
+    img.remove();
+  }
+}
+
 function buildRichLinkCard(url, data) {
   const card = document.createElement("a");
   card.className = "message-link-card";
@@ -1147,7 +1167,7 @@ function buildRichLinkCard(url, data) {
     const img = document.createElement("img");
     img.loading = "lazy"; img.alt = "";
     img.addEventListener("error", () => thumb.remove(), { once: true });
-    img.src = data.image;
+    loadPreviewImage(img, data.image, url);
     thumb.append(img);
     if (data.site === "YouTube") { const play = document.createElement("span"); play.className = "message-link-play"; play.textContent = "▶"; thumb.append(play); }
     card.append(thumb);

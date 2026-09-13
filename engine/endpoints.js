@@ -82,10 +82,35 @@ function proxyRoot() {
 /// browser console reports in red on a perfectly healthy deployment.
 const PROBE_REPLY = "kachat-proxy";
 
+let proxyProbe = null;
+/// Is this page served by something that carries the /nc-proxy handler (dev server, preview
+/// server, the Docker build)? Asked once and remembered. Link previews and other scrapes that
+/// need a same-origin relay check this rather than assuming "dev server or nothing".
+export function isProxyAvailable() {
+  if (typeof window === "undefined" || typeof window.fetch !== "function") return Promise.resolve(false);
+  if (!proxyProbe) {
+    const nativeFetch = window.__kasiaNativeFetch || window.fetch.bind(window);
+    proxyProbe = (async () => {
+      try {
+        const response = await nativeFetch(`${proxyRoot()}__probe`, { cache: "no-store" });
+        const body = (await response.text()).trim();
+        if (response.ok) return body === PROBE_REPLY;
+        return response.status === 400 && body === "Bad proxy target";
+      } catch { return false; }
+    })();
+  }
+  return proxyProbe;
+}
+export function proxiedUrl(url) {
+  const parsed = new URL(url, window.location.origin);
+  return `${proxyRoot()}${encodeURIComponent(parsed.origin)}${parsed.pathname === "/" ? "" : parsed.pathname}${parsed.search}`;
+}
+
 function installIndexerProxy() {
   if (typeof window === "undefined" || typeof window.fetch !== "function" || window.__kasiaProxyInstalled) return;
   window.__kasiaProxyInstalled = true;
   const nativeFetch = window.fetch.bind(window);
+  window.__kasiaNativeFetch = nativeFetch;
 
   // Is this page being served by something that carries the /nc-proxy handler?
   //
@@ -101,25 +126,7 @@ function installIndexerProxy() {
   // does not, and a file:// open has no server at all. The proxy answers __probe with a known
   // string; anything else - a 404, an SPA fallback page, a network error - means no proxy, and
   // requests go direct exactly as before.
-  let probe = null;
-  const proxyAvailable = () => {
-    if (!probe) {
-      probe = (async () => {
-        try {
-          const response = await nativeFetch(`${proxyRoot()}__probe`, { cache: "no-store" });
-          const body = (await response.text()).trim();
-          // Two ways the proxy identifies itself, because a server can be older than the page it
-          // is serving: the current one answers a probe with a known string, and every version
-          // before that answered an unparseable target with 400 "Bad proxy target". Accepting both
-          // means a deployment mid-update proxies rather than falling back to direct requests that
-          // CORS then refuses.
-          if (response.ok) return body === PROBE_REPLY;
-          return response.status === 400 && body === "Bad proxy target";
-        } catch { return false; }
-      })();
-    }
-    return probe;
-  };
+  const proxyAvailable = () => isProxyAvailable();
 
   window.fetch = (input, init) => {
     let rawUrl = "";

@@ -94,6 +94,20 @@ function nextcloudProxy() {
           headers.accept = "text/html,application/xhtml+xml";
         }
         delete headers["x-preview"];
+        // Preview IMAGE bytes (x-preview-image): Meta's CDNs (cdninstagram/fbcdn) refuse a bare
+        // hotlink from a page, so the card fetches the picture through here with a browser UA and
+        // the post as Referer - and, when that is refused too, as Meta's own crawler. Mirrors iOS
+        // LinkPreviewService.fetchPreviewImage.
+        if (headers["x-preview-image"]) {
+          const crawler = headers["x-preview-image"] === "crawler";
+          headers["user-agent"] = crawler
+            ? "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+            : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+          headers.accept = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
+          if (!crawler && headers["x-preview-referer"]) headers.referer = String(headers["x-preview-referer"]);
+        }
+        delete headers["x-preview-image"];
+        delete headers["x-preview-referer"];
         // Opt-in "soft 404": APIs that use 404 to mean "not found, and that's normal" (KNS
         // primary-name lookups for addresses without domains) make the browser console scream
         // red for every answer. When the caller sends x-proxy-soft-404, an upstream 404 is
