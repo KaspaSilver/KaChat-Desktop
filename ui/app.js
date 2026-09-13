@@ -5845,42 +5845,29 @@ function spendingRowHtml(index, address, state, balanceText, used, hasDomain = f
   const label = spendingLabelFor(state, index);
   // Three states (iOS): Used, Unused, and Checking while the history probe has not answered -
   // claiming "Unused" before it has could invite address reuse.
-  const usageBadge = used === true
+  const usage = used === true
     ? '<span class="spending-address-usage used">Used</span>'
     : used === false
       ? '<span class="spending-address-usage unused">Unused</span>'
       : '<span class="spending-address-usage checking">Checking</span>';
-  const domainBadge = hasDomain ? '<span class="spending-address-domain-tag">Contains domain</span>' : "";
-  // Actively offered to a contact as a chat-payment-privacy address: tagged so the
-  // user knows what the row is, and not hideable while the offer stands.
-  const privacyBadge = reserved ? '<span class="spending-address-domain-tag">Chat privacy</span>' : "";
+  const domainTag = hasDomain ? '<span class="spending-address-domain-tag">Contains domain</span>' : "";
   const menuItems = [
-    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="rename" data-index="${index}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>Rename Address</button>`,
-    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="copy" data-index="${index}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Copy Address</button>`,
-    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="receive" data-index="${index}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/></svg>Show QR Code</button>`,
-    isActive ? "" : `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="activate" data-index="${index}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${STAR_PATH}"/></svg>Set as Primary Address</button>`,
-    // Hide straight from the row (iOS parity) — same flag the Address Visibility checklist
-    // edits, with the same guards (never the primary, never a funded address, never an
-    // actively offered pool address) enforced on tap.
-    isActive || reserved ? "" : `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="hide" data-index="${index}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>Hide Address</button>`,
+    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="rename" data-index="${index}">Rename Address</button>`,
+    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="copy" data-index="${index}">Copy Address</button>`,
+    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="receive" data-index="${index}">Show QR Code</button>`,
+    isActive ? "" : `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="activate" data-index="${index}">Set as Primary Address</button>`,
+    isActive || reserved ? "" : `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="hide" data-index="${index}">Hide Address</button>`,
   ].filter(Boolean).join("");
   return `
     <div class="spending-address-row${isActive ? " active" : ""}" data-spending-row="${index}">
-      <button type="button" class="spending-address-row-main" data-spending-open="${index}" aria-label="Open spending address #${index}">
-        <div class="spending-address-row-head">
-          <span class="spending-address-index">#${index}</span>
-          <span class="spending-address-label">${escapeHtml(label)}</span>
-          ${isActive ? `<span class="spending-address-active-badge"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${STAR_PATH}"/></svg>Primary</span>` : ""}
-          ${usageBadge}
-          ${domainBadge}
-          ${privacyBadge}
-        </div>
+      <button type="button" class="spending-address-row-main" data-spending-open="${index}" aria-label="Open ${escapeHtml(label)}">
+        <span class="spending-address-label">${escapeHtml(label)}${isActive ? `<svg class="spending-address-star" viewBox="0 0 24 24" aria-label="Primary"><path d="${STAR_PATH}"/></svg>` : ""}</span>
         <span class="spending-address-value">${escapeHtml(shortAddress(address))}</span>
         <span class="spending-address-balance" data-spending-balance-cell="${index}">${escapeHtml(balanceText)}</span>
-        <span class="spending-address-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+        <span class="spending-address-row-tags">${usage}${domainTag}</span>
       </button>
       <div class="spending-address-row-menu-wrap">
-        <button type="button" class="spending-row-menu-btn" data-spending-menu-toggle="${index}" aria-haspopup="true" aria-expanded="false" aria-label="Address actions for #${index}">
+        <button type="button" class="spending-row-menu-btn" data-spending-menu-toggle="${index}" aria-label="Address actions for ${escapeHtml(label)}">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
         </button>
         <div class="spending-row-menu" data-spending-menu="${index}" role="menu" hidden>${menuItems}</div>
@@ -5931,12 +5918,17 @@ async function renderSpendingList() {
   const hiddenSet = new Set(state.hidden);
   const reservedAddresses = activePoolReservationAddressSet();
   const items = [];
+  const privacyOn = chatsPrivacyEnabled();
   for (let i = 0; i <= state.maxIndex; i++) {
     // Hidden addresses (Address Visibility screen) stay off the main list; the
     // primary can never be hidden.
     if (hiddenSet.has(i) && i !== primaryIndex) continue;
     const address = deriveSpendingAddressAt(i);
-    if (address) items.push({ index: i, address });
+    if (!address) continue;
+    // Actively offered pool addresses are the Chat Privacy tab's rows, not this list's - while
+    // privacy is off the tab does not exist, so they stay here as ordinary rows (iOS).
+    if (privacyOn && i !== primaryIndex && reservedAddresses.has(address)) continue;
+    items.push({ index: i, address });
   }
   if (!items.length) {
     spendingListEl.innerHTML = '<p class="spending-address-empty">No spending addresses yet.</p>';
@@ -5999,7 +5991,7 @@ async function renderSpendingList() {
   // Primary first → addresses with a balance OR a KNS domain (stable within
   // the group) → fresh/unused last.
   const rank = (e) => (e.index === primaryIndex ? 0 : (e.kas > 0 || domainOwning.has(e.address)) ? 1 : 2);
-  enriched.sort((a, b) => rank(a) - rank(b) || a.index - b.index);
+  enriched.sort((a, b) => rank(a) - rank(b) || b.index - a.index);
   updateSpendingTotalBalance(enriched);
   spendingListEl.innerHTML = enriched
     .map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} KAS` : "-- KAS", e.used, domainOwning.has(e.address), reservedAddresses.has(e.address)))
@@ -6028,11 +6020,9 @@ function showSpendingTab(tab) {
   const addressesList = document.querySelector("[data-spending-address-list]");
   const privacyList = document.querySelector("[data-spending-privacy-list]");
   const total = document.querySelector("[data-spending-total-block]");
-  const actions = document.querySelector(".spending-manage-actions");
   if (addressesList) addressesList.hidden = tab !== "addresses";
   if (privacyList) privacyList.hidden = tab !== "privacy";
   if (total) total.hidden = tab !== "addresses";
-  if (actions) actions.hidden = tab !== "addresses";
   if (tab === "privacy") renderSpendingPrivacyList();
 }
 document.querySelectorAll("[data-spending-tab]").forEach((button) => button.addEventListener("click", () => showSpendingTab(button.dataset.spendingTab)));

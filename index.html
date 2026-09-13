@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=376" />
+  <link rel="stylesheet" href="./ui/styles.css?v=377" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -2357,42 +2357,28 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
         </button>
         <span class="chatting-address-balance">Manage Addresses</span>
-        <button class="chatting-address-back spending-visibility-open" type="button" data-open-spending-visibility aria-label="Manage address visibility" title="Manage address visibility">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 2 2 3-3"/><path d="M11 6h10"/><path d="m3 12.5 2 2 3-3"/><path d="M11 12.5h10"/><path d="m3 19 2 2 3-3"/><path d="M11 19h10"/></svg>
-        </button>
+        <button type="button" data-open-spending-visibility hidden aria-hidden="true"></button>
+        <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
       <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Manage addresses view" data-spending-tabs hidden>
         <button type="button" class="settings-segmented-option active" data-spending-tab="addresses">Addresses</button>
         <button type="button" class="settings-segmented-option" data-spending-tab="privacy">Chat Privacy</button>
       </div>
+      <!-- Total, then the actions button directly under it (iOS accountSummary): the actions
+           are about this account, so they sit with the account rather than pinned over the list. -->
       <div class="spending-total" data-spending-total-block>
         <span>Total Balance</span>
         <strong data-spending-total-balance>-- KAS</strong>
+        <button type="button" class="address-actions-pill spending-actions-pill" data-spending-actions-toggle>Address Actions</button>
       </div>
       <div class="manage-address-body">
         <div class="manage-address-list spending-address-list" data-spending-address-list></div>
         <div class="manage-address-list spending-privacy-list" data-spending-privacy-list hidden></div>
       </div>
-      <div class="manage-address-actions spending-manage-actions">
-        <div class="spending-actions-wrap">
-          <button type="button" class="chatting-address-copy manage-address-send-button" data-spending-actions-toggle aria-haspopup="true" aria-expanded="false">
-            <span>Address Actions</span>
-          </button>
-          <div class="spending-actions-menu" data-spending-actions-menu role="menu" hidden>
-            <button type="button" role="menuitem" class="spending-row-menu-item" data-spending-generate>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
-              <span>Generate New Spending Address</span>
-            </button>
-            <button type="button" role="menuitem" class="spending-row-menu-item" data-spending-scan>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-              <span>Discover Addresses</span>
-            </button>
-            <button type="button" role="menuitem" class="spending-row-menu-item" data-spending-consolidate>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V6M6 12l6-6 6 6M5 4h14"/></svg>
-              <span>Send All Kaspa To Primary</span>
-            </button>
-          </div>
-        </div>
+      <div class="spending-actions-menu" data-spending-actions-menu role="menu" hidden aria-hidden="true">
+        <button type="button" data-spending-generate hidden></button>
+        <button type="button" data-spending-scan hidden></button>
+        <button type="button" data-spending-consolidate hidden></button>
       </div>
     </div>
   </div>
@@ -2955,7 +2941,7 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=415"></script>
+  <script type="module" src="./ui/app.js?v=416"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>

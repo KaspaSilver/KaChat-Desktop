@@ -9752,3 +9752,20 @@ body.session-logged-out [data-account-rename-modal] {
 .sidebar-tab-badge, .hub-tile-badge { position: absolute; top: 6px; right: 10px; min-width: 20px; height: 20px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: 999px; background: #e0245e; color: #fff; font-size: 11px; font-weight: 800; line-height: 1; }
 .hub-tile-badge { top: -6px; right: -6px; }
 .notif-center-empty small { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+
+/* Manage Addresses rows as iOS draws them: label with a star for the primary, the short address
+   in mono, the balance, then a small Used / Unused / Checking word - and a vertical ellipsis. */
+.spending-address-row { border-radius: 18px; }
+.spending-address-row-main { display: grid; grid-template-columns: 1fr; grid-template-areas: none; gap: 5px; padding: 16px; }
+.spending-address-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.spending-address-star { width: 11px; height: 11px; fill: var(--kaspa); }
+.spending-address-row .spending-address-value { grid-area: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 14px; color: var(--text); }
+.spending-address-row .spending-address-balance { grid-area: auto; font-size: 14px; font-weight: 700; color: var(--text); text-align: left; justify-self: start; }
+.spending-address-row-tags { display: flex; align-items: center; gap: 8px; }
+.spending-address-row .spending-address-usage { padding: 0; border: 0; background: transparent; font-size: 12px; font-weight: 700; }
+.spending-address-row .spending-address-usage.used { color: #ff9f0a; }
+.spending-address-row .spending-address-usage.unused { color: #34c759; }
+.spending-address-row .spending-address-usage.checking { color: var(--muted); }
+.spending-actions-pill { width: 100%; margin: 12px 0 4px; }
+.spending-total { padding: 10px 16px 6px; }
+.spending-address-row.active { border-color: var(--card-border, var(--line)); background: var(--surface-1, rgba(255, 255, 255, .04)); }
