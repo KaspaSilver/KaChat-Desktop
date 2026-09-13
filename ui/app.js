@@ -46,6 +46,7 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet } from "./dialogs.js";
+import { onContextGesture } from "./touch.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
 // Step 25 shell:
@@ -1798,7 +1799,7 @@ chatInfoNotifyToggle?.addEventListener("change", async () => {
   setContactPref(chatInfoContactAddress, "notify", choice === "default" ? undefined : choice);
   if (choice !== "off") {
     const granted = await ensureNotificationPermission();
-    if (!granted) showCopyToast("Allow notifications in your browser to receive them.");
+    if (!granted) showCopyToast(notificationsUnavailableMessage());
   }
 });
 chatInfoPhotosToggle?.addEventListener("change", () => {
@@ -1836,6 +1837,16 @@ function requestNotificationPermissionIfNeeded() {
   ensureNotificationPermission().catch(() => { /* asking is best-effort */ });
 }
 
+// Why a notification could not be enabled, in the reader's situation. On an iPhone or iPad,
+// a Safari TAB has no Notification API at all - only the home-screen app does (iOS 16.4+).
+function notificationsUnavailableMessage() {
+  const ua = navigator.userAgent || "";
+  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const standalone = document.documentElement.classList.contains("standalone");
+  if (ios && !standalone) return "On iPhone, add KaChat to your Home Screen (Share > Add to Home Screen) to receive notifications.";
+  if (typeof Notification !== "undefined" && Notification.permission === "denied") return "Notifications are blocked for KaChat in your browser settings.";
+  return "Allow notifications in your browser to receive them.";
+}
 async function ensureNotificationPermission() {
   if (typeof Notification === "undefined") return false;
   if (Notification.permission === "granted") return true;
@@ -1854,40 +1865,73 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   // Don't notify for the conversation you're already looking at in a focused window.
   if (activeConversationId === conversationEntry.id && !document.hidden) return;
   const title = displayNameForAddress(contact) || contact?.name || shortAddress(contact?.address || "");
-  try {
-    const note = new Notification(title, {
-      body: displayTextForMessage(message) || "New message",
-      tag: `kachat-${conversationEntry.id}`,
-      icon: kachatLogoUrl,
-      silent: mode !== "sound",
-    });
-    note.onclick = () => { try { window.focus(); } catch {} setActiveAppTab("chats"); openConversation(conversationEntry.id); note.close(); };
-  } catch { /* notification construction can throw in some contexts */ }
+  showAppNotification({
+    title,
+    body: displayTextForMessage(message) || "New message",
+    tag: `kachat-${conversationEntry.id}`,
+    silent: mode !== "sound",
+    route: { kind: "chat", conversationId: conversationEntry.id },
+    onClick: () => { setActiveAppTab("chats"); openConversation(conversationEntry.id); },
+  }).catch(() => { /* best-effort */ });
 }
 
-// Generic desktop notification helper for non-chat pings (wallet address
-// activity, KaPosts). Honors the Play sound preference; falls back to the
-// in-app toast when browser notifications are unavailable/denied.
-function postDesktopNotification({ title, body, tag, onClick } = {}) {
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") {
-    showCopyToast(body ? `${title} — ${body}` : title);
-    return;
-  }
+// One way to show an OS notification, for both places that need one. A desktop browser
+// constructs it directly. A home-screen web app on iOS (16.4+) holds the same permission but
+// `new Notification()` throws there - the notification has to be shown by the service worker
+// (public/sw.js), and its tap comes back as a message the worker posts to the page. The tap is
+// routed by `route` (survives the app being closed and reopened) and, while this page is alive,
+// by the closure registered under a click id.
+const pendingNotificationClicks = new Map();
+let nextNotificationClickId = 1;
+async function showAppNotification({ title, body, tag, silent = false, route = null, onClick = null } = {}) {
+  const options = { body: body || "", tag: tag || undefined, icon: kachatLogoUrl, silent: Boolean(silent) };
   try {
-    const note = new Notification(title || "KaChat", {
-      body: body || "",
-      tag: tag || undefined,
-      icon: kachatLogoUrl,
-      silent: (accountShellPrefs.notificationSound ?? true) === false,
-    });
+    const note = new Notification(title || "KaChat", options);
     note.onclick = () => {
       try { window.focus(); } catch {}
       try { onClick?.(); } catch {}
       note.close();
     };
-  } catch {
-    showCopyToast(body ? `${title} — ${body}` : title);
+    return true;
+  } catch { /* iOS home-screen apps: fall through to the worker */ }
+  const registration = await navigator.serviceWorker?.ready?.catch?.(() => null);
+  if (!registration?.showNotification) throw new Error("No notification path");
+  const clickId = nextNotificationClickId++;
+  if (onClick) {
+    pendingNotificationClicks.set(clickId, onClick);
+    if (pendingNotificationClicks.size > 200) pendingNotificationClicks.delete(pendingNotificationClicks.keys().next().value);
   }
+  await registration.showNotification(title || "KaChat", { ...options, data: { clickId, route } });
+  return true;
+}
+window.addEventListener("kachat:notification-click", (event) => {
+  const data = event.detail || {};
+  const handler = data.clickId ? pendingNotificationClicks.get(data.clickId) : null;
+  if (handler) {
+    pendingNotificationClicks.delete(data.clickId);
+    try { handler(); } catch {}
+    return;
+  }
+  const route = data.route || {};
+  try {
+    if (route.kind === "chat" && route.conversationId) { setActiveAppTab("chats"); openConversation(route.conversationId); }
+    else if (route.kind === "group" && route.groupId) { setActiveAppTab("chats"); openGroupChat(route.groupId); }
+    else if (route.kind === "tab" && route.tab) setActiveAppTab(route.tab);
+  } catch { /* the page may still be booting */ }
+});
+
+// Generic desktop notification helper for non-chat pings (wallet address
+// activity, KaPosts). Honors the Play sound preference; falls back to the
+// in-app toast when browser notifications are unavailable/denied.
+function postDesktopNotification({ title, body, tag, onClick, route = null } = {}) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+    showCopyToast(body ? `${title} — ${body}` : title);
+    return;
+  }
+  showAppNotification({
+    title, body, tag, route, onClick,
+    silent: (accountShellPrefs.notificationSound ?? true) === false,
+  }).catch(() => showCopyToast(body ? `${title} — ${body}` : title));
 }
 
 // Per-event-type gate for KaPosts notification pings (iOS
@@ -2004,6 +2048,8 @@ function setActiveConversationId(id) {
   // its pane must survive the background setActiveConversationId(null) refreshes.
   const groupOwnsDetail = !id && Boolean(activeGroupId) && onChatsTab;
   appBody?.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
+  // Mirrored on <body> so the toolbar (a sibling BEFORE the app body) can react on phones.
+  document.body.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
   // The conversation pane and its "Select a conversation" empty state belong to the CHATS
   // tab only - background refreshes call this with null while another tab (KaPosts etc.)
   // is showing, and unconditionally unhiding the empty state stacked it on top of that
@@ -12238,7 +12284,7 @@ function renderMessages(conversationEntry) {
     }
 
     // Right-click opens the Telegram-style actions menu (reactions + reply/copy/select/etc.).
-    bubble.addEventListener("contextmenu", (event) => {
+    onContextGesture(bubble, (event) => {
       event.preventDefault();
       if (messageSelectionMode) return;
       openOneToOneMessageMenu(message.id, event.clientX, event.clientY);
@@ -13978,7 +14024,7 @@ function deleteConversationsByIds(ids) {
 // Right-click on a chat row (iOS long-press): Read/Unread show contextually (the relevant one
 // only, matching Mail) and reuse the same paths as the Select-mode bulk bar; Delete routes
 // through its own confirmation. Nothing while Select mode is active - the bulk bar owns actions.
-chatList.addEventListener("contextmenu", async (event) => {
+onContextGesture(chatList, async (event) => {
   const row = event.target.closest("[data-conversation-id]");
   if (!row || chatSelectionModeActive) return;
   event.preventDefault();
@@ -19490,7 +19536,7 @@ prefBindings.forEach(([selector, key, fallback]) => {
     }
     if ((key === "chatNotifications" || key === "addressActivityNotifications") && input.checked) {
       ensureNotificationPermission().then((granted) => {
-        if (!granted) showCopyToast("Allow notifications in your browser to receive them.");
+        if (!granted) showCopyToast(notificationsUnavailableMessage());
       });
     }
     if (key === "saveAccount") showCopyToast(input.checked ? "New accounts will be saved on this device." : "New accounts will stay in memory only (not saved).");
@@ -19498,6 +19544,13 @@ prefBindings.forEach(([selector, key, fallback]) => {
   });
 });
 refreshSetupGuideRow();
+// The Notifications page tells a phone reader what it takes (a Safari tab cannot notify at all).
+{
+  const hint = document.querySelector("[data-notif-phone-hint]");
+  const ua = navigator.userAgent || "";
+  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (hint) hint.hidden = !ios;
+}
 
 document.querySelector("[data-generate-wallet]")?.addEventListener("click", openCreateAccountModal);
 
@@ -20148,6 +20201,7 @@ function maybeNotifyGroupIncoming(groupId, senderAddress, text, id, createdAt) {
     title: group?.name || "Group",
     body: `${groupNotificationSenderName(senderAddress)}: ${groupPreviewText(text) || "New message"}`,
     tag: `kachat-group-${groupId}`,
+    route: { kind: "group", groupId },
     onClick: () => { setActiveAppTab("chats"); try { openGroupChat(groupId); } catch {} },
   });
 }
@@ -20177,6 +20231,7 @@ function maybeRecordGroupMention(groupId, senderAddress, text, id, createdAt) {
     title: "Group mention",
     body: `${senderName} mentioned you in ${groupName}`,
     tag: `kachat-group-mention-${id}`,
+    route: { kind: "group", groupId },
     onClick: () => { setActiveAppTab("chats"); try { openGroupChat(groupId); } catch {} },
   });
 }
@@ -20756,6 +20811,7 @@ function openGroupChat(groupId) {
   if (conversation) conversation.hidden = true;
   if (groupChatScreen) groupChatScreen.hidden = false;
   appBody?.classList.add("conversation-open", "detail-active");
+  document.body.classList.add("conversation-open");
   // Fresh composer state per group open.
   try {
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
@@ -21356,7 +21412,7 @@ function renderGroupMessages() {
       bubble.append(pill);
     }
 
-    bubble.addEventListener("contextmenu", (event) => { event.preventDefault(); if (!groupSelectionMode) openGroupMessageMenu(message, event.clientX, event.clientY); });
+    onContextGesture(bubble, (event) => { event.preventDefault(); if (!groupSelectionMode) openGroupMessageMenu(message, event.clientX, event.clientY); });
     // Double-click: the quick-reaction bar (iOS double-tap), "+" into the full picker.
     bubble.addEventListener("dblclick", (event) => {
       if (groupSelectionMode || !key) return;
@@ -22739,7 +22795,7 @@ groupManageBody?.addEventListener("click", async (event) => {
       showCopyToast("Silent. This group will not notify you.");
     } else {
       const granted = await ensureNotificationPermission();
-      if (!granted) showCopyToast("Allow notifications in your browser to receive them.");
+      if (!granted) showCopyToast(notificationsUnavailableMessage());
       else showCopyToast(mode === "all" ? "Notifying for all messages in this group." : "Notifying only for mentions and replies to you.");
     }
     return;

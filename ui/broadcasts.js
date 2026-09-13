@@ -20,6 +20,7 @@ import {
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
+import { onContextGesture } from "./touch.js";
 
 const CHANNELS_KEY = "kachat-broadcast-channels-v1";        // account-scoped: ["name", ...]
 const HIDDEN_KEY = "kachat-broadcast-hidden-v1";            // account-scoped: { [channel]: [address, ...] }
@@ -794,7 +795,7 @@ function buildMessageElement(m) {
 
   appendReactionUi(el, m);
   // 1:1 parity: right-click opens the reactions + Reply/Copy/Hide menu.
-  el.addEventListener("contextmenu", (event) => {
+  onContextGesture(el, (event) => {
     event.preventDefault();
     openBroadcastMessageMenu(m, event.clientX, event.clientY);
   });
@@ -1780,7 +1781,7 @@ export function initBroadcasts(dependencies) {
     }
   });
   // Right-click on a room row: share or copy its invite link (iOS row context menu).
-  listEl?.addEventListener("contextmenu", async (event) => {
+  onContextGesture(listEl, async (event) => {
     const card = event.target.closest("[data-broadcast-open]");
     if (!card) return;
     event.preventDefault();

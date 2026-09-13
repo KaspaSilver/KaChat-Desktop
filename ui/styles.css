@@ -9818,3 +9818,132 @@ body.session-logged-out [data-account-rename-modal] {
 .message-link-audio.voice-player { margin-top: 8px; }
 
 .node-mode-badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(98,244,208,.16); color: var(--kaspa-ink, var(--kaspa)); font-size: 10.5px; font-weight: 800; vertical-align: middle; }
+
+
+/* =============================================================================================
+   Phone shell - Safari "Add to Home Screen" and any phone browser.
+   The layout above already collapses to one column below 860px; this block is what makes that
+   column behave like the iOS app: the status-bar notch and home indicator are respected
+   (viewport-fit=cover + env() insets), the shell follows the keyboard instead of scrolling away
+   under it, the page never rubber-bands as a whole, and text fields never trigger Safari's
+   focus zoom.
+   ============================================================================================= */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  /* The toolbar grows by the status-bar inset so nothing sits under the notch. */
+  --topbar-h: calc(56px + var(--safe-top));
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  min-height: 100dvh;
+  overscroll-behavior: none;           /* lists scroll; the app as a whole never rubber-bands */
+  -webkit-tap-highlight-color: transparent;
+}
+.kachat-shell { height: 100dvh; }
+/* Keyboard-aware height published by ui/pwa.js on touch devices. */
+html.app-h body { min-height: var(--app-h); }
+html.app-h .kachat-shell { height: var(--app-h); }
+html.app-h .logged-out-screen { height: var(--app-h); }
+
+.app-topbar {
+  padding-top: calc(10px + var(--safe-top));
+  padding-left: calc(20px + var(--safe-left));
+  padding-right: calc(20px + var(--safe-right));
+}
+/* Thread headers are the top of the screen on a phone (and on the desktop's chats tab). */
+.conversation-header { padding-top: calc(4px + var(--safe-top)); }
+.conversation-header .back-button { top: calc(var(--safe-top) + (100% - var(--safe-top)) / 2); }
+.logged-out-screen { padding-top: calc(44px + var(--safe-top)); padding-bottom: calc(40px + var(--safe-bottom)); }
+.logged-out-settings-gear { top: calc(18px + var(--safe-top)); }
+.modal-backdrop {
+  padding: max(22px, var(--safe-top)) max(22px, var(--safe-right)) max(22px, var(--safe-bottom)) max(22px, var(--safe-left));
+}
+.account-overlay {
+  padding: max(28px, var(--safe-top)) max(28px, var(--safe-right)) max(28px, var(--safe-bottom)) max(28px, var(--safe-left));
+}
+.copy-toast { bottom: calc(28px + var(--safe-bottom)); }
+.emoji-composer-popover { max-height: calc(100dvh - 16px); }
+
+@media (max-width: 859px) {
+  /* In a thread the toolbar (status light, balance, Select) is the chats list's, not the
+     thread's; iOS shows only the thread's own bar there. Its space goes too. */
+  body.chats-tab.conversation-open .app-topbar { display: none; }
+  body.chats-tab .app-body.conversation-open { padding-top: 0; }
+  /* The phone dock reserves the home-indicator inset (see the 859px dock block); everything
+     that sits above the dock already keys off --dock-inset. Toasts float above the dock. */
+  .copy-toast { bottom: calc(var(--dock-inset, 80px) + 12px); }
+  body.conversation-open .copy-toast { bottom: calc(var(--dock-inset, 80px) + 12px); }
+}
+
+@media (max-width: 620px) {
+  /* Sheets: edge to edge with the safe areas as the only margin, and never taller than the
+     screen - a modal that outgrows a phone scrolls inside itself instead of being cut off. */
+  .modal-backdrop { padding: calc(10px + var(--safe-top)) 10px calc(10px + var(--safe-bottom)); }
+  .modal-backdrop > * { max-height: 100%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+  .app-dialog-sheet-body { max-height: 50dvh; }
+  .kns-wizard-body { max-height: min(60dvh, 640px); }
+  .setup-guide-modal { height: min(660px, 100%); }
+  /* Settings becomes a full screen, the way it is on iOS, rather than a card floating in the
+     margins of one. */
+  .account-overlay { padding: 0; }
+  .account-overlay-card { width: 100%; height: 100%; max-height: none; border-radius: 0; border: 0; }
+  .account-overlay-header { padding-top: calc(14px + var(--safe-top)); }
+  .account-overlay-body { padding: 16px 16px calc(24px + var(--safe-bottom)); }
+  /* The context menus and quick-reaction bar are fixed-position popovers on a desktop; on a
+     phone they must never run off the sides. */
+  .msg-context-menu, .group-msg-menu { max-width: calc(100vw - 16px); }
+  .quick-reaction-bar { max-width: calc(100vw - 16px); }
+  .quick-reaction-row { flex-wrap: wrap; justify-content: center; }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  /* Safari zooms the page into any focused field whose text is under 16px. Every text field
+     reads at 16px on touch - the one deliberately larger field keeps its size. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
+  textarea, select { font-size: 16px !important; }
+  .swap-amount-input { font-size: 22px !important; }
+  /* A long-press is the message menu (see ui/touch.js), not a text selection or Safari's
+     link callout. Same for chat and room rows. */
+  .message-bubble, .message-bubble *, .chat-row, .chat-row *, .broadcast-message, .broadcast-message *,
+  [data-broadcast-open], [data-broadcast-open] * {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* Hover has no meaning on touch: controls that reveal on hover are always shown, or have a
+     tap path (the reaction bar's tap path is the long-press menu, so it stays hidden). */
+  .sidebar-tab, .chat-row, button { touch-action: manipulation; }
+  /* Scrollers keep momentum scrolling and never hand the drag to the page. */
+  .app-sidebar, .app-detail, [data-message-area], [data-group-message-area], .sidebar-scroll,
+  .kaposts-content, .kaposts-panel-body, .profile-screen, .account-overlay-body, .modal-backdrop > * {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+}
+
+/* "Add to Home Screen" nudge on iOS Safari (ui/pwa.js). */
+.ios-install-hint {
+  position: fixed;
+  left: 12px; right: 12px;
+  bottom: calc(var(--dock-inset, 80px) + 10px);
+  z-index: 4500;
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 12px 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(98,244,208,.22);
+  background: linear-gradient(180deg, #171c23, #10151b);
+  box-shadow: 0 18px 44px rgba(0,0,0,.5);
+  color: var(--text);
+  animation: msg-context-in .18s ease;
+}
+.ios-install-hint-icon { width: 40px; height: 40px; border-radius: 10px; flex: 0 0 auto; }
+.ios-install-hint-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; line-height: 1.35; }
+.ios-install-hint-copy strong { font-size: 14px; }
+.ios-install-hint-copy span { color: var(--muted); }
+.ios-install-hint-copy b { color: var(--text); font-weight: 700; }
+.ios-install-hint-copy svg { width: 14px; height: 14px; vertical-align: -2px; fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ios-install-hint-close { flex: 0 0 auto; width: 30px; height: 30px; border: 0; border-radius: 50%; background: rgba(255,255,255,.08); color: var(--muted); font-size: 18px; line-height: 1; }
+html.standalone .ios-install-hint { display: none; }
