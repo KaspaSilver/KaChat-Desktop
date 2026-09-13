@@ -2243,6 +2243,31 @@ function migrateLegacyContacts(legacyContacts) {
   return { contacts, conversations };
 }
 
+// One-time repair: reactions used to be stamped with the wall clock every time they were
+// re-applied, so an old chat's recency could sit at "just now" forever. Pull any recency that
+// rests only on a reaction back to the newest real message; the next history sync re-applies
+// the reaction with its true block time and restores it if it really was the latest event.
+const REACTION_TIME_REPAIR_KEY = "kachat-reaction-time-repair-v1";
+function repairInflatedReactionRecency(conversations) {
+  let flagKey = null;
+  try {
+    flagKey = accountScopedKey(REACTION_TIME_REPAIR_KEY);
+    if (localStorage.getItem(flagKey)) return conversations;
+  } catch { return conversations; }
+  // The reaction event itself does not survive a reload (normalizeConversation drops it), but the
+  // inflated lastActivityAt/updatedAt it left behind do - so every chat is checked, not just
+  // the ones still carrying a reaction event.
+  for (const entry of conversations) {
+    const newestMessage = (entry.messages || []).reduce((max, m) => Math.max(max, Number(m?.createdAt || 0)), 0);
+    if (!newestMessage) continue;
+    if (Number(entry.lastActivityAt || 0) > newestMessage) entry.lastActivityAt = newestMessage;
+    if (Number(entry.updatedAt || 0) > newestMessage) entry.updatedAt = newestMessage;
+    if (entry.lastReactionEvent && Number(entry.lastReactionEvent.timestamp || 0) > newestMessage) entry.lastReactionEvent.timestamp = newestMessage;
+  }
+  try { localStorage.setItem(flagKey, String(Date.now())); } catch {}
+  return conversations;
+}
+
 function loadStoredState() {
   try {
     const raw = chatStorageGetSync(accountScopedKey(STORAGE_KEY));
@@ -2250,7 +2275,7 @@ function loadStoredState() {
       const parsed = JSON.parse(raw);
       const contacts = Array.isArray(parsed?.contacts) ? parsed.contacts.map(normalizeContact).filter((contact) => contact.address) : [];
       const conversations = Array.isArray(parsed?.conversations)
-        ? parsed.conversations.map(normalizeConversation).filter((entry) => entry.contactId && contacts.some((contact) => contact.id === entry.contactId))
+        ? repairInflatedReactionRecency(parsed.conversations.map(normalizeConversation).filter((entry) => entry.contactId && contacts.some((contact) => contact.id === entry.contactId)))
         : [];
       return { contacts, conversations };
     }
@@ -14705,19 +14730,32 @@ function quickReactionEmojis() {
 // Seed the Settings > Chats row preview once everything above is initialized.
 updateQuickReactionsPreview();
 
-function applyLocalReaction(conversationEntry, targetTxId, reactorAddress, emoji) {
+function applyLocalReaction(conversationEntry, targetTxId, reactorAddress, emoji, at = null) {
   if (!conversationEntry.reactionsByTxId) conversationEntry.reactionsByTxId = {};
   const list = conversationEntry.reactionsByTxId[targetTxId] || [];
   const filtered = list.filter((entry) => entry.reactorAddress !== reactorAddress);
   filtered.push({ reactorAddress, emoji });
   conversationEntry.reactionsByTxId[targetTxId] = filtered;
 
-  // Reactions count as real conversation activity — bumps the chat to the
-  // top of the sidebar and drives its preview text, same as a new message.
-  const timestamp = Date.now();
-  conversationEntry.lastReactionEvent = { targetTxId, reactorAddress, emoji, timestamp };
+  // Reactions count as real conversation activity - bumps the chat to the top of the sidebar
+  // and drives its preview text, same as a new message. Stamped with WHEN THE REACTION HAPPENED
+  // (its block time), never the wall clock: stamping "now" meant an old reaction re-read during
+  // a history sync shoved a week-old chat to the top of the list every time it was re-applied.
+  const timestamp = Number(at) > 0 ? Number(at) : Date.now();
+  const previous = Number(conversationEntry.lastReactionEvent?.timestamp || 0);
+  if (timestamp >= previous) {
+    conversationEntry.lastReactionEvent = { targetTxId, reactorAddress, emoji, timestamp };
+  }
   conversationEntry.lastActivityAt = Math.max(Number(conversationEntry.lastActivityAt || 0), timestamp);
-  conversationEntry.updatedAt = timestamp;
+  conversationEntry.updatedAt = Math.max(Number(conversationEntry.updatedAt || 0), timestamp);
+}
+
+// When a message actually happened, as the chain saw it: block time first, the local clock only
+// for a row that has not been mined yet.
+function messageEventTime(message) {
+  const block = Number(message?.blockTime || 0);
+  if (block > 0) return block > 1e12 ? block : block * 1000;
+  return Number(message?.createdAt || 0) || Date.now();
 }
 
 function removeLocalReaction(conversationEntry, targetTxId, reactorAddress) {
@@ -14745,7 +14783,7 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
   const reaction = parseReactionEnvelope(message.text);
   if (reaction) {
     const reactorAddress = message.direction === "outgoing" ? (engine.address || "") : (message.sender || "");
-    if (reaction.action === "add") applyLocalReaction(conversationEntry, reaction.targetTxId, reactorAddress, reaction.emoji);
+    if (reaction.action === "add") applyLocalReaction(conversationEntry, reaction.targetTxId, reactorAddress, reaction.emoji, messageEventTime(message));
     else removeLocalReaction(conversationEntry, reaction.targetTxId, reactorAddress);
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -14921,7 +14959,7 @@ function importPhoneChatArchive(json) {
         // Same interception as live sync: a reaction only ever updates the
         // reactions store — it never becomes a visible chat row.
         const reactor = String(archiveMessage?.senderAddress || (archiveMessage?.isOutgoing ? engine.address || "" : contactAddress));
-        if (reaction.action === "add") applyLocalReaction(conversationEntry, reaction.targetTxId, reactor, reaction.emoji);
+        if (reaction.action === "add") applyLocalReaction(conversationEntry, reaction.targetTxId, reactor, reaction.emoji, phoneArchiveTimestampMs(archiveMessage));
         else removeLocalReaction(conversationEntry, reaction.targetTxId, reactor);
         if (txid) knownTxids.add(txid);
         changed = true;
