@@ -43,7 +43,8 @@ import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
-import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog } from "./dialogs.js";
+import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet } from "./dialogs.js";
+import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
 // Step 25 shell:
 // - Keeps KaspaEngine modules intact.
@@ -1156,6 +1157,25 @@ function renderTextWithMentions(container, rawText) {
 }
 
 /** Preview card for the first link in a message, or null. */
+// Links the user explicitly asked to preview, so a re-render keeps showing them.
+const approvedPreviewUrls = new Set();
+function buildTapToLoadCard(url, conversationEntry) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "link-tap-to-load";
+  let host = "";
+  try { host = new URL(url).host; } catch { host = ""; }
+  card.innerHTML = `
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5a4 4 0 0 0 5.66 0l2.84-2.84a4 4 0 0 0-5.66-5.66l-1.42 1.42"/><path d="M14 10.5a4 4 0 0 0-5.66 0L5.5 13.34a4 4 0 0 0 5.66 5.66l1.42-1.42"/></svg>
+    <span><strong>Tap to load preview</strong>${host ? `<small>${escapeHtml(host)}</small>` : ""}</span>`;
+  card.addEventListener("click", (event) => {
+    event.stopPropagation();
+    approvedPreviewUrls.add(url);
+    renderMessages(conversationEntry);
+  });
+  return card;
+}
+
 function buildLinkPreviewCard(url) {
   const nextcloud = nextcloudShareDownloadUrl(url);
   if (nextcloud) return buildNextcloudRevealCard(url, nextcloud.downloadUrl);
@@ -1287,11 +1307,28 @@ function startReplyTo(messageId) {
   if (!message) return;
   replyingToMessageId = messageId;
   if (replyBannerPreview) replyBannerPreview.textContent = replyPreviewTextFor(message);
+  const replyBannerTitle = replyBanner?.querySelector("[data-reply-banner-title]");
+  if (replyBannerTitle) {
+    const contact = contactForConversation(conversationEntry);
+    replyBannerTitle.textContent = `Replying to ${message.direction === "outgoing" ? "yourself" : (displayNameForAddress(contact) || shortAddress(contact?.address || ""))}`;
+  }
   if (replyBanner) replyBanner.hidden = false;
   composer.elements.message?.focus();
 }
 
 document.querySelector("[data-cancel-reply]")?.addEventListener("click", cancelReply);
+
+// The dead space beside the header chip takes you to the start of the conversation (iOS
+// jumpToChatStart). The chip itself still opens Chat Info.
+document.querySelector(".conversation-header")?.addEventListener("click", (event) => {
+  if (event.target.closest("button")) return;
+  if (!activeConversationId || !messageArea) return;
+  const first = messageArea.querySelector("[data-message-id]");
+  if (!first) return;
+  messageArea.scrollTo({ top: 0, behavior: "smooth" });
+  first.classList.add("message-highlight");
+  window.setTimeout(() => first.classList.remove("message-highlight"), 1200);
+});
 
 // Scrolls to and briefly highlights the message a reply-quote points at,
 // within the currently open conversation only (matches iOS's
@@ -1300,7 +1337,7 @@ function jumpToMessageByTxid(txid) {
   if (!txid || !activeConversationId) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const target = conversationEntry?.messages.find((entry) => entry.txid === txid || entry.id === txid);
-  if (!target) { showCopyToast("Original message not found."); return; }
+  if (!target) { showCopyToast("Original message not available."); return; }
   const el = messageArea.querySelector(`[data-message-id="${CSS.escape(target.id)}"]`);
   if (!el) return;
   el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -2623,6 +2660,19 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   return state;
 }
 
+// The chat list's row timestamp (iOS ChatListView.formatDate): a clock time only for today, so
+// a three-day-old chat does not read as if it happened at 3:03 this afternoon.
+function formatChatListDate(timestamp) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  const now = new Date();
+  const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((midnight(now) - midnight(date)) / 86400000);
+  if (days === 0) return formatTime(timestamp);
+  if (days === 1) return "Yesterday";
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
 function formatTime(timestamp) {
   if (!timestamp) return "";
   return new Intl.DateTimeFormat(undefined, {
@@ -2654,6 +2704,7 @@ function buildDaySeparatorElement(ts) {
   sep.className = "message-day-separator";
   const pill = document.createElement("span");
   pill.textContent = daySeparatorLabel(ts);
+  if (pill.textContent === "Today") sep.classList.add("today");
   sep.append(pill);
   return sep;
 }
@@ -2853,8 +2904,10 @@ function toggleSelectedMessage(messageId) {
 function openDeleteSelectedConfirmation() {
   if (!selectedMessageIds.size || !deleteConfirmModal) return;
   const count = selectedMessageIds.size;
+  const title = deleteConfirmModal.querySelector("h2");
+  if (title) title.textContent = `Delete ${count} Message${count === 1 ? "" : "s"}?`;
   if (deleteConfirmCopy) {
-    deleteConfirmCopy.textContent = `${count} message${count === 1 ? "" : "s"} will be hidden from this browser only. They cannot be removed from Kaspa.`;
+    deleteConfirmCopy.textContent = "This only deletes the message from this device - the recipient still has their own copy, and the encrypted transaction remains permanently on the Kaspa blockchain, visible to anyone but unreadable without your keys. This cannot be undone.";
   }
   deleteConfirmModal.hidden = false;
 }
@@ -2972,6 +3025,41 @@ function openMessageDetails(messageId) {
   messageDetailsModal.hidden = false;
 }
 
+// The delivery glyph that leads an outgoing message's preview (iOS ConversationRow): check for
+// sent, clock while pending, red mark when it failed. Replaces the old literal "You: ".
+function chatListDeliveryGlyphHtml(message) {
+  if (!message || message.direction !== "outgoing") return "";
+  const status = String(message.status || "");
+  if (status === MESSAGE_STATUSES.FAILED) {
+    return `<svg class="chat-row-delivery failed" viewBox="0 0 24 24" aria-label="Not delivered" role="img"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>`;
+  }
+  if (status === MESSAGE_STATUSES.CONFIRMED || status === MESSAGE_STATUSES.SENT) {
+    return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-label="Sent" role="img"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>`;
+  }
+  return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-label="Sending" role="img"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>`;
+}
+
+// What the chat list shows for a message (iOS ConversationRow.formatPreview). Differs from the
+// notification wording: a chess invite is "Chess game - 3 | 2" here, not a play-by-play.
+function chatListPreviewText(message) {
+  if (!message) return "";
+  const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
+  if (chessEnv) {
+    const control = chessEnv.kind === "invite" ? Chess.chessTimeControlLabel(Chess.chessTimeControlFromInvite(chessEnv)) : null;
+    return control ? `♟️ Chess game - ${control}` : "♟️ Chess game";
+  }
+  const replyEnvelope = parseReplyEnvelope(message.text);
+  if (replyEnvelope) return replyEnvelope.text;
+  const fileMime = sniffInlineFileMime(message.text);
+  if (fileMime != null) {
+    if (fileMime.startsWith("image/")) return "Photo";
+    if (fileMime.startsWith("audio/")) return "Voice message";
+    if (fileMime.startsWith("video/")) return "Video";
+    return "File";
+  }
+  return message.text || "";
+}
+
 function conversationPreview(conversationEntry) {
   const contact = contactForConversation(conversationEntry);
   const last = lastMessageFor(conversationEntry);
@@ -2982,15 +3070,17 @@ function conversationPreview(conversationEntry) {
   // message got reacted to rather than showing stale message text.
   if (reactionEvent && (!last || reactionEvent.timestamp >= last.createdAt)) {
     const targetMessage = conversationEntry.messages.find((entry) => entry.txid === reactionEvent.targetTxId || entry.id === reactionEvent.targetTxId);
+    const reactedByMe = Boolean(reactionEvent.reactorAddress) && reactionEvent.reactorAddress === engine.address;
     if (targetMessage) {
-      return targetMessage.direction === "outgoing" ? "Reacted to your message" : "Reacted to their message";
+      const targetIsMine = targetMessage.direction === "outgoing";
+      if (reactedByMe) return targetIsMine ? "You reacted to your message" : "You reacted to their message";
+      return targetIsMine ? "Reacted to your message" : "Reacted to their message";
     }
-    return "Reacted to a message";
+    return reactedByMe ? "You reacted to a message" : "Reacted to a message";
   }
 
-  if (!last) return shortAddress(contact?.address || "");
-  const prefix = last.direction === "outgoing" ? "You: " : "";
-  return `${prefix}${displayTextForMessage(last)}`;
+  if (!last) return "";
+  return chatListPreviewText(last);
 }
 
 // Effective recency for chat-list ordering: the newest of the stored lastActivityAt and the
@@ -10454,12 +10544,17 @@ function visibleChatConversations() {
   return sortedConversations().filter((conversationEntry) => {
     const contact = contactForConversation(conversationEntry);
     if (!contact) return false;
-    const preview = conversationPreview(conversationEntry);
-    return (
-      contact.name.toLowerCase().includes(query) ||
-      contact.address.toLowerCase().includes(query) ||
-      preview.toLowerCase().includes(query)
-    );
+    if (!query) return true;
+    if (displayNameForAddress(contact).toLowerCase().includes(query)) return true;
+    if (contact.name.toLowerCase().includes(query)) return true;
+    if (contact.address.toLowerCase().includes(query)) return true;
+    // Every message body, not just the last one - a search for something said last week has to
+    // find the chat. Media envelopes (multi-KB base64) are skipped by size, as on iOS.
+    return (conversationEntry.messages || []).some((message) => {
+      const text = String(message?.text || "");
+      if (!text || text === "📤 Sent via another device" || text.length > 4096) return false;
+      return text.toLowerCase().includes(query);
+    });
   });
 }
 
@@ -10508,22 +10603,30 @@ function renderChats() {
       const contact = contactForConversation(conversationEntry);
       const last = lastMessageFor(conversationEntry);
       const preview = conversationPreview(conversationEntry);
-      const time = last ? formatTime(last.createdAt) : formatTime(conversationEntry.createdAt);
+      // No time at all before the first message, as on iOS - the row's own creation date is
+      // not activity.
+      const time = last ? formatChatListDate(last.createdAt) : "";
       const selected = selectedChatConversationIds.has(conversationEntry.id);
+      // Silenced: no banner from this conversation, ever. Worth a mark on the row - a chat that
+      // never pings otherwise looks like a chat nobody is using.
+      const silenced = getContactNotifyOverride(contact?.address) === "off";
       return `
         <button class="chat-row${chatSelectionModeActive ? " selecting" : ""}${selected ? " selected" : ""}${conversationEntry.id === activeConversationId ? " active" : ""}" type="button" data-conversation-id="${escapeHtml(conversationEntry.id)}">
           ${chatSelectionModeActive ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
           <span class="chat-row-time">${escapeHtml(time)}</span>
           ${avatarHtmlFor(contact)}
           <span class="chat-meta">
-            <strong>${escapeHtml(displayNameForAddress(contact))}</strong>
-            <span>${escapeHtml(preview)}</span>
+            <strong>${escapeHtml(displayNameForAddress(contact))}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
+            ${last
+              ? `<span>${chatListDeliveryGlyphHtml(last)}${escapeHtml(preview)}</span>`
+              : `<span class="chat-row-none">No messages yet</span>`}
           </span>
           ${conversationEntry.unreadCount > 0 ? `<b class="unread-badge">${conversationEntry.unreadCount > 99 ? "99+" : conversationEntry.unreadCount}</b>` : ``}
         </button>
       `;
     })
-    .join("");
+    .join("")
+    + `<div class="chat-list-footer">${visibleConversations.length} chat${visibleConversations.length === 1 ? "" : "s"}</div>`;
 
   refreshVisibleKnsNames(visibleConversations);
 }
@@ -10597,6 +10700,56 @@ function createDeliveryStatusIcon(message) {
   return icon;
 }
 
+const LONG_MESSAGE_BYTES = 2000;
+const LONG_MESSAGE_PREVIEW_CHARS = 500;
+function isSingleEmojiOnlyMessage(text) {
+  const value = String(text || "");
+  if (value.length > 32) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  // One grapheme, and it has to be an emoji - a lone "a" does not get the treatment.
+  const graphemes = typeof Intl !== "undefined" && Intl.Segmenter
+    ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(trimmed)].length
+    : [...trimmed].length;
+  if (graphemes !== 1) return false;
+  return /\p{Extended_Pictographic}/u.test(trimmed);
+}
+
+// The capsule above a bubble that says what kind of message it is (iOS messageTypeIndicator):
+// handshakes, legacy payments, KNS transfers, photos and audio. Plain text gets none.
+function messageTypeCapsule(message, { hasPaymentCard = false } = {}) {
+  const text = String(message.text || "");
+  let kind = null;
+  if (message.messageType === "handshake") {
+    const completed = /handshake completed|\[request accepted\]/i.test(text) || /completed/i.test(String(message.note || ""));
+    kind = completed ? "handshake-done" : "handshake";
+  } else if (message.messageType === "payment" || message.transport === "kaspa-payment" || message.transport === "kaspa-payment-rest") {
+    if (!hasPaymentCard) kind = "payment";
+  } else if (text.length <= 256 && /^(sent|received) \S+ domain$/i.test(text.trim())) {
+    kind = "domain";
+  } else {
+    const mime = sniffInlineFileMime(text);
+    if (mime != null) kind = mime.startsWith("image/") ? "photo" : "audio";
+  }
+  if (!kind) return null;
+  const labels = {
+    handshake: "Request to communicate", "handshake-done": "Handshake completed", payment: "Payment",
+    domain: "Domain", photo: "Photo", audio: "Audio",
+  };
+  const icons = {
+    handshake: '<svg viewBox="0 0 24 24"><path d="M7 11.5 3.5 15a2 2 0 0 0 2.83 2.83L9.5 14.7"/><path d="m9.5 14.7 1.5 1.5a2 2 0 0 0 2.83-2.83l-3.9-3.9a3 3 0 0 0-4.24 0L4.5 11.5"/><path d="M13.5 8.5 16 6a2 2 0 0 1 2.83 0l1.67 1.67a2 2 0 0 1 0 2.83L18 13"/></svg>',
+    "handshake-done": '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>',
+    payment: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M13.8 9.4c-.4-.7-1.1-1.15-2-1.15-1.24 0-2.05.83-2.05 1.83 0 1 .8 1.5 2.05 1.8 1.25.3 2.05.8 2.05 1.8 0 1-.81 1.84-2.05 1.84-.9 0-1.6-.45-2-1.15M11.85 6.7v10.6"/></svg>',
+    domain: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"/></svg>',
+    photo: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/></svg>',
+    audio: '<svg viewBox="0 0 24 24"><path d="M4 12h2l2-5 3 10 3-8 2 3h4"/></svg>',
+  };
+  const capsule = document.createElement("span");
+  capsule.className = `message-type-capsule ${kind}`;
+  capsule.innerHTML = `${icons[kind]}<span>${escapeHtml(labels[kind])}</span>`;
+  return capsule;
+}
+
 function renderMessages(conversationEntry) {
   // The header's name and bio were written just before this; re-measure so the thread's top inset
   // matches whatever height they came out at.
@@ -10625,7 +10778,10 @@ function renderMessages(conversationEntry) {
   // learns that the relationship just became mutual — it hides mid-conversation
   // the moment a reciprocal message lands, with no reload.
   if (conversationEntry.id === activeConversationId) updateHandshakeWarningBanner();
-  if (requestContact?.relationshipState === "incoming-request") {
+  // The request renders where its message sits (iOS handshakeRequestBubble); the pinned card
+  // remains only for a request that arrived without a message row to carry it.
+  const hasHandshakeRow = messages.some((m) => m?.messageType === "handshake" && m?.direction === "incoming");
+  if (requestContact?.relationshipState === "incoming-request" && !hasHandshakeRow) {
     const card = document.createElement("section");
     card.className = "handshake-request-card";
     card.innerHTML = `
@@ -10722,7 +10878,20 @@ function renderMessages(conversationEntry) {
     }
 
     const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
-    if (chessEnv) {
+    const isPendingHandshakeRequest = message.messageType === "handshake" && message.direction === "incoming"
+      && requestContact?.relationshipState === "incoming-request";
+    if (isPendingHandshakeRequest) {
+      bubble.classList.add("handshake-request-bubble");
+      bubble.innerHTML = `
+        <div class="handshake-request-line">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11.5 3.5 15a2 2 0 0 0 2.83 2.83L9.5 14.7"/><path d="m9.5 14.7 1.5 1.5a2 2 0 0 0 2.83-2.83l-3.9-3.9a3 3 0 0 0-4.24 0L4.5 11.5"/><path d="M13.5 8.5 16 6a2 2 0 0 1 2.83 0l1.67 1.67a2 2 0 0 1 0 2.83L18 13"/><path d="M11 6.5 12.5 5a2 2 0 0 1 2.83 0"/></svg>
+          <span>Contact has requested permission to communicate</span>
+        </div>
+        <div class="handshake-request-actions">
+          <button type="button" class="primary-button" data-accept-handshake>Accept</button>
+          <button type="button" class="secondary-button" data-decline-handshake>Decline</button>
+        </div>`;
+    } else if (chessEnv) {
       // The latest chess message of a game renders as a live board thumbnail with
       // status (so on your turn you see the position); earlier ones stay compact.
       const isLatestChess = (message.createdAt || 0) >= (latestChessByGame.get(chessEnv.gameId) ?? 0);
@@ -10763,8 +10932,11 @@ function renderMessages(conversationEntry) {
     if (replyEnvelope) {
       const quote = document.createElement("div");
       quote.className = "message-reply-quote";
+      // The quoted message's sender in accent, as iOS shows it - "Reply" said nothing about
+      // whose words these were.
       const label = document.createElement("strong");
-      label.textContent = "Reply";
+      const quotedIsMine = replyEnvelope.replyToSender && replyEnvelope.replyToSender === engine.address;
+      label.textContent = quotedIsMine ? "You" : (displayNameForAddress(requestContact) || shortAddress(requestContact?.address || ""));
       const preview = document.createElement("span");
       preview.textContent = replyEnvelope.replyToPreview || "Message";
       quote.append(label, preview);
@@ -10809,10 +10981,33 @@ function renderMessages(conversationEntry) {
     } else {
       const text = document.createElement("span");
       text.className = "message-text";
-      const bodyText = replyEnvelope ? replyEnvelope.text : message.text;
+      const fullBodyText = replyEnvelope ? replyEnvelope.text : message.text;
+      // A giant string (a media payload that failed to parse, or someone's essay) makes the whole
+      // thread's layout janky; past 2000 bytes it shows a 500-character preview and opens in
+      // full on demand. A lone emoji loses its bubble and grows, as iMessage does.
+      const isLongMessage = new TextEncoder().encode(String(fullBodyText || "")).length > LONG_MESSAGE_BYTES;
+      const bodyText = isLongMessage ? `${String(fullBodyText).slice(0, LONG_MESSAGE_PREVIEW_CHARS)}…` : fullBodyText;
+      if (!isLongMessage && isSingleEmojiOnlyMessage(bodyText)) bubble.classList.add("emoji-only");
       const linkUrls = renderTextWithMentions(text, bodyText);
+      if (isLongMessage) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "message-show-more";
+        more.textContent = "Show More";
+        more.addEventListener("click", (event) => {
+          event.stopPropagation();
+          alertDialog({ title: "Message", message: fullBodyText, confirmLabel: "Done" });
+        });
+        text.append(more);
+      }
       const previewable = linkUrls.find(isPreviewableUrl);
-      const card = previewable ? buildLinkPreviewCard(previewable) : null;
+      // Only an accepted contact's links fetch on render. A stranger's link renders as a neutral
+      // "Tap to load preview" card and only touches the link's server when you tap it; your own
+      // outgoing links and anything already resolved this session show as before.
+      const autoFetch = message.direction === "outgoing"
+        || isAcceptedContact(requestContact, conversationEntry)
+        || (previewable && (linkPreviewCache.has(previewable) || approvedPreviewUrls.has(previewable)));
+      const card = previewable ? (autoFetch ? buildLinkPreviewCard(previewable) : buildTapToLoadCard(previewable, conversationEntry)) : null;
       // A link-only message renders as just the preview card (no chat bubble, timestamp below),
       // matching iOS. With a caption or other text, show the text bubble + card beneath it.
       const linkOnly = card && !replyEnvelope && linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0];
@@ -10870,12 +11065,23 @@ function renderMessages(conversationEntry) {
       if (messageSelectionMode) return;
       openOneToOneMessageMenu(message.id, event.clientX, event.clientY);
     });
+    // Double-click opens the quick-reaction bar (iOS double-tap): the six quick emoji, a "+"
+    // into the full picker, and a reply shortcut - an explicit choice between reacting and
+    // replying rather than jumping straight into reply mode.
+    bubble.addEventListener("dblclick", (event) => {
+      if (messageSelectionMode || isPendingHandshakeRequest) return;
+      event.preventDefault();
+      openQuickReactionBar(conversationEntry, message, bubble);
+    });
 
     const deliveryIcon = createDeliveryStatusIcon(message);
-    if (detachedLinkCard) {
+    const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
+    if (detachedLinkCard || typeCapsule) {
       const stack = document.createElement("div");
       stack.className = "message-bubble-stack";
-      stack.append(bubble, detachedLinkCard);
+      if (typeCapsule) stack.append(typeCapsule);
+      stack.append(bubble);
+      if (detachedLinkCard) stack.append(detachedLinkCard);
       row.append(selector, avatarSlot, stack);
     } else {
       row.append(selector, avatarSlot, bubble);
@@ -10960,6 +11166,10 @@ function openConversation(conversationId) {
   if (syncStatus) syncStatus.textContent = syncLabel(conversationEntry);
   renderMessages(conversationEntry);
   activateComposerMode("message");
+  if (composer?.elements?.message && conversationEntry.draft) {
+    composer.elements.message.value = conversationEntry.draft;
+    autoGrowComposer();
+  }
   window.setTimeout(() => composer.elements.message?.focus(), 0);
 
   // Fresh-address payment pools: the lazy once-per-contact offer, the pool-of-2
@@ -12463,8 +12673,22 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   }
   const count = selectedChatConversationIds.size;
   if (!count) return;
-  if (!await confirmText(`Delete ${count} chat${count === 1 ? "" : "s"}? This removes the conversation and contact locally. This cannot be undone.`)) return;
-  const idsToDelete = new Set(selectedChatConversationIds);
+  const confirmed = await confirmDialog({
+    title: `Delete ${count} Chat${count === 1 ? "" : "s"}?`,
+    message: "This permanently deletes every message in each selected chat from this device. This cannot be undone.",
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!confirmed) return;
+  deleteConversationsByIds([...selectedChatConversationIds]);
+  setChatSelectionMode(false);
+});
+
+// Removes chats and their contacts from this device. Shared by the Select-mode bulk bar and the
+// row menu, so both delete exactly the same way (iOS deleteConversations).
+function deleteConversationsByIds(ids) {
+  const idsToDelete = new Set(ids);
+  if (!idsToDelete.size) return;
   const contactIdsToDelete = new Set(
     state.conversations.filter((entry) => idsToDelete.has(entry.id)).map((entry) => entry.contactId),
   );
@@ -12478,8 +12702,54 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   if (activeConversationId && idsToDelete.has(activeConversationId)) setActiveConversationId(null);
   refreshSubscriptionAddresses({ restart: true });
   persistState();
-  setChatSelectionMode(false);
-  showCopyToast(`Deleted ${count} chat${count === 1 ? "" : "s"}`);
+  renderChats();
+  showCopyToast(idsToDelete.size === 1 ? "Chat deleted." : `${idsToDelete.size} chats deleted.`);
+}
+
+// Right-click on a chat row (iOS long-press): Read/Unread show contextually (the relevant one
+// only, matching Mail) and reuse the same paths as the Select-mode bulk bar; Delete routes
+// through its own confirmation. Nothing while Select mode is active - the bulk bar owns actions.
+chatList.addEventListener("contextmenu", async (event) => {
+  const row = event.target.closest("[data-conversation-id]");
+  if (!row || chatSelectionModeActive) return;
+  event.preventDefault();
+  const conversationEntry = state.conversations.find((entry) => entry.id === row.dataset.conversationId);
+  const contact = contactForConversation(conversationEntry);
+  if (!conversationEntry || !contact) return;
+  const isSilent = getContactNotifyOverride(contact.address) === "off";
+  const choice = await chooseDialog({
+    title: displayNameForAddress(contact),
+    options: [
+      conversationEntry.unreadCount > 0
+        ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this chat." }
+        : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again." },
+      {
+        id: "silence",
+        title: isSilent ? "Unsilence" : "Silence",
+        subtitle: isSilent ? "Notifications from this chat resume." : "No notification from this chat, whatever your app-wide setting says.",
+      },
+      { id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true },
+    ],
+  });
+  if (!choice) return;
+  if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }
+  if (choice === "unread") { conversationEntry.unreadCount = Math.max(1, Number(conversationEntry.unreadCount || 0)); persistState(); renderChats(); return; }
+  if (choice === "silence") {
+    // Silencing is the existing per-contact notification override set to "off" - the one the
+    // notification path already consults - not a second, parallel mute flag.
+    setContactPref(contact.address, "notify", isSilent ? undefined : "off");
+    renderChats();
+    return;
+  }
+  if (choice === "delete") {
+    const confirmed = await confirmDialog({
+      title: "Delete Chat?",
+      message: "This permanently deletes every message in this chat from this device. This cannot be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (confirmed) deleteConversationsByIds([conversationEntry.id]);
+  }
 });
 
 document.querySelector("[data-back-to-chats]").addEventListener("click", () => {
@@ -12687,7 +12957,7 @@ importPayloadForm?.addEventListener("submit", (event) => {
 let chatSearchDebounce = null;
 searchInput.addEventListener("input", () => {
   if (chatSearchDebounce) clearTimeout(chatSearchDebounce);
-  chatSearchDebounce = window.setTimeout(() => { chatSearchDebounce = null; renderChats(); }, 120);
+  chatSearchDebounce = window.setTimeout(() => { chatSearchDebounce = null; renderChats(); }, 180);
 });
 
 messageArea.addEventListener("click", (event) => {
@@ -12828,7 +13098,7 @@ async function runEngineSendPipeline(conversationId, messageId) {
     await engine.sendMessageOnchain({
       envelope,
       amountKas: onchainAmountKas(),
-      feeKas: "0",
+      feeKas: message.feeOverrideKas || "0",
       onStatus: (patch) => {
         updateMessageStatus(conversationId, messageId, patch);
         if (patch.protocolString) updateMessageStatus(conversationId, messageId, { protocolString: patch.protocolString });
@@ -12842,7 +13112,7 @@ async function runEngineSendPipeline(conversationId, messageId) {
   }
 }
 
-function queueConversationMessage(conversationId, text) {
+function queueConversationMessage(conversationId, text, { feeOverrideKas = null } = {}) {
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   if (!conversationEntry) return;
 
@@ -12879,6 +13149,8 @@ function queueConversationMessage(conversationId, text) {
     transport: transportMode,
     createdAt,
   });
+  // A fee the user set on the pill for THIS message (iOS feeOverride); the pipeline reads it.
+  if (feeOverrideKas != null) message.feeOverrideKas = String(feeOverrideKas);
   appendIncomingOrReactionMessage(conversationEntry, message);
 
   // Paint the bubble immediately, then do the heavy work. persistState does two full JSON
@@ -12959,6 +13231,7 @@ async function refreshComposerAvailableBalance() {
       balanceKas = balance.totalKas;
     }
     if (token !== composerBalanceToken || composerMode !== "kas") return;
+    composerAvailableKas = Number(balanceKas);
     renderAvailableBalanceBanner(balanceKas, spendingFunded, contact);
   } catch {
     if (token !== composerBalanceToken || composerMode !== "kas") return;
@@ -12972,6 +13245,64 @@ availableBalanceBanner?.addEventListener("click", () => {
   openSpendingManageScreen();
 });
 
+// Payment-mode entry unit (iOS KaspaFiatAmountState): the leading button flips KAS/fiat and
+// carries the typed number across converted; the label beside Max shows the other unit live.
+let paymentUnit = "kas";
+let paymentPrice = null;
+let composerAvailableKas = null;
+const paymentUnitToggle = document.querySelector("[data-payment-unit-toggle]");
+const paymentConversionLabel = document.querySelector("[data-payment-conversion]");
+const paymentMaxButton = document.querySelector("[data-payment-max]");
+function paymentKasFromInput() {
+  const input = composer?.elements?.message;
+  const entered = Number(String(input?.value || "").trim().replace(",", "."));
+  if (!Number.isFinite(entered) || entered <= 0) return null;
+  if (paymentUnit !== "fiat") return entered;
+  return paymentPrice > 0 ? entered / paymentPrice : null;
+}
+function formatKasPlain(kas) {
+  return Number(kas).toFixed(8).replace(/\.?0+$/, "");
+}
+function refreshPaymentUnitUi() {
+  const input = composer?.elements?.message;
+  if (!input || composerMode !== "kas") return;
+  const symbol = currencyMeta().symbol || selectedCurrency.toUpperCase();
+  if (paymentUnitToggle) {
+    paymentUnitToggle.textContent = paymentUnit === "fiat" ? symbol : "";
+    paymentUnitToggle.classList.toggle("fiat", paymentUnit === "fiat");
+    paymentUnitToggle.disabled = !(paymentPrice > 0);
+    paymentUnitToggle.title = paymentPrice > 0 ? (paymentUnit === "fiat" ? "Enter the amount in KAS" : `Enter the amount in ${selectedCurrency.toUpperCase()}`) : "No live price yet";
+  }
+  input.placeholder = paymentUnit === "fiat" ? selectedCurrency.toUpperCase() : "Amount (KAS)";
+  const kas = paymentKasFromInput();
+  if (paymentConversionLabel) {
+    let label = "";
+    if (kas != null) label = paymentUnit === "fiat" ? `${formatKasPlain(kas)} KAS` : (paymentPrice > 0 ? formatFiatValue(kas, paymentPrice) : "");
+    paymentConversionLabel.textContent = label;
+    paymentConversionLabel.hidden = !label;
+  }
+}
+paymentUnitToggle?.addEventListener("click", () => {
+  if (!(paymentPrice > 0)) return;
+  const input = composer?.elements?.message;
+  const kas = paymentKasFromInput();
+  paymentUnit = paymentUnit === "fiat" ? "kas" : "fiat";
+  if (input) input.value = kas == null ? "" : (paymentUnit === "fiat" ? (kas * paymentPrice).toFixed(2) : formatKasPlain(kas));
+  refreshPaymentUnitUi();
+  input?.focus();
+});
+paymentMaxButton?.addEventListener("click", () => {
+  const input = composer?.elements?.message;
+  if (!input) return;
+  if (composerAvailableKas == null) { showCopyToast("Balance unavailable right now."); return; }
+  // The same headroom the send itself reserves for the network fee.
+  const maxKas = Math.max(0, composerAvailableKas - 0.0001);
+  input.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : formatKasPlain(maxKas);
+  refreshPaymentUnitUi();
+  input.focus();
+});
+composer?.elements?.message?.addEventListener("input", () => { if (composerMode === "kas") refreshPaymentUnitUi(); });
+
 async function activateComposerMode(mode) {
   const input = composer?.elements?.message;
   if (!input) return;
@@ -12981,6 +13312,12 @@ async function activateComposerMode(mode) {
   input.inputMode = composerMode === "kas" ? "decimal" : "text";
   input.setAttribute("aria-label", composerMode === "kas" ? "KAS amount" : "Message");
   setComposerHint(composerMode === "kas" ? "Amount (KAS)" : "Message");
+  paymentUnit = "kas";
+  if (paymentConversionLabel) paymentConversionLabel.hidden = true;
+  if (composerMode === "kas") {
+    refreshPaymentUnitUi();
+    fetchKasPrice(selectedCurrency).then((price) => { paymentPrice = price; refreshPaymentUnitUi(); });
+  }
   hideFeeEstimateBanner();
   // Message mode re-shows the handshake warning if the relationship still needs
   // it; payment mode hides it so it can't crowd the Available/fee pills.
@@ -15381,6 +15718,38 @@ composer.elements.message?.addEventListener("paste", async (event) => {
   if (file) await attachPhotoBlob(file);
 });
 
+// The three shortcuts that live in the input bubble on iOS (camera, mic, Kaspa logo), plus the
+// desktop-only emoji picker beside them.
+document.querySelector("[data-composer-camera]")?.addEventListener("click", () => {
+  closeComposerMenu();
+  activateComposerMode("message");
+  photoFileInput?.click();
+});
+document.querySelector("[data-composer-mic]")?.addEventListener("click", () => {
+  closeComposerMenu();
+  activateComposerMode("message");
+  startVoiceRecording();
+});
+document.querySelector("[data-composer-kas]")?.addEventListener("click", () => {
+  closeComposerMenu();
+  activateComposerMode(composerMode === "kas" ? "message" : "kas");
+});
+document.querySelector("[data-composer-emoji]")?.addEventListener("click", (event) => {
+  closeComposerMenu();
+  const input = composer?.elements?.message;
+  if (!input) return;
+  openComposerEmojiPopover({
+    anchor: event.currentTarget,
+    onSelect: (emoji) => {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      input.setRangeText(emoji, start, end, "end");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    },
+  });
+});
+
 composerModeButtons.forEach((button) => {
   button.addEventListener("click", () => {
     const mode = button.dataset.composerMode;
@@ -15413,6 +15782,7 @@ document.addEventListener("click", (event) => {
 function hideFeeEstimateBanner() {
   if (feeEstimateDebounceTimer) window.clearTimeout(feeEstimateDebounceTimer);
   feeEstimateDebounceTimer = null;
+  composerFeeEstimateKas = null;
   if (feeEstimateBanner) feeEstimateBanner.hidden = true;
 }
 
@@ -15496,19 +15866,64 @@ function scheduleFeeEstimate() {
   }
   if (feeEstimateDebounceTimer) window.clearTimeout(feeEstimateDebounceTimer);
   const token = ++feeEstimateRequestToken;
+  // An override the user typed stays on the pill until the message goes; no re-estimating
+  // underneath it.
+  if (composerFeeOverrideKas != null) { renderFeePill(composerFeeOverrideKas, { estimating: false }); return; }
+  renderFeePill(composerFeeEstimateKas, { estimating: true });
   feeEstimateDebounceTimer = window.setTimeout(async () => {
     try {
       const payloadBytes = estimateCommPayloadBytes(text);
       const feeKas = await engine.estimateMessageFee(payloadBytes);
       if (token !== feeEstimateRequestToken || !feeEstimateBanner) return;
-      if (feeKas == null) { feeEstimateBanner.hidden = true; return; }
-      feeEstimateBanner.textContent = `Estimated fee ${feeKas} KAS`;
-      feeEstimateBanner.hidden = false;
+      composerFeeEstimateKas = feeKas == null ? null : String(feeKas);
+      renderFeePill(composerFeeEstimateKas, { estimating: false });
     } catch {
-      if (token === feeEstimateRequestToken && feeEstimateBanner) feeEstimateBanner.hidden = true;
+      if (token === feeEstimateRequestToken && feeEstimateBanner) renderFeePill(null, { estimating: false });
     }
   }, 450);
 }
+
+// iOS feeBubble: "fee: -------- KAS" shimmering while the estimate is in flight, the value
+// underlined once it lands (a tap edits it), "fee: -- KAS" when there is none.
+let composerFeeEstimateKas = null;
+let composerFeeOverrideKas = null;
+function formatKasExact(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(8) : "--";
+}
+function renderFeePill(feeKas, { estimating = false } = {}) {
+  if (!feeEstimateBanner) return;
+  feeEstimateBanner.classList.toggle("estimating", estimating);
+  feeEstimateBanner.classList.toggle("overridden", composerFeeOverrideKas != null);
+  if (estimating && feeKas == null) feeEstimateBanner.textContent = "fee: -------- KAS";
+  else if (feeKas == null) feeEstimateBanner.textContent = "fee: -- KAS";
+  else feeEstimateBanner.textContent = `fee: ${formatKasExact(feeKas)} KAS`;
+  feeEstimateBanner.hidden = false;
+}
+feeEstimateBanner?.addEventListener("click", async () => {
+  if (feeEstimateBanner.classList.contains("estimating")) return;
+  const current = composerFeeOverrideKas ?? composerFeeEstimateKas;
+  if (current == null) return;
+  const typed = await promptDialog({
+    title: "Adjust Network Fee",
+    label: "Fee (KAS)",
+    message: "If the network is busy, a higher fee can help your transaction confirm faster.",
+    initial: formatKasExact(current),
+    confirmLabel: "Save",
+  });
+  if (typed == null) return;
+  const normalized = String(typed).trim().replace(",", ".");
+  if (normalized === "" || normalized === "0") {
+    // Empty or zero reads as "Use Default": back to the live estimate.
+    composerFeeOverrideKas = null;
+    scheduleFeeEstimate();
+    return;
+  }
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value < 0) { showCopyToast("Enter a fee in KAS."); return; }
+  composerFeeOverrideKas = normalized;
+  renderFeePill(composerFeeOverrideKas, { estimating: false });
+});
 
 composer.elements.message?.addEventListener("input", scheduleFeeEstimate);
 
@@ -15554,9 +15969,20 @@ composer.addEventListener("submit", async (event) => {
 
   if (!text) return;
 
+  if (composerMode === "message" && text === "!!HANDSHAKE!!") {
+    input.value = "";
+    autoGrowComposer();
+    clearConversationDraft(activeConversationId);
+    await sendHandshakeFromComposer();
+    return;
+  }
+
   if (composerMode === "kas") {
     try {
-      await sendKasPayment(activeConversationId, text);
+      // Typed in fiat: the send is always in KAS.
+      const kasAmount = paymentUnit === "fiat" ? paymentKasFromInput() : null;
+      if (paymentUnit === "fiat" && kasAmount == null) { setStatus("No live price to convert with."); return; }
+      await sendKasPayment(activeConversationId, kasAmount != null ? formatKasPlain(kasAmount) : text);
     } catch (error) {
       setStatus(`Payment failed: ${error.message}`);
     }
@@ -15566,8 +15992,16 @@ composer.addEventListener("submit", async (event) => {
   input.value = "";
   autoGrowComposer();
   hideFeeEstimateBanner();
-  queueConversationMessage(activeConversationId, text);
+  clearConversationDraft(activeConversationId);
+  const feeOverride = composerFeeOverrideKas;
+  composerFeeOverrideKas = null;
+  queueConversationMessage(activeConversationId, text, { feeOverrideKas: feeOverride });
 });
+
+function clearConversationDraft(conversationId) {
+  const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
+  if (conversationEntry?.draft) { conversationEntry.draft = ""; schedulePersistState(); }
+}
 
 // The composer is a textarea so long messages wrap onto new lines. It grows with the
 // content up to its CSS max-height, then scrolls. Enter sends; Shift+Enter adds a newline.
@@ -15579,12 +16013,39 @@ function autoGrowComposer() {
 }
 composerInputField?.addEventListener("input", autoGrowComposer);
 composerInputField?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (event.key !== "Enter" || event.isComposing) return;
+  // Shift, Control or Option with Return all mean "new line" (iOS ComposerKeyCommandPolicy);
+  // a bare Return sends.
+  if (event.shiftKey || event.ctrlKey || event.altKey) {
+    if (event.shiftKey) return; // the textarea's own default already inserts the newline
     event.preventDefault();
-    if (typeof composer.requestSubmit === "function") composer.requestSubmit();
-    else composer.dispatchEvent(new Event("submit", { cancelable: true }));
+    const start = composerInputField.selectionStart ?? composerInputField.value.length;
+    const end = composerInputField.selectionEnd ?? start;
+    composerInputField.setRangeText("\n", start, end, "end");
+    composerInputField.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
   }
+  event.preventDefault();
+  if (typeof composer.requestSubmit === "function") composer.requestSubmit();
+  else composer.dispatchEvent(new Event("submit", { cancelable: true }));
 });
+// The composer text is a per-conversation draft, restored when the chat reopens (iOS
+// ChatService.setDraft). Saved on every keystroke; the state persists with the conversations.
+composerInputField?.addEventListener("input", () => {
+  if (composerMode !== "message" || !activeConversationId) return;
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  if (!conversationEntry) return;
+  const text = composerInputField.value;
+  const next = text.trim() ? text : "";
+  if ((conversationEntry.draft || "") === next) return;
+  conversationEntry.draft = next;
+  schedulePersistState();
+});
+let persistStateTimer = null;
+function schedulePersistState() {
+  if (persistStateTimer) window.clearTimeout(persistStateTimer);
+  persistStateTimer = window.setTimeout(() => { persistStateTimer = null; persistState(); }, 800);
+}
 
 
 if (indexerUrlInput) {
@@ -18532,6 +18993,73 @@ function openMsgContextMenu({ x, y, reaction, items }) {
   }, 0);
 }
 
+function openQuickReactionBar(conversationEntry, message, bubble) {
+  document.querySelectorAll(".quick-reaction-bar").forEach((el) => el.remove());
+  const targetTxId = message.txid || message.id;
+  const myAddress = engine.address || "";
+  const current = (conversationEntry.reactionsByTxId?.[targetTxId] || []).find((e) => e.reactorAddress === myAddress)?.emoji || null;
+  const bar = document.createElement("div");
+  bar.className = "quick-reaction-bar";
+  bar.innerHTML = `
+    <div class="quick-reaction-row">
+      <button type="button" class="quick-reaction-more" data-quick-more aria-label="More reactions">+</button>
+      ${quickReactionEmojis().map((emoji) => `<button type="button" class="quick-reaction-emoji${emoji === current ? " active" : ""}" data-quick-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join("")}
+    </div>
+    <button type="button" class="quick-reaction-reply" data-quick-reply aria-label="Reply">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+    </button>`;
+  document.body.append(bar);
+  const rect = bubble.getBoundingClientRect();
+  const size = bar.getBoundingClientRect();
+  const left = message.direction === "incoming" ? rect.left : rect.right - size.width;
+  bar.style.left = `${Math.max(8, Math.min(left, window.innerWidth - size.width - 8))}px`;
+  bar.style.top = `${Math.max(8, rect.top - size.height - 8)}px`;
+  const cleanup = () => {
+    bar.remove();
+    document.removeEventListener("mousedown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    messageArea?.removeEventListener("scroll", cleanup, true);
+  };
+  const onDown = (ev) => { if (!bar.contains(ev.target)) cleanup(); };
+  const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
+  window.setTimeout(() => {
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    messageArea?.addEventListener("scroll", cleanup, true);
+  }, 0);
+  bar.addEventListener("click", (event) => {
+    const emojiButton = event.target.closest("[data-quick-emoji]");
+    if (emojiButton) { cleanup(); recordEmojiRecent(emojiButton.dataset.quickEmoji); sendReaction(conversationEntry, message, emojiButton.dataset.quickEmoji); return; }
+    if (event.target.closest("[data-quick-reply]")) { cleanup(); startReplyTo(message.id); return; }
+    if (event.target.closest("[data-quick-more]")) {
+      cleanup();
+      openEmojiReactionPicker({ onPick: (emoji) => sendReaction(conversationEntry, message, emoji) });
+    }
+  });
+}
+
+// Who reacted with what (iOS ReactionsSheet): one section per emoji, most used first.
+function openReactionsSheet(conversationEntry, targetTxId) {
+  const entries = conversationEntry.reactionsByTxId?.[targetTxId] || [];
+  if (!entries.length) return;
+  const contact = contactForConversation(conversationEntry);
+  const groups = new Map();
+  for (const entry of entries) groups.set(entry.emoji, [...(groups.get(entry.emoji) || []), entry]);
+  const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  const nameFor = (address) => address === engine.address ? "You"
+    : (address === contact?.address ? (displayNameForAddress(contact) || shortAddress(address)) : shortAddress(address));
+  const html = sorted.map(([emoji, reactors]) => `
+    <div class="reactions-sheet-group">
+      <div class="reactions-sheet-head"><span class="reactions-sheet-emoji">${escapeHtml(emoji)}</span><span>${reactors.length === 1 ? "1 person" : `${reactors.length} people`}</span></div>
+      ${reactors.map((entry) => `
+        <div class="reactions-sheet-row">
+          ${entry.reactorAddress === engine.address ? selfAvatarHtml("chat-avatar reactions-sheet-avatar") : avatarHtmlFor(contact, "chat-avatar reactions-sheet-avatar")}
+          <span>${escapeHtml(nameFor(entry.reactorAddress))}</span>
+        </div>`).join("")}
+    </div>`).join("");
+  infoSheet({ title: entries.length === 1 ? "1 Reaction" : `${entries.length} Reactions`, html });
+}
+
 // Right-click menu for a 1:1 message: reactions + Reply, Copy, Select, Explorer, Info, Retry, Delete.
 function openOneToOneMessageMenu(messageId, x, y) {
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
@@ -18544,15 +19072,19 @@ function openOneToOneMessageMenu(messageId, x, y) {
   const items = [];
   items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startReplyTo(message.id) });
   if (isText) {
-    items.push({ label: "Copy", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(displayTextForMessage(message)).then(() => showCopyToast("Message copied")).catch(() => {}) });
+    items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(displayTextForMessage(message)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
   }
-  items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterMessageSelection(message.id) });
   if (message.txid) {
     items.push({ label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(message.txid), "_blank", "noopener,noreferrer") });
   }
+  const reactionCount = (conversationEntry.reactionsByTxId?.[targetTxId] || []).length;
+  if (reactionCount > 0) {
+    items.push({ label: `Reactions (${reactionCount})`, icon: MSG_MENU_ICONS.info, onClick: () => openReactionsSheet(conversationEntry, targetTxId) });
+  }
+  items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterMessageSelection(message.id) });
   items.push({ label: "Message info", icon: MSG_MENU_ICONS.info, onClick: () => openMessageDetails(message.id) });
   if (message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED) {
-    items.push({ label: "Retry send", icon: MSG_MENU_ICONS.retry, onClick: () => runEngineSendPipeline(conversationEntry.id, message.id) });
+    items.push({ label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: () => runEngineSendPipeline(conversationEntry.id, message.id) });
   }
   items.push({ label: "Delete for me", icon: MSG_MENU_ICONS.trash, danger: true, onClick: () => deleteOneMessageLocal(conversationEntry, message) });
   // Reactions need a real target (txid or local id) to send against.
@@ -19932,6 +20464,35 @@ async function finishGroupVoice(send) {
 }
 groupVoiceStopBtn?.addEventListener("click", () => finishGroupVoice(true));
 groupVoiceCancelBtn?.addEventListener("click", cancelGroupVoice);
+
+// Scroll-to-latest for the 1:1 thread (iOS scrollToBottomButton): appears when scrolled up,
+// and counts the incoming messages that landed since you last sat at the bottom.
+(function setupChatScrollToBottom() {
+  if (!messageArea || !messageArea.parentElement) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "group-scroll-bottom chat-scroll-bottom";
+  btn.setAttribute("aria-label", "Scroll to latest");
+  btn.hidden = true;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg><b class="chat-scroll-count" hidden></b>';
+  const countEl = btn.querySelector(".chat-scroll-count");
+  messageArea.parentElement.appendChild(btn);
+  let bottomSeenAt = Date.now();
+  let seenConversationId = null;
+  const nearBottom = () => messageArea.scrollHeight - messageArea.scrollTop - messageArea.clientHeight < 120;
+  function update() {
+    if (activeConversationId !== seenConversationId) { seenConversationId = activeConversationId; bottomSeenAt = Date.now(); }
+    if (nearBottom()) { bottomSeenAt = Date.now(); btn.hidden = true; return; }
+    btn.hidden = false;
+    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+    const unseen = (conversationEntry?.messages || []).filter((m) => m.direction === "incoming" && (m.createdAt || 0) > bottomSeenAt).length;
+    countEl.hidden = unseen === 0;
+    countEl.textContent = unseen > 99 ? "99+" : String(unseen);
+  }
+  btn.addEventListener("click", () => messageArea.scrollTo({ top: messageArea.scrollHeight, behavior: "smooth" }));
+  messageArea.addEventListener("scroll", update, { passive: true });
+  new MutationObserver(() => window.requestAnimationFrame(update)).observe(messageArea, { childList: true });
+})();
 
 // Scroll-to-latest button for the group thread — appears when scrolled up.
 (function setupGroupScrollToBottom() {

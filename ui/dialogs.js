@@ -114,6 +114,20 @@ export function promptDialog({ title, label = "", message = "", kicker = null, i
   });
 }
 
+/// A sheet of caller-built HTML (already escaped) with one Done button: for lists that a plain
+/// message cannot carry, such as who reacted to a message.
+export function infoSheet({ title, html = "", kicker = null, confirmLabel = "Done" } = {}) {
+  return new Promise((resolve) => {
+    settle = () => resolve(true);
+    present(`
+      ${headerHtml(kicker, title)}
+      <div class="app-dialog-sheet-body">${html}</div>
+      <div class="modal-actions">
+        <button class="primary-button" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
+      </div>`);
+  });
+}
+
 /// A message with one button: resolves once dismissed.
 export function alertDialog({ title, message = "", kicker = null, confirmLabel = "OK" } = {}) {
   return new Promise((resolve) => {
