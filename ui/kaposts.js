@@ -1015,7 +1015,7 @@ const ICONS = {
   tip: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.25"/><path d="M13.8 9.4c-.4-.7-1.1-1.15-2-1.15-1.24 0-2.05.83-2.05 1.83 0 1 .8 1.5 2.05 1.8 1.25.3 2.05.8 2.05 1.8 0 1-.81 1.84-2.05 1.84-.9 0-1.6-.45-2-1.15M11.85 6.7v10.6"/></svg>`,
 };
 
-function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false } = {}) {
+function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false, openByRemote = false } = {}) {
   const name = posterName(post.posterAddress);
   const time = formatRelativeTime(post.timestamp);
   const isMine = post.posterAddress === deps.engine.address;
@@ -1041,7 +1041,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
     : "";
 
   return `
-    <article class="kaposts-cell${isRoot ? " root" : ""}${!isRoot ? " openable" : ""}" data-kaposts-post="${post.id}"${post.remoteId ? ` data-kaposts-remote-id="${deps.escapeHtml(post.remoteId)}"` : ""}${!isRoot ? ` data-kaposts-open="${post.id}"` : ""}>
+    <article class="kaposts-cell${isRoot ? " root" : ""}${!isRoot ? " openable" : ""}" data-kaposts-post="${post.id}"${post.remoteId ? ` data-kaposts-remote-id="${deps.escapeHtml(post.remoteId)}"` : ""}${!isRoot ? (openByRemote && post.remoteId ? ` data-kaposts-open-remote="${deps.escapeHtml(post.remoteId)}"` : ` data-kaposts-open="${post.id}"`) : ""}>
       <span data-kaposts-profile="${post.id}" class="kaposts-avatar-tap">${posterAvatarHtml(post.posterAddress)}</span>
       <div class="kaposts-cell-main">
         <div class="kaposts-cell-head">
@@ -2057,7 +2057,7 @@ function renderPanel() {
           ? `<div class="kaposts-feed-status">Loading…</div>`
           : feedItems.length === 0
             ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong></div>`
-            : feedItems.map((post) => postCellHtml(post, { inThread: true })).join("")}
+            : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
       </div>`;
     const profileTab = panel.tab === "replies" ? "replies" : "posts";
     mountPagerSentinel(
@@ -2175,7 +2175,7 @@ function renderPanel() {
       const bookmarks = allPostLists().filter((p) => p.bookmarkedByMe && !isHiddenAuthor(p.posterAddress));
       panelBodyEl.innerHTML = bookmarks.length === 0
         ? `<div class="no-results-card"><strong>No bookmarks yet</strong><span>Tap the bookmark icon on any post to save it here.</span></div>`
-        : bookmarks.map((post) => postCellHtml(post, { inThread: true })).join("");
+        : bookmarks.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("");
       restorePanelScroll();
       return;
     }
@@ -3564,7 +3564,11 @@ export function initKaPosts(dependencies) {
     const profileTap = event.target.closest("[data-kaposts-profile]");
     if (profileTap) {
       const p = findPost(profileTap.dataset.kapostsProfile);
-      if (p) openPosterProfile(p.posterAddress, p.posterPubkey);
+      // Already looking at this person's profile: re-opening it rebuilt the panel and threw the
+      // reader back to the top of it, which is what tapping a row in your own profile did.
+      if (p && !(activePanel?.type === "profile" && activePanel.address === p.posterAddress)) {
+        openPosterProfile(p.posterAddress, p.posterPubkey);
+      }
       return;
     }
 
