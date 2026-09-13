@@ -9794,3 +9794,6 @@ body.session-logged-out [data-account-rename-modal] {
 .message-load-earlier:hover { background: var(--surface-2); }
 .internal-link-icon.avatar { background: transparent; overflow: hidden; border-radius: 999px; }
 .internal-link-icon.avatar img, .internal-link-icon.avatar .message-avatar, .internal-link-icon.avatar .kaposts-avatar { width: 40px; height: 40px; border-radius: 999px; object-fit: cover; }
+
+/* The + menu's Send KAS row carries the real Kaspa mark, not a drawn stand-in. */
+.composer-plus-menu .mode-icon-kaspa img { width: 26px; height: 26px; border-radius: 999px; object-fit: contain; display: block; }
