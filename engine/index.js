@@ -34,7 +34,7 @@ import {
   submitProfileFields as knsSubmitProfileFields,
   submitProfileField as knsSubmitProfileField,
   validateProfileFields as knsValidateProfileFields,
-  uploadKnsProfileImage as knsUploadProfileImage,
+  uploadKnsProfileImage as knsUploadProfileImage, setKnsPrimaryDomain as knsSetPrimaryDomain,
   peekPendingKnsCommit,
   clearPendingKnsCommit,
   KNS_ECONOMICS,
@@ -1425,6 +1425,15 @@ export class KaspaEngine {
   async uploadKnsProfileImage(assetId, uploadType, blob) {
     this.requireWallet();
     return knsUploadProfileImage({ engine: this, assetId, uploadType, blob, baseUrl: getEndpoint("knsApi") });
+  }
+
+  // Which of this wallet's domains is its primary name. The cache for our own address is
+  // dropped so the next lookup sees the new primary rather than the entry it just replaced.
+  async setKnsPrimaryDomain(domainId) {
+    this.requireWallet();
+    const result = await knsSetPrimaryDomain({ engine: this, domainId, baseUrl: getEndpoint("knsApi") });
+    this.clearKnsCache?.(this.address);
+    return result;
   }
 }
 

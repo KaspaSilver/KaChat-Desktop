@@ -9518,3 +9518,64 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-ancestor + .kaposts-ancestor,
 .kaposts-thread-chain-item + .kaposts-thread-chain-item { border-top: 1px solid var(--line); }
 .kaposts-thread-chain-item { border-left: 0; margin-left: 0; }
+
+/* --- Profile / KNS / Manage Addresses (iOS parity) ------------------------------------------ */
+.security-warning-card { display: grid; gap: 4px; padding: 12px 14px; border-radius: 12px; background: rgba(255,159,10,.12); margin-bottom: 12px; }
+.security-warning-card strong { color: #ff9f0a; font-size: 14px; }
+.public-key-card { display: grid; gap: 4px; padding: 12px 14px; border-radius: 12px; background: rgba(98,244,208,.12); margin-bottom: 12px; }
+.public-key-card strong { color: var(--kaspa-ink); font-size: 14px; }
+.public-key-card p { margin: 0; font-size: 13px; color: var(--muted); }
+.public-key-hex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; margin-bottom: 10px; }
+/* Your Domains: teal cards (iOS KNSDomainCard) and the per-domain detail. */
+.profile-domains-list { gap: 12px; }
+.kns-domain-card {
+  position: relative; display: grid; place-items: center; width: 100%; height: 96px; border: 0; border-radius: 20px;
+  background: var(--kaspa-ink); color: #06201a; font-size: 22px; font-weight: 800; cursor: pointer; padding: 0 20px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kns-domain-card.static { cursor: default; }
+.kns-domain-card .kns-domain-primary { position: absolute; top: 10px; right: 10px; padding: 3px 8px; border-radius: 999px; background: rgba(0,0,0,.35); color: #fff; font-size: 11px; font-weight: 700; }
+.profile-domain-detail { display: grid; gap: 14px; }
+.profile-domain-detail-rows { display: grid; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-1); overflow: hidden; }
+.profile-domain-detail-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.profile-domain-detail-row:last-child { border-bottom: 0; }
+.profile-domain-detail-row.actionable { cursor: pointer; background: transparent; border-left: 0; border-right: 0; border-top: 0; width: 100%; color: var(--text); font: inherit; text-align: left; }
+.profile-domain-detail-row.actionable:hover { background: var(--surface-2); }
+.profile-domain-detail-row .kns-asset-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-domain-detail-row .star { color: var(--kaspa-ink); }
+.profile-domain-detail-error { margin: 0; padding: 0 16px 12px; font-size: 12px; color: #ff6b6b; }
+.domains-inscribe-button { justify-content: center; }
+.domains-back-row { display: flex; align-items: center; gap: 8px; }
+.domains-back-row button { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 700; cursor: pointer; padding: 4px 0; }
+/* KNS editor sections and image pickers. */
+.kns-editor-section { margin: 12px 0 6px; font-size: 11.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.kns-image-row { display: flex; align-items: center; gap: 12px; }
+.kns-avatar-preview { width: 64px; height: 64px; }
+.kns-avatar-preview img { width: 100%; height: 100%; object-fit: cover; }
+.kns-image-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.kns-banner-preview { height: 110px; border-radius: 10px; background-size: cover; background-position: center; margin-bottom: 8px; }
+.kns-editor-scroll .broadcast-info-row { padding: 6px 0; }
+.kns-editor-scroll .kns-asset-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The persistent save banner (iOS): progress, then a red Retry banner if anything failed. */
+.kns-save-banner {
+  position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 3400;
+  display: inline-flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 999px;
+  border: 1px solid var(--card-border); background: var(--panel-2); box-shadow: 0 14px 36px var(--shadow); font-size: 13px; font-weight: 650;
+}
+.kns-save-banner.failed { color: #ff6b6b; }
+.kns-save-banner button { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 800; cursor: pointer; text-decoration: underline; }
+.kns-save-banner .dismiss { color: var(--muted); text-decoration: none; font-size: 16px; }
+/* Manage Addresses: total balance, the Chat Privacy tab, Checking badge. */
+.spending-total { display: grid; gap: 2px; padding: 8px 16px 4px; }
+.spending-total span { font-size: 12px; color: var(--muted); }
+.spending-total strong { font-size: 22px; }
+.spending-address-usage.checking { color: var(--muted); }
+.spending-privacy-list { display: flex; flex-direction: column; gap: 10px; }
+.spending-privacy-explainer { margin: 0; padding: 0 4px; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.spending-privacy-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-1); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.spending-privacy-row .meta { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.spending-privacy-row .meta small { font-size: 12px; color: var(--muted); }
+.spending-privacy-row .meta code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.spending-privacy-row .funded { display: inline-flex; align-items: center; gap: 6px; color: var(--kaspa-ink); font-weight: 700; font-size: 13px; }
+.spending-privacy-row .funded b { padding: 2px 8px; border-radius: 999px; background: rgba(98,244,208,.15); font-size: 11px; }
+.spending-privacy-row svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

@@ -113,11 +113,11 @@ export function validateProfileFieldValue(key, rawValue) {
   if (key === "contactEmail") {
     const parts = value.split("@");
     if (parts.length !== 2 || !parts[0] || !parts[1] || !parts[1].includes(".")) {
-      throw new Error("Enter a valid email address.");
+      throw new Error("Invalid email address format");
     }
   }
   if (key === "discord" && !KNSProfileLinkBuilder.discordUrl(value)) {
-    throw new Error("Discord must be a numeric user ID or a discord.com/users/<id> link.");
+    throw new Error("Discord must be a numeric user id or a valid /users/<id> URL");
   }
   return value;
 }
@@ -666,6 +666,46 @@ async function sha256Bytes(bytes) {
 // reports a signature-verification failure — the response body text (not
 // just the HTTP status) must be inspected, since that's the only place the
 // rejection reason appears.
+// Sets which of the wallet's domains is its primary name (iOS submitSetPrimaryDomainWithSignatureFallback).
+// The signed message has to match app.knsdomains.org's bytes exactly; the signature is tried in
+// the same three modes the image upload uses, because the API accepts one of them and does not
+// say which up front.
+export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFAULT_MAINNET_URL }) {
+  if (!engine?.kaspa || !engine?.privateKey) throw new Error("Load a wallet before setting a primary domain.");
+  const trimmedId = String(domainId || "").trim();
+  if (!trimmedId) throw new Error("KNS domain id is missing.");
+  const message = `{"domainId":"${trimmedId}","timestamp":${Date.now()}}`;
+  const utf8Bytes = new TextEncoder().encode(message);
+  const modes = [
+    () => engine.kaspa.signMessage({ message, privateKey: engine.privateKey }),
+    async () => {
+      if (utf8Bytes.length !== 32) throw new Error("message is not 32 bytes");
+      return rawSchnorrSignDigest(engine.kaspa, engine.privateKey, utf8Bytes);
+    },
+    async () => rawSchnorrSignDigest(engine.kaspa, engine.privateKey, await sha256Bytes(utf8Bytes)),
+  ];
+  const base = String(baseUrl || KNS_DEFAULT_MAINNET_URL).replace(/\/+$/, "");
+  const url = `${base}/domain/primary-name`;
+  let lastErrorText = "";
+  for (const mode of modes) {
+    let signature;
+    try { signature = await mode(); } catch { continue; }
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ signMessage: message, signature }),
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+    if (response.ok && json?.success) return true;
+    lastErrorText = json?.error || json?.message || text || `HTTP ${response.status}`;
+    const retryable = /signature verification failed|unauthorized|invalid signature/i.test(lastErrorText);
+    if (!retryable) throw new Error(lastErrorText || "KNS set primary failed.");
+  }
+  throw new Error(lastErrorText || "KNS set primary failed.");
+}
+
 export async function uploadKnsProfileImage({ engine, assetId, uploadType, blob, baseUrl = KNS_DEFAULT_MAINNET_URL }) {
   if (!engine?.kaspa || !engine?.privateKey) throw new Error("Load a wallet before uploading a KNS image.");
   if (uploadType !== "avatar" && uploadType !== "banner") throw new Error("uploadType must be 'avatar' or 'banner'.");

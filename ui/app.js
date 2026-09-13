@@ -5837,11 +5837,13 @@ const STAR_PATH = "m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 18l-5.8 3 1.1-6.5L2.6 
 function spendingRowHtml(index, address, state, balanceText, used, hasDomain = false, reserved = false) {
   const isActive = index === state.activeIndex;
   const label = spendingLabelFor(state, index);
+  // Three states (iOS): Used, Unused, and Checking while the history probe has not answered -
+  // claiming "Unused" before it has could invite address reuse.
   const usageBadge = used === true
     ? '<span class="spending-address-usage used">Used</span>'
     : used === false
       ? '<span class="spending-address-usage unused">Unused</span>'
-      : "";
+      : '<span class="spending-address-usage checking">Checking</span>';
   const domainBadge = hasDomain ? '<span class="spending-address-domain-tag">Contains domain</span>' : "";
   // Actively offered to a contact as a chat-payment-privacy address: tagged so the
   // user knows what the row is, and not hideable while the offer stands.
@@ -5980,6 +5982,10 @@ async function renderSpendingList() {
   // the group) → fresh/unused last.
   const rank = (e) => (e.index === primaryIndex ? 0 : (e.kas > 0 || domainOwning.has(e.address)) ? 1 : 2);
   enriched.sort((a, b) => rank(a) - rank(b) || a.index - b.index);
+  // Everything the visible spending addresses hold, together (iOS "Total Balance"). The
+  // chatting address is deliberately not folded in.
+  const totalEl = document.querySelector("[data-spending-total-balance]");
+  if (totalEl) totalEl.textContent = `${trimKas8(enriched.reduce((sum, e) => sum + (Number(e.kas) || 0), 0))} KAS`;
   spendingListEl.innerHTML = enriched
     .map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} KAS` : "-- KAS", e.used, domainOwning.has(e.address), reservedAddresses.has(e.address)))
     .join("");
@@ -5992,8 +5998,106 @@ function openSpendingManageScreen() {
     return;
   }
   spendingManageScreen.hidden = false;
+  // The tab switch only exists while Chats Payment Privacy is on for this account - off means
+  // no live pools, so the screen is just the plain Addresses list.
+  const tabs = document.querySelector("[data-spending-tabs]");
+  if (tabs) tabs.hidden = !chatsPrivacyEnabled();
+  showSpendingTab("addresses");
   renderSpendingList();
 }
+
+let spendingTab = "addresses";
+function showSpendingTab(tab) {
+  spendingTab = tab;
+  document.querySelectorAll("[data-spending-tab]").forEach((b) => b.classList.toggle("active", b.dataset.spendingTab === tab));
+  const addressesList = document.querySelector("[data-spending-address-list]");
+  const privacyList = document.querySelector("[data-spending-privacy-list]");
+  const total = document.querySelector("[data-spending-total-block]");
+  const actions = document.querySelector(".spending-manage-actions");
+  if (addressesList) addressesList.hidden = tab !== "addresses";
+  if (privacyList) privacyList.hidden = tab !== "privacy";
+  if (total) total.hidden = tab !== "addresses";
+  if (actions) actions.hidden = tab !== "addresses";
+  if (tab === "privacy") renderSpendingPrivacyList();
+}
+document.querySelectorAll("[data-spending-tab]").forEach((button) => button.addEventListener("click", () => showSpendingTab(button.dataset.spendingTab)));
+
+// Chat Privacy (iOS chatPrivacyTabContent): the addresses actively offered to contacts as
+// payment-pool reservations. The pool manages these rows; the one manual override is moving a
+// row out, for a payment that landed while this device was not running to notice it.
+async function renderSpendingPrivacyList() {
+  const listEl = document.querySelector("[data-spending-privacy-list]");
+  if (!listEl) return;
+  const entries = activePoolReservationEntries();
+  const explainer = `<p class="spending-privacy-explainer">These are fresh addresses offered to your contacts for private payments. Each contact gets their own, so your payment history stays unlinkable. KaChat keeps at least 2 fresh addresses per chat and replaces them as they are used.</p>`;
+  if (!entries.length) {
+    listEl.innerHTML = `${explainer}<div class="no-results-card"><strong>No Chat Privacy Addresses</strong><span>When you chat with someone while Chats Payment Privacy is on, the fresh addresses offered to them appear here.</span></div>`;
+    return;
+  }
+  const state = getSpendingState();
+  let balances = null;
+  try { balances = await spendingBalancesBatchSompi(entries.map((e) => e.address)); } catch { balances = null; }
+  listEl.innerHTML = explainer + entries.map((entry) => {
+    const sompi = balances?.get(entry.address) || 0;
+    const kas = Number(sompi) / 1e8;
+    const label = String(state.labels?.[entry.index] || "").trim();
+    return `
+      <button type="button" class="spending-privacy-row" data-privacy-row="${escapeHtml(entry.address)}" data-privacy-index="${entry.index}" data-privacy-kas="${kas}">
+        <span class="meta">
+          <small>Address #${entry.index}${label ? ` · ${escapeHtml(label)}` : ""}</small>
+          <code>${escapeHtml(shortAddress(entry.address))}</code>
+          ${kas > 0 ? `<span class="funded">${trimKas8(kas)} KAS <b>Funded</b></span>` : ""}
+        </span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+      </button>`;
+  }).join("");
+}
+
+function releasePoolReservation(address, index) {
+  const poolState = loadPoolState();
+  let changed = false;
+  for (const [contactAddress, list] of Object.entries(poolState.myReservations || {})) {
+    const kept = (list || []).filter((entry) => entry.address !== address);
+    if (kept.length !== (list || []).length) { poolState.myReservations[contactAddress] = kept; changed = true; }
+  }
+  if (!changed) return false;
+  savePoolState(poolState);
+  // It was locked visible while it was an offer; nothing holds it hidden now.
+  const state = getSpendingState();
+  saveSpendingState({ hidden: (state.hidden || []).filter((i) => Number(i) !== Number(index)) });
+  return true;
+}
+
+document.querySelector("[data-spending-privacy-list]")?.addEventListener("click", async (event) => {
+  const row = event.target.closest("[data-privacy-row]");
+  if (!row) return;
+  const address = row.dataset.privacyRow;
+  const index = Number(row.dataset.privacyIndex) || 0;
+  const kas = Number(row.dataset.privacyKas) || 0;
+  const choice = await chooseDialog({
+    title: `Address ${index}`,
+    message: `${shortAddress(address)}${kas > 0 ? `\nHolding ${trimKas8(kas)} KAS` : ""}`,
+    options: [
+      { id: "move", title: "Move out of Chat Payment Privacy", subtitle: kas > 0
+        ? "It has been paid into, so it is no longer a fresh address. Moves it to your normal spending list where you can send from it."
+        : "Stops offering this address to your contact and moves it to your normal spending list." },
+      { id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." },
+      { id: "qr", title: "Show QR Code", subtitle: "Full screen, for scanning with another device." },
+      { id: "cancel", title: "Cancel", subtitle: "Leave it in the pool." },
+    ],
+  });
+  if (choice === "move") {
+    if (releasePoolReservation(address, index)) {
+      showCopyToast("Moved out of Chat Payment Privacy.");
+      renderSpendingPrivacyList();
+      renderSpendingList();
+    }
+  } else if (choice === "copy") {
+    try { await copyTextToClipboard(address); showCopyToast(addressCopiedToastText(address)); } catch {}
+  } else if (choice === "qr") {
+    openChattingAddressScreen({ address, balanceText: `${trimKas8(kas)} KAS`, subtitle: null });
+  }
+});
 
 function closeSpendingManageScreen() {
   closeAllSpendingMenus();
@@ -6183,17 +6287,6 @@ spendingVisibilityList?.addEventListener("click", async (event) => {
 });
 
 spendingListEl?.addEventListener("click", async (event) => {
-  // ⋯ menu toggle — open this row's menu, close any other.
-  const toggle = event.target.closest("[data-spending-menu-toggle]");
-  if (toggle) {
-    const idx = toggle.dataset.spendingMenuToggle;
-    const menu = spendingListEl.querySelector(`[data-spending-menu="${idx}"]`);
-    const willOpen = menu && menu.hidden;
-    closeAllSpendingMenus();
-    if (menu && willOpen) { menu.hidden = false; toggle.setAttribute("aria-expanded", "true"); }
-    return;
-  }
-
   const btn = event.target.closest("[data-spending-action]");
   if (btn) {
     closeAllSpendingMenus();
@@ -6217,7 +6310,7 @@ spendingListEl?.addEventListener("click", async (event) => {
       openChattingAddressScreen({ address: addr, balanceText: cell?.textContent || "", subtitle: null });
     } else if (action === "rename") {
       const current = spendingLabelFor(state, index);
-      const next = await promptText("Label for this spending address", current);
+      const next = await promptDialog({ title: "Rename Address", label: "Label", message: "Give this address a label to help you recognize it.", initial: current, confirmLabel: "Save" });
       if (next == null) return;
       const labels = { ...state.labels };
       const trimmed = String(next).trim();
@@ -6243,6 +6336,27 @@ spendingListEl?.addEventListener("click", async (event) => {
       renderSpendingList();
       showCopyToast("Address hidden. Re-enable it in Address Visibility.");
     }
+    return;
+  }
+
+  const menuToggle = event.target.closest("[data-spending-menu-toggle]");
+  if (menuToggle) {
+    event.stopPropagation();
+    const index = Number(menuToggle.dataset.spendingMenuToggle) || 0;
+    const state = getSpendingState();
+    const isPrimary = index === state.activeIndex;
+    const address = deriveSpendingAddressAt(index);
+    const reserved = address ? activePoolReservationAddressSet().has(address) : false;
+    const options = [
+      { id: "rename", title: "Rename Address", subtitle: "Gives this address a label of your own." },
+      { id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." },
+      { id: "receive", title: "Show QR Code", subtitle: "Full screen, for scanning with another device." },
+    ];
+    if (!isPrimary) options.push({ id: "activate", title: "Set as Primary Address", subtitle: "New payments send from here by default." });
+    if (!isPrimary && !reserved) options.push({ id: "hide", title: "Hide Address", subtitle: "Removes it from this list. Re-enable it in Address Visibility." });
+    const label = spendingLabelFor(state, index);
+    const choice = await chooseDialog({ title: label || `Address ${index}`, message: address ? shortAddress(address) : "", options });
+    if (choice) spendingListEl.querySelector(`[data-spending-action="${choice}"][data-index="${index}"]`)?.click();
     return;
   }
 
@@ -6533,12 +6647,21 @@ function closeSpendingActionsMenu() {
   if (spendingActionsMenu) spendingActionsMenu.hidden = true;
   spendingActionsToggle?.setAttribute("aria-expanded", "false");
 }
-spendingActionsToggle?.addEventListener("click", (event) => {
+spendingActionsToggle?.addEventListener("click", async (event) => {
   event.stopPropagation();
-  if (!spendingActionsMenu) return;
-  const willOpen = spendingActionsMenu.hidden;
-  spendingActionsMenu.hidden = !willOpen;
-  spendingActionsToggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  const choice = await chooseDialog({
+    title: "Address Actions",
+    options: [
+      { id: "generate", title: "Generate New Spending Address", subtitle: "Reveals the next unused address in this wallet." },
+      { id: "discover", title: "Discover Addresses", subtitle: "Finds addresses holding a balance or a KNS domain." },
+      { id: "visibility", title: "Address Visibility", subtitle: "Check off every address you want on the list, in one sitting." },
+      { id: "sweep", title: "Send All Kaspa To Primary", subtitle: "Sweeps every other address into your primary spending address." },
+    ],
+  });
+  if (choice === "generate") spendingGenerateBtn?.click();
+  else if (choice === "discover") spendingScanBtn?.click();
+  else if (choice === "visibility") spendingVisibilityOpenBtn?.click();
+  else if (choice === "sweep") spendingConsolidateBtn?.click();
 });
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".spending-actions-wrap")) closeSpendingActionsMenu();
@@ -7378,10 +7501,63 @@ document.querySelector("[data-dock-wizard-next]")?.addEventListener("click", () 
 // "Receive Kaspa" opens the same full-screen QR view as Chatting Address (and the
 // spending-address Receive), just without the chat-fee note — the old inline
 // profile-qr-card toggle looked nothing like it.
+// Receive Kaspa resolves a fresh address before drawing the QR, so the code on screen is never
+// one that has already appeared on chain (iOS ReceiveKaspaQRView / freshReceiveAddress):
+//   1. the pointer from last time, if it is still untouched;
+//   2. the primary spending address, while it has seen nothing;
+//   3. a slot that has never been revealed, funded or offered.
+const RECEIVE_INDEX_KEY = "kachat-receive-address-index-v1";
+const RECEIVE_SUBTITLE = "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or KNS profile creation.";
+async function freshReceiveAddress() {
+  if (!activeAccountMnemonic()) return null;
+  const state = getSpendingState();
+  const reserved = activePoolReservationAddressSet();
+  const untouched = async (address) => {
+    if (!address || reserved.has(address)) return false;
+    spendingUsageCache.delete(address); // live answer: a QR is scanned the instant it appears
+    const usage = await spendingUsageFor(address);
+    return usage.used !== true;
+  };
+  let remembered = null;
+  try { remembered = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY)) || "null"); } catch { remembered = null; }
+  if (Number.isInteger(remembered) && remembered >= 0) {
+    const address = deriveSpendingAddressAt(remembered);
+    if (await untouched(address)) return address;
+  }
+  const primary = deriveSpendingAddressAt(state.activeIndex);
+  if (await untouched(primary)) {
+    try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(state.activeIndex)); } catch {}
+    return primary;
+  }
+  const index = state.maxIndex + 1;
+  const address = deriveSpendingAddressAt(index);
+  if (!address) return primary;
+  saveSpendingState({ maxIndex: index });
+  try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(index)); } catch {}
+  return address;
+}
+
 document.querySelectorAll("[data-profile-qr-trigger]").forEach((button) => {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     if (!engine.address) return;
-    openChattingAddressScreen({ subtitle: null });
+    if (!activeAccountMnemonic()) {
+      showCopyToast("Spending address is unlocking — go back and try again.");
+      return;
+    }
+    button.disabled = true;
+    const label = button.querySelector("span:last-child");
+    const original = label?.textContent;
+    if (label) label.textContent = "Preparing a fresh address";
+    try {
+      const address = await freshReceiveAddress();
+      if (!address) { showCopyToast("Spending address is unlocking — go back and try again."); return; }
+      let balanceText = "0 KAS";
+      try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} KAS`; } catch {}
+      openChattingAddressScreen({ address, balanceText, subtitle: RECEIVE_SUBTITLE });
+    } finally {
+      button.disabled = false;
+      if (label && original) label.textContent = original;
+    }
   });
 });
 
@@ -7397,7 +7573,7 @@ async function openChattingAddressScreen(options = {}) {
   if (subtitleEl) {
     if (options.subtitle === undefined) {
       subtitleEl.hidden = false;
-      subtitleEl.textContent = "Just send 5-10 KAS at a time, that's plenty to cover chat fees for a while (about 500 messages per KAS).";
+      subtitleEl.textContent = "This address is for chatting and KNS profile creation. Funding it with around 50 Kaspa is enough to create a KNS profile and send messages for a long time.";
     } else if (options.subtitle) {
       subtitleEl.hidden = false;
       subtitleEl.textContent = options.subtitle;
@@ -7473,34 +7649,139 @@ function setProfileDomains(info) {
   renderProfileDomains();
 }
 
+function isOwnPrimaryDomain(domain) {
+  return Boolean(ownKnsPrimaryDomain) && String(domain.fullName || "").toLowerCase() === String(ownKnsPrimaryDomain).toLowerCase();
+}
+
+function knsDomainCardHtml(domain, { clickable = true } = {}) {
+  return `<${clickable ? "button type=\"button\"" : "div"} class="kns-domain-card${clickable ? "" : " static"}" ${clickable ? `data-domain-open="${escapeHtml(domain.inscriptionId || domain.fullName)}"` : ""}>
+    ${escapeHtml(domain.fullName)}
+    ${isOwnPrimaryDomain(domain) ? `<span class="kns-domain-primary">Primary</span>` : ""}
+  </${clickable ? "button" : "div"}>`;
+}
+
 function renderProfileDomains() {
   const countEl = document.querySelector("[data-profile-domains-count]");
   // Blank rather than "0" until a lookup has actually answered - a zero that is really "not asked
   // yet" is worse than no number at all.
   if (countEl) countEl.textContent = ownKnsDomains.length ? String(ownKnsDomains.length) : "";
   const listEl = document.querySelector("[data-profile-domains-list]");
+  const detailEl = document.querySelector("[data-domain-detail]");
   if (!listEl) return;
-  if (!ownKnsDomains.length) {
-    listEl.innerHTML = '<p class="spending-address-empty">No domains yet. Create a KNS profile to register one.</p>';
+  if (detailEl && !detailEl.hidden && domainDetailTarget) {
+    renderDomainDetail(domainDetailTarget);
     return;
   }
-  listEl.innerHTML = ownKnsDomains.map((domain) => {
-    const created = domain.createdAt ? new Date(domain.createdAt).toLocaleDateString() : "";
-    const isPrimary = Boolean(ownKnsPrimaryDomain) && domain.fullName === ownKnsPrimaryDomain;
-    return `<div class="chat-info-domain-row">`
-      + `<strong>${escapeHtml(domain.fullName)}</strong>`
-      + `<span class="profile-domain-meta">`
-      + (isPrimary ? `<span class="profile-domain-primary">Primary</span>` : "")
-      + (created ? `<span>${escapeHtml(created)}</span>` : "")
-      + `</span></div>`;
-  }).join("");
+  if (!ownKnsDomains.length) {
+    listEl.innerHTML = '<p class="spending-address-empty">No domains yet.</p>';
+    return;
+  }
+  listEl.innerHTML = ownKnsDomains.map((domain) => knsDomainCardHtml(domain)).join("");
 }
+
+// One owned domain (iOS KNSDomainDetailView): the card, its asset id, primary or Set as Primary,
+// "Listed" when it is up for sale, and Send at the bottom.
+let domainDetailTarget = null;
+let settingPrimaryAssetId = null;
+let setPrimaryError = "";
+function renderDomainDetail(domain) {
+  const listEl = document.querySelector("[data-profile-domains-list]");
+  const detailEl = document.querySelector("[data-domain-detail]");
+  const inscribe = document.querySelector("[data-domains-inscribe]");
+  const title = document.querySelector("[data-domains-screen] .chatting-address-balance");
+  if (!detailEl) return;
+  domainDetailTarget = domain;
+  const isPrimary = isOwnPrimaryDomain(domain);
+  const assetId = String(domain.inscriptionId || "").trim();
+  const listed = String(domain.status || "").trim().toLowerCase() === "listed";
+  const canSend = Boolean(assetId) && !listed;
+  const busy = settingPrimaryAssetId === assetId;
+  if (listEl) listEl.hidden = true;
+  if (inscribe) inscribe.hidden = true;
+  if (title) title.textContent = domain.fullName;
+  detailEl.hidden = false;
+  detailEl.innerHTML = `
+    <div class="domains-back-row"><button type="button" data-domain-detail-back>‹ Your Domains</button></div>
+    ${knsDomainCardHtml(domain, { clickable: false })}
+    <div class="profile-domain-detail-rows">
+      <div class="profile-domain-detail-row"><span>Asset ID</span><span class="kns-asset-id" title="${escapeHtml(assetId)}">${escapeHtml(assetId || "—")}</span></div>
+      ${isPrimary
+        ? `<div class="profile-domain-detail-row"><span>Primary Domain</span><span class="star">★</span></div>`
+        : assetId
+          ? `<button type="button" class="profile-domain-detail-row actionable" data-domain-set-primary="${escapeHtml(assetId)}" ${busy || settingPrimaryAssetId ? "disabled" : ""}><span>Set as Primary</span><span class="star">${busy ? "…" : "☆"}</span></button>`
+          : ""}
+      ${!isPrimary && setPrimaryError && !settingPrimaryAssetId ? `<p class="profile-domain-detail-error">${escapeHtml(setPrimaryError)}</p>` : ""}
+      ${listed ? `<div class="profile-domain-detail-row"><span>Status</span><span>Listed</span></div>` : ""}
+    </div>
+    <button type="button" class="chatting-address-copy domains-inscribe-button primary-button" data-domain-send="${escapeHtml(assetId)}" ${canSend ? "" : "disabled"}>Send</button>`;
+}
+
+function closeDomainDetail() {
+  const listEl = document.querySelector("[data-profile-domains-list]");
+  const detailEl = document.querySelector("[data-domain-detail]");
+  const inscribe = document.querySelector("[data-domains-inscribe]");
+  const title = document.querySelector("[data-domains-screen] .chatting-address-balance");
+  domainDetailTarget = null;
+  setPrimaryError = "";
+  if (detailEl) { detailEl.hidden = true; detailEl.innerHTML = ""; }
+  if (listEl) listEl.hidden = false;
+  if (inscribe) inscribe.hidden = false;
+  if (title) title.textContent = "Your Domains";
+  renderProfileDomains();
+}
+
+// iOS setPrimaryDomain: no message on success - the star moves the moment the write lands,
+// plus a toast; a failure shows in place under the row.
+async function setPrimaryDomain(domain) {
+  const assetId = String(domain.inscriptionId || "").trim();
+  if (!assetId || settingPrimaryAssetId) return;
+  settingPrimaryAssetId = assetId;
+  setPrimaryError = "";
+  renderDomainDetail(domain);
+  try {
+    await engine.setKnsPrimaryDomain(assetId);
+    ownKnsPrimaryDomain = domain.fullName;
+    showCopyToast(`Primary domain set to ${domain.fullName}.`);
+    settingPrimaryAssetId = null;
+    renderDomainDetail(domain);
+    await refreshOwnKnsProfileUntilResolved({ attempts: 3, delayMs: 3000 });
+  } catch (error) {
+    settingPrimaryAssetId = null;
+    setPrimaryError = error?.message || "Setting the primary domain failed.";
+    renderDomainDetail(domain);
+  }
+}
+
+document.querySelector("[data-domains-screen]")?.addEventListener("click", (event) => {
+  const open = event.target.closest("[data-domain-open]");
+  if (open) {
+    const key = open.dataset.domainOpen;
+    const domain = ownKnsDomains.find((d) => (d.inscriptionId || d.fullName) === key);
+    if (domain) renderDomainDetail(domain);
+    return;
+  }
+  if (event.target.closest("[data-domain-detail-back]")) { closeDomainDetail(); return; }
+  const setPrimary = event.target.closest("[data-domain-set-primary]");
+  if (setPrimary && domainDetailTarget) { setPrimaryDomain(domainDetailTarget); return; }
+  const send = event.target.closest("[data-domain-send]");
+  if (send && domainDetailTarget && !send.disabled) {
+    openKnsTransferModal({ domain: domainDetailTarget.fullName, assetId: domainDetailTarget.inscriptionId });
+    return;
+  }
+  if (event.target.closest("[data-domains-inscribe]")) {
+    // The registration wizard's domain step is iOS's Inscribe Domain sheet; the funding check
+    // still runs underneath but does not stand in the way of someone who owns domains already.
+    document.querySelector("[data-open-kns-register]")?.click();
+    showKnsWizardStep("domain");
+  }
+});
 
 document.querySelector("[data-open-domains-screen]")?.addEventListener("click", () => {
   renderProfileDomains();
   if (domainsScreenEl) domainsScreenEl.hidden = false;
 });
 document.querySelector("[data-close-domains-screen]")?.addEventListener("click", () => {
+  if (domainDetailTarget) { closeDomainDetail(); return; }
   if (domainsScreenEl) domainsScreenEl.hidden = true;
 });
 
@@ -8850,6 +9131,38 @@ function openPrivatekeyModal(overrideKey = null, hintText = null) {
 }
 
 document.querySelector("[data-open-privatekey]")?.addEventListener("click", () => openPrivatekeyModal());
+// iOS addressActionsSheet: the same three rows, each saying what it is.
+document.querySelector("[data-open-address-actions]")?.addEventListener("click", async () => {
+  const choice = await chooseDialog({
+    title: "Address Actions",
+    options: [
+      { id: "private", title: "View Private Key", subtitle: "The key that spends this address. Never share it." },
+      { id: "public", title: "View Public Key", subtitle: "The public half of this address, for anyone who asks for it." },
+      { id: "explorer", title: "View in Explorer", subtitle: "Opens this address on your chosen block explorer." },
+    ],
+  });
+  if (choice === "private") openPrivatekeyModal();
+  else if (choice === "public") openPublicKeySheet();
+  else if (choice === "explorer" && engine.address) window.open(explorerAddressUrl(engine.address), "_blank", "noopener,noreferrer");
+});
+
+// The chatting address's public key (iOS ChattingAddressPublicKeyView): nothing is unlocked to
+// show this - it is a value you hand out on purpose, so no reveal gate and no clipboard expiry.
+function openPublicKeySheet() {
+  let hex = "";
+  try { hex = String(engine.privateKey?.toPublicKey?.().toString?.() || "").toLowerCase(); } catch { hex = ""; }
+  const html = hex
+    ? `<div class="public-key-card"><strong>Safe to share</strong><p>This is the public half of your chatting address. It identifies you and cannot spend anything.</p></div>
+       <div class="recovery-phrase-box public-key-hex">${escapeHtml(hex)}</div>
+       <button type="button" class="secondary-button full" data-copy-public-key="${escapeHtml(hex)}">Copy Public Key</button>`
+    : `<p class="field-hint">This address does not carry a public key.</p>`;
+  infoSheet({ title: "Public Key", html, confirmLabel: "Done" });
+}
+document.addEventListener("click", async (event) => {
+  const copy = event.target.closest("[data-copy-public-key]");
+  if (!copy) return;
+  try { await copyTextToClipboard(copy.dataset.copyPublicKey); showCopyToast("Public key copied"); } catch {}
+});
 
 // Export a specific spending address's private key (derived from the account phrase at its index).
 document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("click", () => {
@@ -8875,10 +9188,15 @@ revealPrivatekeyButton?.addEventListener("click", async () => {
   }
   revealPrivatekeyAfterHold();
 });
+// The clipboard is wiped 30 seconds after a private key lands on it (iOS): a key left on the
+// pasteboard is a key waiting to be pasted somewhere it should not be.
+let privateKeyClipboardTimer = null;
 copyPrivatekeyButton?.addEventListener("click", async () => {
   if (!engine.privateKeyHex) return;
   await copyTextToClipboard(engine.privateKeyHex);
-  showCopyToast("Private key copied");
+  showCopyToast("Private key copied. Clipboard will clear in 30s.");
+  if (privateKeyClipboardTimer) window.clearTimeout(privateKeyClipboardTimer);
+  privateKeyClipboardTimer = window.setTimeout(() => { copyTextToClipboard(" ").catch(() => {}); }, 30_000);
 });
 
 document.querySelectorAll("[data-profile-dropdown], [data-settings-dropdown]").forEach((dropdown) => {
@@ -9806,6 +10124,55 @@ document.querySelector("[data-kns-details-skip]")?.addEventListener("click", asy
 
 const knsEditorModal = document.querySelector("[data-kns-editor-modal]");
 
+// Pending image choices for the editor: null = untouched, "remove" = clear the field, or
+// { blob, dataUrl } = upload this on Save.
+let knsEditorAvatar = null;
+let knsEditorBanner = null;
+const KNS_FIELD_LABELS = {
+  avatarUrl: "Avatar", bannerUrl: "Banner", bio: "Bio", x: "X", website: "Website", telegram: "Telegram",
+  discord: "Discord", contactEmail: "Email", github: "GitHub", redirectUrl: "Redirect",
+};
+
+function knsEditorPendingChanges() {
+  const changes = [];
+  if (knsEditorAvatar === "remove") changes.push({ key: "avatarUrl", label: "Avatar (removed)" });
+  else if (knsEditorAvatar) changes.push({ key: "avatarUrl", label: "Avatar" });
+  if (knsEditorBanner === "remove") changes.push({ key: "bannerUrl", label: "Banner (removed)" });
+  else if (knsEditorBanner) changes.push({ key: "bannerUrl", label: "Banner" });
+  document.querySelectorAll("[data-kns-editor-field]").forEach((el) => {
+    const key = el.dataset.knsEditorField;
+    const current = String(ownKnsProfileFields?.[key] || "").trim();
+    if (el.value.trim() !== current) changes.push({ key, label: KNS_FIELD_LABELS[key] || key, value: el.value });
+  });
+  return changes;
+}
+
+function updateKnsEditorSaveState() {
+  const saveBtn = document.querySelector("[data-kns-editor-save]");
+  if (saveBtn) saveBtn.disabled = knsEditorPendingChanges().length === 0;
+}
+
+function renderKnsEditorImages() {
+  const avatarPreview = document.querySelector("[data-kns-avatar-preview]");
+  const bannerPreview = document.querySelector("[data-kns-banner-preview]");
+  const removeAvatar = document.querySelector("[data-kns-remove-avatar]");
+  const removeBanner = document.querySelector("[data-kns-remove-banner]");
+  const currentAvatar = knsEditorAvatar === "remove" ? "" : (knsEditorAvatar?.dataUrl || ownKnsProfileFields?.avatarUrl || "");
+  const currentBanner = knsEditorBanner === "remove" ? "" : (knsEditorBanner?.dataUrl || ownKnsProfileFields?.bannerUrl || "");
+  if (avatarPreview) {
+    avatarPreview.innerHTML = currentAvatar
+      ? `<img src="${escapeHtml(currentAvatar)}" alt="" />`
+      : `<svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>`;
+  }
+  if (bannerPreview) {
+    bannerPreview.hidden = !currentBanner;
+    bannerPreview.style.backgroundImage = currentBanner ? `url("${currentBanner}")` : "";
+  }
+  if (removeAvatar) removeAvatar.hidden = !currentAvatar;
+  if (removeBanner) removeBanner.hidden = !currentBanner;
+  updateKnsEditorSaveState();
+}
+
 document.querySelector("[data-open-kns-editor]")?.addEventListener("click", () => {
   if (!knsEditorModal || !ownKnsAssetId) {
     showCopyToast("Your domain isn't confirmed yet. Try again shortly.");
@@ -9816,8 +10183,112 @@ document.querySelector("[data-open-kns-editor]")?.addEventListener("click", () =
   document.querySelectorAll("[data-kns-editor-field]").forEach((el) => {
     el.value = ownKnsProfileFields?.[el.dataset.knsEditorField] || "";
   });
+  knsEditorAvatar = null;
+  knsEditorBanner = null;
+  const nameEl = document.querySelector("[data-kns-editor-domain-name]");
+  const assetEl = document.querySelector("[data-kns-editor-asset-id]");
+  if (nameEl) nameEl.textContent = ownKnsPrimaryDomain || "KNS Profile";
+  if (assetEl) { assetEl.textContent = ownKnsAssetId || "—"; assetEl.title = ownKnsAssetId || ""; }
+  renderKnsEditorImages();
   knsEditorModal.hidden = false;
 });
+document.querySelectorAll("[data-kns-editor-field]").forEach((el) => el.addEventListener("input", updateKnsEditorSaveState));
+
+async function readKnsImageFile(file, statusEl) {
+  if (!file) return null;
+  if (statusEl) statusEl.hidden = false;
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    return { blob: file, dataUrl };
+  } finally {
+    if (statusEl) statusEl.hidden = true;
+  }
+}
+document.querySelector("[data-kns-choose-avatar]")?.addEventListener("click", () => document.querySelector("[data-kns-avatar-file]")?.click());
+document.querySelector("[data-kns-choose-banner]")?.addEventListener("click", () => document.querySelector("[data-kns-banner-file]")?.click());
+document.querySelector("[data-kns-avatar-file]")?.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  const picked = await readKnsImageFile(file, document.querySelector("[data-kns-avatar-status]"));
+  if (picked) { knsEditorAvatar = picked; renderKnsEditorImages(); }
+});
+document.querySelector("[data-kns-banner-file]")?.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  const picked = await readKnsImageFile(file, document.querySelector("[data-kns-banner-status]"));
+  if (picked) { knsEditorBanner = picked; renderKnsEditorImages(); }
+});
+document.querySelector("[data-kns-remove-avatar]")?.addEventListener("click", () => {
+  knsEditorAvatar = ownKnsProfileFields?.avatarUrl ? "remove" : null;
+  renderKnsEditorImages();
+});
+document.querySelector("[data-kns-remove-banner]")?.addEventListener("click", () => {
+  knsEditorBanner = ownKnsProfileFields?.bannerUrl ? "remove" : null;
+  renderKnsEditorImages();
+});
+
+// The persistent save banner (iOS): "Preparing profile update..." through each
+// "Updating X (n/m)..." until the save finishes, then a red banner with Retry if anything failed.
+let knsSaveBannerEl = null;
+let failedKnsUpdates = {};
+function showKnsSaveBanner(text) {
+  if (!knsSaveBannerEl) {
+    knsSaveBannerEl = document.createElement("div");
+    knsSaveBannerEl.className = "kns-save-banner";
+    document.body.appendChild(knsSaveBannerEl);
+  }
+  knsSaveBannerEl.className = "kns-save-banner";
+  knsSaveBannerEl.innerHTML = `<span class="kaposts-spinner" aria-hidden="true"></span><span>${escapeHtml(text)}</span>`;
+  knsSaveBannerEl.hidden = false;
+}
+function showKnsFailedBanner() {
+  const count = Object.keys(failedKnsUpdates).length;
+  if (!count) { hideKnsSaveBanner(); return; }
+  if (!knsSaveBannerEl) showKnsSaveBanner("");
+  knsSaveBannerEl.className = "kns-save-banner failed";
+  knsSaveBannerEl.innerHTML = `<span>⚠</span><span>${count} profile update${count === 1 ? "" : "s"} failed</span>
+    <button type="button" data-kns-retry-failed>Retry</button><button type="button" class="dismiss" data-kns-dismiss-failed aria-label="Dismiss">×</button>`;
+  knsSaveBannerEl.hidden = false;
+}
+function hideKnsSaveBanner() { if (knsSaveBannerEl) knsSaveBannerEl.hidden = true; }
+document.addEventListener("click", (event) => {
+  if (event.target.closest("[data-kns-dismiss-failed]")) { failedKnsUpdates = {}; hideKnsSaveBanner(); return; }
+  if (event.target.closest("[data-kns-retry-failed]")) retryFailedKnsUpdates();
+});
+
+async function runKnsProfileWrites(assetId, fields) {
+  const keys = Object.keys(fields);
+  const results = [];
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i];
+    showKnsSaveBanner(`Updating ${KNS_FIELD_LABELS[key] || key} (${i + 1}/${keys.length})...`);
+    try {
+      await engine.submitKnsProfileField(assetId, key, fields[key]);
+      results.push({ key, ok: true });
+      delete failedKnsUpdates[key];
+    } catch (error) {
+      results.push({ key, ok: false, error: error?.message || "" });
+      failedKnsUpdates[key] = fields[key];
+    }
+  }
+  return results;
+}
+
+async function retryFailedKnsUpdates() {
+  const fields = { ...failedKnsUpdates };
+  if (!Object.keys(fields).length || !ownKnsAssetId) return;
+  const results = await runKnsProfileWrites(ownKnsAssetId, fields);
+  engine.clearKnsCache(engine.address);
+  await refreshOwnKnsProfile();
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length) { showKnsFailedBanner(); showCopyToast(`Retry failed: ${failed[0].error || KNS_FIELD_LABELS[failed[0].key]}`); }
+  else { hideKnsSaveBanner(); showCopyToast(results.length === 1 ? `${KNS_FIELD_LABELS[results[0].key]} updated.` : "KNS profile updated."); }
+}
 
 document.querySelectorAll("[data-close-kns-editor]").forEach((button) => {
   button.addEventListener("click", () => { if (knsEditorModal) knsEditorModal.hidden = true; });
@@ -9834,57 +10305,83 @@ document.querySelectorAll("[data-close-kns-guide]").forEach((button) => {
 
 document.querySelector("[data-kns-editor-save]")?.addEventListener("click", async () => {
   const errorEl = document.querySelector("[data-kns-editor-error]");
-  const progressEl = document.querySelector("[data-kns-editor-progress]");
   const saveBtn = document.querySelector("[data-kns-editor-save]");
   if (errorEl) errorEl.hidden = true;
   if (!ownKnsAssetId) {
     if (errorEl) { errorEl.textContent = "Your domain isn't confirmed yet."; errorEl.hidden = false; }
     return;
   }
+  const changes = knsEditorPendingChanges();
+  if (!changes.length) { showCopyToast("No KNS profile changes detected."); return; }
 
-  const fields = {};
-  document.querySelectorAll("[data-kns-editor-field]").forEach((el) => {
-    const key = el.dataset.knsEditorField;
-    const current = ownKnsProfileFields?.[key] || "";
-    if (el.value.trim() !== current.trim()) fields[key] = el.value;
-  });
-  if (!Object.keys(fields).length) {
-    if (knsEditorModal) knsEditorModal.hidden = true;
-    return;
-  }
-
-  let validated;
+  // Text fields are checked before anything is spent.
+  const textFields = {};
+  for (const change of changes) if (change.value !== undefined) textFields[change.key] = change.value;
+  let validated = {};
   try {
-    validated = engine.validateKnsProfileFields(fields);
+    validated = engine.validateKnsProfileFields(textFields);
   } catch (error) {
     if (errorEl) { errorEl.textContent = error.message; errorEl.hidden = false; }
     return;
   }
 
-  if (progressEl) { progressEl.hidden = false; progressEl.textContent = "Starting…"; }
+  // iOS "Confirm Changes": what will be written, and what each write costs.
+  const confirmed = await confirmDialog({
+    title: "Confirm Changes",
+    message: `${changes.length} change${changes.length === 1 ? "" : "s"}. Each is submitted as its own on-chain transaction from your chatting address:\n${changes.map((c) => `• ${c.label}`).join("\n")}\nEach transaction temporarily uses ~2 KAS; ~1 KAS returns immediately as change, so only the small network fee is a real cost.`,
+    confirmLabel: "Confirm",
+  });
+  if (!confirmed) return;
+
   if (saveBtn) saveBtn.disabled = true;
+  if (knsEditorModal) knsEditorModal.hidden = true;
+  const assetId = ownKnsAssetId;
+  const hadPrimary = Boolean(ownKnsPrimaryDomain);
   try {
-    const results = await engine.submitKnsProfileFields(ownKnsAssetId, validated, {
-      onStatus: (event) => {
-        if (!progressEl) return;
-        const label = KNS_PROFILE_FIELD_EDIT_ORDER.includes(event.key) ? event.key : "";
-        progressEl.textContent = `${label ? `${label}: ` : ""}${knsStatusMessage(event.status) || event.status}`;
-      },
-    });
-    const failed = results.filter((r) => !r.ok);
-    if (failed.length && errorEl) {
-      errorEl.textContent = `Some fields failed: ${failed.map((f) => f.key).join(", ")}. Try again shortly.`;
-      errorEl.hidden = false;
-    } else if (knsEditorModal) {
-      knsEditorModal.hidden = true;
+    showKnsSaveBanner("Preparing profile update...");
+    // Images first: the upload hands back the URL that the profile field then carries.
+    const fields = { ...validated };
+    if (knsEditorAvatar === "remove") fields.avatarUrl = "";
+    else if (knsEditorAvatar) {
+      showKnsSaveBanner("Processing avatar...");
+      fields.avatarUrl = (await engine.uploadKnsProfileImage(assetId, "avatar", knsEditorAvatar.blob)).imageUrl;
+    }
+    if (knsEditorBanner === "remove") fields.bannerUrl = "";
+    else if (knsEditorBanner) {
+      showKnsSaveBanner("Processing banner...");
+      fields.bannerUrl = (await engine.uploadKnsProfileImage(assetId, "banner", knsEditorBanner.blob)).imageUrl;
+    }
+    const ordered = {};
+    for (const key of KNS_PROFILE_FIELD_EDIT_ORDER) if (key in fields) ordered[key] = fields[key];
+    const results = await runKnsProfileWrites(assetId, ordered);
+    const okCount = results.filter((r) => r.ok).length;
+    let primaryFailure = "";
+    if (okCount > 0 && !hadPrimary) {
+      // The edited domain becomes the primary when none is set, so the profile just written
+      // is the one everyone resolves (iOS promoteEditedDomainToPrimaryIfNeeded).
+      try { await engine.setKnsPrimaryDomain(assetId); } catch (error) { primaryFailure = error?.message || "unknown error"; }
     }
     engine.clearKnsCache(engine.address);
     await refreshOwnKnsProfile();
+    knsEditorAvatar = null;
+    knsEditorBanner = null;
+    const failed = results.filter((r) => !r.ok);
+    if (!failed.length) {
+      hideKnsSaveBanner();
+      showCopyToast(primaryFailure ? `Set primary failed: ${primaryFailure}` : "KNS profile updated.");
+    } else if (okCount > 0) {
+      showKnsFailedBanner();
+      const reason = failed[0].error ? ` ${failed[0].error}` : "";
+      showCopyToast(`Updated ${okCount}/${results.length}. Failed: ${failed.map((f) => KNS_FIELD_LABELS[f.key] || f.key).join(", ")}.${reason}`);
+    } else {
+      showKnsFailedBanner();
+      showCopyToast(failed[0].error ? `KNS profile update failed: ${failed[0].error}` : "KNS profile update failed.");
+    }
   } catch (error) {
-    if (errorEl) { errorEl.textContent = error.message || "Saving profile changes failed."; errorEl.hidden = false; }
+    hideKnsSaveBanner();
+    showCopyToast(`KNS profile update failed: ${error?.message || "unknown error"}`);
   } finally {
     if (saveBtn) saveBtn.disabled = false;
-    if (progressEl) progressEl.hidden = true;
   }
 });
 
@@ -10016,7 +10513,12 @@ function saveProfileAccountName() {
   showCopyToast("Account name saved");
 }
 
-profileAccountName?.addEventListener("blur", saveProfileAccountName);
+profileAccountName?.addEventListener("blur", () => {
+  const before = activeAccountMetadata()?.name || "";
+  saveProfileAccountName();
+  const after = activeAccountMetadata()?.name || "";
+  if (after && after !== before) showCopyToast("Account renamed.");
+});
 profileAccountName?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -12507,6 +13009,7 @@ contactForm.addEventListener("submit", async (event) => {
       address = validateContactAddress(rawAddress);
     }
 
+    if (address === engine.address) throw new Error("That's your own address.");
     const displayName = name || resolvedDomain || shortAddress(address);
     const existing = state.contacts.find((contact) => contact.address === address);
     if (existing) {

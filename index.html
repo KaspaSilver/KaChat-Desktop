@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=367" />
+  <link rel="stylesheet" href="./ui/styles.css?v=368" />
   <meta name="theme-color" content="#070a0d" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
   <link rel="icon" type="image/png" href="./ui/assets/kachat-logo.png" />
@@ -1962,7 +1962,6 @@
         </div>
         <button class="modal-close" type="button" data-close-kns-editor aria-label="Close">×</button>
       </div>
-      <p class="field-hint">Each changed field is a separate on-chain write (~2 KAS commit + ~1 KAS reveal, offset by network fees).</p>
       <div class="kns-editor-scroll">
         <button class="kns-editor-guide" type="button" data-open-kns-guide>
           <span class="kns-editor-guide-icon" aria-hidden="true">📘</span>
@@ -1972,19 +1971,42 @@
           </span>
           <svg class="kns-editor-guide-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         </button>
+        <p class="kns-editor-section">Avatar</p>
+        <div class="kns-image-row">
+          <span class="kaposts-avatar kns-avatar-preview" data-kns-avatar-preview aria-hidden="true"></span>
+          <div class="kns-image-buttons">
+            <button type="button" class="secondary-button" data-kns-choose-avatar>Choose Avatar</button>
+            <button type="button" class="secondary-button danger" data-kns-remove-avatar hidden>Remove Avatar</button>
+          </div>
+          <input type="file" accept="image/*" hidden data-kns-avatar-file />
+        </div>
+        <p class="field-hint" data-kns-avatar-status hidden>Processing avatar...</p>
+        <p class="kns-editor-section">Banner</p>
+        <div class="kns-banner-preview" data-kns-banner-preview hidden></div>
+        <div class="kns-image-buttons">
+          <button type="button" class="secondary-button" data-kns-choose-banner>Choose Banner</button>
+          <button type="button" class="secondary-button danger" data-kns-remove-banner hidden>Remove Banner</button>
+        </div>
+        <input type="file" accept="image/*" hidden data-kns-banner-file />
+        <p class="field-hint" data-kns-banner-status hidden>Processing banner...</p>
+        <p class="kns-editor-section">Profile</p>
         <label class="field-label compact">Bio<textarea class="field-input" data-kns-editor-field="bio" maxlength="300" rows="3"></textarea></label>
-        <label class="field-label compact">Website<input class="field-input" type="text" data-kns-editor-field="website" maxlength="2048" /></label>
-        <label class="field-label compact">X (Twitter)<input class="field-input" type="text" data-kns-editor-field="x" maxlength="64" /></label>
-        <label class="field-label compact">Telegram<input class="field-input" type="text" data-kns-editor-field="telegram" maxlength="64" /></label>
-        <label class="field-label compact">Discord<input class="field-input" type="text" data-kns-editor-field="discord" maxlength="128" /></label>
-        <label class="field-label compact">Email<input class="field-input" type="text" data-kns-editor-field="contactEmail" maxlength="254" /></label>
-        <label class="field-label compact">GitHub<input class="field-input" type="text" data-kns-editor-field="github" maxlength="64" /></label>
+        <label class="field-label compact">X handle<input class="field-input" type="text" data-kns-editor-field="x" maxlength="64" autocapitalize="none" /></label>
+        <label class="field-label compact">Website<input class="field-input" type="url" data-kns-editor-field="website" maxlength="2048" autocapitalize="none" /></label>
+        <label class="field-label compact">Telegram<input class="field-input" type="text" data-kns-editor-field="telegram" maxlength="64" autocapitalize="none" /></label>
+        <label class="field-label compact">Discord user id<input class="field-input" type="text" data-kns-editor-field="discord" maxlength="128" autocapitalize="none" /></label>
+        <label class="field-label compact">Email<input class="field-input" type="email" data-kns-editor-field="contactEmail" maxlength="254" autocapitalize="none" /></label>
+        <label class="field-label compact">GitHub<input class="field-input" type="text" data-kns-editor-field="github" maxlength="64" autocapitalize="none" /></label>
+        <label class="field-label compact">Redirect URL<input class="field-input" type="url" data-kns-editor-field="redirectUrl" maxlength="2048" autocapitalize="none" /></label>
+        <p class="kns-editor-section">Domain</p>
+        <div class="broadcast-info-row"><span>Name</span><strong data-kns-editor-domain-name>—</strong></div>
+        <div class="broadcast-info-row"><span>Asset ID</span><strong class="kns-asset-id" data-kns-editor-asset-id>—</strong></div>
         <p class="field-error" data-kns-editor-error hidden></p>
         <div class="kns-progress" data-kns-editor-progress hidden></div>
       </div>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-close-kns-editor>Cancel</button>
-        <button class="primary-button" type="button" data-kns-editor-save>Save Changes</button>
+        <button class="primary-button" type="button" data-kns-editor-save disabled>Save</button>
       </div>
     </section>
   </div>
@@ -2223,6 +2245,10 @@
       </header>
       <div class="manage-address-body">
         <div class="profile-domains-list" data-profile-domains-list></div>
+        <div class="profile-domain-detail" data-domain-detail hidden></div>
+      </div>
+      <div class="manage-address-actions">
+        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe>Inscribe New Domain</button>
       </div>
     </div>
   </div>
@@ -2236,12 +2262,13 @@
           </button>
           <span class="chatting-address-balance" data-manage-address-balance>-- KAS</span>
           <div class="manage-address-toolbar">
-            <button type="button" class="manage-address-icon-button" data-open-privatekey aria-label="Export private key">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+            <!-- iOS Address Actions: View Private Key / View Public Key / View in Explorer, in a sheet
+                 that says what each is. The explorer link element stays for the code that sets it. -->
+            <button type="button" class="manage-address-icon-button" data-open-address-actions aria-label="Address Actions" title="Address Actions">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
             </button>
-            <a class="manage-address-icon-button" data-manage-address-explorer-link href="#" target="_blank" rel="noopener noreferrer" aria-label="View address in explorer">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
-            </a>
+            <a data-manage-address-explorer-link href="#" target="_blank" rel="noopener noreferrer" hidden aria-hidden="true"></a>
+            <button type="button" data-open-privatekey hidden aria-hidden="true"></button>
           </div>
         </header>
 
@@ -2340,14 +2367,22 @@
         <button class="chatting-address-back" type="button" data-close-spending-manage aria-label="Back">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
         </button>
-        <span class="chatting-address-balance">Spending Addresses</span>
+        <span class="chatting-address-balance">Manage Addresses</span>
         <button class="chatting-address-back spending-visibility-open" type="button" data-open-spending-visibility aria-label="Manage address visibility" title="Manage address visibility">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 2 2 3-3"/><path d="M11 6h10"/><path d="m3 12.5 2 2 3-3"/><path d="M11 12.5h10"/><path d="m3 19 2 2 3-3"/><path d="M11 19h10"/></svg>
         </button>
       </header>
-      <p class="spending-manage-subtitle">These addresses are derived from your recovery phrase. The same phrase restores them identically on any device. Move funds here to keep chat and spending separate. Tap an address to view its transactions.</p>
+      <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Manage addresses view" data-spending-tabs hidden>
+        <button type="button" class="settings-segmented-option active" data-spending-tab="addresses">Addresses</button>
+        <button type="button" class="settings-segmented-option" data-spending-tab="privacy">Chat Privacy</button>
+      </div>
+      <div class="spending-total" data-spending-total-block>
+        <span>Total Balance</span>
+        <strong data-spending-total-balance>-- KAS</strong>
+      </div>
       <div class="manage-address-body">
         <div class="manage-address-list spending-address-list" data-spending-address-list></div>
+        <div class="manage-address-list spending-privacy-list" data-spending-privacy-list hidden></div>
       </div>
       <div class="manage-address-actions spending-manage-actions">
         <div class="spending-actions-wrap">
@@ -2365,7 +2400,7 @@
             </button>
             <button type="button" role="menuitem" class="spending-row-menu-item" data-spending-consolidate>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V6M6 12l6-6 6 6M5 4h14"/></svg>
-              <span>Send All Kaspa to Primary Spend Address</span>
+              <span>Send All Kaspa To Primary</span>
             </button>
           </div>
         </div>
@@ -2640,7 +2675,7 @@
   <div class="modal-backdrop" data-privatekey-modal hidden>
     <section class="contact-modal recovery-modal recovery-hold-modal" role="dialog" aria-modal="true" aria-label="Private key">
       <button class="modal-close recovery-close" type="button" data-close-privatekey aria-label="Close">×</button>
-      <p class="field-hint" data-privatekey-hint>This is the private key for your chatting address. Anyone with it can spend from this address — never share it.</p>
+      <div class="security-warning-card"><strong>Security Warning</strong><p class="field-hint" data-privatekey-hint>Anyone with this address's private key can spend its funds. Never share it with anyone.</p></div>
 
       <button class="recovery-hold-target" type="button" data-reveal-privatekey aria-label="Tap to reveal private key">
         <img class="recovery-eye-icon" src="./ui/assets/seed-eye-hidden.png" alt="" aria-hidden="true">
@@ -2653,7 +2688,7 @@
       <div class="recovery-phrase-box" data-privatekey-value hidden></div>
 
       <div class="modal-actions recovery-actions">
-        <button class="secondary-button" type="button" data-copy-privatekey hidden>Copy</button>
+        <button class="secondary-button" type="button" data-copy-privatekey hidden>Copy Private Key Hex</button>
         <button class="primary-button" type="button" data-close-privatekey>Done</button>
       </div>
     </section>
@@ -2934,13 +2969,13 @@
     <span data-copy-toast-text>Copied</span>
   </div>
 
-  <script type="module" src="./ui/app.js?v=405"></script>
+  <script type="module" src="./ui/app.js?v=406"></script>
   <script type="module" src="./ui/pwa.js?v=1"></script>
 
   <div class="modal-backdrop logout-backdrop" data-logout-modal hidden>
     <section class="logout-sheet" role="dialog" aria-modal="true" aria-labelledby="logout-title">
       <h2 id="logout-title">Log Out</h2>
-      <p>This signs out of your account, but keeps local wallet and message data on this device.</p>
+      <p>Signs out of this account. Wallet and message data stay on this device.</p>
       <div class="logout-sheet-actions">
         <button class="logout-destructive" type="button" data-confirm-logout>Log Out</button>
         <button class="logout-cancel" type="button" data-close-logout>Cancel</button>
