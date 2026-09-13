@@ -9773,3 +9773,16 @@ body.session-logged-out [data-account-rename-modal] {
 
 .kns-wizard-body > * { min-width: 0; }
 .kns-wizard-center, .kns-wizard-form { max-width: 100%; overflow-wrap: anywhere; }
+
+/* In-app link card (iOS KaChatInternalLinkCardView) and the voice preview bar. */
+.internal-link-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); text-align: left; cursor: pointer; color: var(--text); font: inherit; }
+.internal-link-card .message-link-card-meta { padding: 0; }
+.internal-link-card strong { font-size: 14px; }
+.internal-link-card small { color: var(--muted); font-size: 12px; }
+.internal-link-icon { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 10px; background: rgba(98,244,208,.18); display: grid; place-items: center; }
+.internal-link-icon svg { width: 20px; height: 20px; fill: none; stroke: var(--kaspa); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.voice-recording-panel.preview { border-color: rgba(98,244,208,.35); background: rgba(98,244,208,.08); }
+.voice-preview-play { width: 30px; height: 30px; border-radius: 999px; border: 0; background: var(--kaspa); color: #000; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; }
+.voice-preview-play svg { width: 16px; height: 16px; fill: currentColor; }
+.voice-preview-trash { display: grid; place-items: center; width: 32px; padding: 0; color: #ff6b6b; }
+.voice-preview-trash svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

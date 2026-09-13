@@ -1702,6 +1702,14 @@ export function stopBroadcastPolling() {
 }
 
 /** Deep-open a channel's room from OUTSIDE this module (the global bell center). */
+// An in-chat room link (kachat://broadcast/<channel>): joins the room if it is not in the list
+// yet, then opens it - the same gate a pasted room name goes through.
+export function openBroadcastRoomFromLink(channel) {
+  if (!deps) return;
+  loadState();
+  joinChannel(channel);
+}
+
 export function openBroadcastChannelFromNotification(channel) {
   if (!deps) return;
   const clean = normalizeBroadcastChannel(channel);

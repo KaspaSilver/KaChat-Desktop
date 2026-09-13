@@ -2,7 +2,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
@@ -912,6 +912,75 @@ photoPreviewOverlay?.addEventListener("click", () => { photoPreviewOverlay.hidde
 // back to <img>, else an "Open in Nextcloud" link).
 
 const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
+
+// A link that points back INSIDE KaChat (iOS KaChatInternalLink). Both forms are accepted:
+//   kachat://kapost/<txid>        https://kachat.duckdns.org/post/<txid>
+//   kachat://broadcast/<channel>  https://kachat.duckdns.org/broadcast/<channel>
+// Everything a pasted link carries is untrusted, so the payload is re-validated here rather
+// than trusted from the URL's text.
+const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.duckdns\.org\/(?:post|broadcast)\/[^\s<>"']+)/i;
+function parseKaChatInternalLink(raw) {
+  const text = String(raw || "").trim();
+  let target = null, payload = null;
+  const custom = text.match(/^kachat:\/\/(kapost|broadcast)\/([^/?#]+)\/?$/i);
+  if (custom) { target = custom[1].toLowerCase() === "kapost" ? "kapost" : "broadcast"; payload = custom[2]; }
+  else {
+    const universal = text.match(/^https?:\/\/(?:www\.)?kachat\.duckdns\.org\/(post|broadcast)\/([^/?#]+)\/?$/i);
+    if (!universal) return null;
+    target = universal[1].toLowerCase() === "post" ? "kapost" : "broadcast";
+    payload = universal[2];
+  }
+  try { payload = decodeURIComponent(payload); } catch { return null; }
+  if (target === "kapost") {
+    const id = payload.trim();
+    if (id.length < 8 || id.length > 128 || !/^[A-Za-z0-9_-]+$/.test(id)) return null;
+    return { kind: "kapost", txId: id };
+  }
+  const channel = payload.trim().replace(/^#/, "").toLowerCase();
+  if (!channel || channel.length > 36 || /[\s:/\\?#%@]/.test(channel) || channel.includes("..") || /[\u0000-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(channel)) return null;
+  return { kind: "broadcast", channel };
+}
+function firstInternalLinkIn(text) {
+  const match = String(text || "").match(INTERNAL_LINK_IN_TEXT_RE);
+  if (!match) return null;
+  const link = parseKaChatInternalLink(match[0]);
+  return link ? { ...link, raw: match[0] } : null;
+}
+// Opens the target screen (iOS KaChatLinkRouter) - never the browser for an in-app target.
+function openKaChatInternalLink(link) {
+  if (!link) return;
+  if (isChildModeEnabled()) { showCopyToast("Not available in Child Mode."); return; }
+  if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
+  else if (link.kind === "broadcast") { setActiveAppTab("broadcasts"); try { openBroadcastRoomFromLink(link.channel); } catch {} }
+}
+// The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
+function buildInternalLinkCard(link) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "message-link-card internal-link-card";
+  const isPost = link.kind === "kapost";
+  const icon = isPost
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>';
+  card.innerHTML = `<span class="internal-link-icon">${icon}</span>
+    <span class="message-link-card-meta">
+      <span class="message-link-card-site">${isPost ? "KaPosts" : "Broadcast Room"}</span>
+      <strong>${isPost ? "KaPosts post" : `#${escapeHtml(link.channel)}`}</strong>
+      <small>${isPost ? "Tap to open this post in KaChat." : "Tap to open this KaChat broadcast room."}</small>
+    </span>`;
+  card.addEventListener("click", (event) => { event.stopPropagation(); openKaChatInternalLink(link); });
+  return card;
+}
+// An https universal link rendered as an anchor still opens inside the app.
+document.addEventListener("click", (event) => {
+  const anchor = event.target.closest(".message-text a[href], .group-message-text a[href]");
+  if (!anchor) return;
+  const link = parseKaChatInternalLink(anchor.getAttribute("href"));
+  if (!link) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openKaChatInternalLink(link);
+});
 
 /** `https://host/s/TOKEN` (or `/index.php/s/TOKEN`) -> its raw-file endpoints, else null. */
 function nextcloudShareDownloadUrl(url) {
@@ -11925,17 +11994,24 @@ function renderMessages(conversationEntry) {
         });
         text.append(more);
       }
-      const previewable = linkUrls.find(isPreviewableUrl);
+      // An in-app link (KaPosts post, broadcast room) previews as a native card and opens the
+      // target screen; it is never scraped like a stranger's URL (iOS KaChatInternalLink).
+      const internalLink = firstInternalLinkIn(bodyText);
+      const previewable = internalLink ? null : linkUrls.find(isPreviewableUrl);
       // Only an accepted contact's links fetch on render. A stranger's link renders as a neutral
       // "Tap to load preview" card and only touches the link's server when you tap it; your own
       // outgoing links and anything already resolved this session show as before.
       const autoFetch = message.direction === "outgoing"
         || isAcceptedContact(requestContact, conversationEntry)
         || (previewable && (linkPreviewCache.has(previewable) || approvedPreviewUrls.has(previewable)));
-      const card = previewable ? (autoFetch ? buildLinkPreviewCard(previewable) : buildTapToLoadCard(previewable, conversationEntry)) : null;
+      const card = internalLink
+        ? buildInternalLinkCard(internalLink)
+        : previewable ? (autoFetch ? buildLinkPreviewCard(previewable) : buildTapToLoadCard(previewable, conversationEntry)) : null;
       // A link-only message renders as just the preview card (no chat bubble, timestamp below),
       // matching iOS. With a caption or other text, show the text bubble + card beneath it.
-      const linkOnly = card && !replyEnvelope && linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0];
+      const linkOnly = card && !replyEnvelope && (internalLink
+        ? String(bodyText).trim() === internalLink.raw
+        : (linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));
       if (linkOnly) {
         bubble.classList.add("link-card-bubble");
         bubble.append(card);
@@ -15443,32 +15519,93 @@ function createVoiceRecorder({ maxDurationSeconds, onElapsed, onFinish }) {
   return { start, stop, isRecording: () => recorder != null };
 }
 
+// Recording, then a preview you can play back before it goes anywhere (iOS "Audio ready"):
+// the panel shows the live timer while recording, then play/pause, the length, a trash can
+// and Send. Nothing is sent until Send is pressed.
+let voiceElapsedSeconds = 0;
+const voicePreviews = new Map(); // panel element -> { blob, mimeType, seconds, audio, playing }
+function renderVoicePanel(panel, state, { prefix = "voice-recording", seconds = 0 } = {}) {
+  if (!panel) return;
+  panel.hidden = false;
+  panel.classList.toggle("preview", state === "preview");
+  if (state === "recording") {
+    panel.innerHTML = `<span class="voice-recording-dot" aria-hidden="true"></span>
+      <span data-${prefix}-time>${formatRecordingTime(seconds)}</span>
+      <span class="voice-recording-hint">Recording voice message…</span>
+      <button type="button" class="voice-recording-cancel" data-${prefix}-cancel aria-label="Cancel recording">Cancel</button>
+      <button type="button" class="voice-recording-stop" data-${prefix}-stop>Stop</button>`;
+    return;
+  }
+  const preview = voicePreviews.get(panel);
+  const playing = Boolean(preview?.playing);
+  const position = preview?.audio && Number.isFinite(preview.audio.currentTime) && playing ? `${formatRecordingTime(preview.audio.currentTime)}/` : "";
+  panel.innerHTML = `<button type="button" class="voice-preview-play" data-${prefix}-play aria-label="${playing ? "Pause" : "Play"}">${playing
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg>'}</button>
+    <span class="voice-recording-hint">Audio ready • ${position}${formatRecordingTime(seconds)}</span>
+    <button type="button" class="voice-recording-cancel voice-preview-trash" data-${prefix}-cancel aria-label="Discard recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg></button>
+    <button type="button" class="voice-recording-stop" data-${prefix}-send>Send</button>`;
+}
+function setVoicePreview(panel, { blob, mimeType, seconds }, prefix) {
+  clearVoicePreview(panel);
+  const audio = new Audio(URL.createObjectURL(blob));
+  const entry = { blob, mimeType, seconds, audio, playing: false, prefix };
+  audio.addEventListener("ended", () => { entry.playing = false; renderVoicePanel(panel, "preview", { prefix, seconds: entry.seconds }); });
+  audio.addEventListener("timeupdate", () => { if (entry.playing) renderVoicePanel(panel, "preview", { prefix, seconds: entry.seconds }); });
+  voicePreviews.set(panel, entry);
+  renderVoicePanel(panel, "preview", { prefix, seconds });
+}
+function clearVoicePreview(panel) {
+  const entry = voicePreviews.get(panel);
+  if (entry) { try { entry.audio.pause(); URL.revokeObjectURL(entry.audio.src); } catch {} }
+  voicePreviews.delete(panel);
+  if (panel) { panel.hidden = true; panel.classList.remove("preview"); }
+}
+function toggleVoicePreviewPlayback(panel) {
+  const entry = voicePreviews.get(panel);
+  if (!entry) return;
+  if (entry.playing) { entry.audio.pause(); entry.playing = false; }
+  else { entry.audio.currentTime = 0; entry.audio.play().catch(() => showCopyToast("Failed to play audio.")); entry.playing = true; }
+  renderVoicePanel(panel, "preview", { prefix: entry.prefix, seconds: entry.seconds });
+}
+
 const chatVoiceRecorder = createVoiceRecorder({
   maxDurationSeconds: voiceMaxDurationSeconds,
   onElapsed: (elapsed) => {
-    if (voiceRecordingTimeEl) voiceRecordingTimeEl.textContent = formatRecordingTime(elapsed);
+    voiceElapsedSeconds = elapsed;
+    const el = voiceRecordingPanel?.querySelector("[data-voice-recording-time]");
+    if (el) el.textContent = formatRecordingTime(elapsed);
   },
   onFinish: handleChatVoiceRecordingFinished,
 });
 
 async function startVoiceRecording() {
   if (chatVoiceRecorder.isRecording()) return;
+  clearVoicePreview(voiceRecordingPanel);
   const error = await chatVoiceRecorder.start();
   if (error) {
     showCopyToast(error);
     return;
   }
-  if (voiceRecordingTimeEl) voiceRecordingTimeEl.textContent = "0:00";
-  if (voiceRecordingPanel) voiceRecordingPanel.hidden = false;
+  voiceElapsedSeconds = 0;
+  renderVoicePanel(voiceRecordingPanel, "recording", { seconds: 0 });
 }
 
 function stopVoiceRecording(cancelled) {
   chatVoiceRecorder.stop(cancelled);
 }
 
+// Stop hands the recording to the preview; Send on the preview is what actually sends it.
 async function handleChatVoiceRecordingFinished({ blob, mimeType, cancelled }) {
-  if (voiceRecordingPanel) voiceRecordingPanel.hidden = true;
-  if (cancelled || !blob || !activeConversationId) return;
+  if (cancelled || !blob || !activeConversationId) { clearVoicePreview(voiceRecordingPanel); return; }
+  setVoicePreview(voiceRecordingPanel, { blob, mimeType, seconds: Math.round(voiceElapsedSeconds) }, "voice-recording");
+}
+
+async function sendChatVoicePreview() {
+  const entry = voicePreviews.get(voiceRecordingPanel);
+  if (!entry || !activeConversationId) return;
+  const { blob, mimeType } = entry;
+  clearVoicePreview(voiceRecordingPanel);
 
   // "Send Media via Nextcloud": upload the recording and send its share link (renders as an
   // audio card + player on the recipient's side). Failure falls back to the on-chain envelope.
@@ -15503,8 +15640,15 @@ async function handleChatVoiceRecordingFinished({ blob, mimeType, cancelled }) {
   queueConversationMessage(activeConversationId, envelope);
 }
 
-document.querySelector("[data-voice-recording-stop]")?.addEventListener("click", () => stopVoiceRecording(false));
-document.querySelector("[data-voice-recording-cancel]")?.addEventListener("click", () => stopVoiceRecording(true));
+voiceRecordingPanel?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-voice-recording-stop]")) { stopVoiceRecording(false); return; }
+  if (event.target.closest("[data-voice-recording-send]")) { sendChatVoicePreview(); return; }
+  if (event.target.closest("[data-voice-recording-play]")) { toggleVoicePreviewPlayback(voiceRecordingPanel); return; }
+  if (event.target.closest("[data-voice-recording-cancel]")) {
+    if (chatVoiceRecorder.isRecording()) stopVoiceRecording(true);
+    else clearVoicePreview(voiceRecordingPanel);
+  }
+});
 
 // Envelope parses are memoized by content string: the thread re-renders constantly (sync
 // ticks, reactions, link previews) and re-parsing every photo/voice envelope each time was
@@ -20950,9 +21094,12 @@ function renderGroupMessages() {
       text.className = "message-text";
       const bodyText = replyEnvelope ? replyEnvelope.text : message.text;
       const linkUrls = renderTextWithMentions(text, bodyText);
-      const previewable = (linkUrls || []).find(isPreviewableUrl);
-      const card = previewable ? buildLinkPreviewCard(previewable) : null;
-      const linkOnly = card && !replyEnvelope && linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0];
+      const internalLink = firstInternalLinkIn(bodyText);
+      const previewable = internalLink ? null : (linkUrls || []).find(isPreviewableUrl);
+      const card = internalLink ? buildInternalLinkCard(internalLink) : previewable ? buildLinkPreviewCard(previewable) : null;
+      const linkOnly = card && !replyEnvelope && (internalLink
+        ? String(bodyText).trim() === internalLink.raw
+        : (linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));
       if (linkOnly) {
         bubble.classList.add("link-card-bubble");
         bubble.appendChild(card);
@@ -22221,11 +22368,12 @@ async function startGroupVoice() {
     groupVoiceRecorder.onstop = () => stream.getTracks().forEach((t) => t.stop());
     groupVoiceRecorder.start();
     groupVoiceStartMs = Date.now();
-    if (groupVoicePanel) groupVoicePanel.hidden = false;
-    if (groupVoiceTimeEl) groupVoiceTimeEl.textContent = "0:00";
+    clearVoicePreview(groupVoicePanel);
+    renderVoicePanel(groupVoicePanel, "recording", { prefix: "group-voice", seconds: 0 });
     groupVoiceTimer = window.setInterval(() => {
       const secs = (Date.now() - groupVoiceStartMs) / 1000;
-      if (groupVoiceTimeEl) groupVoiceTimeEl.textContent = formatRecordingTime(secs);
+      const el = groupVoicePanel?.querySelector("[data-group-voice-time]");
+      if (el) el.textContent = formatRecordingTime(secs);
       if (secs >= voiceMaxDurationSeconds()) finishGroupVoice(true);
     }, 250);
   } catch (error) { showCopyToast("Microphone access denied or unavailable."); }
@@ -22235,19 +22383,26 @@ function cancelGroupVoice() {
   stopGroupVoiceTimer();
   try { groupVoiceRecorder?.stop(); } catch {}
   groupVoiceRecorder = null; groupVoiceChunks = [];
-  if (groupVoicePanel) groupVoicePanel.hidden = true;
+  clearVoicePreview(groupVoicePanel);
 }
+// Stop moves the recording into the preview; Send on the preview sends it.
 async function finishGroupVoice(send) {
   stopGroupVoiceTimer();
-  if (groupVoicePanel) groupVoicePanel.hidden = true;
   const recorder = groupVoiceRecorder;
   groupVoiceRecorder = null;
   if (!recorder) return;
   const durationSec = Math.round((Date.now() - groupVoiceStartMs) / 1000);
   await new Promise((resolve) => { recorder.addEventListener("stop", resolve, { once: true }); try { recorder.stop(); } catch { resolve(); } });
-  if (!send || !groupVoiceChunks.length || !activeGroupId) { groupVoiceChunks = []; return; }
+  if (!send || !groupVoiceChunks.length || !activeGroupId) { groupVoiceChunks = []; clearVoicePreview(groupVoicePanel); return; }
   const blob = new Blob(groupVoiceChunks, { type: groupVoiceMime || "audio/webm" });
   groupVoiceChunks = [];
+  setVoicePreview(groupVoicePanel, { blob, mimeType: groupVoiceMime || "audio/webm", seconds: durationSec }, "group-voice");
+}
+async function sendGroupVoicePreview() {
+  const entry = voicePreviews.get(groupVoicePanel);
+  if (!entry || !activeGroupId) return;
+  const { blob, seconds: durationSec } = entry;
+  clearVoicePreview(groupVoicePanel);
   if (isNextcloudMediaSendActive()) {
     try {
       const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, groupVoiceMime || "audio/webm");
@@ -22261,8 +22416,15 @@ async function finishGroupVoice(send) {
   if (!dataUrl.startsWith("data:")) return;
   await sendGroupWire(JSON.stringify({ type: "file", name: "voice.webm", size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }));
 }
-groupVoiceStopBtn?.addEventListener("click", () => finishGroupVoice(true));
-groupVoiceCancelBtn?.addEventListener("click", cancelGroupVoice);
+groupVoicePanel?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-group-voice-stop]")) { finishGroupVoice(true); return; }
+  if (event.target.closest("[data-group-voice-send]")) { sendGroupVoicePreview(); return; }
+  if (event.target.closest("[data-group-voice-play]")) { toggleVoicePreviewPlayback(groupVoicePanel); return; }
+  if (event.target.closest("[data-group-voice-cancel]")) {
+    if (groupVoiceRecorder) cancelGroupVoice();
+    else clearVoicePreview(groupVoicePanel);
+  }
+});
 
 // Scroll-to-latest for the 1:1 thread (iOS scrollToBottomButton): appears when scrolled up,
 // and counts the incoming messages that landed since you last sat at the bottom.
