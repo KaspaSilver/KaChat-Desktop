@@ -2,11 +2,9 @@ import { NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
 
 const NODE_REGISTRY_KEY = "kachat.browser.node-registry.v1";
-/// KaChat's own node: the default every Automatic client tries first.
-///
-/// A browser served over https can only open wss://, which the public resolver does not reliably
-/// hand out - a node we run and can point at with a name is the way that is guaranteed. Users can
-/// still choose their own in Node Connection > Custom, which takes priority over this.
+/// KaChat's own node, kept only as a name the UI can show. Nothing connects to it on its own:
+/// the hosted mode is the public-node scan, and a user who wants this node types it in as a
+/// custom node like any other.
 export const DEFAULT_NODE = "wss://node.kachat.duckdns.org";
 
 const DIRECT_CONNECT_TIMEOUT_MS = 8000;
@@ -238,7 +236,7 @@ export function getNodeRegistrySnapshot() {
 /// Automatic scan (what kaspa-ng's web build does): ask the Kaspa public node resolver for a
 /// node and connect to it, up to a few times since each answer may be a different node. Only
 /// TLS endpoints are usable from a page served over https, so ws:// answers are skipped there.
-const RESOLVER_ATTEMPTS = 4;
+const RESOLVER_ATTEMPTS = 6;
 const RESOLVER_TIMEOUT_MS = 10000;
 async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [] } = {}) {
   if (typeof kaspa.Resolver !== "function") throw new Error("This build of the Kaspa SDK has no node resolver.");
@@ -284,25 +282,11 @@ export async function createRpc(kaspa, log = () => {}) {
     });
   }
 
-  const connectDefault = () => connectCandidate(kaspa, {
-    endpoint: DEFAULT_NODE,
-    timeoutMs: DIRECT_CONNECT_TIMEOUT_MS,
-    log,
-    role: "primary",
-    singleShot: true,
-  });
-
-  // Automatic Scan is the hosted mode: the Kaspa public node resolver picks the node, the way
-  // kaspa-ng's web build does, and KaChat's own node is the quiet fallback when no public node
-  // can be reached. The log and Node Connection say which one is in use.
-  try { return await connectViaResolver(kaspa, { log }); }
-  catch (error) {
-    log(`Automatic scan found no usable public node (${error?.message || error}); trying KaChat's node.`);
-    try { return await connectDefault(); }
-    catch (fallbackError) {
-      throw new Error(`No public node could be reached (${error?.message || error}), and KaChat's node failed too (${fallbackError?.message || fallbackError}).`);
-    }
-  }
+  // Automatic Scan is the hosted mode, and the only one: the Kaspa public node resolver picks
+  // the node, the way kaspa-ng's web build does, retrying a few answers before giving up. There
+  // is no house node behind it - if no public node answers, the error says exactly that and the
+  // heartbeat keeps scanning until one does.
+  return connectViaResolver(kaspa, { log });
 }
 
 /// There is no second node to warm any more.

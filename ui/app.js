@@ -3431,7 +3431,7 @@ function updateArchitectureDetails() {
         ? `Failover ${connection.failover}`
         : getEndpointOverride("trustedNode").trim()
           ? "Your own node · no fallback"
-          : "Automatic scan · KaChat's node as fallback";
+          : "Automatic public-node scan";
   }
   if (standbyStatus) {
     standbyStatus.textContent = standbyReady
@@ -4326,8 +4326,7 @@ document.querySelector("[data-connection-reconnect]")?.addEventListener("click",
   finally { button.disabled = false; renderConnectionStatus(); }
 });
 
-// Node-selection cards: the automatic public-node scan (KaChat's own node behind it as the
-// fallback) vs a specific wRPC URL of the user's. Those are the only two; the selection is staged
+// Node-selection cards: the automatic public-node scan vs a specific wRPC URL of the user's. Those are the only two; the selection is staged
 // in the UI and only committed to the trustedNode endpoint on Apply. An empty trustedNode has
 // always meant the hosted mode, so nothing stored needs renaming.
 let selectedNodeMode = null;
@@ -9899,7 +9898,7 @@ function renderNodeChoice() {
   const note = document.querySelector("[data-node-choice-note]");
   if (note) {
     note.hidden = !current;
-    note.textContent = custom ? "Connected only to this node" : "A healthy public node is picked automatically; KaChat's node is the fallback";
+    note.textContent = custom ? "Connected only to this node" : "A healthy public node is picked automatically";
   }
 }
 document.querySelector("[data-node-choice]")?.addEventListener("change", async (event) => {
