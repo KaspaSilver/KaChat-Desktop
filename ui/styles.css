@@ -6625,6 +6625,55 @@ body.session-logged-out [data-account-rename-modal] {
 .broadcast-room-dot { width: 10px; height: 10px; border-radius: 50%; background: #e05555; flex-shrink: 0; }
 .broadcast-room-dot.ok { background: #4cd964; }
 .broadcast-hidden-btn { margin-left: auto; }
+/* The room's header chip (iOS BroadcastRoomTitleChip). */
+.broadcast-room-chip { display: inline-flex; flex-direction: column; align-items: center; border: 0; background: transparent; cursor: pointer; padding: 0; margin: 0 auto; }
+.broadcast-room-chip-icon { width: 40px; height: 40px; border-radius: 50%; background: rgba(98,244,208,.2); color: var(--kaspa-ink); font-weight: 800; font-size: 18px; display: grid; place-items: center; z-index: 1; }
+.broadcast-room-chip-name { display: inline-flex; align-items: center; gap: 4px; margin-top: -10px; padding: 12px 12px 5px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text); font-size: 13.5px; font-weight: 800; }
+.broadcast-room-chip-name svg { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+/* Room Info (iOS BroadcastRoomInfoView). */
+.broadcast-info-section { display: grid; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.broadcast-info-section:last-child { border-bottom: 0; }
+.broadcast-info-section h3 { margin: 0 0 2px; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.broadcast-info-row { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.broadcast-info-row span { color: var(--muted); }
+.broadcast-info-row strong { font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.broadcast-info-footer { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+.broadcast-info-action { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; }
+.broadcast-info-action svg { width: 18px; height: 18px; fill: none; stroke: var(--kaspa-ink); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.broadcast-info-action b { margin-left: auto; color: var(--muted); font-weight: 600; }
+.broadcast-info-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.broadcast-info-check { margin: 0; font-size: 12.5px; }
+.broadcast-info-check.ok { color: #34c759; }
+.broadcast-info-check.failed { color: #ff9f0a; }
+.broadcast-info-check.checking { color: var(--muted); }
+.broadcast-info-address { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.secondary-button.danger { color: #ff6b6b; }
+/* Join sheet (iOS joinChannelSheet). */
+.broadcast-join-field { display: flex; align-items: center; gap: 4px; padding: 0 0 0 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-1); }
+.broadcast-join-hash { color: var(--muted); font-weight: 800; }
+.broadcast-join-field .kaposts-reply-input { border: 0; background: transparent; flex: 1; }
+.broadcast-join-row { display: flex; gap: 10px; }
+.broadcast-join-row button { flex: 1; }
+.broadcast-join-row button:disabled { opacity: .4; cursor: default; }
+/* Retention sheet (iOS RetentionSettingsView). */
+.broadcast-retention-backdrop { z-index: 3000; }
+.broadcast-retention-sheet { max-width: 420px; display: grid; gap: 10px; }
+.broadcast-retention-row { display: flex; gap: 8px; }
+.broadcast-retention-row input, .broadcast-retention-row select { flex: 1; min-width: 0; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text); padding: 9px 12px; font: inherit; font-size: 14px; }
+.broadcast-retention-warning { color: #ff9f0a; }
+/* The recording bar (iOS recordingBar), the fee pill and the funding gate in a room. */
+.broadcast-recording-bar { align-items: center; gap: 10px; }
+.broadcast-recording-trash { width: 30px; height: 30px; border: 0; background: transparent; color: #ff6b6b; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.broadcast-recording-trash svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.broadcast-fee-row { display: flex; justify-content: flex-end; min-height: 0; }
+.fee-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-1); color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.fee-pill.estimating { cursor: default; text-decoration: none; background-image: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.14) 50%, transparent 70%); background-size: 220% 100%; animation: fee-shimmer 1.1s linear infinite; }
+.fee-pill[hidden] { display: none; }
+.broadcast-funding-gate { margin: 0 0 6px; }
+.kaposts-reply-bar.gated .broadcast-voice-btn { pointer-events: none; }
+.broadcast-message .message-reply-quote.clickable { cursor: pointer; }
+.broadcast-room { position: relative; }
+.broadcast-scroll-bottom { bottom: 96px; }
 /* (No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
    stated once, beside the Popular header in the channel list.) */
 .broadcast-hidden-panel {
@@ -6741,7 +6790,7 @@ body.session-logged-out [data-account-rename-modal] {
 .broadcast-message.has-reactions { margin-bottom: 8px; }
 .message-reaction-pill-entry.active { cursor: pointer; }
 
-/* Broadcast voice notes (visible only while Nextcloud media send is active) */
+/* Broadcast voice notes: on-chain (10s) by default, via Nextcloud when media send is on */
 .broadcast-voice-btn { flex: 0 0 auto; }
 .voice-recording-panel [data-broadcast-voice-time] {
   font-variant-numeric: tabular-nums;

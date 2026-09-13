@@ -17,14 +17,30 @@ import {
   isValidBroadcastChannel,
   normalizeBroadcastChannel,
   sendBroadcastMessage,
+  broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
-import { confirmText, promptText } from "./dialogs.js";
+import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
 
 const CHANNELS_KEY = "kachat-broadcast-channels-v1";        // account-scoped: ["name", ...]
 const HIDDEN_KEY = "kachat-broadcast-hidden-v1";            // account-scoped: { [channel]: [address, ...] }
 const NOTIFY_KEY = "kachat-broadcast-notify-v1";            // account-scoped: { [channel]: true } — the bell
 const LISTEN_KEY = "kachat-broadcast-listen-v1";            // account-scoped: { [channel]: true } — always-listen
-const RETENTION_KEY = "kachat-broadcast-retention-v1";      // account-scoped: { [channel]: days } (0/absent = forever, own channels only)
+const RETENTION_KEY = "kachat-broadcast-retention-v1";      // account-scoped: { [channel]: millis } (own channels only; absent = the 3h default)
+const INDEXER_KEY = "kachat-broadcast-indexer-v1";          // account-scoped: { [channel]: url } — per-room indexer override (Room Info)
+const JOINED_AT_KEY = "kachat-broadcast-joined-at-v1";      // account-scoped: { [channel]: ms } — when this device joined the room
+// Retention is bounded (iOS BroadcastStore.maxRetentionMillis): a room can hold at most three
+// days on this device, and a new room starts at three hours.
+const MAX_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
+const DEFAULT_RETENTION_MS = 3 * 60 * 60 * 1000;
+const RETENTION_UNITS = [
+  ["seconds", 1000], ["minutes", 60_000], ["hours", 3_600_000], ["days", 86_400_000],
+];
+// A voice note that goes on-chain is capped hard (iOS BroadcastAudioRecording.maxDuration);
+// with Nextcloud carrying the bytes the 600s cap of 1:1 notes applies instead.
+const ONCHAIN_VOICE_MAX_SECONDS = 10;
+const LONG_MESSAGE_BYTES = 2000;
+const LONG_MESSAGE_PREVIEW_CHARS = 500;
+const LINK_HOST = "kachat.duckdns.org";
 const CACHE_KEY = "kachat-broadcast-messages-cache-v1";     // GLOBAL: public chain data, account-agnostic
 const REACTIONS_KEY = "kachat-broadcast-reactions-cache-v1"; // GLOBAL: public chain data, account-agnostic
 const POLL_MS = 8000;
@@ -38,7 +54,11 @@ let voicePanelEl, voiceTimeEl, voiceBtn;
 let joinedChannels = [];
 let hiddenByRoom = {};
 let notifyByChannel = {};    // { [channel]: true } — the bell: OS pings for new messages
-let retentionByChannel = {}; // { [channel]: days } — own channels only; indexed rooms are fixed 30-day
+let retentionByChannel = {}; // { [channel]: millis } — own channels only; indexed rooms are fixed 30-day
+let indexerByChannel = {};   // { [channel]: url } — Room Info's per-room indexer override
+let joinedAtByChannel = {};  // { [channel]: ms }
+let feeOverrideKas = null;   // the fee typed on the pill for the NEXT message
+let feeEstimateKas = null;
 // { [channel]: true } — always-listen, own channels only. Keeps a custom room's live block
 // scan running while its screen is closed (iOS BroadcastChannel.alwaysListen). Curated rooms
 // deliberately have no toggle: they are indexer-backed, so there is nothing to keep alive.
@@ -81,6 +101,20 @@ function loadState() {
   try {
     listenByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(LISTEN_KEY)) || "{}") || {};
   } catch { listenByChannel = {}; }
+  try {
+    indexerByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(INDEXER_KEY)) || "{}") || {};
+  } catch { indexerByChannel = {}; }
+  try {
+    joinedAtByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(JOINED_AT_KEY)) || "{}") || {};
+  } catch { joinedAtByChannel = {}; }
+  // Older installs stored retention as a day count (0 = forever). Days become milliseconds,
+  // and everything is clamped to the three-day ceiling the app now has.
+  for (const channel of Object.keys(retentionByChannel)) {
+    const value = Number(retentionByChannel[channel] || 0);
+    if (!Number.isFinite(value) || value <= 0) { delete retentionByChannel[channel]; continue; }
+    const millis = value < 1000 ? value * 86_400_000 : value;
+    retentionByChannel[channel] = Math.min(MAX_RETENTION_MS, millis);
+  }
   try {
     messageCache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") || {};
   } catch { messageCache = {}; }
@@ -135,6 +169,49 @@ function saveRetention() {
 
 function saveListen() {
   localStorage.setItem(deps.accountScopedKey(LISTEN_KEY), JSON.stringify(listenByChannel));
+}
+
+function saveIndexerOverrides() {
+  localStorage.setItem(deps.accountScopedKey(INDEXER_KEY), JSON.stringify(indexerByChannel));
+}
+
+function saveJoinedAt() {
+  localStorage.setItem(deps.accountScopedKey(JOINED_AT_KEY), JSON.stringify(joinedAtByChannel));
+}
+
+function indexerOverrideFor(channel) {
+  return String(indexerByChannel[channel] || "").trim();
+}
+
+function retentionMillisFor(channel) {
+  const stored = Number(retentionByChannel[channel] || 0);
+  return stored > 0 ? Math.min(MAX_RETENTION_MS, stored) : DEFAULT_RETENTION_MS;
+}
+
+// Splits a stored millis value into the largest unit that divides it evenly (iOS
+// BroadcastRetentionUnit.fromMillis), so the sheet pre-fills "3 hours" rather than "10800 seconds".
+function retentionParts(millis) {
+  for (const [unit, per] of [...RETENTION_UNITS].reverse()) {
+    const amount = Math.floor(millis / per);
+    if (millis % per === 0 && amount >= 1 && amount <= Math.floor(MAX_RETENTION_MS / per)) return { amount, unit };
+  }
+  return { amount: Math.max(1, Math.floor(millis / 1000)), unit: "seconds" };
+}
+
+function retentionDescription(millis) {
+  const { amount, unit } = retentionParts(millis);
+  const label = amount === 1 ? unit.replace(/s$/, "") : unit;
+  return `${amount} ${label}`;
+}
+
+// The share text and links for a room (iOS KaChatInternalLink.broadcastRoomShareText): one human
+// line, then BOTH accepted link forms.
+function roomShareLink(channel) {
+  return `kachat://broadcast/${normalizeBroadcastChannel(channel)}`;
+}
+function roomShareText(channel) {
+  const name = normalizeBroadcastChannel(channel);
+  return `Join #${name} on KaChat.\n\nOpen in KaChat: ${roomShareLink(name)}\nOr: https://${LINK_HOST}/broadcast/${name}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,8 +290,7 @@ function handleBroadcastBlockHits(hits) {
  *  forever when unset/0. */
 function retentionCutoffMs(channel) {
   if (isIndexedBroadcastChannel(channel)) return Date.now() - BROADCAST_RETENTION_MS;
-  const days = Number(retentionByChannel[channel] || 0);
-  return days > 0 ? Date.now() - days * 86_400_000 : 0;
+  return Date.now() - retentionMillisFor(channel);
 }
 
 function saveCache() {
@@ -390,8 +466,9 @@ const deepBackfilled = new Set();
 async function backfillChannel(channel, { quiet = true } = {}) {
   try {
     let added = 0;
+    const baseUrl = indexerOverrideFor(channel) || null;
     if (deepBackfilled.has(channel)) {
-      const result = await fetchBroadcastHistory({ channel });
+      const result = await fetchBroadcastHistory({ channel, baseUrl });
       added = mergeMessages(channel, result.messages);
     } else {
       // First open this session: page backwards through the indexer's full history
@@ -401,7 +478,7 @@ async function backfillChannel(channel, { quiet = true } = {}) {
       const cutoff = retentionCutoffMs(channel);
       let before = null;
       for (let page = 0; page < 20; page++) {
-        const result = await fetchBroadcastHistory({ channel, limit: 500, before });
+        const result = await fetchBroadcastHistory({ channel, limit: 500, before, baseUrl });
         added += mergeMessages(channel, result.messages);
         if (!result.hasMore || !result.messages.length) break;
         const oldest = result.messages.reduce(
@@ -445,7 +522,7 @@ function enqueueBroadcastSend(task) {
 
 /** Shared send pipeline used by the composer, voice-note share links, and reactions
  *  (reactions pass showBubble:false — they never get a message row). */
-async function sendBroadcastText(channel, text, { showBubble = true } = {}) {
+async function sendBroadcastText(channel, text, { showBubble = true, feeKas = null } = {}) {
   const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   if (showBubble) {
     (messageCache[channel] ||= []).push({
@@ -458,7 +535,7 @@ async function sendBroadcastText(channel, text, { showBubble = true } = {}) {
     if (activeChannel === channel) renderRoom();
   }
   try {
-    const txid = await enqueueBroadcastSend(() => sendBroadcastMessage({ engine: deps.engine, channel, content: text }));
+    const txid = await enqueueBroadcastSend(() => sendBroadcastMessage({ engine: deps.engine, channel, content: text, feeKas: feeKas || "0" }));
     if (showBubble) {
       messageCache[channel] = (messageCache[channel] || []).map((m) =>
         m.txId === pendingId ? { ...m, txId: txid, status: undefined } : m);
@@ -568,9 +645,8 @@ function languageCardHtml(name) {
 // Leave. Note: these headers scroll away with their content - they are deliberately not sticky.
 function renderChannelList() {
   if (!listEl) return;
-  const own = joinedChannels
-    .filter((name) => !isIndexedBroadcastChannel(name))
-    .sort((a, b) => a.localeCompare(b));
+  // Join order, as iOS keeps its store order - not alphabetical.
+  const own = joinedChannels.filter((name) => !isIndexedBroadcastChannel(name));
   listEl.innerHTML = `
     <div class="broadcast-section-header">
       <span>Popular</span>
@@ -594,7 +670,7 @@ function renderChannelList() {
     </div>
     ${own.length
       ? own.map((name) => channelCardHtml(name, { indexed: false })).join("")
-      : `<p class="broadcast-empty-hint">No channels yet. Tap + to join or create one.</p>`}
+      : `<p class="broadcast-empty-hint">No channels yet - tap + to join or create one.</p>`}
   `;
 }
 
@@ -608,8 +684,9 @@ function buildMessageRow(m) {
   const row = document.createElement("div");
   row.className = `broadcast-msg-row${mine ? " mine" : ""}`;
   const avatar = document.createElement("span");
-  avatar.className = "broadcast-avatar-slot";
+  avatar.className = "broadcast-avatar-slot group-avatar-clickable";
   avatar.innerHTML = deps.avatarHtmlForAddress?.(m.senderAddress, "message-avatar") || "";
+  avatar.addEventListener("click", (event) => { event.stopPropagation(); openBroadcastSenderMenu(m.senderAddress, event.clientX, event.clientY); });
   const card = buildMessageElement(m);
   if (mine) row.append(card, avatar);
   else row.append(avatar, card);
@@ -623,6 +700,7 @@ function buildMessageElement(m) {
 
   const head = document.createElement("div");
   head.className = "broadcast-message-head";
+  el.dataset.broadcastTxid = m.txId;
   const sender = document.createElement("strong");
   sender.dataset.broadcastSender = m.senderAddress;
   sender.textContent = senderName(m.senderAddress);
@@ -653,10 +731,14 @@ function buildMessageElement(m) {
     const quote = document.createElement("div");
     quote.className = "message-reply-quote";
     const label = document.createElement("strong");
-    label.textContent = replyEnvelope.replyToSender ? `Reply to ${senderName(replyEnvelope.replyToSender)}` : "Reply";
+    label.textContent = replyEnvelope.replyToSender ? senderName(replyEnvelope.replyToSender) : "Reply";
     const preview = document.createElement("span");
     preview.textContent = replyEnvelope.replyToPreview || "Message";
     quote.append(label, preview);
+    // Tapping the quote jumps to the original and lights it up; gone from this device's cache
+    // (retention, or before you joined) says so instead of doing nothing.
+    quote.classList.add("clickable");
+    quote.addEventListener("click", (event) => { event.stopPropagation(); jumpToBroadcastMessage(replyEnvelope.replyToId); });
     el.append(quote);
   }
 
@@ -680,9 +762,24 @@ function buildMessageElement(m) {
   } else {
     const body = document.createElement("div");
     body.className = "broadcast-message-body";
-    const bodyText = replyEnvelope ? replyEnvelope.text : m.content;
+    const fullText = replyEnvelope ? replyEnvelope.text : m.content;
+    // Public rooms are where stray base64 and essays land: past 2000 bytes the bubble shows a
+    // 500-character preview and opens in full on demand, as iOS does.
+    const isLong = new TextEncoder().encode(String(fullText || "")).length > LONG_MESSAGE_BYTES;
+    const bodyText = isLong ? `${String(fullText).slice(0, LONG_MESSAGE_PREVIEW_CHARS)}…` : fullText;
     const urls = deps.renderTextWithLinks?.(body, bodyText) ?? [];
     if (!deps.renderTextWithLinks) body.textContent = bodyText;
+    if (isLong) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "message-show-more";
+      more.textContent = "Show More";
+      more.addEventListener("click", (event) => {
+        event.stopPropagation();
+        alertDialog({ title: "Message", message: fullText, confirmLabel: "Done" });
+      });
+      body.append(more);
+    }
     el.append(body);
     const previewable = urls.find((url) => deps.isPreviewableUrl?.(url));
     if (previewable) {
@@ -697,7 +794,64 @@ function buildMessageElement(m) {
     event.preventDefault();
     openBroadcastMessageMenu(m, event.clientX, event.clientY);
   });
+  // Double-click: the quick-reaction bar (iOS double-tap), with "+" into the full picker.
+  el.addEventListener("dblclick", (event) => {
+    if (m.status) return;
+    event.preventDefault();
+    const perReactor = reactionsFor(activeChannel)[m.txId] || {};
+    const myEntry = perReactor[deps.engine.address || ""];
+    deps.openQuickReactionBar?.({
+      anchor: el,
+      alignRight: mine,
+      current: myEntry && !myEntry.removed ? myEntry.emoji : null,
+      onReact: (emoji) => sendBroadcastReaction(m.txId, emoji),
+      onReply: () => startBroadcastReply(m),
+    });
+  });
   return el;
+}
+
+// Scrolls to the original a reply quotes and lights it up for a moment.
+function jumpToBroadcastMessage(txId) {
+  if (!txId || !roomBodyEl) return;
+  let row = null;
+  try { row = roomBodyEl.querySelector(`[data-broadcast-txid="${CSS.escape(String(txId))}"]`); } catch { row = null; }
+  if (!row) { deps.showToast?.("Original message not available."); return; }
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  row.classList.add("message-highlight");
+  window.setTimeout(() => row.classList.remove("message-highlight"), 1200);
+}
+
+// The avatar menu (iOS BroadcastChannelView.avatarButton): who this is, and what you can do
+// about them. Same menu from the sender's name.
+function openBroadcastSenderMenu(address, x, y) {
+  if (!address || !deps.openMsgContextMenu) return;
+  const mine = address === deps.engine.address;
+  const icons = deps.getMsgMenuIcons?.() || {};
+  const name = senderName(address);
+  const items = [];
+  items.push({ label: "View Profile", icon: icons.info, onClick: () => deps.openUserInfo?.(address) });
+  if (!mine) items.push({ label: "Open Chat", icon: icons.reply, onClick: () => deps.openChat?.(address, deps.contactNameFor?.(address) || "") });
+  items.push({
+    label: "Copy Address", icon: icons.copy,
+    onClick: () => deps.copyText?.(address).then(() => deps.showToast?.(deps.addressCopiedToastText?.(address) || "Address copied")).catch(() => {}),
+  });
+  if (!mine) {
+    items.push({ label: "Pay in Kaspa", icon: icons.explorer, onClick: () => deps.payInKaspa?.(address, deps.contactNameFor?.(address) || "") });
+    items.push({ label: "Hide User", icon: icons.trash, danger: true, onClick: () => hideSender(address) });
+  }
+  void name;
+  deps.openMsgContextMenu({ x, y, reaction: null, items });
+}
+
+// A failed send of yours: drop the failed row and send the same content again.
+function retryBroadcastMessage(m) {
+  if (!activeChannel || m.status !== "failed") return;
+  messageCache[activeChannel] = (messageCache[activeChannel] || []).filter((row) => row.txId !== m.txId);
+  renderRoom();
+  sendBroadcastText(activeChannel, m.content).then(() => renderChannelList()).catch((error) => {
+    deps.showToast?.(error.message);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -725,11 +879,13 @@ function cancelBroadcastReply() {
 
 function renderBroadcastReplyBanner() {
   const banner = document.querySelector("[data-broadcast-reply-banner]");
+  const title = document.querySelector("[data-broadcast-reply-title]");
   const preview = document.querySelector("[data-broadcast-reply-preview]");
   if (!banner) return;
   banner.hidden = !broadcastReplyTarget;
-  if (preview && broadcastReplyTarget) {
-    preview.textContent = `Reply to ${senderName(broadcastReplyTarget.senderAddress)}: ${broadcastReplyTarget.preview}`;
+  if (broadcastReplyTarget) {
+    if (title) title.textContent = `Replying to ${senderName(broadcastReplyTarget.senderAddress)}`;
+    if (preview) preview.textContent = broadcastReplyTarget.preview;
   }
 }
 
@@ -747,16 +903,36 @@ function openBroadcastMessageMenu(m, x, y) {
   if (!pending) {
     items.push({ label: "Reply", icon: icons.reply, onClick: () => startBroadcastReply(m) });
   }
-  if (text) {
+  const firstLink = (String(text || "").match(/https?:\/\/[^\s<>"']+/) || [])[0] || null;
+  if (firstLink) {
+    items.push({ label: "Open Link", icon: icons.explorer, onClick: () => window.open(firstLink, "_blank", "noopener,noreferrer") });
+    items.push({ label: "Copy Link", icon: icons.copy, onClick: () => deps.copyText?.(firstLink).catch(() => {}) });
+  }
+  if (text && !deps.parseAudioEnvelope?.(m.content)) {
     items.push({
-      label: "Copy", icon: icons.copy,
-      onClick: () => deps.copyText?.(text).then(() => deps.showToast?.("Message copied")).catch(() => {}),
+      label: "Copy Message", icon: icons.copy,
+      onClick: () => deps.copyText?.(text).then(() => deps.showToast?.("Message copied.")).catch(() => {}),
     });
   }
   if (!pending && deps.explorerTxUrl) {
     items.push({
       label: "View in Explorer", icon: icons.explorer,
       onClick: () => window.open(deps.explorerTxUrl(m.txId), "_blank", "noopener,noreferrer"),
+    });
+  }
+  if (mine && m.status === "failed") {
+    items.push({ label: "Retry Send", icon: icons.retry, onClick: () => retryBroadcastMessage(m) });
+  }
+  const reactionEntries = Object.entries(perReactor).filter(([, entry]) => !entry.removed)
+    .map(([reactorAddress, entry]) => ({ emoji: entry.emoji, reactorAddress }));
+  if (reactionEntries.length) {
+    items.push({
+      label: `Reactions (${reactionEntries.length})`, icon: icons.info,
+      onClick: () => deps.showReactionsSheet?.({
+        entries: reactionEntries,
+        nameFor: (address) => senderName(address),
+        avatarFor: (address) => deps.avatarHtmlForAddress?.(address, "chat-avatar reactions-sheet-avatar") || "",
+      }),
     });
   }
   if (!mine) {
@@ -843,9 +1019,11 @@ function renderRoom() {
   if (!inRoom) return;
 
   if (roomTitleEl) roomTitleEl.textContent = `#${activeChannel}`;
+  if (composerInput) composerInput.placeholder = `Message #${activeChannel}`;
   // No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
   // stated once, beside the Popular header in the channel list.
   updateVoiceButtonVisibility();
+  syncBroadcastFundingGate();
 
   const hidden = hiddenIn(activeChannel);
   const messages = (messageCache[activeChannel] || []).filter((m) =>
@@ -906,6 +1084,92 @@ async function refreshVisibleSenderNames(messages) {
   }
 }
 
+// Zero-balance gate (iOS ZeroBalanceFundingCardView above a greyed compose bar): reading stays
+// fully usable, only composing is blocked, and the card says where to send the KAS.
+let fundingGateQrDrawnFor = null;
+function syncBroadcastFundingGate() {
+  const gate = document.querySelector("[data-broadcast-funding-gate]");
+  const bar = composerInput?.closest(".kaposts-reply-bar");
+  if (!gate) return;
+  const address = deps.chattingAddress?.() || deps.engine.address || "";
+  const gated = Boolean(activeChannel) && Boolean(address) && Boolean(deps.isChattingBalanceZero?.());
+  gate.hidden = !gated;
+  bar?.classList.toggle("gated", gated);
+  if (composerInput) composerInput.disabled = gated;
+  if (!gated) return;
+  const addressEl = gate.querySelector("[data-broadcast-funding-gate-address]");
+  if (addressEl) addressEl.textContent = address;
+  const canvas = gate.querySelector("[data-broadcast-funding-gate-qr]");
+  if (canvas && fundingGateQrDrawnFor !== address && deps.drawQr) {
+    fundingGateQrDrawnFor = address;
+    deps.drawQr(canvas, address).then(() => { canvas.style.width = "160px"; canvas.style.height = "160px"; })
+      .catch(() => { fundingGateQrDrawnFor = null; });
+  }
+}
+
+// The fee pill (iOS feeBubble): "fee: -------- KAS" shimmering while the estimate is in flight,
+// the value underlined once it lands (a tap edits it), hidden with Show Fee Estimate off.
+let feeTimer = null;
+let feeToken = 0;
+function formatKasExact(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(8) : "--";
+}
+function renderFeePill(feeKas, { estimating = false } = {}) {
+  const pill = document.querySelector("[data-broadcast-fee]");
+  if (!pill) return;
+  pill.classList.toggle("estimating", estimating);
+  if (estimating && feeKas == null) pill.textContent = "fee: -------- KAS";
+  else if (feeKas == null) pill.textContent = "fee: -- KAS";
+  else pill.textContent = `fee: ${formatKasExact(feeKas)} KAS`;
+  pill.hidden = false;
+}
+function hideFeePill() {
+  if (feeTimer) clearTimeout(feeTimer);
+  feeTimer = null;
+  feeEstimateKas = null;
+  const pill = document.querySelector("[data-broadcast-fee]");
+  if (pill) pill.hidden = true;
+}
+function scheduleBroadcastFeeEstimate() {
+  const text = String(composerInput?.value || "").trim();
+  if (!activeChannel || !text || !deps.showFeeEstimate?.() || !deps.estimateFeeKas) { hideFeePill(); return; }
+  if (feeOverrideKas != null) { renderFeePill(feeOverrideKas); return; }
+  if (feeTimer) clearTimeout(feeTimer);
+  const token = ++feeToken;
+  renderFeePill(feeEstimateKas, { estimating: true });
+  feeTimer = setTimeout(async () => {
+    try {
+      const fee = await deps.estimateFeeKas(broadcastPayloadBytes(activeChannel, text));
+      if (token !== feeToken) return;
+      feeEstimateKas = fee == null ? null : String(fee);
+      renderFeePill(feeEstimateKas);
+    } catch {
+      if (token === feeToken) renderFeePill(null);
+    }
+  }, 450);
+}
+async function editBroadcastFee() {
+  const pill = document.querySelector("[data-broadcast-fee]");
+  if (!pill || pill.classList.contains("estimating")) return;
+  const current = feeOverrideKas ?? feeEstimateKas;
+  if (current == null) return;
+  const typed = await promptDialog({
+    title: "Adjust Network Fee",
+    label: "Fee (KAS)",
+    message: "If the network is busy, a higher fee can help your transaction confirm faster.",
+    initial: formatKasExact(current),
+    confirmLabel: "Save",
+  });
+  if (typed == null) return;
+  const normalized = String(typed).trim().replace(",", ".");
+  if (normalized === "" || normalized === "0") { feeOverrideKas = null; scheduleBroadcastFeeEstimate(); return; }
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value < 0) { deps.showToast?.("Enter a fee in KAS."); return; }
+  feeOverrideKas = normalized;
+  renderFeePill(feeOverrideKas);
+}
+
 function updateConnectionDot() {
   if (!roomDotEl) return;
   const status = deps.engine.connectionState?.status || deps.engine.connectionState?.state || "";
@@ -918,15 +1182,17 @@ function updateConnectionDot() {
 // ---------------------------------------------------------------------------
 
 function updateVoiceButtonVisibility() {
-  if (voiceBtn) voiceBtn.hidden = !deps.isNextcloudMediaSendActive?.();
+  // The mic is always there (iOS sendOrRecordButton). Nextcloud only changes where the bytes go.
+  if (voiceBtn) voiceBtn.hidden = false;
 }
 
 function ensureVoiceRecorder() {
   if (voiceRecorder || !deps.createVoiceRecorder) return voiceRecorder;
   voiceRecorder = deps.createVoiceRecorder({
-    maxDurationSeconds: () => VOICE_MAX_DURATION_SECONDS,
+    maxDurationSeconds: () => (deps.isNextcloudMediaSendActive?.() ? VOICE_MAX_DURATION_SECONDS : ONCHAIN_VOICE_MAX_SECONDS),
     onElapsed: (elapsed) => {
-      if (voiceTimeEl) voiceTimeEl.textContent = deps.formatRecordingTime?.(elapsed) ?? String(Math.floor(elapsed));
+      voiceRecordedSeconds = elapsed;
+      if (voiceTimeEl) voiceTimeEl.textContent = `Recording... ${Math.floor(elapsed)}s`;
     },
     onFinish: handleVoiceRecordingFinished,
   });
@@ -935,7 +1201,6 @@ function ensureVoiceRecorder() {
 
 async function startVoiceRecording() {
   if (!activeChannel) return;
-  if (!deps.isNextcloudMediaSendActive?.()) return; // button only shows when active anyway
   if (deps.isChattingBalanceZero?.()) {
     deps.showFundingGate?.();
     return;
@@ -949,7 +1214,8 @@ async function startVoiceRecording() {
     voiceRecordingChannel = null;
     return;
   }
-  if (voiceTimeEl) voiceTimeEl.textContent = "0:00";
+  voiceRecordedSeconds = 0;
+  if (voiceTimeEl) voiceTimeEl.textContent = "Recording... 0s";
   if (voicePanelEl) voicePanelEl.hidden = false;
 }
 
@@ -958,18 +1224,39 @@ async function handleVoiceRecordingFinished({ blob, mimeType, cancelled }) {
   const channel = voiceRecordingChannel;
   voiceRecordingChannel = null;
   if (cancelled || !blob || !channel) return;
-  // Upload to Nextcloud and send the share link as a plain broadcast message — recipients
-  // render it as an audio card via the same link-preview probe as 1:1. No on-chain
-  // fallback: on failure nothing stays staged.
+  // With Nextcloud media send on, the bytes go to the server and the room gets the share link
+  // (an audio card on every client). Otherwise, or when the upload fails, the note goes on
+  // chain in the same envelope 1:1 and group voice notes use - if it is short enough.
+  if (deps.isNextcloudMediaSendActive?.()) {
+    try {
+      const url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, mimeType);
+      await sendBroadcastText(channel, url);
+      renderChannelList();
+      return;
+    } catch (error) {
+      deps.showToast?.(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+      deps.appendEngineLog?.(`Broadcast voice note upload failed: ${error.message}`);
+    }
+  }
+  const dataUrl = await new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(blob);
+  });
+  if (!dataUrl.startsWith("data:")) { deps.showToast?.("Could not process the recording."); return; }
+  const durationSec = Math.round(Number(voiceRecordedSeconds) || 0);
+  const envelope = JSON.stringify({ type: "file", name: "voice.webm", size: blob.size, mimeType: mimeType || "audio/webm", content: dataUrl, duration: durationSec });
   try {
-    const url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.webm`, mimeType);
-    await sendBroadcastText(channel, url);
+    await sendBroadcastText(channel, envelope, { feeKas: feeOverrideKas });
+    feeOverrideKas = null;
     renderChannelList();
   } catch (error) {
     deps.showToast?.(`Voice note failed: ${error.message}`);
     deps.appendEngineLog?.(`Broadcast voice note failed: ${error.message}`);
   }
 }
+let voiceRecordedSeconds = 0;
 
 function cancelVoiceRecordingIfActive() {
   if (voiceRecorder?.isRecording()) voiceRecorder.stop(true);
@@ -985,9 +1272,13 @@ function openRoom(channel) {
   if (activeChannel && isIndexedBroadcastChannel(activeChannel) && !joinedChannels.includes(activeChannel)) {
     joinedChannels.push(activeChannel);
     saveChannels();
+    if (!joinedAtByChannel[activeChannel]) { joinedAtByChannel[activeChannel] = Date.now(); saveJoinedAt(); }
     renderChannelList();
   }
   cancelBroadcastReply(); // a reply drafted in another room must not leak across
+  feeOverrideKas = null;
+  hideFeePill();
+  closeRoomInfo();
   renderRoom();
   updateConnectionDot();
   // Only the curated rooms have an indexer behind them. A custom room must never call it:
@@ -1015,12 +1306,14 @@ function closeRoom() {
 function joinChannel(rawName) {
   const name = normalizeBroadcastChannel(rawName);
   if (!isValidBroadcastChannel(name)) {
-    deps.showToast?.("Channel names are up to 36 characters, no spaces or colons.");
+    alertDialog({ title: "Couldn't Join Channel", message: "Channel names must be 1-36 characters with no spaces or colons." });
     return;
   }
   if (!joinedChannels.includes(name)) {
     joinedChannels.push(name);
     saveChannels();
+    joinedAtByChannel[name] = Date.now();
+    saveJoinedAt();
   }
   const joinCard = document.querySelector("[data-broadcast-join-card]");
   if (joinCard) joinCard.hidden = true;
@@ -1041,6 +1334,10 @@ function leaveChannel(name) {
   saveReactions();
   delete listenByChannel[name];
   saveListen();
+  delete indexerByChannel[name];
+  saveIndexerOverrides();
+  delete joinedAtByChannel[name];
+  saveJoinedAt();
   if (activeChannel === name) closeRoom();
   syncScanWanted();
   renderChannelList();
@@ -1071,8 +1368,11 @@ async function sendCurrentMessage() {
       })
     : text;
   cancelBroadcastReply();
+  const feeKas = feeOverrideKas;
+  feeOverrideKas = null;
+  hideFeePill();
   try {
-    await sendBroadcastText(channel, content);
+    await sendBroadcastText(channel, content, { feeKas });
     renderChannelList();
   } catch (error) {
     deps.showToast?.(error.message);
@@ -1137,7 +1437,7 @@ function setBroadcastReactionStatus(key, status, retry = null) {
         broadcastReactionStatus.delete(key);
         renderRoom();
       }
-    }, 60_000);
+    }, 600_000);
   }
   renderRoom();
 }
@@ -1176,21 +1476,198 @@ function hideSender(address) {
   deps.showToast?.("User hidden in this room");
 }
 
+function infoPanelEl() {
+  return document.querySelector("[data-broadcast-info-panel]") || document.querySelector("[data-broadcast-hidden-panel]");
+}
+
+function closeRoomInfo() {
+  const panel = infoPanelEl();
+  if (panel) { panel.hidden = true; panel.innerHTML = ""; }
+}
+
+// Hidden users in ONE room (iOS HiddenBroadcastSendersView): name over the full address,
+// alphabetical, Unhide per row. Reached from Room Info.
 function renderHiddenUsersPanel() {
-  const panel = document.querySelector("[data-broadcast-hidden-panel]");
+  const panel = infoPanelEl();
   if (!panel || !activeChannel) return;
-  const addresses = hiddenByRoom[activeChannel] || [];
+  const addresses = [...(hiddenByRoom[activeChannel] || [])].sort();
   panel.hidden = false;
   panel.innerHTML = `
-    <div class="kaposts-thread-header"><strong>Hidden in #${deps.escapeHtml(activeChannel)}</strong>
-      <button class="kaposts-view-link" type="button" data-broadcast-hidden-close>Done</button></div>
+    <div class="kaposts-thread-header">
+      <button class="kaposts-icon-button" type="button" data-broadcast-info-open aria-label="Back to Room Info">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+      </button>
+      <strong>Hidden Users - #${deps.escapeHtml(activeChannel)}</strong>
+      <button class="kaposts-view-link" type="button" data-broadcast-hidden-close>Done</button>
+    </div>
     ${addresses.length === 0
-      ? `<div class="no-results-card"><strong>No hidden users</strong><span>Click a sender's name in the room to hide them here.</span></div>`
+      ? `<div class="no-results-card"><span>No hidden users in #${deps.escapeHtml(activeChannel)}. Right-click a message to hide its sender.</span></div>`
       : addresses.map((address) => `
           <div class="kaposts-notification-row">
-            <div class="kaposts-notification-main"><span><strong>${deps.escapeHtml(senderName(address))}</strong></span></div>
+            <div class="kaposts-notification-main">
+              <span><strong>${deps.escapeHtml(senderName(address))}</strong></span>
+              <span class="broadcast-info-address">${deps.escapeHtml(address)}</span>
+            </div>
             <button class="kaposts-view-link" type="button" data-broadcast-unhide="${deps.escapeHtml(address)}">Unhide</button>
           </div>`).join("")}`;
+}
+
+// Everything about one room that is not the messages (iOS BroadcastRoomInfoView): what it is,
+// what is in it, how to share it, who you have hidden, and which indexer it reads from.
+let indexerCheck = { state: "idle" }; // idle | checking | reachable(count) | failed(reason)
+function renderRoomInfoPanel() {
+  const panel = infoPanelEl();
+  if (!panel || !activeChannel) return;
+  const channel = activeChannel;
+  const curated = isIndexedBroadcastChannel(channel);
+  const rows = messageCache[channel] || [];
+  const people = new Set(rows.map((m) => m.senderAddress).filter(Boolean)).size;
+  const times = rows.map((m) => Number(m.blockTime) || 0).filter(Boolean);
+  const fmt = (ms) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  const fmtDay = (ms) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  const language = broadcastLanguageDisplayName(channel);
+  const joinedAt = joinedAtByChannel[channel];
+  const hiddenCount = (hiddenByRoom[channel] || []).length;
+  const appWide = String(deps.appWideBroadcastIndexer?.() || "").trim();
+  const override = indexerOverrideFor(channel);
+  const row = (label, value) => `<div class="broadcast-info-row"><span>${deps.escapeHtml(label)}</span><strong>${deps.escapeHtml(value)}</strong></div>`;
+  const checkHtml = indexerCheck.state === "checking"
+    ? `<p class="broadcast-info-check checking">Checking the indexer...</p>`
+    : indexerCheck.state === "reachable"
+      ? `<p class="broadcast-info-check ok">${indexerCheck.count === 0 ? "Connected. It holds nothing for this room yet." : "Connected, and it has this room's messages."}</p>`
+      : indexerCheck.state === "failed"
+        ? `<p class="broadcast-info-check failed">${deps.escapeHtml(indexerCheck.reason)}</p>`
+        : "";
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div class="kaposts-thread-header">
+      <strong>Room Info</strong>
+      <button class="kaposts-view-link" type="button" data-broadcast-hidden-close>Done</button>
+    </div>
+    <section class="broadcast-info-section">
+      ${row("Room", `#${channel}`)}
+      ${language ? row("Language", language) : ""}
+      ${row("Kind", curated ? "Popular" : "Added by you")}
+      ${joinedAt ? row("Joined", fmtDay(joinedAt)) : ""}
+      <p class="broadcast-info-footer">${curated
+        ? "A curated room, always in your list. Anyone running KaChat can post to it."
+        : "A room you added. Anyone who knows the name can post to it."}</p>
+    </section>
+    <section class="broadcast-info-section">
+      <h3>On this device</h3>
+      ${row("Messages", String(rows.length))}
+      ${row("People who posted", String(people))}
+      ${times.length ? row("Latest", fmt(Math.max(...times))) : ""}
+      ${times.length ? row("Oldest held", fmt(Math.min(...times))) : ""}
+      ${!curated ? row("Kept for", retentionDescription(retentionMillisFor(channel))) : ""}
+    </section>
+    <section class="broadcast-info-section">
+      <button type="button" class="broadcast-info-action" data-broadcast-share-room>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4 4m-4-4-4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+        <span>Share this room</span>
+      </button>
+      <button type="button" class="broadcast-info-action" data-broadcast-hidden-users>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="4"/><path d="M3 20a7 7 0 0 1 12.5-4.3M17 15l4 4m0-4-4 4"/></svg>
+        <span>Hidden users</span>
+        <b>${hiddenCount}</b>
+      </button>
+      <p class="broadcast-info-footer">Sharing sends a link that opens this room in KaChat, and a web link for anyone without it. Hiding is per room: someone hidden here still shows in every other room.</p>
+    </section>
+    <section class="broadcast-info-section">
+      <h3>Indexer for this room</h3>
+      <input class="kaposts-reply-input" type="url" data-broadcast-indexer-input value="${deps.escapeHtml(override)}" placeholder="${deps.escapeHtml(appWide)}" autocomplete="off" spellcheck="false" />
+      ${checkHtml}
+      <div class="broadcast-info-buttons">
+        <button type="button" class="primary-button" data-broadcast-indexer-save ${indexerCheck.state === "checking" ? "disabled" : ""}>Save</button>
+        ${override ? `<button type="button" class="secondary-button danger" data-broadcast-indexer-clear>Use the app's indexer</button>` : ""}
+      </div>
+      <p class="broadcast-info-footer">A broadcast lives on the Kaspa blockDAG, so any indexer watching the same network serves the same room. Point this one wherever you like - your own, or someone else's - without changing the indexer every other room uses. Leave it blank to follow ${deps.escapeHtml(appWide || "the app's indexer")}.</p>
+    </section>`;
+}
+
+// Saves the override, then asks the indexer for this room. A wrong URL is otherwise silent: the
+// room simply stops filling in, with nothing on screen to say why.
+async function saveRoomIndexer(value) {
+  if (!activeChannel) return;
+  const channel = activeChannel;
+  const trimmed = String(value || "").trim();
+  if (trimmed === indexerOverrideFor(channel)) return;
+  if (trimmed) indexerByChannel[channel] = trimmed; else delete indexerByChannel[channel];
+  saveIndexerOverrides();
+  deps.showToast?.(trimmed ? `Indexer updated for #${channel}.` : "This room follows the app's indexer again.");
+  deepBackfilled.delete(channel);
+  indexerCheck = { state: "checking" };
+  renderRoomInfoPanel();
+  try {
+    const target = trimmed || String(deps.appWideBroadcastIndexer?.() || "").trim() || null;
+    const page = await fetchBroadcastHistory({ channel, limit: 1, baseUrl: target });
+    indexerCheck = { state: "reachable", count: page.messages.length };
+  } catch (error) {
+    indexerCheck = { state: "failed", reason: `Could not reach it: ${error.message}` };
+  }
+  if (activeChannel === channel) renderRoomInfoPanel();
+  if (isIndexedBroadcastChannel(channel) || trimmed) backfillChannel(channel, { quiet: true });
+}
+
+async function copyRoomLink(channel, { text = false } = {}) {
+  const value = text ? roomShareText(channel) : roomShareLink(channel);
+  try { await deps.copyText?.(value); deps.showToast?.("Room link copied"); } catch { deps.showToast?.("Could not copy the link."); }
+}
+
+// The retention sheet (iOS RetentionSettingsView): an amount and a unit, capped at three days.
+function openRetentionSheet(channel) {
+  const name = normalizeBroadcastChannel(channel);
+  const { amount, unit } = retentionParts(retentionMillisFor(name));
+  const host = document.createElement("div");
+  host.className = "modal-backdrop broadcast-retention-backdrop";
+  host.innerHTML = `
+    <section class="contact-modal broadcast-retention-sheet" role="dialog" aria-modal="true" aria-label="Message Retention">
+      <div class="modal-header"><div><h2>Message Retention</h2></div><button class="modal-close" type="button" data-retention-cancel aria-label="Cancel">×</button></div>
+      <p class="screen-kicker">Message Retention for #${deps.escapeHtml(name)}</p>
+      <div class="broadcast-retention-row">
+        <input type="number" min="1" step="1" inputmode="numeric" data-retention-amount value="${amount}" placeholder="Amount" />
+        <select data-retention-unit>${RETENTION_UNITS.map(([u]) => `<option value="${u}" ${u === unit ? "selected" : ""}>${u}</option>`).join("")}</select>
+      </div>
+      <p class="field-hint" data-retention-footer></p>
+      <p class="field-hint broadcast-retention-warning">Longer retention means more messages stay cached on your device - this can slow the app down over time, especially for busy rooms.</p>
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-retention-cancel>Cancel</button>
+        <button class="primary-button" type="button" data-retention-save>Save</button>
+      </div>
+    </section>`;
+  document.body.appendChild(host);
+  const amountEl = host.querySelector("[data-retention-amount]");
+  const unitEl = host.querySelector("[data-retention-unit]");
+  const footer = host.querySelector("[data-retention-footer]");
+  const save = host.querySelector("[data-retention-save]");
+  const perUnit = () => RETENTION_UNITS.find(([u]) => u === unitEl.value)?.[1] || 1000;
+  const maxAmount = () => Math.floor(MAX_RETENTION_MS / perUnit());
+  const validate = () => {
+    const value = Number(amountEl.value);
+    const valid = Number.isInteger(value) && value >= 1 && value <= maxAmount();
+    save.disabled = !valid;
+    footer.textContent = `How long messages in this broadcast stay cached on this device, up to a maximum of 3 days. Max: ${maxAmount()} ${unitEl.value}.`;
+  };
+  validate();
+  amountEl.addEventListener("input", validate);
+  unitEl.addEventListener("change", validate);
+  const close = () => host.remove();
+  host.addEventListener("click", (event) => {
+    if (event.target === host || event.target.closest("[data-retention-cancel]")) { close(); return; }
+    if (event.target.closest("[data-retention-save]") && !save.disabled) {
+      retentionByChannel[name] = Math.min(MAX_RETENTION_MS, Number(amountEl.value) * perUnit());
+      saveRetention();
+      pruneCache();
+      saveCache();
+      saveReactions();
+      renderChannelList();
+      if (activeChannel === name) renderRoom();
+      close();
+    }
+  });
+  host.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+  amountEl.focus();
+  amountEl.select();
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,16 +1742,75 @@ export function initBroadcasts(dependencies) {
   // Always-listen rooms must start scanning at launch, before the tab is ever opened.
   syncScanWanted();
 
-  document.querySelector("[data-broadcast-join]")?.addEventListener("click", () => {
+  const joinButton = document.querySelector("[data-broadcast-join]");
+  const joinCard = document.querySelector("[data-broadcast-join-card]");
+  const syncJoinButton = () => { if (joinButton) joinButton.disabled = !String(joinInput?.value || "").trim(); };
+  syncJoinButton();
+  joinInput?.addEventListener("input", syncJoinButton);
+  joinButton?.addEventListener("click", () => {
+    if (!String(joinInput?.value || "").trim()) return;
     joinChannel(joinInput?.value || "");
     if (joinInput) joinInput.value = "";
+    syncJoinButton();
+  });
+  document.querySelector("[data-broadcast-join-cancel]")?.addEventListener("click", () => {
+    if (joinCard) joinCard.hidden = true;
+    if (joinInput) joinInput.value = "";
+    syncJoinButton();
   });
   joinInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
+    if (event.key === "Enter" && String(joinInput.value || "").trim()) {
       joinChannel(joinInput.value);
       joinInput.value = "";
+      syncJoinButton();
     }
   });
+  // Right-click on a room row: share or copy its invite link (iOS row context menu).
+  listEl?.addEventListener("contextmenu", async (event) => {
+    const card = event.target.closest("[data-broadcast-open]");
+    if (!card) return;
+    event.preventDefault();
+    const name = card.dataset.broadcastOpen;
+    const choice = await chooseDialog({
+      title: `#${name}`,
+      options: [
+        { id: "share", title: "Share Room Link", subtitle: "Copies an invite with both link forms to your clipboard." },
+        { id: "copy", title: "Copy Room Link", subtitle: "Copies the kachat:// link on its own." },
+      ],
+    });
+    if (choice === "share") copyRoomLink(name, { text: true });
+    else if (choice === "copy") copyRoomLink(name);
+  });
+  composerInput?.addEventListener("input", scheduleBroadcastFeeEstimate);
+  document.querySelector("[data-broadcast-fee]")?.addEventListener("click", editBroadcastFee);
+  document.querySelector("[data-broadcast-funding-gate]")?.addEventListener("click", async (event) => {
+    if (!event.target.closest("[data-broadcast-funding-gate-address], [data-broadcast-funding-gate-copy]")) return;
+    const address = deps.chattingAddress?.() || "";
+    if (!address) return;
+    try { await deps.copyText?.(address); deps.showToast?.(deps.addressCopiedToastText?.(address) || "Address copied"); } catch {}
+  });
+  // The room's header chip opens Room Info; the dead space beside it jumps to the first message.
+  document.querySelector("[data-broadcast-room-info]")?.addEventListener("click", () => { indexerCheck = { state: "idle" }; renderRoomInfoPanel(); });
+  document.querySelector("[data-broadcast-room] .kaposts-thread-header")?.addEventListener("click", (event) => {
+    if (event.target.closest("button") || !roomBodyEl) return;
+    roomBodyEl.scrollTo({ top: 0, behavior: "smooth" });
+    const first = roomBodyEl.querySelector("[data-broadcast-txid]");
+    if (first) { first.classList.add("message-highlight"); window.setTimeout(() => first.classList.remove("message-highlight"), 1200); }
+  });
+  // Scroll-to-latest, appearing once you have scrolled up.
+  if (roomBodyEl?.parentElement) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "group-scroll-bottom broadcast-scroll-bottom";
+    btn.setAttribute("aria-label", "Scroll to latest");
+    btn.hidden = true;
+    btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+    btn.addEventListener("click", () => roomBodyEl.scrollTo({ top: roomBodyEl.scrollHeight, behavior: "smooth" }));
+    roomBodyEl.parentElement.appendChild(btn);
+    roomBodyEl.addEventListener("scroll", () => {
+      btn.hidden = roomBodyEl.scrollHeight - roomBodyEl.scrollTop - roomBodyEl.clientHeight < 120;
+    }, { passive: true });
+  }
 
   document.querySelector("[data-broadcast-back]")?.addEventListener("click", closeRoom);
   sendBtn?.addEventListener("click", sendCurrentMessage);
@@ -1284,7 +1820,6 @@ export function initBroadcasts(dependencies) {
       sendCurrentMessage();
     }
   });
-  document.querySelector("[data-broadcast-hidden-users]")?.addEventListener("click", renderHiddenUsersPanel);
 
   voiceBtn?.addEventListener("click", startVoiceRecording);
   document.querySelector("[data-broadcast-voice-stop]")?.addEventListener("click", () => voiceRecorder?.stop(false));
@@ -1302,9 +1837,13 @@ export function initBroadcasts(dependencies) {
     const leave = event.target.closest("[data-broadcast-leave]");
     if (leave) {
       event.stopPropagation();
-      if (await confirmText(`Leave #${leave.dataset.broadcastLeave}?\n\nLeaving this broadcast permanently deletes every message cached for it on this device. This cannot be undone. Rejoining later starts with no history.`)) {
-        leaveChannel(leave.dataset.broadcastLeave);
-      }
+      const confirmed = await confirmDialog({
+        title: `Leave #${leave.dataset.broadcastLeave}`,
+        message: "Leaving this broadcast permanently deletes every message cached for it on this device. This cannot be undone - rejoining later starts with no history.",
+        confirmLabel: "Leave & Delete",
+        destructive: true,
+      });
+      if (confirmed) leaveChannel(leave.dataset.broadcastLeave);
       return;
     }
 
@@ -1330,12 +1869,14 @@ export function initBroadcasts(dependencies) {
       }
       if (notifyByChannel[name]) {
         delete notifyByChannel[name];
-        deps.showToast?.(`Notifications off for #${name}.`);
+        deps.showToast?.("Notifications are off for this broadcast");
       } else {
         notifyByChannel[name] = true;
         // Make sure the OS-level permission is actually granted so the pings can fire.
         deps.ensureNotificationPermission?.();
-        deps.showToast?.(`Notifications on for #${name}. You will be notified of every new message.`);
+        deps.showToast?.(isIndexedBroadcastChannel(name)
+          ? "You'll get notifications for new messages in this broadcast, even when the app is closed"
+          : "You'll get a notification for new messages in this broadcast as long as your app remains open");
       }
       saveNotify();
       renderChannelList();
@@ -1350,10 +1891,10 @@ export function initBroadcasts(dependencies) {
       const name = listen.dataset.broadcastListen;
       if (listenByChannel[name]) {
         delete listenByChannel[name];
-        deps.showToast?.(`#${name} now receives only while the room is open.`);
+        deps.showToast?.("You will no longer see messages in this broadcast unless you are in the broadcast at the same time chats come in");
       } else {
         listenByChannel[name] = true;
-        deps.showToast?.(`Listening to #${name} in the background. New messages arrive with the room closed.`);
+        deps.showToast?.("You will now listen for new chats as long as your app remains open");
       }
       saveListen();
       syncScanWanted();
@@ -1365,23 +1906,7 @@ export function initBroadcasts(dependencies) {
     const retention = event.target.closest("[data-broadcast-retention]");
     if (retention) {
       event.stopPropagation();
-      const name = retention.dataset.broadcastRetention;
-      const current = Number(retentionByChannel[name] || 0);
-      const answer = await promptText(
-        `Keep #${name} messages for how many days on this device?\n0 = keep forever. Older messages are deleted from this device only.`,
-        String(current),
-      );
-      if (answer == null) return;
-      const days = Math.max(0, Math.floor(Number(answer)));
-      if (!Number.isFinite(days)) return;
-      if (days > 0) retentionByChannel[name] = days;
-      else delete retentionByChannel[name];
-      saveRetention();
-      pruneCache();
-      saveCache();
-      saveReactions();
-      renderChannelList();
-      deps.showToast?.(days > 0 ? `#${name}: keeping ${days} day${days === 1 ? "" : "s"} of messages.` : `#${name}: keeping messages forever.`);
+      openRetentionSheet(retention.dataset.broadcastRetention);
       return;
     }
 
@@ -1402,11 +1927,8 @@ export function initBroadcasts(dependencies) {
 
     const sender = event.target.closest("[data-broadcast-sender]");
     if (sender) {
-      const address = sender.dataset.broadcastSender;
-      if (address && address !== deps.engine.address &&
-          await confirmText(`Hide ${senderName(address)} in #${activeChannel}? Their messages disappear from this room only.`)) {
-        hideSender(address);
-      }
+      event.stopPropagation();
+      openBroadcastSenderMenu(sender.dataset.broadcastSender, event.clientX, event.clientY);
       return;
     }
 
@@ -1419,10 +1941,22 @@ export function initBroadcasts(dependencies) {
       return;
     }
 
+    if (event.target.closest("[data-broadcast-hidden-users]")) { renderHiddenUsersPanel(); return; }
+    if (event.target.closest("[data-broadcast-info-open]")) { renderRoomInfoPanel(); return; }
+    if (event.target.closest("[data-broadcast-share-room]")) { copyRoomLink(activeChannel, { text: true }); return; }
+    if (event.target.closest("[data-broadcast-indexer-save]")) {
+      saveRoomIndexer(infoPanelEl()?.querySelector("[data-broadcast-indexer-input]")?.value || "");
+      return;
+    }
+    if (event.target.closest("[data-broadcast-indexer-clear]")) { saveRoomIndexer(""); return; }
+
     const hiddenClose = event.target.closest("[data-broadcast-hidden-close]");
-    if (hiddenClose) {
-      const panel = document.querySelector("[data-broadcast-hidden-panel]");
-      if (panel) panel.hidden = true;
+    if (hiddenClose) closeRoomInfo();
+  });
+  infoPanelEl()?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.matches("[data-broadcast-indexer-input]")) {
+      event.preventDefault();
+      saveRoomIndexer(event.target.value);
     }
   });
 }

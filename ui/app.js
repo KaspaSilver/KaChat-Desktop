@@ -18062,11 +18062,23 @@ queueMicrotask(async () => {
     copyText: copyTextToClipboard,
     explorerTxUrl,
     // Per-message avatars beside broadcast bubbles (1:1/group parity).
-    avatarHtmlForAddress: (address, className = "message-avatar") => {
-      if (address === engine.address) return selfAvatarHtml(className);
+    avatarHtmlForAddress: (address, className = "message-avatar") => avatarHtmlForAnyAddress(address, className),
+    // The avatar menu's destinations (iOS BroadcastChannelView.avatarButton).
+    openUserInfo: (address) => openChatInfoForAddress(address),
+    openChat: (address, name) => openChatWithAddress({ address, name }),
+    payInKaspa: (address, name) => openChatWithAddressForKaspa({ address, name }),
+    addressCopiedToastText,
+    // Shared reaction surfaces and the fee pill's estimate (Settings > Show Fee Estimate).
+    openQuickReactionBar: openQuickReactionBarFor,
+    showReactionsSheet,
+    showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
+    estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
+    chattingAddress: () => engine.address || "",
+    appWideBroadcastIndexer: () => String(getEndpoint("broadcastIndexer") || ""),
+    drawQr: (canvas, value) => engine.drawQrFor(canvas, value, { dark: "#06110f", light: "#ffffff" }),
+    contactNameFor: (address) => {
       const contact = (state.contacts || []).find((c) => c.address === address);
-      if (contact) return avatarHtmlFor(contact, className);
-      return `<span class="${className}">${escapeHtml(initialsFor(shortAddress(address)))}</span>`;
+      return contact ? (displayNameForAddress(contact) || "") : "";
     },
     // Bell toggle requests OS notification permission on the spot.
     ensureNotificationPermission,
@@ -18994,10 +19006,21 @@ function openMsgContextMenu({ x, y, reaction, items }) {
 }
 
 function openQuickReactionBar(conversationEntry, message, bubble) {
-  document.querySelectorAll(".quick-reaction-bar").forEach((el) => el.remove());
   const targetTxId = message.txid || message.id;
   const myAddress = engine.address || "";
   const current = (conversationEntry.reactionsByTxId?.[targetTxId] || []).find((e) => e.reactorAddress === myAddress)?.emoji || null;
+  openQuickReactionBarFor({
+    anchor: bubble,
+    alignRight: message.direction !== "incoming",
+    current,
+    onReact: (emoji) => sendReaction(conversationEntry, message, emoji),
+    onReply: () => startReplyTo(message.id),
+  });
+}
+
+// The bar itself, shared by 1:1, group and broadcast bubbles (iOS QuickReactionBarView).
+function openQuickReactionBarFor({ anchor, alignRight = false, current = null, onReact, onReply }) {
+  document.querySelectorAll(".quick-reaction-bar").forEach((el) => el.remove());
   const bar = document.createElement("div");
   bar.className = "quick-reaction-bar";
   bar.innerHTML = `
@@ -19009,9 +19032,9 @@ function openQuickReactionBar(conversationEntry, message, bubble) {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
     </button>`;
   document.body.append(bar);
-  const rect = bubble.getBoundingClientRect();
+  const rect = anchor.getBoundingClientRect();
   const size = bar.getBoundingClientRect();
-  const left = message.direction === "incoming" ? rect.left : rect.right - size.width;
+  const left = alignRight ? rect.right - size.width : rect.left;
   bar.style.left = `${Math.max(8, Math.min(left, window.innerWidth - size.width - 8))}px`;
   bar.style.top = `${Math.max(8, rect.top - size.height - 8)}px`;
   const cleanup = () => {
@@ -19029,11 +19052,11 @@ function openQuickReactionBar(conversationEntry, message, bubble) {
   }, 0);
   bar.addEventListener("click", (event) => {
     const emojiButton = event.target.closest("[data-quick-emoji]");
-    if (emojiButton) { cleanup(); recordEmojiRecent(emojiButton.dataset.quickEmoji); sendReaction(conversationEntry, message, emojiButton.dataset.quickEmoji); return; }
-    if (event.target.closest("[data-quick-reply]")) { cleanup(); startReplyTo(message.id); return; }
+    if (emojiButton) { cleanup(); recordEmojiRecent(emojiButton.dataset.quickEmoji); onReact?.(emojiButton.dataset.quickEmoji); return; }
+    if (event.target.closest("[data-quick-reply]")) { cleanup(); onReply?.(); return; }
     if (event.target.closest("[data-quick-more]")) {
       cleanup();
-      openEmojiReactionPicker({ onPick: (emoji) => sendReaction(conversationEntry, message, emoji) });
+      openEmojiReactionPicker({ onPick: (emoji) => onReact?.(emoji) });
     }
   });
 }
@@ -19041,23 +19064,41 @@ function openQuickReactionBar(conversationEntry, message, bubble) {
 // Who reacted with what (iOS ReactionsSheet): one section per emoji, most used first.
 function openReactionsSheet(conversationEntry, targetTxId) {
   const entries = conversationEntry.reactionsByTxId?.[targetTxId] || [];
-  if (!entries.length) return;
   const contact = contactForConversation(conversationEntry);
+  showReactionsSheet({
+    entries,
+    nameFor: (address) => address === contact?.address ? (displayNameForAddress(contact) || shortAddress(address)) : shortAddress(address),
+    avatarFor: (address) => address === contact?.address ? avatarHtmlFor(contact, "chat-avatar reactions-sheet-avatar") : avatarHtmlForAnyAddress(address, "chat-avatar reactions-sheet-avatar"),
+  });
+}
+
+// The sheet itself, shared by 1:1, group and broadcast bubbles. `entries` are
+// { emoji, reactorAddress }; the caller names and draws everyone but you.
+function showReactionsSheet({ entries, nameFor, avatarFor }) {
+  if (!entries?.length) return;
   const groups = new Map();
   for (const entry of entries) groups.set(entry.emoji, [...(groups.get(entry.emoji) || []), entry]);
   const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
-  const nameFor = (address) => address === engine.address ? "You"
-    : (address === contact?.address ? (displayNameForAddress(contact) || shortAddress(address)) : shortAddress(address));
   const html = sorted.map(([emoji, reactors]) => `
     <div class="reactions-sheet-group">
       <div class="reactions-sheet-head"><span class="reactions-sheet-emoji">${escapeHtml(emoji)}</span><span>${reactors.length === 1 ? "1 person" : `${reactors.length} people`}</span></div>
       ${reactors.map((entry) => `
         <div class="reactions-sheet-row">
-          ${entry.reactorAddress === engine.address ? selfAvatarHtml("chat-avatar reactions-sheet-avatar") : avatarHtmlFor(contact, "chat-avatar reactions-sheet-avatar")}
-          <span>${escapeHtml(nameFor(entry.reactorAddress))}</span>
+          ${entry.reactorAddress === engine.address ? selfAvatarHtml("chat-avatar reactions-sheet-avatar") : (avatarFor?.(entry.reactorAddress) || "")}
+          <span>${escapeHtml(entry.reactorAddress === engine.address ? "You" : (nameFor?.(entry.reactorAddress) || shortAddress(entry.reactorAddress)))}</span>
         </div>`).join("")}
     </div>`).join("");
   infoSheet({ title: entries.length === 1 ? "1 Reaction" : `${entries.length} Reactions`, html });
+}
+
+// An avatar for any address: a saved contact's, else the KNS face when cached, else initials.
+function avatarHtmlForAnyAddress(address, className = "message-avatar") {
+  if (address === engine.address) return selfAvatarHtml(className);
+  const contact = (state.contacts || []).find((c) => c.address === address);
+  if (contact) return avatarHtmlFor(contact, className);
+  const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
+  if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" /></span>`;
+  return `<span class="${className}">${escapeHtml(initialsFor(shortAddress(address)))}</span>`;
 }
 
 // Right-click menu for a 1:1 message: reactions + Reply, Copy, Select, Explorer, Info, Retry, Delete.

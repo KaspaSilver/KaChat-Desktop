@@ -261,7 +261,14 @@ export function extractBroadcastHitsFromBlock(kaspa, eventOrBlock, { networkId =
 }
 
 /** Publishes a broadcast into `channel`. Returns the txid (= the message id). */
-export async function sendBroadcastMessage({ engine, channel, content }) {
+/** Bytes the chain will carry for a broadcast of `content` to `channel` - what a fee estimate
+ *  has to be quoted for. */
+export function broadcastPayloadBytes(channel, content) {
+  const name = normalizeBroadcastChannel(channel);
+  return new TextEncoder().encode(`${BROADCAST_PAYLOAD_PREFIX}${name}:${String(content || "")}`).length;
+}
+
+export async function sendBroadcastMessage({ engine, channel, content, feeKas = "0" }) {
   const name = normalizeBroadcastChannel(channel);
   if (!isValidBroadcastChannel(name)) throw new Error("Invalid channel name.");
   const text = String(content || "").trim();
@@ -279,7 +286,7 @@ export async function sendBroadcastMessage({ engine, channel, content }) {
     sourceAddress: engine.address,
     destinationAddress: engine.address, // self-send; the payload IS the message
     amountKas: "0.2",
-    feeKas: "0",
+    feeKas: String(feeKas || "0"),
     payload: new TextEncoder().encode(protocolString),
     log: engine.log,
   });
@@ -299,8 +306,10 @@ export function hasBroadcastIndexer() {
  * `{ txId, channel, senderAddress, content, blockTime }` — or throws; callers treat failures
  * as "no backfill" (nothing user-facing breaks, live sends still work).
  */
-export async function fetchBroadcastHistory({ channel, limit = 200, before = null } = {}) {
-  const base = String(getEndpoint("broadcastIndexer") || "").replace(/\/+$/, "");
+export async function fetchBroadcastHistory({ channel, limit = 200, before = null, baseUrl = null } = {}) {
+  // A room may read from its own indexer (Room Info): any indexer watching the same network
+  // serves the same room, so one room can point elsewhere without moving every other room.
+  const base = String(baseUrl || getEndpoint("broadcastIndexer") || "").replace(/\/+$/, "");
   const url = new URL(`${base}/get-broadcasts`);
   url.searchParams.set("channel", normalizeBroadcastChannel(channel));
   url.searchParams.set("limit", String(Math.max(1, Math.min(500, Number(limit) || 200))));
