@@ -46,7 +46,7 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet } from "./dialogs.js";
-import { onContextGesture, onDoubleGesture } from "./touch.js";
+import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
@@ -17437,6 +17437,8 @@ function autoGrowComposer() {
 composerInputField?.addEventListener("input", autoGrowComposer);
 composerInputField?.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.isComposing) return;
+  // On a phone keyboard Return is a newline and Send is the button, as in the iOS app.
+  if (isTouchDevice()) return;
   // Shift, Control or Option with Return all mean "new line" (iOS ComposerKeyCommandPolicy);
   // a bare Return sends.
   if (event.shiftKey || event.ctrlKey || event.altKey) {
@@ -22542,7 +22544,8 @@ groupComposerInput?.addEventListener("input", scheduleGroupFeeEstimate);
 
 // Enter sends, Shift+Enter is a newline; keep the box auto-growing.
 groupComposerInput?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); groupComposer?.requestSubmit(); }
+  // On a phone keyboard Return is a newline and Send is the button, as in the iOS app.
+  if (event.key === "Enter" && !event.shiftKey && !isTouchDevice()) { event.preventDefault(); groupComposer?.requestSubmit(); }
 });
 groupComposerInput?.addEventListener("input", () => { autoGrowGroupComposer(); refreshGroupMentions(); });
 groupMentionSuggestions?.addEventListener("click", (event) => {

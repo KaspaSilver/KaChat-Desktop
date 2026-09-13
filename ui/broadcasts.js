@@ -20,7 +20,7 @@ import {
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
-import { onContextGesture, onDoubleGesture } from "./touch.js";
+import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 
 const CHANNELS_KEY = "kachat-broadcast-channels-v1";        // account-scoped: ["name", ...]
 const HIDDEN_KEY = "kachat-broadcast-hidden-v1";            // account-scoped: { [channel]: [address, ...] }
@@ -1830,7 +1830,8 @@ export function initBroadcasts(dependencies) {
   document.querySelector("[data-broadcast-back]")?.addEventListener("click", closeRoom);
   sendBtn?.addEventListener("click", sendCurrentMessage);
   composerInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
+    // On a phone keyboard Return is a newline and Send is the button, as in the iOS app.
+    if (event.key === "Enter" && !event.shiftKey && !isTouchDevice()) {
       event.preventDefault();
       sendCurrentMessage();
     }

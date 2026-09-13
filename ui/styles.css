@@ -9947,3 +9947,34 @@ html.app-h .logged-out-screen { height: var(--app-h); }
 .ios-install-hint-copy svg { width: 14px; height: 14px; vertical-align: -2px; fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .ios-install-hint-close { flex: 0 0 auto; width: 30px; height: 30px; border: 0; border-radius: 50%; background: rgba(255,255,255,.08); color: var(--muted); font-size: 18px; line-height: 1; }
 html.standalone .ios-install-hint { display: none; }
+
+/* KaPosts on a phone: the X-style side rail has no room, so its sections become a horizontal
+   icon strip along the top (scrolls sideways when it must) and Post becomes the floating
+   compose button the iOS screen has, above the dock in the same corner as New Chat. */
+@media (max-width: 620px) {
+  .kaposts-screen { flex-direction: column; gap: 6px; }
+  .kaposts-rail {
+    width: 100%; position: static; flex-direction: row; align-items: center; gap: 2px;
+    padding: 0 0 4px; overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+    border-bottom: 1px solid var(--line);
+  }
+  .kaposts-rail::-webkit-scrollbar { display: none; }
+  .kaposts-rail-item { flex: 0 0 auto; padding: 10px 11px; border-radius: 12px; }
+  .kaposts-rail-badge { position: absolute; top: 2px; right: 2px; margin: 0; }
+  .kaposts-rail-post {
+    position: fixed; z-index: 350;
+    right: 20px; bottom: calc(var(--dock-inset, 80px) + 16px);
+    width: 56px; height: 56px; margin: 0; padding: 0; border-radius: 50%;
+    display: grid; place-items: center;
+    box-shadow: 0 10px 30px rgba(98,244,208,.35), 0 4px 14px rgba(0,0,0,.35);
+  }
+  .kaposts-rail-post::after { font-size: 30px; line-height: 1; }
+  .kaposts-content { padding-right: 0; scrollbar-gutter: auto; }
+}
+
+/* Photo viewer on a phone: the picture gets the screen, minus the safe areas. */
+@media (max-width: 620px) {
+  .photo-preview-overlay { padding: calc(8px + var(--safe-top)) 8px calc(8px + var(--safe-bottom)); }
+  .photo-preview-overlay img { max-width: 100%; max-height: 100%; border-radius: 12px; }
+}
