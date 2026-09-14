@@ -1543,7 +1543,11 @@ function jumpToMessageByTxid(txid) {
   if (!txid || !activeConversationId) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const target = conversationEntry?.messages.find((entry) => entry.txid === txid || entry.id === txid);
-  if (!target) { showCopyToast("Original message not available."); return; }
+  if (!target) {
+    const refetching = scheduleReplyGapRefetch(conversationEntry, { force: true, onlyTxid: txid });
+    showCopyToast(refetching ? "Original message not here yet; fetching it now." : "Original message not available.");
+    return;
+  }
   const el = messageArea.querySelector(`[data-message-id="${CSS.escape(target.id)}"]`);
   if (!el) return;
   el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -3756,7 +3760,40 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   if (!catchUp && added && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + added;
   if ((added || paymentStatusChanged) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   if (!quiet && added) setStatus(`${added} new message${added === 1 ? "" : "s"}`);
+  if (added) scheduleReplyGapRefetch(conversationEntry);
   return added;
+}
+
+// A reply names the txid of the message it answers. When that message is on neither the thread
+// nor the store, this device knows it missed one - the only positive signal of a gap the protocol
+// offers (the indexer does not serve messages in block-time order, so a cursor can pass an
+// original that arrives late). Rewind the contact's cursor to a day before the reply and fetch
+// again; a day rather than genesis because the paged fetch stops well short on a long thread.
+// Each original is tried once per session unless the reader taps the quote again.
+const replyGapAttempted = new Set();
+function scheduleReplyGapRefetch(conversationEntry, { force = false, onlyTxid = null } = {}) {
+  if (!conversationEntry) return false;
+  const have = new Set((conversationEntry.messages || []).flatMap((m) => [m.txid, m.id].filter(Boolean).map(String)));
+  let floor = null;
+  for (const m of conversationEntry.messages || []) {
+    const env = parseReplyEnvelope(m.text);
+    const target = String(env?.replyToId || "");
+    if (!target || have.has(target)) continue;
+    if (onlyTxid && target !== onlyTxid) continue;
+    if (!force && replyGapAttempted.has(target)) continue;
+    replyGapAttempted.add(target);
+    const at = Number(m.createdAt || 0) || Date.now();
+    floor = floor == null ? at : Math.min(floor, at);
+  }
+  if (floor == null) return false;
+  const rewindTo = Math.max(0, floor - 24 * 60 * 60 * 1000);
+  const current = Number(conversationEntry.sync?.cursor || 0);
+  if (current && current <= rewindTo) return false;
+  conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: rewindTo };
+  persistState();
+  appendEngineLog(`Reply points at a message this device never received; refetching from ${new Date(rewindTo).toISOString()}.`);
+  syncOneConversation(conversationEntry, { quiet: true, catchUp: true }).catch(() => {});
+  return true;
 }
 
 async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
@@ -8064,7 +8101,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 3;
+const APP_BUILD = 4;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -19377,11 +19414,15 @@ async function dangerWipeCurrentAccount() {
 
 // Chat History (iOS chatHistoryPage): the same archive file every device shares, saved to a
 // file here rather than a share sheet; import merges a file through the blocking restore modal.
-function exportChatHistoryFile() {
+async function exportChatHistoryFile() {
   try {
     const archive = buildLocalChatArchive();
     const stamp = new Date().toISOString().slice(0, 10);
-    downloadBlob(`kachat-chat-history-${stamp}.json`, "application/json", JSON.stringify(archive, null, 2));
+    // Sealed with the same envelope the Nextcloud backup uses (iOS does the same for its local
+    // export): the file carries group keys, and a plaintext copy in Downloads is not a place for
+    // them. Every platform's importer already opens envelopes.
+    const sealed = await sealSharedBackupJson(JSON.stringify(archive));
+    downloadBlob(`kachat-chat-history-${stamp}.json`, "application/json", typeof sealed === "string" ? sealed : JSON.stringify(sealed));
     showCopyToast("Chat history exported.");
   } catch (error) {
     appendEngineLog(`Chat history export failed: ${error.message}`);
@@ -19423,7 +19464,7 @@ document.querySelector("[data-chat-history-file]")?.addEventListener("change", a
   renderHistoryRestore();
   await new Promise((resolve) => window.setTimeout(resolve, 50));
   try {
-    const text = await file.text();
+    const text = await openSharedBackupJson(await file.text());
     const summary = importPhoneChatArchive(text);
     Object.assign(historyRestore, { phase: "success", summary });
     refreshAllConversations({ quiet: true }).catch(() => {});
@@ -20489,46 +20530,39 @@ function openOrCreateOneToOne(address) {
 
 // Per-member menu opened from a message avatar: Message / Copy Address / Hide-or-Unhide.
 function openGroupMemberMenu(address, x, y) {
-  document.querySelector(".group-msg-menu")?.remove();
+  void x; void y;
   if (!address) return;
-  const menu = document.createElement("div");
-  menu.className = "group-msg-menu";
-  const add = (label, fn, danger = false) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    if (danger) b.className = "danger";
-    b.textContent = label;
-    b.addEventListener("click", () => { menu.remove(); fn(); });
-    menu.append(b);
-  };
-  // iOS GroupChatDetailView.avatarButton: View Profile / Open Chat / Copy Address / Pay in Kaspa /
-  // Mute or Unmute User / Hide User.
-  add("View Profile", () => openChatInfoForAddress(address));
-  if (address !== engine.address) add("Open Chat", () => openOrCreateOneToOne(address));
-  add("Copy Address", () => copyTextToClipboard(address).then(() => showCopyToast(addressCopiedToastText(address))).catch(() => {}));
-  if (address !== engine.address) {
-    add("Pay in Kaspa", () => openChatWithAddressForKaspa({ address, name: groupSenderLabel(address) }));
-    const muted = activeGroupId && isGroupMemberMuted(activeGroupId, address);
-    add(muted ? "Unmute User" : "Mute User", () => {
-      if (!activeGroupId) return;
+  const mine = address === engine.address;
+  const muted = Boolean(activeGroupId && !mine && isGroupMemberMuted(activeGroupId, address));
+  const hidden = Boolean(activeGroupId && !mine && isGroupMemberHidden(activeGroupId, address));
+  // iOS GroupChatDetailView's sender sheet: a header naming the sender and their address, then
+  // one row per option saying what it does.
+  const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and shared media." }];
+  if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
+  options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
+  if (!mine) {
+    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: "Send KAS to this member from your chatting address." });
+    options.push(muted
+      ? { id: "mute", title: "Unmute User", subtitle: "Their messages notify you again." }
+      : { id: "mute", title: "Mute User", subtitle: "Their messages stop notifying you; they still appear." });
+    options.push(hidden
+      ? { id: "hide", title: "Unhide User", subtitle: "Their messages show in this group again." }
+      : { id: "hide", title: "Hide User", subtitle: "Their messages disappear from this group on this device.", destructive: true });
+  }
+  chooseDialog({ title: groupSenderLabel(address), message: address, options }).then((choice) => {
+    if (choice === "profile") openChatInfoForAddress(address);
+    else if (choice === "chat") openOrCreateOneToOne(address);
+    else if (choice === "copy") copyTextToClipboard(address).then(() => showCopyToast(addressCopiedToastText(address))).catch(() => {});
+    else if (choice === "pay") openChatWithAddressForKaspa({ address, name: groupSenderLabel(address) });
+    else if (choice === "mute" && activeGroupId) {
       setGroupMemberMuted(activeGroupId, address, !muted);
       showCopyToast(muted ? "User unmuted." : "User muted.");
-    });
-    const hidden = activeGroupId && isGroupMemberHidden(activeGroupId, address);
-    add(hidden ? "Unhide User" : "Hide User", () => {
-      if (!activeGroupId) return;
+    } else if (choice === "hide" && activeGroupId) {
       setGroupMemberHidden(activeGroupId, address, !hidden);
       renderGroupMessages();
       if (!hidden) showCopyToast("User hidden.");
-    }, !hidden);
-  }
-  document.body.append(menu);
-  const vw = window.innerWidth, vh = window.innerHeight;
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.min(x, vw - rect.width - 8)}px`;
-  menu.style.top = `${Math.min(y, vh - rect.height - 8)}px`;
-  const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener("mousedown", close, true); } };
-  window.setTimeout(() => document.addEventListener("mousedown", close, true), 0);
+    }
+  });
 }
 
 function loadGroupUnreadAll() { try { return JSON.parse(localStorage.getItem(GROUP_UNREAD_KEY) || "{}") || {}; } catch { return {}; } }
@@ -22587,12 +22621,13 @@ groupPlusButton?.addEventListener("click", async (event) => {
   event.stopPropagation();
   closeGroupPlusMenu();
   // "Send from Nextcloud" joins the sheet once a server is connected (iOS plusSheet).
-  const options = [];
+  // On-chain photo and voice are always offered (a Nextcloud upload is a different thing), then
+  // Send from Nextcloud once a server is connected - the order and names of the iOS sheet.
+  const options = [
+    { id: "photo", title: "Send On-Chain Photo", subtitle: "Pick an image from your library; it is sent on chain." },
+    { id: "voice", title: "Send On-Chain Voice Message", subtitle: "Record a voice message and send it to the group on chain." },
+  ];
   if (isNextcloudConnected()) options.push({ id: "nextcloud", title: "Send from Nextcloud", subtitle: "Pick a file from your connected server." });
-  options.push(
-    { id: "photo", title: "Send Photo", subtitle: "Pick an image from your library." },
-    { id: "voice", title: "Send Audio Message", subtitle: "Record a voice message and send it to the group." },
-  );
   const choice = await chooseDialog({ title: "Send", options });
   if (choice === "photo") groupPhotoInput?.click();
   else if (choice === "voice") startGroupVoice();

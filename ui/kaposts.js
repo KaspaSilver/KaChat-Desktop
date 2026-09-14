@@ -3516,8 +3516,25 @@ function rememberedVerdict(post) {
 // asks NLLanguageRecognizer offline before offering; the browser's equivalent is the built-in
 // LanguageDetector, which only recent Chromium has - so this ASKS where it can, and lets the
 // server settle it (once, now remembered) where it cannot.
-const KAPOSTS_MIN_DETECT_LETTERS = 12;      // iOS minimumLetters: below this it is guesswork
-const KAPOSTS_MIN_DETECT_CONFIDENCE = 0.55; // iOS minimumConfidence
+// iOS PostTranslationService: four letters are needed to run the recognizer at all ("gm" and
+// emoji-only posts drop out). Text in a dominant non-Latin script takes the recognizer's answer
+// with no confidence floor - the script has settled the question. Latin-script text keeps a
+// floor that scales with length: 0.55 from twelve letters up, 0.75 below (admits "bom dia",
+// rejects "hola").
+const KAPOSTS_MIN_DETECT_LETTERS = 4;
+const KAPOSTS_LATIN_LONG_LETTERS = 12;
+const KAPOSTS_MIN_DETECT_CONFIDENCE = 0.55;
+const KAPOSTS_SHORT_LATIN_CONFIDENCE = 0.75;
+function dominantScriptIsLatin(text) {
+  const letters = String(text || "").match(/\p{L}/gu) || [];
+  if (!letters.length) return true;
+  const latin = letters.filter((ch) => /\p{Script=Latin}/u.test(ch)).length;
+  return latin * 2 >= letters.length;
+}
+function detectConfidenceFloor(text) {
+  if (!dominantScriptIsLatin(text)) return 0;
+  return detectableLetterCount(text) >= KAPOSTS_LATIN_LONG_LETTERS ? KAPOSTS_MIN_DETECT_CONFIDENCE : KAPOSTS_SHORT_LATIN_CONFIDENCE;
+}
 const KAPOSTS_DETECT_CACHE_LIMIT = 400;     // iOS detectionCache.countLimit
 /// stripped text -> language code, or "" for "could not tell". Keyed by content, like iOS.
 const kapostDetected = new Map();
@@ -3586,7 +3603,7 @@ function detectLanguageSoon(post) {
         const results = await detector.detect(stripped);
         const best = (Array.isArray(results) ? results : [])
           .find((row) => row?.detectedLanguage && row.detectedLanguage !== "und");
-        if (best && Number(best.confidence) >= KAPOSTS_MIN_DETECT_CONFIDENCE) {
+        if (best && Number(best.confidence) >= detectConfidenceFloor(stripped)) {
           code = String(best.detectedLanguage).split("-")[0].toLowerCase();
         }
       } catch { code = ""; }

@@ -59,6 +59,13 @@ function encryptedHexFromIndexerPayload(messagePayloadHex) {
   return { encryptedHex: clean, base64Body: null };
 }
 
+// How far behind a cursor every fetch starts (iOS ChatService's live-tail rewind buffer).
+export const SYNC_REWIND_MS = 90 * 1000;
+export function rewoundCursor(cursor) {
+  const value = Number(cursor || 0);
+  return value > 0 ? Math.max(0, value - SYNC_REWIND_MS) : 0;
+}
+
 export function buildConversationSyncPlan({
   conversationId,
   contactAddress,
@@ -124,7 +131,11 @@ export async function syncConversationFromIndexer({
   const query = new URLSearchParams({
     address: contact.address,
     alias: textToHex(plan.alias),
-    block_time: String(plan.cursor || 0),
+    // Always a buffer behind the cursor, never cursor + 1: the indexer does not surface messages
+    // in block-time order (acceptance in the DAG is not monotonic, and an indexer catching up
+    // serves what it has), so a message served late would otherwise be skipped for good. The
+    // overlap comes back and is deduped by txid.
+    block_time: String(rewoundCursor(plan.cursor)),
     limit: String(Math.max(1, Math.min(50, Number(limit) || 50))),
   });
   const url = `${plan.indexerUrl}/contextual-messages/by-sender?${query.toString()}`;
@@ -326,7 +337,7 @@ async function fetchHandshakeTransactionsFromKaspaRest({ walletAddress, cursor =
     const txid = String(transaction?.transaction_id || transaction?.transactionId || transaction?.hash || "").trim();
     const blockTime = Number(transaction?.block_time || transaction?.blockTime || transaction?.accepting_block_time || 0);
     const payload = String(transaction?.payload || "").trim();
-    if (!txid || known.has(txid) || (cursor > 0 && blockTime > 0 && blockTime <= cursor)) continue;
+    if (!txid || known.has(txid) || (cursor > 0 && blockTime > 0 && blockTime <= rewoundCursor(cursor))) continue;
     if (!isHandshakePayloadHex(payload)) continue;
     if (!transactionPaysAddress(transaction, walletAddress)) continue;
     const sender = transactionSenderAddress(transaction, walletAddress);
@@ -378,7 +389,7 @@ export async function syncIncomingHandshakesFromIndexer({
   const baseUrl = normalizeBaseUrl(indexerUrl);
   const query = new URLSearchParams({
     address: walletAddress,
-    block_time: String(Number(cursor || 0)),
+    block_time: String(rewoundCursor(cursor)),
     limit: String(Math.max(1, Math.min(50, Number(limit) || 50))),
   });
 
@@ -536,7 +547,7 @@ async function fetchSelfStashTransactionsFromChain({ walletAddress, cursor = 0, 
     const txid = String(transaction?.transaction_id || transaction?.transactionId || transaction?.hash || "").trim();
     const blockTime = Number(transaction?.block_time || transaction?.blockTime || transaction?.accepting_block_time || 0);
     const payload = String(transaction?.payload || "").trim();
-    if (!txid || known.has(txid) || (cursor > 0 && blockTime > 0 && blockTime <= cursor)) continue;
+    if (!txid || known.has(txid) || (cursor > 0 && blockTime > 0 && blockTime <= rewoundCursor(cursor))) continue;
     if (!isSelfStashPayloadHex(payload)) continue;
     rows.push({ tx_id: txid, block_time: blockTime, message_payload: payload });
   }

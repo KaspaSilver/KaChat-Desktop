@@ -221,6 +221,37 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     const payloadLength = payload instanceof Uint8Array ? payload.length : String(payload).length;
     log("Payload:", payloadKind, payloadLength, "bytes/chars");
   }
+  // iOS KaChatTransactionBuilder, after KIP-9: a wallet that holds a message's or handshake's
+  // nominal amount but not a fee on top spends everything it has into ONE output of (total - fee).
+  // A message is a self-spend and a handshake is recognised by payload, not by amount, so a
+  // little under the nominal figure serves just as well - and it is the only way an account
+  // funded by a 0.2 KAS handshake can ever answer it. Protocol sends only (self-spends and
+  // payload-carrying sends); a plain payment keeps the strict path and its "insufficient funds".
+  const protocolSend = to === sourceAddress || Boolean(payload);
+  if (protocolSend && entries.length <= 80) {
+    const amountSompi = BigInt(kaspa.kaspaToSompi(amount));
+    const prioritySompi = BigInt(kaspa.kaspaToSompi(fee));
+    const totalSompi = entries.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+    if (totalSompi >= amountSompi / 2n) {
+      const draft = kaspa.createTransaction(entries, [{ address: to, amount: totalSompi - (totalSompi / 20n) }], 0n, payload || undefined);
+      const floorFee = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
+      const totalFee = floorFee + prioritySompi;
+      if (totalSompi < amountSompi + totalFee && totalSompi > totalFee) {
+        const reduced = totalSompi - totalFee;
+        log(`Balance holds the amount but not the fee; sending ${reduced} sompi as one output (total minus fee).`);
+        const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
+        const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+        const submitReduced = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+        const response = withRpc
+          ? await withRpc(submitReduced, { retries: 1, label: "Transaction broadcast" })
+          : await submitReduced(rpc);
+        const txid = response?.transactionId || signed.id;
+        log("Broadcast txid:", txid);
+        return { result: { summary: { reduced: true, amountSompi: reduced, feeSompi: totalFee } }, txids: [txid] };
+      }
+    }
+  }
+
   log("Creating transaction from", sourceAddress, "to", to, "amount", amount, "KAS");
   const result = await kaspa.createTransactions({
     entries,

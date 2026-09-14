@@ -835,23 +835,25 @@ function jumpToBroadcastMessage(txId) {
 // The avatar menu (iOS BroadcastChannelView.avatarButton): who this is, and what you can do
 // about them. Same menu from the sender's name.
 function openBroadcastSenderMenu(address, x, y) {
-  if (!address || !deps.openMsgContextMenu) return;
+  void x; void y;
+  if (!address) return;
   const mine = address === deps.engine.address;
-  const icons = deps.getMsgMenuIcons?.() || {};
-  const name = senderName(address);
-  const items = [];
-  items.push({ label: "View Profile", icon: icons.info, onClick: () => deps.openUserInfo?.(address) });
-  if (!mine) items.push({ label: "Open Chat", icon: icons.reply, onClick: () => deps.openChat?.(address, deps.contactNameFor?.(address) || "") });
-  items.push({
-    label: "Copy Address", icon: icons.copy,
-    onClick: () => deps.copyText?.(address).then(() => deps.showToast?.(deps.addressCopiedToastText?.(address) || "Address copied")).catch(() => {}),
-  });
+  // iOS BroadcastChannelView's sender sheet: a header naming the sender and their address, then
+  // one row per option saying what it does.
+  const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and shared media." }];
+  if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this sender." });
+  options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
-    items.push({ label: "Pay in Kaspa", icon: icons.explorer, onClick: () => deps.payInKaspa?.(address, deps.contactNameFor?.(address) || "") });
-    items.push({ label: "Hide User", icon: icons.trash, danger: true, onClick: () => hideSender(address) });
+    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: "Send KAS to this sender from your chatting address." });
+    options.push({ id: "hide", title: "Hide User", subtitle: "Their messages disappear from this room on this device.", destructive: true });
   }
-  void name;
-  deps.openMsgContextMenu({ x, y, reaction: null, items });
+  chooseDialog({ title: senderName(address), message: address, options }).then((choice) => {
+    if (choice === "profile") deps.openUserInfo?.(address);
+    else if (choice === "chat") deps.openChat?.(address, deps.contactNameFor?.(address) || "");
+    else if (choice === "copy") deps.copyText?.(address).then(() => deps.showToast?.(deps.addressCopiedToastText?.(address) || "Address copied")).catch(() => {});
+    else if (choice === "pay") deps.payInKaspa?.(address, deps.contactNameFor?.(address) || "");
+    else if (choice === "hide") hideSender(address);
+  });
 }
 
 // A failed send of yours: drop the failed row and send the same content again.

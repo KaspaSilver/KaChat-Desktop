@@ -304,8 +304,19 @@ export function isKnsEntryFresh(entry, maxAgeMs = MIN_REFRESH_INTERVAL_MS) {
   return Boolean(entry) && Date.now() - Number(entry.fetchedAt || 0) < maxAgeMs;
 }
 
+// A confirmed "no domain" used to expire with everything else, re-confirming "still no domain"
+// for every domainless contact at roughly a request a second. It keeps for six hours; a hit or a
+// failed fetch keeps the ten-minute window.
+const NEGATIVE_RESULT_TTL_MS = 6 * 60 * 60 * 1000;
+function isNegativeEntry(entry) {
+  if (!entry || entry.hadError) return false;
+  if ("primaryDomain" in entry) return !entry.primaryDomain && !(entry.allDomains || []).length;
+  if ("domainName" in entry) return !entry.domainName && !entry.profile;
+  return false;
+}
 function backoffFor(address, attemptMap, failureMap, cached = null) {
   const last = attemptMap.get(address);
+  if (isNegativeEntry(cached) && isKnsEntryFresh(cached, NEGATIVE_RESULT_TTL_MS)) return false;
   // The attempt log lives in memory, so after a reload every address looked "never tried" and
   // the whole contact list was refetched on the spot - the persisted cache answers the same
   // question: anything fetched within the debounce window is not due yet.
