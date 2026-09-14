@@ -4413,6 +4413,17 @@ document.querySelector("[data-connection-reconnect]")?.addEventListener("click",
 // in the UI and only committed to the trustedNode endpoint on Apply. An empty trustedNode has
 // always meant the hosted mode, so nothing stored needs renaming.
 let selectedNodeMode = null;
+// A plain ws:// node from an https page: the browser allows it for a private address but
+// demotes the page to "Not secure" while it is connected (and calls the allowance deprecated).
+// Said next to the field, so the padlock's change has an explanation and a way out.
+function renderInsecureNodeWarning(url) {
+  const el = document.querySelector("[data-node-insecure-warning]");
+  if (!el) return;
+  const insecure = typeof location !== "undefined" && location.protocol === "https:" && /^ws:\/\//i.test(String(url || "").trim());
+  el.hidden = !insecure;
+  if (insecure) el.textContent = "This node uses plain ws://. Because KaChat is loaded over https, the browser will mark the site “Not secure” while connected to it and may block the connection in a future release. Put the node behind a TLS reverse proxy and use wss://, or open KaChat over http on your LAN.";
+}
+document.querySelector("[data-custom-node-url]")?.addEventListener("input", (event) => renderInsecureNodeWarning(event.target.value));
 function currentSavedNodeMode() {
   return getEndpointOverride("trustedNode").trim() ? "custom" : "scan";
 }
@@ -4458,6 +4469,7 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
       if (errorEl) { errorEl.textContent = "Enter a valid wRPC URL that starts with wss:// or ws://"; errorEl.hidden = false; }
       return;
     }
+    renderInsecureNodeWarning(url);
   }
   if (errorEl) errorEl.hidden = true;
   const label = button.textContent;
@@ -8101,7 +8113,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 5;
+const APP_BUILD = 6;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;

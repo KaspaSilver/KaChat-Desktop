@@ -1415,12 +1415,13 @@
               <span class="node-mode-radio" aria-hidden="true"></span>
               <span class="node-mode-copy">
                 <strong>Custom Node</strong> <span class="node-mode-badge">Best</span>
-                <small>Your own Kaspa wRPC endpoint. On the same router/LAN as your node: use its local IP with port 17110 — e.g. ws://192.168.1.50:17110. From outside your network through a TLS reverse proxy: wss://your-domain (no port).</small>
+                <small>Your own Kaspa wRPC endpoint, as wss://your-domain through a TLS reverse proxy (no port). A plain ws:// address such as ws://192.168.1.50:17110 works only on the same LAN, and from this https page the browser marks the site “Not secure” while it is connected and may block it in a future release.</small>
                 <input class="node-mode-input" type="text" placeholder="wss://your-node.duckdns.org" autocomplete="off" spellcheck="false" data-custom-node-url disabled />
               </span>
             </div>
           </div>
           <p class="field-error" data-node-mode-error hidden></p>
+          <p class="field-hint node-insecure-warning" data-node-insecure-warning hidden></p>
           <div class="node-mode-actions">
             <button type="button" class="primary-button" data-node-apply>Apply and Reconnect</button>
           </div>

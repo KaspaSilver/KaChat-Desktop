@@ -10063,3 +10063,6 @@ html.standalone .ios-install-hint { display: none; }
 
 /* Node Connection: the scan narrates itself under the button. */
 .node-scan-trace { margin: 8px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+
+/* Node Connection: the plain-ws:// warning reads as a caution, not a failure. */
+.node-insecure-warning { margin: 8px 2px 0; color: #f2bd5c; font-size: 12.5px; line-height: 1.45; }
