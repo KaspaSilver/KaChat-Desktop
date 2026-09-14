@@ -25,11 +25,18 @@ function nextcloudProxy() {
   ];
 
   const mount = (server) => {
-    server.middlewares.use("/nc-proxy", (req, res) => {
-        // connect strips the "/nc-proxy" mount prefix, so req.url is "/<origin>/<path>?<query>".
+    // Mounted at /nc-proxy and, when the site is built under a base (the published site lives at
+    // /desktop/), at <base>/nc-proxy as well: a reverse proxy that forwards the path unchanged
+    // reaches the handler either way. The client builds its URL from the same base.
+    const base = String(server.config?.base || "/").replace(/\/+$/, "");
+    const mounts = new Set(["/nc-proxy", `${base}/nc-proxy`]);
+    for (const mountPath of mounts) server.middlewares.use(mountPath, (req, res) => {
+        // connect strips the mount prefix, so req.url is "/<origin>/<path>?<query>".
         // "Are you there?" - answered before anything else, so a healthy deployment does not have
         // to report its own liveness check as a console error. See engine/endpoints.js.
-        if ((req.url || "") === "/__probe") {
+        // Tolerant of a trailing slash or a cache-busting query a proxy in front may add.
+        const probePath = String(req.url || "").split("?")[0].replace(/\/+$/, "");
+        if (probePath === "/__probe") {
           res.statusCode = 200;
           res.setHeader("content-type", "text/plain");
           res.setHeader("cache-control", "no-store");
