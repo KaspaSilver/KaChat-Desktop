@@ -3312,8 +3312,18 @@ function chatListDeliveryGlyphHtml(message) {
 
 // What the chat list shows for a message (iOS ConversationRow.formatPreview). Differs from the
 // notification wording: a chess invite is "Chess game - 3 | 2" here, not a play-by-play.
+// A message carrying a web link previews as "Sent a link", whatever else it says (iOS
+// ChatListView): for Nextcloud media the message IS the public share link, and a row would
+// otherwise display the address of someone's photo to anyone glancing at the screen. Web links
+// only - a kaspa: address must keep reading as one.
+const WEB_LINK_RE = /https?:\/\/\S+/i;
+function webLinkPreviewLabel(text) {
+  return WEB_LINK_RE.test(String(text || "")) ? "📎 Sent a link" : null;
+}
 function chatListPreviewText(message) {
   if (!message) return "";
+  const linkLabel = webLinkPreviewLabel(message.text);
+  if (linkLabel) return linkLabel;
   const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
   if (chessEnv) {
     const control = chessEnv.kind === "invite" ? Chess.chessTimeControlLabel(Chess.chessTimeControlFromInvite(chessEnv)) : null;
@@ -8113,7 +8123,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 6;
+const APP_BUILD = 7;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -20679,7 +20689,7 @@ function groupPreviewText(text) {
   // photos/voice notes show "📷 Photo" / "🎤 Audio message" instead of raw
   // JSON, and mention tokens decode to @names.
   const reaction = parseReactionEnvelope(text);
-  const effective = reaction ? `Reacted ${reaction.emoji}` : displayTextForMessage({ text });
+  const effective = reaction ? `Reacted ${reaction.emoji}` : (webLinkPreviewLabel(text) || displayTextForMessage({ text }));
   const raw = decodeGroupMentions(String(effective || "")).replace(/\s+/g, " ").trim();
   return raw.length > 42 ? `${raw.slice(0, 41)}…` : raw;
 }
