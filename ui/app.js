@@ -8220,7 +8220,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 17;
+const APP_BUILD = 18;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -16409,8 +16409,13 @@ function phoneArchiveMessageText(archiveMessage, rawContent) {
   return "";
 }
 
-function importPhoneChatArchive(json) {
-  const archive = JSON.parse(json);
+// `json` may be the archive string or an already-parsed object. A batched restore (Nextcloud)
+// calls this once per slice: it re-reads storage only before the first slice and persists and
+// repaints only after the last, because every reload parses the whole stored state and every
+// persist serialises it - twice per slice, ten slices, tens of megabytes with inline photos,
+// which is what made "Restoring messages…" take minutes for 126 chats.
+function importPhoneChatArchive(json, { reloadState = true, persist = true, render = true } = {}) {
+  const archive = typeof json === "string" ? JSON.parse(json) : json;
   if (!archive || !Array.isArray(archive.conversations)) {
     throw new Error("That file is not a KaChat phone chat backup.");
   }
@@ -16425,7 +16430,7 @@ function importPhoneChatArchive(json) {
 
   // Merge against what is actually persisted right now (the desktop restore may
   // have just replaced storage).
-  reloadStateFromBrowserStorage();
+  if (reloadState) reloadStateFromBrowserStorage();
 
   const addedMessageIds = new Set();
   const touchedConversationIds = new Set();
@@ -16573,7 +16578,7 @@ function importPhoneChatArchive(json) {
     error?.name === "QuotaExceededError" || error?.code === 22 || /quota/i.test(String(error?.message || ""));
   let quotaTrimmed = false;
   try {
-    persistState();
+    if (persist) persistState();
   } catch (error) {
     if (!isQuotaError(error)) { reloadStateFromBrowserStorage(); throw error; }
     let persisted = false;
@@ -16618,11 +16623,12 @@ function importPhoneChatArchive(json) {
           if (!mgr.importGroupRecord(g)) continue;
           importedGroups += 1;
           // Restore decrypted message history so it survives even if the indexer pruned it.
+          const rows = [];
           for (const m of Array.isArray(g.messages) ? g.messages : []) {
             const content = String(m?.content ?? m?.text ?? "");  // accept legacy `text` too
             if (parseReactionEnvelope(content)) continue; // reactions are pills, not stored bubbles
             const blockTime = Number(m?.blockTime ?? m?.createdAt ?? 0) || Date.now();
-            appendGroupMessage(g.groupId, {
+            rows.push({
               id: nowId(),
               senderAddress: m?.senderAddress || "",
               direction: (typeof m?.isOutgoing === "boolean")
@@ -16635,14 +16641,17 @@ function importPhoneChatArchive(json) {
               senderIsAdmin: Boolean(m?.senderIsAdmin),
             });
           }
+          if (rows.length) appendGroupMessagesBulk(g.groupId, rows);
         } catch { /* skip a malformed group */ }
       }
     }
   }
 
-  reloadStateFromBrowserStorage();
-  renderChats();
-  if (importedGroups) { try { renderGroupList(); } catch { /* group UI not ready */ } }
+  if (render) {
+    if (persist) reloadStateFromBrowserStorage();
+    renderChats();
+    if (importedGroups) { try { renderGroupList(); } catch { /* group UI not ready */ } }
+  }
   if (quotaTrimmed) showCopyToast("Backup too large to store fully — imported what fit.");
   return { conversations: touchedConversationIds.size, messages: mergedMessages, groups: importedGroups };
 }
@@ -20465,6 +20474,40 @@ function groupMessagesAreSame(a, b) {
   if (a.msgIdHex && b.msgIdHex) return a.msgIdHex === b.msgIdHex;
   if (a.txId && b.txId) return a.txId === b.txId;
   return Boolean(a.id) && a.id === b.id;
+}
+
+// Many messages for one group in one go (a restore): the store is read once, every row is
+// deduped against what is there and against each other, sorted once and written once.
+// appendGroupMessage per row re-parsed and re-serialised the whole group store for each one.
+function appendGroupMessagesBulk(groupId, messages) {
+  const all = loadGroupMsgAll();
+  const wallet = engine.address || "";
+  if (!all[wallet]) all[wallet] = {};
+  const list = Array.isArray(all[wallet][groupId]) ? all[wallet][groupId] : [];
+  const byMsgId = new Map(); const byTx = new Map(); const byId = new Map();
+  const index = (m) => {
+    if (m.msgIdHex) byMsgId.set(m.msgIdHex, m);
+    if (m.txId) byTx.set(m.txId, m);
+    if (m.id) byId.set(m.id, m);
+  };
+  for (const m of list) index(m);
+  let added = 0;
+  for (const message of messages || []) {
+    const existing = (message.msgIdHex && byMsgId.get(message.msgIdHex)) || (message.txId && byTx.get(message.txId)) || (message.id && byId.get(message.id)) || null;
+    if (existing) {
+      if (!existing.msgIdHex && message.msgIdHex) existing.msgIdHex = message.msgIdHex;
+      if (!existing.txId && message.txId) existing.txId = message.txId;
+      index(existing);
+      continue;
+    }
+    list.push(message);
+    index(message);
+    added += 1;
+  }
+  if (added) list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  all[wallet][groupId] = list;
+  saveGroupMsgAll(all);
+  return added;
 }
 
 function appendGroupMessage(groupId, message) {

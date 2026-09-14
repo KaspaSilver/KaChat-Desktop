@@ -1131,22 +1131,22 @@ function renderRestoreOverlay() {
 }
 
 /** Counts what an archive is about to contribute, for the progress line. */
+function parsedArchive(plainJsonOrObject) {
+  if (plainJsonOrObject && typeof plainJsonOrObject === "object") return plainJsonOrObject;
+  try { return JSON.parse(plainJsonOrObject); } catch { return null; }
+}
 function archiveConversationCount(plainJson) {
-  try {
-    const parsed = JSON.parse(plainJson);
-    return Array.isArray(parsed?.conversations) ? parsed.conversations.length : 0;
-  } catch { return 0; }
+  const parsed = parsedArchive(plainJson);
+  return Array.isArray(parsed?.conversations) ? parsed.conversations.length : 0;
 }
 /** What the backup file holds, before merging: the merge only counts what was NEW to this
  *  device, and a device that already synced its chats from the chain merges almost nothing -
  *  which read as a failed restore. */
 function archiveTotals(plainJson) {
-  try {
-    const parsed = JSON.parse(plainJson);
-    const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
-    const messages = conversations.reduce((sum, c) => sum + (Array.isArray(c?.messages) ? c.messages.length : 0), 0);
-    return { conversations: conversations.length, messages };
-  } catch { return { conversations: 0, messages: 0 }; }
+  const parsed = parsedArchive(plainJson);
+  const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
+  const messages = conversations.reduce((sum, c) => sum + (Array.isArray(c?.messages) ? c.messages.length : 0), 0);
+  return { conversations: conversations.length, messages };
 }
 
 /** Splits a shared archive into per-batch archives so the import reports honest progress.
@@ -1154,15 +1154,19 @@ function archiveTotals(plainJson) {
  *  importer produce its own error — or too small to be worth splitting). Groups ride along with
  *  the LAST batch so they are imported exactly once. */
 function splitArchiveForProgress(plainJson) {
-  let parsed = null;
-  try { parsed = JSON.parse(plainJson); } catch { return null; }
+  const parsed = parsedArchive(plainJson);
   const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : null;
   if (!conversations || conversations.length <= 1) return null;
   const batchSize = Math.max(1, Math.ceil(conversations.length / RESTORE_PROGRESS_STEPS));
   const batches = [];
   for (let index = 0; index < conversations.length; index += batchSize) {
-    const batch = { ...parsed, conversations: conversations.slice(index, index + batchSize) };
-    delete batch.groups;
+    // Only what the importer reads. Spreading the whole archive into every slice carried the
+    // desktop-state snapshot (megabytes) ten times over, serialised and parsed each time.
+    const batch = {
+      walletAddress: parsed.walletAddress,
+      deletedContactAddresses: parsed.deletedContactAddresses,
+      conversations: conversations.slice(index, index + batchSize),
+    };
     batches.push(batch);
   }
   if (Array.isArray(parsed.groups) && parsed.groups.length) {
@@ -1217,7 +1221,7 @@ async function runRestore() {
     if (sharedJson) sharedJson = await deps.openBackupPayload(sharedJson);
     if (legacyJson) legacyJson = await deps.openBackupPayload(legacyJson);
 
-    const totalConversations = sharedJson ? archiveConversationCount(sharedJson) : 0;
+    const totalConversations = sharedJson ? archiveConversationCount(parsedArchive(sharedJson) || sharedJson) : 0;
     advanceRestore(0.38, "Preparing messages…");
     await nextFrame();
 
@@ -1232,9 +1236,11 @@ async function runRestore() {
     advanceRestore(0.46, `Restoring messages… 0 of ${totalConversations} chat${totalConversations === 1 ? "" : "s"}`);
     await nextFrame();
 
-    const summary = { conversations: 0, messages: 0, groups: 0, held: sharedJson ? archiveTotals(sharedJson) : { conversations: 0, messages: 0 } };
+    // Parsed once; the counts, the split and every slice read the same object.
+    const sharedParsed = sharedJson ? parsedArchive(sharedJson) : null;
+    const summary = { conversations: 0, messages: 0, groups: 0, held: sharedParsed ? archiveTotals(sharedParsed) : { conversations: 0, messages: 0 } };
     if (sharedJson) {
-      const split = splitArchiveForProgress(sharedJson);
+      const split = sharedParsed ? splitArchiveForProgress(sharedParsed) : null;
       if (!split) {
         const single = deps.importPhoneArchive?.(sharedJson);
         if (single) {
@@ -1245,8 +1251,11 @@ async function runRestore() {
         advanceRestore(0.92, "Restoring messages…");
       } else {
         let done = 0;
-        for (const batch of split.batches) {
-          const partial = deps.importPhoneArchive?.(JSON.stringify(batch));
+        for (const [batchIndex, batch] of split.batches.entries()) {
+          const last = batchIndex === split.batches.length - 1;
+          // Storage is read before the first slice and written after the last; in between the
+          // slices merge into memory only (see importPhoneChatArchive).
+          const partial = deps.importPhoneArchive?.(batch, { reloadState: batchIndex === 0, persist: last, render: last });
           if (partial) {
             summary.conversations += partial.conversations || 0;
             summary.messages += partial.messages || 0;
