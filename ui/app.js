@@ -8220,7 +8220,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 18;
+const APP_BUILD = 19;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -17308,7 +17308,10 @@ async function sendReaction(conversationEntry, targetMessage, emoji) {
       await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
       if (statusKey) setReactionSendStatus(statusKey, "sent", { rerender });
     } catch (error) {
+      // The pill turns red with a Retry; the reason goes to the same toast a failed send uses
+      // (iOS 57b5aaf) - a reaction failing instantly on every attempt gave nothing to go on.
       appendEngineLog(`Reaction send failed (local state already applied): ${error.message}`);
+      showCopyToast(`Reaction failed: ${error?.message || error}`);
       if (statusKey) setReactionSendStatus(statusKey, "failed", { retry: attempt, rerender });
     }
   };
@@ -20647,6 +20650,7 @@ async function sendGroupReaction(groupId, targetMessage, emoji) {
       if (statusKey) setReactionSendStatus(statusKey, "sent", { rerender });
     } catch (error) {
       appendEngineLog(`Group reaction send failed (local applied): ${error.message}`);
+      showCopyToast(`Reaction failed: ${error?.message || error}`);
       if (statusKey) setReactionSendStatus(statusKey, "failed", { retry: attempt, rerender });
     }
   };

@@ -1436,6 +1436,7 @@ async function sendBroadcastReaction(targetTxId, emoji) {
       if (statusKey) setBroadcastReactionStatus(statusKey, "sent");
     } catch (error) {
       deps.appendEngineLog?.(`Broadcast reaction send failed (local state already applied): ${error.message}`);
+      deps.showToast?.(`Reaction failed: ${error?.message || error}`);
       if (statusKey) setBroadcastReactionStatus(statusKey, "failed", attempt);
     }
   };
