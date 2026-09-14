@@ -307,6 +307,17 @@ let messageRefreshInFlight = false;
 // its messages are not "new" arrivals: we add them silently and read (no notification,
 // no unread badge). Later sweeps are live and notify/mark-unread normally.
 let pendingInitialCatchUp = true;
+// Everything with a block time before this instant is history, whatever sweep happens to
+// deliver it: no banner, no unread. The catch-up flag above only covers the FIRST sweep, and a
+// freshly imported account's history spans many - one page per conversation per sweep, and
+// conversations that a handshake sync only creates on the first pass get their messages on the
+// second - so the flag alone let a whole past arrive as "new mail". Reset when an account is
+// activated, imported or restored; a broadcast room applies the same rule with its own clock.
+let liveSinceMs = Date.now();
+function isLiveMessageTime(createdAt) {
+  const at = Number(createdAt || 0);
+  return at > 0 && at >= liveSinceMs;
+}
 let walletActivityRefreshTimer = null;
 let activeMessageActionId = null;
 let messageSelectionMode = false;
@@ -2926,6 +2937,7 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // A freshly activated wallet re-syncs its whole history from the indexer; treat that
   // next sweep as a silent, already-read backfill rather than a burst of new messages.
   pendingInitialCatchUp = true;
+  liveSinceMs = Date.now();
   state = buildFullyRestoredState();
   refreshSubscriptionAddresses({ restart: false });
   // Per-account Chats Payment Privacy: switching accounts applies that
@@ -3716,6 +3728,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     cursor: conversationEntry.sync?.cursor || 0, indexerUrl,
   });
   let added = 0;
+  let liveAdded = 0;
   for (const incoming of result.messages || []) {
     if (olderThanRetention(incoming)) continue;
     const hiddenKeys = new Set((conversationEntry.hiddenMessageKeys || []).map(String));
@@ -3727,8 +3740,10 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     // fresh-address payment-pool control envelopes are swallowed (return null).
     const visible = appendIncomingOrReactionMessage(conversationEntry, message);
     if (visible) {
-      // Backfill (restore / first sweep) arrives silently; only live messages notify.
-      if (!catchUp) maybeNotifyIncoming(conversationEntry, contact, message);
+      // Backfill (restore / first sweep / anything older than this session) arrives silently;
+      // only live messages notify and count as unread.
+      const live = !catchUp && isLiveMessageTime(message.createdAt);
+      if (live) { maybeNotifyIncoming(conversationEntry, contact, message); liveAdded += 1; }
       added += 1;
     }
   }
@@ -3767,7 +3782,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     scannedCount: Number(result.scannedCount || 0), decryptFailures: Number(result.decryptFailures || 0), indexerUrl,
   };
   // Backfill (restore / first sweep) is added as read; only live messages bump unread.
-  if (!catchUp && added && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + added;
+  if (liveAdded && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + liveAdded;
   if ((added || paymentStatusChanged) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   if (!quiet && added) setStatus(`${added} new message${added === 1 ? "" : "s"}`);
   if (added) scheduleReplyGapRefetch(conversationEntry);
@@ -4080,7 +4095,7 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     applyMessagePatch(message, { messageType: "payment", paymentAmountKas: String(amountKas), txid });
     appendIncomingOrReactionMessage(conversationEntry, message);
     conversationEntry.updatedAt = Date.now();
-    if (!catchUp) {
+    if (!catchUp && isLiveMessageTime(blockTime)) {
       const appended = conversationEntry.messages.find((entry) => entry.txid === txid) || message;
       maybeNotifyIncoming(conversationEntry, contact, appended);
       // Received KAS at your chatting address — also list it in the global notifications bell.
@@ -8123,7 +8138,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 7;
+const APP_BUILD = 8;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -16308,6 +16323,7 @@ function importPhoneChatArchive(json) {
   // Merging a backup is a backfill: keep the next sync sweep silent and its messages
   // read (see pendingInitialCatchUp).
   pendingInitialCatchUp = true;
+  liveSinceMs = Date.now();
   const archiveWallet = String(archive.walletAddress || "").trim();
   if (archiveWallet && engine.address && archiveWallet !== engine.address) {
     throw new Error(`That phone backup belongs to a different wallet (${shortAddress(archiveWallet)}).`);
@@ -17064,6 +17080,7 @@ function applyDesktopStateSnapshot(snapshot) {
   // Restoring is a backfill: the next sync sweep must not notify or mark its messages
   // unread (see pendingInitialCatchUp).
   pendingInitialCatchUp = true;
+  liveSinceMs = Date.now();
   const serialized = JSON.stringify(snapshot.state);
   chatStorageSetSync(accountScopedKey(STORAGE_KEY), serialized);
   chatStorageSetSync(accountScopedKey(STATE_BACKUP_KEY), serialized);
@@ -22077,10 +22094,11 @@ async function syncGroupsNow({ catchUp = false } = {}) {
         // is not new mail: it adds silently, exactly like the 1:1 path (pendingInitialCatchUp)
         // and like iOS's backfill floor for groups. Without this, an "all messages" group would
         // fire a banner for every historical message on the first sync.
-        if (!catchUp) {
+        const live = !catchUp && isLiveMessageTime(createdAt);
+        if (live) {
           maybeNotifyGroupIncoming(decoded.groupId, decoded.senderAddress, decoded.plaintext, decoded.txId || decoded.msgIdHex || nowId(), createdAt);
         }
-        if (decoded.groupId !== activeGroupId) {
+        if (live && decoded.groupId !== activeGroupId) {
           setGroupUnread(decoded.groupId, groupUnreadFor(decoded.groupId) + 1);
         }
       }
