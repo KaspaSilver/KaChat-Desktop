@@ -35,7 +35,7 @@ import {
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
 import { KNSProfileLinkBuilder } from "../engine/kns.js";
-import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
+import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
@@ -3541,7 +3541,7 @@ function updateArchitectureDetails() {
       : connection.failover && connection.failover !== "idle"
         ? `Failover ${connection.failover}`
         : getEndpointOverride("trustedNode").trim()
-          ? "Your own node · no fallback"
+          ? (currentSavedNodeMode() === "official" ? "KaChat official node · no fallback" : "Your own node · no fallback")
           : "Automatic public-node scan";
   }
   if (standbyStatus) {
@@ -4489,7 +4489,9 @@ function renderInsecureNodeWarning(url) {
 }
 document.querySelector("[data-custom-node-url]")?.addEventListener("input", (event) => renderInsecureNodeWarning(event.target.value));
 function currentSavedNodeMode() {
-  return getEndpointOverride("trustedNode").trim() ? "custom" : "scan";
+  const trusted = getEndpointOverride("trustedNode").trim();
+  if (!trusted) return "scan";
+  return trusted.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "official" : "custom";
 }
 function renderNodeModeCards() {
   if (selectedNodeMode == null) selectedNodeMode = currentSavedNodeMode();
@@ -4534,27 +4536,31 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
       return;
     }
     renderInsecureNodeWarning(url);
+  } else if (mode === "official") {
+    // KaChat's own node: connected to strictly, like a custom node, never scanned around.
+    url = DEFAULT_TRUSTED_NODE;
   }
   if (errorEl) errorEl.hidden = true;
   const label = button.textContent;
   button.disabled = true;
-  button.textContent = mode === "custom" ? "Checking your node…" : "Scanning…";
+  const checking = mode === "custom" ? "Checking your node…" : mode === "official" ? "Checking KaChat's node…" : "Scanning…";
+  button.textContent = checking;
   const trace = document.querySelector("[data-node-scan-trace]");
-  if (trace) { trace.textContent = mode === "custom" ? "Checking your node…" : "Asking the public node resolver…"; trace.hidden = false; }
+  if (trace) { trace.textContent = mode === "scan" ? "Asking the public node resolver…" : checking; trace.hidden = false; }
   nodeScanTraceActive = true;
   try {
     if (!engine.kaspa) await engine.loadWasm();
-    if (mode === "custom") {
-      // Strict: confirm the user's node is reachable, synced, and on mainnet BEFORE we
+    if (mode === "custom" || mode === "official") {
+      // Strict: confirm the node is reachable, synced, and on mainnet BEFORE we
       // switch to it. If it fails we surface the error and leave the current node as-is,
       // never silently falling back to a public one.
-      setStatus("Checking your node…");
+      setStatus(checking);
       await engine.verifyNode(url);
     }
     // Leaving a custom node: forget it entirely. It no longer has a way back in - there is no
     // last-good chain or standby pool any more - but a stale entry in the registry is still worth
     // clearing, since the user asked for that node to be gone.
-    if (mode !== "custom") {
+    if (mode === "scan") {
       const previousCustom = getEndpointOverride("trustedNode").trim();
       // Purge both the URL the user typed AND the URL we're actually connected on — the WASM
       // client can normalize the endpoint, so the registry key may differ from the typed value.
@@ -4564,10 +4570,10 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
     }
     setEndpoint("trustedNode", url); // "" clears the override, returning to KaChat's node
     setEndpoint("nodeScan", "");
-    setStatus(mode === "custom" ? "Connecting to your node…" : "Scanning public nodes…");
+    setStatus(mode === "custom" ? "Connecting to your node…" : mode === "official" ? "Connecting to KaChat's node…" : "Scanning public nodes…");
     await engine.connect({ force: true });
     await connectAndRefresh({ quiet: true });
-    showCopyToast(mode === "custom" ? "Connected to your node" : "Connected automatically");
+    showCopyToast(mode === "custom" ? "Connected to your node" : mode === "official" ? "Connected to KaChat's node" : "Connected automatically");
   } catch (error) {
     if (errorEl) { errorEl.textContent = `Could not connect: ${describeConnectError(error)}`; errorEl.hidden = false; }
     setStatus("Connection failed");
@@ -8209,7 +8215,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 13;
+const APP_BUILD = 14;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10091,7 +10097,9 @@ function renderNodeChoice() {
   const saved = loadSavedNodes();
   const options = [
     { value: NODE_CHOICE_SCAN, label: "Automatic Scan (Recommended)" },
-    ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address })),
+    { value: DEFAULT_TRUSTED_NODE, label: "KaChat Official Node (Better)" },
+    ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address }))
+      .filter((o) => o.value.toLowerCase() !== DEFAULT_TRUSTED_NODE.toLowerCase()),
   ];
   if (custom && !options.some((o) => o.value === custom)) options.push({ value: custom, label: custom });
   select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
@@ -10099,7 +10107,9 @@ function renderNodeChoice() {
   const note = document.querySelector("[data-node-choice-note]");
   if (note) {
     note.hidden = !current;
-    note.textContent = custom ? "Connected only to this node" : "A healthy public node is picked automatically";
+    note.textContent = custom
+      ? (custom.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "Connected only to KaChat's node" : "Connected only to this node")
+      : "A healthy public node is picked automatically";
   }
 }
 document.querySelector("[data-node-choice]")?.addEventListener("change", async (event) => {
@@ -18220,10 +18230,11 @@ function renderSetupExtra(kind) {
     // sees what they ask it.
     const opts = [
       { key: "scan", title: "Automatic Node Scan", badge: "Recommended", sub: "The Kaspa public node resolver picks a healthy public node for you, the way kaspa-ng does. Nothing to set up." },
+      { key: "official", title: "KaChat Official Node", badge: "Better", sub: "KaChat's own node at node.kachat.duckdns.org. One known operator, nothing to set up, and no scanning." },
       { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Your own Kaspa wRPC endpoint. Nobody else sees what you ask it, and nothing depends on anyone else's node staying up.", input: true },
     ];
     let current = accountShellPrefs.nodeChoice;
-    if (current !== "own") current = "scan"; // "auto" from older builds means the hosted mode, which is the scan now
+    if (current !== "own" && current !== "official") current = "scan"; // "auto" from older builds means the hosted mode, which is the scan now
     const list = document.createElement("div");
     list.className = "setup-choice-list";
     for (const o of opts) {
@@ -18290,6 +18301,10 @@ function renderSetupExtra(kind) {
 function applySetupNodeChoice() {
   const choice = accountShellPrefs.nodeChoice;
   setEndpoint("nodeScan", "");
+  if (choice === "official") {
+    setEndpoint("trustedNode", DEFAULT_TRUSTED_NODE);
+    return;
+  }
   if (choice !== "own") {
     if (getEndpointOverride("trustedNode").trim()) setEndpoint("trustedNode", "");
     return;
