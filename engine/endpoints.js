@@ -66,7 +66,13 @@ let overrides = loadStored();
 // api.kaspa.org rides through the proxy too: its RATE-LIMIT/error responses carry no CORS
 // headers, so direct browser fetches degrade into a wall of red CORS noise the moment a
 // balance-lookup burst trips its limiter. Server-side forwarding has no CORS at all.
-const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$/i;
+// The Kaspa public node resolver's seed servers (*.kaspa.green/.red/.stream/.blue/.ws) are on the
+// list too: the SDK's Resolver asks them over plain HTTPS from the page, and not every seed sends
+// an Access-Control-Allow-Origin header - a browser then refuses the answer ("blocked by CORS
+// policy", seen from kachat.app against adam.kaspa.green) and Automatic Scan stalls on a server
+// that would have answered a curl. Relayed same-origin, the answer arrives. The wRPC websocket
+// that follows is not a fetch and is unaffected.
+const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$/i;
 /// Where the proxy lives, relative to wherever the app is served from.
 ///
 /// The published site sits under /desktop/, so the proxy is at /desktop/nc-proxy/ - a root-absolute
