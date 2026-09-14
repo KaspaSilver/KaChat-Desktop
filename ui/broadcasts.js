@@ -916,11 +916,14 @@ function openBroadcastMessageMenu(m, x, y) {
     items.push({ label: "Reply", icon: icons.reply, onClick: () => startBroadcastReply(m) });
   }
   const firstLink = (String(text || "").match(/https?:\/\/[^\s<>"']+/) || [])[0] || null;
+  // A Nextcloud share is the address of someone's photo or file: it can be opened, never copied
+  // out to forward (iOS BroadcastChannelView, same rule as the preview card).
+  const share = Boolean(firstLink && deps.isNextcloudShareLink?.(firstLink));
   if (firstLink) {
     items.push({ label: "Open Link", icon: icons.explorer, onClick: () => window.open(firstLink, "_blank", "noopener,noreferrer") });
-    items.push({ label: "Copy Link", icon: icons.copy, onClick: () => deps.copyText?.(firstLink).catch(() => {}) });
+    if (!share) items.push({ label: "Copy Link", icon: icons.copy, onClick: () => deps.copyText?.(firstLink).catch(() => {}) });
   }
-  if (text && !deps.parseAudioEnvelope?.(m.content)) {
+  if (text && !deps.parseAudioEnvelope?.(m.content) && !deps.isNextcloudShareLink?.(text)) {
     items.push({
       label: "Copy Message", icon: icons.copy,
       onClick: () => deps.copyText?.(text).then(() => deps.showToast?.("Message copied.")).catch(() => {}),

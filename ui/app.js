@@ -1007,6 +1007,16 @@ document.addEventListener("click", (event) => {
   openKaChatInternalLink(link);
 });
 
+/** True when `text` is (only) a Nextcloud share link. A share link is the address of someone's
+ *  photo or file; the preview exists so the recipient can see it, and a menu entry that puts the
+ *  URL on the clipboard to forward defeats the sender's choice to share it in one place (iOS
+ *  LinkPreviewCardView). Decided from the URL alone, so it holds in every card state. */
+function isNextcloudShareLink(text) {
+  const value = String(text || "").trim();
+  if (!/^https?:\/\/\S+$/i.test(value)) return false;
+  return nextcloudShareDownloadUrl(value) != null;
+}
+
 /** `https://host/s/TOKEN` (or `/index.php/s/TOKEN`) -> its raw-file endpoints, else null. */
 function nextcloudShareDownloadUrl(url) {
   try {
@@ -8138,7 +8148,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 8;
+const APP_BUILD = 9;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -19904,6 +19914,7 @@ queueMicrotask(async () => {
     engine,
     escapeHtml,
     voiceFileName,
+    isNextcloudShareLink,
     createDeliveryStatusIcon,
     shortAddress,
     accountScopedKey,
@@ -21143,7 +21154,7 @@ function openOneToOneMessageMenu(messageId, x, y) {
   const current = (conversationEntry.reactionsByTxId?.[targetTxId] || []).find((e) => e.reactorAddress === myAddress)?.emoji || null;
   const items = [];
   items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startReplyTo(message.id) });
-  if (isText) {
+  if (isText && !isNextcloudShareLink(message.text)) {
     items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(displayTextForMessage(message)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
   }
   if (message.txid) {
@@ -21188,7 +21199,7 @@ function openGroupMessageMenu(message, x, y) {
   const current = key ? (groupReactionsFor(activeGroupId, key).find((e) => e.reactorAddress === engine.address)?.emoji || null) : null;
   const items = [];
   items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startGroupReply(message) });
-  if (isText) {
+  if (isText && !isNextcloudShareLink(plain)) {
     items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(decodeGroupMentions(plain)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
   }
   if (message.txId) {
