@@ -2089,6 +2089,22 @@ function buildModals() {
  *  this session's fetch first, else the persisted copy for THAT range (even past its 10-minute
  *  TTL — a 3-month curve from an hour ago is still the right shape, and it beats showing another
  *  range's curve). Port of iOS's stale-while-refresh per-range painting. */
+const SEVEN_DAY_RETRY_MS = [1500, 6000, 15000, 40000];
+let sevenDayRetryTimer = null;
+function scheduleSevenDayRetry(currency, attempt) {
+  if (sevenDayRetryTimer || attempt >= SEVEN_DAY_RETRY_MS.length) return;
+  sevenDayRetryTimer = window.setTimeout(async () => {
+    sevenDayRetryTimer = null;
+    if (currencyCode() !== currency || historyForRange(7).length) return;
+    try {
+      const points = await fetchKasPriceHistory(7, { currency, force: true });
+      if (currencyCode() !== currency) return;
+      if (points?.length) { historyByRange[7] = points; if (view === "main") render(); return; }
+    } catch { /* still throttled */ }
+    scheduleSevenDayRetry(currency, attempt + 1);
+  }, SEVEN_DAY_RETRY_MS[attempt]);
+}
+
 function historyForRange(days) {
   const session = historyByRange[days];
   if (session?.length) return session;
@@ -2137,6 +2153,11 @@ async function refreshData({ force = false } = {}) {
     if (priceResult) price = priceResult;
     if (historyResult?.length) historyByRange[days] = historyResult;
     if (days !== 7 && sevenDayResult?.length) historyByRange[7] = sevenDayResult;
+    // The Value card's 24h figure comes from the fixed 7-day curve. When that curve is still
+    // empty - the launch burst tripped CoinGecko's keyless 429 and nothing is persisted yet -
+    // the card said "not available yet" until the next launch. Retry it on a growing backoff
+    // (iOS fa55d76): 1.5s, 6s, 15s, 40s, one in flight, dropped if the currency moves.
+    if (!historyForRange(7).length) scheduleSevenDayRetry(currency, 0);
   } finally {
     loading = false;
     render();

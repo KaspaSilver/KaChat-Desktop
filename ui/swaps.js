@@ -73,6 +73,10 @@ let tab = "swap";                 // "swap" | "history"
 let kasIsSendSide = false;        // iOS default: most people open Swap to acquire KAS
 let otherCoin = USDC_POLYGON;
 let amountText = "";
+// Both amount cards take input (iOS 4b9da6a). Whichever was typed last is the input; the other
+// is always the quote's figure. "get" means the reader typed what they want to receive.
+let inputSide = "send";           // "send" | "get"
+let getText = "";
 let payoutAddressText = "";
 let toAddressOverrideIndex = null;
 let toAddress = "";
@@ -153,7 +157,57 @@ const cn = {
     fromCurrency: from.ticker, fromNetwork: from.network, toCurrency: to.ticker, toNetwork: to.network, fromAmount, address, flow: "standard",
   } }),
   status: (id) => cnRequest("/v2/exchange/by-id", { query: { id } }),
+  minAmount: (from, to) => cnRequest("/v2/exchange/min-amount", { query: {
+    fromCurrency: from.ticker, fromNetwork: from.network, toCurrency: to.ticker, toNetwork: to.network, flow: "standard",
+  } }),
 };
+
+// "You Get" quotes (iOS 2eebb70). ChangeNOW's standard flow has no reverse quote (type=reverse
+// answers "unsupported now in standard flow"), but a standard-flow quote is a straight line in the
+// send amount: rate after the deposit fee, withdrawal fee off the top. So the pair's line is
+// pinned from the minimum plus two direct quotes (cached a minute), solved for the target, and
+// the answer confirmed with a real direct quote at that amount - whose toAmount is what the rate
+// line shows. One refinement if the confirmation drifts past 0.2%. A target under what the
+// pair's minimum gets you says what the minimum gets instead of failing on the create.
+const pairLines = new Map(); // "from>to" -> { min, m, b, at }
+async function pairLine(from, to) {
+  const key = `${from.ticker}:${from.network}>${to.ticker}:${to.network}`;
+  const cached = pairLines.get(key);
+  if (cached && Date.now() - cached.at < 60_000) return cached;
+  const minResponse = await cn.minAmount(from, to);
+  const min = Math.max(Number(minResponse?.minAmount) || 0, 0);
+  const a1 = min > 0 ? min * 2 : 1;
+  const a2 = a1 * 10;
+  const [q1, q2] = await Promise.all([cn.estimate(from, to, trimNum(a1)), cn.estimate(from, to, trimNum(a2))]);
+  const y1 = Number(q1?.toAmount) || 0;
+  const y2 = Number(q2?.toAmount) || 0;
+  if (!(y2 > y1)) throw new Error("ChangeNOW did not return a usable rate for this pair.");
+  const m = (y2 - y1) / (a2 - a1);
+  const b = y1 - m * a1;
+  const line = { min, m, b, at: Date.now() };
+  pairLines.set(key, line);
+  return line;
+}
+function trimNum(value) {
+  return String(Number(value).toFixed(8)).replace(/\.?0+$/, "");
+}
+async function reverseQuote(from, to, targetAmount) {
+  const line = await pairLine(from, to);
+  let send = (targetAmount - line.b) / line.m;
+  let belowMinimum = false;
+  if (!(send > 0) || (line.min > 0 && send < line.min)) { send = line.min > 0 ? line.min : Math.max(send, 0); belowMinimum = true; }
+  let confirmed = await cn.estimate(from, to, trimNum(send));
+  let got = Number(confirmed?.toAmount) || 0;
+  if (!belowMinimum && got > 0 && Math.abs(got - targetAmount) / targetAmount > 0.002) {
+    // Refine once through the confirmed point and the far probe's slope.
+    const send2 = send + (targetAmount - got) / line.m;
+    if (send2 > 0 && !(line.min > 0 && send2 < line.min)) {
+      const again = await cn.estimate(from, to, trimNum(send2));
+      if (Number(again?.toAmount) > 0) { send = send2; confirmed = again; got = Number(again.toAmount); }
+    }
+  }
+  return { sendAmount: trimNum(send), toAmount: got, belowMinimum, minimum: line.min };
+}
 
 // ---------------------------------------------------------------------------
 // Formatting
@@ -237,7 +291,7 @@ function amountCard(label, coin, value, editable) {
     ? `<span class="swap-coin-badge">${coinIcon(coin)}<span>${deps.escapeHtml(coin.displayName)}</span></span>`
     : `<button type="button" class="swap-coin-badge pickable" data-swap-pick-coin>${coinIcon(coin)}<span>${deps.escapeHtml(coin.displayName)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>`;
   const field = editable
-    ? `<input class="swap-amount-input" type="text" inputmode="decimal" placeholder="0.00" data-swap-amount value="${deps.escapeHtml(value)}" />`
+    ? `<input class="swap-amount-input" type="text" inputmode="decimal" placeholder="${editable === "get" ? "0.00" : "0.00"}" ${editable === "get" ? "data-swap-get" : "data-swap-amount"} value="${deps.escapeHtml(value)}" />`
     : `<span class="swap-amount-static">${deps.escapeHtml(value || "0.00")}</span>`;
   return `<div class="profile-card swap-card"><p class="profile-card-label">${label}</p><div class="swap-card-row">${field}${badge}</div></div>`;
 }
@@ -259,15 +313,19 @@ function renderSwapForm() {
   const busy = createState.status === "creating";
   const canSwap = estimateState.status === "success" && !busy;
   const estimated = estimateState.status === "success" ? fmtTrimmed(estimateState.toAmount) : estimateState.status === "loading" ? "..." : "";
+  // The card typed last keeps its text; the other shows the quote (or "..." while one loads).
+  const sendValue = inputSide === "send" ? amountText : (estimateState.status === "success" ? amountText : estimateState.status === "loading" ? "..." : "");
+  const getValue = inputSide === "get" ? getText : estimated;
   const needsPayout = toCoin().ticker !== "kas";
   const result = createState.result;
   return `
-    ${amountCard("You Send", fromCoin(), amountText, true)}
+    ${amountCard("You Send", fromCoin(), sendValue, "send")}
     <div class="swap-action-row">
       <button type="button" class="swap-flip" data-swap-flip aria-label="Switch direction" title="Switch direction"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3"/></svg></button>
       <button type="button" class="swap-go ${canSwap ? "" : "disabled"}" data-swap-create ${canSwap ? "" : "disabled"}>${busy ? "Creating…" : "Get Deposit Address"}</button>
     </div>
-    ${amountCard("You Get", toCoin(), estimated, false)}
+    ${amountCard("You Get", toCoin(), getValue, "get")}
+    ${estimateState.belowMinimum ? `<p class="field-hint">Below this pair's minimum: sending ${deps.escapeHtml(fmtTrimmed(estimateState.minimum))} ${deps.escapeHtml(fromCoin().displayName)} is the least ChangeNOW takes, and gets you ${deps.escapeHtml(estimated)}.</p>` : ""}
     ${needsPayout ? `<input class="field-input swap-payout-input" type="text" data-swap-payout placeholder="Receive ${deps.escapeHtml(toCoin().displayName)} at" value="${deps.escapeHtml(payoutAddressText)}" autocomplete="off" spellcheck="false" />` : ""}
     ${!kasIsSendSide ? `<div class="profile-card swap-address-row">
       <span class="swap-address-copy"><small>Receiving KAS At</small><strong>${deps.escapeHtml(shortMiddle(toAddress))}</strong></span>
@@ -316,18 +374,33 @@ function renderHistory() {
 // ---------------------------------------------------------------------------
 function rescheduleEstimate() {
   if (estimateTimer) clearTimeout(estimateTimer);
-  const amount = Number(amountText);
-  if (!Number.isFinite(amount) || amount <= 0) { estimateState = { status: "idle", toAmount: null, error: null }; renderFormLight(); return; }
+  const typed = inputSide === "get" ? getText : amountText;
+  const amount = Number(typed);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    if (inputSide === "get") amountText = "";
+    estimateState = { status: "idle", toAmount: null, error: null };
+    renderFormLight();
+    return;
+  }
   const token = ++estimateToken;
-  const from = fromCoin(), to = toCoin(), amountStr = amountText;
+  const from = fromCoin(), to = toCoin(), amountStr = typed;
   estimateTimer = window.setTimeout(async () => {
     if (token !== estimateToken) return;
     estimateState = { status: "loading", toAmount: null, error: null };
     renderFormLight();
     try {
-      const response = await cn.estimate(from, to, amountStr);
-      if (token !== estimateToken) return;
-      estimateState = { status: "success", toAmount: Number(response?.toAmount) || 0, error: null };
+      if (inputSide === "get") {
+        const quote = await reverseQuote(from, to, amount);
+        if (token !== estimateToken) return;
+        // The exchange is created from the send amount on the standard flow, so a "You Get"
+        // target deposits the quoted figure and the payout floats with the rate.
+        amountText = quote.sendAmount;
+        estimateState = { status: "success", toAmount: quote.toAmount, error: null, belowMinimum: quote.belowMinimum, minimum: quote.minimum };
+      } else {
+        const response = await cn.estimate(from, to, amountStr);
+        if (token !== estimateToken) return;
+        estimateState = { status: "success", toAmount: Number(response?.toAmount) || 0, error: null };
+      }
     } catch (error) {
       if (token !== estimateToken) return;
       estimateState = { status: "failed", toAmount: null, error: error?.message || "Unavailable" };
@@ -341,10 +414,11 @@ function rescheduleEstimate() {
 function renderFormLight() {
   const active = document.activeElement;
   const wasAmount = active?.matches?.("[data-swap-amount]");
+  const wasGet = active?.matches?.("[data-swap-get]");
   const wasPayout = active?.matches?.("[data-swap-payout]");
   const caret = active?.selectionStart ?? null;
   render();
-  const target = wasAmount ? rootEl.querySelector("[data-swap-amount]") : wasPayout ? rootEl.querySelector("[data-swap-payout]") : null;
+  const target = wasAmount ? rootEl.querySelector("[data-swap-amount]") : wasGet ? rootEl.querySelector("[data-swap-get]") : wasPayout ? rootEl.querySelector("[data-swap-payout]") : null;
   if (target) { target.focus(); if (caret != null) { try { target.setSelectionRange(caret, caret); } catch {} } }
 }
 
@@ -390,6 +464,8 @@ async function executeSwap() {
     saveHistory();
     createState = { status: "success", result: response, error: null };
     amountText = "";
+    getText = "";
+    inputSide = "send";
     estimateState = { status: "idle", toAmount: null, error: null };
     toAddressOverrideIndex = null;
     refreshToAddress();
@@ -574,7 +650,9 @@ export function initSwaps(dependencies) {
 
   rootEl?.addEventListener("input", (event) => {
     const amount = event.target.closest("[data-swap-amount]");
-    if (amount) { amountText = amount.value.trim().replace(",", "."); rescheduleEstimate(); return; }
+    if (amount) { inputSide = "send"; getText = ""; amountText = amount.value.trim().replace(",", "."); rescheduleEstimate(); return; }
+    const get = event.target.closest("[data-swap-get]");
+    if (get) { inputSide = "get"; getText = get.value.trim().replace(",", "."); rescheduleEstimate(); return; }
     const payout = event.target.closest("[data-swap-payout]");
     if (payout) payoutAddressText = payout.value;
   });
