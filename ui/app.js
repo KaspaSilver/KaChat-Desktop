@@ -2299,6 +2299,31 @@ function clearPersistedTestingWallet() {
   localStorage.removeItem(LEGACY_PERSISTED_WALLET_KEY);
 }
 
+// The address of the account a reload will restore, known from local storage alone - so the
+// chat list can be on screen from IndexedDB while the 12MB SDK is still compiling, instead of
+// waiting for the SDK to derive the same address from the key. Empty when nothing would be
+// restored (logged out, or "Keep me signed in" off on a fresh launch).
+let preScopedAddress = "";
+function earlyRestoreAddress() {
+  try {
+    if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") return "";
+    if ((accountShellPrefs.keepSignedIn ?? true) === false && !isSessionActive()) return "";
+    const active = String(localStorage.getItem(ACTIVE_ACCOUNT_KEY) || "").trim();
+    if (active && loadSavedAccounts().some((entry) => entry.address === active && entry.privateKeyHex)) return active;
+    const parsed = JSON.parse(localStorage.getItem(PERSISTED_WALLET_KEY) || "null");
+    if (parsed?.address && parsed?.privateKeyHex) return String(parsed.address).trim();
+  } catch { /* nothing to pre-scope */ }
+  return "";
+}
+function preScopeWalletData() {
+  const address = earlyRestoreAddress();
+  if (!address || engine.address) return false;
+  engine.address = address; // the key follows once the SDK is up (restorePersistedTestingWallet)
+  preScopedAddress = address;
+  activateWalletDataScope(address);
+  return true;
+}
+
 function restorePersistedTestingWallet() {
   if (!engine.kaspa) return false;
   if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") {
@@ -2323,10 +2348,14 @@ function restorePersistedTestingWallet() {
     persistTestingWallet();
     markSessionActive();
     appendEngineLog(`Restored persistent testing wallet: ${wallet.address}`);
-    activateWalletDataScope(wallet.address);
+    // Already scoped and rendered from local storage before the SDK loaded (preScopeWalletData);
+    // doing it again would reset the state and repaint the list for nothing.
+    if (preScopedAddress !== wallet.address) activateWalletDataScope(wallet.address);
+    preScopedAddress = "";
     return true;
   } catch (error) {
     clearPersistedTestingWallet();
+    if (preScopedAddress) { engine.address = null; preScopedAddress = ""; activateWalletDataScope(""); }
     appendEngineLog(`Stored testing wallet could not be restored: ${error.message}`);
     return false;
   }
@@ -8148,7 +8177,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 9;
+const APP_BUILD = 10;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -19752,6 +19781,8 @@ if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true" || !hasSavedAccounts
   showLoggedOutScreen();
 } else {
   hideLoggedOutScreen();
+  // The account's chats come up from IndexedDB now, not after the SDK has loaded.
+  preScopeWalletData();
   renderChats();
   restoreLastAppTab();
   // Asked once the account is actually in, so the prompt has context rather than greeting a
@@ -19828,22 +19859,33 @@ queueMicrotask(async () => {
     const restored = restorePersistedTestingWallet();
     updateWalletUi();
     updateServiceSummary();
-    if (restored) {
-      await connectAndRefresh({ quiet: true });
-    } else if (!engine.address && loggedOutScreen && loggedOutScreen.hidden) {
+    if (!restored && !engine.address && loggedOutScreen && loggedOutScreen.hidden) {
       // Wallet wasn't restored (e.g. "Keep me signed in" is off) — fall back to
       // the sign-in screen instead of an empty main app.
       showLoggedOutScreen();
     }
   }
 
+  // The network work runs in the background. It used to be awaited here, one step after the
+  // other - node scan, balance, then a full sweep of every conversation - and only THEN did
+  // KaPosts, broadcasts, portfolio and the rest initialise, so a reload sat unusable for as long
+  // as a slow resolver plus a long history took. The chats are already on screen from local
+  // storage; the sweep fills in what is new while the reader gets on with it.
   if (wasmReady && engine.address) {
-    await refreshBalanceOnly({ quiet: true });
-    if (cipherReady) await refreshAllConversations({ quiet: true });
-    startAutomaticRefresh();
-    // Seed/diff the Address Activity baselines shortly after startup (first
-    // run per account seeds silently — no notification blast for old funds).
-    scheduleAddressActivityCheck(15_000);
+    (async () => {
+      // connectAndRefresh already fetches the balance; the separate refreshBalanceOnly that
+      // used to follow it was a second connect + balance round trip for nothing.
+      await connectAndRefresh({ quiet: true });
+      if (cipherReady) {
+        try { await refreshAllConversations({ quiet: true }); }
+        catch (error) { appendEngineLog(`First sweep failed: ${error.message}`); }
+      }
+    })().finally(() => {
+      startAutomaticRefresh();
+      // Seed/diff the Address Activity baselines shortly after startup (first
+      // run per account seeds silently — no notification blast for old funds).
+      scheduleAddressActivityCheck(15_000);
+    });
   }
 
   initKaPosts({

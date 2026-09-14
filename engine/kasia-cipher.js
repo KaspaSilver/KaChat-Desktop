@@ -1,3 +1,4 @@
+import { compileWasmResponse } from "./wasm-loader.js";
 // Runtime bridge to Kasia's actual cipher WASM.
 // Source is vendored from Kasia-staging/cipher and built with `npm run setup:cipher`.
 
@@ -19,8 +20,7 @@ export async function loadKasiaCipher() {
       const wasmUrl = new URL("../cipher/cipher_bg.wasm", import.meta.url);
       const response = await fetch(wasmUrl);
       if (!response.ok) throw new Error(`Could not fetch Kasia cipher WASM (HTTP ${response.status}) from ${wasmUrl.pathname}`);
-      const bytes = await response.arrayBuffer();
-      await cipherModule.default({ module_or_path: bytes });
+      await cipherModule.default({ module_or_path: await compileWasmResponse(response) });
     }
     return cipherModule;
   } catch (error) {
