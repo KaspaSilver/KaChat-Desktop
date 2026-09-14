@@ -4759,6 +4759,28 @@ function getActiveSpendingIndex() {
   return getSpendingState().activeIndex;
 }
 
+// Every send out of the PRIMARY spending address rotates it to a fresh one (iOS e53ea11): change
+// goes to a never-used index past the all-time max, and once the node has accepted the
+// transaction the primary moves there - so a failed send moves nothing. Non-primary rows keep
+// same-address change. A compound is a self-send that moves nothing out and neither splits nor
+// rotates. When the fresh address cannot be derived, change stays on the source and the primary
+// stays with it: a pointer must never move to an address the funds did not reach.
+function freshChangeForSpendingIndex(index) {
+  if (index == null || index !== getActiveSpendingIndex()) return null;
+  if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return null;
+  const freshIndex = getSpendingState().maxIndex + 1;
+  const address = deriveSpendingAddressAt(freshIndex);
+  return address ? { index: freshIndex, address } : null;
+}
+function rotatePrimarySpendingTo(fresh) {
+  if (!fresh || !Number.isInteger(fresh.index)) return;
+  saveSpendingState({ activeIndex: fresh.index, maxIndex: Math.max(getSpendingState().maxIndex, fresh.index) });
+  appendEngineLog(`Primary spending address rotated to #${fresh.index} (${shortAddress(fresh.address)}).`);
+  try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
+  try { refreshSpendingSummary?.(); } catch {}
+  try { refreshSpendingDetailIfOpen?.(); } catch {}
+}
+
 // Memoized per (account, index): every derivation re-runs BIP39 seeding
 // (PBKDF2), so looped callers (address list, watched-set builders, payment
 // pool reservations) would otherwise pay that cost per call.
@@ -6868,6 +6890,7 @@ async function submitKnsTransfer() {
   if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
   const { domain, assetId, spendingIndex } = knsTransferContext;
   try {
+    const fresh = spendingIndex != null ? freshChangeForSpendingIndex(spendingIndex) : null;
     const result = await engine.transferKnsDomain({
       domain,
       assetId,
@@ -6875,9 +6898,12 @@ async function submitKnsTransfer() {
       mnemonic: spendingIndex != null ? activeAccountMnemonic() : null,
       spendingIndex,
       passphrase: spendingIndex != null ? activeAccountPassphrase() : "",
+      changeAddress: fresh?.address || null,
       onStatus: (patch) => {
         const label = KNS_TRANSFER_STATUS_LABELS[patch?.status];
         if (label && knsTransferStatusEl) { knsTransferStatusEl.textContent = label; knsTransferStatusEl.hidden = false; }
+        // The primary moves once the node has accepted the commit (the reveal's change follows it).
+        if (patch?.status === "committed" && fresh) rotatePrimarySpendingTo(fresh);
       },
     });
     knsTransferInFlight = false;
@@ -7347,15 +7373,21 @@ const spendingSendController = makeSendController({
   onClose: () => { closeSpendingSendModal(); if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); refreshSpendingDetailIfOpen(); refreshSpendingSummary(); },
   getFeeKas: spendingSendGetFeeKas,
   getBalance: () => engine.balanceForAddress(deriveSpendingAddressAt(spendingSendIndex)),
-  sendFn: ({ destination, amountKas, feeKas, selectedOutpoints }) => engine.sendFromSpending({
-    mnemonic: activeAccountMnemonic(),
-    index: spendingSendIndex,
-    passphrase: activeAccountPassphrase(),
-    destinationAddress: destination,
-    amountKas,
-    feeKas,
-    selectedOutpoints: selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null,
-  }),
+  sendFn: async ({ destination, amountKas, feeKas, selectedOutpoints }) => {
+    const fresh = freshChangeForSpendingIndex(spendingSendIndex);
+    const result = await engine.sendFromSpending({
+      mnemonic: activeAccountMnemonic(),
+      index: spendingSendIndex,
+      passphrase: activeAccountPassphrase(),
+      destinationAddress: destination,
+      amountKas,
+      feeKas,
+      selectedOutpoints: selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null,
+      changeAddress: fresh?.address || null,
+    });
+    if (fresh) rotatePrimarySpendingTo(fresh);
+    return result;
+  },
 });
 
 function openSpendingSendModal(index) {
@@ -8177,7 +8209,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 10;
+const APP_BUILD = 11;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -8867,11 +8899,13 @@ const sendKaspaController = makeSendController({
         });
     }
     if (sendKaspaSourceIndex != null) {
+      const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex);
       return engine.sendFromSpending({
         mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(),
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
-      });
+        changeAddress: fresh?.address || null,
+      }).then((result) => { if (fresh) rotatePrimarySpendingTo(fresh); return result; });
     }
     return engine.send(destination, amountKas, feeKas, outpoints ? { selectedOutpoints: outpoints } : {});
   },
@@ -13354,6 +13388,7 @@ async function sendTipNow() {
 
   try {
     await ensureRuntimes({ quiet: true });
+    const tipFresh = tip.fundingAddress ? freshChangeForSpendingIndex(tip.fundingIndex) : null;
     const result = tip.fundingAddress
       ? await engine.sendFromSpending({
           mnemonic: activeAccountMnemonic(),
@@ -13362,8 +13397,10 @@ async function sendTipNow() {
           destinationAddress,
           amountKas,
           feeKas,
+          changeAddress: tipFresh?.address || null,
         })
       : await engine.send(destinationAddress, amountKas, feeKas);
+    if (tipFresh) rotatePrimarySpendingTo(tipFresh);
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -15040,6 +15077,7 @@ async function sendKasPayment(conversationId, rawAmount) {
     setStatus(`Sending ${amountKas} KAS…`);
 
     try {
+      const payFresh = spendingFunded ? freshChangeForSpendingIndex(fundingIndex) : null;
       const result = spendingFunded
         ? await engine.sendFromSpending({
             mnemonic: activeAccountMnemonic(),
@@ -15048,8 +15086,10 @@ async function sendKasPayment(conversationId, rawAmount) {
             destinationAddress,
             amountKas,
             feeKas: "0",
+            changeAddress: payFresh?.address || null,
           })
         : await engine.send(destinationAddress, amountKas, "0");
+      if (payFresh) rotatePrimarySpendingTo(payFresh);
       const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
       if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");

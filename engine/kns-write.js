@@ -455,7 +455,7 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
 //
 // Amounts match the KNS web app's transfer submission: tx.amount=0 maps to a
 // fixed 2 KAS commit; the reveal output is commit minus the actual fee.
-export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, onStatus = () => {}, log = () => {} }) {
+export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, changeAddress = null, onStatus = () => {}, log = () => {} }) {
   const privateKey = signer?.privateKey || engine?.privateKey;
   const sourceAddress = signer?.address || engine?.address;
   if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before transferring a domain.");
@@ -504,6 +504,9 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
 
   onStatus({ status: "committing", commitAmountKas });
   await engine.connect();
+  // Funded by the primary spending address: the commit's change and the reveal's output both
+  // land on the fresh address the caller chose, so the primary can rotate there (iOS e53ea11).
+  const changeTo = changeAddress || sourceAddress;
   const commitSend = await sendPayloadTransaction({
     kaspa: engine.kaspa,
     rpc: engine.rpc,
@@ -513,6 +516,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
     destinationAddress: commitAddressString,
     amountKas: String(commitAmountKas),
     feeKas: "0",
+    changeAddress: changeTo,
     log,
   });
   const commitTxId = commitSend.txids?.[0];
@@ -526,7 +530,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
     commitAmountSompi,
     commitScriptPublicKey,
     builder,
-    revealTargetAddress: sourceAddress,
+    revealTargetAddress: changeTo,
     revealAmountSompi: commitAmountSompi, // pre-fee placeholder; real value = commit - fee
     signer: { privateKey, address: sourceAddress },
     log,

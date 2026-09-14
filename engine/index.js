@@ -953,7 +953,7 @@ export class KaspaEngine {
   }
 
   // Send from a spending address, signing with its derived key.
-  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null }) {
+  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, changeAddress = null }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
@@ -967,6 +967,7 @@ export class KaspaEngine {
       amountKas,
       feeKas,
       selectedOutpoints,
+      changeAddress,
       log: this.log,
     });
   }
@@ -1400,7 +1401,7 @@ export class KaspaEngine {
   // passphrase) makes a derived spending address the owner/funder/signer of
   // the commit/reveal pair — iOS's fromSpendingAddressIndex analog; omitted,
   // the chatting identity transfers its own domain.
-  async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", onStatus = () => {} }) {
+  async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", changeAddress = null, onStatus = () => {} }) {
     this.requireWallet();
     await this.connect();
     let signer = null;
@@ -1409,7 +1410,7 @@ export class KaspaEngine {
       const spending = this.deriveSpendingWallet(mnemonic, spendingIndex, passphrase);
       signer = { privateKey: spending.privateKey, address: spending.address };
     }
-    return knsTransferDomain({ engine: this, domain, assetId, toAddress, signer, onStatus, log: this.log });
+    return knsTransferDomain({ engine: this, domain, assetId, toAddress, signer, changeAddress, onStatus, log: this.log });
   }
 
   async submitKnsProfileField(assetId, key, value, { onStatus = () => {} } = {}) {

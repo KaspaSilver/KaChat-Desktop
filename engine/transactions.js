@@ -30,8 +30,8 @@ export async function getBalance(kaspa, rpc, address) {
   };
 }
 
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, log }));
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
@@ -192,7 +192,7 @@ function describeKey(privateKey) {
   return `key: ${privateKey.constructor?.name || typeof privateKey} ptr=${privateKey.__wbg_ptr ?? "n/a"}`;
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, log = () => {} }) {
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas || "").trim();
   const fee = String(feeKas || "0").trim();
@@ -252,12 +252,15 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     }
   }
 
-  log("Creating transaction from", sourceAddress, "to", to, "amount", amount, "KAS");
+  // Change goes where the caller says (a fresh spending address when the primary spends, see
+  // ui/app.js freshChangeForSpendingIndex) and otherwise back to the source.
+  const changeTo = changeAddress ? validateMainnetAddress(changeAddress) : sourceAddress;
+  log("Creating transaction from", sourceAddress, "to", to, "amount", amount, "KAS", changeTo !== sourceAddress ? `(change to ${changeTo})` : "");
   const result = await kaspa.createTransactions({
     entries,
     outputs: [{ address: to, amount: kaspa.kaspaToSompi(amount) }],
     priorityFee: kaspa.kaspaToSompi(fee),
-    changeAddress: sourceAddress,
+    changeAddress: changeTo,
     networkId: NETWORK_ID,
     ...(payload ? { payload } : {}),
   });
@@ -355,6 +358,7 @@ export async function sendPayloadTransaction({
   amountKas = "0.0001",
   feeKas = "0",
   payload,
+  changeAddress = null,
   log = () => {},
 }) {
   if (!payload) throw new Error("Payload is required for a message transaction.");
@@ -368,6 +372,7 @@ export async function sendPayloadTransaction({
     amountKas,
     feeKas,
     payload,
+    changeAddress,
     log,
   });
 }
