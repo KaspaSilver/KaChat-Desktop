@@ -1157,8 +1157,13 @@ const PROXIED_IMAGE_HOST_RE = /(^|\.)(cdninstagram\.com|fbcdn\.net|instagram\.co
 const previewImageBlobs = new Map(); // image url -> blob: url, so re-renders do not refetch
 async function loadPreviewImage(img, imageUrl, pageUrl) {
   let host = "";
-  try { host = new URL(imageUrl).hostname; } catch { host = ""; }
-  if (!PROXIED_IMAGE_HOST_RE.test(host)) { img.src = imageUrl; return; }
+  let insecure = false;
+  try { const parsed = new URL(imageUrl); host = parsed.hostname; insecure = parsed.protocol === "http:"; } catch { host = ""; }
+  // A plain-http og:image on an https page is passive mixed content: the browser shows it and
+  // marks the whole tab "Not secure" for it. Those go through the same-origin relay instead
+  // (the page's CSP upgrades whatever is left to https, which a host without TLS cannot serve).
+  const mixed = insecure && typeof location !== "undefined" && location.protocol === "https:";
+  if (!PROXIED_IMAGE_HOST_RE.test(host) && !mixed) { img.src = imageUrl; return; }
   if (previewImageBlobs.has(imageUrl)) { img.src = previewImageBlobs.get(imageUrl); return; }
   if (!(await isProxyAvailable())) { img.src = imageUrl; return; }
   const attempt = async (headers) => {
@@ -8215,7 +8220,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 14;
+const APP_BUILD = 15;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;

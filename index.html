@@ -3,6 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <!-- On an https page, every plain-http subresource the page ever asks for (a link preview's
+       og:image, an avatar a KNS profile points at, a leftover ws:// node) is upgraded to https/wss
+       before it leaves the browser. One such request is enough for Chrome and Brave to mark the
+       whole tab "Not secure" until the next navigation. Only on https: an http page on the LAN
+       must keep talking plain http/ws to a local node. -->
+  <script>
+    if (location.protocol === "https:") {
+      var csp = document.createElement("meta");
+      csp.httpEquiv = "Content-Security-Policy";
+      csp.content = "upgrade-insecure-requests";
+      document.head.appendChild(csp);
+    }
+  </script>
   <title>KaChat Desktop</title>
   <link rel="stylesheet" href="./ui/styles.css?v=385" />
   <meta name="theme-color" content="#070a0d" />
