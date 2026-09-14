@@ -72,7 +72,9 @@ let overrides = loadStored();
 // policy", seen from kachat.app against adam.kaspa.green) and Automatic Scan stalls on a server
 // that would have answered a curl. Relayed same-origin, the answer arrives. The wRPC websocket
 // that follows is not a fetch and is unaffected.
-const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$/i;
+// ChangeNOW too: relayed, the server attaches its own API key (vite.config.mjs), so swaps work
+// for a reader who never pasted one.
+const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$/i;
 /// Where the proxy lives, relative to wherever the app is served from.
 ///
 /// The published site sits under /desktop/, so the proxy is at /desktop/nc-proxy/ - a root-absolute

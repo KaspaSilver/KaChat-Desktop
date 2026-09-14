@@ -12,6 +12,7 @@
 
 import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx } from "./portfolio.js";
 import { chooseDialog, confirmDialog } from "./dialogs.js";
+import { isProxyAvailable } from "../engine/endpoints.js";
 
 const CN_BASE = "https://api.changenow.io";
 const API_KEY_KEY = "kachat-changenow-api-key-v1";           // global (device-level) override
@@ -83,6 +84,14 @@ let estimateToken = 0;
 function apiKey() {
   return String(localStorage.getItem(API_KEY_KEY) || "").trim() || BUILTIN_KEY;
 }
+// When the page is served by something that carries the same-origin relay, the relay attaches
+// the site's own ChangeNOW key to every request (vite.config.mjs), so a reader never pastes one.
+// Only when there is no relay AND no key does the paste-a-key card appear; a relay whose key is
+// missing shows up as a 401/403 on the first request and reopens the card with that said.
+let relayAvailable = false;
+let relayKeyMissing = false;
+isProxyAvailable().then((ok) => { relayAvailable = Boolean(ok); render(); }).catch(() => {});
+function swapsUsable() { return Boolean(apiKey()) || (relayAvailable && !relayKeyMissing); }
 function fromCoin() { return kasIsSendSide ? KAS : otherCoin; }
 function toCoin() { return kasIsSendSide ? otherCoin : KAS; }
 function sameCoin(a, b) { return a && b && a.ticker === b.ticker && a.network === b.network; }
@@ -109,13 +118,20 @@ async function cnRequest(path, { query = null, method = "GET", body = null } = {
   try {
     const response = await fetch(url.toString(), {
       method,
-      headers: { Accept: "application/json", "x-changenow-api-key": apiKey(), ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: { Accept: "application/json", ...(apiKey() ? { "x-changenow-api-key": apiKey() } : {}), ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       cache: "no-store",
       signal: controller.signal,
     });
     const text = await response.text();
     if (!response.ok) {
+      // No key of the reader's own and the relay's key was refused or absent: say so, and
+      // offer the paste-a-key card instead of a bare "401".
+      if (!apiKey() && (response.status === 401 || response.status === 403)) {
+        relayKeyMissing = true;
+        render();
+        throw new Error("This site has no ChangeNOW API key configured. Paste your own key to swap.");
+      }
       // ChangeNOW's 4xx responses carry the real reason in the JSON body.
       let reason = text.slice(0, 300);
       try { reason = JSON.parse(text)?.message || reason; } catch {}
@@ -176,10 +192,11 @@ function refreshToAddress() {
 function render() {
   if (!rootEl) return;
   const header = `<div class="kaposts-header"><h1 class="kaposts-title">ChangeNOW Swap</h1></div>`;
-  if (!apiKey()) {
+  if (!swapsUsable()) {
     rootEl.innerHTML = `${header}
       <div class="profile-card">
         <p class="profile-card-label">ChangeNOW API Key</p>
+        ${relayKeyMissing ? `<p class="field-error">This site has no ChangeNOW API key configured, so swaps need a key of your own.</p>` : ""}
         <p class="swap-disclaimer-text">Desktop stores your ChangeNOW API key locally on this device (it's never committed to the app). Paste yours to enable swaps — get one free at changenow.io/api.</p>
         <form class="broadcast-join-row" data-swap-key-form>
           <input class="kaposts-reply-input" type="password" data-swap-key-input placeholder="ChangeNOW API key" required />

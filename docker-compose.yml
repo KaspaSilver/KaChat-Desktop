@@ -25,6 +25,8 @@ services:
       # Swaps tab uses it, and Vite inlines every VITE_ var into the bundle it
       # serves. Set it in a .env next to this file, or export it before `up`.
       VITE_CHANGENOW_API_KEY: ${VITE_CHANGENOW_API_KEY:-}
+      # Same key, read by the relay at request time so readers never paste one (vite.config.mjs).
+      CHANGENOW_API_KEY: ${CHANGENOW_API_KEY:-${VITE_CHANGENOW_API_KEY:-}}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

@@ -115,6 +115,14 @@ function nextcloudProxy() {
         }
         delete headers["x-preview-image"];
         delete headers["x-preview-referer"];
+        // ChangeNOW: the API key lives on the server (CHANGENOW_API_KEY, or the same
+        // VITE_CHANGENOW_API_KEY docker-compose already passes) and is attached here, so no
+        // reader ever has to paste one and the key never ships inside the page. A key the page
+        // sends itself (a reader's own, from Settings) wins.
+        if (/(^|\.)changenow\.io$/i.test(origin.hostname)) {
+          const serverKey = String(process.env.CHANGENOW_API_KEY || process.env.VITE_CHANGENOW_API_KEY || "").trim();
+          if (serverKey && !String(headers["x-changenow-api-key"] || "").trim()) headers["x-changenow-api-key"] = serverKey;
+        }
         // Opt-in "soft 404": APIs that use 404 to mean "not found, and that's normal" (KNS
         // primary-name lookups for addresses without domains) make the browser console scream
         // red for every answer. When the caller sends x-proxy-soft-404, an upstream 404 is
