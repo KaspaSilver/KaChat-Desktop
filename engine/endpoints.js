@@ -97,11 +97,32 @@ export function isProxyAvailable() {
   if (!proxyProbe) {
     const nativeFetch = window.__kasiaNativeFetch || window.fetch.bind(window);
     proxyProbe = (async () => {
-      try {
+      // Two ways to ask, tried in the order that avoids a red 4xx in the console for the
+      // deployment at hand. On a public site the relay is asked to fetch this site's own
+      // manifest: every version of the middleware answers that with 200 (the __probe route
+      // is newer than some running proxies - kachat.app's answered it with "Bad proxy target"
+      // while the page in front of it was Build 8). On localhost the relay refuses to fetch
+      // itself (its SSRF guard), so __probe goes first there.
+      let base = "/";
+      try { base = import.meta.env.BASE_URL || "/"; } catch { base = "/"; }
+      const host = String(window.location.hostname || "").toLowerCase();
+      const local = host === "localhost" || host === "0.0.0.0" || host.endsWith(".localhost") || /^127\./.test(host) || host === "::1" || host === "[::1]";
+      const viaProbe = async () => {
         const response = await nativeFetch(`${proxyRoot()}__probe`, { cache: "no-store" });
         const body = (await response.text()).trim();
         if (response.ok) return body === PROBE_REPLY;
         return response.status === 400 && body === "Bad proxy target";
+      };
+      const viaSelf = async () => {
+        const target = `${proxyRoot()}${encodeURIComponent(window.location.origin)}${base}manifest.json`;
+        const response = await nativeFetch(target, { cache: "no-store" });
+        if (!response.ok) return false;
+        const body = (await response.text()).trim();
+        return body.includes("KaChat");
+      };
+      try {
+        if (local) return (await viaProbe()) || (await viaSelf());
+        return (await viaSelf()) || (await viaProbe());
       } catch { return false; }
     })();
   }
