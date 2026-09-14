@@ -1670,7 +1670,10 @@ function wireSettings() {
       button.textContent = "Connecting…";
       try {
         const userId = await verifyCredentials(server, username, appPassword);
-        nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
+        // Automatic Sync is on from the moment a server is connected (iOS bde94b0): the archive
+        // on the reader's own server is the one cross-device channel, and a connection that
+        // then sat idle until a toggle was found is a connection that did nothing.
+        nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: true, lastAutoBackup: 0 };
         saveState();
         renderSettings();
         armAutoBackup();
