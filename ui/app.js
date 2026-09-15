@@ -3546,7 +3546,7 @@ function updateArchitectureDetails() {
       : connection.failover && connection.failover !== "idle"
         ? `Failover ${connection.failover}`
         : getEndpointOverride("trustedNode").trim()
-          ? (currentSavedNodeMode() === "official" ? "KaChat official node · no fallback" : "Your own node · no fallback")
+          ? (currentSavedNodeMode() === "official" ? "Kasia public node · no fallback" : "Your own node · no fallback")
           : "Automatic public-node scan";
   }
   if (standbyStatus) {
@@ -4542,13 +4542,13 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
     }
     renderInsecureNodeWarning(url);
   } else if (mode === "official") {
-    // KaChat's own node: connected to strictly, like a custom node, never scanned around.
+    // Kasia's public node: connected to strictly, like a custom node, never scanned around.
     url = DEFAULT_TRUSTED_NODE;
   }
   if (errorEl) errorEl.hidden = true;
   const label = button.textContent;
   button.disabled = true;
-  const checking = mode === "custom" ? "Checking your node…" : mode === "official" ? "Checking KaChat's node…" : "Scanning…";
+  const checking = mode === "custom" ? "Checking your node…" : mode === "official" ? "Checking Kasia's node…" : "Scanning…";
   button.textContent = checking;
   const trace = document.querySelector("[data-node-scan-trace]");
   if (trace) { trace.textContent = mode === "scan" ? "Asking the public node resolver…" : checking; trace.hidden = false; }
@@ -4575,10 +4575,10 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
     }
     setEndpoint("trustedNode", url); // "" clears the override, returning to KaChat's node
     setEndpoint("nodeScan", "");
-    setStatus(mode === "custom" ? "Connecting to your node…" : mode === "official" ? "Connecting to KaChat's node…" : "Scanning public nodes…");
+    setStatus(mode === "custom" ? "Connecting to your node…" : mode === "official" ? "Connecting to Kasia's node…" : "Scanning public nodes…");
     await engine.connect({ force: true });
     await connectAndRefresh({ quiet: true });
-    showCopyToast(mode === "custom" ? "Connected to your node" : mode === "official" ? "Connected to KaChat's node" : "Connected automatically");
+    showCopyToast(mode === "custom" ? "Connected to your node" : mode === "official" ? "Connected to Kasia's node" : "Connected automatically");
   } catch (error) {
     if (errorEl) { errorEl.textContent = `Could not connect: ${describeConnectError(error)}`; errorEl.hidden = false; }
     setStatus("Connection failed");
@@ -8220,7 +8220,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "4.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 21;
+const APP_BUILD = 22;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10102,7 +10102,7 @@ function renderNodeChoice() {
   const saved = loadSavedNodes();
   const options = [
     { value: NODE_CHOICE_SCAN, label: "Automatic Scan (Recommended)" },
-    { value: DEFAULT_TRUSTED_NODE, label: "KaChat Official Node (Better)" },
+    { value: DEFAULT_TRUSTED_NODE, label: "Kasia Public Node (Better)" },
     ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address }))
       .filter((o) => o.value.toLowerCase() !== DEFAULT_TRUSTED_NODE.toLowerCase()),
   ];
@@ -10113,7 +10113,7 @@ function renderNodeChoice() {
   if (note) {
     note.hidden = !current;
     note.textContent = custom
-      ? (custom.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "Connected only to KaChat's node" : "Connected only to this node")
+      ? (custom.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "Connected only to Kasia's node" : "Connected only to this node")
       : "A healthy public node is picked automatically";
   }
 }
@@ -18247,7 +18247,7 @@ function renderSetupExtra(kind) {
     // sees what they ask it.
     const opts = [
       { key: "scan", title: "Automatic Node Scan", badge: "Recommended", sub: "The Kaspa public node resolver picks a healthy public node for you, the way kaspa-ng does. Nothing to set up." },
-      { key: "official", title: "KaChat Official Node", badge: "Better", sub: "KaChat's own node at node.kachat.duckdns.org. One known operator, nothing to set up, and no scanning." },
+      { key: "official", title: "Kasia Public Node", badge: "Better", sub: "Kasia's public node at wrpc.kasia.fyi, the one the Kasia web app uses. One known operator, nothing to set up, and no scanning." },
       { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Your own Kaspa wRPC endpoint. Nobody else sees what you ask it, and nothing depends on anyone else's node staying up.", input: true },
     ];
     let current = accountShellPrefs.nodeChoice;

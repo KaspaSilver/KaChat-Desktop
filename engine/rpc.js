@@ -245,6 +245,7 @@ const RESOLVER_TIMEOUT_MS = 20000;
 // though the nodes can. Same public pool, no house node; refreshed from the resolver's own
 // answers whenever it works.
 const PUBLIC_NODE_SEEDS = [
+  "wss://wrpc.kasia.fyi",
   "wss://isla.kaspa.red/kaspa/mainnet/wrpc/borsh",
   "wss://kate.kaspa.red/kaspa/mainnet/wrpc/borsh",
   "wss://emma.kaspa.stream/kaspa/mainnet/wrpc/borsh",
