@@ -153,6 +153,9 @@ function nextcloudProxy() {
                 upstreamRes.resume(); // discard the redirect body
                 let next = null;
                 try { next = new URL(location, target); } catch { next = null; }
+                // A server redirecting to the very URL that was asked (a seed did this) would
+                // loop until the hop cap; hand it through as-is instead.
+                if (next && next.href === target.href) next = null;
                 // A redirect must obey the same SSRF guard as the original target.
                 const nextHost = (next?.hostname || "").toLowerCase();
                 const nextBlocked = !next || nextHost === "localhost" || nextHost === "0.0.0.0"
@@ -172,6 +175,10 @@ function nextcloudProxy() {
               upstreamRes.pipe(res);
             },
           );
+          // A seed or API that never answers must not hold the relay's connection open until
+          // the CDN in front gives up on it (Cloudflare's 522 is exactly that): fifteen seconds,
+          // then a 504 of our own.
+          upstream.setTimeout(15000, () => upstream.destroy(new Error("upstream timed out")));
           upstream.on("error", (error) => {
             if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
             res.end(`Proxy error: ${error.message}`);

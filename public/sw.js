@@ -17,7 +17,10 @@ self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const names = await caches.keys();
     await Promise.all(names.filter((name) => name !== CACHE).map((name) => caches.delete(name)));
-    await self.clients.claim();
+    // No clients.claim(): taking over a page mid-load left its early requests (the module
+    // preloads the built page issues) outside the worker and the later ones inside, which
+    // Chrome reports as "preload ... not used because it is a cross-world service worker
+    // resource mismatch" and then fetches twice. Control begins with the next navigation.
   })());
 });
 

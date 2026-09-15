@@ -169,10 +169,28 @@ function installIndexerProxy() {
         const parsed = new URL(rawUrl, window.location.origin);
         if (INDEXER_PROXY_HOST_RE.test(parsed.hostname)) {
           const proxied = `${proxyRoot()}${encodeURIComponent(parsed.origin)}${parsed.pathname}${parsed.search}`;
-          return traceApiCall(rawUrl, init, () => proxyAvailable().then((ok) => {
-            if (!ok) return nativeFetch(input, init);
-            if (typeof input === "string" || input instanceof URL) return nativeFetch(proxied, init);
-            return nativeFetch(new Request(proxied, input), init);
+          const direct = () => nativeFetch(input, init);
+          const relayed = () => (typeof input === "string" || input instanceof URL)
+            ? nativeFetch(proxied, init)
+            : nativeFetch(new Request(proxied, input), init);
+          const method = String(init?.method || input?.method || "GET").toUpperCase();
+          return traceApiCall(rawUrl, init, () => proxyAvailable().then(async (ok) => {
+            if (!ok) return direct();
+            // The relay is a convenience, not a dependency. When it cannot answer - a stale
+            // relay passing a redirect through (the browser then follows it cross-origin and
+            // CORS refuses it, seen from kachat.app), a hung upstream surfacing as a 5xx from
+            // the CDN in front - a GET is tried directly, which is exactly what would have
+            // happened without a relay. Bodies cannot be replayed, so a POST is not retried.
+            try {
+              const response = await relayed();
+              if (response.status >= 500 && (method === "GET" || method === "HEAD")) {
+                try { return await direct(); } catch { return response; }
+              }
+              return response;
+            } catch (error) {
+              if (method === "GET" || method === "HEAD") return direct();
+              throw error;
+            }
           }));
         }
       }
