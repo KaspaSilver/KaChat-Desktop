@@ -3297,10 +3297,23 @@ function openMorePopover(anchor, post) {
   // The name is in the label ("Mute alice"), as iOS words it: a bare "Mute" on a busy feed
   // leaves you checking which post the menu came from.
   const name = posterName(post.posterAddress);
-  openPopover(anchor, `
-    ${post.remoteId ? `<button type="button" data-kaposts-pop="activity" data-kaposts-pop-id="${post.id}">Post Activity</button>` : ""}
-    ${!isMine ? `<button type="button" data-kaposts-pop="mute" data-kaposts-pop-id="${post.id}">Mute ${deps.escapeHtml(name)}</button>` : ""}
-    ${!isMine ? `<button type="button" data-kaposts-pop="block" data-kaposts-pop-id="${post.id}" class="danger">Block ${deps.escapeHtml(name)}</button>` : ""}`);
+  // The same half sheet every other menu in the app uses, each row saying what it does (iOS
+  // e9fa63e), rather than a popover of bare labels.
+  void anchor;
+  const options = [];
+  if (post.remoteId) options.push({ id: "activity", title: "Post Activity", subtitle: "Who liked, disliked, reposted and quoted this post." });
+  if (!isMine) {
+    options.push({ id: "mute", title: `Mute ${name}`, subtitle: "Their posts leave your feeds; they are not told." });
+    options.push({ id: "block", title: `Block ${name}`, subtitle: "Their posts and replies disappear everywhere on this device.", destructive: true });
+  }
+  if (!options.length) return;
+  if (typeof deps.chooseDialog !== "function") {
+    openPopover(anchor, options.map((o) => `<button type="button" data-kaposts-pop="${o.id}" data-kaposts-pop-id="${post.id}"${o.destructive ? ' class="danger"' : ""}>${deps.escapeHtml(o.title)}</button>`).join(""));
+    return;
+  }
+  deps.chooseDialog({ title: name, message: post.posterAddress, options }).then((choice) => {
+    if (choice) handlePopoverAction(choice, post);
+  });
 }
 
 function handlePopoverAction(action, post) {
