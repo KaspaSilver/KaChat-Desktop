@@ -1158,7 +1158,6 @@
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-copy"><strong>Quick Reactions</strong><small data-quick-reactions-preview>👍 ❤️ 😂 😮 😢 🙏</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
               <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong><small>Photos from someone you have not added or replied to wait behind a tap. Chat Info can always show a single contact's photos.</small></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
-              <button class="settings-list-row" type="button" data-open-photo-quality><span class="settings-row-copy"><strong>Photo Quality</strong><small>Resolution and compression for photos you send.</small></span><span class="settings-dropdown-caption" data-photo-quality-current></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
             </div>
           </section>
 
@@ -1878,33 +1877,6 @@
     </section>
   </div>
 
-  <div class="modal-backdrop" data-photo-quality-modal hidden>
-    <section class="contact-modal photo-quality-modal" role="dialog" aria-modal="true" aria-label="Photo quality">
-      <div class="modal-header">
-        <div>
-          <p class="screen-kicker">Chats</p>
-          <h2>Photo Quality</h2>
-        </div>
-        <button class="modal-close" type="button" data-close-photo-quality aria-label="Close">×</button>
-      </div>
-      <p class="field-hint photo-quality-desc">Controls how much photos are compressed before sending. Higher quality looks clearer but costs a larger fee and takes longer to send; lower quality sends faster and cheaper but looks more compressed. This only affects photos you send, not ones you receive.</p>
-      <div class="photo-quality-summary-row">
-        <span>Photo quality</span>
-        <span class="photo-quality-summary" data-photo-quality-summary>Balanced · ~15 KB</span>
-      </div>
-      <input class="photo-quality-slider" type="range" min="0" max="3" step="1" value="1" data-photo-quality-slider aria-label="Photo quality" />
-      <div class="photo-quality-ticks">
-        <span>Data Saver</span>
-        <span>Balanced</span>
-        <span>High</span>
-        <span>Best</span>
-      </div>
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-close-photo-quality>Cancel</button>
-        <button class="primary-button" type="button" data-save-photo-quality>Save</button>
-      </div>
-    </section>
-  </div>
 
   <!-- KaPosts quick tip: Send-Kaspa-style modal, direct send through the chat payment rules. -->
   <div class="modal-backdrop" data-tip-modal hidden>

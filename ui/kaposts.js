@@ -40,6 +40,9 @@ import kaspaLogoUrl from "./assets/kaspa-logo.png";
 const UNDO_DELAY_MS = 5000;
 const KAPOSTS_PREFS_KEY = "kachat-kaposts-prefs-v1"; // { following:[], muted:[], blocked:[] } — account-scoped
 
+// Replies posted this session, by txid: kept at the top of their thread until the indexer
+// returns them (iOS 7f82118).
+const sessionReplyIds = new Set();
 let deps = null; // { engine, escapeHtml, shortAddress, accountScopedKey, showToast, appendEngineLog }
 
 // DOM
@@ -151,15 +154,23 @@ function isHiddenAuthor(address) {
 // Identity (contact custom name > KNS primary > short address; .kas stripped)
 // ---------------------------------------------------------------------------
 
+// Every link the apps hand out is https://kachat.app/... (KACHAT_APP_LINKS.md): it unfurls a
+// preview in any chat app, opens the installed app on a phone, and shows the post otherwise.
+function postShareLink(remoteId) {
+  return `https://kachat.app/post/${encodeURIComponent(String(remoteId || ""))}`;
+}
+
 function posterName(address) {
   if (!address) return "Unknown";
   // Your saved contact name wins, then their KNS domain, then the short address —
   // same order iOS resolves display names for notifications and posts.
+  // The .kas suffix is part of the name and shows everywhere (iOS a7c0c5e); typing never needs
+  // it - resolution appends it and mention suggestions match on the bare name.
   const alias = deps.contactAliasFor?.(address);
-  if (alias) return alias.toLowerCase().endsWith(".kas") ? alias.slice(0, -4) : alias;
+  if (alias) return alias;
   const info = deps.engine.peekKnsAddressInfo?.(address);
   const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
-  if (domain) return domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain;
+  if (domain) return domain;
   return deps.shortAddress(address);
 }
 
@@ -1915,8 +1926,10 @@ async function openThread(post, { scrollToRemoteId = null } = {}) {
     const replies = result.posts.map(mapRemotePost).filter(Boolean);
     seedPager(pager, result.posts, result.pagination);
     mutatePost(post.id, (p) => {
-      const localOnly = p.comments.filter((c) => !c.remoteId || !replies.some((r) => r.remoteId === c.remoteId));
-      p.comments = [...replies, ...localOnly];
+      // A reply of this session whose transaction is out but not yet indexed has a txid, so it
+      // is not "local" - it is remembered by id and kept on top until the server returns it.
+      const kept = p.comments.filter((c) => (!c.remoteId || sessionReplyIds.has(c.remoteId)) && !replies.some((r) => r.remoteId === c.remoteId));
+      p.comments = [...kept, ...replies];
     });
     renderThread();
     resolvePosterIdentities(replies.map((reply) => reply.posterAddress), () => {
@@ -1969,7 +1982,9 @@ function loadMoreThreadReplies(postId) {
 
 async function submitReply(parent, text) {
   const comment = makeLocalPost(text);
-  mutatePost(parent.id, (p) => { p.comments = [...p.comments, comment]; });
+  // The indexer orders replies newest first, so the new one goes to the TOP straight away
+  // rather than out of view at the bottom (iOS 7f82118).
+  mutatePost(parent.id, (p) => { p.comments = [comment, ...p.comments]; });
   renderThread();
   // Same 5s undo window as every other interaction: the optimistic comment shows
   // immediately, the on-chain submit fires when the toast's countdown runs out,
@@ -1981,6 +1996,7 @@ async function submitReply(parent, text) {
         // @mentions work in comments exactly like in posts: resolved client-side to pubkeys.
         mentionedPubkeys: await mentionedPubkeysFor(text),
       });
+      sessionReplyIds.add(txid);
       mutatePost(comment.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
       mutatePost(comment.id, (p) => { p.delivery = "failed"; });
@@ -3322,10 +3338,10 @@ function handlePopoverAction(action, post) {
   if (action === "repost") scheduleRepost(post);
   else if (action === "quote") openComposer(post);
   else if (action === "share") {
-    const snippet = post.text.slice(0, 60).trim();
-    const ellipsis = post.text.length > 60 ? "..." : "";
-    navigator.clipboard?.writeText(`"${snippet}${ellipsis}"\n\nOpen in KaChat: kachat://kapost/${post.remoteId}`);
-    deps.showToast?.("Share link copied");
+    // The bare kachat.app link, nothing else: it unfurls the post's preview by itself, and
+    // every paste target wants a URL, not a paragraph (iOS 1c72cd3, 688a02e).
+    navigator.clipboard?.writeText(postShareLink(post.remoteId));
+    deps.showToast?.("Link copied");
   } else if (action === "activity") openEngagementPanel(post);
   else if (action === "bookmark") { mutatePost(post.id, (p) => { p.bookmarkedByMe = !p.bookmarkedByMe; }); renderAll(); }
   else if (action === "mute") { prefs.muted = [...new Set([...prefs.muted, post.posterAddress])]; savePrefs(); renderAll(); }
@@ -4439,10 +4455,8 @@ export function initKaPosts(dependencies) {
     if (share) {
       const p = findPost(share.dataset.kapostsShare);
       if (p?.remoteId) {
-        const snippet = p.text.slice(0, 60).trim();
-        const ellipsis = p.text.length > 60 ? "..." : "";
-        navigator.clipboard?.writeText(`"${snippet}${ellipsis}"\n\nOpen in KaChat: kachat://kapost/${p.remoteId}`);
-        deps.showToast?.("Share link copied");
+        navigator.clipboard?.writeText(postShareLink(p.remoteId));
+        deps.showToast?.("Link copied");
       }
       return;
     }

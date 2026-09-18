@@ -927,18 +927,18 @@ photoPreviewOverlay?.addEventListener("click", () => { photoPreviewOverlay.hidde
 const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 
 // A link that points back INSIDE KaChat (iOS KaChatInternalLink). Both forms are accepted:
-//   kachat://kapost/<txid>        https://kachat.duckdns.org/post/<txid>
-//   kachat://broadcast/<channel>  https://kachat.duckdns.org/broadcast/<channel>
+//   kachat://kapost/<txid>        https://kachat.app/post/<txid>       (kachat.duckdns.org still opens)
+//   kachat://broadcast/<channel>  https://kachat.app/broadcast/<channel>
 // Everything a pasted link carries is untrusted, so the payload is re-validated here rather
 // than trusted from the URL's text.
-const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.duckdns\.org\/(?:post|broadcast)\/[^\s<>"']+)/i;
+const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast)\/[^\s<>"']+|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(?:post|broadcast)\/[^\s<>"']+)/i;
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
   let target = null, payload = null;
   const custom = text.match(/^kachat:\/\/(kapost|broadcast)\/([^/?#]+)\/?$/i);
   if (custom) { target = custom[1].toLowerCase() === "kapost" ? "kapost" : "broadcast"; payload = custom[2]; }
   else {
-    const universal = text.match(/^https?:\/\/(?:www\.)?kachat\.duckdns\.org\/(post|broadcast)\/([^/?#]+)\/?$/i);
+    const universal = text.match(/^https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(post|broadcast)\/([^/?#]+)\/?$/i);
     if (!universal) return null;
     target = universal[1].toLowerCase() === "post" ? "kapost" : "broadcast";
     payload = universal[2];
@@ -1574,11 +1574,25 @@ function jumpToMessageByTxid(txid) {
     showCopyToast(refetching ? "Original message not here yet; fetching it now." : "Original message not available.");
     return;
   }
-  const el = messageArea.querySelector(`[data-message-id="${CSS.escape(target.id)}"]`);
-  if (!el) return;
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
-  el.classList.add("message-highlight");
-  window.setTimeout(() => el.classList.remove("message-highlight"), 1200);
+  const highlight = (el, behavior) => {
+    el.scrollIntoView({ behavior, block: "center" });
+    el.classList.add("message-highlight");
+    window.setTimeout(() => el.classList.remove("message-highlight"), 1200);
+  };
+  const onScreen = messageArea.querySelector(`[data-message-id="${CSS.escape(target.id)}"]`);
+  if (onScreen) { highlight(onScreen, "smooth"); return; }
+  // The original sits above the rendered window: open the window far enough to reach it, with
+  // a little history above, and land there WITHOUT animation a turn later. Animating across
+  // hundreds of freshly added rows lays every one of them out mid-flight and stalls for seconds.
+  const index = conversationEntry.messages.indexOf(target);
+  const key = `c:${conversationEntry.id}`;
+  const needed = conversationEntry.messages.length - Math.max(0, index - 20);
+  if ((messageWindowByThread.get(key) || MESSAGE_WINDOW_STEP) < needed) messageWindowByThread.set(key, needed);
+  renderMessages(conversationEntry);
+  window.requestAnimationFrame(() => {
+    const el = messageArea.querySelector(`[data-message-id="${CSS.escape(target.id)}"]`);
+    if (el) highlight(el, "auto");
+  });
 }
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && photoPreviewOverlay && !photoPreviewOverlay.hidden) photoPreviewOverlay.hidden = true;
@@ -8218,9 +8232,9 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
 // kachat.kas and jumps straight into that chat in payment mode.
-const APP_VERSION = "4.1";
+const APP_VERSION = "5.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 23;
+const APP_BUILD = 24;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15704,8 +15718,10 @@ function setPhotoQualityPresetId(id) {
   if (!PHOTO_QUALITY_PRESETS.some((p) => p.id === id)) return;
   try { localStorage.setItem(PHOTO_QUALITY_KEY, id); } catch {}
 }
+// One size for on-chain photos: 15 KB (iOS ImagePrep.defaultChatTargetBytes). The Photo Quality
+// setting and its presets are gone (iOS d36a82f); a stored preset is ignored.
 function photoQualityTargetBytes() {
-  return photoQualityPresetById(getPhotoQualityPresetId()).bytes;
+  return 15000;
 }
 function photoQualitySummary(preset) {
   return `${preset.name} · ~${Math.round(preset.bytes / 1000)} KB`;
@@ -16028,7 +16044,9 @@ async function sendChatVoicePreview() {
 
   // "Send Media via Nextcloud": upload the recording and send its share link (renders as an
   // audio card + player on the recipient's side). Failure falls back to the on-chain envelope.
-  if (isNextcloudMediaSendActive()) {
+  const voiceOnChain = voiceForcedOnChain;
+  voiceForcedOnChain = false;
+  if (isNextcloudMediaSendActive() && !voiceOnChain) {
     const conversationId = activeConversationId;
     setStatus("Uploading voice note to Nextcloud…");
     try {
@@ -17339,14 +17357,24 @@ composer.elements.message?.addEventListener("paste", async (event) => {
 
 // The three shortcuts that live in the input bubble on iOS (camera, mic, Kaspa logo), plus the
 // desktop-only emoji picker beside them.
+// "Send On-Chain Photo" / "Send On-Chain Voice Message" in the "+" menu mean on chain even while
+// "Send Media via Nextcloud" is on; the composer bar's own camera and mic follow the switch
+// (iOS d36a82f). The flag is set by the row that started the attachment and cleared when it
+// is sent or discarded.
+let photoForcedOnChain = false;
+let voiceForcedOnChain = false;
+let groupPhotoForcedOnChain = false;
+let groupVoiceForcedOnChain = false;
 document.querySelector("[data-composer-camera]")?.addEventListener("click", () => {
   closeComposerMenu();
   activateComposerMode("message");
+  photoForcedOnChain = false;
   photoFileInput?.click();
 });
 document.querySelector("[data-composer-mic]")?.addEventListener("click", () => {
   closeComposerMenu();
   activateComposerMode("message");
+  voiceForcedOnChain = false;
   startVoiceRecording();
 });
 document.querySelector("[data-composer-kas]")?.addEventListener("click", () => {
@@ -17379,9 +17407,11 @@ composerModeButtons.forEach((button) => {
       activateComposerMode("kas");
     } else if (mode === "photo") {
       activateComposerMode("message");
+      photoForcedOnChain = true;
       photoFileInput?.click();
     } else if (mode === "voice") {
       activateComposerMode("message");
+      voiceForcedOnChain = true;
       startVoiceRecording();
     } else if (mode === "handshake") {
       sendHandshakeFromComposer();
@@ -17566,7 +17596,9 @@ composer.addEventListener("submit", async (event) => {
     // "Send Media via Nextcloud": upload the full-quality original and send its share link
     // (renders as a media bubble on the recipient's side). Any failure falls back to the
     // on-chain envelope so the message never silently vanishes.
-    if (isNextcloudMediaSendActive() && attachment.originalBlob) {
+    const photoOnChain = photoForcedOnChain;
+    photoForcedOnChain = false;
+    if (isNextcloudMediaSendActive() && attachment.originalBlob && !photoOnChain) {
       const conversationId = activeConversationId;
       setStatus("Uploading photo to Nextcloud…");
       try {
@@ -22753,7 +22785,9 @@ groupComposer?.addEventListener("submit", async (event) => {
     clearGroupPendingPhoto();
     // "Send Media via Nextcloud": the full-quality original goes to the server and the group
     // gets its share link; any failure falls back to the on-chain envelope.
-    if (isNextcloudMediaSendActive() && attachment.originalBlob) {
+    const photoOnChain = groupPhotoForcedOnChain;
+    groupPhotoForcedOnChain = false;
+    if (isNextcloudMediaSendActive() && attachment.originalBlob && !photoOnChain) {
       try {
         const url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
         sendGroupWire(url);
@@ -22811,11 +22845,11 @@ groupPlusMenu?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-group-compose]");
   if (!btn) return;
   closeGroupPlusMenu();
-  if (btn.dataset.groupCompose === "photo") groupPhotoInput?.click();
-  else if (btn.dataset.groupCompose === "voice") startGroupVoice();
+  if (btn.dataset.groupCompose === "photo") { groupPhotoForcedOnChain = true; groupPhotoInput?.click(); }
+  else if (btn.dataset.groupCompose === "voice") { groupVoiceForcedOnChain = true; startGroupVoice(); }
 });
-document.querySelector("[data-group-camera]")?.addEventListener("click", () => { closeGroupPlusMenu(); groupPhotoInput?.click(); });
-document.querySelector("[data-group-mic]")?.addEventListener("click", () => { closeGroupPlusMenu(); startGroupVoice(); });
+document.querySelector("[data-group-camera]")?.addEventListener("click", () => { closeGroupPlusMenu(); groupPhotoForcedOnChain = false; groupPhotoInput?.click(); });
+document.querySelector("[data-group-mic]")?.addEventListener("click", () => { closeGroupPlusMenu(); groupVoiceForcedOnChain = false; startGroupVoice(); });
 // The "+" (iOS plusSheet): a sheet titled Send, each row saying what it does.
 groupPlusButton?.addEventListener("click", async (event) => {
   event.stopPropagation();
@@ -22829,8 +22863,8 @@ groupPlusButton?.addEventListener("click", async (event) => {
   ];
   if (isNextcloudConnected()) options.push({ id: "nextcloud", title: "Send from Nextcloud", subtitle: "Pick a file from your connected server." });
   const choice = await chooseDialog({ title: "Send", options });
-  if (choice === "photo") groupPhotoInput?.click();
-  else if (choice === "voice") startGroupVoice();
+  if (choice === "photo") { groupPhotoForcedOnChain = true; groupPhotoInput?.click(); }
+  else if (choice === "voice") { groupVoiceForcedOnChain = true; startGroupVoice(); }
   else if (choice === "nextcloud") {
     openNextcloudMediaPicker({
       onPicked: (url) => {
@@ -22924,7 +22958,9 @@ async function sendGroupVoicePreview() {
   if (!entry || !activeGroupId) return;
   const { blob, seconds: durationSec } = entry;
   clearVoicePreview(groupVoicePanel);
-  if (isNextcloudMediaSendActive()) {
+  const voiceOnChain = groupVoiceForcedOnChain;
+  groupVoiceForcedOnChain = false;
+  if (isNextcloudMediaSendActive() && !voiceOnChain) {
     try {
       const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(groupVoiceMime).split(".").pop()}`, groupVoiceMime || "audio/webm");
       await sendGroupWire(url);

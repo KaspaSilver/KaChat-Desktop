@@ -41,7 +41,7 @@ const RETENTION_UNITS = [
 const ONCHAIN_VOICE_MAX_SECONDS = 10;
 const LONG_MESSAGE_BYTES = 2000;
 const LONG_MESSAGE_PREVIEW_CHARS = 500;
-const LINK_HOST = "kachat.duckdns.org";
+const LINK_HOST = "kachat.app"; // every shared link is https://kachat.app/... (KACHAT_APP_LINKS.md)
 const CACHE_KEY = "kachat-broadcast-messages-cache-v1";     // GLOBAL: public chain data, account-agnostic
 const REACTIONS_KEY = "kachat-broadcast-reactions-cache-v1"; // GLOBAL: public chain data, account-agnostic
 const POLL_MS = 8000;
@@ -208,11 +208,12 @@ function retentionDescription(millis) {
 // The share text and links for a room (iOS KaChatInternalLink.broadcastRoomShareText): one human
 // line, then BOTH accepted link forms.
 function roomShareLink(channel) {
-  return `kachat://broadcast/${normalizeBroadcastChannel(channel)}`;
+  return `https://${LINK_HOST}/broadcast/${encodeURIComponent(normalizeBroadcastChannel(channel))}`;
 }
 function roomShareText(channel) {
   const name = normalizeBroadcastChannel(channel);
-  return `Join #${name} on KaChat.\n\nOpen in KaChat: ${roomShareLink(name)}\nOr: https://${LINK_HOST}/broadcast/${name}`;
+  // One human line and the kachat.app link (iOS 688a02e): a bare kachat:// line previews nowhere.
+  return `Join #${name} on KaChat.\n\n${roomShareLink(name)}`;
 }
 
 // ---------------------------------------------------------------------------
