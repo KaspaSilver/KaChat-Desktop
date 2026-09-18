@@ -271,7 +271,27 @@ function loadJsonMap(key) {
   }
 }
 
+// Persistence is coalesced (iOS 5a55f62): every resolved lookup used to re-encode the WHOLE
+// cache synchronously, and a thread that looks up every poster - or a composer that sweeps
+// every contact - ran dozens of full encodes back to back and stalled the page for their total.
+// Writes now land 750 ms after the last change, and at once when the page is being hidden.
+const pendingJsonMaps = new Map(); // key -> map
+let jsonMapFlushTimer = null;
 function saveJsonMap(key, map) {
+  pendingJsonMaps.set(key, map);
+  if (jsonMapFlushTimer) return;
+  jsonMapFlushTimer = setTimeout(flushJsonMaps, 750);
+}
+function flushJsonMaps() {
+  if (jsonMapFlushTimer) { clearTimeout(jsonMapFlushTimer); jsonMapFlushTimer = null; }
+  for (const [key, map] of pendingJsonMaps) writeJsonMapNow(key, map);
+  pendingJsonMaps.clear();
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushJsonMaps);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushJsonMaps(); });
+}
+function writeJsonMapNow(key, map) {
   try { localStorage.setItem(key, JSON.stringify(map)); return; } catch { /* quota — prune below */ }
   // Storage is full (e.g. right after a large phone-backup import). Silently dropping the
   // write would forget every cached "this address has no domain" answer, so each reload
