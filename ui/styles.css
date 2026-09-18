@@ -10066,3 +10066,8 @@ html.standalone .ios-install-hint { display: none; }
 
 /* Node Connection: the plain-ws:// warning reads as a caution, not a failure. */
 .node-insecure-warning { margin: 8px 2px 0; color: #f2bd5c; font-size: 12.5px; line-height: 1.45; }
+
+/* KaPosts edit and delete (iOS 2d483a7, 5a55f62): "· edited" beside the time, a card dimmed
+   behind the delete countdown. */
+.kaposts-cell-edited { color: var(--muted); font-size: 12px; font-weight: 500; }
+.kaposts-cell.deleting { opacity: .45; transition: opacity .2s ease; }

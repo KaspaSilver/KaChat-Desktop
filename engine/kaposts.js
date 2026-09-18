@@ -62,6 +62,11 @@ export const KAPOSTS_PROTOCOL = Object.freeze({
   followSigningString: (action, followedPubkey) => `${action}:${followedPubkey}`,
   quoteSigningString: (contentId, b64Message, quotedAuthorPubkey) => `${contentId}:${b64Message}:${quotedAuthorPubkey}`,
   unquoteSigningString: (contentId) => contentId,
+  // Edits carry the action name in what is signed: a reply's signature covers the very same
+  // three fields, and without the prefix a reply to your own post could be replayed as an
+  // edit of it. Same domain separation for delete (an unquote signs a bare content id).
+  editSigningString: (postId, b64Message, mentionsJson) => `edit:${postId}:${b64Message}:${mentionsJson}`,
+  deleteSigningString: (postId) => `delete:${postId}`,
 
   postPayload: (pubkey, signature, b64Message, mentionsJson) =>
     `kchat:1:post:${pubkey}:${signature}:${b64Message}:${mentionsJson}`,
@@ -75,7 +80,17 @@ export const KAPOSTS_PROTOCOL = Object.freeze({
     `kchat:1:quote:${pubkey}:${signature}:${contentId}:${b64Message}:${quotedAuthorPubkey}`,
   unquotePayload: (pubkey, signature, contentId) =>
     `kchat:1:unquote:${pubkey}:${signature}:${contentId}`,
+  // Replaces the text of one of our posts, replies or quotes - honoured by the indexer only
+  // within two hours of the original (KAPOSTS_INDEXER.md §5.7).
+  editPayload: (pubkey, signature, postId, b64Message, mentionsJson) =>
+    `kchat:1:edit:${pubkey}:${signature}:${postId}:${b64Message}:${mentionsJson}`,
+  // Removes one of our posts from every feed, any time (§5.8). The chain keeps the bytes.
+  deletePayload: (pubkey, signature, postId) =>
+    `kchat:1:delete:${pubkey}:${signature}:${postId}`,
 });
+
+/** Two hours from the original post: the indexer's edit window, enforced on chain time. */
+export const KAPOSTS_EDIT_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Identity bridge (K pubkey <-> Kaspa address; KNS owns ALL display identity)
@@ -399,6 +414,25 @@ export async function submitKaPostQuote({ engine, text = "", contentId, quotedAu
   const pubkey = requesterPubkeyFor(engine);
   const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.quoteSigningString(contentId, b64, quotedAuthorPubkey));
   return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.quotePayload(pubkey, signature, contentId, b64, quotedAuthorPubkey));
+}
+
+/** Edits one of our own posts/replies/quotes (KAPOSTS_INDEXER.md §5.7). */
+export async function submitKaPostEdit({ engine, postId, text, mentionedPubkeys = [] }) {
+  const b64 = utf8ToBase64(KACHAT_MARKER + String(text || ""));
+  const me = requesterPubkeyFor(engine);
+  const clean = [...new Set((Array.isArray(mentionedPubkeys) ? mentionedPubkeys : [])
+    .map((p) => String(p || "").toLowerCase())
+    .filter((p) => /^0[23][0-9a-f]{64}$/.test(p) && p !== me))];
+  const mentions = JSON.stringify(clean);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.editSigningString(postId, b64, mentions));
+  return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.editPayload(me, signature, postId, b64, mentions));
+}
+
+/** Deletes one of our own posts/replies/quotes (§5.8): the indexer stops serving it. */
+export async function submitKaPostDelete({ engine, postId }) {
+  const pubkey = requesterPubkeyFor(engine);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.deleteSigningString(postId));
+  return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.deletePayload(pubkey, signature, postId));
 }
 
 /** Removal counter-action: withdraws our quote/repost of `contentId`. */

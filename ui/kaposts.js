@@ -29,6 +29,9 @@ import {
   submitKaPostQuote,
   submitKaPostReply,
   submitKaPostUnquote,
+  submitKaPostEdit,
+  submitKaPostDelete,
+  KAPOSTS_EDIT_WINDOW_MS,
   submitKaPostVote,
 } from "../engine/kaposts.js";
 import { getEndpoint } from "../engine/endpoints.js";
@@ -87,6 +90,7 @@ let threadHighlightTimer = 0;
 let replyInput, replyMeter, replySend;
 let composerQuoteTarget = null; // post being quoted, when the composer is a quote composer
 let composerReplyTarget = null; // post being replied to, when the composer is a reply composer
+let composerEditTarget = null;  // one of our own posts being edited (iOS 2d483a7): Save replaces its text
 let countdownTicker = null;
 let savedFeedScroll = 0;
 
@@ -435,6 +439,9 @@ function mapRemotePost(post) {
     quoted,
     parentRemoteId: post.parentPostId || null,
     delivery: "sent",
+    // Set by the indexer once an edit was accepted; the cell shows "· edited".
+    editedAt: post.editedAt ? Number(post.editedAt) || null : null,
+    sentAt: null,
   };
 }
 
@@ -1182,9 +1189,13 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
   // Delivery: a spinner while submitting, a green check for the first minute once the K
   // transaction is on the network, red Retry when it didn't go through. Only session posts
   // carry a delivery state; feed rows arrive as "sent" with an old timestamp and show nothing.
-  const sentCheck = post.delivery === "sent" && post.remoteId && localPosts.some((p) => p.id === post.id)
-    && Date.now() - post.timestamp < 60_000;
-  if (sentCheck) scheduleSentCheckExpiry(post.id, post.timestamp + 60_000);
+  // An edit counts from the edit landing (sentAt), not from the original post's time, so an
+  // edit on an old post still gets its check (iOS 90331bc).
+  const sentBasis = post.sentAt || post.timestamp;
+  const sentCheck = post.delivery === "sent" && post.remoteId && (post.sentAt || localPosts.some((p) => p.id === post.id))
+    && Date.now() - sentBasis < 60_000;
+  if (sentCheck) scheduleSentCheckExpiry(post.id, sentBasis + 60_000);
+  const deleting = pendingActions.has(`delete:${post.id}`);
   const deliveryHtml = post.delivery === "pending"
     ? `<div class="kaposts-delivery pending" title="Posting"><span class="kaposts-spinner" aria-label="Posting"></span></div>`
     : post.delivery === "failed"
@@ -1201,12 +1212,12 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
     : "";
 
   return `
-    <article class="kaposts-cell${isRoot ? " root" : ""}${!isRoot ? " openable" : ""}" data-kaposts-post="${post.id}"${post.remoteId ? ` data-kaposts-remote-id="${deps.escapeHtml(post.remoteId)}"` : ""}${!isRoot ? (openByRemote && post.remoteId ? ` data-kaposts-open-remote="${deps.escapeHtml(post.remoteId)}"` : ` data-kaposts-open="${post.id}"`) : ""}>
+    <article class="kaposts-cell${isRoot ? " root" : ""}${!isRoot ? " openable" : ""}${deleting ? " deleting" : ""}" data-kaposts-post="${post.id}"${post.remoteId ? ` data-kaposts-remote-id="${deps.escapeHtml(post.remoteId)}"` : ""}${!isRoot ? (openByRemote && post.remoteId ? ` data-kaposts-open-remote="${deps.escapeHtml(post.remoteId)}"` : ` data-kaposts-open="${post.id}"`) : ""}>
       <span data-kaposts-profile="${post.id}" class="kaposts-avatar-tap">${posterAvatarHtml(post.posterAddress)}</span>
       <div class="kaposts-cell-main">
         <div class="kaposts-cell-head">
           <strong class="kaposts-cell-name" data-kaposts-profile="${post.id}">${deps.escapeHtml(name)}</strong>
-          <span class="kaposts-cell-time">${deps.escapeHtml(time)}</span>
+          <span class="kaposts-cell-time">${deps.escapeHtml(time)}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span>
           ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${post.id}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
           <button class="kaposts-action kaposts-more" type="button" data-kaposts-more="${post.id}" aria-label="More">
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
@@ -2131,7 +2142,7 @@ function renderComposerThreadUi() {
   }
   // The + appears once you type, and never while quoting or replying - both are one post about
   // one other post, so neither stacks into a thread.
-  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || !trimmed;
+  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || Boolean(composerEditTarget) || !trimmed;
   if (composerTitle && !composerQuoteTarget && !composerReplyTarget) {
     composerTitle.textContent = composerThreadSegments.length ? "New Thread" : "New Post";
   }
@@ -2189,8 +2200,9 @@ function autoGrowReply() {
   replyInput.style.height = `${Math.min(replyInput.scrollHeight, REPLY_MAX_HEIGHT_PX)}px`;
 }
 
-function openComposer(quoteTarget = null, { replyTarget = null } = {}) {
+function openComposer(quoteTarget = null, { replyTarget = null, editTarget = null } = {}) {
   editingDraftId = null;
+  composerEditTarget = editTarget;
   // Posting costs KAS — with a confirmed-zero chatting balance, show the funding
   // popup (QR + address + copy) instead of a composer that could never submit.
   if (deps.isChattingBalanceZero?.()) {
@@ -2202,11 +2214,12 @@ function openComposer(quoteTarget = null, { replyTarget = null } = {}) {
   composerReplyTarget = replyTarget;
   quoteTarget = replyTarget || quoteTarget;
   composerQuoteTarget = replyTarget ? null : quoteTarget;
-  composerTitle.textContent = replyTarget ? "Reply to Post" : (quoteTarget ? "Quote Post" : "New Post");
-  if (composerSubmit) composerSubmit.textContent = replyTarget ? "Reply" : "Post";
+  composerTitle.textContent = editTarget ? (editTarget.parentRemoteId ? "Edit Comment" : "Edit Post") : replyTarget ? "Reply to Post" : (quoteTarget ? "Quote Post" : "New Post");
+  if (composerSubmit) composerSubmit.textContent = editTarget ? "Save" : replyTarget ? "Reply" : "Post";
   if (composerInput) composerInput.placeholder = replyTarget ? "Post your reply" : quoteTarget ? "Add a comment" : "What's happening on Kaspa?";
-  composerInput.value = "";
-  composerSubmit.disabled = true;
+  // Edit mode opens on the post's current text (no threading, no draft prompt on close).
+  composerInput.value = editTarget ? editTarget.text : "";
+  composerSubmit.disabled = !editTarget;
   composerMeter.hidden = true;
   composerThreadSegments = [];
   if (quoteTarget) {
@@ -2229,6 +2242,7 @@ async function closeComposer({ keepDraft = null } = {}) {
   // half-sentences, and discarding silently is how people lose what they were writing.
   const hasContent = [String(composerInput?.value || ""), ...composerThreadSegments].some((s) => s.trim());
   let save = keepDraft;
+  if (composerEditTarget) save = false; // an edit is not a draft
   if (save === null && hasContent) {
     // iOS ComposerCloseOptionsSheet: each choice says what happens to the post. Closing the
     // chooser itself (Escape, backdrop) keeps you in the composer with nothing lost.
@@ -2249,10 +2263,78 @@ async function closeComposer({ keepDraft = null } = {}) {
   // Cleared with the rest: a reply composer closed and reopened as a new post would otherwise
   // still submit as a reply to whatever it was last pointed at.
   composerReplyTarget = null;
+  composerEditTarget = null;
   composerThreadSegments = [];
   editingDraftId = null;
   renderComposerThreadUi();
   if (save) renderAll();
+}
+
+// Saving an edit (iOS 2d483a7, 90331bc): the new text shows at once, the usual 5s undo puts
+// the previous text back exactly, then the edit goes on chain; a failed transaction restores
+// the old text. The green check counts from the edit landing.
+function scheduleEdit(post, text) {
+  const previous = post.text;
+  const next = String(text || "");
+  if (!post.remoteId || next === previous) return;
+  mutatePost(post.id, (p) => { p.text = next; });
+  renderAll();
+  scheduleUndoable(`edit:${post.id}`, async () => {
+    try {
+      await submitKaPostEdit({ engine: deps.engine, postId: post.remoteId, text: next, mentionedPubkeys: await mentionedPubkeysFor(next) });
+      mutatePost(post.id, (p) => { p.editedAt = Date.now(); p.sentAt = Date.now(); p.delivery = "sent"; });
+    } catch (error) {
+      mutatePost(post.id, (p) => { p.text = previous; });
+      deps.appendEngineLog?.(`KaPost edit failed: ${error.message}`);
+      deps.showToast?.(`Edit failed: ${error?.message || error}`);
+    }
+    renderAll();
+  }, () => {
+    mutatePost(post.id, (p) => { p.text = previous; });
+    renderAll();
+  }, "Saving edit");
+}
+
+// Deleting one of our own posts (iOS 5a55f62): the card dims behind the 5s undo countdown -
+// Undo just lifts it - then the delete goes on chain and the post leaves every list and
+// comment tree; deleting the post an open thread is about closes the thread.
+function scheduleDelete(post) {
+  if (!post.remoteId) return;
+  scheduleUndoable(`delete:${post.id}`, async () => {
+    try {
+      await submitKaPostDelete({ engine: deps.engine, postId: post.remoteId });
+      removePostEverywhere(post);
+      deps.showToast?.(post.parentRemoteId ? "Comment deleted" : "Post deleted");
+    } catch (error) {
+      deps.appendEngineLog?.(`KaPost delete failed: ${error.message}`);
+      deps.showToast?.(`Delete failed: ${error?.message || error}`);
+    }
+    renderAll();
+  }, null, "Deleting");
+}
+
+function removePostEverywhere(post) {
+  const id = post.id;
+  const remoteId = post.remoteId || null;
+  const gone = (p) => p && (p.id === id || (remoteId && p.remoteId === remoteId));
+  const prune = (list) => {
+    if (!Array.isArray(list)) return list;
+    const kept = list.filter((p) => !gone(p));
+    for (const p of kept) if (Array.isArray(p.comments)) p.comments = prune(p.comments);
+    return kept;
+  };
+  localPosts = prune(localPosts);
+  remotePosts = prune(remotePosts);
+  pendingNewPosts = prune(pendingNewPosts);
+  myContentPosts = prune(myContentPosts);
+  if (activePanel?.posts) activePanel.posts = prune(activePanel.posts);
+  if (activePanel?.replies) activePanel.replies = prune(activePanel.replies);
+  for (const [key, chain] of threadChains.entries()) threadChains.set(key, prune(chain));
+  if (threadStack.includes(id)) {
+    threadStack = threadStack.filter((entry) => entry !== id);
+    pendingThreadScrollRemoteId = null;
+    threadHighlightRemoteId = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3318,6 +3400,15 @@ function openMorePopover(anchor, post) {
   void anchor;
   const options = [];
   if (post.remoteId) options.push({ id: "activity", title: "Post Activity", subtitle: "Who liked, disliked, reposted and quoted this post." });
+  if (isMine && post.remoteId) {
+    const left = KAPOSTS_EDIT_WINDOW_MS - (Date.now() - post.timestamp);
+    if (left > 0) {
+      const minutes = Math.ceil(left / 60000);
+      const leftText = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m left` : `${minutes}m left`;
+      options.push({ id: "edit", title: post.parentRemoteId ? "Edit Comment" : "Edit Post", subtitle: `Replace the text. ${leftText} of the two-hour window.` });
+    }
+    options.push({ id: "delete", title: post.parentRemoteId ? "Delete Comment" : "Delete Post", subtitle: "Removes it from every feed. The chain keeps the bytes.", destructive: true });
+  }
   if (!isMine) {
     options.push({ id: "mute", title: `Mute ${name}`, subtitle: "Their posts leave your feeds; they are not told." });
     options.push({ id: "block", title: `Block ${name}`, subtitle: "Their posts and replies disappear everywhere on this device.", destructive: true });
@@ -3343,6 +3434,8 @@ function handlePopoverAction(action, post) {
     navigator.clipboard?.writeText(postShareLink(post.remoteId));
     deps.showToast?.("Link copied");
   } else if (action === "activity") openEngagementPanel(post);
+  else if (action === "edit") openComposer(null, { editTarget: post });
+  else if (action === "delete") scheduleDelete(post);
   else if (action === "bookmark") { mutatePost(post.id, (p) => { p.bookmarkedByMe = !p.bookmarkedByMe; }); renderAll(); }
   else if (action === "mute") { prefs.muted = [...new Set([...prefs.muted, post.posterAddress])]; savePrefs(); renderAll(); }
   else if (action === "block") {
@@ -4177,12 +4270,14 @@ export function initKaPosts(dependencies) {
     if (!segments.length) return;
     const quoteTarget = composerQuoteTarget;
     const replyTarget = composerReplyTarget;
+    const editTarget = composerEditTarget;
     // The post is on its way, so the draft it came from has served its purpose. Explicit
     // keepDraft: false, because closeComposer would otherwise ask whether to keep writing that
     // is already being sent.
     if (editingDraftId) deleteDraft(editingDraftId);
     closeComposer({ keepDraft: false });
-    if (replyTarget) submitReply(replyTarget, segments[0]);
+    if (editTarget) scheduleEdit(editTarget, segments[0]);
+    else if (replyTarget) submitReply(replyTarget, segments[0]);
     else if (quoteTarget) scheduleQuote(quoteTarget, segments[0]);
     else if (segments.length > 1) scheduleThread(segments);
     else schedulePost(segments[0]);
