@@ -24,6 +24,25 @@ function nextcloudProxy() {
     "te", "trailer", "transfer-encoding", "upgrade",
   ];
 
+  // Cookie jars for Nextcloud Talk. The relay strips cookies both ways (see below), and that
+  // is right for WebDAV - but a Talk GUEST session lives in the PHP session cookie, and even an
+  // own-account Talk session is one cookie the server expects back. A request carrying
+  // x-proxy-jar: <id> gets the cookies that origin set for that jar attached, and the answer's
+  // Set-Cookie stored under it. Jars are memory-only, per relay process, and expire after an
+  // hour idle - a call is over long before that.
+  const jars = new Map(); // jarId -> { origin -> { name -> value }, touched }
+  const JAR_TTL_MS = 60 * 60 * 1000;
+  const jarFor = (id, origin) => {
+    const now = Date.now();
+    for (const [key, jar] of jars) if (now - jar.touched > JAR_TTL_MS) jars.delete(key);
+    let jar = jars.get(id);
+    if (!jar) { jar = { byOrigin: new Map(), touched: now }; jars.set(id, jar); }
+    jar.touched = now;
+    let cookies = jar.byOrigin.get(origin);
+    if (!cookies) { cookies = new Map(); jar.byOrigin.set(origin, cookies); }
+    return cookies;
+  };
+
   const mount = (server) => {
     // Mounted at /nc-proxy and, when the site is built under a base (the published site lives at
     // /desktop/), at <base>/nc-proxy as well: a reverse proxy that forwards the path unchanged
@@ -78,6 +97,16 @@ function nextcloudProxy() {
         // Basic auth, treated the call as a browser session without a CSRF token, and answered
         // 401 - right after a successful connect. An API client authenticates per request.
         delete headers.cookie;
+        const jarId = String(headers["x-proxy-jar"] || "").trim();
+        delete headers["x-proxy-jar"];
+        const jarCookies = /^[A-Za-z0-9_-]{8,64}$/.test(jarId) ? jarFor(jarId, origin.origin) : null;
+        if (jarCookies && jarCookies.size) {
+          headers.cookie = [...jarCookies].map(([name, value]) => `${name}=${value}`).join("; ");
+        }
+        // The Talk signaling channel is a long poll the server holds for up to 30s: give it
+        // room, where an ordinary relay call is cut off at fifteen.
+        const longPoll = String(headers["x-proxy-long-poll"] || "") === "1";
+        delete headers["x-proxy-long-poll"];
         // Hop-by-hop headers describe THIS connection, not the message, and a proxy must not
         // relay them (RFC 9110 7.6.1). Passing them on is what truncated large downloads: a
         // Nextcloud backup answered with `transfer-encoding: chunked` had that header copied onto
@@ -169,6 +198,18 @@ function nextcloudProxy() {
               const mask404 = soft404 && upstreamRes.statusCode === 404;
               const responseHeaders = { ...upstreamRes.headers };
               for (const hop of HOP_BY_HOP) delete responseHeaders[hop];
+              if (jarCookies) {
+                const setCookies = [].concat(upstreamRes.headers["set-cookie"] || []);
+                for (const line of setCookies) {
+                  const first = String(line).split(";")[0];
+                  const eq = first.indexOf("=");
+                  if (eq <= 0) continue;
+                  const name = first.slice(0, eq).trim();
+                  const value = first.slice(eq + 1).trim();
+                  if (/max-age=0|expires=thu, 01 jan 1970/i.test(line)) jarCookies.delete(name);
+                  else jarCookies.set(name, value);
+                }
+              }
               delete responseHeaders["set-cookie"];
               if (mask404) responseHeaders["x-upstream-status"] = "404";
               res.writeHead(mask404 ? 200 : status, responseHeaders);
@@ -178,7 +219,7 @@ function nextcloudProxy() {
           // A seed or API that never answers must not hold the relay's connection open until
           // the CDN in front gives up on it (Cloudflare's 522 is exactly that): fifteen seconds,
           // then a 504 of our own.
-          upstream.setTimeout(15000, () => upstream.destroy(new Error("upstream timed out")));
+          upstream.setTimeout(longPoll ? 60000 : 15000, () => upstream.destroy(new Error("upstream timed out")));
           upstream.on("error", (error) => {
             if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
             res.end(`Proxy error: ${error.message}`);

@@ -6,7 +6,8 @@ import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroad
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
-import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker } from "./nextcloud.js";
+import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable } from "./nextcloud.js";
+import * as Calls from "./calls.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
@@ -131,6 +132,13 @@ function defaultIncomingNotifyMode() {
 // always render) | "manual" (never auto-render). Mirrors iOS PhotoAutoDisplayMode
 // (.automatic / .alwaysShow / .alwaysHide); older installs only ever stored auto/manual.
 function getContactPhotos(address) { return contactPrefs[address]?.photos || "auto"; }
+function contactCallsEnabled(address) {
+  return contactPrefs[address]?.calls === true;
+}
+function setContactCallsEnabled(address, enabled) {
+  setContactPref(address, "calls", enabled ? true : undefined);
+  try { refreshChatInfoContactControls(); } catch { /* Chat Info not open */ }
+}
 function setContactPref(address, key, value) {
   if (!address) return;
   const next = { ...(contactPrefs[address] || {}) };
@@ -1814,6 +1822,8 @@ chatInfoAliasSending?.addEventListener("click", async () => {
 });
 
 function refreshChatInfoContactControls() {
+  const callsToggle = document.querySelector("[data-chat-info-calls]");
+  if (callsToggle) callsToggle.checked = contactCallsEnabled(chatInfoContactAddress);
   if (chatInfoNotifyToggle) {
     chatInfoNotifyToggle.value = getContactNotifyOverride(chatInfoContactAddress) || "default";
     // iOS spells out what Default currently resolves to, so the row never just says "Default"
@@ -1906,6 +1916,7 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   const mode = effectiveNotifyMode(contact?.address);
   if (mode === "off") return;
   if (parseReactionEnvelope(message.text)) return; // reactions aren't standalone messages
+  if (Calls.parseCallEnvelope(message.text)) return; // a call rings on its own screen, not as a banner
   if (parsePaymentPoolEnvelope(message.text)) return; // fresh-address pool control envelopes are silent (matches iOS)
   // Don't notify for the conversation you're already looking at in a focused window.
   if (activeConversationId === conversationEntry.id && !document.hidden) return;
@@ -2969,6 +2980,7 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetPortfolioForAccount(); } catch { /* not yet initialized */ }
   try { resetColdStorageForAccount(); } catch { /* not yet initialized */ }
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
+  try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
   try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
   try { loadNotifCenter(); } catch { /* not yet initialized */ }
   const clean = String(address || "").trim();
@@ -3339,6 +3351,8 @@ function sniffInlineFileMime(text) {
 
 function displayTextForMessage(message) {
   if (!message) return "";
+  const callEnv = Calls.parseCallEnvelope(message.text);
+  if (callEnv) return Calls.callHistoryLine(callEnv, message.direction === "outgoing").text;
   // Per-envelope-kind wording ("♟️ Played e2 → e4", "♟️ Lost on time", …) rather than one
   // generic "Chess" for everything — matches iOS's formatNotificationBody.
   const chessPreview = Chess.chessPreviewText(message.text, message.direction === "outgoing");
@@ -3392,6 +3406,8 @@ function webLinkPreviewLabel(text) {
 }
 function chatListPreviewText(message) {
   if (!message) return "";
+  const callEnv = Calls.parseCallEnvelope(message.text);
+  if (callEnv) return Calls.callPreviewText(callEnv, message.direction === "outgoing");
   const linkLabel = webLinkPreviewLabel(message.text);
   if (linkLabel) return linkLabel;
   const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
@@ -8234,7 +8250,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 25;
+const APP_BUILD = 26;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12148,6 +12164,9 @@ function extendMessageWindow(area, key, rerender) {
 }
 
 function renderMessages(conversationEntry) {
+  // The call button is for someone else: the self-chat has nobody to ring.
+  const callButton = document.querySelector("[data-open-call]");
+  if (callButton) callButton.hidden = !conversationEntry || contactForConversation(conversationEntry)?.address === engine.address;
   // The header's name and bio were written just before this; re-measure so the thread's top inset
   // matches whatever height they came out at.
   syncChatHeaderInsets();
@@ -12284,6 +12303,7 @@ function renderMessages(conversationEntry) {
     }
 
     const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
+    const callEnv = Calls.parseCallEnvelope(message.text);
     const isPendingHandshakeRequest = message.messageType === "handshake" && message.direction === "incoming"
       && requestContact?.relationshipState === "incoming-request";
     if (isPendingHandshakeRequest) {
@@ -12297,6 +12317,15 @@ function renderMessages(conversationEntry) {
           <button type="button" class="primary-button" data-accept-handshake>Accept</button>
           <button type="button" class="secondary-button" data-decline-handshake>Decline</button>
         </div>`;
+    } else if (callEnv) {
+      // A call leaves its history line and nothing else - not even a preview of the server the
+      // invite names (iOS f0c0fab).
+      const line = Calls.callHistoryLine(callEnv, message.direction === "outgoing");
+      const card = document.createElement("div");
+      card.className = `message-call-line${line.icon === "phone-down" ? " down" : ""}`;
+      card.innerHTML = `${Calls.callIconSvg(line.icon)}<span></span>`;
+      card.querySelector("span").textContent = line.text;
+      bubble.append(card);
     } else if (chessEnv) {
       // The latest chess message of a game renders as a live board thumbnail with
       // status (so on your turn you see the position); earlier ones stay compact.
@@ -12903,6 +12932,7 @@ const chatInfoSheetTitle = document.querySelector("[data-chat-info-sheet-title]"
 const chatInfoExplorerLink = document.querySelector("[data-chat-info-explorer-link]");
 const CHAT_INFO_SHEET_TITLES = {
   address: "Address",
+  calls: "Calls",
   domains: "KNS Domains",
   aliases: "Aliases",
   notifications: "Notifications",
@@ -16364,6 +16394,14 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
     // (A payment_notice produces its own payment bubble + notification inside
     // handlePaymentPoolEnvelope, so it is handled there, not here.)
     return null;
+  }
+  // Calls ride the chat: an invite rings, a request asks this device to host, an end hangs up.
+  // The message still lands, as the call-history line every client renders.
+  const callEnvelope = Calls.parseCallEnvelope(message.text);
+  if (callEnvelope) {
+    const contact = contactForConversation(conversationEntry);
+    try { Calls.handleIncomingCallEnvelope(callEnvelope, message, contact?.address || message.sender || ""); }
+    catch (error) { appendEngineLog(`Call envelope handling failed: ${error.message}`); }
   }
   return addMessageToConversation(conversationEntry, message);
 }
@@ -20250,6 +20288,51 @@ queueMicrotask(async () => {
     // CardDAV contacts sync: import {address, name} pairs read from the account's Nextcloud
     // address book into the desktop's contact list (Settings → Contacts).
     importNextcloudContacts,
+  });
+
+  Calls.initCalls({
+    engine,
+    accountScopedKey,
+    showToast: showCopyToast,
+    appendEngineLog,
+    chooseDialog,
+    confirmDialog,
+    nextcloudAccount,
+    talkCallsAvailable: () => nextcloudTalkCallsAvailable(),
+    contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
+    displayNameFor: (address) => {
+      const contact = (state.contacts || []).find((entry) => entry.address === address);
+      return contact ? displayNameForAddress(contact) : shortAddress(address);
+    },
+    ownDisplayName: () => String(activeAccountMetadata()?.name || engine.peekKnsAddressInfo?.(engine.address)?.primaryDomain || "KaChat").trim() || "KaChat",
+    avatarHtmlFor: (address) => {
+      const contact = (state.contacts || []).find((entry) => entry.address === address);
+      return contact ? avatarHtmlFor(contact, "message-avatar") : "";
+    },
+    callsEnabledFor: contactCallsEnabled,
+    setCallsEnabled: setContactCallsEnabled,
+    // Call envelopes are ordinary encrypted 1:1 messages in the contact's chat.
+    sendEnvelope: async (address, json) => {
+      const contact = (state.contacts || []).find((entry) => entry.address === address);
+      const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
+      if (!conversationEntry) throw new Error("No chat with this contact.");
+      queueConversationMessage(conversationEntry.id, json);
+    },
+    notify: ({ title, body, route }) => postDesktopNotification({
+      title, body,
+      onClick: () => { if (route?.address) openChatWithAddress({ address: route.address }); },
+    }),
+  });
+  document.querySelector("[data-open-call]")?.addEventListener("click", () => {
+    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+    const contact = contactForConversation(conversationEntry);
+    if (!contact?.address || contact.address === engine.address) return;
+    Calls.requestCallFromHeader(contact.address).catch((error) => showCopyToast(error?.message || "Could not start the call."));
+  });
+  document.querySelector("[data-chat-info-calls]")?.addEventListener("change", (event) => {
+    if (!chatInfoContactAddress) return;
+    setContactCallsEnabled(chatInfoContactAddress, event.target.checked);
+    showCopyToast(event.target.checked ? "Calls and video calls enabled for this contact." : "Calls off for this contact.");
   });
 
   initChildMode({

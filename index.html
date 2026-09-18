@@ -205,6 +205,12 @@
                 <h1 data-conversation-name>Contact</h1>
                 <p class="conversation-bio" data-conversation-bio hidden aria-hidden="true"></p>
               </button>
+              <!-- One call button (iOS 12343f3): voice or video is chosen in a sheet. Always
+                   there; Chat Info's "Allow calls" switch is its only gate, and the first tap
+                   on a contact not yet enabled asks. -->
+              <button class="conversation-call-button" type="button" data-open-call aria-label="Call" title="Call">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
+              </button>
             </div>
             <div class="conversation-utility-controls" hidden aria-hidden="true">
               <button type="button" data-copy-contact-address>Copy Address</button>
@@ -2819,6 +2825,11 @@
             <span class="chat-info-row-title">Notifications</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="calls" data-chat-info-calls-row>
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
+            <span class="chat-info-row-title">Calls</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="photos">
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L16 8h4v11H4z"/><circle cx="12" cy="13" r="3.3"/></svg>
             <span class="chat-info-row-title">Photos</span>
@@ -2884,6 +2895,15 @@
                     <option value="noSound">No Sound</option>
                     <option value="sound">Sound</option>
                   </select>
+                </div>
+              </div>
+            </section>
+
+            <section data-chat-info-panel="calls" hidden>
+              <div class="settings-list-card">
+                <div class="settings-toggle-row">
+                  <span><strong>Allow calls and video calls</strong><small>Off for everyone until you say so. While off, this contact cannot ring you or ask your Nextcloud to host a call, and the call button asks first. Calls go over Nextcloud Talk: one of you needs a Nextcloud with Talk, the other joins as a guest.</small></span>
+                  <label class="switch-control"><input type="checkbox" data-chat-info-calls><span></span></label>
                 </div>
               </div>
             </section>

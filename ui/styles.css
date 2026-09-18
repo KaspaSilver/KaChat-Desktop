@@ -10071,3 +10071,47 @@ html.standalone .ios-install-hint { display: none; }
    behind the delete countdown. */
 .kaposts-cell-edited { color: var(--muted); font-size: 12px; font-weight: 500; }
 .kaposts-cell.deleting { opacity: .45; transition: opacity .2s ease; }
+
+/* =============================================================================================
+   Calls (iOS 5.0): the header's call button, call-history lines in the thread, the call screen.
+   ============================================================================================= */
+.conversation-header .conversation-call-button {
+  position: absolute; right: 10px; top: calc(var(--safe-top, 0px) + (100% - var(--safe-top, 0px)) / 2); transform: translateY(-50%);
+  width: 38px; height: 38px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 14px;
+  background: rgba(98,244,208,.12); color: var(--kaspa-ink); cursor: pointer; pointer-events: auto;
+}
+.conversation-header .conversation-call-button:hover { background: rgba(98,244,208,.22); }
+.conversation-header .conversation-call-button svg { width: 20px; height: 20px; fill: currentColor; }
+.conversation-header .conversation-call-button[hidden] { display: none; }
+
+.message-call-line { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; }
+.message-call-line svg { width: 18px; height: 18px; fill: currentColor; opacity: .9; }
+.message-call-line.down { color: #ff6b6b; }
+
+.call-overlay {
+  position: fixed; inset: 0; z-index: 6000; display: flex; flex-direction: column;
+  background: radial-gradient(circle at 50% 20%, rgba(98,244,208,.14), transparent 45%), #070a0d;
+  color: var(--text);
+  padding: calc(16px + var(--safe-top, 0px)) 16px calc(16px + var(--safe-bottom, 0px));
+}
+.call-overlay[hidden] { display: none; }
+.call-stage { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; border-radius: 22px; overflow: hidden; background: #0b1014; }
+.call-remote { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #0b1014; }
+.call-overlay:not(.video) .call-remote { opacity: 0; }
+.call-local { position: absolute; right: 14px; bottom: 14px; width: min(34%, 200px); aspect-ratio: 3 / 4; object-fit: cover; border-radius: 14px; border: 1px solid rgba(255,255,255,.18); background: #000; transform: scaleX(-1); }
+.call-local[hidden] { display: none; }
+.call-info { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 20px; pointer-events: none; }
+.call-overlay.video.connected .call-info { position: absolute; top: 14px; left: 14px; align-items: flex-start; text-align: left; padding: 10px 14px; border-radius: 14px; background: rgba(0,0,0,.4); }
+.call-overlay.video.connected .call-avatar { display: none; }
+.call-avatar { width: 96px; height: 96px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--surface-2); font-size: 36px; font-weight: 800; }
+.call-avatar img, .call-avatar .chat-avatar, .call-avatar .message-avatar { width: 100%; height: 100%; object-fit: cover; }
+.call-name { font-size: 24px; font-weight: 800; letter-spacing: -.01em; }
+.call-status { color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
+.call-controls { flex: 0 0 auto; display: flex; justify-content: center; gap: 22px; padding: 22px 0 6px; }
+.call-button { display: flex; flex-direction: column; align-items: center; gap: 8px; border: 0; background: transparent; color: var(--text); cursor: pointer; font-size: 12.5px; font-weight: 650; }
+.call-button svg { width: 62px; height: 62px; padding: 18px; box-sizing: border-box; border-radius: 50%; background: rgba(255,255,255,.12); fill: currentColor; stroke: currentColor; stroke-width: 0; transition: background .15s ease, transform .15s ease; }
+.call-button:hover svg { transform: scale(1.04); }
+.call-button.active svg { background: rgba(255,255,255,.32); color: #06110f; }
+.call-button.decline svg { background: #ff3b30; color: #fff; }
+.call-button.accept svg { background: #34c759; color: #fff; }
+body.call-active .sidebar-tabbar { display: none; }

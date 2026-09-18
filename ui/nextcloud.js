@@ -1840,6 +1840,44 @@ export function isNextcloudConnected() {
   return Boolean(nc);
 }
 
+/** The connected account, for the call service: server origin, login and app password. */
+export function nextcloudAccount() {
+  if (!nc?.server || !nc?.username || !nc?.appPassword) return null;
+  return { server: String(nc.server).replace(/\/+$/, ""), username: nc.username, appPassword: nc.appPassword };
+}
+
+/** Whether this Nextcloud can host a KaChat call: Talk installed with calls enabled, read from
+ *  the server's capabilities (spreed.features incl. conversation-v4 and signaling-v3, and
+ *  config.call.enabled) - iOS NextcloudService.talkCallsAvailable. Probed once per connection
+ *  and remembered for the session; a probe that fails answers false and is retried later. */
+let talkProbe = null; // { server, at, value }
+export async function nextcloudTalkCallsAvailable({ force = false } = {}) {
+  const account = nextcloudAccount();
+  if (!account) return false;
+  if (!force && talkProbe && talkProbe.server === account.server && Date.now() - talkProbe.at < (talkProbe.value ? 6 * 3600_000 : 60_000)) return talkProbe.value;
+  let value = false;
+  try {
+    const response = await fetch(`${apiBase(account.server)}/ocs/v2.php/cloud/capabilities?format=json`, {
+      headers: {
+        Authorization: "Basic " + btoa(`${account.username}:${account.appPassword}`),
+        "OCS-APIRequest": "true",
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (response.ok) {
+      const decoded = await response.json();
+      const spreed = decoded?.ocs?.data?.capabilities?.spreed;
+      const features = Array.isArray(spreed?.features) ? spreed.features : [];
+      const callEnabled = spreed?.config?.call?.enabled;
+      value = Boolean(spreed) && features.includes("conversation-v4") && features.includes("signaling-v3")
+        && (callEnabled === undefined || callEnabled === true || callEnabled === 1 || callEnabled === "1" || callEnabled === "true");
+    }
+  } catch { value = false; }
+  talkProbe = { server: account.server, at: Date.now(), value };
+  return value;
+}
+
 export async function syncNextcloudContacts() {
   return syncContactsFromNextcloud();
 }
