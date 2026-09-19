@@ -854,7 +854,12 @@ function renderOverlay() {
   renderStatus();
   overlay.classList.toggle("video", Boolean(call.video));
   overlay.classList.toggle("connected", call.phase === "connected");
-  if (ui.local) ui.local.hidden = !call.video || call.cameraOff || !call.localStream;
+  // Video: your tile stays on the left even with the camera off (dimmed), so the two-square
+  // layout never collapses; voice: no tiles at all.
+  if (ui.local) {
+    ui.local.hidden = !call.video || !call.localStream;
+    ui.local.classList.toggle("camera-off", Boolean(call.cameraOff));
+  }
   let buttons = "";
   if (call.phase === "ringingIn") {
     buttons = `

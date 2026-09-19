@@ -10101,8 +10101,21 @@ html.standalone .ios-install-hint { display: none; }
 .call-local { position: absolute; right: 14px; bottom: 14px; width: min(34%, 200px); aspect-ratio: 3 / 4; object-fit: cover; border-radius: 14px; border: 1px solid rgba(255,255,255,.18); background: #000; transform: scaleX(-1); }
 .call-local[hidden] { display: none; }
 .call-info { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 20px; pointer-events: none; }
-.call-overlay.video.connected .call-info { position: absolute; top: 14px; left: 14px; align-items: flex-start; text-align: left; padding: 10px 14px; border-radius: 14px; background: rgba(0,0,0,.4); }
-.call-overlay.video.connected .call-avatar { display: none; }
+/* A video call is two equal tiles: you on the left, the person you are talking to on the
+   right (stacked on a phone). The name and status float over the top. */
+.call-overlay.video .call-stage { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background: transparent; overflow: visible; }
+.call-overlay.video .call-local, .call-overlay.video .call-remote {
+  position: static; width: 100%; height: 100%; min-height: 0; aspect-ratio: auto; object-fit: cover;
+  border-radius: 18px; border: 1px solid rgba(255,255,255,.12); background: #0b1014; opacity: 1;
+}
+.call-overlay.video .call-local { order: 1; transform: scaleX(-1); }
+.call-overlay.video .call-remote { order: 2; }
+.call-overlay.video .call-local.camera-off { opacity: .25; }
+.call-overlay.video .call-info { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 3; align-items: center; padding: 10px 16px; border-radius: 14px; background: rgba(0,0,0,.45); }
+.call-overlay.video .call-avatar { display: none; }
+@media (max-width: 620px) {
+  .call-overlay.video .call-stage { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+}
 .call-avatar { width: 96px; height: 96px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--surface-2); font-size: 36px; font-weight: 800; }
 .call-avatar img, .call-avatar .chat-avatar, .call-avatar .message-avatar { width: 100%; height: 100%; object-fit: cover; }
 .call-name { font-size: 24px; font-weight: 800; letter-spacing: -.01em; }
