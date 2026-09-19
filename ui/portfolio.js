@@ -316,7 +316,19 @@ function computeTodayChange(points) {
 
 // iOS PortfolioFormat.currency: symbol prefix (built by hand rather than via an ISO-4217 currency
 // formatter, whose behavior for a non-ISO code like BTC isn't worth relying on), 2 decimals.
+// The eye in the header masks every amount on the Portfolio - picker cards, the Value square,
+// transaction rows, the Value Over Time screen and its readouts - as dots; the KAS price and
+// percentages stay. Persisted on this device (iOS 9aa23bb).
+const HIDE_AMOUNTS_KEY = "kachat-portfolio-hide-amounts";
+let amountsHidden = false;
+try { amountsHidden = localStorage.getItem(HIDE_AMOUNTS_KEY) === "1"; } catch { amountsHidden = false; }
+function setAmountsHidden(hidden) {
+  amountsHidden = Boolean(hidden);
+  try { localStorage.setItem(HIDE_AMOUNTS_KEY, amountsHidden ? "1" : "0"); } catch { /* fine */ }
+}
+const MASKED_AMOUNT = "••••";
 function fmtFiat(value) {
+  if (amountsHidden) return MASKED_AMOUNT;
   const sign = value < 0 ? "-" : "";
   const magnitude = Math.abs(Number(value) || 0).toLocaleString(undefined, {
     minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -326,6 +338,7 @@ function fmtFiat(value) {
 
 // iOS PortfolioFormat.compactCurrency: $2.4B rather than every digit of a market cap.
 function fmtCompactFiat(value) {
+  if (amountsHidden) return MASKED_AMOUNT;
   const v = Math.abs(Number(value) || 0);
   const sign = Number(value) < 0 ? "-" : "";
   const units = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]];
@@ -344,6 +357,7 @@ function fmtPrice(value) {
 }
 
 function fmtKas(value) {
+  if (amountsHidden) return `${MASKED_AMOUNT} KAS`;
   return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} KAS`;
 }
 
@@ -441,31 +455,90 @@ function sparklineSvg(points, { height = 130, width = 560, stroke = "var(--kaspa
 /** Hover-to-scrub, matching iOS SparklineChart's drag crosshair: a vertical line + dot track
  *  the pointer, and the associated readout labels update live. Direct DOM updates only — no
  *  re-render per pointer event. */
-function attachScrub(wrap, points, onScrub, onEnd) {
+function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
   if (!wrap || !points || points.length < 2) return;
   const line = wrap.querySelector(".portfolio-scrub-line");
   const dot = wrap.querySelector(".portfolio-scrub-dot");
   const fractions = chartGeometry(points, wrap.clientHeight || 130);
+  // Press and drag along the line to select a span (iOS reads it between two fingers): the
+  // stretch is shaded green or red, both ends marked, and the header reads the dates and the
+  // return across it. The selection stays until the pointer leaves the chart.
+  let span = null;
+  if (onSpan) {
+    span = document.createElement("div");
+    span.className = "portfolio-scrub-span";
+    span.hidden = true;
+    wrap.append(span);
+  }
+  let anchor = null;   // index where the press began
+  let frozen = false;  // the button came up: keep the span until the pointer leaves
 
-  const move = (event) => {
+  const indexAt = (event) => {
     const rect = wrap.getBoundingClientRect();
     const x = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
     const index = Math.round((x / (rect.width || 1)) * (points.length - 1));
-    const clamped = Math.min(Math.max(index, 0), points.length - 1);
+    return { rect, clamped: Math.min(Math.max(index, 0), points.length - 1) };
+  };
+  const showSpan = (a, b, rect) => {
+    if (!span) return;
+    const from = Math.min(a, b), to = Math.max(a, b);
+    const left = (from / (points.length - 1)) * rect.width;
+    const right = (to / (points.length - 1)) * rect.width;
+    const gain = points[to][1] >= points[from][1];
+    span.hidden = false;
+    span.style.left = `${left}px`;
+    span.style.width = `${Math.max(2, right - left)}px`;
+    span.classList.toggle("loss", !gain);
+    if (line) line.hidden = true;
+    if (dot) { dot.hidden = false; dot.style.left = `${right}px`; dot.style.top = `${fractions[to] * rect.height}px`; }
+    onSpan(points[from], points[to]);
+  };
+  const move = (event) => {
+    if (frozen) return;
+    const { rect, clamped } = indexAt(event);
+    if (anchor != null && onSpan && (event.buttons & 1) && clamped !== anchor) { showSpan(anchor, clamped, rect); return; }
     const px = (clamped / (points.length - 1)) * rect.width;
     const py = fractions[clamped] * rect.height;
+    if (span) span.hidden = true;
     if (line) { line.hidden = false; line.style.left = `${px}px`; }
     if (dot) { dot.hidden = false; dot.style.left = `${px}px`; dot.style.top = `${py}px`; }
     onScrub(points[clamped]);
   };
+  const down = (event) => {
+    frozen = false;
+    anchor = indexAt(event).clamped;
+    move(event);
+  };
+  const up = () => {
+    if (span && !span.hidden) frozen = true;
+    anchor = null;
+  };
   const leave = () => {
+    frozen = false;
+    anchor = null;
+    if (span) span.hidden = true;
     if (line) line.hidden = true;
     if (dot) dot.hidden = true;
     onEnd();
   };
   wrap.addEventListener("pointermove", move);
-  wrap.addEventListener("pointerdown", move);
+  wrap.addEventListener("pointerdown", down);
+  wrap.addEventListener("pointerup", up);
   wrap.addEventListener("pointerleave", leave);
+}
+
+/** The header's reading for a selected span: the two dates, and the return across it. */
+function spanReadout(a, b, formatValue) {
+  const from = a[1], to = b[1];
+  const delta = to - from;
+  const percent = from ? (delta / from) * 100 : 0;
+  const dateOf = (ts) => new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  const sign = delta >= 0 ? "+" : "";
+  return {
+    dates: `${dateOf(a[0])} – ${dateOf(b[0])}`,
+    change: `${sign}${percent.toFixed(2)}% (${sign}${formatValue(delta)})`,
+    gain: delta >= 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1195,11 @@ function render() {
         ${selecting ? `
           <button class="cold-inline-link" type="button" data-portfolio-select-all>${selectedTxIds.size === transactions.length && transactions.length > 0 ? "Deselect All" : "Select All"}</button>
           <button class="cold-inline-link portfolio-select-delete" type="button" data-portfolio-delete-selected ${selectedTxIds.size === 0 ? "disabled" : ""}>Delete Selected (${selectedTxIds.size})</button>` : ""}
+        <button class="kaposts-icon-button${amountsHidden ? " active" : ""}" type="button" data-portfolio-eye title="${amountsHidden ? "Show amounts" : "Hide amounts"}" aria-label="${amountsHidden ? "Show amounts" : "Hide amounts"}">
+          ${amountsHidden
+            ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.1A10.9 10.9 0 0 1 12 5c5 0 9 4 10 7a11.8 11.8 0 0 1-2.6 3.9M6.6 6.6C4.4 8 2.9 10 2 12c1 3 5 7 10 7a9.7 9.7 0 0 0 3.4-.6"/></svg>`
+            : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12c1-3 5-7 10-7s9 4 10 7c-1 3-5 7-10 7S3 15 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`}
+        </button>
         <button class="cold-inline-link" type="button" data-portfolio-select-toggle ${!selecting && transactions.length === 0 ? "disabled" : ""}>${selecting ? "Done" : "Select"}</button>
         <button class="kaposts-icon-button" type="button" data-portfolio-refresh title="Refresh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
@@ -1176,6 +1254,14 @@ function wireScrubbing() {
       if (date) date.hidden = true;
       if (value) value.textContent = price ? fmtPrice(price.price) : "—";
       if (change) change.style.visibility = "";
+    }, (a, b) => {
+      const reading = spanReadout(a, b, (delta) => fmtPrice(Math.abs(delta)));
+      const date = rootEl.querySelector("[data-portfolio-price-date]");
+      const value = rootEl.querySelector("[data-portfolio-price-value]");
+      const change = rootEl.querySelector("[data-portfolio-price-24h]");
+      if (date) { date.hidden = false; date.textContent = reading.dates; }
+      if (value) { value.textContent = reading.change; value.classList.toggle("gain", reading.gain); value.classList.toggle("loss", !reading.gain); }
+      if (change) change.style.visibility = "hidden";
     });
     return;
   }
@@ -1194,6 +1280,12 @@ function wireScrubbing() {
       const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
       if (date) date.hidden = true;
       if (value) value.textContent = stats ? formatHashrate(stats.currentHashrate) : "—";
+    }, (a, b) => {
+      const reading = spanReadout(a, b, (delta) => formatHashrate(Math.abs(delta)));
+      const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
+      const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
+      if (date) { date.hidden = false; date.textContent = reading.dates; }
+      if (value) value.textContent = reading.change;
     });
     return;
   }
@@ -1217,6 +1309,15 @@ function wireScrubbing() {
       if (date) date.hidden = true;
       if (readout) readout.textContent = fmtFiat(valuePoints.length ? valuePoints[valuePoints.length - 1][1] : 0);
       if (change) change.style.visibility = "";
+    }, (a, b) => {
+      // The amount is masked with the eye on; the percent still reads.
+      const reading = spanReadout(a, b, (delta) => fmtFiat(Math.abs(delta)));
+      const date = rootEl.querySelector("[data-portfolio-value-date]");
+      const readout = rootEl.querySelector("[data-portfolio-value-readout]");
+      const change = rootEl.querySelector("[data-portfolio-value-change]");
+      if (date) { date.hidden = false; date.textContent = reading.dates; }
+      if (readout) readout.textContent = reading.change;
+      if (change) change.style.visibility = "hidden";
     });
   }
 }
@@ -2090,6 +2191,23 @@ function buildModals() {
  *  TTL — a 3-month curve from an hour ago is still the right shape, and it beats showing another
  *  range's curve). Port of iOS's stale-while-refresh per-range painting. */
 const SEVEN_DAY_RETRY_MS = [1500, 6000, 15000, 40000];
+// The spot price used to be fetched once, with nothing persisted and no retry, and CoinGecko's
+// keyless tier throttles the launch burst often enough that the Portfolio showed a dash until a
+// manual refresh. The last price paints from disk (peekKasPrice); a failed fetch retries here.
+let spotPriceRetryTimer = null;
+function scheduleSpotPriceRetry(currency, attempt) {
+  if (spotPriceRetryTimer || attempt >= SEVEN_DAY_RETRY_MS.length) return;
+  spotPriceRetryTimer = window.setTimeout(async () => {
+    spotPriceRetryTimer = null;
+    if (currencyCode() !== currency || price) return;
+    try {
+      const result = await fetchKasPrice({ force: true, currency });
+      if (currencyCode() !== currency) return;
+      if (result) { price = result; render(); return; }
+    } catch { /* still throttled */ }
+    scheduleSpotPriceRetry(currency, attempt + 1);
+  }, SEVEN_DAY_RETRY_MS[attempt]);
+}
 let sevenDayRetryTimer = null;
 function scheduleSevenDayRetry(currency, attempt) {
   if (sevenDayRetryTimer || attempt >= SEVEN_DAY_RETRY_MS.length) return;
@@ -2158,6 +2276,7 @@ async function refreshData({ force = false } = {}) {
     // the card said "not available yet" until the next launch. Retry it on a growing backoff
     // (iOS fa55d76): 1.5s, 6s, 15s, 40s, one in flight, dropped if the currency moves.
     if (!historyForRange(7).length) scheduleSevenDayRetry(currency, 0);
+    if (!price) scheduleSpotPriceRetry(currency, 0);
   } finally {
     loading = false;
     render();
@@ -2388,6 +2507,11 @@ export function initPortfolio(dependencies) {
 
     if (event.target.closest("[data-portfolio-refresh]")) { refreshData({ force: true }); return; }
 
+    if (event.target.closest("[data-portfolio-eye]")) {
+      setAmountsHidden(!amountsHidden);
+      render();
+      return;
+    }
     if (event.target.closest("[data-portfolio-select-toggle]")) {
       if (selecting) exitSelectMode(); else selecting = true;
       render();

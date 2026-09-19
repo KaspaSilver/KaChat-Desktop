@@ -77,78 +77,7 @@ const NEW_POSTS_CHECK_INTERVAL_MS = 60_000;
 let feedLoading = false;
 let feedError = null;
 let prefs = { following: [], muted: [], blocked: [] };
-// Our own deletions, by txid, per wallet: the indexer keeps serving a deleted post until it
-// honours the delete action, so the one funnel from indexer rows (mapRemotePost) drops these.
-const KAPOSTS_DELETED_KEY = "kachat-kaposts-deleted-v1";
-let deletedRemoteIds = new Set();
-function loadDeleted() {
-  try { deletedRemoteIds = new Set(JSON.parse(localStorage.getItem(deps.accountScopedKey(KAPOSTS_DELETED_KEY)) || "[]") || []); }
-  catch { deletedRemoteIds = new Set(); }
-}
-function rememberDeleted(remoteId) {
-  if (!remoteId) return;
-  deletedRemoteIds.add(remoteId);
-  const list = [...deletedRemoteIds].slice(-500);
-  deletedRemoteIds = new Set(list);
-  try { localStorage.setItem(deps.accountScopedKey(KAPOSTS_DELETED_KEY), JSON.stringify(list)); } catch { /* fine */ }
-}
-let threadStack = [];     // post ids (local ids)
-// A panel opened from INSIDE an open thread (Post Activity, a poster's profile) presents OVER
-// the thread and its Back returns to the thread — the desktop stand-in for the sheets iOS
-// presents from the thread's own hierarchy. False = the thread owns the viewport.
-let panelOverThread = false;
-// Reply-notification landing: the txid of the reply to scroll to once the parent thread's
-// comment list contains it, and the txid currently flashing after that landing.
-let pendingThreadScrollRemoteId = null;
-let threadHighlightRemoteId = null;
-let threadHighlightTimer = 0;
-let replyInput, replyMeter, replySend;
-let composerQuoteTarget = null; // post being quoted, when the composer is a quote composer
-let composerReplyTarget = null; // post being replied to, when the composer is a reply composer
-let composerEditTarget = null;  // one of our own posts being edited (iOS 2d483a7): Save replaces its text
-let countdownTicker = null;
-let savedFeedScroll = 0;
-
-// Endless-scroll state (see the "Endless scrolling" section below)
-let feedPager = null;
-let feedGeneration = 0;   // bumped on every reload/tab switch/account reset — stale-response guard
-let threadGeneration = 0;
-let panelGeneration = 0;
-let lastFeedLoadAt = 0;
-let renderedFeedIds = new Set(); // what the feed DOM currently holds, so appends never duplicate
-const threadPagers = new Map();  // post id -> pager (a nested thread keeps its own cursor)
-
-function kapostsScrollEl() {
-  return document.querySelector(".kaposts-content");
-}
-
-function rememberFeedScroll() {
-  // Only when actually LEAVING the feed (not when moving between thread levels/panels).
-  if (threadStack.length === 0 && !activePanel) {
-    savedFeedScroll = kapostsScrollEl()?.scrollTop || 0;
-  }
-}
-
-function restoreFeedScroll() {
-  requestAnimationFrame(() => {
-    const el = kapostsScrollEl();
-    if (el && threadStack.length === 0 && !activePanel) el.scrollTop = savedFeedScroll;
-  });
-}
-
-// key -> { deadline, timer, undo() } — pending 5s-undo actions
-const pendingActions = new Map();
-
-function nowId() {
-  return typeof crypto?.randomUUID === "function" ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`;
-}
-
-// ---------------------------------------------------------------------------
-// Persistence (per account)
-// ---------------------------------------------------------------------------
-
 function loadPrefs() {
-  loadDeleted();
   try {
     const raw = localStorage.getItem(deps.accountScopedKey(KAPOSTS_PREFS_KEY));
     const parsed = raw ? JSON.parse(raw) : null;
@@ -423,7 +352,6 @@ function retryPager(key) {
 // ---------------------------------------------------------------------------
 
 function mapRemotePost(post) {
-  if (post?.id && deletedRemoteIds.has(post.id)) return null;
   const content = decodePostContent(post);
   const address = kaspaAddressFromPubkey(deps.engine, post.userPublicKey);
   if (content === null || !address) return null;
@@ -1240,7 +1168,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
           </button>
         </div>
-        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(postDisplayText(post))}</div>
+        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? foldedPrefix(postDisplayText(post)) : postDisplayText(post))}</div>
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${post.id}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
         ${quotedHtml}
@@ -2320,7 +2248,6 @@ function scheduleDelete(post) {
   scheduleUndoable(`delete:${post.id}`, async () => {
     try {
       await submitKaPostDelete({ engine: deps.engine, postId: post.remoteId });
-      rememberDeleted(post.remoteId);
       removePostEverywhere(post);
       deps.showToast?.(post.parentRemoteId ? "Comment deleted" : "Post deleted");
     } catch (error) {
@@ -3928,6 +3855,13 @@ function translateAffordanceHtml(post) {
 }
 
 /// The text a post should render with: its translation, unless the reader asked for the original.
+// A folded cell shows eight lines at most, which never need more than ~1 200 characters; laying
+// out a 25 000-character post to clip it was the feed's lag (iOS a3a7524). Unfolding shows it all.
+function foldedPrefix(text) {
+  const value = String(text || "");
+  return value.length > 1200 ? value.slice(0, 1200) : value;
+}
+
 function postDisplayText(post) {
   const key = translationKeyFor(post);
   const state = kapostTranslations.get(key);

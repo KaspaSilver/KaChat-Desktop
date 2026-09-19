@@ -10148,3 +10148,11 @@ body.call-active .sidebar-tabbar { display: none; }
 .kaposts-tip-amount-field { display: inline-flex; align-items: center; gap: 8px; }
 .kaposts-tip-amount-field .field-input { width: 120px; text-align: right; }
 .kaposts-tip-amount-logo { width: 22px; height: 22px; }
+
+/* Portfolio: the eye and a selected span on a chart (iOS 9aa23bb). */
+.kaposts-icon-button.active { color: var(--kaspa-ink); }
+.portfolio-scrub-span { position: absolute; top: 0; bottom: 0; background: rgba(76,217,100,.18); border-left: 1px solid rgba(76,217,100,.7); border-right: 1px solid rgba(76,217,100,.7); pointer-events: none; }
+.portfolio-scrub-span.loss { background: rgba(255,107,107,.18); border-color: rgba(255,107,107,.7); }
+.portfolio-scrub-span[hidden] { display: none; }
+.portfolio-summary-price.gain, .portfolio-detail-price.gain { color: #4cd964; }
+.portfolio-summary-price.loss, .portfolio-detail-price.loss { color: #ff6b6b; }
