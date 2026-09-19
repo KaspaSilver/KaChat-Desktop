@@ -498,7 +498,8 @@ async function upgradeToVideo() {
     call.pc.addTrack(track, call.localStream);
     call.video = true;
     call.cameraOff = false;
-    if (ui?.local) { ui.local.srcObject = call.localStream; ui.local.hidden = false; }
+    if (ui?.local) ui.local.srcObject = call.localStream;
+    if (ui?.localTile) ui.localTile.hidden = false;
     if (call.peerSessionId) {
       sendPeer(call, "kachat_video_upgrade", {});
       await sendOffer(call);
@@ -573,7 +574,8 @@ async function joinAndSignal(call) {
       default:
     }
   };
-  if (ui?.local) { ui.local.srcObject = call.localStream; ui.local.hidden = !call.video; }
+  if (ui?.local) ui.local.srcObject = call.localStream;
+  if (ui?.localTile) ui.localTile.hidden = !call.video;
   renderOverlay();
   pullLoop(call);
 }
@@ -639,7 +641,8 @@ async function handleSignaling(event, call) {
           call.pc.addTrack(track, call.localStream);
           call.video = true;
           call.cameraOff = false;
-          if (ui?.local) { ui.local.srcObject = call.localStream; ui.local.hidden = false; }
+          if (ui?.local) ui.local.srcObject = call.localStream;
+    if (ui?.localTile) ui.localTile.hidden = false;
           call.client?.updateCallFlags(call.token, true);
         }
       } catch { /* answer without a camera */ }
@@ -778,8 +781,14 @@ function ensureOverlay() {
   overlay.hidden = true;
   overlay.innerHTML = `
     <div class="call-stage">
-      <video class="call-remote" autoplay playsinline data-call-remote></video>
-      <video class="call-local" autoplay playsinline muted hidden data-call-local></video>
+      <div class="call-tile call-tile-local" data-call-tile-local hidden>
+        <video class="call-local" autoplay playsinline muted data-call-local></video>
+        <span class="call-tile-name" data-call-local-name>You</span>
+      </div>
+      <div class="call-tile call-tile-remote" data-call-tile-remote>
+        <video class="call-remote" autoplay playsinline data-call-remote></video>
+        <span class="call-tile-name" data-call-remote-name></span>
+      </div>
       <div class="call-info">
         <div class="call-avatar" data-call-avatar></div>
         <strong class="call-name" data-call-name></strong>
@@ -791,6 +800,10 @@ function ensureOverlay() {
   ui = {
     remote: overlay.querySelector("[data-call-remote]"),
     local: overlay.querySelector("[data-call-local]"),
+    localTile: overlay.querySelector("[data-call-tile-local]"),
+    remoteTile: overlay.querySelector("[data-call-tile-remote]"),
+    localName: overlay.querySelector("[data-call-local-name]"),
+    remoteName: overlay.querySelector("[data-call-remote-name]"),
     avatar: overlay.querySelector("[data-call-avatar]"),
     name: overlay.querySelector("[data-call-name]"),
     status: overlay.querySelector("[data-call-status]"),
@@ -814,8 +827,12 @@ function showOverlay(call) {
   document.body.classList.add("call-active");
   if (ui.avatar) ui.avatar.innerHTML = deps.avatarHtmlFor?.(call.address) || "";
   if (ui.name) ui.name.textContent = deps.displayNameFor(call.address);
+  // Each square is labelled: your own name on yours, theirs on theirs.
+  if (ui.remoteName) ui.remoteName.textContent = deps.displayNameFor(call.address);
+  if (ui.localName) ui.localName.textContent = deps.ownDisplayName();
   if (ui.remote) ui.remote.srcObject = null;
-  if (ui.local) { ui.local.srcObject = null; ui.local.hidden = true; }
+  if (ui.local) { ui.local.srcObject = null; }
+  if (ui.localTile) ui.localTile.hidden = true;
   renderOverlay();
   if (!statusTicker) statusTicker = window.setInterval(renderStatus, 1000);
 }
@@ -856,9 +873,9 @@ function renderOverlay() {
   overlay.classList.toggle("connected", call.phase === "connected");
   // Video: your tile stays on the left even with the camera off (dimmed), so the two-square
   // layout never collapses; voice: no tiles at all.
-  if (ui.local) {
-    ui.local.hidden = !call.video || !call.localStream;
-    ui.local.classList.toggle("camera-off", Boolean(call.cameraOff));
+  if (ui.localTile) {
+    ui.localTile.hidden = !call.video || !call.localStream;
+    ui.localTile.classList.toggle("camera-off", Boolean(call.cameraOff));
   }
   let buttons = "";
   if (call.phase === "ringingIn") {
