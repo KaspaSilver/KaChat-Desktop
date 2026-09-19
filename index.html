@@ -98,6 +98,12 @@
               <span class="chats-tab-badge" data-groups-tab-badge hidden>0</span>
             </span>
           </button>
+          <button type="button" class="chats-tab-button" data-chats-list-tab="public">
+            <span class="chats-tab-label-row">
+              <span>Public Chats</span>
+              <span class="chats-tab-badge" data-public-tab-badge hidden>0</span>
+            </span>
+          </button>
         </nav>
 
         <div class="group-actions-row" data-group-actions-row hidden>
@@ -155,6 +161,27 @@
 
           <div class="chat-list" data-chat-list hidden></div>
           <div class="chat-list group-list" data-group-list hidden></div>
+          <!-- Public Chats: the broadcast rooms, the Chats screen's third tab (iOS a566da7). -->
+          <div class="broadcast-list-wrap" data-broadcast-list-wrap hidden>
+            <div class="kaposts-header">
+              <h1 class="kaposts-title">Public Chats</h1>
+            </div>
+            <p class="broadcast-intro">Public, unencrypted rooms on the Kaspa network. Anyone who joins the same channel sees the same messages.</p>
+            <!-- Join/create card, opened by the + in the "Your Channels" header (iOS's join alert). -->
+            <div class="broadcast-join-card" data-broadcast-join-card hidden>
+              <strong>Join or Create a Channel</strong>
+              <p>Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
+              <div class="broadcast-join-field">
+                <span class="broadcast-join-hash" aria-hidden="true">#</span>
+                <input class="kaposts-reply-input" type="text" data-broadcast-join-input placeholder="channel-name" maxlength="36" autocapitalize="none" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="broadcast-join-row">
+                <button class="secondary-button" type="button" data-broadcast-join-cancel>Cancel</button>
+                <button class="primary-button" type="button" data-broadcast-join disabled>Join</button>
+              </div>
+            </div>
+            <div class="broadcast-list" data-broadcast-list></div>
+          </div>
         </div>
 
         <div class="chat-selection-bar" data-chat-selection-bar hidden>
@@ -194,6 +221,50 @@
           <p>Choose a conversation on the left</p>
         </div>
 
+          <div class="broadcast-room" data-broadcast-room hidden>
+            <div class="kaposts-thread-header">
+              <button class="kaposts-icon-button" type="button" data-broadcast-back aria-label="Back">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+              </button>
+
+              <!-- The room's header chip (iOS BroadcastRoomTitleChip): a # circle over a name
+                   capsule, and the way into Room Info. -->
+              <button class="broadcast-room-chip" type="button" data-broadcast-room-info aria-label="Room info">
+                <span class="broadcast-room-chip-icon" aria-hidden="true">#</span>
+                <span class="broadcast-room-chip-name"><strong data-broadcast-room-title>#channel</strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></span>
+              </button>
+            </div>
+            <div class="broadcast-hidden-panel" data-broadcast-info-panel hidden></div>
+            <div class="broadcast-room-body" data-broadcast-room-body></div>
+            <!-- iOS recordingBar: trash, mic, elapsed time, send. -->
+            <div class="voice-recording-panel broadcast-recording-bar" data-broadcast-voice-panel hidden>
+              <button type="button" class="broadcast-recording-trash" data-broadcast-voice-cancel aria-label="Discard recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+              <span class="voice-recording-dot" aria-hidden="true"></span>
+              <span data-broadcast-voice-time>Recording... 0s</span>
+              <button type="button" class="voice-recording-stop" data-broadcast-voice-stop aria-label="Send recording">Send</button>
+            </div>
+            <div class="chat-funding-gate broadcast-funding-gate" data-broadcast-funding-gate hidden>
+              <strong>Fund your chatting address to start chatting</strong>
+              <canvas width="320" height="320" data-broadcast-funding-gate-qr></canvas>
+              <button type="button" class="chat-funding-gate-address" data-broadcast-funding-gate-address title="Copy address"></button>
+              <button type="button" class="secondary-button" data-broadcast-funding-gate-copy>Copy Address</button>
+            </div>
+            <div class="reply-banner" data-broadcast-reply-banner hidden>
+              <div class="reply-banner-body">
+                <strong data-broadcast-reply-title>Replying to</strong>
+                <span data-broadcast-reply-preview></span>
+              </div>
+              <button type="button" data-broadcast-reply-cancel aria-label="Cancel reply">×</button>
+            </div>
+            <div class="broadcast-fee-row"><span class="fee-pill" data-broadcast-fee hidden>fee: -- KAS</span></div>
+            <div class="kaposts-reply-bar">
+              <textarea class="kaposts-reply-input" data-broadcast-input rows="1" placeholder="Message #channel"></textarea>
+              <button class="kaposts-icon-button broadcast-voice-btn" type="button" data-broadcast-voice aria-label="Record voice message" title="Record voice message">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg>
+              </button>
+              <button class="primary-button" type="button" data-broadcast-send>Send</button>
+            </div>
+          </div>
         <article class="conversation-view" data-conversation hidden>
             <div class="conversation-header">
               <button class="back-button" data-back-to-chats type="button" aria-label="Back to chats">‹</button>
@@ -487,73 +558,6 @@
           </div>
         </div>
 
-        <div class="broadcasts-screen" data-app-tab-screen="broadcasts" hidden>
-          <div class="broadcast-list-wrap" data-broadcast-list-wrap>
-            <div class="kaposts-header">
-              <h1 class="kaposts-title">Broadcasts</h1>
-            </div>
-            <p class="broadcast-intro">Public, unencrypted rooms on the Kaspa network. Anyone who joins the same channel sees the same messages.</p>
-            <!-- Join/create card, opened by the + in the "Your Channels" header (iOS's join alert). -->
-            <div class="broadcast-join-card" data-broadcast-join-card hidden>
-              <strong>Join or Create a Channel</strong>
-              <p>Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
-              <div class="broadcast-join-field">
-                <span class="broadcast-join-hash" aria-hidden="true">#</span>
-                <input class="kaposts-reply-input" type="text" data-broadcast-join-input placeholder="channel-name" maxlength="36" autocapitalize="none" autocomplete="off" spellcheck="false" />
-              </div>
-              <div class="broadcast-join-row">
-                <button class="secondary-button" type="button" data-broadcast-join-cancel>Cancel</button>
-                <button class="primary-button" type="button" data-broadcast-join disabled>Join</button>
-              </div>
-            </div>
-            <div class="broadcast-list" data-broadcast-list></div>
-          </div>
-          <div class="broadcast-room" data-broadcast-room hidden>
-            <div class="kaposts-thread-header">
-              <button class="kaposts-icon-button" type="button" data-broadcast-back aria-label="Back">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
-              </button>
-
-              <!-- The room's header chip (iOS BroadcastRoomTitleChip): a # circle over a name
-                   capsule, and the way into Room Info. -->
-              <button class="broadcast-room-chip" type="button" data-broadcast-room-info aria-label="Room info">
-                <span class="broadcast-room-chip-icon" aria-hidden="true">#</span>
-                <span class="broadcast-room-chip-name"><strong data-broadcast-room-title>#channel</strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></span>
-              </button>
-            </div>
-            <div class="broadcast-hidden-panel" data-broadcast-info-panel hidden></div>
-            <div class="broadcast-room-body" data-broadcast-room-body></div>
-            <!-- iOS recordingBar: trash, mic, elapsed time, send. -->
-            <div class="voice-recording-panel broadcast-recording-bar" data-broadcast-voice-panel hidden>
-              <button type="button" class="broadcast-recording-trash" data-broadcast-voice-cancel aria-label="Discard recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
-              <span class="voice-recording-dot" aria-hidden="true"></span>
-              <span data-broadcast-voice-time>Recording... 0s</span>
-              <button type="button" class="voice-recording-stop" data-broadcast-voice-stop aria-label="Send recording">Send</button>
-            </div>
-            <div class="chat-funding-gate broadcast-funding-gate" data-broadcast-funding-gate hidden>
-              <strong>Fund your chatting address to start chatting</strong>
-              <canvas width="320" height="320" data-broadcast-funding-gate-qr></canvas>
-              <button type="button" class="chat-funding-gate-address" data-broadcast-funding-gate-address title="Copy address"></button>
-              <button type="button" class="secondary-button" data-broadcast-funding-gate-copy>Copy Address</button>
-            </div>
-            <div class="reply-banner" data-broadcast-reply-banner hidden>
-              <div class="reply-banner-body">
-                <strong data-broadcast-reply-title>Replying to</strong>
-                <span data-broadcast-reply-preview></span>
-              </div>
-              <button type="button" data-broadcast-reply-cancel aria-label="Cancel reply">×</button>
-            </div>
-            <div class="broadcast-fee-row"><span class="fee-pill" data-broadcast-fee hidden>fee: -- KAS</span></div>
-            <div class="kaposts-reply-bar">
-              <textarea class="kaposts-reply-input" data-broadcast-input rows="1" placeholder="Message #channel"></textarea>
-              <button class="kaposts-icon-button broadcast-voice-btn" type="button" data-broadcast-voice aria-label="Record voice message" title="Record voice message">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg>
-              </button>
-              <button class="primary-button" type="button" data-broadcast-send>Send</button>
-            </div>
-          </div>
-        </div>
-
         <div class="kaposts-screen" data-app-tab-screen="kaposts" hidden>
           <nav class="kaposts-rail" aria-label="KaPosts sections">
             <h1 class="kaposts-title">KaPosts</h1>
@@ -597,6 +601,9 @@
             <button class="kaposts-feed-tab active" type="button" data-kaposts-feed-tab="feed">Feed</button>
             <button class="kaposts-feed-tab" type="button" data-kaposts-feed-tab="popular">Popular</button>
             <!-- Pull-to-refresh has no desktop gesture; this is the same reload on a button. -->
+            <button class="kaposts-feed-refresh" type="button" data-kaposts-settings aria-label="KaPosts Settings" title="KaPosts Settings">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            </button>
             <button class="kaposts-feed-refresh" type="button" data-kaposts-refresh aria-label="Refresh" title="Refresh">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
             </button>
@@ -806,10 +813,6 @@
       <button class="sidebar-tab" type="button" data-app-tab="kaposts">
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897l12.682-12.68Z"/><path d="M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg></span>
         <span>KaPosts</span>
-      </button>
-      <button class="sidebar-tab" type="button" data-app-tab="broadcasts">
-        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M9.348 14.652a3.75 3.75 0 0 1 0-5.304m5.304 0a3.75 3.75 0 0 1 0 5.304m-7.425 2.121a6.75 6.75 0 0 1 0-9.546m9.546 0a6.75 6.75 0 0 1 0 9.546M5.106 18.894c-3.808-3.807-3.808-9.98 0-13.788m13.788 0c3.808 3.807 3.808 9.98 0 13.788M12 12h.008v.008H12V12Z"/></svg></span>
-        <span>Broadcasts</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="swaps">
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span>
@@ -1110,10 +1113,6 @@
               </button>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="notifications-wallet">
                 <span class="settings-row-copy"><strong>Wallet</strong></span>
-                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-              </button>
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="notifications-kaposts">
-                <span class="settings-row-copy"><strong>KaPosts</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
             </div>

@@ -77,6 +77,21 @@ const NEW_POSTS_CHECK_INTERVAL_MS = 60_000;
 let feedLoading = false;
 let feedError = null;
 let prefs = { following: [], muted: [], blocked: [] };
+// Our own deletions, by txid, per wallet: the indexer keeps serving a deleted post until it
+// honours the delete action, so the one funnel from indexer rows (mapRemotePost) drops these.
+const KAPOSTS_DELETED_KEY = "kachat-kaposts-deleted-v1";
+let deletedRemoteIds = new Set();
+function loadDeleted() {
+  try { deletedRemoteIds = new Set(JSON.parse(localStorage.getItem(deps.accountScopedKey(KAPOSTS_DELETED_KEY)) || "[]") || []); }
+  catch { deletedRemoteIds = new Set(); }
+}
+function rememberDeleted(remoteId) {
+  if (!remoteId) return;
+  deletedRemoteIds.add(remoteId);
+  const list = [...deletedRemoteIds].slice(-500);
+  deletedRemoteIds = new Set(list);
+  try { localStorage.setItem(deps.accountScopedKey(KAPOSTS_DELETED_KEY), JSON.stringify(list)); } catch { /* fine */ }
+}
 let threadStack = [];     // post ids (local ids)
 // A panel opened from INSIDE an open thread (Post Activity, a poster's profile) presents OVER
 // the thread and its Back returns to the thread — the desktop stand-in for the sheets iOS
@@ -133,6 +148,7 @@ function nowId() {
 // ---------------------------------------------------------------------------
 
 function loadPrefs() {
+  loadDeleted();
   try {
     const raw = localStorage.getItem(deps.accountScopedKey(KAPOSTS_PREFS_KEY));
     const parsed = raw ? JSON.parse(raw) : null;
@@ -407,6 +423,7 @@ function retryPager(key) {
 // ---------------------------------------------------------------------------
 
 function mapRemotePost(post) {
+  if (post?.id && deletedRemoteIds.has(post.id)) return null;
   const content = decodePostContent(post);
   const address = kaspaAddressFromPubkey(deps.engine, post.userPublicKey);
   if (content === null || !address) return null;
@@ -2303,6 +2320,7 @@ function scheduleDelete(post) {
   scheduleUndoable(`delete:${post.id}`, async () => {
     try {
       await submitKaPostDelete({ engine: deps.engine, postId: post.remoteId });
+      rememberDeleted(post.remoteId);
       removePostEverywhere(post);
       deps.showToast?.(post.parentRemoteId ? "Comment deleted" : "Post deleted");
     } catch (error) {
@@ -4397,6 +4415,7 @@ export function initKaPosts(dependencies) {
       return;
     }
 
+    if (event.target.closest("[data-kaposts-settings]")) { deps.openKaPostsSettings?.(); return; }
     const more = event.target.closest("[data-kaposts-more]");
     if (more) {
       const p = findPost(more.dataset.kapostsMore);

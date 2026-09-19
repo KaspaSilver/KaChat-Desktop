@@ -1015,8 +1015,9 @@ function appendReactionUi(el, m) {
 function renderRoom() {
   const inRoom = Boolean(activeChannel);
   if (roomEl) roomEl.hidden = !inRoom;
-  const listWrap = document.querySelector("[data-broadcast-list-wrap]");
-  if (listWrap) listWrap.hidden = inRoom;
+  // The list is the Chats screen's third tab and stays where it is; the room takes the pane
+  // beside it (the app decides what that means for the layout).
+  deps.onRoomVisibility?.(inRoom);
   if (!inRoom) return;
 
   if (roomTitleEl) roomTitleEl.textContent = `#${activeChannel}`;
@@ -1860,8 +1861,8 @@ export function initBroadcasts(dependencies) {
     }
   });
 
-  const screen = document.querySelector('[data-app-tab-screen="broadcasts"]');
-  screen?.addEventListener("click", async (event) => {
+  // The list lives in the chats sidebar and the room in the detail pane now; one handler on both.
+  const screenClick = async (event) => {
     const react = event.target.closest("[data-broadcast-react]");
     if (react) {
       event.stopPropagation();
@@ -1987,7 +1988,9 @@ export function initBroadcasts(dependencies) {
 
     const hiddenClose = event.target.closest("[data-broadcast-hidden-close]");
     if (hiddenClose) closeRoomInfo();
-  });
+  };
+  document.querySelector("[data-broadcast-list-wrap]")?.addEventListener("click", screenClick);
+  document.querySelector("[data-broadcast-room]")?.addEventListener("click", screenClick);
   infoPanelEl()?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && event.target.matches("[data-broadcast-indexer-input]")) {
       event.preventDefault();

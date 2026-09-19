@@ -972,7 +972,7 @@ function openKaChatInternalLink(link) {
   if (!link) return;
   if (isChildModeEnabled()) { showCopyToast("Not available in Child Mode."); return; }
   if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
-  else if (link.kind === "broadcast") { setActiveAppTab("broadcasts"); try { openBroadcastRoomFromLink(link.channel); } catch {} }
+  else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
 }
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
@@ -2072,7 +2072,7 @@ let activeGroupId = null;
 // since it's also used there to hide the tab bar during that specific
 // drill-down, which placeholder tabs should NOT do.
 function updateDetailActiveClass() {
-  appBody?.classList.toggle("detail-active", Boolean(activeConversationId) || Boolean(activeGroupId) || currentAppTab !== "chats");
+  appBody?.classList.toggle("detail-active", Boolean(activeConversationId) || Boolean(activeGroupId) || currentAppTab !== "chats" || (activeChatsListTab === "public" && publicRoomOpen));
 }
 
 // Toggle the `.active` highlight on the currently-open chat / group row directly, without a
@@ -4482,7 +4482,7 @@ document.querySelector("[data-notif-list]")?.addEventListener("click", (event) =
   closeNotifCenter();
   if (!notif) return;
   if (notif.targetKind === "broadcast") {
-    setActiveAppTab("broadcasts");
+    openPublicChatsTab();
     // Land in the exact channel the message arrived in, not just the tab.
     if (notif.targetId) { try { openBroadcastChannelFromNotification(notif.targetId); } catch {} }
   } else if (notif.targetKind === "group") {
@@ -7527,7 +7527,7 @@ function setActiveAppTab(tab) {
   if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummary(); }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
-  if (screenTab === "broadcasts") refreshBroadcasts();
+  if (isChats && activeChatsListTab === "public") { refreshBroadcasts(); syncPublicChatsPane(); }
   else stopBroadcastPolling();
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
@@ -7565,10 +7565,10 @@ const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 const DOCK_MAX_ITEMS = 5;
 const DOCK_PINNED = ["hub", "profile"];
 /** Tabs the user can place. Excludes the pinned two. */
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "broadcasts", "apps"];
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kaposts", "broadcasts", "swaps", "apps"];
+const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps"]; // Public Chats live under Chats now (iOS a566da7)
+const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kaposts", "swaps", "apps"];
 const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["kaposts", "broadcasts", "swaps", "apps"];
+const HUB_DEFAULT = ["kaposts", "swaps", "apps"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
 const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap" };
 
@@ -7743,7 +7743,7 @@ function tabUnreadCount(tab) {
 function tabBadgeLabel(count) { return count > 99 ? "99+" : String(count); }
 // Dock tabs carry the same badge as the hub tiles (iOS AppTabBadge on both).
 function refreshTabBadges() {
-  for (const tab of ["profile", "kaposts", "broadcasts"]) {
+  for (const tab of ["profile", "kaposts"]) {
     const count = tabUnreadCount(tab);
     const button = document.querySelector(`.sidebar-tab[data-app-tab="${tab}"]`);
     if (button) {
@@ -8250,7 +8250,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 27;
+const APP_BUILD = 28;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11915,6 +11915,13 @@ function updateChatsListTabBadges() {
     chatsTabBadge.textContent = totalUnread > 99 ? "99+" : String(totalUnread);
     chatsTabBadge.hidden = totalUnread <= 0;
   }
+  // Public Chats badge: broadcast activity in the bell that has not been seen.
+  const publicBadge = document.querySelector("[data-public-tab-badge]");
+  if (publicBadge) {
+    const publicUnread = tabUnreadCount("broadcasts");
+    publicBadge.textContent = publicUnread > 99 ? "99+" : String(publicUnread);
+    publicBadge.hidden = publicUnread <= 0;
+  }
   // Group Chats badge reflects unread decoded group messages (see the group module).
   if (groupsTabBadge) {
     const groupUnread = typeof totalGroupUnread === "function" ? totalGroupUnread() : 0;
@@ -11952,6 +11959,20 @@ function renderChats() {
   if (!isWideLayout) setActiveConversationId(null);
   updateChatsListTabBadges();
 
+  const publicTabButton = document.querySelector('[data-chats-list-tab="public"]');
+  if (publicTabButton) publicTabButton.hidden = isChildModeEnabled();
+  const broadcastListWrap = document.querySelector("[data-broadcast-list-wrap]");
+  if (broadcastListWrap) broadcastListWrap.hidden = activeChatsListTab !== "public";
+  if (activeChatsListTab === "public") {
+    if (emptyState) emptyState.hidden = true;
+    if (groupChatsPlaceholder) groupChatsPlaceholder.hidden = true;
+    chatList.hidden = true;
+    chatList.innerHTML = "";
+    const groupListEl = document.querySelector("[data-group-list]");
+    if (groupListEl) groupListEl.hidden = true;
+    setChatToolRowsForGroupsTab(true);
+    return;
+  }
   if (activeChatsListTab === "groups") {
     if (emptyState) emptyState.hidden = true;
     chatList.hidden = true;
@@ -13258,6 +13279,151 @@ let tipFeeEstimateToken = 0;
 
 function tipQ(selector) { return tipModal ? tipModal.querySelector(selector) : null; }
 
+// --- KaPosts Settings (iOS a566da7) ------------------------------------------
+// The gear in KaPosts' icon row: a default tip (tapping Tip sends it at once, no amount screen)
+// and the KaPosts notification switches, which moved here from Settings > Notifications.
+const KAPOSTS_DEFAULT_TIP_KEY = "kachat-kaposts-default-tip-sompi";
+function kaPostsDefaultTipKas() {
+  try {
+    const sompi = Number(localStorage.getItem(KAPOSTS_DEFAULT_TIP_KEY) || 0);
+    return sompi > 0 ? sompi / 1e8 : 0;
+  } catch { return 0; }
+}
+function setKaPostsDefaultTipKas(kas) {
+  const value = Number(kas);
+  try {
+    if (value > 0) localStorage.setItem(KAPOSTS_DEFAULT_TIP_KEY, String(Math.round(value * 1e8)));
+    else localStorage.removeItem(KAPOSTS_DEFAULT_TIP_KEY);
+  } catch { /* fine */ }
+}
+const KAPOSTS_TIP_ON_TEXT = "Tapping Tip on a post sends this amount straight away, no amount screen. It goes out exactly like a payment in that person's chat: from your primary spending address when Payment Privacy is on, otherwise your chatting address, to their fresh address when they shared one.";
+const KAPOSTS_TIP_OFF_TEXT = "Off: tapping Tip opens the amount screen every time.";
+function openKaPostsSettings() {
+  document.querySelector("[data-kaposts-settings-modal]")?.remove();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.setAttribute("data-kaposts-settings-modal", "");
+  const current = kaPostsDefaultTipKas();
+  backdrop.innerHTML = `
+    <section class="contact-modal kaposts-settings-modal" role="dialog" aria-modal="true" aria-label="KaPosts Settings">
+      <div class="modal-header">
+        <div><p class="modal-kicker">KaPosts</p><h2>KaPosts Settings</h2></div>
+        <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
+      </div>
+      <p class="settings-group-label">Tipping</p>
+      <div class="settings-list-card">
+        <div class="settings-page-form">
+          <div class="settings-toggle-row"><span><strong>Send a default tip instantly</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-instant-tip ${current > 0 ? "checked" : ""}><span></span></label></div>
+          <div class="settings-toggle-row" data-kaposts-tip-amount-row ${current > 0 ? "" : "hidden"}>
+            <span><strong>Default tip</strong></span>
+            <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" /><input class="field-input" type="text" inputmode="decimal" placeholder="1" data-kaposts-tip-amount value="${escapeHtml(current > 0 ? trimKas8(current) : "")}" /><span>KAS</span></span>
+          </div>
+        </div>
+      </div>
+      <p class="settings-group-footer" data-kaposts-tip-footer>${current > 0 ? KAPOSTS_TIP_ON_TEXT : KAPOSTS_TIP_OFF_TEXT}</p>
+      <p class="settings-group-label">Notifications</p>
+      <div class="settings-list-card">
+        <button class="settings-list-row" type="button" data-kaposts-open-notifications><span class="settings-row-copy"><strong>Notifications</strong><small>Which KaPosts activity reaches you: likes, dislikes, reposts, comments, follows and mentions.</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+      </div>
+    </section>`;
+  document.body.append(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener("click", (event) => { if (event.target === backdrop || event.target.closest("[data-kaposts-settings-close]")) close(); });
+  const toggle = backdrop.querySelector("[data-kaposts-instant-tip]");
+  const amountRow = backdrop.querySelector("[data-kaposts-tip-amount-row]");
+  const amount = backdrop.querySelector("[data-kaposts-tip-amount]");
+  const footer = backdrop.querySelector("[data-kaposts-tip-footer]");
+  const commit = () => {
+    if (!toggle.checked) { setKaPostsDefaultTipKas(0); return; }
+    const value = Number(String(amount.value || "").replace(",", "."));
+    if (value > 0) setKaPostsDefaultTipKas(value);
+  };
+  toggle.addEventListener("change", () => {
+    amountRow.hidden = !toggle.checked;
+    if (toggle.checked && !String(amount.value || "").trim()) amount.value = "1";
+    footer.textContent = toggle.checked ? KAPOSTS_TIP_ON_TEXT : KAPOSTS_TIP_OFF_TEXT;
+    commit();
+  });
+  amount.addEventListener("input", commit);
+  backdrop.querySelector("[data-kaposts-open-notifications]")?.addEventListener("click", () => {
+    close();
+    openAccountOverlay();
+    window.setTimeout(() => { try { showSettingsSubscreen("notifications-kaposts"); } catch {} }, 0);
+  });
+}
+
+// The default tip, sent at once: same contact creation, funding source and destination rules
+// as a payment in that person's chat (and as the tip sheet's Send), with a toast and no screen.
+async function sendInstantTip(address, name, amountKasNumber) {
+  const clean = String(address || "").trim();
+  if (!clean || !isValidKaspaAddressString(clean) || clean === engine.address) throw new Error("No one to tip.");
+  const amountKas = trimKas8(Number(amountKasNumber));
+  if (!(Number(amountKas) > 0)) throw new Error("No default tip set.");
+  await ensureRuntimes({ quiet: true });
+  const displayName = String(name || "").trim();
+  let contact = state.contacts.find((entry) => entry.address === clean) || null;
+  let conversationEntry = contact ? (state.conversations.find((entry) => entry.contactId === contact.id) || null) : null;
+  if (!contact) {
+    const createdAt = Date.now();
+    contact = {
+      id: nowId(), name: displayName, nameIsCustom: Boolean(displayName), address: clean,
+      avatar: initialsFor(displayName || clean), createdAt, updatedAt: createdAt,
+      relationshipState: "legacy-manual", handshakeTxid: "",
+    };
+    clearDeletedContactAddress(clean);
+    state.contacts.push(contact);
+  }
+  if (!conversationEntry) {
+    conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
+    state.conversations.push(conversationEntry);
+    refreshSubscriptionAddresses({ restart: true });
+  }
+  persistState();
+  renderChats();
+  const privacyOn = chatsPrivacyEnabled();
+  const fundingIndex = getActiveSpendingIndex();
+  const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
+  const destinationAddress = await consumePoolPaymentDestination(contact);
+  const message = createMessage({
+    conversationId: conversationEntry.id, contactId: contact.id, direction: "outgoing",
+    text: `Sent ${amountKas} KAS`, sender: engine.address || null, receiver: destinationAddress,
+    status: MESSAGE_STATUSES.PENDING, transport: "kaspa-payment", createdAt: Date.now(),
+  });
+  applyMessagePatch(message, { messageType: "payment", paymentAmountKas: amountKas });
+  appendIncomingOrReactionMessage(conversationEntry, message);
+  persistState();
+  if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+  const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
+  showCopyToast(`Sending ${amountKas} KAS tip…`);
+  try {
+    const fresh = fundingAddress ? freshChangeForSpendingIndex(fundingIndex) : null;
+    const result = fundingAddress
+      ? await engine.sendFromSpending({ mnemonic: activeAccountMnemonic(), index: fundingIndex, passphrase: activeAccountPassphrase(), destinationAddress, amountKas, feeKas: "0", changeAddress: fresh?.address || null })
+      : await engine.send(destinationAddress, amountKas, "0");
+    if (fresh) rotatePrimarySpendingTo(fresh);
+    const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
+    const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
+    if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
+    const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
+    applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: "mainnet", note: "Kaspa node accepted and broadcast the payment transaction." });
+    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Math.round(Number(amountKas) * 1e8), destinationAddress);
+    await refreshBalanceOnly({ quiet: true });
+    conversationEntry.updatedAt = Date.now();
+    persistState();
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+    const finalTxid = verifiedTxid || txid;
+    showCopyToast(`Tip sent · ${finalTxid.slice(0, 10)}…`);
+    appendEngineLog(`Instant tip sent: ${explorerTxUrl(finalTxid)}`);
+    return finalTxid;
+  } catch (error) {
+    applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
+    conversationEntry.updatedAt = Date.now();
+    persistState();
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+    throw error;
+  }
+}
+
 function tipSetError(message) {
   const el = tipQ("[data-tip-error]");
   if (!el) return;
@@ -14138,20 +14304,44 @@ chatSelectAll?.addEventListener("click", () => {
   updateChatSelectionBar();
 });
 
+// Chats, Group Chats, Public Chats (the broadcast rooms, iOS a566da7): one list pane, three tabs.
+function selectChatsListTab(tab) {
+  if (tab === "public" && isChildModeEnabled()) tab = "chats";
+  if (tab === activeChatsListTab) return;
+  const leavingPublic = activeChatsListTab === "public";
+  activeChatsListTab = tab;
+  chatsListTabButtons.forEach((entry) => entry.classList.toggle("active", entry.dataset.chatsListTab === tab));
+  // Switching tabs is like moving to a new screen: clear whatever chat or group was
+  // open so the new tab starts fresh with only its own items viewable.
+  setActiveConversationId(null);
+  closeGroupChat();
+  if (leavingPublic) { try { stopBroadcastPolling(); } catch {} }
+  if (chatSelectionModeActive) setChatSelectionMode(false);
+  else renderChats();
+  if (tab === "public") { try { refreshBroadcasts(); } catch {} }
+  syncPublicChatsPane();
+}
 chatsListTabButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    const tab = button.dataset.chatsListTab;
-    if (tab === activeChatsListTab) return;
-    activeChatsListTab = tab;
-    chatsListTabButtons.forEach((entry) => entry.classList.toggle("active", entry === button));
-    // Switching tabs is like moving to a new screen: clear whatever chat or group was
-    // open so the new tab starts fresh with only its own items viewable.
-    setActiveConversationId(null);
-    closeGroupChat();
-    if (chatSelectionModeActive) setChatSelectionMode(false);
-    else renderChats();
-  });
+  button.addEventListener("click", () => selectChatsListTab(button.dataset.chatsListTab));
 });
+// A room open in the Public Chats tab owns the detail pane the way a conversation does.
+let publicRoomOpen = false;
+function syncPublicChatsPane() {
+  const onPublic = currentAppTab === "chats" && activeChatsListTab === "public";
+  const roomEl = document.querySelector("[data-broadcast-room]");
+  if (roomEl) roomEl.hidden = !(onPublic && publicRoomOpen);
+  if (!onPublic) return;
+  if (conversation) conversation.hidden = true;
+  if (groupChatScreen) groupChatScreen.hidden = true;
+  if (detailEmptyState) detailEmptyState.hidden = publicRoomOpen;
+  appBody?.classList.toggle("conversation-open", publicRoomOpen);
+  document.body.classList.toggle("conversation-open", publicRoomOpen);
+  updateDetailActiveClass();
+}
+function openPublicChatsTab() {
+  setActiveAppTab("chats");
+  selectChatsListTab("public");
+}
 
 document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () => {
   if (selectionIsGroups()) {
@@ -20053,7 +20243,14 @@ queueMicrotask(async () => {
     kaPostsSuppressed: () => isChildModeEnabled(),
     // "Tip" button on a post: quick Send-Kaspa-style modal, direct send through the chat
     // payment rules (matches iOS's KaPostTipSheet).
-    tipUser: (address, name) => openTipModal({ address, name }),
+    // A default tip, when set, goes out at once through the same path as the tip sheet's Send;
+    // a failure falls back to the amount screen.
+    tipUser: (address, name) => {
+      const kas = kaPostsDefaultTipKas();
+      if (kas > 0) sendInstantTip(address, name, kas).catch(() => openTipModal({ address, name }));
+      else openTipModal({ address, name });
+    },
+    openKaPostsSettings,
     startChat: (address, name) => openChatWithAddress({ address, name }),
     // Routes to the Profile tab's KNS editor rather than a second copy of it.
     editKnsProfile: () => document.querySelector("[data-open-kns-editor]")?.click(),
@@ -20098,6 +20295,8 @@ queueMicrotask(async () => {
     engine,
     escapeHtml,
     voiceFileName,
+    // The room owns the detail pane while open (Public Chats is a Chats list tab).
+    onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
     isNextcloudShareLink,
     createDeliveryStatusIcon,
     shortAddress,

@@ -10115,3 +10115,15 @@ html.standalone .ios-install-hint { display: none; }
 .call-button.decline svg { background: #ff3b30; color: #fff; }
 .call-button.accept svg { background: #34c759; color: #fff; }
 body.call-active .sidebar-tabbar { display: none; }
+
+/* Public Chats: the broadcast rooms as the Chats screen's third tab (iOS a566da7). The list sits
+   in the chats pane like the other two lists; the room takes the detail pane. */
+.app-sidebar .broadcast-list-wrap { padding: 8px 12px var(--dock-inset, 124px); gap: 12px; }
+.app-sidebar .broadcast-list-wrap .kaposts-header { display: none; }
+.app-sidebar .broadcast-list-wrap[hidden] { display: none; }
+.app-detail > .broadcast-room { height: 100%; padding: calc(10px + var(--safe-top, 0px)) 16px calc(12px + var(--safe-bottom, 0px)); }
+.app-detail > .broadcast-room[hidden] { display: none; }
+/* KaPosts Settings: the default tip field. */
+.kaposts-tip-amount-field { display: inline-flex; align-items: center; gap: 8px; }
+.kaposts-tip-amount-field .field-input { width: 120px; text-align: right; }
+.kaposts-tip-amount-logo { width: 22px; height: 22px; }
