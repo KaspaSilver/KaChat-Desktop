@@ -10192,3 +10192,8 @@ body.call-active .sidebar-tabbar { display: none; }
 .call-video-ask strong { font-size: 15px; }
 .call-video-ask-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 .call-notice { padding: 8px 14px; border-radius: 999px; background: rgba(0,0,0,.55); color: #fff; font-size: 13px; }
+
+/* Public Chats settings: the default rooms, each with a switch. */
+.broadcast-settings-sheet { max-height: min(86vh, 720px); display: flex; flex-direction: column; }
+.broadcast-settings-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.broadcast-settings-body .screen-kicker { margin: 10px 0 0; }

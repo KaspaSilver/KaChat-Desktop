@@ -3410,6 +3410,9 @@ function openMorePopover(anchor, post) {
     options.push({ id: "delete", title: post.parentRemoteId ? "Delete Comment" : "Delete Post", subtitle: "Removes it from every feed. The chain keeps the bytes.", destructive: true });
   }
   if (!isMine) {
+    // Reporting (iOS dd58e26): the post goes to support by email. Posts are on a public chain and
+    // cannot be taken down, so Mute and Block under it are the remedies that act at once.
+    options.push({ id: "report", title: "Report", subtitle: "Tell KaChat about abusive or objectionable content. Opens an email with this post attached.", destructive: true });
     options.push({ id: "mute", title: `Mute ${name}`, subtitle: "Their posts leave your feeds; they are not told." });
     options.push({ id: "block", title: `Block ${name}`, subtitle: "Their posts and replies disappear everywhere on this device.", destructive: true });
   }
@@ -3423,6 +3426,22 @@ function openMorePopover(anchor, post) {
   });
 }
 
+function reportPost(post) {
+  const body = [
+    "I want to report this post.",
+    "",
+    `Post: ${post.remoteId || "not yet on chain"}`,
+    `Author: ${post.posterAddress}`,
+    `Text: ${String(post.text || "").slice(0, 500)}`,
+    "",
+    "What is wrong with it:",
+    "",
+  ].join("\n");
+  const link = document.createElement("a");
+  link.href = `mailto:kaspasilver@gmail.com?subject=${encodeURIComponent("KaPosts report")}&body=${encodeURIComponent(body)}`;
+  link.click();
+}
+
 function handlePopoverAction(action, post) {
   closePopover();
   if (!post) return;
@@ -3434,6 +3453,7 @@ function handlePopoverAction(action, post) {
     navigator.clipboard?.writeText(postShareLink(post.remoteId));
     deps.showToast?.("Link copied");
   } else if (action === "activity") openEngagementPanel(post);
+  else if (action === "report") reportPost(post);
   else if (action === "edit") openComposer(null, { editTarget: post });
   else if (action === "delete") scheduleDelete(post);
   else if (action === "bookmark") { mutatePost(post.id, (p) => { p.bookmarkedByMe = !p.bookmarkedByMe; }); renderAll(); }

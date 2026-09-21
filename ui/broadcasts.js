@@ -135,7 +135,63 @@ export function broadcastUnreadTotal() {
   return total;
 }
 function listedChannels() {
-  return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])];
+  return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])].filter(curatedShown);
+}
+
+// Default (curated) rooms switched off in Public Chats settings (iOS d5c7613): gone from the
+// list and from Other Languages, never notifying, not counted. Per wallet.
+const HIDDEN_CURATED_KEY = "kachat-broadcast-hidden-curated-v1";
+let hiddenCurated = new Set();
+function loadHiddenCurated() {
+  try { hiddenCurated = new Set(JSON.parse(localStorage.getItem(deps.accountScopedKey(HIDDEN_CURATED_KEY)) || "[]") || []); }
+  catch { hiddenCurated = new Set(); }
+}
+function curatedShown(name) { return !hiddenCurated.has(name); }
+/** Off: the room leaves the list and its bell goes off. On: it comes back - #kaspa and
+ *  #kachat-bugs with their bell on again, as they start; the language rooms as they were. */
+function setCuratedChannel(name, shown) {
+  if (!isIndexedBroadcastChannel(name)) return;
+  if (shown) hiddenCurated.delete(name); else hiddenCurated.add(name);
+  try { localStorage.setItem(deps.accountScopedKey(HIDDEN_CURATED_KEY), JSON.stringify([...hiddenCurated])); } catch { /* fine */ }
+  if (!shown) {
+    delete notifyByChannel[name];
+    if (activeChannel === name) closeRoom();
+  } else if (FEATURED_BROADCAST_CHANNELS.includes(name)) notifyByChannel[name] = true;
+  saveNotify();
+  syncScanWanted();
+  renderChannelList();
+}
+
+/** Public Chats settings, behind the gear at the top right of the tab. */
+function openPublicChatsSettings() {
+  const row = (name) => {
+    const language = broadcastLanguageDisplayName(name);
+    return `<div class="settings-toggle-row"><span><strong>#${deps.escapeHtml(name)}</strong>${language ? `<small>${deps.escapeHtml(language)}</small>` : ""}</span><label class="switch-control"><input type="checkbox" data-curated-room="${deps.escapeHtml(name)}" ${curatedShown(name) ? "checked" : ""}><span></span></label></div>`;
+  };
+  const host = document.createElement("div");
+  host.className = "modal-backdrop broadcast-settings-backdrop";
+  host.innerHTML = `
+    <section class="contact-modal broadcast-settings-sheet" role="dialog" aria-modal="true" aria-label="Public Chats Settings">
+      <div class="modal-header"><div><h2>Public Chats</h2></div><button class="modal-close" type="button" data-public-settings-close aria-label="Done">×</button></div>
+      <div class="broadcast-settings-body">
+        <p class="screen-kicker">Popular</p>
+        ${FEATURED_BROADCAST_CHANNELS.map(row).join("")}
+        <p class="field-hint">A room that is switched off no longer appears in Public Chats and never sends a notification. Switch it back on at any time.</p>
+        <p class="screen-kicker">Other Languages</p>
+        ${LANGUAGE_BROADCAST_CHANNELS.map(row).join("")}
+      </div>
+      <div class="modal-actions"><button class="primary-button" type="button" data-public-settings-close>Done</button></div>
+    </section>`;
+  document.body.appendChild(host);
+  const close = () => host.remove();
+  host.addEventListener("click", (event) => {
+    if (event.target === host || event.target.closest("[data-public-settings-close]")) close();
+  });
+  host.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-curated-room]");
+    if (input) setCuratedChannel(input.dataset.curatedRoom, input.checked);
+  });
+  host.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
 }
 
 function loadState() {
@@ -155,9 +211,10 @@ function loadState() {
   } catch { notifyByChannel = {}; }
   // #kaspa and #kachat-bugs notify by default: applied once per wallet, so a bell switched off
   // later stays off.
+  loadHiddenCurated();
   try {
     if (deps.engine.address && localStorage.getItem(deps.accountScopedKey(DEFAULT_NOTIFY_APPLIED_KEY)) !== "1") {
-      for (const name of FEATURED_BROADCAST_CHANNELS) notifyByChannel[name] = true;
+      for (const name of FEATURED_BROADCAST_CHANNELS) if (curatedShown(name)) notifyByChannel[name] = true;
       localStorage.setItem(deps.accountScopedKey(NOTIFY_KEY), JSON.stringify(notifyByChannel));
       localStorage.setItem(deps.accountScopedKey(DEFAULT_NOTIFY_APPLIED_KEY), "1");
     }
@@ -517,6 +574,8 @@ function mergeMessages(channel, rows) {
   if (reactionsChanged) saveReactions();
   // The global notification center gates these by arrival time (only live messages ping, not the
   // backfilled history), so it's safe to hand it every fresh incoming row.
+  // A default room switched off in settings stays silent everywhere, the bell included.
+  if (!curatedShown(channel)) freshIncoming.length = 0;
   if (freshIncoming.length) deps.onIncomingBroadcast?.(freshIncoming);
   // The per-channel bell (iOS parity): OS pings for LIVE messages in notify-enabled channels
   // you're not currently reading. Capped so one poll can't fire a burst.
@@ -729,11 +788,11 @@ function renderChannelList() {
   if (!listEl) return;
   const latest = (name) => Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0);
   const others = joinedChannels
-    .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name))
+    .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name) && curatedShown(name))
     .sort((a, b) => latest(b) - latest(a));
-  const unopenedLanguages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => !joinedChannels.includes(name));
+  const unopenedLanguages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => !joinedChannels.includes(name) && curatedShown(name));
   listEl.innerHTML = `
-    ${FEATURED_BROADCAST_CHANNELS.map((name) => roomRowHtml(name)).join("")}
+    ${FEATURED_BROADCAST_CHANNELS.filter(curatedShown).map((name) => roomRowHtml(name)).join("")}
     ${others.map((name) => roomRowHtml(name, isIndexedBroadcastChannel(name)
       ? { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` }
       : {})).join("")}
@@ -1947,6 +2006,7 @@ export function initBroadcasts(dependencies) {
   }
 
   document.querySelector("[data-broadcast-back]")?.addEventListener("click", closeRoom);
+  document.querySelector("[data-public-chats-settings]")?.addEventListener("click", openPublicChatsSettings);
   document.querySelector("[data-broadcast-own-room-about]")?.addEventListener("click", () => {
     alertDialog({
       title: "About this room",
