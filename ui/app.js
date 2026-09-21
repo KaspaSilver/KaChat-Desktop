@@ -2,7 +2,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
@@ -8250,7 +8250,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 34;
+const APP_BUILD = 35;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14330,6 +14330,12 @@ function syncPublicChatsPane() {
   const onPublic = currentAppTab === "chats" && activeChatsListTab === "public";
   const roomEl = document.querySelector("[data-broadcast-room]");
   if (roomEl) roomEl.hidden = !(onPublic && publicRoomOpen);
+  // The floating button says what it does on this tab.
+  if (newChatFab) {
+    const label = activeChatsListTab === "public" ? "Join or create a public room" : activeChatsListTab === "groups" ? "Create group" : "Create chat";
+    newChatFab.title = label;
+    newChatFab.setAttribute("aria-label", label);
+  }
   if (!onPublic) return;
   if (conversation) conversation.hidden = true;
   if (groupChatScreen) groupChatScreen.hidden = true;
@@ -22705,6 +22711,7 @@ groupMembersList?.addEventListener("click", (event) => {
 document.querySelectorAll("[data-new-chat-fab]").forEach((button) => {
   button.addEventListener("click", () => {
     if (activeChatsListTab === "groups") openGroupCreate();
+    else if (activeChatsListTab === "public") openBroadcastJoin();
     else showContactModal();
   });
 });

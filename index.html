@@ -168,7 +168,7 @@
             </div>
             <p class="broadcast-intro">Public, unencrypted rooms on the Kaspa network. Anyone who joins the same channel sees the same messages.</p>
             <div class="broadcast-list" data-broadcast-list></div>
-            <!-- Join/create card, opened by the "Join or create a room" row at the end of the list (iOS's join alert). -->
+            <!-- Join/create card, opened by the floating button on the Public Chats tab (iOS's join alert). -->
             <div class="broadcast-join-card" data-broadcast-join-card hidden>
               <strong>Join or Create a Channel</strong>
               <p>Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
@@ -232,6 +232,10 @@
               <button class="broadcast-room-chip" type="button" data-broadcast-room-info aria-label="Room info">
                 <span class="broadcast-room-chip-icon" aria-hidden="true">#</span>
                 <span class="broadcast-room-chip-name"><strong data-broadcast-room-title>#channel</strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></span>
+              </button>
+              <!-- Rooms you made only: what "public" means without an indexer (iOS ac34790). -->
+              <button class="kaposts-icon-button broadcast-own-room-about" type="button" data-broadcast-own-room-about aria-label="About this room" title="About this room" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.2"/></svg>
               </button>
             </div>
             <div class="broadcast-hidden-panel" data-broadcast-info-panel hidden></div>

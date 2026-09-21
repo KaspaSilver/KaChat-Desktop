@@ -118,6 +118,15 @@ function markChannelRead(channel) {
   saveRead();
   if (before > 0) deps.onUnreadChanged?.();
 }
+/** The floating button on the Public Chats tab: reveal the join/create card. */
+export function openBroadcastJoin() {
+  const card = document.querySelector("[data-broadcast-join-card]");
+  if (!card) return;
+  card.hidden = false;
+  card.scrollIntoView({ block: "nearest" });
+  joinInput?.focus();
+}
+
 /** Total unread across the rooms in the list - the Public Chats tab's badge. */
 export function broadcastUnreadTotal() {
   if (!deps) return 0;
@@ -284,8 +293,11 @@ function roomShareText(channel) {
 // ---------------------------------------------------------------------------
 
 /** True for a room the user asked to keep listening to with its screen closed. */
+// The bell is the one control (iOS ac34790): a room with notifications on is listened to while
+// the app is open, which is what lets it notify and count unread. The separate "listen" switch
+// is gone; a value stored by an older build is no longer read.
 function alwaysListening(channel) {
-  return Boolean(listenByChannel[channel]) && !isIndexedBroadcastChannel(channel);
+  return Boolean(notifyByChannel[channel]) && !isIndexedBroadcastChannel(channel);
 }
 
 /**
@@ -301,7 +313,7 @@ function alwaysListening(channel) {
 function scanWantedChannels() {
   const wanted = new Set();
   if (tabVisible && activeChannel) wanted.add(activeChannel);
-  for (const channel of Object.keys(listenByChannel)) {
+  for (const channel of Object.keys(notifyByChannel)) {
     if (alwaysListening(channel) && joinedChannels.includes(channel)) wanted.add(channel);
   }
   if (hasBroadcastIndexer()) {
@@ -654,20 +666,6 @@ function bellButtonHtml(name) {
   return `<button class="broadcast-card-icon${on ? " active" : ""}" type="button" data-broadcast-notify="${deps.escapeHtml(name)}" title="${on ? "Notifications on" : "Notifications off"}" aria-label="Toggle notifications">${on ? BELL_ON_SVG : BELL_OFF_SVG}</button>`;
 }
 
-// Always-listen (own channels only): a broadcast antenna, filled with accent when on.
-// Curated rooms get no such control - they are indexer-backed, so there is nothing to keep
-// alive (same split iOS uses to hide the toggle for its indexed channels).
-const LISTEN_ON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="11" r="2.4" fill="currentColor" stroke="none"/><path d="M8.5 7.5a5 5 0 0 0 0 7"/><path d="M15.5 7.5a5 5 0 0 1 0 7"/><path d="M5.8 4.8a9 9 0 0 0 0 12.4"/><path d="M18.2 4.8a9 9 0 0 1 0 12.4"/><path d="M12 13.4V21"/></svg>`;
-const LISTEN_OFF_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="11" r="2.4"/><path d="M8.5 7.5a5 5 0 0 0 0 7"/><path d="M15.5 7.5a5 5 0 0 1 0 7"/><path d="M12 13.4V21"/></svg>`;
-
-function listenButtonHtml(name) {
-  const on = alwaysListening(name);
-  const title = on
-    ? "Always listening. New messages arrive even with this room closed."
-    : "Listen in the background. Off means this room only receives while it is open.";
-  return `<button class="broadcast-card-icon${on ? " active" : ""}" type="button" data-broadcast-listen="${deps.escapeHtml(name)}" title="${title}" aria-label="Toggle background listening">${on ? LISTEN_ON_SVG : LISTEN_OFF_SVG}</button>`;
-}
-
 const GLOBE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z"/></svg>`;
 const CHEVRON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
 
@@ -676,7 +674,8 @@ const CHEVRON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6
 // The rooms tab is a plain list of chat-style rows (iOS 83286b3): a # avatar, the room name,
 // the newest message with its sender and time, a bell-off mark, and an unread badge - #kaspa
 // and #kachat-bugs pinned on top, every other joined room below by latest activity. Language
-// rooms not opened yet sit behind an "Other Languages" row; "Join or create a room" is last.
+// rooms not opened yet sit behind an "Other Languages" row. Joining or creating a room is the
+// floating button's job on this tab (iOS 6639a0b).
 function roomRowTime(ts) {
   if (!ts) return "";
   const date = new Date(ts);
@@ -748,13 +747,6 @@ function renderChannelList() {
         </span>
       </button>
       ${languagesExpanded ? unopenedLanguages.map((name) => roomRowHtml(name, { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` })).join("") : ""}` : ""}
-    <button class="broadcast-room-row broadcast-room-row-join" type="button" data-broadcast-join-toggle>
-      <span class="broadcast-room-row-avatar plus" aria-hidden="true">+</span>
-      <span class="broadcast-room-row-main">
-        <span class="broadcast-room-row-top"><strong>Join or create a room</strong></span>
-        <span class="broadcast-room-row-bottom"><span class="broadcast-room-row-preview">Anyone who joins the same name sees the same messages. Live only, while open or listening.</span></span>
-      </span>
-    </button>
   `;
   deps.onUnreadChanged?.();
 }
@@ -1104,6 +1096,9 @@ function renderRoom() {
   if (!inRoom) return;
 
   if (roomTitleEl) roomTitleEl.textContent = `#${activeChannel}`;
+  // A room you made yourself says what "public" does and does not mean; curated rooms are indexed.
+  const aboutButton = document.querySelector("[data-broadcast-own-room-about]");
+  if (aboutButton) aboutButton.hidden = isIndexedBroadcastChannel(activeChannel);
   if (composerInput) composerInput.placeholder = `Message #${activeChannel}`;
   // No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
   // stated once, beside the Popular header in the channel list.
@@ -1664,7 +1659,7 @@ function renderRoomInfoPanel() {
       ${row("People who posted", String(people))}
       ${times.length ? row("Latest", fmt(Math.max(...times))) : ""}
       ${times.length ? row("Oldest held", fmt(Math.min(...times))) : ""}
-      ${!curated ? row("Kept for", retentionDescription(retentionMillisFor(channel))) : ""}
+      ${curated ? row("Kept for", retentionDescription(retentionMillisFor(channel))) : ""}
     </section>
     <section class="broadcast-info-section">
       <button type="button" class="broadcast-info-action" data-broadcast-share-room>
@@ -1879,8 +1874,7 @@ export function initBroadcasts(dependencies) {
     }
   });
   // Right-click / long-press on a room row: the same half sheet groups have (iOS 83286b3) -
-  // Mark as Read / Unread, notifications, Copy Room Link, plus listening, retention and Delete
-  // for rooms you added. Curated rooms cannot be deleted.
+  // Mark as Read / Unread, notifications, Copy Room Link, plus Delete for rooms you added. Curated rooms cannot be deleted.
   onContextGesture(listEl, async (event) => {
     const card = event.target.closest("[data-broadcast-open]");
     if (!card) return;
@@ -1895,14 +1889,10 @@ export function initBroadcasts(dependencies) {
         : { id: "unread", title: "Mark as Unread", subtitle: "Keeps a badge on this room until you open it." },
       notifying
         ? { id: "notify", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you." }
-        : { id: "notify", title: "Turn Notifications On", subtitle: indexed ? "Notifies you of new messages in this room." : "Notifies you while the app is open and listening." },
+        : { id: "notify", title: "Turn Notifications On", subtitle: indexed ? "Notifies you of new messages in this room." : "Listens and notifies while the app is open." },
       { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room." },
     ];
     if (!indexed && joinedChannels.includes(name)) {
-      options.push(alwaysListening(name)
-        ? { id: "listen", title: "Stop Listening", subtitle: "Only receives while you are looking at it." }
-        : { id: "listen", title: "Keep Listening", subtitle: "Keeps receiving with its screen closed, while the app is open." });
-      options.push({ id: "retention", title: "Message Retention", subtitle: "How long this room's messages stay on this device." });
       options.push({ id: "delete", title: "Delete", subtitle: "Removes the room and its cached messages from this device.", destructive: true });
     }
     const choice = await chooseDialog({ title: `#${name}`, options });
@@ -1913,15 +1903,10 @@ export function initBroadcasts(dependencies) {
       if (notifying) delete notifyByChannel[name];
       else { notifyByChannel[name] = true; deps.ensureNotificationPermission?.(); }
       saveNotify();
+      syncScanWanted();
       renderChannelList();
       deps.showToast?.(notifying ? "Notifications are off for this room" : "Notifications are on for this room");
     } else if (choice === "copy") copyRoomLink(name);
-    else if (choice === "listen") {
-      if (listenByChannel[name]) delete listenByChannel[name]; else listenByChannel[name] = true;
-      saveListen();
-      syncScanWanted();
-      renderChannelList();
-    } else if (choice === "retention") openRetentionSheet(name);
     else if (choice === "delete") {
       const ok = await confirmDialog({ title: `Delete #${name}?`, message: "The room and its cached messages are removed from this device. You can join it again any time.", confirmLabel: "Delete", destructive: true });
       if (!ok) return;
@@ -1962,6 +1947,13 @@ export function initBroadcasts(dependencies) {
   }
 
   document.querySelector("[data-broadcast-back]")?.addEventListener("click", closeRoom);
+  document.querySelector("[data-broadcast-own-room-about]")?.addEventListener("click", () => {
+    alertDialog({
+      title: "About this room",
+      message: "No one can see your messages in here unless they are also active in the room at the same time.\n\nIf you want messages to persist and be seen by anyone who joins, you need to run your own indexer and have users add it to the room.",
+      confirmLabel: "Done",
+    });
+  });
   sendBtn?.addEventListener("click", sendCurrentMessage);
   composerInput?.addEventListener("keydown", (event) => {
     // On a phone keyboard Return is a newline and Send is the button, as in the iOS app.
@@ -2036,34 +2028,8 @@ export function initBroadcasts(dependencies) {
           : "You'll get a notification for new messages in this broadcast as long as your app remains open");
       }
       saveNotify();
-      renderChannelList();
-      return;
-    }
-
-    // Always-listen (own channels): keep this room's live block scan running with its screen
-    // closed. Off, a custom room only receives while you are looking at it.
-    const listen = event.target.closest("[data-broadcast-listen]");
-    if (listen) {
-      event.stopPropagation();
-      const name = listen.dataset.broadcastListen;
-      if (listenByChannel[name]) {
-        delete listenByChannel[name];
-        deps.showToast?.("You will no longer see messages in this broadcast unless you are in the broadcast at the same time chats come in");
-      } else {
-        listenByChannel[name] = true;
-        deps.showToast?.("You will now listen for new chats as long as your app remains open");
-      }
-      saveListen();
       syncScanWanted();
       renderChannelList();
-      return;
-    }
-
-    // Retention gear (own channels): how long cached messages are kept on this device.
-    const retention = event.target.closest("[data-broadcast-retention]");
-    if (retention) {
-      event.stopPropagation();
-      openRetentionSheet(retention.dataset.broadcastRetention);
       return;
     }
 
