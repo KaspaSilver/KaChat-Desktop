@@ -8250,7 +8250,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 32;
+const APP_BUILD = 33;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -19682,7 +19682,7 @@ function renderResyncPicker() {
     listEl.innerHTML = candidates.map((entry) => {
       const contact = contactForConversation(entry);
       const checked = resyncPickerSelection.has(entry.id);
-      return `<label class="resync-picker-row"><input type="checkbox" data-resync-pick="${escapeHtml(entry.id)}" ${checked ? "checked" : ""}><span class="resync-picker-copy"><strong>${escapeHtml(contactDisplayName(contact))}</strong><small>${escapeHtml(shortAddress(contact.address))}</small></span></label>`;
+      return `<label class="resync-picker-row"><input type="checkbox" data-resync-pick="${escapeHtml(entry.id)}" ${checked ? "checked" : ""}><span class="resync-picker-copy"><strong>${escapeHtml(displayNameForAddress(contact) || shortAddress(contact.address))}</strong><small>${escapeHtml(shortAddress(contact.address))}</small></span></label>`;
     }).join("");
   }
   const n = resyncPickerSelection.size;

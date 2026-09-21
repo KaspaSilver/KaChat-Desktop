@@ -77,6 +77,61 @@ const NEW_POSTS_CHECK_INTERVAL_MS = 60_000;
 let feedLoading = false;
 let feedError = null;
 let prefs = { following: [], muted: [], blocked: [] };
+let threadStack = [];     // post ids (local ids)
+// A panel opened from INSIDE an open thread (Post Activity, a poster's profile) presents OVER
+// the thread and its Back returns to the thread — the desktop stand-in for the sheets iOS
+// presents from the thread's own hierarchy. False = the thread owns the viewport.
+let panelOverThread = false;
+// Reply-notification landing: the txid of the reply to scroll to once the parent thread's
+// comment list contains it, and the txid currently flashing after that landing.
+let pendingThreadScrollRemoteId = null;
+let threadHighlightRemoteId = null;
+let threadHighlightTimer = 0;
+let replyInput, replyMeter, replySend;
+let composerQuoteTarget = null; // post being quoted, when the composer is a quote composer
+let composerReplyTarget = null; // post being replied to, when the composer is a reply composer
+let composerEditTarget = null;  // one of our own posts being edited (iOS 2d483a7): Save replaces its text
+let countdownTicker = null;
+let savedFeedScroll = 0;
+
+// Endless-scroll state (see the "Endless scrolling" section below)
+let feedPager = null;
+let feedGeneration = 0;   // bumped on every reload/tab switch/account reset — stale-response guard
+let threadGeneration = 0;
+let panelGeneration = 0;
+let lastFeedLoadAt = 0;
+let renderedFeedIds = new Set(); // what the feed DOM currently holds, so appends never duplicate
+const threadPagers = new Map();  // post id -> pager (a nested thread keeps its own cursor)
+
+function kapostsScrollEl() {
+  return document.querySelector(".kaposts-content");
+}
+
+function rememberFeedScroll() {
+  // Only when actually LEAVING the feed (not when moving between thread levels/panels).
+  if (threadStack.length === 0 && !activePanel) {
+    savedFeedScroll = kapostsScrollEl()?.scrollTop || 0;
+  }
+}
+
+function restoreFeedScroll() {
+  requestAnimationFrame(() => {
+    const el = kapostsScrollEl();
+    if (el && threadStack.length === 0 && !activePanel) el.scrollTop = savedFeedScroll;
+  });
+}
+
+// key -> { deadline, timer, undo() } — pending 5s-undo actions
+const pendingActions = new Map();
+
+function nowId() {
+  return typeof crypto?.randomUUID === "function" ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`;
+}
+
+// ---------------------------------------------------------------------------
+// Persistence (per account)
+// ---------------------------------------------------------------------------
+
 function loadPrefs() {
   try {
     const raw = localStorage.getItem(deps.accountScopedKey(KAPOSTS_PREFS_KEY));
