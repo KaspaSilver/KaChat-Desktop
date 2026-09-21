@@ -16,7 +16,7 @@ export const FEATURED_BROADCAST_CHANNELS = Object.freeze(["kaspa", "kachat-bugs"
 /// Curated per-language rooms, listed behind the collapsible "Other Languages" row under
 /// Popular. Indexer-tracked exactly like the featured rooms (30-day retention, indexer history,
 /// no retention gear, no Leave) but deliberately NOT auto-joined: the room is joined on first
-/// open or bell tap. Auto-joining eleven more rooms would multiply per-room work for every
+/// open or bell tap. Auto-joining a dozen more rooms would multiply per-room work for every
 /// user, including the vast majority who want none of them.
 ///
 /// These names are the literal on-chain channel names and are deliberately inconsistent (native
@@ -30,6 +30,7 @@ export const LANGUAGE_BROADCAST_CHANNELS = Object.freeze([
   "kaspa-espanol",
   "kaspa-francais",
   "kaspa-portugues",
+  "kaspa-romania",
   "kaspa-slovak",
   "kaspa-chinese",
   "kaspa-japanese",
@@ -58,6 +59,7 @@ const BROADCAST_LANGUAGE_DISPLAY_NAMES = Object.freeze({
   "kaspa-espanol": "Español",
   "kaspa-francais": "Français",
   "kaspa-portugues": "Português",
+  "kaspa-romania": "Română",
   "kaspa-slovak": "Slovenčina",
   "kaspa-chinese": "中文",
   "kaspa-japanese": "日本語",
