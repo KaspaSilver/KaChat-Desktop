@@ -218,6 +218,20 @@ export function contactCanBeCalled(address) { return deps?.callsEnabledFor?.(add
 
 /** The chat header's call button: enable calls for the contact if they are off, then choose
  *  voice or video (iOS ChatDetailView, b67fa61 and 12343f3). */
+/** Enabling calls asks for the microphone and the camera right away (iOS 51b052b), so the first
+ *  call does not start with the browser's permission prompts. Nothing is kept open. */
+export async function primeCallPermissions() {
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  const release = (stream) => { for (const track of stream?.getTracks?.() || []) { try { track.stop(); } catch { /* fine */ } } };
+  try {
+    release(await navigator.mediaDevices.getUserMedia({ audio: true, video: true }));
+  } catch {
+    // No camera, or the camera was refused: the microphone alone still makes voice calls work.
+    try { release(await navigator.mediaDevices.getUserMedia({ audio: true })); }
+    catch { deps?.showToast?.("Microphone access is off - allow it in the browser to make calls."); }
+  }
+}
+
 export async function requestCallFromHeader(address) {
   if (!deps || !address) return;
   if (session) { deps.showToast?.("You are already on a call."); return; }
@@ -233,6 +247,7 @@ export async function requestCallFromHeader(address) {
     });
     if (choice !== "enable") return;
     deps.setCallsEnabled(address, true);
+    await primeCallPermissions();
   }
   const kind = await deps.chooseDialog({
     title: `Call ${name}`,
@@ -485,30 +500,73 @@ export async function toggleCamera() {
   renderOverlay();
 }
 
-/** A voice call becomes a video call: the camera joins the connection and a fresh offer carries
- *  it; the other side is told first (kachat_video_upgrade) so its answer carries its camera. */
-async function upgradeToVideo() {
-  const call = session;
-  if (!call || !call.pc || call.video) return;
+const VIDEO_REQUEST_TIMEOUT_MS = 30_000;
+const escapeText = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/** Turns this side's camera on inside a running voice call. Returns false with no camera. */
+async function switchToVideo(call) {
+  if (!call?.pc) return false;
+  if (call.video) return true;
   try {
     const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
     const track = camera.getVideoTracks()[0];
-    if (!track) return;
+    if (!track) return false;
     call.localStream?.addTrack(track);
     call.pc.addTrack(track, call.localStream);
     call.video = true;
     call.cameraOff = false;
     if (ui?.local) ui.local.srcObject = call.localStream;
     if (ui?.localTile) ui.localTile.hidden = false;
-    if (call.peerSessionId) {
-      sendPeer(call, "kachat_video_upgrade", {});
-      await sendOffer(call);
-    }
     call.client?.updateCallFlags(call.token, true);
-    renderOverlay();
+    return true;
   } catch (error) {
     deps.showToast?.(`Camera unavailable: ${error?.message || error}`);
+    return false;
   }
+}
+
+/** A line on the call screen that goes away by itself ("Asked to switch to video…"). */
+function setCallNotice(call, text, ms = 6000) {
+  window.clearTimeout(call.noticeTimer);
+  call.notice = text || "";
+  if (text && ms > 0) call.noticeTimer = window.setTimeout(() => { call.notice = ""; if (session === call) renderOverlay(); }, ms);
+  if (session === call) renderOverlay();
+}
+
+/** Switching a voice call to video asks the other side first (iOS 51b052b): nothing turns a
+ *  camera on until they say yes. No answer in 30 s and the call simply stays on voice. */
+async function upgradeToVideo() {
+  const call = session;
+  if (!call || !call.pc || call.video || call.videoRequest) return;
+  if (!call.peerSessionId || call.phase !== "connected") {
+    deps.showToast?.("Video can be switched on once the call is connected");
+    return;
+  }
+  call.videoRequest = "outgoing";
+  sendPeer(call, "kachat_video_request", {});
+  setCallNotice(call, "Asked to switch to video…", 0);
+  window.clearTimeout(call.videoRequestTimer);
+  call.videoRequestTimer = window.setTimeout(() => {
+    if (session !== call || call.videoRequest !== "outgoing") return;
+    call.videoRequest = null;
+    setCallNotice(call, "No answer to your video request");
+  }, VIDEO_REQUEST_TIMEOUT_MS);
+}
+
+/** The answer to "<name> wants to switch to video". */
+async function answerVideoRequest(accept) {
+  const call = session;
+  if (!call || call.videoRequest !== "incoming") return;
+  call.videoRequest = null;
+  if (!accept) {
+    sendPeer(call, "kachat_video_decline", {});
+    renderOverlay();
+    return;
+  }
+  // Camera first, so the answer to their fresh offer already carries it.
+  await switchToVideo(call);
+  sendPeer(call, "kachat_video_accept", {});
+  renderOverlay();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -631,23 +689,28 @@ async function handleSignaling(event, call) {
     if (call.isOutgoing && !call.connectedAt) await finish("declined");
     return;
   }
-  if (type === "kachat_video_upgrade") {
-    if (!call.video && call.pc) {
-      try {
-        const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
-        const track = camera.getVideoTracks()[0];
-        if (track) {
-          call.localStream?.addTrack(track);
-          call.pc.addTrack(track, call.localStream);
-          call.video = true;
-          call.cameraOff = false;
-          if (ui?.local) ui.local.srcObject = call.localStream;
-    if (ui?.localTile) ui.localTile.hidden = false;
-          call.client?.updateCallFlags(call.token, true);
-        }
-      } catch { /* answer without a camera */ }
+  // An older build announces the switch instead of asking; it gets the same question.
+  if (type === "kachat_video_request" || type === "kachat_video_upgrade") {
+    if (!call.video && call.pc && !call.videoRequest) {
+      call.videoRequest = "incoming";
       renderOverlay();
     }
+    return;
+  }
+  if (type === "kachat_video_accept") {
+    if (call.videoRequest !== "outgoing") return;
+    window.clearTimeout(call.videoRequestTimer);
+    call.videoRequest = null;
+    setCallNotice(call, "");
+    if (await switchToVideo(call)) await sendOffer(call);
+    renderOverlay();
+    return;
+  }
+  if (type === "kachat_video_decline") {
+    if (call.videoRequest !== "outgoing") return;
+    window.clearTimeout(call.videoRequestTimer);
+    call.videoRequest = null;
+    setCallNotice(call, `${deps.displayNameFor(call.address)} declined video`);
     return;
   }
   if (!call.peerSessionId) call.peerSessionId = from;
@@ -729,6 +792,9 @@ async function finish(reason) {
   stopTone();
   window.clearTimeout(call.timeout);
   window.clearTimeout(call.offerFallback);
+  window.clearTimeout(call.videoRequestTimer);
+  window.clearTimeout(call.noticeTimer);
+  call.videoRequest = null;
   call.client?.cancelPull();
   try { call.pc?.close(); } catch { /* fine */ }
   call.pc = null;
@@ -818,6 +884,8 @@ function ensureOverlay() {
     else if (action === "hangup") hangUp();
     else if (action === "mute") toggleMute();
     else if (action === "camera") toggleCamera();
+    else if (action === "video-yes") answerVideoRequest(true);
+    else if (action === "video-no") answerVideoRequest(false);
   });
 }
 
@@ -888,5 +956,19 @@ function renderOverlay() {
       <button type="button" class="call-button${call.video && !call.cameraOff ? " active" : ""}" data-call-action="camera">${call.video && !call.cameraOff ? ICONS.camera : ICONS.cameraOff}<span>${call.video ? (call.cameraOff ? "Camera on" : "Camera off") : "Video"}</span></button>
       <button type="button" class="call-button decline" data-call-action="hangup">${ICONS["phone-down"]}<span>${call.phase === "ringingOut" ? "Cancel" : "Hang up"}</span></button>`;
   }
-  ui.controls.innerHTML = buttons;
+  // The question the other side's "Video" button asks, and the short notices around it.
+  let banner = "";
+  if (call.videoRequest === "incoming" && call.phase !== "ended") {
+    banner = `
+      <div class="call-video-ask">
+        <strong>${escapeText(deps.displayNameFor(call.address))} wants to switch to video</strong>
+        <div class="call-video-ask-actions">
+          <button type="button" class="secondary-button" data-call-action="video-no">Stay on voice</button>
+          <button type="button" class="primary-button" data-call-action="video-yes">Switch to video</button>
+        </div>
+      </div>`;
+  } else if (call.notice && call.phase !== "ended") {
+    banner = `<div class="call-notice">${escapeText(call.notice)}</div>`;
+  }
+  ui.controls.innerHTML = `${banner}<div class="call-controls-row">${buttons}</div>`;
 }

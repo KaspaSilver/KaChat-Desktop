@@ -86,16 +86,73 @@ let voiceRecordingChannel = null;
 // Persistence
 // ---------------------------------------------------------------------------
 
+// What has been read, per room and per wallet (iOS 83286b3): unread = messages from others since
+// the marker; opening a room marks it read; a room seen for the first time counts from now.
+const READ_KEY = "kachat-broadcast-read-v1";
+const DEFAULT_NOTIFY_APPLIED_KEY = "kachat-broadcast-default-notify-v1";
+let readMarkerByChannel = {};   // { [channel]: ms }
+let markedUnread = {};          // { [channel]: true } - "Mark as Unread" with nothing new
+function saveRead() {
+  try { localStorage.setItem(deps.accountScopedKey(READ_KEY), JSON.stringify({ markers: readMarkerByChannel, unread: markedUnread })); } catch { /* fine */ }
+}
+function unreadFor(channel) {
+  if (readMarkerByChannel[channel] == null) { readMarkerByChannel[channel] = Date.now(); saveRead(); }
+  const marker = Number(readMarkerByChannel[channel]) || 0;
+  const me = deps.engine.address || "";
+  const hidden = hiddenIn(channel);
+  let count = 0;
+  for (const m of messageCache[channel] || []) {
+    if (m.senderAddress === me || m.status) continue;
+    if (hidden.has(m.senderAddress)) continue;
+    if (deps.parseReactionEnvelope?.(m.content)) continue;
+    if (Number(m.blockTime || 0) > marker) count += 1;
+  }
+  if (count === 0 && markedUnread[channel]) return 1;
+  return count;
+}
+function markChannelRead(channel) {
+  if (!channel) return;
+  const before = unreadFor(channel);
+  readMarkerByChannel[channel] = Date.now();
+  delete markedUnread[channel];
+  saveRead();
+  if (before > 0) deps.onUnreadChanged?.();
+}
+/** Total unread across the rooms in the list - the Public Chats tab's badge. */
+export function broadcastUnreadTotal() {
+  if (!deps) return 0;
+  let total = 0;
+  for (const name of listedChannels()) total += unreadFor(name);
+  return total;
+}
+function listedChannels() {
+  return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])];
+}
+
 function loadState() {
   try {
     joinedChannels = JSON.parse(localStorage.getItem(deps.accountScopedKey(CHANNELS_KEY)) || "[]") || [];
   } catch { joinedChannels = []; }
+  try {
+    const read = JSON.parse(localStorage.getItem(deps.accountScopedKey(READ_KEY)) || "{}") || {};
+    readMarkerByChannel = read.markers && typeof read.markers === "object" ? read.markers : {};
+    markedUnread = read.unread && typeof read.unread === "object" ? read.unread : {};
+  } catch { readMarkerByChannel = {}; markedUnread = {}; }
   try {
     hiddenByRoom = JSON.parse(localStorage.getItem(deps.accountScopedKey(HIDDEN_KEY)) || "{}") || {};
   } catch { hiddenByRoom = {}; }
   try {
     notifyByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(NOTIFY_KEY)) || "{}") || {};
   } catch { notifyByChannel = {}; }
+  // #kaspa and #kachat-bugs notify by default: applied once per wallet, so a bell switched off
+  // later stays off.
+  try {
+    if (deps.engine.address && localStorage.getItem(deps.accountScopedKey(DEFAULT_NOTIFY_APPLIED_KEY)) !== "1") {
+      for (const name of FEATURED_BROADCAST_CHANNELS) notifyByChannel[name] = true;
+      localStorage.setItem(deps.accountScopedKey(NOTIFY_KEY), JSON.stringify(notifyByChannel));
+      localStorage.setItem(deps.accountScopedKey(DEFAULT_NOTIFY_APPLIED_KEY), "1");
+    }
+  } catch { /* fine */ }
   try {
     retentionByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(RETENTION_KEY)) || "{}") || {};
   } catch { retentionByChannel = {}; }
@@ -441,6 +498,10 @@ function mergeMessages(channel, rows) {
   existing.sort((a, b) => a.blockTime - b.blockTime);
   messageCache[channel] = existing;
   if (added > 0) saveCache();
+  if (added > 0) {
+    if (channel === activeChannel && tabVisible && !document.hidden) markChannelRead(channel);
+    try { renderChannelList(); } catch { /* list not mounted */ }
+  }
   if (reactionsChanged) saveReactions();
   // The global notification center gates these by arrival time (only live messages ping, not the
   // backfilled history), so it's safe to hand it every fresh incoming row.
@@ -612,68 +673,90 @@ const CHEVRON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6
 
 // `indexed` = an indexer-backed room (featured or curated language). Those rooms have a fixed
 // 30-day retention served by the indexer, so they get no retention gear and no Leave.
-function channelCardHtml(name, { indexed }) {
-  // Name only, no preview/description line - matches iOS's clean rows.
+// The rooms tab is a plain list of chat-style rows (iOS 83286b3): a # avatar, the room name,
+// the newest message with its sender and time, a bell-off mark, and an unread badge - #kaspa
+// and #kachat-bugs pinned on top, every other joined room below by latest activity. Language
+// rooms not opened yet sit behind an "Other Languages" row; "Join or create a room" is last.
+function roomRowTime(ts) {
+  if (!ts) return "";
+  const date = new Date(ts);
+  const now = new Date();
+  const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((midnight(now) - midnight(date)) / 86400000);
+  if (days === 0) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (days === 1) return "Yesterday";
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+function lastVisibleMessage(name) {
+  const hidden = hiddenIn(name);
+  const rows = messageCache[name] || [];
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const m = rows[i];
+    if (hidden.has(m.senderAddress)) continue;
+    if (deps.parseReactionEnvelope?.(m.content)) continue;
+    return m;
+  }
+  return null;
+}
+function roomRowHtml(name, { title = null, subtitle = null } = {}) {
+  const last = lastVisibleMessage(name);
+  const unread = unreadFor(name);
+  const me = deps.engine.address || "";
+  // A link-bearing message never shows its URL in a row, same as the chat lists.
+  const rawPreview = last ? humanizeBroadcastContent(last.content) : "";
+  const previewText = /https?:\/\/\S+/i.test(rawPreview) ? "📎 Sent a link" : rawPreview;
+  const preview = last
+    ? `${last.senderAddress === me ? "You" : senderName(last.senderAddress)}: ${previewText}`
+    : (subtitle || "No messages yet");
+  const bellOff = !notifyByChannel[name];
   return `
-    <div class="broadcast-card">
-      <button class="broadcast-card-main" type="button" data-broadcast-open="${deps.escapeHtml(name)}">
-        <strong>#${deps.escapeHtml(name)}</strong>
-      </button>
-      ${bellButtonHtml(name)}
-      ${indexed ? "" : listenButtonHtml(name)}
-      ${indexed ? "" : `<button class="broadcast-card-icon" type="button" data-broadcast-retention="${deps.escapeHtml(name)}" title="Message retention" aria-label="Message retention">${GEAR_SVG}</button>`}
-      ${indexed ? "" : `<button class="broadcast-card-leave" type="button" data-broadcast-leave="${deps.escapeHtml(name)}">Leave</button>`}
-    </div>`;
+    <button class="broadcast-room-row${name === activeChannel ? " active" : ""}" type="button" data-broadcast-open="${deps.escapeHtml(name)}">
+      <span class="broadcast-room-row-avatar" aria-hidden="true">#</span>
+      <span class="broadcast-room-row-main">
+        <span class="broadcast-room-row-top">
+          <strong>${deps.escapeHtml(title || `#${name}`)}</strong>
+          ${bellOff ? `<svg class="broadcast-room-row-muted" viewBox="0 0 24 24" aria-label="Notifications off" role="img"><path d="M18 15v-4a6 6 0 0 0-9.3-5M6 9.5V15l-2 3h13M10 21h4M3 3l18 18"/></svg>` : ""}
+          <span class="broadcast-room-row-time">${deps.escapeHtml(roomRowTime(last?.blockTime))}</span>
+        </span>
+        <span class="broadcast-room-row-bottom">
+          <span class="broadcast-room-row-preview">${deps.escapeHtml(preview.replace(/\s+/g, " ").slice(0, 120))}</span>
+          ${unread > 0 ? `<b class="unread-badge">${unread > 99 ? "99+" : unread}</b>` : ""}
+        </span>
+      </span>
+    </button>`;
 }
 
-/** One curated language room, indented under "Other Languages": native language name over the
- *  literal `#channel-name`, plus its own bell. Neither control assumes the room is joined -
- *  both join it on demand (see openRoom / the bell handler). */
-function languageCardHtml(name) {
-  const label = broadcastLanguageDisplayName(name) || `#${name}`;
-  return `
-    <div class="broadcast-card broadcast-card-language">
-      <button class="broadcast-card-main" type="button" data-broadcast-open="${deps.escapeHtml(name)}">
-        <strong>${deps.escapeHtml(label)}</strong>
-        <span>#${deps.escapeHtml(name)}</span>
-      </button>
-      ${bellButtonHtml(name)}
-    </div>`;
-}
-
-// iOS's list anatomy: Popular (curated, permanent - bell is the only control) pinned on top
-// with the 30-day retention note beside its title and the collapsed "Other Languages" category
-// at its foot, then Your Channels with a + to join/create, each row bell + retention gear +
-// Leave. Note: these headers scroll away with their content - they are deliberately not sticky.
 function renderChannelList() {
   if (!listEl) return;
-  // Join order, as iOS keeps its store order - not alphabetical.
-  const own = joinedChannels.filter((name) => !isIndexedBroadcastChannel(name));
+  const latest = (name) => Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0);
+  const others = joinedChannels
+    .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name))
+    .sort((a, b) => latest(b) - latest(a));
+  const unopenedLanguages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => !joinedChannels.includes(name));
   listEl.innerHTML = `
-    <div class="broadcast-section-header">
-      <span>Popular</span>
-      <span class="broadcast-section-note">All messages persist for 30 days</span>
-    </div>
-    ${FEATURED_BROADCAST_CHANNELS.map((name) => channelCardHtml(name, { indexed: true })).join("")}
-    <button class="broadcast-card broadcast-languages-toggle${languagesExpanded ? " expanded" : ""}" type="button"
-            data-broadcast-languages-toggle aria-expanded="${languagesExpanded ? "true" : "false"}">
-      <span class="broadcast-languages-globe">${GLOBE_SVG}</span>
-      <strong>Other Languages</strong>
-      <span class="broadcast-languages-count">${LANGUAGE_BROADCAST_CHANNELS.length}</span>
-      <span class="broadcast-languages-chevron">${CHEVRON_SVG}</span>
-    </button>
-    ${languagesExpanded ? LANGUAGE_BROADCAST_CHANNELS.map((name) => languageCardHtml(name)).join("") : ""}
-    <div class="broadcast-section-header broadcast-section-your">
-      <span>Your Channels</span>
-      <span style="display:flex;align-items:center;gap:8px;">
-        <span class="broadcast-section-note">Live only, while open or listening</span>
-        <button class="broadcast-join-toggle" type="button" data-broadcast-join-toggle aria-label="Join or create a channel">+</button>
+    ${FEATURED_BROADCAST_CHANNELS.map((name) => roomRowHtml(name)).join("")}
+    ${others.map((name) => roomRowHtml(name, isIndexedBroadcastChannel(name)
+      ? { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` }
+      : {})).join("")}
+    ${unopenedLanguages.length ? `
+      <button class="broadcast-room-row broadcast-languages-toggle${languagesExpanded ? " expanded" : ""}" type="button"
+              data-broadcast-languages-toggle aria-expanded="${languagesExpanded ? "true" : "false"}">
+        <span class="broadcast-room-row-avatar globe" aria-hidden="true">${GLOBE_SVG}</span>
+        <span class="broadcast-room-row-main">
+          <span class="broadcast-room-row-top"><strong>Other Languages</strong><span class="broadcast-room-row-time">${unopenedLanguages.length}</span></span>
+          <span class="broadcast-room-row-bottom"><span class="broadcast-room-row-preview">Rooms in other languages. Opening one adds it to your list.</span><span class="broadcast-languages-chevron">${CHEVRON_SVG}</span></span>
+        </span>
+      </button>
+      ${languagesExpanded ? unopenedLanguages.map((name) => roomRowHtml(name, { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` })).join("") : ""}` : ""}
+    <button class="broadcast-room-row broadcast-room-row-join" type="button" data-broadcast-join-toggle>
+      <span class="broadcast-room-row-avatar plus" aria-hidden="true">+</span>
+      <span class="broadcast-room-row-main">
+        <span class="broadcast-room-row-top"><strong>Join or create a room</strong></span>
+        <span class="broadcast-room-row-bottom"><span class="broadcast-room-row-preview">Anyone who joins the same name sees the same messages. Live only, while open or listening.</span></span>
       </span>
-    </div>
-    ${own.length
-      ? own.map((name) => channelCardHtml(name, { indexed: false })).join("")
-      : `<p class="broadcast-empty-hint">No channels yet - tap + to join or create one.</p>`}
+    </button>
   `;
+  deps.onUnreadChanged?.();
 }
 
 /** One broadcast bubble: header, linkified body (+ the same preview card treatment as 1:1
@@ -1298,6 +1381,8 @@ function openRoom(channel) {
   feeOverrideKas = null;
   hideFeePill();
   closeRoomInfo();
+  markChannelRead(activeChannel);
+  renderChannelList();
   renderRoom();
   updateConnectionDot();
   // Only the curated rooms have an indexer behind them. A custom room must never call it:
@@ -1793,21 +1878,57 @@ export function initBroadcasts(dependencies) {
       syncJoinButton();
     }
   });
-  // Right-click on a room row: share or copy its invite link (iOS row context menu).
+  // Right-click / long-press on a room row: the same half sheet groups have (iOS 83286b3) -
+  // Mark as Read / Unread, notifications, Copy Room Link, plus listening, retention and Delete
+  // for rooms you added. Curated rooms cannot be deleted.
   onContextGesture(listEl, async (event) => {
     const card = event.target.closest("[data-broadcast-open]");
     if (!card) return;
     event.preventDefault();
     const name = card.dataset.broadcastOpen;
-    const choice = await chooseDialog({
-      title: `#${name}`,
-      options: [
-        { id: "share", title: "Share Room Link", subtitle: "Copies an invite with both link forms to your clipboard." },
-        { id: "copy", title: "Copy Room Link", subtitle: "Copies the kachat:// link on its own." },
-      ],
-    });
-    if (choice === "share") copyRoomLink(name, { text: true });
-    else if (choice === "copy") copyRoomLink(name);
+    const indexed = isIndexedBroadcastChannel(name);
+    const unread = unreadFor(name) > 0;
+    const notifying = Boolean(notifyByChannel[name]);
+    const options = [
+      unread
+        ? { id: "read", title: "Mark as Read", subtitle: "Clears this room's unread count." }
+        : { id: "unread", title: "Mark as Unread", subtitle: "Keeps a badge on this room until you open it." },
+      notifying
+        ? { id: "notify", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you." }
+        : { id: "notify", title: "Turn Notifications On", subtitle: indexed ? "Notifies you of new messages in this room." : "Notifies you while the app is open and listening." },
+      { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room." },
+    ];
+    if (!indexed && joinedChannels.includes(name)) {
+      options.push(alwaysListening(name)
+        ? { id: "listen", title: "Stop Listening", subtitle: "Only receives while you are looking at it." }
+        : { id: "listen", title: "Keep Listening", subtitle: "Keeps receiving with its screen closed, while the app is open." });
+      options.push({ id: "retention", title: "Message Retention", subtitle: "How long this room's messages stay on this device." });
+      options.push({ id: "delete", title: "Delete", subtitle: "Removes the room and its cached messages from this device.", destructive: true });
+    }
+    const choice = await chooseDialog({ title: `#${name}`, options });
+    if (choice === "read") { markChannelRead(name); renderChannelList(); }
+    else if (choice === "unread") { markedUnread[name] = true; saveRead(); renderChannelList(); }
+    else if (choice === "notify") {
+      if (indexed && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
+      if (notifying) delete notifyByChannel[name];
+      else { notifyByChannel[name] = true; deps.ensureNotificationPermission?.(); }
+      saveNotify();
+      renderChannelList();
+      deps.showToast?.(notifying ? "Notifications are off for this room" : "Notifications are on for this room");
+    } else if (choice === "copy") copyRoomLink(name);
+    else if (choice === "listen") {
+      if (listenByChannel[name]) delete listenByChannel[name]; else listenByChannel[name] = true;
+      saveListen();
+      syncScanWanted();
+      renderChannelList();
+    } else if (choice === "retention") openRetentionSheet(name);
+    else if (choice === "delete") {
+      const ok = await confirmDialog({ title: `Delete #${name}?`, message: "The room and its cached messages are removed from this device. You can join it again any time.", confirmLabel: "Delete", destructive: true });
+      if (!ok) return;
+      if (activeChannel === name) closeRoom();
+      leaveChannel(name);
+      renderChannelList();
+    }
   });
   composerInput?.addEventListener("input", scheduleBroadcastFeeEstimate);
   document.querySelector("[data-broadcast-fee]")?.addEventListener("click", editBroadcastFee);

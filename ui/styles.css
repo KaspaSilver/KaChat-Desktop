@@ -10156,3 +10156,39 @@ body.call-active .sidebar-tabbar { display: none; }
 .portfolio-scrub-span[hidden] { display: none; }
 .portfolio-summary-price.gain, .portfolio-detail-price.gain { color: #4cd964; }
 .portfolio-summary-price.loss, .portfolio-detail-price.loss { color: #ff6b6b; }
+
+/* Public Chats rows (iOS 83286b3): a chat-style row per room - # avatar, name, newest message,
+   time, bell-off mark and an unread badge. */
+.broadcast-list { gap: 2px; }
+.broadcast-room-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 10px; border: 0; border-radius: 14px;
+  background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit;
+}
+.broadcast-room-row:hover { background: rgba(255,255,255,.05); }
+.broadcast-room-row.active { background: rgba(112,199,186,.12); }
+.broadcast-room-row-avatar {
+  flex: 0 0 46px; width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+  background: rgba(112,199,186,.16); color: var(--kaspa-ink); font-size: 21px; font-weight: 700;
+}
+.broadcast-room-row-avatar.globe, .broadcast-room-row-avatar.plus { background: rgba(255,255,255,.07); color: var(--muted); }
+.broadcast-room-row-avatar svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.broadcast-room-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.broadcast-room-row-top, .broadcast-room-row-bottom { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.broadcast-room-row-top strong { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.broadcast-room-row-muted { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.broadcast-room-row-time { margin-left: auto; flex: 0 0 auto; font-size: 12px; color: var(--muted); }
+.broadcast-room-row-preview { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.broadcast-room-row-bottom .unread-badge { flex: 0 0 auto; }
+.broadcast-room-row .broadcast-languages-chevron svg { width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease; }
+.broadcast-room-row.expanded .broadcast-languages-chevron svg { transform: rotate(180deg); }
+
+/* Calls: the "wants to switch to video" question and short notices sit above the buttons. */
+.call-controls { flex-direction: column; align-items: center; gap: 14px; }
+.call-controls-row { display: flex; justify-content: center; gap: 22px; }
+.call-video-ask {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 16px;
+  background: rgba(20,26,28,.96); border: 1px solid rgba(255,255,255,.12); max-width: min(420px, 92vw); text-align: center;
+}
+.call-video-ask strong { font-size: 15px; }
+.call-video-ask-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.call-notice { padding: 8px 14px; border-radius: 999px; background: rgba(0,0,0,.55); color: #fff; font-size: 13px; }

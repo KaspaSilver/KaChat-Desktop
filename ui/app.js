@@ -2,7 +2,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal } from "./broadcasts.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
@@ -8250,7 +8250,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 31;
+const APP_BUILD = 32;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11915,10 +11915,10 @@ function updateChatsListTabBadges() {
     chatsTabBadge.textContent = totalUnread > 99 ? "99+" : String(totalUnread);
     chatsTabBadge.hidden = totalUnread <= 0;
   }
-  // Public Chats badge: broadcast activity in the bell that has not been seen.
+  // Public Chats badge: unread messages across the rooms in the list (iOS 83286b3).
   const publicBadge = document.querySelector("[data-public-tab-badge]");
   if (publicBadge) {
-    const publicUnread = tabUnreadCount("broadcasts");
+    const publicUnread = broadcastUnreadTotal();
     publicBadge.textContent = publicUnread > 99 ? "99+" : String(publicUnread);
     publicBadge.hidden = publicUnread <= 0;
   }
@@ -20297,6 +20297,7 @@ queueMicrotask(async () => {
     voiceFileName,
     // The room owns the detail pane while open (Public Chats is a Chats list tab).
     onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
+    onUnreadChanged: () => updateChatsListTabBadges(),
     isNextcloudShareLink,
     createDeliveryStatusIcon,
     shortAddress,
@@ -20531,6 +20532,7 @@ queueMicrotask(async () => {
   document.querySelector("[data-chat-info-calls]")?.addEventListener("change", (event) => {
     if (!chatInfoContactAddress) return;
     setContactCallsEnabled(chatInfoContactAddress, event.target.checked);
+    if (event.target.checked) Calls.primeCallPermissions().catch(() => {});
     showCopyToast(event.target.checked ? "Calls and video calls enabled for this contact." : "Calls off for this contact.");
   });
 

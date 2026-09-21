@@ -167,7 +167,8 @@
               <h1 class="kaposts-title">Public Chats</h1>
             </div>
             <p class="broadcast-intro">Public, unencrypted rooms on the Kaspa network. Anyone who joins the same channel sees the same messages.</p>
-            <!-- Join/create card, opened by the + in the "Your Channels" header (iOS's join alert). -->
+            <div class="broadcast-list" data-broadcast-list></div>
+            <!-- Join/create card, opened by the "Join or create a room" row at the end of the list (iOS's join alert). -->
             <div class="broadcast-join-card" data-broadcast-join-card hidden>
               <strong>Join or Create a Channel</strong>
               <p>Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
@@ -180,7 +181,6 @@
                 <button class="primary-button" type="button" data-broadcast-join disabled>Join</button>
               </div>
             </div>
-            <div class="broadcast-list" data-broadcast-list></div>
           </div>
         </div>
 
