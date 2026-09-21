@@ -24,6 +24,10 @@ import dns from "node:dns/promises";
 const PORT = Number(process.env.NC_PROXY_PORT || 8790);
 const HOST = process.env.NC_PROXY_HOST || "0.0.0.0";
 const MAX_REDIRECT_HOPS = 5;
+// A slow or wedged upstream (a busy api.kaspa.org query, a dead link-preview host)
+// must not hang the request until nginx's 120s read-timeout turns it into a 504.
+// Fail fast on socket inactivity instead, so the client gets a prompt error.
+const UPSTREAM_TIMEOUT_MS = Number(process.env.NC_PROXY_UPSTREAM_TIMEOUT_MS || 30000);
 
 function ipIsBlocked(ip) {
   const v4 = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
@@ -56,6 +60,10 @@ async function hostBlocked(hostname) {
 }
 
 async function handle(req, res) {
+  // Cheap liveness endpoint for the container healthcheck (not proxied).
+  if (req.url === "/health" || req.url === "/healthz") {
+    res.statusCode = 200; res.setHeader("content-type", "text/plain"); res.end("ok"); return;
+  }
   // nginx passes the full (still URL-encoded) path; strip the mount prefix to mirror connect's
   // behavior. Accept an optional /desktop prefix so the same server works whether the app is
   // hosted at the origin root (/nc-proxy/...) or under a subpath (/desktop/nc-proxy/...). We do
@@ -123,7 +131,18 @@ async function handle(req, res) {
         upstreamRes.pipe(res);
       },
     );
+    let timedOut = false;
+    // Socket-inactivity timeout: if the upstream stalls (no bytes for this long) on
+    // connect, headers, or body, drop it and answer 504 immediately rather than
+    // letting nginx wait out its own 120s and return the 504 much later.
+    upstream.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+      timedOut = true;
+      if (!res.headersSent) res.writeHead(504, { "content-type": "text/plain" });
+      res.end("Proxy upstream timeout");
+      upstream.destroy();
+    });
     upstream.on("error", (error) => {
+      if (timedOut) return; // already answered 504 on timeout
       if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
       res.end(`Proxy error: ${error.message}`);
     });
