@@ -47,6 +47,14 @@ export const INDEXED_BROADCAST_CHANNELS = Object.freeze([
   ...LANGUAGE_BROADCAST_CHANNELS,
 ]);
 
+/// Rooms the app uses as machinery, never shown as chats: the chess arena
+/// (CHESS_TOURNAMENTS.md). Hidden from Public Chats, no unread, no bell. Mirrors iOS
+/// `BroadcastService.serviceChannels`.
+export const SERVICE_BROADCAST_CHANNELS = Object.freeze(["chess-arena"]);
+export function isServiceBroadcastChannel(name) {
+  return SERVICE_BROADCAST_CHANNELS.includes(normalizeBroadcastChannel(name));
+}
+
 export const BROADCAST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // fixed 30 days (indexed rooms)
 
 /// Native-language label for each curated language room, e.g. "kaspa-espanol" -> "Español".

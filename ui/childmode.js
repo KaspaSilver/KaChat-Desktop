@@ -31,7 +31,7 @@ const USER_TYPE_KEY = "kachat-user-type-choice-v1";
 
 /** Tabs removed everywhere while Child Mode is on (dock, programmatic switches,
  * the Customize Dock page). */
-export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts"];
+export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts", "chess"];
 
 let deps = {
   escapeHtml: (value) => String(value ?? ""),

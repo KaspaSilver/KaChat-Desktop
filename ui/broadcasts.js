@@ -14,6 +14,7 @@ import {
   fetchBroadcastHistory,
   hasBroadcastIndexer,
   isIndexedBroadcastChannel,
+  isServiceBroadcastChannel,
   isValidBroadcastChannel,
   normalizeBroadcastChannel,
   sendBroadcastMessage,
@@ -135,7 +136,15 @@ export function broadcastUnreadTotal() {
   return total;
 }
 function listedChannels() {
-  return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])].filter(curatedShown);
+  return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])].filter((name) => curatedShown(name) && !isServiceBroadcastChannel(name));
+}
+
+// Service rooms (the chess arena) are scanned while their screen is up, on top of whatever the
+// rooms want; the chess module sets this and the block-hit rows for them go to it, not here.
+let serviceScanWanted = [];
+export function setServiceScanWanted(channels) {
+  serviceScanWanted = Array.isArray(channels) ? channels.map((c) => normalizeBroadcastChannel(c)).filter(Boolean) : [];
+  if (deps) syncScanWanted();
 }
 
 // Default (curated) rooms switched off in Public Chats settings (iOS d5c7613): gone from the
@@ -378,6 +387,7 @@ function scanWantedChannels() {
       if (isIndexedBroadcastChannel(channel)) wanted.delete(channel);
     }
   }
+  for (const channel of serviceScanWanted) wanted.add(channel);
   return [...wanted];
 }
 
@@ -396,7 +406,7 @@ function handleBroadcastBlockHits(hits) {
   const byChannel = new Map();
   for (const hit of hits || []) {
     const channel = normalizeBroadcastChannel(hit?.channel);
-    if (!channel || !hit?.txId) continue;
+    if (!channel || !hit?.txId || isServiceBroadcastChannel(channel)) continue;
     // Deliberately NOT filtering hidden senders here: the indexer path stores them and
     // filters at render time, so unhiding a user brings their messages back. Both paths must
     // leave the store in the same state, so this one stores them too.
@@ -788,7 +798,7 @@ function renderChannelList() {
   if (!listEl) return;
   const latest = (name) => Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0);
   const others = joinedChannels
-    .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name) && curatedShown(name))
+    .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name) && curatedShown(name) && !isServiceBroadcastChannel(name))
     .sort((a, b) => latest(b) - latest(a));
   const unopenedLanguages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => !joinedChannels.includes(name) && curatedShown(name));
   listEl.innerHTML = `
@@ -1438,6 +1448,8 @@ function openRoom(channel) {
   markChannelRead(activeChannel);
   renderChannelList();
   renderRoom();
+  // What was typed here last time comes back (iOS 360e5d2).
+  if (composerInput) composerInput.value = deps.readDraft?.(`room:${activeChannel}`) || "";
   updateConnectionDot();
   // Only the curated rooms have an indexer behind them. A custom room must never call it:
   // it serves nothing for that channel, so the request is pure noise and a failure there
@@ -1454,6 +1466,7 @@ function openRoom(channel) {
 function closeRoom() {
   cancelVoiceRecordingIfActive();
   cancelBroadcastReply();
+  if (activeChannel && composerInput) deps.saveDraft?.(`room:${activeChannel}`, composerInput.value);
   activeChannel = null;
   stopPolling();
   syncScanWanted();
@@ -1465,6 +1478,10 @@ function joinChannel(rawName) {
   const name = normalizeBroadcastChannel(rawName);
   if (!isValidBroadcastChannel(name)) {
     alertDialog({ title: "Couldn't Join Channel", message: "Channel names must be 1-36 characters with no spaces or colons." });
+    return;
+  }
+  if (isServiceBroadcastChannel(name)) {
+    alertDialog({ title: "That room is machinery", message: "#chess-arena carries chess tournaments. Play them from Kaspa Hub > Chess." });
     return;
   }
   if (!joinedChannels.includes(name)) {
@@ -1513,6 +1530,7 @@ async function sendCurrentMessage() {
   if (!text) return;
   sendInFlight = true;
   composerInput.value = "";
+  deps.saveDraft?.(`room:${activeChannel}`, "");
   const channel = activeChannel;
   // Reply mode: wrap in the exact cross-platform reply envelope the room renders.
   const replyTarget = broadcastReplyTarget;

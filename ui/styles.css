@@ -10197,3 +10197,62 @@ body.call-active .sidebar-tabbar { display: none; }
 .broadcast-settings-sheet { max-height: min(86vh, 720px); display: flex; flex-direction: column; }
 .broadcast-settings-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
 .broadcast-settings-body .screen-kicker { margin: 10px 0 0; }
+
+/* Chess tournaments (Kaspa Hub > Chess). */
+.chess-t-screen { display: flex; flex-direction: column; min-height: 0; }
+.chess-t-header { gap: 10px; }
+.chess-t-header .kaposts-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chess-t-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 var(--dock-inset, 124px); }
+.chess-t-body .screen-kicker { margin: 12px 0 2px; }
+.chess-t-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border-radius: 16px; background: var(--surface-1, rgba(255,255,255,.04)); border: 1px solid var(--card-border, rgba(255,255,255,.08)); }
+.chess-t-card-top { display: flex; align-items: center; gap: 12px; }
+.chess-t-seats { display: flex; gap: 6px; }
+.chess-t-seat { width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,.14); }
+.chess-t-seat.taken { background: var(--kaspa-ink); }
+.chess-t-cta { width: 100%; }
+.chess-t-cta.danger, .chess-actions .danger { color: #e99aa1; }
+.chess-t-list { display: flex; flex-direction: column; gap: 2px; }
+.chess-t-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px; border: 0; border-radius: 14px; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.chess-t-row:not(.static):hover { background: rgba(255,255,255,.05); }
+.chess-t-row.static { cursor: default; }
+.chess-t-row-icon { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: rgba(112,199,186,.16); color: var(--kaspa-ink); }
+.chess-t-row-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.chess-t-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.chess-t-row-main strong { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chess-t-row-main strong em { font-style: normal; color: var(--muted); font-weight: 400; }
+.chess-t-row-main strong .won { font-weight: 800; }
+.chess-t-row-main small, .chess-t-row-main.muted { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chess-t-row-action { flex: 0 0 auto; font-size: 12.5px; font-weight: 600; color: var(--kaspa-ink); }
+.chess-t-row-action.muted { color: var(--muted); font-weight: 500; }
+.chess-t-row-action.mono { font-variant-numeric: tabular-nums; color: var(--muted); }
+.chess-t-row-chevron svg { width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.chess-t-rank { flex: 0 0 28px; text-align: right; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chess-t-avatar { flex: 0 0 36px; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; overflow: hidden; background: rgba(255,255,255,.08); font-size: 13px; font-weight: 700; }
+.chess-t-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.chess-t-open-seat { flex: 0 0 36px; width: 36px; height: 36px; border-radius: 50%; border: 1px dashed rgba(255,255,255,.35); }
+.chess-t-titles { display: inline-flex; align-items: center; gap: 4px; color: #f5c451; font-weight: 700; }
+.chess-t-titles svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.chess-t-status { margin: 0; font-size: 14px; }
+.chess-t-status.center { text-align: center; font-weight: 600; }
+.chess-t-status.muted { color: var(--muted); }
+.chess-t-champion { display: inline-flex; align-items: center; gap: 6px; color: #f5c451; font-weight: 700; }
+.chess-t-champion svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.chess-t-code { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 14px; }
+.chess-t-code b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.chess-t-clock-row { display: flex; align-items: center; gap: 12px; padding: 4px 6px; }
+.chess-t-clock { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; padding: 4px 12px; border-radius: 10px; background: rgba(255,255,255,.08); }
+.chess-t-clock.running { background: rgba(112,199,186,.2); }
+.chess-t-clock.low { color: #ff6b6b; }
+.chess-t-board { width: min(480px, 52vh, calc(100% - 12px)); }
+.chess-t-chat { display: flex; flex-direction: column; gap: 6px; }
+.chess-t-line { display: flex; flex-direction: column; gap: 1px; padding: 4px 10px; }
+.chess-t-line small { font-size: 12px; font-weight: 600; color: var(--muted); }
+.chess-t-line span { font-size: 14px; }
+.chess-t-chat.bubbles { padding: 0 6px; }
+.chess-t-bubble { align-self: flex-start; max-width: 80%; display: flex; flex-direction: column; gap: 1px; padding: 8px 12px; border-radius: 14px; background: rgba(255,255,255,.08); }
+.chess-t-bubble small { font-size: 11px; font-weight: 600; color: var(--muted); }
+.chess-t-bubble span { font-size: 14px; }
+.chess-t-bubble.mine { align-self: flex-end; background: var(--kaspa-ink); color: #06201c; }
+.chess-t-composer { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
+.chess-t-composer .kaposts-reply-input { flex: 1; }
+.chess-t-error { color: #e99aa1; }

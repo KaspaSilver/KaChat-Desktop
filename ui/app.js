@@ -3,6 +3,7 @@ import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin } from "./broadcasts.js";
+import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
@@ -1097,8 +1098,30 @@ async function fetchOpenGraph(url) {
   if (image) { try { image = new URL(decode(image), url).href; } catch { image = ""; } }
   let site = decode(metaContent(html, "og:site_name"));
   if (!site) { try { site = new URL(url).hostname.replace(/^www\./, ""); } catch { site = ""; } }
+  let host = "";
+  try { host = new URL(url).hostname.toLowerCase(); } catch { /* fine */ }
+  if (host.includes("instagram")) return instagramFallback(url, { title, description, image, site });
   if (!title && !image) return null;
   return { title, description, image, site };
+}
+
+// Instagram serves no Open Graph data - og:image above all - to anyone not logged in, whatever
+// the User-Agent, and its oEmbed needs an API token (iOS 2010124). So the card names what the
+// link is from the URL itself - post, reel, story or @account - with an "Open in Instagram"
+// line, instead of an empty image box.
+function instagramFallback(url, scraped) {
+  if (scraped?.image) return scraped;
+  let parts = [];
+  try { parts = new URL(url).pathname.split("/").filter(Boolean); } catch { /* fine */ }
+  const first = String(parts[0] || "").toLowerCase();
+  let title, description;
+  if (first === "p") { title = "Instagram post"; description = "Open in Instagram to see the post."; }
+  else if (first === "reel" || first === "reels") { title = "Instagram reel"; description = "Open in Instagram to watch the reel."; }
+  else if (first === "stories") { title = "Instagram story"; description = "Open in Instagram to see the story."; }
+  else if (first && !["explore", "accounts", "direct"].includes(first)) { title = `@${parts[0]} on Instagram`; description = "Open in Instagram to see the profile."; }
+  else { title = "Instagram"; description = "Open in Instagram."; }
+  const scrapedTitle = scraped?.title && scraped.title !== "Instagram" ? scraped.title : "";
+  return { title: scrapedTitle || title, description: scraped?.description || description, image: "", site: "Instagram" };
 }
 
 // YouTube: use the oEmbed JSON API for the real video title (matches iOS). oEmbed needs no
@@ -2977,6 +3000,7 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetKaPostsForAccount(); } catch { /* not yet initialized */ }
   try { reloadDockPrefsForAccount(); } catch { /* not yet initialized */ }
   try { resetBroadcastsForAccount(); } catch { /* not yet initialized */ }
+  try { resetChessTournamentsForAccount(); } catch { /* not yet initialized */ }
   try { resetPortfolioForAccount(); } catch { /* not yet initialized */ }
   try { resetColdStorageForAccount(); } catch { /* not yet initialized */ }
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
@@ -4399,7 +4423,10 @@ const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Br
 // The Profile bell is for broadcasts and for Kaspa arriving on your addresses (chatting,
 // spending, cold storage). KaPosts has its own bell inside KaPosts, and group @mentions ping
 // the chat itself, so neither lands here.
-const NOTIF_CENTER_SOURCES = new Set(["broadcast", "wallet"]);
+// The profile bell is wallet activity only (iOS cda2715): public rooms carry their own unread
+// in the Chats tab, KaPosts its own badge. Rows of other kinds saved by older builds are dropped
+// on load.
+const NOTIF_CENTER_SOURCES = new Set(["wallet"]);
 
 function loadNotifCenter() {
   try { globalNotifications = JSON.parse(localStorage.getItem(accountScopedKey(NOTIF_CENTER_KEY)) || "[]").filter((n) => NOTIF_CENTER_SOURCES.has(n?.source)); }
@@ -4444,7 +4471,7 @@ function renderNotifCenter() {
   const list = document.querySelector("[data-notif-list]");
   if (!list) return;
   if (!globalNotifications.length) {
-    list.innerHTML = `<div class="notif-center-empty">No notifications yet<small>Broadcast activity and Kaspa arriving on your addresses show up here.</small></div>`;
+    list.innerHTML = `<div class="notif-center-empty">No notifications yet<small>Kaspa arriving on your addresses shows up here.</small></div>`;
     return;
   }
   list.innerHTML = globalNotifications.map((n) => `
@@ -7532,6 +7559,8 @@ function setActiveAppTab(tab) {
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
   if (screenTab === "swaps") refreshSwaps();
+  // Chess keeps the arena scanned only while its screen is up (iOS acquire/release).
+  if (screenTab === "chess") showChessTournaments(); else hideChessTournaments();
 }
 
 sidebarTabButtons.forEach((button) => {
@@ -7565,12 +7594,12 @@ const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 const DOCK_MAX_ITEMS = 5;
 const DOCK_PINNED = ["hub", "profile"];
 /** Tabs the user can place. Excludes the pinned two. */
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps"]; // Public Chats live under Chats now (iOS a566da7)
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kaposts", "swaps", "apps"];
+const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess"]; // Public Chats live under Chats now (iOS a566da7)
+const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kaposts", "swaps", "apps", "chess"];
 const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["kaposts", "swaps", "apps"];
+const HUB_DEFAULT = ["kaposts", "swaps", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Tournaments" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -7736,7 +7765,7 @@ function tabUnreadCount(tab) {
   try {
     if (tab === "profile") return unreadNotifCount();
     if (tab === "kaposts") return kaPostsUnseenCount();
-    if (tab === "broadcasts") return globalNotifications.filter((n) => n.source === "broadcast" && n.timestamp > notifCenterLastSeenAt).length;
+    if (tab === "broadcasts") return broadcastUnreadTotal();
   } catch {}
   return 0;
 }
@@ -8248,9 +8277,9 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
 // kachat.kas and jumps straight into that chat in payment mode.
-const APP_VERSION = "5.0";
+const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 36;
+const APP_BUILD = 37;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -17928,6 +17957,18 @@ composerInputField?.addEventListener("input", () => {
   conversationEntry.draft = next;
   schedulePersistState();
 });
+// Drafts for groups and public rooms, keyed "group:<id>" / "room:<name>" (iOS 360e5d2): saved
+// on leaving, restored on return, cleared by sending. 1:1 drafts live on the conversation.
+const DRAFTS_KEY = "kachat-drafts-v1";
+function readDrafts() {
+  try { return JSON.parse(localStorage.getItem(accountScopedKey(DRAFTS_KEY)) || "{}") || {}; } catch { return {}; }
+}
+function readDraft(key) { return String(readDrafts()[key] || ""); }
+function saveDraft(key, text) {
+  const drafts = readDrafts();
+  if (String(text || "").trim()) drafts[key] = text; else delete drafts[key];
+  try { localStorage.setItem(accountScopedKey(DRAFTS_KEY), JSON.stringify(drafts)); } catch { /* fine */ }
+}
 let persistStateTimer = null;
 function schedulePersistState() {
   if (persistStateTimer) window.clearTimeout(persistStateTimer);
@@ -20304,6 +20345,7 @@ queueMicrotask(async () => {
     // The room owns the detail pane while open (Public Chats is a Chats list tab).
     onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
     onUnreadChanged: () => updateChatsListTabBadges(),
+    readDraft, saveDraft,
     isNextcloudShareLink,
     createDeliveryStatusIcon,
     shortAddress,
@@ -20372,24 +20414,8 @@ queueMicrotask(async () => {
     postDesktopNotification,
     // Fresh incoming broadcast messages feed the global notification center (gated to LIVE
     // arrivals so the initial history backfill doesn't flood it).
-    onIncomingBroadcast: (rows) => {
-      for (const row of rows || []) {
-        if (Number(row.blockTime || 0) < NOTIF_SESSION_START) continue;
-        const contact = (state.contacts || []).find((c) => c.address === row.senderAddress);
-        const senderName = (contact?.name || "").trim()
-          || engine.peekKnsAddressInfo?.(row.senderAddress)?.primaryDomain
-          || shortAddress(row.senderAddress);
-        recordGlobalNotification({
-          source: "broadcast",
-          id: `broadcast-${row.txId}`,
-          title: `${senderName} in #${row.channel}`,
-          body: `"${displayTextForMessage({ text: row.content }).slice(0, 90)}"`,
-          timestamp: Number(row.blockTime) || Date.now(),
-          targetKind: "broadcast",
-          targetId: row.channel,
-        });
-      }
-    },
+    // Rooms no longer feed the profile bell (iOS 2010124): the Public Chats tab counts them.
+    onIncomingBroadcast: () => {},
   });
 
   initPortfolio({
@@ -20494,6 +20520,17 @@ queueMicrotask(async () => {
     // CardDAV contacts sync: import {address, name} pairs read from the account's Nextcloud
     // address book into the desktop's contact list (Settings → Contacts).
     importNextcloudContacts,
+  });
+
+  initChessTournaments({
+    engine,
+    escapeHtml,
+    showToast: showCopyToast,
+    appendEngineLog,
+    isChattingBalanceZero,
+    showFundingGate: showFundingGateModal,
+    displayNameFor: (address) => mentionDisplayLabel(address),
+    avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
   });
 
   Calls.initCalls({
@@ -21388,16 +21425,18 @@ function openGroupChat(groupId) {
   if (groupChatScreen) groupChatScreen.hidden = false;
   appBody?.classList.add("conversation-open", "detail-active");
   document.body.classList.add("conversation-open");
-  // Fresh composer state per group open.
+  // Fresh composer state per group open - except the text, which is the group's draft (iOS
+  // 360e5d2): what was typed comes back when the group reopens.
   try {
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
-    if (groupComposerInput) { groupComposerInput.value = ""; autoGrowGroupComposer(); }
+    if (groupComposerInput) { groupComposerInput.value = readDraft(`group:${groupId}`); autoGrowGroupComposer(); }
   } catch { /* composer wiring not ready during boot */ }
   window.setTimeout(() => groupComposerInput?.focus(), 0);
   renderGroupList();
 }
 function closeGroupChat() {
   const wasOpen = Boolean(activeGroupId);
+  if (wasOpen && groupComposerInput) saveDraft(`group:${activeGroupId}`, groupComposerInput.value);
   if (groupSelectionMode) { groupSelectionMode = false; selectedGroupMessageKeys.clear(); updateGroupSelectionUi(); }
   try { cancelGroupVoice(); cancelGroupReply(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto(); } catch { /* not ready */ }
   activeGroupId = null;
@@ -23103,6 +23142,7 @@ groupComposer?.addEventListener("submit", async (event) => {
     });
   }
   groupComposerInput.value = "";
+  saveDraft(`group:${activeGroupId}`, "");
   autoGrowGroupComposer();
   groupDraftMentions.clear();
   cancelGroupReply();

@@ -1,0 +1,390 @@
+// Chess tournaments (CHESS_TOURNAMENTS.md, iOS 334cdd1 / 7dc84bb): the wire codec and the
+// rules as one pure reducer. Every device runs this over the same `#chess-arena` rows in the
+// same order and lands on the same bracket, boards, clocks and results - there is no referee.
+// A port of iOS ChessTournamentModels.swift + ChessTournamentEngine.swift; keep it byte for
+// byte, the indexer's leaderboard is a port of the same file.
+
+import { sha256 } from "@noble/hashes/sha2.js";
+import {
+  WHITE, BLACK, opposite, squareFromAlgebraic, algebraic, promotionFromLetter, promotionLetter,
+  initialBoard, pieceAt, applyMove, isLegalMove, normalizingPromotion, isCheckmate, isStalemate,
+  isInsufficientMaterial, squareEquals,
+} from "./chess.js";
+
+export const ARENA_CHANNEL = "chess-arena";
+export const PLAYER_COUNT = 8;
+export const CLOCK_MS = 5 * 60 * 1000;
+export const NAME_MAX_LENGTH = 40;
+export const CHAT_MAX_LENGTH = 280;
+
+// ---------------------------------------------------------------------------------------------
+// Public rooms and private tournaments (§2.1)
+// ---------------------------------------------------------------------------------------------
+
+const PUBLIC_ID_PREFIX = "public-";
+export function publicId(number) { return `${PUBLIC_ID_PREFIX}${number}`; }
+export function publicNumber(id) {
+  if (!String(id || "").startsWith(PUBLIC_ID_PREFIX)) return null;
+  const rest = String(id).slice(PUBLIC_ID_PREFIX.length);
+  if (!/^\d+$/.test(rest)) return null;
+  const n = Number(rest);
+  return n >= 1 ? n : null;
+}
+export function isPublicId(id) { return publicNumber(id) !== null; }
+
+/** The creator code for private tournaments. The chain carries only `k` = SHA-256(CODE:id),
+ *  so the code never appears on chain. Change it on every platform to rotate it. */
+export const PRIVATE_CREATE_CODE = "KACHAT-CHESS";
+
+export function createKey(code, id) {
+  const input = `${String(code || "").trim().toUpperCase()}:${id}`;
+  const digest = sha256(new TextEncoder().encode(input));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 24);
+}
+export function isValidCreateKey(key, id) {
+  if (!key) return false;
+  return key === createKey(PRIVATE_CREATE_CODE, id);
+}
+
+/** Private ids are short and shareable: eight lowercase letters and digits, no confusables. */
+export function newPrivateId() {
+  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wire protocol (§2)
+// ---------------------------------------------------------------------------------------------
+
+/** Keys sorted, slashes unescaped - the same bytes iOS's JSONEncoder emits. */
+export function encodeMessage(message) {
+  const clean = {};
+  for (const key of Object.keys(message).sort()) {
+    if (message[key] === null || message[key] === undefined) continue;
+    clean[key] = message[key];
+  }
+  return JSON.stringify(clean);
+}
+
+/** Cheap gate first (this runs over every arena row), then the decode. */
+export function decodeMessage(content) {
+  const text = String(content || "");
+  if (text.length > 2048 || !text.startsWith("{") || !text.includes('"chess_t"')) return null;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.type !== "chess_t" || parsed.v !== 1) return null;
+  if (typeof parsed.t !== "string" || !parsed.t || parsed.t.length > 64) return null;
+  if (typeof parsed.a !== "string") return null;
+  const str = (v) => (typeof v === "string" ? v : null);
+  return {
+    type: "chess_t", v: 1, t: parsed.t, a: parsed.a,
+    name: str(parsed.name), g: str(parsed.g),
+    n: Number.isInteger(parsed.n) ? parsed.n : null,
+    from: str(parsed.from), to: str(parsed.to), promo: str(parsed.promo),
+    text: str(parsed.text), k: str(parsed.k),
+  };
+}
+
+export const messages = {
+  create: (id, name, code) => ({ type: "chess_t", v: 1, t: id, a: "create", name: String(name).slice(0, NAME_MAX_LENGTH), k: createKey(code, id) }),
+  join: (id) => ({ type: "chess_t", v: 1, t: id, a: "join" }),
+  cancel: (id) => ({ type: "chess_t", v: 1, t: id, a: "cancel" }),
+  move: (id, game, ply, from, to, promo) => ({ type: "chess_t", v: 1, t: id, a: "move", g: game, n: ply, from, to, promo: promo || null }),
+  resign: (id, game) => ({ type: "chess_t", v: 1, t: id, a: "resign", g: game }),
+  claim: (id, game) => ({ type: "chess_t", v: 1, t: id, a: "claim", g: game }),
+  chat: (id, game, text) => ({ type: "chess_t", v: 1, t: id, a: "chat", g: game || "", text: String(text).slice(0, CHAT_MAX_LENGTH) }),
+};
+
+// ---------------------------------------------------------------------------------------------
+// Derived state (§3-4)
+// ---------------------------------------------------------------------------------------------
+
+export function tournamentStatus(t) {
+  if (t.cancelled) return "cancelled";
+  if (t.startedAt == null) return "open";
+  const final = t.games["3-0"];
+  if (final && final.winner) return "finished";
+  return "live";
+}
+export function champion(t) { return t.games["3-0"]?.winner || null; }
+export function seatsLeft(t) { return Math.max(0, PLAYER_COUNT - t.players.length); }
+export function isFull(t) { return t.players.length >= PLAYER_COUNT; }
+export function seedOf(t, address) { const i = t.players.indexOf(address); return i < 0 ? null : i + 1; }
+export function gamesInRound(t, round) {
+  const count = round === 1 ? 4 : round === 2 ? 2 : 1;
+  const out = [];
+  for (let i = 0; i < count; i += 1) { const g = t.games[`${round}-${i}`]; if (g) out.push(g); }
+  return out;
+}
+/** The game `address` is playing (or waiting to play) right now, if any. */
+export function currentGameFor(t, address) {
+  for (const round of [3, 2, 1]) {
+    const game = gamesInRound(t, round).find((g) => g.white === address || g.black === address);
+    if (game) return game;
+  }
+  return null;
+}
+
+export function playerToMove(game) { return game.board.sideToMove === WHITE ? game.white : game.black; }
+export function addressOf(game, color) { return color === WHITE ? game.white : game.black; }
+export function colorOf(game, address) {
+  if (address === game.white) return WHITE;
+  if (address === game.black) return BLACK;
+  return null;
+}
+export function usedMs(game, color) { return color === WHITE ? game.whiteUsedMs : game.blackUsedMs; }
+/** Remaining clock for `color` at chain time `now` (or wall time, for display). */
+export function remainingMs(game, color, now) {
+  let used = usedMs(game, color);
+  if (!game.winner && color === game.board.sideToMove) used += Math.max(0, now - game.lastEventAt);
+  return Math.max(0, CLOCK_MS - used);
+}
+
+/** Chain order: block time, then txid - the same on every device. */
+export function ordered(events) {
+  return [...events].sort((a, b) => {
+    if (a.blockTime !== b.blockTime) return a.blockTime < b.blockTime ? -1 : 1;
+    return a.txId < b.txId ? -1 : a.txId > b.txId ? 1 : 0;
+  });
+}
+
+export function reduce(events) {
+  const tournaments = {};
+  for (const event of ordered(events)) apply(event, tournaments);
+  return tournaments;
+}
+
+function newTournament({ id, name, creator, createdAt, createTxId }) {
+  return { id, name, creator, createdAt, createTxId, players: [], startedAt: null, cancelled: false, games: {}, chat: [], whiteCount: {} };
+}
+
+export function apply(event, tournaments) {
+  const m = event.message;
+  switch (m.a) {
+    case "create": {
+      // Public rooms are never created by message, and a private one needs the creator key.
+      if (tournaments[m.t] || isPublicId(m.t) || !isValidCreateKey(m.k, m.t)) return;
+      const trimmed = String(m.name || "").trim();
+      const t = newTournament({
+        id: m.t,
+        name: trimmed ? String(m.name).slice(0, NAME_MAX_LENGTH) : "Tournament",
+        creator: event.sender, createdAt: event.blockTime, createTxId: event.txId,
+      });
+      t.players = [event.sender];
+      tournaments[m.t] = t;
+      return;
+    }
+    case "join": {
+      const number = publicNumber(m.t);
+      if (!tournaments[m.t] && number !== null) {
+        // The first join opens a public room - but only the NEXT one in the sequence, once the
+        // previous is full, so everyone queues into the same room.
+        const previousFull = number === 1 || Boolean(tournaments[publicId(number - 1)] && isFull(tournaments[publicId(number - 1)]));
+        if (!previousFull) return;
+        tournaments[m.t] = newTournament({
+          id: m.t, name: `Public tournament #${number}`, creator: event.sender,
+          createdAt: event.blockTime, createTxId: event.txId,
+        });
+      }
+      const t = tournaments[m.t];
+      if (!t || tournamentStatus(t) !== "open" || t.players.includes(event.sender)) return;
+      t.players.push(event.sender);
+      if (t.players.length === PLAYER_COUNT) start(t, event.blockTime);
+      return;
+    }
+    case "cancel": {
+      const t = tournaments[m.t];
+      if (!t || tournamentStatus(t) !== "open" || isPublicId(t.id) || t.creator !== event.sender) return;
+      t.cancelled = true;
+      return;
+    }
+    case "move": {
+      const t = tournaments[m.t];
+      if (!t || tournamentStatus(t) !== "live" || !m.g) return;
+      const game = t.games[m.g];
+      if (!game || game.winner || playerToMove(game) !== event.sender) return;
+      if (m.n == null || m.n !== game.moves.length + 1) return;
+      const from = m.from ? squareFromAlgebraic(m.from) : null;
+      const to = m.to ? squareFromAlgebraic(m.to) : null;
+      if (!from || !to) return;
+      // A move after the mover's clock ran out is void: the opponent's claim decides.
+      const elapsed = Math.max(0, event.blockTime - game.lastEventAt);
+      const remaining = CLOCK_MS - usedMs(game, game.board.sideToMove);
+      if (!(elapsed < remaining)) return;
+      let mv = { from, to, promotion: promotionFromLetter(m.promo) };
+      mv = normalizingPromotion(game.board, mv);
+      const piece = pieceAt(game.board, from);
+      if (!isLegalMove(game.board, mv) || !piece) return;
+      const target = pieceAt(game.board, to);
+      const isEnPassant = piece.type === "pawn" && game.board.enPassantTarget && squareEquals(to, game.board.enPassantTarget) && !target;
+      const captured = target ? target.type : (isEnPassant ? "pawn" : null);
+      const mover = game.board.sideToMove;
+      game.board = applyMove(game.board, mv);
+      if (mover === WHITE) game.whiteUsedMs += elapsed; else game.blackUsedMs += elapsed;
+      game.lastEventAt = event.blockTime;
+      game.moves.push({
+        txId: event.txId, ply: m.n, color: mover, from, to, promotion: mv.promotion || null,
+        pieceType: piece.type, captured, blockTime: event.blockTime,
+        clockAfterMs: CLOCK_MS - usedMs(game, mover),
+      });
+      game.halfmoveClock = (piece.type === "pawn" || captured) ? 0 : game.halfmoveClock + 1;
+      const key = positionKey(game.board);
+      game.positionCounts[key] = (game.positionCounts[key] || 0) + 1;
+
+      if (isCheckmate(game.board)) finish(game, addressOf(game, mover), { kind: "checkmate" }, event.blockTime);
+      else if (isStalemate(game.board)) finishDraw(game, "stalemate", event.blockTime);
+      else if (isInsufficientMaterial(game.board)) finishDraw(game, "insufficient material", event.blockTime);
+      else if (game.halfmoveClock >= 100) finishDraw(game, "fifty-move rule", event.blockTime);
+      else if (game.positionCounts[key] >= 3) finishDraw(game, "threefold repetition", event.blockTime);
+      if (game.winner) advance(t, game);
+      return;
+    }
+    case "resign": {
+      const t = tournaments[m.t];
+      if (!t || tournamentStatus(t) !== "live" || !m.g) return;
+      const game = t.games[m.g];
+      if (!game || game.winner) return;
+      const color = colorOf(game, event.sender);
+      if (!color) return;
+      finish(game, addressOf(game, opposite(color)), { kind: "resignation" }, event.blockTime);
+      advance(t, game);
+      return;
+    }
+    case "claim": {
+      const t = tournaments[m.t];
+      if (!t || tournamentStatus(t) !== "live" || !m.g) return;
+      const game = t.games[m.g];
+      if (!game || game.winner) return;
+      const claimant = colorOf(game, event.sender);
+      if (!claimant || claimant === game.board.sideToMove) return;
+      // Valid only if, by chain time, the side to move had indeed run out.
+      const elapsed = Math.max(0, event.blockTime - game.lastEventAt);
+      const remaining = CLOCK_MS - usedMs(game, game.board.sideToMove);
+      if (!(elapsed >= remaining)) return;
+      if (game.board.sideToMove === WHITE) game.whiteUsedMs = CLOCK_MS; else game.blackUsedMs = CLOCK_MS;
+      finish(game, event.sender, { kind: "timeout" }, event.blockTime);
+      advance(t, game);
+      return;
+    }
+    case "chat": {
+      const t = tournaments[m.t];
+      if (!t) return;
+      const text = String(m.text || "").trim();
+      if (!text) return;
+      t.chat.push({ id: event.txId, sender: event.sender, text: text.slice(0, CHAT_MAX_LENGTH), blockTime: event.blockTime, game: m.g || "" });
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bracket
+// ---------------------------------------------------------------------------------------------
+
+function start(t, time) {
+  t.startedAt = time;
+  const seeds = t.players;
+  const pairs = [[0, 7], [1, 6], [2, 5], [3, 4]];
+  pairs.forEach(([a, b], index) => {
+    const white = seeds[a], black = seeds[b];
+    t.games[`1-${index}`] = makeGame(1, index, white, black, time);
+    t.whiteCount[white] = (t.whiteCount[white] || 0) + 1;
+  });
+}
+
+function advance(t, game) {
+  if (game.round >= 3 || game.endedAt == null) return;
+  const nextRound = game.round + 1;
+  const nextIndex = Math.floor(game.index / 2);
+  const a = t.games[`${game.round}-${nextIndex * 2}`]?.winner;
+  const b = t.games[`${game.round}-${nextIndex * 2 + 1}`]?.winner;
+  if (!a || !b || t.games[`${nextRound}-${nextIndex}`]) return;
+  // Colours: fewer whites so far gets white; tie -> lower seed.
+  const whitesA = t.whiteCount[a] || 0, whitesB = t.whiteCount[b] || 0;
+  const aIsWhite = whitesA !== whitesB ? whitesA < whitesB : (seedOf(t, a) ?? 99) < (seedOf(t, b) ?? 99);
+  const white = aIsWhite ? a : b, black = aIsWhite ? b : a;
+  t.games[`${nextRound}-${nextIndex}`] = makeGame(nextRound, nextIndex, white, black, game.endedAt);
+  t.whiteCount[white] = (t.whiteCount[white] || 0) + 1;
+}
+
+function makeGame(round, index, white, black, time) {
+  const board = initialBoard();
+  const game = {
+    id: `${round}-${index}`, round, index, white, black, startedAt: time, board, moves: [],
+    whiteUsedMs: 0, blackUsedMs: 0, lastEventAt: time, winner: null, outcome: null, endedAt: null,
+    positionCounts: {}, halfmoveClock: 0,
+  };
+  game.positionCounts[positionKey(board)] = 1;
+  return game;
+}
+
+function finish(game, winner, outcome, time) {
+  game.winner = winner;
+  game.outcome = outcome;
+  game.endedAt = time;
+}
+
+/** A draw on the board: the player with more clock left advances; equal -> black. */
+function finishDraw(game, reason, time) {
+  const whiteLeft = CLOCK_MS - game.whiteUsedMs;
+  const blackLeft = CLOCK_MS - game.blackUsedMs;
+  finish(game, whiteLeft > blackLeft ? game.white : game.black, { kind: "drawTiebreak", reason }, time);
+}
+
+/** Board, side to move, castling rights and en-passant square - what repetition compares. */
+export function positionKey(board) {
+  const letters = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
+  let key = "";
+  for (let rank = 0; rank < 8; rank += 1) {
+    for (let file = 0; file < 8; file += 1) {
+      const piece = board.squares[rank][file];
+      if (!piece) { key += "."; continue; }
+      const letter = letters[piece.type];
+      key += piece.color === WHITE ? letter.toUpperCase() : letter;
+    }
+  }
+  key += board.sideToMove === WHITE ? "w" : "b";
+  key += board.whiteCanCastleKingside ? "K" : "-";
+  key += board.whiteCanCastleQueenside ? "Q" : "-";
+  key += board.blackCanCastleKingside ? "k" : "-";
+  key += board.blackCanCastleQueenside ? "q" : "-";
+  key += board.enPassantTarget ? algebraic(board.enPassantTarget) : "-";
+  return key;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Leaderboard
+// ---------------------------------------------------------------------------------------------
+
+export function leaderboard(tournaments) {
+  const rows = {};
+  const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, tournamentsPlayed: 0, tournamentsWon: 0, lastPlayedAt: 0 });
+  for (const t of tournaments) {
+    if (t.startedAt == null) continue;
+    for (const player of t.players) {
+      const r = row(player);
+      r.tournamentsPlayed += 1;
+      r.lastPlayedAt = Math.max(r.lastPlayedAt, t.startedAt || 0);
+    }
+    for (const game of Object.values(t.games)) {
+      if (!game.winner) continue;
+      const loser = game.winner === game.white ? game.black : game.white;
+      const w = row(game.winner); w.wins += 1; w.lastPlayedAt = Math.max(w.lastPlayedAt, game.endedAt || 0);
+      const l = row(loser); l.losses += 1; l.lastPlayedAt = Math.max(l.lastPlayedAt, game.endedAt || 0);
+    }
+    const champ = champion(t);
+    if (champ) row(champ).tournamentsWon += 1;
+  }
+  return Object.values(rows).sort((a, b) => {
+    if (a.tournamentsWon !== b.tournamentsWon) return b.tournamentsWon - a.tournamentsWon;
+    if (a.wins !== b.wins) return b.wins - a.wins;
+    return b.lastPlayedAt - a.lastPlayedAt;
+  });
+}
+
+export { promotionLetter };

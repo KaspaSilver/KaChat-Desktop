@@ -249,6 +249,32 @@ export function isLegalMove(board, m) {
 }
 export function isCheckmate(board) { return isKingInCheck(board, board.sideToMove) && legalMoves(board).length === 0; }
 export function isStalemate(board) { return !isKingInCheck(board, board.sideToMove) && legalMoves(board).length === 0; }
+/** Neither side can force mate: K v K, K+minor v K, or K+B v K+B with both bishops on the same
+ *  colour (iOS ChessEngine.isInsufficientMaterial). Pawns, rooks and queens always keep hope. */
+export function isInsufficientMaterial(board) {
+  const whiteMinors = [];
+  const blackMinors = [];
+  for (let rank = 0; rank < 8; rank += 1) {
+    for (let file = 0; file < 8; file += 1) {
+      const piece = board.squares[rank][file];
+      if (!piece || piece.type === "king") continue;
+      if (piece.type === "bishop" || piece.type === "knight") {
+        (piece.color === WHITE ? whiteMinors : blackMinors).push({ file, rank, type: piece.type });
+      } else {
+        return false;
+      }
+    }
+  }
+  const w = whiteMinors.length, b = blackMinors.length;
+  if (w === 0 && b === 0) return true;
+  if ((w === 1 && b === 0) || (w === 0 && b === 1)) return true;
+  if (w === 1 && b === 1) {
+    if (whiteMinors[0].type !== "bishop" || blackMinors[0].type !== "bishop") return false;
+    const light = (s) => (s.file + s.rank) % 2 === 1;
+    return light(whiteMinors[0]) === light(blackMinors[0]);
+  }
+  return false;
+}
 
 // --- apply ---
 export function applyMove(board, m) {
