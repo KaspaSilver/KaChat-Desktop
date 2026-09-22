@@ -10256,3 +10256,7 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-composer { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
 .chess-t-composer .kaposts-reply-input { flex: 1; }
 .chess-t-error { color: #e99aa1; }
+.chess-t-segment { margin: 4px 0 6px; }
+.chess-t-wl { display: inline-flex; gap: 10px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.chess-t-wl .w { color: #6fd39a; }
+.chess-t-wl .l { color: #ff7b7b; }

@@ -42,6 +42,7 @@ let autoOpenedGameId = null;
 let selectedSquare = null;
 let pendingPromotion = null;   // { from, to }
 let busy = false;              // a join/create in flight
+let lobbyMode = "duel";        // "duel" | "tournament" - the lobby's two tabs (iOS 10f3926)
 const drafts = {};             // chat drafts per screen, kept while the screen is up
 
 const me = () => deps?.engine?.address || "";
@@ -129,8 +130,9 @@ function reduceArena() {
   if (queuedPublicRoomId && my) {
     const room = tournaments[queuedPublicRoomId];
     if (room && T.isFull(room) && !room.players.includes(my)) {
+      const wasDuel = T.duelNumber(queuedPublicRoomId) !== null;
       queuedPublicRoomId = null;
-      joinPublicQueue().catch(() => {});
+      (wasDuel ? joinPublicDuelQueue() : joinPublicQueue()).catch(() => {});
     } else if (room?.players.includes(my)) {
       queuedPublicRoomId = null;
     }
@@ -155,11 +157,17 @@ function currentPublicRoomId() {
   while (tournaments[T.publicId(number)] && T.isFull(tournaments[T.publicId(number)])) number += 1;
   return T.publicId(number);
 }
-function myPrivateTournaments() {
+/** The public 1v1 room taking players right now. */
+function currentDuelRoomId() {
+  let number = 1;
+  while (tournaments[T.duelId(number)] && T.isFull(tournaments[T.duelId(number)])) number += 1;
+  return T.duelId(number);
+}
+function myPrivate(duel) {
   const my = me();
   if (!my) return [];
   return Object.values(tournaments)
-    .filter((t) => !T.isPublicId(t.id) && ["open", "live"].includes(T.tournamentStatus(t)) && t.players.includes(my))
+    .filter((t) => !T.isPublicId(t.id) && T.isDuel(t) === duel && ["open", "live"].includes(T.tournamentStatus(t)) && t.players.includes(my))
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 function liveTournaments() {
@@ -221,6 +229,30 @@ async function joinPublicQueue() {
   await send(T.messages.join(id));
 }
 
+/** Joins the public 1v1 room taking players now; same race handling as the tournaments. */
+async function joinPublicDuelQueue() {
+  if (!me() || myActiveTournament()) return;
+  const id = currentDuelRoomId();
+  if (tournaments[id]?.players.includes(me())) return;
+  queuedPublicRoomId = id;
+  await send(T.messages.join(id));
+}
+
+/** A private 1v1 for a friend: no creator code, an eight-character code to share. */
+async function createPrivateDuel() {
+  const name = await promptDialog({
+    title: "Create a private 1v1",
+    message: "You get a code to share with the person you want to play. The game starts when they join. Creating it is one transaction.",
+    label: "Name", initial: "", confirmLabel: "Create", maxLength: T.NAME_MAX_LENGTH,
+  });
+  if (name === null || name === undefined) return;
+  const id = T.newPrivateId();
+  busy = true; render();
+  const ok = await send(T.messages.createDuel(id, String(name).trim() || "1v1"));
+  busy = false;
+  if (ok) openTournament(id); else render();
+}
+
 async function createPrivate() {
   const name = await promptDialog({
     title: "Create a private tournament",
@@ -243,7 +275,7 @@ async function createPrivate() {
 }
 
 async function joinPrivate() {
-  const raw = await promptDialog({ title: "Join a private tournament", message: "The eight-character code the creator shared. Joining is one transaction.", label: "Code", initial: "", confirmLabel: "Join", maxLength: 64 });
+  const raw = await promptDialog({ title: "Join with a code", message: "The eight-character code the creator shared. Joining is one transaction.", label: "Code", initial: "", confirmLabel: "Join", maxLength: 64 });
   if (!raw) return;
   const id = String(raw).trim().toLowerCase();
   const t = tournaments[id];
@@ -333,7 +365,10 @@ function clockText(ms, { tenths = false } = {}) {
   if (tenths && seconds < 10) return `0:${String(seconds).padStart(2, "0")}.${Math.floor((total % 1000) / 100)}`;
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
-function roundName(round) { return round === 3 ? "Final" : round === 2 ? "Semifinal" : "Round 1"; }
+function roundName(round, t = null) {
+  if (t && T.isDuel(t)) return "1v1";
+  return round === 3 ? "Final" : round === 2 ? "Semifinal" : "Round 1";
+}
 function outcomeText(game, { short = false } = {}) {
   if (!game.winner || !game.outcome) return "";
   const who = nameFor(game.winner);
@@ -391,47 +426,73 @@ function rowHtml({ icon, title, subtitle, action = "", attrs = "" }) {
     </button>`;
 }
 
-function renderLobby() {
+const ICON_TWO = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M2.5 19c.6-3.5 2.7-5.5 5.5-5.5s4.9 2 5.5 5.5"/><circle cx="16.5" cy="9" r="2.6"/><path d="M14.8 13.7c2.8.1 4.9 2 5.5 5.3"/></svg>`;
+
+/** The one public room taking players: its seats, and Join - or where you already are. */
+function publicRoomCardHtml({ room, id, title, capacity, joinAttr }) {
   const my = me();
-  const roomId = currentPublicRoomId();
-  const room = tournaments[roomId] || null;
-  const number = T.publicNumber(roomId) || 1;
   const count = room?.players.length || 0;
   const inThisRoom = Boolean(my && room?.players.includes(my));
   const mine = myActiveTournament();
   const busyElsewhere = Boolean(mine) && !inThisRoom;
   let cta;
-  if (inThisRoom) cta = `<button class="secondary-button chess-t-cta" type="button" data-chess-t-open="${esc(roomId)}">You're in. Waiting for ${T.seatsLeft(room)} more…</button>`;
+  if (inThisRoom) cta = `<button class="secondary-button chess-t-cta" type="button" data-chess-t-open="${esc(id)}">You're in. Waiting for ${T.seatsLeft(room)} more…</button>`;
   else if (busyElsewhere) cta = `<button class="secondary-button chess-t-cta" type="button" data-chess-t-open="${esc(mine.id)}">${T.tournamentStatus(mine) === "open" ? "You're waiting in" : "You're playing in"} ${esc(mine.name)}</button>`;
-  else cta = `<button class="primary-button chess-t-cta" type="button" data-chess-t-join-public ${busy ? "disabled" : ""}>${busy ? "Joining…" : "Join (one transaction)"}</button>`;
-  const seats = Array.from({ length: T.PLAYER_COUNT }, (_, i) => `<span class="chess-t-seat${i < count ? " taken" : ""}"></span>`).join("");
-  const privates = myPrivateTournaments();
-  const live = liveTournaments().filter((t) => T.isPublicId(t.id) && t.id !== mine?.id);
-  const done = finishedTournaments().filter((t) => T.isPublicId(t.id)).slice(0, 20);
+  else cta = `<button class="primary-button chess-t-cta" type="button" ${joinAttr} ${busy ? "disabled" : ""}>${busy ? "Joining…" : "Join (one transaction)"}</button>`;
+  const seats = Array.from({ length: capacity }, (_, i) => `<span class="chess-t-seat${i < count ? " taken" : ""}"></span>`).join("");
+  return `
+    <div class="chess-t-card">
+      <div class="chess-t-card-top">
+        <span class="chess-t-row-icon">${capacity === 2 ? ICON_TWO : ICON_PEOPLE}</span>
+        <span class="chess-t-row-main"><strong>${esc(title)}</strong><small>${count} of ${capacity} players waiting</small></span>
+      </div>
+      <div class="chess-t-seats">${seats}</div>
+      ${cta}
+    </div>`;
+}
+
+function tournamentRowHtml(t, action) {
+  const icon = T.tournamentStatus(t) === "finished" ? ICON_TROPHY : T.isPublicId(t.id) ? (T.isDuel(t) ? ICON_TWO : ICON_PEOPLE) : ICON_LOCK;
+  return rowHtml({ icon, title: t.name, subtitle: `${t.players.length} of ${t.capacity} players${T.isPublicId(t.id) ? "" : ` · code ${t.id}`}`, action, attrs: `data-chess-t-open="${esc(t.id)}"` });
+}
+
+function renderLobby() {
+  const mine = myActiveTournament();
+  const duel = lobbyMode === "duel";
+  const roomId = duel ? currentDuelRoomId() : currentPublicRoomId();
+  const room = tournaments[roomId] || null;
+  const number = (duel ? T.duelNumber(roomId) : T.publicNumber(roomId)) || 1;
+  const privates = myPrivate(duel);
+  const live = liveTournaments().filter((t) => T.isDuel(t) === duel && T.isPublicId(t.id) && t.id !== mine?.id);
+  const done = finishedTournaments().filter((t) => T.isDuel(t) === duel && T.isPublicId(t.id)).slice(0, 20);
+  const wonBy = (t) => (T.champion(t) ? `Won by ${nameFor(T.champion(t))}` : "Finished");
   return `
     ${headerHtml("Chess", { trailing: `<button class="kaposts-icon-button" type="button" data-chess-t-leaderboard aria-label="Leaderboard" title="Leaderboard">${ICON_TROPHY}</button>` })}
     <div class="chess-t-body">
-      <p class="screen-kicker">Public</p>
-      <div class="chess-t-card">
-        <div class="chess-t-card-top">
-          <span class="chess-t-row-icon">${ICON_PEOPLE}</span>
-          <span class="chess-t-row-main"><strong>Public tournament #${number}</strong><small>${count} of ${T.PLAYER_COUNT} players waiting</small></span>
-        </div>
-        <div class="chess-t-seats">${seats}</div>
-        ${cta}
+      <div class="settings-segmented chess-t-segment" role="tablist">
+        <button class="settings-segmented-option${duel ? " active" : ""}" type="button" role="tab" aria-selected="${duel}" data-chess-t-mode="duel">1v1</button>
+        <button class="settings-segmented-option${duel ? "" : " active"}" type="button" role="tab" aria-selected="${!duel}" data-chess-t-mode="tournament">Tournaments</button>
       </div>
-      <p class="field-hint">There is always a public room waiting for players. When it fills, it starts and the next one opens. Eight players, single elimination, five minutes a side. Every move is a Kaspa transaction (about 0.0017 KAS each).</p>
+      <p class="screen-kicker">Public</p>
+      ${publicRoomCardHtml({ room, id: roomId, title: duel ? `Public 1v1 #${number}` : `Public tournament #${number}`, capacity: duel ? 2 : T.PLAYER_COUNT, joinAttr: duel ? "data-chess-t-join-duel" : "data-chess-t-join-public" })}
+      <p class="field-hint">${duel
+        ? "Join and you are paired with the next person who joins. When a room fills, the game starts and the next room opens. Five minutes a side; every move is a Kaspa transaction (about 0.0017 KAS each). Games here count on the leaderboard."
+        : "There is always a public room waiting for players. When it fills, it starts and the next one opens. Eight players, single elimination, five minutes a side. Every move is a Kaspa transaction (about 0.0017 KAS each)."}</p>
 
       <p class="screen-kicker">Private</p>
       <div class="chess-t-list">
-        ${privates.map((t) => rowHtml({ icon: ICON_LOCK, title: t.name, subtitle: `${t.players.length} of ${T.PLAYER_COUNT} players · code ${t.id}`, action: T.tournamentStatus(t) === "open" ? `${T.seatsLeft(t)} seat${T.seatsLeft(t) === 1 ? "" : "s"} left` : "In play", attrs: `data-chess-t-open="${esc(t.id)}"` })).join("")}
+        ${privates.map((t) => tournamentRowHtml(t, T.tournamentStatus(t) === "open" ? (duel ? "Waiting" : `${T.seatsLeft(t)} seat${T.seatsLeft(t) === 1 ? "" : "s"} left`) : "In play")).join("")}
         ${rowHtml({ icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M15 8l2 2M18 5l2 2"/></svg>`, title: "Join with a code", subtitle: "The eight-character code a friend shared.", attrs: "data-chess-t-join-private" })}
-        ${rowHtml({ icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>`, title: "Create a private tournament", subtitle: "Needs the creator code.", attrs: "data-chess-t-create" })}
+        ${duel
+          ? rowHtml({ icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>`, title: "Create a private 1v1", subtitle: "Share its code with the person you want to play.", attrs: "data-chess-t-create-duel" })
+          : rowHtml({ icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>`, title: "Create a private tournament", subtitle: "Needs the creator code.", attrs: "data-chess-t-create" })}
       </div>
-      <p class="field-hint">A private tournament is for friends: the creator shares its eight-character code. Creating one needs the creator code.</p>
+      <p class="field-hint">${duel
+        ? "Play a friend: create a 1v1, share its code. Private 1v1s count on the leaderboard too."
+        : "A private tournament is for friends: the creator shares its eight-character code. Creating one needs the creator code."}</p>
 
-      ${live.length ? `<p class="screen-kicker">In play</p><div class="chess-t-list">${live.map((t) => rowHtml({ icon: ICON_PEOPLE, title: t.name, subtitle: `${t.players.length} of ${T.PLAYER_COUNT} players`, action: "Watch", attrs: `data-chess-t-open="${esc(t.id)}"` })).join("")}</div>` : ""}
-      ${done.length ? `<p class="screen-kicker">Finished</p><div class="chess-t-list">${done.map((t) => rowHtml({ icon: ICON_TROPHY, title: t.name, subtitle: `${t.players.length} of ${T.PLAYER_COUNT} players`, action: T.champion(t) ? `Won by ${nameFor(T.champion(t))}` : "Finished", attrs: `data-chess-t-open="${esc(t.id)}"` })).join("")}</div>` : ""}
+      ${live.length ? `<p class="screen-kicker">In play</p><div class="chess-t-list">${live.map((t) => tournamentRowHtml(t, "Watch")).join("")}</div>` : ""}
+      ${done.length ? `<p class="screen-kicker">Finished</p><div class="chess-t-list">${done.map((t) => tournamentRowHtml(t, wonBy(t))).join("")}</div>` : ""}
       ${lastError ? `<p class="field-hint chess-t-error">${esc(lastError)}</p>` : ""}
     </div>`;
 }
@@ -447,8 +508,8 @@ function renderLeaderboard() {
           <div class="chess-t-row static">
             <span class="chess-t-rank">${i + 1}</span>
             ${avatarFor(r.address)}
-            <span class="chess-t-row-main"><strong>${esc(r.address === my ? "You" : nameFor(r.address))}</strong><small>${r.wins}W · ${r.losses}L · ${r.tournamentsPlayed} played</small></span>
-            ${r.tournamentsWon > 0 ? `<span class="chess-t-titles">${ICON_TROPHY}${r.tournamentsWon}</span>` : ""}
+            <span class="chess-t-row-main"><strong>${esc(r.address === my ? "You" : nameFor(r.address))}</strong></span>
+            <span class="chess-t-wl"><b class="w">${r.wins} W</b><b class="l">${r.losses} L</b></span>
           </div>`).join("")}
       </div>
     </div>`;
@@ -464,32 +525,32 @@ function renderTournament() {
   let statusHtml = "";
   if (status === "open") {
     const left = T.seatsLeft(t);
-    statusHtml += `<p class="chess-t-status">Waiting for ${left} more player${left === 1 ? "" : "s"}. It starts by itself when the eighth joins.</p>`;
+    statusHtml += `<p class="chess-t-status">${T.isDuel(t) ? "Waiting for your opponent. The game starts by itself when they join." : `Waiting for ${left} more player${left === 1 ? "" : "s"}. It starts by itself when the eighth joins.`}</p>`;
     if (my && !t.players.includes(my)) statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-join="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Joining…" : "Join (one transaction)"}</button>`;
     else if (t.creator === my && !T.isPublicId(t.id)) statusHtml += `<button class="secondary-button chess-t-cta danger" type="button" data-chess-t-cancel="${esc(t.id)}">Cancel tournament</button>`;
     if (!T.isPublicId(t.id)) statusHtml += `<div class="chess-t-code"><span>Code: <b>${esc(t.id)}</b></span><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button></div>`;
   } else if (status === "live") {
     const game = my ? T.currentGameFor(t, my) : null;
     if (game) {
-      if (game.winner) statusHtml += `<p class="chess-t-status">${game.winner === my ? `You won ${roundName(game.round).toLowerCase()}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
+      if (game.winner) statusHtml += `<p class="chess-t-status">${game.winner === my ? `You won ${T.isDuel(t) ? "the game" : roundName(game.round).toLowerCase()}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
       else statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-game="${esc(game.id)}">Go to your game</button>`;
     } else statusHtml += `<p class="chess-t-status">In play. Open any game to watch it live.</p>`;
   } else if (status === "finished") {
     const champ = T.champion(t);
-    if (champ) statusHtml += `<p class="chess-t-status chess-t-champion">${ICON_TROPHY} ${esc(nameFor(champ))} won the tournament</p>`;
+    if (champ) statusHtml += `<p class="chess-t-status chess-t-champion">${ICON_TROPHY} ${esc(nameFor(champ))} won${T.isDuel(t) ? "" : " the tournament"}</p>`;
   } else statusHtml += `<p class="chess-t-status">Cancelled by the creator.</p>`;
 
   let bracketHtml = "";
   if (status === "open") {
-    bracketHtml = `<p class="screen-kicker">Players (${t.players.length} of ${T.PLAYER_COUNT})</p><div class="chess-t-list">
+    bracketHtml = `<p class="screen-kicker">Players (${t.players.length} of ${t.capacity})</p><div class="chess-t-list">
       ${t.players.map((address, i) => `<div class="chess-t-row static">${avatarFor(address)}<span class="chess-t-row-main"><strong>${esc(nameFor(address))}</strong></span><span class="chess-t-row-action muted">Seed ${i + 1}</span></div>`).join("")}
       ${Array.from({ length: T.seatsLeft(t) }, () => `<div class="chess-t-row static"><span class="chess-t-open-seat"></span><span class="chess-t-row-main muted">Open seat</span></div>`).join("")}
     </div>`;
   } else if (status !== "cancelled") {
-    for (const round of [1, 2, 3]) {
+    for (let round = 1; round <= T.roundsOf(t); round += 1) {
       const games = T.gamesInRound(t, round);
       if (!games.length) continue;
-      bracketHtml += `<p class="screen-kicker">${round === 3 ? "Final" : round === 2 ? "Semifinals" : "Round 1"}</p><div class="chess-t-list">${games.map((game) => `
+      bracketHtml += `<p class="screen-kicker">${T.isDuel(t) ? "Game" : round === 3 ? "Final" : round === 2 ? "Semifinals" : "Round 1"}</p><div class="chess-t-list">${games.map((game) => `
         <button class="chess-t-row" type="button" data-chess-t-game="${esc(game.id)}">
           <span class="chess-t-row-main">
             <strong><span class="${game.winner === game.white ? "won" : ""}">${esc(nameFor(game.white))}</span> <em>vs</em> <span class="${game.winner === game.black ? "won" : ""}">${esc(nameFor(game.black))}</span></strong>
@@ -578,7 +639,7 @@ function renderGame() {
 
   const lines = t.chat.filter((l) => l.game === game.id).slice(-80);
   return `
-    ${headerHtml(roundName(game.round), { back: true })}
+    ${headerHtml(roundName(game.round, t), { back: true })}
     <div class="chess-t-body">
       ${clockRow(flipped ? Chess.WHITE : Chess.BLACK)}
       <div class="chess-board-wrap"><div class="chess-board chess-t-board">${board}</div>${promo}</div>
@@ -675,6 +736,15 @@ function onClick(event) {
     joinPublicQueue().catch(() => {}).finally(() => { busy = false; render(); });
     return;
   }
+  const mode = event.target.closest("[data-chess-t-mode]");
+  if (mode) { lobbyMode = mode.dataset.chessTMode; render(); return; }
+  if (event.target.closest("[data-chess-t-join-duel]")) {
+    if (busy) return;
+    busy = true; render();
+    joinPublicDuelQueue().catch(() => {}).finally(() => { busy = false; render(); });
+    return;
+  }
+  if (event.target.closest("[data-chess-t-create-duel]")) { createPrivateDuel().catch(() => {}); return; }
   if (event.target.closest("[data-chess-t-join-private]")) { joinPrivate().catch(() => {}); return; }
   if (event.target.closest("[data-chess-t-create]")) { createPrivate().catch(() => {}); return; }
   const join = event.target.closest("[data-chess-t-join]");

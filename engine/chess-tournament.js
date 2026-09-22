@@ -22,15 +22,21 @@ export const CHAT_MAX_LENGTH = 280;
 // ---------------------------------------------------------------------------------------------
 
 const PUBLIC_ID_PREFIX = "public-";
-export function publicId(number) { return `${PUBLIC_ID_PREFIX}${number}`; }
-export function publicNumber(id) {
-  if (!String(id || "").startsWith(PUBLIC_ID_PREFIX)) return null;
-  const rest = String(id).slice(PUBLIC_ID_PREFIX.length);
+/** Public 1v1 rooms: the same queue, two seats: `duel-1`, `duel-2`, ... (iOS 10f3926). */
+const DUEL_ID_PREFIX = "duel-";
+function numberOf(id, prefix) {
+  if (!String(id || "").startsWith(prefix)) return null;
+  const rest = String(id).slice(prefix.length);
   if (!/^\d+$/.test(rest)) return null;
   const n = Number(rest);
   return n >= 1 ? n : null;
 }
-export function isPublicId(id) { return publicNumber(id) !== null; }
+export function publicId(number) { return `${PUBLIC_ID_PREFIX}${number}`; }
+export function duelId(number) { return `${DUEL_ID_PREFIX}${number}`; }
+export function publicNumber(id) { return numberOf(id, PUBLIC_ID_PREFIX); }
+export function duelNumber(id) { return numberOf(id, DUEL_ID_PREFIX); }
+/** Public = a numbered room of either kind. */
+export function isPublicId(id) { return publicNumber(id) !== null || duelNumber(id) !== null; }
 
 /** The creator code for private tournaments. The chain carries only `k` = SHA-256(CODE:id),
  *  so the code never appears on chain. Change it on every platform to rotate it. */
@@ -83,13 +89,16 @@ export function decodeMessage(content) {
     type: "chess_t", v: 1, t: parsed.t, a: parsed.a,
     name: str(parsed.name), g: str(parsed.g),
     n: Number.isInteger(parsed.n) ? parsed.n : null,
+    p: Number.isInteger(parsed.p) ? parsed.p : null,
     from: str(parsed.from), to: str(parsed.to), promo: str(parsed.promo),
     text: str(parsed.text), k: str(parsed.k),
   };
 }
 
 export const messages = {
-  create: (id, name, code) => ({ type: "chess_t", v: 1, t: id, a: "create", name: String(name).slice(0, NAME_MAX_LENGTH), k: createKey(code, id) }),
+  create: (id, name, code) => ({ type: "chess_t", v: 1, t: id, a: "create", name: String(name).slice(0, NAME_MAX_LENGTH), k: createKey(code, id), p: PLAYER_COUNT }),
+  /** A private 1v1 needs no creator code: anyone can open one for a friend. */
+  createDuel: (id, name) => ({ type: "chess_t", v: 1, t: id, a: "create", name: String(name).slice(0, NAME_MAX_LENGTH), p: 2 }),
   join: (id) => ({ type: "chess_t", v: 1, t: id, a: "join" }),
   cancel: (id) => ({ type: "chess_t", v: 1, t: id, a: "cancel" }),
   move: (id, game, ply, from, to, promo) => ({ type: "chess_t", v: 1, t: id, a: "move", g: game, n: ply, from, to, promo: promo || null }),
@@ -102,19 +111,22 @@ export const messages = {
 // Derived state (§3-4)
 // ---------------------------------------------------------------------------------------------
 
+export function isDuel(t) { return t.capacity === 2; }
+export function roundsOf(t) { return isDuel(t) ? 1 : 3; }
+export function finalGameId(t) { return `${roundsOf(t)}-0`; }
 export function tournamentStatus(t) {
   if (t.cancelled) return "cancelled";
   if (t.startedAt == null) return "open";
-  const final = t.games["3-0"];
+  const final = t.games[finalGameId(t)];
   if (final && final.winner) return "finished";
   return "live";
 }
-export function champion(t) { return t.games["3-0"]?.winner || null; }
-export function seatsLeft(t) { return Math.max(0, PLAYER_COUNT - t.players.length); }
-export function isFull(t) { return t.players.length >= PLAYER_COUNT; }
+export function champion(t) { return t.games[finalGameId(t)]?.winner || null; }
+export function seatsLeft(t) { return Math.max(0, t.capacity - t.players.length); }
+export function isFull(t) { return t.players.length >= t.capacity; }
 export function seedOf(t, address) { const i = t.players.indexOf(address); return i < 0 ? null : i + 1; }
 export function gamesInRound(t, round) {
-  const count = round === 1 ? 4 : round === 2 ? 2 : 1;
+  const count = isDuel(t) ? 1 : round === 1 ? 4 : round === 2 ? 2 : 1;
   const out = [];
   for (let i = 0; i < count; i += 1) { const g = t.games[`${round}-${i}`]; if (g) out.push(g); }
   return out;
@@ -157,42 +169,48 @@ export function reduce(events) {
   return tournaments;
 }
 
-function newTournament({ id, name, creator, createdAt, createTxId }) {
-  return { id, name, creator, createdAt, createTxId, players: [], startedAt: null, cancelled: false, games: {}, chat: [], whiteCount: {} };
+function newTournament({ id, name, creator, createdAt, createTxId, capacity }) {
+  return { id, name, creator, createdAt, createTxId, capacity, players: [], startedAt: null, cancelled: false, games: {}, chat: [], whiteCount: {} };
 }
 
 export function apply(event, tournaments) {
   const m = event.message;
   switch (m.a) {
     case "create": {
-      // Public rooms are never created by message, and a private one needs the creator key.
-      if (tournaments[m.t] || isPublicId(m.t) || !isValidCreateKey(m.k, m.t)) return;
+      // Public rooms are never created by message. A private tournament (8) needs the creator
+      // key; a private 1v1 (2) is open to anyone.
+      const capacity = m.p === 2 ? 2 : PLAYER_COUNT;
+      if (tournaments[m.t] || isPublicId(m.t) || !(capacity === 2 || isValidCreateKey(m.k, m.t))) return;
       const trimmed = String(m.name || "").trim();
       const t = newTournament({
         id: m.t,
-        name: trimmed ? String(m.name).slice(0, NAME_MAX_LENGTH) : "Tournament",
-        creator: event.sender, createdAt: event.blockTime, createTxId: event.txId,
+        name: trimmed ? trimmed.slice(0, NAME_MAX_LENGTH) : (capacity === 2 ? "1v1" : "Tournament"),
+        creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity,
       });
       t.players = [event.sender];
       tournaments[m.t] = t;
       return;
     }
     case "join": {
-      const number = publicNumber(m.t);
-      if (!tournaments[m.t] && number !== null) {
+      if (!tournaments[m.t]) {
         // The first join opens a public room - but only the NEXT one in the sequence, once the
         // previous is full, so everyone queues into the same room.
-        const previousFull = number === 1 || Boolean(tournaments[publicId(number - 1)] && isFull(tournaments[publicId(number - 1)]));
-        if (!previousFull) return;
-        tournaments[m.t] = newTournament({
-          id: m.t, name: `Public tournament #${number}`, creator: event.sender,
-          createdAt: event.blockTime, createTxId: event.txId,
-        });
+        const number = publicNumber(m.t);
+        const duel = duelNumber(m.t);
+        if (number !== null) {
+          const previousFull = number === 1 || Boolean(tournaments[publicId(number - 1)] && isFull(tournaments[publicId(number - 1)]));
+          if (!previousFull) return;
+          tournaments[m.t] = newTournament({ id: m.t, name: `Public tournament #${number}`, creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity: PLAYER_COUNT });
+        } else if (duel !== null) {
+          const previousFull = duel === 1 || Boolean(tournaments[duelId(duel - 1)] && isFull(tournaments[duelId(duel - 1)]));
+          if (!previousFull) return;
+          tournaments[m.t] = newTournament({ id: m.t, name: `Public 1v1 #${duel}`, creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity: 2 });
+        }
       }
       const t = tournaments[m.t];
       if (!t || tournamentStatus(t) !== "open" || t.players.includes(event.sender)) return;
       t.players.push(event.sender);
-      if (t.players.length === PLAYER_COUNT) start(t, event.blockTime);
+      if (t.players.length === t.capacity) start(t, event.blockTime);
       return;
     }
     case "cancel": {
@@ -289,7 +307,7 @@ export function apply(event, tournaments) {
 function start(t, time) {
   t.startedAt = time;
   const seeds = t.players;
-  const pairs = [[0, 7], [1, 6], [2, 5], [3, 4]];
+  const pairs = isDuel(t) ? [[0, 1]] : [[0, 7], [1, 6], [2, 5], [3, 4]];
   pairs.forEach(([a, b], index) => {
     const white = seeds[a], black = seeds[b];
     t.games[`1-${index}`] = makeGame(1, index, white, black, time);
@@ -298,7 +316,7 @@ function start(t, time) {
 }
 
 function advance(t, game) {
-  if (game.round >= 3 || game.endedAt == null) return;
+  if (game.round >= roundsOf(t) || game.endedAt == null) return;
   const nextRound = game.round + 1;
   const nextIndex = Math.floor(game.index / 2);
   const a = t.games[`${game.round}-${nextIndex * 2}`]?.winner;
@@ -380,9 +398,10 @@ export function leaderboard(tournaments) {
     const champ = champion(t);
     if (champ) row(champ).tournamentsWon += 1;
   }
+  // Wins and losses are the leaderboard: most wins first, fewest losses breaking ties.
   return Object.values(rows).sort((a, b) => {
-    if (a.tournamentsWon !== b.tournamentsWon) return b.tournamentsWon - a.tournamentsWon;
     if (a.wins !== b.wins) return b.wins - a.wins;
+    if (a.losses !== b.losses) return a.losses - b.losses;
     return b.lastPlayedAt - a.lastPlayedAt;
   });
 }
