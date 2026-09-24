@@ -764,7 +764,12 @@ function checkWaitingRoom() {
   if (status === "live" || status === "finished") {
     // Filled: hold for the match-found countdown (chain time, the same on every device), then
     // straight onto the board (the bracket is a tap away from it).
-    if (matchFound(t)) { const el = screenEl.querySelector("[data-chess-t-matchfound]"); if (el) el.textContent = String(matchFoundSecondsLeft(t)); return; }
+    if (matchFound(t)) {
+      const el = screenEl.querySelector("[data-chess-t-matchfound]");
+      if (el) el.textContent = String(matchFoundSecondsLeft(t));
+      else render(); // the room filled since the last paint: show the countdown
+      return;
+    }
     const game = T.currentGameFor(t, my);
     if (game && !game.winner) { autoOpenedGameId = game.id; openGame(t.id, game.id); }
     else openTournament(t.id);
@@ -1179,10 +1184,13 @@ function goBack() {
 
 /** The player's game came into being: open it (once per game). */
 function autoOpenMyGameIfNeeded() {
-  if (!active || !["tournament", "game", "waiting"].includes(view.name)) return;
+  // The waiting room hands over itself, after the match-found countdown (checkWaitingRoom).
+  if (!active || !["tournament", "game"].includes(view.name)) return;
   const t = tournaments[view.tournamentId];
   const my = me();
   if (!t || !my) return;
+  // A room that just filled shows the countdown first, on every device together.
+  if (matchFound(t)) { if (view.name !== "waiting") openWaitingRoom(t.id); return; }
   const game = T.currentGameFor(t, my);
   if (!game || game.winner || autoOpenedGameId === game.id) return;
   autoOpenedGameId = game.id;
