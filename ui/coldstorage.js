@@ -933,7 +933,7 @@ function addressTxRowsHtml(entry) {
           ${tx.block_time ? `<span class="manage-address-row-time">${deps.escapeHtml(new Date(Number(tx.block_time)).toLocaleString())}</span>` : ""}
         </span>
         <span class="manage-address-row-trailing">
-          ${info ? `<span class="manage-address-row-amount ${dirClass}">${outgoing ? "-" : "+"}${fmtKasExact(Number(info.amountSompi))} KAS</span>` : ""}
+          ${info ? `<span class="manage-address-row-amounts"><span class="manage-address-row-amount ${dirClass}">${outgoing ? "-" : "+"}${fmtKasExact(Number(info.amountSompi))} KAS</span>${deps.transactionFeeText?.(tx) ? `<span class="manage-address-row-fee">${deps.escapeHtml(deps.transactionFeeText(tx))}</span>` : ""}</span>` : ""}
           <span class="manage-address-row-open" aria-hidden="true">${EXTERNAL_ICON}</span>
         </span>
       </button>`;

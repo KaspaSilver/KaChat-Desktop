@@ -16,6 +16,20 @@ export const PLAYER_COUNT = 8;
 export const CLOCK_MS = 5 * 60 * 1000;
 export const NAME_MAX_LENGTH = 40;
 export const CHAT_MAX_LENGTH = 280;
+/** Propagation is nobody's thinking time: ten seconds off every move's charge. */
+export const MOVE_DELAY_MS = 10 * 1000;
+/** A side's first move (ply 1 and 2) has 25 s before its clock runs - the gate on a
+ *  simultaneous join, so nobody loses time before their screen has shown the board. */
+export const FIRST_MOVE_GRACE_MS = 25 * 1000;
+/** The allowances apply to games started at or after this instant (2026-09-24 00:00 UTC);
+ *  earlier games have none. A rule change never reaches back (iOS 2641f2e). */
+export const ALLOWANCE_FROM_MS = 1_790_208_000_000;
+/** A seat in a waiting room lasts five minutes from the join. */
+export const SEAT_TTL_MS = 5 * 60 * 1000;
+export function allowanceMs(ply, startedAt) {
+  if (startedAt < ALLOWANCE_FROM_MS) return 0;
+  return ply <= 2 ? FIRST_MOVE_GRACE_MS : MOVE_DELAY_MS;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Public rooms and private tournaments (§2.1)
@@ -100,6 +114,7 @@ export const messages = {
   /** A private 1v1 needs no creator code: anyone can open one for a friend. */
   createDuel: (id, name) => ({ type: "chess_t", v: 1, t: id, a: "create", name: String(name).slice(0, NAME_MAX_LENGTH), p: 2 }),
   join: (id) => ({ type: "chess_t", v: 1, t: id, a: "join" }),
+  leave: (id) => ({ type: "chess_t", v: 1, t: id, a: "leave" }),
   cancel: (id) => ({ type: "chess_t", v: 1, t: id, a: "cancel" }),
   move: (id, game, ply, from, to, promo) => ({ type: "chess_t", v: 1, t: id, a: "move", g: game, n: ply, from, to, promo: promo || null }),
   resign: (id, game) => ({ type: "chess_t", v: 1, t: id, a: "resign", g: game }),
@@ -148,11 +163,34 @@ export function colorOf(game, address) {
   return null;
 }
 export function usedMs(game, color) { return color === WHITE ? game.whiteUsedMs : game.blackUsedMs; }
+/** What the side to move is charged for `elapsed` ms since the last event: the time past this
+ *  ply's allowance. */
+export function chargedMs(game, elapsed) {
+  return Math.max(0, elapsed - allowanceMs(game.moves.length + 1, game.startedAt));
+}
 /** Remaining clock for `color` at chain time `now` (or wall time, for display). */
 export function remainingMs(game, color, now) {
   let used = usedMs(game, color);
-  if (!game.winner && color === game.board.sideToMove) used += Math.max(0, now - game.lastEventAt);
+  if (!game.winner && color === game.board.sideToMove) used += chargedMs(game, now - game.lastEventAt);
   return Math.max(0, CLOCK_MS - used);
+}
+/** The allowance still unspent on the current move ("clock starts in 0:12"); zero once the
+ *  clock is running. */
+export function allowanceLeftMs(game, now) {
+  if (game.winner) return 0;
+  return Math.max(0, allowanceMs(game.moves.length + 1, game.startedAt) - Math.max(0, now - game.lastEventAt));
+}
+/** The players whose seats are still good at `now`: while a room waits, a seat older than
+ *  SEAT_TTL_MS has expired. Once the room has started every player stays. */
+export function seatedPlayers(t, now) {
+  if (tournamentStatus(t) !== "open") return t.players;
+  return t.players.filter((p) => (t.joinedAt[p] ?? t.createdAt) + SEAT_TTL_MS > now);
+}
+export function isSeated(t, address, now) { return seatedPlayers(t, now).includes(address); }
+/** When `address`'s seat runs out, while waiting. */
+export function seatExpiry(t, address) {
+  if (tournamentStatus(t) !== "open" || !t.players.includes(address)) return null;
+  return (t.joinedAt[address] ?? t.createdAt) + SEAT_TTL_MS;
 }
 
 /** Chain order: block time, then txid - the same on every device. */
@@ -170,7 +208,16 @@ export function reduce(events) {
 }
 
 function newTournament({ id, name, creator, createdAt, createTxId, capacity }) {
-  return { id, name, creator, createdAt, createTxId, capacity, players: [], startedAt: null, cancelled: false, games: {}, chat: [], whiteCount: {} };
+  return { id, name, creator, createdAt, createTxId, capacity, players: [], joinedAt: {}, startedAt: null, cancelled: false, games: {}, chat: [], whiteCount: {} };
+}
+
+/** Seats that ran out while the room waited are given back - judged at a join's block time,
+ *  the same on every device. */
+function expireSeats(t, time) {
+  const kept = t.players.filter((p) => (t.joinedAt[p] ?? t.createdAt) + SEAT_TTL_MS > time);
+  if (kept.length === t.players.length) return;
+  for (const gone of t.players) if (!kept.includes(gone)) delete t.joinedAt[gone];
+  t.players = kept;
 }
 
 export function apply(event, tournaments) {
@@ -188,29 +235,43 @@ export function apply(event, tournaments) {
         creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity,
       });
       t.players = [event.sender];
+      t.joinedAt[event.sender] = event.blockTime;
       tournaments[m.t] = t;
       return;
     }
     case "join": {
       if (!tournaments[m.t]) {
-        // The first join opens a public room - but only the NEXT one in the sequence, once the
-        // previous is full, so everyone queues into the same room.
+        // The first join opens a public room - whichever number it names. Which room is
+        // "current" is a client choice (the lowest open room; see the UI module), so a device
+        // missing the early rooms still agrees with the others (iOS d2ab780).
         const number = publicNumber(m.t);
         const duel = duelNumber(m.t);
         if (number !== null) {
-          const previousFull = number === 1 || Boolean(tournaments[publicId(number - 1)] && isFull(tournaments[publicId(number - 1)]));
-          if (!previousFull) return;
           tournaments[m.t] = newTournament({ id: m.t, name: `Public tournament #${number}`, creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity: PLAYER_COUNT });
         } else if (duel !== null) {
-          const previousFull = duel === 1 || Boolean(tournaments[duelId(duel - 1)] && isFull(tournaments[duelId(duel - 1)]));
-          if (!previousFull) return;
           tournaments[m.t] = newTournament({ id: m.t, name: `Public 1v1 #${duel}`, creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity: 2 });
         }
       }
       const t = tournaments[m.t];
-      if (!t || tournamentStatus(t) !== "open" || t.players.includes(event.sender)) return;
+      if (!t || tournamentStatus(t) !== "open") return;
+      // Seats that ran out while the room waited are given back first, so a room can never
+      // fill with players who left long ago, and a returning player takes a fresh seat.
+      expireSeats(t, event.blockTime);
+      if (t.players.includes(event.sender)) return;
       t.players.push(event.sender);
+      t.joinedAt[event.sender] = event.blockTime;
       if (t.players.length === t.capacity) start(t, event.blockTime);
+      return;
+    }
+    case "leave": {
+      // A seat given back while the room is still waiting. Once it has started there is no
+      // leaving - only resigning the game.
+      const t = tournaments[m.t];
+      if (!t || tournamentStatus(t) !== "open") return;
+      const index = t.players.indexOf(event.sender);
+      if (index < 0) return;
+      t.players.splice(index, 1);
+      delete t.joinedAt[event.sender];
       return;
     }
     case "cancel": {
@@ -228,8 +289,9 @@ export function apply(event, tournaments) {
       const from = m.from ? squareFromAlgebraic(m.from) : null;
       const to = m.to ? squareFromAlgebraic(m.to) : null;
       if (!from || !to) return;
-      // A move after the mover's clock ran out is void: the opponent's claim decides.
-      const elapsed = Math.max(0, event.blockTime - game.lastEventAt);
+      // A move after the mover's clock ran out is void: the opponent's claim decides. Charged
+      // past the move's allowance (25 s for a side's first move, ten seconds after).
+      const elapsed = chargedMs(game, event.blockTime - game.lastEventAt);
       const remaining = CLOCK_MS - usedMs(game, game.board.sideToMove);
       if (!(elapsed < remaining)) return;
       let mv = { from, to, promotion: promotionFromLetter(m.promo) };
@@ -278,8 +340,9 @@ export function apply(event, tournaments) {
       if (!game || game.winner) return;
       const claimant = colorOf(game, event.sender);
       if (!claimant || claimant === game.board.sideToMove) return;
-      // Valid only if, by chain time, the side to move had indeed run out.
-      const elapsed = Math.max(0, event.blockTime - game.lastEventAt);
+      // Valid only if, by chain time, the side to move had indeed run out - past the same
+      // allowance a move gets.
+      const elapsed = chargedMs(game, event.blockTime - game.lastEventAt);
       const remaining = CLOCK_MS - usedMs(game, game.board.sideToMove);
       if (!(elapsed >= remaining)) return;
       if (game.board.sideToMove === WHITE) game.whiteUsedMs = CLOCK_MS; else game.blackUsedMs = CLOCK_MS;
@@ -379,29 +442,55 @@ export function positionKey(board) {
 // Leaderboard
 // ---------------------------------------------------------------------------------------------
 
+/** One player's record. Two boards read it: 1v1 (duel games, public and private) and
+ *  Tournaments (tournaments won, then the games inside them). `wins`/`losses` are the totals
+ *  over both, the figures the indexer's /chess/leaderboard serves. */
 export function leaderboard(tournaments) {
   const rows = {};
-  const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, tournamentsPlayed: 0, tournamentsWon: 0, lastPlayedAt: 0 });
+  const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, duelWins: 0, duelLosses: 0, tournamentGameWins: 0, tournamentGameLosses: 0, tournamentsPlayed: 0, tournamentsWon: 0, lastPlayedAt: 0 });
   for (const t of tournaments) {
     if (t.startedAt == null) continue;
-    for (const player of t.players) {
-      const r = row(player);
-      r.tournamentsPlayed += 1;
-      r.lastPlayedAt = Math.max(r.lastPlayedAt, t.startedAt || 0);
+    const duel = isDuel(t);
+    // A 1v1 is not a tournament: it counts on the 1v1 board only.
+    if (!duel) {
+      for (const player of t.players) {
+        const r = row(player);
+        r.tournamentsPlayed += 1;
+        r.lastPlayedAt = Math.max(r.lastPlayedAt, t.startedAt || 0);
+      }
     }
     for (const game of Object.values(t.games)) {
       if (!game.winner) continue;
       const loser = game.winner === game.white ? game.black : game.white;
-      const w = row(game.winner); w.wins += 1; w.lastPlayedAt = Math.max(w.lastPlayedAt, game.endedAt || 0);
-      const l = row(loser); l.losses += 1; l.lastPlayedAt = Math.max(l.lastPlayedAt, game.endedAt || 0);
+      const w = row(game.winner); w.wins += 1; if (duel) w.duelWins += 1; else w.tournamentGameWins += 1; w.lastPlayedAt = Math.max(w.lastPlayedAt, game.endedAt || 0);
+      const l = row(loser); l.losses += 1; if (duel) l.duelLosses += 1; else l.tournamentGameLosses += 1; l.lastPlayedAt = Math.max(l.lastPlayedAt, game.endedAt || 0);
     }
-    const champ = champion(t);
+    const champ = duel ? null : champion(t);
     if (champ) row(champ).tournamentsWon += 1;
   }
   // Wins and losses are the leaderboard: most wins first, fewest losses breaking ties.
   return Object.values(rows).sort((a, b) => {
     if (a.wins !== b.wins) return b.wins - a.wins;
     if (a.losses !== b.losses) return a.losses - b.losses;
+    return b.lastPlayedAt - a.lastPlayedAt;
+  });
+}
+
+/** The 1v1 board: players with a 1v1 game behind them, most wins first, fewest losses. */
+export function duelLeaderboard(rows) {
+  return rows.filter((r) => r.duelWins + r.duelLosses > 0).sort((a, b) => {
+    if (a.duelWins !== b.duelWins) return b.duelWins - a.duelWins;
+    if (a.duelLosses !== b.duelLosses) return a.duelLosses - b.duelLosses;
+    return b.lastPlayedAt - a.lastPlayedAt;
+  });
+}
+
+/** The tournament board: tournaments won first, then the record inside them. */
+export function tournamentLeaderboard(rows) {
+  return rows.filter((r) => r.tournamentsPlayed > 0).sort((a, b) => {
+    if (a.tournamentsWon !== b.tournamentsWon) return b.tournamentsWon - a.tournamentsWon;
+    if (a.tournamentGameWins !== b.tournamentGameWins) return b.tournamentGameWins - a.tournamentGameWins;
+    if (a.tournamentGameLosses !== b.tournamentGameLosses) return a.tournamentGameLosses - b.tournamentGameLosses;
     return b.lastPlayedAt - a.lastPlayedAt;
   });
 }

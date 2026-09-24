@@ -7599,7 +7599,7 @@ const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profil
 const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
 const HUB_DEFAULT = ["kaposts", "swaps", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Tournaments" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -8279,7 +8279,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 38;
+const APP_BUILD = 39;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -9016,6 +9016,23 @@ function closeManageAddressScreen() {
   if (manageAddressScreen) manageAddressScreen.hidden = true;
 }
 
+// The network fee a history transaction paid: inputs minus outputs, known only when the API
+// resolved every input's amount (resolve_previous_outpoints=light); null for a coinbase or
+// an unresolved input. On a received transaction it is what the sender paid (iOS 9839906).
+function transactionFeeText(tx) {
+  const inputs = tx?.inputs || [];
+  if (!inputs.length) return null;
+  let totalIn = 0n;
+  for (const input of inputs) {
+    if (input?.previous_outpoint_amount == null) return null;
+    totalIn += BigInt(input.previous_outpoint_amount);
+  }
+  const totalOut = (tx.outputs || []).reduce((sum, o) => sum + BigInt(o?.amount || 0), 0n);
+  if (totalIn < totalOut) return null;
+  const kas = Number(totalIn - totalOut) / 1e8;
+  return `Fee ${kas >= 0.001 ? kas.toFixed(4) : kas.toFixed(8)} KAS`;
+}
+
 function manageAddressTxDirection(tx, address) {
   const inputs = tx.inputs || [];
   const outputs = tx.outputs || [];
@@ -9084,7 +9101,16 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
         const amountEl = document.createElement("span");
         amountEl.className = `manage-address-row-amount ${info.isOutgoing ? "outgoing" : "incoming"}`;
         amountEl.textContent = `${info.isOutgoing ? "-" : "+"}${sompiToKasDisplay(info.amountSompi)} KAS`;
-        row.append(amountEl);
+        const feeText = transactionFeeText(tx);
+        if (feeText) {
+          const wrap = document.createElement("span");
+          wrap.className = "manage-address-row-amounts";
+          const feeEl = document.createElement("span");
+          feeEl.className = "manage-address-row-fee";
+          feeEl.textContent = feeText;
+          wrap.append(amountEl, feeEl);
+          row.append(wrap);
+        } else row.append(amountEl);
       }
       const trailing = document.createElement("span");
       trailing.className = "manage-address-row-trailing";
@@ -20430,6 +20456,7 @@ queueMicrotask(async () => {
     showToast: showCopyToast, appendEngineLog,
     explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
     txDirectionForAddress: manageAddressTxDirection,
+    transactionFeeText,
     // Fiat toggle in the send flow: live KAS price in the user's selected currency,
     // plus the same symbol/format helpers the manage-address send screen uses.
     fetchKasPrice: () => fetchKasPrice(selectedCurrency),
@@ -20529,8 +20556,15 @@ queueMicrotask(async () => {
     appendEngineLog,
     isChattingBalanceZero,
     showFundingGate: showFundingGateModal,
-    displayNameFor: (address) => mentionDisplayLabel(address),
+    // Contact name, then KNS domain, then the shortened address - the app's rule, and the same
+    // for the player themselves (never "You"; iOS 30d0cca).
+    displayNameFor: (address) => {
+      const contact = (state.contacts || []).find((c) => c.address === address);
+      if (contact) return displayNameForAddress(contact);
+      return knsDomainForAddress(address) || engine.peekKnsAddressInfo?.(address)?.primaryDomain || shortAddress(address);
+    },
     avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
+    estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
   });
 
   Calls.initCalls({

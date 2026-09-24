@@ -237,6 +237,10 @@
                 <span class="broadcast-room-chip-icon" aria-hidden="true">#</span>
                 <span class="broadcast-room-chip-name"><strong data-broadcast-room-title>#channel</strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></span>
               </button>
+              <!-- The room's bell: notifications on or off, asked on a sheet (iOS eff5c09). -->
+              <button class="kaposts-icon-button broadcast-room-bell" type="button" data-broadcast-room-bell aria-label="Notifications" title="Notifications">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2ZM10 21h4"/></svg>
+              </button>
               <!-- Rooms you made only: what "public" means without an indexer (iOS ac34790). -->
               <button class="kaposts-icon-button broadcast-own-room-about" type="button" data-broadcast-own-room-about aria-label="About this room" title="About this room" hidden>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.6v.2"/></svg>
@@ -835,7 +839,7 @@
       <button class="sidebar-tab" type="button" data-app-tab="chess">
         <!-- A rook and a knight (iOS ChessTabIcon: SF Symbols has no chess pieces). -->
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 21h7M4.5 18.5h6M5 18.5V10M10 18.5V10M4 10h7l-1-2H5l-1 2ZM4.5 5v3h6V5M6.5 5v2M8.5 5v2"/><path d="M13 21h8M13.5 18.5h7M15 18.5c0-3 .5-5.5 2.5-7.5 1.2-1.2 2-2.2 2-3.5 0-1-.5-2-1.5-2.5L17 6l-1.5 1.5c-1 .5-1.7 1.6-1.7 2.8 0 .8.3 1.4.8 1.8l1.6-.3"/></svg></span>
-        <span>Chess</span>
+        <span>Chess Online</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="hub">
         <span class="sidebar-tab-icon" aria-hidden="true"><img class="sidebar-tab-logo" src="./ui/assets/kaspa-logo.png" alt="" width="24" height="24" /></span>

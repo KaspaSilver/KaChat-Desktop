@@ -1168,6 +1168,7 @@ function renderRoom() {
   // A room you made yourself says what "public" does and does not mean; curated rooms are indexed.
   const aboutButton = document.querySelector("[data-broadcast-own-room-about]");
   if (aboutButton) aboutButton.hidden = isIndexedBroadcastChannel(activeChannel);
+  document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !notifyByChannel[activeChannel]);
   if (composerInput) composerInput.placeholder = `Message #${activeChannel}`;
   // No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
   // stated once, beside the Popular header in the channel list.
@@ -1871,6 +1872,32 @@ export function resetBroadcastsForAccount() {
 
 /** Called when the Broadcasts tab stops being the visible tab. The open room stops
  *  polling AND stops counting as wanted; always-listen rooms keep their block scan. */
+// Closed rooms are swept from the indexer while the app is on screen (iOS 3c14b46): every
+// listed indexed room with its bell on that is not open asks for its newest rows every 20 s -
+// one small request per room, sequential. The block scan stays the fast path and misses blocks
+// around a stream reconnect; the open room keeps its own 8 s poll. New live rows get the same
+// ping the scan gives; a room's first pass is history, not news, and stays quiet.
+const SWEEP_MS = 20_000;
+let sweepTimer = null;
+let sweepRunning = false;
+function startClosedRoomSweep() {
+  if (sweepTimer) return;
+  sweepTimer = window.setInterval(() => { sweepClosedRooms().catch(() => {}); }, SWEEP_MS);
+}
+async function sweepClosedRooms() {
+  if (sweepRunning || document.hidden || !deps || !hasBroadcastIndexer()) return;
+  sweepRunning = true;
+  try {
+    for (const name of listedChannels()) {
+      if (name === activeChannel || !notifyByChannel[name] || !isIndexedBroadcastChannel(name)) continue;
+      try {
+        const result = await fetchBroadcastHistory({ channel: name, limit: 50, baseUrl: indexerOverrideFor(name) || null });
+        if (mergeMessages(name, result.messages) > 0) renderChannelList();
+      } catch { /* the next sweep tries again */ }
+    }
+  } finally { sweepRunning = false; }
+}
+
 export function stopBroadcastPolling() {
   stopPolling();
   if (!deps) return;
@@ -1924,6 +1951,7 @@ export function initBroadcasts(dependencies) {
   // Live block scanning: rows arrive in the indexer's row shape and go through the same
   // mergeMessages dedupe/retention/render path, so a message seen by both paths is stored once.
   deps.engine.onBroadcastBlockHits?.(handleBroadcastBlockHits);
+  startClosedRoomSweep();
   // Always-listen rooms must start scanning at launch, before the tab is ever opened.
   syncScanWanted();
 
@@ -2025,6 +2053,30 @@ export function initBroadcasts(dependencies) {
 
   document.querySelector("[data-broadcast-back]")?.addEventListener("click", closeRoom);
   document.querySelector("[data-public-chats-settings]")?.addEventListener("click", openPublicChatsSettings);
+  // The bell in the room's top-right: on or off, on a sheet (iOS eff5c09).
+  document.querySelector("[data-broadcast-room-bell]")?.addEventListener("click", async () => {
+    const name = activeChannel;
+    if (!name) return;
+    const on = Boolean(notifyByChannel[name]);
+    const choice = await chooseDialog({
+      title: `Notifications for #${name}`,
+      message: on ? "New messages here notify you." : "New messages here do not notify you.",
+      options: on
+        ? [{ id: "off", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you." }]
+        : [{ id: "on", title: "Turn Notifications On", subtitle: isIndexedBroadcastChannel(name) ? "Notifies you of new messages in this room." : "Listens and notifies while the app is open." }],
+    });
+    if (!choice) return;
+    if (choice === "on") {
+      if (isIndexedBroadcastChannel(name) && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
+      notifyByChannel[name] = true;
+      deps.ensureNotificationPermission?.();
+    } else delete notifyByChannel[name];
+    saveNotify();
+    syncScanWanted();
+    renderChannelList();
+    document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !notifyByChannel[name]);
+    deps.showToast?.(choice === "on" ? "Notifications are on for this room" : "Notifications are off for this room");
+  });
   document.querySelector("[data-broadcast-own-room-about]")?.addEventListener("click", () => {
     alertDialog({
       title: "About this room",
