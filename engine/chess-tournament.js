@@ -485,11 +485,12 @@ export function leaderboard(tournaments) {
   });
 }
 
-/** The 1v1 board: players with a 1v1 game behind them, most wins first, fewest losses. */
+/** The 1v1 board: every game played here - 1v1 rooms and the games inside tournaments alike
+ *  (iOS 1d32335) - most wins first, fewest losses breaking ties. */
 export function duelLeaderboard(rows) {
-  return rows.filter((r) => r.duelWins + r.duelLosses > 0).sort((a, b) => {
-    if (a.duelWins !== b.duelWins) return b.duelWins - a.duelWins;
-    if (a.duelLosses !== b.duelLosses) return a.duelLosses - b.duelLosses;
+  return rows.filter((r) => r.wins + r.losses > 0).sort((a, b) => {
+    if (a.wins !== b.wins) return b.wins - a.wins;
+    if (a.losses !== b.losses) return a.losses - b.losses;
     return b.lastPlayedAt - a.lastPlayedAt;
   });
 }

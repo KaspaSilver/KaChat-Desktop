@@ -675,11 +675,9 @@ function renderFinishedTab() {
   const done = finishedTournaments().filter((t) => T.isDuel(t) === duel && T.isPublicId(t.id)).slice(0, 100);
   if (!done.length) return `<p class="screen-kicker">${duel ? "Finished 1v1 games" : "Finished tournaments"}</p><p class="field-hint">${duel ? "No finished 1v1 games yet." : "No finished tournaments yet."}</p>`;
   if (duel) return `<p class="screen-kicker">Finished 1v1 games</p><div class="chess-t-list">${done.map((t) => { const g = Object.values(t.games)[0]; return g ? finishedGameRowHtml(g, t) : ""; }).join("")}</div>`;
-  return done.map((t) => {
-    const games = Object.values(t.games).sort((a, b) => b.round - a.round || b.index - a.index);
-    const champ = T.champion(t);
-    return `<p class="screen-kicker">${esc(t.name)}${champ ? ` · won by ${esc(nameFor(champ))}` : ""}</p><div class="chess-t-list">${games.map((g) => finishedGameRowHtml(g, t)).join("")}</div>`;
-  }).join("");
+  // Finished tournaments as a list; each opens its bracket - the champion at the end of it,
+  // every game a click away to see the board as it was left.
+  return `<p class="screen-kicker">Finished tournaments</p><div class="chess-t-list">${done.map((t) => tournamentRowHtml(t, T.champion(t) ? `Won by ${nameFor(T.champion(t))}` : "Finished")).join("")}</div>`;
 }
 
 /** One kind's leaderboard (iOS 784208f). */
@@ -697,7 +695,7 @@ function renderLeaderboardRows() {
           ${avatarFor(r.address)}
           <span class="chess-t-row-main"><strong>${esc(nameFor(r.address))}</strong></span>
           ${duel
-            ? `<span class="chess-t-wl"><b class="w">${r.duelWins} W</b><b class="l">${r.duelLosses} L</b></span>`
+            ? `<span class="chess-t-wl"><b class="w">${r.wins} W</b><b class="l">${r.losses} L</b></span>`
             : `<span class="chess-t-wl"><span class="chess-t-titles">${ICON_TROPHY}${r.tournamentsWon}</span><b class="l">${r.tournamentsLost} L</b></span>`}
         </button>`).join("")}
     </div>`;
@@ -1022,7 +1020,7 @@ function rememberRecord() {
   const game = t?.games[view.gameId];
   const my = me();
   if (!t || !game || !my || game.winner) return;
-  recordBeforeEnd = leaderboardRows.find((r) => r.address === my) || { address: my, duelWins: 0, duelLosses: 0, tournamentsWon: 0, tournamentsLost: 0 };
+  recordBeforeEnd = leaderboardRows.find((r) => r.address === my) || { address: my, wins: 0, losses: 0, tournamentsWon: 0, tournamentsLost: 0 };
 }
 
 /** The game just ended: the burst over the board for a couple of seconds, then - for the two
@@ -1069,8 +1067,8 @@ function renderResult() {
   const rank = board.findIndex((r) => r.address === my);
   const iWon = game.winner === my;
   // 1v1: games won and lost. Tournaments: whole tournaments won (champion) and lost (knocked out).
-  const wins = (r) => (duel ? r?.duelWins || 0 : r?.tournamentsWon || 0);
-  const losses = (r) => (duel ? r?.duelLosses || 0 : r?.tournamentsLost || 0);
+  const wins = (r) => (duel ? r?.wins || 0 : r?.tournamentsWon || 0);
+  const losses = (r) => (duel ? r?.losses || 0 : r?.tournamentsLost || 0);
   const shownRow = resultRevealed ? mine : recordBeforeEnd;
   const w = wins(shownRow), l = losses(shownRow);
   const rate = w + l === 0 ? "-" : `${Math.round((w / (w + l)) * 100)}%`;
@@ -1104,7 +1102,7 @@ function renderResult() {
             ${avatarFor(r.address)}
             <span class="chess-t-row-main"><strong>${esc(nameFor(r.address))}</strong></span>
             ${duel
-              ? `<span class="chess-t-wl"><b class="w">${r.duelWins} W</b><b class="l">${r.duelLosses} L</b></span>`
+              ? `<span class="chess-t-wl"><b class="w">${r.wins} W</b><b class="l">${r.losses} L</b></span>`
               : `<span class="chess-t-wl"><span class="chess-t-titles">${ICON_TROPHY}${r.tournamentsWon}</span><b class="l">${r.tournamentsLost} L</b></span>`}
           </button>`).join("")}
       </div>

@@ -10398,3 +10398,5 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-br-champion b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chess-t-br-tbd { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; }
 button.chess-t-row { cursor: pointer; }
+/* The scores keep their width; a long name gives way (iOS 1d32335). */
+.chess-t-wl { flex: 0 0 auto; white-space: nowrap; }
