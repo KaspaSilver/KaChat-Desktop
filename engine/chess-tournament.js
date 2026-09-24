@@ -24,9 +24,17 @@ export const FIRST_MOVE_GRACE_MS = 25 * 1000;
 /** The allowances apply to games started at or after this instant (2026-09-24 00:00 UTC);
  *  earlier games have none. A rule change never reaches back (iOS 2641f2e). */
 export const ALLOWANCE_FROM_MS = 1_790_208_000_000;
+/** From 2026-09-24 20:00 UTC: 10 s on every move, the first included - the match-found
+ *  countdown covers the start, so no separate grace holds the clock (iOS 11ac2b7). */
+export const ALLOWANCE_V2_FROM_MS = 1_790_280_000_000;
+/** "Match found": the ten seconds between the game's start block time and the board opening
+ *  on every device together - equal to the move delay, so white's first move is charged from
+ *  the moment the board is up and not before. */
+export const MATCH_FOUND_DELAY_MS = 10 * 1000;
 /** A seat in a waiting room lasts five minutes from the join. */
 export const SEAT_TTL_MS = 5 * 60 * 1000;
 export function allowanceMs(ply, startedAt) {
+  if (startedAt >= ALLOWANCE_V2_FROM_MS) return MOVE_DELAY_MS;
   if (startedAt < ALLOWANCE_FROM_MS) return 0;
   return ply <= 2 ? FIRST_MOVE_GRACE_MS : MOVE_DELAY_MS;
 }
@@ -447,7 +455,7 @@ export function positionKey(board) {
  *  over both, the figures the indexer's /chess/leaderboard serves. */
 export function leaderboard(tournaments) {
   const rows = {};
-  const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, duelWins: 0, duelLosses: 0, tournamentGameWins: 0, tournamentGameLosses: 0, tournamentsPlayed: 0, tournamentsWon: 0, lastPlayedAt: 0 });
+  const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, duelWins: 0, duelLosses: 0, tournamentGameWins: 0, tournamentGameLosses: 0, tournamentsPlayed: 0, tournamentsWon: 0, tournamentsLost: 0, lastPlayedAt: 0 });
   for (const t of tournaments) {
     if (t.startedAt == null) continue;
     const duel = isDuel(t);
@@ -463,7 +471,8 @@ export function leaderboard(tournaments) {
       if (!game.winner) continue;
       const loser = game.winner === game.white ? game.black : game.white;
       const w = row(game.winner); w.wins += 1; if (duel) w.duelWins += 1; else w.tournamentGameWins += 1; w.lastPlayedAt = Math.max(w.lastPlayedAt, game.endedAt || 0);
-      const l = row(loser); l.losses += 1; if (duel) l.duelLosses += 1; else l.tournamentGameLosses += 1; l.lastPlayedAt = Math.max(l.lastPlayedAt, game.endedAt || 0);
+      // Knocked out: a lost game inside a tournament is one tournament loss, counted the moment it happens.
+      const l = row(loser); l.losses += 1; if (duel) l.duelLosses += 1; else { l.tournamentGameLosses += 1; l.tournamentsLost += 1; } l.lastPlayedAt = Math.max(l.lastPlayedAt, game.endedAt || 0);
     }
     const champ = duel ? null : champion(t);
     if (champ) row(champ).tournamentsWon += 1;
@@ -485,12 +494,12 @@ export function duelLeaderboard(rows) {
   });
 }
 
-/** The tournament board: tournaments won first, then the record inside them. */
+/** The tournament board: whole tournaments only - won (champion) and lost (knocked out). Most
+ *  won first, fewest lost breaking ties. Games inside a tournament are not a score. */
 export function tournamentLeaderboard(rows) {
-  return rows.filter((r) => r.tournamentsPlayed > 0).sort((a, b) => {
+  return rows.filter((r) => r.tournamentsWon + r.tournamentsLost > 0).sort((a, b) => {
     if (a.tournamentsWon !== b.tournamentsWon) return b.tournamentsWon - a.tournamentsWon;
-    if (a.tournamentGameWins !== b.tournamentGameWins) return b.tournamentGameWins - a.tournamentGameWins;
-    if (a.tournamentGameLosses !== b.tournamentGameLosses) return a.tournamentGameLosses - b.tournamentGameLosses;
+    if (a.tournamentsLost !== b.tournamentsLost) return a.tournamentsLost - b.tournamentsLost;
     return b.lastPlayedAt - a.lastPlayedAt;
   });
 }

@@ -1200,21 +1200,15 @@ function quoteCardHeadHtml(quoted) {
   return `<span class="kaposts-quote-head">
     ${posterAvatarHtml(quoted.posterAddress)}
     <strong>${deps.escapeHtml(posterName(quoted.posterAddress))}</strong>
-    ${quoted.timestamp ? `<span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(quoted.timestamp))}</span>` : ""}
   </span>`;
 }
 
 // The poll under the question (iOS 3b1aecf): options as buttons until you vote or the poll
 // closes, then bars with percentages, your choice marked, the vote count and the time left.
-// Bottom right of the card (iOS 2402689): the clock time for a post from today, month + day +
-// time for this year, the year too beyond that - in the user's locale and 12/24-hour setting.
+// When the post was made (iOS b31ff59): the full date and time, in its own row under the
+// actions, in the browser's locale. The name line carries only Follow / Following.
 function postTimestamp(timestampMs) {
-  const date = new Date(Number(timestampMs) || Date.now());
-  const now = new Date();
-  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
-  if (sameDay) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  if (date.getFullYear() === now.getFullYear()) return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  return date.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return new Date(Number(timestampMs) || Date.now()).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 function pollCardHtml(post) {
@@ -1252,7 +1246,6 @@ function pollCardHtml(post) {
 
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false, openByRemote = false, truncates = false } = {}) {
   const name = posterName(post.posterAddress);
-  const time = formatRelativeTime(post.timestamp);
   const isMine = post.posterAddress === deps.engine.address;
   const isFollowing = prefs.following.includes(post.posterAddress);
   const isLong = post.text.length > 280 || (post.text.match(/\n/g) || []).length >= 8;
@@ -1295,7 +1288,6 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
       <div class="kaposts-cell-main">
         <div class="kaposts-cell-head">
           <strong class="kaposts-cell-name" data-kaposts-profile="${post.id}">${deps.escapeHtml(name)}</strong>
-          <span class="kaposts-cell-time">${deps.escapeHtml(time)}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span>
           ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${post.id}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
           <button class="kaposts-action kaposts-more" type="button" data-kaposts-more="${post.id}" aria-label="More">
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
@@ -1306,7 +1298,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
-        <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}</span>${deliveryHtml}</div>
+        ${deliveryHtml}
         <div class="kaposts-actions">
           <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${post.id}"` : `data-kaposts-open="${post.id}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}
@@ -1324,6 +1316,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
           ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${post.id}" title="Copy share link">${ICONS.share}</button>` : ""}
           ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${post.id}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span></button>`}
         </div>
+        <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span></div>
         ${!inThread && isThreadRootPost(post) ? `<button class="kaposts-view-thread" type="button" data-kaposts-open="${post.id}">⤷ View thread</button>` : ""}
       </div>
     </article>`;

@@ -8337,7 +8337,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 44;
+const APP_BUILD = 45;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -20705,6 +20705,7 @@ queueMicrotask(async () => {
     },
     avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
     estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
+    openUserInfo: (address) => openChatInfoForAddress(address),
   });
 
   Calls.initCalls({
