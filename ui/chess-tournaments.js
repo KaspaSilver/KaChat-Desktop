@@ -800,7 +800,10 @@ function renderTournament() {
     const game = my ? T.currentGameFor(t, my) : null;
     if (game) {
       if (game.winner) statusHtml += `<p class="chess-t-status">${game.winner === my ? `You won ${duel ? "the game" : roundName(game, t).toLowerCase()}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
-      else statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-game="${esc(game.id)}">Go to your game</button>`;
+      else if (nextGameCountdownMs(t) != null) {
+        const myColor = T.colorOf(game, my);
+        statusHtml += `<div class="chess-t-next"><span><strong>Next: ${esc(roundName(game, t))} vs ${esc(nameFor(T.addressOf(game, Chess.opposite(myColor))))}</strong><small>Your game starts in</small></span><b data-chess-t-next-countdown>${Math.ceil(nextGameCountdownMs(t) / 1000)}</b></div>`;
+      } else statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-game="${esc(game.id)}">Go to your game</button>`;
     } else statusHtml += `<p class="chess-t-status">In play. Open any game to watch it live.</p>`;
   } else if (status === "finished") {
     const champ = T.champion(t);
@@ -1183,6 +1186,17 @@ function goBack() {
 }
 
 /** The player's game came into being: open it (once per game). */
+/** The player's next game, waiting on its cool-down (iOS 8e113c4): it opens at its start block
+ *  time plus MATCH_FOUND_DELAY_MS - ten seconds on the bracket, the same instant for both
+ *  players - and at once for a player who arrives after that. */
+function nextGameCountdownMs(t) {
+  const my = me();
+  const game = t && my ? T.currentGameFor(t, my) : null;
+  if (!game || game.winner) return null;
+  const left = game.startedAt + T.MATCH_FOUND_DELAY_MS - now;
+  return left > 0 ? left : null;
+}
+
 function autoOpenMyGameIfNeeded() {
   // The waiting room hands over itself, after the match-found countdown (checkWaitingRoom).
   if (!active || !["tournament", "game"].includes(view.name)) return;
@@ -1193,6 +1207,11 @@ function autoOpenMyGameIfNeeded() {
   if (matchFound(t)) { if (view.name !== "waiting") openWaitingRoom(t.id); return; }
   const game = T.currentGameFor(t, my);
   if (!game || game.winner || autoOpenedGameId === game.id) return;
+  // Cool-down on the bracket before the next round: the bracket says who is next and counts down.
+  if (nextGameCountdownMs(t) != null) {
+    if (view.name === "tournament") { const el = screenEl.querySelector("[data-chess-t-next-countdown]"); if (el) el.textContent = String(Math.ceil(nextGameCountdownMs(t) / 1000)); else render(); }
+    return;
+  }
   autoOpenedGameId = game.id;
   openGame(t.id, game.id);
 }
@@ -1362,6 +1381,7 @@ export function showChessTournaments() {
     claimTimeoutsIfDue();
     if (document.hidden || !screenEl) return;
     checkWaitingRoom();
+    if (view.name === "tournament") autoOpenMyGameIfNeeded();
     renderClocks();
   }, TICK_MS);
   showWaitingRoomIfSeated();

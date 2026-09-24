@@ -10400,3 +10400,7 @@ body.call-active .sidebar-tabbar { display: none; }
 button.chess-t-row { cursor: pointer; }
 /* The scores keep their width; a long name gives way (iOS 1d32335). */
 .chess-t-wl { flex: 0 0 auto; white-space: nowrap; }
+.chess-t-next { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.chess-t-next span { display: flex; flex-direction: column; gap: 3px; }
+.chess-t-next small { color: var(--muted); font-size: 12px; }
+.chess-t-next b { font-size: 34px; font-variant-numeric: tabular-nums; }
