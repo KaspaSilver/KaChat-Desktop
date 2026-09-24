@@ -1560,7 +1560,62 @@ const replyBannerPreview = document.querySelector("[data-reply-banner-preview]")
 
 function cancelReply() {
   replyingToMessageId = null;
+  editingMessageId = null;
   if (replyBanner) replyBanner.hidden = true;
+}
+
+// Editing (iOS 913e95f): Edit fills the composer with the current text under an "Editing
+// message" banner; Send posts the edit envelope, never a new bubble.
+let editingMessageId = null;
+function editedMarkElement(status = null) {
+  const mark = document.createElement("span");
+  mark.className = `message-edited${status ? ` ${status}` : ""}`;
+  mark.textContent = status === "pending" ? "edited · sending" : status === "failed" ? "edit failed" : "edited";
+  return mark;
+}
+function startEditMessage(messageId) {
+  if (!activeConversationId) return;
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  const message = conversationEntry?.messages.find((entry) => entry.id === messageId);
+  if (!message) return;
+  cancelReply();
+  editingMessageId = messageId;
+  const current = messageContent(message);
+  const input = composer?.elements?.message;
+  if (input) { input.value = String(parseReplyEnvelope(current)?.text ?? current); autoGrowComposer(); }
+  if (replyBannerPreview) replyBannerPreview.textContent = replyPreviewTextFor(message);
+  const replyBannerTitle = replyBanner?.querySelector("[data-reply-banner-title]");
+  if (replyBannerTitle) replyBannerTitle.textContent = "Editing message";
+  if (replyBanner) replyBanner.hidden = false;
+  input?.focus();
+}
+async function sendEdit(conversationEntry, message, text) {
+  const contact = contactForConversation(conversationEntry);
+  if (!contact || !engine.address || !message.txid) return;
+  const clean = String(text || "").trim().slice(0, MESSAGE_EDIT_MAX_LENGTH);
+  if (!clean) return;
+  applyLocalEdit(conversationEntry, message.txid, engine.address, clean, Date.now(), "pending");
+  persistState();
+  renderMessages(conversationEntry);
+  renderChats();
+  const rerender = () => { if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry); };
+  try {
+    const envelope = await engine.createEncryptedMessageEnvelope({
+      conversationId: conversationEntry.id,
+      contactId: contact.id,
+      toAddress: contact.address,
+      fromAddress: engine.address,
+      text: encodeEditEnvelope(message.txid, clean),
+      localNonce: nowId(),
+      createdAt: Date.now(),
+    });
+    await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
+    if (message.edit) { delete message.edit.status; persistState(); rerender(); }
+  } catch (error) {
+    appendEngineLog(`Edit send failed (local text already applied): ${error.message}`);
+    showCopyToast(`Edit failed: ${error?.message || error}`);
+    if (message.edit) { message.edit.status = "failed"; persistState(); rerender(); }
+  }
 }
 
 function startReplyTo(messageId) {
@@ -3375,6 +3430,8 @@ function sniffInlineFileMime(text) {
 
 function displayTextForMessage(message) {
   if (!message) return "";
+  if (parseEditEnvelope(message.text)) return "Edited a message";
+  if (message.edit?.text != null) message = { ...message, text: messageContent(message) };
   const callEnv = Calls.parseCallEnvelope(message.text);
   if (callEnv) return Calls.callHistoryLine(callEnv, message.direction === "outgoing").text;
   // Per-envelope-kind wording ("♟️ Played e2 → e4", "♟️ Lost on time", …) rather than one
@@ -3430,6 +3487,7 @@ function webLinkPreviewLabel(text) {
 }
 function chatListPreviewText(message) {
   if (!message) return "";
+  if (message.edit?.text != null) message = { ...message, text: messageContent(message) };
   const callEnv = Calls.parseCallEnvelope(message.text);
   if (callEnv) return Calls.callPreviewText(callEnv, message.direction === "outgoing");
   const linkLabel = webLinkPreviewLabel(message.text);
@@ -8279,7 +8337,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 39;
+const APP_BUILD = 40;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12437,9 +12495,10 @@ function renderMessages(conversationEntry) {
       bubble.classList.add("has-payment-card");
       bubble.append(buildPaymentCard(paymentParts, message.direction !== "incoming"));
     } else {
-    const imageEnvelope = parseImageEnvelope(message.text);
-    const audioEnvelope = imageEnvelope ? null : parseAudioEnvelope(message.text);
-    const replyEnvelope = (imageEnvelope || audioEnvelope) ? null : parseReplyEnvelope(message.text);
+    const shownContent = messageContent(message);
+    const imageEnvelope = parseImageEnvelope(shownContent);
+    const audioEnvelope = imageEnvelope ? null : parseAudioEnvelope(shownContent);
+    const replyEnvelope = (imageEnvelope || audioEnvelope) ? null : parseReplyEnvelope(shownContent);
     if (replyEnvelope) {
       const quote = document.createElement("div");
       quote.className = "message-reply-quote";
@@ -12487,7 +12546,7 @@ function renderMessages(conversationEntry) {
     } else {
       const text = document.createElement("span");
       text.className = "message-text";
-      const fullBodyText = replyEnvelope ? replyEnvelope.text : message.text;
+      const fullBodyText = replyEnvelope ? replyEnvelope.text : shownContent;
       // A giant string (a media payload that failed to parse, or someone's essay) makes the whole
       // thread's layout janky; past 2000 bytes it shows a 500-character preview and opens in
       // full on demand. A lone emoji loses its bubble and grows, as iMessage does.
@@ -12506,6 +12565,7 @@ function renderMessages(conversationEntry) {
         });
         text.append(more);
       }
+      if (message.edit?.text != null) text.append(editedMarkElement(message.edit.status));
       // An in-app link (KaPosts post, broadcast room) previews as a native card and opens the
       // target screen; it is never scraped like a stranger's URL (iOS KaChatInternalLink).
       const internalLink = firstInternalLinkIn(bodyText);
@@ -16468,6 +16528,7 @@ const REPLY_PREVIEW_MAX_LENGTH = 80;
 // matches iOS's MessageReplyCodec.previewText.
 function replyPreviewTextFor(message) {
   if (!message) return "";
+  if (message.edit?.text != null) message = { ...message, text: messageContent(message) };
   // Chess envelopes are JSON in the message text — without this branch, replying to a chess
   // message quoted the raw envelope JSON straight into the composer preview and onto the wire.
   const chessPreview = Chess.chessPreviewText(message.text, message.direction === "outgoing");
@@ -16482,6 +16543,58 @@ function replyPreviewTextFor(message) {
     return "📎 File";
   }
   return String(message.text || "").slice(0, REPLY_PREVIEW_MAX_LENGTH);
+}
+
+// Message edits (MESSAGING.md "Message Edits", iOS 913e95f / 125e5ab / a55b79a): an edit is a
+// new message whose content is {"type":"edit","targetTxId":...,"text":...}, travelling like a
+// reaction and never rendered as a bubble. Clients show the newest edit's text in place of the
+// original with an "edited" mark. Only the original sender's edits count, newest by block time
+// wins, text only (a reply keeps its quote), 4 000 characters at most.
+const MESSAGE_EDIT_MAX_LENGTH = 4000;
+function parseEditEnvelope(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed.startsWith("{") || trimmed.length > 100000) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || parsed.type !== "edit") return null;
+    const targetTxId = String(parsed.targetTxId || "");
+    if (!targetTxId) return null;
+    return { targetTxId, text: String(parsed.text ?? "").slice(0, MESSAGE_EDIT_MAX_LENGTH) };
+  } catch { return null; }
+}
+function encodeEditEnvelope(targetTxId, text) {
+  return JSON.stringify({ type: "edit", targetTxId, text: String(text).slice(0, MESSAGE_EDIT_MAX_LENGTH) });
+}
+/** The message's content as it reads after the edit: a reply keeps its quote and gets the new
+ *  text; plain text is simply replaced. */
+function applyEditToContent(editText, original) {
+  const quote = parseReplyEnvelope(original);
+  if (quote) return JSON.stringify({ type: "reply", replyToId: quote.replyToId, replyToSender: quote.replyToSender, replyToPreview: quote.replyToPreview, text: editText });
+  return editText;
+}
+/** Whether an edit may be offered on `content`: plain text, or a reply with text - never an
+ *  envelope of any kind (payment, voice, photo, chess, call, reaction, pool...). */
+function isEditableContent(content) {
+  const unwrapped = String(parseReplyEnvelope(content)?.text ?? content ?? "").trim();
+  return Boolean(unwrapped) && !unwrapped.startsWith("{") && !isNextcloudShareLink(unwrapped);
+}
+/** A 1:1 message's content with its edit applied (the edit is kept on the message row). */
+function messageContent(message) {
+  if (!message) return "";
+  if (message.edit?.text != null) return applyEditToContent(message.edit.text, message.text);
+  return message.text || "";
+}
+/** Records an edit on a 1:1 message when it is the sender's own and newer than the one held. */
+function applyLocalEdit(conversationEntry, targetTxId, editorAddress, text, at, status = null) {
+  const target = (conversationEntry.messages || []).find((m) => m.txid === targetTxId || m.id === targetTxId);
+  if (!target) return false;
+  const senderAddress = target.direction === "outgoing" ? (engine.address || "") : (target.sender || contactForConversation(conversationEntry)?.address || "");
+  if (!editorAddress || editorAddress !== senderAddress) return false;
+  if (!isEditableContent(target.text)) return false;
+  const when = Number(at) > 0 ? Number(at) : Date.now();
+  if (target.edit && Number(target.edit.at || 0) > when) return false;
+  target.edit = { text, at: when, ...(status ? { status } : {}) };
+  return true;
 }
 
 // Matches iOS's MessageReactionContent: reactions are sent as a normal
@@ -16622,6 +16735,16 @@ function removeLocalReaction(conversationEntry, targetTxId, reactorAddress) {
 // return null so callers know not to notify or count them as unread — matching iOS,
 // where these are processed silently and never surface as messages.
 function appendIncomingOrReactionMessage(conversationEntry, message) {
+  const edit = parseEditEnvelope(message.text);
+  if (edit) {
+    const editorAddress = message.direction === "outgoing" ? (engine.address || "") : (message.sender || "");
+    if (applyLocalEdit(conversationEntry, edit.targetTxId, editorAddress, edit.text, messageEventTime(message))) {
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      renderChats();
+    }
+    return null;
+  }
   const reaction = parseReactionEnvelope(message.text);
   if (reaction) {
     const reactorAddress = message.direction === "outgoing" ? (engine.address || "") : (message.sender || "");
@@ -16810,6 +16933,13 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
         if (txid) knownTxids.add(txid);
         continue;
       }
+      const editEnvelope = parseEditEnvelope(rawContent);
+      if (editEnvelope) {
+        const editor = String(archiveMessage?.senderAddress || (archiveMessage?.isOutgoing ? engine.address || "" : contactAddress));
+        if (applyLocalEdit(conversationEntry, editEnvelope.targetTxId, editor, editEnvelope.text, phoneArchiveTimestampMs(archiveMessage))) changed = true;
+        if (txid) knownTxids.add(txid);
+        continue;
+      }
       const reaction = parseReactionEnvelope(rawContent);
       if (reaction) {
         // Same interception as live sync: a reaction only ever updates the
@@ -16934,6 +17064,8 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
           for (const m of Array.isArray(g.messages) ? g.messages : []) {
             const content = String(m?.content ?? m?.text ?? "");  // accept legacy `text` too
             if (parseReactionEnvelope(content)) continue; // reactions are pills, not stored bubbles
+            const editEnvelope = parseEditEnvelope(content);
+            if (editEnvelope) { applyGroupEdit(g.id, editEnvelope.targetTxId, m?.senderAddress || "", editEnvelope.text, Number(m?.blockTime ?? m?.createdAt ?? 0) || Date.now()); continue; }
             const blockTime = Number(m?.blockTime ?? m?.createdAt ?? 0) || Date.now();
             rows.push({
               id: nowId(),
@@ -17933,6 +18065,13 @@ composer.addEventListener("submit", async (event) => {
   autoGrowComposer();
   hideFeeEstimateBanner();
   clearConversationDraft(activeConversationId);
+  if (editingMessageId) {
+    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+    const target = conversationEntry?.messages.find((entry) => entry.id === editingMessageId);
+    cancelReply();
+    if (conversationEntry && target) sendEdit(conversationEntry, target, text);
+    return;
+  }
   const feeOverride = composerFeeOverrideKas;
   composerFeeOverrideKas = null;
   queueConversationMessage(activeConversationId, text, { feeOverrideKas: feeOverride });
@@ -20372,6 +20511,7 @@ queueMicrotask(async () => {
     onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
     onUnreadChanged: () => updateChatsListTabBadges(),
     readDraft, saveDraft,
+    parseEditEnvelope, applyEditToContent, isEditableContent,
     isNextcloudShareLink,
     createDeliveryStatusIcon,
     shortAddress,
@@ -21023,6 +21163,65 @@ function applyGroupReaction(groupId, targetKey, reactorAddress, emoji, action) {
   saveGroupReactionsAll(all);
 }
 
+// Group edits (iOS 125e5ab): the same envelope as 1:1, carried in a group-encrypted message
+// like a reaction; only the sender's own edits count, newest wins, text only. Stored beside
+// the reactions, keyed by the target's key; the editor is checked against the message at render.
+const GROUP_EDITS_KEY = "kachat-group-edits-v1";
+function loadGroupEditsAll() { try { return JSON.parse(localStorage.getItem(GROUP_EDITS_KEY) || "{}") || {}; } catch { return {}; } }
+function saveGroupEditsAll(all) { try { localStorage.setItem(GROUP_EDITS_KEY, JSON.stringify(all)); } catch {} }
+function groupEditFor(groupId, targetKey) {
+  return loadGroupEditsAll()[engine.address || ""]?.[groupId]?.[targetKey] || null;
+}
+function applyGroupEdit(groupId, targetKey, editorAddress, text, at, status = null) {
+  if (!targetKey || !editorAddress) return false;
+  const all = loadGroupEditsAll();
+  const wallet = engine.address || "";
+  const bucket = ((all[wallet] ||= {})[groupId] ||= {});
+  const when = Number(at) > 0 ? Number(at) : Date.now();
+  const existing = bucket[targetKey];
+  if (existing && Number(existing.at || 0) > when) return false;
+  bucket[targetKey] = { text: String(text).slice(0, MESSAGE_EDIT_MAX_LENGTH), at: when, editor: editorAddress, ...(status ? { status } : {}) };
+  saveGroupEditsAll(all);
+  return true;
+}
+/** A group message's content with its edit applied - when the editor is the message's sender. */
+function groupMessageContent(groupId, message) {
+  const key = groupMsgKey(message);
+  const edit = key ? groupEditFor(groupId, key) : null;
+  if (edit && edit.editor === message.senderAddress && isEditableContent(message.text)) return applyEditToContent(edit.text, message.text);
+  return message.text || "";
+}
+let groupEditTarget = null;
+function startGroupEdit(message) {
+  cancelGroupReply();
+  groupEditTarget = message;
+  const current = groupMessageContent(activeGroupId, message);
+  if (groupComposerInput) { groupComposerInput.value = decodeGroupMentions(String(parseReplyEnvelope(current)?.text ?? current)); autoGrowGroupComposer(); }
+  const title = document.querySelector("[data-group-reply-title]");
+  if (title) title.textContent = "Editing message";
+  if (groupReplyPreview) groupReplyPreview.textContent = decodeGroupMentions(replyPreviewTextFor({ ...message, text: current })) || "Message";
+  if (groupReplyBanner) groupReplyBanner.hidden = false;
+  groupComposerInput?.focus();
+}
+async function sendGroupEdit(groupId, targetMessage, encodedText) {
+  const mgr = getGroupManager();
+  const key = groupMsgKey(targetMessage);
+  if (!mgr || !engine.address || !key) return;
+  const clean = String(encodedText || "").trim().slice(0, MESSAGE_EDIT_MAX_LENGTH);
+  if (!clean) return;
+  applyGroupEdit(groupId, key, engine.address, clean, Date.now(), "pending");
+  if (activeGroupId === groupId) renderGroupMessages();
+  try {
+    await mgr.sendGroupMessage(groupId, encodeEditEnvelope(key, clean));
+    applyGroupEdit(groupId, key, engine.address, clean, Date.now());
+  } catch (error) {
+    appendEngineLog(`Group edit send failed (local applied): ${error.message}`);
+    showCopyToast(`Edit failed: ${error?.message || error}`);
+    applyGroupEdit(groupId, key, engine.address, clean, Date.now(), "failed");
+  }
+  if (activeGroupId === groupId) renderGroupMessages();
+}
+
 // Tapback on a group message. Toggles off if you tap your current emoji again.
 async function sendGroupReaction(groupId, targetMessage, emoji) {
   const mgr = getGroupManager();
@@ -21507,6 +21706,7 @@ function jumpToGroupMessage(targetKey) {
 
 // Minimal inline-SVG icons for the message context menu (Telegram-style).
 const MSG_MENU_ICONS = {
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
   reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   select: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
@@ -21698,6 +21898,11 @@ function openOneToOneMessageMenu(messageId, x, y) {
   const current = (conversationEntry.reactionsByTxId?.[targetTxId] || []).find((e) => e.reactorAddress === myAddress)?.emoji || null;
   const items = [];
   items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startReplyTo(message.id) });
+  // Your own text message, once it is on chain: Edit (iOS 913e95f).
+  if (message.direction === "outgoing" && message.txid && message.status !== MESSAGE_STATUSES.FAILED && isEditableContent(message.text)) {
+    items.push({ label: "Edit", icon: MSG_MENU_ICONS.edit, onClick: () => startEditMessage(message.id) });
+    if (message.edit?.status === "failed") items.push({ label: "Retry Edit", icon: MSG_MENU_ICONS.retry, onClick: () => sendEdit(conversationEntry, message, message.edit.text) });
+  }
   if (isText && !isNextcloudShareLink(message.text)) {
     items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(displayTextForMessage(message)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
   }
@@ -21737,12 +21942,18 @@ function deleteOneMessageLocal(conversationEntry, message) {
 
 // Right-click / context menu for a group message: reactions + Reply, Copy, Retry, Delete (local).
 function openGroupMessageMenu(message, x, y) {
-  const plain = parseReplyEnvelope(message.text)?.text ?? message.text;
+  const shown = groupMessageContent(activeGroupId, message);
+  const plain = parseReplyEnvelope(shown)?.text ?? shown;
   const isText = !parseImageEnvelope(message.text) && !parseAudioEnvelope(message.text);
   const key = groupMsgKey(message);
   const current = key ? (groupReactionsFor(activeGroupId, key).find((e) => e.reactorAddress === engine.address)?.emoji || null) : null;
   const items = [];
   items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startGroupReply(message) });
+  if (message.direction === "local" && message.txId && message.status !== MESSAGE_STATUSES.FAILED && isEditableContent(message.text)) {
+    items.push({ label: "Edit", icon: MSG_MENU_ICONS.edit, onClick: () => startGroupEdit(message) });
+    const edit = groupEditFor(activeGroupId, key);
+    if (edit?.status === "failed") items.push({ label: "Retry Edit", icon: MSG_MENU_ICONS.retry, onClick: () => sendGroupEdit(activeGroupId, message, edit.text) });
+  }
   if (isText && !isNextcloudShareLink(plain)) {
     items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(decodeGroupMentions(plain)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
   }
@@ -21971,9 +22182,11 @@ function renderGroupMessages() {
     }
 
     // Rich content — same envelopes (reply / photo / voice) as 1:1, shared with iOS/Android.
-    const imageEnvelope = parseImageEnvelope(message.text);
-    const audioEnvelope = imageEnvelope ? null : parseAudioEnvelope(message.text);
-    const replyEnvelope = (imageEnvelope || audioEnvelope) ? null : parseReplyEnvelope(message.text);
+    const shownContent = groupMessageContent(activeGroupId, message);
+    const groupEdit = shownContent !== (message.text || "") ? groupEditFor(activeGroupId, groupMsgKey(message)) : null;
+    const imageEnvelope = parseImageEnvelope(shownContent);
+    const audioEnvelope = imageEnvelope ? null : parseAudioEnvelope(shownContent);
+    const replyEnvelope = (imageEnvelope || audioEnvelope) ? null : parseReplyEnvelope(shownContent);
     if (replyEnvelope) {
       const quote = document.createElement("div");
       quote.className = "message-reply-quote";
@@ -22005,8 +22218,9 @@ function renderGroupMessages() {
     } else {
       const text = document.createElement("span");
       text.className = "message-text";
-      const bodyText = replyEnvelope ? replyEnvelope.text : message.text;
+      const bodyText = replyEnvelope ? replyEnvelope.text : shownContent;
       const linkUrls = renderTextWithMentions(text, bodyText);
+      if (groupEdit) text.append(editedMarkElement(groupEdit.status));
       const internalLink = firstInternalLinkIn(bodyText);
       const previewable = internalLink ? null : (linkUrls || []).find(isPreviewableUrl);
       const card = internalLink ? buildInternalLinkCard(internalLink) : previewable ? buildLinkPreviewCard(previewable, { autoLoad: message.direction !== "incoming", outgoing: message.direction !== "incoming" }) : null;
@@ -22629,6 +22843,13 @@ async function syncGroupsNow({ catchUp = false } = {}) {
       if (decoded.groupId === activeGroupId) changed++;
       continue;
     }
+    // Edits ride the same way: applied to the edits store, never a bubble of their own.
+    const editEnvelope = parseEditEnvelope(decoded.plaintext);
+    if (editEnvelope) {
+      const bt = Number(decoded.blockTime || 0);
+      if (applyGroupEdit(decoded.groupId, editEnvelope.targetTxId, decoded.senderAddress, editEnvelope.text, bt > 1e12 ? bt : bt > 0 ? bt * 1000 : Date.now()) && decoded.groupId === activeGroupId) changed++;
+      continue;
+    }
     const direction = decoded.senderAddress === engine.address ? "local" : "incoming";
     const bt = Number(decoded.blockTime || 0);
     const createdAt = bt > 1e12 ? bt : (bt > 0 ? bt * 1000 : Date.now());
@@ -23011,6 +23232,7 @@ function startGroupReply(message) {
 }
 function cancelGroupReply() {
   groupReplyTarget = null;
+  groupEditTarget = null;
   if (groupReplyBanner) groupReplyBanner.hidden = true;
 }
 
@@ -23165,6 +23387,17 @@ groupComposer?.addEventListener("submit", async (event) => {
   }
   if (!raw) return;
   const encoded = encodeGroupMentions(raw);
+  if (groupEditTarget) {
+    const target = groupEditTarget;
+    groupComposerInput.value = "";
+    saveDraft(`group:${activeGroupId}`, "");
+    autoGrowGroupComposer();
+    groupDraftMentions.clear();
+    cancelGroupReply();
+    closeGroupMentions();
+    sendGroupEdit(activeGroupId, target, encoded);
+    return;
+  }
   let wire = encoded;
   if (groupReplyTarget) {
     wire = JSON.stringify({

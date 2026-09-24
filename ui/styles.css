@@ -10332,3 +10332,9 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-stat b.l, .chess-t-stat i.l { color: #ff7b7b; }
 .chess-t-stat small { color: var(--muted); font-size: 12px; }
 .chess-t-stat i { font-style: normal; font-size: 12px; font-weight: 700; min-height: 14px; }
+
+/* An edited message (MESSAGING.md "Message Edits"): a small mark after the text. */
+.message-edited { display: inline-block; margin-left: 6px; font-size: 11px; color: var(--muted); opacity: .85; vertical-align: baseline; }
+.message-edited.pending { font-style: italic; }
+.message-edited.failed { color: #ff7b7b; }
+.message.outgoing .message-edited, .broadcast-message.mine .message-edited { color: inherit; opacity: .7; }

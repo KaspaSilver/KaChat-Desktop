@@ -45,6 +45,7 @@ const LONG_MESSAGE_PREVIEW_CHARS = 500;
 const LINK_HOST = "kachat.app"; // every shared link is https://kachat.app/... (KACHAT_APP_LINKS.md)
 const CACHE_KEY = "kachat-broadcast-messages-cache-v1";     // GLOBAL: public chain data, account-agnostic
 const REACTIONS_KEY = "kachat-broadcast-reactions-cache-v1"; // GLOBAL: public chain data, account-agnostic
+const EDITS_KEY = "kachat-broadcast-edits-cache-v1";         // GLOBAL: { [channel]: { [targetTxId]: { text, blockTime, editor, txIds } } }
 const POLL_MS = 8000;
 // Nextcloud carries the audio bytes — same 600s cap as the 1:1 Nextcloud voice notes.
 const VOICE_MAX_DURATION_SECONDS = 600;
@@ -77,6 +78,7 @@ let messageCache = {}; // { [channel]: [{ txId, senderAddress, content, blockTim
 // { [channel]: { byTarget: { [targetTxId]: { [reactorAddress]: { emoji, blockTime, removed? } } },
 //                txIds: [processed reaction txids], lastEvent: { senderAddress, emoji, blockTime } | null } }
 let reactionsCache = {};
+let editsCache = {};
 let activeChannel = null;
 let pollTimer = null;
 let sendInFlight = false;
@@ -254,6 +256,9 @@ function loadState() {
   try {
     reactionsCache = JSON.parse(localStorage.getItem(REACTIONS_KEY) || "{}") || {};
   } catch { reactionsCache = {}; }
+  try {
+    editsCache = JSON.parse(localStorage.getItem(EDITS_KEY) || "{}") || {};
+  } catch { editsCache = {}; }
   // The two featured rooms are always present for every account (matches iOS/Android). The
   // curated LANGUAGE rooms are deliberately NOT auto-joined - they are joined on first open or
   // bell tap, so a user who wants none of them pays for none of them.
@@ -491,6 +496,36 @@ function reactionsFor(channel) {
   return reactionsCache[channel]?.byTarget || {};
 }
 
+// Edits (MESSAGING.md "Message Edits", iOS a55b79a): a plaintext broadcast row like a reaction,
+// applied on the scan, indexer-page and sweep paths (all through mergeMessages). Newest by
+// block time wins; the editor is checked against the message's sender when the text is read.
+function saveEdits() {
+  try { localStorage.setItem(EDITS_KEY, JSON.stringify(editsCache)); } catch { /* fine */ }
+}
+function recordEdit(channel, txId, edit, editorAddress, blockTime, status = null) {
+  if (!editorAddress || !edit?.targetTxId) return false;
+  const byTarget = (editsCache[channel] ||= {});
+  const existing = byTarget[edit.targetTxId];
+  if (txId && existing?.txIds?.includes(txId)) return false;
+  if (existing && Number(existing.blockTime || 0) > blockTime) {
+    if (txId) (existing.txIds ||= []).push(txId);
+    return false;
+  }
+  byTarget[edit.targetTxId] = { text: String(edit.text || ""), blockTime, editor: editorAddress, txIds: [...(existing?.txIds || []), ...(txId ? [txId] : [])].slice(-20), ...(status ? { status } : {}) };
+  return true;
+}
+/** A room message's content with its edit applied - when the editor is the message's sender. */
+function effectiveContent(channel, m) {
+  const edit = editsCache[channel]?.[m?.txId];
+  if (!edit || edit.editor !== m.senderAddress) return m?.content ?? "";
+  if (!deps.isEditableContent?.(m.content)) return m.content ?? "";
+  return deps.applyEditToContent?.(edit.text, m.content) ?? edit.text;
+}
+function editFor(channel, m) {
+  const edit = editsCache[channel]?.[m?.txId];
+  return edit && edit.editor === m.senderAddress ? edit : null;
+}
+
 /** Applies one reaction event. Newest-wins per (targetTxId, reactor); a "remove" is kept as
  *  a tombstone so an older "add" seen again on a later poll can't resurrect the reaction.
  *  Dedupes by reaction txId (pass null for optimistic local applies). Returns true if the
@@ -543,6 +578,11 @@ function mergeMessages(channel, rows) {
     const reaction = deps.parseReactionEnvelope?.(row.content);
     if (reaction) {
       if (recordReaction(channel, row.txId, reaction, row.senderAddress || "", blockTime)) reactionsChanged = true;
+      continue;
+    }
+    const edit = deps.parseEditEnvelope?.(row.content);
+    if (edit) {
+      if (recordEdit(channel, row.txId, edit, row.senderAddress || "", blockTime)) { saveEdits(); added += 1; }
       continue;
     }
     // Our own just-sent message can come back from the chain BEFORE `sendBroadcastText`
@@ -771,7 +811,7 @@ function roomRowHtml(name, { title = null, subtitle = null } = {}) {
   const unread = unreadFor(name);
   const me = deps.engine.address || "";
   // A link-bearing message never shows its URL in a row, same as the chat lists.
-  const rawPreview = last ? humanizeBroadcastContent(last.content) : "";
+  const rawPreview = last ? humanizeBroadcastContent(effectiveContent(name, last)) : "";
   const previewText = /https?:\/\/\S+/i.test(rawPreview) ? "📎 Sent a link" : rawPreview;
   const preview = last
     ? `${last.senderAddress === me ? "You" : senderName(last.senderAddress)}: ${previewText}`
@@ -874,7 +914,9 @@ function buildMessageElement(m) {
 
   // Decode the same wire envelopes 1:1 chats use - replies, photos, and voice notes all
   // arrive as JSON payloads that must never render raw.
-  const replyEnvelope = deps.parseReplyEnvelope?.(m.content) || null;
+  const shownContent = effectiveContent(activeChannel, m);
+  const roomEdit = editFor(activeChannel, m);
+  const replyEnvelope = deps.parseReplyEnvelope?.(shownContent) || null;
   const imageEnvelope = replyEnvelope ? null : (deps.parseImageEnvelope?.(m.content) || null);
   const audioEnvelope = (replyEnvelope || imageEnvelope) ? null : (deps.parseAudioEnvelope?.(m.content) || null);
 
@@ -917,7 +959,7 @@ function buildMessageElement(m) {
   } else {
     const body = document.createElement("div");
     body.className = "broadcast-message-body";
-    const fullText = replyEnvelope ? replyEnvelope.text : m.content;
+    const fullText = replyEnvelope ? replyEnvelope.text : shownContent;
     // Public rooms are where stray base64 and essays land: past 2000 bytes the bubble shows a
     // 500-character preview and opens in full on demand, as iOS does.
     const isLong = new TextEncoder().encode(String(fullText || "")).length > LONG_MESSAGE_BYTES;
@@ -934,6 +976,12 @@ function buildMessageElement(m) {
         alertDialog({ title: "Message", message: fullText, confirmLabel: "Done" });
       });
       body.append(more);
+    }
+    if (roomEdit) {
+      const mark = document.createElement("span");
+      mark.className = `message-edited${roomEdit.status ? ` ${roomEdit.status}` : ""}`;
+      mark.textContent = roomEdit.status === "pending" ? "edited · sending" : roomEdit.status === "failed" ? "edit failed" : "edited";
+      body.append(mark);
     }
     el.append(body);
     const previewable = urls.find((url) => deps.isPreviewableUrl?.(url));
@@ -1031,7 +1079,43 @@ function startBroadcastReply(m) {
 
 function cancelBroadcastReply() {
   broadcastReplyTarget = null;
+  broadcastEditTarget = null;
   renderBroadcastReplyBanner();
+}
+
+let broadcastEditTarget = null; // the row being edited
+function startBroadcastEdit(m) {
+  cancelBroadcastReply();
+  broadcastEditTarget = m;
+  const current = effectiveContent(activeChannel, m);
+  if (composerInput) { composerInput.value = String(deps.parseReplyEnvelope?.(current)?.text ?? current); }
+  const banner = document.querySelector("[data-broadcast-reply-banner]");
+  const title = document.querySelector("[data-broadcast-reply-title]");
+  const preview = document.querySelector("[data-broadcast-reply-preview]");
+  if (title) title.textContent = "Editing message";
+  if (preview) preview.textContent = humanizeBroadcastContent(current).replace(/\s+/g, " ").slice(0, 90);
+  if (banner) banner.hidden = false;
+  composerInput?.focus();
+}
+async function sendBroadcastEdit(channel, targetTxId, text) {
+  const myAddress = deps.engine.address || "";
+  const clean = String(text || "").trim().slice(0, 4000);
+  if (!myAddress || !targetTxId || !clean) return;
+  if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return; }
+  recordEdit(channel, null, { targetTxId, text: clean }, myAddress, Date.now(), "pending");
+  saveEdits();
+  if (activeChannel === channel) renderRoom();
+  try {
+    const txid = await sendBroadcastText(channel, JSON.stringify({ type: "edit", targetTxId, text: clean }), { showBubble: false });
+    recordEdit(channel, txid, { targetTxId, text: clean }, myAddress, Date.now());
+  } catch (error) {
+    deps.appendEngineLog?.(`Broadcast edit send failed (local applied): ${error.message}`);
+    deps.showToast?.(`Edit failed: ${error?.message || error}`);
+    const edit = editsCache[channel]?.[targetTxId];
+    if (edit) edit.status = "failed";
+  }
+  saveEdits();
+  if (activeChannel === channel) renderRoom();
 }
 
 function renderBroadcastReplyBanner() {
@@ -1055,10 +1139,15 @@ function openBroadcastMessageMenu(m, x, y) {
   const myEntry = perReactor[myAddress];
   const current = myEntry && !myEntry.removed ? myEntry.emoji : null;
   const icons = deps.getMsgMenuIcons?.() || {};
-  const text = humanizeBroadcastContent(m.content);
+  const text = humanizeBroadcastContent(effectiveContent(activeChannel, m));
   const items = [];
   if (!pending) {
     items.push({ label: "Reply", icon: icons.reply, onClick: () => startBroadcastReply(m) });
+  }
+  if (mine && !pending && deps.isEditableContent?.(m.content)) {
+    items.push({ label: "Edit", icon: icons.edit, onClick: () => startBroadcastEdit(m) });
+    const edit = editFor(activeChannel, m);
+    if (edit?.status === "failed") items.push({ label: "Retry Edit", icon: icons.retry, onClick: () => sendBroadcastEdit(activeChannel, m.txId, edit.text) });
   }
   const firstLink = (String(text || "").match(/https?:\/\/[^\s<>"']+/) || [])[0] || null;
   // A Nextcloud share is the address of someone's photo or file: it can be opened, never copied
@@ -1107,6 +1196,7 @@ function openBroadcastMessageMenu(m, x, y) {
 
 /** Human text for previews/notifications: unwrap replies, name photos/voice notes. */
 function humanizeBroadcastContent(content) {
+  if (deps.parseEditEnvelope?.(content)) return "Edited a message";
   const reply = deps.parseReplyEnvelope?.(content);
   if (reply) return reply.text || "Reply";
   if (deps.parseImageEnvelope?.(content)) return "📷 Photo";
@@ -1529,6 +1619,14 @@ async function sendCurrentMessage() {
   }
   const text = composerInput.value.trim();
   if (!text) return;
+  if (broadcastEditTarget) {
+    const target = broadcastEditTarget;
+    composerInput.value = "";
+    deps.saveDraft?.(`room:${activeChannel}`, "");
+    cancelBroadcastReply();
+    sendBroadcastEdit(activeChannel, target.txId, text);
+    return;
+  }
   sendInFlight = true;
   composerInput.value = "";
   deps.saveDraft?.(`room:${activeChannel}`, "");
