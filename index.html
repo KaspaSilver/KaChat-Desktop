@@ -595,6 +595,10 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z"/><path d="M19.5 14.25v4.125c0 1.243-1.007 2.25-2.25 2.25H5.625a2.25 2.25 0 0 1-2.25-2.25V6.375c0-1.243 1.007-2.25 2.25-2.25h4.125"/></svg>
               <span>Drafts</span>
             </button>
+            <button class="kaposts-rail-item" type="button" data-kaposts-rail="scheduled">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              <span>Scheduled</span>
+            </button>
             <button class="kaposts-rail-item" type="button" data-kaposts-rail="bookmarks">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z"/></svg>
               <span>Bookmarks</span>
@@ -682,9 +686,36 @@
               <button type="button" data-kaposts-md="subtext" aria-label="Small text" title="Small text"><span class="kaposts-md-glyph kaposts-md-small">Aa</span></button>
               <button type="button" data-kaposts-md="link" aria-label="Link" title="Link"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5a4 4 0 0 0 5.66 0l2.84-2.84a4 4 0 0 0-5.66-5.66l-1.42 1.42"/><path d="M14 10.5a4 4 0 0 0-5.66 0L5.5 13.34a4 4 0 0 0 5.66 5.66l1.42-1.42"/></svg></button>
             </div>
+            <!-- Poll (iOS 3b1aecf): two to four options and a length; the question is the post. -->
+            <div class="kaposts-poll-editor" data-kaposts-poll-editor hidden>
+              <div class="kaposts-poll-options" data-kaposts-poll-options></div>
+              <div class="kaposts-poll-editor-row">
+                <button class="kaposts-chip" type="button" data-kaposts-poll-add>＋ Add option</button>
+                <label class="kaposts-poll-length">Poll length
+                  <select data-kaposts-poll-length>
+                    <option value="3600000">1 hour</option>
+                    <option value="21600000">6 hours</option>
+                    <option value="43200000">12 hours</option>
+                    <option value="86400000" selected>1 day</option>
+                    <option value="259200000">3 days</option>
+                    <option value="604800000">7 days</option>
+                  </select>
+                </label>
+                <button class="kaposts-chip" type="button" data-kaposts-poll-remove>Remove poll</button>
+              </div>
+              <p class="field-hint">Voting is one transaction per vote. The question is the post; the options go out with it. Two to four options, 40 characters each.</p>
+            </div>
+            <!-- Schedule (iOS 3b1aecf): signed now, posted then by the indexer or by this browser. -->
+            <div class="kaposts-schedule-editor" data-kaposts-schedule-editor hidden>
+              <label class="kaposts-poll-length">Schedule for <input type="datetime-local" data-kaposts-schedule-input /></label>
+              <button class="kaposts-chip" type="button" data-kaposts-schedule-remove>Remove</button>
+              <p class="field-hint">Signed now, posted then - by the indexer, or by this browser if the indexer can't be reached.</p>
+            </div>
             <div class="kaposts-composer-threadbar">
               <!-- Live network-fee estimate while typing (Settings > Show Fee Estimate). -->
               <span class="kaposts-composer-fee" data-kaposts-composer-fee hidden></span>
+              <button class="kaposts-chip" type="button" data-kaposts-poll-toggle title="Add a poll">Poll</button>
+              <button class="kaposts-chip" type="button" data-kaposts-schedule-toggle title="Post this later">Schedule</button>
               <button class="kaposts-thread-add" type="button" data-kaposts-thread-add hidden title="Stack this text as a thread segment and keep writing">＋ Add to thread</button>
             </div>
             <div class="kaposts-composer-quote" data-kaposts-composer-quote hidden></div>
@@ -1041,10 +1072,10 @@
               </div>
             </div>
             <p class="settings-group-footer">Translates KaPosts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one.</p>
-            <p class="settings-group-label">Broadcast Indexer</p>
+            <p class="settings-group-label">Public Chats Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
-                  <label class="field-label compact">Broadcast Indexer URL
+                  <label class="field-label compact">Public Chats Indexer URL
                     <input class="field-input" type="url" data-endpoint="broadcastIndexer" autocomplete="off" spellcheck="false" />
                   </label>
                   <p class="field-hint danger" data-endpoint-error="broadcastIndexer" hidden></p>

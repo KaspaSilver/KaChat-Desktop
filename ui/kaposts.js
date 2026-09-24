@@ -33,7 +33,21 @@ import {
   submitKaPostDelete,
   KAPOSTS_EDIT_WINDOW_MS,
   submitKaPostVote,
+  submitKaPoll,
+  submitKaPollVote,
+  fetchPoll,
+  buildScheduledPost,
+  scheduleOnServer,
+  cancelScheduledOnServer,
+  fetchScheduledPosts,
+  submitScheduledLocally,
+  KAPOSTS_POLL_MIN_OPTIONS,
+  KAPOSTS_POLL_MAX_OPTIONS,
+  KAPOSTS_POLL_OPTION_MAX_LENGTH,
+  KAPOSTS_SCHEDULE_MIN_MS,
+  KAPOSTS_SCHEDULE_MAX_MS,
 } from "../engine/kaposts.js";
+import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
@@ -89,6 +103,8 @@ let threadHighlightRemoteId = null;
 let threadHighlightTimer = 0;
 let replyInput, replyMeter, replySend;
 let composerQuoteTarget = null; // post being quoted, when the composer is a quote composer
+let composerPoll = null;        // { options: [..], lengthMs } while the composer carries a poll
+let composerScheduleAt = null;  // ms when the post should go out, while scheduling
 let composerReplyTarget = null; // post being replied to, when the composer is a reply composer
 let composerEditTarget = null;  // one of our own posts being edited (iOS 2d483a7): Save replaces its text
 let countdownTicker = null;
@@ -442,6 +458,22 @@ function mapRemotePost(post) {
     // Set by the indexer once an edit was accepted; the cell shows "· edited".
     editedAt: post.editedAt ? Number(post.editedAt) || null : null,
     sentAt: null,
+    poll: mapRemotePoll(post.poll),
+  };
+}
+
+// A poll rides on a post (KAPOSTS_INDEXER.md §5.9): options (base64 on the wire), the counts,
+// the closing time and the requester's vote. An older indexer serves the poll as a plain post.
+function mapRemotePoll(poll) {
+  if (!poll || !Array.isArray(poll.options) || poll.options.length < 2) return null;
+  const options = poll.options.map((b64) => { try { return decodePostContent({ postContent: b64 }) ?? ""; } catch { return ""; } });
+  const counts = Array.isArray(poll.counts) ? poll.counts.map((n) => Number(n) || 0) : options.map(() => 0);
+  return {
+    options,
+    counts,
+    total: Number(poll.total ?? counts.reduce((a, b) => a + b, 0)) || 0,
+    closesAt: Number(poll.closesAt) || 0,
+    myVote: Number.isInteger(poll.myVote) ? poll.myVote : null,
   };
 }
 
@@ -1172,6 +1204,41 @@ function quoteCardHeadHtml(quoted) {
   </span>`;
 }
 
+// The poll under the question (iOS 3b1aecf): options as buttons until you vote or the poll
+// closes, then bars with percentages, your choice marked, the vote count and the time left.
+function pollCardHtml(post) {
+  const poll = post.poll;
+  if (!poll) return "";
+  const closed = poll.closesAt && Date.now() >= poll.closesAt;
+  const voted = poll.myVote != null;
+  const showResults = closed || voted;
+  const pending = pendingActions.has(`vote:${post.id}`);
+  const canVote = !showResults && !pending && Boolean(post.remoteId) && post.delivery !== "failed";
+  const total = Math.max(0, Number(poll.total) || 0);
+  const rows = poll.options.map((option, index) => {
+    const count = Number(poll.counts?.[index]) || 0;
+    const share = total > 0 ? count / total : 0;
+    if (!showResults) {
+      return `<button class="kaposts-poll-option" type="button" data-kaposts-poll-vote="${post.id}" data-index="${index}" ${canVote ? "" : "disabled"}>${deps.escapeHtml(option)}</button>`;
+    }
+    return `
+      <div class="kaposts-poll-bar${poll.myVote === index ? " mine" : ""}">
+        <span class="kaposts-poll-fill" style="width:${Math.round(share * 100)}%"></span>
+        <span class="kaposts-poll-label">${deps.escapeHtml(option)}${poll.myVote === index ? " ✓" : ""}</span>
+        <span class="kaposts-poll-pct">${Math.round(share * 100)}%</span>
+      </div>`;
+  }).join("");
+  const left = poll.closesAt - Date.now();
+  const timeLeft = closed ? "Final results" : left < 60 * 60 * 1000
+    ? `${Math.max(1, Math.round(left / 60000))} min left`
+    : left < 24 * 60 * 60 * 1000 ? `${Math.round(left / 3600000)} h left` : `${Math.round(left / 86400000)} d left`;
+  return `
+    <div class="kaposts-poll" data-kaposts-poll="${post.id}">
+      ${rows}
+      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"} · ${deps.escapeHtml(timeLeft)}${pending ? ` · <span data-kaposts-countdown="vote:${post.id}"></span>` : ""}</div>
+    </div>`;
+}
+
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false, openByRemote = false, truncates = false } = {}) {
   const name = posterName(post.posterAddress);
   const time = formatRelativeTime(post.timestamp);
@@ -1226,6 +1293,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
         <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? foldedPrefix(postDisplayText(post)) : postDisplayText(post))}</div>
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${post.id}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
+        ${pollCardHtml(post)}
         ${quotedHtml}
         ${deliveryHtml}
         <div class="kaposts-actions">
@@ -1553,8 +1621,9 @@ function formatRelativeTime(timestampMs) {
 // Actions
 // ---------------------------------------------------------------------------
 
-function makeLocalPost(text, { quotedOf = null } = {}) {
+function makeLocalPost(text, { quotedOf = null, poll = null } = {}) {
   return {
+    poll,
     id: nowId(),
     remoteId: null,
     posterPubkey: safeRequesterPubkey(),
@@ -1596,6 +1665,69 @@ function schedulePost(text) {
     localPosts = localPosts.filter((p) => p.id !== post.id);
     restoreComposerDraft(text);
   });
+}
+
+// A poll (iOS 3b1aecf): the question is the post; the options and closing time go out with it,
+// behind the usual 5 s undo. The card keeps its own numbers until the feed carries the
+// indexer's.
+function schedulePoll(question, options, lengthMs) {
+  const closesAt = Date.now() + lengthMs;
+  const poll = { options, counts: options.map(() => 0), total: 0, closesAt, myVote: null };
+  const post = makeLocalPost(question, { poll });
+  localPosts.unshift(post);
+  scheduleUndoable(`post:${post.id}`, async () => {
+    renderToasts();
+    try {
+      const txid = await submitKaPoll({ engine: deps.engine, question, options, closesAtMs: closesAt, mentionedPubkeys: await mentionedPubkeysFor(question) });
+      mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
+    } catch (error) {
+      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+      deps.appendEngineLog?.(`KaPost poll failed: ${error.message}`);
+      deps.showToast?.(`Poll failed: ${error?.message || error}`);
+    }
+    renderAll();
+  }, () => {
+    localPosts = localPosts.filter((p) => p.id !== post.id);
+    restoreComposerDraft(question);
+  });
+}
+
+// A vote is one transaction behind the usual 5 s undo; the card shows the choice at once and
+// takes the indexer's numbers once it has counted it.
+function scheduleVote(post, optionIndex) {
+  if (!post.remoteId || !post.poll) return;
+  const before = { ...post.poll, counts: [...post.poll.counts] };
+  mutatePost(post.id, (p) => {
+    if (!p.poll) return;
+    if (p.poll.myVote != null && p.poll.counts[p.poll.myVote] != null) p.poll.counts[p.poll.myVote] = Math.max(0, p.poll.counts[p.poll.myVote] - 1);
+    else p.poll.total += 1;
+    p.poll.counts[optionIndex] = (p.poll.counts[optionIndex] || 0) + 1;
+    p.poll.myVote = optionIndex;
+  });
+  renderAll();
+  scheduleUndoable(`vote:${post.id}`, async () => {
+    try {
+      await submitKaPollVote({ engine: deps.engine, pollId: post.remoteId, optionIndex });
+      deps.showToast?.("Vote posted to the network");
+      refreshPollNumbers(post);
+    } catch (error) {
+      mutatePost(post.id, (p) => { p.poll = before; });
+      deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
+      deps.showToast?.(`Vote failed: ${error?.message || error}`);
+      renderAll();
+    }
+  }, () => {
+    mutatePost(post.id, (p) => { p.poll = before; });
+    renderAll();
+  }, "Voting");
+}
+
+async function refreshPollNumbers(post) {
+  if (!post.remoteId) return;
+  try {
+    const fresh = mapRemotePoll(await fetchPoll({ engine: deps.engine, postId: post.remoteId }));
+    if (fresh) { mutatePost(post.id, (p) => { p.poll = fresh; }); renderAll(); }
+  } catch { /* the feed carries the numbers next time */ }
 }
 
 // --- X-style thread reading ---------------------------------------------------
@@ -2142,7 +2274,7 @@ function renderComposerThreadUi() {
   }
   // The + appears once you type, and never while quoting or replying - both are one post about
   // one other post, so neither stacks into a thread.
-  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || Boolean(composerEditTarget) || !trimmed;
+  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || Boolean(composerEditTarget) || !trimmed || Boolean(composerPoll) || composerScheduleAt != null;
   if (composerTitle && !composerQuoteTarget && !composerReplyTarget) {
     composerTitle.textContent = composerThreadSegments.length ? "New Thread" : "New Post";
   }
@@ -2231,9 +2363,65 @@ function openComposer(quoteTarget = null, { replyTarget = null, editTarget = nul
     composerQuote.hidden = true;
     composerQuote.innerHTML = "";
   }
+  composerPoll = null;
+  composerScheduleAt = null;
+  renderComposerExtras();
   renderComposerThreadUi();
   composerEl.hidden = false;
   composerInput.focus();
+}
+
+// Poll and Schedule (iOS 3b1aecf) belong to a plain new post: never to a reply, a quote, an
+// edit or a thread.
+function composerExtrasAllowed() {
+  return !composerQuoteTarget && !composerReplyTarget && !composerEditTarget && composerThreadSegments.length === 0;
+}
+function renderComposerExtras() {
+  const pollEditor = document.querySelector("[data-kaposts-poll-editor]");
+  const scheduleEditor = document.querySelector("[data-kaposts-schedule-editor]");
+  const pollToggle = document.querySelector("[data-kaposts-poll-toggle]");
+  const scheduleToggle = document.querySelector("[data-kaposts-schedule-toggle]");
+  const allowed = composerExtrasAllowed();
+  if (pollToggle) { pollToggle.hidden = !allowed || Boolean(composerPoll); }
+  if (scheduleToggle) { scheduleToggle.hidden = !allowed || Boolean(composerPoll) || composerScheduleAt != null; }
+  if (pollEditor) {
+    pollEditor.hidden = !composerPoll;
+    if (composerPoll) {
+      const list = pollEditor.querySelector("[data-kaposts-poll-options]");
+      if (list) {
+        list.innerHTML = composerPoll.options.map((option, index) => `
+          <div class="kaposts-poll-option-row">
+            <input class="kaposts-reply-input" type="text" maxlength="${KAPOSTS_POLL_OPTION_MAX_LENGTH}" placeholder="Option ${index + 1}" value="${deps.escapeHtml(option)}" data-kaposts-poll-option="${index}" />
+            ${composerPoll.options.length > KAPOSTS_POLL_MIN_OPTIONS ? `<button type="button" class="kaposts-thread-segment-remove" data-kaposts-poll-option-remove="${index}" aria-label="Remove option">×</button>` : ""}
+          </div>`).join("");
+      }
+      const add = pollEditor.querySelector("[data-kaposts-poll-add]");
+      if (add) add.hidden = composerPoll.options.length >= KAPOSTS_POLL_MAX_OPTIONS;
+      const length = pollEditor.querySelector("[data-kaposts-poll-length]");
+      if (length) length.value = String(composerPoll.lengthMs);
+    }
+  }
+  if (scheduleEditor) {
+    scheduleEditor.hidden = composerScheduleAt == null;
+    const input = scheduleEditor.querySelector("[data-kaposts-schedule-input]");
+    if (input && composerScheduleAt != null) {
+      const d = new Date(composerScheduleAt);
+      const pad = (n) => String(n).padStart(2, "0");
+      input.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      const min = new Date(Date.now() + KAPOSTS_SCHEDULE_MIN_MS);
+      input.min = `${min.getFullYear()}-${pad(min.getMonth() + 1)}-${pad(min.getDate())}T${pad(min.getHours())}:${pad(min.getMinutes())}`;
+    }
+  }
+  if (composerSubmit && !composerEditTarget && !composerReplyTarget) {
+    composerSubmit.textContent = composerScheduleAt != null ? "Schedule post" : composerPoll ? "Post poll" : "Post";
+  }
+}
+function pollEditorValid() {
+  if (!composerPoll) return true;
+  const options = composerPoll.options.map((o) => String(o || "").trim());
+  if (options.length < KAPOSTS_POLL_MIN_OPTIONS || options.length > KAPOSTS_POLL_MAX_OPTIONS) return false;
+  if (options.some((o) => !o || o.length > KAPOSTS_POLL_OPTION_MAX_LENGTH)) return false;
+  return new Set(options).size === options.length;
 }
 
 async function closeComposer({ keepDraft = null } = {}) {
@@ -2259,6 +2447,8 @@ async function closeComposer({ keepDraft = null } = {}) {
   if (save) saveDraftFromComposer();
 
   composerEl.hidden = true;
+  composerPoll = null;
+  composerScheduleAt = null;
   composerQuoteTarget = null;
   // Cleared with the rest: a reply composer closed and reopened as a new post would otherwise
   // still submit as a reply to whatever it was last pointed at.
@@ -2398,7 +2588,7 @@ function renderPanel() {
   const restorePanelScroll = () => { panelBodyEl.scrollTop = previousTop; };
   const titles = {
     profile: "Profile", notifications: "Notifications", engagement: "Post Activity", search: "Search",
-    bookmarks: "Bookmarks", drafts: "Drafts", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
+    bookmarks: "Bookmarks", drafts: "Drafts", scheduled: "Scheduled", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
   };
   panelTitleEl.textContent = titles[panel.type === "list" ? panel.kind : panel.type] || "Panel";
 
@@ -2594,6 +2784,12 @@ function renderPanel() {
     if (panel.kind === "drafts") {
       panelBodyEl.innerHTML = draftsPanelHtml();
       restorePanelScroll();
+      return;
+    }
+    if (panel.kind === "scheduled") {
+      panelBodyEl.innerHTML = scheduledPanelHtml();
+      restorePanelScroll();
+      if (!panel.refreshed) { panel.refreshed = true; refreshScheduledFromServer().then(() => { if (activePanel === panel) renderPanel(); }); }
       return;
     }
     const addresses = panel.kind === "muted" ? prefs.muted : prefs.blocked;
@@ -3568,6 +3764,141 @@ async function openDraft(id) {
   composerInput.focus();
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled posts (iOS 3b1aecf, KAPOSTS_INDEXER.md §5.10): built and signed when the author
+// chose the time, submitted by the indexer at that time - or by this browser, if the indexer
+// could not be reached, the next time the app runs after it. The coins a scheduled post spends
+// stay reserved until it is on chain.
+// ---------------------------------------------------------------------------
+const SCHEDULED_KEY = "kachat-kaposts-scheduled-v1";
+let scheduledPosts = [];   // { id (txId), text, notBefore, createdAt, spentOutpoints, serialized, restJson, onServer, status, error, submittedAt }
+function loadScheduled() {
+  try { scheduledPosts = JSON.parse(localStorage.getItem(deps.accountScopedKey(SCHEDULED_KEY)) || "[]") || []; }
+  catch { scheduledPosts = []; }
+  if (!Array.isArray(scheduledPosts)) scheduledPosts = [];
+  publishReserved();
+}
+function saveScheduled() {
+  scheduledPosts.sort((a, b) => a.notBefore - b.notBefore);
+  try { localStorage.setItem(deps.accountScopedKey(SCHEDULED_KEY), JSON.stringify(scheduledPosts)); } catch { /* fine */ }
+  publishReserved();
+}
+function reservedOutpoints() {
+  return scheduledPosts.filter((e) => e.status === "scheduled").flatMap((e) => e.spentOutpoints || []);
+}
+function publishReserved() { setReservedOutpoints(reservedOutpoints()); }
+
+async function scheduleForLater(text, notBefore) {
+  deps.showToast?.("Signing the post…");
+  let built;
+  try {
+    built = await buildScheduledPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text), reservedOutpoints: reservedOutpoints() });
+  } catch (error) {
+    deps.appendEngineLog?.(`KaPost schedule build failed: ${error.message}`);
+    deps.showToast?.(`Couldn't schedule: ${error?.message || error}`);
+    restoreComposerDraft(text);
+    return;
+  }
+  const entry = { id: built.txId, text, notBefore, createdAt: Date.now(), spentOutpoints: built.spentOutpoints, serialized: built.serialized, restJson: built.restJson, onServer: false, status: "scheduled", error: null, submittedAt: null };
+  scheduledPosts = scheduledPosts.filter((e) => e.id !== entry.id);
+  scheduledPosts.push(entry);
+  saveScheduled();
+  const when = new Date(notBefore).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  try {
+    await scheduleOnServer({ engine: deps.engine, txId: built.txId, notBeforeMs: notBefore, restJson: built.restJson });
+    entry.onServer = true;
+    saveScheduled();
+    deps.showToast?.(`Scheduled for ${when}`);
+  } catch (error) {
+    deps.appendEngineLog?.(`Scheduling on the indexer failed, keeping it local: ${error.message}`);
+    deps.showToast?.(`Scheduled for ${when} - sends from this browser`);
+  }
+  renderAll();
+}
+
+/** Due entries the indexer never took go out from here; the ones it did are re-offered. */
+async function sendDueScheduled() {
+  const now = Date.now();
+  let changed = false;
+  for (const entry of scheduledPosts) {
+    if (entry.status !== "scheduled" || entry.onServer) continue;
+    if (entry.notBefore <= now) {
+      try {
+        await submitScheduledLocally({ engine: deps.engine, serialized: entry.serialized });
+        entry.status = "submitted";
+        entry.submittedAt = Date.now();
+        deps.showToast?.("Scheduled post sent");
+      } catch (error) {
+        entry.status = "failed";
+        entry.error = error?.message || String(error);
+        deps.appendEngineLog?.(`Scheduled post failed to submit: ${entry.error}`);
+      }
+      changed = true;
+    } else {
+      try { await scheduleOnServer({ engine: deps.engine, txId: entry.id, notBeforeMs: entry.notBefore, restJson: entry.restJson }); entry.onServer = true; changed = true; }
+      catch { /* still local */ }
+    }
+  }
+  if (changed) { saveScheduled(); renderAll(); }
+}
+
+async function refreshScheduledFromServer() {
+  let remote;
+  try { remote = await fetchScheduledPosts({ engine: deps.engine }); } catch { return; }
+  const byId = new Map(remote.map((r) => [r.txId, r]));
+  let changed = false;
+  for (const entry of scheduledPosts) {
+    if (!entry.onServer) continue;
+    const server = byId.get(entry.id);
+    if (!server) continue;
+    const status = ["scheduled", "submitted", "failed", "cancelled"].includes(server.status) ? server.status : entry.status;
+    if (status !== entry.status || (server.error || null) !== (entry.error || null)) {
+      entry.status = status;
+      entry.error = server.error || null;
+      entry.submittedAt = server.submittedAt ? Number(server.submittedAt) : entry.submittedAt;
+      changed = true;
+    }
+  }
+  if (changed) saveScheduled();
+}
+
+async function cancelScheduledPost(id) {
+  const entry = scheduledPosts.find((e) => e.id === id);
+  if (!entry) return;
+  if (entry.status === "scheduled") {
+    const ok = await deps.confirmDialog?.({ title: "Cancel this scheduled post?", message: "It will not go out. The coins it reserved are free again.", confirmLabel: "Cancel post", destructive: true });
+    if (!ok) return;
+    if (entry.onServer) { try { await cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }); } catch { /* dropped locally anyway */ } }
+  }
+  scheduledPosts = scheduledPosts.filter((e) => e.id !== id);
+  saveScheduled();
+  renderAll();
+}
+
+function scheduledPanelHtml() {
+  if (!scheduledPosts.length) {
+    return `<div class="no-results-card"><strong>No scheduled posts</strong>`
+      + `<span>Write a post, tap Schedule in the composer and pick a time. It is signed now and goes out then.</span></div>`;
+  }
+  const fmt = (ms) => new Date(ms).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  return scheduledPosts.map((entry) => {
+    const when = fmt(entry.notBefore);
+    let meta;
+    if (entry.status === "submitted") meta = `Posted ${entry.submittedAt ? fmt(entry.submittedAt) : when}`;
+    else if (entry.status === "failed") meta = `Failed to post at ${when}${entry.error ? `: ${entry.error}` : ""}`;
+    else if (entry.status === "cancelled") meta = "Cancelled";
+    else meta = entry.onServer ? `Goes out ${when}` : `Goes out ${when} - from this browser, so keep KaChat open around then`;
+    return `
+      <div class="kaposts-draft-row kaposts-scheduled-row ${entry.status}">
+        <div class="kaposts-draft-open">
+          <span class="kaposts-draft-preview">${deps.escapeHtml(entry.text)}</span>
+          <span class="kaposts-draft-meta">${deps.escapeHtml(meta)}</span>
+        </div>
+        <button class="kaposts-draft-delete" type="button" data-kaposts-cancel-scheduled="${deps.escapeHtml(entry.id)}" aria-label="${entry.status === "scheduled" ? "Cancel scheduled post" : "Remove"}" title="${entry.status === "scheduled" ? "Cancel" : "Remove"}">&times;</button>
+      </div>`;
+  }).join("");
+}
+
 function draftsPanelHtml() {
   if (!kapostDrafts.length) {
     return `<div class="no-results-card"><strong>No drafts</strong>`
@@ -3970,6 +4301,7 @@ export function resetKaPostsForAccount() {
   syncRailBadge();
   loadPrefs();
   loadDrafts();
+  loadScheduled();
   editingDraftId = null;
   localPosts = [];
   remotePosts = [];
@@ -4160,6 +4492,10 @@ export function initKaPosts(dependencies) {
 
   loadPrefs();
   loadDrafts();
+  loadScheduled();
+  // Due scheduled posts the indexer never took go out from here: at start and every minute.
+  window.setTimeout(() => { sendDueScheduled().catch(() => {}); }, 15_000);
+  window.setInterval(() => { if (!document.hidden) sendDueScheduled().catch(() => {}); }, 60_000);
   loadTranslationVerdicts();
 
   // Feed tab switching
@@ -4301,13 +4637,66 @@ export function initKaPosts(dependencies) {
     // The post is on its way, so the draft it came from has served its purpose. Explicit
     // keepDraft: false, because closeComposer would otherwise ask whether to keep writing that
     // is already being sent.
+    const poll = composerPoll;
+    const scheduleAt = composerScheduleAt;
+    if (poll && composerExtrasAllowed()) {
+      if (!pollEditorValid()) { deps.showToast?.("A poll needs two to four different options of up to 40 characters."); return; }
+    }
+    if (scheduleAt != null && composerExtrasAllowed()) {
+      const lead = scheduleAt - Date.now();
+      if (lead < KAPOSTS_SCHEDULE_MIN_MS || lead > KAPOSTS_SCHEDULE_MAX_MS) { deps.showToast?.("Pick a time between 5 minutes and 30 days from now."); return; }
+    }
     if (editingDraftId) deleteDraft(editingDraftId);
     closeComposer({ keepDraft: false });
+    if (poll && !editTarget && !replyTarget && !quoteTarget && segments.length === 1) { schedulePoll(segments[0], poll.options.map((o) => String(o).trim()), poll.lengthMs); return; }
+    if (scheduleAt != null && !editTarget && !replyTarget && !quoteTarget && segments.length === 1) { scheduleForLater(segments[0], scheduleAt); return; }
     if (editTarget) scheduleEdit(editTarget, segments[0]);
     else if (replyTarget) submitReply(replyTarget, segments[0]);
     else if (quoteTarget) scheduleQuote(quoteTarget, segments[0]);
     else if (segments.length > 1) scheduleThread(segments);
     else schedulePost(segments[0]);
+  });
+
+  // Poll and Schedule chips and their editors.
+  document.querySelector("[data-kaposts-poll-toggle]")?.addEventListener("click", () => {
+    composerPoll = { options: ["", ""], lengthMs: 86400000 };
+    composerScheduleAt = null;
+    renderComposerExtras();
+    renderComposerThreadUi();
+    document.querySelector("[data-kaposts-poll-option='0']")?.focus();
+  });
+  document.querySelector("[data-kaposts-poll-remove]")?.addEventListener("click", () => { composerPoll = null; renderComposerExtras(); renderComposerThreadUi(); });
+  document.querySelector("[data-kaposts-poll-add]")?.addEventListener("click", () => {
+    if (!composerPoll || composerPoll.options.length >= KAPOSTS_POLL_MAX_OPTIONS) return;
+    composerPoll.options.push("");
+    renderComposerExtras();
+    document.querySelector(`[data-kaposts-poll-option='${composerPoll.options.length - 1}']`)?.focus();
+  });
+  document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("input", (event) => {
+    const option = event.target.closest("[data-kaposts-poll-option]");
+    if (option && composerPoll) composerPoll.options[Number(option.dataset.kapostsPollOption)] = option.value;
+  });
+  document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("change", (event) => {
+    if (event.target.matches("[data-kaposts-poll-length]") && composerPoll) composerPoll.lengthMs = Number(event.target.value) || 86400000;
+  });
+  document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-kaposts-poll-option-remove]");
+    if (!remove || !composerPoll) return;
+    composerPoll.options.splice(Number(remove.dataset.kapostsPollOptionRemove), 1);
+    renderComposerExtras();
+  });
+  document.querySelector("[data-kaposts-schedule-toggle]")?.addEventListener("click", () => {
+    composerScheduleAt = Date.now() + 60 * 60 * 1000;
+    composerPoll = null;
+    renderComposerExtras();
+    renderComposerThreadUi();
+    document.querySelector("[data-kaposts-schedule-input]")?.focus();
+  });
+  document.querySelector("[data-kaposts-schedule-remove]")?.addEventListener("click", () => { composerScheduleAt = null; renderComposerExtras(); renderComposerThreadUi(); });
+  document.querySelector("[data-kaposts-schedule-input]")?.addEventListener("change", (event) => {
+    const when = new Date(event.target.value).getTime();
+    if (Number.isFinite(when)) composerScheduleAt = when;
+    if (composerSubmit && !composerEditTarget && !composerReplyTarget) composerSubmit.textContent = "Schedule post";
   });
 
   // X-style +: stack the current text as a thread segment and keep writing.
@@ -4357,6 +4746,14 @@ export function initKaPosts(dependencies) {
   // Delegated feed/thread/toast interactions
   const screen = document.querySelector('[data-app-tab-screen="kaposts"]');
   screen?.addEventListener("click", (event) => {
+    const vote = event.target.closest("[data-kaposts-poll-vote]");
+    if (vote) {
+      event.stopPropagation();
+      if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return; }
+      const post = findPost(vote.dataset.kapostsPollVote);
+      if (post) scheduleVote(post, Number(vote.dataset.index));
+      return;
+    }
     const link = event.target.closest("[data-kaposts-link]");
     if (link) {
       event.stopPropagation();
@@ -4520,6 +4917,11 @@ export function initKaPosts(dependencies) {
       return;
     }
 
+    const cancelScheduled = event.target.closest("[data-kaposts-cancel-scheduled]");
+    if (cancelScheduled) {
+      cancelScheduledPost(cancelScheduled.dataset.kapostsCancelScheduled);
+      return;
+    }
     const openDraftBtn = event.target.closest("[data-kaposts-open-draft]");
     if (openDraftBtn) {
       openDraft(openDraftBtn.dataset.kapostsOpenDraft);

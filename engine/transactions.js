@@ -30,6 +30,17 @@ export async function getBalance(kaspa, rpc, address) {
   };
 }
 
+// Coins reserved by scheduled KaPosts (KAPOSTS_INDEXER.md §5.10): a signed transaction waiting
+// for its time depends on them, so every builder here leaves them alone. "txid:index" strings.
+let reservedOutpoints = new Set();
+export function setReservedOutpoints(list) {
+  reservedOutpoints = new Set(Array.isArray(list) ? list.map(String) : []);
+}
+export function excludeReservedUtxos(entries) {
+  if (!reservedOutpoints.size) return entries;
+  return (entries || []).filter((entry) => !reservedOutpoints.has(`${entry?.outpoint?.transactionId}:${entry?.outpoint?.index}`));
+}
+
 export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, log = () => {} }) {
   return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, log }));
 }
@@ -49,6 +60,8 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
     ? await withRpc(fetchUtxos, { retries: 1, label: "Compound UTXO fetch" })
     : await fetchUtxos(rpc);
   if (!entries || entries.length === 0) throw new Error("No UTXOs to compound.");
+  entries = excludeReservedUtxos(entries);
+  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
   entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
 
   // Built by hand, never through the generator: asking it for (total - fee) left it a few
@@ -98,6 +111,8 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
     ? await withRpc(fetchUtxos, { retries: 1, label: "Max send UTXO fetch" })
     : await fetchUtxos(rpc);
   if (!entries || entries.length === 0) throw new Error("No UTXOs to send.");
+  entries = excludeReservedUtxos(entries);
+  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
   if (selectedOutpoints && selectedOutpoints.length) {
     const wanted = new Set(selectedOutpoints);
     entries = entries.filter((entry) => {
@@ -203,6 +218,8 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     ? await withRpc(fetchUtxos, { retries: 1, label: "UTXO refresh" })
     : await fetchUtxos(rpc);
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
+  entries = excludeReservedUtxos(entries);
+  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
 
   // Coin control: if the caller picked specific UTXOs, spend only those (mirrors
   // iOS's manualUtxos). An outpoint is keyed as "transactionId:index".

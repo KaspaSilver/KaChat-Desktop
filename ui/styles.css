@@ -10338,3 +10338,28 @@ body.call-active .sidebar-tabbar { display: none; }
 .message-edited.pending { font-style: italic; }
 .message-edited.failed { color: #ff7b7b; }
 .message.outgoing .message-edited, .broadcast-message.mine .message-edited { color: inherit; opacity: .7; }
+
+/* KaPosts polls and scheduled posts (iOS 3b1aecf). */
+.kaposts-chip { border: 1px solid var(--line); background: transparent; color: var(--kaspa-ink); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.kaposts-chip:hover { background: rgba(255,255,255,.06); }
+.kaposts-composer-threadbar { gap: 8px; align-items: center; }
+.kaposts-poll-editor, .kaposts-schedule-editor { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; }
+.kaposts-poll-options { display: flex; flex-direction: column; gap: 6px; }
+.kaposts-poll-option-row { display: flex; align-items: center; gap: 6px; }
+.kaposts-poll-option-row .kaposts-reply-input { flex: 1; }
+.kaposts-poll-editor-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.kaposts-poll-length { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.kaposts-poll-length select, .kaposts-poll-length input { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-1, rgba(255,255,255,.04)); color: inherit; }
+.kaposts-poll { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.kaposts-poll-option { width: 100%; text-align: left; padding: 9px 12px; border-radius: 999px; border: 1px solid var(--kaspa-ink); background: transparent; color: var(--kaspa-ink); font: inherit; font-weight: 600; cursor: pointer; }
+.kaposts-poll-option:hover:not([disabled]) { background: rgba(112,199,186,.12); }
+.kaposts-poll-option[disabled] { opacity: .6; cursor: default; }
+.kaposts-poll-bar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-radius: 10px; background: rgba(255,255,255,.05); overflow: hidden; }
+.kaposts-poll-fill { position: absolute; inset: 0 auto 0 0; background: rgba(112,199,186,.22); }
+.kaposts-poll-bar.mine .kaposts-poll-fill { background: rgba(112,199,186,.4); }
+.kaposts-poll-label, .kaposts-poll-pct { position: relative; font-size: 14px; }
+.kaposts-poll-bar.mine .kaposts-poll-label { font-weight: 700; }
+.kaposts-poll-pct { font-variant-numeric: tabular-nums; font-weight: 600; }
+.kaposts-poll-meta { font-size: 12px; color: var(--muted); }
+.kaposts-scheduled-row.failed .kaposts-draft-meta { color: #ff7b7b; }
+.kaposts-scheduled-row.submitted .kaposts-draft-meta { color: #6fd39a; }

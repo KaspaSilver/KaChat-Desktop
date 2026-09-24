@@ -10,6 +10,7 @@
 
 import { getEndpoint } from "./endpoints.js";
 import { sendPayloadTransaction } from "./transactions.js";
+import { NETWORK_ID } from "./utils.js";
 
 // U+2060 WORD JOINER — the KaChat exclusivity marker. Invisible everywhere, survives base64
 // round-trips, and comes back in postContent so feeds can filter on it (the read API never
@@ -87,7 +88,32 @@ export const KAPOSTS_PROTOCOL = Object.freeze({
   // Removes one of our posts from every feed, any time (§5.8). The chain keeps the bytes.
   deletePayload: (pubkey, signature, postId) =>
     `kchat:1:delete:${pubkey}:${signature}:${postId}`,
+  // Polls (§5.9): the question is the post; the options and closing time ride in the payload.
+  pollSigningString: (b64Question, optionsCsv, closesAtMs, mentionsJson) => `poll:${b64Question}:${optionsCsv}:${closesAtMs}:${mentionsJson}`,
+  pollVoteSigningString: (pollId, optionIndex) => `pollvote:${pollId}:${optionIndex}`,
+  pollPayload: (pubkey, signature, b64Question, optionsCsv, closesAtMs, mentionsJson) =>
+    `kchat:1:poll:${pubkey}:${signature}:${b64Question}:${optionsCsv}:${closesAtMs}:${mentionsJson}`,
+  pollVotePayload: (pubkey, signature, pollId, optionIndex) =>
+    `kchat:1:pollvote:${pubkey}:${signature}:${pollId}:${optionIndex}`,
+  // Scheduled posts (§5.10): what the author signs when handing a signed transaction to the indexer.
+  scheduleSigningString: (txId, notBeforeMs) => `schedule:${txId}:${notBeforeMs}`,
+  cancelScheduleSigningString: (txId) => `cancel-schedule:${txId}`,
 });
+
+export const KAPOSTS_POLL_MIN_OPTIONS = 2;
+export const KAPOSTS_POLL_MAX_OPTIONS = 4;
+export const KAPOSTS_POLL_OPTION_MAX_LENGTH = 40;
+export const KAPOSTS_POLL_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+export const KAPOSTS_SCHEDULE_MIN_MS = 5 * 60 * 1000;
+export const KAPOSTS_SCHEDULE_MAX_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The options, each base64 of its UTF-8 text, joined with `,` (base64 has no `,` or `:`). */
+export function pollOptionsCsv(options) {
+  return (options || []).map((o) => utf8ToBase64(String(o))).join(",");
+}
+export function pollOptionsFromCsv(csv) {
+  return String(csv || "").split(",").filter(Boolean).map((b64) => base64ToUtf8(b64) ?? "");
+}
 
 /** Two hours from the original post: the indexer's edit window, enforced on chain time. */
 export const KAPOSTS_EDIT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -392,6 +418,165 @@ export async function submitKaPostReply({ engine, text, postId, parentAuthorPubk
   const mentions = JSON.stringify(clean);
   const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.replySigningString(postId, b64, mentions));
   return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.replyPayload(me, signature, postId, b64, mentions));
+}
+
+function cleanMentions(engine, mentionedPubkeys) {
+  const me = requesterPubkeyFor(engine);
+  const clean = [...new Set((Array.isArray(mentionedPubkeys) ? mentionedPubkeys : [])
+    .map((p) => String(p || "").toLowerCase())
+    .filter((p) => /^0[23][0-9a-f]{64}$/.test(p) && p !== me))];
+  return JSON.stringify(clean);
+}
+
+/** A poll: the question is the post text; 2-4 options of up to 40 characters; closes at
+ *  `closesAtMs` (at most seven days out). Returns txid = poll id. */
+export async function submitKaPoll({ engine, question, options, closesAtMs, mentionedPubkeys = [] }) {
+  const b64 = utf8ToBase64(KACHAT_MARKER + String(question || ""));
+  const csv = pollOptionsCsv(options);
+  const me = requesterPubkeyFor(engine);
+  const mentions = cleanMentions(engine, mentionedPubkeys);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.pollSigningString(b64, csv, closesAtMs, mentions));
+  return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.pollPayload(me, signature, b64, csv, closesAtMs, mentions));
+}
+
+/** One vote per pubkey; a later vote replaces the earlier one. */
+export async function submitKaPollVote({ engine, pollId, optionIndex }) {
+  const me = requesterPubkeyFor(engine);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.pollVoteSigningString(pollId, optionIndex));
+  return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.pollVotePayload(me, signature, pollId, optionIndex));
+}
+
+/** One poll's numbers without reloading the feed: { id, options (b64), counts, total, closesAt, myVote }. */
+export async function fetchPoll({ engine, postId } = {}) {
+  return kapostGet("get-poll", { postId, requesterPubkey: requesterPubkeyFor(engine) });
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled posts (§5.10): built and signed now, submitted by the indexer at the chosen time -
+// or by this device, if the indexer could not be reached, the next time the app runs after it.
+// The server never signs anything; it only forwards bytes it was given.
+// ---------------------------------------------------------------------------
+
+async function kapostPostJson(path, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${kapostBaseUrl()}/${path}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+    if (!response.ok) {
+      const detail = json?.error ? `: ${json.error}` : "";
+      throw new Error(`KaPost indexer request failed (${response.status})${detail}.`);
+    }
+    return json;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const hexOf = (value) => {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array || Array.isArray(value)) return Array.from(value, (b) => Number(b).toString(16).padStart(2, "0")).join("");
+  return String(value);
+};
+const num = (value) => (typeof value === "bigint" ? Number(value) : Number(value || 0));
+
+/** The signed transaction in the shape the Kaspa REST API's POST /transactions accepts. */
+export function scheduledTransactionRestJson(serialized) {
+  const tx = serialized?.transaction || serialized || {};
+  return {
+    transaction: {
+      version: num(tx.version),
+      inputs: (tx.inputs || []).map((input) => ({
+        previousOutpoint: { transactionId: String(input.previousOutpoint?.transactionId || ""), index: num(input.previousOutpoint?.index) },
+        signatureScript: hexOf(input.signatureScript),
+        sequence: num(input.sequence),
+        sigOpCount: num(input.sigOpCount),
+      })),
+      outputs: (tx.outputs || []).map((output) => ({
+        amount: num(output.value ?? output.amount),
+        scriptPublicKey: { version: num(output.scriptPublicKey?.version), scriptPublicKey: hexOf(output.scriptPublicKey?.script ?? output.scriptPublicKey?.scriptPublicKey) },
+      })),
+      lockTime: num(tx.lockTime),
+      subnetworkId: hexOf(tx.subnetworkId),
+      payload: hexOf(tx.payload),
+    },
+  };
+}
+
+/** Builds and signs the post transaction now, spending the smallest confirmed coin that can
+ *  carry it (else the coins together). Nothing is submitted. Returns
+ *  { txId, payload, spentOutpoints, serialized, restJson }. */
+export async function buildScheduledPost({ engine, text, mentionedPubkeys = [], reservedOutpoints = [] }) {
+  if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load WASM and generate/import a wallet first.");
+  const b64 = utf8ToBase64(KACHAT_MARKER + String(text || ""));
+  const me = requesterPubkeyFor(engine);
+  const mentions = cleanMentions(engine, mentionedPubkeys);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.postSigningString(b64, mentions));
+  const payloadString = KAPOSTS_PROTOCOL.postPayload(me, signature, b64, mentions);
+  const payload = new TextEncoder().encode(payloadString);
+  await engine.connect();
+  const kaspa = engine.kaspa;
+  const { entries } = await engine.withRpc((rpc) => rpc.getUtxosByAddresses([engine.address]), { retries: 1, label: "Scheduled post UTXO fetch" });
+  const reserved = new Set((reservedOutpoints || []).map(String));
+  const usable = (entries || [])
+    .filter((e) => !reserved.has(`${e?.outpoint?.transactionId}:${e?.outpoint?.index}`))
+    .filter((e) => Number(e.blockDaaScore ?? 1) > 0 && !e.isCoinbase)
+    .sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? 1 : -1));
+  if (!usable.length) throw new Error("No spendable coins for a scheduled post.");
+  const build = (inputs) => {
+    const total = inputs.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+    const draft = kaspa.createTransaction(inputs, [{ address: engine.address, amount: total - (total / 20n) }], 0n, payload);
+    const fee = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
+    const amount = total - fee;
+    if (amount <= 0n || amount < 20_000_000n) return null; // the self-send output must clear dust
+    return kaspa.createTransaction(inputs, [{ address: engine.address, amount }], 0n, payload);
+  };
+  let tx = null;
+  for (const candidate of usable) { tx = build([candidate]); if (tx) break; }
+  if (!tx) tx = build(usable.slice(0, 80));
+  if (!tx) throw new Error("Balance too low to schedule a post after network fees.");
+  const keyHex = engine.privateKeyHex || engine.privateKey;
+  const signed = kaspa.signTransaction(tx, [keyHex], true);
+  const serialized = typeof signed.serializeToObject === "function" ? signed.serializeToObject() : signed;
+  const txId = String(signed.id || serialized.id || "");
+  if (!txId) throw new Error("Could not compute the scheduled post's transaction id.");
+  const spentOutpoints = (serialized.inputs || []).map((i) => `${i.previousOutpoint?.transactionId}:${num(i.previousOutpoint?.index)}`);
+  const plain = JSON.parse(JSON.stringify(serialized, (k, v) => (typeof v === "bigint" ? v.toString() : v)));
+  return { txId, payload: payloadString, spentOutpoints, serialized: plain, restJson: scheduledTransactionRestJson(serialized) };
+}
+
+export async function scheduleOnServer({ engine, txId, notBeforeMs, restJson }) {
+  const me = requesterPubkeyFor(engine);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.scheduleSigningString(txId, notBeforeMs));
+  return kapostPostJson("schedule-post", { pubkey: me, txId, notBefore: notBeforeMs, signature, transaction: restJson });
+}
+
+export async function cancelScheduledOnServer({ engine, txId }) {
+  const me = requesterPubkeyFor(engine);
+  const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.cancelScheduleSigningString(txId));
+  return kapostPostJson("cancel-scheduled-post", { pubkey: me, txId, signature });
+}
+
+export async function fetchScheduledPosts({ engine } = {}) {
+  const json = await kapostGet("scheduled-posts", { pubkey: requesterPubkeyFor(engine) });
+  return Array.isArray(json?.posts) ? json.posts : [];
+}
+
+/** The local fallback: this device submits the signed transaction itself. */
+export async function submitScheduledLocally({ engine, serialized }) {
+  await engine.connect();
+  let transaction = serialized;
+  try { transaction = new engine.kaspa.Transaction(serialized); } catch { transaction = serialized; }
+  const response = await engine.withRpc((rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }), { retries: 1, label: "Scheduled post submit" });
+  return String(response?.transactionId || serialized?.id || "");
 }
 
 /** vote ∈ upvote | downvote | unvote (unvote = the fork's removal counter-action). */
