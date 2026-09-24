@@ -811,6 +811,8 @@
       </section>
     </div>
 
+  <!-- The four tabs that live in Kaspa Hub by default start hidden: the dock is drawn from the
+       saved arrangement once app.js runs, and before that the page must not flash all nine. -->
   <nav class="sidebar-tabbar" aria-label="Main sections">
       <button class="sidebar-tab" type="button" data-app-tab="cold-storage">
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg></span>
@@ -824,19 +826,19 @@
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.3 4.5h9.1a3.8 3.8 0 0 1 3.8 3.8v2.7a3.8 3.8 0 0 1-3.8 3.8H8.7l-4.45 3.05.02-3.44A3.78 3.78 0 0 1 .5 10.65V8.3a3.8 3.8 0 0 1 3.8-3.8Z"/><path d="M9.65 8.15h6.1a3.75 3.75 0 0 1 3.75 3.75v1.95a3.75 3.75 0 0 1-3.75 3.75h-2.7L9.5 20.1v-2.5"/></svg></span>
         <span>Chats</span>
       </button>
-      <button class="sidebar-tab" type="button" data-app-tab="kaposts">
+      <button class="sidebar-tab" type="button" data-app-tab="kaposts" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897l12.682-12.68Z"/><path d="M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg></span>
         <span>KaPosts</span>
       </button>
-      <button class="sidebar-tab" type="button" data-app-tab="swaps">
+      <button class="sidebar-tab" type="button" data-app-tab="swaps" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span>
         <span>Swaps</span>
       </button>
-      <button class="sidebar-tab" type="button" data-app-tab="apps">
+      <button class="sidebar-tab" type="button" data-app-tab="apps" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg></span>
         <span>Apps</span>
       </button>
-      <button class="sidebar-tab" type="button" data-app-tab="chess">
+      <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
         <!-- A rook and a knight (iOS ChessTabIcon: SF Symbols has no chess pieces). -->
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 21h7M4.5 18.5h6M5 18.5V10M10 18.5V10M4 10h7l-1-2H5l-1 2ZM4.5 5v3h6V5M6.5 5v2M8.5 5v2"/><path d="M13 21h8M13.5 18.5h7M15 18.5c0-3 .5-5.5 2.5-7.5 1.2-1.2 2-2.2 2-3.5 0-1-.5-2-1.5-2.5L17 6l-1.5 1.5c-1 .5-1.7 1.6-1.7 2.8 0 .8.3 1.4.8 1.8l1.6-.3"/></svg></span>
         <span>Chess Online</span>
