@@ -1142,7 +1142,7 @@ export class KaspaEngine {
     return sendMessageOnchain({ engine: this, ...details });
   }
 
-  async estimateMessageFee(payloadBytes = 0) {
+  async estimateMessageFee(payloadBytes = 0, { singleInput = false } = {}) {
     if (!this.kaspa || !this.address) return null;
     await this.connect();
     return estimateOnchainFee({
@@ -1152,6 +1152,7 @@ export class KaspaEngine {
       sourceAddress: this.address,
       amountKas: "0.2",
       payloadBytes,
+      singleInput,
     });
   }
 

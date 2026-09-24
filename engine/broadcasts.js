@@ -280,7 +280,7 @@ export function broadcastPayloadBytes(channel, content) {
   return new TextEncoder().encode(`${BROADCAST_PAYLOAD_PREFIX}${name}:${String(content || "")}`).length;
 }
 
-export async function sendBroadcastMessage({ engine, channel, content, feeKas = "0" }) {
+export async function sendBroadcastMessage({ engine, channel, content, feeKas = "0", singleInput = false }) {
   const name = normalizeBroadcastChannel(channel);
   if (!isValidBroadcastChannel(name)) throw new Error("Invalid channel name.");
   const text = String(content || "").trim();
@@ -300,6 +300,7 @@ export async function sendBroadcastMessage({ engine, channel, content, feeKas = 
     amountKas: "0.2",
     feeKas: String(feeKas || "0"),
     payload: new TextEncoder().encode(protocolString),
+    singleInput,
     log: engine.log,
   });
   const txid = sendResult.txids?.[0] || "";

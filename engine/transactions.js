@@ -41,8 +41,16 @@ export function excludeReservedUtxos(entries) {
   return (entries || []).filter((entry) => !reservedOutpoints.has(`${entry?.outpoint?.transactionId}:${entry?.outpoint?.index}`));
 }
 
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, log }));
+/** The one coin an arena message spends (iOS builds every chess send with a single input): the
+ *  largest coin that covers the amount plus a fee margin. Null when no single coin can. */
+export function singleInputFor(entries, amountSompi, marginSompi = 300_000n) {
+  const sorted = [...(entries || [])].sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? -1 : 1));
+  const pick = sorted.find((e) => BigInt(e.amount || 0) >= amountSompi + marginSompi) || null;
+  return pick ? [pick] : null;
+}
+
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, singleInput, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
@@ -207,7 +215,7 @@ function describeKey(privateKey) {
   return `key: ${privateKey.constructor?.name || typeof privateKey} ptr=${privateKey.__wbg_ptr ?? "n/a"}`;
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, log = () => {} }) {
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas || "").trim();
   const fee = String(feeKas || "0").trim();
@@ -230,6 +238,12 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
       return wanted.has(`${outpoint.transactionId}:${outpoint.index}`);
     });
     if (entries.length === 0) throw new Error("None of the selected UTXOs are still available. Refresh and try again.");
+  }
+  // An arena message spends one coin when one can carry it, so the fee is the one-input fee
+  // the label promised (mobile parity); a wallet of only small coins falls back to the usual pick.
+  if (singleInput && !selectedOutpoints?.length) {
+    const one = singleInputFor(entries, BigInt(kaspa.kaspaToSompi(amount)));
+    if (one) entries = one;
   }
   entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
 
@@ -309,7 +323,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
 // estimate of the real Kasia COMM payload's byte length for the draft text,
 // since mass (and therefore fee) scales with payload size.
 // Builds the representative tx and returns { feeSompi, massGrams } from the generator summary.
-async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null }) {
+async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
   const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
   let { entries } = withRpc
     ? await withRpc(fetchUtxos, { retries: 1, label: "Fee estimate UTXO refresh" })
@@ -324,6 +338,10 @@ async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddr
       return wanted.has(`${outpoint.transactionId}:${outpoint.index}`);
     });
     if (entries.length === 0) return null;
+  }
+  if (singleInput && !selectedOutpoints?.length) {
+    const one = singleInputFor(entries, BigInt(kaspa.kaspaToSompi(amountKas)));
+    if (one) entries = one;
   }
   entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
 
@@ -376,6 +394,7 @@ export async function sendPayloadTransaction({
   feeKas = "0",
   payload,
   changeAddress = null,
+  singleInput = false,
   log = () => {},
 }) {
   if (!payload) throw new Error("Payload is required for a message transaction.");
@@ -390,6 +409,7 @@ export async function sendPayloadTransaction({
     feeKas,
     payload,
     changeAddress,
+    singleInput,
     log,
   });
 }

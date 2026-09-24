@@ -228,7 +228,7 @@ async function estimateJoinFee() {
   if (joinFeeText || !deps.estimateFeeKas) return;
   try {
     const bytes = broadcastPayloadBytes(T.ARENA_CHANNEL, T.encodeMessage(T.messages.join("abcdefgh")));
-    const fee = await deps.estimateFeeKas(bytes);
+    const fee = await deps.estimateFeeKas(bytes, { singleInput: true });
     if (fee == null) return;
     joinFeeText = `${Number(fee).toFixed(4)} KAS`;
     render();
@@ -249,7 +249,8 @@ async function send(message) {
   let attempt = 0;
   for (;;) {
     try {
-      const txid = await sendBroadcastMessage({ engine: deps.engine, channel: T.ARENA_CHANNEL, content, feeKas: "0" });
+      // One input, like every arena send on the phones: the fee is the one the Join button showed.
+      const txid = await sendBroadcastMessage({ engine: deps.engine, channel: T.ARENA_CHANNEL, content, feeKas: "0", singleInput: true });
       // Applied at once with this device's clock; the chain's row replaces the time when it lands.
       rows.set(txid, { txId: txid, senderAddress: me(), content, blockTime: Date.now(), local: true });
       saveCache();
