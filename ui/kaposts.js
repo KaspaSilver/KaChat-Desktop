@@ -1206,6 +1206,17 @@ function quoteCardHeadHtml(quoted) {
 
 // The poll under the question (iOS 3b1aecf): options as buttons until you vote or the poll
 // closes, then bars with percentages, your choice marked, the vote count and the time left.
+// Bottom right of the card (iOS 2402689): the clock time for a post from today, month + day +
+// time for this year, the year too beyond that - in the user's locale and 12/24-hour setting.
+function postTimestamp(timestampMs) {
+  const date = new Date(Number(timestampMs) || Date.now());
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  if (sameDay) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (date.getFullYear() === now.getFullYear()) return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return date.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 function pollCardHtml(post) {
   const poll = post.poll;
   if (!poll) return "";
@@ -1295,7 +1306,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = fa
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
-        ${deliveryHtml}
+        <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}</span>${deliveryHtml}</div>
         <div class="kaposts-actions">
           <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${post.id}"` : `data-kaposts-open="${post.id}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}

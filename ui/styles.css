@@ -10363,3 +10363,5 @@ body.call-active .sidebar-tabbar { display: none; }
 .kaposts-poll-meta { font-size: 12px; color: var(--muted); }
 .kaposts-scheduled-row.failed .kaposts-draft-meta { color: #ff7b7b; }
 .kaposts-scheduled-row.submitted .kaposts-draft-meta { color: #6fd39a; }
+.kaposts-cell-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.kaposts-cell-stamp { color: var(--muted); font-size: 11px; white-space: nowrap; }
