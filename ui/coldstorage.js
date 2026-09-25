@@ -359,8 +359,10 @@ function renderList() {
 function addressRowHtml(account, entry) {
   const funded = (entry.balanceSompi || 0) > 0;
   const used = funded || entry.everUsed === true;
-  const usageBadge = entry.balanceSompi === undefined || (!funded && entry.everUsed === undefined)
+  const usageBadge = entry.balanceSompi === undefined
     ? ""
+    : (!funded && entry.everUsed === undefined)
+      ? '<span class="spending-address-usage checking" data-cold-usage-cell="' + entry.index + '">Checking</span>'
     : used
       ? '<span class="spending-address-usage used" data-cold-usage-cell="' + entry.index + '">Used</span>'
       : '<span class="spending-address-usage unused" data-cold-usage-cell="' + entry.index + '">Unused</span>';
@@ -1659,7 +1661,7 @@ function renderSendFlow() {
         </button>
         <input class="field-input send-amount-input" type="text" inputmode="decimal" data-cold-send-amount
           placeholder="${send.amountUnit === "kas" ? "0.00000000" : "0.00"}" autocomplete="off" value="${deps.escapeHtml(send.amountText)}" />
-        <button type="button" class="send-amount-max" data-cold-send-max ${send.estimatingMax ? "disabled" : ""}>${send.estimatingMax ? "…" : "Max"}</button>
+        <button type="button" class="send-amount-max" data-cold-send-max ${send.estimatingMax || !(send.validAddress || send.resolvedAddress) ? "disabled" : ""}>${send.estimatingMax ? "…" : "Max"}</button>
       </div>
       <p class="field-hint cold-send-conversion" data-cold-send-conversion ${sendConversionText() ? "" : "hidden"}>${deps.escapeHtml(sendConversionText() || "")}</p>
       <div class="settings-segmented full" role="group" aria-label="Fee tier">
@@ -2604,8 +2606,11 @@ async function beginImport(kpubRaw) {
     deps.showToast?.("That doesn't look like a valid Kaspa extended public key (kpub).");
     return;
   }
-  if (accounts.some((a) => a.kpub === kpub)) {
-    deps.showToast?.("That account is already imported.");
+  const existing = accounts.find((a) => a.kpub === kpub);
+  if (existing) {
+    // Re-scanning a kpub you already watch renames that account in place (iOS).
+    const name = await promptModal({ kicker: "Cold Storage", title: "Rename Cold Storage Account", label: "Name", initial: existing.label });
+    if (name?.trim()) { existing.label = name.trim(); saveState(); render(); }
     return;
   }
   const label = await promptModal({
@@ -2703,13 +2708,13 @@ async function handleAddressAction(action, index) {
   } else if (action === "hide") {
     // Refuse rather than silently do nothing if a balance landed between the render and the tap.
     if ((entry.balanceSompi || 0) > 0) {
-      deps.showToast?.("That address holds a balance, so it stays on the list.");
+      deps.showToast?.("This address can't be hidden.");
       return;
     }
     if (!account.hidden.includes(index)) account.hidden.push(index);
     saveState();
     await loadDetail();
-    deps.showToast?.("Address hidden. Bring it back in Address Visibility.");
+    deps.showToast?.("Address hidden. Re-enable it in Address Visibility.");
   } else if (action === "rename") {
     const custom = account.labels?.[index] ?? account.labels?.[String(index)] ?? "";
     const label = await promptModal({
@@ -2783,8 +2788,8 @@ async function runAddressAction(kind) {
       // of addresses worth showing, not the high-water index, which is a number nobody asked for.
       const found = detailEntries.filter((e) => (e.balanceSompi || 0) > 0 || detailDomainOwning.has(e.address)).length;
       detailDiscoverySummary = found === 0
-        ? "Nothing holding a balance or a domain turned up."
-        : `Found ${found} address${found === 1 ? "" : "es"} holding a balance or a domain.`;
+        ? "No addresses with a balance or domain found."
+        : `Found ${found} address${found === 1 ? "" : "es"} with a balance or domain.`;
       deps.showToast?.(detailDiscoverySummary);
     } else if (kind === "refresh") {
       await loadDetail({ useCache: false });

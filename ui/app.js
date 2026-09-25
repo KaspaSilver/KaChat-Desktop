@@ -3503,6 +3503,9 @@ function chatListDeliveryGlyphHtml(message) {
 // only - a kaspa: address must keep reading as one.
 const WEB_LINK_RE = /https?:\/\/\S+/i;
 function webLinkPreviewLabel(text) {
+  const internal = firstInternalLinkIn(text);
+  if (internal?.kind === "post") return "Shared a KaPosts post";
+  if (internal?.kind === "broadcast") return `Public chat room #${internal.channel}`;
   return WEB_LINK_RE.test(String(text || "")) ? "📎 Sent a link" : null;
 }
 function chatListPreviewText(message) {
@@ -6457,10 +6460,10 @@ async function spendingAddressHasHistory(address, { timeoutMs = 0 } = {}) {
     const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=1&offset=0&resolve_previous_outpoints=no`;
     const signal = timeoutMs > 0 && typeof AbortSignal?.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
     const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal });
-    if (!response.ok) return false;
+    if (!response.ok) return null; // unknown, not "unused": a rate-limited probe must not recycle a used address
     const txs = await response.json();
     return Array.isArray(txs) && txs.length > 0;
-  } catch { return false; }
+  } catch { return null; }
 }
 
 // Everything the visible spending addresses hold, together (iOS "Total Balance"). The chatting
@@ -6501,7 +6504,7 @@ async function renderSpendingList() {
     items.push({ index: i, address });
   }
   if (!items.length) {
-    spendingListEl.innerHTML = '<p class="spending-address-empty">No spending addresses yet.</p>';
+    spendingListEl.innerHTML = '<div class="no-results-card"><strong>No Spending Addresses</strong><span>Generate one below to start sending payments from a separate address than the one you chat from.</span></div>';
     return;
   }
   // Provisional render with LAST-KNOWN balances/used-state (index order) so the list appears
@@ -6777,8 +6780,8 @@ async function renderSpendingVisibilityPage() {
         cell.textContent = `${usage.kas.toFixed(4)} KAS`;
         cell.classList.add("used");
       } else {
-        cell.textContent = usage.used ? "Used" : "Unused";
-        cell.classList.add(usage.used ? "used" : "unused");
+        cell.textContent = usage.used === true ? "Used" : usage.used === false ? "Unused" : "Checking";
+        cell.classList.add(usage.used === true ? "used" : usage.used === false ? "unused" : "checking");
       }
     }));
     if (token !== spendingVisibilityToken) return;
@@ -7312,7 +7315,7 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
         catch { continue; } // balance unknown — skip rather than risk recycling a funded address
         if (kas > 0) continue;
       }
-      if (await spendingAddressHasHistory(address)) continue;
+      if ((await spendingAddressHasHistory(address)) !== false) continue; // used, or unknown: not recyclable
       pick = i;
       break;
     }
@@ -7457,6 +7460,7 @@ spendingScanBtn?.addEventListener("click", async () => {
     // gap alive (seeded with the distance from the last hit to the window's end).
     let index = scanEnd + 1;
     let consecutiveEmpty = Math.max(0, scanEnd - highestHit);
+    let discoveryHits = 0;
     while (consecutiveEmpty < SPENDING_GAP_LIMIT) {
       const address = deriveSpendingAddressAt(index);
       if (!address) break;
@@ -7464,7 +7468,7 @@ spendingScanBtn?.addEventListener("click", async () => {
       let held = 0;
       try { const bal = await engine.balanceForAddress(address); held = Number(bal?.totalKas) || 0; }
       catch { break; }
-      if (held > 0) { highestHit = index; consecutiveEmpty = 0; }
+      if (held > 0) { highestHit = index; consecutiveEmpty = 0; discoveryHits += 1; }
       else consecutiveEmpty += 1;
       index += 1;
     }
@@ -7472,9 +7476,9 @@ spendingScanBtn?.addEventListener("click", async () => {
     if (highestHit > state.maxIndex) {
       saveSpendingState({ maxIndex: highestHit });
       renderSpendingList();
-      showCopyToast(`Found addresses in use up to #${highestHit}.`);
+      showCopyToast(`Found ${discoveryHits} address${discoveryHits === 1 ? "" : "es"} with a balance or domain.`);
     } else {
-      showCopyToast("No additional spending addresses with a balance or KNS domain found.");
+      showCopyToast("No addresses with a balance or domain found.");
     }
   } finally {
     spendingScanBtn.disabled = false;
@@ -7630,7 +7634,7 @@ function setActiveAppTab(tab) {
   // Select lives in the topbar now, which every tab shares - but it only ever acts on the chats
   // list, so it goes away with it.
   const selectCluster = document.querySelector("[data-topbar-select-cluster]");
-  if (selectCluster) selectCluster.hidden = !isChats;
+  if (selectCluster) selectCluster.hidden = !isChats || activeChatsListTab === "public";
   // On Chats the topbar narrows to the chats list and the conversation takes the full height
   // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
   document.body.classList.toggle("chats-tab", isChats);
@@ -8380,7 +8384,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 52;
+const APP_BUILD = 53;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12789,6 +12793,17 @@ function renderMessages(conversationEntry) {
   }
   // Keep an open chess board in sync with newly-arrived moves/invites/resigns.
   refreshChessOverlay();
+  // The header's checkerboard shows only while a game with this contact is on (iOS).
+  try {
+    const chessButton = document.querySelector("[data-open-chess]");
+    if (chessButton) {
+      const contact = contactForConversation(conversationEntry);
+      const active = contact?.address && engine.address
+        ? Chess.activeChessGame((conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0 })), engine.address, contact.address)
+        : null;
+      chessButton.hidden = !active;
+    }
+  } catch { /* the header is optional */ }
 }
 
 messageArea?.addEventListener("scroll", () => {
@@ -13195,6 +13210,12 @@ chatInfoOverlay?.addEventListener("click", (event) => {
   openChatInfoSheet(row.dataset.chatInfoSheet);
 });
 document.querySelector("[data-chat-info-sheet-close]")?.addEventListener("click", closeChatInfoSheet);
+document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", () => {
+  const address = chatInfoContactAddress;
+  if (!address || address === engine.address) return;
+  closeChatInfo();
+  openOrCreateOneToOne(address);
+});
 // Clicking the dimmed area outside the sheet dismisses it, the way a detent sheet does.
 chatInfoSheetOverlay?.addEventListener("click", (event) => {
   if (event.target === chatInfoSheetOverlay) closeChatInfoSheet();
@@ -14595,14 +14616,18 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   if (selectionIsGroups()) {
     const count = selectedGroupIds.size;
     if (!count) return;
-    if (!await confirmText(`Delete ${count} group${count === 1 ? "" : "s"} from this device? Members you invited keep their copy. This cannot be undone.`)) return;
+    if (!await confirmDialog({
+      title: `Delete ${count} Group${count === 1 ? "" : "s"}?`,
+      message: "This removes each selected group and its messages from this device. This cannot be undone, and other members won't be notified.",
+      confirmLabel: "Delete", destructive: true,
+    })) return;
     const mgr = getGroupManager();
     const ids = new Set(selectedGroupIds);
     if (activeGroupId && ids.has(activeGroupId)) closeGroupChat();
     if (mgr) for (const id of ids) { try { mgr.deleteGroup(id); } catch { /* already gone */ } }
     setChatSelectionMode(false);
     renderGroupList();
-    showCopyToast(`Deleted ${count} group${count === 1 ? "" : "s"}`);
+    showCopyToast(count === 1 ? "Group deleted." : `${count} groups deleted.`);
     return;
   }
   const count = selectedChatConversationIds.size;
@@ -18009,6 +18034,13 @@ function updateHandshakeWarningBanner() {
   const theirHandshake = (conversationEntry.messages || []).some((message) =>
     message?.direction === "incoming" && message?.messageType === "handshake"
   );
+  // An unanswered handshake of ours: the button says so, here and in the plus menu (iOS).
+  const oursOut = (conversationEntry.messages || []).some((message) =>
+    message?.direction === "outgoing" && message?.messageType === "handshake" && message?.status !== MESSAGE_STATUSES.FAILED);
+  const handshakeLabel = oursOut && !theirHandshake ? "Handshake sent - send again" : "Send Handshake";
+  if (handshakeWarningSendButton && !handshakeWarningSendButton.disabled) handshakeWarningSendButton.textContent = handshakeLabel;
+  const plusRow = document.querySelector("[data-composer-handshake] strong");
+  if (plusRow) plusRow.textContent = handshakeLabel;
   if (theirHandshake) {
     hideHandshakeWarningBanner();
     return;
@@ -20322,7 +20354,7 @@ document.querySelector("[data-logged-out-create]")?.addEventListener("click", op
 document.querySelector("[data-logged-out-import]")?.addEventListener("click", openImportAccountModal);
 
 document.querySelector("[data-copy-balance]")?.addEventListener("click", async () => {
-  try { await copyTextToClipboard(String(currentBalanceKas)); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
+  try { await copyTextToClipboard(Number(currentBalanceKas).toFixed(8)); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
 });
 
 document.querySelectorAll('[data-shell-action="view-recovery"]').forEach((button) => button.addEventListener("click", openRecoveryModal));
@@ -20902,6 +20934,12 @@ queueMicrotask(async () => {
       title, body,
       onClick: () => { if (route?.address) openChatWithAddress({ address: route.address }); },
     }),
+  });
+  document.querySelector("[data-open-chess]")?.addEventListener("click", () => {
+    const { contact, messages } = chessConversationContext();
+    if (!contact?.address) return;
+    const active = Chess.activeChessGame(messages, engine.address, contact.address);
+    if (active) openChessGame(active.gameId);
   });
   document.querySelector("[data-open-call]")?.addEventListener("click", () => {
     const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
@@ -21509,11 +21547,13 @@ function openGroupMemberMenu(address, x, y) {
   const hidden = Boolean(activeGroupId && !mine && isGroupMemberHidden(activeGroupId, address));
   // iOS GroupChatDetailView's sender sheet: a header naming the sender and their address, then
   // one row per option saying what it does.
-  const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and shared media." }];
-  if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
+  const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and address." }];
+  if (!mine) {
+    options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
+    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: "Send KAS to this member from your chatting address." });
+  }
   options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
-    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: "Send KAS to this member from your chatting address." });
     options.push(muted
       ? { id: "mute", title: "Unmute User", subtitle: "Their messages notify you again." }
       : { id: "mute", title: "Mute User", subtitle: "Their messages stop notifying you; they still appear." });
@@ -21546,10 +21586,16 @@ function setGroupUnread(groupId, count) {
   all[wallet][groupId] = Math.max(0, count | 0);
   try { localStorage.setItem(GROUP_UNREAD_KEY, JSON.stringify(all)); } catch {}
 }
+/** What a group's row shows: a non-admin group never opened reads at least 1 (iOS). */
+function groupDisplayUnread(g, opened = openedGroupIds()) {
+  const raw = groupUnreadFor(g.groupId);
+  return (!g.isAdmin && !opened.has(g.groupId)) ? Math.max(1, raw) : raw;
+}
 function totalGroupUnread() {
   const mgr = getGroupManager();
   if (!mgr) return 0;
-  return mgr.listGroups().reduce((sum, g) => sum + groupUnreadFor(g.groupId), 0);
+  const opened = openedGroupIds();
+  return mgr.listGroups().reduce((sum, g) => sum + groupDisplayUnread(g, opened), 0);
 }
 
 // --- element refs ---
@@ -21684,7 +21730,19 @@ function renderGroupList() {
   if (groupChatsPlaceholder) groupChatsPlaceholder.hidden = true;
   if (!groupListEl) return;
   groupListEl.hidden = false;
-  groupListEl.innerHTML = groups.map((g) => {
+  // The search box filters groups too (iOS ChatListView): name, a member's name or address, or
+  // message text.
+  const query = String(searchInput?.value || "").trim().toLowerCase();
+  const matching = !query ? groups : groups.filter((g) => {
+    if (String(g.name || "").toLowerCase().includes(query)) return true;
+    if ((g.members || []).some((m) => String(m.address || "").toLowerCase().includes(query) || groupSenderLabel(m.address).toLowerCase().includes(query))) return true;
+    return groupMessages(g.groupId).some((m) => String(m.text || "").slice(0, 4096).toLowerCase().includes(query));
+  });
+  if (!matching.length) {
+    groupListEl.innerHTML = `<div class="no-results-card"><strong>No matching groups</strong><span>Try a different name, member, or message.</span></div>`;
+    return;
+  }
+  groupListEl.innerHTML = matching.map((g) => {
     const msgs = groupMessages(g.groupId);
     const last = msgs[msgs.length - 1];
     const opened = openedGroupIds();
@@ -21692,21 +21750,64 @@ function renderGroupList() {
       ? `${last.direction === "local" ? "You: " : ""}${groupPreviewText(last.text)}`
       : `${g.members.length} member${g.members.length === 1 ? "" : "s"}`;
     const time = last ? formatTime(last.createdAt) : "";
-    const unread = (!g.isAdmin && !opened.has(g.groupId)) ? Math.max(1, groupUnreadFor(g.groupId)) : groupUnreadFor(g.groupId);
+    const unread = groupDisplayUnread(g, opened);
     const selected = selectedGroupIds.has(g.groupId);
+    const silenced = getGroupNotify(g.groupId) === "muted";
     return `
       <button class="chat-row group-row${chatSelectionModeActive ? " selecting" : ""}${selected ? " selected" : ""}${g.groupId === activeGroupId ? " active" : ""}" type="button" data-group-open="${escapeHtml(g.groupId)}">
         ${chatSelectionModeActive ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
         <span class="chat-row-time">${escapeHtml(time)}</span>
         <span class="chat-avatar">${groupAvatarHtml(g.photoHex)}</span>
         <span class="chat-meta">
-          <strong>${escapeHtml(g.name || "Group")}</strong>
+          <strong>${escapeHtml(g.name || "Group")}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
           <span>${escapeHtml(preview)}</span>
         </span>
         ${unread > 0 ? `<b class="unread-badge">${unread > 99 ? "99+" : unread}</b>` : ``}
       </button>`;
-  }).join("");
+  }).join("") + `<div class="chat-list-footer">${matching.length} group${matching.length === 1 ? "" : "s"}</div>`;
 }
+
+// Right-click on a group row (iOS long-press): Read/Unread, Silence/Unsilence, Delete - the
+// same shape as the 1:1 row sheet. Nothing while Select mode is active.
+onContextGesture(groupListEl, async (event) => {
+  const row = event.target.closest("[data-group-open]");
+  if (!row || chatSelectionModeActive) return;
+  event.preventDefault();
+  const mgr = getGroupManager();
+  const g = mgr?.getGroup(row.dataset.groupOpen);
+  if (!g) return;
+  const silenced = getGroupNotify(g.groupId) === "muted";
+  const choice = await chooseDialog({
+    title: g.name || "Group",
+    options: [
+      groupDisplayUnread(g) > 0
+        ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this group." }
+        : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again." },
+      {
+        id: "silence",
+        title: silenced ? "Unsilence" : "Silence",
+        subtitle: silenced ? "Notifications from this group resume." : "No notification from this group, whatever your app-wide setting says.",
+      },
+      { id: "delete", title: "Delete", subtitle: "Removes this group and its messages from this device.", destructive: true },
+    ],
+  });
+  if (!choice) return;
+  if (choice === "read") { markGroupOpened(g.groupId); setGroupUnread(g.groupId, 0); renderGroupList(); return; }
+  if (choice === "unread") { setGroupUnread(g.groupId, Math.max(1, groupUnreadFor(g.groupId))); renderGroupList(); return; }
+  if (choice === "silence") { setGroupNotify(g.groupId, silenced ? "all" : "muted"); renderGroupList(); return; }
+  if (choice === "delete") {
+    const ok = await confirmDialog({
+      title: `Delete "${g.name || "Group"}"`,
+      message: "This removes the group and its messages from this device. This cannot be undone, and other members won't be notified.",
+      confirmLabel: "Delete", destructive: true,
+    });
+    if (!ok) return;
+    if (activeGroupId === g.groupId) closeGroupChat();
+    try { mgr.deleteGroup(g.groupId); } catch { /* already gone */ }
+    renderGroupList();
+    showCopyToast("Group deleted.");
+  }
+});
 
 // --- group thread (shares the right-side detail pane with the 1:1 conversation view) ---
 // Zero-balance gate for the group composer (iOS zeroBalanceGateCard): reading stays usable,

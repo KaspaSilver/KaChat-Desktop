@@ -551,7 +551,7 @@ function showPendingNewPosts() {
   remotePosts = [...pendingNewPosts.filter((post) => !known.has(post.remoteId)), ...remotePosts];
   pendingNewPosts = [];
   renderAll();
-  document.querySelector("[data-kaposts-feed]")?.scrollTo({ top: 0, behavior: "smooth" });
+  kapostsScrollEl()?.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 /// Only while the feed is actually on screen, the way iOS ties its check to the view's lifetime -
@@ -1260,8 +1260,8 @@ function pollCardHtml(post) {
   }).join("");
   const left = poll.closesAt - Date.now();
   const timeLeft = closed ? "Final results" : left < 60 * 60 * 1000
-    ? `${Math.max(1, Math.round(left / 60000))} min left`
-    : left < 24 * 60 * 60 * 1000 ? `${Math.round(left / 3600000)} h left` : `${Math.round(left / 86400000)} d left`;
+    ? `${Math.max(1, Math.floor(left / 60000))}m left`
+    : left < 24 * 60 * 60 * 1000 ? `${Math.floor(left / 3600000)}h left` : `${Math.floor(left / 86400000)}d left`;
   return `
     <div class="kaposts-poll" data-kaposts-poll="${post.id}">
       ${rows}
@@ -1269,11 +1269,14 @@ function pollCardHtml(post) {
     </div>`;
 }
 
-function postCellHtml(post, { inThread = false, isRoot = false, replyInline = false, openByRemote = false, truncates = false } = {}) {
+function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false } = {}) {
   const name = posterName(post.posterAddress);
   const isMine = post.posterAddress === deps.engine.address;
   const isFollowing = prefs.following.includes(post.posterAddress);
-  const isLong = post.text.length > 280 || (post.text.match(/\n/g) || []).length >= 8;
+  // Measured on the text on screen (a translation can run longer than the original), with the
+  // line count over the first 281 characters, as iOS does.
+  const shownText = postDisplayText(post);
+  const isLong = shownText.length > 280 || (shownText.slice(0, 281).match(/\n/g) || []).length >= 8;
   // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
   // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
   // all. Opening the post is what tapping the post itself is for.
@@ -2043,7 +2046,7 @@ function toggleVote(post, kind) {
     try {
       const vote = wasSet ? "unvote" : (kind === "like" ? "upvote" : "downvote");
       const txid = await submitKaPostVote({ engine: deps.engine, postId: post.remoteId, vote, authorPubkey: post.posterPubkey });
-      showActionToast(wasSet ? "Vote removed on the network" : `${kind === "like" ? "Like" : "Dislike"} posted to the network`, txid);
+      showActionToast(`${kind === "like" ? "Like" : "Dislike"} ${wasSet ? "removed on" : "posted to"} the network`, txid);
     } catch (error) {
       deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
     }
@@ -2442,7 +2445,7 @@ function renderComposerExtras() {
     }
   }
   if (composerSubmit && !composerEditTarget && !composerReplyTarget) {
-    composerSubmit.textContent = composerScheduleAt != null ? "Schedule post" : composerPoll ? "Post poll" : "Post";
+    composerSubmit.textContent = composerScheduleAt != null ? "Schedule" : composerPoll ? "Post Poll" : "Post";
   }
 }
 function pollEditorValid() {
@@ -2529,7 +2532,7 @@ function scheduleDelete(post) {
       deps.showToast?.(`Delete failed: ${error?.message || error}`);
     }
     renderAll();
-  }, null, "Deleting");
+  }, null, post.parentRemoteId ? "Deleting comment" : "Deleting post");
 }
 
 function removePostEverywhere(post) {
@@ -2635,7 +2638,7 @@ function renderPanel() {
     // too fresh), newest first - a post you just made belongs on your own Posts tab.
     const remoteItems = panel.tab === "replies" ? (panel.replies || []) : (panel.posts || []);
     const feedItems = isMine && panel.tab !== "replies"
-      ? [...remoteItems, ...localPosts.filter((post) => post.posterAddress === address && !post.quoted
+      ? [...remoteItems, ...localPosts.filter((post) => post.posterAddress === address
           && !remoteItems.some((row) => row.remoteId && row.remoteId === post.remoteId))]
           .sort((a, b) => b.timestamp - a.timestamp)
       : remoteItems;
@@ -2670,7 +2673,7 @@ function renderPanel() {
         ${panel.loading && feedItems.length === 0
           ? `<div class="kaposts-feed-status">Loading…</div>`
           : feedItems.length === 0
-            ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong><span>${panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here."}</span></div>`
+            ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong>${isMine ? `<span>${panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here."}</span>` : ""}</div>`
             : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
       </div>`;
     // More appears only when the three-line clamp actually hid something.
@@ -3285,6 +3288,7 @@ async function pollKaPostNotificationsForPings() {
   for (const { n, actorAddress } of fresh.slice(0, 5)) {
     const text = stripKaChatMarker(n.postContent ? (decodePostContent({ postContent: n.postContent }) || "") : "").trim();
     const target = notificationTargetTxId(n, text);
+    if (activePanel?.type === "notifications" && document.hasFocus()) continue; // the screen itself is the notification
     deps.postDesktopNotification?.({
       title: "KaPosts",
       body: `${posterName(actorAddress)} ${kaPostsNotificationAction(n, text)}`,
@@ -3632,21 +3636,21 @@ function openMorePopover(anchor, post) {
       const leftText = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m left` : `${minutes}m left`;
       options.push({ id: "edit", title: post.parentRemoteId ? "Edit Comment" : "Edit Post", subtitle: `Replace the text. ${leftText} of the two-hour window.` });
     }
-    options.push({ id: "delete", title: post.parentRemoteId ? "Delete Comment" : "Delete Post", subtitle: "Removes it from every feed. The chain keeps the bytes.", destructive: true });
+    options.push({ id: "delete", title: post.parentRemoteId ? "Delete Comment" : "Delete Post", subtitle: "Removes this post everywhere. You have five seconds to undo.", destructive: true });
   }
   if (!isMine) {
     // Reporting (iOS dd58e26): the post goes to support by email. Posts are on a public chain and
     // cannot be taken down, so Mute and Block under it are the remedies that act at once.
     options.push({ id: "report", title: "Report", subtitle: "Tell KaChat about abusive or objectionable content. Opens an email with this post attached.", destructive: true });
-    options.push({ id: "mute", title: `Mute ${name}`, subtitle: "Their posts leave your feeds; they are not told." });
-    options.push({ id: "block", title: `Block ${name}`, subtitle: "Their posts and replies disappear everywhere on this device.", destructive: true });
+    options.push({ id: "mute", title: `Mute ${name}`, subtitle: "Hides their posts everywhere. They can still interact with you." });
+    options.push({ id: "block", title: `Block ${name}`, subtitle: "Hides their posts and stops them interacting with you.", destructive: true });
   }
   if (!options.length) return;
   if (typeof deps.chooseDialog !== "function") {
     openPopover(anchor, options.map((o) => `<button type="button" data-kaposts-pop="${o.id}" data-kaposts-pop-id="${post.id}"${o.destructive ? ' class="danger"' : ""}>${deps.escapeHtml(o.title)}</button>`).join(""));
     return;
   }
-  deps.chooseDialog({ title: name, message: post.posterAddress, options }).then((choice) => {
+  deps.chooseDialog({ title: isMine ? "Your post" : name, options }).then((choice) => {
     if (choice) handlePopoverAction(choice, post);
   });
 }
@@ -4725,7 +4729,7 @@ export function initKaPosts(dependencies) {
   document.querySelector("[data-kaposts-schedule-input]")?.addEventListener("change", (event) => {
     const when = new Date(event.target.value).getTime();
     if (Number.isFinite(when)) composerScheduleAt = when;
-    if (composerSubmit && !composerEditTarget && !composerReplyTarget) composerSubmit.textContent = "Schedule post";
+    if (composerSubmit && !composerEditTarget && !composerReplyTarget) composerSubmit.textContent = "Schedule";
   });
 
   // X-style +: stack the current text as a thread segment and keep writing.

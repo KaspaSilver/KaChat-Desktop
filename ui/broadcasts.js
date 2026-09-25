@@ -2115,7 +2115,7 @@ export function initBroadcasts(dependencies) {
       deps.showToast?.(notifying ? "Notifications are off for this room" : "Notifications are on for this room");
     } else if (choice === "copy") copyRoomLink(name);
     else if (choice === "delete") {
-      const ok = await confirmDialog({ title: `Delete #${name}?`, message: "The room and its cached messages are removed from this device. You can join it again any time.", confirmLabel: "Delete", destructive: true });
+      const ok = await confirmDialog({ title: `Delete #${name}?`, message: "Every message cached for this room on this device is deleted. This cannot be undone - rejoining later starts with no history.", confirmLabel: "Delete", destructive: true });
       if (!ok) return;
       if (activeChannel === name) closeRoom();
       leaveChannel(name);

@@ -291,6 +291,10 @@
               <!-- One call button (iOS 12343f3): voice or video is chosen in a sheet. Always
                    there; Chat Info's "Allow calls" switch is its only gate, and the first tap
                    on a contact not yet enabled asks. -->
+              <!-- Shown while a chess game with this contact is on (iOS "Open active chess game"). -->
+              <button class="conversation-call-button" type="button" data-open-chess aria-label="Open active chess game" title="Open active chess game" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M4 9h16M4 14h16M9 4v16M14 4v16" opacity=".5"/></svg>
+              </button>
               <button class="conversation-call-button" type="button" data-open-call aria-label="Call" title="Call">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
               </button>
@@ -322,10 +326,6 @@
                 <button type="button" data-handshake-warning-send>Send Handshake</button>
               </div>
               <div class="composer-plus-menu" data-composer-plus-menu hidden>
-                <button type="button" data-composer-mode="kas">
-                  <span class="mode-icon mode-icon-kaspa" aria-hidden="true"><img src="./ui/assets/kaspa-logo.png" alt="" /></span>
-                  <strong>Send KAS</strong>
-                </button>
                 <button type="button" data-composer-mode="photo">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/></svg></span>
                   <strong>Send On-Chain Photo</strong>
@@ -533,7 +533,7 @@
           <div class="hub-empty" data-hub-empty hidden>
             <img src="./ui/assets/kaspa-logo.png" alt="" class="hub-empty-logo" />
             <h3>Nothing here right now</h3>
-            <p>KaPosts, Broadcasts, ChangeNOW Swap and Kaspa Websites appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
+            <p>KaPosts, Public Chats, ChangeNOW Swap, Kaspa Websites and Chess Online appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
           </div>
         </div>
 
@@ -553,7 +553,7 @@
         <div class="profile-screen chess-t-screen" data-app-tab-screen="chess" data-chess-tournaments hidden></div>
         <div class="profile-screen apps-tab-screen" data-app-tab-screen="apps" hidden>
           <div class="kaposts-header">
-            <h1 class="kaposts-title">Apps</h1>
+            <h1 class="kaposts-title">Kaspa Websites</h1>
           </div>
           <p class="broadcast-intro">Explore the Kaspa ecosystem. Links open in your browser.</p>
           <div class="profile-apps-grid apps-screen-grid">
@@ -863,16 +863,16 @@
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="swaps" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span>
-        <span>Swaps</span>
+        <span>Swap</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="apps" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg></span>
-        <span>Apps</span>
+        <span>Websites</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
         <!-- A rook and a knight (iOS ChessTabIcon: SF Symbols has no chess pieces). -->
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 21h7M4.5 18.5h6M5 18.5V10M10 18.5V10M4 10h7l-1-2H5l-1 2ZM4.5 5v3h6V5M6.5 5v2M8.5 5v2"/><path d="M13 21h8M13.5 18.5h7M15 18.5c0-3 .5-5.5 2.5-7.5 1.2-1.2 2-2.2 2-3.5 0-1-.5-2-1.5-2.5L17 6l-1.5 1.5c-1 .5-1.7 1.6-1.7 2.8 0 .8.3 1.4.8 1.8l1.6-.3"/></svg></span>
-        <span>Chess Online</span>
+        <span>Chess</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="hub">
         <span class="sidebar-tab-icon" aria-hidden="true"><img class="sidebar-tab-logo" src="./ui/assets/kaspa-logo.png" alt="" width="24" height="24" /></span>
@@ -2860,6 +2860,12 @@
              grown to six stacked blocks - a QR, a domain list, two alias reveals, two pickers and
              a stats card - which is a lot of scrolling to reach any one of them. -->
         <div class="settings-list-card chat-info-rows">
+          <!-- The way into the 1:1 chat when Info was opened from a group member or a room sender (iOS ChatInfoView). -->
+          <button class="chat-info-row" type="button" data-chat-info-open-chat>
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 3z"/></svg>
+            <span class="chat-info-row-title">Open Chat</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="address">
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/></svg>
             <span class="chat-info-row-title">Address</span>
@@ -2880,14 +2886,14 @@
             <span class="chat-info-row-title">Notifications</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
-          <button class="chat-info-row" type="button" data-chat-info-sheet="calls" data-chat-info-calls-row>
-            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
-            <span class="chat-info-row-title">Calls</span>
-            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
-          </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="photos">
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L16 8h4v11H4z"/><circle cx="12" cy="13" r="3.3"/></svg>
             <span class="chat-info-row-title">Photos</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <button class="chat-info-row" type="button" data-chat-info-sheet="calls" data-chat-info-calls-row>
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
+            <span class="chat-info-row-title">Calls</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="info">

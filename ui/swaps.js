@@ -297,7 +297,7 @@ function amountCard(label, coin, value, editable) {
 
 function rateText() {
   if (estimateState.status === "success") {
-    const fromAmount = Number(amountText) || 0;
+    const fromAmount = Number(estimateState.fromAmount ?? amountText) || 0;
     const to = Number(estimateState.toAmount) || 0;
     if (!(fromAmount > 0)) return "N/A";
     const fromLabel = kasIsSendSide ? "KAS" : otherCoin.displayName;
@@ -396,11 +396,11 @@ function rescheduleEstimate() {
         // The exchange is created from the send amount on the standard flow, so a "You Get"
         // target deposits the quoted figure and the payout floats with the rate.
         amountText = quote.sendAmount;
-        estimateState = { status: "success", toAmount: quote.toAmount, error: null, belowMinimum: quote.belowMinimum, minimum: quote.minimum };
+        estimateState = { status: "success", fromAmount: quote.sendAmount, toAmount: quote.toAmount, error: null, belowMinimum: quote.belowMinimum, minimum: quote.minimum };
       } else {
         const response = await cn.estimate(from, to, amountStr);
         if (token !== estimateToken) return;
-        estimateState = { status: "success", toAmount: Number(response?.toAmount) || 0, error: null };
+        estimateState = { status: "success", fromAmount: amountText, toAmount: Number(response?.toAmount) || 0, error: null };
       }
     } catch (error) {
       if (token !== estimateToken) return;
@@ -486,7 +486,6 @@ async function refreshSwapStatus(id) {
       const swap = history.find((s) => s.id === id);
       if (swap) {
         swap.status = status;
-        if (response.toAmount != null) swap.toAmount = String(response.toAmount);
         saveHistory();
       }
       if (createState.result?.id === id) createState.result = { ...createState.result, status };
@@ -608,8 +607,8 @@ function portfolioPrefill(swap) {
 async function addSwapToPortfolio(swap) {
   const prefill = portfolioPrefill(swap);
   if (!prefill) { deps.showToast?.("Couldn't read this swap's amounts"); return; }
-  const sourceTxId = `swap:${swap.id}`;
-  const duplicates = portfolioIdsContainingTx(sourceTxId);
+  const sourceTxId = `changenow:${swap.id}`;
+  const duplicates = new Set([...portfolioIdsContainingTx(sourceTxId), ...portfolioIdsContainingTx(`swap:${swap.id}`)]);
   const portfolios = listPortfolios();
   if (!portfolios.length) { deps.showToast?.("No portfolio to add this to yet."); return; }
   const duplicateNames = portfolios.filter((p) => duplicates.has(p.id)).map((p) => p.name).join(" and ");
