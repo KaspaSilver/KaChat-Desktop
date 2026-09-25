@@ -1239,7 +1239,7 @@ function postTimestamp(timestampMs) {
 function pollCardHtml(post) {
   const poll = post.poll;
   if (!poll) return "";
-  const closed = poll.closesAt && Date.now() >= poll.closesAt;
+  const closed = Boolean(poll.closesAt) && Date.now() >= poll.closesAt;
   const voted = poll.myVote != null;
   const showResults = closed || voted;
   const pending = pendingActions.has(`vote:${post.id}`);
@@ -1259,13 +1259,13 @@ function pollCardHtml(post) {
       </div>`;
   }).join("");
   const left = poll.closesAt - Date.now();
-  const timeLeft = closed ? "Final results" : left < 60 * 60 * 1000
+  const timeLeft = closed ? "Final results" : !poll.closesAt ? "" : left < 60 * 60 * 1000
     ? `${Math.max(1, Math.floor(left / 60000))}m left`
     : left < 24 * 60 * 60 * 1000 ? `${Math.floor(left / 3600000)}h left` : `${Math.floor(left / 86400000)}d left`;
   return `
     <div class="kaposts-poll" data-kaposts-poll="${post.id}">
       ${rows}
-      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"} · ${deps.escapeHtml(timeLeft)}${pending ? ` · <span data-kaposts-countdown="vote:${post.id}"></span>` : ""}</div>
+      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"}${timeLeft ? ` · ${deps.escapeHtml(timeLeft)}` : ""}${pending ? ` · <span data-kaposts-countdown="vote:${post.id}"></span>` : ""}</div>
     </div>`;
 }
 
@@ -3921,7 +3921,10 @@ async function cancelScheduledPost(id) {
   if (entry.status === "scheduled") {
     const ok = await deps.confirmDialog?.({ title: "Cancel this scheduled post?", message: "It will not go out. The coins it reserved are free again.", confirmLabel: "Cancel post", destructive: true });
     if (!ok) return;
-    if (entry.onServer) { try { await cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }); } catch { /* dropped locally anyway */ } }
+    if (entry.onServer) {
+      try { await cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }); }
+      catch { deps.showToast?.("Could not reach the indexer - the post may still go out at its time"); }
+    }
   }
   scheduledPosts = scheduledPosts.filter((e) => e.id !== id);
   saveScheduled();

@@ -9,7 +9,9 @@ import { NETWORK_ID, validateMainnetAddress, sompiToKaspaDisplay } from "./utils
 // each other; queued per address since they share one UTXO pool.
 const sendQueues = new Map();
 
-function enqueueSend(sourceAddress, task) {
+/** Runs a task in the per-address send queue: anything that picks and spends coins from one
+ *  address goes through here so two builds never choose the same coin. */
+export function enqueueSend(sourceAddress, task) {
   const previous = sendQueues.get(sourceAddress) || Promise.resolve();
   const next = previous.then(task, task).finally(() => {
     if (sendQueues.get(sourceAddress) === next) sendQueues.delete(sourceAddress);

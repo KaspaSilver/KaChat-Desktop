@@ -9,7 +9,7 @@
 // produces, so signatures verify server-side against the embedded compressed pubkey.
 
 import { getEndpoint } from "./endpoints.js";
-import { sendPayloadTransaction } from "./transactions.js";
+import { enqueueSend, sendPayloadTransaction } from "./transactions.js";
 import { NETWORK_ID } from "./utils.js";
 
 // U+2060 WORD JOINER — the KaChat exclusivity marker. Invisible everywhere, survives base64
@@ -518,7 +518,13 @@ export function scheduledTransactionRestJson(serialized) {
 /** Builds and signs the post transaction now, spending the smallest confirmed coin that can
  *  carry it (else the coins together). Nothing is submitted. Returns
  *  { txId, payload, spentOutpoints, serialized, safeJson, restJson }. */
-export async function buildScheduledPost({ engine, text, mentionedPubkeys = [], reservedOutpoints = [] }) {
+export function buildScheduledPost(args) {
+  const address = args?.engine?.address;
+  if (!address) throw new Error("Load WASM and generate/import a wallet first.");
+  // In the send queue, so a chat message going out at the same moment cannot pick this coin.
+  return enqueueSend(address, () => buildScheduledPostNow(args));
+}
+async function buildScheduledPostNow({ engine, text, mentionedPubkeys = [], reservedOutpoints = [] }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load WASM and generate/import a wallet first.");
   const b64 = utf8ToBase64(KACHAT_MARKER + String(text || ""));
   const me = requesterPubkeyFor(engine);
