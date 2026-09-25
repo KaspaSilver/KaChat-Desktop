@@ -254,7 +254,7 @@ export function cutPoints(base, days) {
 export function yearToDateDays() {
   const now = new Date();
   const start = new Date(now.getFullYear(), 0, 1);
-  return Math.max(2, Math.round((now - start) / 86_400_000));
+  return Math.max(2, Math.ceil((now - start) / 86_400_000));
 }
 
 // --- Gate.io: public candles, no key, KAS/USDT trading since 2023-03-21 ---------------------

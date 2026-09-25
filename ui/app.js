@@ -5112,6 +5112,20 @@ function addressActivityWatchedMap() {
   return map;
 }
 
+// Addresses switched off for notifications. Their balances are still read every check so the
+// baseline keeps up: switching them back on must not replay every receive that landed meanwhile.
+function addressActivityMutedList() {
+  const muted = new Set();
+  if ((accountShellPrefs.spendingReceiveNotifications ?? true) === false) {
+    for (const address of spendingWatchedAddressList()) muted.add(address);
+  }
+  for (const entry of listColdWatchedAddresses()) {
+    if (entry.notify === false) muted.add(entry.address);
+  }
+  muted.delete(engine.address || "");
+  return [...muted];
+}
+
 // Addresses that count as "ours" when they appear among a tx's INPUTS —
 // superset of the notifiable set: chatting + all spending (reserved pool
 // addresses are spending-chain indices, so covered) + all cold storage.
@@ -5171,8 +5185,9 @@ async function runAddressActivityCheck() {
   const walletAtStart = engine.address;
   try {
     const watched = addressActivityWatchedMap();
-    if (!watched.size) return;
-    const addresses = [...watched.keys()];
+    const muted = addressActivityMutedList().filter((address) => !watched.has(address));
+    if (!watched.size && !muted.length) return;
+    const addresses = [...watched.keys(), ...muted];
 
     // One batched balance fetch for the whole set (mirrors iOS's single
     // getUtxosByAddresses call). A network failure leaves baselines untouched
@@ -5217,7 +5232,7 @@ async function runAddressActivityCheck() {
       if (previous !== balanceText) changed = true;
       let previousSompi = 0n;
       try { previousSompi = BigInt(previous); } catch {}
-      if (!isFirstRun && balance > previousSompi && addressActivityFeatureEnabled()) {
+      if (!isFirstRun && balance > previousSompi && addressActivityFeatureEnabled() && watched.has(address)) {
         increases.push({ address, delta: balance - previousSompi, kind: watched.get(address) });
       }
       baselines[address] = balanceText;
@@ -8384,7 +8399,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 53;
+const APP_BUILD = 54;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12153,7 +12168,7 @@ function visibleChatConversations() {
     // Every message body, not just the last one - a search for something said last week has to
     // find the chat. Media envelopes (multi-KB base64) are skipped by size, as on iOS.
     return (conversationEntry.messages || []).some((message) => {
-      const text = String(message?.text || "");
+      const text = messageContent(message);
       if (!text || text === "📤 Sent via another device" || text.length > 4096) return false;
       return text.toLowerCase().includes(query);
     });
@@ -12407,7 +12422,7 @@ function renderMessages(conversationEntry) {
     // Invisible control envelopes (reactions, fresh-address pool markers) are applied at ingest,
     // never shown as bubbles. Filter them at render too, so any that slipped into storage before
     // interception existed — or via a history restore that didn't intercept — don't leak as raw JSON.
-    .filter((m) => !parseReactionEnvelope(m?.text) && !parsePaymentPoolEnvelope(m?.text));
+    .filter((m) => !parseReactionEnvelope(m?.text) && !parsePaymentPoolEnvelope(m?.text) && !parseEditEnvelope(m?.text));
   // The thread re-renders constantly (sync polls, link previews resolving,
   // reactions). Capture the scroll state BEFORE the rebuild so a user reading
   // older history isn't yanked back to the bottom by every background render:
@@ -12821,6 +12836,8 @@ function openConversation(conversationId) {
   messageSelectionMode = false;
   selectedMessageIds.clear();
   updateSelectionUi();
+  // An edit or reply in progress belongs to the chat it was started in.
+  if (conversationId !== activeConversationId) cancelReply();
 
   // The detail pane may still hold a Settings/Profile scroll offset. Reset it
   // before the thread switches to its own internal message scroller.
@@ -16722,6 +16739,7 @@ function applyLocalEdit(conversationEntry, targetTxId, editorAddress, text, at, 
   const when = Number(at) > 0 ? Number(at) : Date.now();
   if (target.edit && Number(target.edit.at || 0) > when) return false;
   target.edit = { text, at: when, ...(status ? { status } : {}) };
+  target.updatedAt = Date.now(); // so a throttled backup copy without this edit never wins on hydrate
   return true;
 }
 
@@ -17189,11 +17207,12 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
           importedGroups += 1;
           // Restore decrypted message history so it survives even if the indexer pruned it.
           const rows = [];
+          const restoredEdits = [];
           for (const m of Array.isArray(g.messages) ? g.messages : []) {
             const content = String(m?.content ?? m?.text ?? "");  // accept legacy `text` too
             if (parseReactionEnvelope(content)) continue; // reactions are pills, not stored bubbles
             const editEnvelope = parseEditEnvelope(content);
-            if (editEnvelope) { applyGroupEdit(g.id, editEnvelope.targetTxId, m?.senderAddress || "", editEnvelope.text, Number(m?.blockTime ?? m?.createdAt ?? 0) || Date.now()); continue; }
+            if (editEnvelope) { restoredEdits.push({ editEnvelope, senderAddress: m?.senderAddress || "", at: Number(m?.blockTime ?? m?.createdAt ?? 0) || Date.now() }); continue; }
             const blockTime = Number(m?.blockTime ?? m?.createdAt ?? 0) || Date.now();
             rows.push({
               id: nowId(),
@@ -17209,6 +17228,10 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
             });
           }
           if (rows.length) appendGroupMessagesBulk(g.groupId, rows);
+          for (const { editEnvelope, senderAddress, at } of restoredEdits) {
+            const target = groupMessages(g.groupId).find((row) => row.txId === editEnvelope.targetTxId || row.msgIdHex === editEnvelope.targetTxId);
+            if (target && target.senderAddress === senderAddress && isEditableContent(target.text)) applyGroupEdit(g.groupId, editEnvelope.targetTxId, senderAddress, editEnvelope.text, at);
+          }
         } catch { /* skip a malformed group */ }
       }
     }
@@ -18204,8 +18227,8 @@ composer.addEventListener("submit", async (event) => {
     const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
     const target = conversationEntry?.messages.find((entry) => entry.id === editingMessageId);
     cancelReply();
-    if (conversationEntry && target) sendEdit(conversationEntry, target, text);
-    return;
+    if (conversationEntry && target) { sendEdit(conversationEntry, target, text); return; }
+    // The edited message is not in this chat: send the text as a normal message rather than lose it.
   }
   const feeOverride = composerFeeOverrideKas;
   composerFeeOverrideKas = null;
@@ -21747,7 +21770,7 @@ function renderGroupList() {
     const last = msgs[msgs.length - 1];
     const opened = openedGroupIds();
     const preview = last
-      ? `${last.direction === "local" ? "You: " : ""}${groupPreviewText(last.text)}`
+      ? `${last.direction === "local" ? "You: " : ""}${groupPreviewText(groupMessageContent(g.groupId, last))}`
       : `${g.members.length} member${g.members.length === 1 ? "" : "s"}`;
     const time = last ? formatTime(last.createdAt) : "";
     const unread = groupDisplayUnread(g, opened);
@@ -22368,7 +22391,7 @@ function renderGroupMessages() {
   // storage (e.g. via a group-history restore that didn't intercept) so they don't leak as raw JSON.
   const msgs = groupMessages(activeGroupId).filter(
     (m) => !(m.direction === "incoming" && isGroupMemberHidden(activeGroupId, m.senderAddress))
-      && !parseReactionEnvelope(m?.text),
+      && !parseReactionEnvelope(m?.text) && !parseEditEnvelope(m?.text),
   );
   // Same stick-to-bottom rule as 1:1 renderMessages: background re-renders must
   // not yank a reader who scrolled up back to the bottom.
@@ -22465,7 +22488,8 @@ function renderGroupMessages() {
 
     // Rich content — same envelopes (reply / photo / voice) as 1:1, shared with iOS/Android.
     const shownContent = groupMessageContent(activeGroupId, message);
-    const groupEdit = shownContent !== (message.text || "") ? groupEditFor(activeGroupId, groupMsgKey(message)) : null;
+    const storedEdit = groupEditFor(activeGroupId, groupMsgKey(message));
+    const groupEdit = storedEdit && storedEdit.editor === message.senderAddress && isEditableContent(message.text) ? storedEdit : null;
     const imageEnvelope = parseImageEnvelope(shownContent);
     const audioEnvelope = imageEnvelope ? null : parseAudioEnvelope(shownContent);
     const replyEnvelope = (imageEnvelope || audioEnvelope) ? null : parseReplyEnvelope(shownContent);
@@ -23116,6 +23140,7 @@ async function syncGroupsNow({ catchUp = false } = {}) {
   let result;
   try { result = await mgr.syncGroups(); } catch { return 0; }
   let changed = 0;
+  const pendingGroupEdits = [];
   for (const decoded of result.messages || []) {
     // Reactions are group messages carrying a {type:"reaction"} envelope — apply them to the
     // reactions store and never render them as their own bubble (mirrors the 1:1 path).
@@ -23128,8 +23153,9 @@ async function syncGroupsNow({ catchUp = false } = {}) {
     // Edits ride the same way: applied to the edits store, never a bubble of their own.
     const editEnvelope = parseEditEnvelope(decoded.plaintext);
     if (editEnvelope) {
-      const bt = Number(decoded.blockTime || 0);
-      if (applyGroupEdit(decoded.groupId, editEnvelope.targetTxId, decoded.senderAddress, editEnvelope.text, bt > 1e12 ? bt : bt > 0 ? bt * 1000 : Date.now()) && decoded.groupId === activeGroupId) changed++;
+      // Applied after this batch, once its target (possibly in the same batch) is stored, and
+      // only when the editor is the target's sender (iOS GroupChatService).
+      pendingGroupEdits.push({ decoded, editEnvelope });
       continue;
     }
     const direction = decoded.senderAddress === engine.address ? "local" : "incoming";
@@ -23161,6 +23187,12 @@ async function syncGroupsNow({ catchUp = false } = {}) {
         }
       }
     }
+  }
+  for (const { decoded, editEnvelope } of pendingGroupEdits) {
+    const target = groupMessages(decoded.groupId).find((row) => row.txId === editEnvelope.targetTxId || row.msgIdHex === editEnvelope.targetTxId);
+    if (!target || target.senderAddress !== decoded.senderAddress || !isEditableContent(target.text)) continue;
+    const bt = Number(decoded.blockTime || 0);
+    if (applyGroupEdit(decoded.groupId, editEnvelope.targetTxId, decoded.senderAddress, editEnvelope.text, bt > 1e12 ? bt : bt > 0 ? bt * 1000 : Date.now()) && decoded.groupId === activeGroupId) changed++;
   }
   // iMessage-style membership lines for members who received a key rotation: the engine reports
   // which addresses were added/removed on each root update (see _applyRoot). The acting admin
@@ -23508,7 +23540,7 @@ function startGroupReply(message) {
   groupReplyTarget = message;
   const title = document.querySelector("[data-group-reply-title]");
   if (title) title.textContent = `Replying to ${message.direction === "incoming" ? groupSenderLabel(message.senderAddress) : "yourself"}`;
-  if (groupReplyPreview) groupReplyPreview.textContent = decodeGroupMentions(replyPreviewTextFor(message)) || "Message";
+  if (groupReplyPreview) groupReplyPreview.textContent = decodeGroupMentions(replyPreviewTextFor({ ...message, text: groupMessageContent(activeGroupId, message) })) || "Message";
   if (groupReplyBanner) groupReplyBanner.hidden = false;
   groupComposerInput?.focus();
 }
@@ -23686,7 +23718,7 @@ groupComposer?.addEventListener("submit", async (event) => {
       type: "reply",
       replyToId: groupMsgKey(groupReplyTarget),
       replyToSender: groupReplyTarget.senderAddress || "",
-      replyToPreview: replyPreviewTextFor(groupReplyTarget),
+      replyToPreview: replyPreviewTextFor({ ...groupReplyTarget, text: groupMessageContent(activeGroupId, groupReplyTarget) }),
       text: encoded,
     });
   }

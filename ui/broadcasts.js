@@ -166,7 +166,7 @@ function setCuratedChannel(name, shown) {
   if (!shown) {
     delete notifyByChannel[name];
     if (activeChannel === name) closeRoom();
-  } else if (FEATURED_BROADCAST_CHANNELS.includes(name)) notifyByChannel[name] = true;
+  }
   saveNotify();
   syncScanWanted();
   renderChannelList();
@@ -570,7 +570,14 @@ function mergeMessages(channel, rows) {
   let added = 0;
   let reactionsChanged = false;
   const freshIncoming = [];
-  for (const row of rows) {
+  // Oldest first, so an edit in this page can see the message it targets; the indexer pages
+  // newest-first. The sender of a target is looked up in what is stored or in this page.
+  const ordered = [...(rows || [])].sort((a, b) => (Number(a?.blockTime) || 0) - (Number(b?.blockTime) || 0));
+  const senderOf = (txId) => {
+    const hit = existing.find((m) => m.txId === txId) || ordered.find((r) => r?.txId === txId);
+    return hit ? String(hit.senderAddress || "") : null;
+  };
+  for (const row of ordered) {
     if (!row?.txId || seen.has(row.txId)) continue;
     seen.add(row.txId);
     const blockTime = Number(row.blockTime) || Date.now();
@@ -583,7 +590,12 @@ function mergeMessages(channel, rows) {
     }
     const edit = deps.parseEditEnvelope?.(row.content);
     if (edit) {
-      if (recordEdit(channel, row.txId, edit, row.senderAddress || "", blockTime)) { saveEdits(); added += 1; }
+      // Only the message's own sender may edit it (iOS PublicChatService): anyone else's
+      // "edit" is dropped before it can shadow the real one.
+      const targetSender = senderOf(edit.targetTxId);
+      if (targetSender !== null && targetSender === String(row.senderAddress || "")) {
+        if (recordEdit(channel, row.txId, edit, row.senderAddress || "", blockTime)) { saveEdits(); added += 1; }
+      }
       continue;
     }
     // Our own just-sent message can come back from the chain BEFORE `sendBroadcastText`
@@ -1075,7 +1087,7 @@ function startBroadcastReply(m) {
   broadcastReplyTarget = {
     txId: m.txId,
     senderAddress: m.senderAddress,
-    preview: humanizeBroadcastContent(m.content).replace(/\s+/g, " ").slice(0, 90),
+    preview: humanizeBroadcastContent(effectiveContent(activeChannel, m)).replace(/\s+/g, " ").slice(0, 90),
   };
   renderBroadcastReplyBanner();
   composerInput?.focus();
@@ -1112,6 +1124,10 @@ async function sendBroadcastEdit(channel, targetTxId, text) {
   try {
     const txid = await sendBroadcastText(channel, JSON.stringify({ type: "edit", targetTxId, text: clean }), { showBubble: false });
     recordEdit(channel, txid, { targetTxId, text: clean }, myAddress, Date.now());
+    // The block scan may already have stored the chain row (with an earlier block time), in
+    // which case the call above was a no-op: the pending mark still has to come off.
+    const sent = editsCache[channel]?.[targetTxId];
+    if (sent && sent.editor === myAddress) delete sent.status;
   } catch (error) {
     deps.appendEngineLog?.(`Broadcast edit send failed (local applied): ${error.message}`);
     deps.showToast?.(`Edit failed: ${error?.message || error}`);

@@ -951,7 +951,10 @@ export function parsePortfolioNumber(text) {
   } else if (commas > 0) {
     // One comma followed by anything but exactly three digits is a decimal comma ("1,5").
     const parts = cleaned.split(",");
-    if (commas === 1 && parts.length === 2 && parts[1].length !== 3) cleaned = cleaned.replace(",", ".");
+    // "0,123" and "1,5" are decimals; so is any lone comma for a decimal-comma locale. Only
+    // "1,234" from a decimal-point locale reads as grouping.
+    const decimalComma = parts[1].length !== 3 || DECIMAL_SEPARATORS.decimal === "," || /^-?0*$/.test(parts[0]);
+    if (commas === 1 && parts.length === 2 && decimalComma) cleaned = cleaned.replace(",", ".");
     else cleaned = cleaned.replace(/,/g, "");
   } else if (dots > 1) {
     cleaned = cleaned.replace(/\./g, ""); // "1.234.567" - dots as grouping
@@ -976,28 +979,36 @@ function rangeLabel() {
 }
 /** KAS in the pair for the current base: bitcoin from CoinGecko's own series, VOO / gold /
  *  silver by dividing KAS by the pair's price at each point (Yahoo, in dollars). */
+let pairLoadToken = 0;
 async function loadPairSeries() {
-  if (!chartPair || pairLoading) return;
+  if (!chartPair) return;
   const base = baseDaysFor(rangeDays);
-  if (pairSeries?.pair === chartPair && pairSeries.baseDays === base && pairSeries.currency === currencyCode()) return;
+  if (pairSeries?.pair === chartPair && pairSeries.baseDays === base) return;
+  // A newer request (range or pair changed while this one was in flight) wins.
+  const token = ++pairLoadToken;
+  const pair = chartPair;
   pairLoading = true;
   try {
     let kas = [];
     let latest = null;
-    if (chartPair === "bitcoin") {
+    if (pair === "bitcoin") {
       kas = await fetchKasPriceHistory(base, { currency: "btc" });
       latest = kas.length ? kas[kas.length - 1][1] : null;
     } else {
-      const [pairResult, kasBase] = await Promise.all([fetchMarketPairHistory(chartPair, base), fetchKasPriceHistory(base, { currency: currencyCode() })]);
+      // Yahoo quotes the pair in dollars, so KAS is taken in dollars too (iOS PortfolioViewModel).
+      const [pairResult, kasBase] = await Promise.all([fetchMarketPairHistory(pair, base), fetchKasPriceHistory(base, { currency: "usd" })]);
       kas = dividePoints(kasBase, pairResult.points);
-      latest = pairResult.latest && price?.price > 0 ? price.price / pairResult.latest : (kas.length ? kas[kas.length - 1][1] : null);
+      const kasUsd = kasBase.length ? kasBase[kasBase.length - 1][1] : null;
+      latest = pairResult.latest && kasUsd > 0 ? kasUsd / pairResult.latest : (kas.length ? kas[kas.length - 1][1] : null);
     }
-    pairSeries = { pair: chartPair, baseDays: base, currency: currencyCode(), kas, latest };
-  } catch { pairSeries = null; }
-  finally { pairLoading = false; }
+    if (token !== pairLoadToken) return;
+    pairSeries = { pair, baseDays: base, kas, latest };
+  } catch { if (token === pairLoadToken) pairSeries = null; }
+  finally { if (token === pairLoadToken) pairLoading = false; }
 }
 function pairHistory() {
   if (!pairActive || !pairSeries?.kas?.length) return null;
+  if (pairSeries.pair !== chartPair || pairSeries.baseDays !== baseDaysFor(rangeDays)) return null;
   return rangeDays === 0 ? pairSeries.kas : cutPoints(pairSeries.kas, rangeDays);
 }
 /** Bitcoin amounts are written out in full - eight decimals at least, more for a per-KAS figure;
@@ -1261,13 +1272,20 @@ function valueStatsHtml(summary) {
     </div>`;
 }
 
+/** All runs from the first transaction to today (iOS 00a2b88), not from Gate's listing. */
+function cutValueToFirstTransaction(points, scoped) {
+  if (rangeDays !== 0 || !scoped.length) return points;
+  const firstTx = Math.min(...scoped.map((t) => Number(t.timestamp) || Infinity)) - 86_400_000;
+  return Number.isFinite(firstTx) ? points.filter((p) => p[0] >= firstTx) : points;
+}
+
 // Full-screen Value Over Time chart screen.
 function valueViewHtml(summary) {
   // In a pair, the value is replayed over KAS-in-the-pair, so the amount reads in bitcoin,
   // shares or ounces and the percent is the move against the pair across the range.
   if (pairHistory()) {
     const scoped = activePortfolio().transactions || [];
-    valuePoints = computeValueHistory(scoped, pairHistory());
+    valuePoints = cutValueToFirstTransaction(computeValueHistory(scoped, pairHistory()), scoped);
   }
   const latest = valuePoints.length ? valuePoints[valuePoints.length - 1][1] : summary.currentValue;
   // The move across the SELECTED range, so pressing 7D answers "how did this do this week" rather
@@ -1309,12 +1327,7 @@ function render() {
   history = historyForRange(rangeDays);
   sevenDayHistory = historyForRange(7);
   const summary = computeSummary(scoped, price?.price || 0);
-  valuePoints = computeValueHistory(scoped, history);
-  // All runs from the first transaction to today (iOS 00a2b88), not from Gate's listing.
-  if (rangeDays === 0 && scoped.length) {
-    const firstTx = Math.min(...scoped.map((t) => Number(t.timestamp) || Infinity)) - 86_400_000;
-    if (Number.isFinite(firstTx)) valuePoints = valuePoints.filter((p) => p[0] >= firstTx);
-  }
+  valuePoints = cutValueToFirstTransaction(computeValueHistory(scoped, history), scoped);
 
   if (view === "price") {
     rootEl.innerHTML = priceViewHtml();
@@ -2677,6 +2690,7 @@ export function initPortfolio(dependencies) {
       rangeDays = Number(range.dataset.portfolioRange) || 7;
       render();       // repaints the tapped range from cache right away, even mid-refresh
       refreshData();  // no-op while a refresh is in flight; that one finishes into its own range
+      if (pairActive && chartPair) loadPairSeries().then(() => render()).catch(() => {});
       return;
     }
 

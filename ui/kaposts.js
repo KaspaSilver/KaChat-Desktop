@@ -1758,7 +1758,10 @@ async function refreshPollNumbers(post) {
   if (!post.remoteId) return;
   try {
     const fresh = mapRemotePoll(await fetchPoll({ engine: deps.engine, postId: post.remoteId }));
-    if (fresh) { mutatePost(post.id, (p) => { p.poll = fresh; }); renderAll(); }
+    // Right after a vote the indexer may not have seen the transaction yet and answers with no
+    // vote of ours: keep the optimistic state rather than re-opening the options (a second
+    // vote would be a second fee). The feed carries the settled numbers next time.
+    if (fresh) { mutatePost(post.id, (p) => { if (fresh.myVote == null && p.poll?.myVote != null) return; p.poll = fresh; }); renderAll(); }
   } catch { /* the feed carries the numbers next time */ }
 }
 
@@ -2313,7 +2316,7 @@ function renderComposerThreadUi() {
   if (composerSubmit) {
     // Reply mode keeps its own wording: this runs on every keystroke, and would otherwise reset
     // the button to "Post" the moment anything re-rendered the composer.
-    composerSubmit.textContent = composerReplyTarget ? "Reply" : (total > 1 ? `Post All (${total})` : "Post");
+    composerSubmit.textContent = composerReplyTarget ? "Reply" : (total > 1 ? `Post All (${total})` : composerScheduleAt != null ? "Schedule" : composerPoll ? "Post Poll" : "Post");
     composerSubmit.disabled = total === 0;
   }
   if (composerInput) {
@@ -3832,7 +3835,7 @@ async function scheduleForLater(text, notBefore) {
     restoreComposerDraft(text);
     return;
   }
-  const entry = { id: built.txId, text, notBefore, createdAt: Date.now(), spentOutpoints: built.spentOutpoints, serialized: built.serialized, restJson: built.restJson, onServer: false, status: "scheduled", error: null, submittedAt: null };
+  const entry = { id: built.txId, text, notBefore, createdAt: Date.now(), spentOutpoints: built.spentOutpoints, serialized: built.serialized, safeJson: built.safeJson || null, restJson: built.restJson, onServer: false, status: "scheduled", error: null, submittedAt: null };
   scheduledPosts = scheduledPosts.filter((e) => e.id !== entry.id);
   scheduledPosts.push(entry);
   saveScheduled();
@@ -3849,30 +3852,47 @@ async function scheduleForLater(text, notBefore) {
   renderAll();
 }
 
-/** Due entries the indexer never took go out from here; the ones it did are re-offered. */
-async function sendDueScheduled() {
+/** Due entries the indexer never took go out from here; the ones it did are re-offered.
+ *  One pass at a time: the 15 s first tick and the minute interval must not both submit the
+ *  same transaction. A node that refuses the transaction marks it failed; a connection that
+ *  is not up yet leaves it scheduled for the next pass. */
+let dueInFlight = null;
+const NODE_REJECTION_RE = /reject|invalid|already|orphan|missing|spent|insufficient|signature|mass|dust|not found|utxo/i;
+function sendDueScheduled() {
+  if (dueInFlight) return dueInFlight;
+  dueInFlight = sendDueScheduledNow().finally(() => { dueInFlight = null; });
+  return dueInFlight;
+}
+async function sendDueScheduledNow() {
   const now = Date.now();
+  const list = scheduledPosts;
   let changed = false;
-  for (const entry of scheduledPosts) {
+  for (const entry of list) {
+    if (list !== scheduledPosts) return; // the account switched mid-pass
     if (entry.status !== "scheduled" || entry.onServer) continue;
     if (entry.notBefore <= now) {
       try {
-        await submitScheduledLocally({ engine: deps.engine, serialized: entry.serialized });
+        await submitScheduledLocally({ engine: deps.engine, serialized: entry.serialized, safeJson: entry.safeJson || null });
+        if (list !== scheduledPosts) return;
         entry.status = "submitted";
         entry.submittedAt = Date.now();
         deps.showToast?.("Scheduled post sent");
       } catch (error) {
-        entry.status = "failed";
-        entry.error = error?.message || String(error);
-        deps.appendEngineLog?.(`Scheduled post failed to submit: ${entry.error}`);
+        if (list !== scheduledPosts) return;
+        const message = error?.message || String(error);
+        if (NODE_REJECTION_RE.test(message) || /cannot be rebuilt/.test(message)) {
+          entry.status = "failed";
+          entry.error = message;
+        }
+        deps.appendEngineLog?.(`Scheduled post ${entry.status === "failed" ? "failed to submit" : "submit deferred"}: ${message}`);
       }
       changed = true;
     } else {
-      try { await scheduleOnServer({ engine: deps.engine, txId: entry.id, notBeforeMs: entry.notBefore, restJson: entry.restJson }); entry.onServer = true; changed = true; }
+      try { await scheduleOnServer({ engine: deps.engine, txId: entry.id, notBeforeMs: entry.notBefore, restJson: entry.restJson }); if (list !== scheduledPosts) return; entry.onServer = true; changed = true; }
       catch { /* still local */ }
     }
   }
-  if (changed) { saveScheduled(); renderAll(); }
+  if (changed && list === scheduledPosts) { saveScheduled(); renderAll(); }
 }
 
 async function refreshScheduledFromServer() {

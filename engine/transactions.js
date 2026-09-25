@@ -329,6 +329,9 @@ async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddr
     ? await withRpc(fetchUtxos, { retries: 1, label: "Fee estimate UTXO refresh" })
     : await fetchUtxos(rpc);
   if (!entries || entries.length === 0) return null;
+  // Coins a scheduled post already spends are off the table for the estimate, as for the send.
+  entries = excludeReservedUtxos(entries);
+  if (entries.length === 0) return null;
   // Coin control: estimate against exactly the chosen UTXOs (matches iOS passing manualUtxos to
   // its fee estimate) so the fee reflects those inputs' mass, not an automatic selection.
   if (selectedOutpoints && selectedOutpoints.length) {

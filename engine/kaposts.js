@@ -488,6 +488,10 @@ const hexOf = (value) => {
 };
 const num = (value) => (typeof value === "bigint" ? Number(value) : Number(value || 0));
 
+/** The SDK's serializeToObject() flattens each input to { transactionId, index, ... } while
+ *  ITransaction nests them under previousOutpoint. Read either shape. */
+const outpointOf = (input) => input?.previousOutpoint ?? { transactionId: input?.transactionId, index: input?.index };
+
 /** The signed transaction in the shape the Kaspa REST API's POST /transactions accepts. */
 export function scheduledTransactionRestJson(serialized) {
   const tx = serialized?.transaction || serialized || {};
@@ -495,7 +499,7 @@ export function scheduledTransactionRestJson(serialized) {
     transaction: {
       version: num(tx.version),
       inputs: (tx.inputs || []).map((input) => ({
-        previousOutpoint: { transactionId: String(input.previousOutpoint?.transactionId || ""), index: num(input.previousOutpoint?.index) },
+        previousOutpoint: { transactionId: String(outpointOf(input)?.transactionId || ""), index: num(outpointOf(input)?.index) },
         signatureScript: hexOf(input.signatureScript),
         sequence: num(input.sequence),
         sigOpCount: num(input.sigOpCount),
@@ -513,7 +517,7 @@ export function scheduledTransactionRestJson(serialized) {
 
 /** Builds and signs the post transaction now, spending the smallest confirmed coin that can
  *  carry it (else the coins together). Nothing is submitted. Returns
- *  { txId, payload, spentOutpoints, serialized, restJson }. */
+ *  { txId, payload, spentOutpoints, serialized, safeJson, restJson }. */
 export async function buildScheduledPost({ engine, text, mentionedPubkeys = [], reservedOutpoints = [] }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load WASM and generate/import a wallet first.");
   const b64 = utf8ToBase64(KACHAT_MARKER + String(text || ""));
@@ -548,9 +552,14 @@ export async function buildScheduledPost({ engine, text, mentionedPubkeys = [], 
   const serialized = typeof signed.serializeToObject === "function" ? signed.serializeToObject() : signed;
   const txId = String(signed.id || serialized.id || "");
   if (!txId) throw new Error("Could not compute the scheduled post's transaction id.");
-  const spentOutpoints = (serialized.inputs || []).map((i) => `${i.previousOutpoint?.transactionId}:${num(i.previousOutpoint?.index)}`);
+  const spentOutpoints = (serialized.inputs || []).map((i) => `${outpointOf(i)?.transactionId}:${num(outpointOf(i)?.index)}`);
+  if (spentOutpoints.some((o) => o.startsWith("undefined:"))) throw new Error("Could not read the scheduled post's inputs.");
   const plain = JSON.parse(JSON.stringify(serialized, (k, v) => (typeof v === "bigint" ? v.toString() : v)));
-  return { txId, payload: payloadString, spentOutpoints, serialized: plain, restJson: scheduledTransactionRestJson(serialized) };
+  // The safe JSON form round-trips through Transaction.deserializeFromSafeJSON for the local
+  // fallback submit; the plain object is kept for display and older entries.
+  let safeJson = null;
+  try { safeJson = typeof signed.serializeToSafeJSON === "function" ? signed.serializeToSafeJSON() : null; } catch { safeJson = null; }
+  return { txId, payload: payloadString, spentOutpoints, serialized: plain, safeJson, restJson: scheduledTransactionRestJson(serialized) };
 }
 
 export async function scheduleOnServer({ engine, txId, notBeforeMs, restJson }) {
@@ -571,10 +580,17 @@ export async function fetchScheduledPosts({ engine } = {}) {
 }
 
 /** The local fallback: this device submits the signed transaction itself. */
-export async function submitScheduledLocally({ engine, serialized }) {
+export async function submitScheduledLocally({ engine, serialized, safeJson = null }) {
   await engine.connect();
-  let transaction = serialized;
-  try { transaction = new engine.kaspa.Transaction(serialized); } catch { transaction = serialized; }
+  const Tx = engine.kaspa?.Transaction;
+  let transaction = null;
+  if (safeJson && typeof Tx?.deserializeFromSafeJSON === "function") {
+    try { transaction = Tx.deserializeFromSafeJSON(safeJson); } catch { transaction = null; }
+  }
+  if (!transaction && serialized && typeof Tx?.deserializeFromObject === "function") {
+    try { transaction = Tx.deserializeFromObject(serialized); } catch { transaction = null; }
+  }
+  if (!transaction) throw new Error("This scheduled post cannot be rebuilt on this device. Cancel it and schedule again.");
   const response = await engine.withRpc((rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }), { retries: 1, label: "Scheduled post submit" });
   return String(response?.transactionId || serialized?.id || "");
 }

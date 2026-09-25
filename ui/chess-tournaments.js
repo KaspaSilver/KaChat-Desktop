@@ -43,7 +43,8 @@ let historyDeadline = 0;
 let now = Date.now();
 let lastError = "";
 const pendingMoveGames = new Set();   // "<tournament>|<game>" sent and not yet seen back
-const claimedGames = new Set();       // claims already posted - one is enough
+const claimedGames = new Map();       // game key -> when a claim was posted; retried after CLAIM_RETRY_MS if the board is still open
+const CLAIM_RETRY_MS = 30_000;
 let queuedPublicRoomId = null;
 let joinFeeText = null;               // "0.0017 KAS" once estimated this session
 
@@ -112,7 +113,14 @@ function mergeRows(list) {
   return changed;
 }
 
-async function backfill({ full = false } = {}) {
+let backfillInFlight = null;
+function backfill(opts = {}) {
+  // One crawl at a time: the 8 s and 2 s polls must not each start a 20-page walk.
+  if (backfillInFlight) return backfillInFlight;
+  backfillInFlight = backfillNow(opts).finally(() => { backfillInFlight = null; });
+  return backfillInFlight;
+}
+async function backfillNow({ full = false } = {}) {
   if (!hasBroadcastIndexer()) { historyReady = true; return; }
   try {
     let before = null;
@@ -423,10 +431,11 @@ function claimTimeoutsIfDue() {
       const mine = T.colorOf(game, my);
       if (!mine || game.board.sideToMove === mine) continue;
       const key = keyOf(t.id, game.id);
-      if (claimedGames.has(key)) continue;
+      // A claim the chain rejected (a clock a little ahead) or that never sent is tried again.
+      if (claimedGames.has(key) && now - claimedGames.get(key) < CLAIM_RETRY_MS) continue;
       // A second's margin past zero, so the claim's block time is safely after.
       if (T.remainingMs(game, game.board.sideToMove, now - 1_500) !== 0) continue;
-      claimedGames.add(key);
+      claimedGames.set(key, now);
       send(T.messages.claim(t.id, game.id)).catch(() => {});
     }
   }
@@ -487,12 +496,23 @@ function render() {
     case "kind": html = renderKind(); break;
     default: html = renderHome();
   }
+  // The chat composer survives a repaint: its draft, focus and caret come back on the new node.
+  const focused = document.activeElement?.closest?.("[data-chess-t-chat-input]") || null;
+  const focusKey = focused?.dataset?.chessTChatInput ?? null;
+  const caret = focused ? [focused.selectionStart, focused.selectionEnd] : null;
   screenEl.innerHTML = html;
   const body = screenEl.querySelector(".chess-t-body");
   if (body) body.scrollTop = y;
   for (const [key, text] of Object.entries(drafts)) {
     const input = screenEl.querySelector(`[data-chess-t-chat-input="${key}"]`);
     if (input && !input.value) input.value = text;
+  }
+  if (focusKey !== null) {
+    const input = screenEl.querySelector(`[data-chess-t-chat-input="${focusKey}"]`);
+    if (input) {
+      input.focus({ preventScroll: true });
+      try { if (caret) input.setSelectionRange(caret[0], caret[1]); } catch { /* fine */ }
+    }
   }
 }
 
@@ -765,6 +785,14 @@ function checkWaitingRoom() {
   if (!t || !my) return;
   const status = T.tournamentStatus(t);
   if (status === "live" || status === "finished") {
+    // The room filled without us (our join lost the race and was requeued): back to the kind
+    // screen, where the seat we actually hold opens its own waiting room.
+    if (!t.players.includes(my)) {
+      view = { ...view, name: "kind", tournamentId: null, gameId: null };
+      render();
+      showWaitingRoomIfSeated();
+      return;
+    }
     // Filled: hold for the match-found countdown (chain time, the same on every device), then
     // straight onto the board (the bracket is a tap away from it).
     if (matchFound(t)) {
@@ -1206,10 +1234,13 @@ function autoOpenMyGameIfNeeded() {
   const t = tournaments[view.tournamentId];
   const my = me();
   if (!t || !my) return;
-  // A room that just filled shows the countdown first, on every device together.
-  if (matchFound(t)) { if (view.name !== "waiting") openWaitingRoom(t.id); return; }
+  // A room that just filled shows the countdown first, on every device together (players only).
+  if (matchFound(t)) { if (t.players.includes(my) && view.name !== "waiting") openWaitingRoom(t.id); return; }
   const game = T.currentGameFor(t, my);
   if (!game || game.winner || autoOpenedGameId === game.id) return;
+  // Already on this board (opened by hand): nothing to do, and re-opening would drop the
+  // selected square or a promotion picker.
+  if (view.name === "game" && view.gameId === game.id) { autoOpenedGameId = game.id; return; }
   // Cool-down on the bracket before the next round: the bracket says who is next and counts down.
   if (nextGameCountdownMs(t) != null) {
     if (view.name === "tournament") { const el = screenEl.querySelector("[data-chess-t-next-countdown]"); if (el) el.textContent = String(Math.ceil(nextGameCountdownMs(t) / 1000)); else render(); }
@@ -1391,7 +1422,7 @@ export function showChessTournaments() {
     claimTimeoutsIfDue();
     if (document.hidden || !screenEl) return;
     checkWaitingRoom();
-    if (view.name === "tournament") autoOpenMyGameIfNeeded();
+    if (view.name === "tournament" || view.name === "game") autoOpenMyGameIfNeeded();
     renderClocks();
   }, TICK_MS);
   showWaitingRoomIfSeated();
