@@ -4159,13 +4159,28 @@ function saveStrangerPaymentState(store) {
   try { localStorage.setItem(accountScopedKey(STRANGER_PAYMENT_STATE_KEY), JSON.stringify(store)); } catch {}
 }
 
+// Your own contact carries no invented name: it reads as your KNS domain when you have one and
+// as your address otherwise, the same as everyone else (the chat list, chess seats, calls).
+// Older accounts that were given "My Address" are renamed on sight.
+function normalizeSelfContact(contact) {
+  if (!contact || contact.address !== engine.address) return;
+  if (contact.nameIsCustom && contact.name === "My Address") {
+    contact.nameIsCustom = false;
+    contact.name = shortAddress(contact.address);
+    contact.avatar = initialsFor(contact.name);
+    contact.updatedAt = Date.now();
+  }
+}
+
 function ensureSelfConversation() {
   let contact = state.contacts.find((entry) => entry.address === engine.address);
+  normalizeSelfContact(contact);
   if (!contact) {
     const createdAt = Date.now();
+    const name = shortAddress(engine.address);
     contact = {
-      id: nowId(), name: "My Address", nameIsCustom: true, address: engine.address,
-      avatar: initialsFor("My Address"), createdAt, updatedAt: createdAt,
+      id: nowId(), name, nameIsCustom: false, address: engine.address,
+      avatar: initialsFor(name), createdAt, updatedAt: createdAt,
       relationshipState: "legacy-manual", handshakeTxid: "",
     };
     state.contacts.push(contact);
@@ -4184,6 +4199,7 @@ function ensureSelfConversation() {
 function ensureSelfChatForSync() {
   const myAddress = engine.address;
   if (!myAddress) return;
+  normalizeSelfContact((state.contacts || []).find((entry) => entry.address === myAddress));
   if (loadDeletedContactAddresses().has(myAddress)) return; // respect deletion
   const hasConversation = (state.conversations || []).some((cv) => contactForConversation(cv)?.address === myAddress);
   if (!hasConversation) ensureSelfConversation();
@@ -8337,7 +8353,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 49;
+const APP_BUILD = 50;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
