@@ -10404,3 +10404,13 @@ button.chess-t-row { cursor: pointer; }
 .chess-t-next span { display: flex; flex-direction: column; gap: 3px; }
 .chess-t-next small { color: var(--muted); font-size: 12px; }
 .chess-t-next b { font-size: 34px; font-variant-numeric: tabular-nums; }
+
+/* Portfolio charts: the big number is a button (tap flips to the pair), the gear picks the pair. */
+.portfolio-pair-flip { border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: pointer; text-align: left; }
+.portfolio-pair-flip.static { cursor: default; }
+.portfolio-screen-header { display: flex; align-items: center; justify-content: space-between; }
+.portfolio-pair-gear { margin-left: auto; }
+.manage-address-notify { margin: 8px 12px 4px; }
+.address-resolution-card { margin-top: 8px; }
+.seed-entry-head { display: flex; align-items: center; gap: 10px; }
+.seed-entry-head .cold-inline-link { margin-left: auto; }

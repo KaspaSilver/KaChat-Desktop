@@ -290,6 +290,7 @@ function fmtKasExact(sompi) {
 // ---------------------------------------------------------------------------
 
 const LOCK_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.75" y="10.5" width="16.5" height="10" rx="2.4"/><path d="M7.5 10.5V7.125a4.5 4.5 0 0 1 9 0V10.5"/></svg>`;
+const BELL_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2ZM10 21h4"/></svg>`;
 const PENCIL_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>`;
 const COPY_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>`;
 const QR_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z"/></svg>`;
@@ -673,6 +674,10 @@ function renderColdAccountSheet() {
         subtitle: "Scan it into another device to watch this account there.", icon: QR_ICON })}
       ${coldSheetRow({ attr: `data-cold-account-action="rename" data-id="${account.id}"`, title: "Rename",
         subtitle: "Changes the name shown for this account.", icon: PENCIL_ICON })}
+      ${coldSheetRow({ attr: `data-cold-account-action="notify" data-id="${account.id}"`,
+        title: account.receiveNotifications === false ? "Turn On Receive Notifications" : "Turn Off Receive Notifications",
+        subtitle: account.receiveNotifications === false ? "Notifies you when this account receives Kaspa." : "Stops notifying when this account receives Kaspa. Other accounts keep theirs.",
+        icon: BELL_ICON })}
     </div>`;
 }
 
@@ -1562,12 +1567,14 @@ function sendRecipientStatusHtml() {
   if (!trimmed) return "";
   if (send.resolvingKns) return '<p class="cold-send-status muted">Resolving KNS domain…</p>';
   if (send.knsError) return `<p class="cold-send-status bad">✕ ${deps.escapeHtml(send.knsError)}</p>`;
+  // Who the address resolves to (iOS ac0ef19): the create-chat card under the status.
+  const card = (address, domain) => deps.addressCardHtml?.(address, { domain, onLoaded: () => renderSendStatusOnly() }) || "";
   if (send.resolvedAddress) {
     return `<p class="cold-send-status good">✓ Resolved: ${deps.escapeHtml(send.resolvedDomain || "")}</p>
-      <p class="cold-send-status mono">${deps.escapeHtml(send.resolvedAddress)}</p>`;
+      <p class="cold-send-status mono">${deps.escapeHtml(send.resolvedAddress)}</p>${card(send.resolvedAddress, send.resolvedDomain)}`;
   }
   return send.validAddress
-    ? '<p class="cold-send-status good">✓ Valid address</p>'
+    ? `<p class="cold-send-status good">✓ Valid address</p>${card(trimmed, null)}`
     : '<p class="cold-send-status bad">✕ Invalid address format</p>';
 }
 
@@ -2664,6 +2671,13 @@ async function handleAccountMenuAction(action, id) {
     deps.showToast?.("kpub copied to clipboard.");
   } else if (action === "qr") {
     await openKpubQrModal(account);
+  } else if (action === "notify") {
+    // Stored with the account, per wallet; older records read as on (iOS ba352a2).
+    account.receiveNotifications = account.receiveNotifications === false;
+    saveState();
+    coldWatchedCache.fingerprint = "";
+    deps.showToast?.(account.receiveNotifications ? "Receive notifications on for this account." : "Receive notifications off for this account.");
+    render();
   } else if (action === "rename") {
     const name = await promptModal({
       kicker: "Cold Storage",
@@ -2835,7 +2849,7 @@ export function listColdWatchedAddresses() {
   for (const account of accounts) {
     try {
       const addresses = deriveReceiveAddresses(account.kpub, 0, account.maxIndex + 1);
-      for (const address of addresses) list.push({ address, label: account.label });
+      for (const address of addresses) list.push({ address, label: account.label, notify: account.receiveNotifications !== false });
     } catch { /* a bad kpub just contributes nothing */ }
   }
   coldWatchedCache.fingerprint = fingerprint;

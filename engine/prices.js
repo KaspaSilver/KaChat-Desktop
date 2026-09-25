@@ -230,15 +230,182 @@ export function peekKasMarketStats(currency = "usd") {
   return marketStatsCache?.currency === code ? marketStatsCache : null;
 }
 
+/** The base series a range is cut from (iOS 39adefe): a day of 5-minute points, 90 days of
+ *  hourly points (1W, 1M and 3M are cuts of it), 365 days of daily points (YTD and 1Y). All
+ *  (0) is its own build. Cuts are local, so range taps never touch the network. */
+export function baseDaysFor(days) {
+  if (days === 0) return 0;
+  if (days <= 1) return 1;
+  if (days <= 90) return 90;
+  return 365;
+}
+
+/** The last `days` of a base series, with the one point before the edge kept so the line
+ *  starts at the edge rather than a step inside it. Zero days is everything. */
+export function cutPoints(base, days) {
+  if (!days || !Array.isArray(base) || !base.length) return base || [];
+  const cutoff = Date.now() - days * 86_400_000;
+  const first = base.findIndex((p) => p[0] >= cutoff);
+  if (first < 0) return base;
+  return base.slice(Math.max(0, first - 1));
+}
+
+/** Days since 1 January, computed when read so it is right after midnight (at least 2). */
+export function yearToDateDays() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), 0, 1);
+  return Math.max(2, Math.round((now - start) / 86_400_000));
+}
+
+// --- Gate.io: public candles, no key, KAS/USDT trading since 2023-03-21 ---------------------
+
+/** Gate.io candle closes for a pair at an interval, oldest first, the newest `pointCount` of
+ *  them, paged backwards 1000 at a time and stopping where the listing begins.
+ *  Row shape: [time, quote volume, close, high, low, open, ...]. Returns [[ms, close]]. */
+async function fetchGateCandles(pair, interval, intervalSeconds, pointCount) {
+  const closes = new Map();
+  let to = Math.floor(Date.now() / 1000);
+  let remaining = pointCount;
+  for (let page = 0; page < 8 && remaining > 0; page += 1) {
+    const limit = Math.min(1000, remaining);
+    const url = `https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${encodeURIComponent(pair)}&interval=${interval}&limit=${limit}&to=${to}`;
+    let rows;
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) break;
+      rows = await response.json();
+    } catch { break; }
+    if (!Array.isArray(rows) || !rows.length) break;
+    let earliest = to;
+    for (const row of rows) {
+      if (!Array.isArray(row) || row.length < 3) continue;
+      const time = Number(row[0]);
+      const close = Number(row[2]);
+      if (Number.isFinite(time) && Number.isFinite(close)) { closes.set(time, close); earliest = Math.min(earliest, time); }
+    }
+    remaining -= rows.length;
+    if (rows.length < limit || earliest >= to) break;
+    to = earliest - intervalSeconds;
+  }
+  return [...closes.keys()].sort((a, b) => a - b).map((t) => [t * 1000, closes.get(t)]);
+}
+
+function divideByTime(kas, pair) {
+  const byTime = new Map(pair.map((p) => [p[0], p[1]]));
+  const out = [];
+  for (const [t, v] of kas) {
+    const q = byTime.get(t);
+    if (q > 0) out.push([t, v / q]);
+  }
+  return out;
+}
+
+/** The same range from Gate.io when CoinGecko will not serve it: 5-minute candles for a day,
+ *  hourly for 90 days, daily beyond. Gate quotes USDT, which is the dollar series; bitcoin
+ *  divides by BTC/USDT candle for candle; any other currency is scaled by the ratio of the
+ *  latest known KAS price in it (`spotHint`) to Gate's latest close. */
+async function fetchGateHistory(days, currency, spotHint) {
+  const [interval, seconds, count] = days <= 1 ? ["5m", 300, 288] : days <= 90 ? ["1h", 3600, days * 24] : ["1d", 86_400, days];
+  const [kas, bitcoin] = await Promise.all([
+    fetchGateCandles("KAS_USDT", interval, seconds, count),
+    currency === "btc" ? fetchGateCandles("BTC_USDT", interval, seconds, count) : Promise.resolve([]),
+  ]);
+  if (!kas.length) return [];
+  if (currency === "usd") return kas;
+  if (currency === "btc") return divideByTime(kas, bitcoin);
+  const latest = kas[kas.length - 1][1];
+  if (!(spotHint > 0) || !(latest > 0)) return [];
+  const ratio = spotHint / latest;
+  return kas.map(([t, v]) => [t, v * ratio]);
+}
+
+/** All-time (iOS be477d1): CoinGecko's public tier stops at 365 days, so the older part comes
+ *  from Gate.io's daily KAS/USDT closes and CoinGecko's own last 365 days sit on top unchanged.
+ *  The older points are scaled into the chosen currency by the ratio at the seam. */
+async function fetchAllTimeHistory(currency) {
+  const [recent, gate, bitcoin] = await Promise.all([
+    fetchKasPriceHistory(365, { currency }),
+    fetchGateCandles("KAS_USDT", "1d", 86_400, 6000),
+    currency === "btc" ? fetchGateCandles("BTC_USDT", "1d", 86_400, 6000) : Promise.resolve([]),
+  ]);
+  if (!gate.length) return recent;
+  if (currency === "btc") {
+    const inBitcoin = divideByTime(gate, bitcoin);
+    if (!recent.length) return inBitcoin;
+    return [...inBitcoin.filter((p) => p[0] < recent[0][0]), ...recent];
+  }
+  if (!recent.length) return currency === "usd" ? gate : [];
+  const firstRecent = recent[0];
+  const anchor = [...gate].reverse().find((p) => p[0] <= firstRecent[0]) || gate[gate.length - 1];
+  const ratio = anchor[1] > 0 ? firstRecent[1] / anchor[1] : 1;
+  const older = gate.filter((p) => p[0] < firstRecent[0]).map(([t, v]) => [t, v * ratio]);
+  return [...older, ...recent];
+}
+
+/** Price history for `days` (0 = all-time) in `currency`. CoinGecko first, Gate.io when it
+ *  refuses. Returns `[[timestampMs, price], ...]`; on failure this exact range's cached points. */
 export async function fetchKasPriceHistory(days = 7, { currency = "usd", force = false } = {}) {
   const code = normalizeCurrency(currency);
   const cached = peekKasPriceHistory(days, code);
   if (!force && cached && Date.now() - cached.fetchedAt < MIN_REFRESH_MS) return cached.points;
 
-  const points = await fetchMarketChart(days, code);
+  let points = [];
+  if (days === 0) {
+    points = await fetchAllTimeHistory(code).catch(() => []);
+  } else {
+    points = await fetchMarketChart(days, code).catch(() => []);
+    if (!points.length) points = await fetchGateHistory(days, code, peekKasPrice(code)?.price).catch(() => []);
+  }
   if (!points.length) return cached?.points || [];
   persistHistory(days, code, points);
   return points;
+}
+
+// --- Market pairs (iOS MarketPairService): VOO, gold and silver from Yahoo's chart endpoint ---
+
+export const CHART_PAIRS = Object.freeze({
+  bitcoin: { code: "BTC", title: "Bitcoin", subtitle: "Kaspa priced in bitcoin", symbol: null },
+  voo: { code: "VOO", title: "VOO", subtitle: "Shares of Vanguard's S&P 500 ETF", symbol: "VOO" },
+  gold: { code: "XAU", title: "Gold", subtitle: "Troy ounces of gold", symbol: "GC=F" },
+  silver: { code: "XAG", title: "Silver", subtitle: "Troy ounces of silver", symbol: "SI=F" },
+});
+
+/** A pair's price series in dollars for a base range: { points: [[ms, close]], latest }. */
+export async function fetchMarketPairHistory(pair, baseDays) {
+  const symbol = CHART_PAIRS[pair]?.symbol;
+  if (!symbol) return { points: [], latest: null };
+  const [range, interval] = baseDays === 0 ? ["max", "1d"] : baseDays <= 1 ? ["5d", "5m"] : baseDays <= 90 ? ["3mo", "1h"] : ["2y", "1d"];
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=false`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (response.status === 200) {
+        const json = await response.json();
+        const result = json?.chart?.result?.[0];
+        if (!result) return { points: [], latest: null };
+        const stamps = result.timestamp || [];
+        const closes = result.indicators?.quote?.[0]?.close || [];
+        const points = [];
+        stamps.forEach((stamp, i) => { const close = closes[i]; if (close > 0) points.push([stamp * 1000, close]); });
+        return { points, latest: result.meta?.regularMarketPrice ?? points[points.length - 1]?.[1] ?? null };
+      }
+      if (attempt > 0 || !(response.status === 429 || response.status >= 500)) return { points: [], latest: null };
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    } catch { return { points: [], latest: null }; }
+  }
+  return { points: [], latest: null };
+}
+
+/** KAS divided by the pair's last price at each point. */
+export function dividePoints(kas, pair) {
+  if (!pair?.length) return [];
+  const out = [];
+  let i = 0;
+  for (const [t, v] of kas) {
+    while (i + 1 < pair.length && pair[i + 1][0] <= t) i += 1;
+    if (pair[i][0] <= t && pair[i][1] > 0) out.push([t, v / pair[i][1]]);
+  }
+  return out;
 }
 
 // --- historical day prices --------------------------------------------------

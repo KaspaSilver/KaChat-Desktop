@@ -9,6 +9,12 @@
 import {
   fetchKasPrice,
   fetchKasPriceHistory,
+  baseDaysFor,
+  cutPoints,
+  yearToDateDays,
+  CHART_PAIRS,
+  fetchMarketPairHistory,
+  dividePoints,
   peekKasPrice,
   peekKasPriceHistory,
   peekDailyPrices,
@@ -47,13 +53,25 @@ function isPricePending(notes) {
   return notes === PRICE_PENDING_NOTE || notes === LEGACY_PRICE_UNAVAILABLE_NOTE;
 }
 
-const RANGES = [
-  { days: 1, label: "1D" },
-  { days: 7, label: "1W" },
-  { days: 30, label: "1M" },
-  { days: 90, label: "3M" },
-  { days: 365, label: "1Y" },
-];
+// YTD is the days since 1 January, read when the buttons are drawn so it is right after midnight.
+function ranges() {
+  return [
+    { days: 1, label: "1D" },
+    { days: 7, label: "1W" },
+    { days: 30, label: "1M" },
+    { days: 90, label: "3M" },
+    { days: yearToDateDays(), label: "YTD" },
+    { days: 365, label: "1Y" },
+    { days: 0, label: "All" },
+  ];
+}
+// What a tap on the big number flips the chart to (iOS 39adefe): bitcoin by default, or VOO,
+// gold or silver from the gear; null = the tap does nothing. Persisted on this device.
+const CHART_PAIR_KEY = "kachat-portfolio-chart-pair";
+let chartPair = (() => { try { const v = localStorage.getItem(CHART_PAIR_KEY); return v === null ? "bitcoin" : (v || null); } catch { return "bitcoin"; } })();
+let pairActive = false;            // the big number is showing the pair right now
+let pairSeries = null;             // { pair, baseDays, kas: [[ms, v]], latest } for the current base
+let pairLoading = false;
 
 let deps = null;
 let rootEl = null;
@@ -916,6 +934,29 @@ function statRowHtml(label, value, valueClass = "") {
 /// The change over the SELECTED range, not always 24h (iOS `priceRangeChange`): the badge beside
 /// the price has to answer the question the chart under it is asking. A 1Y chart with a 24h badge
 /// invites reading the year's move as a day's.
+/** Reads a number the way a person pasted or typed it (iOS 266131a): "1,234.56" (grouping
+ *  commas), "1.234,56" or "1,5" (decimal-comma locales), "$ 9.60", " 12 ". Null when empty. */
+export function parsePortfolioNumber(text) {
+  let cleaned = String(text ?? "").replace(/[^0-9,.\-]/g, "");
+  if (!cleaned) return null;
+  const commas = (cleaned.match(/,/g) || []).length;
+  const dots = (cleaned.match(/\./g) || []).length;
+  if (commas > 0 && dots > 0) {
+    // Both present: whichever comes last is the decimal mark, the other is grouping.
+    if (cleaned.lastIndexOf(",") > cleaned.lastIndexOf(".")) cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+    else cleaned = cleaned.replace(/,/g, "");
+  } else if (commas > 0) {
+    // One comma followed by anything but exactly three digits is a decimal comma ("1,5").
+    const parts = cleaned.split(",");
+    if (commas === 1 && parts.length === 2 && parts[1].length !== 3) cleaned = cleaned.replace(",", ".");
+    else cleaned = cleaned.replace(/,/g, "");
+  } else if (dots > 1) {
+    cleaned = cleaned.replace(/\./g, ""); // "1.234.567" - dots as grouping
+  }
+  const value = Number(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
 function rangeChange(series) {
   if (!series || series.length < 2) return null;
   const first = series[0][1];
@@ -927,7 +968,72 @@ function rangeChange(series) {
 
 /// How the selected range is named beside that figure (iOS `priceRangeLabel`).
 function rangeLabel() {
-  return { 1: "24h", 7: "1W", 30: "1M", 90: "3M", 365: "1Y" }[rangeDays] || `${rangeDays}d`;
+  if (rangeDays === 1) return "24h";
+  return ranges().find((r) => r.days === rangeDays)?.label || `${rangeDays}d`;
+}
+/** KAS in the pair for the current base: bitcoin from CoinGecko's own series, VOO / gold /
+ *  silver by dividing KAS by the pair's price at each point (Yahoo, in dollars). */
+async function loadPairSeries() {
+  if (!chartPair || pairLoading) return;
+  const base = baseDaysFor(rangeDays);
+  if (pairSeries?.pair === chartPair && pairSeries.baseDays === base && pairSeries.currency === currencyCode()) return;
+  pairLoading = true;
+  try {
+    let kas = [];
+    let latest = null;
+    if (chartPair === "bitcoin") {
+      kas = await fetchKasPriceHistory(base, { currency: "btc" });
+      latest = kas.length ? kas[kas.length - 1][1] : null;
+    } else {
+      const [pairResult, kasBase] = await Promise.all([fetchMarketPairHistory(chartPair, base), fetchKasPriceHistory(base, { currency: currencyCode() })]);
+      kas = dividePoints(kasBase, pairResult.points);
+      latest = pairResult.latest && price?.price > 0 ? price.price / pairResult.latest : (kas.length ? kas[kas.length - 1][1] : null);
+    }
+    pairSeries = { pair: chartPair, baseDays: base, currency: currencyCode(), kas, latest };
+  } catch { pairSeries = null; }
+  finally { pairLoading = false; }
+}
+function pairHistory() {
+  if (!pairActive || !pairSeries?.kas?.length) return null;
+  return rangeDays === 0 ? pairSeries.kas : cutPoints(pairSeries.kas, rangeDays);
+}
+/** Bitcoin amounts are written out in full - eight decimals at least, more for a per-KAS figure;
+ *  shares or ounces with at least four decimals and four significant digits. */
+function fmtPairAmount(value, { perKas = false } = {}) {
+  const v = Number(value) || 0;
+  const code = CHART_PAIRS[chartPair]?.code || "";
+  if (chartPair === "bitcoin") {
+    let decimals = 8;
+    if (perKas && v > 0 && v < 1e-6) decimals = Math.min(12, Math.ceil(-Math.log10(v)) + 3);
+    return `${v.toFixed(decimals)} ${code}`;
+  }
+  let decimals = 4;
+  if (v > 0 && v < 1) decimals = Math.max(4, Math.ceil(-Math.log10(v)) + 3);
+  return `${v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })} ${code}`;
+}
+function pairGearHtml() {
+  return `<button class="kaposts-icon-button portfolio-pair-gear" type="button" data-portfolio-pair-gear aria-label="Compare against" title="Compare against"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>`;
+}
+/** The gear: what a tap on the big number flips to - one pair at a time, or none. */
+async function openPairPicker() {
+  const choice = await deps.chooseDialog?.({
+    title: "Compare against",
+    message: "Tap the big number on a chart to see Kaspa in this instead.",
+    options: [
+      ...Object.entries(CHART_PAIRS).map(([id, p]) => ({ id, title: `${p.title}${chartPair === id ? " ✓" : ""}`, subtitle: p.subtitle })),
+      { id: "none", title: `None${chartPair ? "" : " ✓"}`, subtitle: "The tap does nothing." },
+    ],
+  });
+  if (!choice) return;
+  chartPair = choice === "none" ? null : choice;
+  try { localStorage.setItem(CHART_PAIR_KEY, chartPair || ""); } catch { /* fine */ }
+  pairActive = false;
+  pairSeries = null;
+  render();
+}
+
+function rangeButtonsHtml() {
+  return ranges().map((r) => `<button class="portfolio-range${r.days === rangeDays ? " active" : ""}" type="button" data-portfolio-range="${r.days}">${r.label}</button>`).join("");
 }
 
 /// Reordering, offered from a card's own menu the way iOS offers it - one screen where the order
@@ -972,6 +1078,10 @@ function marketStatsHtml() {
     </div>`;
 }
 
+// A proper pickaxe (iOS 62288c2): a filled bowed head over a tapered handle, rotated to the
+// diagonal like the old strokes were.
+const PICKAXE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><g transform="rotate(-40 12 12)"><path d="M1.2 9.6C6 1 18 1 22.8 9.6C18 6.6 6 6.6 1.2 9.6Z" fill="currentColor" stroke="none"/><path d="M10.5 5.4h3l-.4 16a1.1 1.1 0 0 1-2.2 0Z" fill="currentColor" stroke="none"/></g></svg>`;
+
 /// Network hashrate, full width under the two squares (iOS `hashrateCard`).
 ///
 /// Full width rather than a third square: it is one series with a long history, and it reads far
@@ -984,9 +1094,7 @@ function hashrateCardHtml() {
     : "";
   return `
     <button class="portfolio-hashrate-card" type="button" data-portfolio-open="hashrate">
-      <span class="portfolio-hashrate-ico" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M6.37 17.9C1.86 11.11 12.89 1.86 18.78 7.48"/><path d="M8.3 7.59 17.21 18.2"/></svg>
-      </span>
+      <span class="portfolio-hashrate-ico" aria-hidden="true">${PICKAXE_SVG}</span>
       <span class="portfolio-hashrate-copy">
         <span class="portfolio-hashrate-label">Network Hashrate</span>
         <span class="portfolio-hashrate-value">${stats ? formatHashrate(stats.currentHashrate) : "—"}</span>
@@ -1012,9 +1120,7 @@ function hashrateViewHtml() {
     </div>
     <div class="profile-card">
       <div class="portfolio-detail-head">
-        <span class="portfolio-hashrate-ico" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M6.37 17.9C1.86 11.11 12.89 1.86 18.78 7.48"/><path d="M8.3 7.59 17.21 18.2"/></svg>
-        </span>
+        <span class="portfolio-hashrate-ico" aria-hidden="true">${PICKAXE_SVG}</span>
         <span class="portfolio-detail-name">Kaspa Network</span>
       </div>
       <div class="portfolio-detail-date" data-portfolio-hashrate-date hidden></div>
@@ -1068,13 +1174,19 @@ function hashrateViewHtml() {
 function priceViewHtml() {
   // Over the range on screen, falling back to the 24h figure only when there is not enough
   // history to compute one.
-  const ranged = rangeChange(history);
-  const change = ranged ? ranged.percent : (price?.change24h ?? null);
+  const inPair = pairHistory();
+  const series = inPair || history;
+  const ranged = rangeChange(series);
+  const change = ranged ? ranged.percent : (inPair ? null : (price?.change24h ?? null));
   const label = ranged ? rangeLabel() : "24h";
   const pPos = (change ?? 0) >= 0;
+  const bigNumber = inPair
+    ? fmtPairAmount(pairSeries.latest ?? series[series.length - 1][1], { perKas: true })
+    : (price ? fmtPrice(price.price) : "—");
   return `
     <div class="portfolio-screen-header">
       <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
+      ${pairGearHtml()}
     </div>
     <div class="profile-card">
       <div class="portfolio-detail-head">
@@ -1083,12 +1195,12 @@ function priceViewHtml() {
       </div>
       <div class="portfolio-detail-date" data-portfolio-price-date hidden></div>
       <div class="portfolio-detail-price-row">
-        <span class="portfolio-detail-price" data-portfolio-price-value>${price ? fmtPrice(price.price) : "—"}</span>
+        <button class="portfolio-detail-price portfolio-pair-flip${chartPair ? "" : " static"}" type="button" data-portfolio-pair-flip title="${chartPair ? `Show in ${deps.escapeHtml(CHART_PAIRS[chartPair].title)}` : ""}" data-portfolio-price-value>${deps.escapeHtml(bigNumber)}${pairActive && pairLoading ? " …" : ""}</button>
         ${change !== null ? `<span class="portfolio-detail-24h ${pPos ? "gain" : "loss"}" data-portfolio-price-24h>${pPos ? "↑" : "↓"} ${Math.abs(change).toFixed(2)}% (${deps.escapeHtml(label)})</span>` : ""}
       </div>
-      ${bigChartSvg(history, { height: 240, chart: "price" })}
+      ${bigChartSvg(series, { height: 240, chart: "price" })}
       <div class="portfolio-ranges portfolio-ranges-wide">
-        ${RANGES.map((r) => `<button class="portfolio-range${r.days === rangeDays ? " active" : ""}" type="button" data-portfolio-range="${r.days}">${r.label}</button>`).join("")}
+        ${rangeButtonsHtml()}
       </div>
     </div>
     <div class="profile-card">
@@ -1130,6 +1242,12 @@ function valueStatsHtml(summary) {
 
 // Full-screen Value Over Time chart screen.
 function valueViewHtml(summary) {
+  // In a pair, the value is replayed over KAS-in-the-pair, so the amount reads in bitcoin,
+  // shares or ounces and the percent is the move against the pair across the range.
+  if (pairHistory()) {
+    const scoped = activePortfolio().transactions || [];
+    valuePoints = computeValueHistory(scoped, pairHistory());
+  }
   const latest = valuePoints.length ? valuePoints[valuePoints.length - 1][1] : summary.currentValue;
   // The move across the SELECTED range, so pressing 7D answers "how did this do this week" rather
   // than repeating one figure under every button. Both the money and the percent, because on a
@@ -1140,21 +1258,22 @@ function valueViewHtml(summary) {
   return `
     <div class="portfolio-screen-header">
       <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
+      ${pairGearHtml()}
     </div>
     <div class="profile-card">
-      <p class="profile-card-label" data-portfolio-value-label>Portfolio Value</p>
+      <p class="profile-card-label" data-portfolio-value-label>Portfolio Value${pairHistory() ? ` in ${deps.escapeHtml(CHART_PAIRS[chartPair].title)}` : ""}</p>
       <div class="portfolio-detail-date" data-portfolio-value-date hidden></div>
-      <div class="portfolio-detail-price" data-portfolio-value-readout>${fmtFiat(latest)}</div>
+      <button class="portfolio-detail-price portfolio-pair-flip${chartPair ? "" : " static"}" type="button" data-portfolio-pair-flip data-portfolio-value-readout>${pairHistory() ? deps.escapeHtml(fmtPairAmount(latest)) : fmtFiat(latest)}</button>
       ${ranged ? `
         <div class="portfolio-detail-change ${up ? "gain" : "loss"}" data-portfolio-value-change>
-          <span>${up ? "\u2191" : "\u2193"} ${fmtFiat(Math.abs(ranged.amount))} (${Math.abs(ranged.percent).toFixed(2)}%)</span>
+          <span>${up ? "\u2191" : "\u2193"} ${pairHistory() ? deps.escapeHtml(fmtPairAmount(Math.abs(ranged.amount))) : fmtFiat(Math.abs(ranged.amount))} (${Math.abs(ranged.percent).toFixed(2)}%)</span>
           <span class="portfolio-detail-change-range">${deps.escapeHtml(rangeLabel())}</span>
         </div>` : ""}
       ${valuePoints.length >= 2
         ? bigChartSvg(valuePoints, { height: 220, stroke: "var(--kaspa-ink)", chart: "value", lineWidth: 3 })
         : `<div class="portfolio-chart-empty">Not enough history yet — check back after a few days of activity.</div>`}
       <div class="portfolio-ranges portfolio-ranges-wide">
-        ${RANGES.map((r) => `<button class="portfolio-range${r.days === rangeDays ? " active" : ""}" type="button" data-portfolio-range="${r.days}">${r.label}</button>`).join("")}
+        ${rangeButtonsHtml()}
       </div>
     </div>
     ${valueStatsHtml(summary)}`;
@@ -1170,6 +1289,11 @@ function render() {
   sevenDayHistory = historyForRange(7);
   const summary = computeSummary(scoped, price?.price || 0);
   valuePoints = computeValueHistory(scoped, history);
+  // All runs from the first transaction to today (iOS 00a2b88), not from Gate's listing.
+  if (rangeDays === 0 && scoped.length) {
+    const firstTx = Math.min(...scoped.map((t) => Number(t.timestamp) || Infinity)) - 86_400_000;
+    if (Number.isFinite(firstTx)) valuePoints = valuePoints.filter((p) => p[0] >= firstTx);
+  }
 
   if (view === "price") {
     rootEl.innerHTML = priceViewHtml();
@@ -1372,7 +1496,7 @@ function closeTxEditor() {
 
 /** Quantity, price per coin and fee, as iOS records them; the ledger stores the total. */
 function editorValues() {
-  const num = (sel) => Number(String(modalsEl.querySelector(sel)?.value || "").replace(",", "."));
+  const num = (sel) => parsePortfolioNumber(modalsEl.querySelector(sel)?.value) ?? 0;
   const quantity = num("[data-portfolio-editor-amount]");
   const pricePerCoin = num("[data-portfolio-editor-price]");
   const fee = num("[data-portfolio-editor-fee]") || 0;
@@ -1609,11 +1733,17 @@ function syncImportModal() {
 
   const input = addressImport?.input || "";
   status.style.color = "";
+  // Who the address resolves to (iOS ac0ef19): the create-chat card under the status.
+  let cardHost = modalsEl.querySelector("[data-portfolio-import-card]");
+  if (!cardHost) { cardHost = document.createElement("div"); cardHost.dataset.portfolioImportCard = ""; status.insertAdjacentElement("afterend", cardHost); }
+  const showCard = (address, domain) => { cardHost.innerHTML = address ? (deps.addressCardHtml?.(address, { domain, onLoaded: () => syncImportModal() }) || "") : ""; };
+  showCard(null);
   if (addressImport?.resolving) { status.textContent = "Resolving domain…"; return; }
   if (!input) { status.textContent = ""; return; }
   if (addressImport.resolvedAddress) {
     status.textContent = `Resolves to ${shortenAddress(addressImport.resolvedAddress)}`;
     status.style.color = "#4cd964";
+    showCard(addressImport.resolvedAddress, addressImport.resolvedDomain);
     return;
   }
   if (addressImport.notFound) { status.textContent = "Domain not found"; return; }
@@ -1621,6 +1751,7 @@ function syncImportModal() {
     const valid = isValidRawAddress(input);
     status.textContent = valid ? "Valid address" : "Invalid address format";
     status.style.color = valid ? "#4cd964" : "#ff6b6b";
+    if (valid) showCard(input, null);
     return;
   }
   status.textContent = "";
@@ -2226,7 +2357,12 @@ function scheduleSevenDayRetry(currency, attempt) {
 function historyForRange(days) {
   const session = historyByRange[days];
   if (session?.length) return session;
-  return peekKasPriceHistory(days, currencyCode())?.points || [];
+  const base = baseDaysFor(days);
+  if (base !== days && historyByRange[base]?.length) return cutPoints(historyByRange[base], days);
+  const persisted = peekKasPriceHistory(days, currencyCode())?.points;
+  if (persisted?.length) return persisted;
+  const persistedBase = base !== days ? peekKasPriceHistory(base, currencyCode())?.points : null;
+  return persistedBase?.length ? cutPoints(persistedBase, days) : [];
 }
 
 /** Drops every cached curve when the selected currency changes — EUR numbers must never be
@@ -2261,16 +2397,21 @@ async function refreshData({ force = false } = {}) {
   loading = true;
   render(); // paints from cache immediately; the fetch below only ever upgrades it
   try {
-    const [priceResult, historyResult, sevenDayResult] = await Promise.all([
+    // Three base fetches cover every button (iOS 39adefe): the range is a local cut of its base.
+    const base = baseDaysFor(days);
+    const [priceResult, historyResult, ninetyResult] = await Promise.all([
       fetchKasPrice({ force, currency }),
-      fetchKasPriceHistory(days, { currency, force }),
-      days === 7 ? null : fetchKasPriceHistory(7, { currency, force }),
+      fetchKasPriceHistory(base, { currency, force }),
+      base === 90 ? null : fetchKasPriceHistory(90, { currency, force }),
     ]);
     // A currency switch while this was in flight makes every result stale — drop it.
     if (currencyCode() !== currency) return;
     if (priceResult) price = priceResult;
-    if (historyResult?.length) historyByRange[days] = historyResult;
-    if (days !== 7 && sevenDayResult?.length) historyByRange[7] = sevenDayResult;
+    if (historyResult?.length) { historyByRange[base] = historyResult; if (base !== days) historyByRange[days] = cutPoints(historyResult, days); }
+    if (base !== 90 && ninetyResult?.length) historyByRange[90] = ninetyResult;
+    // The cards' seven-day window comes out of the 90-day base.
+    if (historyByRange[90]?.length) historyByRange[7] = cutPoints(historyByRange[90], 7);
+    if (pairActive) await loadPairSeries();
     // The Value card's 24h figure comes from the fixed 7-day curve. When that curve is still
     // empty - the launch burst tripped CoinGecko's keyless 429 and nothing is persisted yet -
     // the card said "not available yet" until the next launch. Retry it on a growing backoff
@@ -2497,6 +2638,15 @@ export function initPortfolio(dependencies) {
 
     const hashrateRange = event.target.closest("[data-portfolio-hashrate-range]");
     if (hashrateRange) { hashrateRangeDays = Number(hashrateRange.dataset.portfolioHashrateRange) || 0; render(); return; }
+    const gear = event.target.closest("[data-portfolio-pair-gear]");
+    if (gear) { openPairPicker(); return; }
+    const flip = event.target.closest("[data-portfolio-pair-flip]");
+    if (flip && chartPair) {
+      pairActive = !pairActive;
+      if (pairActive) loadPairSeries().then(() => render()).catch(() => {});
+      render();
+      return;
+    }
     const range = event.target.closest("[data-portfolio-range]");
     if (range) {
       rangeDays = Number(range.dataset.portfolioRange) || 7;

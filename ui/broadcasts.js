@@ -92,7 +92,6 @@ let voiceRecordingChannel = null;
 // What has been read, per room and per wallet (iOS 83286b3): unread = messages from others since
 // the marker; opening a room marks it read; a room seen for the first time counts from now.
 const READ_KEY = "kachat-broadcast-read-v1";
-const DEFAULT_NOTIFY_APPLIED_KEY = "kachat-broadcast-default-notify-v1";
 let readMarkerByChannel = {};   // { [channel]: ms }
 let markedUnread = {};          // { [channel]: true } - "Mark as Unread" with nothing new
 function saveRead() {
@@ -220,16 +219,9 @@ function loadState() {
   try {
     notifyByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(NOTIFY_KEY)) || "{}") || {};
   } catch { notifyByChannel = {}; }
-  // #kaspa and #kachat-bugs notify by default: applied once per wallet, so a bell switched off
-  // later stays off.
+  // Rooms join with notifications OFF and stay off until the user turns a bell on - the
+  // curated rooms included (iOS 1ea3c45). They used to be switched on once per wallet here.
   loadHiddenCurated();
-  try {
-    if (deps.engine.address && localStorage.getItem(deps.accountScopedKey(DEFAULT_NOTIFY_APPLIED_KEY)) !== "1") {
-      for (const name of FEATURED_BROADCAST_CHANNELS) if (curatedShown(name)) notifyByChannel[name] = true;
-      localStorage.setItem(deps.accountScopedKey(NOTIFY_KEY), JSON.stringify(notifyByChannel));
-      localStorage.setItem(deps.accountScopedKey(DEFAULT_NOTIFY_APPLIED_KEY), "1");
-    }
-  } catch { /* fine */ }
   try {
     retentionByChannel = JSON.parse(localStorage.getItem(deps.accountScopedKey(RETENTION_KEY)) || "{}") || {};
   } catch { retentionByChannel = {}; }

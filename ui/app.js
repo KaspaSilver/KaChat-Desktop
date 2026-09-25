@@ -5071,8 +5071,14 @@ function spendingWatchedAddressList() {
 // from the watch too would leave funds nobody ever hears about.
 function addressActivityWatchedMap() {
   const map = new Map();
-  for (const address of spendingWatchedAddressList()) map.set(address, "spending");
+  // The spending addresses have their own switch (Manage Addresses); each cold-storage account
+  // its own (the account's menu). An address switched off is still ours for the self-send
+  // check (ownInputAddressSet) - it just stays quiet. The Settings switch remains the master.
+  if ((accountShellPrefs.spendingReceiveNotifications ?? true) !== false) {
+    for (const address of spendingWatchedAddressList()) map.set(address, "spending");
+  }
   for (const entry of listColdWatchedAddresses()) {
+    if (entry.notify === false) continue;
     if (!map.has(entry.address)) map.set(entry.address, `cold:${entry.label}`);
   }
   map.delete(engine.address || "");
@@ -8353,7 +8359,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 50;
+const APP_BUILD = 51;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -8518,6 +8524,27 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     }
   }
 
+  // Who the address resolves to, under the field (iOS ac0ef19) - the create-chat card.
+  function cardHost() {
+    const anchor = els.resolvedHint || els.recipient;
+    if (!anchor) return null;
+    let host = anchor.parentElement?.querySelector("[data-send-resolution-card]");
+    if (!host) {
+      host = document.createElement("div");
+      host.dataset.sendResolutionCard = "";
+      host.hidden = true;
+      anchor.insertAdjacentElement("afterend", host);
+    }
+    return host;
+  }
+  function showResolutionCard(address, domain = null) {
+    const host = cardHost();
+    if (!host) return;
+    if (!address) { host.hidden = true; host.innerHTML = ""; return; }
+    host.hidden = false;
+    host.innerHTML = addressResolutionCardHtml(address, { domain, onLoaded: (a) => { if ((resolvedAddress || String(els.recipient?.value || "").trim()) === a) showResolutionCard(a, domain); } });
+  }
+
   async function updateValidity() {
     const token = ++resolveToken;
     const raw = String(els.recipient?.value || "").trim();
@@ -8526,6 +8553,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     if (els.resolvedHint) els.resolvedHint.hidden = true;
     if (els.checkEl) els.checkEl.hidden = true;
     if (els.error) els.error.hidden = true;
+    showResolutionCard(null);
 
     if (!raw) { if (els.submit) els.submit.disabled = true; return; }
 
@@ -8534,6 +8562,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       try { validateContactAddress(raw); } catch { valid = false; }
       if (els.checkEl) els.checkEl.hidden = !valid; // green check once it's a valid address
       if (els.submit) els.submit.disabled = !amountValid || !valid;
+      if (valid) showResolutionCard(raw);
       return;
     }
 
@@ -8551,6 +8580,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
           }
           if (els.checkEl) els.checkEl.hidden = false; // resolved -> green check
           if (els.submit) els.submit.disabled = !amountValid;
+          showResolutionCard(resolution.ownerAddress, resolution.domain || raw);
         }
       } catch {
         // leave disabled; submit surfaces a clearer error if attempted anyway
@@ -11757,6 +11787,30 @@ function createChatEffectiveAddress() {
 /// A raw address tells you nothing about whether you typed the right one; a face and a domain do.
 /// Only ever shown for an address the app is confident about - a card flickering through wrong
 /// faces while you type would be worse than no card at all.
+/// The create-chat card, for every other place an address or a .kas domain goes in (iOS
+/// ac0ef19): withdrawals, sends from an address, the portfolio, a group invite. The SCREEN does
+/// the resolving; this takes the outcome and shows the face, the domain and the address. Nil
+/// address, no card. Fetches the profile once and calls `onLoaded` so the caller repaints.
+function addressResolutionCardHtml(address, { domain = null, onLoaded = null } = {}) {
+  if (!address) return "";
+  const profile = engine.peekKnsAddressProfile?.(address);
+  const info = engine.peekKnsAddressInfo?.(address);
+  const knownDomain = info?.explicitPrimaryDomain || profile?.domainName || domain || null;
+  const avatarUrl = profile?.profile?.avatarUrl || "";
+  const looking = !profile && !info;
+  if (looking && typeof onLoaded === "function") {
+    Promise.allSettled([engine.getKnsAddressProfile?.(address), engine.getKnsAddressInfo?.(address)]).then(() => onLoaded(address));
+  }
+  return `
+    <div class="create-chat-preview address-resolution-card">
+      <span class="create-chat-preview-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : escapeHtml(initialsFor(knownDomain || address))}</span>
+      <span class="create-chat-preview-copy">
+        <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No KNS domain"))}</span>
+        <span class="create-chat-preview-address">${escapeHtml(address)}</span>
+      </span>
+    </div>`;
+}
+
 function renderCreateChatPreview() {
   const card = document.querySelector("[data-create-chat-preview]");
   if (!card) return;
@@ -19336,6 +19390,42 @@ function renderImportSeedGrid() {
   }
   updateImportSeedState();
 }
+// Copy on the seed viewer (iOS f9beba1): local clipboard only, wiped after 30 s unless something
+// else was copied meanwhile.
+let revealedMnemonic = "";
+let seedClipboardTimer = 0;
+document.querySelector("[data-copy-seed-phrase]")?.addEventListener("click", async () => {
+  const phrase = revealedMnemonic;
+  if (!phrase) return;
+  try { await navigator.clipboard.writeText(phrase); } catch { showCopyToast("Could not copy the seed phrase."); return; }
+  showCopyToast("Seed phrase copied. Clipboard will clear in 30s.");
+  window.clearTimeout(seedClipboardTimer);
+  seedClipboardTimer = window.setTimeout(async () => {
+    let current = null;
+    try { current = await navigator.clipboard.readText(); } catch { current = null; }
+    if (current === null || current === phrase) { try { await navigator.clipboard.writeText(""); } catch { /* fine */ } }
+  }, 30_000);
+});
+
+// Paste on Import: 12 or 24 words, any spacing; the clipboard is cleared after.
+document.querySelector("[data-import-seed-paste]")?.addEventListener("click", async () => {
+  let text = "";
+  try { text = await navigator.clipboard.readText(); } catch { showCopyToast("Nothing to paste."); return; }
+  const pasted = String(text || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  if (!pasted.length) { showCopyToast("Nothing to paste."); return; }
+  if (pasted.length !== 12 && pasted.length !== 24) { showCopyToast(`A recovery phrase is 12 or 24 words - the clipboard holds ${pasted.length}.`); return; }
+  const unknown = pasted.filter((w) => !isBip39Word(w));
+  if (unknown.length) { showCopyToast(`Not a recovery phrase word: ${unknown.slice(0, 3).join(", ")}`); return; }
+  importWordCount = pasted.length;
+  importWords = Array(24).fill("");
+  pasted.forEach((w, i) => { importWords[i] = w; });
+  document.querySelectorAll("[data-import-word-count]").forEach((b) => b.classList.toggle("active", Number(b.dataset.importWordCount) === importWordCount));
+  importActiveSlot = importWordCount - 1;
+  renderImportSeedGrid();
+  try { await navigator.clipboard.writeText(""); } catch { /* fine */ }
+  showCopyToast("Recovery phrase pasted. Clipboard cleared.");
+});
+
 function focusImportSlot(i) {
   importActiveSlot = Math.max(0, Math.min(importWordCount - 1, i));
   const input = importSeedGrid?.querySelector(`[data-import-slot="${importActiveSlot}"]`);
@@ -19353,6 +19443,17 @@ function resetImportSeedGrid() {
   importWords = Array(24).fill("");
   importActiveSlot = 0;
   renderImportSeedGrid();
+}
+// Manage Addresses > "Notify on receive": the spending addresses' own switch (iOS ba352a2).
+{
+  const toggle = document.querySelector("[data-pref-spending-receive]");
+  if (toggle) {
+    toggle.checked = (accountShellPrefs.spendingReceiveNotifications ?? true) !== false;
+    toggle.addEventListener("change", () => {
+      accountShellPrefs.spendingReceiveNotifications = toggle.checked;
+      persistAccountShellPreferences();
+    });
+  }
 }
 document.querySelectorAll("[data-import-word-count]").forEach((button) => button.addEventListener("click", () => {
   importWordCount = Number(button.dataset.importWordCount) === 12 ? 12 : 24;
@@ -19720,6 +19821,8 @@ function stopRecoveryViewTimer() {
 function hideRevealedRecoveryPhrase() {
   stopRecoveryViewTimer();
   if (recoveryPhraseBox) { recoveryPhraseBox.hidden = true; recoveryPhraseBox.textContent = ""; }
+  revealedMnemonic = "";
+  { const copySeed = document.querySelector("[data-copy-seed-phrase]"); if (copySeed) copySeed.hidden = true; }
   if (revealRecoveryButton) revealRecoveryButton.hidden = false;
   const copyKey = document.querySelector("[data-copy-seed-privatekey]");
   if (copyKey) copyKey.hidden = true;
@@ -19758,6 +19861,9 @@ function revealRecoveryPhraseAfterHold() {
   recoveryPhraseBox.appendChild(grid);
   const copyKey = document.querySelector("[data-copy-seed-privatekey]");
   if (copyKey) copyKey.hidden = !engine.privateKeyHex;
+  revealedMnemonic = account.mnemonic;
+  const copySeed = document.querySelector("[data-copy-seed-phrase]");
+  if (copySeed) copySeed.hidden = false;
   const countdown = document.createElement("span");
   countdown.className = "recovery-countdown";
   countdown.dataset.recoveryCountdown = "";
@@ -19813,6 +19919,8 @@ function closeRecoveryModal() {
   if (copyKey) copyKey.hidden = true;
   if (recoveryModal) recoveryModal.hidden = true;
   if (recoveryPhraseBox) { recoveryPhraseBox.hidden = true; recoveryPhraseBox.textContent = ""; }
+  revealedMnemonic = "";
+  { const copySeed = document.querySelector("[data-copy-seed-phrase]"); if (copySeed) copySeed.hidden = true; }
   if (revealRecoveryButton) revealRecoveryButton.hidden = false;
 }
 function openRecoveryModal() {
@@ -19821,6 +19929,8 @@ function openRecoveryModal() {
   resetRecoveryHold();
   stopRecoveryViewTimer();
   if (recoveryPhraseBox) { recoveryPhraseBox.hidden = true; recoveryPhraseBox.textContent = ""; }
+  revealedMnemonic = "";
+  { const copySeed = document.querySelector("[data-copy-seed-phrase]"); if (copySeed) copySeed.hidden = true; }
   if (revealRecoveryButton) revealRecoveryButton.hidden = false;
   if (recoveryModal) recoveryModal.hidden = false;
 }
@@ -20601,7 +20711,8 @@ queueMicrotask(async () => {
   });
 
   initPortfolio({
-    engine, escapeHtml, accountScopedKey, showToast: showCopyToast,
+    engine, escapeHtml, accountScopedKey, showToast: showCopyToast, chooseDialog,
+    addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
     // Read straight from the live selection so portfolio does not duplicate the
     // currency table (it falls back to the stored key when these are absent).
     currencyCode: () => selectedCurrency.toUpperCase(),
@@ -20609,6 +20720,7 @@ queueMicrotask(async () => {
   });
   initColdStorage({
     engine, escapeHtml, shortAddress, accountScopedKey,
+    addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
     showToast: showCopyToast, appendEngineLog,
     explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
     txDirectionForAddress: manageAddressTxDirection,

@@ -1759,6 +1759,7 @@
         </div>
         <div class="seed-entry-head">
           <span class="field-hint">Enter your recovery phrase</span>
+          <button class="cold-inline-link" type="button" data-import-seed-paste>Paste</button>
           <span class="seed-entry-count" data-import-seed-count>0/24</span>
         </div>
         <div class="seed-grid seed-entry-grid" data-import-seed-grid></div>
@@ -1866,6 +1867,7 @@
       <div class="recovery-phrase-box recovery-phrase-grid-box" data-recovery-phrase hidden></div>
 
       <div class="modal-actions recovery-actions">
+        <button class="secondary-button" type="button" data-copy-seed-phrase hidden>Copy Seed Phrase</button>
         <button class="secondary-button" type="button" data-copy-seed-privatekey hidden>Copy Private Key Hex</button>
         <button class="primary-button" type="button" data-close-recovery>Done</button>
       </div>
@@ -2418,6 +2420,8 @@
         <button type="button" data-open-spending-visibility hidden aria-hidden="true"></button>
         <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
+      <!-- The spending addresses' own receive switch (iOS ba352a2); Settings > Address Activity stays the master. -->
+      <div class="settings-toggle-row manage-address-notify"><span><strong>Notify on receive</strong><small>When a spending address receives Kaspa from someone else.</small></span><label class="switch-control"><input type="checkbox" data-pref-spending-receive checked><span></span></label></div>
       <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Manage addresses view" data-spending-tabs hidden>
         <button type="button" class="settings-segmented-option active" data-spending-tab="addresses">Addresses</button>
         <button type="button" class="settings-segmented-option" data-spending-tab="privacy">Chat Privacy</button>

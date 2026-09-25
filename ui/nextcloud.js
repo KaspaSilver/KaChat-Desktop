@@ -397,15 +397,38 @@ async function uploadBackup(payloadJson) {
   if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the backup folder (HTTP ${mkcol.status}).`);
 
-  const put = await fetch(`${folderURL}/${BACKUP_FILENAME}`, {
-    method: "PUT",
-    headers: { Authorization: authHeader(), "Content-Type": "application/json" },
-    body: payloadJson,
-  });
-  if (!put.ok) throw new Error(`Backup upload failed (HTTP ${put.status}).`);
-  const raw = put.headers.get("OC-ETag") || put.headers.get("ETag");
-  const normalized = raw ? normalizeETag(raw) : "";
-  return normalized || null;
+  // Nextcloud holds a write lock on the file while another PUT (this device's automatic sync,
+  // or another device) is in flight and answers 423. Waited out on a short backoff - half a
+  // minute in all - and only a lock that never clears surfaces, with what to do about it.
+  for (let attempt = 0; ; attempt += 1) {
+    const put = await fetch(`${folderURL}/${BACKUP_FILENAME}`, {
+      method: "PUT",
+      headers: { Authorization: authHeader(), "Content-Type": "application/json" },
+      body: payloadJson,
+    });
+    if (put.status === 423) {
+      if (attempt >= LOCK_RETRY_DELAYS_S.length) {
+        throw new Error("Nextcloud has the backup file locked (HTTP 423): another device or sync is reading or writing it right now. Try again in a minute. If it keeps happening, the lock is stale on the server - clear it with occ (maintenance mode on, empty the file locks, off).");
+      }
+      deps.appendEngineLog?.(`Nextcloud backup file locked (HTTP 423), retrying in ${LOCK_RETRY_DELAYS_S[attempt]}s`);
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAYS_S[attempt] * 1000));
+      continue;
+    }
+    if (!put.ok) throw new Error(`Backup upload failed (HTTP ${put.status}).`);
+    const raw = put.headers.get("OC-ETag") || put.headers.get("ETag");
+    const normalized = raw ? normalizeETag(raw) : "";
+    return normalized || null;
+  }
+}
+const LOCK_RETRY_DELAYS_S = [1, 2, 4, 8, 15];
+
+// Backups on this device queue behind each other: Back Up Now must not run into the automatic
+// sync's upload of the same file (iOS 6551904).
+let backupChain = Promise.resolve();
+function runBackup() {
+  const run = backupChain.then(() => performBackup(), () => performBackup());
+  backupChain = run.then(() => {}, () => {});
+  return run;
 }
 
 /**
@@ -440,7 +463,7 @@ async function repairableTruncation(error) {
   return received >= serverSize;
 }
 
-async function runBackup() {
+async function performBackup() {
   let existingRemoteJson = null;
   try {
     existingRemoteJson = await downloadBackupFile(BACKUP_FILENAME);
