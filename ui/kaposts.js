@@ -11,6 +11,7 @@ import {
   fetchFollowList,
   fetchFollowListAll,
   fetchPost,
+  fetchChainPost,
   fetchThread,
   fetchGlobalFeed,
   fetchKaPostNotifications,
@@ -245,7 +246,7 @@ const PAGER_PAGE_SIZE = 50;
 const PAGER_THREAD_PAGE_SIZE = 100;
 const PAGER_TARGET_ROWS = 18;
 const PAGER_MAX_REQUESTS = 5;
-const PAGER_MAX_UNPRODUCTIVE = 3; // consecutive all-filtered triggers before we ask for a tap
+const PAGER_MAX_UNPRODUCTIVE = 1; // one all-filtered trigger (five requests) and we ask for a tap (iOS KaPostsPaginator)
 const FEED_FRESH_MS = 90_000;
 
 function makePager({ pageSize = PAGER_PAGE_SIZE, target = PAGER_TARGET_ROWS } = {}) {
@@ -827,6 +828,32 @@ async function indexerPost(txId) {
   } catch { return null; }
 }
 
+/// The chain itself, for a post the indexer does not serve (iOS KaPostChainReader): published
+/// seconds ago, or older than the window. Engagement counts are unknown from here; a quoted
+/// post is read with a second chain read.
+async function chainPost(txId) {
+  const record = await fetchChainPost(txId);
+  if (!record) return null;
+  const address = kaspaAddressFromPubkey(deps.engine, record.authorPubkey);
+  if (!address) return null;
+  let quoted = null;
+  if (record.action === "quote" && record.referencedId) {
+    const q = await fetchChainPost(record.referencedId);
+    const qAddress = q ? kaspaAddressFromPubkey(deps.engine, q.authorPubkey) : null;
+    if (q && qAddress) quoted = { remoteId: q.txId, text: q.message, posterAddress: qAddress, timestamp: q.blockTimeMillis };
+  }
+  const post = {
+    id: `remote-${record.txId}`, remoteId: record.txId, posterPubkey: record.authorPubkey, posterAddress: address,
+    text: record.message, timestamp: record.blockTimeMillis || Date.now(),
+    likes: 0, dislikes: 0, reposts: 0, likedByMe: false, dislikedByMe: false, repostedByMe: false,
+    remoteReplyCount: 0, comments: [], quoted,
+    parentRemoteId: record.action === "reply" ? record.referencedId : null,
+    delivery: "sent", editedAt: null, sentAt: null, poll: null,
+  };
+  mergeIntoResolutionPool([post]);
+  return post;
+}
+
 /// The complete chain above a post, fetched once per post and rendered as real cells.
 async function loadAncestorsFor(post) {
   const remoteId = post?.remoteId;
@@ -924,14 +951,12 @@ async function resolveAndOpenPost(txId, { parentRemoteIdHint = null } = {}) {
       deps.appendEngineLog?.(`KaPost actor-content fetch failed: ${error.message}`);
     }
   }
+  // Last: the chain itself - a post the indexer has not caught up on, or one past its window.
+  if (!post) post = await chainPost(txId);
   if (post) {
     await openResolvedPost(post, { parentRemoteIdHint, ownContentLoaded });
   } else {
-    deps.alertDialog?.({
-      title: "This post could not be loaded",
-      message: "It may have been removed, or the network may be unreachable.",
-      confirmLabel: "Back",
-    });
+    deps.showToast?.("Post not found - it may be older than the current feed");
   }
 }
 
@@ -3344,7 +3369,7 @@ export function openKaPostFromNotification(txId) {
 
 function startKaPostsNotificationPolling() {
   if (kaPostsNotifPollTimer) window.clearInterval(kaPostsNotifPollTimer);
-  kaPostsNotifPollTimer = window.setInterval(pollKaPostNotificationsForPings, KAPOSTS_NOTIF_POLL_MS);
+  kaPostsNotifPollTimer = window.setInterval(() => { if (!document.hidden) pollKaPostNotificationsForPings(); }, KAPOSTS_NOTIF_POLL_MS);
   window.setTimeout(pollKaPostNotificationsForPings, 10_000);
 }
 

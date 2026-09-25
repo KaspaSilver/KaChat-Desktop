@@ -170,6 +170,8 @@ function reduceArena() {
   if (active) {
     rememberRecord();
     render();
+    // A seat or a started game that lands from the chain while the kind screen is up.
+    showWaitingRoomIfSeated();
     autoOpenMyGameIfNeeded();
     gameEndedIfNeeded();
   }
@@ -319,7 +321,7 @@ async function createPrivate(duel) {
 }
 
 async function joinPrivate() {
-  const raw = await promptDialog({ title: "Join with a code", message: `The eight-character code the creator shared. Joining is one transaction${joinFeeText ? ` (fee: ${joinFeeText})` : ""}.`, label: "Code", initial: "", confirmLabel: "Join", maxLength: 64 });
+  const raw = await promptDialog({ title: "Join with a code", message: `The eight-character code the creator shared. Joining is one transaction (fee: ${joinFeeText || "--"}).`, label: "Code", initial: "", confirmLabel: "Join", maxLength: 64 });
   if (!raw) return;
   const id = String(raw).trim().toLowerCase();
   const t = tournaments[id];
@@ -687,7 +689,7 @@ function renderLeaderboardRows() {
   const board = duel ? T.duelLeaderboard(leaderboardRows) : T.tournamentLeaderboard(leaderboardRows);
   const my = me();
   return `
-    <p class="screen-kicker">${duel ? "1v1 leaderboard · most wins, fewest losses" : "Tournament leaderboard · most tournaments won"}</p>
+    <p class="screen-kicker">${duel ? "Games won and lost - 1v1s and tournament games alike" : "Tournaments won and lost"}</p>
     ${board.length ? "" : `<p class="field-hint">${duel ? "No finished 1v1 games yet." : "No finished tournaments yet."}</p>`}
     <div class="chess-t-list">
       ${board.map((r, i) => `
@@ -719,7 +721,7 @@ function renderWaitingRoom() {
   if (!t) return `${headerHtml("Waiting", { back: true })}<div class="chess-t-body"><p class="field-hint">Loading the room from the arena…</p></div>`;
   const duel = T.isDuel(t);
   if (matchFound(t)) {
-    const seated = t.players;
+    const seated = my ? [my, ...t.players.filter((p) => p !== my)] : t.players;
     return `
       ${headerHtml(duel ? "Match found!" : "Tournament full!")}
       <div class="chess-t-body chess-t-waiting">
@@ -747,7 +749,7 @@ function renderWaitingRoom() {
       ${T.isPublicId(t.id) ? "" : `
         <div class="chess-t-share">
           <small>Share this code</small>
-          <div><b>${esc(t.id)}</b><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button></div>
+          <div><b>${esc(t.id)}</b><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button><button class="secondary-button" type="button" data-chess-t-share="${esc(t.id)}" data-kind="${duel ? "1v1" : "Tournaments"}">Share</button></div>
         </div>`}
       <p class="field-hint center">${duel ? "You're paired with the next person who joins. The game starts by itself." : "The tournament starts by itself when all eight seats are taken."}</p>
       <button class="secondary-button chess-t-cta danger" type="button" data-chess-t-leave="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Leaving…" : "Leave"}</button>
@@ -796,7 +798,7 @@ function renderTournament() {
     if (my && !T.isSeated(t, my, now)) statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-join="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Joining…" : joinLabel()}</button>`;
     else if (my) statusHtml += `<button class="secondary-button chess-t-cta danger" type="button" data-chess-t-leave="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Leaving…" : "Leave (one transaction)"}</button>`;
     if (t.creator === my && !T.isPublicId(t.id)) statusHtml += `<button class="secondary-button chess-t-cta danger" type="button" data-chess-t-cancel="${esc(t.id)}">Cancel tournament</button>`;
-    if (!T.isPublicId(t.id)) statusHtml += `<div class="chess-t-code"><span>Code: <b>${esc(t.id)}</b></span><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button></div>`;
+    if (!T.isPublicId(t.id)) statusHtml += `<div class="chess-t-code"><span>Code: <b>${esc(t.id)}</b></span><span><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button> <button class="secondary-button" type="button" data-chess-t-share="${esc(t.id)}" data-kind="${duel ? "1v1" : "Tournaments"}">Share</button></span></div>`;
   } else if (status === "live") {
     const game = my ? T.currentGameFor(t, my) : null;
     if (game) {
@@ -971,11 +973,11 @@ function renderGame() {
       </div></div>
     </div>` : "";
 
-  const lines = t.chat.filter((l) => l.game === game.id).slice(-80);
+  const lines = t.chat.filter((l) => l.game === game.id).slice(-120);
   const chat = game.winner
     ? `<p class="field-hint center">Chat was live only.</p>`
     : `<div class="chess-t-chat bubbles">
-        ${lines.length ? lines.map((l) => `<div class="chess-t-bubble${l.sender === my ? " mine" : ""}">${l.sender === my ? "" : `<small>${esc(nameFor(l.sender))}</small>`}<span>${esc(l.text)}</span>${l.sender === my ? `<i class="chess-t-tick${rows.get(l.id)?.local ? " pending" : ""}" aria-hidden="true"></i>` : ""}</div>`).join("") : `<p class="field-hint">No messages yet.</p>`}
+        ${lines.length ? lines.map((l) => `<div class="chess-t-bubble${l.sender === my ? " mine" : ""}">${l.sender === my ? "" : `<small>${esc(nameFor(l.sender))}</small>`}<span>${esc(l.text)}</span>${l.sender === my ? `<i class="chess-t-tick${rows.get(l.id)?.local ? " pending" : ""}" aria-hidden="true"></i>` : ""}</div>`).join("") : `<p class="field-hint">No messages yet. Each message is one transaction.</p>`}
       </div>
       ${myColor ? `
       <form class="chess-t-composer" data-chess-t-chat="${esc(game.id)}">
@@ -1299,6 +1301,13 @@ function onClick(event) {
   }
   const cancel = event.target.closest("[data-chess-t-cancel]");
   if (cancel) { const t = tournaments[cancel.dataset.chessTCancel]; if (t) cancelTournament(t).catch(() => {}); return; }
+  const share = event.target.closest("[data-chess-t-share]");
+  if (share) {
+    const text = `Play me at chess in KaChat: open Kaspa Hub > Chess Online > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
+    if (navigator.share) navigator.share({ text }).catch(() => {});
+    else navigator.clipboard?.writeText(text).then(() => deps.showToast?.("Invite copied"), () => {});
+    return;
+  }
   const copy = event.target.closest("[data-chess-t-copy]");
   if (copy) {
     navigator.clipboard?.writeText(copy.dataset.chessTCopy).then(() => deps.showToast?.("Code copied"), () => {});

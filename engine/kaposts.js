@@ -579,6 +579,63 @@ export async function submitScheduledLocally({ engine, serialized }) {
   return String(response?.transactionId || serialized?.id || "");
 }
 
+// ---------------------------------------------------------------------------
+// Chain reader (iOS KaPostChainReader): a post the indexer has not indexed yet - published seconds
+// ago, or older than its window - is still on chain. Reads the transaction's payload straight
+// from the Kaspa REST API and parses it, so a shared link or a notification opens either way.
+// ---------------------------------------------------------------------------
+
+/** Reads the legacy `k:1:` root as well as today's `kchat:1:`, matching the indexer's dual-read.
+ *  Returns { action, authorPubkey, message, referencedId } or null for a non-post payload. */
+export function parseChainPayload(payload) {
+  const text = String(payload || "");
+  const root = ["kchat:1:", "k:1:"].find((r) => text.startsWith(r));
+  if (!root) return null;
+  // Base64 has no ":" and neither do pubkeys, signatures or ids, so the fields split cleanly.
+  const fields = text.slice(root.length).split(":");
+  if (fields.length < 4) return null;
+  const action = fields[0];
+  const pubkey = fields[1];
+  const messageIndex = action === "post" || action === "poll" ? 3 : action === "reply" || action === "quote" ? 4 : -1;
+  if (messageIndex < 0 || fields.length <= messageIndex) return null;
+  const decoded = base64ToUtf8(fields[messageIndex]);
+  if (decoded === null || decoded === undefined) return null;
+  return {
+    action,
+    authorPubkey: pubkey,
+    message: stripKaChatMarker(decoded).trim(),
+    referencedId: action === "post" || action === "poll" ? null : (fields[3] || null),
+  };
+}
+
+const hexToUtf8 = (hex) => {
+  const clean = String(hex || "");
+  if (!clean || clean.length % 2) return null;
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return null; }
+};
+
+/** Null when the REST API has no such transaction, when it carries no payload, or when the
+ *  payload is not a KaPosts message. Returns { txId, action, authorPubkey, message, referencedId, blockTimeMillis }. */
+export async function fetchChainPost(txId) {
+  const id = String(txId || "").trim();
+  if (!id) return null;
+  const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${base}/transactions/${encodeURIComponent(id)}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, signal: controller.signal });
+    if (!response.ok) return null;
+    const tx = await response.json();
+    const payload = hexToUtf8(tx?.payload);
+    const parsed = payload ? parseChainPayload(payload) : null;
+    if (!parsed) return null;
+    return { txId: id, ...parsed, blockTimeMillis: Number(tx?.block_time) || null };
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
 /** vote ∈ upvote | downvote | unvote (unvote = the fork's removal counter-action). */
 export async function submitKaPostVote({ engine, postId, vote, authorPubkey }) {
   const pubkey = requesterPubkeyFor(engine);

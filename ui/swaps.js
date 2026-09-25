@@ -6,9 +6,9 @@
 // (shown as a QR). Swapping INTO KAS pays out to a fresh, never-used spending address by default
 // so exchange-received coins cannot be chain-linked to everyday spending.
 //
-// The ChangeNOW API key ships with the build, exactly like the iOS/Android apps: Vite inlines
-// `VITE_CHANGENOW_API_KEY` from a gitignored `.env` at build time. A device-level localStorage
-// override is still honored for forks that build without the .env.
+// The ChangeNOW API key never ships inside the page: the relay attaches the deployment's key
+// server-side (vite.config.mjs, CHANGENOW_API_KEY). A device-level localStorage override is
+// still honored for a reader who has their own key.
 
 import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx } from "./portfolio.js";
 import { chooseDialog, confirmDialog } from "./dialogs.js";
@@ -16,8 +16,7 @@ import { isProxyAvailable } from "../engine/endpoints.js";
 
 const CN_BASE = "https://api.changenow.io";
 const API_KEY_KEY = "kachat-changenow-api-key-v1";           // global (device-level) override
-let BUILTIN_KEY = "";
-try { BUILTIN_KEY = String(import.meta.env.VITE_CHANGENOW_API_KEY || "").trim(); } catch { BUILTIN_KEY = ""; }
+const BUILTIN_KEY = ""; // the key lives on the relay, never in the bundle
 const AGREED_KEY = "kachat-swap-disclaimer-agreed-v1";       // account-scoped
 const HISTORY_KEY = "kachat-swap-history-v1";                // account-scoped
 
@@ -311,7 +310,9 @@ function rateText() {
 
 function renderSwapForm() {
   const busy = createState.status === "creating";
-  const canSwap = estimateState.status === "success" && !busy;
+  // A "You Get" below the pair's minimum fails the quote on iOS (the exchange cannot be created);
+  // the hint says what the least is, and the button stays off until the target is raised.
+  const canSwap = estimateState.status === "success" && !busy && !estimateState.belowMinimum;
   const estimated = estimateState.status === "success" ? fmtTrimmed(estimateState.toAmount) : estimateState.status === "loading" ? "..." : "";
   // The card typed last keeps its text; the other shows the quote (or "..." while one loads).
   const sendValue = inputSide === "send" ? amountText : (estimateState.status === "success" ? amountText : estimateState.status === "loading" ? "..." : "");
@@ -325,7 +326,7 @@ function renderSwapForm() {
       <button type="button" class="swap-go ${canSwap ? "" : "disabled"}" data-swap-create ${canSwap ? "" : "disabled"}>${busy ? "Creating…" : "Get Deposit Address"}</button>
     </div>
     ${amountCard("You Get", toCoin(), getValue, "get")}
-    ${estimateState.belowMinimum ? `<p class="field-hint">Below this pair's minimum: sending ${deps.escapeHtml(fmtTrimmed(estimateState.minimum))} ${deps.escapeHtml(fromCoin().displayName)} is the least ChangeNOW takes, and gets you ${deps.escapeHtml(estimated)}.</p>` : ""}
+    ${estimateState.belowMinimum ? `<p class="field-hint swap-error">Minimum you can get is about ${deps.escapeHtml(estimated)} ${deps.escapeHtml(toCoin().displayName)}. Sending ${deps.escapeHtml(fmtTrimmed(estimateState.minimum))} ${deps.escapeHtml(fromCoin().displayName)} is the least ChangeNOW takes, and gets you ${deps.escapeHtml(estimated)}.</p>` : ""}
     ${needsPayout ? `<input class="field-input swap-payout-input" type="text" data-swap-payout placeholder="Receive ${deps.escapeHtml(toCoin().displayName)} at" value="${deps.escapeHtml(payoutAddressText)}" autocomplete="off" spellcheck="false" />` : ""}
     ${!kasIsSendSide ? `<div class="profile-card swap-address-row">
       <span class="swap-address-copy"><small>Receiving KAS At</small><strong>${deps.escapeHtml(shortMiddle(toAddress))}</strong></span>

@@ -250,7 +250,7 @@ function saveState() {
 
 function ensureDefaultPortfolio() {
   if (state.portfolios.length === 0) {
-    const p = { id: nowId(), name: "My Portfolio", transactions: [] };
+    const p = { id: nowId(), name: "Portfolio 1", transactions: [] };
     state.portfolios.push(p);
     state.activeId = p.id;
     saveState();
@@ -344,7 +344,7 @@ function setAmountsHidden(hidden) {
   amountsHidden = Boolean(hidden);
   try { localStorage.setItem(HIDE_AMOUNTS_KEY, amountsHidden ? "1" : "0"); } catch { /* fine */ }
 }
-const MASKED_AMOUNT = "••••";
+const MASKED_AMOUNT = "••••••";
 function fmtFiat(value) {
   if (amountsHidden) return MASKED_AMOUNT;
   const sign = value < 0 ? "-" : "";
@@ -550,7 +550,10 @@ function spanReadout(a, b, formatValue) {
   const from = a[1], to = b[1];
   const delta = to - from;
   const percent = from ? (delta / from) * 100 : 0;
-  const dateOf = (ts) => new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  const sameDay = new Date(a[0]).toDateString() === new Date(b[0]).toDateString();
+  const dateOf = (ts) => (sameDay
+    ? new Date(ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    : new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }));
   const sign = delta >= 0 ? "+" : "";
   return {
     dates: `${dateOf(a[0])} – ${dateOf(b[0])}`,
@@ -1000,16 +1003,17 @@ function pairHistory() {
 /** Bitcoin amounts are written out in full - eight decimals at least, more for a per-KAS figure;
  *  shares or ounces with at least four decimals and four significant digits. */
 function fmtPairAmount(value, { perKas = false } = {}) {
+  if (amountsHidden && !perKas) return MASKED_AMOUNT;
   const v = Number(value) || 0;
-  const code = CHART_PAIRS[chartPair]?.code || "";
   if (chartPair === "bitcoin") {
     let decimals = 8;
     if (perKas && v > 0 && v < 1e-6) decimals = Math.min(12, Math.ceil(-Math.log10(v)) + 3);
-    return `${v.toFixed(decimals)} ${code}`;
+    return `₿${v.toFixed(decimals)}`;
   }
   let decimals = 4;
   if (v > 0 && v < 1) decimals = Math.max(4, Math.ceil(-Math.log10(v)) + 3);
-  return `${v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })} ${code}`;
+  const suffix = chartPair === "voo" ? " VOO" : " oz";
+  return `${v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}${suffix}`;
 }
 function pairGearHtml() {
   return `<button class="kaposts-icon-button portfolio-pair-gear" type="button" data-portfolio-pair-gear aria-label="Compare against" title="Compare against"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>`;
@@ -1030,6 +1034,16 @@ async function openPairPicker() {
   pairActive = false;
   pairSeries = null;
   render();
+}
+
+/** The converter opens reading "1 KAS = …" with the fiat side filled (iOS recomputes on appear). */
+function converterFiatOnOpen() {
+  if (converterFiat) return converterFiat;
+  const amount = decimalInputValue(converterKas);
+  const rate = price?.price;
+  if (!Number.isFinite(amount) || amount <= 0 || !(rate > 0)) return "";
+  converterFiat = groupedFromCanonical((amount * rate).toFixed(2));
+  return converterFiat;
 }
 
 function rangeButtonsHtml() {
@@ -1082,6 +1096,15 @@ function marketStatsHtml() {
 // diagonal like the old strokes were.
 const PICKAXE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><g transform="rotate(-40 12 12)"><path d="M1.2 9.6C6 1 18 1 22.8 9.6C18 6.6 6 6.6 1.2 9.6Z" fill="currentColor" stroke="none"/><path d="M10.5 5.4h3l-.4 16a1.1 1.1 0 0 1-2.2 0Z" fill="currentColor" stroke="none"/></g></svg>`;
 
+/** The points the hashrate chart draws for the selected range; a short window with nothing in
+ *  it would draw an empty chart, so it falls back to the whole series (iOS visiblePoints). */
+function hashrateVisiblePoints(stats) {
+  const all = stats?.history || [];
+  const cutoff = hashrateRangeDays > 0 ? Date.now() - hashrateRangeDays * 86_400_000 : 0;
+  const ranged = cutoff ? all.filter((pt) => pt[0] >= cutoff) : all;
+  return ranged.length >= 2 ? ranged : all;
+}
+
 /// Network hashrate, full width under the two squares (iOS `hashrateCard`).
 ///
 /// Full width rather than a third square: it is one series with a long history, and it reads far
@@ -1128,9 +1151,7 @@ function hashrateViewHtml() {
         <span class="portfolio-detail-price" data-portfolio-hashrate-value>${stats ? formatHashrate(stats.currentHashrate) : "—"}</span>
       </div>
       ${(() => {
-        const all = stats?.history || [];
-        const cutoff = hashrateRangeDays > 0 ? Date.now() - hashrateRangeDays * 86_400_000 : 0;
-        const ranged = cutoff ? all.filter((pt) => pt[0] >= cutoff) : all;
+        const ranged = hashrateVisiblePoints(stats);
         return ranged.length >= 2
           ? bigChartSvg(ranged, { height: 240, chart: "hashrate" })
           : `<div class="portfolio-chart-empty">Network history is still loading.</div>`;
@@ -1212,7 +1233,7 @@ function priceViewHtml() {
         </label>
         <label class="portfolio-editor-field">
           <span>${deps.escapeHtml(deps.currencyCode?.() || "USD")}</span>
-          <input type="text" inputmode="decimal" data-portfolio-conv-fiat value="${deps.escapeHtml(converterFiat)}" />
+          <input type="text" inputmode="decimal" data-portfolio-conv-fiat value="${deps.escapeHtml(converterFiatOnOpen())}" />
         </label>
       </div>
       <p class="field-hint">${price?.price > 0 ? `1 KAS = ${deps.escapeHtml(currencySymbol())}${deps.escapeHtml(Number(price.price).toFixed(8).replace(/0+$/, "").replace(/\.$/, ""))}` : "Waiting for a price..."}</p>
@@ -1364,22 +1385,25 @@ function wireScrubbing() {
   // logo + name stay put (they're separate elements the scrub never touches), matching iOS.
   if (view === "price") {
     const wrap = rootEl.querySelector('[data-portfolio-chart="price"]');
-    attachScrub(wrap, history, ([ts, p]) => {
+    // The chart, the big number and the scrub read the same series, so they can never disagree.
+    const inPair = pairHistory();
+    const fmtPoint = (v) => (inPair ? fmtPairAmount(v, { perKas: true }) : fmtPrice(v));
+    attachScrub(wrap, inPair || history, ([ts, p]) => {
       const date = rootEl.querySelector("[data-portfolio-price-date]");
       const value = rootEl.querySelector("[data-portfolio-price-value]");
       const change = rootEl.querySelector("[data-portfolio-price-24h]");
       if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
-      if (value) value.textContent = fmtPrice(p);
+      if (value) value.textContent = fmtPoint(p);
       if (change) change.style.visibility = "hidden";
     }, () => {
       const date = rootEl.querySelector("[data-portfolio-price-date]");
       const value = rootEl.querySelector("[data-portfolio-price-value]");
       const change = rootEl.querySelector("[data-portfolio-price-24h]");
       if (date) date.hidden = true;
-      if (value) value.textContent = price ? fmtPrice(price.price) : "—";
+      if (value) value.textContent = inPair ? fmtPairAmount(pairSeries.latest ?? inPair[inPair.length - 1][1], { perKas: true }) : (price ? fmtPrice(price.price) : "—");
       if (change) change.style.visibility = "";
     }, (a, b) => {
-      const reading = spanReadout(a, b, (delta) => fmtPrice(Math.abs(delta)));
+      const reading = spanReadout(a, b, (delta) => fmtPoint(Math.abs(delta)));
       const date = rootEl.querySelector("[data-portfolio-price-date]");
       const value = rootEl.querySelector("[data-portfolio-price-value]");
       const change = rootEl.querySelector("[data-portfolio-price-24h]");
@@ -1394,7 +1418,7 @@ function wireScrubbing() {
   if (view === "hashrate") {
     const stats = peekNetworkStats();
     const wrap = rootEl.querySelector('[data-portfolio-chart="hashrate"]');
-    attachScrub(wrap, stats?.history || [], ([ts, hs]) => {
+    attachScrub(wrap, hashrateVisiblePoints(stats), ([ts, hs]) => {
       const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
       const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
       if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
@@ -1417,12 +1441,13 @@ function wireScrubbing() {
   // Value screen: scrubbing shows the point's date + value; the "Portfolio Value" label stays.
   if (view === "value") {
     const wrap = rootEl.querySelector('[data-portfolio-chart="value"]');
+    const fmtValue = (v) => (pairHistory() ? fmtPairAmount(v) : fmtFiat(v));
     attachScrub(wrap, valuePoints, ([ts, v]) => {
       const date = rootEl.querySelector("[data-portfolio-value-date]");
       const readout = rootEl.querySelector("[data-portfolio-value-readout]");
       const change = rootEl.querySelector("[data-portfolio-value-change]");
       if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
-      if (readout) readout.textContent = fmtFiat(v);
+      if (readout) readout.textContent = fmtValue(v);
       // Hidden rather than removed: the range's change under a past value would read as that
       // point's own move, and collapsing the row would shift the chart under the finger.
       if (change) change.style.visibility = "hidden";
@@ -1431,11 +1456,11 @@ function wireScrubbing() {
       const readout = rootEl.querySelector("[data-portfolio-value-readout]");
       const change = rootEl.querySelector("[data-portfolio-value-change]");
       if (date) date.hidden = true;
-      if (readout) readout.textContent = fmtFiat(valuePoints.length ? valuePoints[valuePoints.length - 1][1] : 0);
+      if (readout) readout.textContent = fmtValue(valuePoints.length ? valuePoints[valuePoints.length - 1][1] : 0);
       if (change) change.style.visibility = "";
     }, (a, b) => {
       // The amount is masked with the eye on; the percent still reads.
-      const reading = spanReadout(a, b, (delta) => fmtFiat(Math.abs(delta)));
+      const reading = spanReadout(a, b, (delta) => fmtValue(Math.abs(delta)));
       const date = rootEl.querySelector("[data-portfolio-value-date]");
       const readout = rootEl.querySelector("[data-portfolio-value-readout]");
       const change = rootEl.querySelector("[data-portfolio-value-change]");
@@ -2437,7 +2462,7 @@ async function refreshData({ force = false } = {}) {
 /** For the swap screen's "Add to Portfolio": the available portfolios (id + name). */
 export function listPortfolios() {
   ensureDefaultPortfolio();
-  return state.portfolios.map((p) => ({ id: p.id, name: p.name, isActive: p.id === state.activePortfolioId }));
+  return state.portfolios.map((p) => ({ id: p.id, name: p.name, isActive: p.id === state.activeId }));
 }
 
 /// Which portfolios already hold this on-chain transaction, so a chooser can flag a duplicate

@@ -498,6 +498,7 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
   else if (!response) status = { kind: "pendingResponse" };
   else if (isCheckmate(board)) status = { kind: "checkmate", winner: opposite(board.sideToMove) };
   else if (isStalemate(board)) status = { kind: "stalemate" };
+  else if (isInsufficientMaterial(board)) status = { kind: "insufficientMaterial" };
   else status = { kind: "inProgress" };
 
   const viewerColor = myAddress === whiteAddress ? WHITE : (myAddress === blackAddress ? BLACK : null);
@@ -520,7 +521,7 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
 }
 
 export function isChessGameOver(status) {
-  return status && (status.kind === "declined" || status.kind === "checkmate" || status.kind === "stalemate" || status.kind === "resigned");
+  return status && (status.kind === "declined" || status.kind === "checkmate" || status.kind === "stalemate" || status.kind === "insufficientMaterial" || status.kind === "resigned");
 }
 
 // The contact's current active (not-yet-over) chess game, or null. Most recently invited wins.
@@ -567,6 +568,7 @@ export function chessSummaryStatusText(summary) {
       if (!viewer) return `Checkmate - ${s.winner === WHITE ? "White" : "Black"} wins`;
       return s.winner === viewer ? "Checkmate - You win!" : "Checkmate - You lost";
     case "stalemate": return "Stalemate - draw";
+    case "insufficientMaterial": return "Draw - not enough pieces to checkmate";
     case "resigned":
       if (s.timeout) {
         if (!viewer) return `${s.loser === WHITE ? "White" : "Black"} lost on time`;

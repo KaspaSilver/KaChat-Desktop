@@ -253,7 +253,8 @@ async function listFolder(relativePath = "") {
 /** Creates (or reuses) a public link share — shareType 3 — and returns its /s/TOKEN URL. */
 async function createPublicShareLink(relativePath) {
   const endpoint = `${apiBase()}/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json`;
-  const body = `path=${encodeURIComponent("/" + relativePath)}&shareType=3`;
+  // Read-only (permissions=1): a link to a photo or a note is for viewing, never for editing.
+  const body = `path=${encodeURIComponent("/" + relativePath)}&shareType=3&permissions=1`;
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {

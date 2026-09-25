@@ -428,7 +428,15 @@ function retentionCutoffMs(channel) {
   return Date.now() - retentionMillisFor(channel);
 }
 
+// One JSON pass a beat after the last change (and on page hide), not one per merged page
+// or live block hit: the cache holds every indexed room's 30 days.
+let cacheSaveTimer = 0;
 function saveCache() {
+  if (cacheSaveTimer) return;
+  cacheSaveTimer = window.setTimeout(() => { cacheSaveTimer = 0; saveCacheNow(); }, 500);
+}
+window.addEventListener("pagehide", () => { if (cacheSaveTimer) { window.clearTimeout(cacheSaveTimer); cacheSaveTimer = 0; saveCacheNow(); } });
+function saveCacheNow() {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(messageCache)); }
   catch {
     // Quota: actually drop the OLDEST HALF of each channel's messages (the old code wiped
@@ -555,6 +563,7 @@ function recordReaction(channel, txId, reaction, reactorAddress, blockTime) {
 // Data
 // ---------------------------------------------------------------------------
 
+let listRenderSuppressed = false;
 function mergeMessages(channel, rows) {
   const existing = messageCache[channel] || [];
   const seen = new Set(existing.map((m) => m.txId));
@@ -611,7 +620,7 @@ function mergeMessages(channel, rows) {
   if (added > 0) saveCache();
   if (added > 0) {
     if (channel === activeChannel && tabVisible && !document.hidden) markChannelRead(channel);
-    try { renderChannelList(); } catch { /* list not mounted */ }
+    if (!listRenderSuppressed) { try { renderChannelList(); } catch { /* list not mounted */ } }
   }
   if (reactionsChanged) saveReactions();
   // The global notification center gates these by arrival time (only live messages ping, not the
@@ -653,6 +662,8 @@ async function backfillChannel(channel, { quiet = true } = {}) {
       deepBackfilled.add(channel);
       const cutoff = retentionCutoffMs(channel);
       let before = null;
+      listRenderSuppressed = true; // one list rebuild at the end, not one per page
+      try {
       for (let page = 0; page < 20; page++) {
         const result = await fetchBroadcastHistory({ channel, limit: 500, before, baseUrl });
         added += mergeMessages(channel, result.messages);
@@ -663,6 +674,7 @@ async function backfillChannel(channel, { quiet = true } = {}) {
         if (cutoff && oldest < cutoff) break; // older pages would be pruned anyway
         before = oldest;
       }
+      } finally { listRenderSuppressed = false; }
     }
     if (added > 0) {
       if (activeChannel === channel) renderRoom();

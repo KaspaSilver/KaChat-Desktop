@@ -84,6 +84,8 @@ function normalizeAccount(raw) {
     // Desktop nicety over iOS: the first time an account is opened, run the gap-limit
     // discovery scan automatically instead of waiting for a manual "Discover Addresses".
     discovered: raw.discovered === true,
+    // Per-account receive notifications (iOS notifyOnReceive); older records read as on.
+    receiveNotifications: raw.receiveNotifications !== false,
   };
 }
 
@@ -1050,7 +1052,7 @@ async function openAddressScreen(index) {
   (async () => {
     try {
       const base = String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
-      const url = `${base}/addresses/${encodeURIComponent(entry.address)}/full-transactions?limit=50&offset=0&resolve_previous_outpoints=light`;
+      const url = `${base}/addresses/${encodeURIComponent(entry.address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
       const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
       if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
       const txs = await response.json();

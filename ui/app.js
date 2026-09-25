@@ -1079,13 +1079,33 @@ async function proxiedFetchHtml(url) {
   if (!res.ok) return null;
   const type = res.headers.get("content-type") || "";
   if (!/text\/html|xml/i.test(type)) return null;
-  return (await res.text()).slice(0, 400_000); // <head> metadata lives up top; cap the read
+  // <head> metadata lives up top: read at most 128 kB and stop, rather than buffering a whole
+  // page, and hand the slice to an inert parsed document (no subresource loads, no scripts) -
+  // a regex over a hostile page could otherwise pin the tab for minutes.
+  const reader = res.body?.getReader?.();
+  if (!reader) return (await res.text()).slice(0, 131_072);
+  const decoder = new TextDecoder();
+  let html = "";
+  while (html.length < 131_072) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    html += decoder.decode(value, { stream: true });
+  }
+  try { await reader.cancel(); } catch { /* fine */ }
+  return html.slice(0, 131_072);
 }
 
+let metaDocCache = { html: null, doc: null };
 function metaContent(html, prop) {
-  const a = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*content=["']([^"']*)["']`, "i");
-  const b = new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]*(?:property|name)=["']${prop}["']`, "i");
-  return (html.match(a)?.[1] || html.match(b)?.[1] || "").trim();
+  if (metaDocCache.html !== html) {
+    let doc = null;
+    try { doc = new DOMParser().parseFromString(html, "text/html"); } catch { doc = null; }
+    metaDocCache = { html, doc };
+  }
+  const doc = metaDocCache.doc;
+  if (!doc) return "";
+  const el = doc.querySelector(`meta[property="${prop}"], meta[name="${prop}"]`);
+  return String(el?.getAttribute("content") || "").trim();
 }
 
 async function fetchOpenGraph(url) {
@@ -4348,9 +4368,10 @@ async function refreshAllConversations({ quiet = true } = {}) {
     // Only the sweep that actually ran as the backfill clears the flag, so a restore
     // that arms it mid-sweep still gets its own silent sweep next time.
     if (catchUp) pendingInitialCatchUp = false;
+    // Read by the self-scheduling sweep loop: a failing indexer doubles the pause up to a
+    // minute, a success snaps it back (this used to sit after the return and never ran).
+    lastSweepFailed = sweepFailures > 0;
   }
-  lastSweepFailed = sweepFailures > 0;
-  return added;
 }
 
 function startAutomaticRefresh() {
@@ -5294,7 +5315,7 @@ async function attributeAndNotifyAddressActivity(increases) {
 
 // Slow safety interval: the live subscription covers the common case, this
 // picks up anything a dropped event or REST hiccup missed.
-window.setInterval(() => scheduleAddressActivityCheck(0), 180_000);
+window.setInterval(() => { if (!document.hidden) scheduleAddressActivityCheck(0); }, 180_000);
 
 // ---------------------------------------------------------------------------
 // Fresh-address payment pools (MESSAGING.md "Fresh-Address Payment Pools";
@@ -8359,7 +8380,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 51;
+const APP_BUILD = 52;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12240,7 +12261,7 @@ async function refreshVisibleKnsNames(visibleConversations) {
     for (const contact of contacts) {
       if (applyKnsPrimaryDomainToContact(contact)) changed = true;
     }
-    if (changed) persistState();
+    if (changed) schedulePersistState();
     if (attempted > 0 || changed) {
       renderChats();
       if (activeConversationId) {
@@ -15820,6 +15841,14 @@ function openChessGame(preferGameId = null, timeControl = null) {
   let summary = preferGameId
     ? Chess.summarizeChessGame(preferGameId, messages, engine.address, contact.address)
     : Chess.activeChessGame(messages, engine.address, contact.address);
+  // A time control was chosen while a game is already on: retire that game and start the new
+  // one with the picked control (iOS ChatDetailView retire-then-start), instead of silently
+  // reopening the old board.
+  if (summary && !preferGameId && timeControl && !Chess.isChessGameOver(summary.status)) {
+    chessSendEnvelope(Chess.chessResign(summary.gameId));
+    clearChessClock(summary.gameId);
+    summary = null;
+  }
   if (!summary && !preferGameId) {
     // No active game — invite the contact (random color), then open the pending board.
     const gameId = Chess.newGameId();
@@ -16045,11 +16074,15 @@ function handleChessTap(square) {
   const piece = Chess.pieceAt(b, square);
   if (piece && piece.color === b.sideToMove) selectChessSquare(square);
 }
-function resignChess() {
+async function resignChess() {
   if (!chessState) return;
   const s = chessState.summary;
   // A pending invite is resignable too — that is how the inviter cancels it.
   if (Chess.isChessGameOver(s.status)) return;
+  // An irreversible on-chain loss must not follow a mis-click (iOS ChessGameView confirmation).
+  const pending = s.status?.kind === "pendingResponse";
+  const ok = await confirmDialog({ title: pending ? "Cancel this game?" : "Resign this game?", message: pending ? "The invite is withdrawn. This is one transaction." : "This counts as a loss. Resigning is one transaction.", confirmLabel: pending ? "Cancel game" : "Resign", destructive: true });
+  if (!ok || !chessState) return;
   chessSendEnvelope(Chess.chessResign(chessState.gameId));
   clearChessClock(chessState.gameId);
   refreshChessOverlay();
@@ -20598,7 +20631,8 @@ queueMicrotask(async () => {
     estimatePostFeeKas: (text) => {
       const b64 = kapostsUtf8ToBase64(KAPOSTS_MARKER + String(text || ""));
       const payload = KAPOSTS_PROTOCOL.postPayload("0".repeat(66), "0".repeat(128), b64, "[]");
-      return engine.estimateMessageFee(new TextEncoder().encode(payload).length);
+      // One input, as iOS estimates it (KaPostsAPIClient.estimatePostFee inputCount: 1).
+      return engine.estimateMessageFee(new TextEncoder().encode(payload).length, { singleInput: true });
     },
     // Feed the global notification center (top-bar bell) from the KaPosts notification stream.
     recordGlobalNotification: (item) => recordGlobalNotification(item),
@@ -20957,8 +20991,26 @@ function getGroupManager() {
 const GROUP_MSG_KEY = "kachat-group-messages-v1";
 const GROUP_UNREAD_KEY = "kachat-group-unread-v1";
 
-function loadGroupMsgAll() { try { return JSON.parse(localStorage.getItem(GROUP_MSG_KEY) || "{}") || {}; } catch { return {}; } }
-function saveGroupMsgAll(all) { try { localStorage.setItem(GROUP_MSG_KEY, JSON.stringify(all)); } catch {} }
+// The whole store was parsed from localStorage on every read - inside a sort comparator, per
+// list row, per appended message - and re-serialized on every write. It is read once and held
+// in memory now; writes coalesce into one JSON pass a beat later (and on page hide).
+let groupMsgAllCache = null;
+let groupMsgSaveTimer = 0;
+function loadGroupMsgAll() {
+  if (groupMsgAllCache) return groupMsgAllCache;
+  try { groupMsgAllCache = JSON.parse(localStorage.getItem(GROUP_MSG_KEY) || "{}") || {}; } catch { groupMsgAllCache = {}; }
+  return groupMsgAllCache;
+}
+function flushGroupMsgAll() {
+  groupMsgSaveTimer = 0;
+  if (!groupMsgAllCache) return;
+  try { localStorage.setItem(GROUP_MSG_KEY, JSON.stringify(groupMsgAllCache)); } catch {}
+}
+function saveGroupMsgAll(all) {
+  groupMsgAllCache = all;
+  if (!groupMsgSaveTimer) groupMsgSaveTimer = window.setTimeout(flushGroupMsgAll, 300);
+}
+window.addEventListener("pagehide", () => { if (groupMsgSaveTimer) { window.clearTimeout(groupMsgSaveTimer); flushGroupMsgAll(); } });
 /// System lines - "X was added", a photo or name change - last ten minutes.
 ///
 /// They exist to tell you what just happened, and after that they are clutter in a thread you

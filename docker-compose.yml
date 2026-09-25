@@ -21,11 +21,10 @@ services:
       # what Vite listens on inside the container and should stay put.
       - "${KACHAT_DESKTOP_PORT:-5173}:5173"
     environment:
-      # Optional, and read at run time rather than baked into the image: the
-      # Swaps tab uses it, and Vite inlines every VITE_ var into the bundle it
-      # serves. Set it in a .env next to this file, or export it before `up`.
-      VITE_CHANGENOW_API_KEY: ${VITE_CHANGENOW_API_KEY:-}
-      # Same key, read by the relay at request time so readers never paste one (vite.config.mjs).
+      # Optional: the ChangeNOW key, read by the relay at request time so readers never paste
+      # one (vite.config.mjs). It is never handed to the browser - a VITE_ name would be inlined
+      # into the served bundle, so the old VITE_CHANGENOW_API_KEY is accepted only as a fallback
+      # for this server-side variable. Set it in a .env next to this file, or export it.
       CHANGENOW_API_KEY: ${CHANGENOW_API_KEY:-${VITE_CHANGENOW_API_KEY:-}}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

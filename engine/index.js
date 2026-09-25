@@ -687,9 +687,12 @@ export class KaspaEngine {
       if (this.blockScanChannels.size > 0 && this.blockScanRpc !== this.rpc && !this.blockScanStartPromise) {
         queueMicrotask(() => { this.rebuildBroadcastBlockScan().catch(() => {}); });
       }
+      // A hidden tab keeps the primary probed (the wallet subscription rides on it) and leaves
+      // the standby alone until the page is looked at again.
+      const hiddenTab = typeof document !== "undefined" && document.hidden;
       const [primaryHealthy, standbyHealthy] = await Promise.all([
         probeRpc(this.rpc),
-        this.standbyRpc ? probeRpc(this.standbyRpc) : Promise.resolve(false),
+        this.standbyRpc && !hiddenTab ? probeRpc(this.standbyRpc) : Promise.resolve(false),
       ]);
 
       if (!primaryHealthy) {

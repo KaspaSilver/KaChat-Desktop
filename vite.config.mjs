@@ -32,15 +32,29 @@ function nextcloudProxy() {
   // hour idle - a call is over long before that.
   const jars = new Map(); // jarId -> { origin -> { name -> value }, touched }
   const JAR_TTL_MS = 60 * 60 * 1000;
+  const JAR_MAX = 500; // bounded: an internet client must not be able to grow this without limit
   const jarFor = (id, origin) => {
     const now = Date.now();
     for (const [key, jar] of jars) if (now - jar.touched > JAR_TTL_MS) jars.delete(key);
     let jar = jars.get(id);
-    if (!jar) { jar = { byOrigin: new Map(), touched: now }; jars.set(id, jar); }
+    if (!jar) {
+      while (jars.size >= JAR_MAX) jars.delete(jars.keys().next().value); // oldest first
+      jar = { byOrigin: new Map(), touched: now }; jars.set(id, jar);
+    }
     jar.touched = now;
     let cookies = jar.byOrigin.get(origin);
     if (!cookies) { cookies = new Map(); jar.byOrigin.set(origin, cookies); }
     return cookies;
+  };
+
+  // Hosts the relay must never reach: the machine it runs on, link-local and cloud metadata.
+  const isBlockedHost = (hostname) => {
+    const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+    return !h || h === "localhost" || h.endsWith(".localhost")
+      || /^127\./.test(h) || /^0\./.test(h) || h === "0.0.0.0"
+      || h === "::1" || h === "::" || h.startsWith("::ffff:")
+      || /^169\.254\./.test(h) || /^fe80:/i.test(h) || /^f[cd][0-9a-f]{2}:/i.test(h)
+      || h === "metadata.google.internal";
   };
 
   const mount = (server) => {
@@ -62,6 +76,15 @@ function nextcloudProxy() {
           res.end("kachat-proxy");
           return;
         }
+        // The relay answers the app's own fetch() calls, never a navigation: a top-level load of
+        // a relayed URL would render someone else's HTML on this origin, with this origin's
+        // storage in reach. Browsers label the request kind; a document/frame load is refused.
+        const fetchDest = String(req.headers["sec-fetch-dest"] || "").toLowerCase();
+        if (["document", "iframe", "frame", "embed", "object"].includes(fetchDest)) {
+          res.statusCode = 403;
+          res.end("Proxy target not allowed");
+          return;
+        }
         const match = /^\/([^/]+)(\/.*)?$/.exec(req.url || "");
         let origin = null;
         try {
@@ -78,11 +101,12 @@ function nextcloudProxy() {
         // purpose (a self-hosted Nextcloud on the LAN is a supported setup). Note: a public
         // DNS name resolving to a blocked address (rebinding) is not caught here — this is a
         // dev-server hardening layer, not a security boundary for production.
-        const host = origin.hostname.toLowerCase();
-        const blockedHost = host === "localhost" || host === "0.0.0.0" || host.endsWith(".localhost")
-          || /^127\./.test(host) || host === "::1" || host === "[::1]"
-          || /^169\.254\./.test(host) || host === "metadata.google.internal";
-        if (blockedHost) {
+        // The guard runs on the TARGET actually forwarded (the path segment can be
+        // scheme-relative, "//host/...", which would rewrite the host after an origin-only
+        // check) and again on every redirect hop.
+        let target = null;
+        try { target = new URL(match[2] || "/", `${origin.protocol}//${origin.host}`); } catch { target = null; }
+        if (!target || target.origin !== origin.origin || isBlockedHost(target.hostname)) {
           res.statusCode = 403;
           res.end("Proxy target not allowed");
           return;
@@ -148,7 +172,10 @@ function nextcloudProxy() {
         // VITE_CHANGENOW_API_KEY docker-compose already passes) and is attached here, so no
         // reader ever has to paste one and the key never ships inside the page. A key the page
         // sends itself (a reader's own, from Settings) wins.
-        if (/(^|\.)changenow\.io$/i.test(origin.hostname)) {
+        // Attached only for the app's own calls (browsers mark them same-origin); a bare client
+        // on the internet must not be able to spend this deployment's quota through the relay.
+        const sameOriginCall = String(req.headers["sec-fetch-site"] || "same-origin").toLowerCase() === "same-origin";
+        if (sameOriginCall && /(^|\.)changenow\.io$/i.test(origin.hostname)) {
           const serverKey = String(process.env.CHANGENOW_API_KEY || process.env.VITE_CHANGENOW_API_KEY || "").trim();
           if (serverKey && !String(headers["x-changenow-api-key"] || "").trim()) headers["x-changenow-api-key"] = serverKey;
         }
@@ -165,6 +192,15 @@ function nextcloudProxy() {
         const MAX_REDIRECT_HOPS = 5;
         function forward(target, hop) {
           const client = target.protocol === "http:" ? http : https;
+          // A redirect to another origin gets a clean request: the browser's Authorization (a
+          // Nextcloud app password), the jar's cookies and the ChangeNOW key belong to the origin
+          // that was asked for, never to wherever it pointed.
+          const hopHeaders = { ...headers, host: target.host };
+          if (target.origin !== origin.origin) {
+            delete hopHeaders.authorization;
+            delete hopHeaders.cookie;
+            delete hopHeaders["x-changenow-api-key"];
+          }
           const upstream = client.request(
             {
               protocol: target.protocol,
@@ -172,7 +208,7 @@ function nextcloudProxy() {
               port: target.port || (target.protocol === "http:" ? 80 : 443),
               method: req.method,
               path: `${target.pathname}${target.search}` || "/",
-              headers: { ...headers, host: target.host },
+              headers: hopHeaders,
             },
             (upstreamRes) => {
               const status = upstreamRes.statusCode || 502;
@@ -186,10 +222,7 @@ function nextcloudProxy() {
                 // loop until the hop cap; hand it through as-is instead.
                 if (next && next.href === target.href) next = null;
                 // A redirect must obey the same SSRF guard as the original target.
-                const nextHost = (next?.hostname || "").toLowerCase();
-                const nextBlocked = !next || nextHost === "localhost" || nextHost === "0.0.0.0"
-                  || nextHost.endsWith(".localhost") || /^127\./.test(nextHost) || nextHost === "::1"
-                  || nextHost === "[::1]" || /^169\.254\./.test(nextHost) || nextHost === "metadata.google.internal";
+                const nextBlocked = !next || isBlockedHost(next.hostname);
                 if (!nextBlocked && (next.protocol === "http:" || next.protocol === "https:")) {
                   forward(next, hop + 1);
                   return;
@@ -211,6 +244,15 @@ function nextcloudProxy() {
                 }
               }
               delete responseHeaders["set-cookie"];
+              // Whatever comes back is data for fetch(), never a page of this origin: an opaque
+              // sandbox and no sniffing, and no upstream auth challenge or refresh can reach the
+              // browser as if it were ours.
+              responseHeaders["content-security-policy"] = "sandbox";
+              responseHeaders["x-content-type-options"] = "nosniff";
+              delete responseHeaders["www-authenticate"];
+              delete responseHeaders["proxy-authenticate"];
+              delete responseHeaders.refresh;
+              delete responseHeaders.link;
               if (mask404) responseHeaders["x-upstream-status"] = "404";
               res.writeHead(mask404 ? 200 : status, responseHeaders);
               upstreamRes.pipe(res);
@@ -228,7 +270,7 @@ function nextcloudProxy() {
           if (hop === 0) req.pipe(upstream);
           else upstream.end();
         }
-        forward(new URL(match[2] || "/", `${origin.protocol}//${origin.host}`), 0);
+        forward(target, 0);
     });
   };
   return {

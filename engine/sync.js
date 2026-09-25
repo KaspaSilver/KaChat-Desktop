@@ -669,6 +669,9 @@ export async function syncConversationPreview({ conversationId, contact, walletA
 }
 
 
+const paymentPageCache = new Map(); // url -> { at, promise }
+const PAYMENT_PAGE_TTL_MS = 4000;
+
 export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100 } = {}) {
   if (!conversationId) throw new Error("conversationId is required for payment sync.");
   if (!contact?.address?.startsWith("kaspa:")) throw new Error("A kaspa: contact address is required for payment sync.");
@@ -696,13 +699,27 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     : body && typeof body === "object" ? [body] : [];
 
   const known = new Set((knownTxids || []).map(String));
+  // The page is the WALLET's, not the contact's: one sweep asks for it once per contact with the
+  // same URL, so a page fetched within the last few seconds is reused (iOS reads its own copy).
   const url = new URL(`${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(walletAddress)}/full-transactions`);
   url.searchParams.set("limit", String(Math.max(1, Math.min(100, Number(limit) || 100))));
   url.searchParams.set("offset", "0");
   url.searchParams.set("resolve_previous_outpoints", "light");
-  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) throw new Error(`Kaspa REST payment scan failed (${response.status}).`);
-  const transactions = normalizeTransactions(await response.json());
+  const pageKey = url.href;
+  const cachedPage = paymentPageCache.get(pageKey);
+  let transactions;
+  if (cachedPage && Date.now() - cachedPage.at < PAYMENT_PAGE_TTL_MS) {
+    transactions = await cachedPage.promise;
+  } else {
+    const promise = (async () => {
+      const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(`Kaspa REST payment scan failed (${response.status}).`);
+      return normalizeTransactions(await response.json());
+    })();
+    paymentPageCache.set(pageKey, { at: Date.now(), promise });
+    promise.catch(() => paymentPageCache.delete(pageKey));
+    transactions = await promise;
+  }
   if (!transactions.length) return { messages: [], found: 0, nextCursor: Number(cursor || 0), note: "No new Kaspa payments." };
 
   const messages = [];
