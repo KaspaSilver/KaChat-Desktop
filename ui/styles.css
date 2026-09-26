@@ -2887,15 +2887,38 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .message-delivery-icon {
-  width: 16.5px;
-  height: 16.5px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   align-self: end;
   justify-self: end;
   margin-bottom: 2px;
   opacity: .95;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
 }
+button.message-delivery-icon { cursor: pointer; }
+button.message-delivery-icon:hover .message-delivery-text { text-decoration: underline; }
+.message-delivery-text { color: inherit; }
+.chat-row-delivery-word { color: var(--muted); font-size: 11px; font-weight: 700; margin-right: 5px; }
+.chat-row-delivery-word.failed { color: #ff6b6b; }
+.broadcast-load-earlier {
+  display: block; width: 100%; margin: 4px 0 8px; padding: 8px; border: 0; background: transparent;
+  color: var(--kaspa-ink); font-size: 12.5px; font-weight: 700; cursor: pointer;
+}
+.broadcast-load-earlier:hover { text-decoration: underline; }
+.license-card { margin-top: 12px; padding: 14px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+.license-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.license-card-head span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.license-card-holder { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.license-card-text { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; white-space: pre-wrap; }
+.utxo-load-failed { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
 
 .message-delivery-icon svg {
   width: 15px;
@@ -10059,7 +10082,7 @@ html.standalone .ios-install-hint { display: none; }
 }
 
 /* Delivery mark in a broadcast message head: sits on the baseline row next to the time. */
-.broadcast-message-head .broadcast-delivery-icon { align-self: center; margin: 0 0 0 2px; width: 15px; height: 15px; }
+.broadcast-message-head .broadcast-delivery-icon { align-self: center; margin: 0 0 0 2px; }
 
 /* Node Connection: the scan narrates itself under the button. */
 .node-scan-trace { margin: 8px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }

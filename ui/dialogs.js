@@ -161,6 +161,28 @@ export function chooseDialog({ title, message = "", kicker = null, options = [] 
   });
 }
 
+/// What an error says when a person has to read it (iOS UserFacingError). The app's own errors
+/// carry sentences already written for the user, so those pass through with any developer prefix
+/// stripped; the browser's network and parse errors are translated into something a person can act on.
+export function userFacingError(error) {
+  const fallback = "Something went wrong. Please try again.";
+  if (error == null) return fallback;
+  const name = String(error?.name || "");
+  let text = String(error?.message ?? error ?? "").trim();
+  if (name === "AbortError" || /^(aborted|cancelled|canceled)\.?$/i.test(text)) return "Cancelled.";
+  if (/failed to fetch|networkerror when attempting|load failed|network request failed|err_network|err_internet_disconnected/i.test(text)) {
+    return "Couldn't reach the server. Check your connection and try again.";
+  }
+  if (name === "SyntaxError" && /json|unexpected token|unexpected end of/i.test(text)) {
+    return "The server sent something the app couldn't read. Try again in a moment.";
+  }
+  if (/timed? ?out/i.test(text) && text.length < 80) return "The connection timed out. Check your connection and try again.";
+  for (const prefix of ["Network error: ", "API error: ", "RPC error: ", "Error: ", "TypeError: "]) {
+    if (text.startsWith(prefix)) text = text.slice(prefix.length);
+  }
+  return text || fallback;
+}
+
 /// Drop-in replacements for a bare `confirm(text)` / `prompt(text, initial)`.
 ///
 /// The app had twenty-two of these, each with its wording already written as one string. Splitting

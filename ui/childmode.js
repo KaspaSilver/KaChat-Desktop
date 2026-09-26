@@ -1,7 +1,7 @@
-// Child Mode for KaChat desktop — port of iOS ChildModeService +
+// Simple Mode for KaChat desktop — port of iOS ChildModeService +
 // ChildModeSettingsView + the WelcomeGuide "Who will use KaChat?" step.
 //
-// While Child Mode is ON the app is strictly Chats, Group Chats, Portfolio,
+// While Simple Mode is ON the app is strictly Chats, Group Chats, Portfolio,
 // Cold Storage and Profile/Settings: Swaps, KaPosts and Broadcasts are removed
 // everywhere. The actual gating lives at app.js's single choke point
 // (setActiveAppTab + dockVisibleTabs) using `isChildModeEnabled()` and
@@ -10,7 +10,7 @@
 // baked tabs hidden).
 //
 // Storage design (GLOBAL localStorage keys, deliberately NOT account-scoped:
-// child mode governs the whole app, consistent with desktop's trust model
+// simple mode governs the whole app, consistent with desktop's trust model
 // where the wallet itself lives in localStorage):
 // - kachat-child-mode-record-v1   JSON { salt, hash } (hex) — a random 16-byte
 //   salt plus SHA-256(salt || UTF-8 password). The password itself is NEVER
@@ -18,18 +18,18 @@
 // - kachat-child-mode-enabled-v1  "1"/"0" — the fast flag every gate reads.
 //   Turning OFF only ever happens after `verifyChildModePassword` succeeds.
 // - kachat-user-type-choice-v1    "pending"/"chosen" — the onboarding
-//   Adult/Child question. "pending" makes the setup guide unskippable and
+//   Full/Simple question. "pending" makes the setup guide unskippable and
 //   re-presents the choice after a reload mid-setup; existing installs (no
 //   marker) are never forced through it.
 //
 // Deliberately NO biometrics concepts (nothing to bypass on desktop anyway):
-// only the password turns Child Mode off.
+// only the password turns Simple Mode off.
 
 const RECORD_KEY = "kachat-child-mode-record-v1";
 const ENABLED_KEY = "kachat-child-mode-enabled-v1";
 const USER_TYPE_KEY = "kachat-user-type-choice-v1";
 
-/** Tabs removed everywhere while Child Mode is on (dock, programmatic switches,
+/** Tabs removed everywhere while Simple Mode is on (dock, programmatic switches,
  * the Customize Dock page). */
 export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts", "chess"];
 
@@ -40,8 +40,39 @@ let deps = {
 };
 
 // ---------------------------------------------------------------------------
-// Password record: salted SHA-256, constant-time-ish verify
+// Password record: salt + PBKDF2-HMAC-SHA256 over `iterations` rounds, constant-time-ish
+// verify. Records from before the work factor carry no `iterations` and were a single SHA-256:
+// they verify the old way once and are rewritten (iOS cd57f54).
 // ---------------------------------------------------------------------------
+
+/** About 60 ms on a laptop: nothing at the lock, an eternity for a brute force of an extracted record. */
+const PBKDF2_ITERATIONS = 120_000;
+const FAILED_ATTEMPTS_KEY = "kachat-simple-mode-failed-attempts";
+const LOCKED_UNTIL_KEY = "kachat-simple-mode-locked-until";
+const FREE_ATTEMPTS = 5;
+
+/** Seconds left before another attempt is accepted, null when attempts are open. Five wrong
+ *  answers earn 30 seconds; each one after doubles it, up to an hour. */
+export function simpleModeLockoutRemainingSeconds() {
+  const until = Number(localStorage.getItem(LOCKED_UNTIL_KEY) || 0);
+  const remaining = until - Date.now() / 1000;
+  return remaining > 0 ? Math.ceil(remaining) : null;
+}
+function recordFailedAttempt() {
+  const attempts = Number(localStorage.getItem(FAILED_ATTEMPTS_KEY) || 0) + 1;
+  localStorage.setItem(FAILED_ATTEMPTS_KEY, String(attempts));
+  if (attempts < FREE_ATTEMPTS) return;
+  const penalty = Math.min(3600, 30 * 2 ** (attempts - FREE_ATTEMPTS));
+  localStorage.setItem(LOCKED_UNTIL_KEY, String(Date.now() / 1000 + penalty));
+}
+function clearFailedAttempts() {
+  localStorage.removeItem(FAILED_ATTEMPTS_KEY);
+  localStorage.removeItem(LOCKED_UNTIL_KEY);
+}
+function lockoutMessage() {
+  const seconds = simpleModeLockoutRemainingSeconds();
+  return seconds == null ? null : `Too many wrong passwords. Try again in ${seconds}s.`;
+}
 
 function bytesToHex(bytes) {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -54,12 +85,18 @@ function hexToBytes(hex) {
   return out;
 }
 
-async function hashPassword(password, saltBytes) {
+/** The pre-work-factor record: a single SHA-256(salt || password). */
+async function legacyHashPassword(password, saltBytes) {
   const pw = new TextEncoder().encode(String(password));
   const input = new Uint8Array(saltBytes.length + pw.length);
   input.set(saltBytes, 0);
   input.set(pw, saltBytes.length);
   return new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+}
+async function derivePassword(password, saltBytes, iterations) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(String(password)), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: saltBytes, iterations, hash: "SHA-256" }, key, 256);
+  return new Uint8Array(bits);
 }
 
 function loadRecord() {
@@ -88,23 +125,33 @@ function setChildModeEnabled(value) {
 /** Hashes and stores `password` (free-form; refuses only the empty case). */
 export async function setChildModePassword(password) {
   const value = String(password || "");
-  if (!value) throw new Error("Child Mode password cannot be empty");
+  if (!value) throw new Error("Simple Mode password cannot be empty");
   const salt = new Uint8Array(16);
   crypto.getRandomValues(salt);
-  const hash = await hashPassword(value, salt);
-  localStorage.setItem(RECORD_KEY, JSON.stringify({ salt: bytesToHex(salt), hash: bytesToHex(hash) }));
+  const hash = await derivePassword(value, salt, PBKDF2_ITERATIONS);
+  localStorage.setItem(RECORD_KEY, JSON.stringify({ salt: bytesToHex(salt), hash: bytesToHex(hash), iterations: PBKDF2_ITERATIONS }));
+  clearFailedAttempts();
 }
 
 /** Constant-time-ish check against the stored record; false when none exists. */
 export async function verifyChildModePassword(password) {
   const record = loadRecord();
   if (!record) return false;
-  const candidate = bytesToHex(await hashPassword(String(password || ""), hexToBytes(record.salt)));
+  if (simpleModeLockoutRemainingSeconds() != null) return false;
+  const salt = hexToBytes(record.salt);
+  const iterations = Number(record.iterations) || 0;
+  const candidate = bytesToHex(iterations > 0
+    ? await derivePassword(String(password || ""), salt, iterations)
+    : await legacyHashPassword(String(password || ""), salt));
   const expected = String(record.hash);
-  if (candidate.length !== expected.length) return false;
+  if (candidate.length !== expected.length) { recordFailedAttempt(); return false; }
   let difference = 0;
   for (let i = 0; i < candidate.length; i++) difference |= candidate.charCodeAt(i) ^ expected.charCodeAt(i);
-  return difference === 0;
+  if (difference !== 0) { recordFailedAttempt(); return false; }
+  clearFailedAttempts();
+  // A record from before the work factor: the password is known good right now, so rewrite it with one.
+  if (!iterations) { try { await setChildModePassword(String(password || "")); } catch { /* next time */ } }
+  return true;
 }
 
 /** Traditional change flow: wrong current password = false, nothing changes. */
@@ -124,10 +171,10 @@ export async function clearChildModeConfiguration(password) {
 }
 
 // ---------------------------------------------------------------------------
-// Onboarding Adult/Child marker
+// Onboarding Full/Simple marker
 // ---------------------------------------------------------------------------
 
-/** The Adult/Child choice is still owed: the setup guide must be unskippable. */
+/** The Full/Simple choice is still owed: the setup guide must be unskippable. */
 export function isUserTypePending() {
   return localStorage.getItem(USER_TYPE_KEY) === "pending";
 }
@@ -144,7 +191,7 @@ export function markUserTypeChosen() {
 }
 
 // ---------------------------------------------------------------------------
-// Onboarding-run pending marker (extends the Adult/Child machinery above):
+// Onboarding-run pending marker (extends the Full/Simple machinery above):
 // EVERY account-onboarding run — create or import — is fully unskippable end
 // to end, and an interrupted run (reload/kill mid-guide) re-presents on the
 // next launch. The marker stores the run kind ("create" | "import") so the
@@ -228,17 +275,17 @@ export function renderUserTypeGuideStep(container) {
   if (!container) return;
   guideContainer = container;
   if (isChildModeEnabled()) {
-    // Replay with Child Mode already on: informational only — offering "Adult"
+    // Replay with Simple Mode already on: informational only — offering "Full"
     // here would be a password-free way out.
-    container.innerHTML = `<p class="setup-usertype-note">Child Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; Swap, KaPosts and Broadcasts are hidden. Manage this in Settings &gt; Security &gt; Child Mode.</p>`;
+    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; Swap, KaPosts and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
     return;
   }
   const rows = [
-    { key: "adult", title: "Adult", sub: "The full app, everything available." },
-    { key: "child", title: "Child", sub: "Chats, Portfolio and Cold Storage only. An adult sets a password to unlock the rest later." },
+    { key: "adult", title: "Full", sub: "The full app, everything available." },
+    { key: "child", title: "Simple", sub: "Chats, Portfolio and Cold Storage only. A password unlocks the rest later." },
   ];
   container.innerHTML = `
-    <p class="setup-usertype-note">A child gets a simpler, safer KaChat: just Chats, Group Chats, Portfolio and Cold Storage. Swap, KaPosts and Broadcasts stay hidden until an adult unlocks them.</p>
+    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. Swap, KaPosts and Public Chats stay hidden until the password unlocks them.</p>
     <div class="setup-choice-list">
       ${rows.map((row) => `<button type="button" class="setup-node-row${guideChoice === row.key ? " selected" : ""}" data-cm-usertype="${row.key}"><span class="setup-node-dot"></span><span class="setup-node-copy"><strong>${row.title}</strong><small>${row.sub}</small></span></button>`).join("")}
     </div>
@@ -246,7 +293,7 @@ export function renderUserTypeGuideStep(container) {
     <div class="setup-child-password">
       ${passwordFieldHtml("guide-password", "Password")}
       ${passwordFieldHtml("guide-confirm", "Confirm password")}
-      <p class="field-hint">4 digits, 8 digits, or anything you like. Just don't forget it, it's needed to turn Child Mode off.</p>
+      <p class="field-hint">4 digits, 8 digits, or anything you like. Just don't forget it, it's needed to turn Simple Mode off.</p>
     </div>` : ""}
     <p class="field-error" data-cm-error="guide" ${guideError ? "" : "hidden"}></p>`;
   setGuideError(guideError);
@@ -276,13 +323,13 @@ function resetGuideScratch() {
   guideError = "";
 }
 
-/** The guide's Next on the user-type step. Returns true to advance. Adult just
+/** The guide's Next on the user-type step. Returns true to advance. Full just
  * marks the choice answered; Child validates + stores the password and turns
- * Child Mode ON immediately (persisted right here at the step, not deferred to
+ * Simple Mode ON immediately (persisted right here at the step, not deferred to
  * the end of the guide, so the choice survives however the wizard ends). */
 export async function applyUserTypeGuideChoice() {
   if (isChildModeEnabled()) {
-    // Informational replay: continuing still counts as answered — Child Mode
+    // Informational replay: continuing still counts as answered — Simple Mode
     // being on IS the standing choice.
     markUserTypeChosen();
     return true;
@@ -305,12 +352,12 @@ export async function applyUserTypeGuideChoice() {
   resetGuideScratch();
   markUserTypeChosen();
   renderChildModeSettingsPage();
-  deps.showToast?.("Child Mode is on");
+  deps.showToast?.("Simple Mode is on");
   return true;
 }
 
 // ---------------------------------------------------------------------------
-// Settings > Security > Child Mode page (renders into [data-child-mode-page])
+// Settings > Security > Simple Mode page (renders into [data-child-mode-page])
 // ---------------------------------------------------------------------------
 
 let pageEl = null;
@@ -322,7 +369,7 @@ const ABOUT_CARD_HTML = `
     <div class="settings-page-form">
       <p class="child-mode-heading">What stays available</p>
       <p class="child-mode-keeps"><strong>Chats &amp; Group Chats · Portfolio · Cold Storage</strong></p>
-      <p class="field-hint">While Child Mode is on, Swap, KaPosts and Broadcasts are removed everywhere — the dock, the Customize Dock page and every other entry point. Only the password turns it off.</p>
+      <p class="field-hint">While Simple Mode is on, Swap, KaPosts and Public Chats are removed everywhere — the dock, the Customize Dock page and every other entry point. Only the password turns it off.</p>
     </div>
   </div>`;
 
@@ -339,7 +386,7 @@ export function renderChildModeSettingsPage() {
           <p class="child-mode-heading">Set a Password</p>
           ${passwordFieldHtml("setup-password", "Password")}
           ${passwordFieldHtml("setup-confirm", "Confirm password")}
-          <p class="field-hint">4 digits, 8 digits, or anything you like — just don't forget it. It's needed to turn Child Mode off later.</p>
+          <p class="field-hint">4 digits, 8 digits, or anything you like — just don't forget it. It's needed to turn Simple Mode off later.</p>
           <p class="field-error" data-cm-error="setup" hidden></p>
           <button class="primary-button" type="button" data-cm-action="setup">Set Password &amp; Turn On</button>
         </div>
@@ -348,12 +395,12 @@ export function renderChildModeSettingsPage() {
   } else {
     pageEl.innerHTML = `
       <div class="settings-list-card">
-        <div class="settings-toggle-row"><span><strong>Child Mode</strong><small>${enabled
-          ? "Child Mode is on. Turning it off requires the password."
-          : "A password is already set — turning Child Mode on doesn't ask for it."}</small></span><label class="switch-control"><input type="checkbox" data-cm-toggle${enabled ? " checked" : ""}><span></span></label></div>
+        <div class="settings-toggle-row"><span><strong>Simple Mode</strong><small>${enabled
+          ? "Simple Mode is on. Turning it off requires the password."
+          : "A password is already set — turning Simple Mode on doesn't ask for it."}</small></span><label class="switch-control"><input type="checkbox" data-cm-toggle${enabled ? " checked" : ""}><span></span></label></div>
         <div class="settings-page-form child-mode-prompt" data-cm-turnoff-prompt hidden>
           ${passwordFieldHtml("turnoff-password", "Password")}
-          <p class="field-hint">Enter the Child Mode password to turn it off.</p>
+          <p class="field-hint">Enter the Simple Mode password to turn it off.</p>
           <p class="field-error" data-cm-error="turnoff" hidden></p>
           <div class="child-mode-prompt-actions">
             <button class="secondary-button" type="button" data-cm-action="turnoff-cancel">Cancel</button>
@@ -373,10 +420,10 @@ export function renderChildModeSettingsPage() {
         </div>
       </div>
       <div class="settings-list-card">
-        <button class="settings-list-row danger-row" type="button" data-cm-action="clear-open"><span class="settings-row-copy"><strong>Clear Password</strong><small>Deletes the Child Mode password and turns Child Mode off, returning it to a never-set-up state. Requires the current password.</small></span></button>
+        <button class="settings-list-row danger-row" type="button" data-cm-action="clear-open"><span class="settings-row-copy"><strong>Clear Password</strong><small>Deletes the Simple Mode password and turns Simple Mode off, returning it to a never-set-up state. Requires the current password.</small></span></button>
         <div class="settings-page-form child-mode-prompt" data-cm-clear-prompt hidden>
           ${passwordFieldHtml("clear-password", "Password")}
-          <p class="field-hint">Enter the Child Mode password to delete it and turn Child Mode off.</p>
+          <p class="field-hint">Enter the Simple Mode password to delete it and turn Simple Mode off.</p>
           <p class="field-error" data-cm-error="clear" hidden></p>
           <div class="child-mode-prompt-actions">
             <button class="secondary-button" type="button" data-cm-action="clear-cancel">Cancel</button>
@@ -425,27 +472,31 @@ async function handlePageAction(action) {
     }
     setChildModeEnabled(true);
     renderChildModeSettingsPage();
-    deps.showToast?.("Child Mode is on");
+    deps.showToast?.("Simple Mode is on");
   } else if (action === "turnoff-cancel") {
     const prompt = pageEl?.querySelector("[data-cm-turnoff-prompt]");
     if (prompt) prompt.hidden = true;
     pageError("turnoff", "");
   } else if (action === "turnoff-confirm") {
     const input = pageField("turnoff-password");
+    const locked = lockoutMessage();
+    if (locked) { pageError("turnoff", locked); return; }
     if (!(await verifyChildModePassword(fieldValue("turnoff-password")))) {
-      pageError("turnoff", "Wrong password. Child Mode stays on.");
+      pageError("turnoff", lockoutMessage() || "Wrong password. Simple Mode stays on.");
       if (input) input.value = "";
       return;
     }
     setChildModeEnabled(false);
     renderChildModeSettingsPage();
-    deps.showToast?.("Child Mode is off");
+    deps.showToast?.("Simple Mode is off");
   } else if (action === "change") {
     const current = fieldValue("change-current");
     const next = fieldValue("change-new");
     const confirm = fieldValue("change-confirm");
     if (!current || !next || !confirm) { pageError("change", "Fill in every field first."); return; }
     if (next !== confirm) { pageError("change", "New passwords don't match."); return; }
+    const lockedChange = lockoutMessage();
+    if (lockedChange) { pageError("change", lockedChange); return; }
     let changed = false;
     try {
       changed = await changeChildModePassword(current, next);
@@ -454,7 +505,7 @@ async function handlePageAction(action) {
       return;
     }
     if (!changed) {
-      pageError("change", "Wrong current password. Nothing changed.");
+      pageError("change", lockoutMessage() || "Wrong current password. Nothing changed.");
       const input = pageField("change-current");
       if (input) input.value = "";
       return;
@@ -468,6 +519,8 @@ async function handlePageAction(action) {
     if (prompt) prompt.hidden = true;
     pageError("clear", "");
   } else if (action === "clear-confirm") {
+    const lockedClear = lockoutMessage();
+    if (lockedClear) { pageError("clear", lockedClear); return; }
     let cleared = false;
     try {
       cleared = await clearChildModeConfiguration(fieldValue("clear-password"));
@@ -476,14 +529,14 @@ async function handlePageAction(action) {
       return;
     }
     if (!cleared) {
-      pageError("clear", "Wrong password. Nothing changed.");
+      pageError("clear", lockoutMessage() || "Wrong password. Nothing changed.");
       const input = pageField("clear-password");
       if (input) input.value = "";
       return;
     }
     // Back to the first-time state (the service already turned the flag off).
     renderChildModeSettingsPage();
-    deps.showToast?.("Child Mode password cleared");
+    deps.showToast?.("Simple Mode password cleared");
   }
 }
 
@@ -502,7 +555,7 @@ function wirePage() {
       // Turning ON with a password already set needs no password.
       setChildModeEnabled(true);
       renderChildModeSettingsPage();
-      deps.showToast?.("Child Mode is on");
+      deps.showToast?.("Simple Mode is on");
     } else {
       // Turning OFF requires the password — don't change anything yet.
       toggle.checked = true;

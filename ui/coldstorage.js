@@ -951,7 +951,7 @@ function addressTxRowsHtml(entry) {
 
 function addressUtxoRowsHtml(entry) {
   if (addrUtxos.state === "loading" && !addrUtxos.entries.length) return '<div class="manage-address-empty">Loading…</div>';
-  if (addrUtxos.state === "error") return `<div class="manage-address-empty">Could not load UTXOs: ${deps.escapeHtml(addrUtxos.error || "")}</div>`;
+  if (addrUtxos.state === "error") return `<div class="manage-address-empty cold-txs-failed"><span>Could not load UTXOs: ${deps.escapeHtml(addrUtxos.error || "")}</span><button type="button" class="cold-inline-link" data-cold-utxos-retry>Try Again</button></div>`;
   if (!addrUtxos.entries.length) return '<div class="manage-address-empty">No UTXOs.</div>';
   const labels = coldUtxoLabels(entry.address);
   // Compound row above the list when >1 UTXO, matching iOS's UTXOs-tab section.
@@ -2331,8 +2331,10 @@ async function loadDetail({ useCache = true } = {}) {
     for (const entry of detailEntries) {
       if (entry.balanceSompi !== undefined) continue;
       if (detailToken !== token) return;
+      // A failed lookup keeps the last known figure (or the dash) rather than printing 0 KAS.
       try { entry.balanceSompi = await fetchBalance(entry.address); }
-      catch { entry.balanceSompi = 0; }
+      catch { entry.balanceSompi = balanceCache.get(entry.address); }
+      if (entry.balanceSompi === undefined) continue;
       balanceCache.set(entry.address, entry.balanceSompi);
       const cell = rootEl?.querySelector(`[data-cold-balance-cell="${entry.index}"]`);
       if (cell) cell.textContent = `${fmtKasExact(entry.balanceSompi)} KAS`;
@@ -2965,7 +2967,7 @@ export function initColdStorage(dependencies) {
       toggleVisibilityRow(Number(visRow.dataset.coldVisRow), visRow.dataset.address || "");
       return;
     }
-    if (event.target.closest("[data-cold-txs-retry]")) { if (activeAddressIndex !== null) openAddressScreen(activeAddressIndex); return; }
+    if (event.target.closest("[data-cold-txs-retry]") || event.target.closest("[data-cold-utxos-retry]")) { if (activeAddressIndex !== null) openAddressScreen(activeAddressIndex); return; }
     if (event.target.closest("[data-cold-paste]")) { pasteImport(); return; }
     if (event.target.closest("[data-cold-scan]")) { startScan(); return; }
     if (event.target.closest("[data-cold-remove]")) { removeActiveAccount(); return; }

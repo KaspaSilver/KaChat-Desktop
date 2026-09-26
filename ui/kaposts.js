@@ -5,6 +5,7 @@
 // the indexer feed until their txids round-trip; post/quote/like/dislike submits are held
 // behind a 5-second undo countdown — cancel and nothing ever touches the network.
 
+import { userFacingError } from "./dialogs.js";
 import {
   KAPOSTS_POST_CHARACTER_LIMIT,
   fetchFollowingFeed,
@@ -319,7 +320,7 @@ async function runPager(pager, { fetchPage, absorb, isStale, onUpdate, idOf = (i
     }
   } catch (error) {
     if (!isStale()) pager.error = error?.message || "Could not load more posts.";
-    deps.appendEngineLog?.(`KaPosts load-more failed: ${error?.message || error}`);
+    deps.appendEngineLog?.(`KaPosts load-more failed: ${userFacingError(error)}`);
   } finally {
     pager.loading = false;
     if (!isStale()) {
@@ -516,7 +517,7 @@ async function syncFollowingFromChain() {
     followingChainSynced = false; // network miss - retry on the next feed load
     // Logged rather than swallowed: when this failed silently, the Following tab rendered
     // "Nothing here yet" with nothing anywhere saying the follow list had never loaded.
-    deps.appendEngineLog?.(`KaPosts follow-list sync failed: ${error?.message || error}`);
+    deps.appendEngineLog?.(`KaPosts follow-list sync failed: ${userFacingError(error)}`);
   }
 }
 
@@ -1690,7 +1691,7 @@ function schedulePost(text) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost submit failed: ${error.message}`);
-      deps.showToast?.(`Post failed: ${error?.message || error}`);
+      deps.showToast?.(`Post failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
@@ -1715,7 +1716,7 @@ function schedulePoll(question, options, lengthMs) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost poll failed: ${error.message}`);
-      deps.showToast?.(`Poll failed: ${error?.message || error}`);
+      deps.showToast?.(`Poll failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
@@ -1745,7 +1746,7 @@ function scheduleVote(post, optionIndex) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.poll = before; });
       deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
-      deps.showToast?.(`Vote failed: ${error?.message || error}`);
+      deps.showToast?.(`Vote failed: ${userFacingError(error)}`);
       renderAll();
     }
   }, () => {
@@ -1916,7 +1917,7 @@ async function continueThread(localId) {
   } catch (error) {
     mutatePost(localId, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
     deps.appendEngineLog?.(`KaPost thread submit failed (resumable): ${error.message}`);
-    deps.showToast?.(`Post failed: ${error?.message || error}`);
+    deps.showToast?.(`Post failed: ${userFacingError(error)}`);
   }
   renderAll();
 }
@@ -1937,7 +1938,7 @@ function scheduleQuote(target, text) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost quote failed: ${error.message}`);
-      deps.showToast?.(`Quote failed: ${error?.message || error}`);
+      deps.showToast?.(`Quote failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
@@ -2218,8 +2219,8 @@ function retryPost(post) {
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
-      deps.appendEngineLog?.(`KaPost retry failed: ${error?.message || error}`);
-      deps.showToast?.(`Post failed: ${error?.message || error}`);
+      deps.appendEngineLog?.(`KaPost retry failed: ${userFacingError(error)}`);
+      deps.showToast?.(`Post failed: ${userFacingError(error)}`);
     }
     renderAll();
   })();
@@ -2511,7 +2512,7 @@ function scheduleEdit(post, text) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.text = previous; });
       deps.appendEngineLog?.(`KaPost edit failed: ${error.message}`);
-      deps.showToast?.(`Edit failed: ${error?.message || error}`);
+      deps.showToast?.(`Edit failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
@@ -2532,7 +2533,7 @@ function scheduleDelete(post) {
       deps.showToast?.(post.parentRemoteId ? "Comment deleted" : "Post deleted");
     } catch (error) {
       deps.appendEngineLog?.(`KaPost delete failed: ${error.message}`);
-      deps.showToast?.(`Delete failed: ${error?.message || error}`);
+      deps.showToast?.(`Delete failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, null, post.parentRemoteId ? "Deleting comment" : "Deleting post");
@@ -3831,7 +3832,7 @@ async function scheduleForLater(text, notBefore) {
     built = await buildScheduledPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text), reservedOutpoints: reservedOutpoints() });
   } catch (error) {
     deps.appendEngineLog?.(`KaPost schedule build failed: ${error.message}`);
-    deps.showToast?.(`Couldn't schedule: ${error?.message || error}`);
+    deps.showToast?.(`Couldn't schedule: ${userFacingError(error)}`);
     restoreComposerDraft(text);
     return;
   }

@@ -7,7 +7,7 @@ import { initChessTournaments, showChessTournaments, hideChessTournaments, reset
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
-import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable } from "./nextcloud.js";
+import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
@@ -47,7 +47,7 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
-import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet } from "./dialogs.js";
+import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -642,7 +642,7 @@ function renderSavedAccountsScreen() {
         activateSavedAccount(account.address);
         location.reload();
       } catch (error) {
-        showCopyToast(error.message);
+        showCopyToast(userFacingError(error));
       }
     });
 
@@ -795,7 +795,7 @@ document.querySelector("[data-confirm-account-delete]")?.addEventListener("click
     closeSavedAccountDelete();
   } catch (error) {
     appendEngineLog(`Saved-account removal failed: ${error.message}`);
-    showCopyToast(error.message);
+    showCopyToast(userFacingError(error));
   }
 });
 
@@ -971,7 +971,7 @@ function firstInternalLinkIn(text) {
 // Opens the target screen (iOS KaChatLinkRouter) - never the browser for an in-app target.
 function openKaChatInternalLink(link) {
   if (!link) return;
-  if (isChildModeEnabled()) { showCopyToast("Not available in Child Mode."); return; }
+  if (isChildModeEnabled()) { showCopyToast("Not available in Simple Mode."); return; }
   if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
   else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
 }
@@ -1633,7 +1633,7 @@ async function sendEdit(conversationEntry, message, text) {
     if (message.edit) { delete message.edit.status; persistState(); rerender(); }
   } catch (error) {
     appendEngineLog(`Edit send failed (local text already applied): ${error.message}`);
-    showCopyToast(`Edit failed: ${error?.message || error}`);
+    showCopyToast(`Edit failed: ${userFacingError(error)}`);
     if (message.edit) { message.edit.status = "failed"; persistState(); rerender(); }
   }
 }
@@ -3050,7 +3050,7 @@ let chatStorageFlushErrorNotified = false;
  *  successful flush. (trimPhoneBackupMessages only mutates state here, in this failure path —
  *  exactly like the old localStorage-quota behavior.) */
 function handleChatStorageFlushError(error) {
-  appendEngineLog(`IndexedDB save failed (${error?.message || error}) — writing localStorage fallback copy.`);
+  appendEngineLog(`IndexedDB save failed (${userFacingError(error)}) — writing localStorage fallback copy.`);
   if (!chatStorageFlushErrorNotified) {
     chatStorageFlushErrorNotified = true;
     try { showCopyToast("Saving chats to IndexedDB failed — using localStorage fallback."); } catch { /* early init */ }
@@ -3487,12 +3487,12 @@ function chatListDeliveryGlyphHtml(message) {
   if (!message || message.direction !== "outgoing") return "";
   const status = String(message.status || "");
   if (status === MESSAGE_STATUSES.FAILED) {
-    return `<svg class="chat-row-delivery failed" viewBox="0 0 24 24" aria-label="Not delivered" role="img"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>`;
+    return `<svg class="chat-row-delivery failed" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg><span class="chat-row-delivery-word failed">Failed</span>`;
   }
   if (status === MESSAGE_STATUSES.CONFIRMED || status === MESSAGE_STATUSES.SENT) {
-    return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-label="Sent" role="img"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>`;
+    return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span class="chat-row-delivery-word">Sent</span>`;
   }
-  return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-label="Sending" role="img"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>`;
+  return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg><span class="chat-row-delivery-word">Sending</span>`;
 }
 
 // What the chat list shows for a message (iOS ConversationRow.formatPreview). Differs from the
@@ -8399,13 +8399,50 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 55;
+const APP_BUILD = 56;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 
 const DONATE_DOMAIN = "kachat.kas";
 let donateResolving = false;
+
+// The notices the libraries the desktop ships ask to travel with it (iOS f656d9d has its own list).
+const OPEN_SOURCE_LICENSE_TEXTS = {
+  MIT: `Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.`,
+  ISC: `Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.`,
+  "Apache License 2.0": `Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.`,
+};
+const OPEN_SOURCE_NOTICES = [
+  { name: "Rusty Kaspa WASM SDK", license: "ISC", holder: "Copyright (c) 2022-2025 The Kaspa Developers" },
+  { name: "Kasia cipher", license: "MIT", holder: "Copyright (c) 2025 the Kasia (kasia.wtf) authors" },
+  { name: "@noble/ciphers, @noble/curves, @noble/hashes", license: "MIT", holder: "Copyright (c) 2022 Paul Miller (https://paulmillr.com)" },
+  { name: "jsQR", license: "Apache License 2.0", holder: "Copyright 2016 Cosmo Wolfe" },
+  { name: "node-qrcode", license: "MIT", holder: "Copyright (c) 2012 Ryan Day" },
+  { name: "Vite", license: "MIT", holder: "Copyright (c) 2019-present VoidZero Inc. and Vite contributors" },
+];
+document.querySelector("[data-profile-licenses]")?.addEventListener("click", () => {
+  const cards = OPEN_SOURCE_NOTICES.map((n) => `
+    <div class="license-card">
+      <div class="license-card-head"><strong>${escapeHtml(n.name)}</strong><span>${escapeHtml(n.license)}</span></div>
+      <p class="license-card-holder">${escapeHtml(n.holder)}</p>
+      <p class="license-card-text">${escapeHtml(OPEN_SOURCE_LICENSE_TEXTS[n.license] || "")}</p>
+    </div>`).join("");
+  infoSheet({
+    title: "Open Source Licenses",
+    html: `<p class="field-hint">KaChat is built with these open source libraries. Their authors ask that these notices travel with the app.</p>${cards}`,
+  });
+});
 
 document.querySelector("[data-profile-donate]")?.addEventListener("click", async () => {
   if (donateResolving) return;
@@ -9411,8 +9448,14 @@ async function loadManageAddressUtxos() {
     lastManageAddressUtxos = balance.entries || [];
     renderManageAddressUtxos();
   } catch (error) {
-    lastManageAddressUtxos = [];
-    manageAddressUtxosList.innerHTML = `<div class="manage-address-empty">Could not load UTXOs: ${escapeHtml(error.message)}</div>`;
+    // The list keeps what it had; an outage is not an empty address (iOS a30c7e3).
+    if (lastManageAddressUtxos.length) renderManageAddressUtxos();
+    const failure = document.createElement("div");
+    failure.className = "manage-address-empty utxo-load-failed";
+    failure.innerHTML = `<span>Could not load UTXOs: ${escapeHtml(userFacingError(error))}</span><button type="button" class="cold-inline-link" data-manage-utxos-retry>Try Again</button>`;
+    failure.querySelector("[data-manage-utxos-retry]")?.addEventListener("click", () => loadManageAddressUtxos());
+    if (lastManageAddressUtxos.length) manageAddressUtxosList.prepend(failure);
+    else manageAddressUtxosList.replaceChildren(failure);
   }
 }
 
@@ -12301,33 +12344,43 @@ async function refreshVisibleKnsNames(visibleConversations) {
   }
 }
 
-function createDeliveryStatusIcon(message) {
+// The state of an outgoing message, said in words next to its glyph: "Sending", "Sent",
+// "Failed · Tap to retry" (iOS bb1f9f5). The glyph alone was a colour-coded dot a colour-blind
+// reader could not tell apart. With `onRetry`, the failed state is the retry button.
+function createDeliveryStatusIcon(message, { onRetry = null } = {}) {
   if (message.direction !== "outgoing") return null;
 
   const status = String(message.status || MESSAGE_STATUSES.PENDING);
-  const icon = document.createElement("span");
+  const failed = status === MESSAGE_STATUSES.FAILED;
+  const icon = document.createElement(failed && onRetry ? "button" : "span");
   icon.className = "message-delivery-icon";
+  if (failed && onRetry) {
+    icon.type = "button";
+    icon.addEventListener("click", (event) => { event.stopPropagation(); onRetry(); });
+  }
 
-  if (status === MESSAGE_STATUSES.FAILED) {
+  let svg;
+  let word;
+  let aria;
+  if (failed) {
     icon.classList.add("failed");
-    icon.setAttribute("aria-label", "Message not delivered");
-    icon.title = "Not delivered";
-    icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6.8v7.1"/><circle class="status-dot-mark" cx="12" cy="17.3" r="1.15"/></svg>';
-    return icon;
-  }
-
-  if (status === MESSAGE_STATUSES.CONFIRMED) {
+    svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6.8v7.1"/><circle class="status-dot-mark" cx="12" cy="17.3" r="1.15"/></svg>';
+    word = onRetry ? "Failed · Tap to retry" : "Failed";
+    aria = onRetry ? "Failed to send. Tap to retry." : "Failed to send";
+  } else if (status === MESSAGE_STATUSES.CONFIRMED) {
     icon.classList.add("confirmed");
-    icon.setAttribute("aria-label", "Message delivered");
-    icon.title = "Delivered";
-    icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="status-fill" cx="12" cy="12" r="10"/><path class="status-check" d="m7.4 12.3 3 3.1 6.4-7"/></svg>';
-    return icon;
+    svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="status-fill" cx="12" cy="12" r="10"/><path class="status-check" d="m7.4 12.3 3 3.1 6.4-7"/></svg>';
+    word = "Sent";
+    aria = "Sent";
+  } else {
+    icon.classList.add("pending");
+    svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M12 6.8v5.6l3.7 2.1"/></svg>';
+    word = "Sending";
+    aria = "Sending";
   }
-
-  icon.classList.add("pending");
-  icon.setAttribute("aria-label", "Message pending");
-  icon.title = "Pending";
-  icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M12 6.8v5.6l3.7 2.1"/></svg>';
+  icon.innerHTML = `${svg}<span class="message-delivery-text">${word}</span>`;
+  icon.setAttribute("aria-label", aria);
+  icon.title = word;
   return icon;
 }
 
@@ -12757,7 +12810,7 @@ function renderMessages(conversationEntry) {
       openQuickReactionBar(conversationEntry, message, bubble);
     });
 
-    const deliveryIcon = createDeliveryStatusIcon(message);
+    const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: () => runEngineSendPipeline(conversationEntry.id, message.id) });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
     if (detachedLinkCard || typeCapsule) {
       const stack = document.createElement("div");
@@ -12770,17 +12823,6 @@ function renderMessages(conversationEntry) {
       row.append(selector, avatarSlot, bubble);
     }
     if (deliveryIcon) row.append(deliveryIcon);
-    if (message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED) {
-      const retryLink = document.createElement("button");
-      retryLink.type = "button";
-      retryLink.className = "message-retry-link";
-      retryLink.textContent = "Not Delivered · Retry";
-      retryLink.addEventListener("click", (event) => {
-        event.stopPropagation();
-        runEngineSendPipeline(conversationEntry.id, message.id);
-      });
-      row.append(retryLink);
-    }
     messageArea.appendChild(row);
   });
 
@@ -17901,7 +17943,7 @@ async function sendReaction(conversationEntry, targetMessage, emoji) {
       // The pill turns red with a Retry; the reason goes to the same toast a failed send uses
       // (iOS 57b5aaf) - a reaction failing instantly on every attempt gave nothing to go on.
       appendEngineLog(`Reaction send failed (local state already applied): ${error.message}`);
-      showCopyToast(`Reaction failed: ${error?.message || error}`);
+      showCopyToast(`Reaction failed: ${userFacingError(error)}`);
       if (statusKey) setReactionSendStatus(statusKey, "failed", { retry: attempt, rerender });
     }
   };
@@ -18732,6 +18774,7 @@ const SETUP_ICONS = {
   qrcode: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 20h1"/></svg>',
   server: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>',
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path fill="var(--accent, #62f4d0)" stroke="none" d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg>',
   privacy: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M7.2 12.6s2-3.1 4.8-3.1 4.8 3.1 4.8 3.1-2 3.1-4.8 3.1a4.4 4.4 0 0 1-1.7-.34"/><path d="M7 7l10 10"/></svg>',
 };
 
@@ -18740,7 +18783,7 @@ const SETUP_STEPS = [
   // Child Mode: the Adult/Child question sits at the start of the first-run
   // experience, before language — and is unskippable until answered (see
   // isUserTypePending gating in renderSetupStep/closeSetupGuide).
-  { icon: SETUP_ICONS.family, title: "Who will use KaChat?", body: "", extra: "usertype" },
+  { icon: SETUP_ICONS.shield, title: "How do you want KaChat?", body: "", extra: "usertype" },
   { icon: SETUP_ICONS.globe, title: "Choose Your Language", body: "Select the language you'd like to use in KaChat.", extra: "language" },
   { icon: SETUP_ICONS.currency, title: "Choose Your Currency", body: "Select the currency you'd like prices displayed in.", extra: "currency" },
   { icon: SETUP_ICONS.network, title: "How KaChat Uses Kaspa", body: "KaChat lets you send and receive messages on the Kaspa network itself. Kaspa is required to pay fees when sending your messages. The fee you pay goes to miners which secure the network." },
@@ -19389,7 +19432,7 @@ async function performChattingAddressSwitch() {
     if (setupGuideModal && !setupGuideModal.hidden) renderSetupStep();
   } catch (error) {
     appendEngineLog(`Chatting address switch failed: ${error.message}`);
-    showCopyToast(error.message);
+    showCopyToast(userFacingError(error));
     chattingPickerSwitching = false;
     renderChattingPickerDetail();
   }
@@ -20225,7 +20268,35 @@ async function runIncomingResync(conversationIds) {
 async function dangerWipeCurrentAccount() {
   const account = activeSavedAccountRecord();
   if (!account) { showCopyToast("No active account to wipe."); return; }
-  if (!await confirmText(`Wipe account & messages?\n\nThis permanently removes "${account.name}" and all of its messages and data from this device. Make sure you have backed up its recovery phrase or private key first. This cannot be undone.`)) return;
+  // iOS 78152d3: the confirmation says what is removed and that on-chain messages cannot be;
+  // with Nextcloud connected a second option removes the encrypted archive too.
+  const connected = isNextcloudConnected();
+  const message = connected
+    ? `This deletes "${account.name}", its messages, groups, drafts and settings from this browser, and forgets the Nextcloud login stored here. Your encrypted Nextcloud backup stays unless you choose to remove it. Messages and posts on the Kaspa blockchain cannot be deleted. Make sure you have your recovery phrase.`
+    : `This deletes "${account.name}", its messages, groups, drafts and settings from this browser. Messages and posts on the Kaspa blockchain cannot be deleted. Make sure you have your recovery phrase.`;
+  let removeRemoteBackup = false;
+  if (connected) {
+    const choice = await chooseDialog({
+      title: "Delete account?",
+      message,
+      options: [
+        { id: "delete", title: "Delete Account", subtitle: "The Nextcloud backup stays for your other devices.", destructive: true },
+        { id: "delete-remote", title: "Delete and Remove Nextcloud Backup", subtitle: "Also deletes the encrypted archive from your Nextcloud.", destructive: true },
+        { id: "cancel", title: "Cancel" },
+      ],
+    });
+    if (!choice || choice === "cancel") return;
+    removeRemoteBackup = choice === "delete-remote";
+  } else if (!await confirmDialog({ title: "Delete account?", message, confirmLabel: "Delete Account", destructive: true })) {
+    return;
+  }
+  if (removeRemoteBackup) {
+    try { await deleteRemoteNextcloudBackup(); }
+    catch (error) {
+      appendEngineLog(`Remote backup removal failed: ${error.message}`);
+      if (!await confirmDialog({ title: "Couldn't remove the Nextcloud backup", message: `${userFacingError(error)}\n\nDelete the account from this browser anyway? The archive stays on your Nextcloud.`, confirmLabel: "Delete Anyway", destructive: true })) return;
+    }
+  }
   try {
     localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
     clearSessionActive();
@@ -20244,7 +20315,7 @@ async function dangerWipeCurrentAccount() {
     showCopyToast("Account and messages wiped.");
   } catch (error) {
     appendEngineLog(`Danger Zone account wipe failed: ${error.message}`);
-    showCopyToast(error.message);
+    showCopyToast(userFacingError(error));
   }
 }
 
@@ -20358,6 +20429,7 @@ async function dangerWipeEverything() {
 const DANGER_ZONE_ACTIONS = {
   resync: dangerWipeAndResyncIncoming,
   "wipe-all": dangerWipeEverything,
+  "delete-account": dangerWipeCurrentAccount,
   "export-history": exportChatHistoryFile,
   "import-history": () => document.querySelector("[data-chat-history-file]")?.click(),
   "diagnostics-export": exportDiagnosticsFile,
@@ -20367,7 +20439,7 @@ Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
 });
 
 // Remaining shell-action buttons with no dedicated handler yet show a placeholder toast.
-document.querySelectorAll('[data-shell-action]:not([data-shell-action="logout"]):not([data-shell-action="view-recovery"]):not([data-shell-action="resync"]):not([data-shell-action="wipe-all"]):not([data-shell-action="export-history"]):not([data-shell-action="import-history"]):not([data-shell-action="diagnostics-export"])').forEach((button) => button.addEventListener("click", () => {
+document.querySelectorAll('[data-shell-action]:not([data-shell-action="logout"]):not([data-shell-action="view-recovery"]):not([data-shell-action="resync"]):not([data-shell-action="wipe-all"]):not([data-shell-action="delete-account"]):not([data-shell-action="export-history"]):not([data-shell-action="import-history"]):not([data-shell-action="diagnostics-export"])').forEach((button) => button.addEventListener("click", () => {
   const label = button.querySelector("strong")?.textContent?.trim() || "This control";
   showCopyToast(`${label} frame ready`);
 }));
@@ -21458,7 +21530,7 @@ async function sendGroupEdit(groupId, targetMessage, encodedText) {
     applyGroupEdit(groupId, key, engine.address, clean, Date.now());
   } catch (error) {
     appendEngineLog(`Group edit send failed (local applied): ${error.message}`);
-    showCopyToast(`Edit failed: ${error?.message || error}`);
+    showCopyToast(`Edit failed: ${userFacingError(error)}`);
     applyGroupEdit(groupId, key, engine.address, clean, Date.now(), "failed");
   }
   if (activeGroupId === groupId) renderGroupMessages();
@@ -21484,7 +21556,7 @@ async function sendGroupReaction(groupId, targetMessage, emoji) {
       if (statusKey) setReactionSendStatus(statusKey, "sent", { rerender });
     } catch (error) {
       appendEngineLog(`Group reaction send failed (local applied): ${error.message}`);
-      showCopyToast(`Reaction failed: ${error?.message || error}`);
+      showCopyToast(`Reaction failed: ${userFacingError(error)}`);
       if (statusKey) setReactionSendStatus(statusKey, "failed", { retry: attempt, rerender });
     }
   };
@@ -22611,16 +22683,8 @@ function renderGroupMessages() {
     // Delivery status (checkmark / pending / failed) on your own messages — same as 1:1.
     // Group messages use direction "local", so shim it to "outgoing" for the shared icon.
     if (!incoming && message.status) {
-      const icon = createDeliveryStatusIcon({ ...message, direction: "outgoing" });
+      const icon = createDeliveryStatusIcon({ ...message, direction: "outgoing" }, { onRetry: () => retryGroupMessage(message) });
       if (icon) row.append(icon);
-      if (message.status === MESSAGE_STATUSES.FAILED) {
-        const retryLink = document.createElement("button");
-        retryLink.type = "button";
-        retryLink.className = "message-retry-link";
-        retryLink.textContent = "Not Delivered · Retry";
-        retryLink.addEventListener("click", (event) => { event.stopPropagation(); retryGroupMessage(message); });
-        row.append(retryLink);
-      }
     }
     groupMessageArea.appendChild(row);
   });

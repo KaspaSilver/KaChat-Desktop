@@ -20,7 +20,7 @@ import {
   sendBroadcastMessage,
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
-import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
+import { confirmDialog, promptDialog, alertDialog, chooseDialog, userFacingError } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 
 const CHANNELS_KEY = "kachat-broadcast-channels-v1";        // account-scoped: ["name", ...]
@@ -913,7 +913,7 @@ function buildMessageElement(m) {
   // transaction is on its way, a green check once it is on the network, red if it failed.
   if (mine && deps.createDeliveryStatusIcon) {
     const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : "confirmed";
-    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status });
+    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry: () => retryBroadcastMessage(m) });
     if (icon) { icon.classList.add("broadcast-delivery-icon"); head.append(icon); }
   } else if (m.status === "pending") {
     const badge = document.createElement("span");
@@ -1130,7 +1130,7 @@ async function sendBroadcastEdit(channel, targetTxId, text) {
     if (sent && sent.editor === myAddress) delete sent.status;
   } catch (error) {
     deps.appendEngineLog?.(`Broadcast edit send failed (local applied): ${error.message}`);
-    deps.showToast?.(`Edit failed: ${error?.message || error}`);
+    deps.showToast?.(`Edit failed: ${userFacingError(error)}`);
     const edit = editsCache[channel]?.[targetTxId];
     if (edit) edit.status = "failed";
   }
@@ -1266,8 +1266,21 @@ function appendReactionUi(el, m) {
   }
 }
 
+// The room holds its newest window; "Load earlier messages" at the top widens it without
+// throwing the reader to the bottom when the older rows land (iOS 02a4f58).
+const ROOM_WINDOW = 400;
+let roomWindow = ROOM_WINDOW;
+let roomWindowChannel = null;
+let keepInPlaceAfterOlderLoad = null;   // { height, top } of the scroller before the widen
+function loadEarlierRoomMessages() {
+  if (!roomBodyEl) return;
+  keepInPlaceAfterOlderLoad = { height: roomBodyEl.scrollHeight, top: roomBodyEl.scrollTop };
+  roomWindow += ROOM_WINDOW;
+  renderRoom();
+}
 function renderRoom() {
   const inRoom = Boolean(activeChannel);
+  if (inRoom && roomWindowChannel !== activeChannel) { roomWindowChannel = activeChannel; roomWindow = ROOM_WINDOW; keepInPlaceAfterOlderLoad = null; }
   if (roomEl) roomEl.hidden = !inRoom;
   // The list is the Chats screen's third tab and stays where it is; the room takes the pane
   // beside it (the app decides what that means for the layout).
@@ -1286,10 +1299,19 @@ function renderRoom() {
   syncBroadcastFundingGate();
 
   const hidden = hiddenIn(activeChannel);
-  const messages = (messageCache[activeChannel] || []).filter((m) =>
-    !hidden.has(m.senderAddress) && !deps.parseReactionEnvelope?.(m.content));
+  const allMessages = (messageCache[activeChannel] || []).filter((m) =>
+    !hidden.has(m.senderAddress) && !deps.parseReactionEnvelope?.(m.content) && !deps.parseEditEnvelope?.(m.content));
+  const messages = allMessages.length > roomWindow ? allMessages.slice(-roomWindow) : allMessages;
   if (roomBodyEl) {
     roomBodyEl.replaceChildren();
+    if (allMessages.length > messages.length) {
+      const earlier = document.createElement("button");
+      earlier.type = "button";
+      earlier.className = "broadcast-load-earlier";
+      earlier.textContent = "Load earlier messages";
+      earlier.addEventListener("click", loadEarlierRoomMessages);
+      roomBodyEl.append(earlier);
+    }
     if (messages.length === 0) {
       const empty = document.createElement("div");
       empty.className = "no-results-card";
@@ -1319,7 +1341,13 @@ function renderRoom() {
         roomBodyEl.append(buildMessageRow(m));
       }
     }
-    roomBodyEl.scrollTop = roomBodyEl.scrollHeight;
+    if (keepInPlaceAfterOlderLoad) {
+      const { height, top } = keepInPlaceAfterOlderLoad;
+      keepInPlaceAfterOlderLoad = null;
+      roomBodyEl.scrollTop = roomBodyEl.scrollHeight - height + top;
+    } else {
+      roomBodyEl.scrollTop = roomBodyEl.scrollHeight;
+    }
   }
   refreshVisibleSenderNames(messages);
 }
@@ -1714,7 +1742,7 @@ async function sendBroadcastReaction(targetTxId, emoji) {
       if (statusKey) setBroadcastReactionStatus(statusKey, "sent");
     } catch (error) {
       deps.appendEngineLog?.(`Broadcast reaction send failed (local state already applied): ${error.message}`);
-      deps.showToast?.(`Reaction failed: ${error?.message || error}`);
+      deps.showToast?.(`Reaction failed: ${userFacingError(error)}`);
       if (statusKey) setBroadcastReactionStatus(statusKey, "failed", attempt);
     }
   };

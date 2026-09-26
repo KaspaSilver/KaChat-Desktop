@@ -1860,6 +1860,21 @@ async function syncContactsFromNextcloud() {
 // Exports
 // ---------------------------------------------------------------------------
 
+/** Deletes the encrypted archive from the user's Nextcloud. Only ever on the user's say-so (the
+ *  Delete Account option that names it): the archive is what carries history to their other
+ *  devices. 404 is the state asked for. */
+export async function deleteRemoteNextcloudBackup() {
+  if (!nc?.server || !nc?.username || !nc?.appPassword) return;
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
+  const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
+  for (const name of [BACKUP_FILENAME, LEGACY_DESKTOP_BACKUP_FILENAME]) {
+    const response = await fetch(`${davRoot}/${folder}/${encodeURIComponent(name)}`, { method: "DELETE", headers: { Authorization: authHeader() } });
+    if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
+    if (!(response.ok || response.status === 404)) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
+  }
+  deps.appendEngineLog?.("[Nextcloud] Remote archive deleted");
+}
+
 export function isNextcloudConnected() {
   return Boolean(nc);
 }

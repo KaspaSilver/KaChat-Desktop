@@ -837,6 +837,7 @@
             <a class="profile-about-row profile-about-link" href="https://linktr.ee/Kachat_" target="_blank" rel="noopener"><strong>Website</strong><span>linktr.ee/Kachat_</span></a>
             <a class="profile-about-row profile-about-link" href="mailto:kaspasilver@gmail.com"><strong>Support Email</strong><span>kaspasilver@gmail.com</span></a>
             <button class="profile-about-row profile-about-link" type="button" data-profile-donate><strong>Donate</strong><span data-profile-donate-label>kachat.kas</span></button>
+            <button class="profile-about-row profile-about-link" type="button" data-profile-licenses><strong>Open Source Licenses</strong><span>›</span></button>
           </div>
         </div>
       </section>
@@ -988,7 +989,7 @@
                 <div class="hub-grid dock-editor-grid" data-dock-hub-grid></div>
                 <p class="dock-editor-empty" data-dock-hub-empty hidden>Everything is in your dock. Click a dock item to move it back here.</p>
                 <p class="field-hint dock-editor-refusal" data-dock-refusal hidden></p>
-                <p class="field-hint" data-child-dock-note hidden>Swap, KaPosts and Broadcasts are hidden while Child Mode is on, an adult can bring them back in Settings &gt; Security &gt; Child Mode.</p>
+                <p class="field-hint" data-child-dock-note hidden>Swap, KaPosts and Public Chats are hidden while Simple Mode is on. The password brings them back in Settings &gt; Security &gt; Simple Mode.</p>
 
                 <div class="dock-editor-head dock-editor-head-split">
                   <strong>Your Dock</strong>
@@ -1007,7 +1008,7 @@
               <div class="settings-toggle-row"><span><strong>Password for Account Login</strong><small>Require your password when signing in to a saved account.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-login><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Password for Address Private Keys</strong><small>Require your password to reveal a spending address's private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-spending-key><span></span></label></div>
               <button class="settings-list-row" type="button" data-change-password><span class="settings-row-copy"><strong>Change Password</strong><small data-password-status>No password set</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Child Mode</strong><small>Limit KaChat to Chats, Portfolio and Cold Storage.</small></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+              <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Simple Mode</strong><small>Limit KaChat to Chats, Portfolio and Cold Storage.</small></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
               <div class="settings-toggle-row"><span><strong>Save account on this device</strong><small>Encrypted key storage arrives in the next security phase.</small></span><label class="switch-control"><input type="checkbox" data-pref-save-account checked><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Keep me signed in</strong><small>Restore the active account when KaChat opens.</small></span><label class="switch-control"><input type="checkbox" data-pref-keep-signed-in checked><span></span></label></div>
             </div>
@@ -1017,9 +1018,9 @@
             <p class="settings-group-footer" data-chats-privacy-footer>On: Anytime you receive Kaspa KaChat will do its best make sure the Kaspa goes to a fresh address not tied to your chatting identity. Sending Kaspa KaChat will always make sure it comes out of your primary spend address which is never associated with your chatting identity.<br><br>Off: All Kaspa will flow in and out of your chatting address<br><br>This setting belongs to this account alone - your other accounts keep their own.</p>
           </section>
 
-          <!-- Security sub-screen: Child Mode (ui/childmode.js renders the stateful page). -->
+          <!-- Security sub-screen: Simple Mode (ui/childmode.js renders the stateful page). -->
           <section class="settings-group" data-settings-subscreen="child-mode">
-            <p class="settings-group-label">Child Mode</p>
+            <p class="settings-group-label">Simple Mode</p>
             <div data-child-mode-page></div>
           </section>
 
@@ -1081,7 +1082,7 @@
                   <p class="field-hint danger" data-endpoint-error="broadcastIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">KaChat broadcast history indexer for #kaspa and #kachat-bugs</p>
+            <p class="settings-group-footer">KaChat Public Chats history indexer for #kaspa and #kachat-bugs</p>
             <p class="settings-group-label">Push Registration</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1322,6 +1323,7 @@
             <p class="settings-group-label">Danger Zone</p>
             <div class="settings-list-card danger-list-card">
               <button class="settings-list-row danger-row" type="button" data-shell-action="resync"><span class="settings-row-icon">↻</span><span class="settings-row-copy"><strong>Wipe and re-sync incoming messages</strong></span></button>
+              <button class="settings-list-row danger-row" type="button" data-shell-action="delete-account"><span class="settings-row-icon">⌫</span><span class="settings-row-copy"><strong>Delete Account</strong><small>Removes this account, its messages, groups and drafts from this browser.</small></span></button>
               <button class="settings-list-row danger-row" type="button" data-shell-action="wipe-all"><span class="settings-row-icon">⌫</span><span class="settings-row-copy"><strong>Wipe all saved accounts &amp; local data</strong></span></button>
             </div>
           </section>
