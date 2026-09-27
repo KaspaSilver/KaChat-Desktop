@@ -947,11 +947,6 @@ const KACHAT_UNIVERSAL_LINK_HOST = "kachat.app";
 function profileUniversalLink(address) {
   return `https://${KACHAT_UNIVERSAL_LINK_HOST}/u/${String(address || "").replace(/^kaspa:/i, "")}`;
 }
-/** The line that goes with a shared profile link (iOS profileShareMessage). */
-function profileShareMessage(name) {
-  const clean = String(name || "").replace(/\.kas$/i, "").trim();
-  return clean ? `Chat with ${clean} on KaChat.` : "Chat with me on KaChat.";
-}
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
   let target = null, payload = null;
@@ -8453,7 +8448,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 57;
+const APP_BUILD = 58;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -8490,13 +8485,13 @@ const OPEN_SOURCE_NOTICES = [
 // page offers the download. The browser's share sheet when there is one, else the clipboard.
 document.querySelector("[data-profile-share]")?.addEventListener("click", async () => {
   if (!engine.address) { showCopyToast("Sign in to share your profile."); return; }
+  // The link and nothing else (iOS 7ce35ef): it previews with your name and avatar on its own.
   const url = profileUniversalLink(engine.address);
-  const message = profileShareMessage(knsDomainForAddress(engine.address));
   if (typeof navigator.share === "function") {
-    try { await navigator.share({ title: "KaChat", text: message, url }); return; }
+    try { await navigator.share({ title: knsDomainForAddress(engine.address) || "My KaChat profile", url }); return; }
     catch (error) { if (error?.name === "AbortError") return; }
   }
-  try { await navigator.clipboard.writeText(`${message} ${url}`); showCopyToast("Profile link copied"); }
+  try { await navigator.clipboard.writeText(url); showCopyToast("Profile link copied"); }
   catch { showCopyToast(url); }
 });
 
