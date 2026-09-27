@@ -909,12 +909,10 @@ function buildMessageElement(m) {
   const time = document.createElement("span");
   time.textContent = new Date(m.blockTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   head.append(sender, time);
-  // Your own messages carry the same delivery mark as 1:1 and group bubbles: a clock while the
-  // transaction is on its way, a green check once it is on the network, red if it failed.
+  // Your own messages carry the same delivery label as 1:1 and group bubbles, under the
+  // message (iOS 21baa36): Sending, Sent, Failed · Tap to retry. Appended below, after the body.
   if (mine && deps.createDeliveryStatusIcon) {
-    const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : "confirmed";
-    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry: () => retryBroadcastMessage(m) });
-    if (icon) { icon.classList.add("broadcast-delivery-icon"); head.append(icon); }
+    // handled after the body
   } else if (m.status === "pending") {
     const badge = document.createElement("span");
     badge.className = "broadcast-pending";
@@ -1007,6 +1005,17 @@ function buildMessageElement(m) {
     }
   }
 
+  if (mine && deps.createDeliveryStatusIcon) {
+    const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : "confirmed";
+    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry: () => retryBroadcastMessage(m) });
+    if (icon) {
+      icon.classList.add("broadcast-delivery-icon");
+      const deliveryRow = document.createElement("div");
+      deliveryRow.className = "broadcast-delivery-row";
+      deliveryRow.append(icon);
+      el.append(deliveryRow);
+    }
+  }
   appendReactionUi(el, m);
   // 1:1 parity: right-click opens the reactions + Reply/Copy/Hide menu.
   onContextGesture(el, (event) => {

@@ -33,6 +33,10 @@ function saveTombstonesAll(all) {
 
 export class GroupManager {
   constructor(engine) {
+    this.sinceSupported = null;   // null = not asked yet, false = indexer has no /since read
+    this.sinceBlockTime = 0;
+    this._sinceSeen = new Set();
+    this._sincePasses = 0;
     this.engine = engine;
     this._selfPubHex = null;
   }
@@ -731,11 +735,47 @@ export class GroupManager {
       }
     } catch { /* indexer hiccup — try messages anyway */ }
 
-    // 2. For each known group, pull messages under every member's blinded id — 4 scans in
-    // flight at a time. The old fully-sequential nested loop was one awaited round trip per
-    // member per group (two 8-member groups = 16 serial requests on EVERY 5s sweep).
+    // 2. Live traffic (iOS a56fb98): one POST /group-messages/since carrying every member's
+    // blinded id of every group, starting 10 s before the last answer, rows deduped by txId.
+    // The per-member cursor reads below then run as the safety net about once a minute (they
+    // also advance the cursors), or on every pass on an indexer without the read.
     const messages = [];
-    for (const record of this.listGroups()) {
+    const records = this.listGroups();
+    let usedSince = false;
+    if (this.sinceSupported !== false && this.sinceBlockTime > 0 && records.length) {
+      const ids = [];
+      for (const record of records) {
+        const blindingKey = G.hexToBytes(record.blindingKeyHex);
+        for (const member of record.members) {
+          if (member.xOnlyPubKeyHex) ids.push(G.bytesToHex(G.deriveBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)));
+        }
+      }
+      try {
+        let latest = this.sinceBlockTime;
+        for (let i = 0; i < ids.length; i += 256) {
+          const { messages: rows, latestBlockTime } = await this.engine.scanGroupMessagesSince(ids.slice(i, i + 256), this.sinceBlockTime - 10_000, 200);
+          latest = Math.max(latest, Number(latestBlockTime) || 0);
+          for (const row of rows) {
+            if (!row.txId || this._sinceSeen.has(row.txId)) continue;
+            this._sinceSeen.add(row.txId);
+            if (this._sinceSeen.size > 4000) { for (const old of [...this._sinceSeen].slice(0, 2000)) this._sinceSeen.delete(old); }
+            const parsed = G.parseGroupMessagePayload(row.payloadString);
+            const decoded = this.processMessage(parsed);
+            if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+          }
+        }
+        this.sinceBlockTime = latest;
+        this._sincePasses = (this._sincePasses || 0) + 1;
+        usedSince = true;
+      } catch (error) {
+        if (error?.unsupported) {
+          this.sinceSupported = false;
+          this.engine.log?.("Group live polling: the indexer has no /group-messages/since; reading per member.");
+        }
+      }
+    }
+    const fullScan = !usedSince || this._sincePasses % 12 === 0;
+    for (const record of fullScan ? records : []) {
       const blindingKey = G.hexToBytes(record.blindingKeyHex);
       record.cursors = record.cursors || {};
       const scans = record.members
@@ -763,6 +803,8 @@ export class GroupManager {
       });
       this._put(record);
     }
+    // The first full read establishes "now"; the since reads take over from here.
+    if (fullScan && !this.sinceBlockTime) this.sinceBlockTime = Date.now();
     return { controls: events, messages };
   }
 }

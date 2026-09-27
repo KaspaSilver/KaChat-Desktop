@@ -63,6 +63,16 @@ function baseUrl(indexerUrl) {
 
 // One member's slice of a group's messages. Call once per group member, each with
 // that member's blinded group id (deriveBlindedGroupId(blindingKey, memberPubKey)).
+function mapMessageRow(r, fallbackBlinded = "") {
+  return {
+    txId: String(r.tx_id || r.txId || ""),
+    sender: r.sender ? String(r.sender) : null,
+    blindedGroupId: String(r.blinded_group_id || r.blindedGroupId || fallbackBlinded),
+    blockTime: Number(r.block_time ?? r.blockTime ?? 0),
+    cursor: r.cursor != null ? String(r.cursor) : null,
+    payloadString: reconstructPayload(r.message_payload ?? r.messagePayload, GROUP_PAYLOAD_PREFIXES.gcomm),
+  };
+}
 export async function queryGroupMessages({ indexerUrl, blindedGroupIdHex, cursor = null, limit = 50 } = {}) {
   if (!blindedGroupIdHex) throw new Error("blindedGroupIdHex is required.");
   const base = baseUrl(indexerUrl);
@@ -71,16 +81,32 @@ export async function queryGroupMessages({ indexerUrl, blindedGroupIdHex, cursor
     if (cur) q.set("cursor", cur);
     return `${base}/group-messages/by-blinded-group-id?${q.toString()}`;
   }, limit, cursor);
-  return rows
-    .map((r) => ({
-      txId: String(r.tx_id || ""),
-      sender: r.sender ? String(r.sender) : null,
-      blindedGroupId: String(r.blinded_group_id || blindedGroupIdHex),
-      blockTime: Number(r.block_time || 0),
-      cursor: r.cursor != null ? String(r.cursor) : null,
-      payloadString: reconstructPayload(r.message_payload, GROUP_PAYLOAD_PREFIXES.gcomm),
-    }))
-    .filter((m) => m.payloadString);
+  return rows.map((r) => mapMessageRow(r, blindedGroupIdHex)).filter((m) => m.payloadString);
+}
+
+/** Everything new across many blinded ids in one request (GROUP_MESSAGES_INDEXER.md §2, iOS
+ *  a56fb98): rows with blockTime > sinceBlockTime, oldest first. An indexer without the read
+ *  answers 404/405/501; the error then carries `unsupported: true` so the caller stops asking. */
+export async function queryGroupMessagesSince({ indexerUrl, blindedGroupIds, sinceBlockTime, limit = 200 } = {}) {
+  const base = baseUrl(indexerUrl);
+  const response = await fetch(`${base}/group-messages/since`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ blindedGroupIds, sinceBlockTime, limit }),
+    cache: "no-store",
+  });
+  if ([404, 405, 501].includes(response.status)) {
+    const error = new Error("The indexer does not serve /group-messages/since.");
+    error.unsupported = true;
+    throw error;
+  }
+  if (!response.ok) throw new Error(`Group indexer HTTP ${response.status}`);
+  const json = await response.json();
+  const rows = Array.isArray(json?.messages) ? json.messages : [];
+  return {
+    latestBlockTime: Number(json?.latestBlockTime || sinceBlockTime),
+    messages: rows.map((r) => mapMessageRow(r)).filter((m) => m.payloadString),
+  };
 }
 
 function mapControlRow(r) {

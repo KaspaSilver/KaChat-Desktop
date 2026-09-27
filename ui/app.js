@@ -938,21 +938,41 @@ const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 // A link that points back INSIDE KaChat (iOS KaChatInternalLink). Both forms are accepted:
 //   kachat://kapost/<txid>        https://kachat.app/post/<txid>       (kachat.duckdns.org still opens)
 //   kachat://broadcast/<channel>  https://kachat.app/broadcast/<channel>
+//   kachat://profile/<address>    https://kachat.app/u/<address>       (iOS 863b0e9; a missing kaspa: prefix means mainnet)
 // Everything a pasted link carries is untrusted, so the payload is re-validated here rather
 // than trusted from the URL's text.
-const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast)\/[^\s<>"']+|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(?:post|broadcast)\/[^\s<>"']+)/i;
+const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile)\/[^\s<>"']+|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(?:post|broadcast|u)\/[^\s<>"']+)/i;
+const KACHAT_UNIVERSAL_LINK_HOST = "kachat.app";
+/** The kachat.app link to a person: reads cleanly without the kaspa: prefix. */
+function profileUniversalLink(address) {
+  return `https://${KACHAT_UNIVERSAL_LINK_HOST}/u/${String(address || "").replace(/^kaspa:/i, "")}`;
+}
+/** The line that goes with a shared profile link (iOS profileShareMessage). */
+function profileShareMessage(name) {
+  const clean = String(name || "").replace(/\.kas$/i, "").trim();
+  return clean ? `Chat with ${clean} on KaChat.` : "Chat with me on KaChat.";
+}
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
   let target = null, payload = null;
-  const custom = text.match(/^kachat:\/\/(kapost|broadcast)\/([^/?#]+)\/?$/i);
-  if (custom) { target = custom[1].toLowerCase() === "kapost" ? "kapost" : "broadcast"; payload = custom[2]; }
+  const custom = text.match(/^kachat:\/\/(kapost|broadcast|profile)\/([^/?#]+)\/?$/i);
+  if (custom) { target = custom[1].toLowerCase(); payload = custom[2]; }
   else {
-    const universal = text.match(/^https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(post|broadcast)\/([^/?#]+)\/?$/i);
+    const universal = text.match(/^https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(post|broadcast|u)\/([^/?#]+)\/?$/i);
     if (!universal) return null;
-    target = universal[1].toLowerCase() === "post" ? "kapost" : "broadcast";
+    const path = universal[1].toLowerCase();
+    target = path === "post" ? "kapost" : path === "u" ? "profile" : "broadcast";
     payload = universal[2];
   }
   try { payload = decodeURIComponent(payload); } catch { return null; }
+  if (target === "profile") {
+    // A pasted address is attacker-controlled like everything else in a link: it has to be a
+    // valid Kaspa address, checksum and all, or the link is not ours.
+    let address = payload.trim().toLowerCase();
+    if (!address.includes(":")) address = `kaspa:${address}`;
+    if (address.length > 100 || !isValidKaspaAddressString(address)) return null;
+    return { kind: "profile", address };
+  }
   if (target === "kapost") {
     const id = payload.trim();
     if (id.length < 8 || id.length > 128 || !/^[A-Za-z0-9_-]+$/.test(id)) return null;
@@ -974,6 +994,28 @@ function openKaChatInternalLink(link) {
   if (isChildModeEnabled()) { showCopyToast("Not available in Simple Mode."); return; }
   if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
   else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
+  else if (link.kind === "profile") openProfileLink(link.address);
+}
+/** Someone's profile link: their chat if they are already a contact, otherwise the new-chat
+ *  screen with the address filled in, one click from starting. Your own link lands on Chats. */
+function openProfileLink(address) {
+  const normalized = String(address || "").toLowerCase();
+  if (!isValidKaspaAddressString(normalized)) return;
+  setActiveAppTab("chats");
+  if (String(engine.address || "").toLowerCase() === normalized) return;
+  const contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === normalized);
+  if (contact) {
+    let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
+    if (!conversationEntry) {
+      conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
+      state.conversations.push(conversationEntry);
+      persistState();
+    }
+    openConversation(conversationEntry.id);
+    return;
+  }
+  showContactModal();
+  setContactAddressValue(normalized);
 }
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
@@ -981,6 +1023,7 @@ function buildInternalLinkCard(link) {
   card.type = "button";
   card.className = "message-link-card internal-link-card";
   const isPost = link.kind === "kapost";
+  const isProfile = link.kind === "profile";
   // A shared post shows its author and text once the post resolves (iOS
   // KaPostLinkPreviewCache); until then, and for room invites, the glyph card.
   let entry = null;
@@ -988,15 +1031,25 @@ function buildInternalLinkCard(link) {
     entry = peekKaPostLinkPreview(link.txId);
     if (!entry) resolveKaPostLinkPreview(link.txId).then((resolved) => { if (resolved) scheduleActiveThreadRerender(); }).catch(() => {});
   }
+  const profileContact = isProfile ? state.contacts.find((c) => String(c.address || "").toLowerCase() === link.address) || null : null;
   const icon = isPost
     ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>'
-    : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>';
-  const eyebrow = isPost ? (entry?.action === "reply" ? "KaPosts reply" : entry?.action === "quote" ? "KaPosts quote" : "KaPosts") : "Broadcast Room";
-  const title = isPost ? (entry?.authorName || "KaPosts post") : `#${link.channel}`;
+    : isProfile
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>';
+  const eyebrow = isPost ? (entry?.action === "reply" ? "KaPosts reply" : entry?.action === "quote" ? "KaPosts quote" : "KaPosts") : isProfile ? "KaChat Profile" : "Public Chat Room";
+  const title = isPost
+    ? (entry?.authorName || "KaPosts post")
+    : isProfile
+      ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : shortAddress(link.address)))
+      : `#${link.channel}`;
   const subtitle = isPost
     ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
-    : "Tap to open this KaChat broadcast room.";
-  card.innerHTML = `<span class="internal-link-icon ${entry?.avatarHtml ? "avatar" : ""}">${entry?.avatarHtml || icon}</span>
+    : isProfile
+      ? (profileContact ? "Tap to open your chat." : "Tap to start a chat on KaChat.")
+      : "Tap to open this KaChat public chat room.";
+  const profileAvatar = isProfile ? (avatarHtmlForAnyAddress(link.address, "message-avatar") || "") : "";
+  card.innerHTML = `<span class="internal-link-icon ${entry?.avatarHtml || profileAvatar ? "avatar" : ""}">${entry?.avatarHtml || profileAvatar || icon}</span>
     <span class="message-link-card-meta">
       <span class="message-link-card-site">${escapeHtml(eyebrow)}</span>
       <strong>${escapeHtml(title)}</strong>
@@ -3504,7 +3557,8 @@ function chatListDeliveryGlyphHtml(message) {
 const WEB_LINK_RE = /https?:\/\/\S+/i;
 function webLinkPreviewLabel(text) {
   const internal = firstInternalLinkIn(text);
-  if (internal?.kind === "post") return "Shared a KaPosts post";
+  if (internal?.kind === "kapost") return "Shared a KaPosts post";
+  if (internal?.kind === "profile") return "Shared a KaChat profile";
   if (internal?.kind === "broadcast") return `Public chat room #${internal.channel}`;
   return WEB_LINK_RE.test(String(text || "")) ? "📎 Sent a link" : null;
 }
@@ -8399,7 +8453,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 56;
+const APP_BUILD = 57;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -8431,6 +8485,21 @@ const OPEN_SOURCE_NOTICES = [
   { name: "node-qrcode", license: "MIT", holder: "Copyright (c) 2012 Ryan Day" },
   { name: "Vite", license: "MIT", holder: "Copyright (c) 2019-present VoidZero Inc. and Vite contributors" },
 ];
+// Next to the Profile title (iOS 863b0e9): a kachat.app link to you. Pasted anywhere it previews
+// with your KNS name and avatar; opened with KaChat it starts a chat with you; without it, the
+// page offers the download. The browser's share sheet when there is one, else the clipboard.
+document.querySelector("[data-profile-share]")?.addEventListener("click", async () => {
+  if (!engine.address) { showCopyToast("Sign in to share your profile."); return; }
+  const url = profileUniversalLink(engine.address);
+  const message = profileShareMessage(knsDomainForAddress(engine.address));
+  if (typeof navigator.share === "function") {
+    try { await navigator.share({ title: "KaChat", text: message, url }); return; }
+    catch (error) { if (error?.name === "AbortError") return; }
+  }
+  try { await navigator.clipboard.writeText(`${message} ${url}`); showCopyToast("Profile link copied"); }
+  catch { showCopyToast(url); }
+});
+
 document.querySelector("[data-profile-licenses]")?.addEventListener("click", () => {
   const cards = OPEN_SOURCE_NOTICES.map((n) => `
     <div class="license-card">

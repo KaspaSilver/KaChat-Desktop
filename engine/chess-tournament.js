@@ -195,6 +195,42 @@ export function seatedPlayers(t, now) {
   return t.players.filter((p) => (t.joinedAt[p] ?? t.createdAt) + SEAT_TTL_MS > now);
 }
 export function isSeated(t, address, now) { return seatedPlayers(t, now).includes(address); }
+
+// --- Decided on the clock before the claim (iOS a94f0e8) -----------------------------------
+// The reducer ends a game on the clock only when the opponent posts the claim. When the winner
+// has already left, nobody ever does, and the game would read as in play forever - including
+// for the loser, who then counts as busy. A game whose side to move has run out of clock counts
+// as decided on every screen, with the winner the chain will record once a claim lands. Three
+// seconds of margin so a move in flight is not beaten to it. The rules are unchanged.
+export function flaggedSide(game, now) {
+  if (!game || game.winner) return null;
+  if (remainingMs(game, game.board.sideToMove, now - 3_000) !== 0) return null;
+  return game.board.sideToMove;
+}
+/** Over on the board, or on the clock with the claim still to come. */
+export function isDecided(game, now) { return Boolean(game?.winner) || flaggedSide(game, now) != null; }
+/** The winner as it stands: the one the chain recorded, or the flagged side's opponent. */
+export function decidedWinner(game, now) {
+  if (!game) return null;
+  if (game.winner) return game.winner;
+  const flagged = flaggedSide(game, now);
+  if (!flagged) return null;
+  return flagged === WHITE ? game.black : game.white;
+}
+/** Live with at least one game still undecided. */
+export function isInPlay(t, now) {
+  return tournamentStatus(t) === "live" && Object.values(t.games).some((g) => !isDecided(g, now));
+}
+/** Whether `address` still has something to play here: a player who has lost a game, on the
+ *  board or on the clock with the claim still to come, is out. */
+export function isStillPlaying(t, address, now) {
+  if (!isInPlay(t, now) || !t.players.includes(address)) return false;
+  return !Object.values(t.games).some((g) => {
+    if (!colorOf(g, address)) return false;
+    const winner = decidedWinner(g, now);
+    return winner != null && winner !== address;
+  });
+}
 /** When `address`'s seat runs out, while waiting. */
 export function seatExpiry(t, address) {
   if (tournamentStatus(t) !== "open" || !t.players.includes(address)) return null;

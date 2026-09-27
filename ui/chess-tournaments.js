@@ -209,14 +209,19 @@ function myPrivate(duel) {
   const my = me();
   if (!my) return [];
   return Object.values(tournaments)
-    .filter((t) => !T.isPublicId(t.id) && T.isDuel(t) === duel && ["open", "live"].includes(T.tournamentStatus(t)) && t.players.includes(my))
+    .filter((t) => !T.isPublicId(t.id) && T.isDuel(t) === duel && (T.tournamentStatus(t) === "open" || T.isInPlay(t, now)) && t.players.includes(my))
     .sort((a, b) => b.createdAt - a.createdAt);
 }
+/** Rooms with a game still being played. A live room whose clocks have all run out with no
+ *  claim posted is not one of them (T.flaggedSide). */
 function liveTournaments() {
-  return Object.values(tournaments).filter((t) => T.tournamentStatus(t) === "live").sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  return Object.values(tournaments).filter((t) => T.isInPlay(t, now)).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 }
+/** Finished on the chain, or finished on the clock with the claim still to come. */
 function finishedTournaments() {
-  return Object.values(tournaments).filter((t) => T.tournamentStatus(t) === "finished").sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  return Object.values(tournaments)
+    .filter((t) => T.tournamentStatus(t) === "finished" || (T.tournamentStatus(t) === "live" && !T.isInPlay(t, now)))
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 }
 /** The tournament this player is in that is not over. A waiting seat that has expired does
  *  not count: the player is free to join elsewhere. */
@@ -224,7 +229,7 @@ function myActiveTournament() {
   const my = me();
   if (!my) return null;
   return Object.values(tournaments)
-    .filter((t) => (T.tournamentStatus(t) === "live" && t.players.includes(my)) || (T.tournamentStatus(t) === "open" && T.isSeated(t, my, now)))
+    .filter((t) => T.isStillPlaying(t, my, now) || (T.tournamentStatus(t) === "open" && T.isSeated(t, my, now)))
     .sort((a, b) => b.createdAt - a.createdAt)[0] || null;
 }
 
@@ -456,7 +461,12 @@ function roundName(game, t) {
   return game.round === 3 ? "Final" : game.round === 2 ? "Semifinal" : "Round 1";
 }
 function outcomeText(game, { short = false } = {}) {
-  if (!game.winner || !game.outcome) return short ? "finished" : "";
+  if (!game.winner || !game.outcome) {
+    // Out of clock, claim not posted: the same result, said the same way.
+    const winner = T.decidedWinner(game, now);
+    if (winner) return short ? `${nameFor(winner)} won on time` : `Time ran out. ${nameFor(winner)} won on time.`;
+    return short ? "finished" : "";
+  }
   const who = nameFor(game.winner);
   switch (game.outcome.kind) {
     case "checkmate": return short ? `${who} won by checkmate` : `Checkmate. ${who} won.`;
@@ -647,8 +657,9 @@ function renderPlayTab() {
 }
 
 function gameNamesHtml(game, { bold = true } = {}) {
-  const w = `<span class="${bold && game.winner === game.white ? "won" : ""}">${esc(nameFor(game.white))}</span>`;
-  const b = `<span class="${bold && game.winner === game.black ? "won" : ""}">${esc(nameFor(game.black))}</span>`;
+  const winner = T.decidedWinner(game, now);
+  const w = `<span class="${bold && winner === game.white ? "won" : ""}">${esc(nameFor(game.white))}</span>`;
+  const b = `<span class="${bold && winner === game.black ? "won" : ""}">${esc(nameFor(game.black))}</span>`;
   return `${w} <em>vs</em> ${b}`;
 }
 
@@ -830,7 +841,8 @@ function renderTournament() {
   } else if (status === "live") {
     const game = my ? T.currentGameFor(t, my) : null;
     if (game) {
-      if (game.winner) statusHtml += `<p class="chess-t-status">${game.winner === my ? `You won ${duel ? "the game" : roundName(game, t).toLowerCase()}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
+      const decidedWinner = T.decidedWinner(game, now);
+      if (decidedWinner) statusHtml += `<p class="chess-t-status">${decidedWinner === my ? `You won ${duel ? "the game" : roundName(game, t).toLowerCase()}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
       else if (nextGameCountdownMs(t) != null) {
         const myColor = T.colorOf(game, my);
         statusHtml += `<div class="chess-t-next"><span><strong>Next: ${esc(roundName(game, t))} vs ${esc(nameFor(T.addressOf(game, Chess.opposite(myColor))))}</strong><small>Your game starts in</small></span><b data-chess-t-next-countdown>${Math.ceil(nextGameCountdownMs(t) / 1000)}</b></div>`;
@@ -855,10 +867,10 @@ function renderTournament() {
       const games = T.gamesInRound(t, round);
       if (!games.length) continue;
       bracketHtml += `<p class="screen-kicker">${duel ? "Game" : round === 3 ? "Final" : round === 2 ? "Semifinals" : "Round 1"}</p><div class="chess-t-list">${games.map((game) => rowHtml({
-        icon: game.winner ? ICON_TROPHY : ICON_EYE,
+        icon: T.isDecided(game, now) ? ICON_TROPHY : ICON_EYE,
         title: gameNamesHtml(game),
-        subtitle: esc(game.winner ? outcomeText(game, { short: true }) : `Move ${Math.floor(game.moves.length / 2) + 1} · ${game.board.sideToMove} to move`),
-        trailing: game.winner ? "" : `<span class="chess-t-row-action mono" data-chess-t-clock-for="${esc(keyOf(t.id, game.id))}">${clockText(T.remainingMs(game, game.board.sideToMove, now))}</span>`,
+        subtitle: esc(T.isDecided(game, now) ? outcomeText(game, { short: true }) : `Move ${Math.floor(game.moves.length / 2) + 1} · ${game.board.sideToMove} to move`),
+        trailing: T.isDecided(game, now) ? "" : `<span class="chess-t-row-action mono" data-chess-t-clock-for="${esc(keyOf(t.id, game.id))}">${clockText(T.remainingMs(game, game.board.sideToMove, now))}</span>`,
         attrs: `data-chess-t-game="${esc(game.id)}"`,
       })).join("")}</div>`;
     }
@@ -1034,7 +1046,7 @@ function renderGame() {
 function gameStatusText(t, game) {
   const my = me();
   const myColor = my ? T.colorOf(game, my) : null;
-  if (game.winner) return outcomeText(game);
+  if (T.isDecided(game, now)) return outcomeText(game);
   if (pendingMoveGames.has(keyOf(t.id, game.id))) return "Sending your move…";
   // The clock runs from the moment the board opens (iOS 11ac2b7): games from the 25 s window
   // still say when it starts; newer ones say nothing.

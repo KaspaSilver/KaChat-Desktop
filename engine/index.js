@@ -9,7 +9,7 @@ import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryp
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
-import { queryGroupMessages, queryGroupControlByRecipient, queryGroupControlBySender } from "./group-indexer.js";
+import { queryGroupMessages, queryGroupMessagesSince, queryGroupControlByRecipient, queryGroupControlBySender } from "./group-indexer.js";
 import { extractBroadcastHitsFromBlock, normalizeBroadcastChannel } from "./broadcasts.js";
 import {
   KNS_DEFAULT_MAINNET_URL,
@@ -1097,6 +1097,9 @@ export class KaspaEngine {
   // Indexer scans (delegate to group-indexer, defaulting to the configured indexer).
   async scanGroupMessages(blindedGroupIdHex, cursor = null, limit = 50) {
     return queryGroupMessages({ indexerUrl: getEndpoint("kasiaIndexer"), blindedGroupIdHex, cursor, limit });
+  }
+  async scanGroupMessagesSince(blindedGroupIds, sinceBlockTime, limit = 200) {
+    return queryGroupMessagesSince({ indexerUrl: getEndpoint("kasiaIndexer"), blindedGroupIds, sinceBlockTime, limit });
   }
   async scanGroupControlByRecipient(cursor = null, limit = 50) {
     this.requireWallet();
