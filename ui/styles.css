@@ -10083,6 +10083,9 @@ html.standalone .ios-install-hint { display: none; }
 
 /* Delivery mark in a broadcast message head: sits on the baseline row next to the time. */
 .broadcast-delivery-row { display: flex; justify-content: flex-end; margin-top: 4px; }
+.broadcast-translate-note { margin-top: 4px; font-size: 11.5px; color: var(--muted); }
+.broadcast-translate-note .kaposts-translate-link { font-size: 11.5px; }
+.account-overlay.self .chat-info-name-input[readonly] { pointer-events: none; }
 .broadcast-delivery-row .broadcast-delivery-icon { margin: 0; }
 
 /* Node Connection: the scan narrates itself under the button. */

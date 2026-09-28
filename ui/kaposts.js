@@ -4105,6 +4105,15 @@ function ensureLanguageDetector() {
   return kapostDetectorPromise;
 }
 
+/// Other screens that draw translations (public chat rooms) repaint through here.
+const translationListeners = new Set();
+export function onTranslationChange(listener) {
+  translationListeners.add(listener);
+  return () => translationListeners.delete(listener);
+}
+function notifyTranslationListeners() {
+  for (const listener of translationListeners) { try { listener(); } catch { /* a listener's fault */ } }
+}
 /// One repaint per burst. Detection resolves per post, and a feed of fifty would otherwise
 /// re-render fifty times.
 function scheduleDetectionRepaint() {
@@ -4112,6 +4121,7 @@ function scheduleDetectionRepaint() {
   kapostDetectRepaintTimer = setTimeout(() => {
     kapostDetectRepaintTimer = null;
     renderAll();
+    notifyTranslationListeners();
   }, 60);
 }
 
@@ -4285,6 +4295,81 @@ async function translatePost(post) {
     kapostTranslations.set(key, { status: "failed" });
   }
   renderAll();
+}
+
+// --- Text translation for other screens (iOS 03e5128: public chat messages) --------------------
+// The same service, detection and state maps, addressed by a caller-chosen key and bare text:
+// no id is sent, so the server translates without caching (TRANSLATION_SERVICE.md). Only ever
+// for text that is public already - 1:1 and group messages are encrypted and never leave the device.
+
+/** Worth offering: enough text, a served pair, and not already in the reader's language as far
+ *  as the browser can tell (the server settles it on the first request otherwise). */
+export function canOfferTextTranslation(key, text) {
+  if (!translationServiceUrl()) return false;
+  const clean = String(text || "").trim();
+  if (clean.length < 8) return false;
+  const state = kapostTranslations.get(key);
+  if (state?.status === "unavailable") return false;
+  const languages = kapostLanguages;
+  if (languages && kapostLanguagesUrl === translationServiceUrl() && !languages.target.has(readerLanguage())) return false;
+  const detected = kapostDetected.get(strippedForDetection(clean));
+  if (detected === undefined) { detectLanguageSoon({ text: clean }); return false; }
+  if (detected && detected === readerLanguage()) return false;
+  return true;
+}
+export function textTranslationState(key) {
+  const state = kapostTranslations.get(key) || null;
+  return state ? { ...state, showingOriginal: kapostShowingOriginal.has(key) } : null;
+}
+/** The text to draw: the translation, unless the reader asked for the original. */
+export function translatedTextFor(key, original) {
+  const state = kapostTranslations.get(key);
+  if (state?.status !== "translated" || kapostShowingOriginal.has(key)) return original;
+  return state.text;
+}
+export function showOriginalText(key) { kapostShowingOriginal.add(key); notifyTranslationListeners(); }
+export function showTranslatedText(key) { kapostShowingOriginal.delete(key); notifyTranslationListeners(); }
+/** The reader's own language by name ("English"), for "Translate into English". */
+export function readerLanguageName() {
+  return languageDisplayName(readerLanguage());
+}
+export async function translateText(key, text) {
+  const existing = kapostTranslations.get(key);
+  if (existing?.status === "translating") return;
+  const base = translationServiceUrl();
+  if (!base) return;
+  kapostTranslations.set(key, { status: "translating" });
+  kapostShowingOriginal.delete(key);
+  notifyTranslationListeners();
+  await ensureTranslationLanguages();
+  const target = readerLanguage();
+  try {
+    const response = await fetch(`${base}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ target, posts: [{ text: String(text || "") }] }),
+      signal: AbortSignal.timeout ? AbortSignal.timeout(45_000) : undefined,
+    });
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try { message = (await response.json())?.error || message; } catch {}
+      const terminal = response.status >= 400 && response.status < 500;
+      kapostTranslations.set(key, terminal ? { status: "unavailable", reason: message } : { status: "failed" });
+    } else {
+      const entry = (await response.json())?.translations?.[0];
+      if (!entry || entry.error) {
+        kapostTranslations.set(key, { status: "unavailable", reason: entry?.error || "Translation unavailable" });
+      } else if (entry.untranslated || !entry.text || entry.source === target) {
+        kapostTranslations.set(key, { status: "unavailable", reason: "Already in your language" });
+        if (entry.source) kapostDetected.set(strippedForDetection(String(text || "")), String(entry.source).split("-")[0].toLowerCase());
+      } else {
+        kapostTranslations.set(key, { status: "translated", text: String(entry.text), sourceName: languageDisplayName(entry.source) });
+      }
+    }
+  } catch {
+    kapostTranslations.set(key, { status: "failed" });
+  }
+  notifyTranslationListeners();
 }
 
 /// "ru" -> "Russian", in the reader's own language, falling back to the code itself.

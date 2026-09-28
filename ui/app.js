@@ -1,6 +1,6 @@
 import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview } from "./kaposts.js";
+import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
@@ -945,7 +945,8 @@ const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile)\/[^
 const KACHAT_UNIVERSAL_LINK_HOST = "kachat.app";
 /** The kachat.app link to a person: reads cleanly without the kaspa: prefix. */
 function profileUniversalLink(address) {
-  return `https://${KACHAT_UNIVERSAL_LINK_HOST}/u/${String(address || "").replace(/^kaspa:/i, "")}`;
+  // One builder for your own link and anyone else's (iOS 44d5fa4): lowercased and trimmed.
+  return `https://${KACHAT_UNIVERSAL_LINK_HOST}/u/${String(address || "").trim().toLowerCase().replace(/^kaspa:/, "")}`;
 }
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
@@ -997,7 +998,8 @@ function openProfileLink(address) {
   const normalized = String(address || "").toLowerCase();
   if (!isValidKaspaAddressString(normalized)) return;
   setActiveAppTab("chats");
-  if (String(engine.address || "").toLowerCase() === normalized) return;
+  // Your own link shows your own card (iOS 95f50ca).
+  if (String(engine.address || "").toLowerCase() === normalized) { openChatInfoForAddress(engine.address); return; }
   const known = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === normalized);
   openChatInfoForAddress(known ? known.address : normalized);
 }
@@ -8437,7 +8439,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 59;
+const APP_BUILD = 60;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -13031,6 +13033,15 @@ function openChatInfo() {
 function openChatInfoForAddress(address) {
   if (!address) return;
   let contact = state.contacts.find((entry) => entry.address === address);
+  // Your own User Info (iOS 95f50ca): who you are - name, avatar, KNS profile, address, domains,
+  // share - and none of the per-contact rows. You are never added as your own contact.
+  if (!contact && engine.address && address === engine.address) {
+    const name = knsDomainForAddress(address) || shortAddress(address);
+    const createdAt = Date.now();
+    contact = { id: "self-transient", name, nameIsCustom: false, address, avatar: initialsFor(name), createdAt, updatedAt: createdAt, relationshipState: "self", handshakeTxid: "" };
+    openChatInfoFor(contact, null);
+    return;
+  }
   if (!contact) {
     const createdAt = Date.now();
     const name = groupSenderLabel(address) || shortAddress(address);
@@ -13074,8 +13085,25 @@ function openChatInfoFor(contact, conversationEntry) {
   // immediately below, so putting it in the bar as well said the same thing twice.
   const chatInfoTitle = document.querySelector("[data-chat-info-title]");
   if (chatInfoTitle) chatInfoTitle.textContent = "User Info";
-  const notificationsRow = document.querySelector('[data-chat-info-sheet="notifications"]');
-  if (notificationsRow) notificationsRow.hidden = false;
+  // Your own card (iOS 95f50ca): the per-contact rows and the name/photo editing have nothing to
+  // act on when the person is you; the header offers Done instead of Cancel/Save.
+  const isSelf = Boolean(engine.address) && contact.address === engine.address;
+  chatInfoOverlay.classList.toggle("self", isSelf);
+  for (const sheet of ["aliases", "notifications", "photos", "calls", "info"]) {
+    const row = document.querySelector(`[data-chat-info-sheet="${sheet}"]`);
+    if (row) row.hidden = isSelf;
+  }
+  const openChatRow = document.querySelector("[data-chat-info-open-chat]");
+  if (openChatRow) openChatRow.hidden = isSelf;
+  const cancelButton = document.querySelector("[data-chat-info-cancel]");
+  if (cancelButton) cancelButton.textContent = isSelf ? "Done" : "Cancel";
+  const saveButton = document.querySelector("[data-chat-info-save]");
+  if (saveButton) saveButton.hidden = isSelf;
+  const namePencil = document.querySelector("[data-chat-info-name-edit]");
+  if (namePencil) namePencil.hidden = isSelf;
+  if (chatInfoNameInput) chatInfoNameInput.readOnly = isSelf;
+  if (chatInfoPhotoPick) chatInfoPhotoPick.hidden = isSelf;
+  if (isSelf && chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = true;
   if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
@@ -20909,6 +20937,9 @@ queueMicrotask(async () => {
     explorerTxUrl,
     // Per-message avatars beside broadcast bubbles (1:1/group parity).
     avatarHtmlForAddress: (address, className = "message-avatar") => avatarHtmlForAnyAddress(address, className),
+    // Translate from the message menu (iOS 03e5128): the KaPosts service, public rooms only.
+    translation: { canOffer: canOfferTextTranslation, state: textTranslationState, textFor: translatedTextFor, showOriginal: showOriginalText, showTranslation: showTranslatedText, readerLanguageName, translate: translateText, onChange: onTranslationChange },
+    firstInternalLinkIn,
     // The avatar menu's destinations (iOS BroadcastChannelView.avatarButton).
     openUserInfo: (address) => openChatInfoForAddress(address),
     openChat: (address, name) => openChatWithAddress({ address, name }),

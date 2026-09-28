@@ -895,6 +895,23 @@ function buildMessageRow(m) {
   return row;
 }
 
+/** The bare text a message could be translated from: a plain or reply-wrapped text message, not a
+ *  photo, voice note or KaChat link card. Empty when there is nothing to translate. */
+function translatableText(m) {
+  const content = effectiveContent(activeChannel, m);
+  if (deps.parseImageEnvelope?.(m.content) || deps.parseAudioEnvelope?.(m.content)) return "";
+  const replyEnvelope = deps.parseReplyEnvelope?.(content) || null;
+  const text = String(replyEnvelope ? replyEnvelope.text : content || "").trim();
+  if (!text || text.startsWith("{")) return "";
+  if (deps.firstInternalLinkIn?.(text)) return "";
+  return text;
+}
+/** Per message AND per text: an edit changes the text, and a translation of the old text must not
+ *  show over the new one. */
+function translationKeyFor(m) {
+  const text = translatableText(m);
+  return `publicchat:${m.txId || m.id || ""}:${text.length}:${text.slice(0, 64)}`;
+}
 function buildMessageElement(m) {
   const mine = m.senderAddress === deps.engine.address;
   const el = document.createElement("div");
@@ -973,7 +990,10 @@ function buildMessageElement(m) {
   } else {
     const body = document.createElement("div");
     body.className = "broadcast-message-body";
-    const fullText = replyEnvelope ? replyEnvelope.text : shownContent;
+    const originalText = replyEnvelope ? replyEnvelope.text : shownContent;
+    // The translation while one is showing, otherwise the message (iOS 03e5128).
+    const translationKey = !mine && deps.translation ? translationKeyFor(m) : null;
+    const fullText = translationKey ? deps.translation.textFor(translationKey, originalText) : originalText;
     // Public rooms are where stray base64 and essays land: past 2000 bytes the bubble shows a
     // 500-character preview and opens in full on demand, as iOS does.
     const isLong = new TextEncoder().encode(String(fullText || "")).length > LONG_MESSAGE_BYTES;
@@ -998,6 +1018,27 @@ function buildMessageElement(m) {
       body.append(mark);
     }
     el.append(body);
+    // The line under a translated bubble, the same words KaPosts uses. Nothing at all until
+    // Translate is picked from the menu.
+    const tState = translationKey ? deps.translation.state(translationKey) : null;
+    if (tState) {
+      const note = document.createElement("div");
+      note.className = "broadcast-translate-note";
+      const link = (label, onClick) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "kaposts-translate-link";
+        button.textContent = label;
+        button.addEventListener("click", (event) => { event.stopPropagation(); onClick(); });
+        return button;
+      };
+      if (tState.status === "translating") note.textContent = "Translating…";
+      else if (tState.status === "failed") note.append(link("Translation unavailable - try again", () => deps.translation.translate(translationKey, translatableText(m))));
+      else if (tState.status === "unavailable") note.textContent = tState.reason || "Translation unavailable";
+      else if (tState.showingOriginal) note.append(link("Show translation", () => deps.translation.showTranslation(translationKey)));
+      else { note.append(`Translated from ${tState.sourceName || "another language"} · `); note.append(link("Show original", () => deps.translation.showOriginal(translationKey))); }
+      el.append(note);
+    }
     const previewable = urls.find((url) => deps.isPreviewableUrl?.(url));
     if (previewable) {
       const card = deps.buildLinkPreviewCard?.(previewable);
@@ -1191,6 +1232,20 @@ function openBroadcastMessageMenu(m, x, y) {
       label: "Copy Message", icon: icons.copy,
       onClick: () => deps.copyText?.(text).then(() => deps.showToast?.("Message copied.")).catch(() => {}),
     });
+  }
+  // Translate (iOS 03e5128): someone else's plain text, in a language other than the reader's.
+  // Public rooms only - the text is public already; 1:1 and group messages never leave the device.
+  const translation = deps.translation;
+  if (translation && !mine && !pending && translatableText(m)) {
+    const key = translationKeyFor(m);
+    const state = translation.state(key);
+    if (state?.status === "translated") {
+      items.push(state.showingOriginal
+        ? { label: "Show Translation", icon: icons.info, onClick: () => translation.showTranslation(key) }
+        : { label: "Show Original", icon: icons.info, onClick: () => translation.showOriginal(key) });
+    } else if ((!state || state.status === "failed") && translation.canOffer(key, translatableText(m))) {
+      items.push({ label: `Translate into ${translation.readerLanguageName()}`, icon: icons.info, onClick: () => translation.translate(key, translatableText(m)) });
+    }
   }
   if (!pending && deps.explorerTxUrl) {
     items.push({
@@ -2079,6 +2134,8 @@ export function openBroadcastChannelFromNotification(channel) {
 
 export function initBroadcasts(dependencies) {
   deps = dependencies;
+  // A translation landing, or the reader flipping original/translation, repaints the open room.
+  deps.translation?.onChange?.(() => { if (activeChannel) renderRoom(); });
   listEl = document.querySelector("[data-broadcast-list]");
   roomEl = document.querySelector("[data-broadcast-room]");
   roomTitleEl = document.querySelector("[data-broadcast-room-title]");
