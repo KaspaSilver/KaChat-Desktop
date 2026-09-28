@@ -1218,7 +1218,7 @@
             <p class="settings-group-label">Chats</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-copy"><strong>Quick Reactions</strong><small data-quick-reactions-preview>👍 ❤️ 😂 😮 😢 🙏</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong><small>Photos from someone you have not added or replied to wait behind a tap. Chat Info can always show a single contact's photos.</small></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
+              <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong><small>Photos from someone you have not added or replied to wait behind a tap. User Info can always show a single contact's photos.</small></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
             </div>
           </section>
 
@@ -2811,11 +2811,11 @@
     </section>
   </div>
 
-  <div class="account-overlay" data-chat-info-overlay hidden role="dialog" aria-modal="true" aria-label="Chat Info">
+  <div class="account-overlay" data-chat-info-overlay hidden role="dialog" aria-modal="true" aria-label="User Info">
     <div class="account-overlay-card">
       <header class="account-overlay-header">
         <button class="chat-info-header-button" type="button" data-chat-info-cancel>Cancel</button>
-        <h2 class="account-overlay-title" data-chat-info-title>Chat Info</h2>
+        <h2 class="account-overlay-title" data-chat-info-title>User Info</h2>
         <button class="chat-info-header-button accent" type="button" data-chat-info-save>Save</button>
       </header>
       <div class="account-overlay-body">
@@ -2869,6 +2869,12 @@
           <button class="chat-info-row" type="button" data-chat-info-open-chat>
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 3z"/></svg>
             <span class="chat-info-row-title">Open Chat</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <!-- This person's kachat.app profile link, the same link-only share your own Profile uses (iOS 95c3760). -->
+          <button class="chat-info-row" type="button" data-chat-info-share aria-label="Share this profile">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg>
+            <span class="chat-info-row-title">Share</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="address">

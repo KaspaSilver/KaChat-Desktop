@@ -991,26 +991,15 @@ function openKaChatInternalLink(link) {
   else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
   else if (link.kind === "profile") openProfileLink(link.address);
 }
-/** Someone's profile link: their chat if they are already a contact, otherwise the new-chat
- *  screen with the address filled in, one click from starting. Your own link lands on Chats. */
+/** Someone's profile link shows their User Info, contact or not (iOS 81df734); Open Chat is one
+ *  click from there. Your own link lands on Chats. */
 function openProfileLink(address) {
   const normalized = String(address || "").toLowerCase();
   if (!isValidKaspaAddressString(normalized)) return;
   setActiveAppTab("chats");
   if (String(engine.address || "").toLowerCase() === normalized) return;
-  const contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === normalized);
-  if (contact) {
-    let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
-    if (!conversationEntry) {
-      conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
-      state.conversations.push(conversationEntry);
-      persistState();
-    }
-    openConversation(conversationEntry.id);
-    return;
-  }
-  showContactModal();
-  setContactAddressValue(normalized);
+  const known = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === normalized);
+  openChatInfoForAddress(known ? known.address : normalized);
 }
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
@@ -1041,7 +1030,7 @@ function buildInternalLinkCard(link) {
   const subtitle = isPost
     ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
     : isProfile
-      ? (profileContact ? "Tap to open your chat." : "Tap to start a chat on KaChat.")
+      ? (profileContact ? "Tap to see their User Info." : "Tap to see their profile on KaChat.")
       : "Tap to open this KaChat public chat room.";
   const profileAvatar = isProfile ? (avatarHtmlForAnyAddress(link.address, "message-avatar") || "") : "";
   card.innerHTML = `<span class="internal-link-icon ${entry?.avatarHtml || profileAvatar ? "avatar" : ""}">${entry?.avatarHtml || profileAvatar || icon}</span>
@@ -8448,7 +8437,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 58;
+const APP_BUILD = 59;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -13029,7 +13018,7 @@ function openChatInfo() {
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const contact = contactForConversation(conversationEntry);
   if (!conversationEntry || !contact) return;
-  openChatInfoFor(contact, conversationEntry, { title: "Chat Info", showsNotifications: true });
+  openChatInfoFor(contact, conversationEntry);
 }
 
 /// iOS's "User Info": this same screen opened for someone who may not be a 1:1 thread of yours -
@@ -13060,10 +13049,12 @@ function openChatInfoForAddress(address) {
     persistState();
   }
   const conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id) || null;
-  openChatInfoFor(contact, conversationEntry, { title: "User Info", showsNotifications: false });
+  openChatInfoFor(contact, conversationEntry);
 }
 
-function openChatInfoFor(contact, conversationEntry, { title = "Chat Info", showsNotifications = true } = {}) {
+// The one screen for anyone's profile (iOS 95c3760, 49cb2b6): a 1:1 chat header, a group roster
+// row, a public chat sender and a chess player all open it with the same title and the same rows.
+function openChatInfoFor(contact, conversationEntry) {
   if (!contact || !chatInfoOverlay) return;
 
   chatInfoContactId = contact.id;
@@ -13079,14 +13070,12 @@ function openChatInfoFor(contact, conversationEntry, { title = "Chat Info", show
     if (chatInfoAvatarImage) { chatInfoAvatarImage.hidden = true; chatInfoAvatarImage.src = ""; }
   }
   if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
-  // "Chat Info", as iOS titles it - or "User Info" when opened for a group member. The contact's
-  // name is the heading of the card immediately below, so putting it in the bar as well said the
-  // same thing twice.
+  // "User Info", as iOS titles it everywhere. The contact's name is the heading of the card
+  // immediately below, so putting it in the bar as well said the same thing twice.
   const chatInfoTitle = document.querySelector("[data-chat-info-title]");
-  if (chatInfoTitle) chatInfoTitle.textContent = title;
-  // Per-contact notification settings describe a 1:1 thread, which User Info may not have.
+  if (chatInfoTitle) chatInfoTitle.textContent = "User Info";
   const notificationsRow = document.querySelector('[data-chat-info-sheet="notifications"]');
-  if (notificationsRow) notificationsRow.hidden = !showsNotifications;
+  if (notificationsRow) notificationsRow.hidden = false;
   if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
@@ -13333,6 +13322,20 @@ chatInfoOverlay?.addEventListener("click", (event) => {
   openChatInfoSheet(row.dataset.chatInfoSheet);
 });
 document.querySelector("[data-chat-info-sheet-close]")?.addEventListener("click", closeChatInfoSheet);
+// Shares this person's kachat.app profile link, the same link-only share your own Profile uses.
+document.querySelector("[data-chat-info-share]")?.addEventListener("click", async () => {
+  const address = chatInfoContactAddress;
+  if (!address) return;
+  const url = profileUniversalLink(address);
+  const contact = state.contacts.find((entry) => entry.address === address);
+  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : shortAddress(address));
+  if (typeof navigator.share === "function") {
+    try { await navigator.share({ title: name, url }); return; }
+    catch (error) { if (error?.name === "AbortError") return; }
+  }
+  try { await navigator.clipboard.writeText(url); showCopyToast("Profile link copied"); }
+  catch { showCopyToast(url); }
+});
 document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", () => {
   const address = chatInfoContactAddress;
   if (!address || address === engine.address) return;
