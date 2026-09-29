@@ -13,10 +13,10 @@
 # headers on WebDAV/OCS), and connect middleware only ran on the dev server. It is
 # now mounted on `configurePreviewServer` too, so the built site keeps it.
 #
-# The build runs at CONTAINER START rather than image build. Vite inlines every
-# VITE_ variable into the bundle at build time, and docker-compose passes
-# VITE_CHANGENOW_API_KEY as a run-time environment variable - baking the build
-# into the image would silently drop it. The build takes well under a second.
+# The build runs at CONTAINER START rather than image build, so every release is
+# built from the code that is actually in the container. The ChangeNOW key is
+# CHANGENOW_API_KEY, a run-time environment variable read by the relay on the
+# server; it is never inlined into the bundle.
 
 FROM node:22-alpine
 

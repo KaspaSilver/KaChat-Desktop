@@ -424,7 +424,19 @@ function retryPager(key) {
 // Feed data
 // ---------------------------------------------------------------------------
 
+/** A banner URL fit for a CSS url(): http(s) only, with every character that could close the
+ *  url() or the declaration percent-encoded (escapeHtml's entities are decoded before CSS). */
+function safeCssUrl(raw) {
+  const value = String(raw || "").trim();
+  if (!/^https?:\/\//i.test(value)) return "";
+  return value.replace(/["'()\\\s;<>]/g, (ch) => encodeURIComponent(ch));
+}
+const TX_ID_PATTERN = /^[0-9a-f]{64}$/i;
+const txIdOrNull = (value) => (TX_ID_PATTERN.test(String(value || "")) ? String(value) : null);
 function mapRemotePost(post) {
+  // Every id from the indexer is a transaction id, and they end up in markup: anything else is
+  // not a post, whatever a hostile or broken indexer sends.
+  if (!txIdOrNull(post?.id)) return null;
   const content = decodePostContent(post);
   const address = kaspaAddressFromPubkey(deps.engine, post.userPublicKey);
   if (content === null || !address) return null;
@@ -434,7 +446,7 @@ function mapRemotePost(post) {
     const quotedAddress = kaspaAddressFromPubkey(deps.engine, post.quote.referencedSenderPubkey);
     if (quotedText !== null && quotedAddress) {
       quoted = {
-        remoteId: post.quote.referencedContentId || null, text: stripKaChatMarker(quotedText), posterAddress: quotedAddress,
+        remoteId: txIdOrNull(post.quote.referencedContentId), text: stripKaChatMarker(quotedText), posterAddress: quotedAddress,
         timestamp: Number(post.quote.timestamp) || null,
       };
     }
@@ -455,7 +467,7 @@ function mapRemotePost(post) {
     remoteReplyCount: post.repliesCount || 0,
     comments: [],
     quoted,
-    parentRemoteId: post.parentPostId || null,
+    parentRemoteId: txIdOrNull(post.parentPostId),
     delivery: "sent",
     // Set by the indexer once an edit was accepted; the cell shows "· edited".
     editedAt: post.editedAt ? Number(post.editedAt) || null : null,
@@ -2648,7 +2660,7 @@ function renderPanel() {
       : remoteItems;
     panelBodyEl.innerHTML = `
       <div class="kaposts-profile-hero">
-        <div class="kaposts-profile-banner"${profile?.bannerUrl ? ` style="background-image:url('${deps.escapeHtml(profile.bannerUrl)}')"` : ""}></div>
+        <div class="kaposts-profile-banner"${safeCssUrl(profile?.bannerUrl) ? ` style="background-image:url('${deps.escapeHtml(safeCssUrl(profile.bannerUrl))}')"` : ""}></div>
         <div class="kaposts-profile-row">
           ${posterAvatarHtml(address)}
           <div class="kaposts-profile-meta">
@@ -3829,7 +3841,7 @@ async function scheduleForLater(text, notBefore) {
   deps.showToast?.("Signing the post…");
   let built;
   try {
-    built = await buildScheduledPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text), reservedOutpoints: reservedOutpoints() });
+    built = await buildScheduledPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text), reservedOutpoints });
   } catch (error) {
     deps.appendEngineLog?.(`KaPost schedule build failed: ${error.message}`);
     deps.showToast?.(`Couldn't schedule: ${userFacingError(error)}`);
@@ -4148,7 +4160,10 @@ function detectLanguageSoon(post) {
         }
       } catch { code = ""; }
     }
-    if (kapostDetected.size > KAPOSTS_DETECT_CACHE_LIMIT) kapostDetected.clear();
+    // Oldest out, not everything: clearing the whole cache made the next render re-detect every
+    // post on screen, whose results refilled it past the limit and cleared it again - a repaint
+    // loop on a long feed.
+    while (kapostDetected.size >= KAPOSTS_DETECT_CACHE_LIMIT * 4) kapostDetected.delete(kapostDetected.keys().next().value);
     kapostDetected.set(stripped, code);
     kapostDetecting.delete(stripped);
     scheduleDetectionRepaint();

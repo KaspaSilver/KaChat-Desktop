@@ -7,7 +7,9 @@
 //   2. Show notifications on iOS. A home-screen web app on iOS 16.4+ gets the Notification
 //      permission, but `new Notification()` throws there; the only way to show one is through
 //      this worker (see notificationclick below and showAppNotification in ui/app.js).
-const CACHE = "kachat-shell-v1";
+// Bumped per release that changes the shell: the old name is deleted on activate, which is
+// what clears the previous release's hashed assets out of the cache.
+const CACHE = "kachat-shell-v2";
 
 self.addEventListener("install", () => {
   self.skipWaiting();

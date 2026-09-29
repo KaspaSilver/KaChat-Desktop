@@ -82,6 +82,7 @@ export function normalizeBroadcastChannel(rawName) {
 }
 
 export function isValidBroadcastChannel(name) {
+  if (name === "__proto__" || name === "constructor" || name === "prototype") return false;
   return name.length > 0 && name.length <= 36 && !/[\s:]/.test(name);
 }
 

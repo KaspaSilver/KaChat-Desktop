@@ -9,6 +9,7 @@
 // stays on the KasSigner device.
 
 import { getEndpoint } from "../engine/endpoints.js";
+import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import {
@@ -2303,7 +2304,7 @@ async function loadDetail({ useCache = true } = {}) {
 
   let derived = [];
   try { derived = deriveReceiveAddresses(account.kpub, 0, account.maxIndex + 1); }
-  catch (error) { deps.showToast?.(error.message); return; }
+  catch (error) { deps.showToast?.(userFacingError(error)); return; }
 
   // Seed from the session cache and the persisted per-account cache, so a reopened
   // account paints last-known balances/badges immediately instead of a wall of "…".

@@ -238,6 +238,9 @@ setChatStorageFlushErrorHandler((error) => {
   try { handleChatStorageFlushError(error); } catch (fallbackError) { console.error(fallbackError); }
 });
 
+// Read by the load-time restore below (buildFullyRestoredState), so it is declared up here: the
+// build lowers top-level const to var, and a later declaration reads undefined at load.
+const DELETED_CONTACTS_KEY = "kachat-deleted-contacts-v1";
 let state = loadStoredState();
 
 function subscriptionContactAddresses() {
@@ -323,6 +326,7 @@ const CONTACT_STASH_MAX_PER_FLUSH = 3;
 let contactStashState = null;        // { wallet, known: Set, complete, pending: [address] }
 let contactStashFlushing = false;
 let contactNotesReadBackFor = null;  // the wallet this session already read back for
+let contactNotesRetryAt = 0;         // after a failed read-back, not before this time
 // Everything with a block time before this instant is history, whatever sweep happens to
 // deliver it: no banner, no unread. The catch-up flag above only covers the FIRST sweep, and a
 // freshly imported account's history spans many - one page per conversation per sweep, and
@@ -782,6 +786,25 @@ function removeAccountScopedLocalData(address) {
   if (localStorage.getItem(ACTIVE_ACCOUNT_KEY) === cleanAddress) {
     localStorage.removeItem(ACTIVE_ACCOUNT_KEY);
   }
+
+  // The chats themselves live in IndexedDB once it is available (ui/storage.js), not under the
+  // localStorage prefix above - without this, re-importing the seed brought every chat back.
+  for (const baseKey of [STORAGE_KEY, MESSAGE_HISTORY_KEY, STATE_BACKUP_KEY]) {
+    try { chatStorageRemoveSync(accountScopedKey(baseKey, cleanAddress)); } catch { /* not stored */ }
+  }
+  // Groups (records with their keys, messages, reactions, edits, unread, hidden members) are kept
+  // in global stores bucketed by wallet. A pending group-message write must not put them back.
+  if (groupMsgSaveTimer) { window.clearTimeout(groupMsgSaveTimer); groupMsgSaveTimer = 0; }
+  groupMsgAllCache = null;
+  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY]) {
+    try {
+      const all = JSON.parse(localStorage.getItem(key) || "null");
+      if (all && typeof all === "object" && Object.prototype.hasOwnProperty.call(all, cleanAddress)) {
+        delete all[cleanAddress];
+        localStorage.setItem(key, JSON.stringify(all));
+      }
+    } catch { /* leave a store we cannot read */ }
+  }
 }
 
 function removeSavedAccountFromDevice(account) {
@@ -985,6 +1008,7 @@ function parseKaChatInternalLink(raw) {
     return { kind: "kapost", txId: id };
   }
   const channel = payload.trim().replace(/^#/, "").toLowerCase();
+  if (isUnsafeObjectKey(channel)) return null;
   if (!channel || channel.length > 36 || /[\s:/\\?#%@]/.test(channel) || channel.includes("..") || /[\u0000-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/.test(channel)) return null;
   return { kind: "broadcast", channel };
 }
@@ -997,7 +1021,8 @@ function firstInternalLinkIn(text) {
 // Opens the target screen (iOS KaChatLinkRouter) - never the browser for an in-app target.
 function openKaChatInternalLink(link) {
   if (!link) return;
-  if (isChildModeEnabled()) { showCopyToast("Not available in Simple Mode."); return; }
+  // Simple Mode hides KaPosts and Public Chats; a profile opens User Info, which Chats keeps.
+  if (isChildModeEnabled() && link.kind !== "profile") { showCopyToast("Not available in Simple Mode."); return; }
   if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
   else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
   else if (link.kind === "profile") openProfileLink(link.address);
@@ -1950,7 +1975,7 @@ async function revealChatInfoAlias(which) {
       chatInfoRevealedAliases = await engine.deriveConversationAliases(chatInfoContactAddress);
     }
   } catch (error) {
-    showCopyToast(`Could not derive aliases: ${error.message}`);
+    showCopyToast(`Could not derive aliases: ${userFacingError(error)}`);
     return;
   }
   const el = which === "receiving" ? chatInfoAliasReceiving : chatInfoAliasSending;
@@ -2576,6 +2601,12 @@ function contactForConversation(conversationEntry) {
  *  "new contacts" the photo-approval setting is about. */
 function isAcceptedContact(contact, conversationEntry = null) {
   if (!contact) return false;
+  // Kept only because you looked at their User Info (a profile link, a group roster, a room):
+  // not accepted until you save them or open a chat and write.
+  if (contact.viewedOnly) {
+    const entry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
+    return (entry?.messages || []).some((message) => message?.direction === "outgoing" && message?.messageType !== "handshake");
+  }
   const relationship = String(contact.relationshipState || "");
   if (relationship !== "incoming-request" && relationship !== "declined") return true;
   const entry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
@@ -2882,7 +2913,6 @@ function hydrateConversationMessages(conversationEntry) {
 // restore path (desktop snapshot, phone archive, shared kachat-backup.json merge)
 // honors the list so a deleted chat can never resurrect from a backup. Manually
 // re-adding the contact clears its tombstone.
-const DELETED_CONTACTS_KEY = "kachat-deleted-contacts-v1";
 
 /// When each deleted address was deleted, in ms. Stored as a map; an older install's plain array
 /// of addresses still reads, with a 0 stamp meaning "deleted at an unknown time", which suppresses
@@ -3634,7 +3664,14 @@ function appendEngineLog(message) {
     if (trace) { trace.textContent = line; trace.hidden = false; }
   }
   if (!engineLog) return;
-  engineLog.textContent = `${line}\n${engineLog.textContent}`.trim();
+  // Capped to the newest 400 lines (what the diagnostics export keeps): unbounded, every append
+  // copied the whole log and a long-running session grew without limit.
+  const previous = engineLog.textContent;
+  let cut = -1;
+  for (let i = 0, n = 0; i < previous.length; i += 1) {
+    if (previous.charCodeAt(i) === 10 && ++n === 399) { cut = i; break; }
+  }
+  engineLog.textContent = `${line}\n${cut >= 0 ? previous.slice(0, cut) : previous}`.trim();
 }
 
 async function copyTextToClipboard(value) {
@@ -4143,7 +4180,7 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
   handshakeSyncState.walletAddress = engine.address;
   handshakeSyncState.cursor = Math.max(Number(handshakeSyncState.cursor || 0), Number(result.nextCursor || 0));
   persistHandshakeSyncState();
-  appendEngineLog(`Incoming handshake audit: ${result.indexerScannedCount || 0} indexer row(s), ${result.restScannedCount || 0} REST row(s), ${added} new request(s)${result.errors?.length ? ` · ${result.errors.join(" | ")}` : ""}.`);
+  if (added || result.errors?.length) appendEngineLog(`Incoming handshake audit: ${result.indexerScannedCount || 0} indexer row(s), ${result.restScannedCount || 0} REST row(s), ${added} new request(s)${result.errors?.length ? ` · ${result.errors.join(" | ")}` : ""}.`);
   if (added) {
     refreshSubscriptionAddresses({ restart: true });
     persistState();
@@ -4426,7 +4463,7 @@ async function refreshAllConversations({ quiet = true } = {}) {
     // minute, a success snaps it back (this used to sit after the return and never ran).
     lastSweepFailed = sweepFailures > 0;
     // Saved contacts: read back once per session after the first sweep, then drain what is queued.
-    if (contactNotesReadBackFor !== (engine.address || "")) readBackContactNotes().catch(() => {});
+    if (contactNotesReadBackFor !== (engine.address || "") && Date.now() >= contactNotesRetryAt) readBackContactNotes().catch(() => {});
     else if (contactStash().pending.length) flushContactStashQueue().catch(() => {});
   }
 }
@@ -4571,7 +4608,7 @@ const NOTIF_SESSION_START = Date.now();
 const notifOverlay = document.querySelector("[data-notif-overlay]");
 let globalNotifications = [];
 let notifCenterLastSeenAt = 0;
-const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Broadcast", wallet: "Wallet" };
+const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Public Chats", wallet: "Wallet" };
 // The Profile bell is for broadcasts and for Kaspa arriving on your addresses (chatting,
 // spending, cold storage). KaPosts has its own bell inside KaPosts, and group @mentions ping
 // the chat itself, so neither lands here.
@@ -7218,7 +7255,7 @@ async function consolidateSpendingDetailUtxos() {
   if (!address || spendingConsolidateInFlight) return;
   if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase, so consolidation isn't available."); return; }
   let balance;
-  try { balance = await engine.balanceForAddress(address); } catch (error) { showCopyToast(`Could not load balance: ${error.message}`); return; }
+  try { balance = await engine.balanceForAddress(address); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
   if (entries.length < 2) { showCopyToast("Nothing to consolidate — this address has a single UTXO."); return; }
   const maxKas = Number(balance.totalKas) - 0.001; // headroom for the network fee (many inputs)
@@ -7240,7 +7277,7 @@ async function consolidateSpendingDetailUtxos() {
     if (spendingDetailAddress === address) loadSpendingDetailUtxos(address);
     refreshSpendingSummary?.();
   } catch (error) {
-    showCopyToast(`Consolidation failed: ${error.message}`);
+    showCopyToast(`Consolidation failed: ${userFacingError(error)}`);
   } finally {
     spendingConsolidateInFlight = false;
   }
@@ -8453,7 +8490,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 63;
+const APP_BUILD = 64;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -9431,7 +9468,7 @@ async function consolidateManageAddressUtxos() {
   const address = engine.address;
   if (!address) return;
   let balance;
-  try { balance = await engine.balance(); } catch (error) { showCopyToast(`Could not load balance: ${error.message}`); return; }
+  try { balance = await engine.balance(); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
   if (entries.length < 2) { showCopyToast("Nothing to consolidate — this address has a single UTXO."); return; }
   const maxKas = Number(balance.totalKas) - 0.001; // headroom for the network fee (many inputs)
@@ -9445,7 +9482,7 @@ async function consolidateManageAddressUtxos() {
     loadManageAddressUtxos();
     refreshBalanceOnly?.({ quiet: true });
   } catch (error) {
-    showCopyToast(`Consolidation failed: ${error.message}`);
+    showCopyToast(`Consolidation failed: ${userFacingError(error)}`);
   } finally {
     manageConsolidateInFlight = false;
   }
@@ -9964,7 +10001,7 @@ document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("c
     if (!key) { showCopyToast("Could not derive this address's private key."); return; }
     openPrivatekeyModal(key, `This is the private key for spending address #${spendingDetailIndex}. Anyone with it can spend from this address — never share it.`);
   } catch (error) {
-    showCopyToast(`Could not derive private key: ${error.message}`);
+    showCopyToast(`Could not derive private key: ${userFacingError(error)}`);
   }
 });
 document.querySelectorAll("[data-close-privatekey]").forEach((button) => button.addEventListener("click", closePrivatekeyModal));
@@ -11647,7 +11684,7 @@ document.querySelector("[data-recover-conversations]")?.addEventListener("click"
     appendEngineLog(`Recovery scan complete: ${scanned} self-stash record(s) found, ${recovered} new conversation(s) recovered.`);
     showCopyToast(recovered > 0 ? `Recovered ${recovered} conversation${recovered === 1 ? "" : "s"}` : "No new conversations found");
   } catch (error) {
-    showCopyToast(`Recovery failed: ${error.message}`);
+    showCopyToast(`Recovery failed: ${userFacingError(error)}`);
   } finally {
     button.disabled = false;
   }
@@ -12879,7 +12916,10 @@ function renderMessages(conversationEntry) {
       openQuickReactionBar(conversationEntry, message, bubble);
     });
 
-    const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: chessRetryFits(conversationEntry, message) ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
+    // Only a failed message of yours can be retried, so only that one pays for the chess check
+    // (which replays the whole game).
+    const retryable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED && chessRetryFits(conversationEntry, message);
+    const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: retryable ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
     if (detachedLinkCard || typeCapsule) {
       const stack = document.createElement("div");
@@ -12938,10 +12978,6 @@ messageArea?.addEventListener("scroll", () => {
   if (!conversationEntry) return;
   extendMessageWindow(messageArea, `c:${conversationEntry.id}`, () => renderMessages(conversationEntry));
 }, { passive: true });
-groupMessageArea?.addEventListener("scroll", () => {
-  if (groupMessageArea.scrollTop > 60 || Number(groupMessageArea.dataset.hiddenCount || 0) === 0 || !activeGroupId) return;
-  extendMessageWindow(groupMessageArea, `g:${activeGroupId}`, renderGroupMessages);
-}, { passive: true });
 
 function openConversation(conversationId) {
   messageSelectionMode = false;
@@ -12970,7 +13006,7 @@ function openConversation(conversationId) {
   // both ways — the no-handshake warning shouldn't keep showing once that's
   // true, even if this is the first time re-opening the conversation since.
   promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { persist: false });
-  persistState();
+  schedulePersistState(); // only the unread count changed; do not hold up the chat opening
 
   // Keep the sidebar list in sync (new/updated conversation row, unread badge)
   // now that it stays visible alongside the open conversation at wide widths.
@@ -13069,6 +13105,7 @@ function openChatInfoForAddress(address) {
       updatedAt: createdAt,
       relationshipState: "legacy-manual",
       handshakeTxid: "",
+      viewedOnly: true,
     };
     state.contacts.push(contact);
     persistState();
@@ -13296,6 +13333,7 @@ function closeChatInfo() {
 function saveChatInfo() {
   const contact = state.contacts.find((entry) => entry.id === chatInfoContactId);
   if (contact) {
+    delete contact.viewedOnly; // saved on purpose: a contact now
     const trimmed = String(chatInfoNameInput?.value || "").trim();
     // A non-empty typed value is always a deliberate override; clearing the
     // field back to nothing reverts to auto-naming (KNS primary domain, or
@@ -13381,6 +13419,8 @@ document.querySelector("[data-chat-info-share]")?.addEventListener("click", asyn
 document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", () => {
   const address = chatInfoContactAddress;
   if (!address || address === engine.address) return;
+  const viewed = state.contacts.find((entry) => entry.address === address);
+  if (viewed?.viewedOnly) { delete viewed.viewedOnly; schedulePersistState(); }
   closeChatInfo();
   openOrCreateOneToOne(address);
 });
@@ -13524,7 +13564,7 @@ chatInfoPhotoInput?.addEventListener("change", async () => {
     setStatus("Contact photo updated");
   } catch (error) {
     setStatus(`Could not set photo: ${error.message}`);
-    showCopyToast(`Could not set photo. ${error.message}`);
+    showCopyToast(`Could not set photo. ${userFacingError(error)}`);
   }
 });
 chatInfoRemovePhoto?.addEventListener("click", () => {
@@ -14170,10 +14210,10 @@ function contactStash() {
   };
   return contactStashState;
 }
-function saveContactStash() {
-  const s = contactStash();
-  if (!s.wallet) return;
-  try { localStorage.setItem(accountScopedKey(CONTACT_STASH_KEY), JSON.stringify({ known: [...s.known], complete: s.complete, pending: s.pending })); } catch { /* fine */ }
+function saveContactStash(s = contactStash()) {
+  if (!s?.wallet) return;
+  // Always under the wallet the state belongs to, even if the active account changed meanwhile.
+  try { localStorage.setItem(accountScopedKey(CONTACT_STASH_KEY, s.wallet), JSON.stringify({ known: [...s.known], complete: s.complete, pending: s.pending })); } catch { /* fine */ }
 }
 function noteContactStashed(address) {
   const s = contactStash();
@@ -14210,17 +14250,22 @@ async function flushContactStashQueue() {
     for (let sent = 0; sent < CONTACT_STASH_MAX_PER_FLUSH && s.pending.length; sent += 1) {
       if (engine.address !== wallet) return;
       const address = s.pending[0];
+      // Marked as noted when it is submitted, not after (iOS a1b89bd): a switch or a reload while
+      // the send is in flight must not leave it queued to be sent a second time.
+      s.pending.shift();
+      s.known.add(address);
+      saveContactStash(s);
       try {
         const envelope = await engine.createSelfStashEnvelope({ partnerAddress: address, contactOnly: true });
         const result = await engine.sendSelfStashOnchain({ envelope });
-        if (engine.address !== wallet) return;
-        s.pending.shift();
-        s.known.add(address);
-        saveContactStash();
         appendEngineLog(`Contact note saved on-chain: ${result.txid || ""}`);
       } catch (error) {
+        // Not sent: back in the queue for the next pass.
+        s.known.delete(address);
+        if (!s.pending.includes(address)) s.pending.unshift(address);
+        saveContactStash(s);
         appendEngineLog(`Contact note deferred (non-fatal): ${error.message}`);
-        return; // the next pass tries again
+        return;
       }
     }
   } finally {
@@ -14277,7 +14322,9 @@ async function readBackContactNotes() {
     if (complete) backfillContactStashes();
     flushContactStashQueue().catch(() => {});
   } catch (error) {
-    contactNotesReadBackFor = null; // the next sweep tries again
+    // Tried again in five minutes, not on every 5 s sweep: the read-back pages the whole history.
+    contactNotesReadBackFor = null;
+    contactNotesRetryAt = Date.now() + 5 * 60_000;
     appendEngineLog(`Saved contact read-back failed (non-fatal): ${error.message}`);
   }
 }
@@ -14490,7 +14537,7 @@ showSettingsCategory(null);
 // with a way to drop any of it. Nothing here is user data.
 // ---------------------------------------------------------------------------
 function cacheCategoryDefs() { return [
-  { id: "broadcasts", title: "Broadcast History", detail: "Messages and reactions from public broadcast channels.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
+  { id: "broadcasts", title: "Public Chats History", detail: "Messages and reactions from Public Chats.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
   { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
   { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
   { id: "kns", title: "KNS Profiles", detail: "Names and profile details looked up for addresses.", match: (k) => k.startsWith("kachat-kns-") && k.includes("cache") },
@@ -15331,7 +15378,9 @@ function updateMessageStatus(conversationId, messageId, patch) {
   applyMessagePatch(message, patch);
   conversationEntry.updatedAt = Date.now();
   conversationEntry.lastActivityAt = Math.max(conversationEntry.lastActivityAt, message.updatedAt);
-  persistState();
+  // Debounced: a send walks through several status steps, and each used to write the whole
+  // state synchronously. Unload and tab-hide still flush it at once.
+  schedulePersistState();
   if (activeConversationId === conversationId) renderMessages(conversationEntry);
   if (activeConversationId !== conversationId) renderChats();
 }
@@ -16829,7 +16878,7 @@ async function sendChatVoicePreview() {
       setStatus("Voice note sent via Nextcloud.");
       return;
     } catch (error) {
-      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
     }
   }
 
@@ -16984,6 +17033,9 @@ function replyPreviewTextFor(message) {
 // original with an "edited" mark. Only the original sender's edits count, newest by block time
 // wins, text only (a reply keeps its quote), 4 000 characters at most.
 const MESSAGE_EDIT_MAX_LENGTH = 4000;
+// Keys that come off the network are used as object keys in several stores; these three would
+// reach Object.prototype instead of a property of the store.
+function isUnsafeObjectKey(key) { return key === "__proto__" || key === "constructor" || key === "prototype"; }
 function parseEditEnvelope(text) {
   const trimmed = String(text || "").trim();
   if (!trimmed.startsWith("{") || trimmed.length > 100000) return null;
@@ -16991,7 +17043,7 @@ function parseEditEnvelope(text) {
     const parsed = JSON.parse(trimmed);
     if (!parsed || parsed.type !== "edit") return null;
     const targetTxId = String(parsed.targetTxId || "");
-    if (!targetTxId) return null;
+    if (!targetTxId || targetTxId.length > 200 || isUnsafeObjectKey(targetTxId)) return null;
     return { targetTxId, text: String(parsed.text ?? "").slice(0, MESSAGE_EDIT_MAX_LENGTH) };
   } catch { return null; }
 }
@@ -17042,7 +17094,7 @@ function parseReactionEnvelope(text) {
     if (!parsed || parsed.type !== "reaction") return null;
     const targetTxId = String(parsed.targetTxId || "");
     const emoji = String(parsed.emoji || "");
-    if (!targetTxId || !emoji) return null;
+    if (!targetTxId || !emoji || targetTxId.length > 200 || isUnsafeObjectKey(targetTxId)) return null;
     return { targetTxId, emoji, action: parsed.action === "remove" ? "remove" : "add" };
   } catch {
     return null;
@@ -17173,7 +17225,7 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
   if (edit) {
     const editorAddress = message.direction === "outgoing" ? (engine.address || "") : (message.sender || "");
     if (applyLocalEdit(conversationEntry, edit.targetTxId, editorAddress, edit.text, messageEventTime(message))) {
-      persistState();
+      schedulePersistState();
       if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
       renderChats();
     }
@@ -17184,7 +17236,9 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
     const reactorAddress = message.direction === "outgoing" ? (engine.address || "") : (message.sender || "");
     if (reaction.action === "add") applyLocalReaction(conversationEntry, reaction.targetTxId, reactorAddress, reaction.emoji, messageEventTime(message));
     else removeLocalReaction(conversationEntry, reaction.targetTxId, reactorAddress);
-    persistState();
+    // Debounced: a first sync or a rewind can bring hundreds of reactions, and each wrote the
+    // whole state synchronously.
+    schedulePersistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     renderChats();
     return null;
@@ -18478,7 +18532,7 @@ composer.addEventListener("submit", async (event) => {
         setStatus("Photo sent via Nextcloud.");
         return;
       } catch (error) {
-        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
       }
     }
     queueConversationMessage(activeConversationId, buildImageEnvelopeJson(attachment));
@@ -20648,7 +20702,7 @@ function exportDiagnosticsFile() {
     downloadBlob(`kachat-diagnostics-${stamp}.json`, "application/json", JSON.stringify(archive, null, 2));
     showCopyToast("Diagnostics archive exported.");
   } catch (error) {
-    showCopyToast(`Diagnostics export failed: ${error.message}`);
+    showCopyToast(`Diagnostics export failed: ${userFacingError(error)}`);
   }
 }
 
@@ -20684,11 +20738,6 @@ Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
   document.querySelectorAll(`[data-shell-action="${action}"]`).forEach((button) => button.addEventListener("click", handler));
 });
 
-// Remaining shell-action buttons with no dedicated handler yet show a placeholder toast.
-document.querySelectorAll('[data-shell-action]:not([data-shell-action="logout"]):not([data-shell-action="view-recovery"]):not([data-shell-action="resync"]):not([data-shell-action="wipe-all"]):not([data-shell-action="delete-account"]):not([data-shell-action="export-history"]):not([data-shell-action="import-history"]):not([data-shell-action="diagnostics-export"])').forEach((button) => button.addEventListener("click", () => {
-  const label = button.querySelector("strong")?.textContent?.trim() || "This control";
-  showCopyToast(`${label} frame ready`);
-}));
 
 document.querySelector("[data-logged-out-create]")?.addEventListener("click", openCreateAccountModal);
 
@@ -21090,6 +21139,8 @@ queueMicrotask(async () => {
     explorerTxUrl,
     // Per-message avatars beside broadcast bubbles (1:1/group parity).
     avatarHtmlForAddress: (address, className = "message-avatar") => avatarHtmlForAnyAddress(address, className),
+    buildTapToLoadCard: (url, onApproved) => buildTapToLoadCard(url, null, onApproved),
+    previewApproved: (url) => linkPreviewCache.has(url) || approvedPreviewUrls.has(url),
     // Translate from the message menu (iOS 03e5128): the KaPosts service, public rooms only.
     translation: { canOffer: canOfferTextTranslation, state: textTranslationState, textFor: translatedTextFor, showOriginal: showOriginalText, showTranslation: showTranslatedText, readerLanguageName, translate: translateText, onChange: onTranslationChange },
     firstInternalLinkIn,
@@ -21229,7 +21280,9 @@ queueMicrotask(async () => {
     importNextcloudContacts,
   });
 
-  initChessTournaments({
+  // Chess Online is one screen: whatever goes wrong there must not stop the rest of startup.
+  try { initChessTournamentsSafe(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
+  function initChessTournamentsSafe() { initChessTournaments({
     engine,
     escapeHtml,
     showToast: showCopyToast,
@@ -21246,7 +21299,7 @@ queueMicrotask(async () => {
     avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
     estimateFeeKas: (payloadBytes, opts) => engine.estimateMessageFee(payloadBytes, opts),
     openUserInfo: (address) => openChatInfoForAddress(address),
-  });
+  }); }
 
   Calls.initCalls({
     engine,
@@ -21976,6 +22029,13 @@ const groupChatName = document.querySelector("[data-group-chat-name]");
 const groupChatSub = document.querySelector("[data-group-chat-sub]");
 const groupChatAvatar = document.querySelector("[data-group-chat-avatar]");
 const groupMessageArea = document.querySelector("[data-group-message-area]");
+// Scrolling to the top of a group thread opens its window further. Attached here, after the
+// element is looked up: the build lowers top-level const to var, so attaching it earlier in the
+// module read undefined and the group thread never loaded older messages on scroll.
+groupMessageArea?.addEventListener("scroll", () => {
+  if (groupMessageArea.scrollTop > 60 || Number(groupMessageArea.dataset.hiddenCount || 0) === 0 || !activeGroupId) return;
+  extendMessageWindow(groupMessageArea, `g:${activeGroupId}`, renderGroupMessages);
+}, { passive: true });
 const groupMessageEmpty = document.querySelector("[data-group-message-empty]");
 const groupComposer = document.querySelector("[data-group-composer]");
 const groupComposerInput = document.querySelector("[data-group-composer-input]");
@@ -23596,7 +23656,12 @@ async function syncGroupsNow({ catchUp = false } = {}) {
       appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was removed from the group chat`, Date.now(), `sys:${ev.groupId}:${ev.epoch}:rem:${addr}`);
     }
   }
-  if ((result.controls || []).length) changed++;
+  // Only events that changed something repaint: an unchanged photo or an epoch notice is not news.
+  for (const ev of result.controls || []) {
+    if (!ev || ev.kind === "epoch-notice") continue;
+    if (ev.kind === "photo-updated" && !ev.changed) continue;
+    changed++;
+  }
   if (changed) {
     if (activeGroupId) renderGroupMessages();
     renderGroupList();
@@ -24067,7 +24132,7 @@ groupComposer?.addEventListener("submit", async (event) => {
         const url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
         sendGroupWire(url);
       } catch (error) {
-        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
         sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
       }
     } else {
@@ -24253,7 +24318,7 @@ async function sendGroupVoicePreview() {
       await sendGroupWire(url);
       return;
     } catch (error) {
-      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
     }
   }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
@@ -24415,7 +24480,7 @@ groupManageBody?.addEventListener("click", async (event) => {
         setStatus("Group photo updated");
       } catch (error) {
         setStatus(`Could not set group photo: ${error.message}`);
-        showCopyToast(`Could not set group photo. ${error.message}`);
+        showCopyToast(`Could not set group photo. ${userFacingError(error)}`);
       }
     });
     input.click();
@@ -24473,7 +24538,7 @@ groupManageBody?.addEventListener("click", async (event) => {
       showCopyToast("Invite resent.");
     } catch (error) {
       setStatus(`Invite failed: ${error.message}`);
-      showCopyToast(`Invite failed. ${error.message}`);
+      showCopyToast(`Invite failed. ${userFacingError(error)}`);
     } finally {
       resendOne.disabled = false;
     }
@@ -24496,7 +24561,7 @@ groupManageBody?.addEventListener("click", async (event) => {
       showCopyToast("Invites resent to all members.");
     } catch (error) {
       setStatus(`Some invites still failed: ${error.message}`);
-      showCopyToast(`Some invites still failed. ${error.message}`);
+      showCopyToast(`Some invites still failed. ${userFacingError(error)}`);
     } finally {
       resend.disabled = false;
     }
@@ -24570,7 +24635,7 @@ groupManageBody?.addEventListener("click", async (event) => {
     }
   } catch (error) {
     setStatus(`Group action failed: ${error.message}`);
-    showCopyToast(`Group action failed. ${error.message}`);
+    showCopyToast(`Group action failed. ${userFacingError(error)}`);
   }
 });
 

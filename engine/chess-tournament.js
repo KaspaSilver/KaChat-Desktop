@@ -97,6 +97,10 @@ export function encodeMessage(message) {
 }
 
 /** Cheap gate first (this runs over every arena row), then the decode. */
+const ID_PATTERN = /^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9_-]{1,64}$/;
+/** A dictionary that has no prototype, for keys that come off the network. */
+const dict = () => Object.create(null);
+
 export function decodeMessage(content) {
   const text = String(content || "");
   if (text.length > 2048 || !text.startsWith("{") || !text.includes('"chess_t"')) return null;
@@ -104,7 +108,10 @@ export function decodeMessage(content) {
   try { parsed = JSON.parse(text); } catch { return null; }
   if (!parsed || typeof parsed !== "object") return null;
   if (parsed.type !== "chess_t" || parsed.v !== 1) return null;
-  if (typeof parsed.t !== "string" || !parsed.t || parsed.t.length > 64) return null;
+  // Ids are plain slugs: anything else (a "__proto__", "constructor", markup) is not a room or a
+  // game, and as an object key it could reach Object.prototype.
+  if (typeof parsed.t !== "string" || !ID_PATTERN.test(parsed.t)) return null;
+  if (parsed.g != null && (typeof parsed.g !== "string" || !ID_PATTERN.test(parsed.g))) return null;
   if (typeof parsed.a !== "string") return null;
   const str = (v) => (typeof v === "string" ? v : null);
   return {
@@ -246,13 +253,16 @@ export function ordered(events) {
 }
 
 export function reduce(events) {
-  const tournaments = {};
-  for (const event of ordered(events)) apply(event, tournaments);
+  const tournaments = dict();
+  for (const event of ordered(events)) {
+    // One malformed event must never take the whole arena down with it.
+    try { apply(event, tournaments); } catch { /* skipped */ }
+  }
   return tournaments;
 }
 
 function newTournament({ id, name, creator, createdAt, createTxId, capacity }) {
-  return { id, name, creator, createdAt, createTxId, capacity, players: [], joinedAt: {}, startedAt: null, cancelled: false, games: {}, chat: [], whiteCount: {} };
+  return { id, name, creator, createdAt, createTxId, capacity, players: [], joinedAt: dict(), startedAt: null, cancelled: false, games: dict(), chat: [], whiteCount: dict() };
 }
 
 /** Seats that ran out while the room waited are given back - judged at a join's block time,
@@ -442,7 +452,7 @@ function makeGame(round, index, white, black, time) {
   const game = {
     id: `${round}-${index}`, round, index, white, black, startedAt: time, board, moves: [],
     whiteUsedMs: 0, blackUsedMs: 0, lastEventAt: time, winner: null, outcome: null, endedAt: null,
-    positionCounts: {}, halfmoveClock: 0,
+    positionCounts: dict(), halfmoveClock: 0,
   };
   game.positionCounts[positionKey(board)] = 1;
   return game;
@@ -490,7 +500,7 @@ export function positionKey(board) {
  *  Tournaments (tournaments won, then the games inside them). `wins`/`losses` are the totals
  *  over both, the figures the indexer's /chess/leaderboard serves. */
 export function leaderboard(tournaments) {
-  const rows = {};
+  const rows = dict();
   const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, duelWins: 0, duelLosses: 0, tournamentGameWins: 0, tournamentGameLosses: 0, tournamentsPlayed: 0, tournamentsWon: 0, tournamentsLost: 0, lastPlayedAt: 0 });
   for (const t of tournaments) {
     if (t.startedAt == null) continue;

@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import http from "node:http";
 import https from "node:https";
+import dns from "node:dns";
+import net from "node:net";
 
 // Same-origin Nextcloud proxy. The desktop app runs in a browser, and stock Nextcloud sends no
 // CORS headers on WebDAV/OCS — so ui/nextcloud.js routes every API call through
@@ -47,7 +49,71 @@ function nextcloudProxy() {
     return cookies;
   };
 
-  // Hosts the relay must never reach: the machine it runs on, link-local and cloud metadata.
+  // --- Where the relay may connect (checked on the RESOLVED address, then pinned) -------------
+  // Loopback, link-local (cloud metadata), unspecified and multicast are never reachable. Private
+  // ranges (RFC1918, CGNAT/Tailscale 100.64/10, IPv6 ULA) are blocked too unless the operator
+  // sets KACHAT_RELAY_ALLOW_PRIVATE=1 - for a self-hosted Nextcloud on the same LAN as a private
+  // install. On a public deployment they would let anyone reach the host's internal network.
+  const allowPrivate = String(process.env.KACHAT_RELAY_ALLOW_PRIVATE || "") === "1";
+  const ipv4Blocked = (ip) => {
+    const p = ip.split(".").map(Number);
+    if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+    const [a, b] = p;
+    if (a === 0 || a === 127 || (a === 169 && b === 254) || a >= 224) return true;
+    const isPrivate = a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+    return isPrivate && !allowPrivate;
+  };
+  const ipBlocked = (address) => {
+    const ip = String(address || "").toLowerCase().replace(/^\[|\]$/g, "");
+    const kind = net.isIP(ip);
+    if (kind === 4) return ipv4Blocked(ip);
+    if (kind !== 6) return true;
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+    if (mapped) return ipv4Blocked(mapped[1]);
+    if (ip === "::" || ip === "::1" || /^fe[89ab][0-9a-f]:/.test(ip) || /^ff/.test(ip)) return true;
+    if (/^f[cd][0-9a-f]{2}:/.test(ip)) return !allowPrivate;
+    return false;
+  };
+  /** The address to connect to for `hostname`, or null when every answer is off limits. The
+   *  connection is then pinned to exactly this address, so a DNS answer that changes between
+   *  the check and the connect (rebinding) cannot move it. */
+  const resolveAllowed = async (hostname) => {
+    const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+    if (!h || isBlockedHost(h)) return null;
+    if (net.isIP(h)) return ipBlocked(h) ? null : { address: h, family: net.isIP(h) };
+    let answers = [];
+    try { answers = await dns.promises.lookup(h, { all: true, verbatim: true }); } catch { return null; }
+    if (!answers.length || answers.some((a) => ipBlocked(a.address))) return null;
+    return { address: answers[0].address, family: answers[0].family };
+  };
+
+  // Write methods only where the app actually writes: its own APIs (the same hosts the client
+  // relays - engine/endpoints.js - plus KNS), an authenticated call (a Nextcloud app password),
+  // or a Nextcloud Talk guest session (its cookie jar). Anything else is read-only.
+  const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$|^api\.knsdomains\.org$/i;
+  // Headers that would tell the target who the reader is (their IP behind a CDN or reverse
+  // proxy). The relay speaks for itself.
+  const CLIENT_IDENTITY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-forwarded-server", "forwarded", "x-real-ip", "true-client-ip", "x-client-ip", "x-cluster-client-ip", "via"];
+  // Per-client rate limit: generous for the app (link previews, indexer polls), a wall for anyone
+  // using the relay as an open proxy.
+  const RATE_WINDOW_MS = 60_000;
+  const RATE_MAX = 600;
+  const rateByClient = new Map();
+  const clientKey = (req) => String(req.headers["cf-connecting-ip"] || String(req.headers["x-forwarded-for"] || "").split(",")[0] || req.socket?.remoteAddress || "?").trim();
+  const overRate = (req) => {
+    const key = clientKey(req);
+    const now = Date.now();
+    let entry = rateByClient.get(key);
+    if (!entry || now - entry.start > RATE_WINDOW_MS) {
+      if (rateByClient.size > 5000) rateByClient.clear();
+      entry = { start: now, count: 0 };
+      rateByClient.set(key, entry);
+    }
+    entry.count += 1;
+    return entry.count > RATE_MAX;
+  };
+
+  // Hosts the relay must never reach by name: the machine it runs on, link-local and cloud metadata.
   const isBlockedHost = (hostname) => {
     const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
     return !h || h === "localhost" || h.endsWith(".localhost")
@@ -85,6 +151,12 @@ function nextcloudProxy() {
           res.end("Proxy target not allowed");
           return;
         }
+        if (overRate(req)) {
+          res.statusCode = 429;
+          res.setHeader("retry-after", "60");
+          res.end("Too many requests");
+          return;
+        }
         const match = /^\/([^/]+)(\/.*)?$/.exec(req.url || "");
         let origin = null;
         try {
@@ -111,10 +183,22 @@ function nextcloudProxy() {
           res.end("Proxy target not allowed");
           return;
         }
+        const method = String(req.method || "GET").toUpperCase();
+        const writeAllowed = WRITE_API_HOST_RE.test(target.hostname)
+          || Boolean(String(req.headers.authorization || "").trim())
+          || /^[A-Za-z0-9_-]{8,64}$/.test(String(req.headers["x-proxy-jar"] || "").trim());
+        if (!["GET", "HEAD", "OPTIONS"].includes(method) && !writeAllowed) {
+          res.statusCode = 403;
+          res.end("Proxy method not allowed");
+          return;
+        }
         const headers = { ...req.headers, host: origin.host };
         // The browser's origin/referer would confuse some reverse-proxy setups — drop them.
         delete headers.origin;
         delete headers.referer;
+        // Nothing that identifies the reader goes on to the target.
+        for (const name of CLIENT_IDENTITY_HEADERS) delete headers[name];
+        for (const name of Object.keys(headers)) if (name.startsWith("cf-")) delete headers[name];
         // Never relay cookies in either direction. Nextcloud answers the first (cookie-less,
         // Basic-auth) call by setting a session cookie; the browser stored it for THIS origin and
         // sent it back on every later proxied request, so WebDAV saw a session cookie next to
@@ -174,7 +258,8 @@ function nextcloudProxy() {
         // sends itself (a reader's own, from Settings) wins.
         // Attached only for the app's own calls (browsers mark them same-origin); a bare client
         // on the internet must not be able to spend this deployment's quota through the relay.
-        const sameOriginCall = String(req.headers["sec-fetch-site"] || "same-origin").toLowerCase() === "same-origin";
+        // Exactly "same-origin": a client that sends no header at all is not the app.
+        const sameOriginCall = String(req.headers["sec-fetch-site"] || "").toLowerCase() === "same-origin";
         if (sameOriginCall && /(^|\.)changenow\.io$/i.test(origin.hostname)) {
           const serverKey = String(process.env.CHANGENOW_API_KEY || process.env.VITE_CHANGENOW_API_KEY || "").trim();
           if (serverKey && !String(headers["x-changenow-api-key"] || "").trim()) headers["x-changenow-api-key"] = serverKey;
@@ -190,8 +275,18 @@ function nextcloudProxy() {
         // hands the browser a cross-origin Location it follows directly and gets CORS-blocked
         // on (seen with maps.apple short links in link previews).
         const MAX_REDIRECT_HOPS = 5;
-        function forward(target, hop) {
+        async function forward(target, hop) {
           const client = target.protocol === "http:" ? http : https;
+          // Resolved and checked here, for this hop, and the connection pinned to that address.
+          const pinned = await resolveAllowed(target.hostname);
+          if (!pinned) {
+            if (!res.headersSent) { res.statusCode = 403; res.end("Proxy target not allowed"); }
+            return;
+          }
+          const pinnedLookup = (_host, options, callback) => {
+            if (options && options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
+            else callback(null, pinned.address, pinned.family);
+          };
           // A redirect to another origin gets a clean request: the browser's Authorization (a
           // Nextcloud app password), the jar's cookies and the ChangeNOW key belong to the origin
           // that was asked for, never to wherever it pointed.
@@ -209,6 +304,8 @@ function nextcloudProxy() {
               method: req.method,
               path: `${target.pathname}${target.search}` || "/",
               headers: hopHeaders,
+              lookup: pinnedLookup,
+              servername: net.isIP(target.hostname) ? undefined : target.hostname,
             },
             (upstreamRes) => {
               const status = upstreamRes.statusCode || 502;
@@ -224,7 +321,7 @@ function nextcloudProxy() {
                 // A redirect must obey the same SSRF guard as the original target.
                 const nextBlocked = !next || isBlockedHost(next.hostname);
                 if (!nextBlocked && (next.protocol === "http:" || next.protocol === "https:")) {
-                  forward(next, hop + 1);
+                  forward(next, hop + 1).catch(() => { if (!res.headersSent) { res.statusCode = 502; res.end("Proxy error"); } });
                   return;
                 }
               }
@@ -270,7 +367,7 @@ function nextcloudProxy() {
           if (hop === 0) req.pipe(upstream);
           else upstream.end();
         }
-        forward(target, 0);
+        forward(target, 0).catch(() => { if (!res.headersSent) { res.statusCode = 502; res.end("Proxy error"); } });
     });
   };
   return {

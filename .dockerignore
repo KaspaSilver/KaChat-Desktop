@@ -6,9 +6,8 @@ node_modules/
 dist/
 .rusty-build/
 
-# Vite inlines every VITE_ var into the bundle, so a .env copied in here would
-# put the ChangeNOW key inside the image for anyone who pulls it. Pass it at
-# run time instead: `-e VITE_CHANGENOW_API_KEY=...`.
+# A .env copied in here would put the ChangeNOW key inside the image for anyone
+# who pulls it. Pass it at run time instead: `-e CHANGENOW_API_KEY=...`.
 .env
 .env.*
 !.env.example

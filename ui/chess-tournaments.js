@@ -127,7 +127,8 @@ async function backfillNow({ full = false } = {}) {
     const cutoff = Date.now() - ARENA_RETENTION_MS;
     const pages = backfilled && !full ? 1 : 20;
     for (let page = 0; page < pages; page += 1) {
-      const result = await fetchBroadcastHistory({ channel: T.ARENA_CHANNEL, limit: 500, before });
+      // An incremental poll needs only the newest rows; the full walk pages 500 at a time.
+      const result = await fetchBroadcastHistory({ channel: T.ARENA_CHANNEL, limit: pages === 1 ? 100 : 500, before });
       mergeRows(result.messages);
       if (!result.hasMore || !result.messages?.length) break;
       const oldest = result.messages.reduce((min, m) => Math.min(min, Number(m.blockTime) || Infinity), Infinity);
@@ -149,6 +150,10 @@ function handleHits(hits) {
 }
 
 function reduceArena() {
+  try { reduceArenaNow(); }
+  catch (error) { deps?.appendEngineLog?.(`Chess arena skipped a bad state: ${error?.message || error}`); }
+}
+function reduceArenaNow() {
   const events = [];
   for (const r of rows.values()) {
     const message = T.decodeMessage(r.content);

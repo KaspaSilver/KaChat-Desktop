@@ -535,7 +535,10 @@ async function buildScheduledPostNow({ engine, text, mentionedPubkeys = [], rese
   await engine.connect();
   const kaspa = engine.kaspa;
   const { entries } = await engine.withRpc((rpc) => rpc.getUtxosByAddresses([engine.address]), { retries: 1, label: "Scheduled post UTXO fetch" });
-  const reserved = new Set((reservedOutpoints || []).map(String));
+  // A getter is read here, inside the send queue, so a post scheduled a moment earlier has
+  // already reserved its coin.
+  const reservedList = typeof reservedOutpoints === "function" ? reservedOutpoints() : reservedOutpoints;
+  const reserved = new Set((reservedList || []).map(String));
   const usable = (entries || [])
     .filter((e) => !reserved.has(`${e?.outpoint?.transactionId}:${e?.outpoint?.index}`))
     .filter((e) => Number(e.blockDaaScore ?? 1) > 0 && !e.isCoinbase)

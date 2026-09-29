@@ -561,6 +561,20 @@ export class GroupManager {
       this._archivePreviousRoot(existing, payload.epoch, payload.group_root_epoch);
       return null;
     }
+    // The same root seen again - the recipient control read re-serves every root on every sweep -
+    // changes nothing: no member lookups, no write, no event, and so no re-render of the open
+    // thread (which also stopped a playing voice note). Anything that differs still applies.
+    if (existing && payload.epoch === existing.currentEpoch
+      && payload.group_root_epoch === existing.groupRootEpochHex
+      && payload.blinding_key === existing.blindingKeyHex
+      && payload.admin_signing_pub === existing.adminSigningPub
+      && (payload.name || existing.name || "Group") === existing.name
+      && !(payload.group_seed && !existing.groupSeedHex)
+      && (existing.members || []).every((m) => m.xOnlyPubKeyHex)) {
+      const incoming = [...new Set((payload.members || []).map((a) => String(a || "").trim()).filter(Boolean))].sort();
+      const held = (existing.members || []).map((m) => m.address).sort();
+      if (incoming.length === held.length && incoming.every((a, i) => a === held[i])) return null;
+    }
 
     // Admin self-recovery: a self-addressed root carries the group seed. Trust it only if it
     // re-derives the SIGNED group_id + blinding_key (that binding is what authenticates the
@@ -804,7 +818,8 @@ export class GroupManager {
       this._put(record);
     }
     // The first full read establishes "now"; the since reads take over from here.
-    if (fullScan && !this.sinceBlockTime) this.sinceBlockTime = Date.now();
+    // A minute back: a computer clock running ahead must not skip the newest rows.
+    if (fullScan && !this.sinceBlockTime) this.sinceBlockTime = Date.now() - 60_000;
     return { controls: events, messages };
   }
 }

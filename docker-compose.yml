@@ -26,6 +26,10 @@ services:
       # into the served bundle, so the old VITE_CHANGENOW_API_KEY is accepted only as a fallback
       # for this server-side variable. Set it in a .env next to this file, or export it.
       CHANGENOW_API_KEY: ${CHANGENOW_API_KEY:-${VITE_CHANGENOW_API_KEY:-}}
+      # Optional: set to 1 only on a PRIVATE install whose Nextcloud sits on the same LAN
+      # (192.168.x, 10.x ...). The relay then may reach private addresses. Leave it unset on
+      # any public deployment - otherwise anyone could use it to reach this host's network.
+      KACHAT_RELAY_ALLOW_PRIVATE: ${KACHAT_RELAY_ALLOW_PRIVATE:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

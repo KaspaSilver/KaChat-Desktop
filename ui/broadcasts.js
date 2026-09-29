@@ -204,7 +204,11 @@ function openPublicChatsSettings() {
   host.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
 }
 
-function loadState() {
+let cachesLoaded = false;
+function loadState({ caches = true } = {}) {
+  // A save still waiting must land before anything is read back, or the older stored copy
+  // would replace messages that arrived in the last half second.
+  if (cacheSaveTimer) { window.clearTimeout(cacheSaveTimer); cacheSaveTimer = 0; saveCacheNow(); }
   try {
     joinedChannels = JSON.parse(localStorage.getItem(deps.accountScopedKey(CHANNELS_KEY)) || "[]") || [];
   } catch { joinedChannels = []; }
@@ -242,15 +246,20 @@ function loadState() {
     const millis = value < 1000 ? value * 86_400_000 : value;
     retentionByChannel[channel] = Math.min(MAX_RETENTION_MS, millis);
   }
-  try {
-    messageCache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") || {};
-  } catch { messageCache = {}; }
-  try {
-    reactionsCache = JSON.parse(localStorage.getItem(REACTIONS_KEY) || "{}") || {};
-  } catch { reactionsCache = {}; }
-  try {
-    editsCache = JSON.parse(localStorage.getItem(EDITS_KEY) || "{}") || {};
-  } catch { editsCache = {}; }
+  // The message, reaction and edit caches are this module's own state: once read, the copy in
+  // memory is the newer one. Re-reading them on every tab show cost a parse of every room.
+  if (caches || !cachesLoaded) {
+    try {
+      messageCache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") || {};
+    } catch { messageCache = {}; }
+    try {
+      reactionsCache = JSON.parse(localStorage.getItem(REACTIONS_KEY) || "{}") || {};
+    } catch { reactionsCache = {}; }
+    try {
+      editsCache = JSON.parse(localStorage.getItem(EDITS_KEY) || "{}") || {};
+    } catch { editsCache = {}; }
+    cachesLoaded = true;
+  }
   // The two featured rooms are always present for every account (matches iOS/Android). The
   // curated LANGUAGE rooms are deliberately NOT auto-joined - they are joined on first open or
   // bell tap, so a user who wants none of them pays for none of them.
@@ -453,7 +462,7 @@ function saveCacheNow() {
 
 function saveReactions() {
   try { localStorage.setItem(REACTIONS_KEY, JSON.stringify(reactionsCache)); }
-  catch { reactionsCache = {}; }
+  catch { reactionsCache = {}; appliedRowsByChannel.clear(); }
 }
 
 /** Rolling retention, matching the indexed rooms' product rule. */
@@ -707,7 +716,7 @@ async function backfillChannel(channel, { quiet = true } = {}) {
     }
     return added;
   } catch (error) {
-    if (!quiet) deps.showToast?.(error.message);
+    if (!quiet) deps.showToast?.(userFacingError(error));
     deps.appendEngineLog?.(`Broadcast backfill failed for #${channel}: ${error.message}`);
     return -1;
   }
@@ -1054,7 +1063,12 @@ function buildMessageElement(m) {
     }
     const previewable = urls.find((url) => deps.isPreviewableUrl?.(url));
     if (previewable) {
-      const card = deps.buildLinkPreviewCard?.(previewable);
+      // Your own links load; anyone else's wait for a tap (the rule 1:1 and groups use), so a
+      // stranger in a public room never learns every reader's IP address from a link.
+      const autoLoad = mine || deps.previewApproved?.(previewable);
+      const card = autoLoad
+        ? deps.buildLinkPreviewCard?.(previewable, { autoLoad: true, outgoing: mine })
+        : deps.buildTapToLoadCard?.(previewable, () => renderRoom());
       if (card) el.append(card);
     }
   }
@@ -1134,7 +1148,7 @@ function retryBroadcastMessage(m) {
   messageCache[activeChannel] = (messageCache[activeChannel] || []).filter((row) => row.txId !== m.txId);
   renderRoom();
   sendBroadcastText(activeChannel, m.content).then(() => renderChannelList()).catch((error) => {
-    deps.showToast?.(error.message);
+    deps.showToast?.(userFacingError(error));
   });
 }
 
@@ -1431,7 +1445,10 @@ function renderRoom() {
       const { height, top } = keepInPlaceAfterOlderLoad;
       keepInPlaceAfterOlderLoad = null;
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight - height + top;
-    } else if (lastRenderedNewestKey === null || newestKey !== lastRenderedNewestKey || wasAtBottom) {
+    } else if (lastRenderedNewestKey === null || wasAtBottom
+      || (newestKey !== lastRenderedNewestKey && newest?.senderAddress === deps.engine.address)) {
+      // First paint, a reader already at the bottom, or your own new message: to the bottom.
+      // Someone else's message never pulls a reader out of the history they are reading.
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight;
     } else if (messages.length !== lastRenderedCount) {
       roomBodyEl.scrollTop = before.top + (roomBodyEl.scrollHeight - before.height);
@@ -1631,7 +1648,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel }) {
       renderChannelList();
       return;
     } catch (error) {
-      deps.showToast?.(`Nextcloud upload failed — sending on-chain instead. (${error.message})`);
+      deps.showToast?.(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
       deps.appendEngineLog?.(`Broadcast voice note upload failed: ${error.message}`);
     }
   }
@@ -1649,7 +1666,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel }) {
     feeOverrideKas = null;
     renderChannelList();
   } catch (error) {
-    deps.showToast?.(`Voice note failed: ${error.message}`);
+    deps.showToast?.(`Voice note failed: ${userFacingError(error)}`);
     deps.appendEngineLog?.(`Broadcast voice note failed: ${error.message}`);
   }
 }
@@ -1737,6 +1754,7 @@ function leaveChannel(name) {
   delete messageCache[name];
   saveCache();
   delete reactionsCache[name];
+  appliedRowsByChannel.delete(name); // rejoining must apply its reactions and edits again
   saveReactions();
   delete listenByChannel[name];
   saveListen();
@@ -1790,7 +1808,7 @@ async function sendCurrentMessage() {
     await sendBroadcastText(channel, content, { feeKas });
     renderChannelList();
   } catch (error) {
-    deps.showToast?.(error.message);
+    deps.showToast?.(userFacingError(error));
     deps.appendEngineLog?.(`Broadcast send failed: ${error.message}`);
   } finally {
     sendInFlight = false;
@@ -2092,7 +2110,7 @@ function openRetentionSheet(channel) {
 
 export function refreshBroadcasts() {
   tabVisible = true;
-  loadState();
+  loadState({ caches: false });
   renderChannelList();
   if (activeChannel) renderRoom();
   syncScanWanted();
@@ -2150,7 +2168,7 @@ export function stopBroadcastPolling() {
 // yet, then opens it - the same gate a pasted room name goes through.
 export function openBroadcastRoomFromLink(channel) {
   if (!deps) return;
-  loadState();
+  loadState({ caches: false });
   joinChannel(channel);
 }
 
@@ -2158,7 +2176,7 @@ export function openBroadcastChannelFromNotification(channel) {
   if (!deps) return;
   const clean = normalizeBroadcastChannel(channel);
   if (!clean) return;
-  loadState();
+  loadState({ caches: false });
   openRoom(clean);
 }
 
