@@ -564,9 +564,19 @@ function recordReaction(channel, txId, reaction, reactorAddress, blockTime) {
 // ---------------------------------------------------------------------------
 
 let listRenderSuppressed = false;
+// Reaction and edit rows already applied this session, per channel (iOS 4cb565f): the 8 s poll
+// re-serves the newest rows, and reapplying them, though idempotent, is work for nothing.
+const appliedRowsByChannel = new Map();
+function appliedRowsFor(channel) {
+  let set = appliedRowsByChannel.get(channel);
+  if (!set) { set = new Set(); appliedRowsByChannel.set(channel, set); }
+  if (set.size > 5000) set.clear();
+  return set;
+}
 function mergeMessages(channel, rows) {
   const existing = messageCache[channel] || [];
   const seen = new Set(existing.map((m) => m.txId));
+  const applied = appliedRowsFor(channel);
   let added = 0;
   let reactionsChanged = false;
   const freshIncoming = [];
@@ -578,7 +588,7 @@ function mergeMessages(channel, rows) {
     return hit ? String(hit.senderAddress || "") : null;
   };
   for (const row of ordered) {
-    if (!row?.txId || seen.has(row.txId)) continue;
+    if (!row?.txId || seen.has(row.txId) || applied.has(row.txId)) continue;
     seen.add(row.txId);
     const blockTime = Number(row.blockTime) || Date.now();
     // Reactions ride the same wire as normal messages but never become message
@@ -586,6 +596,7 @@ function mergeMessages(channel, rows) {
     const reaction = deps.parseReactionEnvelope?.(row.content);
     if (reaction) {
       if (recordReaction(channel, row.txId, reaction, row.senderAddress || "", blockTime)) reactionsChanged = true;
+      applied.add(row.txId);
       continue;
     }
     const edit = deps.parseEditEnvelope?.(row.content);
@@ -595,7 +606,9 @@ function mergeMessages(channel, rows) {
       const targetSender = senderOf(edit.targetTxId);
       if (targetSender !== null && targetSender === String(row.senderAddress || "")) {
         if (recordEdit(channel, row.txId, edit, row.senderAddress || "", blockTime)) { saveEdits(); added += 1; }
+        applied.add(row.txId);
       }
+      // An edit met before its target is not remembered, so it is retried once the target lands.
       continue;
     }
     // Our own just-sent message can come back from the chain BEFORE `sendBroadcastText`
@@ -1336,6 +1349,8 @@ const ROOM_WINDOW = 400;
 let roomWindow = ROOM_WINDOW;
 let roomWindowChannel = null;
 let keepInPlaceAfterOlderLoad = null;   // { height, top } of the scroller before the widen
+let lastRenderedNewestKey = null;       // the newest row the room last drew
+let lastRenderedCount = 0;
 function loadEarlierRoomMessages() {
   if (!roomBodyEl) return;
   keepInPlaceAfterOlderLoad = { height: roomBodyEl.scrollHeight, top: roomBodyEl.scrollTop };
@@ -1344,7 +1359,7 @@ function loadEarlierRoomMessages() {
 }
 function renderRoom() {
   const inRoom = Boolean(activeChannel);
-  if (inRoom && roomWindowChannel !== activeChannel) { roomWindowChannel = activeChannel; roomWindow = ROOM_WINDOW; keepInPlaceAfterOlderLoad = null; }
+  if (inRoom && roomWindowChannel !== activeChannel) { roomWindowChannel = activeChannel; roomWindow = ROOM_WINDOW; keepInPlaceAfterOlderLoad = null; lastRenderedNewestKey = null; lastRenderedCount = 0; }
   if (roomEl) roomEl.hidden = !inRoom;
   // The list is the Chats screen's third tab and stays where it is; the room takes the pane
   // beside it (the app decides what that means for the layout).
@@ -1367,6 +1382,7 @@ function renderRoom() {
     !hidden.has(m.senderAddress) && !deps.parseReactionEnvelope?.(m.content) && !deps.parseEditEnvelope?.(m.content));
   const messages = allMessages.length > roomWindow ? allMessages.slice(-roomWindow) : allMessages;
   if (roomBodyEl) {
+    const before = { height: roomBodyEl.scrollHeight, top: roomBodyEl.scrollTop, client: roomBodyEl.clientHeight };
     roomBodyEl.replaceChildren();
     if (allMessages.length > messages.length) {
       const earlier = document.createElement("button");
@@ -1405,13 +1421,25 @@ function renderRoom() {
         roomBodyEl.append(buildMessageRow(m));
       }
     }
+    // The room goes to the bottom only when its NEWEST message changes (iOS 9c9e3e0). A backfill
+    // page of older history, a reaction or a translation must not throw a reader who scrolled
+    // into history back down: older rows landing above keep what was on screen where it was.
+    const newest = messages[messages.length - 1];
+    const newestKey = newest ? String(newest.txId || newest.id || "") : "";
+    const wasAtBottom = before.height - before.top - before.client < 60;
     if (keepInPlaceAfterOlderLoad) {
       const { height, top } = keepInPlaceAfterOlderLoad;
       keepInPlaceAfterOlderLoad = null;
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight - height + top;
-    } else {
+    } else if (lastRenderedNewestKey === null || newestKey !== lastRenderedNewestKey || wasAtBottom) {
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight;
+    } else if (messages.length !== lastRenderedCount) {
+      roomBodyEl.scrollTop = before.top + (roomBodyEl.scrollHeight - before.height);
+    } else {
+      roomBodyEl.scrollTop = before.top;
     }
+    lastRenderedNewestKey = newestKey;
+    lastRenderedCount = messages.length;
   }
   refreshVisibleSenderNames(messages);
 }

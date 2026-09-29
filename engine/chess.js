@@ -432,10 +432,21 @@ export function unwrapReplyText(text) {
 }
 
 // --- Game-state reconstruction (port of iOS ChessGameService.summarize/activeGame) ---
-// `messages` items: { text, outgoing:boolean, txid:string, at:number }.
+// `messages` items: { text, outgoing:boolean, txid:string, at:number, blockTime?:number, failed?:boolean }.
 
-// Replays every chess envelope for `gameId` (in chronological order) and returns a summary, or
-// null if no invite for that game is present.
+// Replays every chess envelope for `gameId` and returns a summary, or null if no invite for that
+// game is present.
+//
+// Moves are replayed by TURN, not by timestamp (iOS c1ee033). An outgoing move carries the
+// sender's clock and an incoming one the chain's, so a device whose clock ran ahead sorted its
+// own move after the reply to it; the reply then looked illegal and was skipped, and both sides
+// sat on "Waiting on opponent". Each side's moves keep their own order (own moves by send clock,
+// the opponent's by chain time) and are dealt to whichever color is to move; an illegal one is
+// dropped and that side's next move tried.
+//
+// Your own response, move or resignation that FAILED to send never reached the opponent, so it
+// does not change the game on your side either (iOS 6cfb62c). It still sets `lastTxid`, which is
+// what offers Retry.
 export function summarizeChessGame(gameId, messages, myAddress, contactAddress) {
   let invite = null;
   let inviterAddress = null;
@@ -449,24 +460,58 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
   // (falling back to the initial allotment) once the invite's time control is known.
   const lastClockByColor = {};
 
+  const moveEntries = [];
   const ordered = [...messages].sort((a, b) => (a.at || 0) - (b.at || 0));
   for (const msg of ordered) {
     const env = parseChessEnvelope(unwrapReplyText(msg.text));
     if (!env || env.gameId !== gameId) continue;
     lastTxid = msg.txid || lastTxid;
     const senderAddress = msg.outgoing ? myAddress : contactAddress;
+    const unsent = Boolean(msg.outgoing && msg.failed);
     if (env.kind === "invite") {
       invite = env; inviterAddress = senderAddress;
     } else if (env.kind === "response") {
+      if (unsent) continue;
       response = env;
     } else if (env.kind === "move") {
+      if (unsent) continue;
+      moveEntries.push({ msg, env, sender: senderAddress });
+    } else if (env.kind === "resign") {
+      if (unsent) continue;
+      resignerAddress = senderAddress;
+      resignReason = typeof env.reason === "string" ? env.reason : null;
+    }
+  }
+
+  if (!invite || !inviterAddress) return null;
+  const otherAddress = inviterAddress === myAddress ? contactAddress : myAddress;
+  const whiteAddress = invite.inviterColor === WHITE ? inviterAddress : otherAddress;
+  const blackAddress = invite.inviterColor === WHITE ? otherAddress : inviterAddress;
+
+  // Each side's own order: the opponent's moves by chain time when both carry one, else by
+  // the message's own timestamp.
+  const sideOrder = (a, b) => {
+    const at = Number(a.msg.blockTime || 0);
+    const bt = Number(b.msg.blockTime || 0);
+    if (!a.msg.outgoing && !b.msg.outgoing && at > 0 && bt > 0 && at !== bt) return at - bt;
+    return (a.msg.at || 0) - (b.msg.at || 0);
+  };
+  const whiteQueue = moveEntries.filter((e) => e.sender === whiteAddress).sort(sideOrder);
+  const blackQueue = moveEntries.filter((e) => e.sender !== whiteAddress).sort(sideOrder);
+  // Deal moves to the side to move until that side has nothing legal left to play.
+  for (;;) {
+    const toMove = board.sideToMove;
+    const queue = toMove === WHITE ? whiteQueue : blackQueue;
+    let applied = false;
+    while (queue.length) {
+      const { msg, env } = queue.shift();
       const from = squareFromAlgebraic(env.from);
       const to = squareFromAlgebraic(env.to);
       if (!from || !to) continue;
       const m = normalizingPromotion(board, move(from, to, promotionFromLetter(env.promotion)));
       if (!isLegalMove(board, m)) continue;
       const movingPiece = pieceAt(board, from);
-      if (!movingPiece) continue;
+      if (!movingPiece || movingPiece.color !== toMove) continue;
       const isEnPassant = movingPiece.type === "pawn" && board.enPassantTarget && squareEquals(to, board.enPassantTarget) && !pieceAt(board, to);
       const captured = isEnPassant ? pieceAt(board, sq(to.file, from.rank)) : pieceAt(board, to);
       board = applyMove(board, m);
@@ -479,23 +524,20 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
         capturedColor: captured ? captured.color : null,
         promotion: m.promotion || null, messageTxid: msg.txid || "",
       });
-    } else if (env.kind === "resign") {
-      resignerAddress = senderAddress;
-      resignReason = typeof env.reason === "string" ? env.reason : null;
+      applied = true;
+      break;
     }
+    if (!applied) break;
   }
-
-  if (!invite || !inviterAddress) return null;
-  const otherAddress = inviterAddress === myAddress ? contactAddress : myAddress;
-  const whiteAddress = invite.inviterColor === WHITE ? inviterAddress : otherAddress;
-  const blackAddress = invite.inviterColor === WHITE ? otherAddress : inviterAddress;
 
   let status;
   // `timeout` true when the loser flagged (their clock ran out and their app auto-sent a
   // chess_resign carrying reason "timeout") rather than resigning by hand.
   if (resignerAddress) status = { kind: "resigned", loser: resignerAddress === whiteAddress ? WHITE : BLACK, timeout: resignReason === "timeout" };
   else if (response && !response.accepted) status = { kind: "declined" };
-  else if (!response) status = { kind: "pendingResponse" };
+  // A move on the board means the game was accepted, even when the acceptance itself has not
+  // reached this device: the game goes on rather than sitting on "Waiting for response".
+  else if (!response && moveHistory.length === 0) status = { kind: "pendingResponse" };
   else if (isCheckmate(board)) status = { kind: "checkmate", winner: opposite(board.sideToMove) };
   else if (isStalemate(board)) status = { kind: "stalemate" };
   else if (isInsufficientMaterial(board)) status = { kind: "insufficientMaterial" };

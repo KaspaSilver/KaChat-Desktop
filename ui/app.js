@@ -8437,9 +8437,9 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
 // kachat.kas and jumps straight into that chat in payment mode.
-const APP_VERSION = "5.1";
+const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 60;
+const APP_BUILD = 61;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12684,7 +12684,7 @@ function renderMessages(conversationEntry) {
       const isLatestChess = (message.createdAt || 0) >= (latestChessByGame.get(chessEnv.gameId) ?? 0);
       const contactAddr = requestContact?.address;
       const summary = (isLatestChess && contactAddr && engine.address)
-        ? Chess.summarizeChessGame(chessEnv.gameId, (conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0 })), engine.address, contactAddr)
+        ? Chess.summarizeChessGame(chessEnv.gameId, (conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED })), engine.address, contactAddr)
         : null;
       if (summary) {
         bubble.append(buildChessThumb(summary, chessEnv.gameId));
@@ -12911,7 +12911,7 @@ function renderMessages(conversationEntry) {
     if (chessButton) {
       const contact = contactForConversation(conversationEntry);
       const active = contact?.address && engine.address
-        ? Chess.activeChessGame((conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0 })), engine.address, contact.address)
+        ? Chess.activeChessGame((conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED })), engine.address, contact.address)
         : null;
       chessButton.hidden = !active;
     }
@@ -13133,7 +13133,7 @@ function openChatInfoFor(contact, conversationEntry) {
 
   // Chess record — only shown once this contact has actually played (matches iOS).
   if (chatInfoChessRow) {
-    const chessMsgs = messages.map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0 }));
+    const chessMsgs = messages.map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED }));
     const hasChessHistory = engine.address && chessMsgs.some((m) => { const e = Chess.parseChessEnvelope(Chess.unwrapReplyText(m.text)); return e && e.kind === "invite"; });
     if (hasChessHistory) {
       const rec = Chess.chessRecord(chessMsgs, engine.address, contact.address);
@@ -16002,7 +16002,7 @@ function chessConversationContext() {
   if (!conv) return { conv: null, contact: null, messages: [] };
   const contact = contactForConversation(conv);
   const messages = (conv.messages || []).map((m) => ({
-    text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0,
+    text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED,
   }));
   return { conv, contact, messages };
 }
