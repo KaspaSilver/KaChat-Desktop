@@ -316,6 +316,13 @@ let messageRefreshInFlight = false;
 // its messages are not "new" arrivals: we add them silently and read (no notification,
 // no unread badge). Later sweeps are live and notify/mark-unread normally.
 let pendingInitialCatchUp = true;
+// Contact notes (see ensureContactStash): declared up here because the sweep reads them, and the
+// build lowers top-level let/const to var - a read above the declaration would see undefined.
+const CONTACT_STASH_KEY = "kachat-contact-stash-v1";
+const CONTACT_STASH_MAX_PER_FLUSH = 3;
+let contactStashState = null;        // { wallet, known: Set, complete, pending: [address] }
+let contactStashFlushing = false;
+let contactNotesReadBackFor = null;  // the wallet this session already read back for
 // Everything with a block time before this instant is history, whatever sweep happens to
 // deliver it: no banner, no unread. The catch-up flag above only covers the FIRST sweep, and a
 // freshly imported account's history spans many - one page per conversation per sweep, and
@@ -4414,6 +4421,9 @@ async function refreshAllConversations({ quiet = true } = {}) {
     // Read by the self-scheduling sweep loop: a failing indexer doubles the pause up to a
     // minute, a success snaps it back (this used to sit after the return and never ran).
     lastSweepFailed = sweepFailures > 0;
+    // Saved contacts: read back once per session after the first sweep, then drain what is queued.
+    if (contactNotesReadBackFor !== (engine.address || "")) readBackContactNotes().catch(() => {});
+    else if (contactStash().pending.length) flushContactStashQueue().catch(() => {});
   }
 }
 
@@ -8439,7 +8449,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 61;
+const APP_BUILD = 62;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14135,6 +14145,139 @@ async function sendOutgoingHandshake(contact, conversationEntry, { accepting = f
   }
 }
 
+// --- Contact notes for chats without a handshake (iOS fe45704, MESSAGING.md §4) ---------------
+// A chat that never had a handshake (deterministic aliases) leaves nothing on chain that a fresh
+// import of the seed could find it by: an alias cannot be turned back into an address. So the
+// first time you message such a contact, a contact-only saved_handshake note is written - the
+// partner's address, encrypted to yourself, in a fee-only transaction to yourself. Once per
+// contact, and only after a COMPLETE read-back of the notes already on chain, so it never
+// writes one that exists. Old chats you have sent in are backfilled after each read-back.
+// (State for this lives beside pendingInitialCatchUp, above the sweep that reads it.)
+function contactStash() {
+  const wallet = engine.address || "";
+  if (contactStashState?.wallet === wallet) return contactStashState;
+  let raw = {};
+  try { raw = JSON.parse(localStorage.getItem(accountScopedKey(CONTACT_STASH_KEY)) || "{}") || {}; } catch { raw = {}; }
+  contactStashState = {
+    wallet,
+    known: new Set(Array.isArray(raw.known) ? raw.known.map(String) : []),
+    complete: Boolean(raw.complete),
+    pending: Array.isArray(raw.pending) ? raw.pending.map(String) : [],
+  };
+  return contactStashState;
+}
+function saveContactStash() {
+  const s = contactStash();
+  if (!s.wallet) return;
+  try { localStorage.setItem(accountScopedKey(CONTACT_STASH_KEY), JSON.stringify({ known: [...s.known], complete: s.complete, pending: s.pending })); } catch { /* fine */ }
+}
+function noteContactStashed(address) {
+  const s = contactStash();
+  if (!address || s.known.has(address)) return;
+  s.known.add(address);
+  saveContactStash();
+}
+/** Only chats with no handshake need one: a handshake chat is found again by its handshake (and
+ *  already writes its own note). */
+function needsContactStash(contact, conversationEntry) {
+  if (!contact?.address || contact.address === engine.address) return false;
+  if (contact.relationshipState !== "legacy-manual") return false;
+  if (contact.handshakeTxid || contact.incomingHandshakeTxid) return false;
+  return !(conversationEntry?.messages || []).some((m) => m?.messageType === "handshake");
+}
+function ensureContactStash(contact, conversationEntry) {
+  const s = contactStash();
+  if (!s.wallet || !s.complete || !contact?.address) return;
+  if (s.known.has(contact.address) || s.pending.includes(contact.address)) return;
+  if (!needsContactStash(contact, conversationEntry)) return;
+  s.pending.push(contact.address);
+  saveContactStash();
+  appendEngineLog(`Queued contact note for …${contact.address.slice(-8)}`);
+  flushContactStashQueue().catch(() => {});
+}
+/** Each note is its own small transaction; a few per pass, the rest on the next one. */
+async function flushContactStashQueue() {
+  if (contactStashFlushing) return;
+  const s = contactStash();
+  if (!s.pending.length || !engine.address || isChattingBalanceZero()) return;
+  contactStashFlushing = true;
+  const wallet = s.wallet;
+  try {
+    for (let sent = 0; sent < CONTACT_STASH_MAX_PER_FLUSH && s.pending.length; sent += 1) {
+      if (engine.address !== wallet) return;
+      const address = s.pending[0];
+      try {
+        const envelope = await engine.createSelfStashEnvelope({ partnerAddress: address, contactOnly: true });
+        const result = await engine.sendSelfStashOnchain({ envelope });
+        if (engine.address !== wallet) return;
+        s.pending.shift();
+        s.known.add(address);
+        saveContactStash();
+        appendEngineLog(`Contact note saved on-chain: ${result.txid || ""}`);
+      } catch (error) {
+        appendEngineLog(`Contact note deferred (non-fatal): ${error.message}`);
+        return; // the next pass tries again
+      }
+    }
+  } finally {
+    contactStashFlushing = false;
+  }
+}
+/** Every chat without a handshake that you have sent a message in and that has no note gets one. */
+function backfillContactStashes() {
+  if (!contactStash().complete) return;
+  for (const conversationEntry of state.conversations || []) {
+    const contact = contactForConversation(conversationEntry);
+    if (!contact) continue;
+    const hasSent = (conversationEntry.messages || []).some((m) => m?.direction === "outgoing" && m?.status !== MESSAGE_STATUSES.FAILED && m?.messageType !== "handshake");
+    if (hasSent) ensureContactStash(contact, conversationEntry);
+  }
+}
+/** Once per session per wallet: read every note back, bring back the chats a fresh import could
+ *  not otherwise find, record which contacts have notes, then write the missing ones. */
+async function readBackContactNotes() {
+  const wallet = engine.address || "";
+  if (!wallet || contactNotesReadBackFor === wallet) return;
+  contactNotesReadBackFor = wallet;
+  try {
+    const { stashes, complete } = await engine.fetchSavedHandshakeNotes();
+    if (engine.address !== wallet) return;
+    const s = contactStash();
+    const deleted = loadDeletedContactAddresses();
+    let recovered = 0;
+    for (const stash of stashes) {
+      const address = stash.partnerAddress;
+      if (!address || address === wallet) continue;
+      s.known.add(address);
+      if (deleted.has(address) || state.contacts.some((entry) => entry.address === address)) continue;
+      if (!isValidKaspaAddressString(address)) continue;
+      const createdAt = Number(stash.timestamp || stash.blockTime || Date.now());
+      const displayName = shortAddress(address);
+      const contact = {
+        id: nowId(), name: displayName, nameIsCustom: false, address, avatar: initialsFor(displayName),
+        createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "",
+      };
+      state.contacts.push(contact);
+      state.conversations.push(createConversation({ contactId: contact.id, createdAt }));
+      recovered += 1;
+    }
+    if (complete) s.complete = true;
+    saveContactStash();
+    if (recovered > 0) {
+      appendEngineLog(`Saved contacts read back: ${recovered} chat${recovered === 1 ? "" : "s"} recovered.`);
+      refreshSubscriptionAddresses({ restart: true });
+      pendingInitialCatchUp = true; // their history arrives as a silent backfill, not new mail
+      persistState();
+      renderChats();
+    }
+    if (complete) backfillContactStashes();
+    flushContactStashQueue().catch(() => {});
+  } catch (error) {
+    contactNotesReadBackFor = null; // the next sweep tries again
+    appendEngineLog(`Saved contact read-back failed (non-fatal): ${error.message}`);
+  }
+}
+
 // Best-effort, fire-and-forget: mirrors iOS's sendOrQueueSelfStash, sending a
 // second self-payment transaction whose payload is this conversation's
 // alias/partner metadata encrypted to our own address. This lets conversations
@@ -14153,6 +14296,7 @@ async function stashHandshakeForRecovery(contact, { isResponse = false, createdA
       createdAt,
     });
     const result = await engine.sendSelfStashOnchain({ envelope });
+    noteContactStashed(contact.address); // a handshake note covers the contact too
     appendEngineLog(`Conversation recovery data stashed on-chain: ${result.txid || ""}`);
   } catch (error) {
     appendEngineLog(`Self-stash skipped (non-fatal): ${error.message}`);
@@ -15219,6 +15363,9 @@ async function runEngineSendPipeline(conversationId, messageId) {
         if (patch.note) setStatus(patch.note);
       },
     });
+    // Your message went out in a chat with no handshake: make sure a fresh import of this seed
+    // can find the chat again. A cheap no-op for every chat already noted.
+    try { ensureContactStash(contact, conversationEntry); } catch { /* never a send failure */ }
   } catch (error) {
     updateMessageStatus(conversationId, messageId, { status: MESSAGE_STATUSES.FAILED });
     const reason = describeThrown(error);

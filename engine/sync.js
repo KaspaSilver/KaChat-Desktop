@@ -555,6 +555,54 @@ async function fetchSelfStashTransactionsFromChain({ walletAddress, cursor = 0, 
 }
 
 /**
+ * Every saved-handshake note this wallet has written, read back from the indexer
+ * (`/self-stash/by-owner`, scope `saved_handshake`, paged by block time) and decrypted. This is
+ * the COMPLETE read-back a contact note may be written after (MESSAGING.md §4): `complete` is
+ * true only when the paging ran to its end, so a partial answer never licenses a duplicate.
+ */
+export async function fetchSavedHandshakeNotes({ walletAddress, privateKeyHex, decryptMessage, indexerUrl, limit = 50, maxPages = 40 } = {}) {
+  if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before reading saved contacts.");
+  if (!privateKeyHex) throw new Error("The active private key is required to decrypt saved contacts.");
+  if (typeof decryptMessage !== "function") throw new Error("Kasia cipher decryptor is unavailable.");
+  const baseUrl = normalizeBaseUrl(indexerUrl);
+  const scopeHex = Array.from(new TextEncoder().encode("saved_handshake"), (b) => b.toString(16).padStart(2, "0")).join("");
+  const seen = new Set();
+  const stashes = [];
+  let blockTime = 0;
+  let complete = false;
+  let rowCount = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const query = new URLSearchParams({ owner: walletAddress, scope: scopeHex, limit: String(limit), block_time: String(blockTime) });
+    const response = await fetch(`${baseUrl}/self-stash/by-owner?${query.toString()}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error(`Saved contact read-back failed (${response.status}).`);
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error("The indexer returned an unexpected saved-contact response.");
+    let newest = blockTime;
+    for (const row of rows) {
+      const txid = String(row?.tx_id || "").trim();
+      const rowTime = Number(row?.block_time || 0);
+      if (rowTime > newest) newest = rowTime;
+      if (!txid || seen.has(txid)) continue;
+      seen.add(txid);
+      rowCount += 1;
+      for (const candidate of selfStashEncryptedCandidates(row?.stashed_data || "")) {
+        try {
+          const parsed = parseSelfStashPayload(await decryptMessage(candidate, privateKeyHex));
+          if (parsed.partnerAddress) { stashes.push({ txid, blockTime: rowTime, ...parsed }); break; }
+        } catch { /* not this candidate */ }
+      }
+    }
+    if (rows.length < limit) { complete = true; break; }
+    if (newest <= blockTime) break; // no progress: stop rather than loop, and stay incomplete
+    blockTime = newest;
+  }
+  // Notes that came back but none of which could be read means the read-back cannot be trusted
+  // to say what is missing: never call that complete, or every chat would be noted again.
+  if (rowCount > 0 && stashes.length === 0) complete = false;
+  return { stashes, complete };
+}
+
+/**
  * Recovers conversation/alias metadata purely from on-chain self-stash
  * transactions plus the active private key — no local database required.
  * Matches iOS's historical-loader recovery flow (see buildSelfStash in

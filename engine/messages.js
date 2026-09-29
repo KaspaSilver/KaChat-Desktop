@@ -242,10 +242,11 @@ export async function createSelfStashEnvelope({
   theirAlias = null,
   partnerAddress,
   isResponse = false,
+  contactOnly = false,
   createdAt = Date.now(),
   encryptToSelf,
 } = {}) {
-  return buildSelfStash({ ourAlias, theirAlias, partnerAddress, isResponse, createdAt, encryptToSelf });
+  return buildSelfStash({ ourAlias, theirAlias, partnerAddress, isResponse, contactOnly, createdAt, encryptToSelf });
 }
 
 export async function sendSelfStashOnchain({ engine, envelope, amountKas = "0.0001", feeKas = "0", onStatus = () => {} }) {

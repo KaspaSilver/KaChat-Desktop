@@ -4,7 +4,7 @@ import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importM
 import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction } from "./transactions.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
-import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, testKasiaIndexer, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
+import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
 import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
@@ -1219,6 +1219,18 @@ export class KaspaEngine {
       ...details,
       walletAddress: this.address,
       privateKeyHex: this.privateKeyHex,
+      decryptMessage: async (encryptedHex) => this.decryptKasiaMessage(encryptedHex),
+    });
+  }
+
+  /** Every saved-handshake note of this wallet, from the indexer: { stashes, complete }. */
+  async fetchSavedHandshakeNotes() {
+    this.requireWallet();
+    if (!this.isKasiaCipherLoaded()) await this.loadKasiaCipher();
+    return fetchSavedHandshakeNotes({
+      walletAddress: this.address,
+      privateKeyHex: this.privateKeyHex,
+      indexerUrl: getEndpoint("kasiaIndexer"),
       decryptMessage: async (encryptedHex) => this.decryptKasiaMessage(encryptedHex),
     });
   }

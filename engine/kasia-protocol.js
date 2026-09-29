@@ -477,11 +477,16 @@ export async function buildEncryptedHandshake({
 //   bytes = ASCII("ciph_msg:1:self_stash:saved_handshake:") ++ <raw ECIES bytes, encrypted to self>
 export const SELF_STASH_SCOPE = "saved_handshake";
 
+// Two shapes (MESSAGING.md §4): a handshake note carries the aliases; a CONTACT note
+// (`contactOnly`, iOS fe45704) is for a chat that never had a handshake and carries only the
+// partner's address - no alias fields, so a reader derives the deterministic pair from the
+// address and never mistakes it for a legacy handshake's routing.
 export async function buildSelfStash({
   ourAlias,
   theirAlias = null,
   partnerAddress,
   isResponse = false,
+  contactOnly = false,
   createdAt = Date.now(),
   encryptToSelf,
 } = {}) {
@@ -489,16 +494,18 @@ export async function buildSelfStash({
   const normalizedPartner = normalizeAddress(partnerAddress);
   if (!normalizedPartner) throw new Error("A valid kaspa: partner address is required for the self-stash.");
 
-  const stashPayload = {
-    type: "handshake",
-    alias: String(ourAlias || ""),
-    timestamp: createdAt,
-    version: 1,
-    theirAlias: theirAlias || null,
-    partnerAddress: normalizedPartner,
-    recipientAddress: normalizedPartner,
-  };
-  if (isResponse) stashPayload.isResponse = true;
+  const stashPayload = contactOnly
+    ? { type: "contact", timestamp: createdAt, version: 1, partnerAddress: normalizedPartner, recipientAddress: normalizedPartner }
+    : {
+      type: "handshake",
+      alias: String(ourAlias || ""),
+      timestamp: createdAt,
+      version: 1,
+      theirAlias: theirAlias || null,
+      partnerAddress: normalizedPartner,
+      recipientAddress: normalizedPartner,
+    };
+  if (isResponse && !contactOnly) stashPayload.isResponse = true;
   // Matches iOS's compactMapValues — nil/absent fields are dropped, not sent as null.
   const sanitized = Object.fromEntries(Object.entries(stashPayload).filter(([, value]) => value !== null && value !== undefined));
   const clearText = JSON.stringify(sanitized);
@@ -571,6 +578,7 @@ export function parseSelfStashPayload(clearText) {
     const parsed = JSON.parse(String(clearText || ""));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
     return {
+      type: String(parsed.type || "handshake").trim(),
       alias: String(parsed.alias || "").trim(),
       theirAlias: String(parsed.theirAlias || "").trim(),
       partnerAddress: String(parsed.partnerAddress || parsed.recipientAddress || "").trim(),
