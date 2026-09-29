@@ -36,7 +36,7 @@ import {
   lastMessage as engineLastMessage,
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
-import { KNSProfileLinkBuilder } from "../engine/kns.js";
+import { KNSProfileLinkBuilder, safeExternalHref } from "../engine/kns.js";
 import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
@@ -973,7 +973,10 @@ function parseKaChatInternalLink(raw) {
     // valid Kaspa address, checksum and all, or the link is not ours.
     let address = payload.trim().toLowerCase();
     if (!address.includes(":")) address = `kaspa:${address}`;
-    if (address.length > 100 || !isValidKaspaAddressString(address)) return null;
+    // The bech32 alphabet first: a crafted link (non-ASCII, a stray scheme) is not an address,
+    // whether or not the SDK's own check has loaded yet.
+    if (!/^kaspa:[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{61,63}$/.test(address)) return null;
+    if (!isValidKaspaAddressString(address)) return null;
     return { kind: "profile", address };
   }
   if (target === "kapost") {
@@ -1388,7 +1391,7 @@ function renderTextWithMentions(container, rawText) {
 /** Preview card for the first link in a message, or null. */
 // Links the user explicitly asked to preview, so a re-render keeps showing them.
 const approvedPreviewUrls = new Set();
-function buildTapToLoadCard(url, conversationEntry) {
+function buildTapToLoadCard(url, conversationEntry, onApproved = null) {
   const card = document.createElement("button");
   card.type = "button";
   card.className = "link-tap-to-load";
@@ -1400,7 +1403,8 @@ function buildTapToLoadCard(url, conversationEntry) {
   card.addEventListener("click", (event) => {
     event.stopPropagation();
     approvedPreviewUrls.add(url);
-    renderMessages(conversationEntry);
+    if (onApproved) onApproved();
+    else renderMessages(conversationEntry);
   });
   return card;
 }
@@ -8449,7 +8453,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 62;
+const APP_BUILD = 63;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12875,7 +12879,7 @@ function renderMessages(conversationEntry) {
       openQuickReactionBar(conversationEntry, message, bubble);
     });
 
-    const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: () => runEngineSendPipeline(conversationEntry.id, message.id) });
+    const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: chessRetryFits(conversationEntry, message) ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
     if (detachedLinkCard || typeCapsule) {
       const stack = document.createElement("div");
@@ -13262,7 +13266,7 @@ function renderChatInfoProfile(contact, profile, domains, domainName = null) {
   chatInfoSocialLinks.replaceChildren();
   for (const [field, label, builder] of links) {
     const raw = profile[field];
-    const href = builder(raw);
+    const href = safeExternalHref(builder(raw));
     const row = document.createElement("div");
     row.className = "chat-info-more-row";
     const name = document.createElement("strong");
@@ -20961,6 +20965,8 @@ queueMicrotask(async () => {
   }
 
   initKaPosts({
+    // A KaChat link from a post opens in the app (iOS 5090ad9); returns whether it was one.
+    openKaChatLink: (raw) => { const link = parseKaChatInternalLink(raw); if (!link) return false; openKaChatInternalLink(link); return true; },
     engine,
     escapeHtml,
     shortAddress,
@@ -22341,6 +22347,54 @@ const MSG_MENU_ICONS = {
 // Shared Telegram-style right-click menu for a message. Renders a quick-reaction row at the
 // top (tap an emoji to toggle it) followed by the action list. Used by both 1:1 and group
 // messages. `reaction` is optional: { current, onPick }. `items` is [{label, icon, danger, onClick}].
+/** Whether a failed message can still be retried. A failed chess action is left off the board
+ *  (engine/chess.js summarizeChessGame), so the game may have moved on without it; retrying it
+ *  then would put it on the two boards in different orders (iOS dd03c4e). Retry is offered only
+ *  while it still fits: a move on your turn that is still legal, an accept while the game awaits
+ *  one, a resignation or invite before the game is over. Anything that is not chess always fits. */
+function chessRetryFits(conversationEntry, message) {
+  const env = Chess.parseChessEnvelope(Chess.unwrapReplyText(String(message?.text || "")));
+  if (!env) return true;
+  const contact = contactForConversation(conversationEntry);
+  if (!contact) return false;
+  const rows = (conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED }));
+  const summary = Chess.summarizeChessGame(env.gameId, rows, engine.address, contact.address);
+  if (env.kind === "invite") return !summary || !Chess.isChessGameOver(summary.status);
+  if (!summary) return false;
+  if (env.kind === "resign") return !Chess.isChessGameOver(summary.status);
+  if (env.kind === "response") return summary.status.kind === "pendingResponse" && !summary.iAmInviter;
+  if (env.kind === "move") {
+    if (summary.status.kind !== "inProgress" || !summary.viewerColor || summary.board.sideToMove !== summary.viewerColor) return false;
+    const from = Chess.squareFromAlgebraic(env.from);
+    const to = Chess.squareFromAlgebraic(env.to);
+    if (!from || !to) return false;
+    const candidate = Chess.normalizingPromotion(summary.board, { from, to, promotion: Chess.promotionFromLetter(env.promotion) });
+    return Chess.isLegalMove(summary.board, candidate);
+  }
+  return true;
+}
+
+// Message menu labels in the languages the desktop carries (iOS 3eee9e4 localized its sheets).
+// A label not in the table, or a language not here, shows as written.
+const MENU_I18N = {
+  es: { Reply: "Responder", Edit: "Editar", "Retry Edit": "Reintentar edición", "Retry Send": "Reintentar envío", "Copy Message": "Copiar mensaje", "Copy Link": "Copiar enlace", "Open Link": "Abrir enlace", "View in Explorer": "Ver en el explorador", Select: "Seleccionar", "Delete for me": "Eliminar para mí", "Message info": "Información del mensaje", "Show Original": "Mostrar original", "Show Translation": "Mostrar traducción", Translate: "Traducir", Share: "Compartir", Reactions: "Reacciones", Hide: "Ocultar" },
+  fr: { Reply: "Répondre", Edit: "Modifier", "Retry Edit": "Réessayer la modification", "Retry Send": "Réessayer l'envoi", "Copy Message": "Copier le message", "Copy Link": "Copier le lien", "Open Link": "Ouvrir le lien", "View in Explorer": "Voir dans l'explorateur", Select: "Sélectionner", "Delete for me": "Supprimer pour moi", "Message info": "Infos du message", "Show Original": "Afficher l'original", "Show Translation": "Afficher la traduction", Translate: "Traduire", Share: "Partager", Reactions: "Réactions", Hide: "Masquer" },
+  de: { Reply: "Antworten", Edit: "Bearbeiten", "Retry Edit": "Bearbeitung erneut senden", "Retry Send": "Erneut senden", "Copy Message": "Nachricht kopieren", "Copy Link": "Link kopieren", "Open Link": "Link öffnen", "View in Explorer": "Im Explorer ansehen", Select: "Auswählen", "Delete for me": "Für mich löschen", "Message info": "Nachrichteninfo", "Show Original": "Original anzeigen", "Show Translation": "Übersetzung anzeigen", Translate: "Übersetzen", Share: "Teilen", Reactions: "Reaktionen", Hide: "Ausblenden" },
+  pt: { Reply: "Responder", Edit: "Editar", "Retry Edit": "Tentar edição novamente", "Retry Send": "Tentar enviar novamente", "Copy Message": "Copiar mensagem", "Copy Link": "Copiar link", "Open Link": "Abrir link", "View in Explorer": "Ver no explorador", Select: "Selecionar", "Delete for me": "Apagar para mim", "Message info": "Informações da mensagem", "Show Original": "Mostrar original", "Show Translation": "Mostrar tradução", Translate: "Traduzir", Share: "Partilhar", Reactions: "Reações", Hide: "Ocultar" },
+};
+function localizedMenuLabel(label) {
+  const table = MENU_I18N[i18nActiveLang()];
+  const text = String(label || "");
+  if (!table) return text;
+  if (table[text]) return table[text];
+  // Labels that carry a value: "Reactions (3)", "Hide <name>", "Translate into <language>".
+  const counted = /^Reactions \((\d+)\)$/.exec(text);
+  if (counted && table.Reactions) return `${table.Reactions} (${counted[1]})`;
+  if (text.startsWith("Hide ") && table.Hide) return `${table.Hide} ${text.slice(5)}`;
+  if (text.startsWith("Translate into ") && table.Translate) return `${table.Translate} (${text.slice(15)})`;
+  return text;
+}
+
 function openMsgContextMenu({ x, y, reaction, items }) {
   document.querySelectorAll(".msg-context-menu, .group-msg-menu").forEach((m) => m.remove());
   const menu = document.createElement("div");
@@ -22381,7 +22435,7 @@ function openMsgContextMenu({ x, y, reaction, items }) {
     ic.innerHTML = item.icon || "";
     const lbl = document.createElement("span");
     lbl.className = "msg-context-label";
-    lbl.textContent = item.label;
+    lbl.textContent = localizedMenuLabel(item.label);
     b.append(ic, lbl);
     b.addEventListener("click", () => { cleanup(); item.onClick(); });
     list.append(b);
@@ -22538,7 +22592,7 @@ function openOneToOneMessageMenu(messageId, x, y) {
   items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterMessageSelection(message.id) });
   items.push({ label: "Message info", icon: MSG_MENU_ICONS.info, onClick: () => openMessageDetails(message.id) });
   if (message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED) {
-    items.push({ label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: () => runEngineSendPipeline(conversationEntry.id, message.id) });
+    if (chessRetryFits(conversationEntry, message)) items.push({ label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: () => runEngineSendPipeline(conversationEntry.id, message.id) });
   }
   items.push({ label: "Delete for me", icon: MSG_MENU_ICONS.trash, danger: true, onClick: () => deleteOneMessageLocal(conversationEntry, message) });
   // Reactions need a real target (txid or local id) to send against.
@@ -22846,7 +22900,19 @@ function renderGroupMessages() {
       if (groupEdit) text.append(editedMarkElement(groupEdit.status));
       const internalLink = firstInternalLinkIn(bodyText);
       const previewable = internalLink ? null : (linkUrls || []).find(isPreviewableUrl);
-      const card = internalLink ? buildInternalLinkCard(internalLink) : previewable ? buildLinkPreviewCard(previewable, { autoLoad: message.direction !== "incoming", outgoing: message.direction !== "incoming" }) : null;
+      // The 1:1 rule (iOS 680cff3): your own messages and senders you have accepted as contacts
+      // auto-load; anyone else's preview waits for a tap, so their server never learns your IP.
+      const senderContact = message.direction === "incoming" ? state.contacts.find((c) => c.address === message.senderAddress) : null;
+      const groupAutoFetch = message.direction !== "incoming"
+        || (senderContact && isAcceptedContact(senderContact))
+        || (previewable && (linkPreviewCache.has(previewable) || approvedPreviewUrls.has(previewable)));
+      const card = internalLink
+        ? buildInternalLinkCard(internalLink)
+        : previewable
+          ? (groupAutoFetch
+            ? buildLinkPreviewCard(previewable, { autoLoad: true, outgoing: message.direction !== "incoming" })
+            : buildTapToLoadCard(previewable, null, () => renderGroupMessages()))
+          : null;
       const linkOnly = card && !replyEnvelope && (internalLink
         ? String(bodyText).trim() === internalLink.raw
         : (linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));

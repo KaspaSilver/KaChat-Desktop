@@ -634,7 +634,8 @@ function handleUrl(raw, canonicalHost, acceptedHosts) {
         return direct.href;
       }
     } else {
-      return direct.href;
+      // Any other scheme is not a link we open: the value shows as text.
+      return null;
     }
   } catch {
     value = stripUrlDecoration(value);
@@ -647,11 +648,21 @@ function handleUrl(raw, canonicalHost, acceptedHosts) {
   return `https://${canonicalHost}/${encodeURIComponent(value)}`;
 }
 
+/** Links from other people's content open only web and email (iOS 5090ad9): a crafted KNS field
+ *  naming any other scheme (javascript:, a wallet's deep link, data:) shows as plain text. */
+export function safeExternalHref(href) {
+  if (!href) return null;
+  try {
+    const scheme = new URL(href).protocol.toLowerCase();
+    return scheme === "http:" || scheme === "https:" || scheme === "mailto:" ? href : null;
+  } catch { return null; }
+}
+
 export const KNSProfileLinkBuilder = Object.freeze({
   websiteUrl(raw) {
     const value = normalizedLinkValue(raw);
     if (!value) return null;
-    try { return new URL(value).href; } catch { return `https://${value}`; }
+    try { return safeExternalHref(new URL(value).href); } catch { return safeExternalHref(`https://${value}`); }
   },
   xUrl(raw) {
     return handleUrl(raw, "x.com", ["x.com", "www.x.com", "twitter.com", "www.twitter.com"]);

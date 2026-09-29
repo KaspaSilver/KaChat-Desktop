@@ -560,7 +560,7 @@ async function fetchSelfStashTransactionsFromChain({ walletAddress, cursor = 0, 
  * the COMPLETE read-back a contact note may be written after (MESSAGING.md §4): `complete` is
  * true only when the paging ran to its end, so a partial answer never licenses a duplicate.
  */
-export async function fetchSavedHandshakeNotes({ walletAddress, privateKeyHex, decryptMessage, indexerUrl, limit = 50, maxPages = 40 } = {}) {
+export async function fetchSavedHandshakeNotes({ walletAddress, privateKeyHex, decryptMessage, indexerUrl, limit = 50, maxPages = 200 } = {}) {
   if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before reading saved contacts.");
   if (!privateKeyHex) throw new Error("The active private key is required to decrypt saved contacts.");
   if (typeof decryptMessage !== "function") throw new Error("Kasia cipher decryptor is unavailable.");

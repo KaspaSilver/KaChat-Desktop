@@ -4913,7 +4913,10 @@ export function initKaPosts(dependencies) {
     const linkOpen = event.target.closest("[data-kaposts-link-open]");
     if (linkOpen) {
       closePopover();
-      window.open(linkOpen.dataset.kapostsLinkOpen, "_blank", "noopener");
+      // KaChat links open in the app; everything else only if it is web (iOS 5090ad9).
+      const href = String(linkOpen.dataset.kapostsLinkOpen || "");
+      if (deps.openKaChatLink?.(href)) return;
+      if (/^https?:\/\//i.test(href)) window.open(href, "_blank", "noopener,noreferrer");
       return;
     }
     const linkCopy = event.target.closest("[data-kaposts-link-copy]");

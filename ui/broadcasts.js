@@ -2101,6 +2101,8 @@ export function refreshBroadcasts() {
 export function resetBroadcastsForAccount() {
   cancelVoiceRecordingIfActive();
   stopPolling();
+  // Each wallet has its own store: rows the last wallet applied are not applied for this one.
+  appliedRowsByChannel.clear();
   activeChannel = null;
   loadState();
   syncScanWanted();
