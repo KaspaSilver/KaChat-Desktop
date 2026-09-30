@@ -29,9 +29,22 @@ export function kaspa() {
   return kaspaPromise;
 }
 
-/** A 24-word phrase for a new wallet, from the Kaspa SDK's own BIP39 generator. */
-export async function newRecoveryPhrase() {
-  return generateMnemonicPhrase(await kaspa(), 24);
+/** A new 12- or 24-word phrase, from the Kaspa SDK's own BIP39 generator. */
+export async function newRecoveryPhrase(wordCount = 24) {
+  return generateMnemonicPhrase(await kaspa(), wordCount === 12 ? 12 : 24);
+}
+
+/**
+ * The main address a phrase + passphrase open, for the passphrase screen's live preview (iOS
+ * `previewChattingAddress`). Nothing is stored. Null when it cannot be derived.
+ */
+export async function previewMainAddress(phrase, passphrase = "", family = "kaspaStandard") {
+  try {
+    const derived = await importMnemonicWithFamily(await kaspa(), phrase, passphrase, { family, index: 0 });
+    return derived.address;
+  } catch {
+    return null;
+  }
 }
 
 /**
