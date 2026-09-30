@@ -146,6 +146,11 @@ async function fetchJson(url, { method = "GET", body = null } = {}) {
 
 function apiUrl(baseUrl, path) {
   const base = String(baseUrl || KNS_DEFAULT_MAINNET_URL).replace(/\/+$/, "");
+  // A browser extension page (KaChat Wallet) reaches the KNS host directly: its host permission
+  // lifts CORS, and it has no same-origin relay to go through.
+  if (typeof location !== "undefined" && /^(chrome|moz|safari-web)-extension:$/.test(String(location.protocol || ""))) {
+    return `${base}${path}`;
+  }
   // Route through the dev server's same-origin /nc-proxy passthrough (vite.config.mjs — it's
   // origin-generic, not Nextcloud-specific): the KNS API omits CORS headers on some endpoints
   // (e.g. /domain/<id>/profile), which the browser hard-blocks when fetched directly.
