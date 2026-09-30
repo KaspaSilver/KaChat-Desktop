@@ -147,8 +147,9 @@ function showWelcome() {
 
 let createDraft = null;
 function freshCreateDraft() {
-  // No preset name: the field starts empty and Generate Account stays off until one is typed.
-  return { wordCount: 24, name: "", phrase: null, revealed: false, confirmed: false };
+  // Nothing preset: no length picked and an empty name. Generate Account stays off until the
+  // user has chosen both.
+  return { wordCount: null, name: "", phrase: null, revealed: false, confirmed: false };
 }
 
 function navHeader({ back = true, backLabel = "Back", title = "" } = {}) {
@@ -157,6 +158,10 @@ function navHeader({ back = true, backLabel = "Back", title = "" } = {}) {
       ${back ? `<button class="nav-back" id="back" aria-label="${esc(backLabel)}">${ICONS.back}<span>${esc(backLabel)}</span></button>` : ""}
       ${title ? `<div class="nav-title">${esc(title)}</div>` : ""}
     </header>`;
+}
+
+function canGenerate(draft) {
+  return (draft.wordCount === 12 || draft.wordCount === 24) && Boolean(draft.name.trim());
 }
 
 function showCreate() {
@@ -183,18 +188,20 @@ function showCreate() {
         <input id="name" value="${esc(d.name)}" placeholder="Enter account name" maxlength="40" autocomplete="off" autofocus />
       </div>
       <p class="error" id="error"></p>
-      <button id="generate" class="with-icon" ${d.name.trim() ? "" : "disabled"}>${ICONS.plusCircle}<span>Generate Account</span></button>
+      <button id="generate" class="with-icon" ${canGenerate(d) ? "" : "disabled"}>${ICONS.plusCircle}<span>Generate Account</span></button>
     </section>`, "create");
   $("#back").onclick = () => { createDraft = null; showWelcome(); };
   for (const option of app.querySelectorAll(".segmented button")) {
     option.onclick = () => {
       d.wordCount = Number(option.dataset.words);
       for (const other of app.querySelectorAll(".segmented button")) other.setAttribute("aria-checked", String(other === option));
+      $("#generate").disabled = !canGenerate(d);
     };
   }
   const name = $("#name");
-  name.oninput = () => { d.name = name.value; $("#generate").disabled = !name.value.trim(); };
+  name.oninput = () => { d.name = name.value; $("#generate").disabled = !canGenerate(d); };
   $("#generate").onclick = async () => {
+    if (!d.wordCount) { $("#error").textContent = "Choose a seed phrase length."; return; }
     if (!d.name.trim()) { $("#error").textContent = "Enter an account name."; return; }
     const button = $("#generate");
     button.disabled = true;
@@ -206,7 +213,7 @@ function showCreate() {
       showCreateSeed();
     } catch (error) {
       $("#error").textContent = error.message;
-      button.disabled = !d.name.trim();
+      button.disabled = !canGenerate(d);
       button.innerHTML = `${ICONS.plusCircle}<span>Generate Account</span>`;
     }
   };
