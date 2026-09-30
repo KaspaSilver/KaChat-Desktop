@@ -3655,10 +3655,18 @@ function conversationRecency(conversationEntry) {
   );
 }
 
+/** The chat with your own address: notes to yourself, synced across your devices. */
+function isSelfConversation(conversationEntry) {
+  const address = contactForConversation(conversationEntry)?.address;
+  return Boolean(address) && Boolean(engine.address) && address === engine.address;
+}
 function sortedConversations() {
+  // Your own chat sits at the very top at all times; pinned chats follow, then by recency.
   return [...state.conversations]
     .filter((conversationEntry) => !conversationEntry.archived)
-    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || conversationRecency(b) - conversationRecency(a));
+    .sort((a, b) => Number(isSelfConversation(b)) - Number(isSelfConversation(a))
+      || Number(b.pinned) - Number(a.pinned)
+      || conversationRecency(b) - conversationRecency(a));
 }
 
 // While Node Connection is scanning, the latest log line is mirrored under its button.
@@ -8496,7 +8504,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 70;
+const APP_BUILD = 71;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14147,6 +14155,8 @@ tipQ("[data-tip-max]")?.addEventListener("click", async () => {
 });
 
 async function sendOutgoingHandshake(contact, conversationEntry, { accepting = false } = {}) {
+  // Never to yourself: a handshake is how a stranger learns about the chat, and you are not one.
+  if (!contact?.address || contact.address === engine.address) return false;
   const createdAt = Date.now();
   const message = createMessage({
     conversationId: conversationEntry.id,
@@ -15993,6 +16003,9 @@ if (composerPlusButton && composerPlusMenu) {
     // The plus button always returns to step one of the menu, never leaves the chess
     // time-control step stranded behind it.
     if (tcMenu && !tcMenu.hidden) { tcMenu.hidden = true; composerPlusMenu.hidden = true; return; }
+    // In your own chat there is no one to shake hands with or to play.
+    const selfChat = isSelfConversation(state.conversations.find((entry) => entry.id === activeConversationId));
+    composerPlusMenu.querySelectorAll("[data-composer-handshake], [data-chess-open]").forEach((row) => { row.hidden = selfChat; });
     composerPlusMenu.hidden = !composerPlusMenu.hidden;
   });
 }
@@ -18411,7 +18424,8 @@ function updateHandshakeWarningBanner() {
   }
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const contact = contactForConversation(conversationEntry);
-  if (!conversationEntry || !contact || !HANDSHAKE_WARNING_STATES.has(contact.relationshipState)) {
+  // A chat with yourself is never gated by a handshake (iOS isSelfChat): it is you.
+  if (!conversationEntry || !contact || contact.address === engine.address || !HANDSHAKE_WARNING_STATES.has(contact.relationshipState)) {
     hideHandshakeWarningBanner();
     return;
   }
