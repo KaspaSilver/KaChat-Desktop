@@ -17,6 +17,7 @@ import { createRpc, probeRpc, disconnectRpc, getNodeRegistrySnapshot, PUBLIC_NOD
 import { getEndpoint } from "../../engine/endpoints.js";
 import { getBalance } from "../../engine/transactions.js";
 import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
+import { getAddressInfo, getAddressProfile, fetchAddressInfo, fetchAddressProfile, peekAddressInfo, peekAddressProfile } from "../../engine/kns.js";
 import { getLocal, setLocal } from "./browser.js";
 import { activeAccountSecrets } from "./vault.js";
 
@@ -251,6 +252,38 @@ export async function balances(addresses, hiddenIndexes = []) {
   spendingEntries.forEach(([index], i) => { bySpendingIndex[index] = spending[i].totalSompi; });
   const total = spending.reduce((sum, b) => sum + b.totalSompi, main.totalSompi);
   return { main: main.totalSompi, spending: bySpendingIndex, total };
+}
+
+// --- KNS ---------------------------------------------------------------------------------
+
+function knsOptions() {
+  return { baseUrl: getEndpoint("knsApi") };
+}
+
+/** What is cached for an address right now (no network): { domainName, profile, domainCount }. */
+export function cachedKns(address) {
+  const profile = peekAddressProfile(address);
+  const info = peekAddressInfo(address);
+  return knsView(profile, info);
+}
+
+/** The address's KNS name, profile (avatar, banner, bio) and domain count, refreshed. */
+export async function kns(address, { force = false } = {}) {
+  const options = knsOptions();
+  const [info, profile] = force
+    ? await Promise.all([fetchAddressInfo(address, options), fetchAddressProfile(address, options)])
+    : await Promise.all([getAddressInfo(address, options), getAddressProfile(address, options)]);
+  return knsView(profile, info);
+}
+
+function knsView(profile, info) {
+  const domains = Array.isArray(info?.allDomains) ? info.allDomains : [];
+  return {
+    domainName: profile?.domainName || info?.primaryDomain || null,
+    profile: profile?.profile || null,
+    domainCount: domains.length,
+    known: Boolean(profile || info),
+  };
 }
 
 // --- Price -------------------------------------------------------------------------------

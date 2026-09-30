@@ -73,6 +73,16 @@ const ICONS = {
   copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
   qr: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4"/></svg>',
   back: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>',
+  // SF Symbols used on the iOS Profile tab.
+  share: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7.5 7.5L12 3l4.5 4.5"/><path d="M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg>',
+  pencilCircle: '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M8.5 15.5h2l5-5-2-2-5 5v2z" fill="var(--bg)"/></svg>',
+  checkCircle: '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="var(--kaspa)"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  qrBig: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4"/></svg>',
+  sendCircle: '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 16.5v-9M8 11.5l4-4 4 4" fill="none" stroke="var(--bg)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  gear: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+  at: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9"/></svg>',
+  chevron: '<svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>',
+  logout: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4H6a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h8"/><path d="M11 12h10M17.5 8.5L21 12l-3.5 3.5"/></svg>',
   // SF Symbols used by the iOS create flow.
   warning: '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3L2 20h20L12 3z" fill="currentColor"/><path d="M12 10v4.5M12 17.2v.3" stroke="#000" stroke-width="2" stroke-linecap="round"/></svg>',
   pencil: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>',
@@ -489,14 +499,20 @@ function showReset() {
   };
 }
 
-// --- home --------------------------------------------------------------------------------
+// --- home: the iOS Profile tab ------------------------------------------------------------
+//
+// Section for section as ProfileView lays it out: the toolbar (connection dot, balance in the
+// middle - lock and expand where iOS has the notification bell, which is chat-only), the pinned
+// "Profile" title with the share button, then account name, profile hero, the two QR buttons,
+// the Chatting and Spending rows, Your Domains, Settings, Log Out and About. Help is left out:
+// its guides are the chat Welcome Guide and the KNS setup guide, which arrives with KNS.
 
 let homeState = null;
 
 function connectionDot(state) {
   const cls = state === "ok" ? "ok" : state === "bad" ? "bad" : "busy";
   const label = state === "ok" ? "Connected" : state === "bad" ? "Not connected" : "Connecting";
-  return `<span class="dot ${cls}" title="${label}" aria-label="${label}"></span>`;
+  return `<button class="dot-button" id="dot" aria-label="${label}" title="${label}"><span class="dot ${cls}"></span></button>`;
 }
 
 async function showHome() {
@@ -512,72 +528,197 @@ async function showHome() {
     addresses: cached,
     spending,
     balances: null,
-    price: wallet.cachedPrice(currency),
+    kns: cached?.main ? wallet.cachedKns(cached.main) : null,
     connection: "busy",
+    editingName: false,
     error: "",
   };
   paintHome();
   refreshHome();
 }
 
+const SOON = "Coming in a later update.";
+
+function spendingTotal(balances) {
+  if (!balances) return null;
+  return Object.values(balances.spending || {}).reduce((sum, value) => sum + BigInt(value || 0n), 0n);
+}
+
+function profileLinkFor(address) {
+  return `https://kachat.app/u/${String(address || "").replace(/^kaspa:/, "")}`;
+}
+
 function paintHome() {
   const s = homeState;
   if (!s) return;
-  const total = s.balances?.total;
-  const primary = s.addresses?.spending?.[s.spending.activeIndex];
-  const mainBalance = s.balances ? `${wallet.formatKas(s.balances.main)} KAS` : "…";
-  const primaryBalance = s.balances ? `${wallet.formatKas(s.balances.spending[s.spending.activeIndex] ?? 0n)} KAS` : "…";
+  const main = s.addresses?.main || null;
+  const primary = s.addresses?.spending?.[s.spending.activeIndex] || null;
+  const mainSompi = s.balances?.main;
+  const primarySompi = s.balances ? (s.balances.spending[s.spending.activeIndex] ?? 0n) : null;
+  const totalSpending = spendingTotal(s.balances);
+  const kns = s.kns || {};
+  const displayName = kns.domainName || s.account.name;
+  const avatar = kns.profile?.avatarUrl ? safeImageUrl(kns.profile.avatarUrl) : null;
+  const banner = kns.profile?.bannerUrl ? safeImageUrl(kns.profile.bannerUrl) : null;
+  const bio = String(kns.profile?.bio || "").trim();
+  const hasKnsProfile = Boolean(kns.domainName);
+  const created = s.account.createdAt ? new Date(s.account.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "—";
+  const version = ext?.runtime?.getManifest?.().version || "";
+
   render(`
-    <header class="topbar">
-      ${connectionDot(s.connection)}
-      <div class="title">${esc(s.account.name)}</div>
-      ${isTab ? "" : `<button class="icon" id="expand" aria-label="Open in a tab" title="Open in a tab">${ICONS.expand}</button>`}
-      <button class="icon" id="lock" aria-label="Lock" title="Lock">${ICONS.lock}</button>
-    </header>
-    <section class="screen">
-      <div class="card balance">
-        <div class="muted small">Total balance</div>
-        <div class="amount">${total != null ? esc(wallet.formatKas(total)) : '<span class="spinner"></span>'}<span class="unit">KAS</span></div>
-        <div class="fiat">${total != null ? esc(wallet.formatFiat(total, s.price)) : "&nbsp;"}</div>
+    <div class="profile">
+      <header class="toolbar">
+        ${connectionDot(s.connection)}
+        <button class="toolbar-balance" id="balance" aria-label="Copy balance">
+          <img src="icons/kaspa-logo.png" alt="" />
+          <span>${mainSompi != null ? esc(wallet.formatKas(mainSompi, 8)) : "--"} KAS</span>
+        </button>
+        <div class="toolbar-right">
+          ${isTab ? "" : `<button class="icon" id="expand" aria-label="Open in a tab" title="Open in a tab">${ICONS.expand}</button>`}
+          <button class="icon" id="lock" aria-label="Lock" title="Lock">${ICONS.lock}</button>
+        </div>
+      </header>
+      <div class="profile-title">
+        <h1>Profile</h1>
+        <button class="share-circle" id="share" aria-label="Share your profile" title="Copy your profile link" ${main ? "" : "disabled"}>${ICONS.share}</button>
       </div>
-      <div class="actions">
-        <button id="receive" ${primary ? "" : "disabled"}>Receive</button>
-        <button id="send" class="secondary" disabled title="Sending arrives in the next update">Send</button>
-      </div>
-      ${s.error ? `<p class="error">${esc(s.error)}</p>` : ""}
-      <div class="card stack">
-        ${addressRowHtml("main", "Main address", s.addresses?.main, mainBalance, "Your KaChat identity and KNS domains")}
-        ${addressRowHtml("spending", s.spending.activeIndex === 0 ? "Spending address" : `Spending #${s.spending.activeIndex}`, primary, primaryBalance, "Where Receive sends payments")}
-      </div>
-      <div class="spacer"></div>
-      <p class="muted small center-text" id="node">${s.connection === "ok" ? `Node: ${esc(wallet.connectedNodeUrl())}` : s.connection === "bad" ? "Can't reach a Kaspa node - retrying" : "Connecting to the Kaspa network…"}</p>
-    </section>`, "home");
-  $("#lock").onclick = async () => { await vault.lock(); tellBackground({ type: "lock" }); await wallet.disconnect(); showUnlock(); };
+      <section class="profile-body">
+        <div class="account-row">
+          ${s.editingName
+            ? `<input id="account-name" value="${esc(s.account.name)}" maxlength="40" aria-label="Account name" autofocus />
+               <button class="icon plain" id="save-name" aria-label="Save name">${ICONS.checkCircle}</button>`
+            : `<span class="account-name">${esc(s.account.name)}</span>
+               <button class="icon plain" id="edit-name" aria-label="Rename account">${ICONS.pencilCircle}</button>`}
+        </div>
+
+        <div class="glass hero">
+          ${banner ? `<div class="banner"><img src="${esc(banner)}" alt="" referrerpolicy="no-referrer" /></div>` : '<div class="banner gradient"></div>'}
+          <div class="hero-row">
+            <div class="avatar">${avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer" />` : `<span>${esc((displayName || "?").trim().charAt(0).toUpperCase())}</span>`}</div>
+            <button class="link" id="kns-profile">${hasKnsProfile ? "Edit KNS Profile" : "Create KNS Profile"}</button>
+          </div>
+          <div class="hero-text">
+            <div class="hero-name">${esc(displayName)}</div>
+            ${bio ? `<div class="hero-bio">${esc(bio)}</div>` : ""}
+          </div>
+        </div>
+
+        <div class="qr-buttons">
+          <button class="qr-button" id="receive" ${primary ? "" : "disabled"}>
+            <span class="qr-circle">${ICONS.qrBig}</span><span>Receive Kaspa</span>
+          </button>
+          <button class="qr-button" id="chatting-qr" ${main ? "" : "disabled"}>
+            <span class="qr-circle">${ICONS.qrBig}</span><span>Chatting Address</span>
+          </button>
+        </div>
+
+        ${addressActionRowHtml("chatting", "Chatting", main, mainSompi != null ? `${wallet.formatKas(mainSompi, 8)} KAS` : null, null)}
+        ${addressActionRowHtml("spending", "Spending", primary, primarySompi != null ? `${wallet.formatKas(primarySompi, 8)} KAS` : null, totalSpending != null ? `Total: ${wallet.formatKas(totalSpending, 8)} KAS` : null)}
+
+        <button class="glass nav-row" id="domains">
+          <span class="nav-row-label">${ICONS.at}<span>Your Domains</span></span>
+          <span class="nav-row-value">${kns.known ? esc(String(kns.domainCount)) : ""}</span>${ICONS.chevron}
+        </button>
+        <button class="glass nav-row" id="settings">
+          <span class="nav-row-label">${ICONS.gear}<span>Settings</span></span>${ICONS.chevron}
+        </button>
+        <button class="glass nav-row danger-row" id="logout">
+          <span>Log Out</span>${ICONS.logout}
+        </button>
+
+        <div class="section-header">About</div>
+        <div class="glass list">
+          <div class="list-row"><span>Created</span><span class="muted">${esc(created)}</span></div>
+          <div class="list-row"><span>Version</span><span class="muted">${esc(version)}</span></div>
+          <a class="list-row" href="https://linktr.ee/Kachat_" target="_blank" rel="noopener noreferrer"><span>Website</span><span class="muted">linktr.ee/Kachat_</span></a>
+          <a class="list-row" href="mailto:kaspasilver@gmail.com"><span>Support Email</span><span class="muted">kaspasilver@gmail.com</span></a>
+          <button class="list-row" id="donate"><span>Donate</span><span class="muted">kachat.kas</span></button>
+          <button class="list-row" id="licenses"><span>Open Source Licenses</span>${ICONS.chevron}</button>
+        </div>
+      </section>
+    </div>`, "home");
+
+  $("#dot").onclick = () => toast(s.connection === "ok" ? `Connected to ${wallet.connectedNodeUrl().replace(/^wss:\/\//, "")}` : s.connection === "bad" ? "Can't reach a Kaspa node - retrying" : "Connecting to the Kaspa network…");
+  $("#balance").onclick = () => { if (mainSompi != null) copyText(wallet.formatKas(mainSompi, 8), "Balance"); };
+  $("#lock").onclick = lockWallet;
   const expand = $("#expand");
   if (expand) expand.onclick = async () => { await ext.tabs.create({ url: ext.runtime.getURL("popup.html?view=tab") }); window.close(); };
-  const receive = $("#receive");
-  if (primary) receive.onclick = () => showQr({ title: "Receive Kaspa", address: primary, note: "Send only Kaspa (KAS) to this address." });
-  for (const kind of ["main", "spending"]) {
-    const address = kind === "main" ? s.addresses?.main : primary;
-    if (!address) continue;
-    const copy = $(`#copy-${kind}`);
-    const qr = $(`#qr-${kind}`);
-    if (copy) copy.onclick = () => copyText(address);
-    if (qr) qr.onclick = () => showQr({ title: kind === "main" ? "Main address" : "Spending address", address });
+  if (main) $("#share").onclick = () => copyText(profileLinkFor(main), "Profile link");
+
+  if (s.editingName) {
+    const input = $("#account-name");
+    const commit = async () => {
+      const name = input.value.trim();
+      s.editingName = false;
+      if (name && name !== s.account.name) {
+        const view = await vault.renameAccount(s.account.id, name);
+        s.account = view.accounts.find((a) => a.id === s.account.id) || s.account;
+        toast("Account renamed.");
+      }
+      paintHome();
+    };
+    $("#save-name").onclick = commit;
+    input.onkeydown = (event) => { if (event.key === "Enter") commit(); if (event.key === "Escape") { s.editingName = false; paintHome(); } };
+    input.select();
+  } else {
+    $("#edit-name").onclick = () => { s.editingName = true; paintHome(); };
   }
+
+  $("#kns-profile").onclick = () => toast(SOON);
+  if (primary) $("#receive").onclick = () => showQr({
+    title: "Receive Kaspa",
+    address: primary,
+    balanceSompi: primarySompi,
+    note: "Kaspa sent here lands in this account and shows in your spending total. Use this address for everything not related to chatting or KNS profile creation.",
+  });
+  if (main) $("#chatting-qr").onclick = () => showQr({ title: "Chatting Address", address: main, balanceSompi: mainSompi });
+  for (const [kind, address] of [["chatting", main], ["spending", primary]]) {
+    const copy = $(`#copy-${kind}`);
+    if (copy && address) copy.onclick = () => copyText(address);
+    $(`#send-${kind}`).onclick = () => toast("Sending arrives in the next update.");
+    $(`#manage-${kind}`).onclick = () => toast("Manage arrives in the next update.");
+  }
+  $("#domains").onclick = () => toast(SOON);
+  $("#settings").onclick = () => toast(SOON);
+  $("#logout").onclick = lockWallet;
+  $("#donate").onclick = () => toast("Donating arrives with sending in the next update.");
+  $("#licenses").onclick = () => toast(SOON);
 }
 
-function addressRowHtml(kind, label, address, balanceText, hint) {
+async function lockWallet() {
+  await vault.lock();
+  tellBackground({ type: "lock" });
+  await wallet.disconnect();
+  showUnlock();
+}
+
+// One address row: title + balance on the left (tapping it copies the address), then the
+// Send and Manage circles - iOS addressActionRow.
+function addressActionRowHtml(kind, title, address, balanceText, totalText) {
   return `
-    <div class="address-row">
-      <div class="meta">
-        <div class="row-between"><span class="label">${esc(label)}</span><span class="bal">${esc(balanceText)}</span></div>
-        <div class="addr" title="${esc(address || "")}">${address ? esc(wallet.shortAddress(address)) : '<span class="spinner"></span>'}</div>
-        <div class="muted small">${esc(hint)}</div>
-      </div>
-      <button class="icon" id="copy-${kind}" aria-label="Copy ${esc(label)}" title="Copy" ${address ? "" : "disabled"}>${ICONS.copy}</button>
-      <button class="icon" id="qr-${kind}" aria-label="Show ${esc(label)} QR code" title="QR code" ${address ? "" : "disabled"}>${ICONS.qr}</button>
+    <div class="glass address-action">
+      <button class="address-copy" id="copy-${kind}" aria-label="Copy ${esc(title)} address" ${address ? "" : "disabled"}>
+        <span class="address-title">${esc(title)}</span>
+        ${address ? "" : '<span class="muted tiny">Address unlocking...</span>'}
+        ${balanceText != null ? `<span class="address-balance">${esc(balanceText)}</span>` : '<span class="spinner small-spin"></span>'}
+        ${totalText ? `<span class="muted tiny">${esc(totalText)}</span>` : ""}
+      </button>
+      <button class="circle-action" id="send-${kind}" aria-label="Send">${ICONS.sendCircle}</button>
+      <button class="circle-action" id="manage-${kind}" aria-label="Manage">${ICONS.gear}</button>
     </div>`;
+}
+
+/** Only http(s) images from a KNS profile - anything else is ignored. */
+function safeImageUrl(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const candidate = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 let refreshing = false;
@@ -589,21 +730,22 @@ async function refreshHome() {
     // Addresses first: derived from the phrase (a moment of CPU on first unlock), then cached.
     if (!s.addresses || s.addresses.accountId !== s.account.id || !s.addresses.spending?.[s.spending.maxIndex]) {
       s.addresses = await wallet.deriveAddresses();
+      s.kns = wallet.cachedKns(s.addresses.main);
       paintHomeIfShowing(s);
     }
-    wallet.price(s.currency).then((p) => { if (p) { s.price = p; paintHomeIfShowing(s); } });
+    wallet.kns(s.addresses.main).then((info) => { s.kns = info; paintHomeIfShowing(s); }).catch(() => {});
     try {
       await wallet.connection();
       s.connection = "ok";
-      s.error = "";
+      paintHomeIfShowing(s);
       s.balances = await wallet.balances(s.addresses, s.spending.hidden);
     } catch (error) {
       s.connection = "bad";
-      s.error = "";
       console.warn("[KaChat Wallet] network:", error);
     }
   } catch (error) {
     s.error = error.message;
+    toast(error.message);
   } finally {
     refreshing = false;
     paintHomeIfShowing(s);
@@ -611,8 +753,15 @@ async function refreshHome() {
 }
 
 function paintHomeIfShowing(state) {
-  // Only repaint when the home screen for this state is what's on screen.
-  if (homeState === state && app.dataset.screen === "home") paintHome();
+  // Only repaint when the home screen for this state is what's on screen, and never under
+  // someone typing a new account name.
+  if (homeState === state && app.dataset.screen === "home" && !state.editingName) {
+    const scroller = app.querySelector(".profile-body");
+    const scrollTop = scroller?.scrollTop || 0;
+    paintHome();
+    const next = app.querySelector(".profile-body");
+    if (next) next.scrollTop = scrollTop;
+  }
 }
 
 // Balances stay current while the popup is open.
@@ -620,21 +769,24 @@ setInterval(() => { if (homeState && app.dataset.screen === "home") refreshHome(
 
 // --- QR ----------------------------------------------------------------------------------
 
-async function showQr({ title, address, note = "" }) {
+// The address QR screen - iOS ChattingAddressQRView: balance, the code, the full address, a
+// line on what the address is for, and copy.
+async function showQr({ title, address, balanceSompi = null, note = "" }) {
   render(`
-    <header class="topbar"><button class="icon" id="back" aria-label="Back">${ICONS.back}</button><div class="title">${esc(title)}</div></header>
+    ${navHeader({ title })}
     <section class="screen">
       <div class="qr">
+        ${balanceSompi != null ? `<div class="qr-balance">${esc(wallet.formatKas(balanceSompi, 8))} KAS</div>` : ""}
         <canvas id="qr" width="512" height="512" aria-label="QR code for ${esc(address)}"></canvas>
         <div class="addr-full">${esc(address)}</div>
         ${note ? `<p class="muted small center-text">${esc(note)}</p>` : ""}
       </div>
-      <button id="copy">${ICONS.copy} Copy address</button>
+      <button id="copy" class="with-icon">${ICONS.copy}<span>Copy Address</span></button>
     </section>`, "qr");
   $("#back").onclick = () => paintHome();
   $("#copy").onclick = () => copyText(address);
   try {
-    await drawKaspaQr($("#qr"), address, { dark: "#071415", light: "#ffffff" });
+    await drawKaspaQr($("#qr"), address, { dark: "#000000", light: "#ffffff" });
   } catch { /* the address text is still there to copy */ }
 }
 
