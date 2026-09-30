@@ -106,7 +106,7 @@ function showCurrencyPicker({ current, onBack }) {
       <div class="glass list" role="radiogroup" aria-label="Currency">
         ${CURRENCIES.map(([name, code]) => `
           <button class="list-row" role="radio" data-code="${code}" aria-checked="${code === current}">
-            <span>${esc(name)} (${code.toUpperCase()})</span>${code === current ? `<span class="accent">${ICONS.checkBig}</span>` : ""}
+            <span>${esc(name)} (${code.toUpperCase()})</span>${code === current ? `<span class="accent">${ICONS.checkmark}</span>` : ""}
           </button>`).join("")}
       </div>
     </section>`, "settings");
@@ -149,7 +149,7 @@ function showAutoLockPicker({ current, onBack }) {
       <div class="glass list" role="radiogroup" aria-label="Auto-Lock">
         ${AUTO_LOCK_CHOICES.map(([value, text]) => `
           <button class="list-row" role="radio" data-minutes="${value}" aria-checked="${value === current}">
-            <span>${esc(text)}</span>${value === current ? `<span class="accent">${ICONS.checkBig}</span>` : ""}
+            <span>${esc(text)}</span>${value === current ? `<span class="accent">${ICONS.checkmark}</span>` : ""}
           </button>`).join("")}
       </div>
     </section>`, "settings");
@@ -227,7 +227,7 @@ function showExplorerPicker({ onBack }) {
       <div class="glass list" role="radiogroup" aria-label="Explorer">
         ${Object.entries(wallet.EXPLORERS).map(([id, entry]) => `
           <button class="list-row" role="radio" data-explorer="${id}" aria-checked="${id === current}">
-            <span>${esc(entry.name)}</span>${id === current ? `<span class="accent">${ICONS.checkBig}</span>` : ""}
+            <span>${esc(entry.name)}</span>${id === current ? `<span class="accent">${ICONS.checkmark}</span>` : ""}
           </button>`).join("")}
       </div>
       <p class="form-footer">Used to build "view transaction" links throughout the app.</p>
@@ -320,11 +320,11 @@ async function showConnectionSettings({ onBack }) {
             ${nodeChoices().map(([address, label]) => `
               <button class="form-row between" role="radio" data-node="${esc(address)}" aria-checked="${address === draft.node}">
                 <span class="stack-tight"><span>${esc(label)}</span>${address && label !== address ? `<span class="mono tiny muted">${esc(address)}</span>` : ""}</span>
-                ${address === draft.node ? `<span class="accent">${ICONS.checkBig}</span>` : ""}
+                ${address === draft.node ? `<span class="accent">${ICONS.checkmark}</span>` : ""}
               </button>`).join("")}
             <div class="form-row">
               <input id="custom-node" class="plain-input mono" value="${esc(draft.customNode)}" placeholder="wss://host or host:port" autocomplete="off" spellcheck="false" />
-              <button class="icon plain accent" id="use-custom" aria-label="Use this node">${ICONS.checkCircle}</button>
+              <button class="link-button small" id="use-custom" ${draft.customNode.trim() ? "" : "disabled"}>Use</button>
             </div>
             ${draft.node ? '<div class="form-row"><span class="accent small">Connected only to this node</span></div>' : ""}
             ${draft.nodeError ? `<div class="form-row error-text">${esc(draft.nodeError)}</div>` : ""}
@@ -360,6 +360,7 @@ async function showConnectionSettings({ onBack }) {
       draft.bookLabel = $("#book-label").value;
       draft.bookAddress = $("#book-address").value;
     };
+    $("#custom-node").oninput = (event) => { $("#use-custom").disabled = !event.target.value.trim(); };
     for (const row of app.querySelectorAll("[data-node]")) {
       row.onclick = () => { keep(); draft.node = row.dataset.node; draft.nodeError = ""; paint(); };
     }
