@@ -1780,7 +1780,7 @@ function syncImportModal() {
   if (!input) { status.textContent = ""; return; }
   if (addressImport.resolvedAddress) {
     status.textContent = `Resolves to ${shortenAddress(addressImport.resolvedAddress)}`;
-    status.style.color = "#4cd964";
+    status.style.color = "var(--ios-green)";
     showCard(addressImport.resolvedAddress, addressImport.resolvedDomain);
     return;
   }
@@ -1788,7 +1788,7 @@ function syncImportModal() {
   if (looksLikeRawAddress(input)) {
     const valid = isValidRawAddress(input);
     status.textContent = valid ? "Valid address" : "Invalid address format";
-    status.style.color = valid ? "#4cd964" : "#ff6b6b";
+    status.style.color = valid ? "var(--ios-green)" : "var(--ios-red)";
     if (valid) showCard(input, null);
     return;
   }
