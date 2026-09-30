@@ -12205,3 +12205,12 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 /* Profile: the account name is a plain row, not a labelled card (iOS accountNameRow). */
 .profile-account-card { background: none; border: 0; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; padding: 0 4px; }
 .profile-account-card .profile-card-label { display: none; }
+
+/* Your own message rows place every part explicitly. With only the delivery label and the avatar
+   placed, the grid auto-placed the (empty) selection checkbox into the wide middle column and
+   pushed the bubble into the 32px avatar column - one letter per line. */
+.message-row.local > .message-selector { grid-column: 1; grid-row: 1; }
+.message-row.local > .message-bubble,
+.message-row.local > .message-bubble-stack { grid-column: 2; grid-row: 1; }
+.message-row.local > .message-avatar-slot { grid-column: 3; grid-row: 1 / span 2; align-self: end; }
+.message-row.local > .message-delivery-icon { grid-column: 2; grid-row: 2; justify-self: end; }
