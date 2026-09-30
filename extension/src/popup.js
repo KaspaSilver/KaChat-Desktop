@@ -147,7 +147,8 @@ function showWelcome() {
 
 let createDraft = null;
 function freshCreateDraft() {
-  return { wordCount: 24, name: "My Account", phrase: null, revealed: false, confirmed: false };
+  // No preset name: the field starts empty and Generate Account stays off until one is typed.
+  return { wordCount: 24, name: "", phrase: null, revealed: false, confirmed: false };
 }
 
 function navHeader({ back = true, backLabel = "Back", title = "" } = {}) {
@@ -179,10 +180,10 @@ function showCreate() {
       </div>
       <div class="field-group">
         <h3>Account Name</h3>
-        <input id="name" value="${esc(d.name)}" placeholder="Enter account name" maxlength="40" autocomplete="off" />
+        <input id="name" value="${esc(d.name)}" placeholder="Enter account name" maxlength="40" autocomplete="off" autofocus />
       </div>
       <p class="error" id="error"></p>
-      <button id="generate" class="with-icon">${ICONS.plusCircle}<span>Generate Account</span></button>
+      <button id="generate" class="with-icon" ${d.name.trim() ? "" : "disabled"}>${ICONS.plusCircle}<span>Generate Account</span></button>
     </section>`, "create");
   $("#back").onclick = () => { createDraft = null; showWelcome(); };
   for (const option of app.querySelectorAll(".segmented button")) {
@@ -194,6 +195,7 @@ function showCreate() {
   const name = $("#name");
   name.oninput = () => { d.name = name.value; $("#generate").disabled = !name.value.trim(); };
   $("#generate").onclick = async () => {
+    if (!d.name.trim()) { $("#error").textContent = "Enter an account name."; return; }
     const button = $("#generate");
     button.disabled = true;
     button.innerHTML = '<span class="spinner"></span><span>Generate Account</span>';
@@ -204,7 +206,7 @@ function showCreate() {
       showCreateSeed();
     } catch (error) {
       $("#error").textContent = error.message;
-      button.disabled = false;
+      button.disabled = !d.name.trim();
       button.innerHTML = `${ICONS.plusCircle}<span>Generate Account</span>`;
     }
   };
@@ -238,7 +240,7 @@ function showCreateSeed() {
   // One flow object, so Back from the password step returns to the same passphrase question.
   const flow = { mode: "create", phrase: d.phrase, family: "kaspaStandard", onBack: showCreateSeed, onProceed: null };
   flow.onProceed = (passphrase) => showSetPassword(
-    { mnemonic: d.phrase, passphrase, family: "kaspaStandard", name: d.name.trim() || "My Account" },
+    { mnemonic: d.phrase, passphrase, family: "kaspaStandard", name: d.name.trim() },
     () => showPassphraseQuestion(flow),
   );
   $("#next").onclick = () => showPassphraseQuestion(flow);
@@ -413,7 +415,7 @@ function showSetPassword(account, onBack) {
     button.disabled = true;
     button.innerHTML = '<span class="spinner"></span> Encrypting…';
     try {
-      await vault.createVault(pw, { ...account, name: account.name || "My Account" });
+      await vault.createVault(pw, account);
       createDraft = null;
       noteActivity();
       showHome();
