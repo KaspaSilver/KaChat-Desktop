@@ -246,6 +246,7 @@ export async function buildAndSubmitKnsReveal({
   revealTargetAddress,
   revealAmountSompi,
   signer = null,
+  revealPriorityFeeSompi = KNS_ECONOMICS.revealPriorityFeeSompi,
   log = () => {},
 }) {
   const kaspa = engine?.kaspa;
@@ -293,7 +294,7 @@ export async function buildAndSubmitKnsReveal({
   log("Estimating KNS reveal transaction fee...");
   const massFee = kaspa.calculateTransactionFee(NETWORK_ID, draftTx, 1);
   if (massFee == null) throw new Error("Could not calculate the reveal transaction's network fee.");
-  const totalFee = massFee + KNS_ECONOMICS.revealPriorityFeeSompi;
+  const totalFee = massFee + BigInt(revealPriorityFeeSompi ?? KNS_ECONOMICS.revealPriorityFeeSompi);
   const finalOutputValue = commitAmountSompi - totalFee;
   if (finalOutputValue < KNS_ECONOMICS.dustThresholdSompi) {
     throw new Error("Commit amount is too small to cover the reveal transaction's fee.");
@@ -455,7 +456,9 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
 //
 // Amounts match the KNS web app's transfer submission: tx.amount=0 maps to a
 // fixed 2 KAS commit; the reveal output is commit minus the actual fee.
-export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, changeAddress = null, onStatus = () => {}, log = () => {} }) {
+// `revealPriorityFeeSompi` is the fee picked on the Send Domain sheet (iOS WithdrawFeeTier: 0.02 KAS
+// x Normal 1 / Fast 2 / Priority 5); left out, the 0.02 KAS default.
+export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, changeAddress = null, revealPriorityFeeSompi = KNS_ECONOMICS.revealPriorityFeeSompi, onStatus = () => {}, log = () => {} }) {
   const privateKey = signer?.privateKey || engine?.privateKey;
   const sourceAddress = signer?.address || engine?.address;
   if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before transferring a domain.");
@@ -533,6 +536,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
     revealTargetAddress: changeTo,
     revealAmountSompi: commitAmountSompi, // pre-fee placeholder; real value = commit - fee
     signer: { privateKey, address: sourceAddress },
+    revealPriorityFeeSompi,
     log,
   });
   onStatus({ status: "revealed", revealTxid: reveal.txid });

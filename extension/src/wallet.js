@@ -21,7 +21,8 @@ import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateSendFeeDet
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "../../ui/kspt.js";
 import { resolveDomain, looksLikeDomain } from "../../engine/kns.js";
 import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
-import { getAddressInfo, getAddressProfile, fetchAddressInfo, fetchAddressProfile, peekAddressInfo, peekAddressProfile } from "../../engine/kns.js";
+import { getAddressInfo, getAddressProfile, fetchAddressInfo, fetchAddressProfile, peekAddressInfo, peekAddressProfile, clearKnsCache } from "../../engine/kns.js";
+import { transferDomain as knsTransferDomain, setKnsPrimaryDomain } from "../../engine/kns-write.js";
 import { getLocal, setLocal } from "./browser.js";
 import { activeAccountSecrets } from "./vault.js";
 
@@ -797,5 +798,102 @@ export async function discoverSpendingAddresses(onProgress = () => {}) {
 
 // --- Explorer -----------------------------------------------------------------------------
 
-export function explorerTxUrl(txid) { return `https://explorer.kaspa.org/txs/${txid}`; }
-export function explorerAddressUrl(address) { return `https://explorer.kaspa.org/addresses/${address}`; }
+// The block explorer "view transaction" links open in - Settings > Connection > Kaspa Explorer,
+// the same two choices as iOS (KaspaExplorer), explorer.kaspa.org by default.
+export const EXPLORERS = Object.freeze({
+  kaspaOrg: { name: "explorer.kaspa.org", tx: "https://explorer.kaspa.org/txs/", address: "https://explorer.kaspa.org/addresses/" },
+  kaspaStream: { name: "kaspa.stream", tx: "https://kaspa.stream/transactions/", address: "https://kaspa.stream/addresses/" },
+});
+let explorerId = "kaspaOrg";
+export function useExplorer(id) { explorerId = EXPLORERS[id] ? id : "kaspaOrg"; }
+export function currentExplorer() { return explorerId; }
+export function explorerTxUrl(txid) { return `${EXPLORERS[explorerId].tx}${txid}`; }
+export function explorerAddressUrl(address) { return `${EXPLORERS[explorerId].address}${address}`; }
+
+// --- KNS domains ------------------------------------------------------------------------------
+//
+// Your Domains (iOS KNSDomainsListView): the chatting address's verified domains, newest first,
+// and which one is primary. Set as Primary is a signed message to the KNS API (no transaction);
+// Send is the on-chain commit/reveal transfer inscription. No inscribing new domains and no
+// profile editing here - profiles are moving to .kachat names.
+
+/** { domains:[{fullName, inscriptionId, status, createdAt}], primaryDomain } - cached, or fetched. */
+export function cachedDomains(address) {
+  const info = peekAddressInfo(address);
+  return info ? { domains: info.allDomains || [], primaryDomain: info.primaryDomain || null } : null;
+}
+
+export async function domains(address, { force = false } = {}) {
+  const info = force ? await fetchAddressInfo(address, knsOptions()) : await getAddressInfo(address, knsOptions());
+  return { domains: info?.allDomains || [], primaryDomain: info?.primaryDomain || null };
+}
+
+// The engine's KNS write path expects its wallet object; this is the same shape for one source.
+async function knsEngine(source) {
+  const from = await sourceWallet(source);
+  const k = await kaspa();
+  const engine = {
+    kaspa: k,
+    rpc: await connection(),
+    address: from.address,
+    privateKey: new k.PrivateKey(from.privateKeyHex),
+    privateKeyHex: from.privateKeyHex,
+    async connect() { engine.rpc = await connection(); return engine.rpc; },
+    withRpc: (fn) => withRpc(fn),
+  };
+  return engine;
+}
+
+/** Makes `domainId` the chatting address's primary name. Throws with the API's reason. */
+export async function setPrimaryDomain(domainId) {
+  const engine = await knsEngine({ kind: "main" });
+  await setKnsPrimaryDomain({ engine, domainId, baseUrl: getEndpoint("knsApi") });
+  clearKnsCache(engine.address);
+}
+
+/**
+ * Transfers a domain from the chatting address: commit, then reveal, then waits (up to 90 s)
+ * for the KNS API to show the new owner. onStatus gets the engine's stage names.
+ */
+export async function transferDomain({ domain, assetId, toAddress, priorityFeeSompi, onStatus = () => {} }) {
+  const engine = await knsEngine({ kind: "main" });
+  return knsTransferDomain({
+    engine, domain, assetId, toAddress,
+    revealPriorityFeeSompi: priorityFeeSompi,
+    onStatus,
+    log: (...parts) => console.info("[KaChat Wallet]", ...parts),
+  });
+}
+
+// --- Chatting address picker (iOS ChattingAddressPickerView) ---------------------------------
+
+/**
+ * Identity addresses `start..start+count-1` of the active account's family, each with its
+ * balance and KNS domains. Listed when they hold something, are index 0, or are current.
+ */
+export async function scanIdentityAddresses(start = 0, count = 50) {
+  const account = await activeAccountSecrets();
+  const k = await kaspa();
+  const rows = [];
+  for (let index = start; index < start + count; index += 1) {
+    const derived = await importMnemonicWithFamily(k, account.mnemonic, account.passphrase, { family: account.family, index });
+    rows.push({ index, address: derived.address });
+  }
+  const balancesByAddress = await balancesFor(rows.map((r) => r.address));
+  // KNS a few at a time: the API rate-limits bursts.
+  const queue = [...rows];
+  const worker = async () => {
+    for (let row = queue.shift(); row; row = queue.shift()) {
+      try {
+        const info = await getAddressInfo(row.address, knsOptions());
+        row.domains = info?.allDomains || [];
+        row.primaryDomain = info?.primaryDomain || null;
+      } catch {
+        row.domains = [];
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  for (const row of rows) row.balanceSompi = balancesByAddress[row.address] ?? 0n;
+  return { rows, currentIndex: account.identityIndex || 0 };
+}

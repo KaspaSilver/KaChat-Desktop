@@ -20,6 +20,8 @@ import { showSend } from "./send.js";
  * @param {string} opts.title
  * @param {Function} opts.onBack
  * @param {object} [opts.spending] { index, label, primary, hidden } for spending rows
+ * @param {Function} [opts.onChangeIdentity] imported accounts: offers Change Chatting Address,
+ *   called after the chatting address moved
  */
 export function showManageAddress(opts) {
   const state = { tab: "history", balance: null, history: null, historyError: "", coins: null, spending: opts.spending || null };
@@ -55,6 +57,7 @@ export function showManageAddress(opts) {
             <button class="list-row" id="rename"><span>Rename</span>${ICONS.chevron}</button>
             ${sp.primary ? "" : `<button class="list-row" id="primary"><span>Set as Primary</span>${ICONS.chevron}</button>`}
             ${sp.primary ? "" : `<button class="list-row" id="hide"><span>${sp.hidden ? "Show in Manage Addresses" : "Hide"}</span>${ICONS.chevron}</button>`}` : ""}
+          ${opts.onChangeIdentity ? `<button class="list-row" id="change-identity"><span>Change Chatting Address</span>${ICONS.chevron}</button>` : ""}
           <a class="list-row" href="${esc(wallet.explorerAddressUrl(opts.address))}" target="_blank" rel="noopener noreferrer"><span>View in Explorer</span>${ICONS.chevron}</a>
           <button class="list-row" id="pubkey"><span>Public Key</span>${ICONS.chevron}</button>
           <button class="list-row danger-text" id="privkey"><span>View Private Key</span>${ICONS.chevron}</button>
@@ -63,6 +66,8 @@ export function showManageAddress(opts) {
 
     $("#back").onclick = opts.onBack;
     $("#copy").onclick = () => copyText(opts.address);
+    const changeIdentity = $("#change-identity");
+    if (changeIdentity) changeIdentity.onclick = () => showChattingAddressPicker({ onBack: back, onChanged: opts.onChangeIdentity });
     $("#receive").onclick = () => showQr({ title: opts.title, address: opts.address, balanceSompi: state.balance, onBack: back });
     $("#send").onclick = () => showSend({ source: opts.source, fromAddress: opts.address, title: opts.title, onClose: back });
     $("#compound").onclick = () => {
@@ -352,6 +357,104 @@ function confirmSweep({ list, onBack }) {
     } else {
       toast(`Moved ${done} address${done === 1 ? "" : "es"} to primary.`);
       onBack();
+    }
+  };
+}
+
+// --- Change Chatting Address: iOS ChattingAddressPickerView ------------------------------------
+//
+// For imported accounts: the phrase may already hold your identity at another index of its
+// family - a KNS domain or a funded balance. Scans 50 at a time; lists an index when it holds
+// Kaspa or domains, or is #0, or is the current one.
+
+function showChattingAddressPicker({ onBack, onChanged }) {
+  const state = { rows: [], scanned: 0, scanning: false, current: 0, error: "" };
+  const pickerBack = () => { state.scanning = false; paint(); };
+
+  const scan = async () => {
+    state.scanning = true;
+    state.error = "";
+    paint();
+    try {
+      const { rows, currentIndex } = await wallet.scanIdentityAddresses(state.scanned, 50);
+      state.current = currentIndex;
+      state.rows.push(...rows);
+      state.scanned += 50;
+    } catch {
+      state.error = "Could not derive addresses from this seed. Please try again.";
+    }
+    state.scanning = false;
+    if (app.dataset.screen === "identity-picker") paint();
+  };
+
+  const paint = () => {
+    const shown = state.rows.filter((r) => r.balanceSompi > 0n || r.domains?.length || r.index === 0 || r.index === state.current);
+    render(`
+      ${navHeader({ title: "Chatting Address" })}
+      <section class="screen manage">
+        <div class="source-head">
+          <h2>Choose Your Chatting Address</h2>
+          <p class="muted">If this seed already holds your identity at a different address - a KNS domain or a funded chatting balance - pick it here. Only addresses with a balance or domains are shown.</p>
+        </div>
+        <div class="glass list">
+          ${shown.map((row) => `
+            <button class="list-row identity-row" data-index="${row.index}">
+              <span class="identity-index">#${row.index}</span>
+              <span class="tx-meta"><span class="mono small">${esc(row.address.slice(0, 10))}...${esc(row.address.slice(-6))}</span><span class="muted tiny">${esc(wallet.formatKas(row.balanceSompi, 8))} KAS</span></span>
+              ${row.domains?.length ? `<span class="chip accent">${esc(row.domains.length === 1 ? row.domains[0].fullName : `${row.domains.length} domains`)}</span>` : ""}
+              <span class="${row.index === state.current ? "accent strong" : "muted strong"} tiny">${row.index === state.current ? "Current" : row.index === 0 ? "Default" : ""}</span>
+              ${ICONS.chevron}
+            </button>`).join("") || (state.scanning ? "" : '<div class="list-row muted">Nothing found yet.</div>')}
+        </div>
+        ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}
+        ${state.scanning
+          ? `<p class="muted small center-text"><span class="spinner small-spin"></span> Scanning addresses ${state.scanned + 1} to ${state.scanned + 50}...</p>`
+          : state.scanned ? `<p class="muted small center-text">Scanned the first ${state.scanned} addresses.</p><button class="soft with-icon" id="further">${ICONS.search}<span>Scan Further</span></button>` : ""}
+      </section>`, "identity-picker");
+    $("#back").onclick = onBack;
+    const further = $("#further");
+    if (further) further.onclick = scan;
+    for (const button of app.querySelectorAll("[data-index]")) {
+      const row = state.rows.find((r) => r.index === Number(button.dataset.index));
+      button.onclick = () => showIdentityDetail({ row, current: state.current, onBack: pickerBack, onChanged });
+    }
+  };
+  paint();
+  scan();
+}
+
+function showIdentityDetail({ row, current, onBack, onChanged }) {
+  const isCurrent = row.index === current;
+  render(`
+    ${navHeader({ title: "Chatting Address" })}
+    <section class="screen manage">
+      <h2>Address #${row.index}</h2>
+      <button class="manage-address mono" id="copy">${esc(row.address)}</button>
+      <p class="muted tiny center-text">Tap the address to copy it</p>
+      <div class="glass list"><div class="list-row"><span>Balance</span><span>${esc(wallet.formatKas(row.balanceSompi, 8))} KAS</span></div></div>
+      ${row.domains?.length ? `
+        <div class="section-header">KNS Domains (${row.domains.length})</div>
+        ${row.domains.map((d) => `<div class="domain-card small-card"><span class="domain-name">${esc(d.fullName)}</span>${String(d.fullName).toLowerCase() === String(row.primaryDomain || "").toLowerCase() ? '<span class="domain-badge">Primary</span>' : ""}</div>`).join("")}` : ""}
+      <p class="error" id="error"></p>
+      <div class="spacer"></div>
+      <button id="set" ${isCurrent ? "disabled" : ""}>${isCurrent ? "Current Chatting Address" : "Set as Chatting Address"}</button>
+    </section>`, "identity-detail");
+  $("#back").onclick = onBack;
+  $("#copy").onclick = () => copyText(row.address);
+  $("#set").onclick = async () => {
+    const button = $("#set");
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner"></span>';
+    try {
+      const view = await vault.readAccounts();
+      await vault.setIdentityIndex(view.activeAccountId, row.index);
+      await wallet.deriveAddresses();
+      toast(`Chatting address set to #${row.index}.`);
+      onChanged();
+    } catch (error) {
+      $("#error").textContent = error.message;
+      button.disabled = false;
+      button.textContent = "Set as Chatting Address";
     }
   };
 }

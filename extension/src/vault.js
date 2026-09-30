@@ -157,6 +157,8 @@ function normalizeAccount(account) {
     passphrase: String(account?.passphrase || ""),
     family: account?.family || "kaspaStandard",
     identityIndex: Math.max(0, Math.floor(Number(account?.identityIndex) || 0)),
+    // Imported accounts can pick a different chatting address (iOS ChattingAddressPickerView).
+    imported: Boolean(account?.imported),
   };
 }
 
@@ -164,8 +166,8 @@ function normalizeAccount(account) {
 function publicView(payload) {
   return {
     activeAccountId: payload.activeAccountId,
-    accounts: payload.accounts.map(({ id, name, family, identityIndex, createdAt, passphrase }) => ({
-      id, name, family, identityIndex, createdAt, hasPassphrase: Boolean(passphrase),
+    accounts: payload.accounts.map(({ id, name, family, identityIndex, createdAt, passphrase, imported }) => ({
+      id, name, family, identityIndex, createdAt, hasPassphrase: Boolean(passphrase), imported: Boolean(imported),
     })),
   };
 }
@@ -190,6 +192,77 @@ export async function renameAccount(id, name) {
   if (account) account.name = clean.slice(0, 40);
   await writePayload(payload);
   return publicView(payload);
+}
+
+/**
+ * Adds another account (created or imported) to the unlocked vault and makes it the active one.
+ * Refuses a phrase that is already in the vault with the same passphrase and address family.
+ */
+export async function addAccount(account) {
+  const payload = await readPayload();
+  const next = normalizeAccount(account);
+  const duplicate = payload.accounts.find((a) =>
+    a.mnemonic === next.mnemonic && (a.passphrase || "") === next.passphrase
+    && (a.family || "kaspaStandard") === next.family && (a.identityIndex || 0) === next.identityIndex);
+  if (duplicate) throw new Error(`This account is already in the wallet as "${duplicate.name}".`);
+  const stored = { ...next, id: newAccountId(), createdAt: Date.now() };
+  payload.accounts.push(stored);
+  payload.activeAccountId = stored.id;
+  await writePayload(payload);
+  return publicView(payload);
+}
+
+/** Moves an account's chatting (identity) address to another index of its family. */
+export async function setIdentityIndex(id, index) {
+  const payload = await readPayload();
+  const account = payload.accounts.find((a) => a.id === id);
+  if (!account) throw new Error("That account is no longer in the wallet.");
+  account.identityIndex = Math.max(0, Math.floor(Number(index) || 0));
+  await writePayload(payload);
+  return publicView(payload);
+}
+
+export async function switchAccount(id) {
+  const payload = await readPayload();
+  if (!payload.accounts.some((a) => a.id === id)) throw new Error("That account is no longer in the wallet.");
+  payload.activeAccountId = id;
+  await writePayload(payload);
+  return publicView(payload);
+}
+
+/**
+ * Removes one account from this browser. The last account can't be removed this way - that is
+ * Reset Wallet. Returns the new public view (the next account becomes active).
+ */
+export async function removeAccount(id) {
+  const payload = await readPayload();
+  if (payload.accounts.length <= 1) throw new Error("This is the only account. Use Reset Wallet to remove everything.");
+  payload.accounts = payload.accounts.filter((a) => a.id !== id);
+  if (payload.activeAccountId === id) payload.activeAccountId = payload.accounts[0].id;
+  await writePayload(payload);
+  return publicView(payload);
+}
+
+/** An account's recovery phrase (and passphrase), after the password is checked again. */
+export async function revealSecrets(id, password) {
+  if (!(await verifyPassword(password))) throw new Error("Wrong password.");
+  const payload = await readPayload();
+  const account = payload.accounts.find((a) => a.id === id);
+  if (!account) throw new Error("That account is no longer in the wallet.");
+  return { mnemonic: account.mnemonic, passphrase: account.passphrase || "" };
+}
+
+/** Re-seals the vault under a new password (new salt), keeping the wallet unlocked. */
+export async function changePassword(currentPassword, nextPassword) {
+  if (String(nextPassword || "").length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
+  }
+  if (!(await verifyPassword(currentPassword))) throw new Error("The current password is wrong.");
+  const payload = await readPayload();
+  const kdf = newKdf();
+  const keyBytes = await deriveKeyBytes(nextPassword, fromBase64(kdf.salt), kdf.iterations);
+  await setLocal(VAULT_KEY, await seal(payload, keyBytes, kdf));
+  await setSession(SESSION_KEY, toBase64(keyBytes));
 }
 
 /**

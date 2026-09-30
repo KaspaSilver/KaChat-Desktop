@@ -435,3 +435,103 @@ textarea.recipient { background: transparent; border: 0; border-radius: 0; min-h
 .toggle.on { background: #30d158; }
 .toggle.on::after { left: 18px; }
 .break { word-break: break-all; }
+
+/* --- Accounts screen: iOS OnboardingView with Saved Accounts ----------------------------------- */
+.onboard { position: relative; }
+.onboard-gear { position: absolute; top: 12px; right: 12px; color: #fff; }
+.saved { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.saved-header { color: var(--muted); font-size: 13px; font-weight: 600; padding-left: 4px; }
+.saved-list { display: flex; flex-direction: column; gap: 10px; max-height: calc(64px * 4 + 30px); overflow-y: auto; }
+.saved-row { display: flex; align-items: center; min-height: 64px; background: var(--onboard-row); border-radius: 14px; padding-right: 6px; flex-shrink: 0; }
+.saved-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; background: transparent; color: #fff; padding: 10px 12px; text-align: left; font-weight: 400; }
+.saved-icon { color: var(--kaspa); flex: none; display: inline-flex; }
+.saved-text { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.saved-name { font-weight: 600; font-size: 15px; }
+.saved-address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-edit { color: var(--kaspa); }
+.onboard .hero { min-height: 150px; }
+
+/* --- iOS half-sheet ----------------------------------------------------------------------------- */
+.sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; z-index: 50; animation: fade .15s ease; }
+.sheet { width: 100%; background: #1c1c1e; border-radius: 16px 16px 0 0; padding: 6px 12px 16px; display: flex; flex-direction: column; gap: 6px; animation: rise .2s ease; }
+.sheet-grabber { width: 36px; height: 5px; border-radius: 3px; background: #48484a; margin: 4px auto 8px; }
+.sheet-head { text-align: center; padding-bottom: 6px; }
+.sheet-title { font-weight: 700; font-size: 16px; }
+.sheet-row { display: flex; align-items: center; gap: 12px; background: #2c2c2e; color: var(--text); border-radius: 12px; padding: 12px 14px; text-align: left; font-weight: 400; }
+.sheet-row.danger, .sheet-row.danger .sheet-icon { color: #ff453a; }
+.sheet-icon { color: var(--kaspa); display: inline-flex; flex: none; }
+.sheet-text { display: flex; flex-direction: column; gap: 2px; }
+.sheet-label { font-weight: 600; font-size: 15px; }
+@keyframes fade { from { opacity: 0; } }
+@keyframes rise { from { transform: translateY(40px); } }
+
+/* --- Import: ImportSourceWalletView / ImportWalletView ------------------------------------------ */
+.source-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; }
+.source-head h2 { margin: 4px 0 0; font-size: 19px; }
+.source-head p { margin: 0; font-size: 13px; }
+.source-head-icon { color: var(--kaspa); }
+.source-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 1; min-height: 0; }
+.source-row { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: 12px; background: rgba(44,44,46,.72); border: .8px solid rgba(255,255,255,.18); color: var(--text); text-align: left; font-weight: 400; flex-shrink: 0; }
+.source-row[aria-checked="true"] { border: 1.2px solid rgba(112,199,186,.6); }
+.source-radio { display: inline-flex; color: var(--muted); }
+.source-icon { color: var(--kaspa); width: 24px; display: inline-flex; justify-content: center; }
+.source-text { display: flex; flex-direction: column; gap: 2px; }
+.source-name { font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+.source-default { font-size: 10px; font-weight: 800; color: var(--kaspa); }
+.source-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); }
+.screen.import-source { gap: 14px; }
+.screen.import-words { gap: 12px; }
+.words-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.words-head > span:first-child { flex: 1; }
+.mini-button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px; font-size: 12px; background: transparent; color: var(--kaspa-ink); border: 1px solid var(--kaspa-dim); border-radius: 8px; }
+.words-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+.words-count.good { color: #30d158; }
+.word-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.word-slot { display: flex; align-items: center; gap: 4px; background: var(--panel); border-radius: 8px; padding: 0 6px; border: 1.5px solid transparent; }
+.word-slot.active { background: rgba(112,199,186,.15); border-color: var(--kaspa); }
+.word-slot .n { font-size: 10px; color: var(--muted); width: 18px; text-align: right; flex: none; }
+.word-slot input { background: transparent; border: 0; padding: 8px 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; min-width: 0; width: 100%; box-shadow: none; }
+.word-slot input:focus-visible { outline: none; }
+.word-slot.invalid input { color: #ff453a; }
+.suggest { display: flex; gap: 6px; overflow-x: auto; min-height: 34px; align-items: center; scrollbar-width: none; }
+.chip-word { flex: none; background: rgba(112,199,186,.12); color: var(--text); border-radius: 999px; padding: 6px 12px; font-weight: 400; font-size: 13px; }
+.chip-word b { font-weight: 700; }
+
+/* --- Settings ------------------------------------------------------------------------------------ */
+.screen.settings { gap: 14px; overflow-y: auto; }
+.screen.settings > * { flex-shrink: 0; }
+.settings-row { width: 100%; }
+.settings-label { display: inline-flex; align-items: center; gap: 10px; }
+.settings-label svg { color: var(--kaspa); }
+.danger-text .settings-label svg { color: #ff453a; }
+.settings-value { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.accent { color: var(--kaspa); }
+.accent svg { color: var(--kaspa); }
+.strong { font-weight: 650; }
+.plain-input { flex: 1; min-width: 0; width: 100%; background: transparent; border: 0; padding: 4px 0; font-size: 14px; box-shadow: none; }
+.plain-input:focus-visible { outline: none; }
+.plain-button { background: transparent; color: var(--text); padding: 0; font-weight: 400; text-align: left; display: flex; }
+.screen.licenses { gap: 12px; overflow-y: auto; }
+.screen.licenses > * { flex-shrink: 0; }
+.license-card { padding: 14px; border-radius: 16px; display: flex; flex-direction: column; gap: 4px; }
+.license-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.license-text { font-size: 10.5px; color: var(--muted); line-height: 1.4; margin: 6px 0 0; }
+
+/* --- Your Domains ----------------------------------------------------------------------------- */
+.screen.domains { gap: 16px; overflow-y: auto; }
+.screen.domains > * { flex-shrink: 0; }
+.domain-button { background: transparent; padding: 0; border-radius: 20px; }
+.domain-card { position: relative; height: 100px; border-radius: 20px; background: var(--kaspa); display: flex; align-items: center; justify-content: center; padding: 0 18px; }
+.domain-card.small-card { height: 64px; border-radius: 16px; }
+.domain-name { color: #000; font-weight: 800; font-size: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.small-card .domain-name { font-size: 17px; }
+.domain-badge { position: absolute; top: 10px; right: 12px; font-size: 10.5px; font-weight: 800; color: #fff; background: rgba(0,0,0,.35); padding: 3px 9px; border-radius: 999px; }
+.asset-id { max-width: 60%; }
+button.domain-send { background: var(--kaspa); color: #000; border-radius: 999px; }
+.screen.progress-sheet { justify-content: center; gap: 14px; padding: 24px; }
+.progress { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.progress-bar { height: 100%; background: var(--kaspa); transition: width .4s ease; }
+
+/* --- Chatting address picker ------------------------------------------------------------------ */
+.identity-row { gap: 10px; }
+.identity-index { width: 40px; color: var(--kaspa); font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
