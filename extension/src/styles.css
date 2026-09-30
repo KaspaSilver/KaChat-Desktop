@@ -535,3 +535,16 @@ button.domain-send { background: var(--kaspa); color: #000; border-radius: 999px
 /* --- Chatting address picker ------------------------------------------------------------------ */
 .identity-row { gap: 10px; }
 .identity-index { width: 40px; color: var(--kaspa); font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+
+/* --- Website approval window --------------------------------------------------------------------- */
+.screen.approve { gap: 14px; overflow-y: auto; }
+.screen.approve > * { flex-shrink: 0; }
+.approve-site { display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 6px; text-align: center; }
+.site-badge { width: 48px; height: 48px; border-radius: 12px; background: var(--kaspa-dim); color: var(--kaspa); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 22px; }
+.site-host { font-weight: 700; font-size: 16px; word-break: break-all; }
+.approve-amount { text-align: center; font-size: 30px; font-weight: 800; }
+.approve-amount span { font-size: 16px; color: var(--kaspa); }
+.approve-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.approve-buttons button { padding: 14px; border-radius: 12px; }
+.sign-message { background: var(--panel); border-radius: 12px; padding: 12px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; user-select: text; }
+.list-row .muted.break, .list-row .break { white-space: normal; max-width: 100%; overflow: visible; word-break: break-all; }

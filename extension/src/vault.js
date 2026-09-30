@@ -184,6 +184,14 @@ export async function activeAccountSecrets() {
   return account;
 }
 
+/** One account including its secrets, by id - website approvals act on the connected account. */
+export async function accountSecretsById(id) {
+  const payload = await readPayload();
+  const account = payload.accounts.find((a) => a.id === id);
+  if (!account) throw new Error("That account is no longer in the wallet.");
+  return account;
+}
+
 export async function renameAccount(id, name) {
   const clean = String(name || "").trim();
   if (!clean) return readAccounts();

@@ -17,6 +17,7 @@ import {
   app, esc, render, $, toast, noteActivity, resetActivityPing, ICONS, navHeader, showSheet,
 } from "./ui.js";
 import { isBip39Word, bip39Matches } from "../../ui/bip39-english.js";
+import { removeConnectionsFor } from "./approve.js";
 
 let goHome = () => {};
 let goSettings = () => {};
@@ -179,6 +180,7 @@ function confirmRemoveAccount(account, count) {
             await vault.removeAccount(account.id);
           }
           await removeLocal([`kachat.spending.${account.id}`, `kachat.addresses.${account.id}`]);
+          await removeConnectionsFor(account.id);
           await wallet.disconnect();
           toast("Account removed.");
         } catch (error) {
@@ -792,6 +794,7 @@ function showReset() {
   $("#reset").onclick = async () => {
     await vault.resetWallet();
     await setLoggedOut(false);
+    await removeConnectionsFor(null);
     await wallet.disconnect();
     showWelcome();
   };

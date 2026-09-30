@@ -6,6 +6,7 @@
 //                    toggles: every secret is behind the wallet password instead
 //   Connection       Connection Settings (KNS API, Kaspa REST API, Kaspa Node, Node Address Book)
 //                    and Kaspa Explorer
+//   Connected Sites  the extension's own addition: websites connected through window.kachat
 //   View Seed Phrase the password, then iOS SeedPhraseView
 //
 // Chat-only pages (Notifications, Chats, Contacts, Storage, Chat History, Danger Zone,
@@ -19,6 +20,7 @@ import {
   app, esc, render, $, toast, copyText, copySecret, settings, saveSettings, ICONS, navHeader, passwordGate,
 } from "./ui.js";
 import { ENDPOINT_DEFAULTS, getEndpoint, getEndpointOverride, setEndpoint } from "../../engine/endpoints.js";
+import { connections, removeConnection } from "./approve.js";
 
 // iOS AppCurrency, same order and codes (the code is CoinGecko's vs_currency).
 export const CURRENCIES = [
@@ -60,6 +62,7 @@ export async function showSettings(opts) {
         ${rowHtml("customization", ICONS.paintbrush, "Customization")}
         ${rowHtml("security", ICONS.lockShieldSmall, "Security")}
         ${rowHtml("connection", ICONS.antenna, "Connection")}
+        ${appSettings ? "" : rowHtml("sites", ICONS.safari, "Connected Sites")}
       </div>
       ${appSettings ? "" : `<div class="glass list">${rowHtml("seed", ICONS.key, "View Seed Phrase", "", true)}</div>`}
     </section>`, "settings");
@@ -67,6 +70,8 @@ export async function showSettings(opts) {
   $("#customization").onclick = () => showCustomization({ onBack: back });
   $("#security").onclick = () => showSecurity({ onBack: back, appSettings });
   $("#connection").onclick = () => showConnectionHub({ onBack: back });
+  const sites = $("#sites");
+  if (sites) sites.onclick = () => showConnectedSites({ onBack: back });
   const seed = $("#seed");
   if (seed) seed.onclick = () => passwordGate({
     title: "View Seed Phrase",
@@ -405,6 +410,8 @@ async function showConnectionSettings({ onBack }) {
       }
       const nodeChanged = draft.node !== getEndpoint("trustedNode");
       setEndpoint("kaspaApi", rest.value);
+      // The background worker has no localStorage; it reads the REST API from here.
+      await saveSettings({ restApi: rest.value });
       setEndpoint("trustedNode", draft.node);
       if (nodeChanged) {
         await wallet.disconnect();
@@ -416,6 +423,33 @@ async function showConnectionSettings({ onBack }) {
     };
   };
   paint();
+}
+
+// --- Connected Sites ------------------------------------------------------------------------
+
+async function showConnectedSites({ onBack }) {
+  const all = await connections();
+  const entries = Object.entries(all).sort((a, b) => (b[1].connectedAt || 0) - (a[1].connectedAt || 0));
+  render(`
+    ${navHeader({ title: "Connected Sites" })}
+    <section class="screen settings">
+      <div class="glass list">
+        ${entries.length ? entries.map(([origin, entry]) => `
+          <div class="list-row">
+            <span class="tx-meta"><span class="ellipsis">${esc(origin.replace(/^https:\/\//, ""))}</span><span class="muted tiny">${esc(entry.accountName || "")} · ${esc(wallet.shortAddress(entry.address))}</span></span>
+            <button class="link-button small danger-text" data-origin="${esc(origin)}">Disconnect</button>
+          </div>`).join("") : '<div class="list-row muted">No sites are connected.</div>'}
+      </div>
+      <p class="form-footer">A connected site can see that account's chatting address and balance, and can ask you to send Kaspa or sign a message - every request opens KaChat Wallet for your approval.</p>
+    </section>`, "settings");
+  $("#back").onclick = onBack;
+  for (const button of app.querySelectorAll("[data-origin]")) {
+    button.onclick = async () => {
+      await removeConnection(button.dataset.origin);
+      toast("Disconnected.");
+      showConnectedSites({ onBack });
+    };
+  }
 }
 
 // --- View Seed Phrase: iOS SeedPhraseView -------------------------------------------------

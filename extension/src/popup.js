@@ -13,6 +13,10 @@ import { showManageAddress, showManageAddresses } from "./manage.js";
 import { showWelcome, showUnlock, enterApp, setHandlers, setLoggedOut } from "./onboarding.js";
 import { showDomains } from "./domains.js";
 import { showSettings, showLicenses } from "./settings.js";
+import { showApproval } from "./approve.js";
+
+const params = new URLSearchParams(location.search);
+const isApproval = params.get("view") === "approve";
 
 // --- boot --------------------------------------------------------------------------------
 
@@ -24,6 +28,8 @@ async function boot() {
   // Start the 12 MB WASM download/compile now, while the first screen is up.
   wallet.kaspa().catch(() => {});
   wallet.useExplorer((await settings()).explorer);
+  // A website's request (background.js opened this window for it).
+  if (isApproval) return showApproval(params.get("id") || "");
   if (!(await vault.hasVault())) return showWelcome();
   if (!(await vault.isUnlocked())) return showUnlock();
   noteActivity();
@@ -38,6 +44,7 @@ setHandlers({
 // The wallet can lock under an open popup (auto-lock alarm, or the lock button in another
 // window): the unlock key disappears from storage.session, and the popup follows.
 ext?.storage?.onChanged?.addListener((changes, area) => {
+  if (isApproval) return;
   if (area === "session" && changes["kachat.unlockKey"] && !changes["kachat.unlockKey"].newValue) {
     wallet.disconnect();
     showUnlock();

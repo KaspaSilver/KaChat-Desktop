@@ -1,7 +1,8 @@
 // One handle on the extension APIs for every browser we ship to. Chromium (Chrome, Brave, Edge,
 // Opera, Arc) exposes `chrome` with promise-returning calls in Manifest V3; Firefox exposes
-// `browser` (and a `chrome` alias). Everything here uses only the promise forms.
-export const ext = globalThis.browser ?? globalThis.chrome;
+// `browser` and a `chrome` alias. `chrome` comes first: recent Chromium also defines a `browser`
+// namespace whose runtime.onMessage drops sendResponse answers, which broke website requests.
+export const ext = globalThis.chrome?.runtime ? globalThis.chrome : globalThis.browser;
 
 /** True when running as an extension page or worker (not the plain desktop web app). */
 export const isExtension = Boolean(ext?.runtime?.id);

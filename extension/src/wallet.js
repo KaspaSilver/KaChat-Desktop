@@ -24,7 +24,7 @@ import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
 import { getAddressInfo, getAddressProfile, fetchAddressInfo, fetchAddressProfile, peekAddressInfo, peekAddressProfile, clearKnsCache } from "../../engine/kns.js";
 import { transferDomain as knsTransferDomain, setKnsPrimaryDomain } from "../../engine/kns-write.js";
 import { getLocal, setLocal } from "./browser.js";
-import { activeAccountSecrets } from "./vault.js";
+import { activeAccountSecrets, accountSecretsById } from "./vault.js";
 
 let kaspaPromise = null;
 let rpc = null;
@@ -352,7 +352,8 @@ export function shortAddress(address) {
 const NETWORK = "mainnet";
 
 async function sourceWallet(source) {
-  const account = await activeAccountSecrets();
+  // `accountId` pins a specific account (a website's connected account); otherwise the active one.
+  const account = source?.accountId ? await accountSecretsById(source.accountId) : await activeAccountSecrets();
   const k = await kaspa();
   if (source?.kind === "spending") {
     const derived = deriveSpendingWallet(k, account.mnemonic, source.index, account.passphrase);
@@ -896,4 +897,23 @@ export async function scanIdentityAddresses(start = 0, count = 50) {
   await Promise.all(Array.from({ length: 4 }, worker));
   for (const row of rows) row.balanceSompi = balancesByAddress[row.address] ?? 0n;
   return { rows, currentIndex: account.identityIndex || 0 };
+}
+
+// --- Website connect --------------------------------------------------------------------------
+
+/** The chatting address and public key a website sees for an account. */
+export async function identityFor(accountId) {
+  const from = await sourceWallet({ kind: "main", accountId });
+  const k = await kaspa();
+  return { address: from.address, publicKey: String(new k.PrivateKey(from.privateKeyHex).toPublicKey().toString()) };
+}
+
+/**
+ * Signs `message` with the account's chatting key, the Kaspa wallet standard (Schnorr over
+ * blake2b("PersonalMessageSigningHash", message)) - what KasWare's signMessage produces.
+ */
+export async function signMessage(accountId, message) {
+  const from = await sourceWallet({ kind: "main", accountId });
+  const k = await kaspa();
+  return String(k.signMessage({ message: String(message), privateKey: from.privateKeyHex }));
 }
