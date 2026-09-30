@@ -505,7 +505,10 @@ function showReset() {
 // middle - lock and expand where iOS has the notification bell, which is chat-only), the pinned
 // "Profile" title with the share button, then account name, profile hero, the two QR buttons,
 // the Chatting and Spending rows, Your Domains, Settings, Log Out and About. Help is left out:
-// its guides are the chat Welcome Guide and the KNS setup guide, which arrives with KNS.
+// its guides are the chat Welcome Guide and the KNS setup guide.
+//
+// No Create / Edit KNS Profile: profile creation is moving to .kachat names, which do not exist
+// yet. An existing KNS name, avatar, banner and bio are still SHOWN (read-only) in the hero.
 
 let homeState = null;
 
@@ -561,7 +564,6 @@ function paintHome() {
   const avatar = kns.profile?.avatarUrl ? safeImageUrl(kns.profile.avatarUrl) : null;
   const banner = kns.profile?.bannerUrl ? safeImageUrl(kns.profile.bannerUrl) : null;
   const bio = String(kns.profile?.bio || "").trim();
-  const hasKnsProfile = Boolean(kns.domainName);
   const created = s.account.createdAt ? new Date(s.account.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "—";
   const version = ext?.runtime?.getManifest?.().version || "";
 
@@ -595,7 +597,6 @@ function paintHome() {
           ${banner ? `<div class="banner"><img src="${esc(banner)}" alt="" referrerpolicy="no-referrer" /></div>` : '<div class="banner gradient"></div>'}
           <div class="hero-row">
             <div class="avatar">${avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer" />` : `<span>${esc((displayName || "?").trim().charAt(0).toUpperCase())}</span>`}</div>
-            <button class="link" id="kns-profile">${hasKnsProfile ? "Edit KNS Profile" : "Create KNS Profile"}</button>
           </div>
           <div class="hero-text">
             <div class="hero-name">${esc(displayName)}</div>
@@ -664,7 +665,6 @@ function paintHome() {
     $("#edit-name").onclick = () => { s.editingName = true; paintHome(); };
   }
 
-  $("#kns-profile").onclick = () => toast(SOON);
   if (primary) $("#receive").onclick = () => showQr({
     title: "Receive Kaspa",
     address: primary,

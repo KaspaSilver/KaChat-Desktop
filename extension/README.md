@@ -47,7 +47,8 @@ locks the wallet.
 
 1. Foundation - create/import/unlock/lock, vault, network, balances, receive. **(done)**
 2. Send, fees, Max, KNS name lookup, Manage Addresses, history, compound, coin control.
-3. KNS: domains, set primary, transfer, inscribe, profile editor.
+3. KNS domains: list, set primary, transfer. No inscribing and no profile creation or
+   editing - profiles move to .kachat names, which are not built yet.
 4. Settings (currency, auto-lock, change password, view phrase, nodes and APIs), multiple
    accounts, Firefox build, store packaging.
 5. Website connect: permissioned signing and sending for dApps.
