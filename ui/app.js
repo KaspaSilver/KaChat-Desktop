@@ -1888,12 +1888,17 @@ function updateConversationBio() {
 // Same cache-only avatar logic as updateAvatarElement, but as an HTML string
 // for the sidebar row template (which re-renders via innerHTML, not live DOM
 // nodes it can update in place).
+/// iOS draws a person.fill glyph, in the accent on a 20% accent circle, for anyone without a
+/// photo or KNS avatar (KNSAvatarView.fallbackAvatar) - never initials.
+function personGlyphSvg() {
+  return '<svg class="avatar-person-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12.2a4.6 4.6 0 1 0 0-9.2 4.6 4.6 0 0 0 0 9.2Zm0 1.9c-4.6 0-8.3 2.5-8.3 5.6V21h16.6v-1.3c0-3.1-3.7-5.6-8.3-5.6Z"/></svg>';
+}
 function avatarHtmlFor(contact, className = "chat-avatar") {
   // A user-assigned photo wins over the live KNS avatar, which wins over initials.
   if (contact?.photo) return `<span class="${className}"><img src="${escapeHtml(contact.photo)}" alt="" /></span>`;
   const avatarUrl = engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
-  return `<span class="${className}">${escapeHtml(initialsFor(contact.name))}</span>`;
+  return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
 // Same idea as avatarHtmlFor, but for the active wallet's own messages —
@@ -1904,11 +1909,11 @@ function selfAvatarHtml(className = "chat-avatar") {
   const avatarUrl = engine.peekKnsAddressProfile?.(engine.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   const name = activeAccountMetadata()?.name || shortAddress(engine.address);
-  return `<span class="${className}">${escapeHtml(initialsFor(name))}</span>`;
+  return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
 function updateAvatarElement(initialsEl, imageEl, contact) {
-  if (initialsEl) initialsEl.textContent = initialsFor(contact.name);
+  if (initialsEl) initialsEl.innerHTML = personGlyphSvg();
   if (!imageEl) return;
   // User-assigned photo takes priority over the live KNS avatar.
   const src = contact?.photo || engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
@@ -8490,7 +8495,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 67;
+const APP_BUILD = 68;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11992,7 +11997,7 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
   }
   return `
     <div class="create-chat-preview address-resolution-card">
-      <span class="create-chat-preview-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : escapeHtml(initialsFor(knownDomain || address))}</span>
+      <span class="create-chat-preview-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : personGlyphSvg()}</span>
       <span class="create-chat-preview-copy">
         <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No KNS domain"))}</span>
         <span class="create-chat-preview-address">${escapeHtml(address)}</span>
@@ -12024,7 +12029,7 @@ function renderCreateChatPreview() {
   card.innerHTML = `
     <span class="create-chat-preview-avatar">${avatarUrl
       ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
-      : escapeHtml(initialsFor(name || address))}</span>
+      : personGlyphSvg()}</span>
     <span class="create-chat-preview-copy">
       <span class="create-chat-preview-name${name ? "" : " muted"}">${escapeHtml(name || (looking ? "Looking up…" : "No KNS domain"))}</span>
       <span class="create-chat-preview-address">${escapeHtml(address)}</span>
@@ -12097,7 +12102,7 @@ function renderCreateChatPicker() {
       <button type="button" class="create-chat-picker-row${row.address === chosen ? " picked" : ""}" data-create-chat-pick="${escapeHtml(row.address)}">
         <span class="create-chat-picker-avatar">${avatarUrl
           ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
-          : escapeHtml(initialsFor(row.name))}</span>
+          : personGlyphSvg()}</span>
         <span class="create-chat-picker-copy">
           <span class="create-chat-picker-name">${escapeHtml(row.name)}</span>
           <span class="create-chat-picker-sub">${escapeHtml(createChatPickerSubtitle(row))}</span>
@@ -12672,6 +12677,7 @@ function renderMessages(conversationEntry) {
     }
 
     const bubble = document.createElement("div");
+    let replyQuoteEl = null; // a reply's quote, drawn above the bubble
     bubble.className = `message-bubble ${message.direction === "incoming" ? "incoming" : "local"}`;
     bubble.dataset.messageId = message.id;
     // Set when a caption+link message builds a preview card: rendered below the bubble.
@@ -12783,7 +12789,8 @@ function renderMessages(conversationEntry) {
         event.stopPropagation();
         jumpToMessageByTxid(replyEnvelope.replyToId);
       });
-      bubble.append(quote);
+      // Above the bubble, not inside it (iOS replyQuoteView); placed when the row is assembled.
+      replyQuoteEl = quote;
     }
 
     if (imageEnvelope) {
@@ -12921,10 +12928,11 @@ function renderMessages(conversationEntry) {
     const retryable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED && chessRetryFits(conversationEntry, message);
     const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: retryable ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
-    if (detachedLinkCard || typeCapsule) {
+    if (detachedLinkCard || typeCapsule || replyQuoteEl) {
       const stack = document.createElement("div");
       stack.className = "message-bubble-stack";
       if (typeCapsule) stack.append(typeCapsule);
+      if (replyQuoteEl) stack.append(replyQuoteEl);
       stack.append(bubble);
       if (detachedLinkCard) stack.append(detachedLinkCard);
       row.append(selector, avatarSlot, stack);
@@ -13123,7 +13131,7 @@ function openChatInfoFor(contact, conversationEntry) {
   chatInfoContactAddress = contact.address;
   resetChatInfoAliases();
   refreshChatInfoContactControls();
-  if (chatInfoAvatarInitials) chatInfoAvatarInitials.textContent = initialsFor(contact.name);
+  if (chatInfoAvatarInitials) chatInfoAvatarInitials.innerHTML = personGlyphSvg();
   if (contact.photo) {
     if (chatInfoAvatarImage) { chatInfoAvatarImage.src = contact.photo; chatInfoAvatarImage.hidden = false; }
     if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = true;
@@ -22105,7 +22113,7 @@ function memberAvatarHtml(address, className = "chat-avatar") {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
   if (address === engine.address) return selfAvatarHtml(className);
-  return `<span class="${className}">${escapeHtml(initialsFor(shortAddress(address)))}</span>`;
+  return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
 // Most-recent activity for a group: its newest message time, falling back to the group
@@ -22620,7 +22628,7 @@ function avatarHtmlForAnyAddress(address, className = "message-avatar") {
   if (contact) return avatarHtmlFor(contact, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" /></span>`;
-  return `<span class="${className}">${escapeHtml(initialsFor(shortAddress(address)))}</span>`;
+  return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
 // Right-click menu for a 1:1 message: reactions + Reply, Copy, Select, Explorer, Info, Retry, Delete.
@@ -22882,6 +22890,7 @@ function renderGroupMessages() {
     avatarSlot.className = "message-avatar-slot";
 
     const bubble = document.createElement("div");
+    let groupReplyQuoteEl = null; // a reply's quote, drawn above the bubble
     bubble.className = `message-bubble ${incoming ? "incoming" : "local"}`;
     // Set when a caption+link message builds a preview card: rendered below the bubble.
     let detachedLinkCard = null;
@@ -22935,7 +22944,7 @@ function renderGroupMessages() {
       preview.textContent = decodeGroupMentions(replyEnvelope.replyToPreview) || "Message";
       quote.append(label, preview);
       quote.addEventListener("click", (event) => { event.stopPropagation(); jumpToGroupMessage(replyEnvelope.replyToId); });
-      bubble.append(quote);
+      groupReplyQuoteEl = quote; // above the bubble, as in 1:1
     }
 
     if (imageEnvelope) {
@@ -23043,10 +23052,12 @@ function renderGroupMessages() {
       row.addEventListener("click", () => toggleGroupSelected(key));
     }
 
-    if (detachedLinkCard) {
+    if (detachedLinkCard || groupReplyQuoteEl) {
       const stack = document.createElement("div");
       stack.className = "message-bubble-stack";
-      stack.append(bubble, detachedLinkCard);
+      if (groupReplyQuoteEl) stack.append(groupReplyQuoteEl);
+      stack.append(bubble);
+      if (detachedLinkCard) stack.append(detachedLinkCard);
       row.append(selector, avatarSlot, stack);
     } else {
       row.append(selector, avatarSlot, bubble);
@@ -23193,7 +23204,7 @@ function renderGroupMemberPicker(excludeAddresses = []) {
 function groupPickerAvatarHtml(address, name) {
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="chat-avatar"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
-  return `<span class="chat-avatar">${escapeHtml(initialsFor(name))}</span>`;
+  return `<span class="chat-avatar avatar-fallback">${personGlyphSvg()}</span>`;
 }
 function updateGroupCreateSubmit() {
   if (!groupCreateSubmit) return;
@@ -23341,7 +23352,7 @@ function renderGroupAddressPreview() {
   card.innerHTML = `
     <span class="create-chat-preview-avatar">${avatarUrl
       ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
-      : escapeHtml(initialsFor(domain || address))}</span>
+      : personGlyphSvg()}</span>
     <span class="create-chat-preview-copy">
       <span class="create-chat-preview-name${domain ? "" : " muted"}">${escapeHtml(domain || (looking ? "Looking up…" : "No KNS domain"))}</span>
       <span class="create-chat-preview-address">${escapeHtml(address)}</span>

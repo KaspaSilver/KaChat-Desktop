@@ -12175,3 +12175,33 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 }
 .copy-toast-icon { background: var(--ios-green); color: #fff; font-size: 11px; }
 
+
+/* ==== iOS theme: follow-ups ==== */
+/* Avatar fallback: the person.fill glyph in the accent on a 20% accent circle (iOS KNSAvatarView),
+   never initials. */
+.avatar-fallback,
+.create-chat-preview-avatar:has(> .avatar-person-glyph),
+.create-chat-picker-avatar:has(> .avatar-person-glyph),
+.conversation-avatar:has(> [data-conversation-avatar-initials]:not([hidden])),
+.chat-info-avatar:has(> [data-chat-info-avatar-initials]:not([hidden])) {
+  display: grid;
+  place-items: center;
+  background: rgba(112,199,186,.2);
+  color: var(--kaspa);
+}
+[data-conversation-avatar-initials], [data-chat-info-avatar-initials] {
+  display: grid; place-items: center; width: 100%; height: 100%; color: var(--kaspa);
+}
+[data-conversation-avatar-initials][hidden], [data-chat-info-avatar-initials][hidden] { display: none; }
+.avatar-person-glyph { width: 46%; height: 46%; fill: currentColor; stroke: none; }
+
+/* Reply quotes sit above the bubble, on their own card, aligned to the bubble's side. */
+.message-bubble-stack > .message-reply-quote { cursor: pointer; }
+.message-row.local .message-bubble-stack > .message-reply-quote { justify-self: end; align-self: flex-end; }
+
+/* No kicker above dialog titles (iOS sheets have a title only). */
+.modal-kicker { display: none; }
+
+/* Profile: the account name is a plain row, not a labelled card (iOS accountNameRow). */
+.profile-account-card { background: none; border: 0; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; padding: 0 4px; }
+.profile-account-card .profile-card-label { display: none; }
