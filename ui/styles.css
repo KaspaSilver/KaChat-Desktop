@@ -7,19 +7,48 @@
   /* The chats list's width, shared with the bar that sits over it. */
   --sidebar-w: clamp(300px, 34%, 620px);
   --topbar-h: 56px;
-  --bg: #070a0d;
-  --panel: #101419;
-  --panel-2: #151a21;
-  --panel-3: #1b2129;
-  --text: #f2f6f7;
-  --muted: #8d98a2;
-  --line: rgba(255,255,255,.08);
-  --kaspa: #62f4d0;
+  /* iOS system palette (dark): systemBackground, secondarySystemBackground, tertiary, quaternary;
+     label, secondaryLabel (systemGray on black), separator. The accent is the app's AccentColor
+     asset, #70C7BA, the same in both appearances. */
+  --bg: #000000;
+  --panel: #1c1c1e;
+  --panel-2: #2c2c2e;
+  --panel-3: #3a3a3c;
+  --text: #ffffff;
+  --muted: #8e8e93;
+  --line: rgba(84,84,88,.65);
+  --kaspa: #70c7ba;
   /* Accent used for TEXT/icons (links, active tabs). Kept separate from --kaspa
      (which fills buttons) so it can darken on light backgrounds where bright
      mint text would be unreadable. */
   --kaspa-ink: var(--kaspa);
-  --kaspa-dim: rgba(98,244,208,.18);
+  /* Aliases some rules were written against; they were never defined, so only their fallbacks
+     ever applied (near-white text in light mode, for one). */
+  --accent: var(--kaspa);
+  --text-primary: var(--text);
+  --text-muted: var(--muted);
+  --kaspa-dim: rgba(112,199,186,.18);
+  /* Text and icons drawn ON the accent: white, as iOS draws it on AccentColor fills. */
+  --on-accent: #ffffff;
+  /* Outgoing message bubbles (iOS OutgoingBubble): a deeper teal in dark mode so white text reads. */
+  --bubble-out: #167368;
+  --bubble-out-text: #ffffff;
+  /* iOS system colours used for state. */
+  --ios-green: #30d158;
+  --ios-red: #ff453a;
+  --ios-orange: #ff9f0a;
+  --ios-gray5: #2c2c2e;
+  --ios-gray6: #1c1c1e;
+  /* The sign-in screen's own near-black with a green cast (iOS OnboardingView), dark in both themes. */
+  --onboarding-bg: #0e1614;
+  --onboarding-row: #1a2624;
+  --ios-system-bg: #000000;
+  --ios-gray4: #3a3a3c;
+  --ios-fill-3: rgba(118,118,128,.24);
+  --ios-segment-on: #636366;
+  --ios-material: rgba(44,44,46,.72);
+  --ios-material-stroke: rgba(255,255,255,.18);
+  --ios-disabled-fill: #8e8e93;
   /* Translucent surface + hairline tokens. On dark these lighten the backdrop
      (white alphas); the light theme flips them to dark alphas so the 95+
      rgba(255,255,255,…) surfaces can be remapped by switching these tokens. */
@@ -28,7 +57,8 @@
   --surface-3: rgba(255,255,255,.12);
   /* Stronger border used to give cards clear definition (profile/settings
      cards were originally rgba(255,255,255,.14)). */
-  --card-border: rgba(255,255,255,.14);
+  /* iOS cards: .regularMaterial with a white .18 hairline. */
+  --card-border: rgba(255,255,255,.18);
   --shadow: rgba(0,0,0,.42);
 }
 
@@ -36,31 +66,45 @@
    Light choice, or System following the OS). */
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #eef1f4;
+  /* iOS system palette (light): systemGroupedBackground, secondarySystemGroupedBackground,
+     systemGray6, systemGray5; label, secondaryLabel on white, separator. */
+  --bg: #f2f2f7;
   --panel: #ffffff;
-  --panel-2: #f4f6f8;
-  --panel-3: #e9edf1;
-  --text: #0b1416;
-  --muted: #5a6771;
-  --line: rgba(0,0,0,.12);
-  --kaspa: #62f4d0;
-  --kaspa-ink: #0a8f70;
-  --kaspa-dim: rgba(10,143,112,.14);
+  --panel-2: #f2f2f7;
+  --panel-3: #e5e5ea;
+  --text: #000000;
+  --muted: #8a8a8e;
+  --line: rgba(60,60,67,.29);
+  --kaspa: #70c7ba;
+  --kaspa-ink: #70c7ba;
+  --kaspa-dim: rgba(112,199,186,.16);
+  --bubble-out: #70c7ba;
+  --bubble-out-text: #ffffff;
+  --ios-green: #34c759;
+  --ios-red: #ff3b30;
+  --ios-orange: #ff9500;
+  --ios-gray5: #e5e5ea;
+  --ios-gray6: #f2f2f7;
+  --ios-system-bg: #ffffff;
+  --ios-gray4: #d1d1d6;
+  --ios-fill-3: rgba(118,118,128,.12);
+  --ios-segment-on: #ffffff;
+  --ios-material: rgba(255,255,255,.72);
+  --ios-material-stroke: rgba(255,255,255,.18);
+  --ios-disabled-fill: #8e8e93;
   --surface-1: rgba(12,26,32,.04);
   --surface-2: rgba(12,26,32,.07);
   --surface-3: rgba(12,26,32,.11);
-  --card-border: rgba(0,0,0,.12);
-  --shadow: rgba(20,35,45,.16);
+  --card-border: rgba(60,60,67,.18);
+  --shadow: rgba(0,0,0,.12);
 }
 
 /* Structural surfaces that hardcode a dark background rather than a variable. */
 :root[data-theme="light"] body {
-  background:
-    radial-gradient(circle at 50% 15%, rgba(10,143,112,.06), transparent 30%),
-    linear-gradient(180deg, #f7f9fb 0%, var(--bg) 100%);
+  background: var(--bg);
 }
 :root[data-theme="light"] .app-sidebar {
-  background: linear-gradient(180deg, #ffffff, #f4f6f8);
+  background: var(--bg);
 }
 
 * { box-sizing: border-box; }
@@ -76,11 +120,12 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 50% 15%, rgba(98,244,208,.08), transparent 30%),
-    linear-gradient(180deg, #0b0f13 0%, var(--bg) 100%);
+  background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* SF Pro where the system has it, as the iOS app draws everything in the system font. */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button, input { font: inherit; }
@@ -268,7 +313,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .sidebar-tab.active { color: var(--kaspa-ink); }
-.sidebar-tab.active .sidebar-tab-icon { background: rgba(98,244,208,.14); }
+.sidebar-tab.active .sidebar-tab-icon { background: rgba(112,199,186,.14); }
 
 .app-detail {
   flex: 1;
@@ -338,10 +383,10 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   border: 0;
   border-radius: 999px;
   background: var(--kaspa);
-  color: #06110f;
+  color: var(--on-accent);
   display: grid;
   place-items: center;
-  box-shadow: 0 10px 30px rgba(98,244,208,.35), 0 4px 14px rgba(0,0,0,.35);
+  box-shadow: 0 10px 30px rgba(112,199,186,.35), 0 4px 14px rgba(0,0,0,.35);
 }
 
 .new-chat-fab:hover { filter: brightness(1.05); }
@@ -436,9 +481,9 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   width: min(100%, 560px);
   height: min(100%, 86vh);
   background: linear-gradient(180deg, #12171d, #0d1116);
-  border: 1px solid rgba(98,244,208,.16);
+  border: 1px solid rgba(112,199,186,.16);
   border-radius: 24px;
-  box-shadow: 0 30px 90px rgba(0,0,0,.58), 0 0 42px rgba(98,244,208,.06);
+  box-shadow: 0 30px 90px rgba(0,0,0,.58), 0 0 42px rgba(112,199,186,.06);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -606,7 +651,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   place-items: center;
   border-radius: 999px;
   background: var(--kaspa);
-  color: #06110f;
+  color: var(--on-accent);
 }
 
 .profile-qr-circle svg {
@@ -665,7 +710,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   flex: 0 0 auto;
 }
 
-.profile-address-icon:hover { border-color: rgba(98,244,208,.3); }
+.profile-address-icon:hover { border-color: rgba(112,199,186,.3); }
 
 .profile-address-icon svg {
   width: 22px;
@@ -774,13 +819,13 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); cursor: pointer;
 }
-.notif-center-row:hover { border-color: rgba(98,244,208,.3); }
-.notif-center-row.unread { background: rgba(98,244,208,.06); border-color: rgba(98,244,208,.24); }
+.notif-center-row:hover { border-color: rgba(112,199,186,.3); }
+.notif-center-row.unread { background: rgba(112,199,186,.06); border-color: rgba(112,199,186,.24); }
 .notif-center-source {
   flex: 0 0 auto; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   padding: 3px 7px; border-radius: 999px; background: rgba(255,255,255,.08); color: var(--muted);
 }
-.notif-center-source.notif-src-kaposts { color: var(--kaspa-ink); background: rgba(98,244,208,.12); }
+.notif-center-source.notif-src-kaposts { color: var(--kaspa-ink); background: rgba(112,199,186,.12); }
 .notif-center-source.notif-src-group { color: #7aa2ff; background: rgba(122,162,255,.12); }
 .notif-center-source.notif-src-broadcast { color: #f0b23c; background: rgba(240,178,60,.12); }
 .notif-center-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -789,7 +834,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .notif-center-time { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
 
 .service-health-button:focus-visible {
-  outline: 2px solid rgba(98,244,208,.72);
+  outline: 2px solid rgba(112,199,186,.72);
   outline-offset: 3px;
 }
 
@@ -924,10 +969,10 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   align-items: center;
   justify-content: center;
   gap: 9px;
-  color: #06110f;
+  color: var(--on-accent);
   background: var(--kaspa);
   font-weight: 700;
-  box-shadow: 0 12px 30px rgba(98,244,208,.16);
+  box-shadow: 0 12px 30px rgba(112,199,186,.16);
 }
 
 .add-contact-icon {
@@ -967,13 +1012,13 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .chat-row:hover {
-  border-color: rgba(98,244,208,.24);
-  background: linear-gradient(180deg, rgba(98,244,208,.075), rgba(255,255,255,.025));
+  border-color: rgba(112,199,186,.24);
+  background: linear-gradient(180deg, rgba(112,199,186,.075), rgba(255,255,255,.025));
 }
 
 .chat-row.selected {
-  border-color: rgba(98,244,208,.45);
-  background: linear-gradient(180deg, rgba(98,244,208,.12), rgba(255,255,255,.025));
+  border-color: rgba(112,199,186,.45);
+  background: linear-gradient(180deg, rgba(112,199,186,.12), rgba(255,255,255,.025));
 }
 
 .chat-row.selecting { padding-left: 48px; }
@@ -988,7 +1033,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   place-items: center;
   border-radius: 15px;
   color: var(--kaspa-ink);
-  background: rgba(98,244,208,.08);
+  background: rgba(112,199,186,.08);
   border: 1px solid var(--kaspa-dim);
   font-weight: 800;
   letter-spacing: -.02em;
@@ -1126,7 +1171,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   border-radius: 999px;
   padding: 8px 12px;
   color: var(--kaspa-ink);
-  background: rgba(98,244,208,.08);
+  background: rgba(112,199,186,.08);
   font-weight: 700;
 }
 
@@ -1136,7 +1181,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   margin: 54px 0 16px;
   border-radius: 26px;
   font-size: 22px;
-  box-shadow: 0 0 34px rgba(98,244,208,.12);
+  box-shadow: 0 0 34px rgba(112,199,186,.12);
 }
 
 .conversation-view h1 {
@@ -1170,7 +1215,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   border-radius: 999px;
   padding: 8px 11px;
   color: var(--kaspa-ink);
-  background: rgba(98,244,208,.075);
+  background: rgba(112,199,186,.075);
   font-weight: 750;
   font-size: 12px;
 }
@@ -1186,10 +1231,10 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   justify-self: center;
   margin: 2px 0 8px;
   padding: 7px 11px;
-  border: 1px solid rgba(98,244,208,.13);
+  border: 1px solid rgba(112,199,186,.13);
   border-radius: 999px;
   color: var(--muted);
-  background: rgba(98,244,208,.045);
+  background: rgba(112,199,186,.045);
   font-size: 11px;
   font-weight: 700;
   max-width: 88%;
@@ -1227,12 +1272,12 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .contact-modal {
   width: min(100%, 420px);
   padding: 20px;
-  border: 1px solid rgba(98,244,208,.18);
-  border-radius: 28px;
-  background: linear-gradient(180deg, #171c23, #10151b);
-  box-shadow:
-    0 30px 90px rgba(0,0,0,.58),
-    0 0 42px rgba(98,244,208,.08);
+  /* An iOS sheet: the system's elevated surface (secondarySystemBackground in dark, white in
+     light), a hairline, no coloured glow. It follows the theme like every other surface. */
+  border: 1px solid var(--card-border);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: 0 24px 70px var(--shadow);
 }
 
 .modal-header {
@@ -1301,8 +1346,8 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .field-input:focus {
-  border-color: rgba(98,244,208,.36);
-  box-shadow: 0 0 0 3px rgba(98,244,208,.08);
+  border-color: rgba(112,199,186,.36);
+  box-shadow: 0 0 0 3px rgba(112,199,186,.08);
 }
 
 .field-hint {
@@ -1326,9 +1371,9 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .primary-button {
-  color: #06110f;
+  color: var(--on-accent);
   background: var(--kaspa);
-  box-shadow: 0 12px 30px rgba(98,244,208,.14);
+  box-shadow: 0 12px 30px rgba(112,199,186,.14);
 }
 
 .secondary-button {
@@ -1380,8 +1425,8 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .message-bubble.local {
   justify-self: end;
   color: var(--text);
-  border: 1px solid rgba(98,244,208,.35);
-  background: linear-gradient(180deg, rgba(98,244,208,.12), rgba(255,255,255,.02));
+  border: 1px solid rgba(112,199,186,.35);
+  background: linear-gradient(180deg, rgba(112,199,186,.12), rgba(255,255,255,.02));
   border-bottom-right-radius: 7px;
 }
 
@@ -1430,7 +1475,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 .message-payment-card.outgoing {
   background: linear-gradient(135deg, var(--kaspa), color-mix(in srgb, var(--kaspa) 78%, #06110f));
-  color: #06110f;
+  color: var(--on-accent);
   border: 1px solid rgba(255, 255, 255, .22);
 }
 .message-payment-card.incoming {
@@ -1530,10 +1575,10 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   border-radius: 15px;
   display: grid;
   place-items: center;
-  color: #06110f;
+  color: var(--on-accent);
   background: var(--kaspa);
   font-weight: 900;
-  box-shadow: 0 10px 24px rgba(98,244,208,.16);
+  box-shadow: 0 10px 24px rgba(112,199,186,.16);
 }
 
 
@@ -1620,11 +1665,11 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   place-items: center;
   border-radius: 26px;
   color: var(--kaspa-ink);
-  background: rgba(98,244,208,.08);
+  background: rgba(112,199,186,.08);
   border: 1px solid var(--kaspa-dim);
   font-size: 24px;
   font-weight: 900;
-  box-shadow: 0 0 34px rgba(98,244,208,.12);
+  box-shadow: 0 0 34px rgba(112,199,186,.12);
 }
 
 .profile-address {
@@ -1644,10 +1689,10 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .profile-qr-card {
   margin-top: 12px;
   padding: 14px;
-  border-color: rgba(98,244,208,.22);
+  border-color: rgba(112,199,186,.22);
   box-shadow:
     0 18px 50px rgba(0,0,0,.24),
-    0 0 28px rgba(98,244,208,.08);
+    0 0 28px rgba(112,199,186,.08);
 }
 
 .profile-qr-card canvas {
@@ -1694,12 +1739,12 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   padding: 16px;
   border-radius: 28px;
   background:
-    radial-gradient(circle at 50% 50%, rgba(98,244,208,.08), transparent 65%),
+    radial-gradient(circle at 50% 50%, rgba(112,199,186,.08), transparent 65%),
     #071415;
-  border-color: rgba(98,244,208,.32);
+  border-color: rgba(112,199,186,.32);
   box-shadow:
     0 18px 50px rgba(0,0,0,.24),
-    0 0 26px rgba(98,244,208,.12);
+    0 0 26px rgba(112,199,186,.12);
 }
 
 .profile-qr-card canvas {
@@ -1731,7 +1776,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 
 .message-state-dot.local-draft {
   background: var(--kaspa);
-  box-shadow: 0 0 12px rgba(98,244,208,.35);
+  box-shadow: 0 0 12px rgba(112,199,186,.35);
 }
 
 .unread-badge {
@@ -1741,7 +1786,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   display: inline-grid;
   place-items: center;
   border-radius: 999px;
-  color: #06110f;
+  color: var(--on-accent);
   background: var(--kaspa);
   font-size: 11px;
   line-height: 1;
@@ -1783,7 +1828,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 
 .message-state-dot.confirmed {
   background: var(--kaspa);
-  box-shadow: 0 0 12px rgba(98,244,208,.42);
+  box-shadow: 0 0 12px rgba(112,199,186,.42);
 }
 
 .message-state-dot.failed {
@@ -1824,7 +1869,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .message-bubble:focus-visible {
-  outline: 2px solid rgba(112, 245, 215, 0.75);
+  outline: 2px solid rgba(112,199,186, 0.75);
   outline-offset: 3px;
 }
 
@@ -1862,7 +1907,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 
 .detail-section-title {
   margin-top: 4px;
-  color: rgba(112, 245, 215, 0.88);
+  color: rgba(112,199,186, 0.88);
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.09em;
@@ -1874,7 +1919,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   overflow: auto;
   padding: 12px;
   border-radius: 14px;
-  border: 1px solid rgba(112, 245, 215, 0.22);
+  border: 1px solid rgba(112,199,186, 0.22);
   background: rgba(8, 16, 20, 0.76);
   color: rgba(236, 255, 251, 0.86);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1989,8 +2034,8 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .confirm-preview {
   padding: 14px 16px;
   border-radius: 18px;
-  background: rgba(93, 240, 208, 0.09);
-  border: 1px solid rgba(93, 240, 208, 0.18);
+  background: rgba(112,199,186, 0.09);
+  border: 1px solid rgba(112,199,186, 0.18);
   color: var(--text);
   font-weight: 800;
   line-height: 1.35;
@@ -2156,9 +2201,9 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   width: 36px;
   height: 36px;
   border-radius: 12px;
-  color: #06110f;
+  color: var(--on-accent);
   background: var(--kaspa);
-  box-shadow: 0 7px 18px rgba(98,244,208,.16);
+  box-shadow: 0 7px 18px rgba(112,199,186,.16);
 }
 .kachat-composer .composer-send svg {
   width: 21px;
@@ -2485,7 +2530,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid rgba(112, 245, 215, 0.22);
+  border: 1px solid rgba(112,199,186, 0.22);
   border-radius: 24px;
   background: rgba(13, 20, 26, 0.98);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
@@ -2503,8 +2548,8 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 
 .message-action-sheet > button:hover {
-  border-color: rgba(112, 245, 215, 0.35);
-  background: rgba(112, 245, 215, 0.08);
+  border-color: rgba(112,199,186, 0.35);
+  background: rgba(112,199,186, 0.08);
 }
 
 .message-action-preview,
@@ -2694,7 +2739,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .quick-reaction-more { width: 26px; height: 26px; border: 0; border-radius: 50%; background: rgba(255,255,255,.08); color: var(--muted); font-size: 16px; font-weight: 800; cursor: pointer; }
 .quick-reaction-emoji { border: 0; background: transparent; font-size: 26px; line-height: 1; cursor: pointer; padding: 2px; border-radius: 8px; }
 .quick-reaction-emoji:hover { background: rgba(255,255,255,.08); }
-.quick-reaction-emoji.active { background: rgba(98,244,208,.18); }
+.quick-reaction-emoji.active { background: rgba(112,199,186,.18); }
 .quick-reaction-reply { width: 30px; height: 30px; border: 0; background: transparent; color: var(--kaspa-ink); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .quick-reaction-reply svg { width: 18px; height: 18px; }
 
@@ -2715,7 +2760,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 }
 .emoji-composer-categories { display: flex; gap: 6px; }
 .emoji-composer-categories button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: transparent; font-size: 16px; cursor: pointer; filter: grayscale(1); opacity: .7; }
-.emoji-composer-categories button.active { background: rgba(98,244,208,.16); filter: none; opacity: 1; }
+.emoji-composer-categories button.active { background: rgba(112,199,186,.16); filter: none; opacity: 1; }
 .emoji-composer-grid { overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); gap: 4px; align-content: start; }
 
 /* Who reacted (iOS ReactionsSheet). */
@@ -3009,10 +3054,10 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .architecture-badge {
   flex: 0 0 auto;
   padding: 6px 9px;
-  border: 1px solid rgba(98,244,208,.28);
+  border: 1px solid rgba(112,199,186,.28);
   border-radius: 999px;
   color: var(--kaspa-ink);
-  background: rgba(98,244,208,.055);
+  background: rgba(112,199,186,.055);
   font-size: 10px;
   font-weight: 900;
   letter-spacing: .08em;
@@ -3077,7 +3122,7 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .switch-control input { position:absolute; opacity:0; pointer-events:none; }
 .switch-control span { width:46px; height:28px; border-radius:999px; display:block; position:relative; background:#343a43; border:1px solid var(--line); transition:.2s; }
 .switch-control span::after { content:""; position:absolute; width:22px; height:22px; left:2px; top:2px; border-radius:50%; background:#f5f6f7; transition:.2s; box-shadow:0 2px 7px rgba(0,0,0,.3); }
-.switch-control input:checked + span { background:rgba(98,244,208,.72); }
+.switch-control input:checked + span { background:rgba(112,199,186,.72); }
 .switch-control input:checked + span::after { transform:translateX(18px); }
 .danger-zone-group { padding-bottom:8px; }
 .danger-row, .danger-row .settings-row-icon { color:#ff6672; }
@@ -3086,7 +3131,7 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .profile-screen { align-content:start !important; overflow-y:auto; }
 .profile-title-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .profile-title-row h1 { margin:0; }
-.profile-account-add { width:42px; height:42px; border-radius:14px; border:1px solid rgba(98,244,208,.45); background:rgba(98,244,208,.08); color:var(--kaspa); font-size:25px; }
+.profile-account-add { width:42px; height:42px; border-radius:14px; border:1px solid rgba(112,199,186,.45); background:rgba(112,199,186,.08); color:var(--kaspa); font-size:25px; }
 .profile-identity-card { margin-top:16px; padding:16px; display:flex; align-items:center; gap:13px; border:1px solid var(--line); border-radius:22px; background:linear-gradient(180deg,var(--surface-1),rgba(255,255,255,.025)); }
 .profile-avatar.small { width:44px; height:44px; border-radius:15px; font-size:19px; }
 .profile-identity-copy { flex:1; min-width:0; display:grid; gap:3px; }
@@ -3139,7 +3184,7 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 }
 .logged-out-screen[hidden] { display:none !important; }
 .logged-out-content { width:min(100%, 460px); margin:0 auto; display:flex; flex-direction:column; align-items:stretch; }
-.logged-out-logo { width:132px; height:132px; margin:0 auto 6px; border-radius:50%; overflow:hidden; background:#ffffff; box-shadow:0 10px 30px rgba(98,244,208,.20); display:grid; place-items:center; }
+.logged-out-logo { width:132px; height:132px; margin:0 auto 6px; border-radius:50%; overflow:hidden; background:#ffffff; box-shadow:0 10px 30px rgba(112,199,186,.20); display:grid; place-items:center; }
 .logged-out-logo img { width:100%; height:100%; object-fit:cover; transform:scale(1.32); }
 .logged-out-content > h1 { margin:6px 0 0; text-align:center; font-size:52px; line-height:1; letter-spacing:-.03em; font-weight:900; }
 .logged-out-tagline { margin:12px 0 0; text-align:center; color:var(--muted); font-size:17px; font-weight:700; }
@@ -3175,7 +3220,7 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .logged-out-actions { display:grid; gap:12px; margin-top:26px; }
 .logged-out-actions button { min-height:54px; border-radius:14px; border:1px solid transparent; font:800 15.5px/1.1 inherit; display:flex; align-items:center; justify-content:center; gap:10px; }
 .logged-out-actions button span { font-size:19px; }
-.logged-out-primary { background:var(--kaspa); color:#06110f; box-shadow:0 12px 30px rgba(98,244,208,.14); }
+.logged-out-primary { background:var(--kaspa); color: var(--on-accent); box-shadow:0 12px 30px rgba(112,199,186,.14); }
 .logged-out-primary:hover { filter:brightness(1.05); }
 .logged-out-secondary { background:var(--surface-1); color:var(--text); border-color:var(--line); }
 .logged-out-secondary:hover { background:var(--surface-2); }
@@ -3234,8 +3279,8 @@ body.session-logged-out [data-account-rename-modal] {
   border-radius: 22px;
   background: #071415;
   box-shadow:
-    0 0 0 1px rgba(98,244,208,.14) inset,
-    0 0 22px rgba(98,244,208,.16);
+    0 0 0 1px rgba(112,199,186,.14) inset,
+    0 0 22px rgba(112,199,186,.16);
   pointer-events: auto;
   cursor: default;
 }
@@ -3274,8 +3319,8 @@ body.session-logged-out [data-account-rename-modal] {
   border-radius: 34px;
   background: #071415;
   box-shadow:
-    0 0 0 1px rgba(98,244,208,.18) inset,
-    0 0 46px rgba(98,244,208,.24),
+    0 0 0 1px rgba(112,199,186,.18) inset,
+    0 0 46px rgba(112,199,186,.24),
     0 30px 90px rgba(0,0,0,.5);
   pointer-events: none;
 }
@@ -3451,7 +3496,7 @@ body.session-logged-out [data-account-rename-modal] {
   font-size: 14px;
   font-weight: 760;
 }
-.create-chat-tool:hover { background: rgba(98,244,208,.055); }
+.create-chat-tool:hover { background: rgba(112,199,186,.055); }
 .create-chat-tool + .create-chat-tool { border-left: 1px solid var(--surface-2); }
 .create-chat-tool-icon,
 .create-chat-tool-icon svg {
@@ -3484,8 +3529,8 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .create-chat-address-card:focus-within,
 .create-chat-name-input:focus {
-  border-color: rgba(98,244,208,.42);
-  box-shadow: 0 0 0 3px rgba(98,244,208,.08);
+  border-color: rgba(112,199,186,.42);
+  box-shadow: 0 0 0 3px rgba(112,199,186,.08);
 }
 @media (max-width: 520px) {
   .create-chat-modal { width: min(100%, 390px); padding-inline: 14px; }
@@ -3563,7 +3608,7 @@ body.session-logged-out [data-account-rename-modal] {
   bottom: calc(100% + 8px);
   z-index: 5;
   padding: 6px 10px;
-  border: 1px solid rgba(92, 235, 205, 0.2);
+  border: 1px solid rgba(112,199,186, 0.2);
   border-radius: 14px;
   background: rgba(20, 31, 34, 0.94);
   color: var(--muted);
@@ -3687,7 +3732,7 @@ body.session-logged-out [data-account-rename-modal] {
   25% { box-shadow: 0 0 0 3px var(--kaspa); }
 }
 .composer.payment-mode .composer-field-wrap {
-  border-color: rgba(92, 235, 205, 0.34);
+  border-color: rgba(112,199,186, 0.34);
 }
 .composer.payment-mode .composer-input {
   font-variant-numeric: tabular-nums;
@@ -3698,7 +3743,7 @@ body.session-logged-out [data-account-rename-modal] {
 .composer:not(.payment-mode) .payment-back { display: none !important; }
 .payment-back {
   display: inline-flex; align-items: center; gap: 5px; align-self: center; margin-left: 4px;
-  border: 1px solid rgba(98,244,208,.35); border-radius: 999px; background: rgba(98,244,208,.12);
+  border: 1px solid rgba(112,199,186,.35); border-radius: 999px; background: rgba(112,199,186,.12);
   color: var(--kaspa-ink); font-weight: 700; font-size: 12px; padding: 5px 10px; cursor: pointer; white-space: nowrap;
 }
 .payment-back svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -3924,7 +3969,7 @@ body.session-logged-out [data-account-rename-modal] {
   color: var(--text); background: var(--panel-2); border: 1px solid var(--line);
   border-radius: 11px; cursor: pointer;
 }
-.settings-select:focus { outline: none; border-color: rgba(98,244,208,.42); }
+.settings-select:focus { outline: none; border-color: rgba(112,199,186,.42); }
 
 .settings-select-row {
   display: flex;
@@ -3981,7 +4026,7 @@ body.session-logged-out [data-account-rename-modal] {
 
 .settings-segmented-option.active {
   background: var(--kaspa);
-  color: #06110f;
+  color: var(--on-accent);
 }
 
 .settings-group-footer {
@@ -4151,7 +4196,7 @@ body.session-logged-out [data-account-rename-modal] {
   justify-content: center;
   border: 0;
   background: transparent;
-  color: var(--kaspa, #058b6f);
+  color: var(--kaspa, #70c7ba);
   flex: 0 0 auto;
 }
 
@@ -4191,7 +4236,7 @@ body.session-logged-out [data-account-rename-modal] {
 .chatting-address-qr-frame {
   padding: 20px;
   background: #ffffff;
-  border: 3px solid var(--kaspa, #058b6f);
+  border: 3px solid var(--kaspa, #70c7ba);
   border-radius: 20px;
 }
 
@@ -4227,7 +4272,7 @@ body.session-logged-out [data-account-rename-modal] {
   gap: 8px;
   border: 0;
   background: transparent;
-  color: var(--kaspa, #058b6f);
+  color: var(--kaspa, #70c7ba);
   font-size: 14.5px;
   font-weight: 650;
 }
@@ -4349,7 +4394,7 @@ body.session-logged-out [data-account-rename-modal] {
   position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; border-radius: 50%; color: #0a0f0d;
-  background: var(--kaspa); box-shadow: 0 0 0 3px rgba(98,244,208,.18);
+  background: var(--kaspa); box-shadow: 0 0 0 3px rgba(112,199,186,.18);
 }
 .send-recipient-check svg { width: 13px; height: 13px; }
 
@@ -4358,10 +4403,10 @@ body.session-logged-out [data-account-rename-modal] {
   display: flex; align-items: center; gap: 10px; width: 100%;
   padding: 12px 14px; margin-bottom: 10px;
   border: 1px solid var(--kaspa); border-radius: 12px;
-  background: rgba(98,244,208,.10); color: var(--kaspa-ink);
+  background: rgba(112,199,186,.10); color: var(--kaspa-ink);
   font: inherit; font-weight: 700; font-size: 14px; cursor: pointer;
 }
-.manage-address-consolidate-btn:hover { background: rgba(98,244,208,.18); }
+.manage-address-consolidate-btn:hover { background: rgba(112,199,186,.18); }
 .manage-address-consolidate-btn svg { width: 18px; height: 18px; flex: 0 0 18px; }
 /* Full resolved address shown under the KNS domain (matches iOS). */
 .send-resolved-address { display: block; margin-top: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
@@ -4383,7 +4428,7 @@ body.session-logged-out [data-account-rename-modal] {
   font-size: 14px;
   flex: 0 0 auto;
 }
-.send-amount-unit:hover { background: var(--surface-2); border-color: rgba(98,244,208,.4); }
+.send-amount-unit:hover { background: var(--surface-2); border-color: rgba(112,199,186,.4); }
 
 /* Paste and Scan QR: iOS spreads them across the row with an icon each, rather than leaving two
    bare links huddled at one end. */
@@ -4608,11 +4653,11 @@ body.session-logged-out [data-account-rename-modal] {
   justify-content: center;
   padding: 14px;
   border-radius: 999px;
-  background: var(--kaspa, #058b6f);
-  color: #06110f;
+  background: var(--kaspa, #70c7ba);
+  color: var(--on-accent);
   font-weight: 700;
 }
-.manage-address-send-button { background: var(--kaspa, #058b6f); }
+.manage-address-send-button { background: var(--kaspa, #70c7ba); }
 
 .send-kaspa-modal .field-hint[data-send-kaspa-resolved] { color: var(--kaspa-ink); }
 
@@ -4644,8 +4689,8 @@ body.session-logged-out [data-account-rename-modal] {
   background: var(--surface-1, rgba(255, 255, 255, .04));
 }
 .spending-address-row.active {
-  border-color: var(--kaspa, #058b6f);
-  background: color-mix(in srgb, var(--kaspa, #058b6f) 10%, transparent);
+  border-color: var(--kaspa, #70c7ba);
+  background: color-mix(in srgb, var(--kaspa, #70c7ba) 10%, transparent);
 }
 .spending-address-row-main {
   flex: 1;
@@ -4688,8 +4733,8 @@ body.session-logged-out [data-account-rename-modal] {
   gap: 4px;
   font-size: 11px;
   font-weight: 700;
-  color: #06110f;
-  background: var(--kaspa, #058b6f);
+  color: var(--on-accent);
+  background: var(--kaspa, #70c7ba);
   padding: 2px 8px;
   border-radius: 999px;
 }
@@ -4708,8 +4753,8 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .spending-address-usage.unused {
   color: var(--kaspa-ink);
-  border-color: color-mix(in srgb, var(--kaspa, #058b6f) 45%, transparent);
-  background: color-mix(in srgb, var(--kaspa, #058b6f) 10%, transparent);
+  border-color: color-mix(in srgb, var(--kaspa, #70c7ba) 45%, transparent);
+  background: color-mix(in srgb, var(--kaspa, #70c7ba) 10%, transparent);
 }
 
 /* --- Address Visibility screen (paged checklist, iOS parity) --- */
@@ -4747,7 +4792,7 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
   flex: 0 0 auto;
 }
-.spending-visibility-toggle.on { color: var(--kaspa, #058b6f); }
+.spending-visibility-toggle.on { color: var(--kaspa, #70c7ba); }
 .spending-visibility-toggle svg {
   width: 24px;
   height: 24px;
@@ -4791,7 +4836,7 @@ body.session-logged-out [data-account-rename-modal] {
   border: 1px solid var(--card-border, var(--line));
   border-radius: 12px;
   background: var(--surface-1, rgba(255, 255, 255, .04));
-  color: var(--kaspa, #058b6f);
+  color: var(--kaspa, #70c7ba);
   cursor: pointer;
 }
 .spending-visibility-page-btn:disabled { opacity: .35; cursor: default; }
@@ -4816,8 +4861,8 @@ body.session-logged-out [data-account-rename-modal] {
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 999px;
-  color: #06110f;
-  background: color-mix(in srgb, var(--kaspa, #62f4d0) 85%, #fff);
+  color: var(--on-accent);
+  background: color-mix(in srgb, var(--kaspa, #70c7ba) 85%, #fff);
 }
 /* KNS domain cards in the address-detail KNS Domains tabs. */
 .kns-domain-card {
@@ -4828,9 +4873,9 @@ body.session-logged-out [data-account-rename-modal] {
   width: 100%;
   padding: 12px 14px;
   margin-bottom: 8px;
-  border: 1px solid color-mix(in srgb, var(--kaspa, #62f4d0) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--kaspa, #70c7ba) 40%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--kaspa, #62f4d0) 8%, transparent);
+  background: color-mix(in srgb, var(--kaspa, #70c7ba) 8%, transparent);
   color: var(--text);
   text-align: left;
   cursor: pointer;
@@ -5020,7 +5065,7 @@ body.session-logged-out [data-account-rename-modal] {
    here uses, and still only on :focus-visible, so it appears for keyboard users and not on a
    click. */
 .chats-tab-button:focus-visible {
-  outline: 2px solid rgba(98,244,208,.72);
+  outline: 2px solid rgba(112,199,186,.72);
   outline-offset: -3px;
   border-radius: 12px;
 }
@@ -5275,7 +5320,7 @@ body.session-logged-out [data-account-rename-modal] {
   place-items: center;
   border-radius: 50%;
   color: var(--kaspa-ink);
-  background: rgba(98,244,208,.1);
+  background: rgba(112,199,186,.1);
   border: 1px solid var(--kaspa-dim);
   font-weight: 800;
   font-size: 20px;
@@ -5366,7 +5411,7 @@ body.session-logged-out [data-account-rename-modal] {
   text-align: left;
   cursor: pointer;
 }
-.import-source-row.selected { border-color: color-mix(in srgb, var(--kaspa, #62f4d0) 60%, transparent); }
+.import-source-row.selected { border-color: color-mix(in srgb, var(--kaspa, #70c7ba) 60%, transparent); }
 .import-source-mark { color: var(--kaspa); font-size: 13px; flex: 0 0 auto; }
 .import-source-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .import-source-copy strong { font-size: 14px; }
@@ -5540,14 +5585,14 @@ body.session-logged-out [data-account-rename-modal] {
   margin: 0 0 16px;
   padding: 12px 14px;
   border-radius: 14px;
-  border: 1px solid rgba(98,244,208,.22);
+  border: 1px solid rgba(112,199,186,.22);
   background: rgba(78,205,196,.08);
   color: var(--text);
   text-align: left;
   cursor: pointer;
   transition: background .15s ease, border-color .15s ease;
 }
-.kns-editor-guide:hover { background: rgba(78,205,196,.14); border-color: rgba(98,244,208,.4); }
+.kns-editor-guide:hover { background: rgba(78,205,196,.14); border-color: rgba(112,199,186,.4); }
 .kns-editor-guide-icon {
   flex: 0 0 auto;
   width: 34px;
@@ -5555,7 +5600,7 @@ body.session-logged-out [data-account-rename-modal] {
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: rgba(98,244,208,.16);
+  background: rgba(112,199,186,.16);
   font-size: 18px;
 }
 .kns-editor-guide-text { display: grid; gap: 2px; }
@@ -5573,7 +5618,7 @@ body.session-logged-out [data-account-rename-modal] {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: rgba(98,244,208,.16);
+  background: rgba(112,199,186,.16);
   color: var(--kaspa-ink);
   font-size: 13px;
   font-weight: 800;
@@ -5665,7 +5710,7 @@ body.session-logged-out [data-account-rename-modal] {
   transition: transform .1s ease, background .1s ease;
 }
 .message-reaction-bar button:hover { background: var(--line); transform: scale(1.15); }
-.message-reaction-bar button.active { background: rgba(98,244,208,.18); }
+.message-reaction-bar button.active { background: rgba(112,199,186,.18); }
 
 .message-reaction-pill {
   position: absolute;
@@ -5735,7 +5780,7 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
 }
 .voice-recording-cancel { background: var(--line); color: var(--muted); }
-.voice-recording-stop { background: var(--kaspa); color: #06110f; }
+.voice-recording-stop { background: var(--kaspa); color: var(--on-accent); }
 
 .message-audio-bubble {
   display: flex;
@@ -5780,8 +5825,8 @@ body.session-logged-out [data-account-rename-modal] {
 .initial-sync-note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
 .initial-sync-spinner {
   display: inline-block; width: 34px; height: 34px; border-radius: 50%;
-  border: 3px solid color-mix(in srgb, var(--accent, #62f4d0) 25%, transparent);
-  border-top-color: var(--accent, #62f4d0);
+  border: 3px solid color-mix(in srgb, var(--accent, #70c7ba) 25%, transparent);
+  border-top-color: var(--accent, #70c7ba);
   animation: initial-sync-spin 0.9s linear infinite;
 }
 @keyframes initial-sync-spin { to { transform: rotate(360deg); } }
@@ -5799,7 +5844,7 @@ body.session-logged-out [data-account-rename-modal] {
 .passphrase-question { text-align: center; padding: 18px 8px 6px; }
 .passphrase-question-icon svg {
   width: 56px; height: 56px; fill: none;
-  stroke: var(--accent, #62f4d0); stroke-width: 1.6;
+  stroke: var(--accent, #70c7ba); stroke-width: 1.6;
   stroke-linecap: round; stroke-linejoin: round;
 }
 .passphrase-question-title { margin: 14px 0 0; font-size: 19px; line-height: 1.35; }
@@ -5807,13 +5852,13 @@ body.session-logged-out [data-account-rename-modal] {
 /* "No" is a real answer here, not a dismissal, so it reads as the accent-tinted second choice
    iOS gives it rather than a plain grey cancel. */
 .passphrase-actions .passphrase-no {
-  background: color-mix(in srgb, var(--accent, #62f4d0) 15%, transparent);
-  color: var(--accent, #62f4d0);
+  background: color-mix(in srgb, var(--accent, #70c7ba) 15%, transparent);
+  color: var(--accent, #70c7ba);
 }
 .linklike-button {
   background: none; border: 0; cursor: pointer; padding: 12px;
   font: inherit; font-weight: 600; font-size: 13.5px;
-  color: var(--accent, #62f4d0);
+  color: var(--accent, #70c7ba);
 }
 .passphrase-entry-title { margin: 14px 0 4px; font-size: 17px; }
 /* The explainer: plain language, scrollable, back only - reading about it always returns to
@@ -5939,7 +5984,7 @@ body.session-logged-out [data-account-rename-modal] {
   width: 56px;
   height: 56px;
   fill: none;
-  stroke: var(--accent, #62f4d0);
+  stroke: var(--accent, #70c7ba);
   stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -6033,15 +6078,15 @@ body.session-logged-out [data-account-rename-modal] {
 .chess-sq.light { background: #efd9b4; }
 .chess-sq.dark { background: #b58863; }
 .chess-sq.last::after { content: ""; position: absolute; inset: 0; background: rgba(255,255,0,.35); }
-.chess-sq.selected::after { content: ""; position: absolute; inset: 0; background: rgba(98,244,208,.35); }
+.chess-sq.selected::after { content: ""; position: absolute; inset: 0; background: rgba(112,199,186,.35); }
 /* iOS conveys piece color via fill + contrasting outline (same glyph for both). */
 /* paint-order draws the stroke first and the fill on top, so the whole piece is a
    solid fill with the outline only at its edge — matching iOS's layered glyph. */
 .chess-piece { position: relative; z-index: 1; paint-order: stroke fill; }
 .chess-piece.white { color: #fcfcfc; -webkit-text-stroke: 1.5px #121212; }
 .chess-piece.black { color: #121212; -webkit-text-stroke: 1.5px #fcfcfc; }
-.chess-dot { position: absolute; z-index: 2; width: 30%; height: 30%; border-radius: 50%; background: rgba(98,244,208,.55); }
-.chess-dot.capture { width: 84%; height: 84%; background: transparent; border: 3px solid rgba(98,244,208,.55); box-sizing: border-box; }
+.chess-dot { position: absolute; z-index: 2; width: 30%; height: 30%; border-radius: 50%; background: rgba(112,199,186,.55); }
+.chess-dot.capture { width: 84%; height: 84%; background: transparent; border: 3px solid rgba(112,199,186,.55); box-sizing: border-box; }
 
 .chess-promo { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; background: rgba(3,6,9,.62); backdrop-filter: blur(3px); }
 .chess-promo[hidden] { display: none; }
@@ -6075,10 +6120,10 @@ body.session-logged-out [data-account-rename-modal] {
 .chess-chat:empty { display: none; }
 .chess-chat-msg { max-width: 78%; padding: 7px 11px; border-radius: 14px; font-size: 13px; line-height: 1.35; word-break: break-word; }
 .chess-chat-msg.incoming { align-self: flex-start; background: var(--surface-2); color: var(--text); }
-.chess-chat-msg.outgoing { align-self: flex-end; background: var(--kaspa); color: #06110f; }
+.chess-chat-msg.outgoing { align-self: flex-end; background: var(--kaspa); color: var(--on-accent); }
 .chess-composer { display: flex; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--line); flex: 0 0 auto; }
 .chess-composer .field-input { flex: 1; min-width: 0; }
-.chess-chat-send { flex: 0 0 auto; width: 42px; border: 0; border-radius: 12px; background: var(--kaspa); color: #06110f; display: grid; place-items: center; cursor: pointer; }
+.chess-chat-send { flex: 0 0 auto; width: 42px; border: 0; border-radius: 12px; background: var(--kaspa); color: var(--on-accent); display: grid; place-items: center; cursor: pointer; }
 .chess-chat-send svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ============================================================
@@ -6101,7 +6146,7 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
 }
 .kaposts-icon-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.kaposts-icon-button:hover { border-color: rgba(98,244,208,.3); }
+.kaposts-icon-button:hover { border-color: rgba(112,199,186,.3); }
 
 .kaposts-feed-tabs { display: flex; border-bottom: 1px solid var(--line); }
 .kaposts-feed-tab {
@@ -6152,12 +6197,12 @@ body.session-logged-out [data-account-rename-modal] {
   animation: kaposts-cell-flash 2.4s ease-out 1;
 }
 @keyframes kaposts-cell-flash {
-  0%   { box-shadow: 0 0 0 0 rgba(98,244,208,.55); }
-  18%  { box-shadow: 0 0 0 5px rgba(98,244,208,.28); }
-  100% { box-shadow: 0 0 0 0 rgba(98,244,208,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(112,199,186,.55); }
+  18%  { box-shadow: 0 0 0 5px rgba(112,199,186,.28); }
+  100% { box-shadow: 0 0 0 0 rgba(112,199,186,0); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .kaposts-cell-highlight { animation: none; box-shadow: 0 0 0 2px rgba(98,244,208,.35); }
+  .kaposts-cell-highlight { animation: none; box-shadow: 0 0 0 2px rgba(112,199,186,.35); }
 }
 .kaposts-avatar {
   flex-shrink: 0; width: 42px; height: 42px; border-radius: 50%;
@@ -6341,7 +6386,7 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
   transition: transform .14s ease, border-color .14s ease, background-color .14s ease;
 }
-.hub-tile:hover { border-color: rgba(98,244,208,.45); transform: translateY(-2px); }
+.hub-tile:hover { border-color: rgba(112,199,186,.45); transform: translateY(-2px); }
 .hub-tile.dragging { opacity: .45; }
 .hub-tile-icon { display: grid; place-items: center; height: 30px; color: var(--kaspa-ink); }
 .hub-tile-icon svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -6490,7 +6535,7 @@ body.session-logged-out [data-account-rename-modal] {
 
 .kaposts-profile-hero { border: 1px solid var(--card-border); border-radius: 18px; overflow: hidden; background: var(--surface-1); }
 .kaposts-profile-banner {
-  height: 120px; background: linear-gradient(135deg, rgba(98,244,208,.5), rgba(98,244,208,.12));
+  height: 120px; background: linear-gradient(135deg, rgba(112,199,186,.5), rgba(112,199,186,.12));
   background-size: cover; background-position: center;
 }
 .kaposts-profile-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px 14px; margin-top: -26px; }
@@ -6511,10 +6556,10 @@ body.session-logged-out [data-account-rename-modal] {
 /* "Chat" opens the 1:1 thread; "Edit KNS Profile" routes to the same editor the Profile tab uses. */
 .kaposts-profile-chat, .kaposts-edit-kns {
   display: inline-flex; align-items: center; gap: 6px;
-  border: 1px solid rgba(98,244,208,.35); border-radius: 999px; background: rgba(98,244,208,.12);
+  border: 1px solid rgba(112,199,186,.35); border-radius: 999px; background: rgba(112,199,186,.12);
   color: var(--kaspa-ink); font-weight: 700; font-size: 12.5px; padding: 6px 12px; cursor: pointer;
 }
-.kaposts-profile-chat:hover, .kaposts-edit-kns:hover { background: rgba(98,244,208,.2); }
+.kaposts-profile-chat:hover, .kaposts-edit-kns:hover { background: rgba(112,199,186,.2); }
 .kaposts-profile-chat svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .kaposts-edit-kns { margin: 0 14px 12px; align-self: flex-start; }
 .kaposts-profile-tabs { margin-top: 2px; }
@@ -6525,7 +6570,7 @@ body.session-logged-out [data-account-rename-modal] {
   background: linear-gradient(180deg, var(--surface-1), rgba(255,255,255,.02));
 }
 .kaposts-notification-row.openable { cursor: pointer; }
-.kaposts-notification-row.openable:hover { border-color: rgba(98,244,208,.3); }
+.kaposts-notification-row.openable:hover { border-color: rgba(112,199,186,.3); }
 .kaposts-notification-row .kaposts-avatar { width: 38px; height: 38px; }
 /* The kind badge on the actor's avatar (iOS Item.Kind icon + tint). */
 .kaposts-notification-avatar { position: relative; flex-shrink: 0; }
@@ -6590,7 +6635,7 @@ body.session-logged-out [data-account-rename-modal] {
   border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: var(--surface-1);
   color: var(--text); font: inherit; cursor: pointer;
 }
-.kaposts-search-row:hover { border-color: rgba(98,244,208,.3); }
+.kaposts-search-row:hover { border-color: rgba(112,199,186,.3); }
 .kaposts-search-row .kaposts-avatar { width: 36px; height: 36px; flex-shrink: 0; }
 .kaposts-search-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .kaposts-search-row-main strong { font-size: 14px; }
@@ -6657,7 +6702,7 @@ body.session-logged-out [data-account-rename-modal] {
 .broadcast-hidden-btn { margin-left: auto; }
 /* The room's header chip (iOS BroadcastRoomTitleChip). */
 .broadcast-room-chip { display: inline-flex; flex-direction: column; align-items: center; border: 0; background: transparent; cursor: pointer; padding: 0; margin: 0 auto; }
-.broadcast-room-chip-icon { width: 40px; height: 40px; border-radius: 50%; background: rgba(98,244,208,.2); color: var(--kaspa-ink); font-weight: 800; font-size: 18px; display: grid; place-items: center; z-index: 1; }
+.broadcast-room-chip-icon { width: 40px; height: 40px; border-radius: 50%; background: rgba(112,199,186,.2); color: var(--kaspa-ink); font-weight: 800; font-size: 18px; display: grid; place-items: center; z-index: 1; }
 .broadcast-room-chip-name { display: inline-flex; align-items: center; gap: 4px; margin-top: -10px; padding: 12px 12px 5px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text); font-size: 13.5px; font-weight: 800; }
 .broadcast-room-chip-name svg { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 /* Room Info (iOS BroadcastRoomInfoView). */
@@ -6736,7 +6781,7 @@ body.session-logged-out [data-account-rename-modal] {
   line-height: 1;
 }
 .reaction-status.pending { color: var(--muted); }
-.reaction-status.sent { color: var(--kaspa, #62f4d0); }
+.reaction-status.sent { color: var(--kaspa, #70c7ba); }
 .reaction-status.failed { color: #e05555; cursor: pointer; }
 
 /* Quick Reactions editor (Settings > Chats): six emoji slots, iOS-style. */
@@ -6757,7 +6802,7 @@ body.session-logged-out [data-account-rename-modal] {
   background: var(--surface-1, rgba(255,255,255,.04));
   color: var(--text);
 }
-.quick-reaction-slot:focus { outline: none; border-color: var(--kaspa, #62f4d0); }
+.quick-reaction-slot:focus { outline: none; border-color: var(--kaspa, #70c7ba); }
 .quick-reactions-actions { display: flex; gap: 10px; justify-content: flex-end; }
 
 /* Reply banner above the room composer (context-menu Reply). */
@@ -6767,7 +6812,7 @@ body.session-logged-out [data-account-rename-modal] {
   gap: 8px;
   padding: 6px 10px;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--kaspa, #62f4d0);
+  border-left: 3px solid var(--kaspa, #70c7ba);
   border-radius: 10px;
   background: var(--surface-1, rgba(255,255,255,.04));
   font-size: 12.5px;
@@ -6802,7 +6847,7 @@ body.session-logged-out [data-account-rename-modal] {
   border: 1px solid var(--line); border-radius: 16px; padding: 10px 13px;
   background: linear-gradient(180deg, var(--surface-1), rgba(255,255,255,.02));
 }
-.broadcast-message.mine { align-self: flex-end; border-color: rgba(98,244,208,.35); background: linear-gradient(180deg, rgba(98,244,208,.12), rgba(255,255,255,.02)); }
+.broadcast-message.mine { align-self: flex-end; border-color: rgba(112,199,186,.35); background: linear-gradient(180deg, rgba(112,199,186,.12), rgba(255,255,255,.02)); }
 .broadcast-message-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
 .broadcast-message-head strong { color: var(--kaspa-ink); cursor: pointer; font-size: 12.5px; }
 .broadcast-message.mine .broadcast-message-head strong { cursor: default; }
@@ -7040,7 +7085,7 @@ body.session-logged-out [data-account-rename-modal] {
 /* Profile 4.0: KNS hero + Apps grid */
 .profile-hero-card { padding: 0; overflow: hidden; }
 .profile-hero-banner {
-  height: 110px; background: linear-gradient(135deg, rgba(98,244,208,.5), rgba(98,244,208,.1));
+  height: 110px; background: linear-gradient(135deg, rgba(112,199,186,.5), rgba(112,199,186,.1));
   background-size: cover; background-position: center;
 }
 /* Avatar and the KNS affordance share the row that overlaps the banner; the name and bio sit
@@ -7073,7 +7118,7 @@ body.session-logged-out [data-account-rename-modal] {
 .profile-app-bubble span {
   display: inline-flex; align-items: center; justify-content: center;
   width: 52px; height: 52px; border-radius: 50%;
-  background: rgba(98,244,208,.15); color: var(--kaspa-ink); font-size: 20px; font-weight: 800;
+  background: rgba(112,199,186,.15); color: var(--kaspa-ink); font-size: 20px; font-weight: 800;
 }
 
 /* ============================================================
@@ -7185,7 +7230,7 @@ body.session-logged-out [data-account-rename-modal] {
 
 /* X-style: the whole cell is a click target for its thread */
 .kaposts-cell.openable { cursor: pointer; transition: border-color .15s ease, background .15s ease; }
-.kaposts-cell.openable:hover { border-color: rgba(98,244,208,.22); }
+.kaposts-cell.openable:hover { border-color: rgba(112,199,186,.22); }
 
 /* Like/dislike burst: pop the icon and flash a ring when a vote lands */
 @keyframes kaposts-pop {
@@ -7224,7 +7269,7 @@ body.session-logged-out [data-account-rename-modal] {
   color: var(--text); cursor: pointer; padding: 0;
 }
 .kaposts-md-toolbar button:hover { background: rgba(255,255,255,.07); }
-.kaposts-md-toolbar button:active { background: rgba(98,244,208,.16); }
+.kaposts-md-toolbar button:active { background: rgba(112,199,186,.16); }
 .kaposts-md-toolbar svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .kaposts-md-glyph { font-size: 14.5px; line-height: 1; font-family: Georgia, "Times New Roman", serif; }
 .kaposts-md-glyph.kaposts-md-small { font-size: 11px; font-family: inherit; font-weight: 600; }
@@ -7243,7 +7288,7 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .kaposts-thread-segment-num {
   flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
-  font-size: 11px; font-weight: 700; color: var(--kaspa-ink); background: rgba(98,244,208,.14);
+  font-size: 11px; font-weight: 700; color: var(--kaspa-ink); background: rgba(112,199,186,.14);
 }
 .kaposts-thread-segment-text {
   flex: 1; min-width: 0; font-size: 13px; line-height: 1.35;
@@ -7255,10 +7300,10 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-thread-segment-remove:hover { color: var(--ink); }
 .kaposts-composer-threadbar { display: flex; justify-content: flex-end; margin-top: 6px; }
 .kaposts-thread-add {
-  border: 1px solid rgba(98,244,208,.3); background: rgba(98,244,208,.1); color: var(--kaspa-ink);
+  border: 1px solid rgba(112,199,186,.3); background: rgba(112,199,186,.1); color: var(--kaspa-ink);
   font-size: 12.5px; font-weight: 700; padding: 6px 12px; border-radius: 999px; cursor: pointer;
 }
-.kaposts-thread-add:hover { background: rgba(98,244,208,.18); }
+.kaposts-thread-add:hover { background: rgba(112,199,186,.18); }
 
 /* X-style thread reading */
 .kaposts-view-thread {
@@ -7270,7 +7315,7 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-thread-chain-header {
   padding: 8px 16px; font-size: 13px; font-weight: 700; color: var(--kaspa-ink);
 }
-.kaposts-thread-chain-item { border-left: 2px solid rgba(98,244,208,.35); margin-left: 16px; }
+.kaposts-thread-chain-item { border-left: 2px solid rgba(112,199,186,.35); margin-left: 16px; }
 
 /* KaPosts quick tip modal */
 [data-tip-modal] { z-index: 1600; }
@@ -7296,9 +7341,9 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .broadcast-join-toggle {
   width: 26px; height: 26px; border-radius: 50%; border: 0; cursor: pointer;
-  background: rgba(98,244,208,.14); color: var(--kaspa-ink); font-size: 17px; font-weight: 700; line-height: 1;
+  background: rgba(112,199,186,.14); color: var(--kaspa-ink); font-size: 17px; font-weight: 700; line-height: 1;
 }
-.broadcast-join-toggle:hover { background: rgba(98,244,208,.22); }
+.broadcast-join-toggle:hover { background: rgba(112,199,186,.22); }
 /* Retention note at the trailing edge of the Popular header (iOS parity: the in-room banner
    was removed, so the 30-day rule is stated once, here). Headers are intentionally NOT
    sticky - they scroll away with their content. */
@@ -7564,7 +7609,7 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
   text-align: left;
 }
-.portfolio-hashrate-card:hover { border-color: rgba(98,244,208,.35); }
+.portfolio-hashrate-card:hover { border-color: rgba(112,199,186,.35); }
 .portfolio-hashrate-ico { display: grid; place-items: center; width: 30px; flex: 0 0 auto; color: var(--kaspa-ink); }
 .portfolio-hashrate-ico svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .portfolio-hashrate-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -7636,7 +7681,7 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
   text-align: left;
 }
-.cold-action-row:hover:not([disabled]) { border-color: rgba(98,244,208,.35); }
+.cold-action-row:hover:not([disabled]) { border-color: rgba(112,199,186,.35); }
 /* Hide Address is tinted, matching the tint iOS and Android give it: not destructive, but it
    takes something off the list. */
 .cold-action-row-warn .cold-action-icon,
@@ -7672,7 +7717,7 @@ body.session-logged-out [data-account-rename-modal] {
   font: inherit;
   font-size: 13px;
 }
-.cold-send-coincontrol-row:hover { border-color: rgba(98,244,208,.35); }
+.cold-send-coincontrol-row:hover { border-color: rgba(112,199,186,.35); }
 .cold-send-coincontrol-row > span:first-child { color: var(--text); font-weight: 650; }
 .cold-send-row-value { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .cold-coincontrol-actions { display: flex; gap: 16px; }
@@ -7691,8 +7736,8 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
   text-align: left;
 }
-.cold-coincontrol-row:hover { border-color: rgba(98,244,208,.35); }
-.cold-coincontrol-row.selected { border-color: var(--kaspa, #62f4d0); background: rgba(98,244,208,.09); }
+.cold-coincontrol-row:hover { border-color: rgba(112,199,186,.35); }
+.cold-coincontrol-row.selected { border-color: var(--kaspa, #70c7ba); background: rgba(112,199,186,.09); }
 .cold-coincontrol-check { display: grid; place-items: center; color: var(--muted); flex: 0 0 auto; }
 .cold-coincontrol-row.selected .cold-coincontrol-check { color: var(--kaspa-ink); }
 .cold-coincontrol-check svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -7727,12 +7772,12 @@ body.session-logged-out [data-account-rename-modal] {
 .cold-send-qr-panel .cold-qr-frame canvas { display: block; width: 280px; height: 280px; }
 .cold-send-frame-dots { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; max-width: 300px; }
 .cold-send-frame-dots span { width: 8px; height: 8px; border-radius: 50%; background: #d1d5d3; }
-.cold-send-frame-dots span.active { background: var(--kaspa, #058b6f); }
+.cold-send-frame-dots span.active { background: var(--kaspa, #70c7ba); }
 .cold-send-frame-counter { margin: 0; font-size: 12px; color: rgba(0,0,0,.55); }
 .cold-send-frame-controls { display: flex; gap: 18px; }
 .cold-send-frame-controls button {
   border: 0; background: transparent; cursor: pointer;
-  color: var(--kaspa, #058b6f); font-size: 18px; line-height: 1;
+  color: var(--kaspa, #70c7ba); font-size: 18px; line-height: 1;
 }
 
 /* Signed-response scan step */
@@ -7745,7 +7790,7 @@ body.session-logged-out [data-account-rename-modal] {
 .cold-send-scan-progress { margin: 0; font-size: 13px; font-weight: 650; text-align: center; }
 .cold-send-scan-dots { display: flex; gap: 4px; justify-content: center; margin-top: 6px; }
 .cold-send-scan-dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--surface-3, rgba(255,255,255,.14)); }
-.cold-send-scan-dots span.got { background: var(--kaspa, #058b6f); }
+.cold-send-scan-dots span.got { background: var(--kaspa, #70c7ba); }
 
 .cold-send-wait { margin: 30px 0; text-align: center; color: var(--muted); }
 .cold-send-result-icon { font-size: 44px; text-align: center; line-height: 1; }
@@ -7807,7 +7852,7 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .create-chat-preview-tag {
   flex: 0 0 auto; font-size: 11px; font-weight: 700; color: var(--kaspa-ink);
-  padding: 4px 8px; border-radius: 999px; background: rgba(98,244,208,.12);
+  padding: 4px 8px; border-radius: 999px; background: rgba(112,199,186,.12);
 }
 
 .create-chat-picker-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -7824,7 +7869,7 @@ body.session-logged-out [data-account-rename-modal] {
   width: 100%; box-sizing: border-box; padding: 9px 12px; font: inherit; font-size: 13px;
   color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px;
 }
-.create-chat-picker-query:focus { outline: none; border-color: rgba(98,244,208,.42); }
+.create-chat-picker-query:focus { outline: none; border-color: rgba(112,199,186,.42); }
 /* The list scrolls on its own so a long follow graph cannot push Name off the bottom of the
    sheet - the address field and Add stay reachable however many people you follow. */
 .create-chat-picker-list { margin-top: 10px; max-height: 268px; overflow-y: auto; }
@@ -7834,7 +7879,7 @@ body.session-logged-out [data-account-rename-modal] {
   color: var(--text); font: inherit; cursor: pointer;
 }
 .create-chat-picker-row:hover { background: rgba(255,255,255,.05); }
-.create-chat-picker-row.picked { background: rgba(98,244,208,.09); }
+.create-chat-picker-row.picked { background: rgba(112,199,186,.09); }
 .create-chat-picker-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
 .create-chat-picker-name {
   font-size: 13.5px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -7858,7 +7903,7 @@ body.session-logged-out [data-account-rename-modal] {
   display: flex; align-items: center; justify-content: center; gap: 7px;
   width: fit-content; margin: 0 auto 12px; padding: 9px 16px;
   border: 0; border-radius: 999px; cursor: pointer;
-  background: var(--kaspa); color: #06110f; font: inherit; font-size: 13.5px; font-weight: 750;
+  background: var(--kaspa); color: var(--on-accent); font: inherit; font-size: 13.5px; font-weight: 750;
   box-shadow: 0 10px 26px rgba(0,0,0,.32);
 }
 .kaposts-new-pill:hover { filter: brightness(1.05); }
@@ -7898,7 +7943,7 @@ body.session-logged-out [data-account-rename-modal] {
   border: 1px dashed var(--line); border-radius: 50%; background: rgba(255,255,255,.05);
   color: var(--muted);
 }
-.group-photo-picker:hover { border-color: rgba(98,244,208,.42); color: var(--text); }
+.group-photo-picker:hover { border-color: rgba(112,199,186,.42); color: var(--text); }
 .group-photo-picker-image { width: 100%; height: 100%; object-fit: cover; }
 .group-photo-picker-placeholder {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -8004,7 +8049,7 @@ body.session-logged-out [data-account-rename-modal] {
 .cold-qr-head { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cold-qr-head strong { font-size: 15px; }
 .cold-qr-close { color: #55605c; }
-.cold-qr-frame { border: 3px solid var(--kaspa, #058b6f); border-radius: 20px; padding: 14px; background: #fff; }
+.cold-qr-frame { border: 3px solid var(--kaspa, #70c7ba); border-radius: 20px; padding: 14px; background: #fff; }
 .cold-qr-frame canvas { display: block; width: 240px; height: 240px; }
 /* "Tap anywhere to copy", the line iOS puts under every large QR. Two tones: the cold QR card is
    white (it has to be, for scanners), the app's own QR screens are dark. */
@@ -8025,7 +8070,7 @@ body.session-logged-out [data-account-rename-modal] {
 .cold-qr-copy {
   display: inline-flex; align-items: center; gap: 7px;
   border: 0; background: transparent; padding: 4px 8px;
-  color: var(--kaspa, #058b6f); font-size: 13.5px; font-weight: 700; cursor: pointer;
+  color: var(--kaspa, #70c7ba); font-size: 13.5px; font-weight: 700; cursor: pointer;
 }
 .cold-qr-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .cold-scan-modal {
@@ -8135,7 +8180,7 @@ body.session-logged-out [data-account-rename-modal] {
   transition: background .15s ease;
 }
 .chatting-picker-row:hover { background: var(--surface-2, rgba(255, 255, 255, .05)); }
-.chatting-picker-row.current { border-color: color-mix(in srgb, var(--kaspa, #62f4d0) 60%, transparent); }
+.chatting-picker-row.current { border-color: color-mix(in srgb, var(--kaspa, #70c7ba) 60%, transparent); }
 .chatting-picker-row-index {
   flex: 0 0 auto;
   min-width: 34px;
@@ -8156,7 +8201,7 @@ body.session-logged-out [data-account-rename-modal] {
 .chatting-picker-domain-pill {
   padding: 2px 7px;
   border-radius: 999px;
-  background: var(--kaspa, #62f4d0);
+  background: var(--kaspa, #70c7ba);
   color: #041014;
   font-size: 10.5px;
   font-weight: 700;
@@ -8511,7 +8556,7 @@ body.session-logged-out [data-account-rename-modal] {
   width: 28px; height: 28px;
   border-radius: 50%;
   background: var(--kaspa);
-  color: #06110f;
+  color: var(--on-accent);
   display: grid;
   place-items: center;
   border: 2px solid var(--bg, #06110f);
@@ -8570,7 +8615,7 @@ body.session-logged-out [data-account-rename-modal] {
 .group-manage-toggle-row.is-disabled .switch-control { pointer-events: none; }
 /* The member row opens that member's User Info, so it has to look like it does something. */
 .group-member-line[data-group-member-profile] { cursor: pointer; }
-.group-member-line[data-group-member-profile]:hover { border-color: rgba(98,244,208,.35); }
+.group-member-line[data-group-member-profile]:hover { border-color: rgba(112,199,186,.35); }
 /* Hidden Users summary shares the members-dropdown look but with a leading icon */
 .group-members-summary .group-manage-row-icon { margin-right: 2px; }
 /* Collapsible members dropdown (collapsed by default) */
@@ -8787,7 +8832,7 @@ body.session-logged-out [data-account-rename-modal] {
   height: 96px;
   margin: -22px -16px 6px;
   border-radius: 18px 18px 0 0;
-  background-color: rgba(98,244,208,.12);
+  background-color: rgba(112,199,186,.12);
   background-size: cover;
   background-position: center;
 }
@@ -8797,8 +8842,8 @@ body.session-logged-out [data-account-rename-modal] {
    button rather than a glyph sitting next to some text: a tinted circle that responds to hover.
    As a bare transparent stroke it looked like decoration and people did not try clicking it. */
 .chat-info-name-pencil {
-  border: 1px solid rgba(98,244,208,.35);
-  background: rgba(98,244,208,.12);
+  border: 1px solid rgba(112,199,186,.35);
+  background: rgba(112,199,186,.12);
   color: var(--kaspa-ink);
   padding: 0;
   width: 26px;
@@ -8811,7 +8856,7 @@ body.session-logged-out [data-account-rename-modal] {
   flex: 0 0 auto;
   transition: background .15s ease, border-color .15s ease;
 }
-.chat-info-name-pencil:hover { background: rgba(98,244,208,.22); border-color: rgba(98,244,208,.6); }
+.chat-info-name-pencil:hover { background: rgba(112,199,186,.22); border-color: rgba(112,199,186,.6); }
 .chat-info-name-pencil:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
 .chat-info-name-pencil svg {
   width: 15px;
@@ -8882,7 +8927,7 @@ body.session-logged-out [data-account-rename-modal] {
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, #12171d, #0d1116);
-  border-top: 1px solid rgba(98,244,208,.16);
+  border-top: 1px solid rgba(112,199,186,.16);
   border-radius: 20px 20px 24px 24px;
   box-shadow: 0 -18px 50px rgba(0,0,0,.5);
 }
@@ -9234,7 +9279,7 @@ body.session-logged-out [data-account-rename-modal] {
   transition: transform .1s ease, background .1s ease;
 }
 .msg-context-reactions button:hover { background: var(--surface-2); transform: scale(1.18); }
-.msg-context-reactions button.active { background: rgba(98,244,208,.20); }
+.msg-context-reactions button.active { background: rgba(112,199,186,.20); }
 .msg-context-actions {
   display: flex;
   flex-direction: column;
@@ -9545,7 +9590,7 @@ body.session-logged-out [data-account-rename-modal] {
 /* --- Profile / KNS / Manage Addresses (iOS parity) ------------------------------------------ */
 .security-warning-card { display: grid; gap: 4px; padding: 12px 14px; border-radius: 12px; background: rgba(255,159,10,.12); margin-bottom: 12px; }
 .security-warning-card strong { color: #ff9f0a; font-size: 14px; }
-.public-key-card { display: grid; gap: 4px; padding: 12px 14px; border-radius: 12px; background: rgba(98,244,208,.12); margin-bottom: 12px; }
+.public-key-card { display: grid; gap: 4px; padding: 12px 14px; border-radius: 12px; background: rgba(112,199,186,.12); margin-bottom: 12px; }
 .public-key-card strong { color: var(--kaspa-ink); font-size: 14px; }
 .public-key-card p { margin: 0; font-size: 13px; color: var(--muted); }
 .public-key-hex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; margin-bottom: 10px; }
@@ -9600,7 +9645,7 @@ body.session-logged-out [data-account-rename-modal] {
 .spending-privacy-row .meta small { font-size: 12px; color: var(--muted); }
 .spending-privacy-row .meta code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .spending-privacy-row .funded { display: inline-flex; align-items: center; gap: 6px; color: var(--kaspa-ink); font-weight: 700; font-size: 13px; }
-.spending-privacy-row .funded b { padding: 2px 8px; border-radius: 999px; background: rgba(98,244,208,.15); font-size: 11px; }
+.spending-privacy-row .funded b { padding: 2px 8px; border-radius: 999px; background: rgba(112,199,186,.15); font-size: 11px; }
 .spending-privacy-row svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* iOS "Address Actions": one labelled capsule under the tabs on the chatting and spending address
@@ -9618,11 +9663,11 @@ body.session-logged-out [data-account-rename-modal] {
 .seed-entry-count.complete { color: #34c759; }
 .seed-entry-grid { max-height: 300px; overflow-y: auto; padding: 2px; }
 .seed-entry-cell { padding: 6px 8px; cursor: text; }
-.seed-entry-cell:has(input.active) { border-color: var(--kaspa); box-shadow: 0 0 0 1px var(--kaspa); background: rgba(98,244,208,.08); }
+.seed-entry-cell:has(input.active) { border-color: var(--kaspa); box-shadow: 0 0 0 1px var(--kaspa); background: rgba(112,199,186,.08); }
 .seed-entry-input { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--text); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; padding: 3px 0; outline: none; }
 .seed-entry-input.invalid { color: #ff6b6b; }
 .seed-entry-suggestions { display: flex; gap: 8px; overflow-x: auto; min-height: 36px; margin: 10px 0 4px; padding-bottom: 2px; }
-.seed-suggestion { flex: 0 0 auto; padding: 7px 12px; border: 0; border-radius: 999px; background: rgba(98,244,208,.14); color: var(--kaspa-ink, var(--kaspa)); font-size: 14px; cursor: pointer; }
+.seed-suggestion { flex: 0 0 auto; padding: 7px 12px; border: 0; border-radius: 999px; background: rgba(112,199,186,.14); color: var(--kaspa-ink, var(--kaspa)); font-size: 14px; cursor: pointer; }
 .seed-suggestion b { font-weight: 800; }
 .import-source-title { text-align: center; margin: 4px 0 6px; }
 .recovery-phrase-grid-box { word-spacing: normal; line-height: 1.3; }
@@ -9663,12 +9708,12 @@ body.session-logged-out [data-account-rename-modal] {
 .kns-wizard-center h3, .kns-wizard-form h3 { margin: 0; font-size: 21px; line-height: 1.3; }
 .kns-wizard-form h3.centered { text-align: center; }
 .kns-wizard-form { display: grid; gap: 12px; padding: 6px 2px 2px; }
-.kns-wizard-icon { width: 72px; height: 72px; border-radius: 999px; display: grid; place-items: center; font-size: 34px; font-weight: 800; background: rgba(98,244,208,.12); color: var(--kaspa); }
+.kns-wizard-icon { width: 72px; height: 72px; border-radius: 999px; display: grid; place-items: center; font-size: 34px; font-weight: 800; background: rgba(112,199,186,.12); color: var(--kaspa); }
 .kns-wizard-icon.warn { color: var(--kaspa); }
 .kns-wizard-icon.ok { background: rgba(52,199,89,.14); color: #34c759; }
 .kns-wizard-icon.muted { background: var(--surface-2); color: var(--muted); }
 .kns-wizard-choices { display: grid; gap: 10px; width: 100%; margin-top: 8px; }
-.secondary-button.accent { background: rgba(98,244,208,.14); color: var(--kaspa-ink, var(--kaspa)); border-color: transparent; }
+.secondary-button.accent { background: rgba(112,199,186,.14); color: var(--kaspa-ink, var(--kaspa)); border-color: transparent; }
 .linklike-button.muted { color: var(--muted); }
 .kns-wizard-label { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .kns-wizard-balance { margin: 0; font-size: 22px; font-weight: 800; }
@@ -9802,9 +9847,9 @@ body.session-logged-out [data-account-rename-modal] {
 .internal-link-card .message-link-card-meta { padding: 0; }
 .internal-link-card strong { font-size: 14px; }
 .internal-link-card small { color: var(--muted); font-size: 12px; }
-.internal-link-icon { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 10px; background: rgba(98,244,208,.18); display: grid; place-items: center; }
+.internal-link-icon { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 10px; background: rgba(112,199,186,.18); display: grid; place-items: center; }
 .internal-link-icon svg { width: 20px; height: 20px; fill: none; stroke: var(--kaspa); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.voice-recording-panel.preview { border-color: rgba(98,244,208,.35); background: rgba(98,244,208,.08); }
+.voice-recording-panel.preview { border-color: rgba(112,199,186,.35); background: rgba(112,199,186,.08); }
 .voice-preview-play { width: 30px; height: 30px; border-radius: 999px; border: 0; background: var(--kaspa); color: #000; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; }
 .voice-preview-play svg { width: 16px; height: 16px; fill: currentColor; }
 .voice-preview-trash { display: grid; place-items: center; width: 32px; padding: 0; color: #ff6b6b; }
@@ -9824,7 +9869,7 @@ body.session-logged-out [data-account-rename-modal] {
 /* Voice bubble (iOS AudioBubble): play circle, waveform that fills with playback, length. */
 .voice-player { display: flex; align-items: center; gap: 10px; min-width: 220px; max-width: 320px; padding: 4px 2px; }
 .voice-player audio { display: none; }
-.voice-player-toggle { width: 34px; height: 34px; flex: 0 0 auto; border: 0; border-radius: 999px; background: var(--kaspa); color: #06110f; display: grid; place-items: center; cursor: pointer; }
+.voice-player-toggle { width: 34px; height: 34px; flex: 0 0 auto; border: 0; border-radius: 999px; background: var(--kaspa); color: var(--on-accent); display: grid; place-items: center; cursor: pointer; }
 .voice-player-toggle svg { width: 18px; height: 18px; fill: currentColor; }
 .voice-player .voice-pause { display: none; }
 .voice-player.playing .voice-pause { display: block; }
@@ -9840,7 +9885,7 @@ body.session-logged-out [data-account-rename-modal] {
 .voice-player.outgoing .voice-player-time { color: rgba(6,17,15,.75); }
 .message-link-audio.voice-player { margin-top: 8px; }
 
-.node-mode-badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(98,244,208,.16); color: var(--kaspa-ink, var(--kaspa)); font-size: 10.5px; font-weight: 800; vertical-align: middle; }
+.node-mode-badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(112,199,186,.16); color: var(--kaspa-ink, var(--kaspa)); font-size: 10.5px; font-weight: 800; vertical-align: middle; }
 
 
 /* =============================================================================================
@@ -9956,7 +10001,7 @@ html.app-h .logged-out-screen { height: var(--app-h); }
   display: flex; align-items: center; gap: 12px;
   padding: 12px 12px 12px 14px;
   border-radius: 18px;
-  border: 1px solid rgba(98,244,208,.22);
+  border: 1px solid rgba(112,199,186,.22);
   background: linear-gradient(180deg, #171c23, #10151b);
   box-shadow: 0 18px 44px rgba(0,0,0,.5);
   color: var(--text);
@@ -9990,7 +10035,7 @@ html.standalone .ios-install-hint { display: none; }
     right: 20px; bottom: calc(var(--dock-inset, 80px) + 16px);
     width: 56px; height: 56px; margin: 0; padding: 0; border-radius: 50%;
     display: grid; place-items: center;
-    box-shadow: 0 10px 30px rgba(98,244,208,.35), 0 4px 14px rgba(0,0,0,.35);
+    box-shadow: 0 10px 30px rgba(112,199,186,.35), 0 4px 14px rgba(0,0,0,.35);
   }
   .kaposts-rail-post::after { font-size: 30px; line-height: 1; }
   .kaposts-content { padding-right: 0; scrollbar-gutter: auto; }
@@ -10105,9 +10150,9 @@ html.standalone .ios-install-hint { display: none; }
 .conversation-header .conversation-call-button {
   position: absolute; right: 10px; top: calc(var(--safe-top, 0px) + (100% - var(--safe-top, 0px)) / 2); transform: translateY(-50%);
   width: 38px; height: 38px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 14px;
-  background: rgba(98,244,208,.12); color: var(--kaspa-ink); cursor: pointer; pointer-events: auto;
+  background: rgba(112,199,186,.12); color: var(--kaspa-ink); cursor: pointer; pointer-events: auto;
 }
-.conversation-header .conversation-call-button:hover { background: rgba(98,244,208,.22); }
+.conversation-header .conversation-call-button:hover { background: rgba(112,199,186,.22); }
 .conversation-header .conversation-call-button svg { width: 20px; height: 20px; fill: currentColor; }
 .conversation-header .conversation-call-button[hidden] { display: none; }
 
@@ -10117,7 +10162,7 @@ html.standalone .ios-install-hint { display: none; }
 
 .call-overlay {
   position: fixed; inset: 0; z-index: 6000; display: flex; flex-direction: column;
-  background: radial-gradient(circle at 50% 20%, rgba(98,244,208,.14), transparent 45%), #070a0d;
+  background: radial-gradient(circle at 50% 20%, rgba(112,199,186,.14), transparent 45%), #070a0d;
   color: var(--text);
   padding: calc(16px + var(--safe-top, 0px)) 16px calc(16px + var(--safe-bottom, 0px));
 }
@@ -10441,3 +10486,688 @@ button.chess-t-row { cursor: pointer; }
 .address-resolution-card { margin-top: 8px; }
 .seed-entry-head { display: flex; align-items: center; gap: 10px; }
 .seed-entry-head .cold-inline-link { margin-left: auto; }
+
+/* ==== iOS theme: onboarding (sign-in, saved accounts, create, import, passphrase, setup guide, chatting address) ==== */
+/* Forced dark + brand background in BOTH themes (iOS .environment(\.colorScheme,.dark)). Tokens are
+   re-declared locally so light mode cannot leak in; the pencil popover lives inside this element. */
+.logged-out-screen {
+  color-scheme: dark;
+  --text: #ffffff;
+  --muted: rgba(235,235,245,.6);
+  --line: rgba(84,84,88,.65);
+  --ios-gray5: #2c2c2e;
+  --ios-gray6: #1c1c1e;
+  --kaspa-ink: #70c7ba;
+  --surface-1: rgba(255,255,255,.05);
+  --surface-2: rgba(255,255,255,.08);
+  --card-border: rgba(255,255,255,.18);
+  --ios-material: rgba(44,44,46,.72);
+  background: var(--onboarding-bg);                 /* was radial glow + panel->bg gradient */
+  align-content: stretch;                            /* was center */
+  padding: calc(44px + var(--safe-top, 0px)) calc(32px + var(--safe-right, 0px))
+           calc(40px + var(--safe-bottom, 0px)) calc(32px + var(--safe-left, 0px));  /* h was 22px */
+}
+
+/* Title row: "KaChat" then the 40px logo to its RIGHT, centred; spacers above and below the title
+   block; saved accounts + buttons at the bottom. Pure CSS grid, no markup change. */
+.logged-out-content {
+  width: min(100%, 460px);
+  align-self: stretch;
+  display: grid;                                     /* was flex column */
+  grid-template-columns: minmax(0,1fr) auto auto minmax(0,1fr);
+  grid-template-rows: minmax(20px,1fr) auto auto minmax(40px,1fr) auto auto;
+  column-gap: 10px;
+  align-items: center;
+}
+.logged-out-content > * { grid-column: 1 / -1; }
+.logged-out-content > h1 {
+  grid-row: 2; grid-column: 2;
+  margin: 0;
+  font-size: 34px;              /* was 52px */
+  font-weight: 700;             /* was 900 */
+  line-height: 41px;            /* was 1 */
+  letter-spacing: .011em;       /* was -.03em (SF large title tracks slightly positive) */
+  text-align: left;
+}
+.logged-out-logo {
+  grid-row: 2; grid-column: 3;
+  width: 40px; height: 40px;    /* was 132px */
+  margin: 0;                    /* was 0 auto 6px */
+  border-radius: 9px;           /* was 50% */
+  background: transparent;      /* was #fff */
+  box-shadow: none;             /* was accent glow */
+}
+/* kachat-logo.png is 432px with the tile occupying 186px (123..309): scale so the tile fills. */
+.logged-out-logo img { transform: scale(2.33); }    /* was 1.32 */
+.logged-out-tagline {
+  grid-row: 3;
+  margin: 12px 0 0;
+  font-size: 15px;              /* was 17px */
+  font-weight: 400;             /* was 700 */
+  line-height: 20px;
+  color: var(--muted);
+}
+.saved-accounts-section { grid-row: 5; margin-top: 0; }   /* was margin-top 34px */
+.logged-out-actions { grid-row: 6; gap: 16px; margin-top: 16px; }  /* gap was 12, margin 26 */
+
+.logged-out-section-label {
+  margin: 0 0 10px;             /* was 0 0 12px */
+  padding-left: 0;              /* was 2px */
+  font-size: 17px;              /* was 12px */
+  font-weight: 600;             /* was 800 */
+  letter-spacing: normal;       /* was .08em */
+  text-transform: none;         /* was uppercase */
+  color: var(--text);           /* was muted */
+}
+.saved-account-list { gap: 10px; }                  /* unchanged */
+.saved-account-card {
+  grid-template-columns: minmax(0,1fr) 32px;        /* was 1fr 52px */
+  column-gap: 12px;
+  align-items: center;                              /* was stretch */
+  height: 64px;
+  padding: 0 12px;
+  border: 0;                                        /* was 1px card-border */
+  border-radius: 12px;                              /* was 16px */
+  background: var(--onboarding-row);                /* was surface-1 */
+  box-shadow: none;
+}
+.saved-account-signin {
+  grid-template-columns: 24px minmax(0,1fr);        /* was 44px 1fr 22px */
+  gap: 10px;                                        /* was 13px */
+  padding: 0;                                       /* was 13px 8px 13px 14px */
+  height: 100%;
+}
+.saved-account-signin:hover { background: transparent; }
+.saved-account-card:hover { background: color-mix(in srgb, var(--onboarding-row) 88%, #fff); }
+.saved-account-icon {
+  width: 24px; height: 24px;                        /* was 44px */
+  border-radius: 0;
+  background: transparent;                          /* was kaspa-dim */
+  color: var(--kaspa);
+  font-size: 18px; font-weight: 700;
+}
+.saved-account-copy { gap: 2px; }                   /* was 3px */
+.saved-account-copy strong { font-size: 15px; font-weight: 600; }  /* was 16/700 */
+.saved-account-copy small {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px; font-weight: 400; line-height: 13px;  /* was 600 12.5px/1.2 */
+  color: var(--muted);
+}
+.saved-account-chevron { display: none; }           /* iOS row has no chevron */
+.saved-account-edit {
+  width: 32px; height: 32px; min-height: 0;         /* was 52px wide, full height */
+  border: 0; border-left: 0;                        /* drop the divider */
+  border-radius: 8px;
+  color: var(--kaspa);
+}
+.saved-account-edit:hover, .saved-account-edit[aria-expanded="true"] { background: rgba(255,255,255,.06); }
+.saved-account-edit svg { width: 16px; height: 16px; stroke-width: 2.4; }  /* was 20px / 2.1 (15pt semibold) */
+
+.logged-out-actions button {
+  min-height: 54px;
+  padding: 16px;
+  border: 0;
+  border-radius: 12px;          /* was 14px */
+  font-size: 17px;              /* replaces the invalid `font:800 15.5px/1.1 inherit` */
+  font-weight: 400;
+  line-height: 22px;
+  gap: 8px;                     /* was 10px */
+}
+.logged-out-actions button span { font-size: 17px; line-height: 1; }  /* was 19px */
+.logged-out-primary { background: var(--kaspa); color: #ffffff; box-shadow: none; }  /* was #06110f + glow */
+.logged-out-secondary { background: var(--ios-gray5); color: var(--text); border: 0; } /* was surface-1 + border */
+.logged-out-secondary:hover { background: #3a3a3c; }
+
+/* Gear = plain accent toolbar icon, not a bordered circle. Scoped: .profile-gear-button is shared. */
+.logged-out-settings-gear {
+  width: 44px; height: 44px;
+  border: 0;                    /* was 1px line */
+  background: transparent;      /* was surface-1 */
+  color: var(--kaspa);          /* was text */
+  top: calc(8px + var(--safe-top, 0px));   /* was 18px */
+  right: calc(12px + var(--safe-right, 0px)); /* was 18px */
+}
+.logged-out-settings-gear svg { width: 24px; height: 24px; stroke-width: 1.6; }
+.logged-out-settings-gear:hover { background: rgba(255,255,255,.06); }
+
+.account-action-menu {
+  min-width: 200px;
+  padding: 6px;
+  border: 0.8px solid var(--ios-material-stroke);   /* was 1px line */
+  border-radius: 16px;
+  background: var(--ios-material);                  /* was rgba(25,29,34,.98) */
+  -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 5px 20px rgba(0,0,0,.35);           /* was 0 18px 50px .55 */
+}
+.account-action-menu-item {
+  gap: 12px;                                        /* was 11px */
+  padding: 12px 14px;                               /* was 12px 16px */
+  border-top: 0;                                    /* no dividers */
+  border-radius: 12px;
+  font-size: 15px; font-weight: 600; line-height: 20px;   /* replaces invalid shorthand */
+}
+.account-action-menu-item svg { width: 18px; height: 18px; stroke-width: 2.3; color: var(--kaspa); }
+.account-action-menu-item:hover { background: rgba(255,255,255,.08); }
+.account-action-menu-item-destructive, .account-action-menu-item-destructive svg { color: var(--ios-red); } /* was #ff5d68 */
+
+/* Page = modal card */
+.create-account-flow, .import-account-flow {
+  background: var(--ios-system-bg);                 /* was #171c23->#10151b gradient (unthemed) */
+  border: 0.8px solid var(--card-border);           /* was accent .18 */
+  border-radius: 20px;                              /* was 28px */
+  box-shadow: 0 24px 60px rgba(0,0,0,.45);          /* drop the accent glow */
+  padding: 16px 16px 20px;                          /* iOS .padding() = 16; was 20 */
+}
+/* Nav title */
+.create-account-flow .modal-header, .import-account-flow .modal-header { align-items: center; margin-bottom: 16px; }
+.create-account-flow .modal-header h2 { font-size: 34px; font-weight: 700; line-height: 41px; letter-spacing: .011em; } /* was 24/-.03em */
+.import-account-flow .modal-header h2 { font-size: 17px; font-weight: 600; line-height: 22px; letter-spacing: normal; } /* iOS inline title */
+/* Close = iOS sheet close circle (xmark.circle.fill look) */
+.create-account-flow .modal-close, .import-account-flow .modal-close {
+  width: 30px; height: 30px;                        /* was 38 */
+  border: 0; border-radius: 50%;                    /* was 1px line, 14px */
+  background: var(--ios-fill-3);                    /* was surface-1 */
+  color: var(--muted);
+  font-size: 20px; font-weight: 600; line-height: 1;
+}
+
+/* Info cards */
+.create-account-flow .create-warning {
+  gap: 12px;                                        /* was 6px */
+  padding: 16px;                                    /* was 12px 14px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 12px;
+  background: var(--ios-gray6);                     /* was surface-1 */
+  margin-bottom: 24px;                              /* was 14px */
+}
+.create-account-flow .create-warning strong { gap: 8px; font-size: 17px; font-weight: 600; color: var(--ios-orange); } /* was 13.5 #f2bd5c */
+.create-account-flow .create-warning strong svg { width: 20px; height: 20px; }
+/* exclamationmark.triangle.FILL: solid triangle, exclamation knocked out in the card colour */
+.create-account-flow .create-warning:not(.create-warning-orange) strong svg { fill: currentColor; stroke: var(--ios-gray6); stroke-width: 2; }
+.create-account-flow .create-warning p { font-size: 15px; line-height: 20px; color: var(--muted); } /* was 13/1.4 */
+.create-account-flow .create-warning-orange {
+  background: color-mix(in srgb, var(--ios-orange) 10%, transparent);  /* was rgba(242,189,92,.08) */
+  border: 0;                                        /* was orange .25 */
+}
+
+/* "Seed Phrase Length" = headline + iOS segmented control */
+.create-account-flow .seed-length-fieldset { margin: 0 0 24px; }
+.create-account-flow .seed-length-fieldset legend { font-size: 17px; font-weight: 600; margin-bottom: 8px; color: var(--text); } /* was 800 */
+.create-account-flow .seed-length-options {
+  gap: 0;                                           /* was 10px */
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--ios-fill-3);
+}
+.create-account-flow .seed-length-options span {
+  min-height: 32px;                                 /* was 58px */
+  padding: 4px 8px;                                 /* was 10px 14px */
+  gap: 0;
+  align-items: center; text-align: center;
+  border: 0;                                        /* was 1px */
+  border-radius: 7px;                               /* was 14px */
+  background: transparent;                          /* was surface-1 */
+  color: var(--text);
+}
+.create-account-flow .seed-length-options strong { font-size: 13px; font-weight: 400; line-height: 18px; }
+.create-account-flow .seed-length-options small { font-size: 11px; line-height: 13px; color: var(--muted); opacity: 1; } /* desktop-only copy, kept */
+.create-account-flow .seed-length-options input:checked + span {
+  background: var(--ios-segment-on);                /* was blue rgba(60,94,255,.17) */
+  border: 0;                                        /* was blue border */
+  box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04);  /* was blue ring */
+}
+.create-account-flow .seed-length-options input:checked + span strong { font-weight: 600; }
+.create-account-flow .seed-length-options input:focus-visible + span { outline: 2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); outline-offset: 1px; }
+
+/* "Account Name" = headline label over a .roundedBorder field */
+.create-account-flow [data-create-step="setup"] .field-label {
+  gap: 8px;                                         /* was 7px */
+  margin-bottom: 44px;                              /* 24 stack spacing + 20 spacer before Generate */
+  font-size: 17px; font-weight: 600; color: var(--text);  /* was 13/650 muted */
+}
+.create-account-flow [data-create-step="setup"] .field-input {
+  height: 34px;
+  padding: 0 8px;                                   /* was 12px 13px */
+  border: 1px solid var(--line);
+  border-radius: 6px;                               /* was 14px */
+  background: var(--panel);                         /* secondarySystemBackground #1c1c1e / #fff */
+  font-size: 17px; font-weight: 400;                /* label weight would otherwise inherit */
+}
+.create-account-flow [data-create-step="setup"] .field-input:focus { border-color: var(--kaspa); box-shadow: none; }
+
+/* Buttons (create + import): primary on top full width, Cancel under it */
+.create-account-flow .modal-actions:not(.passphrase-actions),
+.import-account-flow .modal-actions:not(.passphrase-actions) {
+  flex-direction: column-reverse;                   /* was row, justify end */
+  align-items: stretch;
+  gap: 12px;                                        /* was 10px */
+}
+.create-account-flow .primary-button, .import-account-flow .primary-button,
+.create-account-flow .secondary-button, .import-account-flow .secondary-button {
+  min-height: 54px; padding: 16px;                  /* Type A; was 11px 14px / .full 10px 12px */
+  border: 0; border-radius: 12px;                   /* was 14px */
+  font-size: 17px; font-weight: 400; line-height: 22px;  /* was 800 */
+  box-shadow: none;                                 /* drop accent glow */
+}
+.create-account-flow .primary-button, .import-account-flow .primary-button { background: var(--kaspa); color: #fff; }
+.create-account-flow .secondary-button, .import-account-flow .secondary-button { background: var(--ios-gray5); color: var(--text); } /* was var(--line) */
+.create-account-flow .primary-button:disabled, .import-account-flow .primary-button:disabled {
+  background: var(--ios-disabled-fill); color: #fff; cursor: default;  /* Color.gray, not dimmed */
+}
+
+/* Seed reveal cover */
+.create-account-flow .seed-reveal-cover {
+  gap: 12px;                                        /* was 10px */
+  padding: 40px 16px;                               /* was 34px 16px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 12px;                              /* was 14px */
+  background: var(--ios-gray6);                     /* was surface-1 */
+  color: var(--muted);
+  font-size: 15px; font-weight: 400;                /* was 14/600 */
+  margin-bottom: 24px;
+}
+.create-account-flow .seed-reveal-cover svg { width: 34px; height: 34px; stroke-width: 2; }
+
+/* Seed word grid (shared with the Settings seed viewer, which is the same iOS look) */
+.seed-grid { gap: 8px; }                            /* unchanged */
+.seed-grid-cell {
+  align-items: center;                              /* was baseline */
+  gap: 4px;                                         /* was 6px */
+  padding: 8px 6px;                                 /* was 9px 10px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 8px;
+  background: var(--ios-gray6);                     /* was surface-1 */
+  min-width: 0;
+}
+.seed-grid-index { width: 18px; min-width: 18px; font-size: 11px; line-height: 13px; color: var(--muted); text-align: right; flex: 0 0 auto; }
+.seed-grid-word {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 15px;                                  /* was 13px (subheadline mono) */
+  line-height: 20px;
+  color: var(--text);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Confirm checkbox = CheckboxToggleStyle */
+.create-account-flow .seed-confirm {
+  gap: 12px;                                        /* was 10px */
+  margin: 40px 0 24px;                              /* was 14px 0 4px (24 spacing + 16 top pad) */
+  font-size: 15px; line-height: 20px;               /* was 13/1.4 */
+  color: var(--text);
+}
+.create-account-flow .seed-confirm input {
+  appearance: none; -webkit-appearance: none;
+  width: 20px; height: 20px; margin: 0;             /* was 18px, margin-top 2 */
+  border: 1.6px solid var(--muted);
+  border-radius: 4px;
+  background: transparent center / 14px no-repeat;
+  flex: 0 0 auto;
+}
+.create-account-flow .seed-confirm input:checked {
+  border-color: var(--kaspa);
+  background-color: var(--kaspa);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E");
+}
+.create-account-flow .seed-confirm input:focus-visible { outline: 2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); outline-offset: 2px; }
+.create-account-flow .field-error, .import-account-flow .field-error { color: var(--ios-red); font-size: 13px; font-weight: 400; } /* was #ff6b7d / 700 */
+
+.import-account-flow .import-source-title { margin: 8px 0 8px; font-size: 20px; font-weight: 700; line-height: 25px; text-align: center; } /* was 19px, 4/6 */
+.import-account-flow [data-import-step="source"] > .field-hint {
+  margin: 0 0 12px; padding: 0 8px;
+  font-size: 15px; line-height: 20px; color: var(--muted); text-align: center;  /* was 12px left */
+}
+.import-source-list { gap: 10px; margin: 8px 0 12px; padding: 2px; }  /* gap was 8 */
+.import-source-row {
+  gap: 12px;
+  padding: 12px;                                    /* was 10px 12px */
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--ios-material);                  /* was surface-2 */
+  -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+  border: 0.8px solid var(--ios-material-stroke);   /* was 1px line */
+  box-shadow: 0 5px 20px rgba(0,0,0,.12);
+}
+.import-source-row.selected { border: 1.2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); }
+.import-source-mark { width: 20px; text-align: center; font-size: 17px; line-height: 1; color: var(--muted); } /* was 13px accent */
+.import-source-row.selected .import-source-mark { color: var(--kaspa); }
+.import-source-copy { gap: 2px; }                  /* was 1px */
+.import-source-copy strong { font-size: 15px; font-weight: 600; line-height: 20px; } /* was 14 */
+.import-source-default { margin-left: 6px; font-size: 11px; font-weight: 700; color: var(--kaspa); } /* was 10.5/800 */
+.import-source-copy small { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; line-height: 13px; color: var(--muted); } /* was 11.5 */
+/* Continue here is Type B */
+.import-account-flow [data-import-step="source"] .primary-button,
+.import-account-flow [data-import-step="source"] .secondary-button {
+  min-height: 50px; padding: 14px 16px; border-radius: 14px; font-weight: 600;
+}
+
+.import-account-flow [data-import-step="form"] .field-label {
+  gap: 6px; margin-bottom: 12px;
+  font-size: 15px; font-weight: 400; color: var(--muted);   /* was 13/650 */
+}
+.import-account-flow [data-import-step="form"] .field-label .field-input {
+  height: 34px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel);
+  font-size: 17px; font-weight: 400; color: var(--text);
+}
+.import-account-flow [data-import-step="form"] .field-label .field-input:focus { border-color: var(--kaspa); box-shadow: none; }
+
+/* 12/24 words: iOS segmented control instead of the accent pill */
+.seed-count-segmented {
+  gap: 0;                                           /* was 4px */
+  padding: 2px;                                     /* was 3px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 9px;                               /* was 999px */
+  background: var(--ios-fill-3);                    /* was surface-1 */
+  margin: 0 0 12px;                                 /* was 4px 0 12px */
+}
+.seed-count-segmented .settings-segmented-option {
+  padding: 6px 8px;                                 /* was 7px 14px */
+  border-radius: 7px;                               /* was 999px */
+  font-size: 13px; font-weight: 400; line-height: 18px;   /* was 650 */
+  color: var(--text);                               /* was muted */
+}
+.seed-count-segmented .settings-segmented-option.active {
+  background: var(--ios-segment-on);                /* was var(--kaspa) */
+  color: var(--text);                               /* was on-accent */
+  font-weight: 600;
+  box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04);
+}
+
+.seed-entry-head { margin: 0 0 12px; gap: 8px; }
+.seed-entry-head .field-hint { margin: 0; font-size: 15px; color: var(--muted); }  /* was 12px */
+.seed-entry-head .cold-inline-link {                /* Paste = .bordered .small */
+  height: 28px; padding: 0 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent);
+  color: var(--kaspa);
+  font-size: 12px; font-weight: 600;                /* was 12.5/700, no fill */
+}
+.seed-entry-count { font-size: 12px; font-weight: 600; color: var(--muted); }  /* was 700 */
+.seed-entry-count.complete { color: var(--ios-green); }                        /* was #34c759 */
+
+.seed-entry-grid { gap: 8px; padding: 4px 2px; }   /* was padding 2px */
+.seed-entry-cell { padding: 6px 8px; gap: 4px; border: 0; }   /* keeps 6/8: the input adds 3px each side, so about 9 in total */
+.seed-entry-cell .seed-grid-index { font-size: 11px; }
+.seed-entry-cell:has(input.active) {
+  border: 0;                                        /* was accent border */
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent);  /* was rgba(112,199,186,.08) */
+  box-shadow: inset 0 0 0 1.5px var(--kaspa);       /* was 0 0 0 1px */
+}
+.seed-entry-input { font-size: 13px; color: var(--text); }  /* unchanged size */
+.seed-entry-input.invalid { color: var(--ios-red); }        /* was #ff6b6b */
+
+.seed-entry-suggestions { gap: 8px; min-height: 40px; margin: 10px 0; align-items: center; }  /* was 36px, 10/4 */
+.seed-suggestion {
+  padding: 8px 12px;                                /* was 7px 12px */
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--kaspa) 12%, transparent);  /* was .14 */
+  color: var(--kaspa);
+  font-size: 16px; font-weight: 400; line-height: 21px;   /* was 14px */
+}
+.seed-suggestion b { font-weight: 700; }            /* was 800 */
+
+/* Question */
+.passphrase-question { padding: 24px 8px 0; }       /* was 18px 8px 6px */
+.passphrase-question-icon svg { stroke: var(--kaspa); }   /* was var(--accent, …) fallback */
+.passphrase-question-title { margin: 24px 0 0; font-size: 22px; font-weight: 700; line-height: 28px; } /* was 19px/1.35, 14 */
+.passphrase-question-steer { margin: 24px 0 0; font-size: 15px; line-height: 20px; color: var(--muted); } /* was 13px, 10 */
+.passphrase-question + .passphrase-actions { margin-top: 32px; }   /* Spacer gap before the buttons */
+.passphrase-actions { gap: 12px; }                  /* was 10px */
+/* Type B for everything in the passphrase screens (must beat the Type A rules in 3.3) */
+.create-account-flow .passphrase-actions .primary-button,
+.import-account-flow .passphrase-actions .primary-button,
+.create-account-flow .passphrase-actions .secondary-button,
+.import-account-flow .passphrase-actions .secondary-button {
+  min-height: 50px; padding: 14px 16px; border-radius: 14px;
+  font-size: 17px; font-weight: 600; line-height: 22px;
+}
+.create-account-flow .passphrase-actions .passphrase-no,
+.import-account-flow .passphrase-actions .passphrase-no {
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent);  /* restate: 3.3 would turn it gray5 */
+  color: var(--kaspa);
+}
+/* "What is a passphrase?" = plain button: PRIMARY colour, 15/600 */
+.passphrase-actions .linklike-button { padding: 12px; font-size: 15px; font-weight: 600; color: var(--text); } /* was 13.5 accent */
+/* Desktop's Back buttons stand in for iOS's accent nav-bar "Back" */
+.create-account-flow .passphrase-actions .secondary-button:not(.passphrase-no),
+.import-account-flow .passphrase-actions .secondary-button:not(.passphrase-no) {
+  background: transparent; color: var(--kaspa); font-weight: 400;   /* was gray fill */
+}
+
+/* Entry */
+.passphrase-entry-title { margin: 8px 0 20px; font-size: 20px; font-weight: 700; line-height: 25px; } /* was 14/4, 17px */
+[data-create-passphrase-screen="entry"] > .field-hint,
+[data-import-passphrase-screen="entry"] > .field-hint { margin: 0 0 20px; font-size: 15px; line-height: 20px; color: var(--muted); } /* was 12px */
+[data-create-passphrase-screen="entry"] .field-label,
+[data-import-passphrase-screen="entry"] .field-label { gap: 6px; margin-bottom: 12px; font-size: 13px; font-weight: 400; color: var(--muted); } /* desktop-only label, quietened */
+.passphrase-field {
+  gap: 0;                                           /* was 8px */
+  align-items: center;
+  border-radius: 12px;
+  background: var(--ios-gray6);
+}
+.passphrase-field .field-input,
+[data-create-passphrase-screen="entry"] .field-input,
+[data-import-passphrase-screen="entry"] .field-input {
+  padding: 16px;                                    /* was 12px 13px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 12px;                              /* was 14px */
+  background: var(--ios-gray6);                     /* was surface-1 */
+  font-size: 17px; font-weight: 400; color: var(--text);
+}
+.passphrase-field .field-input { background: transparent; }
+.passphrase-field .field-input:focus,
+[data-create-passphrase-screen="entry"] .field-input:focus,
+[data-import-passphrase-screen="entry"] .field-input:focus { box-shadow: none; }
+.passphrase-field:focus-within,
+[data-create-passphrase-confirm]:focus { box-shadow: 0 0 0 2px color-mix(in srgb, var(--kaspa) 45%, transparent); }
+.passphrase-eye {                                   /* the in-field eye (text "Show" kept) */
+  align-self: stretch;
+  padding: 0 16px;                                  /* was 0 14px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 0 12px 12px 0;
+  background: transparent;                          /* was surface-1 */
+  color: var(--muted);                              /* was kaspa-ink */
+  font-size: 15px; font-weight: 400;                /* was 13/650 */
+}
+
+/* Address preview */
+.passphrase-address-preview {
+  margin: 20px 0 20px;                              /* was 12px 0 4px */
+  padding: 16px;                                    /* was 12px 14px */
+  border: 0;                                        /* was white .08 */
+  border-radius: 12px;
+  background: var(--ios-gray6);                     /* was rgba(255,255,255,.04): invisible in light */
+}
+.passphrase-preview-label { margin: 0 0 6px; font-size: 12px; letter-spacing: normal; text-transform: none; color: var(--muted); } /* was 11.5 uppercase */
+.passphrase-preview-address { font-size: 13px; line-height: 18px; color: var(--text); }  /* was 12px + undefined --text-primary */
+.passphrase-preview-address[data-pending] { color: var(--muted); }                        /* was undefined --text-muted */
+.passphrase-preview-note { margin: 6px 0 0; font-size: 12px; line-height: 16px; color: var(--muted); } /* was 11.5 */
+
+/* Explainer */
+.passphrase-explainer section { margin: 0 0 18px; }                       /* was 16px */
+.passphrase-explainer h4 { margin: 0 0 6px; font-size: 17px; font-weight: 600; line-height: 22px; color: var(--text); } /* was 14px */
+.passphrase-explainer p { font-size: 15px; line-height: 20px; color: var(--muted); }  /* was 13/1.55 */
+
+.setup-guide-modal {
+  background: var(--ios-system-bg);                 /* was .contact-modal gradient (unthemed) */
+  border: 0.8px solid var(--card-border);
+  border-radius: 20px;                              /* was 28px */
+  box-shadow: 0 24px 60px rgba(0,0,0,.45);
+  padding: 16px 24px 24px;                          /* was 20px; iOS bar has h24 b24 */
+}
+.setup-guide-top { min-height: 28px; margin-bottom: 0; }
+.setup-guide-skip { padding: 4px 0; font-size: 17px; font-weight: 400; color: var(--kaspa); } /* was 14/650 kaspa-ink */
+.setup-guide-progress { font-size: 13px; color: var(--muted); }   /* desktop-only; was 12 */
+.setup-guide-scroll { padding: 24px 0; }            /* iOS .padding(.vertical, 24) */
+.setup-guide-icon { margin: 0; }                    /* was 8px 0 4px; spacing now comes from the title margin */
+.setup-guide-icon svg { stroke: var(--kaspa); }     /* was var(--accent,…) */
+.setup-guide-title { margin: 20px 0 0; font-size: 22px; font-weight: 700; line-height: 28px; letter-spacing: normal; } /* was margin 6px 0 */
+.setup-guide-icon[hidden] + .setup-guide-title { margin-top: 0; }
+.setup-guide-body { margin: 20px 0 0; font-size: 15px; line-height: 20px; color: var(--muted); } /* was 14/1.5, 0 0 8 */
+.setup-guide-extra { margin: 20px 0 0; }            /* was 6px 0 12px */
+
+/* Bottom bar: Type B pair */
+.setup-guide-nav { gap: 12px; padding-top: 0; }     /* was 10 / 16 (the scroll's bottom padding supplies the gap) */
+.setup-guide-nav .primary-button, .setup-guide-nav .secondary-button {
+  min-height: 50px; padding: 14px 16px; border-radius: 14px;
+  font-size: 17px; font-weight: 600; line-height: 22px;   /* was 800 */
+  box-shadow: none;
+}
+.setup-guide-nav .primary-button { background: var(--kaspa); color: #fff; }
+.setup-guide-nav .secondary-button { background: var(--ios-gray5); color: var(--text); }  /* was var(--line) */
+.setup-guide-nav .setup-guide-back[disabled] { opacity: .35; }                            /* unchanged */
+
+/* Language / currency rows */
+.setup-choice-list { gap: 8px; }                    /* was 6px */
+.setup-choice-row {
+  padding: 12px;                                    /* was 11px 14px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 10px;
+  background: var(--ios-gray6);                     /* was surface-1 */
+  font-size: 15px; font-weight: 500;                /* was 14/400 */
+}
+.setup-choice-row.selected { border: 0; }           /* was kaspa-ink border */
+.setup-choice-check { width: 17px; height: 17px; stroke: var(--kaspa); stroke-width: 2.6; }
+
+/* Choice rows: radio + title + inline badge + subtitle (grid; no markup change) */
+.setup-node-row {
+  display: grid;                                    /* was flex, centre */
+  grid-template-columns: 20px auto 1fr;
+  column-gap: 12px; row-gap: 2px;
+  align-items: start;
+  padding: 12px;                                    /* was 12px 14px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 12px;                              /* was 10px */
+  background: var(--ios-gray6);                     /* was surface-1 */
+}
+.setup-node-row.selected { border: 0; }
+.setup-node-copy { display: contents; }
+.setup-node-dot { grid-column: 1; grid-row: 1 / span 2; margin-top: 0; }
+.setup-node-copy strong { grid-column: 2; grid-row: 1; font-size: 15px; font-weight: 600; line-height: 20px; } /* was 14 */
+.setup-node-badge {
+  grid-column: 3; grid-row: 1; justify-self: start; align-self: center;
+  margin-left: -6px;                                /* 6px from the title, as in iOS */
+  padding: 0; border: 0; border-radius: 0;          /* was an outlined pill */
+  font-size: 11px; font-weight: 700;                /* was 10.5/800 */
+  text-transform: none; letter-spacing: normal;     /* was uppercase .04em */
+  color: var(--kaspa);
+}
+.setup-node-copy small { grid-column: 2 / -1; grid-row: 2; font-size: 12px; line-height: 16px; color: var(--muted); } /* was lh 1.35 */
+/* Radio: circle / checkmark.circle.fill */
+.setup-node-dot {
+  width: 20px; height: 20px;                        /* was 16px */
+  border: 1.5px solid var(--muted);                 /* was 2px */
+  border-radius: 50%;
+  background: transparent center / 12px no-repeat;
+}
+.setup-node-row.selected .setup-node-dot {
+  border-color: var(--kaspa);
+  background-color: var(--kaspa);
+  box-shadow: none;                                 /* was inset panel ring */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E");
+}
+.setup-node-input {                                 /* own-node field */
+  margin: 0; padding: 10px;
+  border: 0; border-radius: 10px;                   /* was 1px line, 14px */
+  background: var(--ios-gray6);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;  /* was 12.5 */
+}
+.setup-usertype-note { margin: 0 0 16px; font-size: 15px; line-height: 20px; color: var(--muted); } /* was 13.5, 0 0 10 */
+.setup-child-password .password-field-wrap .field-input { padding: 10px 42px 10px 10px; border: 0; border-radius: 10px; background: var(--ios-gray6); font-size: 17px; }
+.setup-child-password .field-hint { margin: 0; font-size: 12px; color: var(--muted); }
+
+/* Funding */
+.setup-funding { gap: 12px; align-items: center; }  /* was 10px, stretch */
+.setup-funding-address {
+  padding: 0;                                       /* was 12px 14px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 0;
+  background: transparent;                          /* was surface-1 */
+  font-size: 13px;                                  /* was 12.5 */
+  line-height: 18px;
+  text-align: center;                               /* was left */
+  color: var(--text);
+}
+.setup-funding .secondary-button {                  /* Show QR Code / Change Chatting Address = accent links */
+  background: transparent; color: var(--kaspa);
+  font-size: 15px; font-weight: 600;
+  padding: 6px 12px; min-height: 0; box-shadow: none;
+}
+
+/* Address explainer rows */
+.setup-address-row {
+  gap: 4px;                                         /* was 3px */
+  padding: 12px;                                    /* was 12px 14px */
+  border: 0;                                        /* was 1px line */
+  border-radius: 12px;                              /* was 10px */
+  background: var(--ios-gray6);                     /* was surface-1 */
+  margin-bottom: 12px;                              /* was 8px */
+}
+.setup-address-row strong { font-size: 15px; font-weight: 600; } /* was 14 */
+.setup-address-value {
+  font-size: 12px; color: var(--muted);             /* was kaspa-ink */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;  /* was break-all */
+  word-break: normal;
+}
+.setup-address-row small { font-size: 12px; line-height: 16px; color: var(--muted); }
+
+.chatting-picker-title { padding: 8px 24px 8px; font-size: 20px; font-weight: 700; line-height: 25px; text-align: center; } /* was 18px left, 4/20/6 */
+.chatting-picker-screen .spending-manage-subtitle { padding: 0 24px 16px; font-size: 15px; line-height: 20px; text-align: center; color: var(--muted); } /* was 12.5 left */
+.chatting-picker-list { gap: 10px; }
+.chatting-picker-row {
+  padding: 12px;                                    /* was 12px 14px */
+  border: 0;                                        /* was 1px card-border */
+  border-radius: 12px;                              /* was 14px */
+  background: var(--ios-gray6);                     /* was surface-1 */
+}
+.chatting-picker-row:hover { background: color-mix(in srgb, var(--ios-gray6) 85%, var(--text)); }
+.chatting-picker-row.current { border: 0; }         /* iOS marks it with the "Current" label only */
+.chatting-picker-row-index { min-width: 40px; font-size: 12px; font-weight: 700; color: var(--kaspa); } /* was 34 / 12.5 */
+.chatting-picker-row-address { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; color: var(--text); } /* was 12.5 */
+.chatting-picker-row-meta { gap: 6px; font-size: 12px; color: var(--muted); }
+.chatting-picker-domain-pill { padding: 2px 7px; background: var(--kaspa); color: #000; font-size: 11px; font-weight: 700; } /* was #041014, 10.5 */
+.chatting-picker-row-badge { font-size: 11px; font-weight: 700; color: var(--muted); }   /* was 10.5 */
+.chatting-picker-row-badge.is-current { color: var(--kaspa); }
+.chatting-picker-row-chevron { width: 12px; height: 12px; stroke: var(--muted); stroke-width: 2.6; } /* was 16 / 2 */
+.chatting-picker-footer { gap: 6px; padding: 16px 24px 4px; font-size: 12px; color: var(--muted); } /* was 8 / 14 20 4 / 12.5 */
+.chatting-picker-scan-more {
+  border: 0;                                        /* was 1px card-border pill */
+  background: transparent;
+  color: var(--kaspa);
+  font-size: 15px; font-weight: 600;                /* was 13/650 */
+  padding: 6px 12px;
+}
+.chatting-picker-scan-more:hover { background: transparent; text-decoration: underline; }
+.chatting-picker-error { font-size: 12px; color: var(--ios-red); text-align: center; }
+
+/* Detail */
+.chatting-picker-detail-body { gap: 16px; padding: 16px 24px; }   /* was 14 / 4px 0 8px */
+.chatting-picker-detail-heading { font-size: 17px; font-weight: 600; }   /* was 15/700 */
+.chatting-picker-detail-address {
+  padding: 12px; border: 0; border-radius: 12px;    /* was 1px border */
+  background: var(--ios-gray6);                     /* was surface-1 */
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; line-height: 18px; color: var(--text);
+}
+.chatting-picker-detail-hint { margin-top: -10px; font-size: 11px; color: var(--muted); }  /* iOS VStack spacing 6 under the address */
+.chatting-picker-detail-stat { padding: 12px; border: 0; border-radius: 12px; background: var(--ios-gray6); font-size: 15px; }
+.chatting-picker-detail-stat span:first-child { font-weight: 600; }
+.chatting-picker-detail-stat span:last-child { font-family: inherit; font-variant-numeric: tabular-nums; color: var(--muted); } /* was monospace */
+.chatting-picker-detail-domains > strong { font-size: 15px; font-weight: 600; }  /* was 14 */
+.chatting-picker-detail-domain { padding: 12px; border: 0; border-radius: 12px; background: var(--ios-gray6); font-size: 15px; } /* approximates KNSDomainCard */
+.chatting-picker-detail-domain em { font-size: 11px; font-weight: 700; color: var(--kaspa); }
+/* Bottom bar + Set button */
+.chatting-picker-detail-screen .manage-address-actions {
+  padding: 12px 24px;                               /* was 14px 18px 24px */
+  background: var(--ios-material);                  /* .ultraThinMaterial */
+  -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+  border-top: 0.5px solid var(--line);
+}
+.chatting-picker-detail-screen [data-chatting-picker-set] {
+  min-height: 50px; padding: 14px 16px; border-radius: 14px;
+  font-size: 17px; font-weight: 600; box-shadow: none;
+  background: var(--kaspa); color: #fff;
+}
+.chatting-picker-detail-screen [data-chatting-picker-set]:disabled { background: var(--ios-gray4); color: #fff; } /* systemGray4 */
+

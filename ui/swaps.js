@@ -227,7 +227,7 @@ function shortMiddle(text) { return text.length > 20 ? `${text.slice(0, 12)}...$
 
 function coinIcon(coin) {
   if (coin.ticker === "kas") return `<img class="swap-coin-icon" src="./ui/assets/kaspa-logo.png" alt="" />`;
-  const color = COIN_COLORS[coin.ticker] || "rgba(98,244,208,.35)";
+  const color = COIN_COLORS[coin.ticker] || "rgba(112,199,186,.35)";
   return `<span class="swap-coin-icon text" style="background:${color}">${deps.escapeHtml(coin.ticker.toUpperCase())}</span>`;
 }
 

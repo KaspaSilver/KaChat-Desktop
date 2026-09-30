@@ -8490,7 +8490,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 64;
+const APP_BUILD = 65;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10226,7 +10226,7 @@ function applyThemePreference(preference) {
   const effective = effectiveTheme(themePreference);
   document.documentElement.setAttribute("data-theme", effective);
   const themeColorMeta = document.querySelector('meta[name="theme-color"]');
-  if (themeColorMeta) themeColorMeta.setAttribute("content", effective === "light" ? "#eef1f4" : "#070a0d");
+  if (themeColorMeta) themeColorMeta.setAttribute("content", effective === "light" ? "#f2f2f7" : "#000000");
   document.querySelectorAll("[data-theme-option]").forEach((button) => {
     // Highlight the chosen preference (System/Light/Dark), not the resolved theme.
     button.classList.toggle("active", button.getAttribute("data-theme-option") === themePreference);
@@ -19073,7 +19073,7 @@ const SETUP_ICONS = {
   network: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3.6 9h16.8M3.6 15h16.8"/></svg>',
   qrcode: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 20h1"/></svg>',
   server: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>',
-  chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path fill="var(--accent, #62f4d0)" stroke="none" d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path fill="var(--accent, #70c7ba)" stroke="none" d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg>',
   shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg>',
   privacy: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M7.2 12.6s2-3.1 4.8-3.1 4.8 3.1 4.8 3.1-2 3.1-4.8 3.1a4.4 4.4 0 0 1-1.7-.34"/><path d="M7 7l10 10"/></svg>',
 };
@@ -19316,7 +19316,7 @@ function renderSetupStep() {
       canvas.className = "setup-guide-qr";
       setupIconEl.appendChild(canvas);
       setupIconEl.hidden = false;
-      Promise.resolve(engine.drawQr(canvas, { dark: "#62f4d0", light: "#00000000" }))
+      Promise.resolve(engine.drawQr(canvas, { dark: "#70c7ba", light: "#00000000" }))
         .catch(() => { setupIconEl.innerHTML = step.icon; });
     } else if (step.icon) {
       setupIconEl.innerHTML = step.icon;
