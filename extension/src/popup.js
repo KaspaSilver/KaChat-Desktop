@@ -21,10 +21,14 @@ function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// Screens drawn on the sign-in look (iOS OnboardingView): the green-cast near-black page.
+const ONBOARDING_SCREENS = new Set(["welcome", "unlock"]);
+
 function render(html, screen = "") {
   app.innerHTML = html;
   if (screen) app.dataset.screen = screen;
   else delete app.dataset.screen;
+  document.body.classList.toggle("onboarding", ONBOARDING_SCREENS.has(screen));
   const first = app.querySelector("[autofocus]");
   if (first) first.focus();
 }
@@ -69,6 +73,9 @@ const ICONS = {
   copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
   qr: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4"/></svg>',
   back: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>',
+  // SF Symbols plus.circle.fill / square.and.arrow.down, as on the iOS sign-in buttons.
+  plusCircle: '<svg width="19" height="19" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7.5v9M7.5 12h9" stroke="var(--kaspa)" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  download: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>',
 };
 
 // --- boot --------------------------------------------------------------------------------
@@ -97,19 +104,24 @@ ext?.storage?.onChanged?.addListener((changes, area) => {
 
 // --- welcome / create / import -----------------------------------------------------------
 
+// The KaChat wordmark with the app mark beside it - iOS OnboardingView.titleSection.
+function wordmarkHtml(tagline) {
+  return `
+    <div class="hero">
+      <div class="wordmark"><h1>KaChat</h1><img src="icons/kachat-logo.png" alt="KaChat logo" /></div>
+      <p class="tagline">${esc(tagline)}</p>
+    </div>`;
+}
+
 function showWelcome() {
   render(`
-    <section class="screen center">
-      <img class="logo" src="icons/icon-128.png" alt="" />
-      <div class="stack center-text">
-        <h1>KaChat Wallet</h1>
-        <p class="muted">Your Kaspa wallet in the browser - the same addresses as KaChat on your phone.</p>
+    <section class="onboard">
+      ${wordmarkHtml("Secure Kaspa wallet on the BlockDAG")}
+      <div class="buttons">
+        <button id="create">${ICONS.plusCircle}<span>Create New Account</span></button>
+        <button id="import" class="secondary">${ICONS.download}<span>Import Existing Account</span></button>
       </div>
-      <div class="stack">
-        <button id="create">Create a new wallet</button>
-        <button id="import" class="secondary">I already have a recovery phrase</button>
-      </div>
-    </section>`);
+    </section>`, "welcome");
   $("#create").onclick = () => showCreate();
   $("#import").onclick = () => showImport();
 }
@@ -230,16 +242,15 @@ function showSetPassword(account, onBack) {
 
 function showUnlock() {
   render(`
-    <section class="screen center">
-      <img class="logo" src="icons/icon-128.png" alt="" />
-      <h1 class="center-text">Welcome back</h1>
-      <form class="stack" id="form">
+    <section class="onboard">
+      ${wordmarkHtml("Enter your password to unlock")}
+      <form id="form">
         <input id="pw" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" autofocus />
         <p class="error" id="error"></p>
-        <button id="unlock" type="submit">Unlock</button>
+        <div class="buttons"><button id="unlock" type="submit">Unlock</button></div>
+        <button class="ghost" type="button" id="forgot">Forgot password?</button>
       </form>
-      <button class="ghost" id="forgot">Forgot password?</button>
-    </section>`);
+    </section>`, "unlock");
   $("#form").onsubmit = async (event) => {
     event.preventDefault();
     const button = $("#unlock");

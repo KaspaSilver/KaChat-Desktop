@@ -1,14 +1,19 @@
-/* KaChat Wallet - the desktop app's palette, laid out like the iOS Profile tab. */
+/* KaChat Wallet - the iOS app's look: its accent (AccentColor #70C7BA, white text on it),
+   true-black screens, and the sign-in screen's green-cast near-black (OnboardingView). */
 :root {
-  --bg: #070a0d;
-  --panel: #101419;
-  --panel-2: #161b21;
-  --text: #f2f6f7;
-  --muted: #8d98a2;
-  --line: rgba(255, 255, 255, .08);
-  --kaspa: #62f4d0;
-  --kaspa-ink: #62f4d0;
-  --kaspa-dim: rgba(98, 244, 208, .16);
+  --bg: #000000;
+  --panel: #1c1c1e;
+  --panel-2: #2c2c2e;
+  --text: #ffffff;
+  --muted: #98989f;
+  --line: rgba(255, 255, 255, .1);
+  --kaspa: #70c7ba;
+  --kaspa-ink: #70c7ba;
+  --on-accent: #ffffff;
+  --kaspa-dim: rgba(112, 199, 186, .18);
+  /* OnboardingView.pageBackground / rowBackground - the brand's near-black with a green cast. */
+  --onboard-bg: #0e1614;
+  --onboard-row: #1a2624;
   --danger: #ff6b6b;
   --radius: 14px;
   color-scheme: dark;
@@ -16,14 +21,14 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #eef1f4;
+    --bg: #f2f2f7;
     --panel: #ffffff;
-    --panel-2: #f5f7f9;
-    --text: #0b1416;
-    --muted: #5a6771;
+    --panel-2: #e5e5ea;
+    --text: #000000;
+    --muted: #6c6c70;
     --line: rgba(0, 0, 0, .1);
-    --kaspa-ink: #0a8f70;
-    --kaspa-dim: rgba(10, 143, 112, .12);
+    --kaspa-ink: #3f9d90;
+    --kaspa-dim: rgba(112, 199, 186, .2);
     --danger: #d64545;
     color-scheme: light;
   }
@@ -86,7 +91,7 @@ button, .button {
   appearance: none; border: 0; cursor: pointer;
   font: inherit; font-weight: 650;
   border-radius: 12px; padding: 11px 14px;
-  background: var(--kaspa); color: #04211a;
+  background: var(--kaspa); color: var(--on-accent);
 }
 button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
 button.ghost { background: transparent; color: var(--kaspa-ink); padding: 8px 10px; }
@@ -153,3 +158,29 @@ details summary { cursor: pointer; color: var(--muted); font-weight: 600; }
   animation: spin .8s linear infinite; display: inline-block; vertical-align: middle;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- Sign-in screens (welcome, unlock): iOS OnboardingView ------------------------------------
+   Dark in both appearances on purpose - the one place the product introduces itself. */
+body.onboarding {
+  --bg: var(--onboard-bg);
+  --panel: var(--onboard-row);
+  --panel-2: #2c2c2e;
+  --text: #ffffff;
+  --muted: #98989f;
+  --line: rgba(255, 255, 255, .1);
+  --kaspa-ink: #70c7ba;
+  color-scheme: dark;
+}
+html:has(body.onboarding), body.onboarding, body.onboarding #app { background: var(--onboard-bg); color: var(--text); }
+
+.onboard { display: flex; flex-direction: column; flex: 1; padding: 0 28px 32px; }
+.onboard .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; }
+.wordmark { display: flex; align-items: center; gap: 10px; }
+.wordmark h1 { font-size: 34px; font-weight: 800; letter-spacing: -.5px; }
+.wordmark img { width: 40px; height: 40px; border-radius: 9px; }
+.tagline { color: var(--muted); font-size: 15px; }
+.onboard .buttons { display: flex; flex-direction: column; gap: 14px; }
+.onboard .buttons button { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; font-size: 16px; border-radius: 12px; }
+.onboard .buttons button.secondary { background: #2c2c2e; border: 0; color: #fff; }
+.onboard form { display: flex; flex-direction: column; gap: 12px; }
+.onboard input { background: var(--onboard-row); border-color: rgba(255,255,255,.08); padding: 14px; font-size: 15px; }
