@@ -2529,6 +2529,7 @@ function preScopeWalletData() {
   engine.address = address; // the key follows once the SDK is up (restorePersistedTestingWallet)
   preScopedAddress = address;
   activateWalletDataScope(address);
+  restoreLastBalance();
   return true;
 }
 
@@ -3890,7 +3891,7 @@ async function connectAndRefresh({ quiet = false } = {}) {
     const balance = await engine.balance();
     refreshSubscriptionAddresses({ restart: false });
     await engine.startWalletSubscription({ force: false });
-    currentBalanceKas = balance.totalKas ?? balance.kas ?? "--";
+    currentBalanceKas = balance.totalKas ?? balance.kas ?? "--"; rememberLastBalance();
     updateWalletUi();
     updateServiceSummary();
     if (!quiet) setStatus("Ready");
@@ -3908,7 +3909,7 @@ async function refreshBalanceOnly({ quiet = true } = {}) {
   try {
     await engine.connect();
     const balance = await engine.balance();
-    currentBalanceKas = balance.totalKas ?? balance.kas ?? "--";
+    currentBalanceKas = balance.totalKas ?? balance.kas ?? "--"; rememberLastBalance();
     updateWalletUi();
     updateServiceSummary();
     if (!quiet) setStatus("Balance refreshed");
@@ -8495,7 +8496,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 68;
+const APP_BUILD = 69;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11831,6 +11832,20 @@ document.querySelector("[data-funding-gate]")?.addEventListener("click", async (
   }
 });
 
+// The last balance a node reported for each account, shown at once on the next launch while the
+// node is still being reached (iOS keeps the last known figure rather than a dash).
+const LAST_BALANCE_KEY = "kachat-last-balance-v1";
+function rememberLastBalance() {
+  if (!engine.address || !/^\d+(\.\d+)?$/.test(String(currentBalanceKas))) return;
+  try { localStorage.setItem(accountScopedKey(LAST_BALANCE_KEY), String(currentBalanceKas)); } catch { /* fine */ }
+}
+function restoreLastBalance() {
+  if (!engine.address || currentBalanceKas !== "--") return;
+  try {
+    const saved = localStorage.getItem(accountScopedKey(LAST_BALANCE_KEY));
+    if (saved && /^\d+(\.\d+)?$/.test(saved)) currentBalanceKas = saved;
+  } catch { /* fine */ }
+}
 function updateWalletUi() {
   updateChatFundingGate();
   const address = engine.address;
@@ -15571,7 +15586,7 @@ async function refreshComposerAvailableBalance() {
       balanceKas = (await engine.balanceForAddress(address)).totalKas;
     } else {
       const balance = await engine.balance();
-      currentBalanceKas = balance.totalKas;
+      currentBalanceKas = balance.totalKas; rememberLastBalance();
       balanceKas = balance.totalKas;
     }
     if (token !== composerBalanceToken || composerMode !== "kas") return;
@@ -15875,7 +15890,7 @@ async function sendKasPayment(conversationId, rawAmount) {
     const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
     const spendingFunded = Boolean(fundingAddress);
     const balance = spendingFunded ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
-    if (!spendingFunded) currentBalanceKas = balance.totalKas;
+    if (!spendingFunded) currentBalanceKas = balance.totalKas; rememberLastBalance();
     const requestedSompi = BigInt(Math.round(Number(amountKas) * 1e8));
     const feeReserveSompi = 10000n;
     if (requestedSompi + feeReserveSompi > balance.totalSompi) {
@@ -20974,6 +20989,379 @@ queueMicrotask(async () => {
     return true;
   })();
 
+  // Every module is set up NOW, while the two runtimes (about 13 MB of WebAssembly) download and
+  // compile. None of them needs a runtime to start: they read this device's saved data for the
+  // account preScopeWalletData already put on screen. Waiting for the runtimes first left most of
+  // the app without click handlers for the whole download.
+  try {
+    initKaPosts({
+      // A KaChat link from a post opens in the app (iOS 5090ad9); returns whether it was one.
+      openKaChatLink: (raw) => { const link = parseKaChatInternalLink(raw); if (!link) return false; openKaChatInternalLink(link); return true; },
+      engine,
+      escapeHtml,
+      shortAddress,
+      accountScopedKey,
+      isChattingBalanceZero,
+      showFundingGate: showFundingGateModal,
+      showToast: showCopyToast,
+      // The app's own overlay rather than the browser's - see ui/dialogs.js.
+      confirmDialog,
+      chooseDialog,
+      alertDialog,
+      appendEngineLog,
+      explorerTxUrl,
+      // Background activity pings (Settings > Notifications > KaPosts).
+      shouldNotifyKaPostsAction,
+      postDesktopNotification,
+      // OS-notification clicks land on the exact post — the KaPosts tab must be
+      // fronted first since the ping can arrive while another tab is active.
+      openKaPostsTab: () => setActiveAppTab("kaposts"),
+      kaPostsSuppressed: () => isChildModeEnabled(),
+      // "Tip" button on a post: quick Send-Kaspa-style modal, direct send through the chat
+      // payment rules (matches iOS's KaPostTipSheet).
+      // A default tip, when set, goes out at once through the same path as the tip sheet's Send;
+      // a failure falls back to the amount screen.
+      tipUser: (address, name) => {
+        const kas = kaPostsDefaultTipKas();
+        if (kas > 0) sendInstantTip(address, name, kas).catch(() => openTipModal({ address, name }));
+        else openTipModal({ address, name });
+      },
+      openKaPostsSettings,
+      startChat: (address, name) => openChatWithAddress({ address, name }),
+      // Routes to the Profile tab's KNS editor rather than a second copy of it.
+      editKnsProfile: () => document.querySelector("[data-open-kns-editor]")?.click(),
+      showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
+      // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
+      // signature of the right width, so the estimate is for the bytes that will actually go.
+      estimatePostFeeKas: (text) => {
+        const b64 = kapostsUtf8ToBase64(KAPOSTS_MARKER + String(text || ""));
+        const payload = KAPOSTS_PROTOCOL.postPayload("0".repeat(66), "0".repeat(128), b64, "[]");
+        // One input, as iOS estimates it (KaPostsAPIClient.estimatePostFee inputCount: 1).
+        return engine.estimateMessageFee(new TextEncoder().encode(payload).length, { singleInput: true });
+      },
+      // Feed the global notification center (top-bar bell) from the KaPosts notification stream.
+      recordGlobalNotification: (item) => recordGlobalNotification(item),
+      // Your saved name for a contact wins over their KNS domain everywhere a poster is named
+      // (matches iOS: alias -> domain -> short address).
+      contactAliasFor: (address) => {
+        const name = ((state.contacts || []).find((c) => c.address === address)?.name || "").trim();
+        return name || null;
+      },
+      // @mention autocomplete source: your 1:1 chat contacts that have a KNS domain. Returns
+      // [{ domain (bare, no .kas), address, name }]. Only these people can be @-mentioned.
+      getMentionCandidates: () => {
+        const out = [];
+        const seen = new Set();
+        for (const contact of state.contacts || []) {
+          const info = engine.peekKnsAddressInfo?.(contact.address);
+          const domain = String(info?.explicitPrimaryDomain || info?.primaryDomain || "").trim();
+          if (!domain) continue;
+          const bare = domain.replace(/\.kas$/i, "").toLowerCase();
+          if (!bare || seen.has(bare)) continue;
+          // Need the compressed KaPost pubkey to notify them; skip if we can't derive it.
+          const pubkey = engine.kapostPubkeyForAddress?.(contact.address);
+          if (!pubkey) continue;
+          seen.add(bare);
+          out.push({ domain: bare, address: contact.address, name: (contact.name || "").trim() || bare, pubkey });
+        }
+        return out;
+      },
+    });
+  } catch (error) { appendEngineLog(`initKaPosts did not start: ${error?.message || error}`); }
+
+  try {
+    initBroadcasts({
+      engine,
+      escapeHtml,
+      voiceFileName,
+      // The room owns the detail pane while open (Public Chats is a Chats list tab).
+      onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
+      onUnreadChanged: () => updateChatsListTabBadges(),
+      readDraft, saveDraft,
+      parseEditEnvelope, applyEditToContent, isEditableContent,
+      isNextcloudShareLink,
+      createDeliveryStatusIcon,
+      shortAddress,
+      accountScopedKey,
+      isChattingBalanceZero,
+      showFundingGate: showFundingGateModal,
+      showToast: showCopyToast,
+      appendEngineLog,
+      // Link previews: the exact same renderers as 1:1 bubbles (linkify + the
+      // progressive Nextcloud video→audio→img→attachment probe).
+      renderTextWithLinks,
+      buildLinkPreviewCard,
+      buildVoicePlayer,
+      isPreviewableUrl,
+      // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer, and the
+      // same preview bar before anything is sent.
+      createVoiceRecorder,
+      formatRecordingTime,
+      voicePreview: {
+        render: renderVoicePanel, set: setVoicePreview, clear: clearVoicePreview,
+        toggle: toggleVoicePreviewPlayback, get: (panel) => voicePreviews.get(panel),
+      },
+      isNextcloudMediaSendActive,
+      uploadNextcloudMedia,
+      // Reactions: identical wire parser and fixed tapback set across all clients.
+      parseReactionEnvelope,
+      // Getter, not a snapshot: the set is user-customizable (Settings > Chats).
+      quickReactionEmojis: () => quickReactionEmojis(),
+      // Same wire envelopes as 1:1 chats — replies, photos, and voice notes must decode
+      // in broadcast rooms too instead of rendering raw JSON.
+      parseReplyEnvelope,
+      parseImageEnvelope,
+      parseAudioEnvelope,
+      openPhotoPreview,
+      // Right-click context menu (1:1 parity): quick reactions + Reply/Copy/Explorer/Hide.
+      // Functions are hoisted; MSG_MENU_ICONS is a const declared later in the module, so
+      // it is handed over lazily to dodge the temporal dead zone at init time.
+      openMsgContextMenu,
+      getMsgMenuIcons: () => MSG_MENU_ICONS,
+      copyText: copyTextToClipboard,
+      explorerTxUrl,
+      // Per-message avatars beside broadcast bubbles (1:1/group parity).
+      avatarHtmlForAddress: (address, className = "message-avatar") => avatarHtmlForAnyAddress(address, className),
+      buildTapToLoadCard: (url, onApproved) => buildTapToLoadCard(url, null, onApproved),
+      previewApproved: (url) => linkPreviewCache.has(url) || approvedPreviewUrls.has(url),
+      // Translate from the message menu (iOS 03e5128): the KaPosts service, public rooms only.
+      translation: { canOffer: canOfferTextTranslation, state: textTranslationState, textFor: translatedTextFor, showOriginal: showOriginalText, showTranslation: showTranslatedText, readerLanguageName, translate: translateText, onChange: onTranslationChange },
+      firstInternalLinkIn,
+      // The avatar menu's destinations (iOS BroadcastChannelView.avatarButton).
+      openUserInfo: (address) => openChatInfoForAddress(address),
+      openChat: (address, name) => openChatWithAddress({ address, name }),
+      payInKaspa: (address, name) => openChatWithAddressForKaspa({ address, name }),
+      addressCopiedToastText,
+      // Shared reaction surfaces and the fee pill's estimate (Settings > Show Fee Estimate).
+      openQuickReactionBar: openQuickReactionBarFor,
+      showReactionsSheet,
+      showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
+      estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
+      chattingAddress: () => engine.address || "",
+      appWideBroadcastIndexer: () => String(getEndpoint("broadcastIndexer") || ""),
+      drawQr: (canvas, value) => engine.drawQrFor(canvas, value, { dark: "#06110f", light: "#ffffff" }),
+      contactNameFor: (address) => {
+        const contact = (state.contacts || []).find((c) => c.address === address);
+        return contact ? (displayNameForAddress(contact) || "") : "";
+      },
+      // Bell toggle requests OS notification permission on the spot.
+      ensureNotificationPermission,
+      // "Today"/"Yesterday" day pills, shared with 1:1 and group chats.
+      daySeparatorLabel,
+      // Per-channel bell: OS pings for live messages in notify-enabled channels.
+      postDesktopNotification,
+      // Fresh incoming broadcast messages feed the global notification center (gated to LIVE
+      // arrivals so the initial history backfill doesn't flood it).
+      // Rooms no longer feed the profile bell (iOS 2010124): the Public Chats tab counts them.
+      onIncomingBroadcast: () => {},
+    });
+  } catch (error) { appendEngineLog(`initBroadcasts did not start: ${error?.message || error}`); }
+
+  try {
+    initPortfolio({
+      engine, escapeHtml, accountScopedKey, showToast: showCopyToast, chooseDialog,
+      addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
+      // Read straight from the live selection so portfolio does not duplicate the
+      // currency table (it falls back to the stored key when these are absent).
+      currencyCode: () => selectedCurrency.toUpperCase(),
+      currencySymbol: () => String(currencyMeta().symbol || "").trim(),
+    });
+  } catch (error) { appendEngineLog(`initPortfolio did not start: ${error?.message || error}`); }
+  try {
+    initColdStorage({
+      engine, escapeHtml, shortAddress, accountScopedKey,
+      addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
+      showToast: showCopyToast, appendEngineLog,
+      explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
+      txDirectionForAddress: manageAddressTxDirection,
+      transactionFeeText,
+      // Fiat toggle in the send flow: live KAS price in the user's selected currency,
+      // plus the same symbol/format helpers the manage-address send screen uses.
+      fetchKasPrice: () => fetchKasPrice(selectedCurrency),
+      currencySymbol: () => currencyMeta().symbol.trim(),
+      currencyCode: () => selectedCurrency.toUpperCase(),
+      formatFiatValue,
+    });
+  } catch (error) { appendEngineLog(`initColdStorage did not start: ${error?.message || error}`); }
+  try {
+    initSwaps({
+      engine, escapeHtml, shortAddress, accountScopedKey, showToast: showCopyToast, appendEngineLog,
+      explorerAddressUrl, addressCopiedToastText, copyTextToClipboard,
+      currencySymbol: () => currencyMeta().symbol.trim(),
+      currencyCode: () => selectedCurrency.toUpperCase(),
+      // Swap payouts land on a fresh spending address (iOS SwapService): the picker lists the
+      // wallet's spending addresses with their used flags, and can reveal a new one.
+      listSpendingAddresses: async () => {
+        if (!activeAccountMnemonic()) return [];
+        const state = getSpendingState();
+        const hidden = new Set(state.hidden.map(Number));
+        const entries = [];
+        for (let i = 0; i <= state.maxIndex; i += 1) {
+          const address = deriveSpendingAddressAt(i);
+          if (!address) continue;
+          const usage = await spendingUsageFor(address);
+          entries.push({ index: i, address, label: spendingLabelFor(state, i), kas: usage.kas, used: usage.used, hidden: hidden.has(i) && i !== state.activeIndex });
+        }
+        return entries;
+      },
+      nextFreshSpendingIndex: () => { const st = getSpendingState(); return Math.max(st.maxIndex, st.activeIndex) + 1; },
+      spendingAddressAt: (index) => deriveSpendingAddressAt(index),
+      revealNextSpendingAddress: () => revealNextSpendingAddress({ toast: false }),
+      openSpendingAddresses: () => openSpendingManageScreen(),
+    });
+  } catch (error) { appendEngineLog(`initSwaps did not start: ${error?.message || error}`); }
+  try {
+    initNextcloud({
+      accountScopedKey, escapeHtml, appendEngineLog,
+      showToast: showCopyToast,
+      getActiveConversationId: () => activeConversationId,
+      // A real re-render for the open thread. Without this the module falls back to
+      // dispatching synthetic clicks at the sidebar row, which also clears composer state.
+      refreshActiveConversationView: () => {
+        if (!activeConversationId) return;
+        const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+        if (conversationEntry) renderMessages(conversationEntry);
+      },
+      queueConversationMessage,
+      // "Send from Nextcloud" staging: the picked file's share link lands in the composer for
+      // review instead of auto-sending — the user presses send themselves.
+      stageComposerText: (text) => {
+        activateComposerMode("message");
+        const input = composer?.elements?.message;
+        if (!input) return;
+        input.value = text;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+      },
+      // The backup payload is the CROSS-PLATFORM ChatHistoryArchive (same file name
+      // and same schema iOS/Android write), merged with whatever the server already
+      // holds so a desktop upload can only ever add to the shared history. The
+      // desktop's own persisted state rides along in the additive `desktopState`
+      // key, which both phone decoders ignore. Since envelope v1 the upload body is
+      // ENCRYPTED: decrypt what the server already has (legacy plaintext passes
+      // through), merge, then always seal the union. A failed decrypt throws here,
+      // so runBackup aborts before its PUT and the remote file is left untouched.
+      exportBackupPayload: async (existingRemoteJson = null) => {
+        const remotePlainJson = existingRemoteJson == null ? null : await openSharedBackupJson(existingRemoteJson);
+        return sealSharedBackupJson(buildSharedBackupPayload(remotePlainJson));
+      },
+      // Reader for downloaded backup files: decrypts an envelope, passes legacy
+      // plaintext through, throws (aborting the restore) when decryption fails.
+      openBackupPayload: openSharedBackupJson,
+      // Legacy `kachat-backup-desktop.json` bodies only — kept so a user with an
+      // old desktop-only backup can still recover from it.
+      importBackupPayload: (json) => {
+        const parsed = JSON.parse(json);
+        if (parsed?.kind !== "kachat-desktop-backup" || !parsed.state) {
+          throw new Error("That file is not a KaChat desktop backup.");
+        }
+        // Write-through the same storage the live persist path uses (IndexedDB
+        // cache when available, localStorage fallback otherwise), then reload
+        // synchronously from that cache.
+        applyDesktopStateSnapshot(parsed);
+      },
+      // The desktop-only half of a shared `kachat-backup.json`; false when the
+      // file was written by a phone and carries no desktopState.
+      importDesktopState: importDesktopStateFromSharedArchive,
+      // The shared archive itself (whoever wrote it): merged into the desktop
+      // conversations, never a state replace.
+      importPhoneArchive: importPhoneChatArchive,
+      // CardDAV contacts sync: import {address, name} pairs read from the account's Nextcloud
+      // address book into the desktop's contact list (Settings → Contacts).
+      importNextcloudContacts,
+    });
+  } catch (error) { appendEngineLog(`initNextcloud did not start: ${error?.message || error}`); }
+
+  // Chess Online is one screen: whatever goes wrong there must not stop the rest of startup.
+  try { initChessTournamentsSafe(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
+  function initChessTournamentsSafe() { initChessTournaments({
+    engine,
+    escapeHtml,
+    showToast: showCopyToast,
+    appendEngineLog,
+    isChattingBalanceZero,
+    showFundingGate: showFundingGateModal,
+    // Contact name, then KNS domain, then the shortened address - the app's rule, and the same
+    // for the player themselves (never "You"; iOS 30d0cca).
+    displayNameFor: (address) => {
+      const contact = (state.contacts || []).find((c) => c.address === address);
+      if (contact) return displayNameForAddress(contact);
+      return knsDomainForAddress(address) || engine.peekKnsAddressInfo?.(address)?.primaryDomain || shortAddress(address);
+    },
+    avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
+    estimateFeeKas: (payloadBytes, opts) => engine.estimateMessageFee(payloadBytes, opts),
+    openUserInfo: (address) => openChatInfoForAddress(address),
+  }); }
+
+  try {
+    Calls.initCalls({
+      engine,
+      accountScopedKey,
+      showToast: showCopyToast,
+      appendEngineLog,
+      chooseDialog,
+      confirmDialog,
+      nextcloudAccount,
+      talkCallsAvailable: () => nextcloudTalkCallsAvailable(),
+      contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
+      displayNameFor: (address) => {
+        const contact = (state.contacts || []).find((entry) => entry.address === address);
+        return contact ? displayNameForAddress(contact) : shortAddress(address);
+      },
+      ownDisplayName: () => String(activeAccountMetadata()?.name || engine.peekKnsAddressInfo?.(engine.address)?.primaryDomain || "KaChat").trim() || "KaChat",
+      avatarHtmlFor: (address) => {
+        const contact = (state.contacts || []).find((entry) => entry.address === address);
+        return contact ? avatarHtmlFor(contact, "message-avatar") : "";
+      },
+      callsEnabledFor: contactCallsEnabled,
+      setCallsEnabled: setContactCallsEnabled,
+      // Call envelopes are ordinary encrypted 1:1 messages in the contact's chat.
+      sendEnvelope: async (address, json) => {
+        const contact = (state.contacts || []).find((entry) => entry.address === address);
+        const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
+        if (!conversationEntry) throw new Error("No chat with this contact.");
+        queueConversationMessage(conversationEntry.id, json);
+      },
+      notify: ({ title, body, route }) => postDesktopNotification({
+        title, body,
+        onClick: () => { if (route?.address) openChatWithAddress({ address: route.address }); },
+      }),
+    });
+  } catch (error) { appendEngineLog(`Calls.initCalls did not start: ${error?.message || error}`); }
+  document.querySelector("[data-open-chess]")?.addEventListener("click", () => {
+    const { contact, messages } = chessConversationContext();
+    if (!contact?.address) return;
+    const active = Chess.activeChessGame(messages, engine.address, contact.address);
+    if (active) openChessGame(active.gameId);
+  });
+  document.querySelector("[data-open-call]")?.addEventListener("click", () => {
+    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+    const contact = contactForConversation(conversationEntry);
+    if (!contact?.address || contact.address === engine.address) return;
+    Calls.requestCallFromHeader(contact.address).catch((error) => showCopyToast(error?.message || "Could not start the call."));
+  });
+  document.querySelector("[data-chat-info-calls]")?.addEventListener("change", (event) => {
+    if (!chatInfoContactAddress) return;
+    setContactCallsEnabled(chatInfoContactAddress, event.target.checked);
+    if (event.target.checked) Calls.primeCallPermissions().catch(() => {});
+    showCopyToast(event.target.checked ? "Calls and video calls enabled for this contact." : "Calls off for this contact.");
+  });
+
+  try {
+    initChildMode({
+      escapeHtml,
+      showToast: showCopyToast,
+      // Toggling Child Mode re-renders the dock immediately: gated tabs vanish
+      // (or return) and, if the user is sitting on a now-hidden tab, the
+      // applyDockLayout snap drops them back to Chats.
+      onChildModeChanged: () => applyDockLayout(),
+    });
+  } catch (error) { appendEngineLog(`initChildMode did not start: ${error?.message || error}`); }
+
+  // Per-account dock prefs may differ from the pre-login defaults rendered at load.
+  reloadDockPrefsForAccount();
+
+  // Now the runtimes: the wallet's keys, the network and the first sweep need them.
   const [wasmResult, cipherResult] = await Promise.allSettled([wasmTask, cipherTask]);
   const wasmReady = wasmResult.status === "fulfilled";
   const cipherReady = cipherResult.status === "fulfilled";
@@ -20990,6 +21378,8 @@ queueMicrotask(async () => {
 
   if (wasmReady) {
     const restored = restorePersistedTestingWallet();
+    // Swap derived its receive address before the runtime existed; derive it now.
+    if (restored) { try { resetSwapsForAccount(); } catch { /* not started */ } }
     updateWalletUi();
     updateServiceSummary();
     if (!restored && !engine.address && loggedOutScreen && loggedOutScreen.hidden) {
@@ -21021,357 +21411,6 @@ queueMicrotask(async () => {
     });
   }
 
-  initKaPosts({
-    // A KaChat link from a post opens in the app (iOS 5090ad9); returns whether it was one.
-    openKaChatLink: (raw) => { const link = parseKaChatInternalLink(raw); if (!link) return false; openKaChatInternalLink(link); return true; },
-    engine,
-    escapeHtml,
-    shortAddress,
-    accountScopedKey,
-    isChattingBalanceZero,
-    showFundingGate: showFundingGateModal,
-    showToast: showCopyToast,
-    // The app's own overlay rather than the browser's - see ui/dialogs.js.
-    confirmDialog,
-    chooseDialog,
-    alertDialog,
-    appendEngineLog,
-    explorerTxUrl,
-    // Background activity pings (Settings > Notifications > KaPosts).
-    shouldNotifyKaPostsAction,
-    postDesktopNotification,
-    // OS-notification clicks land on the exact post — the KaPosts tab must be
-    // fronted first since the ping can arrive while another tab is active.
-    openKaPostsTab: () => setActiveAppTab("kaposts"),
-    kaPostsSuppressed: () => isChildModeEnabled(),
-    // "Tip" button on a post: quick Send-Kaspa-style modal, direct send through the chat
-    // payment rules (matches iOS's KaPostTipSheet).
-    // A default tip, when set, goes out at once through the same path as the tip sheet's Send;
-    // a failure falls back to the amount screen.
-    tipUser: (address, name) => {
-      const kas = kaPostsDefaultTipKas();
-      if (kas > 0) sendInstantTip(address, name, kas).catch(() => openTipModal({ address, name }));
-      else openTipModal({ address, name });
-    },
-    openKaPostsSettings,
-    startChat: (address, name) => openChatWithAddress({ address, name }),
-    // Routes to the Profile tab's KNS editor rather than a second copy of it.
-    editKnsProfile: () => document.querySelector("[data-open-kns-editor]")?.click(),
-    showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
-    // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
-    // signature of the right width, so the estimate is for the bytes that will actually go.
-    estimatePostFeeKas: (text) => {
-      const b64 = kapostsUtf8ToBase64(KAPOSTS_MARKER + String(text || ""));
-      const payload = KAPOSTS_PROTOCOL.postPayload("0".repeat(66), "0".repeat(128), b64, "[]");
-      // One input, as iOS estimates it (KaPostsAPIClient.estimatePostFee inputCount: 1).
-      return engine.estimateMessageFee(new TextEncoder().encode(payload).length, { singleInput: true });
-    },
-    // Feed the global notification center (top-bar bell) from the KaPosts notification stream.
-    recordGlobalNotification: (item) => recordGlobalNotification(item),
-    // Your saved name for a contact wins over their KNS domain everywhere a poster is named
-    // (matches iOS: alias -> domain -> short address).
-    contactAliasFor: (address) => {
-      const name = ((state.contacts || []).find((c) => c.address === address)?.name || "").trim();
-      return name || null;
-    },
-    // @mention autocomplete source: your 1:1 chat contacts that have a KNS domain. Returns
-    // [{ domain (bare, no .kas), address, name }]. Only these people can be @-mentioned.
-    getMentionCandidates: () => {
-      const out = [];
-      const seen = new Set();
-      for (const contact of state.contacts || []) {
-        const info = engine.peekKnsAddressInfo?.(contact.address);
-        const domain = String(info?.explicitPrimaryDomain || info?.primaryDomain || "").trim();
-        if (!domain) continue;
-        const bare = domain.replace(/\.kas$/i, "").toLowerCase();
-        if (!bare || seen.has(bare)) continue;
-        // Need the compressed KaPost pubkey to notify them; skip if we can't derive it.
-        const pubkey = engine.kapostPubkeyForAddress?.(contact.address);
-        if (!pubkey) continue;
-        seen.add(bare);
-        out.push({ domain: bare, address: contact.address, name: (contact.name || "").trim() || bare, pubkey });
-      }
-      return out;
-    },
-  });
-
-  initBroadcasts({
-    engine,
-    escapeHtml,
-    voiceFileName,
-    // The room owns the detail pane while open (Public Chats is a Chats list tab).
-    onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
-    onUnreadChanged: () => updateChatsListTabBadges(),
-    readDraft, saveDraft,
-    parseEditEnvelope, applyEditToContent, isEditableContent,
-    isNextcloudShareLink,
-    createDeliveryStatusIcon,
-    shortAddress,
-    accountScopedKey,
-    isChattingBalanceZero,
-    showFundingGate: showFundingGateModal,
-    showToast: showCopyToast,
-    appendEngineLog,
-    // Link previews: the exact same renderers as 1:1 bubbles (linkify + the
-    // progressive Nextcloud video→audio→img→attachment probe).
-    renderTextWithLinks,
-    buildLinkPreviewCard,
-    buildVoicePlayer,
-    isPreviewableUrl,
-    // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer, and the
-    // same preview bar before anything is sent.
-    createVoiceRecorder,
-    formatRecordingTime,
-    voicePreview: {
-      render: renderVoicePanel, set: setVoicePreview, clear: clearVoicePreview,
-      toggle: toggleVoicePreviewPlayback, get: (panel) => voicePreviews.get(panel),
-    },
-    isNextcloudMediaSendActive,
-    uploadNextcloudMedia,
-    // Reactions: identical wire parser and fixed tapback set across all clients.
-    parseReactionEnvelope,
-    // Getter, not a snapshot: the set is user-customizable (Settings > Chats).
-    quickReactionEmojis: () => quickReactionEmojis(),
-    // Same wire envelopes as 1:1 chats — replies, photos, and voice notes must decode
-    // in broadcast rooms too instead of rendering raw JSON.
-    parseReplyEnvelope,
-    parseImageEnvelope,
-    parseAudioEnvelope,
-    openPhotoPreview,
-    // Right-click context menu (1:1 parity): quick reactions + Reply/Copy/Explorer/Hide.
-    // Functions are hoisted; MSG_MENU_ICONS is a const declared later in the module, so
-    // it is handed over lazily to dodge the temporal dead zone at init time.
-    openMsgContextMenu,
-    getMsgMenuIcons: () => MSG_MENU_ICONS,
-    copyText: copyTextToClipboard,
-    explorerTxUrl,
-    // Per-message avatars beside broadcast bubbles (1:1/group parity).
-    avatarHtmlForAddress: (address, className = "message-avatar") => avatarHtmlForAnyAddress(address, className),
-    buildTapToLoadCard: (url, onApproved) => buildTapToLoadCard(url, null, onApproved),
-    previewApproved: (url) => linkPreviewCache.has(url) || approvedPreviewUrls.has(url),
-    // Translate from the message menu (iOS 03e5128): the KaPosts service, public rooms only.
-    translation: { canOffer: canOfferTextTranslation, state: textTranslationState, textFor: translatedTextFor, showOriginal: showOriginalText, showTranslation: showTranslatedText, readerLanguageName, translate: translateText, onChange: onTranslationChange },
-    firstInternalLinkIn,
-    // The avatar menu's destinations (iOS BroadcastChannelView.avatarButton).
-    openUserInfo: (address) => openChatInfoForAddress(address),
-    openChat: (address, name) => openChatWithAddress({ address, name }),
-    payInKaspa: (address, name) => openChatWithAddressForKaspa({ address, name }),
-    addressCopiedToastText,
-    // Shared reaction surfaces and the fee pill's estimate (Settings > Show Fee Estimate).
-    openQuickReactionBar: openQuickReactionBarFor,
-    showReactionsSheet,
-    showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
-    estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
-    chattingAddress: () => engine.address || "",
-    appWideBroadcastIndexer: () => String(getEndpoint("broadcastIndexer") || ""),
-    drawQr: (canvas, value) => engine.drawQrFor(canvas, value, { dark: "#06110f", light: "#ffffff" }),
-    contactNameFor: (address) => {
-      const contact = (state.contacts || []).find((c) => c.address === address);
-      return contact ? (displayNameForAddress(contact) || "") : "";
-    },
-    // Bell toggle requests OS notification permission on the spot.
-    ensureNotificationPermission,
-    // "Today"/"Yesterday" day pills, shared with 1:1 and group chats.
-    daySeparatorLabel,
-    // Per-channel bell: OS pings for live messages in notify-enabled channels.
-    postDesktopNotification,
-    // Fresh incoming broadcast messages feed the global notification center (gated to LIVE
-    // arrivals so the initial history backfill doesn't flood it).
-    // Rooms no longer feed the profile bell (iOS 2010124): the Public Chats tab counts them.
-    onIncomingBroadcast: () => {},
-  });
-
-  initPortfolio({
-    engine, escapeHtml, accountScopedKey, showToast: showCopyToast, chooseDialog,
-    addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
-    // Read straight from the live selection so portfolio does not duplicate the
-    // currency table (it falls back to the stored key when these are absent).
-    currencyCode: () => selectedCurrency.toUpperCase(),
-    currencySymbol: () => String(currencyMeta().symbol || "").trim(),
-  });
-  initColdStorage({
-    engine, escapeHtml, shortAddress, accountScopedKey,
-    addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
-    showToast: showCopyToast, appendEngineLog,
-    explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
-    txDirectionForAddress: manageAddressTxDirection,
-    transactionFeeText,
-    // Fiat toggle in the send flow: live KAS price in the user's selected currency,
-    // plus the same symbol/format helpers the manage-address send screen uses.
-    fetchKasPrice: () => fetchKasPrice(selectedCurrency),
-    currencySymbol: () => currencyMeta().symbol.trim(),
-    currencyCode: () => selectedCurrency.toUpperCase(),
-    formatFiatValue,
-  });
-  initSwaps({
-    engine, escapeHtml, shortAddress, accountScopedKey, showToast: showCopyToast, appendEngineLog,
-    explorerAddressUrl, addressCopiedToastText, copyTextToClipboard,
-    currencySymbol: () => currencyMeta().symbol.trim(),
-    currencyCode: () => selectedCurrency.toUpperCase(),
-    // Swap payouts land on a fresh spending address (iOS SwapService): the picker lists the
-    // wallet's spending addresses with their used flags, and can reveal a new one.
-    listSpendingAddresses: async () => {
-      if (!activeAccountMnemonic()) return [];
-      const state = getSpendingState();
-      const hidden = new Set(state.hidden.map(Number));
-      const entries = [];
-      for (let i = 0; i <= state.maxIndex; i += 1) {
-        const address = deriveSpendingAddressAt(i);
-        if (!address) continue;
-        const usage = await spendingUsageFor(address);
-        entries.push({ index: i, address, label: spendingLabelFor(state, i), kas: usage.kas, used: usage.used, hidden: hidden.has(i) && i !== state.activeIndex });
-      }
-      return entries;
-    },
-    nextFreshSpendingIndex: () => { const st = getSpendingState(); return Math.max(st.maxIndex, st.activeIndex) + 1; },
-    spendingAddressAt: (index) => deriveSpendingAddressAt(index),
-    revealNextSpendingAddress: () => revealNextSpendingAddress({ toast: false }),
-    openSpendingAddresses: () => openSpendingManageScreen(),
-  });
-  initNextcloud({
-    accountScopedKey, escapeHtml, appendEngineLog,
-    showToast: showCopyToast,
-    getActiveConversationId: () => activeConversationId,
-    // A real re-render for the open thread. Without this the module falls back to
-    // dispatching synthetic clicks at the sidebar row, which also clears composer state.
-    refreshActiveConversationView: () => {
-      if (!activeConversationId) return;
-      const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
-      if (conversationEntry) renderMessages(conversationEntry);
-    },
-    queueConversationMessage,
-    // "Send from Nextcloud" staging: the picked file's share link lands in the composer for
-    // review instead of auto-sending — the user presses send themselves.
-    stageComposerText: (text) => {
-      activateComposerMode("message");
-      const input = composer?.elements?.message;
-      if (!input) return;
-      input.value = text;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.focus();
-    },
-    // The backup payload is the CROSS-PLATFORM ChatHistoryArchive (same file name
-    // and same schema iOS/Android write), merged with whatever the server already
-    // holds so a desktop upload can only ever add to the shared history. The
-    // desktop's own persisted state rides along in the additive `desktopState`
-    // key, which both phone decoders ignore. Since envelope v1 the upload body is
-    // ENCRYPTED: decrypt what the server already has (legacy plaintext passes
-    // through), merge, then always seal the union. A failed decrypt throws here,
-    // so runBackup aborts before its PUT and the remote file is left untouched.
-    exportBackupPayload: async (existingRemoteJson = null) => {
-      const remotePlainJson = existingRemoteJson == null ? null : await openSharedBackupJson(existingRemoteJson);
-      return sealSharedBackupJson(buildSharedBackupPayload(remotePlainJson));
-    },
-    // Reader for downloaded backup files: decrypts an envelope, passes legacy
-    // plaintext through, throws (aborting the restore) when decryption fails.
-    openBackupPayload: openSharedBackupJson,
-    // Legacy `kachat-backup-desktop.json` bodies only — kept so a user with an
-    // old desktop-only backup can still recover from it.
-    importBackupPayload: (json) => {
-      const parsed = JSON.parse(json);
-      if (parsed?.kind !== "kachat-desktop-backup" || !parsed.state) {
-        throw new Error("That file is not a KaChat desktop backup.");
-      }
-      // Write-through the same storage the live persist path uses (IndexedDB
-      // cache when available, localStorage fallback otherwise), then reload
-      // synchronously from that cache.
-      applyDesktopStateSnapshot(parsed);
-    },
-    // The desktop-only half of a shared `kachat-backup.json`; false when the
-    // file was written by a phone and carries no desktopState.
-    importDesktopState: importDesktopStateFromSharedArchive,
-    // The shared archive itself (whoever wrote it): merged into the desktop
-    // conversations, never a state replace.
-    importPhoneArchive: importPhoneChatArchive,
-    // CardDAV contacts sync: import {address, name} pairs read from the account's Nextcloud
-    // address book into the desktop's contact list (Settings → Contacts).
-    importNextcloudContacts,
-  });
-
-  // Chess Online is one screen: whatever goes wrong there must not stop the rest of startup.
-  try { initChessTournamentsSafe(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
-  function initChessTournamentsSafe() { initChessTournaments({
-    engine,
-    escapeHtml,
-    showToast: showCopyToast,
-    appendEngineLog,
-    isChattingBalanceZero,
-    showFundingGate: showFundingGateModal,
-    // Contact name, then KNS domain, then the shortened address - the app's rule, and the same
-    // for the player themselves (never "You"; iOS 30d0cca).
-    displayNameFor: (address) => {
-      const contact = (state.contacts || []).find((c) => c.address === address);
-      if (contact) return displayNameForAddress(contact);
-      return knsDomainForAddress(address) || engine.peekKnsAddressInfo?.(address)?.primaryDomain || shortAddress(address);
-    },
-    avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
-    estimateFeeKas: (payloadBytes, opts) => engine.estimateMessageFee(payloadBytes, opts),
-    openUserInfo: (address) => openChatInfoForAddress(address),
-  }); }
-
-  Calls.initCalls({
-    engine,
-    accountScopedKey,
-    showToast: showCopyToast,
-    appendEngineLog,
-    chooseDialog,
-    confirmDialog,
-    nextcloudAccount,
-    talkCallsAvailable: () => nextcloudTalkCallsAvailable(),
-    contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
-    displayNameFor: (address) => {
-      const contact = (state.contacts || []).find((entry) => entry.address === address);
-      return contact ? displayNameForAddress(contact) : shortAddress(address);
-    },
-    ownDisplayName: () => String(activeAccountMetadata()?.name || engine.peekKnsAddressInfo?.(engine.address)?.primaryDomain || "KaChat").trim() || "KaChat",
-    avatarHtmlFor: (address) => {
-      const contact = (state.contacts || []).find((entry) => entry.address === address);
-      return contact ? avatarHtmlFor(contact, "message-avatar") : "";
-    },
-    callsEnabledFor: contactCallsEnabled,
-    setCallsEnabled: setContactCallsEnabled,
-    // Call envelopes are ordinary encrypted 1:1 messages in the contact's chat.
-    sendEnvelope: async (address, json) => {
-      const contact = (state.contacts || []).find((entry) => entry.address === address);
-      const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
-      if (!conversationEntry) throw new Error("No chat with this contact.");
-      queueConversationMessage(conversationEntry.id, json);
-    },
-    notify: ({ title, body, route }) => postDesktopNotification({
-      title, body,
-      onClick: () => { if (route?.address) openChatWithAddress({ address: route.address }); },
-    }),
-  });
-  document.querySelector("[data-open-chess]")?.addEventListener("click", () => {
-    const { contact, messages } = chessConversationContext();
-    if (!contact?.address) return;
-    const active = Chess.activeChessGame(messages, engine.address, contact.address);
-    if (active) openChessGame(active.gameId);
-  });
-  document.querySelector("[data-open-call]")?.addEventListener("click", () => {
-    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
-    const contact = contactForConversation(conversationEntry);
-    if (!contact?.address || contact.address === engine.address) return;
-    Calls.requestCallFromHeader(contact.address).catch((error) => showCopyToast(error?.message || "Could not start the call."));
-  });
-  document.querySelector("[data-chat-info-calls]")?.addEventListener("change", (event) => {
-    if (!chatInfoContactAddress) return;
-    setContactCallsEnabled(chatInfoContactAddress, event.target.checked);
-    if (event.target.checked) Calls.primeCallPermissions().catch(() => {});
-    showCopyToast(event.target.checked ? "Calls and video calls enabled for this contact." : "Calls off for this contact.");
-  });
-
-  initChildMode({
-    escapeHtml,
-    showToast: showCopyToast,
-    // Toggling Child Mode re-renders the dock immediately: gated tabs vanish
-    // (or return) and, if the user is sitting on a now-hidden tab, the
-    // applyDockLayout snap drops them back to Chats.
-    onChildModeChanged: () => applyDockLayout(),
-  });
-
-  // Per-account dock prefs may differ from the pre-login defaults rendered at load.
-  reloadDockPrefsForAccount();
 
   // A page reload mid-setup doesn't dodge an onboarding run. Two persisted
   // markers drive the re-present, and BOTH re-present as an onboarding run

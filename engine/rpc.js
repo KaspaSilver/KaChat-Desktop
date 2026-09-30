@@ -261,6 +261,12 @@ function rememberPublicNode(url) {
     localStorage.setItem(SEEN_NODES_KEY, JSON.stringify(next));
   } catch { /* storage is a nicety */ }
 }
+/** The most recent node that answered, or "". */
+function lastPublicNode() {
+  if (typeof localStorage === "undefined") return "";
+  try { return String(JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]")[0] || ""); } catch { return ""; }
+}
+const LAST_NODE_TIMEOUT_MS = 3500;
 function knownPublicNodes() {
   let remembered = [];
   if (typeof localStorage !== "undefined") {
@@ -281,6 +287,20 @@ async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [
   const tried = new Set(excludedEndpoints.map((u) => String(u || "").toLowerCase()));
   let lastError = null;
   let resolverAnswered = false;
+  // The node that answered last time, tried first and briefly: a reload that finds it still
+  // healthy connects straight away instead of waiting on the resolver round trip. If it has
+  // gone, the resolver runs exactly as before.
+  const lastNode = lastPublicNode();
+  if (lastNode && !tried.has(lastNode.toLowerCase()) && (!secure || /^wss:\/\//i.test(lastNode))) {
+    tried.add(lastNode.toLowerCase());
+    try {
+      const rpc = await connectCandidate(kaspa, { endpoint: lastNode, timeoutMs: LAST_NODE_TIMEOUT_MS, log, role: "primary", singleShot: true });
+      rememberPublicNode(lastNode);
+      return rpc;
+    } catch (error) {
+      log(`Last node ${lastNode} did not answer quickly; asking the resolver.`);
+    }
+  }
   for (let attempt = 1; attempt <= RESOLVER_ATTEMPTS; attempt += 1) {
     let url = "";
     try {
