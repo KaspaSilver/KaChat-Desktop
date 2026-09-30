@@ -1,0 +1,155 @@
+/* KaChat Wallet - the desktop app's palette, laid out like the iOS Profile tab. */
+:root {
+  --bg: #070a0d;
+  --panel: #101419;
+  --panel-2: #161b21;
+  --text: #f2f6f7;
+  --muted: #8d98a2;
+  --line: rgba(255, 255, 255, .08);
+  --kaspa: #62f4d0;
+  --kaspa-ink: #62f4d0;
+  --kaspa-dim: rgba(98, 244, 208, .16);
+  --danger: #ff6b6b;
+  --radius: 14px;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #eef1f4;
+    --panel: #ffffff;
+    --panel-2: #f5f7f9;
+    --text: #0b1416;
+    --muted: #5a6771;
+    --line: rgba(0, 0, 0, .1);
+    --kaspa-ink: #0a8f70;
+    --kaspa-dim: rgba(10, 143, 112, .12);
+    --danger: #d64545;
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* The toolbar popup is a fixed box; the full-tab view centres the same column. */
+body { width: 360px; min-height: 580px; }
+body.tab { width: auto; min-height: 100vh; }
+body.tab #app { max-width: 420px; margin: 24px auto; border: 1px solid var(--line); border-radius: 18px; min-height: 620px; }
+
+#app { display: flex; flex-direction: column; min-height: 580px; }
+
+.screen { display: flex; flex-direction: column; gap: 14px; padding: 18px; flex: 1; }
+.screen.center { justify-content: center; }
+
+.topbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.topbar .title { flex: 1; font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--kaspa); box-shadow: 0 0 6px var(--kaspa); }
+.dot.busy { background: #f5c451; }
+.dot.bad { background: var(--danger); }
+
+h1 { font-size: 22px; margin: 0; }
+h2 { font-size: 17px; margin: 0; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.center-text { text-align: center; }
+
+.logo { width: 64px; height: 64px; border-radius: 16px; align-self: center; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.balance { text-align: center; padding: 18px 14px; }
+.balance .amount { font-size: 28px; font-weight: 800; letter-spacing: -.5px; }
+.balance .amount .unit { font-size: 15px; font-weight: 700; color: var(--kaspa-ink); margin-left: 4px; }
+.balance .fiat { color: var(--muted); margin-top: 2px; }
+
+.actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+
+button, .button {
+  appearance: none; border: 0; cursor: pointer;
+  font: inherit; font-weight: 650;
+  border-radius: 12px; padding: 11px 14px;
+  background: var(--kaspa); color: #04211a;
+}
+button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+button.ghost { background: transparent; color: var(--kaspa-ink); padding: 8px 10px; }
+button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+button.icon {
+  background: transparent; color: var(--text);
+  width: 32px; height: 32px; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+button.icon:hover { background: var(--panel-2); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid var(--kaspa); outline-offset: 2px;
+}
+
+.address-row { display: flex; align-items: center; gap: 10px; }
+.address-row .meta { flex: 1; min-width: 0; }
+.address-row .label { font-weight: 700; }
+.address-row .addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.address-row .bal { font-weight: 700; white-space: nowrap; }
+
+label.field { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+input, textarea, select {
+  font: inherit; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; width: 100%;
+}
+textarea { resize: vertical; min-height: 96px; }
+
+.error { color: var(--danger); font-size: 13px; min-height: 18px; }
+
+.words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.words span {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 6px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.words span b { color: var(--muted); font-weight: 500; margin-right: 4px; }
+.words.blurred span { filter: blur(6px); user-select: none; }
+
+.check { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; }
+.check input { width: auto; margin-top: 3px; }
+
+.qr { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+/* The QR library sets an inline 512px size on the canvas; the display size wins here. */
+.qr canvas { width: 220px !important; height: 220px !important; border-radius: 14px; background: #fff; }
+.qr .addr-full { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; text-align: center; color: var(--muted); }
+
+.row-between { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.spacer { flex: 1; }
+
+details summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+
+#toast {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  background: var(--panel); border: 1px solid var(--line); color: var(--text);
+  padding: 9px 14px; border-radius: 999px; font-weight: 600; font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.35);
+}
+
+.spinner {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--line); border-top-color: var(--kaspa);
+  animation: spin .8s linear infinite; display: inline-block; vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
