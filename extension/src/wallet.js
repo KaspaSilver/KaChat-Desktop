@@ -13,7 +13,8 @@ import {
   importMnemonicWithFamily,
   deriveSpendingWallet,
 } from "../../engine/wallet.js";
-import { createRpc, probeRpc, disconnectRpc } from "../../engine/rpc.js";
+import { createRpc, probeRpc, disconnectRpc, getNodeRegistrySnapshot, PUBLIC_NODE_SEEDS } from "../../engine/rpc.js";
+import { getEndpoint } from "../../engine/endpoints.js";
 import { getBalance } from "../../engine/transactions.js";
 import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
 import { getLocal, setLocal } from "./browser.js";
@@ -127,17 +128,100 @@ export async function deriveAddresses() {
  * same way the desktop app does: the user's own node if one is set, otherwise the Kaspa public
  * node resolver.
  */
-export async function connection(log = () => {}) {
+// Every connection step goes to the console (right-click the popup > Inspect > Console), which
+// is where to look when the dot stays yellow.
+const logConnection = (...parts) => console.info("[KaChat Wallet]", ...parts);
+const LAST_NODE_KEY = "kachat.lastNode";
+
+export async function connection(log = logConnection) {
   if (rpc && await probeRpc(rpc)) return rpc;
   if (!rpcPromise) {
     rpcPromise = (async () => {
       if (rpc) { await disconnectRpc(rpc); rpc = null; }
       const k = await kaspa();
-      rpc = await createRpc(k, log);
+      // Fast path: the node that answered last time, straight away. The public resolver scan
+      // behind createRpc can spend 15-20 seconds on one unresponsive seed server before it
+      // moves on, which every popup open would otherwise wait out. A user-set node is left to
+      // createRpc, which connects to it strictly.
+      if (!getEndpoint("trustedNode")) {
+        // Kept in extension storage too: it is written straight to disk, where the engine's
+        // localStorage registry can be lost when the browser is closed abruptly.
+        const lastGood = (await getLocal(LAST_NODE_KEY)) || getNodeRegistrySnapshot().lastGoodEndpoint;
+        if (lastGood) {
+          try {
+            rpc = await connectDirect(k, lastGood);
+            log("Reconnected to the last node:", lastGood);
+            return rpc;
+          } catch (error) {
+            log(`Last node ${lastGood} did not answer (${error?.message || error}); scanning for another.`);
+          }
+        }
+      }
+      rpc = getEndpoint("trustedNode") ? await createRpc(k, log) : await raceForNode(k, log);
+      if (!getEndpoint("trustedNode") && rpc?.url) await setLocal(LAST_NODE_KEY, rpc.url);
       return rpc;
     })().finally(() => { rpcPromise = null; });
   }
   return rpcPromise;
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * No remembered node: the public resolver scan, and - if it has not answered within three
+ * seconds - the known public nodes tried directly alongside it. First to connect wins; a late
+ * second connection is closed. The resolver alone can sit 20 seconds on one dead seed server.
+ */
+async function raceForNode(k, log) {
+  let settled = false;
+  const viaResolver = createRpc(k, log);
+  const viaKnownNodes = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const nodes = [...PUBLIC_NODE_SEEDS].sort(() => Math.random() - 0.5);
+    for (const url of nodes) {
+      if (settled) break;
+      try {
+        const client = await connectDirect(k, url);
+        log("Connected directly to a known public node:", url);
+        return client;
+      } catch { /* next */ }
+    }
+    throw new Error("No known public node answered.");
+  })();
+  const attempts = [viaResolver, viaKnownNodes];
+  let winner;
+  try {
+    winner = await Promise.any(attempts);
+  } catch {
+    throw new Error("Can't reach a Kaspa node right now.");
+  }
+  settled = true;
+  for (const attempt of attempts) attempt.then((client) => { if (client && client !== winner) disconnectRpc(client); }, () => {});
+  return winner;
+}
+
+/** One node, once, fast: connect, confirm it is synced, or give up within a few seconds. */
+async function connectDirect(k, url, timeoutMs = 5000) {
+  const client = new k.RpcClient({ url, encoding: k.Encoding?.Borsh, networkId: "mainnet" });
+  try {
+    await withTimeout(
+      client.connect({ blockAsyncConnect: true, strategy: k.ConnectStrategy?.Fallback ?? 1, timeoutDuration: timeoutMs }),
+      timeoutMs + 1000,
+      "Connecting",
+    );
+    const info = await withTimeout(client.getServerInfo(), 5000, "Node check");
+    if (info?.isSynced === false) throw new Error("node is not synced");
+    return client;
+  } catch (error) {
+    try { await client.disconnect(); } catch { /* already closed */ }
+    throw error;
+  }
 }
 
 export function connectedNodeUrl() {

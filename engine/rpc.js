@@ -244,7 +244,7 @@ const RESOLVER_TIMEOUT_MS = 20000;
 // cannot be reached from where the reader is (its seed servers blocked or unreachable) even
 // though the nodes can. Same public pool, no house node; refreshed from the resolver's own
 // answers whenever it works.
-const PUBLIC_NODE_SEEDS = [
+export const PUBLIC_NODE_SEEDS = [
   "wss://wrpc.kasia.fyi",
   "wss://isla.kaspa.red/kaspa/mainnet/wrpc/borsh",
   "wss://kate.kaspa.red/kaspa/mainnet/wrpc/borsh",
