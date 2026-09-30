@@ -139,8 +139,16 @@ export function proxiedUrl(url) {
   return `${proxyRoot()}${encodeURIComponent(parsed.origin)}${parsed.pathname === "/" ? "" : parsed.pathname}${parsed.search}`;
 }
 
+/// Running as a browser extension page (the KaChat Wallet extension). Extensions reach their
+/// declared hosts without CORS and have no same-origin relay to reroute through.
+function isExtensionPage() {
+  const protocol = typeof location !== "undefined" ? String(location.protocol || "") : "";
+  return protocol === "chrome-extension:" || protocol === "moz-extension:" || protocol === "safari-web-extension:";
+}
+
 function installIndexerProxy() {
   if (typeof window === "undefined" || typeof window.fetch !== "function" || window.__kasiaProxyInstalled) return;
+  if (isExtensionPage()) return;
   window.__kasiaProxyInstalled = true;
   const nativeFetch = window.fetch.bind(window);
   window.__kasiaNativeFetch = nativeFetch;

@@ -274,7 +274,10 @@ function knownPublicNodes() {
 async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [] } = {}) {
   if (typeof kaspa.Resolver !== "function") throw new Error("This build of the Kaspa SDK has no node resolver.");
   const resolver = new kaspa.Resolver();
-  const secure = typeof location !== "undefined" && location.protocol === "https:";
+  // An extension page is held to the same rule as an https page: only TLS (wss://) nodes, so the
+  // addresses the wallet asks about never cross the network in the clear.
+  const secure = typeof location !== "undefined"
+    && (location.protocol === "https:" || /^(chrome|moz|safari-web)-extension:$/.test(location.protocol));
   const tried = new Set(excludedEndpoints.map((u) => String(u || "").toLowerCase()));
   let lastError = null;
   let resolverAnswered = false;
