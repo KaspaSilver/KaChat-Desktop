@@ -25,7 +25,9 @@ extension's card to pick up the new build.
 
 | Piece | What it does |
 |---|---|
-| `popup.html`, `src/popup.js` | The whole wallet UI. The same page opens as a full tab with `?view=tab` (the expand button). |
+| `popup.html`, `src/popup.js` | Boot, create/import/unlock and the home screen (the iOS Profile tab). The same page opens as a full tab with `?view=tab` (the expand button). |
+| `src/send.js`, `src/manage.js` | Send Kaspa (fees, Max, coin control, Sent sheet) and the Manage screens (history, UTXOs, keys, spending addresses). |
+| `src/ui.js` | Shared rendering helpers, icons, the QR screen. |
 | `src/vault.js` | The encrypted vault: recovery phrases sealed with the wallet password (PBKDF2-SHA256, 600,000 rounds, then AES-256-GCM). Nothing secret is stored unencrypted. |
 | `src/wallet.js` | Kaspa WASM, address derivation, node connection, balances, price - thin wrappers over `../engine`. |
 | `src/background.js` | Auto-lock only (a one-shot alarm re-armed by activity). Website connect comes here later. |
@@ -46,7 +48,7 @@ locks the wallet.
 ## Roadmap
 
 1. Foundation - create/import/unlock/lock, vault, network, balances, receive. **(done)**
-2. Send, fees, Max, KNS name lookup, Manage Addresses, history, compound, coin control.
+2. Send, fees, Max, KNS name lookup, Manage Addresses, history, compound, coin control. **(done)**
 3. KNS domains: list, set primary, transfer. No inscribing and no profile creation or
    editing - profiles move to .kachat names, which are not built yet.
 4. Settings (currency, auto-lock, change password, view phrase, nodes and APIs), multiple

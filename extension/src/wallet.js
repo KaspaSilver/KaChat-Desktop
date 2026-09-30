@@ -12,10 +12,14 @@ import {
   generateMnemonicPhrase,
   importMnemonicWithFamily,
   deriveSpendingWallet,
+  spendingDerivationPath,
+  importPrivateKey,
 } from "../../engine/wallet.js";
 import { createRpc, probeRpc, disconnectRpc, getNodeRegistrySnapshot, PUBLIC_NODE_SEEDS } from "../../engine/rpc.js";
 import { getEndpoint } from "../../engine/endpoints.js";
-import { getBalance } from "../../engine/transactions.js";
+import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateSendFeeDetail } from "../../engine/transactions.js";
+import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "../../ui/kspt.js";
+import { resolveDomain, looksLikeDomain } from "../../engine/kns.js";
 import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
 import { getAddressInfo, getAddressProfile, fetchAddressInfo, fetchAddressProfile, peekAddressInfo, peekAddressProfile } from "../../engine/kns.js";
 import { getLocal, setLocal } from "./browser.js";
@@ -86,12 +90,15 @@ export async function spendingState(accountId) {
   const maxIndex = Math.max(activeIndex, Math.floor(Number(raw.maxIndex) || 0));
   const hidden = Array.isArray(raw.hidden) ? raw.hidden.map(Number).filter((n) => Number.isInteger(n) && n >= 0) : [];
   const labels = raw.labels && typeof raw.labels === "object" ? { ...raw.labels } : {};
-  return { activeIndex, maxIndex, hidden, labels };
+  // Which index the Receive QR is handing out (iOS receiveAddressIndex) - separate from the
+  // primary, which is where payments are SENT from.
+  const receiveIndex = Number.isInteger(raw.receiveIndex) && raw.receiveIndex >= 0 ? raw.receiveIndex : null;
+  return { activeIndex, maxIndex, hidden, labels, receiveIndex };
 }
 
 export async function saveSpendingState(accountId, patch) {
   const next = { ...(await spendingState(accountId)), ...patch };
-  next.maxIndex = Math.max(next.activeIndex, next.maxIndex);
+  next.maxIndex = Math.max(next.activeIndex, next.maxIndex, Number.isInteger(next.receiveIndex) ? next.receiveIndex : 0);
   await setLocal(spendingStateKey(accountId), next);
   return next;
 }
@@ -329,3 +336,466 @@ export function shortAddress(address) {
   if (text.length <= 22) return text;
   return `${text.slice(0, 12)}…${text.slice(-6)}`;
 }
+
+
+// =========================================================================================
+// Phase 2: sending and address management
+// =========================================================================================
+//
+// A "source" names which of the account's addresses a transaction spends from:
+//   { kind: "main" }                  the chatting (identity) address
+//   { kind: "spending", index: n }    spending address #n
+// Keys are derived from the vault for the moment they are needed and handed to the engine as
+// hex; nothing about them is kept afterwards.
+
+const NETWORK = "mainnet";
+
+async function sourceWallet(source) {
+  const account = await activeAccountSecrets();
+  const k = await kaspa();
+  if (source?.kind === "spending") {
+    const derived = deriveSpendingWallet(k, account.mnemonic, source.index, account.passphrase);
+    return { accountId: account.id, address: derived.address, privateKeyHex: derived.privateKeyHex };
+  }
+  const derived = await importMnemonicWithFamily(k, account.mnemonic, account.passphrase, {
+    family: account.family,
+    index: account.identityIndex,
+  });
+  return { accountId: account.id, address: derived.address, privateKeyHex: derived.privateKeyHex };
+}
+
+/** The node call wrapper the engine expects: one reconnect-and-retry on a dropped socket. */
+async function withRpc(fn) {
+  try {
+    return await fn(await connection());
+  } catch (error) {
+    if (!/not connected|closed|timed out|timeout|network/i.test(String(error?.message || error))) throw error;
+    await disconnect();
+    return fn(await connection());
+  }
+}
+
+/** Spendable coins at an address, sorted largest first. */
+export async function utxos(address) {
+  const response = await withRpc((node) => node.getUtxosByAddresses([address]));
+  return (response?.entries || [])
+    .map((entry) => ({
+      entry,
+      key: `${entry?.outpoint?.transactionId}:${entry?.outpoint?.index}`,
+      transactionId: String(entry?.outpoint?.transactionId || ""),
+      index: Number(entry?.outpoint?.index ?? 0),
+      amount: BigInt(entry?.amount ?? 0),
+      daaScore: BigInt(entry?.blockDaaScore ?? 0),
+      isCoinbase: Boolean(entry?.isCoinbase),
+    }))
+    .sort((a, b) => (a.amount > b.amount ? -1 : a.amount < b.amount ? 1 : 0));
+}
+
+export function kasToSompi(kasText) {
+  const text = String(kasText ?? "").trim();
+  if (!/^\d*\.?\d{0,8}$/.test(text) || text === "" || text === ".") return null;
+  const [whole, fraction = ""] = text.split(".");
+  return BigInt(whole || "0") * 100_000_000n + BigInt((fraction + "00000000").slice(0, 8));
+}
+
+export function sompiToKasText(sompi) {
+  return formatKas(sompi, 8).replace(/,/g, "");
+}
+
+/** Is this a valid mainnet Kaspa address? (checksum included, via the SDK) */
+export async function isValidAddress(text) {
+  const clean = String(text || "").trim();
+  if (!/^kaspa:[a-z0-9]{50,}$/.test(clean)) return false;
+  try {
+    const k = await kaspa();
+    return typeof k.Address?.validate === "function" ? Boolean(k.Address.validate(clean)) : Boolean(new k.Address(clean));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What the recipient field means: a kaspa: address, or a KNS name (alice.kas / alice) resolved
+ * to its owner. Returns { address, domain } or throws with the message to show.
+ */
+export async function resolveRecipient(input) {
+  const text = String(input || "").trim();
+  if (!text) throw new Error("Enter a Kaspa address (kaspa:...)");
+  if (text.toLowerCase().startsWith("kaspa:")) {
+    const address = text.split("?")[0].toLowerCase();
+    if (!(await isValidAddress(address))) throw new Error("Invalid address format");
+    return { address, domain: null };
+  }
+  if (looksLikeDomain(text)) {
+    const resolved = await resolveDomain(text, { baseUrl: getEndpoint("knsApi") });
+    const address = resolved?.ownerAddress || resolved?.address || resolved?.owner;
+    if (!address) throw new Error("No KNS domain by that name.");
+    return { address, domain: resolved?.domain || resolved?.fullName || text.toLowerCase() };
+  }
+  throw new Error("Invalid address format");
+}
+
+/**
+ * Fee for sending `amountKas` from `address`: { policyKas, sdkBaseKas } as numbers. The policy fee
+ * (mass x 100 sompi/gram, as on iOS) is what is shown and paid; the SDK adds its own base fee
+ * automatically, so the send passes the difference as a priority tip.
+ */
+export async function estimateFee({ address, amountKas = "0.2", selectedOutpoints = null }) {
+  const detail = await estimateSendFeeDetail({
+    kaspa: await kaspa(),
+    rpc: await connection(),
+    withRpc,
+    sourceAddress: address,
+    amountKas: String(amountKas),
+    payloadBytes: 0,
+    selectedOutpoints,
+  });
+  if (!detail) return null;
+  return { policyKas: Number(detail.policyFeeKas), sdkBaseKas: Number(detail.sdkFeeKas) };
+}
+
+/** Fee for spending `inputCount` coins into one output (Max, compound), at the live quoted rate. */
+export async function maxFee(inputCount) {
+  const rate = await fetchQuotedFeeRateSompiPerGram();
+  const mass = calculateMass(Math.max(1, inputCount), [34, 34], 0);
+  return { policyKas: Number(calculateFee(mass, rate)) / 1e8, sdkBaseKas: Number(mass) / 1e8 };
+}
+
+/**
+ * Sends Kaspa. `max` spends every coin (or the selected ones) into ONE output of total minus
+ * `totalFeeKas`, which is the only shape KIP-9 accepts near a full balance. A normal send pays
+ * `tipKas` on top of the SDK's base fee. Sending from the PRIMARY spending address sends change
+ * to a fresh address and moves the primary there once the node accepts it (iOS/desktop parity).
+ */
+export async function send({ source, destination, amountKas = null, tipKas = "0", totalFeeKas = null, selectedOutpoints = null, max = false }) {
+  const from = await sourceWallet(source);
+  const k = await kaspa();
+  const node = await connection();
+  const log = (...parts) => console.info("[KaChat Wallet]", ...parts);
+  if (max) {
+    return sendMaxKaspa({
+      kaspa: k, rpc: node, withRpc, privateKey: from.privateKeyHex, sourceAddress: from.address,
+      destinationAddress: destination,
+      totalFeeSompi: totalFeeKas != null ? kasToSompi(String(totalFeeKas)) : null,
+      selectedOutpoints, log,
+    });
+  }
+  let fresh = null;
+  if (source?.kind === "spending") {
+    const state = await spendingState(from.accountId);
+    if (source.index === state.activeIndex) {
+      const account = await activeAccountSecrets();
+      const index = state.maxIndex + 1;
+      fresh = { index, address: deriveSpendingWallet(k, account.mnemonic, index, account.passphrase).address };
+    }
+  }
+  const result = await sendKaspa({
+    kaspa: k, rpc: node, withRpc, privateKey: from.privateKeyHex, sourceAddress: from.address,
+    destinationAddress: destination, amountKas: String(amountKas), feeKas: String(tipKas || "0"),
+    selectedOutpoints, changeAddress: fresh?.address || null, log,
+  });
+  if (fresh) {
+    await saveSpendingState(from.accountId, { activeIndex: fresh.index, maxIndex: fresh.index });
+    await cacheSpendingAddress(from.accountId, fresh.index, fresh.address);
+  }
+  return result;
+}
+
+/** Merges every coin at the source into one (a self-send with no change). */
+export async function compound(source, totalFeeKas = null) {
+  const from = await sourceWallet(source);
+  return sweepAllToSelf({
+    kaspa: await kaspa(), rpc: await connection(), withRpc,
+    privateKey: from.privateKeyHex, sourceAddress: from.address,
+    totalFeeSompi: totalFeeKas != null ? kasToSompi(String(totalFeeKas)) : null,
+    log: (...parts) => console.info("[KaChat Wallet]", ...parts),
+  });
+}
+
+/** The source's private key as hex - for the reveal screen, behind the password. */
+export async function privateKeyHex(source) {
+  return (await sourceWallet(source)).privateKeyHex;
+}
+
+/** The source's public key (compressed, hex). */
+export async function publicKeyHex(source) {
+  const from = await sourceWallet(source);
+  const k = await kaspa();
+  return String(new k.PrivateKey(from.privateKeyHex).toPublicKey().toString());
+}
+
+// --- History ------------------------------------------------------------------------------
+
+function restBase() {
+  return String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
+}
+
+/**
+ * Recent transactions touching `address` from the Kaspa REST API, each reduced to what the
+ * history list shows: { txid, time, isOutgoing, amountSompi, feeSompi, confirmed }.
+ */
+export async function history(address, limit = 50) {
+  const url = `${restBase()}/addresses/${encodeURIComponent(address)}/full-transactions?limit=${limit}&offset=0&resolve_previous_outpoints=light`;
+  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) throw new Error(`History unavailable (HTTP ${response.status}).`);
+  const txs = await response.json();
+  const own = await ownAddresses().catch(() => new Set());
+  own.add(address);
+  return (Array.isArray(txs) ? txs : []).map((tx) => describeTransaction(tx, address, own)).filter(Boolean);
+}
+
+// This account's known addresses (chatting + every cached spending address). A send from the
+// primary spending address puts its change on a fresh spending address, so that output is
+// change, not money sent - history counts only what left the account.
+async function ownAddresses() {
+  const account = await activeAccountSecrets();
+  const cached = (await cachedAddresses(account.id)) || {};
+  const own = new Set(Object.values(cached.spending || {}));
+  if (cached.main) own.add(cached.main);
+  return own;
+}
+
+function describeTransaction(tx, address, own = new Set([address])) {
+  const inputs = tx.inputs || [];
+  const outputs = tx.outputs || [];
+  const weSent = inputs.some((input) => (input.previous_outpoint_address || input.previousOutpointAddress) === address);
+  let toUs = 0n;
+  let toOthers = 0n;
+  let toOwn = 0n; // this account's other addresses: change, or a move between them
+  for (const output of outputs) {
+    const to = output.script_public_key_address;
+    const amount = BigInt(output.amount || 0);
+    if (to === address) toUs += amount;
+    else if (to && own.has(to)) toOwn += amount;
+    else if (to) toOthers += amount;
+  }
+  let fee = null;
+  if (inputs.length && inputs.every((input) => input.previous_outpoint_amount != null)) {
+    const totalIn = inputs.reduce((sum, input) => sum + BigInt(input.previous_outpoint_amount), 0n);
+    const totalOut = outputs.reduce((sum, output) => sum + BigInt(output.amount || 0), 0n);
+    if (totalIn >= totalOut) fee = totalIn - totalOut;
+  }
+  let isOutgoing;
+  let amount;
+  if (weSent && toOthers > 0n) { isOutgoing = true; amount = toOthers; }
+  else if (!weSent && toUs > 0n) { isOutgoing = false; amount = toUs; }
+  else if (weSent && toOwn > 0n) { isOutgoing = true; amount = toOwn; } // to another own address
+  else if (weSent) { isOutgoing = true; amount = 0n; } // a self-send (compound)
+  else return null;
+  return {
+    txid: tx.transaction_id,
+    time: Number(tx.block_time || 0),
+    isOutgoing,
+    isSelf: weSent && toOthers === 0n && toOwn === 0n,
+    amountSompi: amount,
+    feeSompi: fee,
+    confirmed: Boolean(tx.is_accepted),
+  };
+}
+
+const USED_KEY = "kachat.usedAddresses";
+
+/**
+ * Has this address ever appeared on chain? iOS spendingAddressUsedState: the REST
+ * transactions-count. A "used" answer is remembered for good; null means the probe failed.
+ */
+export async function addressUsed(address) {
+  const used = new Set((await getLocal(USED_KEY)) || []);
+  if (used.has(address)) return true;
+  try {
+    const response = await fetch(`${restBase()}/addresses/${encodeURIComponent(address)}/transactions-count`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const json = await response.json();
+    const isUsed = Number(json?.total ?? 0) > 0;
+    if (isUsed) { used.add(address); await setLocal(USED_KEY, [...used]); }
+    return isUsed;
+  } catch {
+    return null;
+  }
+}
+
+// --- Spending addresses -------------------------------------------------------------------
+
+async function cacheSpendingAddress(accountId, index, address) {
+  const cached = (await cachedAddresses(accountId)) || { accountId, main: null, spending: {} };
+  cached.spending = { ...(cached.spending || {}), [index]: address };
+  await setLocal(`kachat.addresses.${accountId}`, cached);
+}
+
+/** Addresses for a run of spending indexes, deriving the seed only once for the whole run. */
+export async function spendingAddressRange(start, count) {
+  const account = await activeAccountSecrets();
+  const k = await kaspa();
+  const master = new k.XPrv(new k.Mnemonic(account.mnemonic).toSeed(account.passphrase || ""));
+  const result = {};
+  for (let index = start; index < start + count; index += 1) {
+    const key = master.derivePath(spendingDerivationPath(index)).toPrivateKey().toString();
+    result[index] = importPrivateKey(k, key).address;
+  }
+  return result;
+}
+
+/** Every revealed spending address of the active account, with balances (one node call). */
+export async function spendingList() {
+  const account = await activeAccountSecrets();
+  const state = await spendingState(account.id);
+  const cached = (await cachedAddresses(account.id))?.spending || {};
+  const missing = [];
+  for (let index = 0; index <= state.maxIndex; index += 1) if (!cached[index]) missing.push(index);
+  let addresses = { ...cached };
+  if (missing.length) {
+    addresses = { ...addresses, ...(await spendingAddressRange(0, state.maxIndex + 1)) };
+    const all = (await cachedAddresses(account.id)) || { accountId: account.id, main: null };
+    await setLocal(`kachat.addresses.${account.id}`, { ...all, accountId: account.id, spending: addresses });
+  }
+  const indexes = Array.from({ length: state.maxIndex + 1 }, (_, i) => i);
+  const balancesByAddress = await balancesFor(indexes.map((i) => addresses[i]));
+  return {
+    state,
+    rows: indexes.map((index) => ({
+      index,
+      address: addresses[index],
+      label: labelFor(state, index),
+      hidden: state.hidden.includes(index),
+      primary: index === state.activeIndex,
+      balanceSompi: balancesByAddress[addresses[index]] ?? 0n,
+    })),
+  };
+}
+
+export function labelFor(state, index) {
+  const custom = String(state.labels?.[index] ?? state.labels?.[String(index)] ?? "").trim();
+  if (custom) return custom;
+  return index === 0 ? "Primary spending" : `Spending #${index}`;
+}
+
+/** Balances for many addresses in one node call: { address: sompi }. */
+export async function balancesFor(addresses) {
+  const list = addresses.filter(Boolean);
+  if (!list.length) return {};
+  const out = {};
+  for (const address of list) out[address] = 0n;
+  for (let i = 0; i < list.length; i += 50) {
+    const chunk = list.slice(i, i + 50);
+    const response = await withRpc((node) => node.getUtxosByAddresses(chunk));
+    for (const entry of response?.entries || []) {
+      const owner = String(entry?.address?.toString?.() ?? entry?.address ?? "");
+      if (owner in out) out[owner] += BigInt(entry?.amount ?? 0);
+    }
+  }
+  return out;
+}
+
+async function activeState() {
+  const account = await activeAccountSecrets();
+  return { account, state: await spendingState(account.id) };
+}
+
+export async function setSpendingHidden(index, hidden) {
+  const { account, state } = await activeState();
+  if (hidden && index === state.activeIndex) throw new Error("The primary spending address can't be hidden.");
+  const set = new Set(state.hidden);
+  if (hidden) set.add(index); else set.delete(index);
+  return saveSpendingState(account.id, { hidden: [...set] });
+}
+
+export async function setSpendingLabel(index, label) {
+  const { account, state } = await activeState();
+  const labels = { ...state.labels };
+  const clean = String(label || "").trim();
+  if (clean) labels[index] = clean.slice(0, 40); else delete labels[index];
+  return saveSpendingState(account.id, { labels });
+}
+
+export async function setPrimarySpending(index) {
+  const { account, state } = await activeState();
+  const hidden = state.hidden.filter((i) => i !== index);
+  return saveSpendingState(account.id, { activeIndex: index, maxIndex: Math.max(state.maxIndex, index), hidden });
+}
+
+/**
+ * iOS "Generate New Spending Address": the lowest hidden index that is confirmed unused
+ * (never the primary, no balance) is un-hidden and reused; otherwise the chain extends by one.
+ */
+export async function generateSpendingAddress() {
+  const { account, state } = await activeState();
+  const cached = (await cachedAddresses(account.id))?.spending || {};
+  const candidates = [...state.hidden].sort((a, b) => a - b).filter((i) => i !== state.activeIndex);
+  if (candidates.length) {
+    const addresses = { ...(await spendingAddressRange(0, state.maxIndex + 1)), ...cached };
+    const balances = await balancesFor(candidates.map((i) => addresses[i]));
+    for (const index of candidates) {
+      const address = addresses[index];
+      if ((balances[address] ?? 0n) > 0n) continue;
+      if ((await addressUsed(address)) === false) {
+        await saveSpendingState(account.id, { hidden: state.hidden.filter((i) => i !== index) });
+        return index;
+      }
+    }
+  }
+  const index = state.maxIndex + 1;
+  const [address] = Object.values(await spendingAddressRange(index, 1));
+  await saveSpendingState(account.id, { maxIndex: index, hidden: state.hidden.filter((i) => i !== index) });
+  await cacheSpendingAddress(account.id, index, address);
+  return index;
+}
+
+/**
+ * The Receive QR address (iOS freshReceiveAddress): the one handed out last time while it is
+ * still unused, else the primary while THAT is unused, else a generated one. Never changes the
+ * primary. A failed probe keeps the current answer rather than rotating on a guess.
+ */
+export async function freshReceiveAddress() {
+  const { account, state } = await activeState();
+  const addressAt = async (index) => {
+    const cached = (await cachedAddresses(account.id))?.spending?.[index];
+    return cached || (await spendingAddressRange(index, 1))[index];
+  };
+  if (Number.isInteger(state.receiveIndex)) {
+    const address = await addressAt(state.receiveIndex);
+    if ((await addressUsed(address)) !== true) return address;
+  }
+  const primary = await addressAt(state.activeIndex);
+  if ((await addressUsed(primary)) !== true) {
+    await saveSpendingState(account.id, { receiveIndex: state.activeIndex });
+    return primary;
+  }
+  const index = await generateSpendingAddress();
+  await saveSpendingState(account.id, { receiveIndex: index });
+  return addressAt(index);
+}
+
+/**
+ * iOS "Discover Addresses": sweeps the first 300 spending indexes (whatever the gaps - a
+ * balance at #291 behind twenty empty slots is ordinary) in node batches of 50 and surfaces
+ * every address that holds Kaspa. Returns how many were found.
+ */
+export async function discoverSpendingAddresses(onProgress = () => {}) {
+  const { account, state } = await activeState();
+  const window = 300;
+  const addresses = await spendingAddressRange(0, window);
+  const indexes = Object.keys(addresses).map(Number);
+  const found = [];
+  for (let i = 0; i < indexes.length; i += 50) {
+    onProgress(i, window);
+    const slice = indexes.slice(i, i + 50);
+    const balances = await balancesFor(slice.map((index) => addresses[index]));
+    for (const index of slice) if ((balances[addresses[index]] ?? 0n) > 0n) found.push(index);
+  }
+  onProgress(window, window);
+  const highest = Math.max(state.maxIndex, ...found);
+  const hidden = new Set(state.hidden);
+  for (let index = state.maxIndex + 1; index <= highest; index += 1) if (!found.includes(index)) hidden.add(index);
+  for (const index of found) hidden.delete(index);
+  await saveSpendingState(account.id, { maxIndex: highest, hidden: [...hidden] });
+  const cached = (await cachedAddresses(account.id)) || { accountId: account.id, main: null, spending: {} };
+  const spending = { ...(cached.spending || {}) };
+  for (let index = 0; index <= highest; index += 1) spending[index] = addresses[index] || spending[index];
+  await setLocal(`kachat.addresses.${account.id}`, { ...cached, spending });
+  return found.length;
+}
+
+// --- Explorer -----------------------------------------------------------------------------
+
+export function explorerTxUrl(txid) { return `https://explorer.kaspa.org/txs/${txid}`; }
+export function explorerAddressUrl(address) { return `https://explorer.kaspa.org/addresses/${address}`; }

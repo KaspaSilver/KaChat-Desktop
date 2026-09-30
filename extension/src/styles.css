@@ -357,3 +357,81 @@ button.link { background: transparent; color: var(--kaspa); padding: 0 0 4px; fo
 .list-row .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
 
 .qr-balance { font-size: 22px; font-weight: 750; color: var(--kaspa); }
+
+/* --- iOS grouped forms: Send, Coin Control ------------------------------------------------------ */
+.form-bar { justify-content: space-between; }
+.bar-text { background: transparent; color: var(--kaspa-ink); font-weight: 500; font-size: 15px; padding: 6px 8px; }
+.bar-text.strong { font-weight: 700; }
+.bar-text:disabled { background: transparent !important; color: var(--muted) !important; }
+.nav-right { position: absolute; right: 8px; }
+.form { flex: 1; overflow-y: auto; padding: 4px 16px 24px; display: flex; flex-direction: column; gap: 22px; }
+.form > * { flex-shrink: 0; }
+.form-section { display: flex; flex-direction: column; gap: 6px; }
+.form-header { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .3px; padding: 0 12px; }
+.form-footer { color: var(--muted); font-size: 12px; padding: 0 12px; line-height: 1.35; }
+.form-card { background: var(--panel); border-radius: 10px; overflow: hidden; }
+.form-row { display: flex; align-items: center; gap: 8px; padding: 11px 14px; background: transparent; color: var(--text); font-weight: 400; font-size: 15px; text-align: left; width: 100%; border-radius: 0; }
+.form-row + .form-row, .form-card > * + .form-row { border-top: .5px solid rgba(255, 255, 255, .1); }
+.form-row.between { justify-content: space-between; }
+.stack-tight { flex-direction: column; align-items: flex-start; gap: 3px; }
+.nav-like .muted { display: inline-flex; align-items: center; gap: 6px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+textarea.recipient { background: transparent; border: 0; border-radius: 0; min-height: 0; resize: none; padding: 12px 14px; font-size: 13px; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.status.good { color: #30d158; }
+.status.bad { color: #ff453a; }
+.link-button { background: transparent; color: var(--kaspa-ink); padding: 0; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.link-button.small { font-size: 13px; font-weight: 650; }
+.link-button.underline { text-decoration: underline; }
+.link-button.center { align-self: center; }
+.link-button:disabled { background: transparent; color: var(--muted); }
+.amount-row input { flex: 1; min-width: 0; background: transparent; border: 0; padding: 0; font-size: 17px; }
+.amount-logo { width: 22px; height: 22px; }
+.segmented.wide { width: 100%; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); }
+.fee-edit { display: inline-flex; align-items: center; gap: 4px; }
+.fee-edit input { width: 110px; text-align: right; padding: 4px 8px; }
+.error-text { color: #ff453a; font-size: 13px; }
+.coin .coin-meta { flex: 1; display: flex; flex-direction: column; }
+.coin svg { color: var(--muted); flex: none; }
+.coin-amount { font-weight: 600; }
+
+/* --- Sent sheet ----------------------------------------------------------------------------------- */
+.screen.sent { align-items: center; text-align: center; padding-top: 36px; }
+.sent-check { margin-bottom: 4px; }
+.sent-amount { font-size: 26px; font-weight: 800; }
+.sent-details { width: 100%; text-align: left; }
+.screen.sent .big { width: 100%; }
+
+/* --- Manage ------------------------------------------------------------------------------------------ */
+.screen.manage { gap: 14px; overflow-y: auto; }
+.screen.manage > * { flex-shrink: 0; }
+.manage-balance { text-align: center; font-size: 30px; font-weight: 800; letter-spacing: -.4px; }
+.manage-balance span { font-size: 16px; color: var(--kaspa); }
+.manage-balance.small-balance { font-size: 26px; }
+.manage-address { background: transparent; color: var(--muted); font-size: 11.5px; word-break: break-all; padding: 0 8px; font-weight: 400; }
+.chips { display: flex; justify-content: center; gap: 6px; }
+.chip { font-size: 11px; font-weight: 650; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); }
+.chip.accent { background: var(--kaspa-dim); color: var(--kaspa); }
+.manage-actions { display: flex; justify-content: space-evenly; }
+.manage-action { background: transparent; color: var(--text); display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; padding: 0; }
+.tx { gap: 10px; }
+.tx-icon { width: 30px; height: 30px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--panel-2); color: var(--muted); }
+.tx-icon.in { color: #30d158; }
+.tx-icon.out { color: var(--kaspa); }
+.tx-meta { flex: 1; display: flex; flex-direction: column; min-width: 0; text-align: left; }
+.tx-amount { font-weight: 650; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tx-amount.in { color: #30d158; }
+.danger-text { color: #ff453a !important; }
+.key-box { padding: 14px; word-break: break-all; font-size: 13px; user-select: text; }
+.blurred-key { filter: blur(6px); user-select: none; }
+.address-list-row .chip { margin-left: 4px; vertical-align: middle; }
+.menu-sheet { position: fixed; top: 52px; right: 12px; background: var(--panel-2); border: .5px solid rgba(255,255,255,.14); border-radius: 13px; box-shadow: 0 12px 30px rgba(0,0,0,.5); overflow: hidden; z-index: 10; min-width: 250px; }
+.menu-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; background: transparent; color: var(--text); font-weight: 400; font-size: 14px; border-radius: 0; text-align: left; }
+.menu-item + .menu-item { border-top: .5px solid rgba(255,255,255,.1); }
+.menu-item svg { color: var(--kaspa); flex: none; }
+.toggle { width: 42px; height: 26px; border-radius: 999px; background: #3a3a3c; position: relative; flex: none; transition: background .15s; }
+.toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: left .15s; }
+.toggle.on { background: #30d158; }
+.toggle.on::after { left: 18px; }
+.break { word-break: break-all; }
