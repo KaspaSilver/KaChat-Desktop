@@ -29,6 +29,7 @@ extension's card to pick up the new build.
 | `src/onboarding.js` | The accounts screen (Saved Accounts), Create Account, Import Account (iOS source-wallet list, word grid, passphrase), unlock and reset. |
 | `src/send.js`, `src/manage.js` | Send Kaspa (fees, Max, coin control, Sent sheet) and the Manage screens (history, UTXOs, keys, spending addresses, Change Chatting Address). |
 | `src/domains.js` | Your Domains: a tab per name service (.kachat, .kas, .k, .kaspa) with "Get a domain" links; .kas Set as Primary (signed KNS API call) and Send Domain (commit/reveal transfer). |
+| `src/market.js` | The .kachat marketplace - a 1:1 port of iOS KachatMarketView (hero, search, Marketplace / My Names / Activity, listing, Buy and Make an Offer sheets, How it works). UI only: redacted placeholders, final actions disabled. |
 | `src/names.js`, `src/names-normalize.js` | The name services (port of iOS NameServices.swift): names an address owns on .k / .kaspa, resolving a typed name on every service, the "Other domains" picker. The normalizers are checked against the dotk and Kaspa Names SDK vectors: `node tools/check-name-vectors.mjs`. |
 | `src/settings.js` | Settings: currency, auto-lock, change password, connection, explorer, connected sites, View Seed Phrase, licenses. |
 | `src/approve.js` | The approval window for website requests: connect, send Kaspa, sign message. |

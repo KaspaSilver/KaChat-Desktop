@@ -13,6 +13,7 @@ import { showManageAddress, showManageAddresses } from "./manage.js";
 import { cachedOwnedNames, ownedNames, otherNamesCount } from "./names.js";
 import { showWelcome, showUnlock, enterApp, setHandlers, setLoggedOut } from "./onboarding.js";
 import { showDomains } from "./domains.js";
+import { showKachatMarket, kachatWordmark } from "./market.js";
 import { showSettings, showLicenses } from "./settings.js";
 import { showApproval } from "./approve.js";
 
@@ -174,6 +175,10 @@ function paintHome() {
           <span class="nav-row-label">${ICONS.at}<span>Your Domains</span></span>
           <span class="nav-row-value">${domainCount != null ? esc(String(domainCount)) : ""}</span>${ICONS.chevron}
         </button>
+        <button class="glass nav-row" id="kachat-names">
+          <span class="nav-row-label">${kachatWordmark(22)}<span>Marketplace</span></span>
+          <span class="coming-pill">Coming soon</span>${ICONS.chevron}
+        </button>
         <button class="glass nav-row" id="settings">
           <span class="nav-row-label">${ICONS.gear}<span>Settings</span></span>${ICONS.chevron}
         </button>
@@ -253,6 +258,7 @@ function paintHome() {
   };
   $("#manage-spending").onclick = () => showManageAddresses({ onBack: showHome });
   $("#domains").onclick = () => { if (main) showDomains({ address: main, onBack: showHome }); };
+  $("#kachat-names").onclick = () => showKachatMarket({ onBack: showHome });
   $("#settings").onclick = () => showSettings({ onBack: showHome });
   $("#logout").onclick = () => showSheet({
     title: "Log Out",
