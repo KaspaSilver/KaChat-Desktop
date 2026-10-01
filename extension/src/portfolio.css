@@ -226,3 +226,17 @@ body.tab #app[data-screen="portfolio-editor"] { height: calc(100vh - 48px); }
 @media (prefers-color-scheme: light) { .pf-toast { background: rgba(255, 255, 255, .95); border-color: rgba(0, 0, 0, .08); } }
 .pf-row-mid > .pf-caption { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pf-panel-bar > :first-child { justify-self: start; }
+
+/* --- Realized P&L and Fees Spent cards; transfers --------------------------------------------- */
+.pf-info-card { margin: 5px 12px; padding: 14px; display: flex; align-items: flex-start; gap: 12px; }
+.pf-info-icon { width: 30px; flex: none; display: inline-flex; justify-content: center; padding-top: 2px; }
+.pf-info-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.pf-info-value { font-size: 20px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.pf-info-value.up { color: var(--pf-green); }
+.pf-info-value.down { color: var(--pf-red); }
+.pf-info-fiat { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pf-info-text .pf-caption { line-height: 1.3; }
+.pf-row-icon.transfer { color: var(--kaspa); }
+.pf-three { grid-template-columns: repeat(3, 1fr); }
+/* Form rows are flex boxes, which beat the [hidden] attribute's display: none. */
+.pf-editor [hidden], .pf-panel [hidden] { display: none !important; }

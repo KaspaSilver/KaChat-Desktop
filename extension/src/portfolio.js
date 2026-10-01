@@ -58,6 +58,8 @@ function paintHome() {
       <div class="pf-cards" id="pf-cards">${cardsHtml()}</div>
       <div class="pf-squares">${priceSquareHtml()}${valueSquareHtml()}</div>
       ${hashrateCardHtml()}
+      ${realizedPLCardHtml()}
+      ${feesCardHtml()}
       ${transactionsSectionHtml()}
     </div>`, "portfolio:home");
   dock.bindTabTop();
@@ -147,6 +149,49 @@ function hashrateCardHtml() {
     </button>`;
 }
 
+// --- Realized P&L and Fees Spent ------------------------------------------------------------
+
+/** This calendar year's sells against the cost of the KAS they sold, oldest buys first (FIFO). */
+function realizedPLCardHtml() {
+  const pl = core.realizedPLThisYear();
+  const hidden = store.valuesHidden;
+  const notes = [];
+  if (pl.sellCount === 0) notes.push("No sells yet this year.");
+  else {
+    notes.push(`Sells: ${pl.sellCount}. Oldest buys first (FIFO).`);
+    if (pl.uncoveredKas > 0) notes.push(`${hidden ? core.MASKED : core.kas(pl.uncoveredKas)} sold with no buy on record, counted at zero cost.`);
+  }
+  if (pl.pendingPriceCount > 0) notes.push("Some prices are still loading.");
+  const value = hidden ? core.MASKED : `${pl.amount > 0 ? "+" : ""}${core.currency(pl.amount)}`;
+  const tone = hidden || pl.sellCount === 0 ? "" : pl.amount >= 0 ? "up" : "down";
+  return `
+    <div class="pf-glass pf-info-card">
+      <span class="accent pf-info-icon">${SF.checkSeal(20)}</span>
+      <span class="pf-info-text">
+        <span class="pf-square-title">Realized P&amp;L ${pl.year}</span>
+        <span class="pf-info-value ${tone}" data-fit="0.7">${esc(value)}</span>
+        <span class="muted pf-caption">${esc(notes.join(" "))}</span>
+      </span>
+    </div>`;
+}
+
+/** Network fees the active portfolio's imported addresses paid, in KAS and at each day's price. */
+function feesCardHtml() {
+  const fees = core.feeSummary();
+  const hidden = store.valuesHidden;
+  const body = fees.count === 0 ? `
+        <span class="pf-info-value">—</span>
+        <span class="muted pf-caption">Add your chatting address with + to count the network fees it has paid.</span>` : `
+        <span class="pf-info-value" data-fit="0.7">${esc(hidden ? core.MASKED : core.feeKas(fees.totalKas))}</span>
+        <span class="pf-info-fiat">${esc(hidden ? core.MASKED : core.currency(fees.totalFiat))}</span>
+        <span class="muted pf-caption">${fees.unpricedCount > 0 ? `Transactions: ${fees.count}. Some prices are still loading.` : `Transactions: ${fees.count}, at each day's price.`}</span>`;
+  return `
+    <div class="pf-glass pf-info-card">
+      <span class="accent pf-info-icon">${SF.fuelpump(20)}</span>
+      <span class="pf-info-text"><span class="pf-square-title">Fees Spent</span>${body}</span>
+    </div>`;
+}
+
 // --- Transactions section (PortfolioTransactionsView) -----------------------------------------
 
 function transactionsSectionHtml() {
@@ -173,14 +218,22 @@ function transactionsSectionHtml() {
     </div>`;
 }
 
+const TYPE_TITLES = { buy: "Buy", sell: "Sell", transfer: "Transfer" };
+const TRANSFER_FOOTER = "KAS moved between your own addresses - sent away and brought back, or wallet to wallet. It doesn't change your holdings, cost or profit.";
+
+function typePickerHtml(attr, selected) {
+  return `<div class="segmented wide pf-three" role="radiogroup" aria-label="Type">${core.TYPES.map((t) =>
+    `<button type="button" role="radio" ${attr}="${t}" aria-checked="${selected === t}">${TYPE_TITLES[t]}</button>`).join("")}</div>`;
+}
+
 function rowInnerHtml(tx) {
-  const buy = tx.type !== "sell";
+  const kind = core.TYPES.includes(tx.type) ? tx.type : "buy";
   const hidden = store.valuesHidden;
   const pending = core.isPricePending(tx.notes);
   return `
-    <span class="pf-row-icon ${buy ? "buy" : "sell"}">${buy ? SF.downCircleFill(26) : SF.upCircleFill(26)}</span>
+    <span class="pf-row-icon ${kind}">${kind === "buy" ? SF.downCircleFill(26) : kind === "sell" ? SF.upCircleFill(26) : SF.transferCircleFill(26)}</span>
     <span class="pf-row-mid">
-      <span class="pf-row-type">${buy ? "Buy" : "Sell"}${pending ? `<span class="pf-warn" title="Price still loading, tap to set manually" aria-label="Price still loading, tap to set manually">${SF.warnFill(12)}</span>` : ""}</span>
+      <span class="pf-row-type">${TYPE_TITLES[kind]}${pending ? `<span class="pf-warn" title="Price still loading, tap to set manually" aria-label="Price still loading, tap to set manually">${SF.warnFill(12)}</span>` : ""}</span>
       <span class="muted pf-caption">${esc(core.dateTimeText(tx.timestamp))}</span>
       ${tx.notes ? `<span class="muted pf-caption pf-row-notes">${esc(tx.notes)}</span>` : ""}
     </span>
@@ -509,13 +562,17 @@ function bindReorderDrag(list, onMove) {
 // Add chooser, Import or Export, Move to Portfolio
 // =================================================================================================
 
-function showAddChooser() {
+async function showAddChooser() {
+  const chatting = (await wallet.cachedAddresses(store.accountId).catch(() => null))?.main || null;
   showSheet({
     title: "Add to Portfolio",
     cancel: false,
     rows: [
       { label: "Add Transaction", subtitle: "Record a buy or a sell by hand.", icon: SF.pencil(18), onClick: () => showEditor(null) },
-      { label: "Add Kaspa Address", subtitle: "Track an address's balance as part of this portfolio.", icon: SF.arrowLeftRight(18), onClick: showAddAddress },
+      { label: "Add Kaspa Address", subtitle: "Track an address's balance as part of this portfolio.", icon: SF.arrowLeftRight(18), onClick: () => showAddAddress() },
+      // One tap for the address KaChat itself spends from: its buys and sells, and every network
+      // fee it paid (messages, handshakes, payments) for the Fees Spent card.
+      ...(chatting ? [{ label: "Add Chatting Address", subtitle: "Your chatting address's buys and sells, and every network fee it has paid.", icon: SF.bubbles(18), onClick: () => showAddAddress(chatting) }] : []),
     ],
   });
 }
@@ -565,7 +622,7 @@ function showEditor(id) {
   const existing = id ? core.findTransaction(id) : null;
   const amountKas = existing ? core.amountKasOf(existing) : 0;
   const form = {
-    isBuy: existing ? existing.type !== "sell" : true,
+    type: existing && core.TYPES.includes(existing.type) ? existing.type : "buy",
     quantity: existing && amountKas > 0 ? core.trimmedAll(amountKas) : "",
     price: existing
       ? (amountKas > 0 ? core.trimmedAll(existing.fiatValue / amountKas) : "")
@@ -579,8 +636,11 @@ function showEditor(id) {
     const quantity = core.parsePortfolioNumber(form.quantity);
     const price = core.parsePortfolioNumber(form.price);
     const fee = core.parsePortfolioNumber(form.fee) || 0;
-    const total = quantity != null && price != null ? (form.isBuy ? quantity * price + fee : quantity * price - fee) : null;
-    return { quantity, price, total, valid: (quantity || 0) > 0 && (price || 0) > 0 };
+    // A transfer's total is what the KAS was worth when it moved - a note, counted nowhere.
+    const base = quantity != null && price != null ? quantity * price : null;
+    const total = base == null ? null : form.type === "buy" ? base + fee : form.type === "sell" ? base - fee : base;
+    // A transfer needs only its amount; its price counts for nothing.
+    return { quantity, price, total, valid: (quantity || 0) > 0 && (form.type === "transfer" || (price || 0) > 0) };
   };
   const close = () => showPortfolio();
   render(`
@@ -591,15 +651,12 @@ function showEditor(id) {
     </header>
     <section class="form pf-editor">
       <div class="form-section"><div class="form-card"><div class="form-row">
-        <div class="segmented wide" role="radiogroup" aria-label="Type">
-          <button type="button" role="radio" data-type="buy" aria-checked="${form.isBuy}">Buy</button>
-          <button type="button" role="radio" data-type="sell" aria-checked="${!form.isBuy}">Sell</button>
-        </div>
-      </div></div></div>
+        ${typePickerHtml("data-type", form.type)}
+      </div></div><div class="form-footer" id="pf-ed-type-footer" ${form.type === "transfer" ? "" : "hidden"}>${esc(TRANSFER_FOOTER)}</div></div>
       <div class="form-section"><div class="form-card">
         <label class="form-row pf-field-row"><span>Quantity</span><input id="pf-ed-qty" inputmode="decimal" placeholder="0.00" value="${esc(form.quantity)}" autocomplete="off" /><span class="muted">KAS</span></label>
         <label class="form-row pf-field-row"><span>Price Per Coin</span><span class="muted pf-sym">${esc(symbol)}</span><input id="pf-ed-price" inputmode="decimal" placeholder="0.00" value="${esc(form.price)}" autocomplete="off" /></label>
-        <label class="form-row pf-field-row"><span>Fee (optional)</span><span class="muted pf-sym">${esc(symbol)}</span><input id="pf-ed-fee" inputmode="decimal" placeholder="0.00" autocomplete="off" /></label>
+        <label class="form-row pf-field-row" id="pf-ed-fee-row" ${form.type === "transfer" ? "hidden" : ""}><span>Fee (optional)</span><span class="muted pf-sym">${esc(symbol)}</span><input id="pf-ed-fee" inputmode="decimal" placeholder="0.00" autocomplete="off" /></label>
         <label class="form-row pf-field-row"><span>Date</span><input id="pf-ed-date" type="datetime-local" class="pf-date" value="${esc(toLocalInput(form.timestamp))}" /></label>
       </div></div>
       <div class="form-section"><div class="form-card">
@@ -614,12 +671,14 @@ function showEditor(id) {
   const update = () => {
     const v = values();
     $("#pf-ed-save").disabled = !v.valid;
-    $("#pf-ed-total-label").textContent = form.isBuy ? "Total Spent" : "Total Received";
+    $("#pf-ed-total-label").textContent = form.type === "buy" ? "Total Spent" : form.type === "sell" ? "Total Received" : "Value at the Time";
+    $("#pf-ed-fee-row").hidden = form.type === "transfer";
+    $("#pf-ed-type-footer").hidden = form.type !== "transfer";
     $("#pf-ed-total").textContent = core.currency(v.total ?? 0);
   };
   for (const button of app.querySelectorAll("[data-type]")) {
     button.onclick = () => {
-      form.isBuy = button.dataset.type === "buy";
+      form.type = button.dataset.type;
       for (const other of app.querySelectorAll("[data-type]")) other.setAttribute("aria-checked", String(other === button));
       update();
     };
@@ -635,9 +694,10 @@ function showEditor(id) {
   $("#pf-ed-cancel").onclick = close;
   $("#pf-ed-save").onclick = async () => {
     const v = values();
-    if (!v.valid || v.total == null) return;
+    if (!v.valid) return;
     const trimmed = form.notes.trim();
-    const fields = { type: form.isBuy ? "buy" : "sell", amountKas: v.quantity, fiatValue: v.total, timestamp: form.timestamp, notes: trimmed || null };
+    // A transfer with no price is still a complete record.
+    const fields = { type: form.type, amountKas: v.quantity, fiatValue: v.total ?? 0, timestamp: form.timestamp, notes: trimmed || null };
     if (existing) await core.updateTransaction(existing.id, fields);
     else await core.addTransaction(fields);
     close();
@@ -659,7 +719,9 @@ function toLocalInput(ms) {
 // Add Kaspa Address
 // =================================================================================================
 
-function showAddAddress() {
+/** Add Kaspa Address; with `preset` (Add Chatting Address) there is no field - the import of that
+ *  address starts as the sheet opens and the sheet shows only its progress. */
+function showAddAddress(preset = null) {
   const s = { input: "", resolving: false, resolved: null, notFound: false, importing: false, progress: "Starting…" };
   let seq = 0;
   const looksRaw = (text) => /^kaspa(test)?:/i.test(text);
@@ -716,9 +778,10 @@ function showAddAddress() {
     </div>`;
   const bar = () => ({
     leading: { label: "Cancel", disabled: s.importing, onClick: () => panel.close() },
-    trailing: { label: "Import", strong: true, disabled: !canImport(), onClick: start },
+    trailing: preset ? null : { label: "Import", strong: true, disabled: !canImport(), onClick: start },
   });
-  const panel = openPanel({ title: "Add Kaspa Address", ...bar(), body: bodyHtml(), locked: () => s.importing });
+  if (preset) s.importing = true;
+  const panel = openPanel({ title: preset ? "Add Chatting Address" : "Add Kaspa Address", ...bar(), body: bodyHtml(), locked: () => s.importing });
   const refreshExtra = () => {
     const extra = panel.body.querySelector("#pf-addr-extra");
     if (extra) extra.innerHTML = `${cardHtml()}${statusHtml() ? `<div class="form-row">${statusHtml()}</div>` : ""}`;
@@ -764,8 +827,8 @@ function showAddAddress() {
     field.focus();
   };
   async function start() {
-    if (!canImport()) return;
-    const address = effective();
+    if (!preset && !canImport()) return;
+    const address = preset || effective();
     s.importing = true;
     s.progress = "Starting…";
     panel.setBody(bodyHtml());
@@ -779,6 +842,7 @@ function showAddAddress() {
       s.importing = false;
       panel.close();
       let message = `Imported ${result.imported} transaction${result.imported === 1 ? "" : "s"}`;
+      if (result.feeCount > 0) message += `. Network fees counted: ${result.feeCount}`;
       if (result.missingPriceCount > 0) message += `. Prices for ${result.missingPriceCount} are still loading and will fill in automatically`;
       if (result.incomplete) message += ". Some history couldn't be fetched, re-add this address later to import the rest";
       pfToast(message, { duration: message.length > 40 ? 3200 : 1600 });
@@ -788,7 +852,7 @@ function showAddAddress() {
       pfToast(error instanceof core.ImportError ? error.message : "Import failed.", { error: true, duration: 2600 });
     }
   }
-  bind();
+  if (preset) start(); else bind();
 }
 
 // =================================================================================================
@@ -913,10 +977,7 @@ export async function showAddToPortfolio(opts) {
     <div class="form-section">
       <div class="form-header">Type</div>
       <div class="form-card"><div class="form-row">
-        <div class="segmented wide" role="radiogroup" aria-label="Type">
-          <button type="button" role="radio" data-atype="buy" aria-checked="${s.type === "buy"}">Buy</button>
-          <button type="button" role="radio" data-atype="sell" aria-checked="${s.type === "sell"}">Sell</button>
-        </div>
+        ${typePickerHtml("data-atype", s.type)}
       </div></div>
     </div>
     <div class="form-section">

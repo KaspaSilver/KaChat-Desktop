@@ -34,6 +34,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const HIDDEN_KEY = "kachat.portfolio.valuesHidden";   // iOS kachat_portfolio_values_hidden
 const PAIR_KEY = "kachat.portfolio.chartPair";        // iOS kachat_chart_pair (absent = bitcoin, "" = none)
 const storeKey = (accountId) => `kachat.portfolios.${accountId}`;
+/** The fee records, beside the ledger (iOS kachat_portfolio_fees_<wallet>). */
+const feesKey = (accountId) => `kachat.portfolioFees.${accountId}`;
+
+/** buy, sell, or transfer - KAS moved between your own addresses, a record only. */
+export const TYPES = ["buy", "sell", "transfer"];
+const normalType = (type) => (TYPES.includes(type) ? type : "buy");
 
 function uuid() {
   return (crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`).toUpperCase();
@@ -54,6 +60,8 @@ export const store = {
   accountId: null,
   currency: "usd",
   data: { activeId: null, portfolios: [] },
+  /** PortfolioFeeRecord: { txId, portfolioId, sourceAddress, amountSompi (string), timestamp, fiatValue|null } */
+  fees: [],
   valuesHidden: false,
   chartPair: "bitcoin",
   loaded: false,
@@ -66,7 +74,7 @@ function normalizeData(raw) {
     p.createdAt = Number(p.createdAt) || Date.now();
     p.transactions = Array.isArray(p.transactions) ? p.transactions.filter((t) => t && t.id) : [];
     for (const t of p.transactions) {
-      t.type = t.type === "sell" ? "sell" : "buy";
+      t.type = normalType(t.type);
       t.amountSompi = String(t.amountSompi ?? "0");
       t.fiatValue = Number(t.fiatValue) || 0;
       t.timestamp = Number(t.timestamp) || Date.now();
@@ -92,6 +100,7 @@ export async function loadStore() {
   const currencyChanged = store.loaded && currency !== store.currency;
   if (accountChanged || !store.loaded) {
     store.data = normalizeData(await getLocal(storeKey(accountId)));
+    store.fees = normalizeFees(await getLocal(feesKey(accountId)));
     store.accountId = accountId;
   }
   store.currency = currency;
@@ -113,6 +122,21 @@ export async function loadStore() {
   return { accountChanged, currencyChanged };
 }
 
+function normalizeFees(raw) {
+  return (Array.isArray(raw) ? raw : []).filter((f) => f && f.txId && f.portfolioId).map((f) => ({
+    txId: String(f.txId), portfolioId: f.portfolioId, sourceAddress: String(f.sourceAddress || ""),
+    amountSompi: String(f.amountSompi ?? "0"), timestamp: Number(f.timestamp) || 0,
+    fiatValue: f.fiatValue == null || !Number.isFinite(Number(f.fiatValue)) ? null : Number(f.fiatValue),
+  }));
+}
+
+let lastSavedFees = "";
+async function saveFees() {
+  if (!store.accountId) return;
+  lastSavedFees = JSON.stringify(store.fees);
+  await setLocal(feesKey(store.accountId), store.fees);
+}
+
 let lastSaved = "";
 export async function save() {
   if (!store.accountId) return;
@@ -124,6 +148,11 @@ export async function save() {
 // The popup and a tab can both be open: a change saved by one shows up in the other.
 ext?.storage?.onChanged?.addListener((changes, area) => {
   if (area !== "local" || !store.accountId) return;
+  const feeChange = changes[feesKey(store.accountId)];
+  if (feeChange?.newValue && JSON.stringify(feeChange.newValue) !== lastSavedFees) {
+    store.fees = normalizeFees(feeChange.newValue);
+    emit("data");
+  }
   const change = changes[storeKey(store.accountId)];
   if (!change?.newValue || JSON.stringify(change.newValue) === lastSaved) return;
   const activeBefore = store.data.activeId;
@@ -183,6 +212,10 @@ export async function deletePortfolio(id) {
   if (index < 0) return;
   list.splice(index, 1);
   if (store.data.activeId === id) store.data.activeId = list[0].id;
+  // Its fee records go with it (iOS forgetPortfolio), or they would linger under no portfolio.
+  const before = store.fees.length;
+  store.fees = store.fees.filter((f) => f.portfolioId !== id);
+  if (store.fees.length !== before) await saveFees();
   await save();
   emit("data");
 }
@@ -229,7 +262,7 @@ export async function addTransaction({ type, amountKas, fiatValue, timestamp, no
   const amountSompi = kasToSompiString(amountKas);
   if (!portfolio || amountSompi == null) return null;
   const tx = {
-    id: uuid(), type: type === "sell" ? "sell" : "buy", amountSompi, fiatValue: Number(fiatValue) || 0,
+    id: uuid(), type: normalType(type), amountSompi, fiatValue: Number(fiatValue) || 0,
     timestamp: Number(timestamp) || Date.now(), notes: notes || null, portfolioId: portfolio.id,
   };
   if (sourceAddress) tx.sourceAddress = sourceAddress;
@@ -241,9 +274,9 @@ export async function addTransaction({ type, amountKas, fiatValue, timestamp, no
 }
 
 /**
- * iOS updateTransaction rebuilds the row from the edited fields and keeps its portfolio - and,
- * exactly as on iOS, without its sourceAddress / sourceTxId (quirk 1 in the spec): an edited row
- * is the user's own figure from then on, so the background price backfill never overwrites it.
+ * iOS updateTransaction: the edited fields, in the row's own portfolio - and its sourceAddress /
+ * sourceTxId kept, since they are how a re-import of the address recognises it (dropping them
+ * made the next import add the same transaction again, undoing a sell re-marked a transfer).
  */
 export async function updateTransaction(id, { type, amountKas, fiatValue, timestamp, notes }) {
   for (const p of store.data.portfolios) {
@@ -251,10 +284,13 @@ export async function updateTransaction(id, { type, amountKas, fiatValue, timest
     if (index < 0) continue;
     const amountSompi = kasToSompiString(amountKas);
     if (amountSompi == null) return;
+    const previous = p.transactions[index];
     p.transactions[index] = {
-      id, type: type === "sell" ? "sell" : "buy", amountSompi, fiatValue: Number(fiatValue) || 0,
+      id, type: normalType(type), amountSompi, fiatValue: Number(fiatValue) || 0,
       timestamp: Number(timestamp) || Date.now(), notes: notes || null, portfolioId: p.id,
     };
+    if (previous.sourceAddress) p.transactions[index].sourceAddress = previous.sourceAddress;
+    if (previous.sourceTxId) p.transactions[index].sourceTxId = previous.sourceTxId;
     await save();
     emit("data");
     return;
@@ -304,7 +340,8 @@ export function computeSummary(transactions, currentPrice) {
   for (const tx of transactions) {
     const amount = BigInt(tx.amountSompi || "0");
     if (tx.type === "sell") { holdingsSompi -= amount; totalProceeds += tx.fiatValue; }
-    else { holdingsSompi += amount; totalInvested += tx.fiatValue; boughtSompi += amount; }
+    else if (tx.type === "buy") { holdingsSompi += amount; totalInvested += tx.fiatValue; boughtSompi += amount; }
+    // transfer: your own KAS changing address - no holdings, cost or profit move
   }
   const holdingsKas = Number(holdingsSompi) / 1e8;
   const totalBoughtKas = Number(boughtSompi) / 1e8;
@@ -326,11 +363,77 @@ export function valueHistory(transactions, points) {
   return points.map(([ts, price]) => {
     while (i < sorted.length && sorted[i].timestamp <= ts) {
       const amount = BigInt(sorted[i].amountSompi || "0");
-      holdings += sorted[i].type === "sell" ? -amount : amount;
+      if (sorted[i].type === "sell") holdings -= amount;
+      else if (sorted[i].type === "buy") holdings += amount;
       i += 1;
     }
     return [ts, (Number(holdings) / 1e8) * price];
   });
+}
+
+/**
+ * FIFO realized profit and loss for the sells dated in `year` (computeRealizedPL). Every buy, from
+ * any year, is a lot; each sell, from any year, takes from the oldest lots first, but only this
+ * year's sells add to the result. Same timestamp: the buy goes first. A sell larger than the lots
+ * left counts the rest at zero cost (uncoveredKas). Transfers are skipped.
+ */
+export function computeRealizedPL(transactions, year) {
+  const result = { year, proceeds: 0, costBasis: 0, sellCount: 0, uncoveredKas: 0, pendingPriceCount: 0, amount: 0 };
+  const lots = [];
+  let lotStart = 0;
+  let uncovered = 0n;
+  const ordered = [...transactions].sort((a, b) => (a.timestamp === b.timestamp
+    ? (a.type === "buy" && b.type === "sell" ? -1 : b.type === "buy" && a.type === "sell" ? 1 : 0)
+    : a.timestamp - b.timestamp));
+  for (const tx of ordered) {
+    const sompi = BigInt(tx.amountSompi || "0");
+    if (tx.type === "buy") {
+      if (sompi <= 0n) continue;
+      lots.push({ sompi, costPerSompi: tx.fiatValue / Number(sompi) });
+      if (isPricePending(tx.notes)) result.pendingPriceCount += 1;
+    } else if (tx.type === "sell") {
+      let remaining = sompi;
+      let cost = 0;
+      while (remaining > 0n && lotStart < lots.length) {
+        const lot = lots[lotStart];
+        const take = remaining < lot.sompi ? remaining : lot.sompi;
+        cost += Number(take) * lot.costPerSompi;
+        lot.sompi -= take;
+        remaining -= take;
+        if (lot.sompi === 0n) lotStart += 1;
+      }
+      if (new Date(tx.timestamp).getFullYear() !== year) continue;
+      result.proceeds += tx.fiatValue;
+      result.costBasis += cost;
+      result.sellCount += 1;
+      if (remaining > 0n) uncovered += remaining;
+      if (isPricePending(tx.notes)) result.pendingPriceCount += 1;
+    }
+  }
+  result.uncoveredKas = Number(uncovered) / 1e8;
+  result.amount = result.proceeds - result.costBasis;
+  return result;
+}
+
+export function realizedPLThisYear() {
+  return computeRealizedPL(scopedTransactions(), new Date().getFullYear());
+}
+
+/** The Fees Spent card's numbers for the active portfolio. */
+export function feeSummary(portfolioId = store.data.activeId) {
+  const summary = { totalKas: 0, totalFiat: 0, count: 0, unpricedCount: 0 };
+  for (const fee of store.fees) {
+    if (fee.portfolioId !== portfolioId) continue;
+    summary.totalKas += Number(fee.amountSompi) / 1e8;
+    summary.count += 1;
+    if (fee.fiatValue == null) summary.unpricedCount += 1; else summary.totalFiat += fee.fiatValue;
+  }
+  return summary;
+}
+
+/** Fees are fractions of a KAS: en_US grouping, 2 to 8 decimals. */
+export function feeKas(value) {
+  return `${Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 8 })} KAS`;
 }
 
 export function rangeChange(points) {
@@ -924,19 +1027,38 @@ export function buildCsv() {
   return { filename: `kachat-portfolio-${stamp}.csv`, csv };
 }
 
-function parseCsvLine(line) {
-  const fields = [];
+/**
+ * A CSV document as records of fields (RFC 4180): commas and line breaks inside double quotes
+ * belong to the field, "" inside quotes is one quote, LF / CRLF / CR outside quotes end the
+ * record, and blank lines yield none - so a note with line breaks survives a round trip.
+ */
+export function parseCsvRecords(content) {
+  const records = [];
+  let fields = [];
   let current = "";
   let quoted = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const c = line[i];
-    if (quoted && c === '"' && line[i + 1] === '"') { current += '"'; i += 1; }
-    else if (c === '"') quoted = !quoted;
-    else if (c === "," && !quoted) { fields.push(current); current = ""; }
-    else current += c;
+  const endRecord = () => {
+    fields.push(current);
+    if (!(fields.length === 1 && !fields[0].trim())) records.push(fields);
+    fields = [];
+    current = "";
+  };
+  const text = String(content || "");
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { current += '"'; i += 1; } else quoted = false;
+      } else current += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { fields.push(current); current = ""; }
+    else if (c === "\r" || c === "\n") {
+      if (c === "\r" && text[i + 1] === "\n") i += 1;
+      endRecord();
+    } else current += c;
   }
-  fields.push(current);
-  return fields;
+  if (current || fields.length) endRecord();
+  return records;
 }
 
 const lenient = (raw) => {
@@ -957,18 +1079,18 @@ function headerOffsetMinutes(header) {
 /** Imports into the active portfolio; a row with an exactly equal timestamp is replaced in place
  *  (keeping its id). Returns imported + replaced. */
 export async function importCsv(text) {
-  const lines = String(text || "").split(/\r?\n|\r/);
-  if (!lines.length) return 0;
-  const offset = headerOffsetMinutes(lines.shift());
+  const records = parseCsvRecords(text);
+  if (!records.length) return 0;
+  const offset = headerOffsetMinutes(records.shift().join(","));
   const portfolio = activePortfolio();
   let count = 0;
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const f = parseCsvLine(line);
+  for (const f of records) {
     if (f.length < 6) continue;
     if (String(f[1]).trim().toUpperCase() !== "KAS") continue;
-    const type = String(f[2]).trim().toLowerCase();
-    if (type !== "buy" && type !== "sell") continue;
+    const typeRaw = String(f[2]).trim().toLowerCase();
+    // CoinMarketCap writes "Transfer In" / "Transfer Out"; both are a transfer here.
+    const type = TYPES.includes(typeRaw) ? typeRaw : typeRaw.startsWith("transfer") ? "transfer" : null;
+    if (!type) continue;
     const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(f[0]).trim());
     if (!m) continue;
     const timestamp = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - offset * 60_000;
@@ -977,7 +1099,8 @@ export async function importCsv(text) {
     if (amount == null || total == null) continue;
     if (f.length > 7 && String(f[7]).trim().toUpperCase() === "USD") {
       const fee = lenient(f[6]) || 0;
-      total = type === "buy" ? total + fee : Math.max(total - fee, 0);
+      if (type === "buy") total += fee;
+      else if (type === "sell") total = Math.max(total - fee, 0);
     }
     const notes = f.length > 8 && f[8] ? f[8] : null;
     const amountSompi = kasToSompiString(amount);
@@ -988,7 +1111,12 @@ export async function importCsv(text) {
     else portfolio.transactions.push({ ...row, id: uuid() });
     count += 1;
   }
-  if (count) { await save(); emit("data"); }
+  if (count) {
+    await save();
+    emit("data");
+    // A re-imported export can carry rows whose price was still loading: price them by date.
+    startPriceBackfillIfNeeded();
+  }
   return count;
 }
 
@@ -1065,25 +1193,36 @@ export async function importAddress(addressInput, onProgress = () => {}) {
   const accountId = store.accountId;
   const existing = new Set();
   for (const p of store.data.portfolios) for (const t of p.transactions) if (t.sourceAddress === address && t.sourceTxId) existing.add(t.sourceTxId);
+  // Fees dedupe per portfolio: the same fee may be counted once in each portfolio.
+  const existingFees = new Set(store.fees.filter((f) => f.portfolioId === portfolio.id).map((f) => f.txId));
 
   onProgress("Fetching transactions…");
   const history = await fetchHistoryResumable(address, onProgress);
   const candidates = [];
+  const feeCandidates = [];
   for (const tx of history.transactions) {
     const txId = tx.transaction_id;
     const time = Number(tx.block_time);
-    if (!txId || existing.has(txId) || !Number.isFinite(time) || time <= 0) continue;
+    const dated = Number.isFinite(time) && time > 0;
+    // Fees first and on their own terms: a message to yourself has no buy or sell in it, but it
+    // still paid a fee.
+    if (txId && dated && !existingFees.has(txId)) {
+      const fee = feeSompiOf(tx, address);
+      if (fee != null) { existingFees.add(txId); feeCandidates.push({ txId, sompi: fee, timestamp: time, day: utcDayKey(time) }); }
+    }
+    if (!txId || existing.has(txId) || !dated) continue;
     const direction = directionFor(tx, address);
     if (!direction) continue;
     existing.add(txId);
     candidates.push({ txId, ...direction, timestamp: time, day: utcDayKey(time) });
   }
-  if (!candidates.length) throw new ImportError(history.complete ? "noTransactions" : "historyFetchFailed");
+  if (!candidates.length && !feeCandidates.length) throw new ImportError(history.complete ? "noTransactions" : "historyFetchFailed");
 
   onProgress("Fetching prices…");
   const cur = store.currency;
   let prices = {};
-  try { prices = await resolveDailyPrices(candidates.map((c) => c.day), cur); } catch { prices = peekDailyPrices(candidates.map((c) => c.day), cur); }
+  const days = [...candidates.map((c) => c.day), ...feeCandidates.map((c) => c.day)];
+  try { prices = await resolveDailyPrices(days, cur); } catch { prices = peekDailyPrices(days, cur); }
   if (store.accountId !== accountId) throw new ImportError("noActivePortfolio");
 
   let missing = 0;
@@ -1099,29 +1238,56 @@ export async function importAddress(addressInput, onProgress = () => {}) {
       sourceAddress: address, sourceTxId: c.txId,
     });
   }
+  const fees = feeCandidates.map((c) => ({
+    txId: c.txId, portfolioId: portfolio.id, sourceAddress: address, amountSompi: c.sompi.toString(), timestamp: c.timestamp,
+    fiatValue: Number.isFinite(prices[c.day]) ? (Number(c.sompi) / 1e8) * prices[c.day] : null,
+  }));
   await save();
+  if (fees.length) { store.fees.push(...fees); await saveFees(); }
   emit("data");
   startPriceBackfillIfNeeded();
-  return { imported: candidates.length, missingPriceCount: missing, incomplete: !history.complete };
+  return { imported: candidates.length, feeCount: fees.length, missingPriceCount: missing, incomplete: !history.complete };
+}
+
+/**
+ * The network fee `address` paid on `tx` (feeSompi(of:paidBy:)): inputs spent minus outputs paid
+ * out, only for a transaction it sent and only when every input's amount is known. Null when
+ * nothing was paid.
+ */
+function feeSompiOf(tx, address) {
+  const inputs = tx.inputs || [];
+  if (!inputs.some((input) => input.previous_outpoint_address === address)) return null;
+  let spent = 0n;
+  for (const input of inputs) {
+    if (input.previous_outpoint_amount == null) return null;
+    spent += BigInt(input.previous_outpoint_amount);
+  }
+  const paidOut = (tx.outputs || []).reduce((sum, o) => sum + BigInt(o.amount || 0), 0n);
+  return spent > paidOut ? spent - paidOut : null;
 }
 
 function pendingRows() {
   const rows = [];
-  for (const p of store.data.portfolios) for (const t of p.transactions) if (isPricePending(t.notes) && t.sourceTxId) rows.push(t);
+  for (const p of store.data.portfolios) for (const t of p.transactions) if (isPricePending(t.notes)) rows.push(t);
   return rows;
 }
+
+// Any row still waiting on its price - from an address import or a CSV re-import of one (which
+// carries the marker but no on-chain source) - and any fee not priced yet. Only the date is needed.
+const pendingFees = () => store.fees.filter((f) => f.fiatValue == null);
+const hasPending = () => pendingRows().length > 0 || pendingFees().length > 0;
 
 let backfillRunning = null;
 /** Passes at 0 s, 30 s, 2 min and 5 min while rows are pending (restarted on wallet load). */
 export function startPriceBackfillIfNeeded() {
-  if (backfillRunning || !store.loaded || !pendingRows().length) return;
+  if (backfillRunning || !store.loaded || !hasPending()) return;
   const accountId = store.accountId;
   const token = {};
   backfillRunning = token;
   (async () => {
     for (const delay of [0, 30_000, 120_000, 300_000]) {
       if (delay) await sleep(delay);
-      if (backfillRunning !== token || store.accountId !== accountId || !pendingRows().length) break;
+      if (backfillRunning !== token || store.accountId !== accountId || !hasPending()) break;
       await backfillPass(accountId, token);
     }
     if (backfillRunning === token) backfillRunning = null;
@@ -1130,7 +1296,7 @@ export function startPriceBackfillIfNeeded() {
 
 async function backfillPass(accountId, token) {
   const cur = store.currency;
-  const days = [...new Set(pendingRows().map((t) => utcDayKey(t.timestamp)))];
+  const days = [...new Set([...pendingRows(), ...pendingFees()].map((t) => utcDayKey(t.timestamp)))];
   if (!days.length) return;
   const prices = await resolveDailyPrices(days, cur).catch(() => ({}));
   const missing = days.filter((d) => prices[d] === undefined).sort().reverse().slice(0, 30);
@@ -1149,7 +1315,16 @@ async function backfillPass(accountId, token) {
     tx.notes = null;
     changed = true;
   }
-  if (changed) { await save(); emit("data"); }
+  if (changed) await save();
+  let feesChanged = false;
+  for (const fee of pendingFees()) {
+    const dayPrice = prices[utcDayKey(fee.timestamp)];
+    if (!Number.isFinite(dayPrice)) continue;
+    fee.fiatValue = (Number(fee.amountSompi) / 1e8) * dayPrice;
+    feesChanged = true;
+  }
+  if (feesChanged) await saveFees();
+  if (changed || feesChanged) emit("data");
 }
 
 /** CoinGecko's /coins/kaspa/history for one UTC day (AddToPortfolioSheet's price lookup). */
