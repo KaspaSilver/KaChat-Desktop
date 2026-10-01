@@ -40,6 +40,10 @@ import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, open
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 
 const PORTFOLIO_KEY = "kachat-portfolios-v1"; // account-scoped: { activeId, portfolios: [{id, name, transactions: [...] }] }
+// Network fees the portfolios' imported addresses paid (iOS PortfolioFeeRecord), stored per
+// account BESIDE the ledger: [{ txId, portfolioId, sourceAddress, amountSompi, timestamp,
+// fiatValue }] - fiatValue null until that day's price is known (the backfill fills it in).
+const FEES_KEY = "kachat-portfolio-fees-v1";
 const MAX_PORTFOLIOS = 5;
 // Mirrors iOS PortfolioAddressImporter.priceUnavailableNote — rows the import couldn't price
 // synchronously carry this note, show a warning icon, and are filled in by the background price
@@ -79,7 +83,8 @@ let deps = null;
 let rootEl = null;
 let modalsEl = null;
 let state = { activeId: null, portfolios: [] };
-let price = null;          // { price, change24h, currency, fetchedAt }
+let fees = [];             // every portfolio's PortfolioFeeRecords for this account (FEES_KEY)
+let price = null;         // { price, change24h, currency, fetchedAt }
 let history = [];          // [[ts, fiat]] for the selected range — resolved every render
 let sevenDayHistory = [];  // fixed 7d window for per-card "today's change" (independent of range)
 let valuePoints = [];      // ledger replay of `history` — rebuilt every render
@@ -239,6 +244,7 @@ function nowId() {
 // ---------------------------------------------------------------------------
 
 function loadState() {
+  loadFees();
   try {
     const parsed = JSON.parse(localStorage.getItem(deps.accountScopedKey(PORTFOLIO_KEY)) || "null");
     if (parsed?.portfolios?.length) { state = parsed; return; }
@@ -248,6 +254,25 @@ function loadState() {
 
 function saveState() {
   localStorage.setItem(deps.accountScopedKey(PORTFOLIO_KEY), JSON.stringify(state));
+}
+
+function loadFees() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(deps.accountScopedKey(FEES_KEY)) || "null");
+    fees = Array.isArray(parsed) ? parsed : [];
+  } catch { fees = []; }
+}
+
+function saveFees() {
+  try { localStorage.setItem(deps.accountScopedKey(FEES_KEY), JSON.stringify(fees)); } catch { /* quota */ }
+}
+
+/// A deleted portfolio's fees go with it (iOS forgetPortfolio). Its rows already do: they live
+/// inside the portfolio object, which is dropped from `state` before it is saved.
+function forgetPortfolioFees(portfolioId) {
+  const before = fees.length;
+  fees = fees.filter((fee) => fee.portfolioId !== portfolioId);
+  if (fees.length !== before) saveFees();
 }
 
 function ensureDefaultPortfolio() {
@@ -279,6 +304,8 @@ function computeSummary(transactions, priceUsd) {
   for (const tx of transactions) {
     const amount = Number(tx.amountKas) || 0;
     const fiat = Number(tx.fiatValue) || 0;
+    // A transfer is your own KAS changing address: a record only, counted nowhere (iOS 7423330).
+    if (tx.type === "transfer") continue;
     if (tx.type === "sell") {
       holdingsKas -= amount;
       totalProceeds += fiat;
@@ -306,11 +333,74 @@ function computeValueHistory(transactions, pricePoints) {
   return pricePoints.map(([ts, p]) => {
     while (txIndex < sorted.length && sorted[txIndex].timestamp <= ts) {
       const tx = sorted[txIndex];
-      holdings += (tx.type === "sell" ? -1 : 1) * (Number(tx.amountKas) || 0);
+      if (tx.type !== "transfer") holdings += (tx.type === "sell" ? -1 : 1) * (Number(tx.amountKas) || 0);
       txIndex += 1;
     }
     return [ts, holdings * p];
   });
+}
+
+/** Sompi as an integer, so FIFO lots subtract exactly rather than drifting in float KAS. */
+function toSompi(amountKas) {
+  return Math.round((Number(amountKas) || 0) * 1e8);
+}
+
+/** FIFO realized profit and loss for the sells dated in `year` (iOS computeRealizedPL). Every
+ *  buy, from any year, is a lot; each sell, from any year, takes from the oldest lots first - so
+ *  a sale this year is matched against whatever was still held - but only this year's sells add
+ *  to the result. Same timestamp: the buy goes first. A sell larger than the lots left counts the
+ *  rest at zero cost (`uncoveredKas`). Transfers are skipped: their cost stays with the KAS. */
+function computeRealizedPL(transactions, year) {
+  const result = { year, proceeds: 0, costBasis: 0, sellCount: 0, uncoveredKas: 0, pendingPriceCount: 0, amount: 0 };
+  const lots = [];
+  let lotStart = 0;
+  let uncoveredSompi = 0;
+  const ordered = [...transactions].sort((a, b) => {
+    if (a.timestamp === b.timestamp) return (a.type === "buy" && b.type === "sell") ? -1 : (a.type === "sell" && b.type === "buy") ? 1 : 0;
+    return a.timestamp - b.timestamp;
+  });
+  for (const tx of ordered) {
+    const sompi = toSompi(tx.amountKas);
+    const fiat = Number(tx.fiatValue) || 0;
+    if (tx.type === "buy") {
+      if (sompi <= 0) continue;
+      lots.push({ sompi, costPerSompi: fiat / sompi });
+      if (isPricePending(tx.notes)) result.pendingPriceCount += 1;
+    } else if (tx.type === "sell") {
+      let remaining = sompi;
+      let cost = 0;
+      while (remaining > 0 && lotStart < lots.length) {
+        const take = Math.min(remaining, lots[lotStart].sompi);
+        cost += take * lots[lotStart].costPerSompi;
+        lots[lotStart].sompi -= take;
+        remaining -= take;
+        if (lots[lotStart].sompi === 0) lotStart += 1;
+      }
+      if (new Date(tx.timestamp).getFullYear() !== year) continue;
+      result.proceeds += fiat;
+      result.costBasis += cost;
+      result.sellCount += 1;
+      uncoveredSompi += Math.max(remaining, 0);
+      if (isPricePending(tx.notes)) result.pendingPriceCount += 1;
+    }
+    // transfer: your own KAS changing address - not a sale, and its cost stays with it.
+  }
+  result.uncoveredKas = uncoveredSompi / 1e8;
+  result.amount = result.proceeds - result.costBasis;
+  return result;
+}
+
+/** The Fees Spent card's numbers for one portfolio (iOS feeSummary). */
+function computeFeeSummary(portfolioId) {
+  const summary = { totalKas: 0, totalFiat: 0, count: 0, unpricedCount: 0 };
+  for (const fee of fees) {
+    if (fee.portfolioId !== portfolioId) continue;
+    summary.totalKas += (Number(fee.amountSompi) || 0) / 1e8;
+    summary.count += 1;
+    if (Number.isFinite(fee.fiatValue)) summary.totalFiat += fee.fiatValue;
+    else summary.unpricedCount += 1;
+  }
+  return summary;
 }
 
 /** Real today-only $ and % change: latest value sample minus the sample closest to (but not
@@ -636,19 +726,30 @@ function summaryCardHtml(summary) {
     </div>`;
 }
 
-function transactionRowHtml(tx) {
-  const isBuy = tx.type !== "sell";
+/** "buy" | "sell" | "transfer" - anything unrecognised reads as a buy, as it always has. */
+function txKind(tx) {
+  return tx?.type === "sell" || tx?.type === "transfer" ? tx.type : "buy";
+}
+// Icon, colour class and title per type (iOS icon/color/title(for:)): a transfer is a two-way
+// arrow in the accent colour.
+const TX_KIND_ICON = { buy: "↓", sell: "↑", transfer: "⇄" };
+const TX_KIND_TITLE = { buy: "Buy", sell: "Sell", transfer: "Transfer" };
+
+/** `preview`: the row as the move sheet shows it - no click target, no delete, no selection. */
+function transactionRowHtml(tx, { preview = false } = {}) {
+  const kind = txKind(tx);
   const needsPrice = isPricePending(tx.notes);
-  const picked = selectedTxIds.has(tx.id);
+  const selectingRow = selecting && !preview;
+  const picked = selectingRow && selectedTxIds.has(tx.id);
   // In select mode the row toggles instead of opening the editor, and the row-level delete goes
   // away: two ways to delete on one row, one of them ignoring the selection, is a trap.
-  const attr = selecting ? `data-portfolio-tx-select="${tx.id}"` : `data-portfolio-tx-edit="${tx.id}"`;
+  const attr = preview ? "" : selecting ? `data-portfolio-tx-select="${tx.id}"` : `data-portfolio-tx-edit="${tx.id}"`;
   return `
-    <div class="portfolio-tx-row${selecting ? " selecting" : ""}${picked ? " picked" : ""}" ${attr} role="button" tabindex="0" ${selecting ? `aria-pressed="${picked}"` : ""}>
-      ${selecting ? `<span class="portfolio-tx-check${picked ? " on" : ""}" aria-hidden="true">${picked ? "✓" : ""}</span>` : ""}
-      <span class="portfolio-tx-icon ${isBuy ? "buy" : "sell"}">${isBuy ? "↓" : "↑"}</span>
+    <div class="portfolio-tx-row${selectingRow ? " selecting" : ""}${picked ? " picked" : ""}" ${attr} ${preview ? "" : `role="button" tabindex="0"`} ${selectingRow ? `aria-pressed="${picked}"` : ""}>
+      ${selectingRow ? `<span class="portfolio-tx-check${picked ? " on" : ""}" aria-hidden="true">${picked ? "✓" : ""}</span>` : ""}
+      <span class="portfolio-tx-icon ${kind}">${TX_KIND_ICON[kind]}</span>
       <div class="portfolio-tx-main">
-        <span class="portfolio-tx-type ${isBuy ? "buy" : "sell"}">${isBuy ? "Buy" : "Sell"}${needsPrice ? ' <span class="portfolio-tx-warn" title="Price is still loading, it will fill in automatically. Click to set it yourself.">⚠</span>' : ""}</span>
+        <span class="portfolio-tx-type ${kind}">${TX_KIND_TITLE[kind]}${needsPrice ? ' <span class="portfolio-tx-warn" title="Price is still loading, it will fill in automatically. Click to set it yourself.">⚠</span>' : ""}</span>
         <span class="portfolio-tx-date">${fmtDate(tx.timestamp)}</span>
         ${tx.notes && !needsPrice ? `<span class="portfolio-tx-notes">${deps.escapeHtml(tx.notes)}</span>` : ""}
       </div>
@@ -656,7 +757,7 @@ function transactionRowHtml(tx) {
         <span class="portfolio-tx-amount">${fmtKas(tx.amountKas)}</span>
         <span class="portfolio-tx-fiat">${fmtFiat(tx.fiatValue || 0)}</span>
       </div>
-      ${selecting ? "" : `<button class="portfolio-tx-delete" type="button" data-portfolio-tx-delete="${tx.id}" aria-label="Delete transaction">×</button>`}
+      ${selecting || preview ? "" : `<button class="portfolio-tx-delete" type="button" data-portfolio-tx-delete="${tx.id}" aria-label="Delete transaction">×</button>`}
     </div>`;
 }
 
@@ -770,6 +871,66 @@ function renderCardModal() {
     </div>`;
 }
 
+/// Hold a transaction (or right-click it): move it to another portfolio (iOS b438f2d). The row
+/// itself sits on top, on a frosted card, so it's clear what is moving; a portfolio that already
+/// holds the same on-chain transaction is offered but disabled, since moving it there would
+/// count it twice. The record moves as-is - same id, same source - so a later "Add to Portfolio"
+/// of the same transaction still recognises it wherever it now lives.
+let movingTxId = null;
+function openMoveSheet(txId) {
+  const tx = (activePortfolio().transactions || []).find((t) => t.id === txId);
+  if (!tx || !modalsEl) return;
+  movingTxId = txId;
+  renderMoveSheet();
+  modalsEl.querySelector("[data-portfolio-move-modal]").hidden = false;
+}
+
+function closeMoveSheet() {
+  movingTxId = null;
+  const modal = modalsEl?.querySelector("[data-portfolio-move-modal]");
+  if (modal) modal.hidden = true;
+}
+
+function renderMoveSheet() {
+  const body = modalsEl?.querySelector("[data-portfolio-move-body]");
+  const source = activePortfolio();
+  const tx = (source.transactions || []).find((t) => t.id === movingTxId);
+  if (!body || !tx) return;
+  const others = state.portfolios.filter((p) => p.id !== source.id);
+  const alreadyHolding = portfolioIdsContainingTx(tx.sourceTxId || "");
+  body.innerHTML = `
+    <div class="modal-header">
+      <div><p class="modal-kicker">Portfolio</p><h2>Move to Portfolio</h2></div>
+      <button class="modal-close" type="button" data-portfolio-move-close aria-label="Close">×</button>
+    </div>
+    <div class="portfolio-move-card">${transactionRowHtml(tx, { preview: true })}</div>
+    ${others.length === 0
+      ? `<p class="field-hint portfolio-move-empty">Create another portfolio first, then you can move transactions into it.</p>`
+      : `<div class="cold-action-rows">
+          ${others.map((p) => {
+            const duplicate = alreadyHolding.has(p.id);
+            return `
+              <button type="button" class="cold-action-row" data-portfolio-move-to="${p.id}" ${duplicate ? "disabled" : ""}>
+                <span class="cold-action-copy"><strong>${deps.escapeHtml(p.name)}</strong><small>${duplicate ? "Already has this transaction." : "Move this transaction here."}</small></span>
+              </button>`;
+          }).join("")}
+        </div>`}`;
+}
+
+function moveTransaction(txId, destinationId) {
+  const source = activePortfolio();
+  const destination = state.portfolios.find((p) => p.id === destinationId);
+  const index = (source.transactions || []).findIndex((t) => t.id === txId);
+  if (!destination || destination.id === source.id || index < 0) return;
+  const [tx] = source.transactions.splice(index, 1);
+  (destination.transactions ||= []).push(tx);
+  selectedTxIds.delete(txId);
+  saveState();
+  closeMoveSheet();
+  render();
+  deps.showToast?.(`Moved to ${destination.name}.`);
+}
+
 /// An in-app confirm. Every native `window.confirm` reads as "localhost says", which is the
 /// BROWSER asking rather than the app - and on a page people are trusting with money that is
 /// exactly the wrong voice. Resolves true when the destructive button is pressed.
@@ -838,16 +999,30 @@ function settleNamePrompt(value) {
   resolve?.(value);
 }
 
-function openAddressImport() {
+/** The wallet's own chatting address, when one is loaded. */
+function chattingAddress() {
+  const address = String(deps?.engine?.address || "").trim();
+  return address.startsWith("kaspa:") ? address : null;
+}
+
+/// `presetAddress` is "Add Chatting Address": no field to fill - the import of that address
+/// starts as the sheet opens, and the sheet shows only its progress (iOS 61eff0f).
+function openAddressImport(presetAddress = null) {
   addressImport = {
     busy: false, progress: "", input: "",
     resolving: false, resolvedAddress: null, resolvedDomain: null, notFound: false,
+    preset: presetAddress || null,
   };
   knsResolveSeq += 1; // abandon any lookup left over from a previous open
   modalsEl.querySelector("[data-portfolio-import-address]").value = "";
+  const preset = Boolean(presetAddress);
+  const title = modalsEl.querySelector("[data-portfolio-import-title]");
+  if (title) title.textContent = preset ? "Add Chatting Address" : "Add Kaspa Address";
+  modalsEl.querySelectorAll("[data-portfolio-import-manual]").forEach((el) => { el.hidden = preset; });
   setImportProgress("");
   syncImportModal();
   modalsEl.querySelector("[data-portfolio-import-modal]").hidden = false;
+  if (preset) runAddressImport(presetAddress);
 }
 
 /// The two header buttons open overlays rather than dropdowns.
@@ -862,6 +1037,11 @@ function renderPortfolioActionSheet() {
     ? [
         { action: "tx", title: "Add Transaction", subtitle: "Record a buy or a sell by hand." },
         { action: "address", title: "Add Kaspa Address", subtitle: "Track an address's balance as part of this portfolio." },
+        // One click for the address KaChat itself spends from: its buys and sells, and every
+        // network fee it paid (messages, handshakes, payments) for the Fees Spent card.
+        ...(chattingAddress() ? [
+          { action: "chatting", title: "Add Chatting Address", subtitle: "Your chatting address's buys and sells, and every network fee it has paid." },
+        ] : []),
       ]
     : [
         { action: "import", title: "Import CSV", subtitle: "Read transactions in from a file." },
@@ -1145,6 +1325,64 @@ function hashrateCardHtml() {
     </button>`;
 }
 
+const REALIZED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/><path d="m9 12 2 2 4-4"/></svg>`;
+const FUEL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 22h12"/><path d="M4 9h10"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 4 0V9.83a2 2 0 0 0-.59-1.42L18 5"/></svg>`;
+
+/** Fees are fractions of a KAS - up to eight places, so a month of messages doesn't read 0. */
+function fmtFeeKas(value) {
+  return `${(Number(value) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 8 })} KAS`;
+}
+
+/// Two cards under Network Hashrate, for the active portfolio (iOS 61eff0f):
+/// - Realized P&L <year>: this calendar year's sells against the cost of the KAS they sold,
+///   oldest buys first (FIFO, computeRealizedPL). Masked with the eye.
+/// - Fees Spent: network fees the portfolio's imported addresses paid, in KAS and in the app
+///   currency at each day's price. Fed by Add Chatting Address (and Add Kaspa Address).
+function insightCardsHtml(portfolio) {
+  const pl = computeRealizedPL(portfolio.transactions || [], new Date().getFullYear());
+  const notes = [];
+  if (pl.sellCount === 0) {
+    notes.push("No sells yet this year.");
+  } else {
+    notes.push(`Sells: ${pl.sellCount}. Oldest buys first (FIFO).`);
+    if (pl.uncoveredKas > 0) {
+      notes.push(`${amountsHidden ? MASKED_AMOUNT : fmtKas(pl.uncoveredKas)} sold with no buy on record, counted at zero cost.`);
+    }
+  }
+  if (pl.pendingPriceCount > 0) notes.push("Some prices are still loading.");
+  const plText = amountsHidden ? MASKED_AMOUNT : `${pl.amount > 0 ? "+" : ""}${fmtFiat(pl.amount)}`;
+  const plClass = amountsHidden || pl.sellCount === 0 ? "" : (pl.amount >= 0 ? "gain" : "loss");
+
+  const fee = computeFeeSummary(portfolio.id);
+  const feeBody = fee.count === 0
+    ? `<span class="portfolio-hashrate-value">—</span>
+       <span class="portfolio-insight-note">Add your chatting address with + to count the network fees it has paid.</span>`
+    : `<span class="portfolio-hashrate-value">${amountsHidden ? MASKED_AMOUNT : fmtFeeKas(fee.totalKas)}</span>
+       <span class="portfolio-insight-sub">${fmtFiat(fee.totalFiat)}</span>
+       <span class="portfolio-insight-note">${fee.unpricedCount > 0
+         ? `Transactions: ${fee.count}. Some prices are still loading.`
+         : `Transactions: ${fee.count}, at each day's price.`}</span>`;
+
+  return `
+    <div class="portfolio-insights">
+      <div class="portfolio-hashrate-card portfolio-insight-card">
+        <span class="portfolio-hashrate-ico" aria-hidden="true">${REALIZED_SVG}</span>
+        <span class="portfolio-hashrate-copy">
+          <span class="portfolio-hashrate-label">Realized P&amp;L ${pl.year}</span>
+          <span class="portfolio-hashrate-value ${plClass}">${plText}</span>
+          <span class="portfolio-insight-note">${notes.map((n) => deps.escapeHtml(n)).join(" ")}</span>
+        </span>
+      </div>
+      <div class="portfolio-hashrate-card portfolio-insight-card">
+        <span class="portfolio-hashrate-ico" aria-hidden="true">${FUEL_SVG}</span>
+        <span class="portfolio-hashrate-copy">
+          <span class="portfolio-hashrate-label">Fees Spent</span>
+          ${feeBody}
+        </span>
+      </div>
+    </div>`;
+}
+
 /// Full-screen network hashrate screen: the chart, what a block currently pays, an estimate of
 /// what a given hashrate earns per day, and what the number actually means (iOS's hashrate view).
 function hashrateViewHtml() {
@@ -1385,6 +1623,8 @@ function render() {
 
     ${hashrateCardHtml()}
 
+    ${insightCardsHtml(portfolio)}
+
     <div class="profile-card">
       <div class="portfolio-tx-header">
         <p class="profile-card-label">Transactions</p>
@@ -1509,6 +1749,12 @@ function trimmedNumber(value) {
 function setEditorType(type) {
   modalsEl.querySelector("[data-portfolio-editor-type]").value = type;
   modalsEl.querySelectorAll("[data-portfolio-editor-type-option]").forEach((b) => b.classList.toggle("active", b.dataset.portfolioEditorTypeOption === type));
+  // A transfer needs only its amount: no fee, and a footer saying what it means (iOS 7423330).
+  const isTransfer = type === "transfer";
+  const feeField = modalsEl.querySelector("[data-portfolio-editor-fee-field]");
+  if (feeField) feeField.hidden = isTransfer;
+  const note = modalsEl.querySelector("[data-portfolio-editor-transfer-note]");
+  if (note) note.hidden = !isTransfer;
   updateEditorHint();
 }
 function openTxEditor(txId) {
@@ -1530,7 +1776,7 @@ function openTxEditor(txId) {
   modalsEl.querySelectorAll("[data-portfolio-editor-symbol]").forEach((el) => { el.textContent = currencySymbol(); });
   modalsEl.querySelector("[data-portfolio-editor-delete]").hidden = !tx;
   modalsEl.querySelector("[data-portfolio-editor-save]").textContent = tx ? "Save" : "Add";
-  setEditorType(tx?.type === "sell" ? "sell" : "buy");
+  setEditorType(tx ? txKind(tx) : "buy");
   backdrop.hidden = false;
 }
 
@@ -1545,17 +1791,21 @@ function editorValues() {
   const quantity = num("[data-portfolio-editor-amount]");
   const pricePerCoin = num("[data-portfolio-editor-price]");
   const fee = num("[data-portfolio-editor-fee]") || 0;
-  const isBuy = modalsEl.querySelector("[data-portfolio-editor-type]")?.value !== "sell";
-  const valid = quantity > 0 && pricePerCoin > 0;
-  const total = valid ? (isBuy ? quantity * pricePerCoin + fee : quantity * pricePerCoin - fee) : null;
-  return { quantity, pricePerCoin, fee, isBuy, valid, total };
+  const rawType = modalsEl.querySelector("[data-portfolio-editor-type]")?.value;
+  const type = rawType === "sell" || rawType === "transfer" ? rawType : "buy";
+  // A transfer only needs its amount: it has no price that counts for anything.
+  const valid = quantity > 0 && (type === "transfer" || pricePerCoin > 0);
+  const base = quantity > 0 && pricePerCoin > 0 ? quantity * pricePerCoin : null;
+  // A transfer's total is what the KAS was worth when it moved - a note on the row, counted nowhere.
+  const total = base === null ? null : type === "buy" ? base + fee : type === "sell" ? base - fee : base;
+  return { quantity, pricePerCoin, fee, type, valid, total };
 }
 function updateEditorHint() {
   const v = editorValues();
   const label = modalsEl.querySelector("[data-portfolio-editor-total-label]");
   const total = modalsEl.querySelector("[data-portfolio-editor-total]");
   const save = modalsEl.querySelector("[data-portfolio-editor-save]");
-  if (label) label.textContent = v.isBuy ? "Total Spent" : "Total Received";
+  if (label) label.textContent = v.type === "buy" ? "Total Spent" : v.type === "sell" ? "Total Received" : "Value at the Time";
   if (total) total.textContent = fmtFiat(v.total ?? 0);
   if (save) save.disabled = !v.valid;
 }
@@ -1564,8 +1814,9 @@ function saveTxEditor() {
   const v = editorValues();
   if (!v.valid) return;
   const amount = v.quantity;
-  const type = v.isBuy ? "buy" : "sell";
-  const fiatValue = v.total;
+  const type = v.type;
+  // A transfer with no price is still a complete record.
+  const fiatValue = v.total ?? 0;
   const dateRaw = modalsEl.querySelector("[data-portfolio-editor-date]")?.value;
   const timestamp = dateRaw ? new Date(dateRaw).getTime() : Date.now();
   const notes = modalsEl.querySelector("[data-portfolio-editor-notes]")?.value?.trim() || null;
@@ -1591,20 +1842,47 @@ function saveTxEditor() {
 // CSV import/export (CoinMarketCap "Transaction History" format — matches iOS)
 // ---------------------------------------------------------------------------
 
-/** Splits on commas outside double quotes, unescapes "" back to " within a quoted field. */
-function parseCsvLine(line) {
-  const fields = [];
+/** Splits a CSV document into records of fields (RFC 4180, iOS parseCsvRecords): commas and
+ *  line breaks inside double quotes belong to the field, "" inside quotes is one literal quote,
+ *  and a line break outside quotes - LF, CRLF or CR - ends the record. Blank lines yield no
+ *  record. Whole records rather than lines, because a note can hold line breaks, which the
+ *  export writes inside its quotes - splitting the file on every newline first cut such a row
+ *  in two. */
+function parseCsvRecords(content) {
+  const text = String(content ?? "");
+  const records = [];
+  let fields = [];
   let current = "";
   let inQuotes = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const c = line[i];
-    if (inQuotes && c === '"' && line[i + 1] === '"') { current += '"'; i += 1; }
-    else if (c === '"') inQuotes = !inQuotes;
-    else if (c === "," && !inQuotes) { fields.push(current); current = ""; }
-    else current += c;
+  const endRecord = () => {
+    fields.push(current);
+    if (!(fields.length === 1 && !fields[0].trim())) records.push(fields);
+    fields = [];
+    current = "";
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { current += '"'; i += 1; }
+        else inQuotes = false;
+      } else {
+        current += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      fields.push(current);
+      current = "";
+    } else if (c === "\r" || c === "\n") {
+      if (c === "\r" && text[i + 1] === "\n") i += 1; // CRLF is one line ending
+      endRecord();
+    } else {
+      current += c;
+    }
   }
-  fields.push(current);
-  return fields;
+  if (current || fields.length) endRecord();
+  return records;
 }
 
 function parseLenientDouble(raw) {
@@ -1637,7 +1915,7 @@ function buildCsvExport() {
     const fiat = Number(tx.fiatValue) || 0;
     const perKas = amount !== 0 ? fiat / amount : 0;
     const notes = String(tx.notes || "").replace(/"/g, '""');
-    csv += `"${date}","KAS","${tx.type === "sell" ? "sell" : "buy"}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
+    csv += `"${date}","KAS","${txKind(tx)}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
   }
   return { filename: `kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`, csv };
 }
@@ -1680,9 +1958,9 @@ function importFromNextcloud() {
 /** Same replace-by-timestamp dedup as iOS: a row whose timestamp exactly matches an existing
  *  transaction in the active portfolio replaces it in place rather than piling up copies. */
 function importCsvText(content) {
-  const lines = content.split(/\r?\n/);
-  if (!lines.length) return 0;
-  const header = lines.shift();
+  const records = parseCsvRecords(content);
+  if (!records.length) return 0;
+  const header = records.shift().join(",");
   const offsetMinutes = parseHeaderUtcOffsetMinutes(header);
 
   const portfolio = activePortfolio();
@@ -1691,13 +1969,13 @@ function importCsvText(content) {
   portfolio.transactions.forEach((tx, index) => indexByTimestamp.set(tx.timestamp, index));
 
   let imported = 0;
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const fields = parseCsvLine(line);
+  for (const fields of records) {
     if (fields.length < 6) continue;
     if (String(fields[1]).trim().toUpperCase() !== "KAS") continue;
-    const type = String(fields[2]).trim().toLowerCase();
-    if (type !== "buy" && type !== "sell") continue;
+    const typeRaw = String(fields[2]).trim().toLowerCase();
+    // CoinMarketCap writes "Transfer In" / "Transfer Out"; both are a transfer here.
+    const type = typeRaw === "buy" || typeRaw === "sell" ? typeRaw : typeRaw.startsWith("transfer") ? "transfer" : null;
+    if (!type) continue;
     const dateMatch = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(fields[0]).trim());
     if (!dateMatch) continue;
     const [, y, mo, d, h, mi, s] = dateMatch.map(Number);
@@ -1710,7 +1988,11 @@ function importCsvText(content) {
     let fiatValue = totalValue;
     if (fields.length > 7 && String(fields[7]).trim().toUpperCase() === "USD") {
       const fee = parseLenientDouble(fields[6]);
-      if (fee !== null) fiatValue = type === "buy" ? fiatValue + fee : Math.max(fiatValue - fee, 0);
+      if (fee !== null) {
+        if (type === "buy") fiatValue += fee;
+        else if (type === "sell") fiatValue = Math.max(fiatValue - fee, 0);
+        // transfer: no fee - it counts for nothing anyway.
+      }
     }
     const notes = fields.length > 8 && fields[8] ? fields[8] : null;
 
@@ -1725,7 +2007,13 @@ function importCsvText(content) {
     imported += 1;
   }
 
-  if (imported > 0) { saveState(); render(); }
+  if (imported > 0) {
+    saveState();
+    render();
+    // A re-imported export can carry rows whose price was still loading when it was written -
+    // price them by their date like any other.
+    startPriceBackfillIfNeeded();
+  }
   return imported;
 }
 
@@ -1758,6 +2046,29 @@ function txDirectionForAddress(tx, address) {
   if (weAreSender && totalToOthers > 0n) return { isOutgoing: true, amountSompi: haveRecipient ? recipientAmount : totalToOthers };
   if (!weAreSender && totalToUs > 0n) return { isOutgoing: false, amountSompi: totalToUs };
   return null;
+}
+
+/** The network fee `address` paid on `tx`, in sompi (iOS feeSompi(of:paidBy:)): everything its
+ *  inputs spent minus everything its outputs paid out. Only for a transaction `address` sent -
+ *  one of its coins is an input - and only when every input's amount is known (the REST API
+ *  resolves them with resolve_previous_outpoints), since a missing amount would make any
+ *  difference a guess. Null otherwise, or when nothing was paid. The whole fee goes to
+ *  `address`: KaChat's sends spend one address's coins. */
+function feeSompiPaidBy(tx, address) {
+  const inputs = tx.inputs || [];
+  if (!inputs.some((input) => input.previous_outpoint_address === address)) return null;
+  let spent = 0n;
+  for (const input of inputs) {
+    const amount = input.previous_outpoint_amount;
+    if (amount === null || amount === undefined || amount === "") return null;
+    try { spent += BigInt(amount); } catch { return null; }
+  }
+  let paidOut = 0n;
+  for (const output of tx.outputs || []) {
+    try { paidOut += BigInt(output.amount || 0); } catch { return null; }
+  }
+  if (spent <= paidOut) return null;
+  return Number(spent - paidOut);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2004,14 +2315,28 @@ async function runAddressImport(addressRaw) {
         if (tx.sourceAddress === address && tx.sourceTxId) existingTxIds.add(tx.sourceTxId);
       }
     }
+    // Fees are deduped per portfolio by txid (iOS existingFeeTxIds): the portfolio the import
+    // started in, which is also where its rows and fees land.
+    const targetPortfolioId = activePortfolio().id;
+    const existingFeeTxIds = new Set(fees.filter((f) => f.portfolioId === targetPortfolioId).map((f) => f.txId));
 
     setImportProgress("Fetching transactions…");
     const historyResult = await fetchTransactionsResumable(address, setImportProgress);
 
     const candidates = [];
+    const feeCandidates = [];
     for (const tx of historyResult.transactions) {
       const txId = tx.transaction_id;
       const blockTime = Number(tx.block_time);
+      // Fees first and on their own terms: a message to yourself has no buy or sell in it
+      // (no direction) but it still paid a fee.
+      if (txId && !existingFeeTxIds.has(txId) && Number.isFinite(blockTime) && blockTime > 0) {
+        const feeSompi = feeSompiPaidBy(tx, address);
+        if (feeSompi !== null) {
+          feeCandidates.push({ txId, sompi: feeSompi, timestamp: blockTime, day: utcDayKey(blockTime) });
+          existingFeeTxIds.add(txId);
+        }
+      }
       if (!txId || existingTxIds.has(txId) || !Number.isFinite(blockTime) || blockTime <= 0) continue;
       const direction = txDirectionForAddress(tx, address);
       if (!direction) continue;
@@ -2023,7 +2348,7 @@ async function runAddressImport(addressRaw) {
         day: utcDayKey(blockTime),
       });
     }
-    if (!candidates.length) {
+    if (!candidates.length && !feeCandidates.length) {
       setImportProgress(historyResult.complete
         ? "No new transactions found for this address."
         : "Couldn't fetch this address's transactions. Check your connection and try again.");
@@ -2031,12 +2356,14 @@ async function runAddressImport(addressRaw) {
     }
 
     // Prices the day cache already holds are applied for free (no network call at all); every
-    // other row lands with the pending sentinel and is filled in by the backfill below.
+    // other row lands with the pending sentinel and is filled in by the backfill below. Fees are
+    // priced in the same batch as the rows.
     const currency = currencyCode();
-    const uniqueDays = [...new Set(candidates.map((c) => c.day))];
+    const uniqueDays = [...new Set([...candidates.map((c) => c.day), ...feeCandidates.map((c) => c.day)])];
     const priceByDay = peekDailyPrices(uniqueDays, currency);
 
-    const portfolio = activePortfolio();
+    // The portfolio the import started in - unless it was deleted meanwhile.
+    const portfolio = state.portfolios.find((p) => p.id === targetPortfolioId) || activePortfolio();
     portfolio.transactions ||= [];
     let missingPriceCount = 0;
     for (const c of candidates) {
@@ -2054,13 +2381,26 @@ async function runAddressImport(addressRaw) {
         sourceTxId: c.txId,
       });
     }
+    for (const c of feeCandidates) {
+      const dayPrice = priceByDay[c.day];
+      fees.push({
+        txId: c.txId,
+        portfolioId: portfolio.id,
+        sourceAddress: address,
+        amountSompi: c.sompi,
+        timestamp: c.timestamp,
+        fiatValue: Number.isFinite(dayPrice) ? (c.sompi / 1e8) * dayPrice : null,
+      });
+    }
     // Saved BEFORE any pricing network call — this is the whole point: the ledger survives a
     // mid-import rate limit, whatever CoinGecko does next.
     saveState();
+    if (feeCandidates.length) saveFees();
     render();
 
     setImportProgress(
       `Imported ${candidates.length} transaction${candidates.length === 1 ? "" : "s"}.`
+      + (feeCandidates.length ? ` Network fees counted: ${feeCandidates.length}.` : "")
       + (historyResult.complete ? "" : " Some pages couldn't be fetched, so this is partial - run it again later to pick up the rest.")
       + (missingPriceCount ? ` Prices for ${missingPriceCount} of them are still loading and will fill in automatically.` : ""),
     );
@@ -2077,14 +2417,25 @@ async function runAddressImport(addressRaw) {
 // Background price backfill (iOS PortfolioViewModel.startPriceBackfillIfNeeded)
 // ---------------------------------------------------------------------------
 
+/** Any row still waiting on its price - from an address import, or a CSV re-import of one (which
+ *  carries the marker but not the on-chain source). Only the date is needed (iOS 98f5009). */
 function pendingPriceRows() {
   const rows = [];
   for (const p of state.portfolios) {
     for (const tx of p.transactions || []) {
-      if (isPricePending(tx.notes) && tx.sourceTxId) rows.push(tx);
+      if (isPricePending(tx.notes)) rows.push(tx);
     }
   }
   return rows;
+}
+
+/** Fee records whose day's price is not known yet. */
+function pendingPriceFees() {
+  return fees.filter((fee) => !Number.isFinite(fee.fiatValue));
+}
+
+function hasPendingPrices() {
+  return pendingPriceRows().length > 0 || pendingPriceFees().length > 0;
 }
 
 /** Prices auto-imported rows the import itself couldn't price. Runs a few passes on a growing
@@ -2094,13 +2445,13 @@ function pendingPriceRows() {
  *  re-triggering while it runs is a no-op (the running loop picks up any newly imported rows on
  *  its next pass). */
 function startPriceBackfillIfNeeded() {
-  if (priceBackfillTimer || !pendingPriceRows().length) return;
+  if (priceBackfillTimer || !hasPendingPrices()) return;
   const accountKey = deps.accountScopedKey(PORTFOLIO_KEY);
   priceBackfillTimer = (async () => {
     for (const delay of [0, 30_000, 120_000, 300_000]) {
       if (delay > 0) await sleep(delay);
       // An account switch reloaded `state` out from under this loop — its rows are gone.
-      if (deps.accountScopedKey(PORTFOLIO_KEY) !== accountKey || !pendingPriceRows().length) break;
+      if (deps.accountScopedKey(PORTFOLIO_KEY) !== accountKey || !hasPendingPrices()) break;
       await runPriceBackfillPass(accountKey);
     }
     priceBackfillTimer = null;
@@ -2110,8 +2461,12 @@ function startPriceBackfillIfNeeded() {
 async function runPriceBackfillPass(accountKey) {
   const currency = currencyCode();
   const pending = pendingPriceRows();
-  if (!pending.length) return;
-  const days = [...new Set(pending.map((tx) => utcDayKey(tx.timestamp)))];
+  const pendingFees = pendingPriceFees();
+  if (!pending.length && !pendingFees.length) return;
+  const days = [...new Set([
+    ...pending.map((tx) => utcDayKey(tx.timestamp)),
+    ...pendingFees.map((fee) => utcDayKey(fee.timestamp)),
+  ])];
 
   const prices = await resolveDailyPrices(days, currency);
   // Days the batched range couldn't cover (older than CoinGecko's keyless 365-day window, or
@@ -2129,7 +2484,7 @@ async function runPriceBackfillPass(accountKey) {
   let changed = false;
   for (const p of state.portfolios) {
     for (const tx of p.transactions || []) {
-      if (!isPricePending(tx.notes) || !tx.sourceTxId) continue;
+      if (!isPricePending(tx.notes)) continue;
       const dayPrice = prices[utcDayKey(tx.timestamp)];
       if (!Number.isFinite(dayPrice)) continue;
       tx.fiatValue = (Number(tx.amountKas) || 0) * dayPrice;
@@ -2137,7 +2492,17 @@ async function runPriceBackfillPass(accountKey) {
       changed = true;
     }
   }
-  if (changed) { saveState(); render(); }
+  if (changed) saveState();
+  let feesChanged = false;
+  for (const fee of fees) {
+    if (Number.isFinite(fee.fiatValue)) continue;
+    const dayPrice = prices[utcDayKey(fee.timestamp)];
+    if (!Number.isFinite(dayPrice)) continue;
+    fee.fiatValue = ((Number(fee.amountSompi) || 0) / 1e8) * dayPrice;
+    feesChanged = true;
+  }
+  if (feesChanged) saveFees();
+  if (changed || feesChanged) render();
 }
 
 // ---------------------------------------------------------------------------
@@ -2157,7 +2522,9 @@ function buildModals() {
           <div class="settings-segmented full" role="group" aria-label="Type">
             <button type="button" class="settings-segmented-option active" data-portfolio-editor-type-option="buy">Buy</button>
             <button type="button" class="settings-segmented-option" data-portfolio-editor-type-option="sell">Sell</button>
+            <button type="button" class="settings-segmented-option" data-portfolio-editor-type-option="transfer">Transfer</button>
           </div>
+          <p class="field-hint" data-portfolio-editor-transfer-note hidden>KAS moved between your own addresses - sent away and brought back, or wallet to wallet. It doesn't change your holdings, cost or profit.</p>
           <input type="hidden" data-portfolio-editor-type value="buy" />
           <label class="portfolio-editor-field">
             <span>Quantity</span>
@@ -2167,7 +2534,7 @@ function buildModals() {
             <span>Price Per Coin</span>
             <span class="portfolio-editor-unit-row"><em data-portfolio-editor-symbol>$</em><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-price /></span>
           </label>
-          <label class="portfolio-editor-field">
+          <label class="portfolio-editor-field" data-portfolio-editor-fee-field>
             <span>Fee (optional)</span>
             <span class="portfolio-editor-unit-row"><em data-portfolio-editor-symbol>$</em><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-fee /></span>
           </label>
@@ -2205,6 +2572,10 @@ function buildModals() {
       <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Portfolio options" data-portfolio-card-body></div>
     </div>
 
+    <div class="modal-backdrop" data-portfolio-move-modal hidden>
+      <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Move to Portfolio" data-portfolio-move-body></div>
+    </div>
+
     <div class="modal-backdrop" data-portfolio-reorder-modal hidden>
       <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Reorder Portfolios" data-portfolio-reorder-body></div>
     </div>
@@ -2212,23 +2583,23 @@ function buildModals() {
     <div class="modal-backdrop" data-portfolio-import-modal hidden>
       <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Add Kaspa Address">
         <div class="modal-header">
-          <div><p class="modal-kicker">Portfolio</p><h2>Add Kaspa Address</h2></div>
+          <div><p class="modal-kicker">Portfolio</p><h2 data-portfolio-import-title>Add Kaspa Address</h2></div>
           <button class="modal-close" type="button" data-portfolio-import-close aria-label="Close">×</button>
         </div>
         <div class="portfolio-editor-body">
-          <p class="portfolio-import-note">Enter a Kaspa address or a KNS domain like name.kas. Imports that address's on-chain history: every received transaction becomes a buy and every sent one a sell, priced at that day's KAS price. Re-running later only adds new activity.</p>
-          <label class="portfolio-editor-field">
+          <p class="portfolio-import-note" data-portfolio-import-manual>Enter a Kaspa address or a KNS domain like name.kas. Imports that address's on-chain history: every received transaction becomes a buy and every sent one a sell, priced at that day's KAS price. Re-running later only adds new activity.</p>
+          <label class="portfolio-editor-field" data-portfolio-import-manual>
             <span>Kaspa Address or KNS Domain</span>
             <input type="text" placeholder="kaspa:qr… or domain" data-portfolio-import-address spellcheck="false" autocomplete="off" autocapitalize="off" />
           </label>
-          <p class="portfolio-editor-hint" data-portfolio-import-status></p>
-          <div class="portfolio-tx-header-actions">
+          <p class="portfolio-editor-hint" data-portfolio-import-status data-portfolio-import-manual></p>
+          <div class="portfolio-tx-header-actions" data-portfolio-import-manual>
             <button class="cold-inline-link" type="button" data-portfolio-import-paste>Paste</button>
             <button class="cold-inline-link" type="button" data-portfolio-import-scan>Scan QR</button>
           </div>
           <p class="portfolio-import-progress" data-portfolio-import-progress></p>
         </div>
-        <div class="modal-actions">
+        <div class="modal-actions" data-portfolio-import-manual>
           <button class="primary-button" type="button" data-portfolio-import-start>Import</button>
         </div>
       </div>
@@ -2260,10 +2631,19 @@ function buildModals() {
       const which = portfolioAction.dataset.portfolioAction;
       if (which === "tx") openTxEditor(null);
       else if (which === "address") openAddressImport();
+      else if (which === "chatting") { const own = chattingAddress(); if (own) openAddressImport(own); }
       else if (which === "export") exportCsv();
       else if (which === "import") modalsEl.querySelector("[data-portfolio-csv-input]")?.click();
       else if (which === "nc-export") exportToNextcloud();
       else if (which === "nc-import") importFromNextcloud();
+      return;
+    }
+
+    // --- Move to Portfolio sheet ---
+    if (event.target.closest("[data-portfolio-move-close]")) { closeMoveSheet(); return; }
+    const moveTo = event.target.closest("[data-portfolio-move-to]");
+    if (moveTo) {
+      if (!moveTo.disabled && movingTxId) moveTransaction(movingTxId, moveTo.dataset.portfolioMoveTo);
       return;
     }
 
@@ -2306,6 +2686,7 @@ function buildModals() {
         state.portfolios = state.portfolios.filter((p) => p.id !== portfolio.id);
         if (state.activeId === portfolio.id) state.activeId = state.portfolios[0].id;
         saveState();
+        forgetPortfolioFees(portfolio.id);
       }
       modalsEl.querySelector("[data-portfolio-card-modal]").hidden = true;
       cardModalId = null;
@@ -2557,7 +2938,7 @@ export function addTransactionToPortfolio(portfolioId, {
   const portfolio = state.portfolios.find((p) => p.id === portfolioId) || activePortfolio();
   (portfolio.transactions ||= []).push({
     id: nowId(),
-    type: type === "sell" ? "sell" : "buy",
+    type: type === "sell" || type === "transfer" ? type : "buy",
     amountKas: Number(amountKas) || 0,
     fiatValue: Number(fiatValue) || 0,
     notes: notes || null,
@@ -2584,6 +2965,7 @@ export function refreshPortfolio() {
 
 export function resetPortfolioForAccount() {
   closeActiveScanner(); // an account switch must never leave a camera running
+  closeMoveSheet();     // its row belonged to the previous account
   loadState();
   ensureDefaultPortfolio();
   render();
@@ -2826,9 +3208,50 @@ export function initPortfolio(dependencies) {
     }
 
     const txEdit = event.target.closest("[data-portfolio-tx-edit]");
-    if (txEdit) { openTxEditor(txEdit.dataset.portfolioTxEdit); return; }
+    if (txEdit) {
+      // The click that ends a long press already opened the move sheet - it must not also open
+      // the editor underneath it.
+      if (suppressTxClick) { suppressTxClick = false; return; }
+      openTxEditor(txEdit.dataset.portfolioTxEdit);
+      return;
+    }
 
     closeCardMenus();
+  });
+
+  // Hold a transaction row (~0.45s, iOS's minimumDuration) or right-click it: move it to another
+  // portfolio. Only on rows that open the editor - in Select mode the row belongs to selection,
+  // and neither gesture is attached (iOS TapToEdit). A press that drifts is a scroll, not a hold.
+  let holdTimer = 0;
+  let holdStart = null;
+  let suppressTxClick = false;
+  const cancelHold = () => { if (holdTimer) { window.clearTimeout(holdTimer); holdTimer = 0; } holdStart = null; };
+  rootEl?.addEventListener("pointerdown", (event) => {
+    cancelHold();
+    suppressTxClick = false;
+    if (event.button !== 0) return;
+    const row = event.target.closest("[data-portfolio-tx-edit]");
+    if (!row || event.target.closest("[data-portfolio-tx-delete]")) return;
+    const txId = row.dataset.portfolioTxEdit;
+    holdStart = { x: event.clientX, y: event.clientY };
+    holdTimer = window.setTimeout(() => {
+      holdTimer = 0;
+      holdStart = null;
+      suppressTxClick = true;
+      openMoveSheet(txId);
+    }, 450);
+  });
+  rootEl?.addEventListener("pointermove", (event) => {
+    if (!holdStart) return;
+    if (Math.abs(event.clientX - holdStart.x) > 8 || Math.abs(event.clientY - holdStart.y) > 8) cancelHold();
+  });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((type) => rootEl?.addEventListener(type, cancelHold));
+  rootEl?.addEventListener("contextmenu", (event) => {
+    const row = event.target.closest("[data-portfolio-tx-edit]");
+    if (!row) return;
+    event.preventDefault();
+    cancelHold();
+    openMoveSheet(row.dataset.portfolioTxEdit);
   });
 
   render();

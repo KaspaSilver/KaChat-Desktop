@@ -2382,15 +2382,17 @@
           <span class="spending-detail-balance-value" data-manage-address-balance>-- KAS</span>
         </div>
 
-        <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Manage address view">
-          <button type="button" class="settings-segmented-option active" data-manage-address-tab="transactions">Transaction History</button>
-          <button type="button" class="settings-segmented-option" data-manage-address-tab="utxos">UTXOs</button>
-        </div>
-
         <!-- iOS: one labelled button instead of unlabelled glyphs in the bar. Opens the same
              Address Actions sheet as Manage Addresses: View Private Key / View Public Key /
              View in Explorer, each saying what it does. -->
         <button type="button" class="address-actions-pill" data-open-address-actions>Address Actions</button>
+
+        <!-- Right above what it switches, on the app's underline tab bar (iOS b96d727, 718b88c). -->
+        <nav class="domains-tabs address-tabs" aria-label="Chatting address view">
+          <button type="button" class="domains-tab active" data-manage-address-tab="transactions">History</button>
+          <button type="button" class="domains-tab" data-manage-address-tab="utxos">UTXOs</button>
+          <button type="button" class="domains-tab" data-manage-address-tab="kachat">.kachat</button>
+        </nav>
 
         <div class="manage-address-body">
           <div data-manage-address-panel="transactions">
@@ -2398,6 +2400,9 @@
           </div>
           <div data-manage-address-panel="utxos" hidden>
             <div class="manage-address-list" data-manage-address-utxos></div>
+          </div>
+          <div data-manage-address-panel="kachat" hidden>
+            <div class="manage-address-list" data-kachat-address-domains></div>
           </div>
         </div>
 
@@ -2557,12 +2562,13 @@
         <span class="spending-detail-balance-address" data-spending-detail-address></span>
       </div>
 
-      <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Spending address view">
-        <button type="button" class="settings-segmented-option active" data-spending-detail-tab="transactions">History</button>
-        <button type="button" class="settings-segmented-option" data-spending-detail-tab="utxos">UTXOs</button>
-        <button type="button" class="settings-segmented-option" data-spending-detail-tab="kns">KNS Domains</button>
-      </div>
       <button type="button" class="address-actions-pill" data-spending-address-actions>Address Actions</button>
+      <!-- History / UTXOs / .kachat on the app's underline tab bar (iOS b96d727, 718b88c). -->
+      <nav class="domains-tabs address-tabs" aria-label="Spending address view">
+        <button type="button" class="domains-tab active" data-spending-detail-tab="transactions">History</button>
+        <button type="button" class="domains-tab" data-spending-detail-tab="utxos">UTXOs</button>
+        <button type="button" class="domains-tab" data-spending-detail-tab="kachat">.kachat</button>
+      </nav>
 
       <div class="manage-address-body">
         <div data-spending-detail-panel="transactions">
@@ -2571,8 +2577,8 @@
         <div data-spending-detail-panel="utxos" hidden>
           <div class="manage-address-list" data-spending-detail-utxos></div>
         </div>
-        <div data-spending-detail-panel="kns" hidden>
-          <div class="manage-address-list" data-spending-detail-kns></div>
+        <div data-spending-detail-panel="kachat" hidden>
+          <div class="manage-address-list" data-kachat-address-domains></div>
         </div>
       </div>
 

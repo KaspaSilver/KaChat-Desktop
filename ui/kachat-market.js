@@ -722,3 +722,14 @@ export function showKachatMarket() {
 export function hideKachatMarket() {
   closeLayersOwnedBy("market");
 }
+
+/** The ".kachat" tab of every screen that shows an address's history - Manage Addresses, Cold
+ *  Storage and the chatting address (iOS KachatAddressDomainsList): the .kachat names that
+ *  address holds. It replaced the KNS Domains tab, and is empty until .kachat names launch. */
+export function kachatAddressDomainsHtml() {
+  return `<div class="kachat-address-domains">
+    <span class="kachat-address-domains-mark" aria-hidden="true">${KACHAT_WORDMARK_SVG}</span>
+    <strong>No .kachat names on this address</strong>
+    <p>Names this address claims or buys show here once .kachat names launch.</p>
+  </div>`;
+}

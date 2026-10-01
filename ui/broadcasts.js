@@ -988,6 +988,18 @@ function translationKeyFor(m) {
   const text = translatableText(m);
   return `publicchat:${m.txId || m.id || ""}:${text.length}:${text.slice(0, 64)}`;
 }
+function messageTimeLineText(ms) {
+  const date = new Date(ms);
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return time;
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const day = date.toDateString() === yesterday.toDateString()
+    ? "Yesterday"
+    : date.toLocaleDateString([], { month: "short", day: "numeric" });
+  return `${day}, ${time}`;
+}
+
 function buildMessageElement(m) {
   const mine = m.senderAddress === deps.engine.address;
   const el = document.createElement("div");
@@ -999,9 +1011,7 @@ function buildMessageElement(m) {
   const sender = document.createElement("strong");
   sender.dataset.broadcastSender = m.senderAddress;
   sender.textContent = senderName(m.senderAddress);
-  const time = document.createElement("span");
-  time.textContent = new Date(m.blockTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  head.append(sender, time);
+  head.append(sender);
   // Your own messages carry the same delivery label as 1:1 and group bubbles, under the
   // message (iOS 21baa36): Sending, Sent, Failed · Tap to retry. Appended below, after the body.
   if (mine && deps.createDeliveryStatusIcon) {
@@ -1127,17 +1137,24 @@ function buildMessageElement(m) {
     }
   }
 
+  // The time under every message, and under your own the delivery status right after it
+  // ("10:57 AM  ✓ Sent"). Rooms are long feeds, so another day's message says which
+  // (iOS MessageTimeLine, showsDay).
+  const timeLine = document.createElement("div");
+  timeLine.className = "broadcast-delivery-row broadcast-time-line";
+  const time = document.createElement("span");
+  time.className = "broadcast-time";
+  time.textContent = messageTimeLineText(Number(m.blockTime) || Date.now());
+  timeLine.append(time);
   if (mine && deps.createDeliveryStatusIcon) {
     const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : "confirmed";
     const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry: () => retryBroadcastMessage(m) });
     if (icon) {
       icon.classList.add("broadcast-delivery-icon");
-      const deliveryRow = document.createElement("div");
-      deliveryRow.className = "broadcast-delivery-row";
-      deliveryRow.append(icon);
-      el.append(deliveryRow);
+      timeLine.append(icon);
     }
   }
+  el.append(timeLine);
   appendReactionUi(el, m);
   // 1:1 parity: right-click opens the reactions + Reply/Copy/Hide menu.
   onContextGesture(el, (event) => {

@@ -9,6 +9,7 @@
 // stays on the KasSigner device.
 
 import { getEndpoint } from "../engine/endpoints.js";
+import { kachatAddressDomainsHtml } from "./kachat-market.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
@@ -56,7 +57,6 @@ let activeAddressIndex = null; // non-null = address screen within the open acco
 let addressTab = "transactions";
 let addrTxs = { state: "idle", txs: [], error: null };
 let addrUtxos = { state: "idle", entries: [], error: null };
-let addrKns = { state: "idle", domains: [], error: null };
 let addrToken = 0;
 // Addresses of the open account that own at least one KNS domain (cached
 // engine lookups) — drives the "Contains domain" row tag and list ordering.
@@ -575,9 +575,9 @@ function renderColdPortfolioDetails() {
       : ""}
     <div class="portfolio-editor-body cold-portfolio-form">
       <div class="settings-segmented full" role="group" aria-label="Type">
-        ${["buy", "sell"].map((kind) => `
+        ${["buy", "sell", "transfer"].map((kind) => `
           <button type="button" class="settings-segmented-option ${d.type === kind ? "active" : ""}" data-cold-pf-type="${kind}">
-            ${kind === "buy" ? "Buy" : "Sell"}
+            ${kind === "buy" ? "Buy" : kind === "sell" ? "Sell" : "Transfer"}
           </button>`).join("")}
       </div>
       <label class="portfolio-editor-field">
@@ -588,7 +588,7 @@ function renderColdPortfolioDetails() {
         <span>Price per KAS (${deps.escapeHtml(currency)})</span>
         <input type="number" step="any" min="0" placeholder="${d.priceLoading ? "Looking up…" : "0"}" data-cold-pf-price value="${deps.escapeHtml(String(d.price ?? ""))}" />
       </label>
-      <div class="portfolio-editor-field cold-portfolio-total"><span>Total</span><span>${deps.escapeHtml(fmtFiatLike(total, currency))}</span></div>
+      <div class="portfolio-editor-field cold-portfolio-total"><span>${d.type === "transfer" ? "Value at the Time" : "Total"}</span><span>${deps.escapeHtml(fmtFiatLike(total, currency))}</span></div>
       <label class="portfolio-editor-field">
         <span>Date</span>
         <input type="datetime-local" data-cold-pf-date value="${deps.escapeHtml(d.dateLocal)}" />
@@ -979,23 +979,6 @@ function addressUtxoRowsHtml(entry) {
   }).join("");
 }
 
-// KNS domains owned by this cold storage address — same assets-by-owner
-// lookup and card style as the spending-address KNS Domains tab, but
-// deliberately LIST-ONLY: a KNS transfer is a commit/reveal inscription pair
-// whose reveal input spends a P2SH redeem script, and the KSPT QR format
-// KaChat and the KasSigner exchange only carries plain single-sig Schnorr
-// inputs — so no send flow is offered here (see the footer note).
-function addressKnsRowsHtml() {
-  if (addrKns.state === "loading" && !addrKns.domains.length) return '<div class="manage-address-empty">Loading…</div>';
-  if (addrKns.state === "error" && !addrKns.domains.length) return `<div class="manage-address-empty">Could not load KNS domains: ${deps.escapeHtml(addrKns.error || "")}</div>`;
-  if (!addrKns.domains.length) return '<div class="manage-address-empty">No KNS domains on this address.</div>';
-  const cards = addrKns.domains.map((domain) => `
-    <div class="kns-domain-card" role="listitem">
-      <strong>${deps.escapeHtml(domain.fullName || "")}</strong>
-    </div>`).join("");
-  return `${cards}<p class="kns-domain-note">Sending domains from a cold storage address requires signing on the KasSigner, which doesn't support inscription transactions yet.</p>`;
-}
-
 function renderAddressScreen() {
   const account = activeAccount();
   const entry = detailEntries.find((e) => e.index === activeAddressIndex);
@@ -1018,13 +1001,14 @@ function renderAddressScreen() {
       <span class="spending-detail-balance-value">${fmtKasExact(balanceSompi)} KAS</span>
       <span class="spending-detail-balance-address">${deps.escapeHtml(shortColdAddress(entry.address))}</span>
     </div>
-    <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Cold address view">
-      <button type="button" class="settings-segmented-option ${addressTab === "transactions" ? "active" : ""}" data-cold-tab="transactions">History</button>
-      <button type="button" class="settings-segmented-option ${addressTab === "utxos" ? "active" : ""}" data-cold-tab="utxos">UTXOs${addrUtxos.state === "ready" ? ` (${addrUtxos.entries.length})` : ""}</button>
-      <button type="button" class="settings-segmented-option ${addressTab === "kns" ? "active" : ""}" data-cold-tab="kns">KNS Domains${addrKns.state === "ready" ? ` (${addrKns.domains.length})` : ""}</button>
-    </div>
+    <!-- History / UTXOs / .kachat on the app's underline tab bar (iOS b96d727, 718b88c). -->
+    <nav class="domains-tabs address-tabs" aria-label="Cold address view">
+      <button type="button" class="domains-tab ${addressTab === "transactions" ? "active" : ""}" data-cold-tab="transactions">History</button>
+      <button type="button" class="domains-tab ${addressTab === "utxos" ? "active" : ""}" data-cold-tab="utxos">UTXOs</button>
+      <button type="button" class="domains-tab ${addressTab === "kachat" ? "active" : ""}" data-cold-tab="kachat">.kachat</button>
+    </nav>
     <div class="manage-address-list cold-address-panel">
-      ${addressTab === "transactions" ? addressTxRowsHtml(entry) : addressTab === "utxos" ? addressUtxoRowsHtml(entry) : addressKnsRowsHtml()}
+      ${addressTab === "transactions" ? addressTxRowsHtml(entry) : addressTab === "utxos" ? addressUtxoRowsHtml(entry) : kachatAddressDomainsHtml()}
     </div>
     <div class="cold-bottom-actions">
       <button class="primary-button cold-capsule" type="button" data-cold-addr-receive>
@@ -1047,7 +1031,6 @@ async function openAddressScreen(index) {
   addressTab = "transactions";
   addrTxs = { state: "loading", txs: [], error: null };
   addrUtxos = { state: "loading", entries: [], error: null };
-  addrKns = { state: "loading", domains: [], error: null };
   const token = ++addrToken;
   render();
 
@@ -1080,21 +1063,6 @@ async function openAddressScreen(index) {
     } catch (error) {
       if (addrToken !== token) return;
       addrUtxos = { state: "error", entries: [], error: error.message };
-    }
-    render();
-  })();
-
-  // KNS domains (assets-by-owner, engine-cached) for the KNS Domains tab.
-  (async () => {
-    try {
-      const info = await deps.engine.fetchKnsAddressInfo?.(entry.address);
-      if (addrToken !== token) return;
-      addrKns = { state: "ready", domains: info?.allDomains || [], error: null };
-    } catch (error) {
-      if (addrToken !== token) return;
-      const cached = deps.engine.peekKnsAddressInfo?.(entry.address);
-      if (cached) addrKns = { state: "ready", domains: cached.allDomains || [], error: null };
-      else addrKns = { state: "error", domains: [], error: error.message };
     }
     render();
   })();

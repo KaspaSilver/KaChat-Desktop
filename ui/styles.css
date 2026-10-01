@@ -12408,3 +12408,46 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .nc-plain-file-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .nc-plain-file-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nc-plain-file-copy small { color: var(--muted); font-size: 12px; }
+
+/* Address screens: History / UTXOs / .kachat on the underline tab bar (iOS b96d727, 718b88c). */
+.domains-tabs.address-tabs { margin: 4px 0 0; flex-shrink: 0; }
+.cold-detail-header ~ .address-tabs { margin: 4px 16px 0; }
+.kachat-address-domains { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 24px 20px; }
+.kachat-address-domains strong { font-size: 17px; font-weight: 600; color: var(--text); }
+.kachat-address-domains p { margin: 0; font-size: 15px; line-height: 1.35; color: var(--muted); max-width: 320px; }
+.kachat-address-domains-mark { display: inline-flex; width: 40px; height: 40px; }
+.kachat-address-domains-mark svg { width: 100%; height: 100%; }
+
+/* Public chats: the time under every message, the delivery status after it (iOS MessageTimeLine). */
+.broadcast-time-line { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px; }
+.broadcast-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.broadcast-message.mine .broadcast-time { color: rgba(255,255,255,.7); }
+/* Portfolio: Transfer rows (iOS 7423330) - a two-way arrow in the accent colour, beside the green
+   buy and red sell. */
+.portfolio-tx-icon.transfer { background: var(--kaspa-ink); color: #fff; }
+.portfolio-tx-type.transfer { color: var(--kaspa-ink); }
+
+/* Portfolio: Realized P&L <year> and Fees Spent, under Network Hashrate (iOS 61eff0f). They wear
+   the hashrate card's glass but are not buttons, and stack 10px apart like iOS's list rows. */
+.portfolio-hashrate-card:has(+ .portfolio-insights) { margin-bottom: 10px; }
+.portfolio-insights { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.portfolio-insights .portfolio-insight-card { margin-bottom: 0; align-items: flex-start; cursor: default; }
+.portfolio-insights .portfolio-insight-card:hover { background-color: var(--glass-fill); border-color: var(--glass-stroke); }
+.portfolio-insight-card .portfolio-hashrate-ico { padding-top: 2px; }
+.portfolio-insight-card .portfolio-hashrate-copy { flex: 1; }
+.portfolio-insight-card .portfolio-hashrate-value { overflow-wrap: anywhere; }
+.portfolio-insight-card .portfolio-hashrate-value.gain { color: var(--ios-green); }
+.portfolio-insight-card .portfolio-hashrate-value.loss { color: var(--ios-red); }
+.portfolio-insight-sub { font-size: 15px; font-weight: 650; color: var(--text); }
+.portfolio-insight-note { font-size: 12px; line-height: 1.4; color: var(--muted); }
+
+/* Portfolio: Move to Portfolio sheet (iOS b438f2d) - the row that is moving, on a frosted card,
+   above one option per other portfolio. */
+.portfolio-move-card {
+  margin: 4px 0 12px; padding: 2px 14px; border-radius: 16px;
+  border: .8px solid var(--glass-stroke); background: var(--glass-fill);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow);
+}
+.portfolio-move-card .portfolio-tx-row { border-top: 0; padding: 10px 0; cursor: default; }
+.portfolio-move-empty { text-align: center; margin: 8px 0 4px; }

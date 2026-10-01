@@ -4,7 +4,7 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
-import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG } from "./kachat-market.js";
+import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
@@ -7130,56 +7130,13 @@ const spendingDetailAddressEl = document.querySelector("[data-spending-detail-ad
 const spendingDetailExplorer = document.querySelector("[data-spending-detail-explorer]");
 const spendingDetailTxList = document.querySelector("[data-spending-detail-transactions]");
 const spendingDetailUtxoList = document.querySelector("[data-spending-detail-utxos]");
-const spendingDetailKnsList = document.querySelector("[data-spending-detail-kns]");
 let spendingDetailIndex = 0;
 let spendingDetailAddress = null;
 
-function setSpendingDetailTabCount(tab, count) {
-  const button = document.querySelector(`[data-spending-detail-tab="${tab}"]`);
-  if (!button) return;
-  const base = tab === "utxos" ? "UTXOs" : tab === "kns" ? "KNS Domains" : "History";
-  button.textContent = count == null ? base : `${base} (${count})`;
-}
-
-// KNS domains owned by this specific spending address (assets-by-owner
-// lookup, engine-cached). Cards match the address-detail domain rows; tapping
-// one opens the transfer modal scoped to THIS address's derivation index —
-// the domain transfer is then owned/funded/signed by that derived key.
-async function loadSpendingDetailKnsDomains(address) {
-  if (!spendingDetailKnsList) return;
-  spendingDetailKnsList.innerHTML = '<div class="manage-address-empty">Loading…</div>';
-  setSpendingDetailTabCount("kns", null);
-  const index = spendingDetailIndex;
-  let info = null;
-  try { info = await engine.fetchKnsAddressInfo(address); } catch { info = engine.peekKnsAddressInfo?.(address) || null; }
-  if (spendingDetailAddress !== address) return;
-  const domains = info?.allDomains || [];
-  setSpendingDetailTabCount("kns", domains.length);
-  if (!domains.length) {
-    spendingDetailKnsList.innerHTML = '<div class="manage-address-empty">No KNS domains on this address.</div>';
-    return;
-  }
-  spendingDetailKnsList.replaceChildren();
-  for (const domain of domains) {
-    const status = String(domain.status || "default").trim().toLowerCase();
-    const transferable = Boolean(domain.inscriptionId) && status !== "listed";
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "kns-domain-card";
-    card.disabled = !transferable;
-    const name = document.createElement("strong");
-    name.textContent = domain.fullName;
-    card.append(name);
-    const hint = document.createElement("small");
-    hint.textContent = transferable ? "Tap to send this domain" : "This domain is listed and can't be sent right now.";
-    card.append(hint);
-    card.addEventListener("click", () => {
-      if (!transferable) return;
-      openKnsTransferModal({ domain: domain.fullName, assetId: domain.inscriptionId, spendingIndex: index });
-    });
-    spendingDetailKnsList.appendChild(card);
-  }
-}
+// Plain tab names - History, UTXOs, .kachat - with no counts (iOS 718b88c). The .kachat tab
+// (iOS KachatAddressDomainsList) is a placeholder until .kachat names launch; the KNS Domains
+// tab and its per-domain Send are gone, .kas names being managed from Your Domains.
+document.querySelectorAll("[data-kachat-address-domains]").forEach((el) => { el.innerHTML = kachatAddressDomainsHtml(); });
 
 // --- Send KNS Domain modal (spending-address transfers) ---
 const knsTransferModal = document.querySelector("[data-kns-transfer-modal]");
@@ -7252,7 +7209,6 @@ async function submitKnsTransfer() {
     showCopyToast(result.verified
       ? `${domain} sent to ${shortAddress(result.recipientAddress)}.`
       : `${domain} transfer broadcast — the indexer may take a moment to reflect it.`);
-    if (spendingDetailAddress) loadSpendingDetailKnsDomains(spendingDetailAddress);
   } catch (error) {
     knsTransferInFlight = false;
     if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
@@ -7301,7 +7257,6 @@ async function loadSpendingDetailUtxos(address) {
     const balance = await engine.balanceForAddress(address);
     if (spendingDetailAddress !== address) return; // user navigated away
     renderSpendingDetailUtxos(address, balance.entries || []);
-    setSpendingDetailTabCount("utxos", (balance.entries || []).length);
     if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = `${balance.totalKas} KAS`;
   } catch (error) {
     if (spendingDetailAddress !== address) return;
@@ -7363,12 +7318,9 @@ async function openSpendingDetailScreen(index) {
   if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = "…";
   if (spendingDetailExplorer) spendingDetailExplorer.href = explorerAddressUrl(address);
   setSpendingDetailTab("transactions");
-  setSpendingDetailTabCount("utxos", null);
-  setSpendingDetailTabCount("kns", null);
   spendingDetailScreen.hidden = false;
   loadManageAddressTransactions(address, spendingDetailTxList);
   loadSpendingDetailUtxos(address);
-  loadSpendingDetailKnsDomains(address);
 }
 
 function closeSpendingDetailScreen() {
@@ -7380,7 +7332,6 @@ function refreshSpendingDetailIfOpen() {
   if (spendingDetailScreen && !spendingDetailScreen.hidden && spendingDetailAddress) {
     loadManageAddressTransactions(spendingDetailAddress, spendingDetailTxList);
     loadSpendingDetailUtxos(spendingDetailAddress);
-    loadSpendingDetailKnsDomains(spendingDetailAddress);
   }
 }
 
@@ -8630,7 +8581,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 77;
+const APP_BUILD = 78;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
