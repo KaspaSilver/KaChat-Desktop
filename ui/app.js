@@ -8907,7 +8907,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 81;
+const APP_BUILD = 82;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -19703,10 +19703,10 @@ const SETUP_STEPS = [
   { icon: SETUP_ICONS.globe, title: "Choose Your Language", body: "Select the language you'd like to use in KaChat.", extra: "language" },
   { icon: SETUP_ICONS.currency, title: "Choose Your Currency", body: "Select the currency you'd like prices displayed in.", extra: "currency" },
   { icon: SETUP_ICONS.network, title: "How KaChat Uses Kaspa", body: "KaChat lets you send and receive messages on the Kaspa network itself. Kaspa is required to pay fees when sending your messages. The fee you pay goes to miners which secure the network." },
-  { icon: SETUP_ICONS.qrcode, qr: true, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started to be able to create a KNS profile and chat for a while. 5 Kaspa is enough for about 2500 messages", extra: "funding" },
+  { icon: SETUP_ICONS.qrcode, qr: true, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started - enough to claim a .kachat name and chat for a while. 5 Kaspa is enough for about 2500 messages.", extra: "funding" },
   { icon: SETUP_ICONS.server, title: "Connect to a Node", body: "KaChat needs to connect to a node. How would you like to connect?", extra: "node" },
   { icon: null, title: "Chatting vs. Spending Address", body: "", extra: "addresses" },
-  { icon: SETUP_ICONS.chat, title: "Starting a Conversation", body: "To chat with someone, press Create Chat and enter their Kaspa address or KNS domain. If you send a message, they will not see it unless you send a handshake first, or you both decide to message each other around the same time - doing the latter increases your privacy." },
+  { icon: SETUP_ICONS.chat, title: "Starting a Conversation", body: "To chat with someone, press Create Chat and enter their Kaspa address or .kachat name. Your first message reaches them as a Message Request they can accept. For the most privacy, turn on Private Chat: nothing links you on chain, and they see your messages once they start a private chat with you too." },
   // Per-account Chats Payment Privacy (fresh-address payment pools) — placed
   // directly after the starting-a-conversation step, the guide's final step.
   // Copy matches iOS's WelcomeGuideView paymentPrivacyStep exactly.
@@ -19880,7 +19880,7 @@ function renderSetupExtra(kind) {
   } else if (kind === "addresses") {
     const spendingAddr = deriveSpendingAddressAt(getActiveSpendingIndex());
     const rows = [
-      { title: "Chatting Address", value: engine.address || "--", caption: "Your public messaging identity. Fund it with a small amount to pay message fees and KNS profile creation fees - never send money here that you intend to spend." },
+      { title: "Chatting Address", value: engine.address || "--", caption: "Your public messaging identity. Fund it with a small amount to pay message fees and for your .kachat name - never send money here that you intend to spend." },
       { title: "Spending Address", value: spendingAddr || "Import a recovery phrase to use spending addresses", caption: "Where you send and receive Kaspa you intend to use for everything else." },
     ];
     for (const r of rows) {
