@@ -19,9 +19,9 @@ import { createRpc, probeRpc, disconnectRpc, getNodeRegistrySnapshot, PUBLIC_NOD
 import { getEndpoint } from "../../engine/endpoints.js";
 import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateSendFeeDetail } from "../../engine/transactions.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "../../ui/kspt.js";
-import { resolveDomain, looksLikeDomain } from "../../engine/kns.js";
+import { looksLikeName, resolveEverywhere, primaryResolution, notFoundMessage } from "./names.js";
 import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
-import { getAddressInfo, getAddressProfile, fetchAddressInfo, fetchAddressProfile, peekAddressInfo, peekAddressProfile, clearKnsCache } from "../../engine/kns.js";
+import { getAddressInfo, fetchAddressInfo, peekAddressInfo, clearKnsCache } from "../../engine/kns.js";
 import { transferDomain as knsTransferDomain, setKnsPrimaryDomain } from "../../engine/kns-write.js";
 import { getLocal, setLocal } from "./browser.js";
 import { activeAccountSecrets, accountSecretsById } from "./vault.js";
@@ -270,27 +270,26 @@ function knsOptions() {
 
 /** What is cached for an address right now (no network): { domainName, profile, domainCount }. */
 export function cachedKns(address) {
-  const profile = peekAddressProfile(address);
-  const info = peekAddressInfo(address);
-  return knsView(profile, info);
+  return knsView(peekAddressInfo(address));
 }
 
-/** The address's KNS name, profile (avatar, banner, bio) and domain count, refreshed. */
+/**
+ * The address's .kas name and domain count, refreshed. Only the NAME: like iOS (KNSService
+ * .loadsDomainProfiles = false), KaChat no longer loads .kas profiles - avatar, banner and bio
+ * will come from .kachat names.
+ */
 export async function kns(address, { force = false } = {}) {
   const options = knsOptions();
-  const [info, profile] = force
-    ? await Promise.all([fetchAddressInfo(address, options), fetchAddressProfile(address, options)])
-    : await Promise.all([getAddressInfo(address, options), getAddressProfile(address, options)]);
-  return knsView(profile, info);
+  const info = force ? await fetchAddressInfo(address, options) : await getAddressInfo(address, options);
+  return knsView(info);
 }
 
-function knsView(profile, info) {
+function knsView(info) {
   const domains = Array.isArray(info?.allDomains) ? info.allDomains : [];
   return {
-    domainName: profile?.domainName || info?.primaryDomain || null,
-    profile: profile?.profile || null,
+    domainName: info?.primaryDomain || null,
     domainCount: domains.length,
-    known: Boolean(profile || info),
+    known: Boolean(info),
   };
 }
 
@@ -417,8 +416,11 @@ export async function isValidAddress(text) {
 }
 
 /**
- * What the recipient field means: a kaspa: address, or a KNS name (alice.kas / alice) resolved
- * to its owner. Returns { address, domain } or throws with the message to show.
+ * What the recipient field means: a kaspa: address, or a name on any service (iOS
+ * NameServicesClient) - the ending typed, else the first of .kachat, .kas, .k, .kaspa that
+ * resolves. Returns { address, domain, tld, resolutions } - `resolutions` is every service's
+ * answer, for the "Other domains" picker - or throws with the message to show (a not-found error
+ * carries `resolutions` too: another service may have the name).
  */
 export async function resolveRecipient(input) {
   const text = String(input || "").trim();
@@ -426,13 +428,17 @@ export async function resolveRecipient(input) {
   if (text.toLowerCase().startsWith("kaspa:")) {
     const address = text.split("?")[0].toLowerCase();
     if (!(await isValidAddress(address))) throw new Error("Invalid address format");
-    return { address, domain: null };
+    return { address, domain: null, tld: null, resolutions: [] };
   }
-  if (looksLikeDomain(text)) {
-    const resolved = await resolveDomain(text, { baseUrl: getEndpoint("knsApi") });
-    const address = resolved?.ownerAddress || resolved?.address || resolved?.owner;
-    if (!address) throw new Error("No KNS domain by that name.");
-    return { address, domain: resolved?.domain || resolved?.fullName || text.toLowerCase() };
+  if (looksLikeName(text)) {
+    const resolutions = await resolveEverywhere(text);
+    const primary = primaryResolution(resolutions, text);
+    if (!primary) {
+      const error = new Error(notFoundMessage(text));
+      error.resolutions = resolutions;
+      throw error;
+    }
+    return { address: primary.address, domain: primary.display, tld: primary.tld, resolutions };
   }
   throw new Error("Invalid address format");
 }

@@ -10,6 +10,7 @@ import {
 } from "./ui.js";
 import { showSend } from "./send.js";
 import { showManageAddress, showManageAddresses } from "./manage.js";
+import { cachedOwnedNames, ownedNames, otherNamesCount } from "./names.js";
 import { showWelcome, showUnlock, enterApp, setHandlers, setLoggedOut } from "./onboarding.js";
 import { showDomains } from "./domains.js";
 import { showSettings, showLicenses } from "./settings.js";
@@ -60,7 +61,8 @@ ext?.storage?.onChanged?.addListener((changes, area) => {
 // its guides are the chat Welcome Guide and the KNS setup guide.
 //
 // No Create / Edit KNS Profile: profile creation is moving to .kachat names, which do not exist
-// yet. An existing KNS name, avatar, banner and bio are still SHOWN (read-only) in the hero.
+// yet. Like iOS (5.2), only a .kas domain's NAME is read - no avatar, banner or bio: full
+// profiles will come from .kachat. Your Domains counts .kas, .k and .kaspa names together.
 
 let homeState = null;
 
@@ -84,6 +86,7 @@ async function showHome() {
     spending,
     balances: null,
     kns: cached?.main ? wallet.cachedKns(cached.main) : null,
+    otherNames: cached?.main ? cachedOwnedNames(cached.main) : null,
     connection: "busy",
     editingName: false,
     error: "",
@@ -111,9 +114,7 @@ function paintHome() {
   const totalSpending = spendingTotal(s.balances);
   const kns = s.kns || {};
   const displayName = kns.domainName || s.account.name;
-  const avatar = kns.profile?.avatarUrl ? safeImageUrl(kns.profile.avatarUrl) : null;
-  const banner = kns.profile?.bannerUrl ? safeImageUrl(kns.profile.bannerUrl) : null;
-  const bio = String(kns.profile?.bio || "").trim();
+  const domainCount = kns.known ? kns.domainCount + otherNamesCount(s.otherNames) : null;
   const created = s.account.createdAt ? new Date(s.account.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "—";
   const version = ext?.runtime?.getManifest?.().version || "";
 
@@ -144,13 +145,12 @@ function paintHome() {
         </div>
 
         <div class="glass hero">
-          ${banner ? `<div class="banner"><img src="${esc(banner)}" alt="" referrerpolicy="no-referrer" /></div>` : '<div class="banner gradient"></div>'}
+          <div class="banner gradient"></div>
           <div class="hero-row">
-            <div class="avatar">${avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer" />` : `<span>${esc((displayName || "?").trim().charAt(0).toUpperCase())}</span>`}</div>
+            <div class="avatar"><span>${esc((displayName || "?").trim().charAt(0).toUpperCase())}</span></div>
           </div>
           <div class="hero-text">
             <div class="hero-name">${esc(displayName)}</div>
-            ${bio ? `<div class="hero-bio">${esc(bio)}</div>` : ""}
           </div>
         </div>
 
@@ -168,7 +168,7 @@ function paintHome() {
 
         <button class="glass nav-row" id="domains">
           <span class="nav-row-label">${ICONS.at}<span>Your Domains</span></span>
-          <span class="nav-row-value">${kns.known ? esc(String(kns.domainCount)) : ""}</span>${ICONS.chevron}
+          <span class="nav-row-value">${domainCount != null ? esc(String(domainCount)) : ""}</span>${ICONS.chevron}
         </button>
         <button class="glass nav-row" id="settings">
           <span class="nav-row-label">${ICONS.gear}<span>Settings</span></span>${ICONS.chevron}
@@ -298,19 +298,6 @@ function addressActionRowHtml(kind, title, address, balanceText, totalText) {
     </div>`;
 }
 
-/** Only http(s) images from a KNS profile - anything else is ignored. */
-function safeImageUrl(raw) {
-  const text = String(raw || "").trim();
-  if (!text) return null;
-  const candidate = /^https?:\/\//i.test(text) ? text : `https://${text}`;
-  try {
-    const url = new URL(candidate);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
 let refreshing = false;
 async function refreshHome() {
   if (refreshing || !homeState) return;
@@ -321,9 +308,15 @@ async function refreshHome() {
     if (!s.addresses || s.addresses.accountId !== s.account.id || !s.addresses.spending?.[s.spending.maxIndex]) {
       s.addresses = await wallet.deriveAddresses();
       s.kns = wallet.cachedKns(s.addresses.main);
+      s.otherNames = cachedOwnedNames(s.addresses.main);
       paintHomeIfShowing(s);
     }
     wallet.kns(s.addresses.main).then((info) => { s.kns = info; paintHomeIfShowing(s); }).catch(() => {});
+    // .k / .kaspa names change rarely; the 30 s balance refresh asks for them every 5 minutes.
+    if (!s.otherNamesAt || Date.now() - s.otherNamesAt > 5 * 60_000) {
+      s.otherNamesAt = Date.now();
+      ownedNames(s.addresses.main).then((owned) => { s.otherNames = owned; paintHomeIfShowing(s); }).catch(() => {});
+    }
     try {
       await wallet.connection();
       s.connection = "ok";

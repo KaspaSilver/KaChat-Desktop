@@ -3,7 +3,7 @@
   "name": "KaChat Wallet",
   "short_name": "KaChat",
   "version": "0.1.0",
-  "description": "Kaspa wallet by KaChat: your KaChat accounts, balances and KNS domains in the browser, and a wallet Kaspa websites can connect to.",
+  "description": "Kaspa wallet by KaChat: your KaChat accounts, balances and domains (.kas, .k, .kaspa) in the browser, and a wallet Kaspa websites can connect to.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -57,8 +57,9 @@
   "host_permissions": [
     "https://api.kaspa.org/*",
     "https://api.knsdomains.org/*",
-    "https://storage.knsdomains.org/*",
     "https://api.coingecko.com/*",
+    "https://kaspaname.com/*",
+    "https://api.dotk.name/*",
     "https://*.kaspa.green/*",
     "https://*.kaspa.red/*",
     "https://*.kaspa.stream/*",

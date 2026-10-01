@@ -548,3 +548,21 @@ button.domain-send { background: var(--kaspa); color: #000; border-radius: 999px
 .approve-buttons button { padding: 14px; border-radius: 12px; }
 .sign-message { background: var(--panel); border-radius: 12px; padding: 12px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; user-select: text; }
 .list-row .muted.break, .list-row .break { white-space: normal; max-width: 100%; overflow: visible; word-break: break-all; }
+
+/* --- Name services: underline tabs (iOS UnderlineTabBar), Get a domain, Other domains --------- */
+.underline-tabs { display: flex; justify-content: space-around; border-bottom: .5px solid rgba(255,255,255,.12); padding: 0 8px; flex-shrink: 0; }
+.underline-tabs button { background: transparent; color: var(--muted); font-weight: 700; font-size: 15px; padding: 10px 6px 9px; border-radius: 0; border-bottom: 2.5px solid transparent; }
+.underline-tabs button[aria-selected="true"] { color: var(--kaspa); border-bottom-color: var(--kaspa); }
+.get-domain-bar { padding: 8px 16px 16px; flex-shrink: 0; }
+.get-domain { display: block; text-align: center; padding: 15px; border-radius: 999px; background: rgba(44,44,46,.72); border: 1.5px solid var(--kaspa); color: var(--kaspa); font-weight: 700; font-size: 14px; text-decoration: none; }
+.kachat-coming { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 36px 20px; }
+.kachat-coming h3 { margin: 4px 0 0; font-size: 16px; }
+.kachat-coming p { margin: 0; }
+.other-domains { width: 100%; }
+.other-domains-toggle { background: transparent; color: var(--kaspa); font-weight: 650; font-size: 12px; padding: 4px 0; display: inline-flex; align-items: center; gap: 4px; }
+.other-domains-chevron { display: inline-flex; transition: transform .15s; }
+.other-domains-chevron svg { width: 12px; height: 12px; }
+.other-domains-chevron.open { transform: rotate(90deg); }
+.other-domains-list { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+.other-domain { display: flex; align-items: center; gap: 8px; width: 100%; background: transparent; color: var(--text); padding: 2px 0; text-align: left; font-weight: 400; }
+.other-domain:disabled { opacity: 1; cursor: default; background: transparent !important; color: var(--text) !important; }

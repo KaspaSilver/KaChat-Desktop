@@ -1,16 +1,19 @@
 // Your Domains - iOS KNSDomainsListView, KNSDomainDetailView and KNSDomainSendView.
 //
-//   list     the chatting address's domains as teal cards, newest first, "Primary" badge,
-//            "No domains yet." when empty
-//   detail   the card, Asset ID, Set as Primary / Primary Domain, Status: Listed, Send
-//   send     recipient (address or name.kas), Normal / Fast / Priority fee on 0.02 KAS, then the
-//            two-transaction progress sheet and the Sent sheet
+//   list     an underline tab per name service, KaChat's own first: .kachat (coming), .kas
+//            (KNS), .k (dotk), .kaspa (Kaspa Names). Each outside service's tab lists the
+//            chatting address's names as teal cards and pins "Get a <ending> domain at <site>",
+//            which opens that service's site - KaChat creates only its own .kachat names.
+//            .kas cards carry "Primary"; a .kaspa name still settling carries "Settling".
+//   detail   (.kas) the card, Asset ID, Set as Primary / Primary Domain, Status: Listed, Send
+//   send     recipient (address or a name on any service, with "Other domains"), Normal /
+//            Fast / Priority fee on 0.02 KAS, the two-transaction progress sheet, the Sent sheet
 //
-// Left out on purpose: "Inscribe New Domain" and profile editing. Profiles are moving to
-// .kachat names, which are not built yet.
+// Left out on purpose: inscribing and profile editing. Profiles are moving to .kachat names.
 
 import * as wallet from "./wallet.js";
 import { app, esc, render, $, toast, ICONS, navHeader } from "./ui.js";
+import * as names from "./names.js";
 
 const BASE_FEE_SOMPI = 2_000_000n; // 0.02 KAS - iOS WithdrawFeeTier base for domain transfers
 const FEE_TIERS = [
@@ -21,42 +24,147 @@ const FEE_TIERS = [
 
 const sameDomain = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 
-function cardHtml(domain, primary) {
+// iOS DomainNameCardView: the name, and an optional corner badge.
+function nameCardHtml(title, badge = null) {
   return `
     <div class="domain-card">
-      <span class="domain-name">${esc(domain.fullName)}</span>
-      ${primary ? '<span class="domain-badge">Primary</span>' : ""}
+      <span class="domain-name">${esc(title)}</span>
+      ${badge ? `<span class="domain-badge">${esc(badge)}</span>` : ""}
     </div>`;
 }
 
+function cardHtml(domain, primary) {
+  return nameCardHtml(domain.fullName, primary ? "Primary" : null);
+}
+
+// Which tab Your Domains shows, kept while you go into a domain and back.
+let selectedTab = names.DEFAULT_TAB;
+
 export function showDomains({ address, onBack }) {
-  const state = { data: wallet.cachedDomains(address), loading: true, error: "" };
+  const state = {
+    data: wallet.cachedDomains(address), loading: true, error: "",
+    owned: names.cachedOwnedNames(address), ownedLoading: true,
+  };
   const back = () => showDomains({ address, onBack });
+  const here = () => app.dataset.screen === "domains";
+
+  const getNameButton = (tld) => {
+    const info = names.service(tld);
+    if (!info?.site) return "";
+    return `<a class="get-domain" href="${esc(info.site)}" target="_blank" rel="noopener noreferrer">Get a ${esc(info.suffix)} domain at ${esc(info.siteName)}</a>`;
+  };
+
+  const kasTab = () => {
+    const list = state.data?.domains || [];
+    if (state.error) return `<p class="error">${esc(state.error)}</p>`;
+    if (!state.data && state.loading) return '<div class="center-text"><span class="spinner"></span></div>';
+    if (!list.length) return '<p class="muted center-text">No domains yet.</p>';
+    return list.map((domain, i) => `
+      <button class="domain-button" data-i="${i}" aria-label="${esc(domain.fullName)}">
+        ${cardHtml(domain, sameDomain(domain.fullName, state.data.primaryDomain))}
+      </button>`).join("");
+  };
+
+  const serviceTab = (tld) => {
+    const info = names.service(tld);
+    const list = state.owned?.[tld] || [];
+    if (!list.length) {
+      if (state.ownedLoading && !state.owned?.[tld]) return '<div class="center-text"><span class="spinner"></span></div>';
+      if (state.owned?.failed?.[tld]) return `<p class="muted center-text">Couldn't reach ${esc(info.serviceName)}. <button class="link-button" id="retry">Try again</button></p>`;
+      return `<p class="muted center-text">No ${esc(info.suffix)} names yet.</p>`;
+    }
+    return list.map((owned) => nameCardHtml(owned.display, owned.provisional ? "Settling" : null)).join("");
+  };
+
+  const kachatTab = () => `
+    <div class="kachat-coming">
+      <span class="accent">${ICONS.atCircle}</span>
+      <h3>.kachat names are coming</h3>
+      <p class="muted small">KaChat's own names will live here: claim one, set it as your name in chats, and share it as your profile link.</p>
+    </div>`;
 
   const paint = () => {
-    const list = state.data?.domains || [];
+    const body = selectedTab === "kas" ? kasTab() : selectedTab === "kachat" ? kachatTab() : serviceTab(selectedTab);
     render(`
       ${navHeader({ title: "Your Domains" })}
-      <section class="screen domains">
-        ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}
-        ${!state.data && state.loading ? '<div class="center-text"><span class="spinner"></span></div>' : ""}
-        ${state.data && !list.length ? '<p class="muted center-text">No domains yet.</p>' : ""}
-        ${list.map((domain, i) => `
-          <button class="domain-button" data-i="${i}" aria-label="${esc(domain.fullName)}">
-            ${cardHtml(domain, sameDomain(domain.fullName, state.data.primaryDomain))}
-          </button>`).join("")}
-        ${state.data && state.loading ? '<p class="muted small center-text"><span class="spinner small-spin"></span></p>' : ""}
-      </section>`, "domains");
+      <div class="underline-tabs" role="tablist" aria-label="Name service">
+        ${names.NAME_SERVICES.map((s) => `<button role="tab" data-tab="${s.tld}" aria-selected="${s.tld === selectedTab}">${esc(s.suffix)}</button>`).join("")}
+      </div>
+      <section class="screen domains" id="domains-body">${body}</section>
+      ${selectedTab === "kachat" ? "" : `<div class="get-domain-bar">${getNameButton(selectedTab)}</div>`}`, "domains");
     $("#back").onclick = onBack;
+    for (const tab of app.querySelectorAll("[data-tab]")) tab.onclick = () => switchTo(tab.dataset.tab);
+    const list = state.data?.domains || [];
     for (const button of app.querySelectorAll("[data-i]")) {
       button.onclick = () => showDomainDetail({ address, domain: list[Number(button.dataset.i)], primaryDomain: state.data.primaryDomain, onBack: back });
     }
+    const retry = $("#retry");
+    if (retry) retry.onclick = loadOwned;
+    bindSwipe($("#domains-body"));
   };
+
+  const switchTo = (tld) => {
+    if (!names.service(tld) || tld === selectedTab) return;
+    selectedTab = tld;
+    paint();
+  };
+
+  // A sideways swipe (trackpad or touch) or the arrow keys change the name service, as the
+  // iOS swipe does.
+  const step = (delta) => {
+    const order = names.NAME_SERVICES.map((s) => s.tld);
+    const next = order[order.indexOf(selectedTab) + delta];
+    if (next) switchTo(next);
+  };
+  function bindSwipe(element) {
+    if (!element) return;
+    let wheelX = 0;
+    let wheelTimer = null;
+    let cooldown = false;
+    element.addEventListener("wheel", (event) => {
+      if (cooldown || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+      wheelX += event.deltaX;
+      clearTimeout(wheelTimer);
+      wheelTimer = setTimeout(() => { wheelX = 0; }, 200);
+      if (Math.abs(wheelX) > 80) {
+        cooldown = true;
+        step(wheelX > 0 ? 1 : -1);
+        wheelX = 0;
+      }
+    }, { passive: true });
+    let start = null;
+    element.addEventListener("pointerdown", (event) => { if (event.pointerType !== "mouse") start = { x: event.clientX, y: event.clientY }; });
+    element.addEventListener("pointerup", (event) => {
+      if (!start) return;
+      const dx = event.clientX - start.x;
+      const dy = event.clientY - start.y;
+      start = null;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
+    });
+  }
+  const onKey = (event) => {
+    if (!here()) { document.removeEventListener("keydown", onKey); return; }
+    if (event.target.closest?.("input, textarea")) return;
+    if (event.key === "ArrowRight") step(1);
+    if (event.key === "ArrowLeft") step(-1);
+  };
+  document.addEventListener("keydown", onKey);
+
+  const loadOwned = () => {
+    state.ownedLoading = true;
+    if (here()) paint();
+    names.ownedNames(address)
+      .then((owned) => { state.owned = owned; })
+      .catch(() => {})
+      .finally(() => { state.ownedLoading = false; if (here()) paint(); });
+  };
+
   paint();
   wallet.domains(address, { force: true })
     .then((data) => { state.data = data; state.error = ""; })
     .catch((error) => { state.error = state.data ? "" : error.message || "Could not load KNS domains."; })
-    .finally(() => { state.loading = false; if (app.dataset.screen === "domains") paint(); });
+    .finally(() => { state.loading = false; if (here()) paint(); });
+  loadOwned();
 }
 
 function showDomainDetail({ address, domain, primaryDomain, onBack }) {
@@ -132,7 +240,7 @@ const STAGES = {
 
 function showSendDomain({ domain, onBack, onSent }) {
   const state = {
-    recipientInput: "", recipient: null, recipientError: "", resolving: false,
+    recipientInput: "", recipient: null, recipientError: "", resolving: false, resolutions: [], othersOpen: false,
     tier: "normal", customFeeSompi: null, editingFee: false,
     sending: false, stage: null, error: "",
   };
@@ -146,6 +254,8 @@ function showSendDomain({ domain, onBack, onSent }) {
     const input = state.recipientInput.trim().split("?")[0];
     state.recipient = null;
     state.recipientError = "";
+    state.resolutions = [];
+    state.othersOpen = false;
     if (!input) { paint(); return; }
     state.resolving = true;
     paint();
@@ -153,9 +263,12 @@ function showSendDomain({ domain, onBack, onSent }) {
       const resolved = await wallet.resolveRecipient(input);
       if (seq !== resolveSeq) return;
       state.recipient = resolved;
+      state.resolutions = resolved.resolutions || [];
     } catch (error) {
       if (seq !== resolveSeq) return;
-      state.recipientError = /No KNS domain/.test(error.message) ? "KNS domain not found" : error.message;
+      state.recipientError = error.message;
+      state.resolutions = error.resolutions || [];
+      state.othersOpen = state.resolutions.some((r) => r.address);
     } finally {
       if (seq === resolveSeq) { state.resolving = false; paint(); }
     }
@@ -166,7 +279,7 @@ function showSendDomain({ domain, onBack, onSent }) {
     const focusedId = document.activeElement?.id;
     const status = (() => {
       if (!state.recipientInput.trim()) return "";
-      if (state.resolving) return `<div class="status muted"><span class="spinner small-spin"></span> Resolving KNS domain...</div>`;
+      if (state.resolving) return `<div class="status muted"><span class="spinner small-spin"></span> Looking up domain...</div>`;
       if (state.recipientError) return `<div class="status bad">${ICONS.xCircle}<span>${esc(state.recipientError)}</span></div>`;
       if (state.recipient?.domain) return `<div class="status good">${ICONS.checkFill}<span>Resolved: ${esc(state.recipient.domain)}</span></div><div class="mono tiny muted break">${esc(state.recipient.address)}</div>`;
       if (state.recipient) return `<div class="status good">${ICONS.checkFill}<span>Valid address</span></div>`;
@@ -187,11 +300,11 @@ function showSendDomain({ domain, onBack, onSent }) {
         <div class="form-section">
           <div class="form-header">Recipient Address</div>
           <div class="form-card">
-            <textarea id="recipient" class="mono recipient" rows="2" placeholder="kaspa:qr... or name.kas" spellcheck="false" autocapitalize="off">${esc(state.recipientInput)}</textarea>
-            ${status ? `<div class="form-row stack-tight">${status}</div>` : ""}
+            <textarea id="recipient" class="mono recipient" rows="2" placeholder="kaspa:qr... or domain" spellcheck="false" autocapitalize="off">${esc(state.recipientInput)}</textarea>
+            ${status || state.resolutions.length ? `<div class="form-row stack-tight">${status}${names.otherDomainsHtml({ resolutions: state.resolutions, selectedTld: state.recipient?.tld || names.splitTypedName(state.recipientInput).tld, open: state.othersOpen })}</div>` : ""}
             <div class="form-row"><button class="link-button" id="paste">${ICONS.clipboard}<span>Paste</span></button></div>
           </div>
-          <div class="form-footer">Enter a Kaspa address (kaspa:...) or a .kas domain.</div>
+          <div class="form-footer">Enter a Kaspa address (kaspa:...) or a domain.</div>
         </div>
         <div class="form-section">
           <div class="form-header">Fee</div>
@@ -220,6 +333,17 @@ function showSendDomain({ domain, onBack, onSent }) {
       clearTimeout(recipientTimer);
       recipientTimer = setTimeout(resolveRecipient, 350);
     };
+    names.bindOtherDomains(app, {
+      onToggle: () => { state.othersOpen = !state.othersOpen; paint(); },
+      onPick: (tld) => {
+        const pick = state.resolutions.find((r) => r.tld === tld && r.address);
+        if (!pick) return;
+        state.recipient = { address: pick.address, domain: pick.display, tld: pick.tld, resolutions: state.resolutions };
+        state.recipientError = "";
+        state.othersOpen = false;
+        paint();
+      },
+    });
     $("#paste").onclick = async () => {
       try { state.recipientInput = (await navigator.clipboard.readText()).trim(); resolveRecipient(); }
       catch { toast("Clipboard unavailable - paste with ⌘V instead."); }

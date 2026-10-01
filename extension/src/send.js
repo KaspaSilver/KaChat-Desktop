@@ -1,5 +1,6 @@
 // Send Kaspa - iOS WithdrawKaspaView, section for section:
-//   Recipient Address (kaspa: address or name.kas, resolved as you type; Paste)
+//   Recipient Address (a kaspa: address, or a name on any service - .kachat, .kas, .k, .kaspa -
+//     resolved as you type, with "Other domains" to pick another service's answer; Paste)
 //   Amount (with the currency value beside it, Max, Available)
 //   Coin Control (Automatic, or exactly which coins to spend)
 //   Fee (Normal / Fast / Priority, the network fee - tap it to set your own)
@@ -8,6 +9,7 @@
 
 import * as wallet from "./wallet.js";
 import { app, esc, render, $, toast, copyText, settings, ICONS } from "./ui.js";
+import { otherDomainsHtml, bindOtherDomains, splitTypedName } from "./names.js";
 
 const FEE_TIERS = [
   { id: "normal", label: "Normal", multiplier: 1 },
@@ -31,6 +33,8 @@ export function showSend(opts) {
     recipient: opts.compound ? { address: opts.fromAddress, domain: null } : null,
     recipientError: "",
     resolving: false,
+    resolutions: [],        // every name service's answer for a typed name ("Other domains")
+    othersOpen: false,
     amountText: "",
     maxMode: false,
     coins: null,            // all spendable coins at the source
@@ -142,6 +146,8 @@ export function showSend(opts) {
     const input = state.recipientInput.trim();
     state.recipient = null;
     state.recipientError = "";
+    state.resolutions = [];
+    state.othersOpen = false;
     if (!input) { paint(); return; }
     state.resolving = true;
     paint();
@@ -149,9 +155,13 @@ export function showSend(opts) {
       const resolved = await wallet.resolveRecipient(input);
       if (seq !== resolveSeq) return;
       state.recipient = resolved;
+      state.resolutions = resolved.resolutions || [];
     } catch (error) {
       if (seq !== resolveSeq) return;
       state.recipientError = error.message;
+      state.resolutions = error.resolutions || [];
+      // Nothing for the ending typed, but another service has the name: show it straight away.
+      state.othersOpen = state.resolutions.some((r) => r.address);
     } finally {
       if (seq === resolveSeq) { state.resolving = false; paint(); }
     }
@@ -209,7 +219,7 @@ export function showSend(opts) {
     const fiat = amount != null && state.price?.price ? wallet.formatFiat(amount, state.price) : "";
     const recipientStatus = (() => {
       if (opts.compound || !state.recipientInput.trim()) return "";
-      if (state.resolving) return `<div class="status muted"><span class="spinner small-spin"></span> Resolving KNS domain...</div>`;
+      if (state.resolving) return `<div class="status muted"><span class="spinner small-spin"></span> Looking up domain...</div>`;
       if (state.recipientError) return `<div class="status bad">${ICONS.xCircle}<span>${esc(state.recipientError)}</span></div>`;
       if (state.recipient?.domain) return `<div class="status good">${ICONS.checkFill}<span>Resolved: ${esc(state.recipient.domain)}</span></div><div class="mono tiny muted break">${esc(state.recipient.address)}</div>`;
       if (state.recipient) return `<div class="status good">${ICONS.checkFill}<span>Valid address</span></div>`;
@@ -228,11 +238,11 @@ export function showSend(opts) {
           <div class="form-card">
             ${opts.compound
               ? `<div class="form-row">${ICONS.merge}<span class="mono small ellipsis">${esc(opts.fromAddress)}</span></div>`
-              : `<textarea id="recipient" class="mono recipient" rows="2" placeholder="kaspa:qr... or name.kas" spellcheck="false" autocapitalize="off">${esc(state.recipientInput)}</textarea>
-                 ${recipientStatus ? `<div class="form-row stack-tight">${recipientStatus}</div>` : ""}
+              : `<textarea id="recipient" class="mono recipient" rows="2" placeholder="kaspa:qr... or domain" spellcheck="false" autocapitalize="off">${esc(state.recipientInput)}</textarea>
+                 ${recipientStatus || state.resolutions.length ? `<div class="form-row stack-tight">${recipientStatus}${otherDomainsHtml({ resolutions: state.resolutions, selectedTld: state.recipient?.tld || splitTypedName(state.recipientInput).tld, open: state.othersOpen })}</div>` : ""}
                  <div class="form-row between"><button class="link-button" id="paste">${ICONS.clipboard}<span>Paste</span></button></div>`}
           </div>
-          ${opts.compound ? "" : '<div class="form-footer">Enter a Kaspa address (kaspa:...)</div>'}
+          ${opts.compound ? "" : '<div class="form-footer">Enter a Kaspa address (kaspa:...) or a domain.</div>'}
         </div>
 
         <div class="form-section">
@@ -296,6 +306,17 @@ export function showSend(opts) {
         recipientTimer = setTimeout(resolveRecipient, 350);
       };
     }
+    bindOtherDomains(app, {
+      onToggle: () => { state.othersOpen = !state.othersOpen; paint(); },
+      onPick: (tld) => {
+        const pick = state.resolutions.find((r) => r.tld === tld && r.address);
+        if (!pick) return;
+        state.recipient = { address: pick.address, domain: pick.display, tld: pick.tld, resolutions: state.resolutions };
+        state.recipientError = "";
+        state.othersOpen = false;
+        paint();
+      },
+    });
     const paste = $("#paste");
     if (paste) paste.onclick = async () => {
       try {

@@ -21,6 +21,7 @@ import {
 } from "./ui.js";
 import { ENDPOINT_DEFAULTS, getEndpoint, getEndpointOverride, setEndpoint } from "../../engine/endpoints.js";
 import { connections, removeConnection } from "./approve.js";
+import { NAME_SERVICES } from "./names.js";
 
 // iOS AppCurrency, same order and codes (the code is CoinGecko's vs_currency).
 export const CURRENCIES = [
@@ -305,6 +306,16 @@ async function showConnectionSettings({ onBack }) {
           <div class="form-header">Kaspa Name Service</div>
           <div class="form-card"><div class="form-row stack-tight"><span>KNS API URL</span><span class="mono tiny muted break">${esc(getEndpoint("knsApi"))}</span></div></div>
           <div class="form-footer">KNS domain resolution service</div>
+        </div>
+
+        <div class="form-section">
+          <div class="form-header">Other Name Services</div>
+          <div class="form-card">
+            ${NAME_SERVICES.filter((n) => n.tld === "k" || n.tld === "kaspa").map((n) => `
+              <div class="form-row stack-tight"><span class="muted small">${esc(n.serviceName)} (${esc(n.suffix)})</span><span class="mono tiny muted break">${esc(n.api)}</span></div>`).join("")}
+            <div class="form-row stack-tight"><span class="muted small">KaChat Names (.kachat)</span><span class="muted">Coming soon</span></div>
+          </div>
+          <div class="form-footer">Used to show the .k and .kaspa names an address owns, and to look up names you type. KaChat's own .kachat names will be set here once they launch.</div>
         </div>
 
         <div class="form-section">

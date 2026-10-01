@@ -28,7 +28,8 @@ extension's card to pick up the new build.
 | `popup.html`, `src/popup.js` | Boot and the home screen (the iOS Profile tab). The same page opens as a full tab with `?view=tab` (the expand button), and as the website approval window with `?view=approve`. |
 | `src/onboarding.js` | The accounts screen (Saved Accounts), Create Account, Import Account (iOS source-wallet list, word grid, passphrase), unlock and reset. |
 | `src/send.js`, `src/manage.js` | Send Kaspa (fees, Max, coin control, Sent sheet) and the Manage screens (history, UTXOs, keys, spending addresses, Change Chatting Address). |
-| `src/domains.js` | Your Domains: list, Set as Primary (signed KNS API call), Send Domain (commit/reveal transfer). |
+| `src/domains.js` | Your Domains: a tab per name service (.kachat, .kas, .k, .kaspa) with "Get a domain" links; .kas Set as Primary (signed KNS API call) and Send Domain (commit/reveal transfer). |
+| `src/names.js`, `src/names-normalize.js` | The name services (port of iOS NameServices.swift): names an address owns on .k / .kaspa, resolving a typed name on every service, the "Other domains" picker. The normalizers are checked against the dotk and Kaspa Names SDK vectors: `node tools/check-name-vectors.mjs`. |
 | `src/settings.js` | Settings: currency, auto-lock, change password, connection, explorer, connected sites, View Seed Phrase, licenses. |
 | `src/approve.js` | The approval window for website requests: connect, send Kaspa, sign message. |
 | `src/ui.js` | Shared rendering helpers, icons, sheets, the password gate, the QR screen. |

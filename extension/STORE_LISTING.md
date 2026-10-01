@@ -17,7 +17,7 @@ kachat.app link site is redeployed with `web_site/wallet-privacy.html` (KaChat r
 **Name:** KaChat Wallet
 
 **Summary (Chrome, max 132 characters):**
-Kaspa wallet by KaChat. Send and receive KAS, manage addresses and KNS domains, and connect to Kaspa websites.
+Kaspa wallet by KaChat. Send and receive KAS, manage addresses and domains, and connect to Kaspa websites.
 
 **Category:** Chrome: Productivity > Tools (or "Workflow & Planning"; there is no finance category).
 Firefox: Privacy & Security is wrong for this - use "Other". Edge: Productivity.
@@ -33,7 +33,9 @@ the same addresses as KaChat on iPhone, Android and desktop.
 - A fresh receiving address every time, and Manage Addresses for your spending addresses:
   generate, discover, rename, hide, set the primary, and send everything to it
 - History, coins (UTXOs) and Compound for every address
-- Your KNS domains: see them, set your primary name, and send a domain to someone else
+- Your domains on every Kaspa name service (.kas, .k, .kaspa), with .kachat names on the way:
+  set your primary .kas name and send a .kas domain to someone else
+- Send to a name on any service - and pick another service's answer under "Other domains"
 - Several accounts in one wallet
 - Connect to Kaspa websites: they ask, you approve every connection, payment and signature
 - Your recovery phrase is encrypted with your password and never leaves your computer
@@ -56,8 +58,10 @@ the user's approval.
 - Host permission `api.kaspa.org` - Kaspa REST API: transaction history and address usage.
 - Host permissions `*.kaspa.green`, `*.kaspa.red`, `*.kaspa.stream`, `*.kaspa.blue`, `*.kaspa.ws` -
   the public Kaspa node resolver and nodes, for balances and sending transactions.
-- Host permissions `api.knsdomains.org`, `storage.knsdomains.org` - Kaspa Name Service: domain
-  names, profile images, .kas name lookups, setting the primary domain.
+- Host permission `api.knsdomains.org` - Kaspa Name Service: the .kas domains an address owns,
+  name lookups, setting the primary domain.
+- Host permissions `api.dotk.name`, `kaspaname.com` - the .k (dotk) and .kaspa (Kaspa Names)
+  name services, read-only: the names an address owns and name lookups.
 - Host permission `api.coingecko.com` - the Kaspa price in the user's currency.
 - Content scripts on `https://*/*` (and localhost) - provide `window.kachat`, the interface Kaspa
   websites use to ask the wallet for a connection, payment or signature. The scripts only relay
