@@ -1,12 +1,14 @@
 // Managing your addresses - a 1:1 port of the iOS screens:
 //
-//   ChattingAddressManageView   Balance, Transaction History | UTXOs (n), Address Actions (View
-//                               Private Key, View Public Key, View in Explorer), Receive / Send
+//   ChattingAddressManageView   Balance, Address Actions (View
+//                               Private Key, View Public Key, View in Explorer), History | UTXOs |
+//                               .kachat on the underline tab bar, Receive / Send
 //   ManageAddressesView         Total Balance, Address Actions (Generate, Discover, Address
 //                               Visibility, Send All Kaspa To Primary), one card per spending
 //                               address with its own actions sheet (Rename, Copy, Show QR Code,
 //                               Set as Primary, Hide)
-//   SpendingAddressTransactionHistoryView   one spending address: History | UTXOs | KNS Domains,
+//   SpendingAddressTransactionHistoryView   one spending address: History | UTXOs | .kachat (iOS
+//                               5.2 dropped its KNS Domains tab: .kas names live in Your Domains),
 //                               private key export and explorer in the bar, Receive / Send
 //   SpendingAddressVisibilityView, ConsolidateToPrimaryConfirmView, the private / public key
 //   sheets, Rename UTXO, the Transaction sheet.
@@ -22,7 +24,7 @@ import {
   passwordGate, formatKas8,
 } from "./ui.js";
 import { showSend } from "./send.js";
-import { showSendDomain } from "./domains.js";
+import { kachatWordmark } from "./market.js";
 import { showAddToPortfolio } from "./portfolio.js";
 
 // SF Symbols these screens use, drawn to match.
@@ -218,6 +220,32 @@ function loaders(state, address, repaintIfHere) {
   return { loadHistory, loadCoins };
 }
 
+// iOS KachatAddressDomainsList - the .kachat tab of every address screen (it replaced KNS
+// Domains in 5.2; .kas names are managed from Your Domains). Empty until .kachat names launch.
+function kachatTabHtml() {
+  return `
+    <div class="kachat-address-empty">
+      ${kachatWordmark(40)}
+      <div class="strong">No .kachat names on this address</div>
+      <p class="muted small">Names this address claims or buys show here once .kachat names launch.</p>
+    </div>`;
+}
+
+// iOS UnderlineTabBar with the plain titles History / UTXOs / .kachat.
+function addressTabsHtml(current) {
+  return `
+    <div class="underline-tabs address-tabs" role="tablist">
+      ${[["history", "History"], ["utxos", "UTXOs"], ["kachat", ".kachat"]].map(([id, title]) =>
+        `<button role="tab" data-tab="${id}" aria-selected="${current === id}">${title}</button>`).join("")}
+    </div>`;
+}
+
+function addressTabContent(state, compoundFooter) {
+  if (state.tab === "history") return `<div class="glass list">${historyHtml(state)}</div>`;
+  if (state.tab === "utxos") return utxosHtml(state, compoundFooter);
+  return kachatTabHtml();
+}
+
 // --- keys -------------------------------------------------------------------------------------
 
 // iOS ChattingAddressPrivateKeyView / SpendingAddressPrivateKeyView: the warning, tap to reveal
@@ -325,14 +353,9 @@ export function showManageAddress(opts) {
       ${navHeader({ title: "Chatting Address" })}
       <div class="manage-scroll">
         <div class="ios-balance"><span class="muted tiny">Balance</span><span class="ios-balance-value">${total != null ? `${esc(formatKas8(total))} KAS` : '<span class="spinner small-spin"></span>'}</span></div>
-        <div class="segmented wide" role="tablist">
-          <button type="button" role="tab" data-tab="history" aria-checked="${state.tab === "history"}">Transaction History</button>
-          <button type="button" role="tab" data-tab="utxos" aria-checked="${state.tab === "utxos"}">UTXOs (${state.coins ? state.coins.length : 0})</button>
-        </div>
         <button class="ios-capsule" id="address-actions">Address Actions</button>
-        ${state.tab === "history"
-          ? `<div class="glass list">${historyHtml(state)}</div>`
-          : utxosHtml(state, "Combines all UTXOs at this address into a single one, to reduce the number of inputs a future send needs.")}
+        ${addressTabsHtml(state.tab)}
+        ${addressTabContent(state, "Combines all UTXOs at this address into a single one, to reduce the number of inputs a future send needs.")}
       </div>
       <div class="ios-bottom-bar">
         <button class="ios-capsule with-icon" id="receive">${SF.qrcode}<span>Receive</span></button>
@@ -612,41 +635,17 @@ function showSpendingAddress({ row, onBack }) {
   const title = row.label;
   const state = {
     tab: "history", history: null, historyLoading: false, coins: null, coinsLoading: false, coinsError: "", labels: {},
-    domains: null, domainsLoading: false, domainsFailed: false,
   };
   const back = () => paint();
   const here = () => app.dataset.screen === "manage-spending";
   const repaintIfHere = () => { if (here()) paint(); };
   const { loadHistory, loadCoins } = loaders(state, row.address, repaintIfHere);
-  const loadDomains = () => {
-    state.domainsLoading = true;
-    repaintIfHere();
-    wallet.domains(row.address, { force: true })
-      .then((data) => { state.domains = data.domains; state.domainsFailed = false; })
-      .catch(() => { state.domainsFailed = true; })
-      .finally(() => { state.domainsLoading = false; repaintIfHere(); });
-  };
-
   const openSend = (compound = false) => showSend({
     source, fromAddress: row.address, compound,
     navTitle: compound ? "Compound UTXOs" : `Send Kaspa from Address #${row.index}`,
     feeFooter: "If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. Tap the fee amount to set a custom fee.",
     onClose: () => { paint(); loadHistory(); loadCoins(); },
   });
-
-  const domainsHtml = () => {
-    if (!state.domains && state.domainsLoading) return '<div class="glass list"><div class="list-row center-row"><span class="spinner small-spin"></span></div></div>';
-    if (state.domainsFailed && !state.domains) return '<div class="glass list"><div class="list-row muted">Could not load KNS domains. Pull to retry.</div></div>';
-    if (!state.domains?.length) return '<div class="glass list"><div class="list-row muted">No KNS domains on this address.</div></div>';
-    return state.domains.map((domain, i) => {
-      const sendable = Boolean(domain.inscriptionId) && domain.status !== "listed";
-      return `
-        <button class="domain-button ${sendable ? "" : "dim"}" data-domain="${i}" ${sendable ? "" : "disabled"}>
-          <div class="domain-card"><span class="domain-name">${esc(domain.fullName)}</span></div>
-          ${sendable ? "" : '<span class="muted tiny">This domain is listed and can\'t be sent right now.</span>'}
-        </button>`;
-    }).join("");
-  };
 
   function paint() {
     const scroll = app.querySelector(".manage-scroll")?.scrollTop || 0;
@@ -661,14 +660,8 @@ function showSpendingAddress({ row, onBack }) {
       </header>
       <div class="manage-scroll">
         <div class="ios-balance"><span class="muted tiny">Balance</span><span class="ios-balance-value">${esc(formatKas8(row.balanceSompi))} KAS</span></div>
-        <div class="segmented wide three" role="tablist">
-          <button type="button" role="tab" data-tab="history" aria-checked="${state.tab === "history"}">History</button>
-          <button type="button" role="tab" data-tab="utxos" aria-checked="${state.tab === "utxos"}">UTXOs (${state.coins ? state.coins.length : 0})</button>
-          <button type="button" role="tab" data-tab="domains" aria-checked="${state.tab === "domains"}">KNS Domains (${state.domains ? state.domains.length : 0})</button>
-        </div>
-        ${state.tab === "history" ? `<div class="glass list">${historyHtml(state)}</div>`
-          : state.tab === "utxos" ? utxosHtml(state, "Combines this address's UTXOs to reduce the inputs a future send needs. A single transaction can only merge so many at once, so if this address has a very large number, tap Compound again after it confirms to keep reducing.")
-          : domainsHtml()}
+        ${addressTabsHtml(state.tab)}
+        ${addressTabContent(state, "Combines this address's UTXOs to reduce the inputs a future send needs. A single transaction can only merge so many at once, so if this address has a very large number, tap Compound again after it confirms to keep reducing.")}
       </div>
       <div class="ios-bottom-bar">
         <button class="ios-capsule with-icon" id="receive">${SF.qrcode}<span>Receive</span></button>
@@ -682,9 +675,6 @@ function showSpendingAddress({ row, onBack }) {
     for (const tab of app.querySelectorAll("[data-tab]")) tab.onclick = () => { state.tab = tab.dataset.tab; paint(); };
     $("#receive").onclick = () => showQr({ title: `Address #${row.index}`, address: row.address, backLabel: "Close", onBack: back });
     $("#send").onclick = () => openSend(false);
-    for (const button of app.querySelectorAll("[data-domain]")) {
-      button.onclick = () => showSendDomain({ domain: state.domains[Number(button.dataset.domain)], source, onBack: back, onSent: () => { paint(); loadDomains(); } });
-    }
     bindTabsContent(state, { address: row.address, repaint: paint, reloadHistory: loadHistory, reloadCoins: loadCoins, onCompound: () => openSend(true) });
   }
 
@@ -692,7 +682,6 @@ function showSpendingAddress({ row, onBack }) {
   wallet.utxoLabels(row.address).then((labels) => { state.labels = labels; repaintIfHere(); });
   loadHistory();
   loadCoins();
-  loadDomains();
 }
 
 // --- Address Visibility: iOS SpendingAddressVisibilityView -----------------------------------

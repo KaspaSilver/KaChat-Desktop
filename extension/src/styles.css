@@ -803,3 +803,7 @@ html:has(#app[data-screen="qr"]), body:has(#app[data-screen="qr"]) { background:
 .link-button:disabled { background: transparent !important; color: var(--muted) !important; }
 .ios-capsule:disabled { opacity: .5 !important; }
 .sheet-row:disabled { background: #2c2c2e !important; color: var(--text) !important; opacity: .45 !important; }
+/* iOS KachatAddressDomainsList */
+.kachat-address-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 24px 12px; }
+.kachat-address-empty p { margin: 0; }
+.manage-scroll > .address-tabs { margin: 0 -16px; padding: 0 16px; }
