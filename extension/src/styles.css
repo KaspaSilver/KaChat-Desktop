@@ -46,9 +46,12 @@ html, body {
 /* The toolbar popup is a fixed box; the full-tab view centres the same column. */
 body { width: 360px; min-height: 580px; }
 body.tab { width: auto; min-height: 100vh; }
-body.tab #app { max-width: 420px; margin: 24px auto; border: 1px solid var(--line); border-radius: 18px; min-height: 620px; }
+body.tab #shell { max-width: 420px; margin: 24px auto; border: 1px solid var(--line); border-radius: 18px; min-height: 620px; overflow: hidden; }
 
-#app { display: flex; flex-direction: column; min-height: 580px; }
+/* The page column and, under it, the dock (iOS tab bar) on the screens that have one. */
+#shell { display: flex; flex-direction: column; min-height: 580px; }
+#app { display: flex; flex-direction: column; min-height: calc(580px - var(--dock-h, 0px)); flex: 1; }
+body.dock-on { --dock-h: 56px; }
 
 .screen { display: flex; flex-direction: column; gap: 14px; padding: 18px; flex: 1; }
 .screen.center { justify-content: center; }
@@ -260,8 +263,8 @@ button:disabled:not(.ghost):not(.icon) { background: #8e8e93; color: #fff; opaci
    sections scroll under them, like the iOS safe-area-inset title. */
 body:has(.profile) { height: 600px; min-height: 0; overflow: hidden; }
 body.tab:has(.profile) { height: 100vh; }
-.profile { display: flex; flex-direction: column; height: 600px; }
-body.tab .profile { height: calc(100vh - 48px); }
+.profile { display: flex; flex-direction: column; height: calc(600px - var(--dock-h, 0px)); }
+body.tab .profile { height: calc(100vh - 48px - var(--dock-h, 0px)); }
 
 .toolbar { display: grid; grid-template-columns: 70px 1fr 70px; align-items: center; padding: 8px 10px 2px; }
 .dot-button { background: transparent; padding: 8px; justify-self: start; border-radius: 50%; display: inline-flex; line-height: 0; }
@@ -658,8 +661,8 @@ button.domain-send { background: var(--kaspa); color: #000; border-radius: 999px
 .panel-bar > :last-child { justify-self: end; }
 .panel-body { overflow-y: auto; padding-top: 4px; }
 /* Pinned navigation bar, scrolling content - as iOS (the Profile screen's fixed height). */
-#app[data-screen^="kachat-"] { height: 600px; min-height: 0; }
-body.tab #app[data-screen^="kachat-"] { height: calc(100vh - 48px); }
+#app[data-screen^="kachat-"] { height: calc(600px - var(--dock-h, 0px)); min-height: 0; }
+body.tab #app[data-screen^="kachat-"] { height: calc(100vh - 48px - var(--dock-h, 0px)); }
 .km { min-height: 0; }
 .km-actions button { white-space: nowrap; font-size: 13px; gap: 6px; padding: 12px 8px; }
 .km-actions button svg { width: 17px; height: 17px; flex: none; }
@@ -672,9 +675,9 @@ body.tab #app[data-screen^="kachat-"] { height: calc(100vh - 48px); }
 
 /* --- Manage screens: 1:1 with iOS ChattingAddressManageView / ManageAddressesView ----------- */
 #app[data-screen="manage-chat"], #app[data-screen="manage-spending"], #app[data-screen="manage-list"],
-#app[data-screen="visibility"], #app[data-screen="coins"], #app[data-screen="consolidate"] { height: 600px; min-height: 0; }
+#app[data-screen="visibility"], #app[data-screen="coins"], #app[data-screen="consolidate"] { height: calc(600px - var(--dock-h, 0px)); min-height: 0; }
 body.tab #app[data-screen="manage-chat"], body.tab #app[data-screen="manage-spending"], body.tab #app[data-screen="manage-list"],
-body.tab #app[data-screen="visibility"], body.tab #app[data-screen="coins"], body.tab #app[data-screen="consolidate"] { height: calc(100vh - 48px); }
+body.tab #app[data-screen="visibility"], body.tab #app[data-screen="coins"], body.tab #app[data-screen="consolidate"] { height: calc(100vh - 48px - var(--dock-h, 0px)); }
 .manage-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 6px 16px 18px; }
 .manage-scroll > * { flex-shrink: 0; }
 .manage-scroll.flush { padding: 0; gap: 0; }
@@ -766,3 +769,28 @@ body.tab #app[data-screen="visibility"], body.tab #app[data-screen="coins"], bod
 .segmented.three button { white-space: nowrap; font-size: 11.5px; }
 html:has(#app[data-screen="qr"]), body:has(#app[data-screen="qr"]) { background: #fff; }
 .ios-tx .tx-meta .tiny:last-child:not(.mono) { white-space: normal; }
+
+/* --- The dock: iOS UITabBar (default background: translucent bar material, hairline on top) --- */
+#dock { flex: none; height: var(--dock-h, 56px); display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: rgba(22, 22, 24, .94); backdrop-filter: blur(20px); border-top: .5px solid rgba(255, 255, 255, .15); padding-bottom: 4px; }
+#dock[hidden] { display: none; }
+.dock-item { background: transparent; border-radius: 0; padding: 6px 0 0; display: flex; flex-direction: column; align-items: center; gap: 2px; color: #8e8e93; font-size: 10px; font-weight: 550; }
+.dock-item svg { width: 26px; height: 26px; }
+.dock-item[aria-selected="true"] { color: var(--kaspa); }
+.dock-item:hover { background: transparent; }
+/* Tab roots carry the iOS large title under the toolbar (dot, balance). */
+.tab-toolbar { flex: none; display: grid; grid-template-columns: 70px 1fr 70px; align-items: center; padding: 8px 10px 2px; }
+.tab-toolbar .toolbar-right { justify-self: end; display: flex; gap: 2px; }
+.large-tab-title { font-size: 34px; font-weight: 800; letter-spacing: -.5px; margin: 0; padding: 2px 16px 8px; }
+
+/* --- Camera scanner (iOS QRScannerView / MultiFrameQRScannerView) ---------------------------- */
+.scanner { position: fixed; inset: 0; z-index: 70; background: #000; display: flex; flex-direction: column; }
+.scanner-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 8px; }
+.scanner-bar .nav-title { position: static; transform: none; }
+.scanner-stage { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.scanner-stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.scanner-frame { position: relative; width: 250px; height: 250px; border: 3px solid #fff; border-radius: 12px; box-shadow: 0 0 0 999px rgba(0,0,0,.35); }
+.scanner-hint, .scanner-progress { position: absolute; bottom: 36px; left: 0; right: 0; text-align: center; color: #fff; font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+.scanner-dots { display: flex; gap: 5px; justify-content: center; flex-wrap: wrap; margin-bottom: 6px; padding: 0 20px; }
+.scanner-dots span { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.4); }
+.scanner-dots span.on { background: var(--kaspa); }
+.scanner-denied { display: flex; flex-direction: column; gap: 12px; align-items: center; text-align: center; padding: 24px; }

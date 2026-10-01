@@ -21,8 +21,13 @@ export function esc(value) {
 // Screens drawn on the sign-in look (iOS OnboardingView): the green-cast near-black page.
 const ONBOARDING_SCREENS = new Set(["welcome", "unlock", "accounts"]);
 
+const renderHooks = [];
+/** Called with the screen name after every render (the dock follows the screen this way). */
+export function onRender(hook) { renderHooks.push(hook); }
+
 export function render(html, screen = "") {
   app.innerHTML = html;
+  for (const hook of renderHooks) { try { hook(screen); } catch { /* a hook never breaks a screen */ } }
   if (screen) app.dataset.screen = screen;
   else delete app.dataset.screen;
   document.body.classList.toggle("onboarding", ONBOARDING_SCREENS.has(screen));

@@ -1048,3 +1048,41 @@ export async function signMessage(accountId, message) {
   const k = await kaspa();
   return String(k.signMessage({ message: String(message), privateKey: from.privateKeyHex }));
 }
+
+// --- Cold Storage (watch-only kpub accounts) and the KSPT signing engine ----------------------
+
+/** A KasSigner kpub, checked by deriving its first address; null when it isn't one. */
+export async function validateKpub(kpub) {
+  const trimmed = String(kpub || "").trim();
+  if (!trimmed) return null;
+  try {
+    const k = await kaspa();
+    k.PublicKeyGenerator.fromXPub(trimmed).receiveAddressAsStrings("mainnet", 0, 1);
+    return trimmed;
+  } catch {
+    return null;
+  }
+}
+
+/** Receive-chain addresses start..end-1 of a kpub (iOS: kpub -> 0 -> i; change chain unused). */
+export async function kpubAddresses(kpub, start, end) {
+  const k = await kaspa();
+  return k.PublicKeyGenerator.fromXPub(String(kpub).trim()).receiveAddressAsStrings("mainnet", start, end);
+}
+
+/**
+ * The engine shape ui/kspt.js (the KSPT codec, unsigned build, max, compound, broadcast) was
+ * written against on desktop: { kaspa, connect, withRpc, balanceForAddress }.
+ */
+export async function ksptEngine() {
+  const k = await kaspa();
+  return {
+    kaspa: k,
+    connect: () => connection(),
+    withRpc: (fn) => withRpc(fn),
+    balanceForAddress: async (address) => getBalance(k, await connection(), address),
+  };
+}
+
+/** Bulk "was this ever used" for the cold account screen and its visibility list. */
+export { knownUsedState as usedStateKnown };

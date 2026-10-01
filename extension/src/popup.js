@@ -16,6 +16,8 @@ import { showDomains } from "./domains.js";
 import { showKachatMarket, kachatWordmark } from "./market.js";
 import { showSettings, showLicenses } from "./settings.js";
 import { showApproval } from "./approve.js";
+import * as dock from "./dock.js";
+import { showCameraPermissionPage } from "./camera.js";
 
 const params = new URLSearchParams(location.search);
 const isApproval = params.get("view") === "approve";
@@ -32,11 +34,18 @@ async function boot() {
   wallet.useExplorer((await settings()).explorer);
   // A website's request (background.js opened this window for it).
   if (isApproval) return showApproval(params.get("id") || "");
+  // The one-time camera permission page the scanner opens from the popup.
+  if (params.get("view") === "camera") return showCameraPermissionPage(app);
   if (!(await vault.hasVault())) return showWelcome();
   if (!(await vault.isUnlocked())) return showUnlock();
   noteActivity();
   return enterApp();
 }
+
+// The Profile tab's screens keep the dock; sheets and full-screen flows (send, keys, QR) don't.
+dock.showsDock("home", "manage-chat", "manage-list", "manage-spending", "domains", "domain-detail",
+  "settings", "licenses", "kachat-market", "kachat-listing", "identity-picker", "identity-detail");
+dock.registerTab("profile", () => showHome());
 
 setHandlers({
   home: () => showHome(),
@@ -49,6 +58,7 @@ ext?.storage?.onChanged?.addListener((changes, area) => {
   if (isApproval) return;
   if (area === "session" && changes["kachat.unlockKey"] && !changes["kachat.unlockKey"].newValue) {
     wallet.disconnect();
+    dock.enableDock(false);
     showUnlock();
   }
 });
@@ -74,6 +84,8 @@ function connectionDot(state) {
 }
 
 async function showHome() {
+  dock.enableDock(true);
+  dock.resetTab("profile");
   const accounts = await vault.readAccounts().catch(() => null);
   if (!accounts) return showUnlock();
   const account = accounts.accounts.find((a) => a.id === accounts.activeAccountId) || accounts.accounts[0];
@@ -293,6 +305,7 @@ function paintHome() {
 // iOS Log Out: back to the accounts screen, where you pick an account (or add one). The vault
 // stays unlocked; the lock button is what asks for the password again.
 async function logOut() {
+  dock.enableDock(false);
   await setLoggedOut(true);
   homeState = null;
   await wallet.disconnect();
@@ -300,6 +313,7 @@ async function logOut() {
 }
 
 async function lockWallet() {
+  dock.enableDock(false);
   await vault.lock();
   tellBackground({ type: "lock" });
   await wallet.disconnect();
@@ -354,10 +368,14 @@ async function refreshHome() {
     try {
       await wallet.connection();
       s.connection = "ok";
+      dock.setStatus({ connection: "ok", nodeUrl: wallet.connectedNodeUrl() });
       paintHomeIfShowing(s);
       s.balances = await wallet.balances(s.addresses, s.spending.hidden);
+      // The other tabs' toolbars show the chatting wallet's balance, as iOS does.
+      dock.setStatus({ balanceText: wallet.formatKas(s.balances.main, 8) });
     } catch (error) {
       s.connection = "bad";
+      dock.setStatus({ connection: "bad" });
       console.warn("[KaChat Wallet] network:", error);
     }
   } catch (error) {

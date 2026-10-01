@@ -8,7 +8,10 @@
   <link rel="stylesheet" href="./src/styles.css" />
 </head>
 <body>
-  <main id="app" aria-live="polite"></main>
+  <div id="shell">
+    <main id="app" aria-live="polite"></main>
+    <nav id="dock" aria-label="Tabs" hidden></nav>
+  </div>
   <div id="toast" role="status" hidden></div>
   <script type="module" src="./src/popup.js"></script>
 </body>
