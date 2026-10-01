@@ -2812,8 +2812,17 @@ async function syncInbox({ catchUp = false } = {}) {
     const s = chatRequestState();
     const found = await engine.fetchInboxMessages({ cursor: s.inboxCursor, indexerUrl: currentIndexerUrl() });
     if (engine.address !== wallet) return 0;
-    const newest = found.reduce((max, row) => Math.max(max, Number(row.blockTime || 0)), 0);
-    if (newest > s.inboxCursor) { s.inboxCursor = newest; saveChatRequestState(s); }
+    // The cursor moves to the newest entry - but never past one whose sender the indexer hasn't
+    // resolved yet (an empty sender until the spent input is known): that entry is asked for
+    // again next time, or its sender would never be found (iOS 5d1f724). Re-reading entries
+    // already handled is harmless - known senders are skipped.
+    const unresolvedTimes = found.filter((row) => !row.sender).map((row) => Number(row.blockTime || 0));
+    const resolvedTimes = found.filter((row) => row.sender).map((row) => Number(row.blockTime || 0));
+    const resolvedNewest = resolvedTimes.length ? Math.max(...resolvedTimes) : null;
+    const nextCursor = unresolvedTimes.length
+      ? Math.min(Math.max(0, Math.min(...unresolvedTimes) - 1), resolvedNewest ?? 0)
+      : resolvedNewest;
+    if (nextCursor != null && nextCursor > s.inboxCursor) { s.inboxCursor = nextCursor; saveChatRequestState(s); }
     const senders = [];
     for (const row of found) {
       const sender = String(row.sender || "");
@@ -8898,7 +8907,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 80;
+const APP_BUILD = 81;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
