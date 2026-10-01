@@ -223,6 +223,7 @@ function showBuy() {
   openPanel({
     title: "Buy Name",
     leading: "Cancel",
+    full: true, // full height with Cancel top left, like Make an Offer (iOS 6dd5578)
     body: `
       <div class="form-section">
         <div class="form-card">
@@ -245,6 +246,7 @@ function showOffer() {
   openPanel({
     title: "Make an Offer",
     leading: "Cancel",
+    full: true,
     body: `
       <div class="form-section">
         <div class="form-card">
@@ -283,12 +285,12 @@ function showOffer() {
 }
 
 /** An iOS sheet with its own navigation bar: Cancel on the left or Done on the right. */
-function openPanel({ title, leading = null, trailing = null, body, onMount = null }) {
+function openPanel({ title, leading = null, trailing = null, body, onMount = null, full = false }) {
   document.querySelector(".panel-backdrop")?.remove();
   const backdrop = document.createElement("div");
   backdrop.className = "panel-backdrop";
   backdrop.innerHTML = `
-    <div class="panel" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="panel ${full ? "full" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
       <div class="sheet-grabber"></div>
       <header class="panel-bar">
         ${leading ? `<button class="bar-text" data-close>${esc(leading)}</button>` : "<span></span>"}
