@@ -249,13 +249,13 @@ function normalizeNodeAddress(raw) {
   if (!text) return null;
   if (/^ws:\/\//i.test(text)) return { error: "Use wss. Unencrypted connections are not supported." };
   const candidate = /^wss:\/\//i.test(text) ? text : /^[a-z0-9.-]+:\d{2,5}(\/.*)?$/i.test(text) ? `wss://${text}` : null;
-  if (!candidate) return { error: "Enter as wss://host or host:port" };
+  if (!candidate) return { error: "Enter as host:port or wss://host" };
   try {
     const url = new URL(candidate);
-    if (url.protocol !== "wss:" || !url.hostname) return { error: "Enter as wss://host or host:port" };
+    if (url.protocol !== "wss:" || !url.hostname) return { error: "Enter as host:port or wss://host" };
     return { value: candidate.replace(/\/+$/, "") };
   } catch {
-    return { error: "Enter as wss://host or host:port" };
+    return { error: "Enter as host:port or wss://host" };
   }
 }
 
@@ -274,163 +274,190 @@ function normalizeHttpsUrl(raw, fallback) {
   }
 }
 
+// iOS ConnectionSettingsView, wallet-only: of its underline tabs (Indexer, Node, Translation,
+// Domains, Explorer) the wallet keeps Node, Domains and Explorer - the indexers and the
+// translation service are for chats and KaPosts. As on iOS, picking a node applies at once,
+// the IP Address Book saves as you edit it, and Save stores the URL fields.
+const CONNECTION_TABS = [["node", "Node"], ["domains", "Domains"], ["explorer", "Explorer"]];
+const HTTPS_REQUIRED = "Use https. Unencrypted connections are not supported.";
+let connectionTab = "node";
+
 async function showConnectionSettings({ onBack }) {
-  const stored = await settings();
-  const book = Array.isArray(stored.nodeBook) ? stored.nodeBook : [];
+  const book = (await settings()).nodeBook;
   const draft = {
+    book: Array.isArray(book) ? book : [],
     restApi: getEndpointOverride("kaspaApi"),
-    node: getEndpoint("trustedNode"),
-    customNode: "",
     bookLabel: "",
     bookAddress: "",
-    error: "",
-    nodeError: "",
     bookError: "",
+    nodeError: "",
+    error: "",
   };
+
   const nodeChoices = () => {
-    const list = [["", "Automatic Scan (Recommended)"]];
-    for (const entry of book) list.push([entry.address, entry.label || entry.address]);
-    if (draft.node && !list.some(([address]) => address === draft.node)) list.push([draft.node, draft.node]);
+    const pinned = getEndpoint("trustedNode");
+    const list = [["", "Default (Recommended)"]];
+    for (const entry of draft.book) list.push([entry.address, entry.label || entry.address]);
+    if (pinned && !list.some(([address]) => address === pinned)) list.push([pinned, pinned]);
     return list;
   };
 
+  const nodeTab = () => {
+    const pinned = getEndpoint("trustedNode");
+    return `
+      <div class="form-section">
+        <div class="form-header">Kaspa Node</div>
+        <div class="form-card">
+          <label class="form-row between picker-row">
+            <span>Kaspa Node</span>
+            <span class="menu-picker">
+              <select id="node-choice" aria-label="Kaspa Node">
+                ${nodeChoices().map(([address, label]) => `<option value="${esc(address)}" ${address === pinned ? "selected" : ""}>${esc(label)}</option>`).join("")}
+              </select>
+              ${ICONS.chevronUpDown}
+            </span>
+          </label>
+          ${draft.nodeError ? `<div class="form-row error-text small">${esc(draft.nodeError)}</div>` : ""}
+          ${pinned ? '<div class="form-row"><span class="accent small">Connected only to this node</span></div>' : ""}
+        </div>
+        <div class="form-footer">Default finds a public Kaspa node for you and comes back to the last one that answered. Choosing a specific node connects only to it, without falling back to others. Doesn't affect the domains or explorer on the other tabs. Add custom addresses to the IP Address Book below to select them here.</div>
+      </div>
+
+      <div class="form-section">
+        <div class="form-header">IP Address Book</div>
+        <div class="form-card">
+          <div class="form-row"><input id="book-label" class="plain-input" value="${esc(draft.bookLabel)}" placeholder="Label (optional)" autocomplete="off" /></div>
+          <div class="form-row">
+            <input id="book-address" class="plain-input mono" value="${esc(draft.bookAddress)}" placeholder="host:port or wss://host" autocomplete="off" spellcheck="false" />
+            <button class="icon plain accent" id="book-add" aria-label="Add address" ${draft.bookAddress.trim() ? "" : "disabled"}>${ICONS.plusCircleSmall}</button>
+          </div>
+          ${draft.bookError ? `<div class="form-row error-text small">${esc(draft.bookError)}</div>` : ""}
+          ${draft.book.length ? draft.book.map((entry, i) => `
+            <div class="form-row between">
+              <button class="plain-button stack-tight" data-copy="${i}" title="Copy">
+                ${entry.label ? `<span>${esc(entry.label)}</span><span class="mono tiny muted">${esc(entry.address)}</span>` : `<span class="mono small">${esc(entry.address)}</span>`}
+              </button>
+              <button class="icon plain danger-text" data-remove="${i}" aria-label="Delete saved address">${ICONS.trash}</button>
+            </div>`).join("") : '<div class="form-row muted"><i>No saved addresses</i></div>'}
+        </div>
+        <div class="form-footer">Save your own node addresses here, then pick one under Kaspa Node above. Tap an address to copy it. A browser reaches nodes over wRPC (wss://).</div>
+      </div>`;
+  };
+
+  const domainsTab = () => `
+    <div class="form-section">
+      <div class="form-header">Kaspa Name Service</div>
+      <div class="form-card"><div class="form-row stack-tight"><span class="muted small">KNS API URL</span><span class="mono small muted break">${esc(getEndpoint("knsApi"))}</span></div></div>
+      <div class="form-footer">KNS domain resolution service</div>
+    </div>
+    <div class="form-section">
+      <div class="form-header">Other Name Services</div>
+      <div class="form-card">
+        ${NAME_SERVICES.filter((n) => n.tld === "k" || n.tld === "kaspa").map((n) => `
+          <div class="form-row stack-tight"><span class="muted small">${esc(n.serviceName)} (${esc(n.suffix)})</span><span class="mono small muted break">${esc(n.api)}</span></div>`).join("")}
+        <div class="form-row stack-tight"><span class="muted small">KaChat Names (.kachat)</span><span class="muted">Coming soon</span></div>
+      </div>
+      <div class="form-footer">Used to show the .k and .kaspa names an address owns. KaChat's own .kachat names will be set here once they launch.</div>
+    </div>`;
+
+  const explorerTab = () => `
+    <div class="form-section">
+      <div class="form-header">Kaspa Explorer API</div>
+      <div class="form-card"><div class="form-row stack-tight"><span class="muted small">Kaspa REST API URL</span>
+        <input id="rest" class="plain-input mono" value="${esc(draft.restApi)}" placeholder="${esc(ENDPOINT_DEFAULTS.kaspaApi)}" autocomplete="off" spellcheck="false" />
+        <span class="error-text small" id="rest-error">${/^http:\/\//i.test(draft.restApi.trim()) ? HTTPS_REQUIRED : ""}</span>
+      </div></div>
+      <div class="form-footer">REST API for transaction history and balance lookups</div>
+    </div>`;
+
   const paint = () => {
+    const scroll = app.querySelector(".form")?.scrollTop || 0;
     render(`
       <header class="navbar form-bar">
-        <button class="bar-text" id="cancel">Cancel</button>
+        <button class="nav-back" id="back" aria-label="Back">${ICONS.back}<span>Back</span></button>
         <div class="nav-title">Connection Settings</div>
         <button class="bar-text strong" id="save">Save</button>
       </header>
+      <div class="underline-tabs" role="tablist" aria-label="Connection">
+        ${CONNECTION_TABS.map(([id, title]) => `<button role="tab" data-ctab="${id}" aria-selected="${id === connectionTab}">${esc(title)}</button>`).join("")}
+      </div>
       <section class="form">
-        <div class="form-section">
-          <div class="form-header">Kaspa Name Service</div>
-          <div class="form-card"><div class="form-row stack-tight"><span>KNS API URL</span><span class="mono tiny muted break">${esc(getEndpoint("knsApi"))}</span></div></div>
-          <div class="form-footer">KNS domain resolution service</div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-header">Other Name Services</div>
-          <div class="form-card">
-            ${NAME_SERVICES.filter((n) => n.tld === "k" || n.tld === "kaspa").map((n) => `
-              <div class="form-row stack-tight"><span class="muted small">${esc(n.serviceName)} (${esc(n.suffix)})</span><span class="mono tiny muted break">${esc(n.api)}</span></div>`).join("")}
-            <div class="form-row stack-tight"><span class="muted small">KaChat Names (.kachat)</span><span class="muted">Coming soon</span></div>
-          </div>
-          <div class="form-footer">Used to show the .k and .kaspa names an address owns, and to look up names you type. KaChat's own .kachat names will be set here once they launch.</div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-header">Kaspa Explorer API</div>
-          <div class="form-card"><div class="form-row stack-tight"><span>Kaspa REST API URL</span>
-            <input id="rest" class="plain-input mono" value="${esc(draft.restApi)}" placeholder="${esc(ENDPOINT_DEFAULTS.kaspaApi)}" autocomplete="off" spellcheck="false" /></div></div>
-          <div class="form-footer">REST API for transaction history and balance lookups</div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-header">Kaspa Node</div>
-          <div class="form-card" role="radiogroup" aria-label="Kaspa Node">
-            ${nodeChoices().map(([address, label]) => `
-              <button class="form-row between" role="radio" data-node="${esc(address)}" aria-checked="${address === draft.node}">
-                <span class="stack-tight"><span>${esc(label)}</span>${address && label !== address ? `<span class="mono tiny muted">${esc(address)}</span>` : ""}</span>
-                ${address === draft.node ? `<span class="accent">${ICONS.checkmark}</span>` : ""}
-              </button>`).join("")}
-            <div class="form-row">
-              <input id="custom-node" class="plain-input mono" value="${esc(draft.customNode)}" placeholder="wss://host or host:port" autocomplete="off" spellcheck="false" />
-              <button class="link-button small" id="use-custom" ${draft.customNode.trim() ? "" : "disabled"}>Use</button>
-            </div>
-            ${draft.node ? '<div class="form-row"><span class="accent small">Connected only to this node</span></div>' : ""}
-            ${draft.nodeError ? `<div class="form-row error-text">${esc(draft.nodeError)}</div>` : ""}
-          </div>
-          <div class="form-footer">Automatic Scan finds a public Kaspa node for you. Choosing a specific node connects only to it, without falling back to others. Doesn't affect the KNS/REST API URLs above. Add your own nodes to the Node Address Book below to select them here. Browsers can only reach nodes over wRPC (wss://).</div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-header">Node Address Book</div>
-          <div class="form-card">
-            <div class="form-row"><input id="book-label" class="plain-input" value="${esc(draft.bookLabel)}" placeholder="Label (optional)" autocomplete="off" /></div>
-            <div class="form-row">
-              <input id="book-address" class="plain-input mono" value="${esc(draft.bookAddress)}" placeholder="wss://host or host:port" autocomplete="off" spellcheck="false" />
-              <button class="icon plain accent" id="book-add" aria-label="Add address">${ICONS.plusCircleSmall}</button>
-            </div>
-            ${draft.bookError ? `<div class="form-row error-text">${esc(draft.bookError)}</div>` : ""}
-            ${book.length ? book.map((entry, i) => `
-              <div class="form-row between">
-                <button class="plain-button stack-tight" data-copy="${i}"><span>${esc(entry.label || "Node")}</span><span class="mono tiny muted">${esc(entry.address)}</span></button>
-                <button class="icon plain danger-text" data-remove="${i}" aria-label="Delete saved address">${ICONS.trash}</button>
-              </div>`).join("") : '<div class="form-row muted"><i>No saved addresses</i></div>'}
-          </div>
-          <div class="form-footer">Save your own node addresses here, then pick one under Kaspa Node above.</div>
-        </div>
-
+        ${connectionTab === "node" ? nodeTab() : connectionTab === "domains" ? domainsTab() : explorerTab()}
         ${draft.error ? `<div class="form-section"><div class="form-card"><div class="form-row error-text">${esc(draft.error)}</div></div></div>` : ""}
       </section>`, "settings");
+    const form = app.querySelector(".form");
+    if (form) form.scrollTop = scroll;
 
-    $("#cancel").onclick = onBack;
-    const keep = () => {
-      draft.restApi = $("#rest").value;
-      draft.customNode = $("#custom-node").value;
-      draft.bookLabel = $("#book-label").value;
-      draft.bookAddress = $("#book-address").value;
-    };
-    $("#custom-node").oninput = (event) => { $("#use-custom").disabled = !event.target.value.trim(); };
-    for (const row of app.querySelectorAll("[data-node]")) {
-      row.onclick = () => { keep(); draft.node = row.dataset.node; draft.nodeError = ""; paint(); };
+    $("#back").onclick = onBack;
+    // Save covers every tab: the fields keep their edits while you switch between them.
+    for (const tab of app.querySelectorAll("[data-ctab]")) {
+      tab.onclick = () => { connectionTab = tab.dataset.ctab; draft.error = ""; paint(); };
     }
-    $("#use-custom").onclick = () => {
-      keep();
-      const parsed = normalizeNodeAddress(draft.customNode);
-      if (!parsed || parsed.error) { draft.nodeError = parsed?.error || "Enter as wss://host or host:port"; paint(); return; }
-      draft.node = parsed.value;
-      draft.customNode = "";
+
+    const nodeChoice = $("#node-choice");
+    if (nodeChoice) nodeChoice.onchange = async () => {
+      const value = nodeChoice.value;
+      if (value === getEndpoint("trustedNode")) return;
+      setEndpoint("trustedNode", value);
+      await wallet.disconnect();
+      toast(value ? "Node updated." : "Default node connection enabled.");
       draft.nodeError = "";
       paint();
     };
-    $("#book-add").onclick = async () => {
-      keep();
+
+    const label = $("#book-label");
+    if (label) label.oninput = () => { draft.bookLabel = label.value; };
+    const address = $("#book-address");
+    if (address) address.oninput = () => {
+      draft.bookAddress = address.value;
+      draft.bookError = "";
+      $("#book-add").disabled = !address.value.trim();
+    };
+    const add = $("#book-add");
+    if (add) add.onclick = async () => {
       const parsed = normalizeNodeAddress(draft.bookAddress);
-      if (!parsed || parsed.error) { draft.bookError = parsed?.error || "Enter as wss://host or host:port"; paint(); return; }
-      if (!book.some((entry) => entry.address === parsed.value)) book.push({ label: draft.bookLabel.trim(), address: parsed.value });
-      await saveSettings({ nodeBook: book });
-      draft.nodeError = "";
+      if (!parsed || parsed.error) { draft.bookError = parsed?.error || "Enter as host:port or wss://host"; paint(); return; }
+      if (!draft.book.some((entry) => entry.address === parsed.value)) draft.book.push({ label: draft.bookLabel.trim(), address: parsed.value });
+      await saveSettings({ nodeBook: draft.book });
       draft.bookLabel = "";
       draft.bookAddress = "";
       draft.bookError = "";
       paint();
     };
     for (const button of app.querySelectorAll("[data-copy]")) {
-      button.onclick = () => copyText(book[Number(button.dataset.copy)].address, "Node address");
+      button.onclick = () => copyText(draft.book[Number(button.dataset.copy)].address, "Node address");
     }
     for (const button of app.querySelectorAll("[data-remove]")) {
       button.onclick = async () => {
-        keep();
-        const [removed] = book.splice(Number(button.dataset.remove), 1);
-        await saveSettings({ nodeBook: book });
-        toast(removed?.address === draft.node ? "Removed from address book. Still connected to this node." : "Address removed.");
+        // Removing the pinned node's entry keeps the pin; the picker then shows it as a custom
+        // address (iOS deleteSavedNodeAddress).
+        const [removed] = draft.book.splice(Number(button.dataset.remove), 1);
+        await saveSettings({ nodeBook: draft.book });
+        toast(removed?.address === getEndpoint("trustedNode") ? "Removed from address book. Still connected to this node." : "Address removed.");
         paint();
       };
     }
 
+    const rest = $("#rest");
+    if (rest) rest.oninput = () => {
+      draft.restApi = rest.value;
+      $("#rest-error").textContent = /^http:\/\//i.test(rest.value.trim()) ? HTTPS_REQUIRED : "";
+    };
+
     $("#save").onclick = async () => {
-      keep();
-      const rest = normalizeHttpsUrl(draft.restApi, ENDPOINT_DEFAULTS.kaspaApi);
-      if (rest.error) { draft.error = rest.error; toast(rest.error); paint(); return; }
+      const parsed = normalizeHttpsUrl(draft.restApi, ENDPOINT_DEFAULTS.kaspaApi);
+      if (parsed.error) { draft.error = parsed.error; connectionTab = "explorer"; toast(parsed.error); paint(); return; }
       // A REST API other than api.kaspa.org needs the browser's permission to be reached. The
       // request has to come straight from this click, before anything else is awaited.
-      if (rest.value !== ENDPOINT_DEFAULTS.kaspaApi && ext?.permissions?.request) {
+      if (parsed.value !== ENDPOINT_DEFAULTS.kaspaApi && ext?.permissions?.request) {
         let granted = false;
-        try { granted = await ext.permissions.request({ origins: [`${new URL(rest.value).origin}/*`] }); } catch { granted = false; }
-        if (!granted) { draft.error = "KaChat Wallet needs your permission to reach that address."; paint(); return; }
+        try { granted = await ext.permissions.request({ origins: [`${new URL(parsed.value).origin}/*`] }); } catch { granted = false; }
+        if (!granted) { draft.error = "KaChat Wallet needs your permission to reach that address."; connectionTab = "explorer"; paint(); return; }
       }
-      const nodeChanged = draft.node !== getEndpoint("trustedNode");
-      setEndpoint("kaspaApi", rest.value);
+      setEndpoint("kaspaApi", parsed.value);
       // The background worker has no localStorage; it reads the REST API from here.
-      await saveSettings({ restApi: rest.value });
-      setEndpoint("trustedNode", draft.node);
-      if (nodeChanged) {
-        await wallet.disconnect();
-        toast(draft.node ? "Node updated." : "Automatic scan enabled.");
-      } else {
-        toast("Settings saved.");
-      }
+      await saveSettings({ restApi: parsed.value });
+      toast("Settings saved.");
       onBack();
     };
   };

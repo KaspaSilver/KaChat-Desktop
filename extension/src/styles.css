@@ -566,3 +566,12 @@ button.domain-send { background: var(--kaspa); color: #000; border-radius: 999px
 .other-domains-list { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
 .other-domain { display: flex; align-items: center; gap: 8px; width: 100%; background: transparent; color: var(--text); padding: 2px 0; text-align: left; font-weight: 400; }
 .other-domain:disabled { opacity: 1; cursor: default; background: transparent !important; color: var(--text) !important; }
+
+/* iOS menu-style Picker row: the value in accent with the up/down chevrons. */
+.menu-picker { position: relative; display: inline-flex; align-items: center; gap: 4px; color: var(--kaspa); max-width: 65%; }
+.menu-picker select { appearance: none; -webkit-appearance: none; background: transparent; border: 0; color: var(--kaspa); font: inherit; font-size: 15px; text-align: right; text-align-last: right; padding: 0; cursor: pointer; max-width: 100%; text-overflow: ellipsis; }
+.menu-picker select:focus-visible { outline: none; }
+.menu-picker select option { color: #fff; background: #2c2c2e; }
+.picker-row { cursor: pointer; }
+.form-bar .nav-back { position: static; }
+.underline-tabs + .form, .underline-tabs + .screen { padding-top: 16px; }
