@@ -218,7 +218,11 @@ async function listFolder(relativePath = "") {
     cache: "no-store",
   });
   if (response.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
-  if (response.status !== 207) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
+  if (response.status !== 207) {
+    const error = new Error(`Nextcloud returned HTTP ${response.status}.`);
+    error.status = response.status;
+    throw error;
+  }
 
   const xml = new DOMParser().parseFromString(await response.text(), "application/xml");
   const results = [];
@@ -369,6 +373,57 @@ async function ensureFolder(davRoot, parts) {
     if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the media folder (HTTP ${mkcol.status}).`);
   }
   return url;
+}
+
+// --- Plain files in the KaChat folder (Portfolio CSV export / import, iOS aa5d783) ---
+
+/** Uploads `body` as `filename` into the KaChat folder (backupFolderPath - beside the chat
+ *  backup), creating the folder chain if needed, and returns the stored path. A file of the same
+ *  name is replaced; exports carry a timestamp in their name, so each one is a new file. */
+export async function uploadToKaChatFolder(body, filename, contentType) {
+  if (!nc) throw new Error("Nextcloud is not connected.");
+  await ensureDavUser();
+  const folder = backupFolderPath();
+  const parts = folder.split("/").filter(Boolean);
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
+  const folderURL = await ensureFolder(davRoot, parts);
+  const storedName = String(filename || "file").replace(/[^\w.\-]+/g, "_");
+  const put = await fetch(`${folderURL}/${encodeURIComponent(storedName)}`, {
+    method: "PUT",
+    headers: { Authorization: authHeader(), "Content-Type": contentType || "application/octet-stream" },
+    body,
+  });
+  if (put.status === 401) throw new Error("Nextcloud refused the upload (HTTP 401).");
+  if (!put.ok) throw new Error(`Upload failed (HTTP ${put.status}).`);
+  return parts.length ? `${parts.join("/")}/${storedName}` : storedName;
+}
+
+/** A file's text, for importing it. Every failure throws so the caller can say what went wrong. */
+export async function downloadNextcloudText(path, { maxBytes = 10_000_000 } = {}) {
+  if (!nc) throw new Error("Nextcloud is not connected.");
+  await ensureDavUser();
+  const encoded = String(path || "").split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  const response = await fetch(`${apiBase()}/remote.php/dav/files/${davUser()}/${encoded}`, {
+    headers: { Authorization: authHeader() },
+    cache: "no-store",
+  });
+  if (response.status === 401) throw new Error("Nextcloud refused the download (HTTP 401).");
+  if (!response.ok) throw new Error(`Download failed (HTTP ${response.status}).`);
+  const blob = await response.blob();
+  if (blob.size > maxBytes) throw new Error("That file is too large to import.");
+  return blob.text();
+}
+
+let pickerAllowedExtensions = null;
+/** Browses the account and hands back the file picked - no share link. Starts in the KaChat
+ *  folder (where Export to Nextcloud puts files) with All Files for the root; only files whose
+ *  extension is allowed can be picked, the rest show dimmed (iOS NextcloudFileSelectView). */
+export function openNextcloudFilePicker({ allowedExtensions = [], onPicked = null } = {}) {
+  if (!nc) { deps.showToast?.("Connect Nextcloud in Settings → Storage first."); return false; }
+  pickerAllowedExtensions = new Set(allowedExtensions.map((ext) => String(ext).toLowerCase()));
+  pickerOnPicked = onPicked;
+  openPicker("file");
+  return true;
 }
 
 /** Uploads media bytes to KaChat/Media/ and returns the public /s/TOKEN share link. */
@@ -1437,7 +1492,7 @@ function openPicker(mode) {
   pickerMode = mode;
   pickerOpen = true;
   pickerStack = [];
-  pickerPath = mode === "media" ? (nc.startFolder || "") : "";
+  pickerPath = mode === "media" ? (nc.startFolder || "") : mode === "file" ? backupFolderPath() : "";
   const modal = modalsEl.querySelector("[data-nc-picker-modal]");
   if (modal) modal.hidden = false;
   loadPickerFolder();
@@ -1458,7 +1513,8 @@ async function loadPickerFolder() {
   try {
     pickerFiles = await listFolder(pickerPath);
   } catch (error) {
-    pickerError = corsHint(error);
+    // The KaChat folder doesn't exist until something is first saved to it: that reads as empty.
+    if (!(pickerMode === "file" && error?.status === 404)) pickerError = corsHint(error);
   }
   pickerLoading = false;
   renderPicker();
@@ -1466,7 +1522,7 @@ async function loadPickerFolder() {
 }
 
 function pickerTitle() {
-  if (!pickerPath) return pickerMode === "media" ? "Nextcloud" : "All Files";
+  if (!pickerPath) return pickerMode === "media" || pickerMode === "file" ? "Nextcloud" : "All Files";
   return pickerPath.split("/").pop();
 }
 
@@ -1479,10 +1535,10 @@ function renderPicker() {
   if (!body) return;
   if (titleEl) titleEl.textContent = pickerTitle();
   if (chooseBtn) {
-    chooseBtn.hidden = pickerMode === "media";
+    chooseBtn.hidden = pickerMode === "media" || pickerMode === "file";
     chooseBtn.textContent = pickerPath ? "Use This Folder" : "Use All Files";
   }
-  if (allFilesBtn) allFilesBtn.hidden = !(pickerMode === "media" && (pickerPath || pickerStack.length));
+  if (allFilesBtn) allFilesBtn.hidden = !((pickerMode === "media" || pickerMode === "file") && (pickerPath || pickerStack.length));
   if (backBtn) backBtn.hidden = pickerStack.length === 0;
 
   const folders = pickerFiles.filter((f) => f.isDirectory)
@@ -1494,6 +1550,10 @@ function renderPicker() {
   // Everything else (audio, PDFs, docs, …) is sendable too — listed as rows under the grid.
   const others = pickerMode === "media"
     ? pickerFiles.filter((f) => !f.isDirectory && !f.isImage && !f.isVideo)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+    : [];
+  const plainFiles = pickerMode === "file"
+    ? pickerFiles.filter((f) => !f.isDirectory)
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
     : [];
 
@@ -1519,9 +1579,24 @@ function renderPicker() {
         <span>${deps.escapeHtml(file.name)}</span>
         ${file.size ? `<small>${(file.size / 1024).toFixed(0)} KB</small>` : ""}
       </button>`).join("")}
-    ${!pickerLoading && !folders.length && !media.length && !others.length && !pickerError
-      ? `<p class="nc-empty">${pickerMode === "media" ? "This folder is empty." : "No subfolders."}</p>` : ""}
+    ${plainFiles.map((file) => {
+      const pickable = pickerAllowedExtensions?.has(fileExtension(file.path));
+      const detail = [file.size ? formatFileSize(file.size) : "", file.modified && !Number.isNaN(file.modified.getTime()) ? file.modified.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : ""].filter(Boolean).join(" · ");
+      return `
+      <button class="nc-folder-row nc-file-row nc-plain-file${pickable ? " pickable" : ""}" type="button" data-nc-pick-file="${deps.escapeHtml(file.path)}" ${pickable ? "" : "disabled"}>
+        ${fileRowIcon(file)}
+        <span class="nc-plain-file-copy"><span>${deps.escapeHtml(file.name)}</span>${detail ? `<small>${deps.escapeHtml(detail)}</small>` : ""}</span>
+      </button>`;
+    }).join("")}
+    ${!pickerLoading && !folders.length && !media.length && !others.length && !plainFiles.length && !pickerError
+      ? `<p class="nc-empty">${pickerMode === "media" || pickerMode === "file" ? "This folder is empty." : "No subfolders."}</p>` : ""}
     ${pickerLoading ? '<p class="nc-empty">Loading…</p>' : ""}`;
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function fileRowIcon(file) {
@@ -1662,6 +1737,14 @@ function buildModals() {
       return;
     }
     const pickFile = event.target.closest("[data-nc-pick-file]");
+    if (pickFile && pickerMode === "file") {
+      if (pickFile.disabled) return;
+      const onPicked = pickerOnPicked;
+      const file = pickerFiles.find((f) => f.path === pickFile.dataset.ncPickFile);
+      closePicker();
+      if (file) onPicked?.(file);
+      return;
+    }
     if (pickFile) { pickMediaFile(pickFile.dataset.ncPickFile); }
   });
 

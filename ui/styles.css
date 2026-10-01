@@ -12399,3 +12399,12 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .profile-about-link:hover { background: var(--row-hover); }
 .profile-about-card .profile-about-row:first-child { border-radius: 18px 18px 0 0; }
 .profile-about-card .profile-about-row:last-child { border-radius: 0 0 18px 18px; }
+
+/* Nextcloud file pick (Portfolio > Import from Nextcloud): CSVs in accent, everything else dimmed. */
+.nc-plain-file { text-align: left; }
+.nc-plain-file svg { color: var(--muted); }
+.nc-plain-file.pickable svg { color: var(--kaspa-ink); }
+.nc-plain-file:disabled { cursor: default; opacity: .5; }
+.nc-plain-file-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.nc-plain-file-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-plain-file-copy small { color: var(--muted); font-size: 12px; }

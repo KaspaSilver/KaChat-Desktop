@@ -34,6 +34,7 @@ import { resolveDomain } from "../engine/kns.js";
 import { looksLikeName, resolveEverywhere, primary as primaryName } from "../engine/name-services.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { saveFile } from "./save-file.js";
+import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
@@ -865,6 +866,11 @@ function renderPortfolioActionSheet() {
     : [
         { action: "import", title: "Import CSV", subtitle: "Read transactions in from a file." },
         { action: "export", title: "Export CSV", subtitle: "Write this portfolio's transactions out to a file." },
+        // With a Nextcloud account connected (iOS aa5d783).
+        ...(isNextcloudConnected() ? [
+          { action: "nc-import", title: "Import from Nextcloud", subtitle: "Pick a CSV file from your Nextcloud." },
+          { action: "nc-export", title: "Export to Nextcloud", subtitle: "Save the CSV to the KaChat folder in your Nextcloud." },
+        ] : []),
       ];
   body.innerHTML = `
     <div class="modal-header">
@@ -1617,10 +1623,11 @@ function parseHeaderUtcOffsetMinutes(header) {
   return sign * (Math.abs(hours) * 60 + minutes);
 }
 
-async function exportCsv() {
+/** The export as { filename, csv }, or null (with the toast said) when there is nothing to export. */
+function buildCsvExport() {
   const portfolio = activePortfolio();
   const rows = [...(portfolio.transactions || [])].sort((a, b) => a.timestamp - b.timestamp);
-  if (!rows.length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return; }
+  if (!rows.length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return null; }
   const pad = (n) => String(n).padStart(2, "0");
   let csv = "Date (UTC+0:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes\n";
   for (const tx of rows) {
@@ -1632,11 +1639,42 @@ async function exportCsv() {
     const notes = String(tx.notes || "").replace(/"/g, '""');
     csv += `"${date}","KAS","${tx.type === "sell" ? "sell" : "buy"}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
   }
+  return { filename: `kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`, csv };
+}
+
+async function exportCsv() {
+  const built = buildCsvExport();
+  if (!built) return;
   try {
-    await saveFile(`kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`, "text/csv", csv);
+    await saveFile(built.filename, "text/csv", built.csv);
   } catch {
     deps.showToast?.("Export failed. Couldn't write the CSV file");
   }
+}
+
+/** Same CSV as Export CSV, uploaded into the KaChat folder of the connected Nextcloud. */
+async function exportToNextcloud() {
+  const built = buildCsvExport();
+  if (!built) return;
+  try {
+    const path = await uploadToKaChatFolder(new Blob([built.csv], { type: "text/csv" }), built.filename, "text/csv");
+    deps.showToast?.(`Saved to ${path} in Nextcloud.`);
+  } catch (error) {
+    deps.showToast?.(`Export to Nextcloud failed: ${error?.message || "unknown error"}`);
+  }
+}
+
+/** The picked file goes through the same import as a file from disk. */
+function importFromNextcloud() {
+  openNextcloudFilePicker({
+    allowedExtensions: ["csv", "txt"],
+    onPicked: async (file) => {
+      let imported = 0;
+      try { imported = importCsvText(await downloadNextcloudText(file.path)); }
+      catch (error) { deps.showToast?.(`Import from Nextcloud failed: ${error?.message || "unknown error"}`); return; }
+      deps.showToast?.(imported > 0 ? `Imported ${imported} transaction${imported === 1 ? "" : "s"}` : "Import failed. Check the CSV format");
+    },
+  });
 }
 
 /** Same replace-by-timestamp dedup as iOS: a row whose timestamp exactly matches an existing
@@ -2224,6 +2262,8 @@ function buildModals() {
       else if (which === "address") openAddressImport();
       else if (which === "export") exportCsv();
       else if (which === "import") modalsEl.querySelector("[data-portfolio-csv-input]")?.click();
+      else if (which === "nc-export") exportToNextcloud();
+      else if (which === "nc-import") importFromNextcloud();
       return;
     }
 
