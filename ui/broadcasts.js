@@ -163,9 +163,13 @@ function setCuratedChannel(name, shown) {
   if (!isIndexedBroadcastChannel(name)) return;
   if (shown) hiddenCurated.delete(name); else hiddenCurated.add(name);
   try { localStorage.setItem(deps.accountScopedKey(HIDDEN_CURATED_KEY), JSON.stringify([...hiddenCurated])); } catch { /* fine */ }
+  const isJoined = joinedChannels.includes(name);
   if (!shown) {
     delete notifyByChannel[name];
     if (activeChannel === name) closeRoom();
+  } else if (isJoined && FEATURED_BROADCAST_CHANNELS.includes(name)) {
+    // As iOS setCuratedChannel does: a featured room switched back on notifies again.
+    notifyByChannel[name] = true;
   }
   saveNotify();
   syncScanWanted();
@@ -174,23 +178,32 @@ function setCuratedChannel(name, shown) {
 
 /** Public Chats settings, behind the gear at the top right of the tab. */
 function openPublicChatsSettings() {
+  // iOS PublicChatsSettingsView: a Form titled "Public Chats" with Done, a Popular section with
+  // its footer, and an Other Languages section; each room a toggle with its language under it.
   const row = (name) => {
     const language = broadcastLanguageDisplayName(name);
-    return `<div class="settings-toggle-row"><span><strong>#${deps.escapeHtml(name)}</strong>${language ? `<small>${deps.escapeHtml(language)}</small>` : ""}</span><label class="switch-control"><input type="checkbox" data-curated-room="${deps.escapeHtml(name)}" ${curatedShown(name) ? "checked" : ""}><span></span></label></div>`;
+    return `<label class="settings-toggle-row public-settings-row"><span class="settings-row-copy"><strong>#${deps.escapeHtml(name)}</strong>${language ? `<small>${deps.escapeHtml(language)}</small>` : ""}</span><span class="switch-control"><input type="checkbox" data-curated-room="${deps.escapeHtml(name)}" ${curatedShown(name) ? "checked" : ""}><span></span></span></label>`;
   };
   const host = document.createElement("div");
   host.className = "modal-backdrop broadcast-settings-backdrop";
   host.innerHTML = `
-    <section class="contact-modal broadcast-settings-sheet" role="dialog" aria-modal="true" aria-label="Public Chats Settings">
-      <div class="modal-header"><div><h2>Public Chats</h2></div><button class="modal-close" type="button" data-public-settings-close aria-label="Done">×</button></div>
+    <section class="contact-modal broadcast-settings-sheet public-settings-form" role="dialog" aria-modal="true" aria-label="Public Chats">
+      <header class="public-settings-nav">
+        <span aria-hidden="true"></span>
+        <h2>Public Chats</h2>
+        <button class="public-settings-done" type="button" data-public-settings-close>Done</button>
+      </header>
       <div class="broadcast-settings-body">
-        <p class="screen-kicker">Popular</p>
-        ${FEATURED_BROADCAST_CHANNELS.map(row).join("")}
-        <p class="field-hint">A room that is switched off no longer appears in Public Chats and never sends a notification. Switch it back on at any time.</p>
-        <p class="screen-kicker">Other Languages</p>
-        ${LANGUAGE_BROADCAST_CHANNELS.map(row).join("")}
+        <section class="settings-group">
+          <p class="settings-group-label">Popular</p>
+          <div class="settings-list-card">${FEATURED_BROADCAST_CHANNELS.map(row).join("")}</div>
+          <p class="settings-group-footer">A room that is switched off no longer appears in Public Chats and never sends a notification. Switch it back on at any time.</p>
+        </section>
+        <section class="settings-group">
+          <p class="settings-group-label">Other Languages</p>
+          <div class="settings-list-card">${LANGUAGE_BROADCAST_CHANNELS.map(row).join("")}</div>
+        </section>
       </div>
-      <div class="modal-actions"><button class="primary-button" type="button" data-public-settings-close>Done</button></div>
     </section>`;
   document.body.appendChild(host);
   const close = () => host.remove();

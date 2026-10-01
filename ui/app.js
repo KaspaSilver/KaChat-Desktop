@@ -7748,6 +7748,7 @@ function setActiveAppTab(tab) {
   });
 
   currentAppTab = tab;
+  try { updatePublicChatsSettingsButton(); } catch { /* not ready yet */ }
   const isChats = screenTab === "chats";
   if (appSidebar) appSidebar.hidden = !isChats;
   if (newChatFab) newChatFab.hidden = !isChats;
@@ -8504,7 +8505,7 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.1.0";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 71;
+const APP_BUILD = 72;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14877,12 +14878,19 @@ function updateChatSelectionBar() {
   }
 }
 
+/// The Public Chats settings gear sits beside Select, only on the Public Chats page and never
+/// while selecting (iOS ChatListView toolbar).
+function updatePublicChatsSettingsButton() {
+  const gear = document.querySelector("[data-public-chats-settings]");
+  if (gear) gear.hidden = !(currentAppTab === "chats" && activeChatsListTab === "public" && !chatSelectionModeActive);
+}
 function setChatSelectionMode(active) {
   chatSelectionModeActive = active;
   if (!active) { selectedChatConversationIds.clear(); selectedGroupIds.clear(); }
   if (chatSelectToggle) chatSelectToggle.textContent = active ? "Cancel" : "Select";
   if (chatSelectAll) chatSelectAll.hidden = !active;
   if (appSidebar) appSidebar.classList.toggle("selecting-chats", active);
+  updatePublicChatsSettingsButton();
   updateChatSelectionBar();
   renderChats();
   renderGroupList();
@@ -14936,6 +14944,7 @@ chatsListTabButtons.forEach((button) => {
 // A room open in the Public Chats tab owns the detail pane the way a conversation does.
 let publicRoomOpen = false;
 function syncPublicChatsPane() {
+  updatePublicChatsSettingsButton();
   const onPublic = currentAppTab === "chats" && activeChatsListTab === "public";
   const roomEl = document.querySelector("[data-broadcast-room]");
   if (roomEl) roomEl.hidden = !(onPublic && publicRoomOpen);
