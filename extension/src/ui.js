@@ -214,6 +214,8 @@ export const ICONS = {
   arrowRightCircleOutline: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M8 12h8M13 8.5l3.5 3.5-3.5 3.5"/></svg>',
   atCircle: '<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3.5"/><path d="M15.5 9v4.2a2.3 2.3 0 0 0 4.3 1.1"/></svg>',
   chevronUpDown: '<svg width="12" height="16" viewBox="0 0 12 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6.5L6 3l3.5 3.5M2.5 11.5L6 15l3.5-3.5"/></svg>',
+  // SF Symbol person.fill - the avatar for anyone without a photo (iOS KNSAvatarView fallback).
+  person: '<svg width="32" height="32" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7.5" r="4.5" fill="currentColor"/><path d="M3.5 21c0-4.6 3.8-7.5 8.5-7.5s8.5 2.9 8.5 7.5z" fill="currentColor"/></svg>',
   download: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>',
 };
 

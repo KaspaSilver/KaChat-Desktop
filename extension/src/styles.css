@@ -59,10 +59,12 @@ body.tab #app { max-width: 420px; margin: 24px auto; border: 1px solid var(--lin
 }
 .topbar .title { flex: 1; font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
-.dot.ok { background: var(--kaspa); box-shadow: 0 0 6px var(--kaspa); }
-.dot.busy { background: #f5c451; }
-.dot.bad { background: var(--danger); }
+/* iOS ConnectionStatusIndicator: a 12 pt dot with a faint outline - system green connected,
+   orange connecting, red disconnected. */
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .2); }
+.dot.ok { background: #30d158; }
+.dot.busy { background: #ff9f0a; }
+.dot.bad { background: #ff453a; }
 
 h1 { font-size: 22px; margin: 0; }
 h2 { font-size: 17px; margin: 0; }
@@ -280,7 +282,9 @@ body.tab .profile { height: calc(100vh - 48px); }
   background: rgba(142, 142, 147, .15); color: var(--kaspa);
 }
 
-.profile-body { flex: 1; overflow-y: auto; padding: 0 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+/* iOS: the scroll content has .padding() (16) and the account row pulls up 8 - so 8 under the
+   pinned title band. */
+.profile-body { flex: 1; overflow-y: auto; padding: 16px 16px 24px; display: flex; flex-direction: column; gap: 16px; }
 /* A scrolling flex column squeezes children that clip their overflow (the hero) to nothing. */
 .profile-body > * { flex-shrink: 0; }
 
@@ -575,3 +579,10 @@ button.domain-send { background: var(--kaspa); color: #000; border-radius: 999px
 .picker-row { cursor: pointer; }
 .form-bar .nav-back { position: static; }
 .underline-tabs + .form, .underline-tabs + .screen { padding-top: 16px; }
+
+/* The pencil sits 8 pt after the name, at the name's size (iOS pencil.circle.fill .title3). */
+.account-row button.plain { width: auto; height: auto; padding: 0; display: inline-flex; }
+.account-row button.plain svg { width: 20px; height: 20px; }
+
+/* iOS KNSAvatarView fallback: person glyph on the accent at 20%. */
+.avatar.avatar-glyph { background: color-mix(in srgb, var(--kaspa) 20%, var(--bg)); color: var(--kaspa); display: flex; align-items: center; justify-content: center; }
