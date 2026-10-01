@@ -1,5 +1,4 @@
-// The dock - iOS MainTabView's tab bar, wallet-only: Storage | Portfolio | Profile, the iOS
-// default order for those three (AppTab.defaultOrder: coldStorage, portfolio, ..., profile).
+// The dock - iOS MainTabView's tab bar, wallet-only: Storage | Profile | Portfolio.
 // Selected items take the accent, the rest the system grey; labels are 10 pt under 26 pt
 // glyphs. Each tab keeps its own place: switching back returns to the screen you left there
 // (iOS keeps every tab's NavigationStack alive). Tapping the tab you are on does nothing.
@@ -19,7 +18,8 @@ const ICON = {
   profile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="9.5" r="3.3"/><path d="M5.6 18.6c1.4-2.3 3.7-3.5 6.4-3.5s5 1.2 6.4 3.5"/></svg>',
 };
 
-const TABS = [["cold", "Storage"], ["portfolio", "Portfolio"], ["profile", "Profile"]];
+// Profile sits in the middle, between the two wallet tools (the user's order).
+const TABS = [["cold", "Storage"], ["profile", "Profile"], ["portfolio", "Portfolio"]];
 
 const roots = {};
 const last = {};
