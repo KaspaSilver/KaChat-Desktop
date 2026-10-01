@@ -8630,7 +8630,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 75;
+const APP_BUILD = 76;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11861,23 +11861,48 @@ function saveProfileAccountName() {
 
   updateWalletUi();
   renderSavedAccountsScreen();
-  showCopyToast("Account name saved");
 }
 
-profileAccountName?.addEventListener("blur", () => {
+// iOS accountNameRow: the name reads as plain text with a pencil beside it; the pencil swaps it
+// for a field and a checkmark, and Return, the checkmark or clicking away commits.
+function setAccountNameEditing(editing) {
+  const textEl = document.querySelector("[data-profile-account-name-text]");
+  const pencil = document.querySelector("[data-profile-account-edit]");
+  const done = document.querySelector("[data-profile-account-done]");
+  if (!profileAccountName) return;
+  profileAccountName.hidden = !editing;
+  if (textEl) textEl.hidden = editing;
+  if (pencil) pencil.hidden = editing;
+  if (done) done.hidden = !editing;
+}
+function commitAccountRename() {
+  if (!profileAccountName || profileAccountName.hidden) return;
   const before = activeAccountMetadata()?.name || "";
   saveProfileAccountName();
+  setAccountNameEditing(false);
+  updateWalletUi();
   const after = activeAccountMetadata()?.name || "";
   if (after && after !== before) showCopyToast("Account renamed.");
+}
+document.querySelector("[data-profile-account-edit]")?.addEventListener("click", () => {
+  if (!profileAccountName) return;
+  profileAccountName.value = activeAccountMetadata()?.name || "Current Account";
+  setAccountNameEditing(true);
+  profileAccountName.focus();
+  profileAccountName.select();
 });
+// mousedown, so the field's blur does not commit first and leave the click on a hidden button.
+document.querySelector("[data-profile-account-done]")?.addEventListener("mousedown", (event) => event.preventDefault());
+document.querySelector("[data-profile-account-done]")?.addEventListener("click", commitAccountRename);
+profileAccountName?.addEventListener("blur", commitAccountRename);
 profileAccountName?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
-    profileAccountName.blur();
+    commitAccountRename();
   } else if (event.key === "Escape") {
     event.preventDefault();
     profileAccountName.value = activeAccountMetadata()?.name || "Current Account";
-    profileAccountName.blur();
+    setAccountNameEditing(false);
   }
 });
 
@@ -11995,6 +12020,8 @@ function updateWalletUi() {
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
   if (profileInitial) profileInitial.textContent = address ? accountName.trim().charAt(0).toUpperCase() || "K" : "◎";
   if (profileAccountName && document.activeElement !== profileAccountName) profileAccountName.value = accountName;
+  const profileAccountNameText = document.querySelector("[data-profile-account-name-text]");
+  if (profileAccountNameText) profileAccountNameText.textContent = accountName;
   if (profileSessionState) profileSessionState.textContent = "";
   if (profileCreated) profileCreated.textContent = meta?.createdAt ? new Date(meta.createdAt).toLocaleString() : "—";
   if (settingsAccountName) settingsAccountName.textContent = accountName;

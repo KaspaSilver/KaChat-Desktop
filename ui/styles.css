@@ -12307,3 +12307,95 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .connection-readonly span { color: var(--muted); font-size: 13px; }
 .connection-readonly code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); user-select: text; word-break: break-all; }
 .connection-readonly em { font-style: normal; color: var(--muted); }
+
+/* ==== Profile, 1:1 with iOS ProfileView ==== */
+/* VStack(spacing: 16).padding(): 16pt everywhere, and the large title pinned on a solid
+   systemBackground band that the content scrolls under. */
+.profile-screen { gap: 16px; padding: 0 16px 120px; }
+.profile-screen > .profile-title-row {
+  position: sticky; top: 0; z-index: 5; flex-shrink: 0;
+  margin: 0 -16px; padding: 2px 16px 8px;
+  justify-content: flex-start; gap: 12px;
+  background: var(--bg-plain);
+}
+.profile-title-row .kaposts-title { font-size: 34px; font-weight: 700; line-height: 41px; }
+.profile-share-button { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; background: rgba(142,142,147,.15); color: var(--kaspa-ink); }
+.profile-share-button:hover { background: rgba(142,142,147,.24); }
+.profile-share-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Bell on the right of the bar, Profile only. */
+.topbar-profile-cluster { display: none; align-items: center; }
+body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-profile-cluster { display: flex; }
+.topbar-bell-button { position: relative; width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--kaspa-ink); cursor: pointer; }
+.topbar-bell-button:hover { background: var(--fill-tertiary); }
+.topbar-bell-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.topbar-bell-button .profile-bell-dot { position: absolute; top: 6px; right: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--ios-red); }
+
+/* Account name: title3 semibold text and a secondary pencil.circle.fill, no card, tucked 8pt
+   closer to the title (.padding(.top, -8)). */
+.profile-account-row { display: flex; align-items: center; gap: 8px; margin-top: -8px; min-height: 28px; flex-shrink: 0; }
+.profile-account-name { font-size: 20px; font-weight: 600; line-height: 25px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-account-row .profile-name-input {
+  flex: 1; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; box-shadow: none;
+  color: var(--text); font: inherit; font-size: 20px; font-weight: 600; line-height: 25px;
+}
+.profile-account-row .profile-name-input[hidden], .profile-account-row [hidden] { display: none !important; }
+.profile-account-pencil, .profile-account-done { width: 24px; height: 24px; padding: 0; border: 0; background: transparent; cursor: pointer; flex: 0 0 auto; display: grid; place-items: center; }
+.profile-account-pencil svg, .profile-account-done svg { width: 23px; height: 23px; }
+.profile-account-pencil svg circle { fill: var(--muted); }
+.profile-account-done svg circle { fill: var(--kaspa); }
+.profile-account-pencil svg .cutout { fill: var(--bg-plain); }
+.profile-account-done svg .cutout-stroke { fill: none; stroke: var(--bg-plain); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Hero: 140pt banner, 76pt avatar ringed in systemBackground overlapping by 38pt, the accent
+   "Edit .kachat Profile" text button bottom-aligned beside it. */
+.profile-hero-card { padding: 0; }
+.profile-hero-top { padding: 0 16px; margin-top: -38px; align-items: flex-end; }
+.profile-hero-avatar { width: 76px; height: 76px; border: 3px solid var(--bg-plain); background: var(--fill-tertiary); }
+.profile-hero-avatar svg { width: 38px; height: 38px; }
+.profile-hero-kns { padding: 0 0 4px; font-size: 15px; font-weight: 600; color: var(--kaspa-ink); }
+.profile-hero-kns:hover { opacity: .75; }
+.profile-hero-meta { padding: 8px 16px 14px; gap: 6px; }
+.profile-hero-meta strong { font-size: 20px; font-weight: 700; line-height: 25px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-hero-bio { font-size: 15px; color: var(--muted); }
+
+/* Receive / Chatting: 80pt accent circles with a black filled qrcode glyph, subheadline label. */
+.profile-qr-row { display: flex; justify-content: space-evenly; gap: 24px; padding: 0; flex-shrink: 0; }
+.profile-qr-button { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: var(--text); font-size: 15px; font-weight: 400; cursor: pointer; }
+.profile-qr-circle { width: 80px; height: 80px; background: var(--kaspa); color: #000; }
+.profile-qr-circle svg.qr-glyph { width: 28px; height: 28px; fill: currentColor; stroke: none; }
+.profile-qr-button:hover .profile-qr-circle { filter: brightness(1.06); }
+
+/* Address rows: a centred cluster - 140pt title/balance block, then two 54pt material circles
+   with accent glyphs (arrow.up.circle.fill, gearshape). */
+.profile-address-row { justify-content: center; gap: 24px; padding: 14px 16px; }
+.profile-address-main { width: 140px; flex: 0 0 140px; gap: 3px; padding: 0; }
+.profile-address-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.profile-address-balance { font-size: 12px; font-weight: 600; color: var(--kaspa-ink); }
+.profile-address-note, .profile-address-total { font-size: 11px; color: var(--muted); }
+.profile-address-actions { margin-left: 0; gap: 24px; }
+.profile-address-icon { width: 54px; height: 54px; color: var(--kaspa-ink); background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); border: .8px solid var(--glass-stroke); }
+.profile-address-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.profile-address-icon svg.send-glyph circle { fill: currentColor; stroke: none; }
+.profile-address-icon svg.send-glyph path { stroke: var(--panel); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Your Domains / Settings / Help: Label(icon + title) in primary, trailing count and a small
+   secondary chevron. Log Out: red title, red icon on the right. */
+.profile-recovery-row, .profile-logout-row { display: flex; align-items: center; padding: 16px; font-size: 17px; font-weight: 400; line-height: 22px; color: var(--text); text-align: left; cursor: pointer; }
+.profile-recovery-row > svg { width: 22px; height: 22px; color: var(--text); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.profile-row-trailing { display: inline-flex; align-items: center; gap: 8px; }
+.profile-row-trailing svg { width: 8px; height: 13px; color: var(--muted); fill: none; stroke: currentColor; stroke-width: 2.6; }
+.profile-domains-count { font-size: 17px; color: var(--muted); }
+.profile-logout-row { justify-content: space-between; color: var(--ios-red); }
+.profile-logout-row svg { width: 22px; height: 22px; color: var(--ios-red); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* About: footnote-medium header inset 4pt, then the glass card of 16pt rows with inset dividers. */
+.profile-section-label { margin: 0 4px -8px; font-size: 13px; font-weight: 500; color: var(--muted); text-transform: none; letter-spacing: 0; }
+.profile-about-card { padding: 0; gap: 0; }
+.profile-about-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; font-size: 17px; line-height: 22px; color: var(--text); }
+.profile-about-row strong { font-weight: 400; color: var(--text); }
+.profile-about-row span { color: var(--muted); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-about-link:hover strong { color: var(--text); }
+.profile-about-link:hover { background: var(--row-hover); }
+.profile-about-card .profile-about-row:first-child { border-radius: 18px 18px 0 0; }
+.profile-about-card .profile-about-row:last-child { border-radius: 0 0 18px 18px; }
