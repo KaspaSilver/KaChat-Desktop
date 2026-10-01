@@ -227,6 +227,52 @@ export async function syncConversationFromIndexer({
 }
 
 
+// --- No-handshake first contact (NO_HANDSHAKE_MESSAGING.md §5.3) -----------------------------
+/** Whether the indexer answers inbox lookups: true on an answer, false on 404 (an indexer
+ *  without the feature), null when it couldn't be reached - unknown, so not worth caching. */
+export async function probeInboxSupport(indexerUrl = DEFAULT_KASIA_INDEXER_URL) {
+  try {
+    const baseUrl = normalizeBaseUrl(indexerUrl);
+    const query = new URLSearchParams({ tag: "0".repeat(32), limit: "1" });
+    const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (response.status === 404) return false;
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => null);
+    return Array.isArray(body) ? true : null;
+  } catch {
+    return null;
+  }
+}
+
+/** First-contact messages filed under `tag` (the recipient's inbox tag), ascending, newer than
+ *  `cursor`: [{ sender, txid, blockTime }]. Pages until the indexer runs dry or `maxPages`. */
+export async function fetchInboxMessages({ tag, cursor = 0, indexerUrl = DEFAULT_KASIA_INDEXER_URL, limit = 100, maxPages = 20 } = {}) {
+  if (!/^[0-9a-f]{32}$/.test(String(tag || ""))) throw new Error("A 32-hex inbox tag is required.");
+  const baseUrl = normalizeBaseUrl(indexerUrl);
+  const out = [];
+  const seen = new Set();
+  let since = Number(cursor) || 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const query = new URLSearchParams({ tag, block_time: String(since), limit: String(Math.max(1, Math.min(500, limit))) });
+    const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error(`Inbox lookup failed (${response.status}).`);
+    const rows = await response.json();
+    if (!Array.isArray(rows) || !rows.length) break;
+    let newest = since;
+    for (const row of rows) {
+      const txid = String(row?.tx_id || "");
+      const blockTime = Number(row?.block_time || 0);
+      if (blockTime > newest) newest = blockTime;
+      if (!txid || seen.has(txid)) continue;
+      seen.add(txid);
+      out.push({ sender: String(row?.sender || ""), txid, blockTime });
+    }
+    if (rows.length < limit || newest <= since) break;
+    since = newest;
+  }
+  return out;
+}
+
 async function resolveHandshakeSenderFromTransaction(txid, receiver) {
   if (!txid) return "";
   try {

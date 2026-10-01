@@ -421,6 +421,55 @@ export async function listOwnedNames({ address, xOnlyPubKeyHex = null, network =
   return { k, kaspa };
 }
 
+// --- any address (account discovery) ------------------------------------------------------
+
+/**
+ * Names `address` owns on `.k` and `.kaspa`, flattened (.k first, then .kaspa), for scanning many
+ * addresses (iOS NameServicesClient.ownedNames(of:)). A failed lookup counts as no names.
+ * @param {string} address
+ * @param {{xOnlyPubKeyHex?: string|null, network?: string}} [options]
+ * @returns {Promise<(OwnedServiceName & {tld: "k"|"kaspa"})[]>}
+ */
+export async function ownedNamesOf(address, { xOnlyPubKeyHex = null, network = "mainnet" } = {}) {
+  const owner = swiftTrim(address).toLowerCase();
+  if (!owner) return [];
+  const result = await listOwnedNames({ address: owner, xOnlyPubKeyHex, network });
+  if (!result) return [];
+  return [
+    ...result.k.names.map((n) => ({ ...n, tld: "k" })),
+    ...result.kaspa.names.map((n) => ({ ...n, tld: "kaspa" })),
+  ];
+}
+
+/**
+ * `ownedNamesOf` for many addresses, `concurrency` lookups at a time rather than one burst of two
+ * requests per address against services that rate-limit (iOS ownedNames(of: [String])).
+ * @param {string[]} addresses
+ * @param {Object} [options]
+ * @param {(address: string) => Promise<string|null>} [options.xOnlyPubKeyFor] The address's 64-hex
+ *   x-only key (for `.kaspa`); a throw or null means no `.kaspa` lookup for it.
+ * @param {number} [options.concurrency=6]
+ * @param {string} [options.network="mainnet"]
+ * @returns {Promise<Map<string, (OwnedServiceName & {tld: "k"|"kaspa"})[]>>} Only addresses that
+ *   own at least one name, keyed by the address exactly as passed in.
+ */
+export async function ownedNamesForAddresses(addresses, { xOnlyPubKeyFor = null, concurrency = 6, network = "mainnet" } = {}) {
+  const result = new Map();
+  const list = Array.isArray(addresses) ? addresses : [];
+  const step = Math.max(1, Math.floor(concurrency) || 6);
+  for (let start = 0; start < list.length; start += step) {
+    await Promise.all(list.slice(start, start + step).map(async (address) => {
+      let xOnlyPubKeyHex = null;
+      if (xOnlyPubKeyFor) {
+        try { xOnlyPubKeyHex = await xOnlyPubKeyFor(address); } catch { xOnlyPubKeyHex = null; }
+      }
+      const names = await ownedNamesOf(address, { xOnlyPubKeyHex, network });
+      if (names.length) result.set(address, names);
+    }));
+  }
+  return result;
+}
+
 // --- forward resolution (typed name -> address) -------------------------------------------
 
 /**

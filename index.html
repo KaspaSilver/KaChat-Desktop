@@ -323,12 +323,27 @@
             </div>
             <div class="message-area" data-message-area><div data-message-empty hidden aria-hidden="true"></div></div>
 
-            <div class="composer-shell">
+            <!-- A Message Request: read it all, then Accept or Reject - in place of the composer
+                 (iOS 5.2, NO_HANDSHAKE_MESSAGING.md). Accept sends nothing. -->
+            <div class="message-request-bar" data-message-request-bar hidden>
+              <p data-message-request-text></p>
+              <div class="message-request-actions">
+                <button type="button" class="message-request-reject" data-message-request-reject>Reject</button>
+                <button type="button" class="message-request-accept" data-message-request-accept>Accept</button>
+              </div>
+            </div>
+
+            <div class="composer-shell" data-direct-composer-shell>
               <div class="available-balance-banner" data-available-balance-banner hidden role="status" aria-live="polite"></div>
               <div class="fee-estimate-banner" data-fee-estimate-banner hidden role="status" aria-live="polite"></div>
               <!-- Lives inside the composer shell (not as a sibling grid row) so the
                    absolutely-positioned payment/fee pills, which sit above the shell,
                    can never overlap it. -->
+              <!-- A Private chat that hasn't heard back: why the other person isn't notified. -->
+              <div class="private-chat-notice" data-private-chat-notice hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
+                <span data-private-chat-notice-text></span>
+              </div>
               <div class="handshake-warning-banner" data-handshake-warning-banner hidden role="status" aria-live="polite">
                 <span>The recipient won't see your messages until they message you or you ping them with a handshake. Handshakes cost 0.2 KAS and are returned to you if they accept. You lose privacy if you ping them.</span>
                 <button type="button" data-handshake-warning-send>Send Handshake</button>
@@ -1639,6 +1654,18 @@
         <label class="create-chat-section-title" for="create-chat-name">NAME (OPTIONAL)</label>
         <input id="create-chat-name" class="create-chat-name-input" name="name" type="text" placeholder="Contact name" autocomplete="off" />
       </section>
+
+      <!-- Private: no first-contact signal at all (iOS 5.2, NO_HANDSHAKE_MESSAGING.md §3.1). -->
+      <section class="create-chat-section create-chat-private-section">
+        <div class="create-chat-private-card">
+          <span class="create-chat-private-label">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
+            Private Chat
+          </span>
+          <label class="switch-control"><input type="checkbox" name="privateChat" data-create-chat-private /><span></span></label>
+        </div>
+        <p class="create-chat-help" data-create-chat-private-footer>They'll get your first message as a Message Request. Turn on Private Chat if you'd rather leave no link between you on chain.</p>
+      </section>
       <input type="file" data-contact-import-file accept=".vcf,text/vcard,text/x-vcard" hidden />
     </form>
   </div>
@@ -2609,7 +2636,7 @@
         <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
       <h3 class="chatting-picker-title">Choose Your Chatting Address</h3>
-      <p class="spending-manage-subtitle">If this seed already holds your identity at a different address, a KNS domain or a funded chatting balance, pick it here. Only addresses with a balance or domains are shown.</p>
+      <p class="spending-manage-subtitle">If this seed already holds your identity at a different address, a domain (.kas, .k or .kaspa) or a funded chatting balance, pick it here. Only addresses with a balance or domains are shown.</p>
       <div class="manage-address-body">
         <div class="manage-address-list chatting-picker-list" data-chatting-picker-list></div>
         <p class="field-error chatting-picker-error" data-chatting-picker-error hidden></p>

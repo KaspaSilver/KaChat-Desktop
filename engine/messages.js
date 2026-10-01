@@ -56,8 +56,9 @@ export function createMessageEnvelope({ conversationId, contactId, toAddress, fr
 }
 
 
-export async function createEncryptedMessageEnvelope({ conversationId, contactId, toAddress, fromAddress = null, text, localNonce, createdAt = Date.now(), alias = "kachat" }) {
+export async function createEncryptedMessageEnvelope({ conversationId, contactId, toAddress, fromAddress = null, text, localNonce, createdAt = Date.now(), alias = "kachat", inboxTag = null }) {
   const kasiaPayload = await buildEncryptedCommMessage({
+    inboxTag,
     alias,
     text,
     sender: fromAddress,

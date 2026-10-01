@@ -2468,11 +2468,10 @@ async function discoverAddresses(account) {
     index < KNS_PROBE_DEPTH && !((balances.get(address) || 0) > 0));
   const ownsDomain = new Set();
   if (knsCandidates.length) {
+    // Any name counts - .kas, .k or .kaspa (iOS NameServicesClient.ownsAnyName).
     try {
-      await deps.engine.refreshKnsIfNeeded?.(knsCandidates.map((c) => c.address));
-      for (const { address } of knsCandidates) {
-        if (deps.engine.peekKnsAddressInfo?.(address)?.allDomains?.length) ownsDomain.add(address);
-      }
+      const owners = await deps.engine.addressesOwningAnyName(knsCandidates.map((c) => c.address));
+      for (const address of owners) ownsDomain.add(address);
     } catch { /* tags are a nicety; a balance is what actually matters here */ }
   }
 

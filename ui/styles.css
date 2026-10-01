@@ -12451,3 +12451,56 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 }
 .portfolio-move-card .portfolio-tx-row { border-top: 0; padding: 10px 0; cursor: default; }
 .portfolio-move-empty { text-align: center; margin: 8px 0 4px; }
+
+/* ==== Message Requests (iOS 5.2, NO_HANDSHAKE_MESSAGING.md) ==== */
+.message-requests-row .chat-meta strong { font-size: 17px; font-weight: 600; }
+.message-requests-icon {
+  width: 50px; height: 50px; flex: 0 0 50px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--kaspa); color: #000;
+}
+.message-requests-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+.message-requests-count {
+  margin-left: auto; padding: 3px 8px; border-radius: 999px; background: var(--kaspa); color: #000;
+  font-size: 12px; font-weight: 700; line-height: 1.2;
+}
+.message-requests-chevron { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: .6; }
+.message-requests-row .message-requests-count + .message-requests-chevron { margin-left: 8px; }
+.message-requests-row .chat-meta + .message-requests-chevron { margin-left: auto; }
+
+.message-requests-modal { width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 64px)); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.message-requests-list { overflow-y: auto; padding: 8px 16px 20px; }
+.message-requests-card { border-radius: 12px; overflow: hidden; background: var(--grouped-cell, var(--panel)); }
+.message-requests-card .chat-row { width: 100%; border-radius: 0; }
+.message-requests-footer { margin: 8px 16px 0; font-size: 13px; line-height: 1.35; color: var(--muted); }
+.message-requests-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 56px 16px; color: var(--muted); }
+.message-requests-empty svg { width: 40px; height: 40px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.message-requests-empty strong { color: var(--text); font-size: 17px; font-weight: 600; }
+
+/* Accept / Reject in place of the composer. */
+.conversation-view > .message-request-bar { grid-row: 4; }
+.message-request-bar {
+  display: flex; flex-direction: column; gap: 10px; padding: 10px 16px 8px;
+  background: var(--glass-fill); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border-top: .5px solid var(--line);
+}
+.message-request-bar[hidden], .composer-shell[hidden], .private-chat-notice[hidden] { display: none !important; }
+.message-request-bar p { margin: 0; text-align: center; font-size: 12px; line-height: 1.35; color: var(--muted); }
+.message-request-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.message-request-actions button { padding: 12px; border: 0; border-radius: 12px; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; }
+.message-request-reject { background: rgba(255,59,48,.15); color: var(--ios-red); }
+.message-request-accept { background: var(--kaspa); color: var(--on-accent, #fff); }
+.message-request-actions button:hover { filter: brightness(1.06); }
+
+/* A Private chat that hasn't heard back. */
+.private-chat-notice {
+  display: flex; align-items: flex-start; gap: 8px; margin: 0 0 6px; padding: 10px 12px; border-radius: 12px;
+  background: var(--glass-fill); border: .8px solid var(--glass-stroke);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  font-size: 12px; line-height: 1.35; color: var(--muted);
+}
+.private-chat-notice svg { width: 13px; height: 13px; flex: 0 0 13px; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Create Chat: the Private Chat switch. */
+.create-chat-private-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-radius: 12px; background: var(--grouped-cell, var(--panel)); }
+.create-chat-private-label { display: inline-flex; align-items: center; gap: 10px; font-size: 17px; color: var(--text); }
+.create-chat-private-label svg { width: 18px; height: 18px; fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

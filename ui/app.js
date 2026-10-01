@@ -2103,6 +2103,25 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   if (parseReactionEnvelope(message.text)) return; // reactions aren't standalone messages
   if (Calls.parseCallEnvelope(message.text)) return; // a call rings on its own screen, not as a banner
   if (parsePaymentPoolEnvelope(message.text)) return; // fresh-address pool control envelopes are silent (matches iOS)
+  // Nothing at all from a blocked address; one "New message request" per requester, then
+  // silence until accepted (NO_HANDSHAKE_MESSAGING.md §4).
+  if (isChatBlocked(contact?.address)) return;
+  if (isMessageRequest(conversationEntry)) {
+    const s = chatRequestState();
+    const key = String(contact?.address || "").toLowerCase();
+    if (!key || s.notified.has(key)) return;
+    s.notified.add(key);
+    saveChatRequestState(s);
+    showAppNotification({
+      title: "New message request",
+      body: `${shortAddress(contact.address)} wants to chat with you`,
+      tag: `kachat-request-${key}`,
+      silent: mode !== "sound",
+      route: { kind: "chat", conversationId: conversationEntry.id },
+      onClick: () => { setActiveAppTab("chats"); openConversation(conversationEntry.id); },
+    }).catch(() => { /* best-effort */ });
+    return;
+  }
   // Don't notify for the conversation you're already looking at in a focused window.
   if (activeConversationId === conversationEntry.id && !document.hidden) return;
   const title = displayNameForAddress(contact) || contact?.name || shortAddress(contact?.address || "");
@@ -2627,6 +2646,295 @@ function contactForConversation(conversationEntry) {
   return state.contacts.find((contact) => contact.id === conversationEntry?.contactId) || null;
 }
 
+// --- Message Requests and no-handshake first contact (iOS 5.2, NO_HANDSHAKE_MESSAGING.md) ------
+// A first message carries the recipient's inbox tag (kchat:1:dm:<tag>:...) so they can find it
+// without knowing the sender; they see it in Message Requests and Accept or Reject it. Accept is
+// local - nothing is sent. Reject deletes the chat and blocks the address until the user writes to
+// them. State per wallet; addresses lowercased. Stored on the function object (not a top-level
+// let) because renderChats can run during boot, before later declarations initialise.
+function chatRequestState() {
+  const wallet = engine.address || "";
+  const cached = chatRequestState.cache;
+  if (cached && cached.wallet === wallet) return cached;
+  let raw = null;
+  try { raw = wallet ? JSON.parse(localStorage.getItem(accountScopedKey("kachat-chat-requests-v1")) || "null") : null; } catch { raw = null; }
+  const list = (value) => new Set(Array.isArray(value) ? value.map((a) => String(a).toLowerCase()) : []);
+  const fresh = {
+    wallet,
+    accepted: list(raw?.accepted),
+    privateChats: list(raw?.privateChats),
+    blocked: list(raw?.blocked),
+    // Addresses our one inbox-tagged first message has gone to - only the first carries the tag.
+    inboxTagged: list(raw?.inboxTagged),
+    // Requesters already announced by a "New message request" notification.
+    notified: list(raw?.notified),
+    inboxCursor: Number(raw?.inboxCursor) || 0,
+    // When this wallet first ran with Message Requests: older chats are never requests.
+    startedAt: Number(raw?.startedAt) || Date.now(),
+  };
+  chatRequestState.cache = fresh;
+  if (wallet && !raw) saveChatRequestState(fresh);
+  return fresh;
+}
+function saveChatRequestState(s = chatRequestState()) {
+  if (!s?.wallet) return;
+  try {
+    localStorage.setItem(accountScopedKey("kachat-chat-requests-v1", s.wallet), JSON.stringify({
+      accepted: [...s.accepted], privateChats: [...s.privateChats], blocked: [...s.blocked],
+      inboxTagged: [...s.inboxTagged], notified: [...s.notified], inboxCursor: s.inboxCursor, startedAt: s.startedAt,
+    }));
+  } catch { /* storage full or blocked: the state still holds for this session */ }
+}
+function isChatBlocked(address) { return Boolean(address) && chatRequestState().blocked.has(String(address).toLowerCase()); }
+function isPrivateChat(address) { return Boolean(address) && chatRequestState().privateChats.has(String(address).toLowerCase()); }
+
+/** A conversation someone else started that the user hasn't accepted. Writing to them, adding
+ *  them yourself, an explicit Accept, or a chat that already existed when Message Requests
+ *  arrived (its first message predates startedAt) all make it an ordinary chat. */
+function isMessageRequest(conversationEntry) {
+  const contact = contactForConversation(conversationEntry);
+  if (!contact?.address || !engine.address || contact.address === engine.address) return false;
+  const key = contact.address.toLowerCase();
+  const s = chatRequestState();
+  if (s.accepted.has(key) || s.privateChats.has(key) || s.blocked.has(key)) return false;
+  // Someone else started it: found through our inbox, or by their handshake (old clients, Kasia).
+  if (!contact.inboxDiscovered && contact.relationshipState !== "incoming-request") return false;
+  const messages = conversationEntry.messages || [];
+  if (messages.some((m) => m?.direction === "outgoing")) return false;
+  let first = Infinity;
+  for (const m of messages) {
+    const at = Number(m?.createdAt || 0);
+    if (at > 0 && at < first) first = at;
+  }
+  // A sender just found in the inbox whose history is still loading stays out of the list.
+  if (!Number.isFinite(first)) return Boolean(contact.inboxDiscovered);
+  return first >= s.startedAt;
+}
+function messageRequestConversations() {
+  return sortedConversations().filter((entry) => isMessageRequest(entry))
+    .sort((a, b) => Number(lastMessageFor(b)?.createdAt || 0) - Number(lastMessageFor(a)?.createdAt || 0));
+}
+
+/** Accept: the chat joins the chat list; nothing is sent on chain. Also what writing to (or
+ *  paying) someone does - and it lifts a block, since messaging them is consent. */
+function acceptChat(address) {
+  if (!address) return;
+  const key = String(address).toLowerCase();
+  const s = chatRequestState();
+  if (s.accepted.has(key) && !s.blocked.has(key)) return;
+  s.accepted.add(key);
+  s.blocked.delete(key);
+  saveChatRequestState(s);
+}
+/** Starting a chat as Private: it never carries the inbox tag, so nothing on chain links the two
+ *  people. The other side isn't notified until they start a private chat with this address too. */
+function setPrivateChat(address, isPrivate) {
+  if (!address) return;
+  const key = String(address).toLowerCase();
+  const s = chatRequestState();
+  if (isPrivate) s.privateChats.add(key); else s.privateChats.delete(key);
+  s.accepted.add(key);
+  s.blocked.delete(key);
+  saveChatRequestState(s);
+}
+/** Reject: their messages are deleted from this device and the address is blocked - ignored by
+ *  discovery, fetching and notifications until the user writes to them. */
+function rejectChatRequest(conversationEntry) {
+  const contact = contactForConversation(conversationEntry);
+  if (!contact?.address || contact.address === engine.address) return;
+  const key = contact.address.toLowerCase();
+  const s = chatRequestState();
+  s.blocked.add(key);
+  s.accepted.delete(key);
+  s.privateChats.delete(key);
+  saveChatRequestState(s);
+  recordDeletedContactAddresses([contact.address]);
+  state.conversations = state.conversations.filter((entry) => entry.id !== conversationEntry.id);
+  state.contacts = state.contacts.filter((entry) => entry.id !== contact.id);
+  if (activeConversationId === conversationEntry.id) setActiveConversationId(null);
+  refreshSubscriptionAddresses({ restart: true });
+  persistState();
+  renderChats();
+  renderMessageRequestsSheet();
+  showCopyToast("Request rejected.");
+}
+
+/** Whether the configured indexer answers inbox lookups - probed once per indexer URL; an
+ *  unreachable indexer is asked again next time. `inboxSupportKnown` is the cached answer for
+ *  synchronous UI (undefined until probed). */
+function currentIndexerUrl() { return indexerUrlInput?.value?.trim() || getEndpoint("kasiaIndexer"); }
+function inboxSupportKnown() { return (inboxSupportKnown.byUrl ||= new Map()).get(currentIndexerUrl()); }
+async function inboxSupported() {
+  const url = currentIndexerUrl();
+  const map = (inboxSupportKnown.byUrl ||= new Map());
+  if (map.has(url)) return map.get(url);
+  let answer = null;
+  try { answer = await engine.probeInboxSupport(url); } catch { answer = null; }
+  if (answer === null) return false;
+  const changed = map.get(url) !== answer;
+  map.set(url, answer);
+  if (changed && activeConversationId) {
+    const active = state.conversations.find((entry) => entry.id === activeConversationId);
+    if (active) { updateMessageRequestUi(active); updateHandshakeWarningBanner(); }
+  }
+  return answer;
+}
+
+/** The inbox tag for a message to this contact, or null to send it untagged. Only the FIRST
+ *  message carries it: not once a tagged one has gone out, not once they have written to us,
+ *  never in a Private chat, and only when the indexer files `dm` - one that doesn't know it
+ *  drops the transaction from its index altogether. */
+async function firstContactInboxTag(contact, conversationEntry) {
+  const address = contact?.address;
+  if (!address || address === engine.address) return null;
+  const key = address.toLowerCase();
+  const s = chatRequestState();
+  if (s.privateChats.has(key) || s.inboxTagged.has(key)) return null;
+  if ((conversationEntry?.messages || []).some((m) => m?.direction === "incoming")) return null;
+  if (!(await inboxSupported())) return null;
+  return engine.inboxTagFor(address);
+}
+function noteInboxTagged(address) {
+  const s = chatRequestState();
+  s.inboxTagged.add(String(address).toLowerCase());
+  saveChatRequestState(s);
+}
+
+/** Finds people who wrote to this wallet first: asks the indexer for our inbox tag, then pulls
+ *  each new sender's history the normal way (sender + alias). Blocked senders are skipped; the
+ *  rest land in Message Requests. */
+async function syncInbox({ catchUp = false } = {}) {
+  if (syncInbox.inFlight || !engine.address || typeof engine.fetchInboxMessages !== "function") return 0;
+  if (!(await inboxSupported())) return 0;
+  syncInbox.inFlight = true;
+  const wallet = engine.address;
+  try {
+    const s = chatRequestState();
+    const found = await engine.fetchInboxMessages({ cursor: s.inboxCursor, indexerUrl: currentIndexerUrl() });
+    if (engine.address !== wallet) return 0;
+    const newest = found.reduce((max, row) => Math.max(max, Number(row.blockTime || 0)), 0);
+    if (newest > s.inboxCursor) { s.inboxCursor = newest; saveChatRequestState(s); }
+    const senders = [];
+    for (const row of found) {
+      const sender = String(row.sender || "");
+      if (!sender.startsWith("kaspa:") || sender === wallet || isChatBlocked(sender) || senders.includes(sender)) continue;
+      senders.push(sender);
+    }
+    let added = 0;
+    for (const sender of senders) {
+      // Someone already known is fetched by the ordinary sweep; only a new sender is added here.
+      if (state.contacts.some((c) => c.address === sender)) continue;
+      const createdAt = Date.now();
+      const contact = {
+        id: nowId(), name: shortAddress(sender), nameIsCustom: false, address: sender, avatar: initialsFor(shortAddress(sender)),
+        createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "", inboxDiscovered: true,
+      };
+      const conversationEntry = createConversation({ contactId: contact.id, createdAt });
+      state.contacts.push(contact);
+      state.conversations.push(conversationEntry);
+      try { added += await syncOneConversation(conversationEntry, { quiet: true, catchUp }); }
+      catch (error) { appendEngineLog(`Message request history fetch failed for ${shortAddress(sender)}: ${error.message}`); }
+      if (engine.address !== wallet) return added;
+    }
+    if (senders.length) {
+      refreshSubscriptionAddresses({ restart: true });
+      persistState();
+      renderChats();
+      renderMessageRequestsSheet();
+    }
+    return added;
+  } finally {
+    syncInbox.inFlight = false;
+  }
+}
+
+// The Message Requests sheet (iOS MessageRequestsView): open a request to read it, then Accept or
+// Reject from inside it.
+function messageRequestsSheetEl() {
+  let el = document.querySelector("[data-message-requests-modal]");
+  if (el) return el;
+  el = document.createElement("div");
+  el.className = "modal-backdrop message-requests-backdrop";
+  el.dataset.messageRequestsModal = "";
+  el.hidden = true;
+  el.innerHTML = `
+    <div class="contact-modal message-requests-modal" role="dialog" aria-modal="true" aria-label="Message Requests">
+      <header class="create-chat-header">
+        <span></span>
+        <h2>Message Requests</h2>
+        <button class="create-chat-nav-button" type="button" data-message-requests-done>Done</button>
+      </header>
+      <div class="message-requests-list" data-message-requests-list></div>
+    </div>`;
+  el.addEventListener("click", (event) => {
+    if (event.target === el || event.target.closest("[data-message-requests-done]")) { el.hidden = true; return; }
+    const row = event.target.closest("[data-request-conversation-id]");
+    if (!row) return;
+    el.hidden = true;
+    setActiveAppTab("chats");
+    openConversation(row.dataset.requestConversationId);
+  });
+  document.body.appendChild(el);
+  return el;
+}
+function renderMessageRequestsSheet() {
+  const el = document.querySelector("[data-message-requests-modal]");
+  if (!el || el.hidden) return;
+  const listEl = el.querySelector("[data-message-requests-list]");
+  const requests = messageRequestConversations();
+  if (!requests.length) {
+    listEl.innerHTML = `<div class="message-requests-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.2 6.3A2 2 0 0 1 8.1 5h7.8a2 2 0 0 1 1.9 1.3L20 13.5h-4.2a1 1 0 0 0-.9.6l-.6 1.3a1 1 0 0 1-.9.6h-2.8a1 1 0 0 1-.9-.6l-.6-1.3a1 1 0 0 0-.9-.6Z"/></svg><strong>No message requests</strong></div>`;
+    return;
+  }
+  listEl.innerHTML = `<div class="message-requests-card">${requests.map((entry) => {
+    const contact = contactForConversation(entry);
+    const last = lastMessageFor(entry);
+    return `
+      <button class="chat-row" type="button" data-request-conversation-id="${escapeHtml(entry.id)}">
+        <span class="chat-row-time">${escapeHtml(last ? formatChatListDate(last.createdAt) : "")}</span>
+        ${avatarHtmlFor(contact)}
+        <span class="chat-meta">
+          <strong>${escapeHtml(displayNameForAddress(contact))}</strong>
+          ${last ? `<span>${escapeHtml(conversationPreview(entry))}</span>` : `<span class="chat-row-none">Loading messages…</span>`}
+        </span>
+      </button>`;
+  }).join("")}</div>
+  <p class="message-requests-footer">Open a request to read it. Accept to reply and move it to your chats; Reject deletes it and stops that address reaching you until you write to them.</p>`;
+}
+function openMessageRequestsSheet() {
+  const el = messageRequestsSheetEl();
+  el.hidden = false;
+  renderMessageRequestsSheet();
+}
+
+/** In a request, Accept / Reject replace the composer; a Private chat that hasn't heard back says
+ *  why the other person isn't notified; the handshake banner and "Send Handshake" show only where
+ *  first contact still needs one (an indexer without inbox lookups, never a Private chat). */
+function updateMessageRequestUi(conversationEntry) {
+  const bar = document.querySelector("[data-message-request-bar]");
+  const shell = document.querySelector("[data-direct-composer-shell]");
+  const notice = document.querySelector("[data-private-chat-notice]");
+  const contact = contactForConversation(conversationEntry);
+  const isRequest = Boolean(conversationEntry) && isMessageRequest(conversationEntry);
+  if (bar) {
+    bar.hidden = !isRequest;
+    const text = bar.querySelector("[data-message-request-text]");
+    if (text && contact) text.textContent = `${displayNameForAddress(contact)} wants to chat. Accept to reply - nothing is sent until you write back.`;
+  }
+  if (shell) shell.hidden = isRequest;
+  const heardFrom = (conversationEntry?.messages || []).some((m) => m?.direction === "incoming" && m?.messageType !== "handshake");
+  const showPrivate = Boolean(contact) && contact.address !== engine.address && isPrivateChat(contact.address) && !heardFrom && !isRequest;
+  if (notice) {
+    notice.hidden = !showPrivate;
+    const text = notice.querySelector("[data-private-chat-notice-text]");
+    if (text && contact) text.textContent = `Private chat - nothing links you two on chain, so ${displayNameForAddress(contact)} isn't notified. They'll see your messages once they start a private chat with your address too.`;
+  }
+  const handshakeOffered = inboxSupportKnown() !== true && !(contact && isPrivateChat(contact.address));
+  const plusHandshake = document.querySelector("[data-composer-handshake]");
+  if (plusHandshake) plusHandshake.hidden = !handshakeOffered;
+  if (inboxSupportKnown() === undefined && engine.address) inboxSupported().catch(() => {});
+}
+
 /** The accepted/established-contact predicate behind the stranger-gating features, mirroring
  *  iOS ContactsManager.isAcceptedContact: true for contacts you added yourself and for anyone
  *  you have ever sent a message to (accepting a communication request IS an outgoing message,
@@ -2641,6 +2949,9 @@ function isAcceptedContact(contact, conversationEntry = null) {
     const entry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
     return (entry?.messages || []).some((message) => message?.direction === "outgoing" && message?.messageType !== "handshake");
   }
+  // An unaccepted Message Request is a stranger: their photos and links wait for a tap.
+  const requestEntry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
+  if (requestEntry && isMessageRequest(requestEntry)) return false;
   const relationship = String(contact.relationshipState || "");
   if (relationship !== "incoming-request" && relationship !== "declined") return true;
   const entry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
@@ -4157,6 +4468,8 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
     // parser bump, a wallet switch - and re-serves history the user already threw away. Anything
     // sent since the deletion is a fresh request and is let through.
     if (isContactDeletedAsOf(request.sender, request.txid, request.blockTime)) continue;
+    // A rejected (blocked) address stays blocked: its handshake is not a way back in.
+    if (isChatBlocked(request.sender)) continue;
     let contact = state.contacts.find((entry) => entry.address === request.sender);
     let conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
     let wasOutgoingRequest = false;
@@ -4462,6 +4775,9 @@ async function refreshAllConversations({ quiet = true } = {}) {
     catch (error) { sweepFailures += 1; appendEngineLog(`Incoming handshake sync failed: ${error.message}`); }
     try { added += await syncOutgoingHandshakeEvidence({ quiet }); }
     catch (error) { sweepFailures += 1; appendEngineLog(`Outgoing handshake sync failed: ${error.message}`); }
+    // People writing to us for the first time, without a handshake (Message Requests).
+    try { added += await syncInbox({ catchUp }); }
+    catch (error) { appendEngineLog(`Inbox sync failed: ${error.message}`); }
     try { added += await syncStrangerPaymentsIntoSelfChat({ catchUp }); }
     catch (error) { appendEngineLog(`Stranger payment sweep failed: ${error.message}`); }
     // Per-contact sync runs 4 wide instead of strictly sequentially — with many contacts
@@ -4474,10 +4790,9 @@ async function refreshAllConversations({ quiet = true } = {}) {
       // notes-to-self across your devices (by-sender(self) + your-key decrypt returns only self→
       // self messages; the cursor keeps the ongoing cost tiny). Stranger PAYMENTS to your chatting
       // address are still handled separately by syncStrangerPaymentsIntoSelfChat above.
-      // Match KaChat's relationship boundary: discovering an incoming
-      // handshake must not import that unknown sender's historical contextual
-      // messages before the user accepts the request.
-      if (contact?.relationshipState === "incoming-request" || contact?.relationshipState === "declined") return false;
+      // A Message Request is read in full now (iOS 5.2): only a declined or blocked address is
+      // left unfetched.
+      if (contact?.relationshipState === "declined" || isChatBlocked(contact?.address)) return false;
       return true;
     });
     let sweepNext = 0;
@@ -4566,9 +4881,8 @@ function startActiveChatPoll() {
       const contact = conversationEntry ? contactForConversation(conversationEntry) : null;
       if (!document.hidden && conversationEntry && engine.address && engine.isKasiaCipherLoaded?.()
           && !messageRefreshInFlight && !pendingInitialCatchUp
-          // Same relationship boundary the sweep applies: an unaccepted stranger's history is
-          // not pulled in just because their request is open on screen.
-          && contact?.relationshipState !== "incoming-request" && contact?.relationshipState !== "declined") {
+          // Same boundary the sweep applies: a declined or blocked address is not fetched.
+          && contact?.relationshipState !== "declined" && !isChatBlocked(contact?.address)) {
         await syncOneConversation(conversationEntry, { quiet: true, catchUp: false });
       }
     } catch { /* the 5s sweep is the backstop; a missed tick costs nothing */ }
@@ -6255,6 +6569,8 @@ function markPoolAddressUsed(address, contactAddress) {
 // timeout. If every pool address turns out used, the payment falls back to the
 // chatting address and the low-water addr_pool_request asks for more.
 async function consumePoolPaymentDestination(contact) {
+  // Every 1:1 payment passes here: paying someone is reaching out to them, like writing (iOS 5.2).
+  if (contact?.address && contact.address !== engine.address) acceptChat(contact.address);
   let skippedUsedElsewhere = 0;
   try {
     // Each iteration either consumes the head unused address (returns) or marks it
@@ -7566,13 +7882,14 @@ spendingScanBtn?.addEventListener("click", async () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
 
-    // KNS domains count as "in use" too - the engine batches, caches, and paces these.
-    if (label) label.textContent = "Checking KNS…";
-    try { await engine.refreshKnsIfNeeded?.(windowEntries.map((entry) => entry.address)); }
-    catch { /* fall back to whatever is cached */ }
+    // A name on any service (.kas, .k, .kaspa) counts as "in use" too (iOS ownsAnyName) - KNS
+    // is batched/cached/paced by the engine, .k and .kaspa go six addresses at a time.
+    if (label) label.textContent = "Checking names…";
+    let nameOwners = new Set();
+    try { nameOwners = await engine.addressesOwningAnyName(windowEntries.filter((entry) => !hits.has(entry.index)).map((entry) => entry.address)); }
+    catch { /* no names counted for this scan */ }
     for (const entry of windowEntries) {
-      const info = engine.peekKnsAddressInfo?.(entry.address);
-      if (info?.allDomains?.length) hits.add(entry.index);
+      if (nameOwners.has(entry.address)) hits.add(entry.index);
     }
     for (const index of hits) highestHit = Math.max(highestHit, index);
 
@@ -8220,7 +8537,7 @@ applyDockLayout();
 //   2. the primary spending address, while it has seen nothing;
 //   3. a slot that has never been revealed, funded or offered.
 const RECEIVE_INDEX_KEY = "kachat-receive-address-index-v1";
-const RECEIVE_SUBTITLE = "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or KNS profile creation.";
+const RECEIVE_SUBTITLE = "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting.";
 async function freshReceiveAddress() {
   if (!activeAccountMnemonic()) return null;
   const state = getSpendingState();
@@ -8286,7 +8603,7 @@ async function openChattingAddressScreen(options = {}) {
   if (subtitleEl) {
     if (options.subtitle === undefined) {
       subtitleEl.hidden = false;
-      subtitleEl.textContent = "This address is for chatting and KNS profile creation. Funding it with around 50 Kaspa is enough to create a KNS profile and send messages for a long time.";
+      subtitleEl.textContent = "This address is for chatting. Funding it with around 50 Kaspa is enough to send messages for a long time.";
     } else if (options.subtitle) {
       subtitleEl.hidden = false;
       subtitleEl.textContent = options.subtitle;
@@ -8581,7 +8898,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 78;
+const APP_BUILD = 79;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12371,9 +12688,43 @@ function showContactModal() {
   window.setTimeout(() => contactAddressInput?.focus(), 0);
 }
 
+function updateCreateChatPrivateFooter() {
+  const toggle = document.querySelector("[data-create-chat-private]");
+  const footer = document.querySelector("[data-create-chat-private-footer]");
+  if (!footer) return;
+  footer.textContent = toggle?.checked
+    ? "Nothing on chain links you two - not even who wrote first. They won't be notified: they'll see your messages once they start a private chat with your address too, so agree on it somewhere else first."
+    : "They'll get your first message as a Message Request. Turn on Private Chat if you'd rather leave no link between you on chain.";
+}
+document.querySelector("[data-create-chat-private]")?.addEventListener("change", updateCreateChatPrivateFooter);
+
+// Accept / Reject on a Message Request.
+document.querySelector("[data-message-request-accept]")?.addEventListener("click", () => {
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  const contact = contactForConversation(conversationEntry);
+  if (!contact) return;
+  acceptChat(contact.address);
+  persistState();
+  renderChats();
+  renderMessages(conversationEntry);
+  renderMessageRequestsSheet();
+});
+document.querySelector("[data-message-request-reject]")?.addEventListener("click", async () => {
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  if (!conversationEntry) return;
+  const ok = await confirmDialog({
+    title: "Reject this request?",
+    message: "Their messages are deleted from this device, and this address can't reach you again until you write to them.",
+    confirmLabel: "Reject",
+    destructive: true,
+  });
+  if (ok) rejectChatRequest(conversationEntry);
+});
+
 function closeContactModal() {
   contactModal.hidden = true;
   contactForm.reset();
+  updateCreateChatPrivateFooter();
   setCreateChatError("");
   resetCreateChatPicker();
   updateCreateChatAddState();
@@ -12446,7 +12797,8 @@ function importPayloadIntoConversation(payloadValue) {
 }
 
 function updateChatsListTabBadges() {
-  const totalUnread = state.conversations.reduce((sum, entry) => sum + Number(entry.unreadCount || 0), 0);
+  // Message Requests and blocked chats don't count (iOS 84e3402).
+  const totalUnread = state.conversations.reduce((sum, entry) => sum + (isMessageRequest(entry) || isChatBlocked(contactForConversation(entry)?.address) ? 0 : Number(entry.unreadCount || 0)), 0);
   if (chatsTabBadge) {
     chatsTabBadge.textContent = totalUnread > 99 ? "99+" : String(totalUnread);
     chatsTabBadge.hidden = totalUnread <= 0;
@@ -12474,6 +12826,8 @@ function visibleChatConversations() {
   return sortedConversations().filter((conversationEntry) => {
     const contact = contactForConversation(conversationEntry);
     if (!contact) return false;
+    // Requests sit behind the Message Requests row; blocked chats nowhere.
+    if (isMessageRequest(conversationEntry) || isChatBlocked(contact.address)) return false;
     if (!query) return true;
     if (displayNameForAddress(contact).toLowerCase().includes(query)) return true;
     if (contact.name.toLowerCase().includes(query)) return true;
@@ -12542,7 +12896,22 @@ function renderChats() {
     return;
   }
 
-  chatList.innerHTML = visibleConversations
+  // People who wrote first and haven't been accepted: one row, always there, right above your
+  // own chat - hidden only while searching or selecting (iOS 74bd52c).
+  const showsRequestsRow = !searchInput.value.trim() && !chatSelectionModeActive;
+  const requestCount = showsRequestsRow ? messageRequestConversations().length : 0;
+  const requestsRowHtml = showsRequestsRow ? `
+        <button class="chat-row message-requests-row" type="button" data-open-message-requests>
+          <span class="message-requests-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.2 6.3A2 2 0 0 1 8.1 5h7.8a2 2 0 0 1 1.9 1.3L20 13.5h-4.2a1 1 0 0 0-.9.6l-.6 1.3a1 1 0 0 1-.9.6h-2.8a1 1 0 0 1-.9-.6l-.6-1.3a1 1 0 0 0-.9-.6Z"/><path d="M12 7.5v4.5M9.8 10 12 12.2 14.2 10"/></svg></span>
+          <span class="chat-meta">
+            <strong>Message Requests</strong>
+            <span>${requestCount > 0 ? "People who wrote to you first" : "No new requests"}</span>
+          </span>
+          ${requestCount > 0 ? `<b class="message-requests-count">${requestCount > 99 ? "99+" : requestCount}</b>` : ""}
+          <svg class="message-requests-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>` : "";
+
+  chatList.innerHTML = requestsRowHtml + visibleConversations
     .map((conversationEntry) => {
       const contact = contactForConversation(conversationEntry);
       const last = lastMessageFor(conversationEntry);
@@ -12761,22 +13130,12 @@ function renderMessages(conversationEntry) {
   // own send) re-renders the thread, so this is where the handshake warning
   // learns that the relationship just became mutual — it hides mid-conversation
   // the moment a reciprocal message lands, with no reload.
-  if (conversationEntry.id === activeConversationId) updateHandshakeWarningBanner();
-  // The request renders where its message sits (iOS handshakeRequestBubble); the pinned card
-  // remains only for a request that arrived without a message row to carry it.
-  const hasHandshakeRow = messages.some((m) => m?.messageType === "handshake" && m?.direction === "incoming");
-  if (requestContact?.relationshipState === "incoming-request" && !hasHandshakeRow) {
-    const card = document.createElement("section");
-    card.className = "handshake-request-card";
-    card.innerHTML = `
-      <strong>Communication request</strong>
-      <span>${escapeHtml(requestContact.name || shortAddress(requestContact.address))} wants to start an encrypted KaChat conversation.</span>
-      <div class="handshake-request-actions">
-        <button type="button" class="secondary-button" data-decline-handshake>Decline</button>
-        <button type="button" class="primary-button" data-accept-handshake>Accept</button>
-      </div>`;
-    messageArea.appendChild(card);
+  if (conversationEntry.id === activeConversationId) {
+    updateMessageRequestUi(conversationEntry);
+    updateHandshakeWarningBanner();
   }
+  // No Accept/Decline card or bubble any more (iOS 5.2): a handshake from an old client or Kasia
+  // is just the first line of a Message Request, accepted or rejected from its bar.
 
   if (messages.length === 0) {
     messageArea.appendChild(messageEmpty);
@@ -12873,8 +13232,7 @@ function renderMessages(conversationEntry) {
 
     const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
     const callEnv = Calls.parseCallEnvelope(message.text);
-    const isPendingHandshakeRequest = message.messageType === "handshake" && message.direction === "incoming"
-      && requestContact?.relationshipState === "incoming-request";
+    const isPendingHandshakeRequest = false;
     if (isPendingHandshakeRequest) {
       bubble.classList.add("handshake-request-bubble");
       bubble.innerHTML = `
@@ -14942,6 +15300,9 @@ contactForm.addEventListener("submit", async (event) => {
     }
 
     if (address === engine.address) throw new Error("That's your own address.");
+    // Starting a chat accepts it; Private also keeps it from ever carrying the inbox tag.
+    if (formData.get("privateChat")) setPrivateChat(address, true);
+    else acceptChat(address);
     // A domain finds the address; it does not name the person (iOS 509c0fe).
     const displayName = name || (engine.knsNamesAsIdentity ? resolvedDomain : "") || shortAddress(address);
     const existing = state.contacts.find((contact) => contact.address === address);
@@ -14975,6 +15336,7 @@ contactForm.addEventListener("submit", async (event) => {
 });
 
 chatList.addEventListener("click", (event) => {
+  if (event.target.closest("[data-open-message-requests]")) { openMessageRequestsSheet(); return; }
   const row = event.target.closest("[data-conversation-id]");
   if (!row) return;
   const conversationId = row.dataset.conversationId;
@@ -15621,6 +15983,8 @@ async function runEngineSendPipeline(conversationId, messageId) {
       text: message.text,
       localNonce: message.localNonce,
       createdAt: message.createdAt,
+      // First contact carries their inbox tag so they can find it (NO_HANDSHAKE_MESSAGING.md).
+      inboxTag: await firstContactInboxTag(contact, conversationEntry),
     };
     const envelope = await engine.createEncryptedMessageEnvelope(envelopeDetails);
 
@@ -15636,6 +16000,9 @@ async function runEngineSendPipeline(conversationId, messageId) {
         if (patch.note) setStatus(patch.note);
       },
     });
+    // The one tagged first message is out: nothing after it to this address is tagged. Recorded
+    // only on a successful submit, so a failed send doesn't use the tag up.
+    if (envelopeDetails.inboxTag) noteInboxTagged(contact.address);
     // Your message went out in a chat with no handshake: make sure a fresh import of this seed
     // can find the chat again. A cheap no-op for every chat already noted.
     try { ensureContactStash(contact, conversationEntry); } catch { /* never a send failure */ }
@@ -15675,10 +16042,14 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
   const createdAt = Date.now();
   const contact = contactForConversation(conversationEntry);
   promoteRelationshipFromIncomingEvidence(contact, conversationEntry);
-  if (["outgoing-request", "incoming-request", "declined", "request-failed"].includes(contact?.relationshipState)) {
-    setStatus(contact.relationshipState === "incoming-request" ? "Accept the communication request before replying" : contact.relationshipState === "declined" ? "Communication request declined" : contact.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "Communication request failed");
+  // Writing to someone is consent (iOS 5.2): their chat is accepted and a block on them lifts. A
+  // handshake request from an old client is answered just by writing back.
+  if (contact?.relationshipState === "incoming-request") contact.relationshipState = "established";
+  if (["outgoing-request", "declined", "request-failed"].includes(contact?.relationshipState)) {
+    setStatus(contact.relationshipState === "declined" ? "Communication request declined" : contact.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "Communication request failed");
     return;
   }
+  if (contact?.address) acceptChat(contact.address);
   let finalText = text;
   if (replyingToMessageId) {
     const replyTarget = conversationEntry.messages.find((entry) => entry.id === replyingToMessageId);
@@ -18611,8 +18982,10 @@ function updateHandshakeWarningBanner() {
   }
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const contact = contactForConversation(conversationEntry);
-  // A chat with yourself is never gated by a handshake (iOS isSelfChat): it is you.
-  if (!conversationEntry || !contact || contact.address === engine.address || !HANDSHAKE_WARNING_STATES.has(contact.relationshipState)) {
+  // A chat with yourself is never gated by a handshake (iOS isSelfChat): it is you. Nor is one
+  // where first contact needs no handshake: an indexer with inbox lookups, or a Private chat.
+  if (!conversationEntry || !contact || contact.address === engine.address || !HANDSHAKE_WARNING_STATES.has(contact.relationshipState)
+      || inboxSupportKnown() !== false || isPrivateChat(contact.address)) {
     hideHandshakeWarningBanner();
     return;
   }
@@ -19745,7 +20118,16 @@ function chattingPickerCandidateAt(index) {
 function visibleChattingPickerCandidates() {
   const current = activeChattingIndex();
   return chattingPickerCandidates.filter((entry) =>
-    entry.balanceSompi > 0n || entry.domains.length > 0 || entry.index === 0 || entry.index === current);
+    entry.balanceSompi > 0n || chattingPickerNameCount(entry) > 0 || entry.index === 0 || entry.index === current);
+}
+
+// Names on every service: KNS .kas domains plus .k / .kaspa names (iOS nameCount / onlyName).
+function chattingPickerNameCount(entry) {
+  return (entry.domains?.length || 0) + (entry.otherNames?.length || 0);
+}
+function chattingPickerOnlyName(entry) {
+  if (chattingPickerNameCount(entry) !== 1) return null;
+  return entry.domains?.[0]?.fullName || entry.otherNames?.[0]?.display || null;
 }
 
 function renderChattingPickerFooter() {
@@ -19773,9 +20155,8 @@ function renderChattingPickerList() {
     return;
   }
   chattingPickerListEl.innerHTML = rows.map((entry) => {
-    const pillText = entry.domains.length === 1
-      ? entry.domains[0].fullName
-      : entry.domains.length > 1 ? `${entry.domains.length} domains` : "";
+    const nameCount = chattingPickerNameCount(entry);
+    const pillText = nameCount > 0 ? (chattingPickerOnlyName(entry) || `${nameCount} domains`) : "";
     const pill = pillText ? `<span class="chatting-picker-domain-pill">${escapeHtml(pillText)}</span>` : "";
     const badge = entry.index === current
       ? '<span class="chatting-picker-row-badge is-current">Current</span>'
@@ -19838,6 +20219,11 @@ async function scanChattingAddressBatch() {
 
     try { await engine.refreshKnsIfNeeded?.(addresses); } catch { /* fall back to whatever is cached */ }
     if (token !== chattingPickerToken) return;
+    // .k and .kaspa too: an identity can live at an address whose only trace is a name on one of
+    // them (iOS ownedNames(of:), six addresses at a time).
+    let otherNamesByAddress = new Map();
+    try { otherNamesByAddress = await engine.otherServiceNamesFor(addresses); } catch { /* none counted */ }
+    if (token !== chattingPickerToken) return;
 
     for (const entry of derived) {
       const info = engine.peekKnsAddressInfo?.(entry.address) || null;
@@ -19847,6 +20233,7 @@ async function scanChattingAddressBatch() {
         balanceSompi: balances.get(entry.address) || 0n,
         domains: Array.isArray(info?.allDomains) ? info.allDomains : [],
         primaryDomain: info?.primaryDomain || null,
+        otherNames: otherNamesByAddress.get(entry.address) || [],
       });
     }
     chattingPickerScanned = start + CHATTING_PICKER_BATCH;
@@ -19894,6 +20281,13 @@ function renderChattingPickerDetail() {
   if (!candidate) { chattingPickerDetailBody.replaceChildren(); return; }
   const isCurrent = candidate.index === activeChattingIndex();
   const domains = candidate.domains;
+  const otherNames = candidate.otherNames || [];
+  const otherNamesHtml = otherNames.length
+    ? `<div class="chatting-picker-detail-domains"><strong>.k and .kaspa Names (${escapeHtml(String(otherNames.length))})</strong>`
+      + otherNames.map((name) =>
+        `<div class="chatting-picker-detail-domain"><span>${escapeHtml(name.display)}</span>${name.settling ? "<em>Settling</em>" : ""}</div>`).join("")
+      + `</div>`
+    : "";
   const domainsHtml = domains.length
     ? `<div class="chatting-picker-detail-domains"><strong>KNS Domains (${escapeHtml(String(domains.length))})</strong>`
       + domains.map((domain) => {
@@ -19908,6 +20302,7 @@ function renderChattingPickerDetail() {
     <button type="button" class="chatting-picker-detail-address" data-chatting-picker-copy>${escapeHtml(candidate.address)}</button>
     <p class="chatting-picker-detail-hint">Click the address to copy it.</p>
     <div class="chatting-picker-detail-stat"><span>Balance</span><span>${escapeHtml(formatSompiForNotification(candidate.balanceSompi))} KAS</span></div>
+    ${otherNamesHtml}
     ${domainsHtml}`;
   if (chattingPickerSetBtn) {
     chattingPickerSetBtn.disabled = isCurrent || chattingPickerSwitching;

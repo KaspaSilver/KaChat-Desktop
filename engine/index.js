@@ -4,8 +4,8 @@ import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importM
 import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction } from "./transactions.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
-import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
-import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload } from "./kasia-protocol.js";
+import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
+import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
@@ -30,7 +30,7 @@ import {
   fetchProfileByAssetId as knsFetchProfileByAssetId,
   dropProfileCache as knsDropProfileCache,
 } from "./kns.js";
-import { looksLikeName as nsLooksLikeName, resolveEverywhere as nsResolveEverywhere, primary as nsPrimary, listOwnedNames as nsListOwnedNames } from "./name-services.js";
+import { looksLikeName as nsLooksLikeName, resolveEverywhere as nsResolveEverywhere, primary as nsPrimary, listOwnedNames as nsListOwnedNames, ownedNamesForAddresses as nsOwnedNamesForAddresses } from "./name-services.js";
 import {
   inscribeDomain as knsInscribeDomain,
   transferDomain as knsTransferDomain,
@@ -1250,6 +1250,17 @@ export class KaspaEngine {
     return testKasiaIndexer(indexerUrl);
   }
 
+  // --- No-handshake first contact (NO_HANDSHAKE_MESSAGING.md) ---
+  inboxTagFor(address) { return inboxTagFor(address); }
+
+  async probeInboxSupport(indexerUrl) { return probeInboxSupport(indexerUrl || undefined); }
+
+  /** People who wrote to this wallet first: [{ sender, txid, blockTime }] newer than `cursor`. */
+  async fetchInboxMessages({ cursor = 0, indexerUrl } = {}) {
+    this.requireWallet();
+    return fetchInboxMessages({ tag: inboxTagFor(this.address), cursor, indexerUrl: indexerUrl || undefined });
+  }
+
   async syncIncomingHandshakesFromIndexer(details = {}) {
     this.requireWallet();
     if (!this.isKasiaCipherLoaded()) await this.loadKasiaCipher();
@@ -1347,6 +1358,33 @@ export class KaspaEngine {
     let xOnlyPubKeyHex = null;
     try { xOnlyPubKeyHex = await this.xOnlyPubKeyForAddress?.(address); } catch { xOnlyPubKeyHex = null; }
     return nsListOwnedNames({ address, xOnlyPubKeyHex });
+  }
+
+  /** .k and .kaspa names each address owns, six lookups at a time (iOS
+   *  NameServicesClient.ownedNames(of:)), for account discovery. Map of address -> names
+   *  ({name, display, settling, tld}); only addresses that own a name. Failures count as none. */
+  async otherServiceNamesFor(addresses) {
+    return nsOwnedNamesForAddresses(addresses, { xOnlyPubKeyFor: (address) => this.xOnlyPubKeyForAddress(address) });
+  }
+
+  /** The addresses that own a name on any service KaChat reads - .kas (KNS, batched and cached),
+   *  .k and .kaspa (iOS NameServicesClient.ownsAnyName), so discovery finds an address whose only
+   *  trace is a name. .kachat joins once its registry is live. */
+  async addressesOwningAnyName(addresses) {
+    const list = [...new Set((addresses || []).filter(Boolean))];
+    const owners = new Set();
+    try { await this.refreshKnsIfNeeded(list); } catch { /* fall back to whatever is cached */ }
+    for (const address of list) {
+      if (this.peekKnsAddressInfo(address)?.allDomains?.length) owners.add(address);
+    }
+    const others = await this.otherServiceNamesFor(list.filter((address) => !owners.has(address)));
+    for (const address of others.keys()) owners.add(address);
+    return owners;
+  }
+
+  /** Whether one address owns a name on any service (iOS ownsAnyName). */
+  async ownsAnyName(address) {
+    return (await this.addressesOwningAnyName([address])).has(address);
   }
 
   async fetchKnsAddressInfo(address, options = {}) {

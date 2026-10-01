@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+
 // Kasia protocol adapter for KaChatShell.
 // Step 25 aligns this module with the actual Kasia source that was uploaded.
 //
@@ -154,6 +156,27 @@ export function decodeMessageBody(base64Body) {
   };
 }
 
+// --- No-handshake first contact (NO_HANDSHAKE_MESSAGING.md) ---------------------------------
+// The tag a first-contact message carries so its recipient can find it: the first 16 bytes of
+// SHA-256("kachat-inbox:v1:" + the recipient's lowercased address), as hex. Must match iOS
+// InboxTag.compute byte for byte.
+export const DM_PREFIX = `kchat:${VERSION}:dm:`;
+export function inboxTagFor(address) {
+  const input = "kachat-inbox:v1:" + String(address || "").trim().toLowerCase();
+  const digest = sha256(new TextEncoder().encode(input));
+  return Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+/** `kchat:1:dm:<tag>:<alias>:<sealed>` is a contextual message plus the recipient's inbox tag,
+ *  so every parser reads it as `kchat:1:comm:<alias>:<sealed>`. */
+export function normalizeContextualPayload(payload) {
+  const raw = String(payload || "");
+  if (!raw.startsWith(DM_PREFIX)) return raw;
+  const rest = raw.slice(DM_PREFIX.length);
+  const colon = rest.indexOf(DELIM);
+  if (colon === -1) return raw;
+  return `kchat:${VERSION}:comm:` + rest.slice(colon + 1);
+}
+
 export function buildCommMessage({
   text,
   alias = DEFAULT_ALIAS,
@@ -207,7 +230,8 @@ export function makeKasiaCommPayload(details) {
 }
 
 export function parseCommMessage(protocolString) {
-  const raw = String(protocolString || "");
+  // A first-contact `dm` message reads exactly like `comm`.
+  const raw = normalizeContextualPayload(protocolString);
   // Dual-read: new `kchat:` root and legacy `ciph_msg:` root (tail is byte-identical).
   if (!raw.startsWith(`kchat:${VERSION}:comm:`) && !raw.startsWith(`ciph_msg:${VERSION}:comm:`)) return null;
   const parts = raw.split(DELIM);
@@ -326,6 +350,7 @@ export async function buildEncryptedCommMessage({
   contactId = null,
   localNonce = null,
   encryptMessage,
+  inboxTag = null,
 } = {}) {
   if (typeof encryptMessage !== "function") throw new Error("Kasia cipher encryptor is required.");
   const normalizedReceiver = normalizeAddress(receiver);
@@ -338,7 +363,12 @@ export async function buildEncryptedCommMessage({
 
   const encryptedBytes = hexToBytes(encryptedHex);
   const base64Body = bytesToBase64(encryptedBytes);
-  const protocolString = `kchat:${VERSION}:comm:${recipientAlias}:${base64Body}`;
+  // With an inbox tag it is a first-contact message: the same message, also filed by the
+  // recipient's tag so they can find it without knowing the sender (NO_HANDSHAKE_MESSAGING.md).
+  const tag = /^[0-9a-f]{32}$/.test(String(inboxTag || "")) ? inboxTag : null;
+  const protocolString = tag
+    ? `${DM_PREFIX}${tag}:${recipientAlias}:${base64Body}`
+    : `kchat:${VERSION}:comm:${recipientAlias}:${base64Body}`;
   const protocolBytes = new TextEncoder().encode(protocolString);
   const payloadHex = toHex(protocolString);
   const messageId = checksumHex(`${createdAt}:${conversationId || ""}:${contactId || ""}:${localNonce || ""}:${protocolString}`);
