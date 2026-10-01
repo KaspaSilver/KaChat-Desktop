@@ -6,6 +6,7 @@ import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroad
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
+import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
@@ -4894,6 +4895,16 @@ const appTabScreens = document.querySelectorAll("[data-app-tab-screen]");
 // registration wizard. This lookup itself is read-only.
 let ownKnsAssetId = null;
 let ownKnsProfileFields = null;
+// The .kas domain the profile editor is open for (iOS 09e0403: Your Domains > domain > Customize
+// Profile). Its own copy, so a background refresh of your profile can never retarget a save.
+let knsEditorTarget = null; // { assetId, name, fields }
+// Your Domains tab state, declared up here because the profile refresh reads it early.
+let activeDomainsTab = DEFAULT_DOMAIN_TAB;
+let otherServiceNames = { k: null, kaspa: null }; // { state, names: [{ name, display, settling }] }
+let otherServiceNamesFor = "";
+let otherServiceNamesAt = 0;
+function knsEditAssetId() { return knsEditorTarget?.assetId || ownKnsAssetId; }
+function knsEditFields() { return knsEditorTarget ? knsEditorTarget.fields : ownKnsProfileFields; }
 
 function updateProfileHero(info, profileInfo) {
   const bannerEl = document.querySelector("[data-profile-hero-banner]");
@@ -4928,6 +4939,11 @@ function updateProfileHero(info, profileInfo) {
 async function refreshOwnKnsProfile({ force = false } = {}) {
   if (!engine.address || !profileKnsOwned || !profileKnsEmptyCta) return;
   const address = engine.address;
+  // The Profile's Your Domains count includes the .k and .kaspa names (iOS 09e0403).
+  if (otherServiceNamesFor !== address || Date.now() - otherServiceNamesAt > 5 * 60_000) {
+    otherServiceNamesAt = Date.now();
+    refreshOtherServiceNames();
+  }
   const cachedInfo = engine.peekKnsAddressInfo(address);
   const cachedProfile = engine.peekKnsAddressProfile(address);
   if (cachedInfo) applyOwnKnsProfile(cachedInfo, cachedProfile);
@@ -8399,23 +8415,72 @@ function knsDomainCardHtml(domain, { clickable = true } = {}) {
   </${clickable ? "button" : "div"}>`;
 }
 
+// Your Domains: a tab per name service (iOS df23b6f). .kas lists the KNS domains with their
+// detail; .k and .kaspa list the names this address owns there (read-only); .kachat waits for
+// KaChat's own names. Each outside service's tab pins its "Get a domain" button.
+async function refreshOtherServiceNames() {
+  const address = engine.address;
+  if (!address) return;
+  let result = null;
+  try { result = await engine.listOtherServiceNames(address); } catch { result = null; }
+  if (engine.address !== address || !result) return;
+  for (const tld of ["k", "kaspa"]) {
+    const fresh = result[tld];
+    // A service that could not be reached keeps the names it gave last time (iOS NameServicesClient).
+    if (fresh?.state === "unreachable" && otherServiceNamesFor === address && otherServiceNames[tld]?.names?.length) {
+      otherServiceNames[tld] = { ...otherServiceNames[tld], state: "unreachable" };
+    } else {
+      otherServiceNames[tld] = fresh;
+    }
+  }
+  otherServiceNamesFor = address;
+  renderProfileDomains();
+}
+function domainNameCardHtml(name, badge = "") {
+  return `<div class="kns-domain-card static">${escapeHtml(name)}${badge ? `<span class="kns-domain-primary">${escapeHtml(badge)}</span>` : ""}</div>`;
+}
 function renderProfileDomains() {
   const countEl = document.querySelector("[data-profile-domains-count]");
-  // Blank rather than "0" until a lookup has actually answered - a zero that is really "not asked
-  // yet" is worse than no number at all.
-  if (countEl) countEl.textContent = ownKnsDomains.length ? String(ownKnsDomains.length) : "";
+  // Blank rather than "0" until a lookup has actually answered. The count includes .k and .kaspa.
+  const otherCount = (otherServiceNamesFor === engine.address)
+    ? (otherServiceNames.k?.names?.length || 0) + (otherServiceNames.kaspa?.names?.length || 0) : 0;
+  const total = ownKnsDomains.length + otherCount;
+  if (countEl) countEl.textContent = total ? String(total) : "";
   const listEl = document.querySelector("[data-profile-domains-list]");
   const detailEl = document.querySelector("[data-domain-detail]");
   if (!listEl) return;
+  document.querySelectorAll("[data-domains-tab]").forEach((tab) => tab.classList.toggle("active", tab.dataset.domainsTab === activeDomainsTab));
+  const getButton = document.querySelector("[data-domains-inscribe]");
+  const service = NAME_SERVICES[activeDomainsTab];
+  if (getButton) {
+    getButton.hidden = !service?.getDomainLabel || Boolean(detailEl && !detailEl.hidden);
+    if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
+  }
   if (detailEl && !detailEl.hidden && domainDetailTarget) {
     renderDomainDetail(domainDetailTarget);
     return;
   }
-  if (!ownKnsDomains.length) {
-    listEl.innerHTML = '<p class="spending-address-empty">No domains yet.</p>';
+  if (activeDomainsTab === "kachat") {
+    listEl.innerHTML = `
+      <div class="domains-kachat-placeholder">
+        <span class="domains-kachat-mark" aria-hidden="true">${KACHAT_WORDMARK_SVG}</span>
+        <strong>.kachat names are coming</strong>
+        <p>KaChat's own names will live here: claim one, set it as your name in chats, and share it as your profile link.</p>
+      </div>`;
     return;
   }
-  listEl.innerHTML = ownKnsDomains.map((domain) => knsDomainCardHtml(domain)).join("");
+  if (activeDomainsTab === "kas") {
+    listEl.innerHTML = ownKnsDomains.length
+      ? ownKnsDomains.map((domain) => knsDomainCardHtml(domain)).join("")
+      : '<p class="spending-address-empty">No domains yet.</p>';
+    return;
+  }
+  const owned = otherServiceNamesFor === engine.address ? otherServiceNames[activeDomainsTab] : null;
+  const names = owned?.names || [];
+  const notice = owned?.state === "unreachable"
+    ? `<p class="spending-address-empty">Couldn't reach ${escapeHtml(service.serviceName)}. Try again in a moment.</p>`
+    : (!owned ? '<p class="spending-address-empty">Looking up names…</p>' : (!names.length ? `<p class="spending-address-empty">No ${escapeHtml(service.suffix || `.${activeDomainsTab}`)} names yet.</p>` : ""));
+  listEl.innerHTML = names.map((entry) => domainNameCardHtml(entry.display || entry.name, entry.settling ? "Settling" : "")).join("") + notice;
 }
 
 // One owned domain (iOS KNSDomainDetailView): the card, its asset id, primary or Set as Primary,
@@ -8444,6 +8509,7 @@ function renderDomainDetail(domain) {
     ${knsDomainCardHtml(domain, { clickable: false })}
     <div class="profile-domain-detail-rows">
       <div class="profile-domain-detail-row"><span>Asset ID</span><span class="kns-asset-id" title="${escapeHtml(assetId)}">${escapeHtml(assetId || "—")}</span></div>
+      ${assetId ? `<button type="button" class="profile-domain-detail-row actionable" data-domain-customize="${escapeHtml(assetId)}"><span>Customize Profile</span><span class="star">◉</span></button>` : ""}
       ${isPrimary
         ? `<div class="profile-domain-detail-row"><span>Primary Domain</span><span class="star">★</span></div>`
         : assetId
@@ -8464,7 +8530,6 @@ function closeDomainDetail() {
   setPrimaryError = "";
   if (detailEl) { detailEl.hidden = true; detailEl.innerHTML = ""; }
   if (listEl) listEl.hidden = false;
-  if (inscribe) inscribe.hidden = false;
   if (title) title.textContent = "Your Domains";
   renderProfileDomains();
 }
@@ -8502,20 +8567,40 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
   if (event.target.closest("[data-domain-detail-back]")) { closeDomainDetail(); return; }
   const setPrimary = event.target.closest("[data-domain-set-primary]");
   if (setPrimary && domainDetailTarget) { setPrimaryDomain(domainDetailTarget); return; }
+  // KaChat no longer SHOWS .kas profiles, but a domain's own profile can still be customized
+  // here, loaded fresh for that domain (iOS onCustomizeProfile).
+  const customize = event.target.closest("[data-domain-customize]");
+  if (customize && domainDetailTarget) {
+    const domain = domainDetailTarget;
+    const assetId = String(domain.inscriptionId || "").trim();
+    customize.disabled = true;
+    engine.fetchKnsDomainProfileForEditing(assetId)
+      .then((profile) => openKnsEditor({ assetId, name: domain.fullName, fields: profile || {} }))
+      .catch(() => openKnsEditor({ assetId, name: domain.fullName, fields: {} }))
+      .finally(() => { customize.disabled = false; });
+    return;
+  }
+  const tab = event.target.closest("[data-domains-tab]");
+  if (tab) {
+    activeDomainsTab = tab.dataset.domainsTab;
+    if (domainDetailTarget) closeDomainDetail(); else renderProfileDomains();
+    return;
+  }
   const send = event.target.closest("[data-domain-send]");
   if (send && domainDetailTarget && !send.disabled) {
     openKnsTransferModal({ domain: domainDetailTarget.fullName, assetId: domainDetailTarget.inscriptionId });
     return;
   }
   if (event.target.closest("[data-domains-inscribe]")) {
-    // The registration wizard's domain step is iOS's Inscribe Domain sheet; the funding check
-    // still runs underneath but does not stand in the way of someone who owns domains already.
-    openKnsProfileWizard({ startAt: "domain" });
+    // Each outside service sells its own names; KaChat links to it (iOS 718724b).
+    const url = NAME_SERVICES[activeDomainsTab]?.websiteURL;
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
 });
 
 document.querySelector("[data-open-domains-screen]")?.addEventListener("click", () => {
   renderProfileDomains();
+  refreshOtherServiceNames();
   if (domainsScreenEl) domainsScreenEl.hidden = false;
 });
 document.querySelector("[data-close-domains-screen]")?.addEventListener("click", () => {
@@ -8545,7 +8630,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 74;
+const APP_BUILD = 75;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11458,7 +11543,7 @@ function knsEditorPendingChanges() {
   else if (knsEditorBanner) changes.push({ key: "bannerUrl", label: "Banner" });
   document.querySelectorAll("[data-kns-editor-field]").forEach((el) => {
     const key = el.dataset.knsEditorField;
-    const current = String(ownKnsProfileFields?.[key] || "").trim();
+    const current = String(knsEditFields()?.[key] || "").trim();
     if (el.value.trim() !== current) changes.push({ key, label: KNS_FIELD_LABELS[key] || key, value: el.value });
   });
   return changes;
@@ -11474,8 +11559,8 @@ function renderKnsEditorImages() {
   const bannerPreview = document.querySelector("[data-kns-banner-preview]");
   const removeAvatar = document.querySelector("[data-kns-remove-avatar]");
   const removeBanner = document.querySelector("[data-kns-remove-banner]");
-  const currentAvatar = knsEditorAvatar === "remove" ? "" : (knsEditorAvatar?.dataUrl || ownKnsProfileFields?.avatarUrl || "");
-  const currentBanner = knsEditorBanner === "remove" ? "" : (knsEditorBanner?.dataUrl || ownKnsProfileFields?.bannerUrl || "");
+  const currentAvatar = knsEditorAvatar === "remove" ? "" : (knsEditorAvatar?.dataUrl || knsEditFields()?.avatarUrl || "");
+  const currentBanner = knsEditorBanner === "remove" ? "" : (knsEditorBanner?.dataUrl || knsEditFields()?.bannerUrl || "");
   if (avatarPreview) {
     avatarPreview.innerHTML = currentAvatar
       ? `<img src="${escapeHtml(currentAvatar)}" alt="" />`
@@ -11490,25 +11575,28 @@ function renderKnsEditorImages() {
   updateKnsEditorSaveState();
 }
 
-document.querySelector("[data-open-kns-editor]")?.addEventListener("click", () => {
-  if (!knsEditorModal || !ownKnsAssetId) {
+document.querySelector("[data-open-kns-editor]")?.addEventListener("click", () => openKnsEditor());
+// target: { assetId, name, fields } for one domain's own profile; none edits the primary.
+function openKnsEditor(target = null) {
+  knsEditorTarget = target;
+  if (!knsEditorModal || !knsEditAssetId()) {
     showCopyToast("Your domain isn't confirmed yet. Try again shortly.");
     return;
   }
   document.querySelector("[data-kns-editor-error]").hidden = true;
   document.querySelector("[data-kns-editor-progress]").hidden = true;
   document.querySelectorAll("[data-kns-editor-field]").forEach((el) => {
-    el.value = ownKnsProfileFields?.[el.dataset.knsEditorField] || "";
+    el.value = knsEditFields()?.[el.dataset.knsEditorField] || "";
   });
   knsEditorAvatar = null;
   knsEditorBanner = null;
   const nameEl = document.querySelector("[data-kns-editor-domain-name]");
   const assetEl = document.querySelector("[data-kns-editor-asset-id]");
-  if (nameEl) nameEl.textContent = ownKnsPrimaryDomain || "KNS Profile";
-  if (assetEl) { assetEl.textContent = ownKnsAssetId || "—"; assetEl.title = ownKnsAssetId || ""; }
+  if (nameEl) nameEl.textContent = knsEditorTarget?.name || ownKnsPrimaryDomain || "KNS Profile";
+  if (assetEl) { assetEl.textContent = knsEditAssetId() || "—"; assetEl.title = knsEditAssetId() || ""; }
   renderKnsEditorImages();
   knsEditorModal.hidden = false;
-});
+}
 document.querySelectorAll("[data-kns-editor-field]").forEach((el) => el.addEventListener("input", updateKnsEditorSaveState));
 
 async function readKnsImageFile(file, statusEl) {
@@ -11541,11 +11629,11 @@ document.querySelector("[data-kns-banner-file]")?.addEventListener("change", asy
   if (picked) { knsEditorBanner = picked; renderKnsEditorImages(); }
 });
 document.querySelector("[data-kns-remove-avatar]")?.addEventListener("click", () => {
-  knsEditorAvatar = ownKnsProfileFields?.avatarUrl ? "remove" : null;
+  knsEditorAvatar = knsEditFields()?.avatarUrl ? "remove" : null;
   renderKnsEditorImages();
 });
 document.querySelector("[data-kns-remove-banner]")?.addEventListener("click", () => {
-  knsEditorBanner = ownKnsProfileFields?.bannerUrl ? "remove" : null;
+  knsEditorBanner = knsEditFields()?.bannerUrl ? "remove" : null;
   renderKnsEditorImages();
 });
 
@@ -11598,8 +11686,8 @@ async function runKnsProfileWrites(assetId, fields) {
 
 async function retryFailedKnsUpdates() {
   const fields = { ...failedKnsUpdates };
-  if (!Object.keys(fields).length || !ownKnsAssetId) return;
-  const results = await runKnsProfileWrites(ownKnsAssetId, fields);
+  if (!Object.keys(fields).length || !knsEditAssetId()) return;
+  const results = await runKnsProfileWrites(knsEditAssetId(), fields);
   engine.clearKnsCache(engine.address);
   await refreshOwnKnsProfile();
   const failed = results.filter((r) => !r.ok);
@@ -11621,7 +11709,7 @@ document.querySelector("[data-kns-editor-save]")?.addEventListener("click", asyn
   const errorEl = document.querySelector("[data-kns-editor-error]");
   const saveBtn = document.querySelector("[data-kns-editor-save]");
   if (errorEl) errorEl.hidden = true;
-  if (!ownKnsAssetId) {
+  if (!knsEditAssetId()) {
     if (errorEl) { errorEl.textContent = "Your domain isn't confirmed yet."; errorEl.hidden = false; }
     return;
   }
@@ -11649,7 +11737,7 @@ document.querySelector("[data-kns-editor-save]")?.addEventListener("click", asyn
 
   if (saveBtn) saveBtn.disabled = true;
   if (knsEditorModal) knsEditorModal.hidden = true;
-  const assetId = ownKnsAssetId;
+  const assetId = knsEditAssetId();
   const hadPrimary = Boolean(ownKnsPrimaryDomain);
   try {
     showKnsSaveBanner("Preparing profile update...");
@@ -14599,6 +14687,16 @@ function showSettingsCategory(index) {
   settingsScreenEl.scrollTop = 0;
 }
 
+// Connection Settings: one tab per kind of connection (iOS ee01f81). Every field saves as it
+// changes, so switching tabs never loses an edit.
+function showConnectionTab(name) {
+  document.querySelectorAll("[data-connection-tab]").forEach((tab) => tab.classList.toggle("active", tab.dataset.connectionTab === name));
+  document.querySelectorAll("[data-connection-panel]").forEach((panel) => { panel.hidden = panel.dataset.connectionPanel !== name; });
+}
+document.querySelectorAll("[data-connection-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => showConnectionTab(tab.dataset.connectionTab));
+});
+
 function showSettingsSubscreen(name, parentIndex) {
   if (!settingsScreenEl || !settingsHubEl) return;
   const target = settingsGroupsEls.find((group) => group.dataset.settingsSubscreen === name);
@@ -14608,7 +14706,7 @@ function showSettingsSubscreen(name, parentIndex) {
   // The retention window is per account, so the checkmark is only right once the page opens.
   if (name === "retention") refreshRetentionSelectionUi();
   if (name === "cache") renderCachePage();
-  if (name === "connection-settings") renderNodeChoice();
+  if (name === "connection-settings") { renderNodeChoice(); showConnectionTab("indexer"); }
   settingsSubscreenParentIndex = Number.isInteger(parentIndex) && parentIndex >= 0 ? parentIndex : null;
   settingsHubEl.hidden = true;
   settingsGroupsEls.forEach((group) => { group.hidden = group !== target; });

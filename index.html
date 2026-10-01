@@ -1060,6 +1060,15 @@
           <!-- Connection sub-screens. -->
           <section class="settings-group" data-settings-subscreen="connection-settings">
             <p class="settings-group-label">Connection Settings</p>
+            <!-- One tab per kind of connection (iOS ee01f81); the fields keep their edits across tabs. -->
+            <nav class="domains-tabs connection-tabs" aria-label="Connection type">
+              <button type="button" class="domains-tab active" data-connection-tab="indexer">Indexer</button>
+              <button type="button" class="domains-tab" data-connection-tab="node">Node</button>
+              <button type="button" class="domains-tab" data-connection-tab="translation">Translation</button>
+              <button type="button" class="domains-tab" data-connection-tab="domains">Domains</button>
+              <button type="button" class="domains-tab" data-connection-tab="explorer">Explorer</button>
+            </nav>
+            <div class="connection-panel" data-connection-panel="indexer">
             <p class="settings-group-label">KaChat Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1080,16 +1089,6 @@
               </div>
             </div>
             <p class="settings-group-footer">K social network indexer that powers KaPosts feeds</p>
-            <p class="settings-group-label">Translation Service</p>
-            <div class="settings-list-card">
-              <div class="settings-page-form">
-                  <label class="field-label compact">Translation Service URL
-                    <input class="field-input" type="url" data-endpoint="translationService" autocomplete="off" spellcheck="false" />
-                  </label>
-                  <p class="field-hint danger" data-endpoint-error="translationService" hidden></p>
-              </div>
-            </div>
-            <p class="settings-group-footer">Translates KaPosts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one.</p>
             <p class="settings-group-label">Public Chats Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1099,7 +1098,7 @@
                   <p class="field-hint danger" data-endpoint-error="broadcastIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">KaChat Public Chats history indexer for #kaspa and #kachat-bugs</p>
+            <p class="settings-group-footer">KaChat public chat history indexer for #kaspa and #kachat-bugs</p>
             <p class="settings-group-label">Push Registration</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1110,26 +1109,8 @@
               </div>
             </div>
             <p class="settings-group-footer">Used only for push registration and updates</p>
-            <p class="settings-group-label">Kaspa Name Service</p>
-            <div class="settings-list-card">
-              <div class="settings-page-form">
-                  <label class="field-label compact">KNS API URL
-                    <input class="field-input" type="url" data-endpoint="knsApi" autocomplete="off" spellcheck="false" readonly />
-                  </label>
-                  <p class="field-hint danger" data-endpoint-error="knsApi" hidden></p>
-              </div>
             </div>
-            <p class="settings-group-footer">KNS domain resolution service</p>
-            <p class="settings-group-label">Kaspa Explorer API</p>
-            <div class="settings-list-card">
-              <div class="settings-page-form">
-                  <label class="field-label compact">Kaspa REST API URL
-                    <input class="field-input" type="url" data-endpoint="kaspaApi" autocomplete="off" spellcheck="false" />
-                  </label>
-                  <p class="field-hint danger" data-endpoint-error="kaspaApi" hidden></p>
-              </div>
-            </div>
-            <p class="settings-group-footer">REST API for transaction history and balance lookups</p>
+            <div class="connection-panel" data-connection-panel="node" hidden>
             <p class="settings-group-label">Kaspa Node</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1141,7 +1122,7 @@
                   <p class="field-hint accent" data-node-choice-note hidden>Connected only to this node</p>
               </div>
             </div>
-            <p class="settings-group-footer">Automatic Scan discovers and connects to the best available nodes. Choosing a specific node connects only to it, without falling back to others. Doesn't affect the Indexer/KNS/REST API URLs above. Add custom addresses to the IP Address Book below to select them here.</p>
+            <p class="settings-group-footer">Automatic Scan discovers and connects to the best available nodes. Choosing a specific node connects only to it, without falling back to others. Doesn't affect the indexers, domains or explorer on the other tabs. Add custom addresses to the IP Address Book below to select them here.</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
                   <button class="danger-button subtle full" type="button" data-reset-connection-defaults>Reset to Defaults</button>
@@ -1163,6 +1144,52 @@
               <div class="saved-node-list" data-saved-nodes-list></div>
             </div>
             <p class="settings-group-footer">Save your own node addresses here, then pick one under Kaspa Node above.</p>
+            </div>
+            <div class="connection-panel" data-connection-panel="translation" hidden>
+            <p class="settings-group-label">Translation Service</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
+                  <label class="field-label compact">Translation Service URL
+                    <input class="field-input" type="url" data-endpoint="translationService" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <p class="field-hint danger" data-endpoint-error="translationService" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">Translates KaPosts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one (see TRANSLATION_SERVICE.md).</p>
+            </div>
+            <div class="connection-panel" data-connection-panel="domains" hidden>
+            <p class="settings-group-label">Kaspa Name Service</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
+                  <label class="field-label compact">KNS API URL
+                    <input class="field-input" type="url" data-endpoint="knsApi" autocomplete="off" spellcheck="false" readonly />
+                  </label>
+                  <p class="field-hint danger" data-endpoint-error="knsApi" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">KNS domain resolution service</p>
+            <p class="settings-group-label">Other Name Services</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form connection-readonly-list">
+                <div class="connection-readonly"><span>dotk (.k)</span><code>https://api.dotk.name/v1</code></div>
+                <div class="connection-readonly"><span>Kaspa Names (.kaspa)</span><code>https://kaspaname.com/v1</code></div>
+                <div class="connection-readonly"><span>KaChat Names (.kachat)</span><em>Coming soon</em></div>
+              </div>
+            </div>
+            <p class="settings-group-footer">Used to show the .k and .kaspa names an address owns. KaChat's own .kachat names will be set here once they launch.</p>
+            </div>
+            <div class="connection-panel" data-connection-panel="explorer" hidden>
+            <p class="settings-group-label">Kaspa Explorer API</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
+                  <label class="field-label compact">Kaspa REST API URL
+                    <input class="field-input" type="url" data-endpoint="kaspaApi" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <p class="field-hint danger" data-endpoint-error="kaspaApi" hidden></p>
+              </div>
+            </div>
+            <p class="settings-group-footer">REST API for transaction history and balance lookups</p>
+            </div>
           </section>
 
           <section class="settings-group" data-settings-subscreen="explorer">
@@ -2107,7 +2134,7 @@
         <button class="modal-close" type="button" data-close-kns-editor aria-label="Close">×</button>
       </div>
       <div class="kns-editor-scroll">
-        <button class="kns-editor-guide" type="button" data-open-kns-guide>
+        <button class="kns-editor-guide" type="button" data-open-kns-guide hidden>
           <span class="kns-editor-guide-icon" aria-hidden="true">📘</span>
           <span class="kns-editor-guide-text">
             <span class="kns-editor-guide-title">Setup Guide</span>
@@ -2306,12 +2333,20 @@
         <span class="chatting-address-balance">Your Domains</span>
         <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
+      <!-- A tab per name service (iOS df23b6f, f9a8750): .kachat, .kas, .k, .kaspa. -->
+      <nav class="domains-tabs" data-domains-tabs aria-label="Name services">
+        <button type="button" class="domains-tab" data-domains-tab="kachat">.kachat</button>
+        <button type="button" class="domains-tab" data-domains-tab="kas">.kas</button>
+        <button type="button" class="domains-tab" data-domains-tab="k">.k</button>
+        <button type="button" class="domains-tab" data-domains-tab="kaspa">.kaspa</button>
+      </nav>
       <div class="manage-address-body">
         <div class="profile-domains-list" data-profile-domains-list></div>
         <div class="profile-domain-detail" data-domain-detail hidden></div>
       </div>
       <div class="manage-address-actions">
-        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe>Inscribe New Domain</button>
+        <!-- Each outside service's "Get a domain" button (iOS 718724b); none on .kachat yet. -->
+        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe>Get a .kas domain at knsdomains.org</button>
       </div>
     </div>
   </div>

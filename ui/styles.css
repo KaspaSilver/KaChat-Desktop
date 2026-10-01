@@ -12280,3 +12280,30 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 /* The KNS create/edit buttons on the Profile hero are retired (iOS 09e0403): the hero edits your
    .kachat profile; a .kas profile is edited from its domain in Your Domains. */
 .profile-hero-kns.retired { display: none !important; }
+
+/* Your Domains: a tab per name service (iOS 5.2). */
+.domains-tabs { display: flex; border-bottom: .5px solid var(--line); margin: 0 16px; }
+.domains-tab {
+  flex: 1; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer;
+  font: inherit; font-size: 15px; font-weight: 700; color: rgba(112,199,186,.5); padding: 10px 0 8px;
+}
+.domains-tab.active { color: var(--kaspa-ink); border-bottom-color: var(--kaspa); }
+.domains-kachat-placeholder {
+  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px;
+  padding: 36px 20px; color: var(--muted);
+}
+.domains-kachat-placeholder strong { color: var(--text); font-size: 17px; }
+.domains-kachat-placeholder p { margin: 0; font-size: 14px; line-height: 1.4; max-width: 300px; }
+.domains-kachat-mark { display: inline-flex; width: 64px; height: 64px; }
+.domains-kachat-mark svg { width: 100%; height: 100%; }
+.domains-inscribe-button[hidden] { display: none !important; }
+
+/* Connection Settings tabs (iOS ee01f81). */
+.connection-tabs { margin: 0 0 8px; }
+.connection-tabs .domains-tab { font-size: 14px; }
+.connection-panel[hidden] { display: none !important; }
+.connection-readonly-list { gap: 12px; }
+.connection-readonly { display: flex; flex-direction: column; gap: 4px; }
+.connection-readonly span { color: var(--muted); font-size: 13px; }
+.connection-readonly code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); user-select: text; word-break: break-all; }
+.connection-readonly em { font-style: normal; color: var(--muted); }
