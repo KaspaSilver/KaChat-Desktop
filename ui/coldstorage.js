@@ -1319,23 +1319,23 @@ function handleSendRecipientInput(raw) {
     return;
   }
   send.validAddress = false;
-  if (deps.engine.knsLooksLikeDomain?.(trimmed)) {
+  if (deps.engine.looksLikeName?.(trimmed)) {
     send.resolvingKns = true;
     renderSendStatusOnly();
     window.setTimeout(async () => {
       if (!send || token !== sendResolveToken) return;
       try {
-        const resolution = await deps.engine.resolveKnsDomain(trimmed);
+        const resolution = await deps.engine.resolveName(trimmed);
         if (!send || token !== sendResolveToken) return;
         if (resolution) {
           send.resolvedAddress = resolution.ownerAddress;
           send.resolvedDomain = resolution.domain;
         } else {
-          send.knsError = "KNS domain not found";
+          send.knsError = "No domain found";
         }
       } catch {
         if (!send || token !== sendResolveToken) return;
-        send.knsError = "KNS domain not found";
+        send.knsError = "No domain found";
       }
       send.resolvingKns = false;
       renderSendStatusOnly();
@@ -1570,7 +1570,7 @@ async function handleSignedResponse(bytes) {
 function sendRecipientStatusHtml() {
   const trimmed = send.toInput.trim();
   if (!trimmed) return "";
-  if (send.resolvingKns) return '<p class="cold-send-status muted">Resolving KNS domain…</p>';
+  if (send.resolvingKns) return '<p class="cold-send-status muted">Looking up domain…</p>';
   if (send.knsError) return `<p class="cold-send-status bad">✕ ${deps.escapeHtml(send.knsError)}</p>`;
   // Who the address resolves to (iOS ac0ef19): the create-chat card under the status.
   const card = (address, domain) => deps.addressCardHtml?.(address, { domain, onLoaded: () => renderSendStatusOnly() }) || "";

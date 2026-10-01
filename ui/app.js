@@ -4,6 +4,8 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
+import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG } from "./kachat-market.js";
+import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
@@ -63,6 +65,8 @@ window.KaspaEngineClass = KaspaEngine;
 window.__kaspaEngineStep = "kachat-shell-step-71";
 
 const engine = new KaspaEngine({ log: appendEngineLog });
+// The .kachat wordmark is the .kachat section's dock and Hub icon (iOS KachatTabIcon).
+document.querySelectorAll("[data-kachat-wordmark]").forEach((el) => { el.innerHTML = KACHAT_WORDMARK_SVG; });
 // .kas profiles saved before they stopped loading are dropped (iOS d6ded9d).
 engine.dropKnsProfileCache?.();
 engine.onConnectionState?.(() => {
@@ -7816,6 +7820,8 @@ function setActiveAppTab(tab) {
   if (screenTab === "swaps") refreshSwaps();
   // Chess keeps the arena scanned only while its screen is up (iOS acquire/release).
   if (screenTab === "chess") showChessTournaments(); else hideChessTournaments();
+  try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
+  try { if (screenTab === "kachat-stats") showKachatStats(); else hideKachatStats(); } catch { /* not started */ }
 }
 
 sidebarTabButtons.forEach((button) => {
@@ -7849,12 +7855,14 @@ const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 const DOCK_MAX_ITEMS = 5;
 const DOCK_PINNED = ["hub", "profile"];
 /** Tabs the user can place. Excludes the pinned two. */
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess"]; // Public Chats live under Chats now (iOS a566da7)
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kaposts", "swaps", "apps", "chess"];
+// .kachat and KaChat Stats (iOS 5.2) are Hub sections like the rest: first in the Hub on a fresh
+// install, appended for an existing arrangement (normalizeDockPrefs), assignable to the dock.
+const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess", "kachat-names", "kachat-stats"]; // Public Chats live under Chats now (iOS a566da7)
+const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
 const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["kaposts", "swaps", "apps", "chess"];
+const HUB_DEFAULT = ["kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -8525,16 +8533,19 @@ document.querySelector("[data-help-welcome]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = true;
   openSetupGuide();
 });
+// Profile > Help's guide row is the .kachat Profile Setup Guide (iOS b000310).
 document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = true;
-  openKnsProfileWizard();
+  openKachatSetupGuide();
 });
+// The Profile hero's button edits your .kachat profile (iOS 09e0403).
+document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", () => openKachatProfileEditor());
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 73;
+const APP_BUILD = 74;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -8793,10 +8804,10 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       return;
     }
 
-    if (engine.knsLooksLikeDomain(raw)) {
+    if (engine.looksLikeName(raw)) {
       if (els.submit) els.submit.disabled = true;
       try {
-        const resolution = await engine.resolveKnsDomain(raw);
+        const resolution = await engine.resolveName(raw);
         if (token !== resolveToken) return; // a newer keystroke superseded this lookup
         if (resolution) {
           resolvedAddress = resolution.ownerAddress;
@@ -11931,6 +11942,34 @@ function setCreateChatError(message = "") {
 // "Valid address" / "Resolved: name.kas" / "Invalid address format" states.
 let createChatResolveToken = 0;
 
+// "Other domains" (iOS a0dbc15): what the same name points to on the other services, and the
+// one the new chat will use. Picking another switches the chat to it.
+let createChatNameResults = [];
+let createChatPickedName = "";
+const OTHER_DOMAIN_STATE_LABEL = { notRegistered: "Not registered", failed: "Couldn't check" };
+function createChatResolvedStatusHtml(picked) {
+  const others = createChatNameResults.filter((entry) => entry.name !== picked.name);
+  return `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(picked.name)}</span>`
+    + `<span class="create-chat-status-mono">${escapeHtml(picked.address)}</span>`
+    + (others.length ? `
+      <details class="create-chat-other-domains">
+        <summary>Other domains</summary>
+        ${others.map((entry) => entry.state === "resolved"
+          ? `<button type="button" class="create-chat-other-domain" data-create-chat-other="${escapeHtml(entry.name)}"><strong>${escapeHtml(entry.name)}</strong><span>${escapeHtml(shortAddress(entry.address))}</span></button>`
+          : `<div class="create-chat-other-domain muted"><strong>${escapeHtml(entry.name)}</strong><span>${escapeHtml(OTHER_DOMAIN_STATE_LABEL[entry.state] || "Couldn't check")}</span></div>`).join("")}
+      </details>` : "");
+}
+document.querySelector("[data-create-chat-status]")?.addEventListener("click", (event) => {
+  const pick = event.target.closest("[data-create-chat-other]");
+  if (!pick) return;
+  const entry = createChatNameResults.find((candidate) => candidate.name === pick.dataset.createChatOther && candidate.state === "resolved");
+  if (!entry) return;
+  createChatPickedName = entry.name;
+  createChatResolvedAddress = entry.address;
+  renderCreateChatStatus(createChatResolvedStatusHtml(entry));
+  renderCreateChatPreview();
+  renderCreateChatPicker();
+});
 function renderCreateChatStatus(html) {
   const statusEl = document.querySelector("[data-create-chat-status]");
   if (!statusEl) return;
@@ -11942,6 +11981,8 @@ function updateCreateChatAddState() {
   if (!createChatAddButton || !contactAddressInput) return;
   const raw = String(contactAddressInput.value || "").trim();
   const token = ++createChatResolveToken;
+  createChatNameResults = [];
+  createChatPickedName = "";
 
   if (!raw) {
     renderCreateChatStatus("");
@@ -11969,11 +12010,11 @@ function updateCreateChatAddState() {
     return;
   }
 
-  if (engine.knsLooksLikeDomain(raw)) {
+  if (engine.looksLikeName(raw)) {
     // Matches both "name.kas" and a bare "name" — resolution normalizes either
     // form by appending .kas if it's missing (see resolveKnsDomain). Debounced
     // live resolution so Add only enables for a domain that actually exists.
-    renderCreateChatStatus('<span class="create-chat-status-muted">Resolving KNS domain…</span>');
+    renderCreateChatStatus('<span class="create-chat-status-muted">Looking up domain…</span>');
     createChatAddButton.disabled = true;
     createChatResolvedAddress = "";
     renderCreateChatPreview();
@@ -11981,23 +12022,22 @@ function updateCreateChatAddState() {
     window.setTimeout(async () => {
       if (token !== createChatResolveToken) return;
       try {
-        const resolution = await engine.resolveKnsDomain(raw);
+        const resolution = await engine.resolveName(raw);
         if (token !== createChatResolveToken) return;
         if (resolution?.ownerAddress) {
-          renderCreateChatStatus(
-            `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(resolution.domain || raw)}</span>`
-            + `<span class="create-chat-status-mono">${escapeHtml(resolution.ownerAddress)}</span>`
-          );
+          createChatNameResults = resolution.results || [];
+          createChatPickedName = resolution.domain || raw;
+          renderCreateChatStatus(createChatResolvedStatusHtml({ name: createChatPickedName, address: resolution.ownerAddress }));
           createChatAddButton.disabled = false;
           createChatResolvedAddress = resolution.ownerAddress;
           renderCreateChatPreview();
           renderCreateChatPicker();
         } else {
-          renderCreateChatStatus('<span class="create-chat-status-bad">✕ KNS domain not found</span>');
+          renderCreateChatStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
         }
       } catch {
         if (token !== createChatResolveToken) return;
-        renderCreateChatStatus('<span class="create-chat-status-bad">✕ KNS domain not found</span>');
+        renderCreateChatStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
       }
     }, 300);
     return;
@@ -14810,10 +14850,14 @@ contactForm.addEventListener("submit", async (event) => {
 
     let address;
     let resolvedDomain = null;
-    if (engine.knsLooksLikeDomain(rawAddress) && !rawAddress.startsWith("kaspa:")) {
-      setCreateChatError("Resolving KNS domain…");
-      const resolution = await engine.resolveKnsDomain(rawAddress);
-      if (!resolution) throw new Error(`Could not resolve ${engine.knsNormalizeDomainName(rawAddress) || rawAddress}. Check the domain name and try again.`);
+    if (engine.looksLikeName(rawAddress) && !rawAddress.startsWith("kaspa:") && createChatResolvedAddress && createChatPickedName) {
+      // The name already resolved in the field, or the one picked under Other domains.
+      address = validateContactAddress(createChatResolvedAddress);
+      resolvedDomain = createChatPickedName;
+    } else if (engine.looksLikeName(rawAddress) && !rawAddress.startsWith("kaspa:")) {
+      setCreateChatError("Looking up domain…");
+      const resolution = await engine.resolveName(rawAddress);
+      if (!resolution) throw new Error(`No domain found for ${rawAddress}. Check the name and try again.`);
       address = validateContactAddress(resolution.ownerAddress);
       resolvedDomain = resolution.domain;
       setCreateChatError("");
@@ -14822,7 +14866,8 @@ contactForm.addEventListener("submit", async (event) => {
     }
 
     if (address === engine.address) throw new Error("That's your own address.");
-    const displayName = name || resolvedDomain || shortAddress(address);
+    // A domain finds the address; it does not name the person (iOS 509c0fe).
+    const displayName = name || (engine.knsNamesAsIdentity ? resolvedDomain : "") || shortAddress(address);
     const existing = state.contacts.find((contact) => contact.address === address);
     if (existing) {
       const existingConversation = state.conversations.find((entry) => entry.contactId === existing.id);
@@ -21119,7 +21164,8 @@ queueMicrotask(async () => {
       openKaPostsSettings,
       startChat: (address, name) => openChatWithAddress({ address, name }),
       // Routes to the Profile tab's KNS editor rather than a second copy of it.
-      editKnsProfile: () => document.querySelector("[data-open-kns-editor]")?.click(),
+      // KaPosts' profile button edits your .kachat profile too (iOS 09e0403).
+      editKnsProfile: () => openKachatProfileEditor(),
       showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
       // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
       // signature of the right width, so the estimate is for the bytes that will actually go.
@@ -21366,6 +21412,18 @@ queueMicrotask(async () => {
 
   // Chess Online is one screen: whatever goes wrong there must not stop the rest of startup.
   try { initChessTournamentsSafe(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
+  // Kaspa Hub, 5.2: the .kachat marketplace (UI only) and KaChat Stats (the indexers' numbers).
+  try {
+    initKachatMarket({ escapeHtml, showToast: showCopyToast, confirmDialog, openChat: (address) => openChatWithAddress({ address }) });
+  } catch (error) { appendEngineLog(`.kachat did not start: ${error?.message || error}`); }
+  try {
+    initKachatStats({
+      escapeHtml,
+      infoSheet,
+      // Every KaChat indexer the app is configured with; the screen asks each once.
+      indexerUrls: () => ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"].map((key) => getEndpoint(key)).filter(Boolean),
+    });
+  } catch (error) { appendEngineLog(`KaChat Stats did not start: ${error?.message || error}`); }
   function initChessTournamentsSafe() { initChessTournaments({
     engine,
     escapeHtml,
@@ -23548,12 +23606,12 @@ function updateGroupAddressState() {
     return;
   }
 
-  if (engine.knsLooksLikeDomain(raw)) {
-    setGroupAddressStatus('<span class="create-chat-status-muted">Resolving KNS domain…</span>');
+  if (engine.looksLikeName(raw)) {
+    setGroupAddressStatus('<span class="create-chat-status-muted">Looking up domain…</span>');
     window.setTimeout(async () => {
       if (token !== groupAddressResolveToken) return;
       try {
-        const resolution = await engine.resolveKnsDomain(raw);
+        const resolution = await engine.resolveName(raw);
         if (token !== groupAddressResolveToken) return;
         if (resolution?.ownerAddress) {
           groupAddressResolved = resolution.ownerAddress;
@@ -23563,12 +23621,12 @@ function updateGroupAddressState() {
             : `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(resolution.domain || raw)}</span><span class="create-chat-status-mono">${escapeHtml(resolution.ownerAddress)}</span>`);
           if (groupAddressAddButton) groupAddressAddButton.disabled = Boolean(dupe);
         } else {
-          setGroupAddressStatus('<span class="create-chat-status-bad">✕ KNS domain not found</span>');
+          setGroupAddressStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
         }
         renderGroupAddressPreview();
       } catch {
         if (token !== groupAddressResolveToken) return;
-        setGroupAddressStatus('<span class="create-chat-status-bad">✕ KNS domain not found</span>');
+        setGroupAddressStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
       }
     }, 300);
     return;

@@ -31,7 +31,7 @@ const USER_TYPE_KEY = "kachat-user-type-choice-v1";
 
 /** Tabs removed everywhere while Simple Mode is on (dock, programmatic switches,
  * the Customize Dock page). */
-export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts", "chess"];
+export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts", "chess", "kachat-names"]; // .kachat is a marketplace (iOS b064468); Stats stays (read-only)
 
 let deps = {
   escapeHtml: (value) => String(value ?? ""),

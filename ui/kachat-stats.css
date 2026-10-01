@@ -1,0 +1,215 @@
+/* KaChat Stats (Kaspa Hub > KaChat Stats; iOS KaChatStatsView). Built on the iOS theme's tokens
+   and shared classes (.kaposts-header/.kaposts-title, .profile-card, .settings-segmented). */
+
+/* The iOS system colours the categories use. Blue, green, orange and yellow are the theme's own;
+   the others have no theme token, so they are defined here with iOS's dark and light values. */
+:root {
+  --kstats-blue: var(--ios-blue);
+  --kstats-green: var(--ios-green);
+  --kstats-orange: var(--ios-orange);
+  --kstats-yellow: var(--ios-yellow);
+  --kstats-cyan: #64d2ff;
+  --kstats-indigo: #5e5ce6;
+  --kstats-teal: #40c8e0;
+  --kstats-pink: #ff375f;
+  --kstats-purple: #bf5af2;
+  --kstats-brown: #ac8e68;
+  --kstats-gray: #8e8e93;
+}
+:root[data-theme="light"] {
+  --kstats-cyan: #32ade6;
+  --kstats-indigo: #5856d6;
+  --kstats-teal: #30b0c7;
+  --kstats-pink: #ff2d55;
+  --kstats-purple: #af52de;
+  --kstats-brown: #a2845e;
+  --kstats-gray: #8e8e93;
+}
+
+.kstats-screen { display: flex; flex-direction: column; min-height: 0; }
+.kstats-header { width: 100%; gap: 10px; flex-shrink: 0; }
+.kstats-header .kaposts-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kstats-header .kaposts-icon-button { flex: 0 0 auto; }
+.kstats-header .kaposts-icon-button:disabled { cursor: default; }
+.kstats-refresh.is-loading svg { animation: kstats-spin .9s linear infinite; }
+@keyframes kstats-spin { to { transform: rotate(360deg); } }
+
+.kstats-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-bottom: 28px;
+  flex-shrink: 0;
+}
+
+/* Hero: the chart glyph, the range's total, its caption. */
+.kstats-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 24px 0;
+  text-align: center;
+}
+.kstats-hero-icon { color: var(--kaspa-ink); margin-bottom: 4px; line-height: 0; }
+.kstats-hero-icon svg { width: 38px; height: 38px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kstats-hero-total {
+  max-width: 100%;
+  color: var(--text);
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, sans-serif;
+  font-size: clamp(26px, 9vw, 44px);
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kstats-hero-caption { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.35; }
+.kstats-hero-note { margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
+
+/* SwiftUI's .redacted(reason: .placeholder): the text's shape as a rounded grey block. */
+.kstats-redacted {
+  color: transparent !important;
+  background: var(--fill-secondary, var(--fill-tertiary));
+  border-radius: 6px;
+  user-select: none;
+}
+.kstats-hero-total .kstats-redacted { border-radius: 10px; }
+
+.kstats-picker { flex-shrink: 0; }
+
+/* Share bar: one segment per kind, proportional to its count. */
+.kstats-share {
+  display: flex;
+  gap: 2px;
+  height: 12px;
+  margin: 0 16px;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.kstats-share-part { flex: 0 1 0; min-width: 3px; }
+.kstats-share-empty { flex-grow: 1; background: var(--fill-tertiary); }
+
+/* The kinds, as one card of rows with inset dividers. */
+.profile-card.kstats-card { padding: 0; overflow: hidden; }
+.kstats-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  position: relative;
+}
+.kstats-row + .kstats-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 60px;
+  right: 0;
+  height: .5px;
+  background: var(--line);
+}
+.kstats-row-icon {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+.kstats-row-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kstats-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.kstats-row-main strong { color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.3; }
+.kstats-row-main small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kstats-row-value {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.kstats-row-value strong { color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.3; }
+.kstats-row-value strong.kstats-dash { color: var(--muted); }
+.kstats-row-value small { color: var(--muted); font-size: 12px; line-height: 1.3; }
+
+/* No stats: no indexer for this network, or none reports /stats yet. */
+.profile-card.kstats-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px;
+  text-align: center;
+}
+.kstats-unavailable-icon { color: var(--muted); line-height: 0; }
+.kstats-unavailable-icon svg { width: 32px; height: 32px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kstats-unavailable strong { color: var(--text); font-size: 17px; font-weight: 600; }
+.kstats-unavailable p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.35; }
+.kstats-retry {
+  margin-top: 4px;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 16px;
+  background: var(--kaspa-dim, var(--fill-tertiary));
+  color: var(--kaspa-ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.kstats-retry:hover { background: var(--fill-tertiary); }
+
+.kstats-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.kstats-footer p { margin: 0; }
+
+/* "What counts" (rendered inside the app's info sheet). */
+.kstats-info { display: flex; flex-direction: column; gap: 12px; }
+.kstats-info-header, .kstats-info-footer { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.kstats-info-list {
+  border-radius: 12px;
+  border: .5px solid var(--line);
+  background: var(--sheet-row, var(--grouped-row));
+  overflow: hidden;
+}
+.kstats-info-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 10px 16px;
+  position: relative;
+}
+.kstats-info-row + .kstats-info-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 60px;
+  right: 0;
+  height: .5px;
+  background: var(--line);
+}
+.kstats-info-icon { flex: 0 0 30px; width: 30px; display: grid; place-items: center; padding-top: 1px; }
+.kstats-info-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.kstats-info-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.kstats-info-copy strong { color: var(--text); font-size: 15px; font-weight: 600; }
+.kstats-info-copy span { color: var(--muted); font-size: 15px; line-height: 1.35; }

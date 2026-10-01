@@ -12261,3 +12261,22 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 }
 .broadcast-room-row.selected .broadcast-room-select { background: var(--kaspa); border-color: var(--kaspa); }
 .broadcast-room-select svg { width: 14px; height: 14px; fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Create Chat: Other domains (iOS a0dbc15) */
+.create-chat-other-domains { margin-top: 8px; }
+.create-chat-other-domains summary { cursor: pointer; color: var(--kaspa-ink); font-size: 13px; font-weight: 600; }
+.create-chat-other-domain {
+  display: flex; justify-content: space-between; gap: 10px; width: 100%;
+  margin-top: 6px; padding: 9px 12px; border: 0; border-radius: 10px;
+  background: var(--fill-tertiary); color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer;
+}
+.create-chat-other-domain span { color: var(--muted); font-size: 12.5px; }
+.create-chat-other-domain.muted { cursor: default; }
+.create-chat-other-domain.muted strong { color: var(--muted); font-weight: 500; }
+
+/* The .kachat wordmark is wider than tall: sized by height in the dock and the Hub grid. */
+.kachat-wordmark-icon svg, .hub-tile-icon .kmkt-wordmark, .dock-preview-icon .kmkt-wordmark { width: auto !important; max-width: 44px; height: 18px !important; fill: currentColor; stroke: none; }
+
+/* The KNS create/edit buttons on the Profile hero are retired (iOS 09e0403): the hero edits your
+   .kachat profile; a .kas profile is edited from its domain in Your Domains. */
+.profile-hero-kns.retired { display: none !important; }

@@ -30,7 +30,8 @@ import {
   fetchNetworkStats, peekNetworkStats, formatHashrate, estimateDailyKas,
 } from "../engine/network-stats.js";
 import { validateMainnetAddress } from "../engine/utils.js";
-import { looksLikeDomain, resolveDomain } from "../engine/kns.js";
+import { resolveDomain } from "../engine/kns.js";
+import { looksLikeName, resolveEverywhere, primary as primaryName } from "../engine/name-services.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { saveFile } from "./save-file.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
@@ -1776,7 +1777,7 @@ function syncImportModal() {
   if (!cardHost) { cardHost = document.createElement("div"); cardHost.dataset.portfolioImportCard = ""; status.insertAdjacentElement("afterend", cardHost); }
   const showCard = (address, domain) => { cardHost.innerHTML = address ? (deps.addressCardHtml?.(address, { domain, onLoaded: () => syncImportModal() }) || "") : ""; };
   showCard(null);
-  if (addressImport?.resolving) { status.textContent = "Resolving domain…"; return; }
+  if (addressImport?.resolving) { status.textContent = "Looking up domain…"; return; }
   if (!input) { status.textContent = ""; return; }
   if (addressImport.resolvedAddress) {
     status.textContent = `Resolves to ${shortenAddress(addressImport.resolvedAddress)}`;
@@ -1784,7 +1785,7 @@ function syncImportModal() {
     showCard(addressImport.resolvedAddress, addressImport.resolvedDomain);
     return;
   }
-  if (addressImport.notFound) { status.textContent = "Domain not found"; return; }
+  if (addressImport.notFound) { status.textContent = "No domain found"; return; }
   if (looksLikeRawAddress(input)) {
     const valid = isValidRawAddress(input);
     status.textContent = valid ? "Valid address" : "Invalid address format";
@@ -1808,7 +1809,7 @@ function handleImportInputChange(raw) {
   addressImport.resolving = false;
   const seq = (knsResolveSeq += 1);
 
-  if (trimmed && !looksLikeRawAddress(trimmed) && looksLikeDomain(trimmed)) {
+  if (trimmed && !looksLikeRawAddress(trimmed) && looksLikeName(trimmed)) {
     addressImport.resolving = true;
     resolveImportDomain(trimmed, seq);
   }
@@ -1867,9 +1868,17 @@ async function resolveImportDomain(domain, seq) {
   await sleep(300);
   if (seq !== knsResolveSeq || addressImport?.input !== domain) return;
 
+  // Every name service in priority order (iOS 79b6ac8): the typed ending's, else .kachat, .kas,
+  // .k, .kaspa - the same resolution as sends and new chats.
   let resolution = null;
   try {
-    resolution = await resolveDomain(domain, { baseUrl: getEndpoint("knsApi") });
+    const results = (await resolveEverywhere(domain, {
+      resolveKas: async (name) => {
+        try { return (await resolveDomain(name, { baseUrl: getEndpoint("knsApi") }))?.ownerAddress || null; } catch { return null; }
+      },
+    })).filter((entry) => entry.state !== "notLive");
+    const winner = primaryName(results, domain);
+    resolution = winner?.address ? { ownerAddress: winner.address, domain: winner.name } : null;
   } catch { resolution = null; }
 
   // Input may have moved on while the lookup was in flight — a stale answer must not overwrite

@@ -30,6 +30,7 @@ import {
   fetchProfileByAssetId as knsFetchProfileByAssetId,
   dropProfileCache as knsDropProfileCache,
 } from "./kns.js";
+import { looksLikeName as nsLooksLikeName, resolveEverywhere as nsResolveEverywhere, primary as nsPrimary, listOwnedNames as nsListOwnedNames } from "./name-services.js";
 import {
   inscribeDomain as knsInscribeDomain,
   transferDomain as knsTransferDomain,
@@ -1309,6 +1310,43 @@ export class KaspaEngine {
 
   async resolveKnsDomain(domain, options = {}) {
     return knsResolveDomain(domain, { baseUrl: getEndpoint("knsApi"), ...options });
+  }
+
+  // --- Every name service (iOS NameServicesClient, 5.2): .kachat first once live, then .kas, .k,
+  // .kaspa. A name typed with its ending asks that service; a bare name takes the first that answers.
+
+  /** Whether the input reads as a name on any service rather than an address. */
+  looksLikeName(input) {
+    const raw = String(input || "").trim();
+    if (!raw || /^kaspa(test)?:/i.test(raw)) return false;
+    return nsLooksLikeName(raw);
+  }
+
+  /** Every service's answer for a typed name, in resolution order. Services not live yet are left
+   *  out, as iOS leaves them out. */
+  async resolveNameEverywhere(input) {
+    const results = await nsResolveEverywhere(String(input || "").trim(), {
+      resolveKas: async (name) => {
+        try { return (await this.resolveKnsDomain(name))?.ownerAddress || null; } catch { return null; }
+      },
+    });
+    return results.filter((entry) => entry.state !== "notLive");
+  }
+
+  /** The address a typed name points to, in the shape resolveKnsDomain returned:
+   *  { ownerAddress, domain, tld, results } (results = every service's answer), or null. */
+  async resolveName(input) {
+    const results = await this.resolveNameEverywhere(input);
+    const winner = nsPrimary(results, String(input || "").trim());
+    if (!winner?.address) return null;
+    return { ownerAddress: winner.address, domain: winner.name, tld: winner.tld, results };
+  }
+
+  /** Names this address owns on .k and .kaspa (read-only), for Your Domains. */
+  async listOtherServiceNames(address) {
+    let xOnlyPubKeyHex = null;
+    try { xOnlyPubKeyHex = await this.xOnlyPubKeyForAddress?.(address); } catch { xOnlyPubKeyHex = null; }
+    return nsListOwnedNames({ address, xOnlyPubKeyHex });
   }
 
   async fetchKnsAddressInfo(address, options = {}) {

@@ -551,6 +551,9 @@
 
         <!-- Kaspa Hub > Chess: tournaments in the #chess-arena room (CHESS_TOURNAMENTS.md). -->
         <div class="profile-screen chess-t-screen" data-app-tab-screen="chess" data-chess-tournaments hidden></div>
+        <!-- Kaspa Hub, 5.2: the .kachat name marketplace (UI only until names launch) and KaChat Stats. -->
+        <div class="profile-screen" data-app-tab-screen="kachat-names" data-kachat-market hidden></div>
+        <div class="profile-screen" data-app-tab-screen="kachat-stats" data-kachat-stats hidden></div>
         <div class="profile-screen apps-tab-screen" data-app-tab-screen="apps" hidden>
           <div class="kaposts-header">
             <h1 class="kaposts-title">Kaspa Websites</h1>
@@ -752,8 +755,11 @@
             <div class="profile-hero-banner" data-profile-hero-banner></div>
             <div class="profile-hero-top">
               <span class="kaposts-avatar profile-hero-avatar" data-profile-hero-avatar aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg></span>
-              <button class="profile-hero-kns" type="button" data-open-kns-register data-profile-kns-empty-cta>Create KNS Profile</button>
-              <button class="profile-hero-kns" type="button" data-open-kns-editor data-profile-kns-owned hidden>Edit KNS Profile</button>
+              <!-- 5.2: the Profile hero edits your .kachat profile (iOS 09e0403); .kas profiles are edited per
+                   domain from Your Domains. The two KNS buttons stay for those flows but never show here. -->
+              <button class="profile-hero-kns" type="button" data-open-kachat-profile>Edit .kachat Profile</button>
+              <button class="profile-hero-kns retired" type="button" data-open-kns-register data-profile-kns-empty-cta hidden>Create KNS Profile</button>
+              <button class="profile-hero-kns retired" type="button" data-open-kns-editor data-profile-kns-owned hidden>Edit KNS Profile</button>
             </div>
             <div class="profile-hero-meta">
               <strong data-profile-hero-name>Account</strong>
@@ -872,6 +878,14 @@
       <button class="sidebar-tab" type="button" data-app-tab="apps" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg></span>
         <span>Websites</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="kachat-names" hidden>
+        <span class="sidebar-tab-icon kachat-wordmark-icon" aria-hidden="true" data-kachat-wordmark></span>
+        <span>.kachat</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="kachat-stats" hidden>
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 20.5h18"/><path d="M6 17V11M10 17V6M14 17v-8M18 17v-4"/></svg></span>
+        <span>Stats</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
         <!-- A rook and a knight (iOS ChessTabIcon: SF Symbols has no chess pieces). -->
@@ -1540,7 +1554,7 @@
       <section class="create-chat-section">
         <p class="create-chat-section-title">ADDRESS</p>
         <div class="create-chat-address-card">
-          <label class="create-chat-address-label" for="create-chat-address">Kaspa Address or KNS Domain</label>
+          <label class="create-chat-address-label" for="create-chat-address">Kaspa Address or Domain</label>
           <input id="create-chat-address" class="create-chat-address-input" name="address" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" required />
           <div class="create-chat-tools" aria-label="Address actions">
             <button type="button" class="create-chat-tool" data-contact-import>
@@ -1564,7 +1578,7 @@
         </div>
         <p class="create-chat-error" data-create-chat-error hidden></p>
         <p class="create-chat-help">Enter a Kaspa address (kaspa:...) or KNS domain name (e.g., alice.kas)</p>
-        <p class="create-chat-status" data-create-chat-status hidden></p>
+        <div class="create-chat-status" data-create-chat-status hidden></div>
         <div class="create-chat-preview" data-create-chat-preview hidden></div>
       </section>
 
@@ -2275,7 +2289,7 @@
           </button>
           <button class="help-guide-row" type="button" data-help-kns>
             <span class="help-guide-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.2"/><circle cx="8.6" cy="11" r="2"/><path d="M5.8 16c.6-1.5 1.6-2.2 2.8-2.2s2.2.7 2.8 2.2"/><path d="M14 9.6h4.4M14 12.6h4.4"/></svg></span>
-            <span class="help-guide-copy"><strong>KNS Profile Setup Guide</strong><small>Set up your KNS domain, avatar, banner and bio step by step.</small></span>
+            <span class="help-guide-copy"><strong>.kachat Profile Setup Guide</strong><small>Claim your .kachat name and set up your avatar, banner and bio step by step.</small></span>
             <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
           </button>
         </div>
