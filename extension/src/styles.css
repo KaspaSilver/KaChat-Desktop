@@ -794,3 +794,12 @@ html:has(#app[data-screen="qr"]), body:has(#app[data-screen="qr"]) { background:
 .scanner-dots span { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.4); }
 .scanner-dots span.on { background: var(--kaspa); }
 .scanner-denied { display: flex; flex-direction: column; gap: 12px; align-items: center; text-align: center; padding: 24px; }
+
+/* Fixed-height screens: #app grows to fill the shell (flex: 1), which would let tall content
+   override the height and push the dock away - these keep their height and scroll inside. */
+#app[data-screen^="kachat-"], #app[data-screen="manage-chat"], #app[data-screen="manage-spending"], #app[data-screen="manage-list"],
+#app[data-screen="visibility"], #app[data-screen="coins"], #app[data-screen="consolidate"] { flex: none; }
+/* The generic disabled-button grey must not repaint these. */
+.link-button:disabled { background: transparent !important; color: var(--muted) !important; }
+.ios-capsule:disabled { opacity: .5 !important; }
+.sheet-row:disabled { background: #2c2c2e !important; color: var(--text) !important; opacity: .45 !important; }

@@ -36,6 +36,8 @@ the same addresses as KaChat on iPhone, Android and desktop.
 - Your domains on every Kaspa name service (.kas, .k, .kaspa), with .kachat names on the way:
   set your primary .kas name and send a .kas domain to someone else
 - Send to a name on any service - and pick another service's answer under "Other domains"
+- Cold Storage: watch a KasSigner account by its kpub and send from it by signing on the device - the transaction goes out and the signature comes back as animated QR codes
+- Portfolio: up to five portfolios of buys and sells, price and value charts, profit and loss, network hashrate, CSV import/export, and import from any Kaspa address
 - Several accounts in one wallet
 - Connect to Kaspa websites: they ask, you approve every connection, payment and signature
 - Your recovery phrase is encrypted with your password and never leaves your computer
@@ -62,7 +64,8 @@ the user's approval.
   name lookups, setting the primary domain.
 - Host permissions `api.dotk.name`, `kaspaname.com` - the .k (dotk) and .kaspa (Kaspa Names)
   name services, read-only: the names an address owns and name lookups.
-- Host permission `api.coingecko.com` - the Kaspa price in the user's currency.
+- Host permission `api.coingecko.com` - the Kaspa price in the user's currency and the Portfolio's price history.
+- Host permissions `api.gateio.ws`, `query1.finance.yahoo.com` - Portfolio: long-range KAS price history (fallback) and the comparison charts (VOO, gold, silver).
 - Content scripts on `https://*/*` (and localhost) - provide `window.kachat`, the interface Kaspa
   websites use to ask the wallet for a connection, payment or signature. The scripts only relay
   those requests; they do not read or change page content. Every request needs the user's

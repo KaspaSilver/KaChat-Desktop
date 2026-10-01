@@ -11,9 +11,10 @@
 //   SpendingAddressVisibilityView, ConsolidateToPrimaryConfirmView, the private / public key
 //   sheets, Rename UTXO, the Transaction sheet.
 //
-// Left out because the extension has no counterpart: Add to Portfolio (no portfolio), "Notify on
-// receive" (no notifications) and the Chat Privacy tab (chats only).
+// Left out because the extension has no counterpart: "Notify on receive" (no notifications) and
+// the Chat Privacy tab (chats only).
 
+import { remember } from "./dock.js";
 import * as wallet from "./wallet.js";
 import * as vault from "./vault.js";
 import {
@@ -22,12 +23,14 @@ import {
 } from "./ui.js";
 import { showSend } from "./send.js";
 import { showSendDomain } from "./domains.js";
+import { showAddToPortfolio } from "./portfolio.js";
 
 // SF Symbols these screens use, drawn to match.
 const SF = {
   arrowUpFill: '<svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 17V7.5M7.8 11.5L12 7.3l4.2 4.2" fill="none" stroke="var(--bg)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   // arrow.up.circle.fill on an accent capsule: a black disc with the arrow cut out in the accent.
   sendFill: '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 17V7.5M7.8 11.5L12 7.3l4.2 4.2" fill="none" stroke="var(--kaspa)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  chartPieFill: '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3.1A9 9 0 1 0 20.9 13H11z" fill="currentColor"/><path d="M13 2.6V11h8.4A8.6 8.6 0 0 0 13 2.6z" fill="currentColor"/></svg>',
   arrowDownFill: '<svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7v9.5M7.8 12.5l4.2 4.2 4.2-4.2" fill="none" stroke="var(--bg)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   upRightSquare: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M9.5 14.5l6-6M10 8.5h5.5V14"/></svg>',
   cube: '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l9 5v10l-9 5-9-5V7z" fill="currentColor"/><path d="M3 7l9 5 9-5M12 12v10" fill="none" stroke="var(--bg)" stroke-width="1.4"/></svg>',
@@ -120,8 +123,9 @@ function historyHtml(state) {
   }).join("");
 }
 
-// iOS TransactionActionsSheet (Add to Portfolio has no counterpart in the extension).
-function showTransactionSheet(tx) {
+// iOS TransactionActionsSheet: Open in Explorer, and Add to Portfolio when the transaction has
+// a direction (a buy or a sell of KAS for this address).
+function showTransactionSheet(tx, sourceAddress, onDone) {
   const summary = tx.direction ? `${tx.direction === "out" ? "Sent" : "Received"} ${portfolioKas(tx.amountSompi)}${tx.time ? ` on ${txDate(tx.time)}` : ""}` : "";
   showSheet({
     title: "Transaction",
@@ -132,7 +136,12 @@ function showTransactionSheet(tx) {
       subtitle: "Opens this transaction on the block explorer.",
       icon: SF.safari,
       onClick: () => window.open(wallet.explorerTxUrl(tx.txid), "_blank", "noopener"),
-    }],
+    }, ...(tx.direction ? [{
+      label: "Add to Portfolio",
+      subtitle: "Records it as a buy or a sell in a portfolio of your choosing.",
+      icon: SF.chartPieFill,
+      onClick: () => showAddToPortfolio({ txid: tx.txid, direction: tx.direction, amountSompi: tx.amountSompi, time: tx.time, sourceAddress, onDone }),
+    }] : [])],
   });
 }
 
@@ -169,7 +178,7 @@ function utxosHtml(state, compoundFooter) {
 }
 
 function bindTabsContent(state, { address, repaint, reloadHistory, reloadCoins, onCompound }) {
-  for (const row of app.querySelectorAll("[data-tx]")) row.onclick = () => showTransactionSheet(state.history.txs[Number(row.dataset.tx)]);
+  for (const row of app.querySelectorAll("[data-tx]")) row.onclick = () => showTransactionSheet(state.history.txs[Number(row.dataset.tx)], address, repaint);
   const historyRetry = $("#history-retry");
   if (historyRetry) historyRetry.onclick = reloadHistory;
   const coinsRetry = $("#coins-retry");
@@ -329,6 +338,7 @@ export function showManageAddress(opts) {
         <button class="ios-capsule with-icon" id="receive">${SF.qrcode}<span>Receive</span></button>
         <button class="ios-capsule with-icon" id="send" ${total === 0n ? "disabled" : ""}>${SF.sendFill}<span>Send</span></button>
       </div>`, "manage-chat");
+    remember(() => paint());
     const scroller = app.querySelector(".manage-scroll");
     if (scroller) scroller.scrollTop = scroll;
     $("#back").onclick = opts.onBack;
@@ -575,6 +585,7 @@ export function showManageAddresses({ onBack }) {
               : `<button class="icon plain card-menu" data-menu="${row.index}" aria-label="More" ${state.busy?.primary != null ? "disabled" : ""}>${SF.ellipsisV}</button>`}
           </div>`).join("")}
       </div>`, "manage-list");
+    remember(() => paint());
     const scroller = app.querySelector(".manage-scroll");
     if (scroller) scroller.scrollTop = scroll;
     $("#back").onclick = onBack;
@@ -663,6 +674,7 @@ function showSpendingAddress({ row, onBack }) {
         <button class="ios-capsule with-icon" id="receive">${SF.qrcode}<span>Receive</span></button>
         <button class="ios-capsule with-icon" id="send" ${row.balanceSompi === 0n ? "disabled" : ""}>${SF.sendFill}<span>Send</span></button>
       </div>`, "manage-spending");
+    remember(() => paint());
     const scroller = app.querySelector(".manage-scroll");
     if (scroller) scroller.scrollTop = scroll;
     $("#back").onclick = onBack;

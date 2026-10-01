@@ -11,6 +11,7 @@
 //
 // Left out on purpose: inscribing and profile editing. Profiles are moving to .kachat names.
 
+import { remember } from "./dock.js";
 import * as wallet from "./wallet.js";
 import { app, esc, render, $, toast, ICONS, navHeader } from "./ui.js";
 import * as names from "./names.js";
@@ -92,6 +93,7 @@ export function showDomains({ address, onBack }) {
       </div>
       <section class="screen domains" id="domains-body">${body}</section>
       ${selectedTab === "kachat" ? "" : `<div class="get-domain-bar">${getNameButton(selectedTab)}</div>`}`, "domains");
+    remember(() => paint());
     $("#back").onclick = onBack;
     for (const tab of app.querySelectorAll("[data-tab]")) tab.onclick = () => switchTo(tab.dataset.tab);
     const list = state.data?.domains || [];

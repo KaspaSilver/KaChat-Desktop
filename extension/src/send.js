@@ -420,7 +420,7 @@ function friendlySendError(error) {
 
 // --- Coin Control: iOS CoinControlView --------------------------------------------------------
 
-function showCoinControl({ coins, selected, labels = {}, onCancel, onDone }) {
+export function showCoinControl({ coins, selected, labels = {}, onCancel, onDone }) {
   const picked = new Set(selected || []);
   let menuOpen = false;
   const paint = () => {
