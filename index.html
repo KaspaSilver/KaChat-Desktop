@@ -1636,6 +1636,19 @@
         <div class="create-chat-preview" data-create-chat-preview hidden></div>
       </section>
 
+      <!-- Private: no first-contact signal at all (iOS 5.2, NO_HANDSHAKE_MESSAGING.md §3.1). Right
+           under Address, above Contacts, as in iOS AddContactView. -->
+      <section class="create-chat-section create-chat-private-section">
+        <div class="create-chat-private-card">
+          <span class="create-chat-private-label">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
+            Private Chat
+          </span>
+          <label class="switch-control"><input type="checkbox" name="privateChat" data-create-chat-private /><span></span></label>
+        </div>
+        <p class="create-chat-help" data-create-chat-private-footer>They'll get your first message as a Message Request. Turn on Private Chat if you'd rather leave no link between you on chain.</p>
+      </section>
+
       <section class="create-chat-section create-chat-picker" data-create-chat-picker-section hidden>
         <div class="create-chat-picker-head">
           <p class="create-chat-section-title">CONTACTS</p>
@@ -1655,17 +1668,6 @@
         <input id="create-chat-name" class="create-chat-name-input" name="name" type="text" placeholder="Contact name" autocomplete="off" />
       </section>
 
-      <!-- Private: no first-contact signal at all (iOS 5.2, NO_HANDSHAKE_MESSAGING.md §3.1). -->
-      <section class="create-chat-section create-chat-private-section">
-        <div class="create-chat-private-card">
-          <span class="create-chat-private-label">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
-            Private Chat
-          </span>
-          <label class="switch-control"><input type="checkbox" name="privateChat" data-create-chat-private /><span></span></label>
-        </div>
-        <p class="create-chat-help" data-create-chat-private-footer>They'll get your first message as a Message Request. Turn on Private Chat if you'd rather leave no link between you on chain.</p>
-      </section>
       <input type="file" data-contact-import-file accept=".vcf,text/vcard,text/x-vcard" hidden />
     </form>
   </div>
