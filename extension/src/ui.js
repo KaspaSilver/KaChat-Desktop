@@ -40,10 +40,24 @@ export function toast(message) {
   toastTimer = setTimeout(() => { toastEl.hidden = true; }, 1800);
 }
 
+/**
+ * iOS addressCopiedToastText: the prefix, the first 4, 4 from the exact middle and the last 4 of
+ * the payload ("kaspa:qqd6...e65y...lqeh"); a payload under 24 characters shows whole.
+ */
+export function copiedAddressText(address) {
+  const text = String(address || "");
+  const colon = text.indexOf(":");
+  const prefix = colon >= 0 ? text.slice(0, colon + 1) : "";
+  const payload = colon >= 0 ? text.slice(colon + 1) : text;
+  if (payload.length < 24) return text;
+  const mid = Math.floor(payload.length / 2) - 2;
+  return `${prefix}${payload.slice(0, 4)}...${payload.slice(mid, mid + 4)}...${payload.slice(-4)}`;
+}
+
 export async function copyText(text, what = "Address") {
   try {
     await navigator.clipboard.writeText(text);
-    toast(`${what} copied`);
+    toast(what === "Address" ? `Address ${copiedAddressText(text)} copied` : `${what} copied`);
   } catch {
     toast("Couldn't copy - select and copy it instead");
   }
@@ -81,36 +95,91 @@ export async function copySecret(text, message) {
  * subtitle, rows with a subtitle each, and Cancel. Tapping outside or Escape cancels.
  *   rows: [{ label, subtitle, icon, danger, onClick }]
  */
-export function showSheet({ title, subtitle = "", rows = [], cancelSubtitle = "Leave everything as it is." }) {
+export function showSheet({ title, subtitle = "", headerHtml = "", rows = [], cancel = true, cancelSubtitle = "Leave everything as it is.", footerHtml = "" }) {
   document.querySelector(".sheet-backdrop")?.remove();
   const backdrop = document.createElement("div");
   backdrop.className = "sheet-backdrop";
-  backdrop.innerHTML = `
+  let currentRows = rows;
+  const rowHtml = (row, i) => `
+    <button class="sheet-row ${row.danger ? "danger" : ""} ${row.tint ? `tint-${row.tint}` : ""}" data-row="${i}" ${row.disabled ? "disabled" : ""}>
+      ${row.icon ? `<span class="sheet-icon">${row.icon}</span>` : ""}
+      <span class="sheet-text"><span class="sheet-label">${esc(row.label)}</span>${row.subtitle ? `<span class="muted small">${esc(row.subtitle)}</span>` : ""}</span>
+      ${row.busy ? '<span class="spinner small-spin"></span>' : ""}
+    </button>`;
+  const body = () => `
     <div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
       <div class="sheet-grabber"></div>
-      <div class="sheet-head"><div class="sheet-title">${esc(title)}</div>${subtitle ? `<div class="muted small">${esc(subtitle)}</div>` : ""}</div>
-      ${rows.map((row, i) => `
-        <button class="sheet-row ${row.danger ? "danger" : ""}" data-row="${i}">
-          ${row.icon ? `<span class="sheet-icon">${row.icon}</span>` : ""}
-          <span class="sheet-text"><span class="sheet-label">${esc(row.label)}</span>${row.subtitle ? `<span class="muted small">${esc(row.subtitle)}</span>` : ""}</span>
-        </button>`).join("")}
-      <button class="sheet-row" data-row="cancel">
+      <div class="sheet-head"><div class="sheet-title">${esc(title)}</div>${subtitle ? `<div class="muted small">${esc(subtitle)}</div>` : ""}${headerHtml}</div>
+      ${currentRows.map(rowHtml).join("")}
+      ${cancel ? `<button class="sheet-row" data-row="cancel">
         <span class="sheet-icon">${ICONS.xCircle}</span>
         <span class="sheet-text"><span class="sheet-label">Cancel</span><span class="muted small">${esc(cancelSubtitle)}</span></span>
-      </button>
+      </button>` : ""}
+      ${footerHtml}
     </div>`;
+  backdrop.innerHTML = body();
   const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
   const onKey = (event) => { if (event.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop) return close();
     const button = event.target.closest("[data-row]");
-    if (!button) return;
-    close();
-    if (button.dataset.row !== "cancel") rows[Number(button.dataset.row)]?.onClick?.();
+    if (!button || button.disabled) return;
+    const row = currentRows[Number(button.dataset.row)];
+    // A row that keeps the sheet open (Discover) says so; everything else closes it first.
+    if (!row?.keepOpen) close();
+    if (button.dataset.row !== "cancel") row?.onClick?.();
   });
   document.body.appendChild(backdrop);
   backdrop.querySelector(".sheet-row")?.focus();
+  return {
+    close,
+    isOpen: () => backdrop.isConnected,
+    /** Redraws in place: new rows, header or footer (a discovery's progress). */
+    update(next) {
+      if (!backdrop.isConnected) return;
+      if (next.rows) currentRows = next.rows;
+      if (next.headerHtml != null) headerHtml = next.headerHtml;
+      if (next.footerHtml != null) footerHtml = next.footerHtml;
+      backdrop.innerHTML = body();
+    },
+    element: backdrop,
+  };
+}
+
+/**
+ * An iOS alert: a title, a message, an optional text field and two buttons. onConfirm gets the
+ * field's value; Cancel and the backdrop dismiss.
+ */
+export function showAlert({ title, message = "", field = null, confirmLabel = "OK", cancelLabel = null, onConfirm = () => {} }) {
+  document.querySelector(".alert-backdrop")?.remove();
+  const backdrop = document.createElement("div");
+  backdrop.className = "alert-backdrop";
+  backdrop.innerHTML = `
+    <form class="alert" role="alertdialog" aria-modal="true" aria-label="${esc(title)}">
+      <div class="alert-body">
+        <div class="alert-title">${esc(title)}</div>
+        ${message ? `<div class="alert-message">${esc(message)}</div>` : ""}
+        ${field ? `<input class="alert-field" value="${esc(field.value || "")}" placeholder="${esc(field.placeholder || "")}" autocomplete="off" />` : ""}
+      </div>
+      <div class="alert-buttons ${cancelLabel ? "two" : ""}">
+        ${cancelLabel ? `<button type="button" class="alert-button" data-cancel>${esc(cancelLabel)}</button>` : ""}
+        <button type="submit" class="alert-button strong">${esc(confirmLabel)}</button>
+      </div>
+    </form>`;
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (event) => { if (event.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  backdrop.addEventListener("click", (event) => { if (event.target === backdrop || event.target.closest("[data-cancel]")) close(); });
+  backdrop.querySelector("form").onsubmit = (event) => {
+    event.preventDefault();
+    const value = backdrop.querySelector(".alert-field")?.value ?? null;
+    close();
+    onConfirm(value);
+  };
+  document.body.appendChild(backdrop);
+  const input = backdrop.querySelector(".alert-field");
+  if (input) { input.focus(); input.select(); } else backdrop.querySelector(".alert-button.strong").focus();
 }
 
 /** A password prompt as its own screen (the browser's stand-in for iOS Face ID prompts). */
@@ -216,6 +285,7 @@ export const ICONS = {
   chevronUpDown: '<svg width="12" height="16" viewBox="0 0 12 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6.5L6 3l3.5 3.5M2.5 11.5L6 15l3.5-3.5"/></svg>',
   // SF Symbol person.fill - the avatar for anyone without a photo (iOS KNSAvatarView fallback).
   person: '<svg width="32" height="32" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7.5" r="4.5" fill="currentColor"/><path d="M3.5 21c0-4.6 3.8-7.5 8.5-7.5s8.5 2.9 8.5 7.5z" fill="currentColor"/></svg>',
+  upRightSquare: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M9.5 14.5l6-6M10 8.5h5.5V14"/></svg>',
   download: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>',
 };
 
@@ -227,24 +297,44 @@ export function navHeader({ back = true, backLabel = "Back", title = "" } = {}) 
     </header>`;
 }
 
-// The address QR screen - iOS ChattingAddressQRView: balance, the code, the full address, a
-// line on what the address is for, and copy.
-export async function showQr({ title, address, balanceSompi = null, note = "", onBack }) {
+// The address QR screen - iOS ChattingAddressQRView / SpendingAddressQRView: a white page, the
+// code in an accent frame, the full address, an optional line on what the address is for, and
+// "Tap anywhere to copy". With a title (Show QR Code: "Address #n") the bar shows it; without
+// one it shows the balance, as the iOS bar's principal item does.
+export async function showQr({ title = "", address, balanceSompi = null, note = "", onBack, backLabel = "Back" }) {
+  const barTitle = title || (balanceSompi != null ? `${formatKas8(balanceSompi)} KAS` : "—");
   render(`
-    ${navHeader({ title })}
-    <section class="screen">
-      <div class="qr">
-        ${balanceSompi != null ? `<div class="qr-balance">${esc(formatKas(balanceSompi, 8))} KAS</div>` : ""}
-        <canvas id="qr" width="512" height="512" aria-label="QR code for ${esc(address)}"></canvas>
-        <div class="addr-full">${esc(address)}</div>
-        ${note ? `<p class="muted small center-text">${esc(note)}</p>` : ""}
-      </div>
-      <button id="copy" class="with-icon">${ICONS.copy}<span>Copy Address</span></button>
+    <header class="navbar qr-bar">
+      <button class="nav-back" id="back" aria-label="${esc(backLabel)}">${ICONS.back}<span>${esc(backLabel)}</span></button>
+      <div class="nav-title ${title ? "" : "mono-digits"}">${esc(barTitle)}</div>
+    </header>
+    <section class="qr-page" id="qr-page" title="Tap anywhere to copy">
+      <div class="qr-frame"><canvas id="qr" width="512" height="512" aria-label="QR code for ${esc(address)}"></canvas></div>
+      <div class="qr-address">${esc(address)}</div>
+      ${note ? `<p class="qr-note">${esc(note)}</p>` : ""}
+      <p class="qr-hint">Tap anywhere to copy</p>
     </section>`, "qr");
   $("#back").onclick = onBack;
-  $("#copy").onclick = () => copyText(address);
+  $("#qr-page").onclick = () => copyText(address);
   try {
     await drawKaspaQr($("#qr"), address, { dark: "#000000", light: "#ffffff" });
   } catch { /* the address text is still there to copy */ }
 }
 
+/** iOS ReceiveKaspaQRView while the fresh address is worked out, or when it can't be. */
+export function showQrPending({ failed = false, onBack }) {
+  render(`
+    ${navHeader({})}
+    <section class="qr-page">
+      ${failed ? '<p class="qr-note">Spending address is unlocking — go back and try again.</p>' : '<span class="spinner dark-spinner"></span><p class="qr-note">Preparing a fresh address</p>'}
+    </section>`, "qr");
+  $("#back").onclick = onBack;
+}
+
+/** "%.8f" - always eight decimals, no grouping, as every iOS balance line prints. */
+export function formatKas8(sompi) {
+  const value = BigInt(sompi ?? 0);
+  const negative = value < 0n;
+  const abs = negative ? -value : value;
+  return `${negative ? "-" : ""}${abs / 100_000_000n}.${String(abs % 100_000_000n).padStart(8, "0")}`;
+}

@@ -238,7 +238,8 @@ const STAGES = {
   verifying: ["Confirming the new owner", 0.95],
 };
 
-function showSendDomain({ domain, onBack, onSent }) {
+/** Send Domain. `source` is the owner: the chatting address, or { kind: "spending", index }. */
+export function showSendDomain({ domain, onBack, onSent, source = { kind: "main" } }) {
   const state = {
     recipientInput: "", recipient: null, recipientError: "", resolving: false, resolutions: [], othersOpen: false,
     tier: "normal", customFeeSompi: null, editingFee: false,
@@ -396,6 +397,7 @@ function showSendDomain({ domain, onBack, onSent }) {
         assetId: domain.inscriptionId,
         toAddress: state.recipient.address,
         priorityFeeSompi: feeSompi(),
+        source,
         onStatus: ({ status }) => { if (STAGES[status]) { state.stage = status; paintProgress(); } },
       });
       const who = state.recipient.domain || wallet.shortAddress(result.recipientAddress);

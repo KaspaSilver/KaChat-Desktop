@@ -6,7 +6,7 @@ import { ext, isExtension, tellBackground } from "./browser.js";
 import * as vault from "./vault.js";
 import * as wallet from "./wallet.js";
 import {
-  app, isTab, esc, render, $, toast, copyText, settings, noteActivity, ICONS, showQr, showSheet,
+  app, isTab, esc, render, $, toast, copyText, settings, noteActivity, ICONS, showQr, showQrPending, showSheet,
 } from "./ui.js";
 import { showSend } from "./send.js";
 import { showManageAddress, showManageAddresses } from "./manage.js";
@@ -224,35 +224,49 @@ function paintHome() {
     $("#edit-name").onclick = () => { s.editingName = true; paintHome(); };
   }
 
-  // Receive hands out a never-used address (iOS freshReceiveAddress), resolved on the tap.
+  // Receive hands out a never-used address (iOS ReceiveKaspaQRView over freshReceiveAddress):
+  // "Preparing a fresh address" while it is worked out, then the white QR page with the
+  // address's balance in the bar.
   if (primary) $("#receive").onclick = async () => {
-    const button = $("#receive");
-    button.disabled = true;
-    let address = primary;
-    try { address = (await wallet.freshReceiveAddress()) || primary; } catch { /* fall back to the primary */ }
+    showQrPending({ onBack: showHome });
+    let address;
+    try { address = await wallet.freshReceiveAddress(); } catch { address = null; }
+    if (app.dataset.screen !== "qr") return;
+    if (!address) return showQrPending({ failed: true, onBack: showHome });
     let balanceSompi = null;
-    try { balanceSompi = (await wallet.balancesFor([address]))[address] ?? null; } catch { /* unknown - shown blank */ }
+    try { balanceSompi = (await wallet.balancesFor([address]))[address] ?? null; } catch { /* unknown - nothing shown */ }
+    if (app.dataset.screen !== "qr") return;
     showQr({
-      title: "Receive Kaspa",
       address,
       balanceSompi,
       note: "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or KNS profile creation.",
       onBack: showHome,
     });
   };
-  if (main) $("#chatting-qr").onclick = () => showQr({ title: "Chatting Address", address: main, balanceSompi: mainSompi, onBack: paintHome });
+  if (main) $("#chatting-qr").onclick = () => showQr({
+    address: main,
+    balanceSompi: mainSompi,
+    note: "This address is for chatting and KNS profile creation. Funding it with around 50 Kaspa is enough to create a KNS profile and send messages for a long time.",
+    onBack: paintHome,
+  });
   for (const [kind, address] of [["chatting", main], ["spending", primary]]) {
     const copy = $(`#copy-${kind}`);
     if (copy && address) copy.onclick = () => copyText(address);
   }
   const mainSource = { kind: "main" };
   const spendingSource = { kind: "spending", index: s.spending.activeIndex };
-  $("#send-chatting").onclick = () => { if (main) showSend({ source: mainSource, fromAddress: main, title: "From your chatting address", onClose: showHome }); };
-  $("#send-spending").onclick = () => { if (primary) showSend({ source: spendingSource, fromAddress: primary, title: "From your primary spending address", onClose: showHome }); };
+  // The Profile Send buttons: WithdrawKaspaView ("Send Kaspa") for the chatting address,
+  // SpendingAddressWithdrawView ("Send Kaspa from Address #n") for the primary spending one.
+  $("#send-chatting").onclick = () => {
+    if (main) showSend({ source: mainSource, fromAddress: main, navTitle: "Send Kaspa", feeFooter: "If the network is busy, Fast or Priority pays a higher fee to help your withdrawal confirm sooner. Tap the fee amount to set a custom fee.", onClose: showHome });
+  };
+  $("#send-spending").onclick = () => {
+    if (primary) showSend({ source: spendingSource, fromAddress: primary, navTitle: `Send Kaspa from Address #${s.spending.activeIndex}`, feeFooter: "If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. Tap the fee amount to set a custom fee.", onClose: showHome });
+  };
   $("#manage-chatting").onclick = () => {
     if (!main) return;
     showManageAddress({
-      source: mainSource, address: main, title: "Chatting Address", onBack: showHome,
+      address: main, onBack: showHome,
       onChangeIdentity: s.account.imported ? () => { homeState = null; showHome(); } : null,
     });
   };

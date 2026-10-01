@@ -669,3 +669,100 @@ body.tab #app[data-screen^="kachat-"] { height: calc(100vh - 48px); }
 /* iOS sheets in dark mode sit on the elevated background, their cards one step lighter. */
 .panel { background: #1c1c1e; }
 .panel .form-card, .panel .km-card { background: #2c2c2e; }
+
+/* --- Manage screens: 1:1 with iOS ChattingAddressManageView / ManageAddressesView ----------- */
+#app[data-screen="manage-chat"], #app[data-screen="manage-spending"], #app[data-screen="manage-list"],
+#app[data-screen="visibility"], #app[data-screen="coins"], #app[data-screen="consolidate"] { height: 600px; min-height: 0; }
+body.tab #app[data-screen="manage-chat"], body.tab #app[data-screen="manage-spending"], body.tab #app[data-screen="manage-list"],
+body.tab #app[data-screen="visibility"], body.tab #app[data-screen="coins"], body.tab #app[data-screen="consolidate"] { height: calc(100vh - 48px); }
+.manage-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 6px 16px 18px; }
+.manage-scroll > * { flex-shrink: 0; }
+.manage-scroll.flush { padding: 0; gap: 0; }
+.ios-balance { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 4px; }
+.ios-balance-value { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.ios-balance-value.big { font-size: 24px; font-weight: 800; }
+.ios-capsule { width: 100%; border-radius: 999px; background: var(--kaspa); color: #000; font-weight: 700; font-size: 14px; padding: 14px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.ios-capsule:disabled { background: var(--kaspa) !important; color: #000 !important; opacity: .5; }
+.ios-capsule svg { width: 18px; height: 18px; }
+.ios-bottom-bar { flex: none; display: flex; gap: 12px; padding: 10px 16px 14px; background: var(--bg); }
+.segmented.three button { font-size: 12px; padding-left: 4px; padding-right: 4px; }
+.list-row.center-row { justify-content: center; }
+.list-row.stack-row { flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+.list-row.stack-row svg { width: 14px; height: 14px; vertical-align: -2px; }
+.ios-tx { gap: 10px; align-items: center; text-align: left; }
+.ios-tx .tx-meta { gap: 2px; }
+.ios-tx-icon { display: inline-flex; flex: none; color: var(--muted); }
+.ios-tx-icon.out, .ios-tx-title.out, .ios-tx-amount.out { color: #ff453a; }
+.ios-tx-icon.in, .ios-tx-title.in, .ios-tx-amount.in { color: #30d158; }
+.ios-tx-title { font-size: 12px; font-weight: 650; color: var(--muted); }
+.ios-tx-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex: none; }
+.ios-tx-amount { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ios-utxo { gap: 10px; align-items: center; }
+.ios-utxo .tx-meta { gap: 2px; }
+.accent-row { color: var(--kaspa); gap: 8px; justify-content: flex-start; }
+.accent-row span { color: var(--text); }
+.address-card { display: flex; align-items: center; gap: 12px; padding: 16px; cursor: pointer; }
+.address-card:focus-visible { outline: 2px solid var(--kaspa); }
+.address-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.address-card-main .accent svg { vertical-align: -1px; }
+.medium { font-weight: 550; }
+.address-status { display: flex; align-items: center; gap: 8px; }
+.used-badge { font-size: 12px; font-weight: 650; color: var(--muted); }
+.used-badge.used { color: #ff9f0a; }
+.used-badge.unused { color: #30d158; }
+.domain-tag { font-size: 10.5px; font-weight: 650; color: var(--kaspa); background: rgba(112,199,186,.15); padding: 2px 8px; border-radius: 999px; }
+.card-menu { color: var(--muted); }
+.bar-circles { display: flex; gap: 10px; }
+.bar-circle { width: 32px; height: 32px; border-radius: 50%; background: rgba(120,120,128,.24); color: var(--kaspa); display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.bar-circle svg { width: 16px; height: 16px; }
+.domain-button.dim { opacity: .5; display: flex; flex-direction: column; gap: 6px; }
+.plain-list { display: flex; flex-direction: column; }
+.vis-row { display: flex; align-items: center; gap: 12px; padding: 11px 16px; background: transparent; color: var(--text); font-weight: 400; text-align: left; border-radius: 0; border-bottom: .5px solid rgba(255,255,255,.1); }
+.vis-row.locked > span:first-child { opacity: .45; }
+.vis-row .tx-meta { gap: 2px; }
+.mono-digits { font-variant-numeric: tabular-nums; }
+.pager { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 8px 16px 12px; background: rgba(28,28,30,.92); border-top: .5px solid rgba(255,255,255,.1); }
+.pad { padding: 28px 16px; }
+.discovery { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 14px 6px 4px; }
+.discovery .sheet-row { justify-content: center; width: 100%; margin-top: 6px; }
+.sheet-summary { margin: 8px 4px 0; }
+.sheet-row:disabled { opacity: .45; cursor: default; }
+.sheet-row.tint-orange .sheet-icon { color: #ff9f0a; }
+.callout.safe { background: rgba(112,199,186,.1); }
+.callout.safe .callout-title { color: var(--kaspa); }
+.key-screen { gap: 16px; }
+.key-box.selectable { user-select: text; }
+.nav-menu { position: static; }
+.sent-tx { display: inline-flex; gap: 6px; align-items: center; color: var(--kaspa); }
+.dark-spinner { border-color: rgba(0,0,0,.2); border-top-color: #000; }
+/* iOS ChattingAddressQRView: a white page whatever the theme. */
+#app[data-screen="qr"] { background: #fff; color: #000; }
+.qr-bar { background: #fff; }
+.qr-bar .nav-title { color: #000; font-size: 13px; font-weight: 700; }
+.qr-bar .nav-back { color: var(--kaspa-ink, #3f9d90); }
+.qr-page { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 24px 28px; background: #fff; color: #000; cursor: copy; text-align: center; }
+.qr-frame { padding: 16px; background: #fff; border: 3px solid var(--kaspa); border-radius: 20px; line-height: 0; }
+.qr-frame canvas { width: 200px !important; height: 200px !important; image-rendering: pixelated; }
+.qr-address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #000; word-break: break-all; }
+.qr-note { font-size: 14px; color: rgba(0,0,0,.6); margin: 0; }
+.qr-hint { font-size: 12px; color: rgba(0,0,0,.4); margin: 0; }
+/* iOS alert */
+.alert-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 60; animation: fade .12s ease; }
+.alert { width: 270px; background: rgba(44,44,46,.97); border-radius: 14px; overflow: hidden; text-align: center; }
+.alert-body { padding: 18px 16px 14px; display: flex; flex-direction: column; gap: 6px; }
+.alert-title { font-weight: 700; font-size: 16px; }
+.alert-message { font-size: 13px; color: rgba(235,235,245,.85); }
+.alert-field { margin-top: 8px; background: #1c1c1e; border: .5px solid rgba(255,255,255,.15); border-radius: 7px; padding: 7px 8px; font-size: 13px; }
+.alert-buttons { display: grid; border-top: .5px solid rgba(255,255,255,.15); }
+.alert-buttons.two { grid-template-columns: 1fr 1fr; }
+.alert-button { background: transparent; color: #0a84ff; font-size: 16px; font-weight: 400; padding: 11px; border-radius: 0; }
+.alert-buttons.two .alert-button + .alert-button { border-left: .5px solid rgba(255,255,255,.15); }
+.alert-button.strong { font-weight: 650; }
+/* The generic list rule clips grey text at 60%; these rows lay out their own columns. */
+.ios-tx .muted, .ios-utxo .muted, .address-card .muted, .vis-row .muted { max-width: none; overflow: visible; white-space: nowrap; text-overflow: clip; }
+.ios-tx .tx-meta { min-width: 0; overflow: hidden; }
+.ios-tx .tx-meta .tiny { font-size: 10.5px; }
+.ios-tx-right .tiny { font-size: 10px; }
+.segmented.three button { white-space: nowrap; font-size: 11.5px; }
+html:has(#app[data-screen="qr"]), body:has(#app[data-screen="qr"]) { background: #fff; }
+.ios-tx .tx-meta .tiny:last-child:not(.mono) { white-space: normal; }

@@ -8,7 +8,7 @@
 // The same screen is Compound UTXOs: the recipient locked to the address itself, amount Max.
 
 import * as wallet from "./wallet.js";
-import { app, esc, render, $, toast, copyText, settings, ICONS } from "./ui.js";
+import { app, esc, render, $, toast, copyText, settings, ICONS, formatKas8 } from "./ui.js";
 import { otherDomainsHtml, bindOtherDomains, splitTypedName } from "./names.js";
 
 const FEE_TIERS = [
@@ -21,7 +21,9 @@ const FEE_TIERS = [
  * @param {object} opts
  * @param {{kind:"main"}|{kind:"spending",index:number}} opts.source
  * @param {string} opts.fromAddress
- * @param {string} [opts.title]      shown under the title, e.g. "Spending #3"
+ * @param {string} [opts.title]      a line under the bar (Donate says who it is for)
+ * @param {string} [opts.navTitle]   the bar title: iOS "Send Kaspa" / "Send Kaspa from Address #n"
+ * @param {string} [opts.feeFooter]  the Fee footer (iOS words it per screen)
  * @param {boolean} [opts.compound]
  * @param {string} [opts.recipient]  prefill (Donate)
  * @param {Function} opts.onClose    back / cancel / done
@@ -76,6 +78,7 @@ export function showSend(opts) {
 
   // --- loading ----------------------------------------------------------------------------
   const load = async () => {
+    wallet.utxoLabels(opts.fromAddress).then((labels) => { state.labels = labels; }).catch(() => {});
     try {
       state.coins = await wallet.utxos(opts.fromAddress);
     } catch (error) {
@@ -228,7 +231,7 @@ export function showSend(opts) {
     render(`
       <header class="navbar form-bar">
         <button class="bar-text" id="cancel">Cancel</button>
-        <div class="nav-title">${opts.compound ? "Compound UTXOs" : "Send Kaspa"}</div>
+        <div class="nav-title ellipsis">${esc(opts.compound ? "Compound UTXOs" : opts.navTitle || "Send Kaspa")}</div>
         ${state.sending ? '<span class="bar-text"><span class="spinner small-spin"></span></span>' : `<button class="bar-text strong" id="send" ${canSend() ? "" : "disabled"}>Send</button>`}
       </header>
       <section class="form">
@@ -289,7 +292,7 @@ export function showSend(opts) {
                     : '<span class="muted">—</span>'}
             </div>
           </div>
-          <div class="form-footer">If the network is busy, Fast or Priority pays a higher fee to help your transaction confirm sooner. Tap the fee amount to set a custom fee.</div>
+          <div class="form-footer">${esc(opts.feeFooter || "If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. Tap the fee amount to set a custom fee.")}</div>
         </div>
 
         ${state.error ? `<div class="form-section"><div class="form-card"><div class="form-row error-text">${esc(state.error)}</div></div></div>` : ""}
@@ -343,6 +346,8 @@ export function showSend(opts) {
       showCoinControl({
         coins: state.coins || [],
         selected: state.selected,
+        labels: state.labels,
+        onCancel: () => { view.screen = "form"; paint(); },
         onDone: (selection) => {
           state.selected = selection;
           state.maxMode = false;
@@ -415,31 +420,46 @@ function friendlySendError(error) {
 
 // --- Coin Control: iOS CoinControlView --------------------------------------------------------
 
-function showCoinControl({ coins, selected, onDone }) {
+function showCoinControl({ coins, selected, labels = {}, onCancel, onDone }) {
   const picked = new Set(selected || []);
+  let menuOpen = false;
   const paint = () => {
     const total = coins.filter((c) => picked.has(c.key)).reduce((sum, c) => sum + c.amount, 0n);
     render(`
       <header class="navbar form-bar">
-        <button class="bar-text" id="auto">Automatic</button>
+        <button class="bar-text" id="cancel">Cancel</button>
         <div class="nav-title">Coin Control</div>
-        <button class="bar-text strong" id="done">Done</button>
+        <button class="icon plain nav-menu accent" id="menu" aria-label="More">${ICONS.ellipsis}</button>
       </header>
+      ${menuOpen ? `
+        <div class="menu-sheet" role="menu">
+          <button class="menu-item" id="select-all"><span>Select All</span></button>
+          <button class="menu-item" id="clear"><span>Automatic (Clear Selection)</span></button>
+        </div>` : ""}
       <section class="form">
         <div class="form-section">
-          <div class="form-header">${picked.size ? `${picked.size} selected · ${esc(wallet.formatKas(total, 8))} KAS` : "Choose the coins to spend"}</div>
           <div class="form-card">
             ${coins.length ? coins.map((coin) => `
               <button class="form-row coin" data-key="${esc(coin.key)}" role="checkbox" aria-checked="${picked.has(coin.key)}">
-                ${picked.has(coin.key) ? ICONS.checkSquare : ICONS.square}
-                <span class="coin-meta"><span class="coin-amount">${esc(wallet.formatKas(coin.amount, 8))} KAS</span><span class="mono tiny muted">${esc(coin.transactionId.slice(0, 10))}…:${coin.index}</span></span>
-              </button>`).join("") : '<div class="form-row muted">No coins at this address.</div>'}
+                <span class="${picked.has(coin.key) ? "accent" : "muted"}">${picked.has(coin.key) ? ICONS.circleCheck : ICONS.circle}</span>
+                <span class="coin-meta">
+                  ${labels[coin.key] ? `<span class="accent tiny strong">${esc(labels[coin.key])}</span>` : ""}
+                  <span class="coin-amount">${esc(formatKas8(coin.amount))} KAS</span>
+                  <span class="mono tiny muted">${esc(coin.transactionId.slice(0, 10))}...:${coin.index}</span>
+                </span>
+              </button>`).join("") : '<div class="form-row muted">No UTXOs found at this address.</div>'}
           </div>
-          <div class="form-footer">Only the coins you tick are spent. With none ticked, coins are chosen automatically.</div>
+          ${picked.size ? `<div class="form-footer">Selected: ${esc(formatKas8(total))} KAS (${picked.size} UTXO${picked.size === 1 ? "" : "s"})</div>` : ""}
         </div>
-      </section>`, "coins");
-    $("#auto").onclick = () => onDone(null);
-    $("#done").onclick = () => onDone(picked.size ? new Set(picked) : null);
+      </section>
+      <div class="ios-bottom-bar"><button class="ios-capsule" id="confirm">${picked.size ? "Confirm Selection" : "Use Automatic Selection"}</button></div>`, "coins");
+    $("#cancel").onclick = onCancel;
+    $("#menu").onclick = () => { menuOpen = !menuOpen; paint(); };
+    const selectAll = $("#select-all");
+    if (selectAll) selectAll.onclick = () => { for (const c of coins) picked.add(c.key); menuOpen = false; paint(); };
+    const clear = $("#clear");
+    if (clear) clear.onclick = () => { picked.clear(); menuOpen = false; paint(); };
+    $("#confirm").onclick = () => onDone(picked.size ? new Set(picked) : null);
     for (const row of app.querySelectorAll(".coin")) {
       row.onclick = () => {
         const key = row.dataset.key;
@@ -453,22 +473,19 @@ function showCoinControl({ coins, selected, onDone }) {
 
 // --- Sent: iOS SentConfirmationSheet -----------------------------------------------------------
 
-function showSent({ amountSompi, feeKas, to, txid, compound, onDone }) {
+// Sent, the amount, "to <recipient>" (not for a compound), the transaction as an explorer link,
+// "Tap the transaction to open it in the explorer.", Done.
+function showSent({ amountSompi, to, txid, compound, onDone }) {
   render(`
     <section class="screen sent">
-      <div class="sent-check">${ICONS.checkBig}</div>
-      <h2>${compound ? "Compounded" : "Sent"}</h2>
-      ${compound ? "" : `<div class="sent-amount">${esc(wallet.formatKas(amountSompi ?? 0n, 8))} KAS</div>`}
-      <div class="form-card sent-details">
-        ${compound ? "" : `<div class="form-row between"><span class="muted">To</span><span class="mono small ellipsis">${esc(to?.domain || to?.address || "")}</span></div>`}
-        <div class="form-row between"><span class="muted">Network fee</span><span>${esc(Number(feeKas || 0).toFixed(8).replace(/0+$/, "").replace(/\.$/, ""))} KAS</span></div>
-        ${txid ? `<button class="form-row between nav-like" id="txid"><span class="muted">Transaction</span><span class="mono small">${esc(txid.slice(0, 10))}…${esc(txid.slice(-6))}</span></button>` : ""}
-      </div>
-      ${txid ? `<a class="link-button center" href="${esc(wallet.explorerTxUrl(txid))}" target="_blank" rel="noopener noreferrer">View in Explorer</a>` : ""}
+      <div class="sent-check" style="color:#30d158">${ICONS.checkBig}</div>
+      <h2>Sent</h2>
+      <div class="sent-amount">${esc(wallet.sompiToKasText(amountSompi ?? 0n))} KAS</div>
+      ${compound ? "" : `<div class="muted small center-text break">to ${esc(to?.domain || to?.address || "")}</div>`}
+      ${txid ? `<a class="link-button center mono tiny break sent-tx" href="${esc(wallet.explorerTxUrl(txid))}" target="_blank" rel="noopener noreferrer">${esc(txid)} ${ICONS.upRightSquare}</a>
+      <p class="muted tiny center-text">Tap the transaction to open it in the explorer.</p>` : ""}
       <div class="spacer"></div>
       <button id="done" class="big">Done</button>
     </section>`, "sent");
-  const txButton = $("#txid");
-  if (txButton) txButton.onclick = () => copyText(txid, "Transaction ID");
   $("#done").onclick = onDone;
 }

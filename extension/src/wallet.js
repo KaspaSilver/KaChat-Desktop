@@ -539,66 +539,98 @@ function restBase() {
 }
 
 /**
- * Recent transactions touching `address` from the Kaspa REST API, each reduced to what the
- * history list shows: { txid, time, isOutgoing, amountSompi, feeSompi, confirmed }.
+ * Up to 200 transactions touching `address`, newest first - iOS fetchFullTransactionsResult
+ * (one page of 200, retried at 0 / 0.6 / 2 / 5 s on HTTP 429 or 5xx only). Returns
+ * { txs, complete }: complete is false when the page could not be fetched.
+ * Each tx: { txid, time (ms), direction: "out" | "in" | null, amountSompi, feeSompi }.
  */
-export async function history(address, limit = 50) {
-  const url = `${restBase()}/addresses/${encodeURIComponent(address)}/full-transactions?limit=${limit}&offset=0&resolve_previous_outpoints=light`;
-  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) throw new Error(`History unavailable (HTTP ${response.status}).`);
-  const txs = await response.json();
-  const own = await ownAddresses().catch(() => new Set());
-  own.add(address);
-  return (Array.isArray(txs) ? txs : []).map((tx) => describeTransaction(tx, address, own)).filter(Boolean);
+export async function history(address) {
+  const url = `${restBase()}/addresses/${encodeURIComponent(address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
+  for (const delay of [0, 600, 2000, 5000]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    let response;
+    try {
+      response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: AbortSignal.timeout(20_000) });
+    } catch {
+      continue;
+    }
+    if (response.ok) {
+      const txs = await response.json().catch(() => null);
+      if (!Array.isArray(txs)) return { txs: [], complete: false };
+      return { txs: txs.map((tx) => describeTransaction(tx, address)), complete: true };
+    }
+    if (response.status !== 429 && response.status < 500) break;
+  }
+  return { txs: [], complete: false };
 }
 
-// This account's known addresses (chatting + every cached spending address). A send from the
-// primary spending address puts its change on a fresh spending address, so that output is
-// change, not money sent - history counts only what left the account.
-async function ownAddresses() {
-  const account = await activeAccountSecrets();
-  const cached = (await cachedAddresses(account.id)) || {};
-  const own = new Set(Object.values(cached.spending || {}));
-  if (cached.main) own.add(cached.main);
-  return own;
-}
-
-function describeTransaction(tx, address, own = new Set([address])) {
+// iOS KaspaFullTransactionResponse.direction(for:) and feeText(): outgoing when this address
+// paid in and some output goes elsewhere (amount = the smallest such output); incoming when it
+// only receives (amount = everything paid to it); otherwise no direction ("Transaction").
+function describeTransaction(tx, address) {
   const inputs = tx.inputs || [];
   const outputs = tx.outputs || [];
-  const weSent = inputs.some((input) => (input.previous_outpoint_address || input.previousOutpointAddress) === address);
-  let toUs = 0n;
-  let toOthers = 0n;
-  let toOwn = 0n; // this account's other addresses: change, or a move between them
-  for (const output of outputs) {
-    const to = output.script_public_key_address;
-    const amount = BigInt(output.amount || 0);
-    if (to === address) toUs += amount;
-    else if (to && own.has(to)) toOwn += amount;
-    else if (to) toOthers += amount;
+  const isSender = inputs.some((input) => input.previous_outpoint_address === address);
+  const toOthers = outputs.filter((o) => o.script_public_key_address && o.script_public_key_address !== address).map((o) => BigInt(o.amount || 0));
+  const toUs = outputs.filter((o) => o.script_public_key_address === address).reduce((sum, o) => sum + BigInt(o.amount || 0), 0n);
+  let direction = null;
+  let amountSompi = null;
+  if (isSender && toOthers.length) {
+    direction = "out";
+    amountSompi = toOthers.reduce((min, v) => (v < min ? v : min));
+  } else if (!isSender && toUs > 0n) {
+    direction = "in";
+    amountSompi = toUs;
   }
-  let fee = null;
+  let feeSompi = null;
   if (inputs.length && inputs.every((input) => input.previous_outpoint_amount != null)) {
     const totalIn = inputs.reduce((sum, input) => sum + BigInt(input.previous_outpoint_amount), 0n);
-    const totalOut = outputs.reduce((sum, output) => sum + BigInt(output.amount || 0), 0n);
-    if (totalIn >= totalOut) fee = totalIn - totalOut;
+    const totalOut = outputs.reduce((sum, o) => sum + BigInt(o.amount || 0), 0n);
+    if (totalIn >= totalOut) feeSompi = totalIn - totalOut;
   }
-  let isOutgoing;
-  let amount;
-  if (weSent && toOthers > 0n) { isOutgoing = true; amount = toOthers; }
-  else if (!weSent && toUs > 0n) { isOutgoing = false; amount = toUs; }
-  else if (weSent && toOwn > 0n) { isOutgoing = true; amount = toOwn; } // to another own address
-  else if (weSent) { isOutgoing = true; amount = 0n; } // a self-send (compound)
-  else return null;
-  return {
-    txid: tx.transaction_id,
-    time: Number(tx.block_time || 0),
-    isOutgoing,
-    isSelf: weSent && toOthers === 0n && toOwn === 0n,
-    amountSompi: amount,
-    feeSompi: fee,
-    confirmed: Boolean(tx.is_accepted),
-  };
+  return { txid: tx.transaction_id, time: Number(tx.block_time || 0), direction, amountSompi, feeSompi };
+}
+
+// --- UTXO labels (iOS setSpendingUtxoLabel: per address, keyed "txid:index") -----------------
+
+function utxoLabelsKey(address) { return `kachat.utxoLabels.${address}`; }
+
+export async function utxoLabels(address) {
+  return (await getLocal(utxoLabelsKey(address))) || {};
+}
+
+export async function setUtxoLabel(address, outpointKey, label) {
+  const labels = await utxoLabels(address);
+  const clean = String(label || "").trim();
+  if (clean) labels[outpointKey] = clean; else delete labels[outpointKey];
+  await setLocal(utxoLabelsKey(address), labels);
+  return labels;
+}
+
+/**
+ * Which addresses have ever been touched on chain, in bulk: POST /addresses/active, 250 per
+ * request, 4 at a time (iOS AddressActivityService). { address: boolean }, or null when the
+ * REST server can't answer it (callers fall back to sweeping balances).
+ */
+export async function addressesActive(addresses) {
+  const batches = [];
+  for (let i = 0; i < addresses.length; i += 250) batches.push(addresses.slice(i, i + 250));
+  const out = {};
+  for (let i = 0; i < batches.length; i += 4) {
+    const results = await Promise.all(batches.slice(i, i + 4).map(async (batch) => {
+      const response = await fetch(`${restBase()}/addresses/active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ addresses: batch }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }).map((p) => p.catch(() => null)));
+    if (results.some((r) => !Array.isArray(r))) return null;
+    for (const list of results) for (const entry of list) out[entry.address] = Boolean(entry.active);
+  }
+  return out;
 }
 
 const USED_KEY = "kachat.usedAddresses";
@@ -607,15 +639,23 @@ const USED_KEY = "kachat.usedAddresses";
  * Has this address ever appeared on chain? iOS spendingAddressUsedState: the REST
  * transactions-count. A "used" answer is remembered for good; null means the probe failed.
  */
+const sessionUnused = new Set();
+
+/** What is known without asking: true (used, remembered for good), false (unused this session), or null. */
+export async function knownUsedState(address) {
+  if (new Set((await getLocal(USED_KEY)) || []).has(address)) return true;
+  return sessionUnused.has(address) ? false : null;
+}
+
 export async function addressUsed(address) {
   const used = new Set((await getLocal(USED_KEY)) || []);
   if (used.has(address)) return true;
   try {
-    const response = await fetch(`${restBase()}/addresses/${encodeURIComponent(address)}/transactions-count`, { cache: "no-store" });
+    const response = await fetch(`${restBase()}/addresses/${encodeURIComponent(address)}/transactions-count`, { cache: "no-store", signal: AbortSignal.timeout(8000) });
     if (!response.ok) return null;
     const json = await response.json();
     const isUsed = Number(json?.total ?? 0) > 0;
-    if (isUsed) { used.add(address); await setLocal(USED_KEY, [...used]); }
+    if (isUsed) { used.add(address); await setLocal(USED_KEY, [...used]); } else sessionUnused.add(address);
     return isUsed;
   } catch {
     return null;
@@ -664,6 +704,7 @@ export async function spendingList() {
       index,
       address: addresses[index],
       label: labelFor(state, index),
+      customLabel: customLabel(state, index),
       hidden: state.hidden.includes(index),
       primary: index === state.activeIndex,
       balanceSompi: balancesByAddress[addresses[index]] ?? 0n,
@@ -671,10 +712,14 @@ export async function spendingList() {
   };
 }
 
+/** The address's own label, or "" - iOS SpendingAddressEntry.label. */
+export function customLabel(state, index) {
+  return String(state.labels?.[index] ?? state.labels?.[String(index)] ?? "").trim();
+}
+
+/** iOS displayLabel: the label you gave it, else "Address #<index>". */
 export function labelFor(state, index) {
-  const custom = String(state.labels?.[index] ?? state.labels?.[String(index)] ?? "").trim();
-  if (custom) return custom;
-  return index === 0 ? "Primary spending" : `Spending #${index}`;
+  return customLabel(state, index) || `Address #${index}`;
 }
 
 /** Balances for many addresses in one node call: { address: sompi }. */
@@ -711,7 +756,7 @@ export async function setSpendingLabel(index, label) {
   const { account, state } = await activeState();
   const labels = { ...state.labels };
   const clean = String(label || "").trim();
-  if (clean) labels[index] = clean.slice(0, 40); else delete labels[index];
+  if (clean) labels[index] = clean; else delete labels[index];
   return saveSpendingState(account.id, { labels });
 }
 
@@ -722,20 +767,29 @@ export async function setPrimarySpending(index) {
 }
 
 /**
- * iOS "Generate New Spending Address": the lowest hidden index that is confirmed unused
- * (never the primary, no balance) is un-hidden and reused; otherwise the chain extends by one.
+ * iOS "Generate New Spending Address" (ManageAddressesView.generateNew): a hidden address that
+ * is not the primary, holds nothing and was never used is recycled, lowest index first - one
+ * whose used-state is unknown gets one transactions-count probe, all probes sharing a 2 s
+ * budget; when the budget runs out (or a probe fails) the chain extends by one instead.
  */
 export async function generateSpendingAddress() {
   const { account, state } = await activeState();
   const cached = (await cachedAddresses(account.id))?.spending || {};
-  const candidates = [...state.hidden].sort((a, b) => a - b).filter((i) => i !== state.activeIndex);
+  const candidates = [...state.hidden].sort((a, b) => a - b).filter((i) => i !== state.activeIndex && i <= state.maxIndex);
   if (candidates.length) {
     const addresses = { ...(await spendingAddressRange(0, state.maxIndex + 1)), ...cached };
     const balances = await balancesFor(candidates.map((i) => addresses[i]));
+    const deadline = Date.now() + 2000;
     for (const index of candidates) {
       const address = addresses[index];
       if ((balances[address] ?? 0n) > 0n) continue;
-      if ((await addressUsed(address)) === false) {
+      let used = await knownUsedState(address);
+      if (used == null) {
+        if (Date.now() >= deadline) break;
+        used = await Promise.race([addressUsed(address), new Promise((resolve) => setTimeout(() => resolve(null), Math.max(0, deadline - Date.now())))]);
+        if (used == null) break;
+      }
+      if (used === false) {
         await saveSpendingState(account.id, { hidden: state.hidden.filter((i) => i !== index) });
         return index;
       }
@@ -746,6 +800,19 @@ export async function generateSpendingAddress() {
   await saveSpendingState(account.id, { maxIndex: index, hidden: state.hidden.filter((i) => i !== index) });
   await cacheSpendingAddress(account.id, index, address);
   return index;
+}
+
+/** Extends the revealed range to `index` (Address Visibility past the end): the ones between are hidden. */
+export async function revealSpendingAddress(index) {
+  const { account, state } = await activeState();
+  if (index <= state.maxIndex) return setSpendingHidden(index, false);
+  const hidden = new Set(state.hidden);
+  for (let i = state.maxIndex + 1; i < index; i += 1) hidden.add(i);
+  hidden.delete(index);
+  const range = await spendingAddressRange(state.maxIndex + 1, index - state.maxIndex);
+  const cached = (await cachedAddresses(account.id)) || { accountId: account.id, main: null, spending: {} };
+  await setLocal(`kachat.addresses.${account.id}`, { ...cached, spending: { ...(cached.spending || {}), ...range } });
+  return saveSpendingState(account.id, { maxIndex: index, hidden: [...hidden] });
 }
 
 /**
@@ -774,33 +841,74 @@ export async function freshReceiveAddress() {
 }
 
 /**
- * iOS "Discover Addresses": sweeps the first 300 spending indexes (whatever the gaps - a
- * balance at #291 behind twenty empty slots is ordinary) in node batches of 50 and surfaces
- * every address that holds Kaspa. Returns how many were found.
+ * iOS "Discover Addresses" (WalletManager.discoverSpendingAddresses). A match is an address
+ * holding Kaspa or a KNS domain.
+ *   fast path   indexes 0..999: one bulk /addresses/active pass says which were ever touched;
+ *               UTXOs for the touched ones in one sweep; KNS for touched, unfunded ones below
+ *               #200.
+ *   fallback    (the REST server can't answer /addresses/active) balances 100 at a time up to
+ *               #5000, stopping past #1000 after 60 misses in a row; KNS below #200.
+ * Matches are un-hidden; when the highest is past the revealed range, the range grows to it and
+ * the empty indexes in between are hidden. onProgress({ checkingIndex, foundCount }).
  */
 export async function discoverSpendingAddresses(onProgress = () => {}) {
   const { account, state } = await activeState();
-  const window = 300;
-  const addresses = await spendingAddressRange(0, window);
-  const indexes = Object.keys(addresses).map(Number);
-  const found = [];
-  for (let i = 0; i < indexes.length; i += 50) {
-    onProgress(i, window);
-    const slice = indexes.slice(i, i + 50);
-    const balances = await balancesFor(slice.map((index) => addresses[index]));
-    for (const index of slice) if ((balances[addresses[index]] ?? 0n) > 0n) found.push(index);
+  const DEEP_FLOOR = 1000;
+  const MAX_INDEX = 5000;
+  const BATCH = 100;
+  const KNS_DEPTH = 200;
+  const GAP = 60;
+  const found = new Set();
+  const addresses = {};
+  const knsOwns = async (address) => {
+    try { return ((await getAddressInfo(address, knsOptions()))?.allDomains || []).length > 0; } catch { return false; }
+  };
+
+  onProgress({ checkingIndex: 0, foundCount: 0 });
+  Object.assign(addresses, await spendingAddressRange(0, DEEP_FLOOR));
+  const floorList = Array.from({ length: DEEP_FLOOR }, (_, i) => addresses[i]);
+  const active = await addressesActive(floorList);
+  if (active) {
+    const touched = Array.from({ length: DEEP_FLOOR }, (_, i) => i).filter((i) => active[addresses[i]]);
+    onProgress({ checkingIndex: DEEP_FLOOR - 1, foundCount: 0 });
+    const balances = await balancesFor(touched.map((i) => addresses[i]));
+    const knsChecks = [];
+    for (const index of touched) {
+      if ((balances[addresses[index]] ?? 0n) > 0n) found.add(index);
+      else if (index < KNS_DEPTH) knsChecks.push(index);
+    }
+    for (let i = 0; i < knsChecks.length; i += 6) {
+      const slice = knsChecks.slice(i, i + 6);
+      const owns = await Promise.all(slice.map((index) => knsOwns(addresses[index])));
+      slice.forEach((index, j) => { if (owns[j]) found.add(index); });
+      onProgress({ checkingIndex: slice[slice.length - 1], foundCount: found.size });
+    }
+  } else {
+    let misses = 0;
+    for (let start = 0; start < MAX_INDEX; start += BATCH) {
+      if (start >= DEEP_FLOOR) Object.assign(addresses, await spendingAddressRange(start, BATCH));
+      const indexes = Array.from({ length: BATCH }, (_, i) => start + i);
+      const balances = await balancesFor(indexes.map((i) => addresses[i]));
+      for (const index of indexes) {
+        let hit = (balances[addresses[index]] ?? 0n) > 0n;
+        if (!hit && index < KNS_DEPTH) hit = await knsOwns(addresses[index]);
+        if (hit) { found.add(index); misses = 0; } else misses += 1;
+      }
+      onProgress({ checkingIndex: start + BATCH - 1, foundCount: found.size });
+      if (start + BATCH >= DEEP_FLOOR && misses >= GAP) break;
+    }
   }
-  onProgress(window, window);
+
   const highest = Math.max(state.maxIndex, ...found);
   const hidden = new Set(state.hidden);
-  for (let index = state.maxIndex + 1; index <= highest; index += 1) if (!found.includes(index)) hidden.add(index);
+  for (let index = state.maxIndex + 1; index <= highest; index += 1) if (!found.has(index)) hidden.add(index);
   for (const index of found) hidden.delete(index);
   await saveSpendingState(account.id, { maxIndex: highest, hidden: [...hidden] });
   const cached = (await cachedAddresses(account.id)) || { accountId: account.id, main: null, spending: {} };
   const spending = { ...(cached.spending || {}) };
-  for (let index = 0; index <= highest; index += 1) spending[index] = addresses[index] || spending[index];
+  for (let index = 0; index <= highest; index += 1) if (addresses[index]) spending[index] = addresses[index];
   await setLocal(`kachat.addresses.${account.id}`, { ...cached, spending });
-  return found.length;
+  return found.size;
 }
 
 // --- Explorer -----------------------------------------------------------------------------
@@ -862,14 +970,31 @@ export async function setPrimaryDomain(domainId) {
  * Transfers a domain from the chatting address: commit, then reveal, then waits (up to 90 s)
  * for the KNS API to show the new owner. onStatus gets the engine's stage names.
  */
-export async function transferDomain({ domain, assetId, toAddress, priorityFeeSompi, onStatus = () => {} }) {
-  const engine = await knsEngine({ kind: "main" });
-  return knsTransferDomain({
+export async function transferDomain({ domain, assetId, toAddress, priorityFeeSompi, source = { kind: "main" }, onStatus = () => {} }) {
+  const engine = await knsEngine(source);
+  // From the PRIMARY spending address the change goes to a fresh index and the primary moves
+  // there once it is accepted (iOS KNSDomainTransferService fromSpendingAddressIndex).
+  let fresh = null;
+  if (source?.kind === "spending") {
+    const { account, state } = await activeState();
+    if (source.index === state.activeIndex) {
+      const index = Math.max(state.maxIndex, source.index) + 1;
+      fresh = { accountId: account.id, index, address: (await spendingAddressRange(index, 1))[index] };
+    }
+  }
+  const result = await knsTransferDomain({
     engine, domain, assetId, toAddress,
+    signer: { privateKey: engine.privateKey, address: engine.address },
+    changeAddress: fresh?.address || null,
     revealPriorityFeeSompi: priorityFeeSompi,
     onStatus,
     log: (...parts) => console.info("[KaChat Wallet]", ...parts),
   });
+  if (fresh) {
+    await saveSpendingState(fresh.accountId, { activeIndex: fresh.index, maxIndex: fresh.index });
+    await cacheSpendingAddress(fresh.accountId, fresh.index, fresh.address);
+  }
+  return result;
 }
 
 // --- Chatting address picker (iOS ChattingAddressPickerView) ---------------------------------

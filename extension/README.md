@@ -27,7 +27,7 @@ extension's card to pick up the new build.
 |---|---|
 | `popup.html`, `src/popup.js` | Boot and the home screen (the iOS Profile tab). The same page opens as a full tab with `?view=tab` (the expand button), and as the website approval window with `?view=approve`. |
 | `src/onboarding.js` | The accounts screen (Saved Accounts), Create Account, Import Account (iOS source-wallet list, word grid, passphrase), unlock and reset. |
-| `src/send.js`, `src/manage.js` | Send Kaspa (fees, Max, coin control, Sent sheet) and the Manage screens (history, UTXOs, keys, spending addresses, Change Chatting Address). |
+| `src/send.js`, `src/manage.js` | Send Kaspa (fees, Max, coin control, Sent sheet) and the Manage screens - 1:1 with iOS ChattingAddressManageView, ManageAddressesView and SpendingAddressTransactionHistoryView: history and UTXO tabs, Address Actions, keys, Generate / Discover / Address Visibility / Send All To Primary, per-address KNS domains, Change Chatting Address. |
 | `src/domains.js` | Your Domains: a tab per name service (.kachat, .kas, .k, .kaspa) with "Get a domain" links; .kas Set as Primary (signed KNS API call) and Send Domain (commit/reveal transfer). |
 | `src/market.js` | The .kachat marketplace - a 1:1 port of iOS KachatMarketView (hero, search, Marketplace / My Names / Activity, listing, Buy and Make an Offer sheets, How it works). UI only: redacted placeholders, final actions disabled. |
 | `src/names.js`, `src/names-normalize.js` | The name services (port of iOS NameServices.swift): names an address owns on .k / .kaspa, resolving a typed name on every service, the "Other domains" picker. The normalizers are checked against the dotk and Kaspa Names SDK vectors: `node tools/check-name-vectors.mjs`. |
