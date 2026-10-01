@@ -1645,7 +1645,7 @@ function renderSendFlow() {
             : "Merges all of this address's UTXOs into a single one, so future sends need fewer inputs."}</p>`
         : `<label class="field-label">Recipient Address
              <input class="field-input cold-mono-input" type="text" data-cold-send-recipient
-               placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false"
+               placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false"
                value="${deps.escapeHtml(send.toInput)}" />
            </label>
            <div class="cold-send-recipient-status" data-cold-send-recipient-status>${sendRecipientStatusHtml()}</div>

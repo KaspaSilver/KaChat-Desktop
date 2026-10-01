@@ -190,7 +190,8 @@ function posterName(address) {
   // it - resolution appends it and mention suggestions match on the bare name.
   const alias = deps.contactAliasFor?.(address);
   if (alias) return alias;
-  const info = deps.engine.peekKnsAddressInfo?.(address);
+  // A .kas name is no one's identity (iOS 509c0fe).
+  const info = deps.engine.knsNamesAsIdentity ? deps.engine.peekKnsAddressInfo?.(address) : null;
   const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
   if (domain) return domain;
   return deps.shortAddress(address);
@@ -1065,10 +1066,15 @@ const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 // at the start or follow whitespace / an opening bracket-quote. Matches the indexer spec so what
 // highlights here is exactly what triggers a mention notification server-side.
 const MENTION_PATTERN = /(^|[\s([{<"'])@([a-z0-9-]+(?:\.[a-z0-9-]+)*)/gi;
+// @mentions ride on .kas names, which are no longer anyone's identity: one switch turns them off
+// everywhere until they are rebuilt on .kachat (iOS 08dd836 MentionsFeature.enabled). No
+// suggestions, no mentioned pubkeys on posts, and @name.kas in a post is plain text.
+const MENTIONS_ENABLED = false;
 
 // Escape a plain-text run, but wrap any @mention tokens in a highlight span first.
 function escapeWithMentions(rawText) {
   const value = String(rawText || "");
+  if (!MENTIONS_ENABLED) return deps.escapeHtml(value);
   let out = "";
   let last = 0;
   for (const m of value.matchAll(MENTION_PATTERN)) {
@@ -1087,6 +1093,7 @@ function escapeWithMentions(rawText) {
 // mentioned_pubkeys. Chatted contacts resolve from the local candidate list; ANYONE else with
 // a KNS domain resolves live (owner address -> pubkey). Unresolvable tokens stay plain text.
 async function mentionedPubkeysFor(text) {
+  if (!MENTIONS_ENABLED) return [];
   const domains = [];
   const seenDomains = new Set();
   // Scanned on the RENDERED text, as iOS does, so `**@alice**` still notifies alice: the mention
@@ -1172,7 +1179,7 @@ function linkifyPostText(text, { interactive = true } = {}) {
     const piece = deps.escapeHtml(value.slice(a, b));
     const mention = mentions.find((m) => a >= m.start && b <= m.end);
     if (mention) {
-      out += interactive
+      out += interactive && MENTIONS_ENABLED
         ? `<span class="kaposts-mention" data-kaposts-mention="${deps.escapeHtml(mention.domain.toLowerCase())}">${piece}</span>`
         : piece;
       continue;
@@ -4506,6 +4513,7 @@ export function resetKaPostsForAccount() {
 const MENTION_QUERY_RE = /(?:^|[\s([{<"'])@([a-z0-9-]*)$/i;
 
 function attachMentionAutocomplete(textarea) {
+  if (!MENTIONS_ENABLED) return;
   if (!textarea || textarea.dataset.mentionWired) return;
   textarea.dataset.mentionWired = "1";
   let menu = null;

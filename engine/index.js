@@ -27,6 +27,8 @@ import {
   clearAllKnsCache,
   checkDomainAvailability as knsCheckDomainAvailability,
   fetchInscribeFeeTiers as knsFetchInscribeFeeTiers,
+  fetchProfileByAssetId as knsFetchProfileByAssetId,
+  dropProfileCache as knsDropProfileCache,
 } from "./kns.js";
 import {
   inscribeDomain as knsInscribeDomain,
@@ -1317,16 +1319,30 @@ export class KaspaEngine {
     return knsGetAddressInfo(address, { baseUrl: getEndpoint("knsApi"), ...options });
   }
 
+  // KaChat reads only a .kas domain's NAME (iOS d6ded9d): no avatar, banner, bio or links are
+  // loaded from .kas profiles any more - full profiles will come from .kachat. And a .kas name is
+  // no one's identity (iOS 509c0fe): it never labels a person. Both are single switches.
+  get knsProfilesLoaded() { return false; }
+  get knsNamesAsIdentity() { return false; }
+
   async fetchKnsAddressProfile(address, options = {}) {
+    if (!this.knsProfilesLoaded) return null;
     return knsFetchAddressProfile(address, { baseUrl: getEndpoint("knsApi"), ...options });
   }
 
   async getKnsAddressProfile(address, options = {}) {
+    if (!this.knsProfilesLoaded) return null;
     return knsGetAddressProfile(address, { baseUrl: getEndpoint("knsApi"), ...options });
   }
 
+  /** One domain's .kas profile, for editing it in Your Domains only: never cached or shown
+   *  anywhere else (iOS fetchDomainProfileForEditing). */
+  async fetchKnsDomainProfileForEditing(assetId) {
+    return knsFetchProfileByAssetId(assetId, { baseUrl: getEndpoint("knsApi") });
+  }
+
   async refreshKnsIfNeeded(addresses, options = {}) {
-    return knsRefreshIfNeeded(addresses, { baseUrl: getEndpoint("knsApi"), ...options });
+    return knsRefreshIfNeeded(addresses, { baseUrl: getEndpoint("knsApi"), ...(this.knsProfilesLoaded ? {} : { profiles: false }), ...options });
   }
 
   peekKnsAddressInfo(address) {
@@ -1374,7 +1390,13 @@ export class KaspaEngine {
   }
 
   peekKnsAddressProfile(address) {
+    if (!this.knsProfilesLoaded) return null;
     return knsPeekAddressProfile(address);
+  }
+
+  /** Profiles saved before they stopped loading are dropped once at startup. */
+  dropKnsProfileCache() {
+    try { knsDropProfileCache(); } catch { /* fine */ }
   }
 
   clearKnsCache(address) {

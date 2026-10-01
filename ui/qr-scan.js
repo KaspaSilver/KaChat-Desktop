@@ -121,7 +121,7 @@ export function scanKaspaAddress(options = {}) {
     hint: "Line the QR code up inside the square",
     manualTitle: "Enter it manually",
     manualLabel: "Kaspa address or KNS domain",
-    manualPlaceholder: "kaspa:qr... or name.kas",
+    manualPlaceholder: "kaspa:qr... or domain",
     mono: true,
     ...options,
     normalize: normalizeScannedKaspaAddress,

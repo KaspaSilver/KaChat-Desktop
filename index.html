@@ -1541,7 +1541,7 @@
         <p class="create-chat-section-title">ADDRESS</p>
         <div class="create-chat-address-card">
           <label class="create-chat-address-label" for="create-chat-address">Kaspa Address or KNS Domain</label>
-          <input id="create-chat-address" class="create-chat-address-input" name="address" type="text" placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false" required />
+          <input id="create-chat-address" class="create-chat-address-input" name="address" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" required />
           <div class="create-chat-tools" aria-label="Address actions">
             <button type="button" class="create-chat-tool" data-contact-import>
               <span class="create-chat-tool-icon" aria-hidden="true"><svg class="person-plus-icon" viewBox="0 0 32 32" focusable="false" aria-hidden="true">
@@ -1607,16 +1607,16 @@
           <legend>Seed Phrase Length</legend>
           <div class="seed-length-options">
             <label><input type="radio" name="wordCount" value="12" /><span><strong>12 words</strong><small>Standard</small></span></label>
-            <label><input type="radio" name="wordCount" value="24" checked /><span><strong>24 words</strong><small>Recommended</small></span></label>
+            <label><input type="radio" name="wordCount" value="24" /><span><strong>24 words</strong><small>Recommended</small></span></label>
           </div>
         </fieldset>
         <label class="field-label">Account Name
-          <input class="field-input" data-create-name type="text" value="My Account" maxlength="48" placeholder="Enter account name" autocomplete="off" />
+          <input class="field-input" data-create-name type="text" value="" maxlength="48" placeholder="Enter account name" autocomplete="off" />
         </label>
         <p class="field-error" data-create-account-error hidden></p>
         <div class="modal-actions">
           <button class="secondary-button" type="button" data-close-create-account>Cancel</button>
-          <button class="primary-button" type="button" data-generate-account>Generate Account</button>
+          <button class="primary-button" type="button" data-generate-account disabled>Generate Account</button>
         </div>
       </div>
 
@@ -2027,7 +2027,7 @@
 
       <div class="group-add-by-address">
         <p class="field-hint">Not in your contacts? Add anyone by Kaspa address or KNS domain:</p>
-        <input class="group-address-input" type="text" placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false" data-group-address-input />
+        <input class="group-address-input" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" data-group-address-input />
         <div class="group-address-tools" aria-label="Address actions">
           <button type="button" class="group-address-tool" data-group-address-import>
             <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="12" cy="8.5" r="5.25"/><path d="M3.5 24.5c.7-5.4 4-8.7 8.5-8.7 2.3 0 4.3.8 5.8 2.3"/><path d="M24.2 18.9v5.8M21.3 21.8h5.8"/></svg>
@@ -2363,7 +2363,7 @@
 
         <div class="manage-address-send-body">
           <label class="field-label"><span data-i18n="send.recipient">Recipient</span>
-            <input class="field-input" type="text" data-manage-send-recipient placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false" />
+            <input class="field-input" type="text" data-manage-send-recipient placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" />
           </label>
           <p class="field-hint" data-manage-send-resolved hidden></p>
           <span class="field-label" data-manage-send-amount-label>Amount (KAS)</span>
@@ -2593,7 +2593,7 @@
       </div>
       <p class="field-hint">Transfer <strong data-kns-transfer-domain></strong> to another Kaspa address. This inscribes an on-chain transfer (about 2 KAS committed from the owning address, most of it returned minus network fees).</p>
       <label class="field-label">Recipient
-        <input class="field-input" type="text" data-kns-transfer-recipient placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false" />
+        <input class="field-input" type="text" data-kns-transfer-recipient placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" />
       </label>
       <p class="field-error" data-kns-transfer-error hidden></p>
       <p class="field-hint" data-kns-transfer-status hidden></p>
@@ -2615,7 +2615,7 @@
       </div>
       <label class="field-label"><span data-send-kaspa-recipient-label>Recipient</span>
         <span class="send-recipient-field">
-          <input class="field-input" type="text" data-send-kaspa-recipient placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false" />
+          <input class="field-input" type="text" data-send-kaspa-recipient placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" />
           <span class="send-recipient-check" data-send-kaspa-check hidden aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           </span>
@@ -2683,7 +2683,7 @@
       </div>
       <p class="field-hint spending-send-source" data-spending-send-source></p>
       <label class="field-label">Recipient
-        <input class="field-input" type="text" data-spending-send-recipient placeholder="kaspa:qr... or name.kas" autocomplete="off" spellcheck="false" />
+        <input class="field-input" type="text" data-spending-send-recipient placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" />
       </label>
       <p class="field-hint" data-spending-send-resolved hidden></p>
       <label class="field-label">Amount (KAS)

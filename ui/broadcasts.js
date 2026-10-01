@@ -136,6 +136,46 @@ export function broadcastUnreadTotal() {
   for (const name of listedChannels()) total += unreadFor(name);
   return total;
 }
+// --- Select mode (iOS e08c4cc): rooms picked in bulk for Mark as Read / Unread / Delete --------
+let roomSelectionActive = false;
+const selectedRooms = new Set();
+export function setRoomSelectionMode(active) {
+  roomSelectionActive = Boolean(active);
+  if (!roomSelectionActive) selectedRooms.clear();
+  if (deps) renderChannelList();
+}
+/** { count, total, allSelected } over the rooms in the list. */
+export function roomSelectionState() {
+  const all = listedChannels();
+  return { count: selectedRooms.size, total: all.length, allSelected: all.length > 0 && all.every((n) => selectedRooms.has(n)) };
+}
+export function toggleSelectAllRooms() {
+  const { allSelected } = roomSelectionState();
+  selectedRooms.clear();
+  if (!allSelected) for (const name of listedChannels()) selectedRooms.add(name);
+  renderChannelList();
+}
+export function markSelectedRooms(read) {
+  for (const name of selectedRooms) {
+    if (read) markChannelRead(name);
+    else { markedUnread[name] = true; }
+  }
+  if (!read) saveRead();
+  deps.onUnreadChanged?.();
+}
+/** "Delete" from the room list: a room you added is left for good with its messages; a default
+ *  room is only switched off, exactly like its toggle in Public Chats settings (iOS removeFromList). */
+function removeFromList(name) {
+  if (isIndexedBroadcastChannel(name)) setCuratedChannel(name, false);
+  else leaveChannel(name);
+}
+export function deleteSelectedRooms() {
+  const names = [...selectedRooms];
+  for (const name of names) removeFromList(name);
+  selectedRooms.clear();
+  renderChannelList();
+  return names.length;
+}
 function listedChannels() {
   return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])].filter((name) => curatedShown(name) && !isServiceBroadcastChannel(name));
 }
@@ -795,9 +835,9 @@ async function sendBroadcastText(channel, text, { showBubble = true, feeKas = nu
 function senderName(address) {
   if (!address) return "unknown";
   if (address === deps.engine.address) return "You";
-  const info = deps.engine.peekKnsAddressInfo?.(address);
-  const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
-  if (domain) return domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain;
+  // A .kas name is no one's identity (iOS 509c0fe): the name you gave them, else the address.
+  const contactName = deps.contactNameFor?.(address);
+  if (contactName) return contactName;
   return deps.shortAddress(address);
 }
 
@@ -869,7 +909,8 @@ function roomRowHtml(name, { title = null, subtitle = null } = {}) {
     : (subtitle || "No messages yet");
   const bellOff = !notifyByChannel[name];
   return `
-    <button class="broadcast-room-row${name === activeChannel ? " active" : ""}" type="button" data-broadcast-open="${deps.escapeHtml(name)}">
+    <button class="broadcast-room-row${name === activeChannel && !roomSelectionActive ? " active" : ""}${roomSelectionActive ? " selecting" : ""}${selectedRooms.has(name) ? " selected" : ""}" type="button" data-broadcast-open="${deps.escapeHtml(name)}"${roomSelectionActive ? ` aria-pressed="${selectedRooms.has(name) ? "true" : "false"}"` : ""}>
+      ${roomSelectionActive ? `<span class="broadcast-room-select" aria-hidden="true">${selectedRooms.has(name) ? `<svg viewBox="0 0 20 20"><path d="m5.1 10.1 3.1 3.1 6.7-7"/></svg>` : ""}</span>` : ""}
       <span class="broadcast-room-row-avatar" aria-hidden="true">#</span>
       <span class="broadcast-room-row-main">
         <span class="broadcast-room-row-top">
@@ -1476,7 +1517,7 @@ function renderRoom() {
 
 let knsInFlight = false;
 async function refreshVisibleSenderNames(messages) {
-  if (knsInFlight) return;
+  if (knsInFlight || !deps.engine.knsNamesAsIdentity) return;
   knsInFlight = true;
   try {
     const addresses = [...new Set(messages.slice(-30).map((m) => m.senderAddress))]
@@ -2255,7 +2296,7 @@ export function initBroadcasts(dependencies) {
   // Mark as Read / Unread, notifications, Copy Room Link, plus Delete for rooms you added. Curated rooms cannot be deleted.
   onContextGesture(listEl, async (event) => {
     const card = event.target.closest("[data-broadcast-open]");
-    if (!card) return;
+    if (!card || roomSelectionActive) return;
     event.preventDefault();
     const name = card.dataset.broadcastOpen;
     const indexed = isIndexedBroadcastChannel(name);
@@ -2272,6 +2313,10 @@ export function initBroadcasts(dependencies) {
     ];
     if (!indexed && joinedChannels.includes(name)) {
       options.push({ id: "delete", title: "Delete", subtitle: "Removes the room and its cached messages from this device.", destructive: true });
+    } else if (indexed) {
+      // A default room is never really deleted - it is switched off, exactly like its toggle in
+      // Public Chats settings, and nothing is lost, so it needs no confirmation (iOS e08c4cc).
+      options.push({ id: "switch-off", title: "Delete", subtitle: "Switches this default room off. Turn it back on in Public Chats settings.", destructive: true });
     }
     const choice = await chooseDialog({ title: `#${name}`, options });
     if (choice === "read") { markChannelRead(name); renderChannelList(); }
@@ -2285,6 +2330,7 @@ export function initBroadcasts(dependencies) {
       renderChannelList();
       deps.showToast?.(notifying ? "Notifications are off for this room" : "Notifications are on for this room");
     } else if (choice === "copy") copyRoomLink(name);
+    else if (choice === "switch-off") { setCuratedChannel(name, false); }
     else if (choice === "delete") {
       const ok = await confirmDialog({ title: `Delete #${name}?`, message: "Every message cached for this room on this device is deleted. This cannot be undone - rejoining later starts with no history.", confirmLabel: "Delete", destructive: true });
       if (!ok) return;
@@ -2449,6 +2495,13 @@ export function initBroadcasts(dependencies) {
     }
 
     const open = event.target.closest("[data-broadcast-open]");
+    if (open && roomSelectionActive) {
+      const name = open.dataset.broadcastOpen;
+      if (selectedRooms.has(name)) selectedRooms.delete(name); else selectedRooms.add(name);
+      renderChannelList();
+      deps.onRoomSelectionChanged?.();
+      return;
+    }
     if (open) { openRoom(open.dataset.broadcastOpen); return; }
 
     const sender = event.target.closest("[data-broadcast-sender]");

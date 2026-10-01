@@ -2172,7 +2172,7 @@ function buildModals() {
           <p class="portfolio-import-note">Enter a Kaspa address or a KNS domain like name.kas. Imports that address's on-chain history: every received transaction becomes a buy and every sent one a sell, priced at that day's KAS price. Re-running later only adds new activity.</p>
           <label class="portfolio-editor-field">
             <span>Kaspa Address or KNS Domain</span>
-            <input type="text" placeholder="kaspa:qr… or name.kas" data-portfolio-import-address spellcheck="false" autocomplete="off" autocapitalize="off" />
+            <input type="text" placeholder="kaspa:qr… or domain" data-portfolio-import-address spellcheck="false" autocomplete="off" autocapitalize="off" />
           </label>
           <p class="portfolio-editor-hint" data-portfolio-import-status></p>
           <div class="portfolio-tx-header-actions">

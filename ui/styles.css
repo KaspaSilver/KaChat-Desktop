@@ -12252,3 +12252,12 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .public-settings-row .settings-row-copy { display: grid; gap: 2px; }
 .public-settings-row .settings-row-copy strong { font-size: 17px; font-weight: 400; }
 .public-settings-row .settings-row-copy small { font-size: 12px; color: var(--muted); }
+
+/* Public Chats Select mode (iOS e08c4cc): a selection circle leads each room row. */
+.broadcast-room-row.selecting { gap: 10px; }
+.broadcast-room-select {
+  flex: 0 0 22px; width: 22px; height: 22px; border-radius: 50%;
+  border: 1.5px solid var(--label-tertiary); display: grid; place-items: center;
+}
+.broadcast-room-row.selected .broadcast-room-select { background: var(--kaspa); border-color: var(--kaspa); }
+.broadcast-room-select svg { width: 14px; height: 14px; fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }

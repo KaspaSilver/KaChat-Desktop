@@ -2,7 +2,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
@@ -63,6 +63,8 @@ window.KaspaEngineClass = KaspaEngine;
 window.__kaspaEngineStep = "kachat-shell-step-71";
 
 const engine = new KaspaEngine({ log: appendEngineLog });
+// .kas profiles saved before they stopped loading are dropped (iOS d6ded9d).
+engine.dropKnsProfileCache?.();
 engine.onConnectionState?.(() => {
   updateServiceSummary();
 });
@@ -1370,7 +1372,7 @@ const CHAT_MENTION_TOKEN_RE = /@\{?(kaspa(?:test)?:[a-z0-9]{20,})\}?/gi;
 // Display label for a mention: the person's KNS domain when known (what the user asked to see),
 // otherwise their contact name / short address. Read from the synchronous KNS cache.
 function mentionDisplayLabel(address) {
-  const info = engine.peekKnsAddressInfo?.(address);
+  const info = engine.knsNamesAsIdentity ? engine.peekKnsAddressInfo?.(address) : null;
   const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
   if (domain) return domain; // includes the .kas suffix
   if (address === engine.address) return "You";
@@ -2397,7 +2399,9 @@ function displayNameForAddress(contact) {
 /// recently. The profile cache already picks better than that - the first owned domain with any
 /// profile content - and "most recently created" would misrepresent who someone is.
 function knsDomainForAddress(address) {
-  if (!address) return null;
+  // A .kas name is no one's identity in KaChat (iOS 509c0fe): with no .kachat name, people read as
+  // the name you gave them, else their address.
+  if (!address || !engine.knsNamesAsIdentity) return null;
   const info = engine.peekKnsAddressInfo?.(address);
   if (info?.explicitPrimaryDomain) return info.explicitPrimaryDomain;
   return engine.peekKnsAddressProfile?.(address)?.domainName || null;
@@ -2407,6 +2411,25 @@ function knsDomainForAddress(address) {
 // name and its address has an explicit on-chain primary domain, adopt it as
 // contact.name so it becomes the single source of truth everywhere (sidebar,
 // header, Chat Info) instead of being recomputed separately in each place.
+/// Once per account (iOS 509c0fe): a contact whose name was only ever its .kas domain - every
+/// auto-named contact - goes back to unnamed, so it reads as its address. A name you typed
+/// yourself is kept.
+const DOMAIN_NAMES_REVERTED_KEY = "kachat-domain-names-reverted-v1";
+function revertDomainContactNamesOnce() {
+  if (!engine.address || engine.knsNamesAsIdentity) return;
+  const key = accountScopedKey(DOMAIN_NAMES_REVERTED_KEY);
+  try { if (localStorage.getItem(key) === "1") return; } catch { return; }
+  let changed = 0;
+  for (const contact of state.contacts || []) {
+    if (!contact || contact.nameIsCustom || !/\.kas$/i.test(String(contact.name || "").trim())) continue;
+    contact.name = shortAddress(contact.address);
+    contact.avatar = initialsFor(contact.name);
+    contact.updatedAt = Date.now();
+    changed += 1;
+  }
+  try { localStorage.setItem(key, "1"); } catch { /* fine */ }
+  if (changed) { schedulePersistState(); try { renderChats(); } catch { /* not ready */ } }
+}
 function applyKnsPrimaryDomainToContact(contact) {
   if (!contact || contact.nameIsCustom) return false;
   const domain = knsDomainForAddress(contact.address);
@@ -3194,6 +3217,10 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   pendingInitialCatchUp = true;
   liveSinceMs = Date.now();
   state = buildFullyRestoredState();
+  // Your own chat is there from the moment the account is created, imported or opened (iOS
+  // ensureSelfConversation), already first in the list.
+  if (engine.address === clean) { try { ensureSelfChatForSync(); } catch { /* fine */ } }
+  if (engine.address === clean) { try { revertDomainContactNamesOnce(); } catch { /* fine */ } }
   refreshSubscriptionAddresses({ restart: false });
   // Per-account Chats Payment Privacy: switching accounts applies that
   // account's stored value immediately (Settings toggle included).
@@ -4318,14 +4345,16 @@ function ensureSelfConversation() {
   return { contact, conversationEntry };
 }
 
-// Keep a "Note to Self" chat present (unless the user deleted it) so it appears in the list to
-// write in, AND so the per-contact COMM sweep runs against your own address — that's what carries
-// your notes-to-self across all your devices. Idempotent; respects a prior self-chat deletion.
+// Keep the "Note to Self" chat present so it appears in the list to write in, AND so the
+// per-contact COMM sweep runs against your own address — that's what carries your notes-to-self
+// across all your devices. Idempotent; it cannot be deleted (iOS ef4f183).
 function ensureSelfChatForSync() {
   const myAddress = engine.address;
   if (!myAddress) return;
   normalizeSelfContact((state.contacts || []).find((entry) => entry.address === myAddress));
-  if (loadDeletedContactAddresses().has(myAddress)) return; // respect deletion
+  // Your own chat always exists (iOS ef4f183): an earlier deletion of it is undone.
+  const deletedMap = loadDeletedContactMap();
+  if (deletedMap[myAddress]) { delete deletedMap[myAddress]; saveDeletedContactMap(deletedMap); }
   const hasConversation = (state.conversations || []).some((cv) => contactForConversation(cv)?.address === myAddress);
   if (!hasConversation) ensureSelfConversation();
 }
@@ -4340,8 +4369,6 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     saveStrangerPaymentState(store);
     return 0;
   }
-  // The user deleted the self-chat — respect it.
-  if (loadDeletedContactAddresses().has(myAddress)) return 0;
   let txs = [];
   try {
     const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(myAddress)}/full-transactions?limit=20&offset=0&resolve_previous_outpoints=light`;
@@ -4869,10 +4896,12 @@ function updateProfileHero(info, profileInfo) {
   const avatarEl = document.querySelector("[data-profile-hero-avatar]");
   const nameEl = document.querySelector("[data-profile-hero-name]");
   const bioEl = document.querySelector("[data-profile-hero-bio]");
-  const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
+  // Your domain name (a .kachat name, once they exist) or your short address - never the account
+  // name, which is your own label, and never a .kas name (iOS 3041164, 509c0fe).
+  const domain = engine.knsNamesAsIdentity ? (info?.explicitPrimaryDomain || info?.primaryDomain || "") : "";
   const displayName = domain
     ? (domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain)
-    : (activeAccountMetadata().name || "Account");
+    : shortAddress(engine.address || "");
   if (nameEl) nameEl.textContent = displayName;
   const bio = profileInfo?.profile?.bio || "";
   if (bioEl) { bioEl.hidden = !bio; bioEl.textContent = bio; }
@@ -8503,9 +8532,9 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
 // kachat.kas and jumps straight into that chat in payment mode.
-const APP_VERSION = "5.1.0";
+const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 72;
+const APP_BUILD = 73;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12446,7 +12475,8 @@ function renderChats() {
 // though renderChats() runs often.
 let knsChatListRefreshInFlight = false;
 async function refreshVisibleKnsNames(visibleConversations) {
-  if (knsChatListRefreshInFlight || !engine.address) return;
+  // The contact KNS sweep only ever named people; with .kas names off as identity it has nothing to do.
+  if (knsChatListRefreshInFlight || !engine.address || !engine.knsNamesAsIdentity) return;
   const contacts = visibleConversations
     .map((entry) => contactForConversation(entry))
     .filter((contact) => contact?.address);
@@ -13527,6 +13557,8 @@ function renderChatInfoDomains(info) {
   // iOS DISABLES its KNS Domains row at zero domains rather than hiding it, so the screen keeps
   // the same shape for every contact instead of resizing as lookups land.
   if (row) row.disabled = domains.length === 0;
+  // User Info drops its KNS Domains card (iOS 509c0fe): a .kas name says nothing about who this is.
+  if (row) row.hidden = !engine.knsNamesAsIdentity;
   if (!domains.length) {
     list.replaceChildren();
     return;
@@ -14850,7 +14882,9 @@ function visibleGroups() {
 // Selection is per-tab: the Group Chats tab acts on selectedGroupIds, everything else on
 // selectedChatConversationIds.
 function selectionIsGroups() { return activeChatsListTab === "groups"; }
+function selectionIsRooms() { return activeChatsListTab === "public"; }
 function activeSelectionCount() {
+  if (selectionIsRooms()) { try { return roomSelectionState().count; } catch { return 0; } }
   return selectionIsGroups() ? selectedGroupIds.size : selectedChatConversationIds.size;
 }
 
@@ -14864,7 +14898,12 @@ function updateChatSelectionBar() {
   if (markUnread) markUnread.disabled = disabled;
   if (deleteButton) deleteButton.disabled = disabled;
   if (chatSelectAll) {
-    if (selectionIsGroups()) {
+    if (selectionIsRooms()) {
+      let rooms = { total: 0, allSelected: false };
+      try { rooms = roomSelectionState(); } catch { /* not started */ }
+      chatSelectAll.textContent = rooms.allSelected ? "Deselect All" : "Select All";
+      chatSelectAll.disabled = rooms.total === 0;
+    } else if (selectionIsGroups()) {
       const visible = visibleGroups();
       const allSelected = visible.length > 0 && visible.every((g) => selectedGroupIds.has(g.groupId));
       chatSelectAll.textContent = allSelected ? "Deselect All" : "Select All";
@@ -14890,6 +14929,7 @@ function setChatSelectionMode(active) {
   if (chatSelectToggle) chatSelectToggle.textContent = active ? "Cancel" : "Select";
   if (chatSelectAll) chatSelectAll.hidden = !active;
   if (appSidebar) appSidebar.classList.toggle("selecting-chats", active);
+  try { setRoomSelectionMode(active && selectionIsRooms()); } catch { /* rooms not started */ }
   updatePublicChatsSettingsButton();
   updateChatSelectionBar();
   renderChats();
@@ -14900,6 +14940,7 @@ chatSelectToggle?.addEventListener("click", () => setChatSelectionMode(!chatSele
 
 chatSelectAll?.addEventListener("click", () => {
   if (!chatSelectionModeActive) return;
+  if (selectionIsRooms()) { toggleSelectAllRooms(); updateChatSelectionBar(); return; }
   if (selectionIsGroups()) {
     const visible = visibleGroups();
     const allSelected = visible.length > 0 && visible.every((g) => selectedGroupIds.has(g.groupId));
@@ -14968,6 +15009,7 @@ function openPublicChatsTab() {
 }
 
 document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () => {
+  if (selectionIsRooms()) { markSelectedRooms(true); setChatSelectionMode(false); showCopyToast("Marked as read"); return; }
   if (selectionIsGroups()) {
     for (const id of selectedGroupIds) setGroupUnread(id, 0);
     setChatSelectionMode(false);
@@ -14984,6 +15026,7 @@ document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () =>
 });
 
 document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () => {
+  if (selectionIsRooms()) { markSelectedRooms(false); setChatSelectionMode(false); showCopyToast("Marked as unread"); return; }
   if (selectionIsGroups()) {
     for (const id of selectedGroupIds) {
       if (Number(groupUnreadFor(id) || 0) === 0) setGroupUnread(id, 1);
@@ -15004,6 +15047,18 @@ document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () 
 });
 
 document.querySelector("[data-chat-delete-selected]")?.addEventListener("click", async () => {
+  if (selectionIsRooms()) {
+    const count = roomSelectionState().count;
+    if (!count) return;
+    if (!await confirmDialog({
+      title: `Delete ${count} Public Chat${count === 1 ? "" : "s"}?`,
+      message: "Rooms you added are removed with their messages. Default rooms are only switched off - turn them back on any time in Public Chats settings (the gear).",
+      confirmLabel: "Delete", destructive: true,
+    })) return;
+    deleteSelectedRooms();
+    setChatSelectionMode(false);
+    return;
+  }
   if (selectionIsGroups()) {
     const count = selectedGroupIds.size;
     if (!count) return;
@@ -15037,7 +15092,8 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
 // Removes chats and their contacts from this device. Shared by the Select-mode bulk bar and the
 // row menu, so both delete exactly the same way (iOS deleteConversations).
 function deleteConversationsByIds(ids) {
-  const idsToDelete = new Set(ids);
+  // Your chat with yourself cannot be deleted (iOS ef4f183): bulk delete skips it.
+  const idsToDelete = new Set(ids.filter((id) => !isSelfConversation(state.conversations.find((entry) => entry.id === id))));
   if (!idsToDelete.size) return;
   const contactIdsToDelete = new Set(
     state.conversations.filter((entry) => idsToDelete.has(entry.id)).map((entry) => entry.contactId),
@@ -15078,7 +15134,8 @@ onContextGesture(chatList, async (event) => {
         title: isSilent ? "Unsilence" : "Silence",
         subtitle: isSilent ? "Notifications from this chat resume." : "No notification from this chat, whatever your app-wide setting says.",
       },
-      { id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true },
+      // Your own chat has no Delete (iOS ef4f183).
+      ...(isSelfConversation(conversationEntry) ? [] : [{ id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true }]),
     ],
   });
   if (!choice) return;
@@ -18882,12 +18939,14 @@ function openCreateAccountModal() {
   pendingNewAccount = null;
   if (createAccountError) { createAccountError.hidden = true; createAccountError.textContent = ""; }
   if (createAccountErrorSeed) createAccountErrorSeed.hidden = true;
-  if (createNameInput) createNameInput.value = "My Account";
+  // Neither a name nor a seed length is chosen for you (iOS 3a5c852): both must be picked, and
+  // Generate Account stays disabled until they are.
+  if (createNameInput) createNameInput.value = "";
   if (createPassphraseInput) { createPassphraseInput.value = ""; createPassphraseInput.type = "password"; }
   if (createPassphraseConfirm) createPassphraseConfirm.value = "";
   if (createPassphraseError) createPassphraseError.hidden = true;
-  const w24 = document.querySelector('input[name="wordCount"][value="24"]');
-  if (w24) w24.checked = true;
+  document.querySelectorAll('input[name="wordCount"]').forEach((input) => { input.checked = false; });
+  updateGenerateAccountEnabled();
   showCreateStep("setup");
   if (createAccountModal) createAccountModal.hidden = false;
   queueMicrotask(() => createNameInput?.focus());
@@ -18913,9 +18972,17 @@ function renderSeedGrid(phrase) {
 }
 
 // STEP 1 → STEP 2: generate a phrase and show it for backup (no derivation yet).
+function updateGenerateAccountEnabled() {
+  if (!generateAccountBtn) return;
+  const named = String(createNameInput?.value || "").trim().length > 0;
+  const lengthPicked = Boolean(document.querySelector('input[name="wordCount"]:checked'));
+  generateAccountBtn.disabled = !(named && lengthPicked);
+}
+createNameInput?.addEventListener("input", updateGenerateAccountEnabled);
+document.querySelectorAll('input[name="wordCount"]').forEach((input) => input.addEventListener("change", updateGenerateAccountEnabled));
 generateAccountBtn?.addEventListener("click", async () => {
   const name = String(createNameInput?.value || "").trim();
-  const wordCount = Number(document.querySelector('input[name="wordCount"]:checked')?.value || 24);
+  const wordCount = Number(document.querySelector('input[name="wordCount"]:checked')?.value || 0);
   if (!name) { if (createAccountError) { createAccountError.textContent = "Enter an account name."; createAccountError.hidden = false; } return; }
   if (![12, 24].includes(wordCount)) { if (createAccountError) { createAccountError.textContent = "Choose a 12 or 24 word seed phrase."; createAccountError.hidden = false; } return; }
   generateAccountBtn.disabled = true;
@@ -21163,6 +21230,8 @@ queueMicrotask(async () => {
       chattingAddress: () => engine.address || "",
       appWideBroadcastIndexer: () => String(getEndpoint("broadcastIndexer") || ""),
       drawQr: (canvas, value) => engine.drawQrFor(canvas, value, { dark: "#06110f", light: "#ffffff" }),
+      // Picking rooms in Select mode updates the shared bar's count and Select All.
+      onRoomSelectionChanged: () => updateChatSelectionBar(),
       contactNameFor: (address) => {
         const contact = (state.contacts || []).find((c) => c.address === address);
         return contact ? (displayNameForAddress(contact) || "") : "";
@@ -21309,7 +21378,7 @@ queueMicrotask(async () => {
     displayNameFor: (address) => {
       const contact = (state.contacts || []).find((c) => c.address === address);
       if (contact) return displayNameForAddress(contact);
-      return knsDomainForAddress(address) || engine.peekKnsAddressInfo?.(address)?.primaryDomain || shortAddress(address);
+      return knsDomainForAddress(address) || shortAddress(address);
     },
     avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
     estimateFeeKas: (payloadBytes, opts) => engine.estimateMessageFee(payloadBytes, opts),
@@ -21331,7 +21400,7 @@ queueMicrotask(async () => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
         return contact ? displayNameForAddress(contact) : shortAddress(address);
       },
-      ownDisplayName: () => String(activeAccountMetadata()?.name || engine.peekKnsAddressInfo?.(engine.address)?.primaryDomain || "KaChat").trim() || "KaChat",
+      ownDisplayName: () => String(activeAccountMetadata()?.name || "KaChat").trim() || "KaChat",
       avatarHtmlFor: (address) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
         return contact ? avatarHtmlFor(contact, "message-avatar") : "";
@@ -21611,9 +21680,7 @@ function groupOsPingAllowed(groupId) {
 
 function groupNotificationSenderName(senderAddress) {
   const contact = (state.contacts || []).find((c) => c.address === senderAddress);
-  return (contact?.name || "").trim()
-    || engine.peekKnsAddressInfo?.(senderAddress)?.primaryDomain
-    || shortAddress(senderAddress);
+  return (contact?.name || "").trim() || shortAddress(senderAddress);
 }
 
 // Single entry point for "an incoming group message just landed" — applies this group's
@@ -21636,8 +21703,8 @@ function maybeNotifyGroupIncoming(groupId, senderAddress, text, id, createdAt) {
   if (isGroupMemberHidden(groupId, senderAddress)) return;
   // Muted is the softer one: their messages stay in the thread, they just stop pinging.
   if (isGroupMemberMuted(groupId, senderAddress)) return;
-  if (textMentionsMe(text)) { maybeRecordGroupMention(groupId, senderAddress, text, id, createdAt); return; }
-  if (mode !== "all" && !isReplyToMyGroupMessage(text)) return;
+  if (GROUP_MENTIONS_ENABLED && textMentionsMe(text)) { maybeRecordGroupMention(groupId, senderAddress, text, id, createdAt); return; }
+  if (GROUP_MENTIONS_ENABLED && mode !== "all" && !isReplyToMyGroupMessage(text)) return;
   if (!groupOsPingAllowed(groupId)) return;
   // Ordinary group traffic is higher volume than a mention, so it uses the same rule as the
   // 1:1 path: a real OS notification or nothing. (postDesktopNotification would otherwise fall
@@ -23588,7 +23655,7 @@ function openGroupManage(groupId) {
         <span>Silent Group Chat</span>
         <label class="switch-control"><input type="checkbox" data-group-notify-silent${isSilent ? " checked" : ""}><span></span></label>
       </div>
-      <div class="group-manage-toggle-row${isSilent ? " is-disabled" : ""}">
+      <div class="group-manage-toggle-row${isSilent ? " is-disabled" : ""}"${GROUP_MENTIONS_ENABLED ? "" : " hidden"}>
         <span>Only Notify if I'm Mentioned</span>
         <label class="switch-control"><input type="checkbox" data-group-notify-mentions${isMentionsOnly ? " checked" : ""}${isSilent ? " disabled" : ""}><span></span></label>
       </div>`;
@@ -24081,7 +24148,12 @@ function groupMentionCandidates(query) {
     .slice(0, 6);
 }
 function closeGroupMentions() { if (groupMentionSuggestions) { groupMentionSuggestions.hidden = true; groupMentionSuggestions.innerHTML = ""; } }
+// @mentions are off until they are rebuilt on .kachat (iOS 08dd836): no suggestions, typed
+// @names go out as plain text, and "Only Notify if I'm Mentioned" is hidden and not applied (the
+// stored choice is kept, so no group goes quiet).
+const GROUP_MENTIONS_ENABLED = false;
 function refreshGroupMentions() {
+  if (!GROUP_MENTIONS_ENABLED) return closeGroupMentions();
   if (!groupComposerInput || !groupMentionSuggestions) return;
   const value = groupComposerInput.value;
   const caret = groupComposerInput.selectionStart ?? value.length;
@@ -24112,6 +24184,7 @@ function insertGroupMention(address, handle) {
 // GroupMentionCodec so mentions decode cross-platform (desktop's old @{address} form did not).
 function encodeGroupMentions(text) {
   let out = String(text || "");
+  if (!GROUP_MENTIONS_ENABLED) return out;
   // Autocomplete-tracked handles first (exactly what the user inserted).
   for (const [handle, address] of [...groupDraftMentions.entries()].sort((a, b) => b[0].length - a[0].length)) {
     out = out.split(handle).join(`@${address}`);

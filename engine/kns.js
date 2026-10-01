@@ -533,6 +533,7 @@ export async function refreshIfNeeded(addresses, options = {}) {
   const eligible = (addresses || []).filter((address) =>
     !pendingFetches.has(address) && backoffFor(address, lastAttemptAt, failureCounts, domainCache[address]));
   await Promise.all(eligible.map((address) => fetchAddressInfo(address, options)));
+  if (options.profiles === false) return eligible.length;
   const eligibleProfiles = (addresses || []).filter((address) =>
     !pendingProfileFetches.has(address) && backoffFor(address, lastProfileAttemptAt, profileFailureCounts, profileCache[address]));
   await Promise.all(eligibleProfiles.map((address) => fetchAddressProfile(address, options)));
@@ -554,6 +555,13 @@ export function clearKnsCache(address) {
   delete domainCache[address];
   delete profileCache[address];
   saveJsonMap(DOMAIN_CACHE_KEY, domainCache);
+  saveJsonMap(PROFILE_CACHE_KEY, profileCache);
+}
+
+/** Drops every saved .kas profile (iOS d6ded9d strips profiles cached before profiles stopped
+ *  loading); domain info stays. */
+export function dropProfileCache() {
+  for (const key of Object.keys(profileCache)) delete profileCache[key];
   saveJsonMap(PROFILE_CACHE_KEY, profileCache);
 }
 
