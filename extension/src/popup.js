@@ -17,6 +17,8 @@ import { showKachatMarket, kachatWordmark } from "./market.js";
 import { showSettings, showLicenses } from "./settings.js";
 import { showApproval } from "./approve.js";
 import * as dock from "./dock.js";
+import { showColdStorage } from "./cold.js";
+import { showPortfolio } from "./portfolio.js";
 import { showCameraPermissionPage } from "./camera.js";
 
 const params = new URLSearchParams(location.search);
@@ -46,6 +48,8 @@ async function boot() {
 dock.showsDock("home", "manage-chat", "manage-list", "manage-spending", "domains", "domain-detail",
   "settings", "licenses", "kachat-market", "kachat-listing", "identity-picker", "identity-detail");
 dock.registerTab("profile", () => showHome());
+dock.registerTab("cold", () => showColdStorage());
+dock.registerTab("portfolio", () => showPortfolio());
 
 setHandlers({
   home: () => showHome(),

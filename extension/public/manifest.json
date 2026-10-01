@@ -58,6 +58,8 @@
     "https://api.kaspa.org/*",
     "https://api.knsdomains.org/*",
     "https://api.coingecko.com/*",
+    "https://query1.finance.yahoo.com/*",
+    "https://api.gateio.ws/*",
     "https://kaspaname.com/*",
     "https://api.dotk.name/*",
     "https://*.kaspa.green/*",
