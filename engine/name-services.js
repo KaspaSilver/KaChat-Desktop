@@ -1,3 +1,5 @@
+import { IS_TESTNET } from "./network.js";
+import { normalize as kachatNormalize, isValid as kachatIsValid } from "./kachat-names/codec.js";
 // The Kaspa name services besides KNS (which engine/kns.js covers for `.kas`), plus the
 // priority resolution that asks every service at once. A port of iOS
 // KaChat/Services/NameServices.swift (5.2):
@@ -59,7 +61,8 @@ const REQUEST_TIMEOUT_MS = 15000; // iOS: timeoutIntervalForRequest = 15
  */
 
 const SERVICE_TABLE = {
-  kachat: { serviceName: "KaChat Names", websiteURL: null, websiteName: null, isLive: false },
+  // Live on testnet only (the testnet-10 registry, iOS 25cc2c9); mainnet waits for an audit.
+  kachat: { serviceName: "KaChat Names", websiteURL: null, websiteName: null, isLive: IS_TESTNET },
   kas: { serviceName: "KNS", websiteURL: "https://app.knsdomains.org", websiteName: "knsdomains.org", isLive: true },
   k: { serviceName: "dotk", websiteURL: "https://dotk.name", websiteName: "dotk.name", isLive: true },
   kaspa: { serviceName: "Kaspa Names", websiteURL: "https://kaspaname.com", websiteName: "kaspaname.com", isLive: true },
@@ -503,11 +506,11 @@ export async function ownedNamesForAddresses(addresses, { xOnlyPubKeyFor = null,
  * @param {string} [deps.network="mainnet"] `.kaspa` is left out off mainnet.
  * @returns {Promise<NameResolution[]>} [] when the label is empty.
  */
-export async function resolveEverywhere(input, { resolveKas, network = "mainnet" } = {}) {
+export async function resolveEverywhere(input, { resolveKas, resolveKachat, network = "mainnet" } = {}) {
   const { label } = splitTypedName(input);
   if (!label) return [];
   const settled = await Promise.all([
-    resolveKachatEntry(label),
+    resolveKachatEntry(label, resolveKachat),
     typeof resolveKas === "function" ? resolveKasEntry(label, resolveKas) : null,
     resolveDotkEntry(label, network),
     resolveKaspaNamesEntry(label, network),
@@ -535,10 +538,22 @@ function entry(tld, canonical, address, failed) {
   return { tld, name: `${canonical}.${tld}`, address: failed ? null : (address ?? null), state };
 }
 
-// `.kachat` is not live: no rule, no lookup. iOS omits it; this reports it as notLive.
-async function resolveKachatEntry(label) {
-  if (NAME_SERVICES.kachat.isLive) return null; // nothing to ask yet once live - port then
-  return { tld: "kachat", name: `${label.toLowerCase()}.kachat`, address: null, state: "notLive" };
+// `.kachat`: not live on mainnet (reported as notLive). On testnet the registry's owner of an
+// ACTIVE name - a name in grace or lapsed does not resolve (KACHAT_NAMES.md section 4). The app
+// supplies the lookup (`resolveKachat(canonical) -> address|null`, throws when unreadable).
+async function resolveKachatEntry(label, resolveKachat) {
+  if (!NAME_SERVICES.kachat.isLive) {
+    return { tld: "kachat", name: `${label.toLowerCase()}.kachat`, address: null, state: "notLive" };
+  }
+  const canonical = kachatNormalize(label);
+  if (!kachatIsValid(canonical) || typeof resolveKachat !== "function") return null;
+  try {
+    const address = await resolveKachat(canonical);
+    return entry("kachat", canonical, typeof address === "string" ? address : null, false);
+  } catch (error) {
+    console.warn(`[NameServices] .kachat lookup failed: ${error?.message || error}`);
+    return entry("kachat", canonical, null, true);
+  }
 }
 
 async function resolveKasEntry(label, resolveKas) {

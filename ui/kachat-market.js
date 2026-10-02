@@ -10,15 +10,31 @@
 //
 // Also here: "Edit .kachat Profile" (the profile editor's layout with nothing in it yet) and the
 // .kachat Setup Guide it opens (claim, avatar, banner, details, done - each step Coming soon).
+//
+// On TESTNET (testnet-10, iOS 5df42b4) it is live instead (ui/kachat-names-live.js): a Testnet
+// badge, search with real availability and price, Claim, registrations in flight, the registry's
+// listings / names / offers / activity, the live name detail with its transaction sheets, and the
+// live address profile editor. This file keeps the layers and the mockups, and hands the live
+// screens what they need through initKachatLive.
 
 import "./kachat-market.css";
 import { KAS_UNIT } from "../engine/network.js";
+import { kachatNamesLive } from "./kachat-names-runtime.js";
+import {
+  initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
+  liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml, liveRegistrationsHtml,
+  livePageHtml, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
+} from "./kachat-names-live.js";
+
+/** Your Domains > .kachat on testnet (iOS KachatLiveDomainsTab); see kachat-names-live.js. */
+export { renderKachatLiveDomainsTab };
 
 let deps = null;
 let marketEl = null;
 
-// Market navigation. view: "home" | "listing". page: "market" | "myNames" | "activity".
-const state = { view: "home", page: "market", search: "", homeScroll: 0 };
+// Market navigation. view: "home" | "listing" | "name" (a live name, testnet). page: "market" |
+// "myNames" | "activity". detail: the live name detail while view is "name".
+const state = { view: "home", page: "market", search: "", homeScroll: 0, detail: null };
 
 /** A listing as a real one will hand it in; no listing exists yet, so its seller is unknown and
  *  Message stays disabled. With a seller, Message opens a 1:1 chat through deps.openChat. */
@@ -135,6 +151,8 @@ function bindEscape() {
   escapeBound = true;
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !layers.length) return;
+    // An app dialog or the password prompt over a sheet takes its own Escape first.
+    if (document.querySelector(".app-dialog-backdrop:not([hidden]), [data-password-modal]:not([hidden])")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     closeLayer(layers[layers.length - 1]);
@@ -198,11 +216,12 @@ function heroHtml() {
       <span class="kmkt-hero-mark">${KACHAT_WORDMARK_SVG}</span>
       <h2 class="kmkt-hero-title">Your name on KaChat</h2>
       <p class="kmkt-hero-body">Claim a .kachat name, or buy and sell them peer to peer. The name and the payment settle together on Kaspa - nobody holds either in between.</p>
-      ${comingSoonPill()}
+      <div class="kmkt-hero-status" data-kmkt-hero-status>${liveHeroStatusHtml(comingSoonPill())}</div>
     </section>`;
 }
 
 function searchResultHtml() {
+  if (liveHubIsLive()) return liveSearchResultHtml(state.search);
   const typed = state.search.trim().toLowerCase();
   if (!typed) return "";
   return `
@@ -303,9 +322,15 @@ function activityPageHtml() {
 }
 
 function pageHtml() {
+  if (liveHubIsLive()) return livePageHtml(state.page);
   if (state.page === "myNames") return myNamesPageHtml();
   if (state.page === "activity") return activityPageHtml();
   return marketPageHtml();
+}
+
+/** How it works, and on testnet the refresh control (iOS pull to refresh). */
+function headerActionsHtml() {
+  return `${liveRefreshButtonHtml()}<button class="kaposts-icon-button" type="button" data-kmkt-how aria-label="How it works" title="How it works">${ICON.question}</button>`;
 }
 
 function homeHtml() {
@@ -313,10 +338,11 @@ function homeHtml() {
     <div class="kmkt-root">
       <div class="kaposts-header kmkt-header">
         <h1 class="kaposts-title">.kachat</h1>
-        <button class="kaposts-icon-button" type="button" data-kmkt-how aria-label="How it works" title="How it works">${ICON.question}</button>
+        <div class="kaposts-header-actions" data-kmkt-header-actions>${headerActionsHtml()}</div>
       </div>
       ${heroHtml()}
       ${searchCardHtml()}
+      <div class="kmkt-live-pending" data-kmkt-live-pending>${liveRegistrationsHtml()}</div>
       ${tabsHtml()}
       <div data-kmkt-page-body>${pageHtml()}</div>
     </div>`;
@@ -494,7 +520,11 @@ function openHowItWorksSheet() {
     html: `
       ${navBar("How .kachat works", { trailing: { label: "Done", bold: true } })}
       <div class="kmkt-sheet-body kmkt-form">
-        ${formSection(rows, { footer: "Nothing here is live yet." })}
+        ${formSection(rows, {
+          footer: liveHubIsLive()
+            ? "Live on Testnet: names, prices and payments here use TKAS on testnet-10. Mainnet names come after an audit."
+            : "Nothing here is live yet.",
+        })}
       </div>`,
   });
 }
@@ -518,12 +548,59 @@ function screen() {
 function render() {
   const el = screen();
   if (!el) return;
-  el.innerHTML = state.view === "listing" ? listingHtml() : homeHtml();
+  if (state.view === "name" && state.detail) el.innerHTML = state.detail.html();
+  else el.innerHTML = state.view === "listing" ? listingHtml() : homeHtml();
+}
+
+/** The live hub changed (kachat-names-live.js): re-render the parts that show it. */
+function onLiveChanged(kind) {
+  const el = screen();
+  if (!el || state.view !== "home") return;
+  if (kind === "ready") {
+    const scroll = el.scrollTop;
+    render();
+    el.scrollTop = scroll;
+    return;
+  }
+  const set = (selector, html) => { const part = el.querySelector(selector); if (part) part.innerHTML = html; };
+  if (kind === "search") { set("[data-kmkt-search-result]", searchResultHtml()); return; }
+  if (kind === "pending") { set("[data-kmkt-live-pending]", liveRegistrationsHtml()); return; }
+  set("[data-kmkt-header-actions]", headerActionsHtml());
+  set("[data-kmkt-hero-status]", liveHeroStatusHtml(comingSoonPill()));
+  set("[data-kmkt-live-pending]", liveRegistrationsHtml());
+  if (kind !== "refresh") {
+    set("[data-kmkt-search-result]", searchResultHtml());
+    set("[data-kmkt-page-body]", pageHtml());
+  }
+}
+
+/** A live name (testnet): its detail replaces the home page, Back returns to it. */
+function openNameDetail(info) {
+  const el = screen();
+  if (!el) return;
+  if (state.view === "home") state.homeScroll = el.scrollTop;
+  state.detail?.destroy();
+  state.detail = createNameDetail(info, { mode: "market", owner: "market", host: () => screen() });
+  state.view = "name";
+  render();
+  el.scrollTop = 0;
+  state.detail.attach();
+}
+
+function goHome() {
+  state.detail?.destroy();
+  state.detail = null;
+  state.view = "home";
+  render();
+  if (marketEl) marketEl.scrollTop = state.homeScroll;
 }
 
 function onMarketClick(event) {
   const target = event.target;
+  if (target.closest("[data-kmkt-back]")) { goHome(); return; }
+  if (state.view === "name") { state.detail?.onClick(event); return; }
   if (target.closest("[data-kmkt-how]")) { openHowItWorksSheet(); return; }
+  if (target.closest("[data-kmkt-refresh]")) { liveHubRefresh(); return; }
 
   const tab = target.closest("[data-kmkt-page]");
   if (tab) {
@@ -540,18 +617,13 @@ function onMarketClick(event) {
     return;
   }
 
+  if (liveHubIsLive() && liveHubClick(event)) return;
+
   if (target.closest("[data-kmkt-open-listing]")) {
     state.homeScroll = marketEl.scrollTop;
     state.view = "listing";
     render();
     marketEl.scrollTop = 0;
-    return;
-  }
-
-  if (target.closest("[data-kmkt-back]")) {
-    state.view = "home";
-    render();
-    marketEl.scrollTop = state.homeScroll;
     return;
   }
 
@@ -568,6 +640,7 @@ function onMarketInput(event) {
   const input = event.target.closest("[data-kmkt-search]");
   if (!input) return;
   state.search = input.value;
+  if (liveEnabled()) liveSearchInput(state.search);
   const result = marketEl.querySelector("[data-kmkt-search-result]");
   if (result) result.innerHTML = searchResultHtml();
 }
@@ -578,6 +651,8 @@ function onMarketInput(event) {
 
 export function openKachatProfileEditor() {
   if (layers.some((layer) => layer.owner === "profile")) return;
+  // Testnet: the live address profile editor (iOS KachatLiveProfileEditor).
+  if (liveEnabled()) { openLiveProfileEditor("profile"); return; }
   const fieldRows = PROFILE_FIELDS.map((field) => `<div class="kmkt-form-row kmkt-muted">${esc(field)}</div>`).join("");
   openLayer({
     owner: "profile",
@@ -629,9 +704,9 @@ function guideStepHtml(step) {
         ${guideStepHeader("Claim your .kachat name", "It's the name people see you as across KaChat - in chats, on posts and on your profile link. Without one, people see your address.", `<span class="kmkt-guide-mark">${KACHAT_WORDMARK_SVG}</span>`)}
         <div class="kmkt-guide-claim">
           <div class="kmkt-guide-field"><span class="kmkt-placeholder-text">yourname</span><span class="kmkt-search-suffix">.kachat</span></div>
-          <small class="kmkt-muted">Registration isn't open yet.</small>
+          <small class="kmkt-muted">${kachatNamesLive() ? "On Testnet, claim one in Kaspa Hub &gt; .kachat." : "Registration isn't open yet."}</small>
         </div>
-        ${comingSoonPill()}`;
+        ${kachatNamesLive() ? "" : comingSoonPill()}`;
     case "avatar":
       return `
         ${guideStepHeader("Add a profile photo", "Your avatar shows next to your name everywhere in KaChat.", ICON.personCircle)}
@@ -703,9 +778,22 @@ export function openKachatSetupGuide() {
 // Lifecycle
 // ---------------------------------------------------------------------------------------------
 
-/** deps: { escapeHtml, showToast, openChat: (address) => void, confirmDialog } */
+/** deps: { escapeHtml, showToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
+ *  openChat(address), deviceLock(reason) -> Promise<bool>, walletAddress(), contactNameFor(address),
+ *  explorerTxUrl(txid), explorerAddressUrl(address), shortAddress(address), onIdentityChanged() } */
 export function initKachatMarket(dependencies) {
   deps = dependencies || {};
+  initKachatLive({
+    getDeps: () => deps,
+    esc,
+    ICON,
+    openLayer,
+    closeLayer,
+    navBar,
+    sectionHeader,
+    hubChanged: onLiveChanged,
+    openNameDetail,
+  });
   screen();
 }
 
@@ -716,12 +804,18 @@ export function showKachatMarket() {
   const scroll = el.scrollTop;
   render();
   el.scrollTop = scroll;
+  liveHubShow();
+  // A name typed before the screen went off is looked up again (the registry may have moved).
+  if (liveEnabled() && state.search.trim()) liveSearchInput(state.search);
+  if (state.view === "name") state.detail?.attach();
 }
 
 /** The .kachat screen went off: its own sheets close with it (the profile editor and the setup
  *  guide are not the market's and stay). Where you were - tab, listing, search - is kept. */
 export function hideKachatMarket() {
   closeLayersOwnedBy("market");
+  liveHubHide();
+  state.detail?.detach();
 }
 
 /** The ".kachat" tab of every screen that shows an address's history - Manage Addresses, Cold

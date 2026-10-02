@@ -1,0 +1,189 @@
+/* The live .kachat screens on testnet (ui/kachat-names-live.js; iOS KachatNamesLiveViews.swift).
+   Built on kachat-market.css (kmkt-*); theme tokens only, so both appearances follow :root. */
+
+/* ---- Small pieces ----------------------------------------------------------------------- */
+
+.kl-green { color: var(--ios-green); }
+.kl-orange { color: var(--ios-orange); }
+.kl-red { color: var(--ios-red); }
+
+.kl-spinner {
+  display: inline-block; flex: 0 0 auto; width: 18px; height: 18px;
+  border-radius: 50%; border: 2px solid var(--fill-secondary); border-top-color: var(--muted);
+  animation: kl-spin .8s linear infinite; vertical-align: middle;
+}
+@keyframes kl-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .kl-spinner { animation-duration: 2.4s; } }
+
+.kl-testnet-badge {
+  display: inline-block; align-self: center;
+  padding: 4px 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--ios-orange) 15%, transparent);
+  color: var(--ios-orange); font-size: 12px; font-weight: 700; line-height: 16px;
+}
+.kmkt-hero-status { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.kl-setup-error { margin: 0; padding: 0 32px; font-size: 12px; line-height: 16px; color: var(--muted); text-align: center; }
+
+.kl-status {
+  display: inline-block; flex: 0 0 auto; padding: 3px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; line-height: 14px;
+}
+.kl-status-active { color: var(--ios-green); background: color-mix(in srgb, var(--ios-green) 15%, transparent); }
+.kl-status-grace { color: var(--ios-orange); background: color-mix(in srgb, var(--ios-orange) 15%, transparent); }
+.kl-status-lapsed { color: var(--ios-red); background: color-mix(in srgb, var(--ios-red) 15%, transparent); }
+
+.kl-note { margin: 0; padding: 0 4px; font-size: 13px; line-height: 18px; color: var(--muted); }
+.kl-note-inline { margin: 0; font-size: 13px; line-height: 18px; }
+.kl-error { margin: 0; font-size: 12px; line-height: 16px; color: var(--ios-red); overflow-wrap: anywhere; }
+.kl-mono {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 16px;
+  color: var(--muted); overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
+}
+.kl-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--kaspa-ink); font-size: 14px; font-weight: 600; text-decoration: none;
+}
+.kl-link:hover { text-decoration: underline; }
+.kl-link .kmkt-ico { width: 15px; height: 15px; }
+
+/* The refresh control (iOS pull to refresh): spins while the registry refreshes. */
+.kl-refresh .kmkt-ico { width: 20px; height: 20px; }
+.kl-refresh.spinning .kmkt-ico { animation: kl-spin .9s linear infinite; }
+.kl-refresh:disabled { cursor: default; }
+.kl-nav-trailing { justify-self: end; display: inline-flex; }
+.kl-nav-icon {
+  display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--kaspa-ink); cursor: pointer;
+}
+.kl-nav-icon:hover { background: var(--row-hover); }
+
+/* ---- Rows ------------------------------------------------------------------------------- */
+
+.kl-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.kl-row-text strong {
+  max-width: 100%; font-size: 15px; font-weight: 600; line-height: 20px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-row-text small {
+  max-width: 100%; font-size: 12px; line-height: 16px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-row-text small.kl-orange { color: var(--ios-orange); font-size: 11px; }
+.kl-row-price { flex: 0 0 auto; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.kl-row-value { flex: 0 0 auto; font-size: 15px; color: var(--text); white-space: nowrap; }
+.kl-row-buttons { display: inline-flex; gap: 6px; flex: 0 0 auto; }
+.kl-at-badge {
+  width: 36px; height: 36px; flex: 0 0 auto; border-radius: 50%;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent); color: var(--kaspa-ink);
+}
+.kl-at-badge .kmkt-ico { width: 19px; height: 19px; stroke-width: 2; }
+
+/* A name row with a button beside it (Reclaim). */
+.kl-split {
+  display: flex; align-items: center; gap: 8px; padding-right: 12px;
+  background-image: linear-gradient(var(--line), var(--line));
+  background-size: calc(100% - var(--kmkt-inset)) .5px;
+  background-position: right bottom; background-repeat: no-repeat;
+}
+.kmkt-list > .kl-split:last-child { background-image: none; }
+.kl-split > .kmkt-row { flex: 1; min-width: 0; background-image: none; }
+
+.kl-search-link { width: 100%; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.kl-search-link:hover { background: color-mix(in srgb, var(--grouped-row) 92%, var(--text)); }
+
+.kl-empty { padding: 6px 0; }
+.kmkt-empty-card .kl-spinner { margin: 2px auto; }
+
+/* ---- Registrations in flight ------------------------------------------------------------ */
+
+.kmkt-live-pending { display: flex; flex-direction: column; gap: 12px; }
+.kmkt-live-pending:empty { display: none; }
+.kl-reg-card { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+.kl-reg-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.kl-reg-head strong { font-size: 17px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kl-reg-head .kmkt-ico { width: 22px; height: 22px; }
+.kl-reg-text { margin: 0; font-size: 15px; line-height: 20px; color: var(--muted); }
+.kl-reg-card small { font-size: 12px; }
+.kl-progress { height: 4px; border-radius: 999px; background: var(--fill-tertiary); overflow: hidden; }
+.kl-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--kaspa); transition: width .4s ease; }
+.kl-reg-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Destructive bordered buttons (iOS role: .destructive). */
+.kmkt-root .secondary-button.kl-danger, .kmkt-sheet .secondary-button.kl-danger {
+  background: color-mix(in srgb, var(--ios-red) 12%, transparent); color: var(--ios-red); border-color: transparent;
+}
+
+/* ---- Name detail ------------------------------------------------------------------------ */
+
+.kl-detail-body { display: flex; flex-direction: column; gap: 18px; padding-top: 8px; }
+.kl-name-art-text {
+  max-width: calc(100% - 32px); padding: 0 16px;
+  color: var(--on-accent-strong); font-size: 24px; font-weight: 800; line-height: 30px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-price { font-size: 20px; font-weight: 700; line-height: 25px; color: var(--text); }
+.kl-expiry { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.kl-expiry small { font-size: 12px; }
+.kl-action-grid { display: flex; flex-direction: column; gap: 10px; }
+.kl-action-grid .kmkt-action { min-height: 42px; }
+.kl-owner-icon { display: inline-flex; color: color-mix(in srgb, var(--kaspa-ink) 60%, transparent); flex: 0 0 auto; }
+.kl-owner-icon .kmkt-ico { width: 34px; height: 34px; stroke-width: 1.5; }
+.kl-owner .kmkt-seller-copy { gap: 3px; }
+
+/* ---- Sheets ----------------------------------------------------------------------------- */
+
+.kl-nav { flex: 0 0 auto; }
+.kl-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.kl-fieldset > .kmkt-form-section:first-child { margin-top: 8px; }
+.kl-fieldset + .kl-summary > .kmkt-form-section:first-child { margin-top: 20px; }
+.kl-summary > .kmkt-form-section:first-child { margin-top: 8px; }
+.kl-form-row > span:first-child { flex: 0 1 auto; min-width: 0; }
+.kl-form-value { flex: 1 1 auto; min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.kl-form-row.bold .kl-form-value { font-weight: 600; }
+.kmkt-form-footer.kl-red { color: var(--ios-red); }
+.kmkt-form-footer.kl-green { color: var(--ios-green); }
+.kmkt-form-button.kl-destructive { color: var(--ios-red); }
+.kmkt-form-button:disabled.kl-destructive { color: var(--label-tertiary); }
+.kmkt-form-button .kl-spinner { margin: 0 auto; }
+
+.kl-warning { justify-content: flex-start; align-items: flex-start; gap: 10px; color: var(--ios-red); font-size: 15px; line-height: 20px; }
+.kl-warning .kmkt-ico { width: 20px; height: 20px; margin-top: 1px; }
+.kl-sent { flex-direction: column; align-items: flex-start; gap: 6px; }
+.kl-sent-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.kl-sent small { font-size: 12px; line-height: 16px; }
+.kl-status-row { min-height: 0; padding-top: 8px; padding-bottom: 10px; }
+
+.kl-step-row { justify-content: flex-start; align-items: flex-start; gap: 12px; }
+.kl-step-num {
+  width: 22px; height: 22px; flex: 0 0 auto; border-radius: 50%;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent); color: var(--kaspa-ink);
+  font-size: 12px; font-weight: 700;
+}
+.kl-label-text { font-size: 15px; line-height: 20px; }
+
+/* Text fields in a form row. */
+.kl-input, .kl-textarea, .kl-select {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 0;
+  color: var(--text); font: inherit; font-size: 17px; line-height: 22px;
+}
+.kl-input::placeholder, .kl-textarea::placeholder { color: var(--placeholder); }
+.kl-input-trailing { text-align: right; }
+.kl-textarea { resize: vertical; min-height: 88px; }
+.kl-textarea-row { align-items: stretch; }
+.kl-select { flex: 0 1 auto; text-align: right; cursor: pointer; color: var(--kaspa-ink); }
+.kl-link-field { cursor: text; }
+.kl-link-field > span { flex: 0 0 auto; }
+.kl-input:disabled, .kl-textarea:disabled, .kl-select:disabled { opacity: .6; }
+
+/* ---- Your Domains > .kachat ------------------------------------------------------------- */
+
+.kl-domains { display: grid; gap: 12px; }
+.kl-domains-loading { display: flex; justify-content: center; padding: 24px 0; }
+.kl-domains-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 40px 16px; text-align: center;
+}
+.kl-domains-empty .kmkt-ico { width: 44px; height: 44px; }
+.kl-domains-empty strong { font-size: 17px; font-weight: 600; color: var(--text); }
+.kl-domains-empty p { margin: 0; font-size: 15px; color: var(--muted); }

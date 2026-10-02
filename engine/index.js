@@ -44,6 +44,36 @@ import {
   KNS_ECONOMICS,
 } from "./kns-write.js";
 
+/** A node UTXO entry (the WASM SDK's UtxoEntryReference, or a plain IUtxoEntry) as a plain object
+ *  with its covenant id (hex or null); see KaspaEngine.getUtxosWithCovenants. */
+function plainUtxo(e) {
+  const inner = e?.entry ?? e?.utxoEntry ?? null;
+  const pick = (k) => e?.[k] ?? inner?.[k];
+  const outpoint = pick("outpoint") || {};
+  const spk = pick("scriptPublicKey");
+  let script = "";
+  let scriptVersion = 0;
+  if (spk && typeof spk === "object") {
+    script = String(spk.script ?? spk.scriptPublicKey ?? "");
+    scriptVersion = Number(spk.version ?? 0);
+  } else if (typeof spk === "string") {
+    // the SDK's string form is the 2-byte version (4 hex digits) followed by the script
+    scriptVersion = parseInt(spk.slice(0, 4), 16) || 0;
+    script = spk.slice(4);
+  }
+  const cov = inner?.covenantId ?? e?.covenantId ?? null;
+  const covenantId = cov == null ? null : String(typeof cov === "string" ? cov : cov.toString()).toLowerCase();
+  return {
+    outpoint: { transactionId: String(outpoint.transactionId ?? "").toLowerCase(), index: Number(outpoint.index ?? 0) },
+    amount: BigInt(pick("amount") ?? 0),
+    scriptPublicKey: script.toLowerCase(),
+    scriptVersion,
+    blockDaaScore: BigInt(pick("blockDaaScore") ?? 0),
+    isCoinbase: Boolean(pick("isCoinbase")),
+    covenantId: covenantId || null,
+  };
+}
+
 export class KaspaEngine {
   constructor({ log = () => {} } = {}) {
     this.log = log;
@@ -877,6 +907,61 @@ export class KaspaEngine {
     return balance;
   }
 
+  // .kachat names (engine/kachat-names/service.js): the node reads and the submit the service
+  // needs, on the engine's own connection and failover (withRpc).
+
+  /** The node's DAG point: `{ networkId, virtualDaaScore: bigint, pastMedianTime: bigint }`
+   *  (unix ms), from getBlockDagInfo (network id from getServerInfo when the DAG info has none). */
+  async currentDagPoint() {
+    this.requireSdk();
+    return this.withRpc(async (rpc) => {
+      const dag = await rpc.getBlockDagInfo();
+      let networkId = String(dag?.network ?? dag?.networkId ?? "");
+      if (!networkId) networkId = String((await rpc.getServerInfo())?.networkId ?? "");
+      return {
+        networkId,
+        virtualDaaScore: BigInt(dag?.virtualDaaScore ?? 0),
+        pastMedianTime: BigInt(dag?.pastMedianTime ?? 0),
+      };
+    }, { retries: 1, label: "DAG info" });
+  }
+
+  /** The virtual DAA score, or null when no node answers. */
+  async currentVirtualDaaScore() {
+    try { return (await this.currentDagPoint()).virtualDaaScore; } catch { return null; }
+  }
+
+  /** UTXOs of `addresses` WITH their covenant ids, as plain objects:
+   *  `{ outpoint: { transactionId, index }, amount: bigint, scriptPublicKey: hex (script only),
+   *  scriptVersion, blockDaaScore: bigint, isCoinbase, covenantId: hex | null }`. 50 addresses
+   *  per request. */
+  async getUtxosWithCovenants(addresses) {
+    this.requireSdk();
+    const list = [...new Set((addresses || []).map(String).filter(Boolean))];
+    const out = [];
+    for (let start = 0; start < list.length; start += 50) {
+      const chunk = list.slice(start, start + 50);
+      const response = await this.withRpc((rpc) => rpc.getUtxosByAddresses(chunk), { retries: 1, label: "UTXO read" });
+      for (const e of response?.entries || []) out.push(plainUtxo(e));
+    }
+    return out;
+  }
+
+  /** The registry's injected `getUtxosByAddresses` (engine/kachat-names/registry.js). */
+  async utxosForRegistry(addresses) {
+    return this.getUtxosWithCovenants(addresses);
+  }
+
+  /** Submits a Kaspa WASM SDK Transaction as is; returns the node's transaction id. */
+  async submitRpcTransaction(transaction) {
+    this.requireSdk();
+    const response = await this.withRpc(
+      (rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }),
+      { retries: 1, label: "Transaction submit" },
+    );
+    return String(response?.transactionId ?? "");
+  }
+
   async send(destinationAddress, amountKas, feeKas = "0", options = {}) {
     this.requireWallet();
     await this.connect();
@@ -1341,6 +1426,8 @@ export class KaspaEngine {
   async resolveNameEverywhere(input) {
     const results = await nsResolveEverywhere(String(input || "").trim(), {
       network: NETWORK,
+      // .kachat (testnet): the shared registry, registered by the app (setKachatNameHooks).
+      resolveKachat: this.kachatHooks?.resolve || undefined,
       resolveKas: async (name) => {
         try { return (await this.resolveKnsDomain(name))?.ownerAddress || null; } catch { return null; }
       },
@@ -1383,8 +1470,19 @@ export class KaspaEngine {
     }
     const others = await this.otherServiceNamesFor(list.filter((address) => !owners.has(address)));
     for (const address of others.keys()) owners.add(address);
+    // .kachat where it is live (testnet): an address holding only a .kachat name is found too.
+    if (this.kachatHooks?.ownsAny) {
+      for (const address of list) {
+        if (owners.has(address)) continue;
+        try { if (await this.kachatHooks.ownsAny(address)) owners.add(address); } catch { /* unreadable: not counted */ }
+      }
+    }
     return owners;
   }
+
+  /** The .kachat registry hooks the app registers on testnet: { resolve(canonical) -> address|null,
+   *  ownsAny(address) -> bool }. The engine never builds the registry itself. */
+  setKachatNameHooks(hooks) { this.kachatHooks = hooks || null; }
 
   /** Whether one address owns a name on any service (iOS ownsAnyName). */
   async ownsAnyName(address) {

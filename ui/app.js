@@ -5,7 +5,8 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
-import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml } from "./kachat-market.js";
+import { initKachatNamesRuntime, kachatNames } from "./kachat-names-runtime.js";
+import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
@@ -3588,6 +3589,8 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
   try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
   try { loadNotifCenter(); } catch { /* not yet initialized */ }
+  // .kachat registrations in flight (testnet) pick up again for this wallet (iOS resume()).
+  try { refreshKachatIdentity.at = 0; window.setTimeout(() => { try { kachatNames()?.actions.resume(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
   const clean = String(address || "").trim();
   if (!clean) {
     state = { contacts: [], conversations: [] };
@@ -5307,6 +5310,34 @@ let otherServiceNamesAt = 0;
 function knsEditAssetId() { return knsEditorTarget?.assetId || ownKnsAssetId; }
 function knsEditFields() { return knsEditorTarget ? knsEditorTarget.fields : ownKnsProfileFields; }
 
+/** Testnet: reads this wallet's .kachat identity from the shared registry and repaints the hero
+ *  name. State lives on the function object (renderers can run before later declarations init). */
+function refreshKachatIdentity() {
+  const runtime = kachatNames();
+  const address = engine.address || "";
+  if (!runtime || !address) { refreshKachatIdentity.label = ""; return; }
+  refreshKachatIdentity.at = Date.now();
+  if (!refreshKachatIdentity.subscribed) {
+    refreshKachatIdentity.subscribed = true;
+    // A registration completing, a transfer or a new primary changes the label.
+    runtime.registry.onChange?.(() => { refreshKachatIdentity.at = 0; });
+  }
+  runtime.registry.refreshIfStale({ maxAge: 300 })
+    .then(() => runtime.registry.identity(address))
+    .then((identity) => {
+      if (engine.address !== address) return;
+      const label = identity?.label ? String(identity.label) : "";
+      const changed = refreshKachatIdentity.address !== address || refreshKachatIdentity.label !== label;
+      refreshKachatIdentity.address = address;
+      refreshKachatIdentity.label = label;
+      if (changed) {
+        const nameEl = document.querySelector("[data-profile-hero-name]");
+        if (nameEl) nameEl.textContent = label ? `${label}.kachat` : shortAddress(address);
+      }
+    })
+    .catch(() => { /* registry unreadable: the short address stays */ });
+}
+
 function updateProfileHero(info, profileInfo) {
   const bannerEl = document.querySelector("[data-profile-hero-banner]");
   const avatarEl = document.querySelector("[data-profile-hero-avatar]");
@@ -5315,10 +5346,18 @@ function updateProfileHero(info, profileInfo) {
   // Your domain name (a .kachat name, once they exist) or your short address - never the account
   // name, which is your own label, and never a .kas name (iOS 3041164, 509c0fe).
   const domain = engine.knsNamesAsIdentity ? (info?.explicitPrimaryDomain || info?.primaryDomain || "") : "";
-  const displayName = domain
-    ? (domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain)
-    : shortAddress(engine.address || "");
+  // Testnet: your .kachat label (your primary name while active, else your oldest active name -
+  // KACHAT_NAMES.md section 7) is your name on the hero (iOS 5df42b4).
+  const kachatLabel = refreshKachatIdentity.address === engine.address ? refreshKachatIdentity.label : "";
+  const displayName = kachatLabel
+    ? `${kachatLabel}.kachat`
+    : domain
+      ? (domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain)
+      : shortAddress(engine.address || "");
   if (nameEl) nameEl.textContent = displayName;
+  if (kachatNames() && (refreshKachatIdentity.address !== engine.address || Date.now() - (refreshKachatIdentity.at || 0) > 60_000)) {
+    refreshKachatIdentity();
+  }
   const bio = profileInfo?.profile?.bio || "";
   if (bioEl) { bioEl.hidden = !bio; bioEl.textContent = bio; }
   const bannerUrl = profileInfo?.profile?.bannerUrl || "";
@@ -8816,6 +8855,8 @@ function renderProfileDomains() {
     return;
   }
   if (activeDomainsTab === "kachat") {
+    // Testnet: your .kachat names, live from the registry (iOS KachatLiveDomainsTab).
+    if (renderKachatLiveDomainsTab(listEl, engine.address)) return;
     listEl.innerHTML = `
       <div class="domains-kachat-placeholder">
         <span class="domains-kachat-mark" aria-hidden="true">${KACHAT_WORDMARK_SVG}</span>
@@ -8985,7 +9026,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 83;
+const APP_BUILD = 84;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15127,6 +15168,10 @@ function renderTestnetToggle() {
     ? "Reload KaChat to finish switching to Testnet."
     : "Reload KaChat to finish switching back to Mainnet.";
 }
+// .kachat registrations in flight resume when the app comes back to the front (iOS app-active).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") { try { kachatNames()?.actions.resume(); } catch { /* not ready */ } }
+});
 document.querySelector("[data-pref-testnet]")?.addEventListener("change", (event) => {
   setPreferredNetwork(event.target.checked ? "testnet" : "mainnet");
   renderTestnetToggle();
@@ -15145,6 +15190,11 @@ if (IS_TESTNET) {
   const readonly = document.querySelectorAll(".connection-readonly code");
   if (readonly[0]) readonly[0].textContent = "https://api-tn10.dotk.name/v1";
   if (readonly[1]) { const em = document.createElement("em"); em.textContent = "Not available on this network"; readonly[1].replaceWith(em); }
+  // .kachat is live on testnet: read through the chat indexer when it serves names, else straight
+  // from the chain (iOS 5df42b4).
+  document.querySelectorAll(".connection-readonly em").forEach((em) => {
+    if (em.textContent.trim() === "Coming soon") em.textContent = "Live on Testnet (testnet-10 registry)";
+  });
   document.querySelectorAll('[data-node-mode="official"]').forEach((card) => { card.hidden = true; });
 }
 
@@ -22010,7 +22060,26 @@ queueMicrotask(async () => {
   try { initChessTournamentsSafe(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
   // Kaspa Hub, 5.2: the .kachat marketplace (UI only) and KaChat Stats (the indexers' numbers).
   try {
-    initKachatMarket({ escapeHtml, showToast: showCopyToast, confirmDialog, openChat: (address) => openChatWithAddress({ address }) });
+    // .kachat names are live on testnet-10 (iOS 5df42b4): one shared service/registry/actions runtime.
+    initKachatNamesRuntime(engine);
+    try { kachatNames()?.actions.resume(); } catch (error) { appendEngineLog(`.kachat resume failed: ${error?.message || error}`); }
+    initKachatMarket({
+      escapeHtml, showToast: showCopyToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
+      openChat: (address) => openChatWithAddress({ address }),
+      // The device lock in front of every .kachat transaction: iOS uses the gate the seed phrase and
+      // private keys use (DeviceAuth), so the desktop asks for the app password when that is on.
+      deviceLock: async (reason) => {
+        if (!(accountShellPrefs.passwordForSeed && hasAppPassword())) return true;
+        return requestPassword({ mode: "verify", title: "Enter Password", message: reason || "Enter your password to confirm this transaction." });
+      },
+      walletAddress: () => engine.address || "",
+      contactNameFor: (address) => {
+        const contact = state.contacts.find((entry) => entry.address === address);
+        return contact ? displayNameForAddress(contact) : "";
+      },
+      explorerTxUrl, explorerAddressUrl, shortAddress,
+      onIdentityChanged: () => { try { refreshKachatIdentity(); } catch { /* not ready yet */ } },
+    });
   } catch (error) { appendEngineLog(`.kachat did not start: ${error?.message || error}`); }
   try {
     initKachatStats({
