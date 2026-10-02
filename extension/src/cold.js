@@ -17,6 +17,7 @@
 // on the device over a QR exchange. Accounts are kept per wallet account, like iOS keeps them
 // per wallet. Left out: the per-account receive notifications toggle (the extension has none).
 
+import { netKey } from "./net.js";
 import { ownsAnyName } from "./names.js";
 import "./cold.css";
 import QRCode from "qrcode";
@@ -42,7 +43,7 @@ let store = { key: null, accounts: [] };
 
 async function storageKey() {
   const view = await vault.readAccounts();
-  return `kachat.cold.${view.activeAccountId || view.accounts?.[0]?.id || "default"}`;
+  return netKey(`kachat.cold.${view.activeAccountId || view.accounts?.[0]?.id || "default"}`);
 }
 
 function normalize(raw) {

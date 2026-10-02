@@ -8,6 +8,7 @@
 // own localStorage caches - the extension page's localStorage is per extension, so the caches
 // survive closing the popup.
 
+import { netKey } from "./net.js";
 import { getLocal, setLocal, ext } from "./browser.js";
 import * as vault from "./vault.js";
 import { settings } from "./ui.js";
@@ -33,9 +34,10 @@ export function isPricePending(notes) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const HIDDEN_KEY = "kachat.portfolio.valuesHidden";   // iOS kachat_portfolio_values_hidden
 const PAIR_KEY = "kachat.portfolio.chartPair";        // iOS kachat_chart_pair (absent = bitcoin, "" = none)
-const storeKey = (accountId) => `kachat.portfolios.${accountId}`;
+// Per network, as iOS keys portfolios by the network's address (net.js netKey).
+const storeKey = (accountId) => netKey(`kachat.portfolios.${accountId}`);
 /** The fee records, beside the ledger (iOS kachat_portfolio_fees_<wallet>). */
-const feesKey = (accountId) => `kachat.portfolioFees.${accountId}`;
+const feesKey = (accountId) => netKey(`kachat.portfolioFees.${accountId}`);
 
 /** buy, sell, or transfer - KAS moved between your own addresses, a record only. */
 export const TYPES = ["buy", "sell", "transfer"];

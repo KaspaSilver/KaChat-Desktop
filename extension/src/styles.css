@@ -808,3 +808,6 @@ html:has(#app[data-screen="qr"]), body:has(#app[data-screen="qr"]) { background:
 .kachat-address-empty p { margin: 0; }
 .manage-scroll > .address-tabs { margin: 0 -16px; padding: 0 16px; }
 .panel.full { height: 92%; }
+/* Testnet toggle: orange, as iOS tints it */
+.testnet-icon { display: inline-flex; color: #ff9f0a; }
+.toggle.testnet-toggle.on { background: #ff9f0a; }

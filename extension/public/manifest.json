@@ -56,6 +56,8 @@
   ],
   "host_permissions": [
     "https://api.kaspa.org/*",
+    "https://api-tn10.dotk.name/*",
+    "https://api-tn10.kaspa.org/*",
     "https://api.knsdomains.org/*",
     "https://api.coingecko.com/*",
     "https://query1.finance.yahoo.com/*",

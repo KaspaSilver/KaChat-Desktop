@@ -16,13 +16,23 @@ import { normalizeDomainLabel, resolveDomain } from "../../engine/kns.js";
 import { getEndpoint } from "../../engine/endpoints.js";
 import { dotkCanonical, kaspaNamesCanonical } from "./names-normalize.js";
 import { esc, ICONS } from "./ui.js";
+import { IS_TESTNET, MAINNET_KNS, TESTNET_KNS } from "./net.js";
+
+// The KNS API for the running network (testnet reads /tn10, iOS knsBaseURL).
+function knsBase() {
+  const configured = String(getEndpoint("knsApi") || "").replace(/\/+$/, "");
+  if (IS_TESTNET && (!configured || configured === MAINNET_KNS)) return TESTNET_KNS;
+  return configured || MAINNET_KNS;
+}
 
 // Declaration order is the tab order: KaChat's own names first.
 export const NAME_SERVICES = [
   { tld: "kachat", suffix: ".kachat", serviceName: "KaChat Names", site: null, siteName: null, api: null, live: false },
   { tld: "kas", suffix: ".kas", serviceName: "KNS", site: "https://app.knsdomains.org", siteName: "knsdomains.org", api: null, live: true },
-  { tld: "k", suffix: ".k", serviceName: "dotk", site: "https://dotk.name", siteName: "dotk.name", api: "https://api.dotk.name/v1", live: true },
-  { tld: "kaspa", suffix: ".kaspa", serviceName: "Kaspa Names", site: "https://kaspaname.com", siteName: "kaspaname.com", api: "https://kaspaname.com/v1", live: true },
+  // Testnet-10: dotk has its own API; Kaspa Names publishes no testnet deployment (iOS
+  // NameServiceTLD.apiBaseURL).
+  { tld: "k", suffix: ".k", serviceName: "dotk", site: "https://dotk.name", siteName: "dotk.name", api: IS_TESTNET ? "https://api-tn10.dotk.name/v1" : "https://api.dotk.name/v1", live: true },
+  { tld: "kaspa", suffix: ".kaspa", serviceName: "Kaspa Names", site: "https://kaspaname.com", siteName: "kaspaname.com", api: IS_TESTNET ? null : "https://kaspaname.com/v1", live: true },
 ];
 
 export const service = (tld) => NAME_SERVICES.find((s) => s.tld === tld);
@@ -77,7 +87,7 @@ async function resolveKas(label) {
   if (!canonical) return null;
   const display = `${canonical}.kas`;
   try {
-    const resolution = await resolveDomain(display, { baseUrl: getEndpoint("knsApi") });
+    const resolution = await resolveDomain(display, { baseUrl: knsBase() });
     return { tld: "kas", display, address: resolution?.ownerAddress || null, failed: false };
   } catch {
     return { tld: "kas", display, address: null, failed: true };
@@ -93,6 +103,7 @@ async function resolveDotk(label) {
 }
 
 async function resolveKaspaNames(label) {
+  if (!service("kaspa").api) return null;
   const canonical = kaspaNamesCanonical(label);
   if (!canonical) return null;
   const display = `${canonical}.kaspa`;
@@ -134,7 +145,7 @@ export function notFoundMessage(typed) {
  */
 export function xOnlyKeyFromAddress(address) {
   const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-  const body = String(address || "").trim().toLowerCase().replace(/^kaspa:/, "");
+  const body = String(address || "").trim().toLowerCase().replace(/^kaspa(test)?:/, "");
   if (body.length <= 8) return null;
   let acc = 0;
   let bits = 0;
@@ -161,6 +172,7 @@ async function ownedDotk(address) {
 }
 
 async function ownedKaspaNames(address) {
+  if (!service("kaspa").api) return [];
   const key = xOnlyKeyFromAddress(address);
   if (!key) return [];
   const outcome = await getJson(`${service("kaspa").api}/addresses/${key}/names`);

@@ -6,12 +6,14 @@
 // or title can't stand in for it. The page's own words (a message to sign) are shown as plain
 // text, never markup.
 
+import { netKey } from "./net.js";
 import * as vault from "./vault.js";
 import * as wallet from "./wallet.js";
 import { ext, getLocal, setLocal } from "./browser.js";
 import { esc, render, $, toast, noteActivity, resetActivityPing, ICONS } from "./ui.js";
 
-export const CONNECTIONS_KEY = "kachat.connections";
+// Per network: a site connected on mainnet knows the kaspa: address, on testnet the kaspatest: one.
+export const CONNECTIONS_KEY = netKey("kachat.connections");
 
 export async function connections() {
   return (await getLocal(CONNECTIONS_KEY)) || {};

@@ -5,7 +5,8 @@
   const CHANNEL = "kachat-wallet";
   // `chrome` first: recent Chromium's separate `browser` namespace drops sendResponse answers.
   const api = globalThis.chrome?.runtime ? globalThis.chrome : globalThis.browser;
-  const CONNECTIONS_KEY = "kachat.connections";
+  // Connections are kept per network ("kachat.connections" / "kachat.connections.testnet").
+  const CONNECTION_KEYS = ["kachat.connections", "kachat.connections.testnet"];
   const origin = window.location.origin;
 
   const toPage = (message) => window.postMessage({ channel: CHANNEL, direction: "to-page", ...message }, origin);
@@ -30,9 +31,10 @@
 
   // Connecting, disconnecting or switching the connected account in the wallet.
   api.storage?.onChanged?.addListener((changes, area) => {
-    if (area !== "local" || !changes[CONNECTIONS_KEY]) return;
-    const before = changes[CONNECTIONS_KEY].oldValue?.[origin]?.address || null;
-    const after = changes[CONNECTIONS_KEY].newValue?.[origin]?.address || null;
+    const key = CONNECTION_KEYS.find((k) => changes[k]);
+    if (area !== "local" || !key) return;
+    const before = changes[key].oldValue?.[origin]?.address || null;
+    const after = changes[key].newValue?.[origin]?.address || null;
     if (before === after) return;
     if (after) toPage({ event: "accountsChanged", payload: [after] });
     else {

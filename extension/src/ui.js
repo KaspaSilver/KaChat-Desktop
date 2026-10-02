@@ -4,6 +4,7 @@
 import { tellBackground, getLocal, setLocal } from "./browser.js";
 import { drawKaspaQr } from "../../engine/qr.js";
 import { formatKas } from "./wallet.js";
+import { IS_TESTNET, kasLabel } from "./net.js";
 
 export const app = document.getElementById("app");
 const toastEl = document.getElementById("toast");
@@ -25,8 +26,15 @@ const renderHooks = [];
 /** Called with the screen name after every render (the dock follows the screen this way). */
 export function onRender(hook) { renderHooks.push(hook); }
 
+// iOS KaspaUnit: on testnet every amount reads TKAS - the whole word KAS only, so "Kaspa" is
+// untouched. Market data (the KAS price and its converter) stays KAS.
+const KEEPS_KAS = new Set(["portfolio:price"]);
+export function unitText(html, screen = "") {
+  return IS_TESTNET && !KEEPS_KAS.has(screen) ? kasLabel(html) : html;
+}
+
 export function render(html, screen = "") {
-  app.innerHTML = html;
+  app.innerHTML = unitText(html, screen);
   for (const hook of renderHooks) { try { hook(screen); } catch { /* a hook never breaks a screen */ } }
   if (screen) app.dataset.screen = screen;
   else delete app.dataset.screen;
@@ -39,7 +47,7 @@ export function $(selector) { return app.querySelector(selector); }
 
 let toastTimer = null;
 export function toast(message) {
-  toastEl.textContent = message;
+  toastEl.textContent = unitText(String(message));
   toastEl.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toastEl.hidden = true; }, 1800);
@@ -122,7 +130,7 @@ export function showSheet({ title, subtitle = "", headerHtml = "", rows = [], ca
       </button>` : ""}
       ${footerHtml}
     </div>`;
-  backdrop.innerHTML = body();
+  backdrop.innerHTML = unitText(body());
   const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
   const onKey = (event) => { if (event.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
@@ -146,7 +154,7 @@ export function showSheet({ title, subtitle = "", headerHtml = "", rows = [], ca
       if (next.rows) currentRows = next.rows;
       if (next.headerHtml != null) headerHtml = next.headerHtml;
       if (next.footerHtml != null) footerHtml = next.footerHtml;
-      backdrop.innerHTML = body();
+      backdrop.innerHTML = unitText(body());
     },
     element: backdrop,
   };

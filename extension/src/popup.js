@@ -17,6 +17,7 @@ import { showKachatMarket, kachatWordmark } from "./market.js";
 import { showSettings, showLicenses } from "./settings.js";
 import { showApproval } from "./approve.js";
 import * as dock from "./dock.js";
+import { NETWORK, NETWORK_MIRROR_KEY, syncNetworkMirror } from "./net.js";
 import { showColdStorage } from "./cold.js";
 import { showPortfolio } from "./portfolio.js";
 import { showCameraPermissionPage } from "./camera.js";
@@ -31,6 +32,7 @@ async function boot() {
     render('<section class="screen center"><p class="center-text">Open this page from the KaChat Wallet extension.</p></section>');
     return;
   }
+  await syncNetworkMirror();
   // Start the 12 MB WASM download/compile now, while the first screen is up.
   wallet.kaspa().catch(() => {});
   wallet.useExplorer((await settings()).explorer);
@@ -59,6 +61,11 @@ setHandlers({
 // The wallet can lock under an open popup (auto-lock alarm, or the lock button in another
 // window): the unlock key disappears from storage.session, and the popup follows.
 ext?.storage?.onChanged?.addListener((changes, area) => {
+  // The network was switched in another KaChat Wallet window: this one follows (net.js).
+  if (area === "local" && changes[NETWORK_MIRROR_KEY] && changes[NETWORK_MIRROR_KEY].newValue !== NETWORK) {
+    location.reload();
+    return;
+  }
   if (isApproval) return;
   if (area === "session" && changes["kachat.unlockKey"] && !changes["kachat.unlockKey"].newValue) {
     wallet.disconnect();

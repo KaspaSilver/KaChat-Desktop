@@ -24,6 +24,7 @@ import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
 import { getAddressInfo, fetchAddressInfo, peekAddressInfo, clearKnsCache } from "../../engine/kns.js";
 import { transferDomain as knsTransferDomain, setKnsPrimaryDomain } from "../../engine/kns-write.js";
 import { getLocal, setLocal } from "./browser.js";
+import { IS_TESTNET, NETWORK_ID, ADDRESS_PREFIX, netKey, MAINNET_REST, TESTNET_REST, MAINNET_KNS, TESTNET_KNS } from "./net.js";
 import { activeAccountSecrets, accountSecretsById } from "./vault.js";
 
 let kaspaPromise = null;
@@ -78,8 +79,10 @@ export async function validateRecoveryPhrase(phrase) {
 
 // --- Addresses ---------------------------------------------------------------------------
 
-function spendingStateKey(accountId) { return `kachat.spending.${accountId}`; }
-function addressCacheKey(accountId) { return `kachat.addresses.${accountId}`; }
+// Per network (iOS keeps spending state and the address cache apart): the same key derives
+// kaspatest: addresses on testnet.
+function spendingStateKey(accountId) { return netKey(`kachat.spending.${accountId}`); }
+function addressCacheKey(accountId) { return netKey(`kachat.addresses.${accountId}`); }
 
 /**
  * The account's spending-address bookkeeping - same shape as the desktop app's, so the ideas
@@ -140,7 +143,7 @@ export async function deriveAddresses() {
 // Every connection step goes to the console (right-click the popup > Inspect > Console), which
 // is where to look when the dot stays yellow.
 const logConnection = (...parts) => console.info("[KaChat Wallet]", ...parts);
-const LAST_NODE_KEY = "kachat.lastNode";
+const LAST_NODE_KEY = netKey("kachat.lastNode");
 
 export async function connection(log = logConnection) {
   if (rpc && await probeRpc(rpc)) return rpc;
@@ -217,7 +220,7 @@ async function raceForNode(k, log) {
 
 /** One node, once, fast: connect, confirm it is synced, or give up within a few seconds. */
 async function connectDirect(k, url, timeoutMs = 5000) {
-  const client = new k.RpcClient({ url, encoding: k.Encoding?.Borsh, networkId: "mainnet" });
+  const client = new k.RpcClient({ url, encoding: k.Encoding?.Borsh, networkId: NETWORK_ID });
   try {
     await withTimeout(
       client.connect({ blockAsyncConnect: true, strategy: k.ConnectStrategy?.Fallback ?? 1, timeoutDuration: timeoutMs }),
@@ -226,6 +229,9 @@ async function connectDirect(k, url, timeoutMs = 5000) {
     );
     const info = await withTimeout(client.getServerInfo(), 5000, "Node check");
     if (info?.isSynced === false) throw new Error("node is not synced");
+    // A node of the other network answers too; only the running network's will do.
+    const net = String(info?.networkId ?? "").toLowerCase();
+    if (net && (IS_TESTNET ? !net.includes("testnet") : net.includes("testnet"))) throw new Error(`node is on ${info.networkId}`);
     return client;
   } catch (error) {
     try { await client.disconnect(); } catch { /* already closed */ }
@@ -265,8 +271,15 @@ export async function balances(addresses, hiddenIndexes = []) {
 // --- KNS ---------------------------------------------------------------------------------
 
 function knsOptions() {
-  return { baseUrl: getEndpoint("knsApi") };
+  const configured = String(getEndpoint("knsApi") || "").replace(/\/+$/, "");
+  if (IS_TESTNET && (!configured || configured === MAINNET_KNS)) return { baseUrl: TESTNET_KNS };
+  return { baseUrl: configured || MAINNET_KNS };
 }
+
+/** The KNS API for the running network (Connection Settings > Domains shows it). */
+export function knsApiUrl() { return knsOptions().baseUrl; }
+/** The Kaspa REST API for the running network. */
+export function restApiUrl() { return restBase(); }
 
 /** What is cached for an address right now (no network): { domainName, profile, domainCount }. */
 export function cachedKns(address) {
@@ -348,7 +361,7 @@ export function shortAddress(address) {
 // Keys are derived from the vault for the moment they are needed and handed to the engine as
 // hex; nothing about them is kept afterwards.
 
-const NETWORK = "mainnet";
+const NETWORK = NETWORK_ID;
 
 async function sourceWallet(source) {
   // `accountId` pins a specific account (a website's connected account); otherwise the active one.
@@ -406,7 +419,7 @@ export function sompiToKasText(sompi) {
 /** Is this a valid mainnet Kaspa address? (checksum included, via the SDK) */
 export async function isValidAddress(text) {
   const clean = String(text || "").trim();
-  if (!/^kaspa:[a-z0-9]{50,}$/.test(clean)) return false;
+  if (!clean.startsWith(ADDRESS_PREFIX) || !/^[a-z]+:[a-z0-9]{50,}$/.test(clean)) return false;
   try {
     const k = await kaspa();
     return typeof k.Address?.validate === "function" ? Boolean(k.Address.validate(clean)) : Boolean(new k.Address(clean));
@@ -425,7 +438,7 @@ export async function isValidAddress(text) {
 export async function resolveRecipient(input) {
   const text = String(input || "").trim();
   if (!text) throw new Error("Enter a Kaspa address (kaspa:...)");
-  if (text.toLowerCase().startsWith("kaspa:")) {
+  if (/^kaspa(test)?:/i.test(text)) {
     const address = text.split("?")[0].toLowerCase();
     if (!(await isValidAddress(address))) throw new Error("Invalid address format");
     return { address, domain: null, tld: null, resolutions: [] };
@@ -535,7 +548,10 @@ export async function publicKeyHex(source) {
 // --- History ------------------------------------------------------------------------------
 
 function restBase() {
-  return String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
+  const configured = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+  // Testnet reads api-tn10 (iOS a67a1c2) - also while the shared endpoint defaults still say mainnet.
+  if (IS_TESTNET && (!configured || configured === MAINNET_REST)) return TESTNET_REST;
+  return configured || MAINNET_REST;
 }
 
 /**
@@ -633,7 +649,7 @@ export async function addressesActive(addresses) {
   return out;
 }
 
-const USED_KEY = "kachat.usedAddresses";
+const USED_KEY = netKey("kachat.usedAddresses");
 
 /**
  * Has this address ever appeared on chain? iOS spendingAddressUsedState: the REST
@@ -667,7 +683,7 @@ export async function addressUsed(address) {
 async function cacheSpendingAddress(accountId, index, address) {
   const cached = (await cachedAddresses(accountId)) || { accountId, main: null, spending: {} };
   cached.spending = { ...(cached.spending || {}), [index]: address };
-  await setLocal(`kachat.addresses.${accountId}`, cached);
+  await setLocal(addressCacheKey(accountId), cached);
 }
 
 /** Addresses for a run of spending indexes, deriving the seed only once for the whole run. */
@@ -694,7 +710,7 @@ export async function spendingList() {
   if (missing.length) {
     addresses = { ...addresses, ...(await spendingAddressRange(0, state.maxIndex + 1)) };
     const all = (await cachedAddresses(account.id)) || { accountId: account.id, main: null };
-    await setLocal(`kachat.addresses.${account.id}`, { ...all, accountId: account.id, spending: addresses });
+    await setLocal(addressCacheKey(account.id), { ...all, accountId: account.id, spending: addresses });
   }
   const indexes = Array.from({ length: state.maxIndex + 1 }, (_, i) => i);
   const balancesByAddress = await balancesFor(indexes.map((i) => addresses[i]));
@@ -811,7 +827,7 @@ export async function revealSpendingAddress(index) {
   hidden.delete(index);
   const range = await spendingAddressRange(state.maxIndex + 1, index - state.maxIndex);
   const cached = (await cachedAddresses(account.id)) || { accountId: account.id, main: null, spending: {} };
-  await setLocal(`kachat.addresses.${account.id}`, { ...cached, spending: { ...(cached.spending || {}), ...range } });
+  await setLocal(addressCacheKey(account.id), { ...cached, spending: { ...(cached.spending || {}), ...range } });
   return saveSpendingState(account.id, { maxIndex: index, hidden: [...hidden] });
 }
 
@@ -906,7 +922,7 @@ export async function discoverSpendingAddresses(onProgress = () => {}) {
   const cached = (await cachedAddresses(account.id)) || { accountId: account.id, main: null, spending: {} };
   const spending = { ...(cached.spending || {}) };
   for (let index = 0; index <= highest; index += 1) if (addresses[index]) spending[index] = addresses[index];
-  await setLocal(`kachat.addresses.${account.id}`, { ...cached, spending });
+  await setLocal(addressCacheKey(account.id), { ...cached, spending });
   return found.size;
 }
 
@@ -921,8 +937,9 @@ export const EXPLORERS = Object.freeze({
 let explorerId = "kaspaOrg";
 export function useExplorer(id) { explorerId = EXPLORERS[id] ? id : "kaspaOrg"; }
 export function currentExplorer() { return explorerId; }
-export function explorerTxUrl(txid) { return `${EXPLORERS[explorerId].tx}${txid}`; }
-export function explorerAddressUrl(address) { return `${EXPLORERS[explorerId].address}${address}`; }
+// On testnet every link goes to tn10.kaspa.stream, whichever explorer is picked (iOS 421a832).
+export function explorerTxUrl(txid) { return IS_TESTNET ? `https://tn10.kaspa.stream/transactions/${txid}` : `${EXPLORERS[explorerId].tx}${txid}`; }
+export function explorerAddressUrl(address) { return IS_TESTNET ? `https://tn10.kaspa.stream/addresses/${encodeURIComponent(address)}` : `${EXPLORERS[explorerId].address}${address}`; }
 
 // --- KNS domains ------------------------------------------------------------------------------
 //
@@ -961,7 +978,7 @@ async function knsEngine(source) {
 /** Makes `domainId` the chatting address's primary name. Throws with the API's reason. */
 export async function setPrimaryDomain(domainId) {
   const engine = await knsEngine({ kind: "main" });
-  await setKnsPrimaryDomain({ engine, domainId, baseUrl: getEndpoint("knsApi") });
+  await setKnsPrimaryDomain({ engine, domainId, baseUrl: knsApiUrl() });
   clearKnsCache(engine.address);
 }
 
@@ -1061,7 +1078,7 @@ export async function validateKpub(kpub) {
   if (!trimmed) return null;
   try {
     const k = await kaspa();
-    k.PublicKeyGenerator.fromXPub(trimmed).receiveAddressAsStrings("mainnet", 0, 1);
+    k.PublicKeyGenerator.fromXPub(trimmed).receiveAddressAsStrings(NETWORK_ID, 0, 1);
     return trimmed;
   } catch {
     return null;
@@ -1071,7 +1088,8 @@ export async function validateKpub(kpub) {
 /** Receive-chain addresses start..end-1 of a kpub (iOS: kpub -> 0 -> i; change chain unused). */
 export async function kpubAddresses(kpub, start, end) {
   const k = await kaspa();
-  return k.PublicKeyGenerator.fromXPub(String(kpub).trim()).receiveAddressAsStrings("mainnet", start, end);
+  // The same kpub gives kaspatest: addresses on testnet (iOS: only the prefix changes).
+  return k.PublicKeyGenerator.fromXPub(String(kpub).trim()).receiveAddressAsStrings(NETWORK_ID, start, end);
 }
 
 /**

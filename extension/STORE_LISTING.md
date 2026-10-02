@@ -60,6 +60,7 @@ the user's approval.
 - Host permission `api.kaspa.org` - Kaspa REST API: transaction history and address usage.
 - Host permissions `*.kaspa.green`, `*.kaspa.red`, `*.kaspa.stream`, `*.kaspa.blue`, `*.kaspa.ws` -
   the public Kaspa node resolver and nodes, for balances and sending transactions.
+- Host permissions `api-tn10.kaspa.org`, `api-tn10.dotk.name` - the testnet-10 REST API and .k name service, used only when the user turns on Testnet in Settings.
 - Host permission `api.knsdomains.org` - Kaspa Name Service: the .kas domains an address owns,
   name lookups, setting the primary domain.
 - Host permissions `api.dotk.name`, `kaspaname.com` - the .k (dotk) and .kaspa (Kaspa Names)

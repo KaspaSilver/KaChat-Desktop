@@ -34,9 +34,16 @@ async function lockNow() {
   await ext.storage.session.clear();
 }
 
-const CONNECTIONS_KEY = "kachat.connections";
 const UNLOCK_KEY = "kachat.unlockKey";
-const DEFAULT_REST_API = "https://api.kaspa.org";
+const NETWORK_MIRROR_KEY = "kachat.network"; // net.js mirrors the pages' choice here (no localStorage in a worker)
+
+async function onTestnet() {
+  return (await ext.storage.local.get(NETWORK_MIRROR_KEY))?.[NETWORK_MIRROR_KEY] === "testnet";
+}
+/** Connections are kept per network, like the pages' net.js netKey. */
+async function connectionsKey() {
+  return (await onTestnet()) ? "kachat.connections.testnet" : "kachat.connections";
+}
 const MAX_MESSAGE_LENGTH = 4096;
 
 const rejected = () => ({ error: { code: 4001, message: "The request was rejected in KaChat Wallet." } });
@@ -47,7 +54,7 @@ const invalid = (message) => ({ error: { code: -32602, message } });
 const approvals = new Map();
 
 async function connections() {
-  return (await ext.storage.local.get(CONNECTIONS_KEY))?.[CONNECTIONS_KEY] || {};
+  return (await ext.storage.local.get(await connectionsKey()))?.[await connectionsKey()] || {};
 }
 
 async function isUnlocked() {
@@ -74,7 +81,9 @@ function fromExtensionPage(sender) {
 
 async function restApi() {
   const settings = (await ext.storage.local.get(SETTINGS_KEY))?.[SETTINGS_KEY] || {};
-  return String(settings.restApi || DEFAULT_REST_API).replace(/\/+$/, "");
+  const testnet = await onTestnet();
+  const configured = testnet ? settings.restApiTestnet : settings.restApi;
+  return String(configured || (testnet ? "https://api-tn10.kaspa.org" : "https://api.kaspa.org")).replace(/\/+$/, "");
 }
 
 async function balanceOf(address) {
@@ -114,7 +123,7 @@ async function handleSiteRequest(method, params, origin) {
   const open = connection && (await isUnlocked());
   switch (method) {
     case "getNetwork":
-      return { result: "mainnet" };
+      return { result: (await onTestnet()) ? "testnet-10" : "mainnet" };
     case "getAccounts":
       return { result: open ? [connection.address] : [] };
     case "requestAccounts":
@@ -128,14 +137,15 @@ async function handleSiteRequest(method, params, origin) {
       if (connection) {
         const all = await connections();
         delete all[origin];
-        await ext.storage.local.set({ [CONNECTIONS_KEY]: all });
+        await ext.storage.local.set({ [await connectionsKey()]: all });
       }
       return { result: true };
     }
     case "sendKaspa": {
       if (!connection) return unauthorized();
       const [to, sompi, options] = params;
-      if (typeof to !== "string" || !/^kaspa:[a-z0-9]{50,90}$/.test(to.trim().toLowerCase())) return invalid("sendKaspa: a kaspa: address is required.");
+      const prefix = (await onTestnet()) ? "kaspatest:" : "kaspa:";
+      if (typeof to !== "string" || !to.trim().toLowerCase().startsWith(prefix) || !/^[a-z]+:[a-z0-9]{50,90}$/.test(to.trim().toLowerCase())) return invalid(`sendKaspa: a ${prefix} address is required.`);
       if (!/^\d{1,19}$/.test(String(sompi)) || BigInt(sompi) <= 0n) return invalid("sendKaspa: the amount is a whole number of sompi above zero.");
       const priorityFee = String(options?.priorityFee ?? "0");
       if (!/^\d{1,15}$/.test(priorityFee)) return invalid("sendKaspa: priorityFee is a whole number of sompi.");

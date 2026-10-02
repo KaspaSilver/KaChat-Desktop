@@ -179,7 +179,9 @@ function confirmRemoveAccount(account, count) {
           } else {
             await vault.removeAccount(account.id);
           }
-          await removeLocal([`kachat.spending.${account.id}`, `kachat.addresses.${account.id}`, `kachat.cold.${account.id}`, `kachat.portfolios.${account.id}`, `kachat.portfolioFees.${account.id}`]);
+          // Both networks' data (iOS removeSavedAccount clears both encodings).
+          const keys = ["spending", "addresses", "cold", "portfolios", "portfolioFees"].map((k) => `kachat.${k}.${account.id}`);
+          await removeLocal([...keys, ...keys.map((k) => `${k}.testnet`)]);
           await removeConnectionsFor(account.id);
           await wallet.disconnect();
           toast("Account removed.");

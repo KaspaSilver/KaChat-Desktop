@@ -7,7 +7,7 @@
 //
 //   await kachat.requestAccounts()            -> ["kaspa:..."]   (asks the user to connect)
 //   await kachat.getAccounts()                -> [] until connected and unlocked
-//   await kachat.getNetwork()                 -> "mainnet"
+//   await kachat.getNetwork()                 -> "mainnet" | "testnet-10"
 //   await kachat.getPublicKey()               -> "02..."
 //   await kachat.getBalance()                 -> { confirmed, unconfirmed, total }  (sompi)
 //   await kachat.sendKaspa(to, sompi, { priorityFee })  -> txid   (asks the user)

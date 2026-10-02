@@ -21,6 +21,9 @@ import {
 } from "./ui.js";
 import { ENDPOINT_DEFAULTS, getEndpoint, getEndpointOverride, setEndpoint } from "../../engine/endpoints.js";
 import { connections, removeConnection } from "./approve.js";
+import { IS_TESTNET, TESTNET_REST, switchNetwork } from "./net.js";
+
+const BOOK_KEY = IS_TESTNET ? "nodeBookTestnet" : "nodeBook";
 import { NAME_SERVICES } from "./names.js";
 
 // iOS AppCurrency, same order and codes (the code is CoinGecko's vs_currency).
@@ -202,6 +205,9 @@ function showChangePassword({ onBack }) {
 
 // --- Connection ---------------------------------------------------------------------------
 
+// iOS ConnectionHubPage: Connection Settings, the Testnet toggle and its footer, then Kaspa
+// Explorer in its own section. iOS applies a switch on the next launch; the extension reloads its
+// pages straight away (every open KaChat Wallet window follows).
 function showConnectionHub({ onBack }) {
   const explorer = wallet.EXPLORERS[wallet.currentExplorer()].name;
   render(`
@@ -210,14 +216,42 @@ function showConnectionHub({ onBack }) {
       <div class="section-header">Connection</div>
       <div class="glass list">
         ${rowHtml("connection-settings", ICONS.antenna, "Connection Settings")}
-        ${rowHtml("explorer", ICONS.safari, "Kaspa Explorer", explorer)}
+        <button class="list-row settings-row" id="testnet" role="switch" aria-checked="${IS_TESTNET}">
+          <span class="settings-label"><span class="testnet-icon">${TESTTUBE}</span><span>Testnet</span></span>
+          <span class="toggle testnet-toggle ${IS_TESTNET ? "on" : ""}"></span>
+        </button>
       </div>
+      <!-- "K&#x41;S": a sentence, not an amount - ui.unitText must not make it TKAS. -->
+      <p class="form-footer">Testnet is for testing only - testnet K&#x41;S has no value. On testnet your account uses its kaspatest: address, with its own balance, and Connection Settings holds testnet values: the testnet explorer and automatic node discovery. Turning it off brings your mainnet settings back.</p>
+      <div class="glass list">
+        ${rowHtml("explorer", ICONS.safari, "Kaspa Explorer", IS_TESTNET ? "tn10.kaspa.stream" : explorer)}
+      </div>
+      ${IS_TESTNET ? `
+        <div class="glass list">
+          <a class="list-row settings-row" href="https://faucet-tn10.kaspanet.io" target="_blank" rel="noopener noreferrer">
+            <span class="settings-label"><span class="testnet-icon">${DROP}</span><span>TN10 Faucet</span></span>
+            <span class="settings-value">${ICONS.chevron}</span>
+          </a>
+        </div>
+        <p class="form-footer">Free testnet-10 coins for trying things out.</p>` : ""}
     </section>`, "settings");
   $("#back").onclick = onBack;
   const again = () => showConnectionHub({ onBack });
   $("#connection-settings").onclick = () => showConnectionSettings({ onBack: again });
   $("#explorer").onclick = () => showExplorerPicker({ onBack: again });
+  $("#testnet").onclick = async () => {
+    const next = IS_TESTNET ? "mainnet" : "testnet";
+    await switchNetwork(next);
+    await wallet.disconnect();
+    // Back on this page after the reload: the dock and toolbar show the new network.
+    location.reload();
+  };
 }
+
+// SF Symbol drop.fill
+const DROP = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c3.5 4.4 6.5 8.2 6.5 11.7a6.5 6.5 0 0 1-13 0C5.5 10.7 8.5 6.9 12 2.5z" fill="currentColor"/></svg>';
+// SF Symbol testtube.2
+const TESTTUBE = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3v13.5a2.5 2.5 0 0 0 5 0V3M6 3h7M8.5 10h3"/><path d="M15 6v10.5a2.5 2.5 0 0 0 5 0V6M14 6h7M16.5 12h3"/></svg>';
 
 function showExplorerPicker({ onBack }) {
   const current = wallet.currentExplorer();
@@ -283,7 +317,8 @@ const HTTPS_REQUIRED = "Use https. Unencrypted connections are not supported.";
 let connectionTab = "node";
 
 async function showConnectionSettings({ onBack }) {
-  const book = (await settings()).nodeBook;
+  // Each network keeps its own address book (iOS ConnectionProfile.savedNodeAddresses).
+  const book = (await settings())[BOOK_KEY];
   const draft = {
     book: Array.isArray(book) ? book : [],
     restApi: getEndpointOverride("kaspaApi"),
@@ -347,14 +382,14 @@ async function showConnectionSettings({ onBack }) {
   const domainsTab = () => `
     <div class="form-section">
       <div class="form-header">Kaspa Name Service</div>
-      <div class="form-card"><div class="form-row stack-tight"><span class="muted small">KNS API URL</span><span class="mono small muted break">${esc(getEndpoint("knsApi"))}</span></div></div>
+      <div class="form-card"><div class="form-row stack-tight"><span class="muted small">KNS API URL</span><span class="mono small muted break">${esc(wallet.knsApiUrl())}</span></div></div>
       <div class="form-footer">KNS domain resolution service</div>
     </div>
     <div class="form-section">
       <div class="form-header">Other Name Services</div>
       <div class="form-card">
         ${NAME_SERVICES.filter((n) => n.tld === "k" || n.tld === "kaspa").map((n) => `
-          <div class="form-row stack-tight"><span class="muted small">${esc(n.serviceName)} (${esc(n.suffix)})</span><span class="mono small muted break">${esc(n.api)}</span></div>`).join("")}
+          <div class="form-row stack-tight"><span class="muted small">${esc(n.serviceName)} (${esc(n.suffix)})</span>${n.api ? `<span class="mono small muted break">${esc(n.api)}</span>` : '<span class="muted">Not available on this network</span>'}</div>`).join("")}
         <div class="form-row stack-tight"><span class="muted small">KaChat Names (.kachat)</span><span class="muted">Coming soon</span></div>
       </div>
       <div class="form-footer">Used to show the .k and .kaspa names an address owns. KaChat's own .kachat names will be set here once they launch.</div>
@@ -364,7 +399,7 @@ async function showConnectionSettings({ onBack }) {
     <div class="form-section">
       <div class="form-header">Kaspa Explorer API</div>
       <div class="form-card"><div class="form-row stack-tight"><span class="muted small">Kaspa REST API URL</span>
-        <input id="rest" class="plain-input mono" value="${esc(draft.restApi)}" placeholder="${esc(ENDPOINT_DEFAULTS.kaspaApi)}" autocomplete="off" spellcheck="false" />
+        <input id="rest" class="plain-input mono" value="${esc(draft.restApi)}" placeholder="${esc(IS_TESTNET ? TESTNET_REST : ENDPOINT_DEFAULTS.kaspaApi)}" autocomplete="off" spellcheck="false" />
         <span class="error-text small" id="rest-error">${/^http:\/\//i.test(draft.restApi.trim()) ? HTTPS_REQUIRED : ""}</span>
       </div></div>
       <div class="form-footer">REST API for transaction history and balance lookups</div>
@@ -418,7 +453,7 @@ async function showConnectionSettings({ onBack }) {
       const parsed = normalizeNodeAddress(draft.bookAddress);
       if (!parsed || parsed.error) { draft.bookError = parsed?.error || "Enter as host:port or wss://host"; paint(); return; }
       if (!draft.book.some((entry) => entry.address === parsed.value)) draft.book.push({ label: draft.bookLabel.trim(), address: parsed.value });
-      await saveSettings({ nodeBook: draft.book });
+      await saveSettings({ [BOOK_KEY]: draft.book });
       draft.bookLabel = "";
       draft.bookAddress = "";
       draft.bookError = "";
@@ -432,7 +467,7 @@ async function showConnectionSettings({ onBack }) {
         // Removing the pinned node's entry keeps the pin; the picker then shows it as a custom
         // address (iOS deleteSavedNodeAddress).
         const [removed] = draft.book.splice(Number(button.dataset.remove), 1);
-        await saveSettings({ nodeBook: draft.book });
+        await saveSettings({ [BOOK_KEY]: draft.book });
         toast(removed?.address === getEndpoint("trustedNode") ? "Removed from address book. Still connected to this node." : "Address removed.");
         paint();
       };
@@ -445,18 +480,19 @@ async function showConnectionSettings({ onBack }) {
     };
 
     $("#save").onclick = async () => {
-      const parsed = normalizeHttpsUrl(draft.restApi, ENDPOINT_DEFAULTS.kaspaApi);
+      const defaultRest = IS_TESTNET ? TESTNET_REST : ENDPOINT_DEFAULTS.kaspaApi;
+      const parsed = normalizeHttpsUrl(draft.restApi, defaultRest);
       if (parsed.error) { draft.error = parsed.error; connectionTab = "explorer"; toast(parsed.error); paint(); return; }
       // A REST API other than api.kaspa.org needs the browser's permission to be reached. The
       // request has to come straight from this click, before anything else is awaited.
-      if (parsed.value !== ENDPOINT_DEFAULTS.kaspaApi && ext?.permissions?.request) {
+      if (parsed.value !== defaultRest && parsed.value !== ENDPOINT_DEFAULTS.kaspaApi && ext?.permissions?.request) {
         let granted = false;
         try { granted = await ext.permissions.request({ origins: [`${new URL(parsed.value).origin}/*`] }); } catch { granted = false; }
         if (!granted) { draft.error = "KaChat Wallet needs your permission to reach that address."; connectionTab = "explorer"; paint(); return; }
       }
       setEndpoint("kaspaApi", parsed.value);
       // The background worker has no localStorage; it reads the REST API from here.
-      await saveSettings({ restApi: parsed.value });
+      await saveSettings({ [IS_TESTNET ? "restApiTestnet" : "restApi"]: parsed.value });
       toast("Settings saved.");
       onBack();
     };
