@@ -6,6 +6,7 @@ import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS
 import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames } from "./kachat-names-runtime.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc } from "./kachat-names-live.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
@@ -5334,9 +5335,53 @@ function refreshKachatIdentity() {
         const nameEl = document.querySelector("[data-profile-hero-name]");
         if (nameEl) nameEl.textContent = label ? `${label}.kachat` : shortAddress(address);
       }
+      return kachatHeroProfile(address);
+    })
+    .then((hero) => {
+      if (engine.address !== address || hero === undefined) return;
+      refreshKachatIdentity.hero = hero ? { ...hero, address } : null;
+      applyKachatHeroProfile(refreshKachatIdentity.hero);
     })
     .catch(() => { /* registry unreadable: the short address stays */ });
 }
+
+/** Paints the .kachat profile over the hero (testnet). `hero` = { avatarUrl, bannerUrl, bio,
+ *  linktreeUrl, address } | null; null hides only the Linktree link and leaves the KNS paint. */
+function applyKachatHeroProfile(hero) {
+  const linkEl = document.querySelector("[data-profile-hero-linktree]");
+  const current = hero && hero.address === engine.address ? hero : null;
+  if (linkEl) {
+    const url = current?.linktreeUrl || "";
+    linkEl.hidden = !url;
+    if (url) {
+      linkEl.href = url;
+      const text = linkEl.querySelector("[data-profile-hero-linktree-text]");
+      if (text) text.textContent = url.replace(/^https:\/\//, "");
+    }
+  }
+  if (!current) return;
+  const bannerEl = document.querySelector("[data-profile-hero-banner]");
+  const avatarEl = document.querySelector("[data-profile-hero-avatar]");
+  const bioEl = document.querySelector("[data-profile-hero-bio]");
+  if (bannerEl && current.bannerUrl) bannerEl.style.backgroundImage = `url(${JSON.stringify(String(current.bannerUrl))})`;
+  if (avatarEl && current.avatarUrl && avatarEl.dataset.avatarUrl !== current.avatarUrl) {
+    avatarEl.dataset.avatarUrl = current.avatarUrl;
+    const img = document.createElement("img");
+    img.alt = "";
+    img.referrerPolicy = "no-referrer";
+    img.src = current.avatarUrl;
+    // A host that refuses hotlinking gets one retry through the relay (kachatImageSrc).
+    img.addEventListener("error", async () => {
+      if (img.dataset.relayed) { img.remove(); return; }
+      img.dataset.relayed = "1";
+      try { const relayed = await kachatImageSrc(current.avatarUrl, { viaRelay: true }); if (relayed) img.src = relayed; else img.remove(); } catch { img.remove(); }
+    }, { once: false });
+    avatarEl.replaceChildren(img);
+  }
+  if (bioEl && current.bio) { bioEl.hidden = false; bioEl.textContent = current.bio; }
+}
+// A background refresh of a social profile repaints the hero.
+try { onKachatSocialChange(() => { refreshKachatIdentity.at = 0; if (engine.address) refreshKachatIdentity(); }); } catch { /* mainnet / not ready */ }
 
 function updateProfileHero(info, profileInfo) {
   const bannerEl = document.querySelector("[data-profile-hero-banner]");
@@ -5358,6 +5403,10 @@ function updateProfileHero(info, profileInfo) {
   if (kachatNames() && (refreshKachatIdentity.address !== engine.address || Date.now() - (refreshKachatIdentity.at || 0) > 60_000)) {
     refreshKachatIdentity();
   }
+  // Testnet: the .kachat profile (pictures and bio looked up from its social links, and its
+  // Linktree link) comes first; the KNS one otherwise (iOS ad32798, 1322216). Applied after the
+  // KNS paint so a KNS refresh never overwrites it.
+  window.setTimeout(() => applyKachatHeroProfile(refreshKachatIdentity.hero), 0);
   const bio = profileInfo?.profile?.bio || "";
   if (bioEl) { bioEl.hidden = !bio; bioEl.textContent = bio; }
   const bannerUrl = profileInfo?.profile?.bannerUrl || "";
@@ -9026,7 +9075,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 84;
+const APP_BUILD = 85;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;

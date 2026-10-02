@@ -1,6 +1,8 @@
 // The live .kachat screens, TESTNET ONLY (iOS KachatNamesLiveViews.swift, 5df42b4): the hub's
 // search, registrations in flight, Marketplace / My Names / Activity, the name detail with its
-// actions, every transaction sheet, the Your Domains > .kachat tab and the address profile editor.
+// actions, every transaction sheet, the Your Domains > .kachat tab, the address profile editor and
+// the profile hero's .kachat pictures, bio and Linktree link (kachatHeroProfile), looked up from the
+// profile's social links on this device (engine/kachat-names/social-image-resolver.js).
 // On mainnet none of this is reached (`kachatNames()` is null) - kachat-market.js keeps its
 // "Coming soon" mockups. Every spending or destructive action shows its cost first (built against
 // live UTXOs, nothing sent), asks to confirm, then passes the device lock (deps.deviceLock) before
@@ -14,7 +16,11 @@ import { KAS_UNIT, kasLabel } from "../engine/network.js";
 import { kachatNames } from "./kachat-names-runtime.js";
 import { userFacingError } from "./dialogs.js";
 import { Operation, Stage, isOpen, needsDriving, validateKey } from "../engine/kachat-names/actions.js";
-import { Status, Profile, addressOf, keyOf, shortAddress as registryShortAddress } from "../engine/kachat-names/registry-state.js";
+import {
+  Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress,
+} from "../engine/kachat-names/registry-state.js";
+import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
+import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs } from "../engine/kachat-names/codec.js";
 import { paramsPrice, paramsRenewPrice } from "../engine/kachat-names/manifest.js";
 
@@ -171,13 +177,6 @@ function identityChanged() {
 function readPrivacySeen() { try { return localStorage.getItem(PRIVACY_SEEN_KEY) === "1"; } catch { return false; } }
 function writePrivacySeen() { try { localStorage.setItem(PRIVACY_SEEN_KEY, "1"); } catch { /* blocked */ } }
 
-function graphemeList(s) {
-  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
-    return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s), (x) => x.segment);
-  }
-  return Array.from(s);
-}
-
 // ---------------------------------------------------------------------------------------------
 // Icons (SF Symbol look-alikes, stroked in currentColor)
 // ---------------------------------------------------------------------------------------------
@@ -195,6 +194,9 @@ const LI = {
   uturn: svg(`<path d="M9 14.5 4 9.5l5-5"/><path d="M4 9.5h10a6 6 0 0 1 0 12h-3"/>`),
   external: svg(`<path d="M13.5 4.5h6v6M19.5 4.5l-8.5 8.5"/><path d="M17.5 13.5v4.6a1.4 1.4 0 0 1-1.4 1.4H5.9a1.4 1.4 0 0 1-1.4-1.4V7.9a1.4 1.4 0 0 1 1.4-1.4h4.6"/>`),
   card: svg(`<rect x="3" y="5" width="18" height="14" rx="2.4"/><circle cx="9" cy="11" r="2.3"/><path d="M5.8 16.4a3.6 3.6 0 0 1 6.4 0M14.5 10h4M14.5 13.5h3"/>`),
+  person: svg(`<circle cx="12" cy="8.6" r="3.9"/><path d="M4.6 20.2a7.6 7.6 0 0 1 14.8 0"/>`),
+  personExclaim: svg(`<circle cx="10" cy="8.4" r="3.7"/><path d="M3.4 19.8a6.8 6.8 0 0 1 10.4-5.4"/><path d="M18.6 13v3.6M18.6 19.6h.01"/>`),
+  wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
 };
 
 const spinner = (cls = "") => `<span class="kl-spinner ${cls}" role="status" aria-label="Loading"></span>`;
@@ -1700,7 +1702,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
         avatar: base?.avatar ?? null,
         banner: base?.banner ?? null,
         bio: base?.bio ?? null,
-        links: base?.links ? { ...base.links } : null,
+        linktree: base?.linktree ?? null,
         primaryName: d.info.name,
       });
       const txId = await actions.saveProfile(profile);
@@ -1877,27 +1879,264 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Edit .kachat Profile (KachatLiveProfileEditor)
+// The social profile: avatar, banner and bio looked up on this device (KachatSocialImageResolver)
 // ---------------------------------------------------------------------------------------------
 
-const LINK_FIELDS = [
-  ["website", "Website"],
-  ["x", "X"],
-  ["github", "GitHub"],
-  ["telegram", "Telegram"],
-  ["discord", "Discord"],
-  ["nostr", "Nostr"],
-];
+// A web page can't read another site's pages or most APIs (CORS), so the resolver's requests go
+// through the app's same-origin relay (/nc-proxy, vite.config.mjs). The three JSON APIs that answer
+// a page directly (FxTwitter, GitHub, Discord's invite API) are asked directly first, so X, GitHub
+// and Discord profiles also resolve on a plain static host without the relay. Everything else
+// without the relay is "couldn't reach", with Retry.
+const SOCIAL_DIRECT_HOST_RE = /^(api\.fxtwitter\.com|api\.github\.com|discord\.com)$/i;
+const SOCIAL_STORAGE = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { localStorage.setItem(key, value); } catch { /* full or blocked: memory only */ } },
+  remove(key) { try { localStorage.removeItem(key); } catch { /* blocked */ } },
+};
+
+/** A response body as text, at most `maxBytes` bytes of it; the rest is never read. */
+async function readCappedText(res, maxBytes) {
+  const reader = res.body?.getReader?.();
+  if (!reader) return (await res.text()).slice(0, maxBytes);
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    while (bytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = bytes + value.byteLength > maxBytes ? value.subarray(0, maxBytes - bytes) : value;
+      bytes += chunk.byteLength;
+      text += decoder.decode(chunk, { stream: true });
+    }
+    text += decoder.decode();
+  } finally {
+    try { await reader.cancel(); } catch { /* done already */ }
+  }
+  return text;
+}
+
+async function socialFetchOnce(url, { accept, timeoutMs = 8000, agent, maxBytes = 3_000_000, signal } = {}, viaRelay) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener?.("abort", onAbort, { once: true });
+  try {
+    const headers = {};
+    if (accept) headers.Accept = accept;
+    let target = url;
+    if (viaRelay) {
+      target = proxiedUrl(url);
+      // the relay's link-preview mode: a crawler User-Agent, so pages emit their Open Graph tags
+      if (agent === "crawler") headers["x-preview"] = "1";
+    }
+    const fetchFn = window.__kasiaNativeFetch || window.fetch.bind(window);
+    const res = await fetchFn(target, {
+      headers, signal: controller.signal, credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer",
+    });
+    const text = await readCappedText(res, maxBytes);
+    return { status: res.status, contentType: res.headers.get("content-type") || "", text };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
+  }
+}
+
+/** The resolver's `fetchText` (social-image-resolver.js contract) for this web app. */
+async function socialFetchText(url, options = {}) {
+  let host = "";
+  try { host = new URL(url).hostname; } catch { return null; }
+  if (SOCIAL_DIRECT_HOST_RE.test(host)) {
+    const direct = await socialFetchOnce(url, options, false);
+    if (direct) return direct;
+  }
+  if (!(await isProxyAvailable())) return null;
+  return socialFetchOnce(url, options, true);
+}
+
+let socialResolver = null;
+/** The one resolver of this app (iOS KachatSocialImageResolver.shared), made on first use. */
+function socialImages() {
+  if (!socialResolver) {
+    socialResolver = new KachatSocialImageResolver({ fetchText: socialFetchText, storage: SOCIAL_STORAGE, now: () => Date.now() });
+  }
+  return socialResolver;
+}
+
+/** Image hosts that refuse a page's hotlink: their pictures come through the relay. Facebook's
+ *  `lookaside.fbsbx.com` answers anything but its own crawler with an HTML page. */
+const SOCIAL_RELAY_IMAGE_HOST_RE = /(^|\.)(fbsbx\.com|fbcdn\.net)$/i;
+const SOCIAL_IMAGE_MAX_BYTES = 10_000_000;
+const socialImageBlobs = new Map(); // `${mode}|${url}` -> Promise<string|null> (blob: URL)
+
+function httpsImageUrl(url) {
+  if (typeof url !== "string" || url.length > 2048 || !/^https:\/\/[^\s"'<>\\]+$/i.test(url)) return null;
+  try { return new URL(url).protocol === "https:" ? url : null; } catch { return null; }
+}
+
+async function relayImage(url, modes, referer) {
+  if (!(await isProxyAvailable())) return null;
+  const fetchFn = window.__kasiaNativeFetch || window.fetch.bind(window);
+  for (const mode of modes) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const headers = { "x-preview-image": mode };
+      if (mode === "1" && referer) headers["x-preview-referer"] = referer;
+      const res = await fetchFn(proxiedUrl(url), { headers, signal: controller.signal, credentials: "omit", cache: "no-store" });
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      if (!blob.size || blob.size > SOCIAL_IMAGE_MAX_BYTES || !/^image\//i.test(blob.type || "") || /svg/i.test(blob.type)) continue;
+      return URL.createObjectURL(blob);
+    } catch {
+      /* next mode */
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
 
 /**
- * The address profile (KACHAT_NAMES.md section 7): avatar, banner, bio, links and which of your
- * names labels you - written as a `kchat:1:profile:` self-transfer. No display name: the label is
- * always a name you own or your address. `owner` groups the layer (default "profile").
+ * A `src` that loads `url` (a resolved .kachat avatar or banner) in this page: the URL itself for
+ * hosts that serve a page's <img> (render it with referrerpolicy="no-referrer"), or a blob: URL
+ * fetched through the relay for hosts that refuse hotlinks (Facebook). `viaRelay: true` forces the
+ * relay - the retry for an <img> that failed to load. `referer`: the profile link, for hosts that
+ * check it. Null when it can't be loaded (not https, or the relay is needed and missing).
+ */
+export async function kachatImageSrc(url, { viaRelay = false, referer = null } = {}) {
+  const safe = httpsImageUrl(url);
+  if (!safe) return null;
+  let host = "";
+  try { host = new URL(safe).hostname; } catch { return null; }
+  const needsRelay = SOCIAL_RELAY_IMAGE_HOST_RE.test(host);
+  if (!viaRelay && !needsRelay) return safe;
+  const modes = needsRelay ? ["crawler", "1"] : ["1", "crawler"];
+  const key = `${modes[0]}|${safe}`;
+  if (!socialImageBlobs.has(key)) {
+    const pending = relayImage(safe, modes, referer).then((src) => {
+      if (!src) socialImageBlobs.delete(key); // a later retry may work
+      return src;
+    });
+    socialImageBlobs.set(key, pending);
+    if (socialImageBlobs.size > 100) {
+      const [oldKey, oldPending] = socialImageBlobs.entries().next().value;
+      socialImageBlobs.delete(oldKey);
+      oldPending.then((src) => { if (src) { try { URL.revokeObjectURL(src); } catch { /* fine */ } } });
+    }
+  }
+  return socialImageBlobs.get(key);
+}
+
+/** Calls `listener(link, SocialProfile)` whenever a lookup lands a new answer (e.g. a stale
+ *  hero picture refreshed in the background). Returns the unsubscribe function. */
+export function onKachatSocialChange(listener) {
+  return socialImages().onChange(listener);
+}
+
+/**
+ * The .kachat profile of `address` for the profile hero (iOS ContactsView, testnet only): the
+ * avatar, banner and bio its social links show right now, looked up on this device (cached 24 h;
+ * a stale answer is returned at once and refreshed in the background - see onKachatSocialChange),
+ * and its Linktree link. The address's own record this device wrote comes first, then the
+ * registry's identity. `avatarUrl` / `bannerUrl` are ready for <img src> (kachatImageSrc: render
+ * with referrerpolicy="no-referrer"; on an <img> error, retry with kachatImageSrc(url, { viaRelay:
+ * true })). `bio` is plain text (escape it). Any piece may be null.
+ * -> Promise<{ avatarUrl: string|null, bannerUrl: string|null, bio: string|null, linktreeUrl: string|null } | null>
+ *    null on mainnet, before the runtime exists, or when the address has no profile record.
+ */
+export async function kachatHeroProfile(address) {
+  const rt = kachatNames();
+  if (!rt || !address) return null;
+  const { registry } = rt;
+  try { await registry.refreshIfStale({ maxAge: 300 }); } catch { /* use what we have */ }
+  let own = null;
+  try { own = (await registry.ownProfile(address))?.profile ?? null; } catch { own = null; }
+  let raw = own;
+  if (!raw) { try { raw = (await registry.identity(address))?.profile ?? null; } catch { raw = null; } }
+  if (!raw) return null;
+  const p = (raw instanceof Profile ? raw : new Profile(raw)).sanitized();
+  const resolver = socialImages();
+  const look = async (link, kind) => {
+    if (!link) return null;
+    const cached = await resolver.profile(link); // a stale answer now; looked up again behind it
+    if (cached) return cached.piece(kind);
+    const result = await resolver.resolve(link, { maxAgeMs: socialFreshForMs }); // joins that lookup
+    return result.profile?.piece(kind) ?? null;
+  };
+  const [avatar, banner, bio] = await Promise.all([
+    look(p.avatar, SocialKind.avatar), look(p.banner, SocialKind.banner), look(p.bio, SocialKind.bio),
+  ]);
+  const [avatarUrl, bannerUrl] = await Promise.all([
+    avatar ? kachatImageSrc(avatar, { referer: p.avatar }) : null,
+    banner ? kachatImageSrc(banner, { referer: p.banner }) : null,
+  ]);
+  return { avatarUrl: avatarUrl ?? null, bannerUrl: bannerUrl ?? null, bio: bio ?? null, linktreeUrl: p.linktree ?? null };
+}
+
+/** An <img> for a resolved picture, filled in by hydrateSocialImages (never a fetched page's HTML). */
+function socialImgHtml(url, cls, referer) {
+  const safe = httpsImageUrl(url);
+  if (!safe) return "";
+  return `<img class="${cls}" alt="" decoding="async" referrerpolicy="no-referrer" data-kl-social-img="${esc(safe)}" data-kl-social-ref="${esc(referer ?? "")}" />`;
+}
+
+/** Points each new social <img> under `root` at a loadable src; one retry through the relay when
+ *  the host refuses it, then hidden. */
+function hydrateSocialImages(root) {
+  root.querySelectorAll("img[data-kl-social-img]:not([data-kl-hydrated])").forEach((img) => {
+    img.dataset.klHydrated = "1";
+    const url = img.dataset.klSocialImg;
+    const referer = img.dataset.klSocialRef || null;
+    let retried = false;
+    img.addEventListener("error", async () => {
+      if (retried) { img.hidden = true; return; }
+      retried = true;
+      const src = await kachatImageSrc(url, { viaRelay: true, referer });
+      if (!img.isConnected) return;
+      if (src) img.src = src;
+      else img.hidden = true;
+    });
+    kachatImageSrc(url, { referer }).then((src) => {
+      if (!img.isConnected) return;
+      if (src) img.src = src;
+      else img.hidden = true;
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Edit .kachat Profile (KachatLiveProfileEditor, KachatSourceInput, KachatSocialPreview)
+// ---------------------------------------------------------------------------------------------
+
+const SOCIAL_KINDS = [SocialKind.avatar, SocialKind.banner, SocialKind.bio];
+const KIND_TITLE = { avatar: "Avatar", banner: "Banner", bio: "Bio" };
+
+function missingText(kind, platformName) {
+  return `No ${kind} on this ${platformName} profile.`;
+}
+
+/**
+ * The address profile (KACHAT_NAMES.md section 7): where the avatar, banner and bio come from (a
+ * social profile link each - a platform from the picker plus the handle after its prefix; they can
+ * be different accounts), a Linktree link, and which of your names labels you - written as a
+ * `kchat:1:profile:` self-transfer. No free text and no uploads: what shows comes from a platform
+ * that moderates it. A review card laid out like the profile header shows what others will see;
+ * Save stays disabled until every filled field's lookup has finished and found its piece.
+ * `owner` groups the layer (default "profile").
  */
 export function openLiveProfileEditor(owner = "profile") {
   const rt = kachatNames();
   if (!rt || !kit) return null;
-  const form = { avatar: "", banner: "", bio: "", links: Object.fromEntries(LINK_FIELDS.map(([k]) => [k, ""])), primary: "" };
+  const resolver = socialImages();
+  /** per field: the platform picked, the handle typed, and where its lookup stands
+   *  (none | looking | found | empty | unreachable) */
+  const fields = Object.fromEntries(SOCIAL_KINDS.map((k) => [k, {
+    platform: SocialPlatform.x, handle: "", lookup: "none", resolved: null, attempt: 0, key: "", timer: null,
+  }]));
+  const form = { linktree: "", primary: "" };
   let activeNames = [];
   let loaded = false;
   let saving = false;
@@ -1905,17 +2144,31 @@ export function openLiveProfileEditor(owner = "profile") {
   let error = null;
   let layer = null;
   let closed = false;
+  const rendered = new Map(); // container selector -> last html, so unchanged parts (images) stay
 
-  const badImage = () => [form.avatar, form.banner].some((s) => {
-    const t = s.trim();
-    return t.length > 0 && !Profile.isImageURL(t);
-  });
+  const isEmpty = (kind) => !fields[kind].handle.trim();
+  const sourceOf = (kind) => SocialSource.from(fields[kind].platform, fields[kind].handle, kind);
+  const isBad = (kind) => !isEmpty(kind) && sourceOf(kind) == null;
+  /** The source when the handle field holds a whole pasted link (rather than a handle). */
+  const pastedSource = (kind) => {
+    const t = fields[kind].handle.trim();
+    if (!(t.toLowerCase().startsWith("http") || (t.includes(".") && t.includes("/")))) return null;
+    return sourceOf(kind);
+  };
+  /** A field is saved only once its lookup found what it shows - what you reviewed. */
+  const notReviewed = (kind) => !isEmpty(kind) && fields[kind].lookup !== "found";
+  /** The Linktree field holds just the username (`linktr.ee/` is shown in front of it). */
+  const badLinktree = () => {
+    const t = form.linktree.trim();
+    return t.length > 0 && Profile.linktreeLinkFromUsername(t) == null;
+  };
+  const blocked = () => SOCIAL_KINDS.some((k) => isBad(k) || notReviewed(k)) || badLinktree();
 
   const profile = () => new Profile({
-    avatar: form.avatar,
-    banner: form.banner,
-    bio: form.bio,
-    links: { ...form.links },
+    avatar: sourceOf(SocialKind.avatar)?.link ?? null,
+    banner: sourceOf(SocialKind.banner)?.link ?? null,
+    bio: sourceOf(SocialKind.bio)?.link ?? null,
+    linktree: Profile.linktreeLinkFromUsername(form.linktree),
     primaryName: form.primary || null,
   }).sanitized();
 
@@ -1923,8 +2176,73 @@ export function openLiveProfileEditor(owner = "profile") {
     ? navHtml("Edit .kachat Profile", { leading: { label: "Done", bold: true } })
     : navHtml("Edit .kachat Profile", { leading: { label: "Cancel" } }));
 
-  const bannerFooter = () => (badImage() ? footer("Image links must start with https:// or ipfs://.", "kl-red") : "");
-  const bioCount = () => `${graphemeList(form.bio).length}/${Profile.maxBio}`;
+  // MARK: pieces
+
+  const piece = (kind) => (fields[kind].lookup === "found" ? fields[kind].resolved?.piece(kind) ?? null : null);
+
+  /** One line per piece for the review card: where it came from, or why it is missing. */
+  const reviewNote = (kind) => {
+    const f = fields[kind];
+    const source = sourceOf(kind);
+    if (source) {
+      const name = SocialPlatform.displayName(source.platform);
+      switch (f.lookup) {
+        case "found": return { text: `${KIND_TITLE[kind]} from ${name}`, from: true };
+        case "empty": return { text: missingText(kind, name) };
+        case "unreachable": return { text: `${KIND_TITLE[kind]}: couldn't reach ${name}.` };
+        default: return { text: `${KIND_TITLE[kind]}: looking up ${name}...` };
+      }
+    }
+    if (!isEmpty(kind)) return null; // an invalid handle: its field says so
+    // an empty field the account used elsewhere can't fill: the platform never shares it
+    const other = SOCIAL_KINDS.map((k) => sourceOf(k)).find(Boolean);
+    if (other && !SocialPlatform.choices(kind).includes(other.platform)) {
+      return { text: `${SocialPlatform.displayName(other.platform)} doesn't share ${kind === SocialKind.banner ? "banners" : "bios"}.` };
+    }
+    return null;
+  };
+
+  /** The review card, laid out like the profile header: banner, avatar, bio. */
+  const reviewHtml = () => {
+    if (!SOCIAL_KINDS.some((k) => sourceOf(k))) return "";
+    const banner = piece(SocialKind.banner);
+    const avatar = piece(SocialKind.avatar);
+    const bio = piece(SocialKind.bio);
+    const notes = SOCIAL_KINDS.map(reviewNote).filter(Boolean);
+    return section(`
+      <div class="kl-review">
+        <div class="kl-review-banner">${banner ? socialImgHtml(banner, "kl-review-banner-img", sourceOf(SocialKind.banner)?.link) : ""}</div>
+        <div class="kl-review-avatar">${LI.person}${avatar ? socialImgHtml(avatar, "kl-review-avatar-img", sourceOf(SocialKind.avatar)?.link) : ""}</div>
+        <div class="kl-review-body">
+          ${bio ? `<p class="kl-review-bio">${esc(bio)}</p>` : ""}
+          ${notes.length ? `<ul class="kl-review-notes">${notes.map((n) => `<li class="${n.from ? "kl-review-from" : ""}">${esc(n.text)}</li>`).join("")}</ul>` : ""}
+        </div>
+      </div>`, { header: "Preview", footerHtml: footer("What others see: each device looks it up from the platform.") });
+  };
+
+  /** Where one field's lookup stands (iOS KachatSocialPreview). */
+  const statusHtml = (kind) => {
+    const source = sourceOf(kind);
+    if (!source) return "";
+    const name = SocialPlatform.displayName(source.platform);
+    switch (fields[kind].lookup) {
+      case "found":
+        return `<div class="kmkt-form-row kl-src-status"><span class="kl-green">${LI.checkCircle}</span><span>${esc(`From ${name}`)}</span></div>`;
+      case "empty":
+        return `<div class="kmkt-form-row kl-src-status">${LI.personExclaim}<span>${esc(missingText(kind, name))}</span></div>`;
+      case "unreachable":
+        return `<div class="kmkt-form-row kl-src-status">${LI.wifiExclaim}<span>${esc(`Couldn't reach ${name}.`)}</span>
+          <button type="button" class="kl-src-retry" data-kl-src-retry="${kind}">Retry</button></div>`;
+      default:
+        return `<div class="kmkt-form-row kl-src-status">${spinner()}<span>Looking up the profile...</span></div>`;
+    }
+  };
+
+  const fieldFooter = (kind) => (isBad(kind) ? footer("That doesn't look like a handle on this platform.", "kl-red") : "");
+  const linktreeFooter = () => (badLinktree()
+    ? footer("Enter your Linktree username: letters, numbers, dots, dashes or underscores.", "kl-red")
+    : footer("Add your Linktree to point people to your other accounts and websites."));
+  const placeholderFor = (platform) => (platform === SocialPlatform.discord ? "invite" : "handle");
 
   const saveHtml = () => {
     let foot;
@@ -1932,37 +2250,50 @@ export function openLiveProfileEditor(owner = "profile") {
     else if (error) foot = footer(error, "kl-red");
     else foot = footer("Saving writes your profile to the chain from your address to itself, for a network fee. Profiles are public.");
     return section(
-      `<button class="kmkt-form-button" type="button" data-kl-profile-save ${saving || !loaded || badImage() ? "disabled" : ""}>
+      `<button class="kmkt-form-button" type="button" data-kl-profile-save ${saving || !loaded || blocked() ? "disabled" : ""}>
         ${saving ? spinner() : "Save Profile"}
       </button>`,
       { footerHtml: foot },
     );
   };
 
-  const input = (field, placeholder, value, type = "text") => `
-    <label class="kmkt-form-row">
-      <input class="kl-input" type="${type}" placeholder="${esc(placeholder)}" value="${esc(value)}" autocomplete="off" autocapitalize="none"
-        autocorrect="off" spellcheck="false" data-kl-profile-field="${esc(field)}" aria-label="${esc(field)}" />
-    </label>`;
+  /** Platform picker, the handle after the platform's prefix, and where its lookup stands. */
+  const fieldHtml = (kind) => {
+    const f = fields[kind];
+    const options = SocialPlatform.choices(kind)
+      .map((p) => `<option value="${esc(p)}" ${p === f.platform ? "selected" : ""}>${esc(SocialPlatform.displayName(p))}</option>`).join("");
+    return section(`
+      <label class="kmkt-form-row kl-link-field">
+        <span>Account on</span>
+        <select class="kl-select" data-kl-src-platform="${kind}" aria-label="${esc(`${KIND_TITLE[kind]}: account on`)}">${options}</select>
+      </label>
+      <label class="kmkt-form-row kl-src-handle-row">
+        <span class="kl-src-prefix" data-kl-src-prefix="${kind}">${esc(SocialPlatform.prefix(f.platform))}</span>
+        <input class="kl-input" type="text" value="${esc(f.handle)}" placeholder="${esc(placeholderFor(f.platform))}" autocomplete="off"
+          autocapitalize="none" autocorrect="off" spellcheck="false" data-kl-src-handle="${kind}" aria-label="${esc(`${KIND_TITLE[kind]}: handle`)}" />
+      </label>
+      <div class="kl-src-status-wrap" data-kl-src-status="${kind}">${statusHtml(kind)}</div>`, {
+      header: KIND_TITLE[kind],
+      footerHtml: `<div data-kl-src-foot="${kind}">${fieldFooter(kind)}</div>`,
+    });
+  };
 
   const formHtml = () => `
     ${section(`
       <div class="kmkt-form-row kmkt-label-row">
         <span class="kmkt-label-icon">${LI.card}</span>
         <span class="kmkt-label-text">Your profile belongs to your address, not to a name: it stays the same when you buy, sell or let a name go.</span>
-      </div>`)}
-    ${section(input("avatar", "https://... or ipfs://...", form.avatar, "url"), { header: "Avatar" })}
-    ${section(input("banner", "https://... or ipfs://...", form.banner, "url"), { header: "Banner", footerHtml: `<div data-kl-banner-footer>${bannerFooter()}</div>` })}
+      </div>`, {
+      footerHtml: footer("Each piece comes from a social profile you link, exactly as that platform shows it, so its moderation applies here too. You can use one account for all three, or mix them."),
+    })}
+    <div data-kl-review-wrap>${reviewHtml()}</div>
+    ${SOCIAL_KINDS.map(fieldHtml).join("")}
     ${section(`
-      <label class="kmkt-form-row kl-textarea-row">
-        <textarea class="kl-textarea" rows="4" placeholder="Bio" data-kl-profile-field="bio" aria-label="Bio">${esc(form.bio)}</textarea>
-      </label>`, { header: "Bio", footerHtml: `<p class="kmkt-form-footer" data-kl-bio-count>${esc(bioCount())}</p>` })}
-    ${section(LINK_FIELDS.map(([key, title]) => `
-      <label class="kmkt-form-row kl-link-field">
-        <span>${esc(title)}</span>
-        <input class="kl-input kl-input-trailing" type="text" value="${esc(form.links[key])}" autocomplete="off" autocapitalize="none"
-          autocorrect="off" spellcheck="false" data-kl-profile-link="${esc(key)}" aria-label="${esc(title)}" />
-      </label>`).join(""), { header: "Links" })}
+      <label class="kmkt-form-row kl-src-handle-row">
+        <span class="kl-src-prefix">linktr.ee/</span>
+        <input class="kl-input" type="text" value="${esc(form.linktree)}" placeholder="username" autocomplete="off" autocapitalize="none"
+          autocorrect="off" spellcheck="false" data-kl-profile-linktree aria-label="Linktree username" />
+      </label>`, { header: "Links", footerHtml: `<div data-kl-linktree-foot>${linktreeFooter()}</div>` })}
     ${section(`
       <label class="kmkt-form-row kl-link-field">
         <span>Primary name</span>
@@ -1976,23 +2307,107 @@ export function openLiveProfileEditor(owner = "profile") {
     })}
     <div data-kl-profile-save-wrap>${saveHtml()}</div>`;
 
+  // MARK: rendering
+
+  /** Replaces a container's html only when it changed (an unchanged <img> keeps loading). */
+  const put = (selector, html) => {
+    const el = layer?.el.querySelector(selector);
+    if (!el || rendered.get(selector) === html) return;
+    rendered.set(selector, html);
+    el.innerHTML = html;
+  };
+
   const renderBody = () => {
     if (closed || !layer) return;
     const body = layer.el.querySelector("[data-kl-profile-body]");
-    if (body) body.innerHTML = loaded ? formHtml() : `<div class="kl-domains-loading">${spinner()}</div>`;
+    if (!body) return;
+    rendered.clear();
+    body.innerHTML = loaded ? formHtml() : `<div class="kl-domains-loading">${spinner()}</div>`;
+    hydrateSocialImages(body);
   };
+
+  /** Everything but the inputs: lookups, footers, the review card, Save. */
+  const renderLive = () => {
+    if (closed || !layer || !loaded) return;
+    for (const k of SOCIAL_KINDS) {
+      put(`[data-kl-src-status="${k}"]`, statusHtml(k));
+      put(`[data-kl-src-foot="${k}"]`, fieldFooter(k));
+    }
+    put("[data-kl-review-wrap]", reviewHtml());
+    put("[data-kl-linktree-foot]", linktreeFooter());
+    put("[data-kl-profile-save-wrap]", saveHtml());
+    hydrateSocialImages(layer.el);
+  };
+
   const renderChrome = () => {
     if (closed || !layer) return;
     const nav = layer.el.querySelector("[data-kl-nav]");
     if (nav) nav.outerHTML = navFor();
-    const save = layer.el.querySelector("[data-kl-profile-save-wrap]");
-    if (save) save.innerHTML = saveHtml();
-    const bf = layer.el.querySelector("[data-kl-banner-footer]");
-    if (bf) bf.innerHTML = bannerFooter();
-    const count = layer.el.querySelector("[data-kl-bio-count]");
-    if (count) count.textContent = bioCount();
-    layer.el.querySelectorAll("[data-kl-profile-body] input, [data-kl-profile-body] textarea, [data-kl-profile-body] select")
+    renderLive();
+    layer.el.querySelectorAll("[data-kl-profile-body] input, [data-kl-profile-body] select")
       .forEach((el) => { el.disabled = saving; });
+  };
+
+  /** Puts a field's platform and handle back into its inputs (a pasted link, a filled field). */
+  const syncInputs = (kind) => {
+    const el = layer?.el;
+    if (!el) return;
+    const f = fields[kind];
+    const select = el.querySelector(`[data-kl-src-platform="${kind}"]`);
+    if (select && select.value !== f.platform) select.value = f.platform;
+    const prefix = el.querySelector(`[data-kl-src-prefix="${kind}"]`);
+    if (prefix) prefix.textContent = SocialPlatform.prefix(f.platform);
+    const input = el.querySelector(`[data-kl-src-handle="${kind}"]`);
+    if (input) {
+      if (input.value !== f.handle) input.value = f.handle;
+      input.placeholder = placeholderFor(f.platform);
+    }
+  };
+
+  // MARK: lookups
+
+  /** Once one field's account is found, the empty fields take the same account where its
+   *  platform can fill them - one handle sets up the whole profile, and each stays editable. */
+  const fillEmpty = (fromKind) => {
+    const from = fields[fromKind];
+    for (const k of SOCIAL_KINDS) {
+      if (k === fromKind || !isEmpty(k) || !SocialPlatform.choices(k).includes(from.platform)) continue;
+      fields[k].platform = from.platform;
+      fields[k].handle = from.handle;
+      syncInputs(k);
+      lookUp(k);
+    }
+  };
+
+  /** Debounced: one lookup once typing pauses; `attempt` reruns it for Retry. Only the latest
+   *  lookup of a field may land, and whatever happens the state ends somewhere final. */
+  const lookUp = (kind) => {
+    const f = fields[kind];
+    const source = sourceOf(kind);
+    const key = `${source?.link ?? ""}#${f.attempt}`;
+    if (key === f.key) return;
+    f.key = key;
+    clearTimeout(f.timer);
+    f.timer = null;
+    if (!source) {
+      f.lookup = "none";
+      f.resolved = null;
+      renderLive();
+      return;
+    }
+    f.lookup = "looking";
+    renderLive();
+    f.timer = setTimeout(async () => {
+      f.timer = null;
+      if (closed || f.key !== key) return;
+      const result = await resolver.resolve(source);
+      if (closed || f.key !== key) return;
+      f.resolved = result.profile ?? null;
+      const found = result.profile?.piece(kind) != null;
+      f.lookup = found ? "found" : (result.kind === "answered" ? "empty" : "unreachable");
+      renderLive();
+      if (found) fillEmpty(kind);
+    }, 500);
   };
 
   const load = async () => {
@@ -2003,11 +2418,13 @@ export function openLiveProfileEditor(owner = "profile") {
       let p = null;
       try { p = (await registry.ownProfile(address))?.profile ?? null; } catch { p = null; }
       if (!p) { try { p = (await registry.identity(address))?.profile ?? null; } catch { p = null; } }
-      if (p) {
-        form.avatar = p.avatar ?? "";
-        form.banner = p.banner ?? "";
-        form.bio = p.bio ?? "";
-        for (const [k] of LINK_FIELDS) form.links[k] = p.links?.[k] ?? "";
+      if (p && !closed) {
+        for (const k of SOCIAL_KINDS) {
+          const s = SocialSource.fromLink(p[k] ?? "", k);
+          fields[k].platform = s ? s.platform : SocialPlatform.x;
+          fields[k].handle = s ? s.displayHandle : "";
+        }
+        form.linktree = Profile.linktreeUsername(p.linktree);
       }
       const key = keyOf(address);
       if (key) {
@@ -2015,12 +2432,14 @@ export function openLiveProfileEditor(owner = "profile") {
       }
       if (p?.primaryName && activeNames.includes(p.primaryName)) form.primary = p.primaryName;
     }
+    if (closed) return;
     loaded = true;
     renderBody();
+    for (const k of SOCIAL_KINDS) lookUp(k);
   };
 
   const save = async () => {
-    if (saving || !loaded || badImage()) return;
+    if (saving || !loaded || blocked()) return;
     const seen = readPrivacySeen();
     const ok = await confirmAsk({
       title: "Save your profile?",
@@ -2031,7 +2450,7 @@ export function openLiveProfileEditor(owner = "profile") {
     });
     if (!ok) return;
     writePrivacySeen();
-    if (!(await deviceLock()) || closed) return;
+    if (!(await deviceLock()) || closed || blocked()) return;
     saving = true;
     error = null;
     renderChrome();
@@ -2045,6 +2464,16 @@ export function openLiveProfileEditor(owner = "profile") {
     renderChrome();
   };
 
+  const onPlatform = (select) => {
+    const kind = select.dataset.klSrcPlatform;
+    if (!fields[kind] || !SocialPlatform.choices(kind).includes(select.value)) return;
+    if (fields[kind].platform === select.value) return;
+    fields[kind].platform = select.value;
+    syncInputs(kind);
+    lookUp(kind);
+    renderLive();
+  };
+
   layer = kit.openLayer({
     owner,
     kind: "tall",
@@ -2053,31 +2482,51 @@ export function openLiveProfileEditor(owner = "profile") {
       ${navFor()}
       <div class="kmkt-sheet-body kmkt-form" data-kl-profile-body></div>`,
     onClick(event) {
-      if (event.target.closest("[data-kl-profile-save]")) save();
+      if (event.target.closest("[data-kl-profile-save]")) { save(); return; }
+      const retry = event.target.closest("[data-kl-src-retry]");
+      if (retry && fields[retry.dataset.klSrcRetry]) {
+        const f = fields[retry.dataset.klSrcRetry];
+        f.attempt += 1;
+        lookUp(retry.dataset.klSrcRetry);
+      }
     },
     onInput(event) {
-      const field = event.target.closest("[data-kl-profile-field]");
-      if (field) {
-        const name = field.dataset.klProfileField;
-        if (name === "bio") {
-          const parts = graphemeList(field.value);
-          if (parts.length > Profile.maxBio) field.value = parts.slice(0, Profile.maxBio).join("");
-          form.bio = field.value;
-        } else if (name === "avatar" || name === "banner") {
-          form[name] = field.value;
+      const handle = event.target.closest("[data-kl-src-handle]");
+      if (handle) {
+        const kind = handle.dataset.klSrcHandle;
+        const f = fields[kind];
+        if (!f) return;
+        f.handle = handle.value;
+        // A whole pasted link: switch the picker to its platform, keep the handle.
+        const pasted = pastedSource(kind);
+        if (pasted && SocialPlatform.choices(kind).includes(pasted.platform)) {
+          f.platform = pasted.platform;
+          f.handle = pasted.displayHandle;
+          syncInputs(kind);
         }
-        renderChrome();
+        lookUp(kind);
+        renderLive();
         return;
       }
-      const link = event.target.closest("[data-kl-profile-link]");
-      if (link) { form.links[link.dataset.klProfileLink] = link.value; return; }
+      const platform = event.target.closest("[data-kl-src-platform]");
+      if (platform) { onPlatform(platform); return; }
+      if (event.target.closest("[data-kl-profile-linktree]")) {
+        form.linktree = event.target.value;
+        renderLive();
+        return;
+      }
       const primary = event.target.closest("[data-kl-profile-primary]");
       if (primary) form.primary = primary.value;
     },
-    onClose() { closed = true; },
+    onClose() {
+      closed = true;
+      for (const k of SOCIAL_KINDS) { clearTimeout(fields[k].timer); fields[k].timer = null; }
+    },
   });
   // A <select> reports its choice through "change" as well as "input".
   layer.el.addEventListener("change", (event) => {
+    const platform = event.target.closest("[data-kl-src-platform]");
+    if (platform) { onPlatform(platform); return; }
     const primary = event.target.closest("[data-kl-profile-primary]");
     if (primary) form.primary = primary.value;
   });

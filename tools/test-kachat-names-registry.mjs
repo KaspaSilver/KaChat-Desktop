@@ -22,7 +22,7 @@ import * as C from "../engine/kachat-names/codec.js";
 import * as T from "../engine/kachat-names/transaction.js";
 import * as M from "../engine/kachat-names/manifest.js";
 import * as R from "../engine/kachat-names/registry-state.js";
-import { KachatNamesRegistry, parseJSONExact } from "../engine/kachat-names/registry.js";
+import { KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix } from "../engine/kachat-names/registry.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -291,26 +291,94 @@ function runRules(r) {
   r.eq(R.label([owned[2]], null, g, now), null, "label: no active name");
 
   const p = new R.Profile({
-    avatar: " https://example.com/a.png ", banner: "http://example.com/b.png", bio: "x".repeat(300),
-    links: { website: "https://k.app", x: "", github: null, telegram: "  ", discord: null, nostr: "npub1" }, primaryName: "Alice.kachat",
+    avatar: " x.com/KaspaCurrency/ ", banner: "youtube.com/@KaspaCurrency", bio: "instagram.com/instagram",
+    linktree: "https://www.linktr.ee/kaspa?utm=1", primaryName: "Alice.kachat",
   });
   const clean = p.sanitized();
-  r.eq(clean.avatar, "https://example.com/a.png", "profile: avatar kept and trimmed");
-  r.eq(clean.banner, null, "profile: http banner dropped");
-  r.eq(clean.bio?.length, 280, "profile: bio cut to 280");
-  r.eq({ ...clean.links }, { website: "https://k.app", x: null, github: null, telegram: null, discord: null, nostr: "npub1" }, "profile: blank links dropped");
+  r.eq(clean.avatar, "https://x.com/KaspaCurrency", "profile: avatar source normalized");
+  r.eq(clean.banner, "https://www.youtube.com/@KaspaCurrency", "profile: banner from another account");
+  r.eq(clean.bio, null, "profile: a bio source on a platform without bios is dropped");
+  r.eq(clean.linktree, "https://linktr.ee/kaspa", "profile: Linktree link normalized");
   r.eq(clean.primaryName, "alice", "profile: primary name normalized");
+  const other = new R.Profile({ avatar: "https://example.com/me", banner: "instagram.com/instagram", linktree: "https://example.com/links" });
+  r.check(R.profileEqual(other.sanitized(), new R.Profile()), "profile: unsupported social site and non-Linktree link dropped");
   const json = p.recordJSON();
   r.check(C.utf8(json).length <= 2048, "profile JSON within 2 KB");
-  r.check(json.startsWith("{\"avatar\":\"https://example.com/a.png\",\"bio\":"), `profile JSON compact with sorted keys: ${json.slice(0, 60)}`);
+  r.eq(json, "{\"avatar\":\"https://x.com/KaspaCurrency\",\"banner\":\"https://www.youtube.com/@KaspaCurrency\",\"linktree\":\"https://linktr.ee/kaspa\",\"primaryName\":\"alice\",\"v\":1}", "profile JSON compact with sorted keys");
   r.check(R.profileEqual(R.Profile.parse(json), clean), "profile JSON round trip");
-  r.check(R.profileEqual(R.Profile.parse("{\"v\":1,\"displayName\":\"x\",\"avatar\":\"ftp://a\"}"), new R.Profile()), "profile: unknown fields and bad schemes dropped");
+  r.check(R.profileEqual(R.Profile.parse("{\"v\":1,\"displayName\":\"x\",\"bio\":\"free text\",\"avatar\":\"ftp://a\"}"), new R.Profile()), "profile: free text, display names and bad links dropped");
   r.eq(R.Profile.parse("{\"v\":2}"), null, "profile: only v 1");
   r.eq(R.Profile.parse("{\"avatar\":\"https://a/b\"}"), null, "profile: v is required");
-  const big = new R.Profile({ links: { website: "w".repeat(1500), x: "x".repeat(600) } });
+  r.check(R.profileEqual(R.Profile.parse("{\"v\":1,\"links\":{\"x\":\"@me\"},\"bio\":\"t.me/telegram\"}"), new R.Profile({ bio: "https://t.me/telegram" })), "profile: the old links object is ignored");
+  r.eq(R.Profile.parse("{\"v\":1,\"linktree\":5}"), null, "profile: a non-string field does not decode");
   let threw = false;
-  try { big.recordJSON(); } catch { threw = true; }
-  r.check(threw, "profile over 2 KB refused");
+  try { new R.Profile({ primaryName: "a".repeat(40) }).recordJSON(); } catch { threw = true; }
+  r.check(!threw, "profile: an invalid primary name is dropped, not refused");
+
+  // what a social link shows
+  const SS = R.SocialSource;
+  r.eq(SS.decodeEntities("a &amp; b &#39;c&#x27; &#064;d &quot;e&quot; &amp;#39;"), "a & b 'c' @d \"e\" &#39;", "entities decoded one level");
+  const html = "<meta property=\"og:image\" content=\"https://pbs.twimg.com/profile_images/1/a_200x200.jpg\"/><meta property=\"og:description\" content=\"Builder &amp; miner\"/>";
+  r.eq(SS.xAvatar(SS.openGraphImage(html)), "https://pbs.twimg.com/profile_images/1/a_400x400.jpg", "X avatar upgraded to 400px");
+  r.eq(SS.bio("x", SS.openGraphDescription(html)), "Builder & miner", "X bio from og:description");
+  r.eq(SS.bio("twitch", "Speedruns — Twitch streams live on Twitch!"), "Speedruns", "Twitch boilerplate cut");
+  r.eq(SS.bio("instagram", "687M Followers, 305 Following"), null, "no bio from Instagram's counts");
+  r.eq(SS.bio("x", "b".repeat(400))?.length, 280, "bio cut to 280");
+  const gh = SS.githubProfile("{\"avatar_url\":\"https://avatars.githubusercontent.com/u/1\",\"bio\":\" hi \"}");
+  r.check(gh.avatar === "https://avatars.githubusercontent.com/u/1" && gh.bio === "hi", "GitHub avatar and bio");
+  const fx = SS.fxTwitterProfile("{\"code\":200,\"user\":{\"avatar_url\":\"https://pbs.twimg.com/profile_images/1/a_normal.jpg\",\"banner_url\":\"https://pbs.twimg.com/profile_banners/9/8\",\"description\":\"hi\"}}");
+  r.eq(fx, new R.SocialProfile({ avatar: "https://pbs.twimg.com/profile_images/1/a_400x400.jpg", banner: "https://pbs.twimg.com/profile_banners/9/8/1500x500", bio: "hi" }), "FxTwitter: avatar 400px, banner 1500x500, bio");
+  r.eq(SS.fxTwitterProfile("{\"code\":404,\"message\":\"NOT_FOUND\"}"), new R.SocialProfile(), "FxTwitter: unknown account answers empty");
+  r.eq(SS.fxTwitterProfile("{\"code\":500}"), null, "FxTwitter: an error means fall back");
+  r.eq(SS.fromLink("instagram.com/instagram", "bio"), null, "no bio source on Instagram");
+  r.eq(SS.from("x", "@KaspaCurrency", "avatar")?.link, "https://x.com/KaspaCurrency", "X handle with @");
+  r.eq(SS.from("youtube", "MrBeast", "banner")?.link, "https://www.youtube.com/@MrBeast", "YouTube handle");
+  r.eq(SS.from("tiktok", "tiktok", "avatar")?.link, "https://www.tiktok.com/@tiktok", "TikTok handle");
+  r.eq(SS.from("linkedin", "company/linkedin", "avatar")?.link, "https://www.linkedin.com/company/linkedin", "LinkedIn company path");
+  r.eq(SS.from("discord", "discord-developers", "bio")?.link, "https://discord.gg/discord-developers", "Discord invite code");
+  const pasted = SS.from("x", "https://www.youtube.com/@MrBeast", "avatar");
+  r.check(pasted?.platform === "youtube" && pasted?.displayHandle === "MrBeast", "a pasted link switches platform");
+  r.eq(SS.from("instagram", "instagram", "banner"), null, "no banner from Instagram");
+  r.eq(SS.from("x", "bad handle!", "avatar"), null, "invalid handle refused");
+  r.eq(R.Profile.linktreeLinkFromUsername("kaspa"), "https://linktr.ee/kaspa", "Linktree from a username");
+  r.eq(R.Profile.linktreeLinkFromUsername("@kaspa "), "https://linktr.ee/kaspa", "Linktree from @username");
+  r.eq(R.Profile.linktreeLinkFromUsername("https://linktr.ee/kaspa"), "https://linktr.ee/kaspa", "Linktree from a pasted link");
+  r.eq(R.Profile.linktreeLinkFromUsername("kas pa"), null, "Linktree username with a space refused");
+  r.eq(R.Profile.linktreeUsername("https://linktr.ee/kaspa"), "kaspa", "Linktree username shown back");
+  r.check(SS.fromLink("t.me/telegram", "bio") != null, "bio source on Telegram");
+  r.eq(SS.discordDescription("{\"guild\":{\"id\":\"1\",\"description\":\"Devs\"}}"), "Devs", "Discord server description");
+
+  // desktop extras: the rest of the link rules, per-field platforms, the page readers
+  const P = R.SocialPlatform;
+  r.eq([...P.choices("banner")], ["x", "youtube", "discord"], "banner platforms");
+  r.eq([...P.choices("bio")], ["x", "youtube", "telegram", "twitch", "kick", "github", "discord"], "bio platforms");
+  r.eq(P.choices("avatar").length, 11, "every platform can fill the avatar");
+  r.check(P.all.every((x) => P.prefix(x) && P.displayName(x)), "every platform has a prefix and a name");
+  const links = {
+    "twitter.com/jack": "https://x.com/jack", "https://mobile.twitter.com/jack?s=20": "https://x.com/jack",
+    "m.youtube.com/channel/UC123": "https://www.youtube.com/channel/UC123", "fb.com/zuck": "https://www.facebook.com/zuck",
+    "instagram.com/nasa/": "https://www.instagram.com/nasa/", "twitch.tv/twitch": "https://www.twitch.tv/twitch",
+    "kick.com/xqc": "https://kick.com/xqc", "github.com/torvalds": "https://github.com/torvalds",
+    "telegram.me/durov": "https://t.me/durov", "linkedin.com/in/someone": "https://www.linkedin.com/in/someone",
+    "https://discord.com/invite/abc": "https://discord.gg/abc",
+  };
+  for (const [raw, want] of Object.entries(links)) r.eq(SS.fromLink(raw, "avatar")?.link ?? null, want, `link ${raw}`);
+  for (const raw of ["x.com/home", "x.com/jack/status/1", "instagram.com/p/abc", "t.me/+invite", "tiktok.com/tiktok", "facebook.com/profile.php", "example.com/jack", "javascript:alert(1)", ""]) {
+    r.eq(SS.fromLink(raw, "avatar"), null, `not a profile: ${raw || "(empty)"}`);
+  }
+  const yt = SS.fromLink("youtube.com/channel/UC123", "avatar");
+  r.eq(SS.from("youtube", yt.displayHandle, "avatar")?.link, "https://www.youtube.com/channel/UC123", "a YouTube channel path shown back maps to itself");
+  r.eq(SS.from("linkedin", "someone", "avatar")?.displayHandle, "someone", "LinkedIn handle shown without in/");
+  r.eq(SS.openGraphImage("<meta content='https://a.example/i.png' name='twitter:image'><meta property=\"og:image\" content=\"http://insecure/x.png\">"), "https://a.example/i.png", "og:image: http skipped, twitter:image used");
+  r.eq(SS.openGraphDescription("<meta property=\"og:description\" content=\"   \"><META NAME=\"Description\" content=\"  Hello &#x1F600; \">"), "Hello \u{1F600}", "description: a blank og:description skipped, any case, entities, trimmed");
+  r.eq(SS.openGraphImage(`<meta${" a".repeat(100_000)}`), null, "an unterminated tag is not read");
+  r.eq(SS.xBanner("x \"profile_banners/123/456\" y"), "https://pbs.twimg.com/profile_banners/123/456/1500x500", "X banner from the page");
+  r.eq(SS.youtubeBanner("\"imageBannerViewModel\" ... \"imageBannerViewModel\":{\"image\":{\"sources\":[{\"url\":\"https://yt3.googleusercontent.com/abc=w1060\""), "https://yt3.googleusercontent.com/abc=w1060", "YouTube banner from the page");
+  const invite = { guild: { id: "613425648685547541", icon: "a_1d18", banner: null, description: " Devs " } };
+  r.eq(SS.discordImage(invite, "avatar"), "https://cdn.discordapp.com/icons/613425648685547541/a_1d18.png?size=256", "Discord server icon");
+  r.eq(SS.discordImage(invite, "banner"), null, "Discord: no banner");
+  r.eq(SS.discordImage({ guild: { id: "1/../x", icon: "a" } }, "avatar"), null, "Discord: an odd id refused");
+  r.check(new R.SocialProfile().isEmpty && !new R.SocialProfile({ bio: "x" }).isEmpty, "SocialProfile.isEmpty");
 
   const k = C.concat(new Uint8Array(31).fill(0x10), [0x00]);
   r.eq(C.hex(R.step(k, -1)), C.hex(C.concat(new Uint8Array(30).fill(0x10), [0x0f, 0xff])), "key - 1 borrows");
@@ -473,9 +541,9 @@ async function runRegistryChain(v, r) {
   // identity: label from the walked names, own profile only
   const id0 = await reg.identity(ownerAddress.toUpperCase());
   r.eq({ label: id0.label, names: id0.names, profile: id0.profile }, { label: "alpha-tn", names: ["alpha-tn"], profile: null }, "registry (chain): identity");
-  await reg.noteOwnProfile({ bio: " hi ", primaryName: "Alpha-TN" }, ownerAddress, "ab".repeat(32));
+  await reg.noteOwnProfile({ bio: " t.me/telegram ", primaryName: "Alpha-TN" }, ownerAddress, "ab".repeat(32));
   const id1 = await reg.identity(ownerAddress);
-  r.eq(id1.profile?.bio, "hi", "registry (chain): own profile known");
+  r.eq(id1.profile?.bio, "https://t.me/telegram", "registry (chain): own profile known");
   const reg1b = new KachatNamesRegistry(deps);
   r.eq((await reg1b.ownProfile(ownerAddress))?.profile.primaryName, "alpha-tn", "registry (chain): own profile persisted");
 
@@ -528,7 +596,7 @@ async function runRegistryIndexer(v, r) {
     if (p === "/market/listings") return response(200, { listings: [nameObj("alice", { price: "700" })], next: null });
     if (p === "/names/alice/history") return response(200, { events: [{ txId: "aa", op: "sale", name: "alice", at: 5, price: "700" }], next: null });
     if (p === "/names/alice/offers") return response(200, { offers: [{ outpoint: { txId: "ef".repeat(32), index: 1 }, buyer: owner, amount: "100", refundAfter: 9, refundable: false }] });
-    if (p === `/identity/${owner}`) return response(200, { address: owner, label: "alice", names: ["alice"], profile: { v: 1, bio: " yo " } });
+    if (p === `/identity/${owner}`) return response(200, { address: owner, label: "alice", names: ["alice"], profile: { v: 1, bio: " github.com/yo " } });
     return response(404, { error: "not_found" });
   };
   const reg = new KachatNamesRegistry({ fetch, restBase: () => "https://rest.test", indexerBase: () => " https://idx.test/ ", getUtxosByAddresses: async () => [], storage: memoryStorage(), manifest: async () => m, now: () => nowMs, log: () => {} });
@@ -546,7 +614,7 @@ async function runRegistryIndexer(v, r) {
   r.eq((await reg.history("alice")).map((e) => e.price), [700n], "registry (indexer): history");
   r.eq((await reg.offersFor("alice")).map((o) => o.name), ["alice"], "registry (indexer): offers take the asked name");
   const id = await reg.identity(owner);
-  r.eq({ label: id.label, bio: id.profile?.bio }, { label: "alice", bio: "yo" }, "registry (indexer): identity sanitized");
+  r.eq({ label: id.label, bio: id.profile?.bio }, { label: "alice", bio: "https://github.com/yo" }, "registry (indexer): identity sanitized");
   let msg = "";
   try { await reg.lapsed(); } catch (e) { msg = e.message; }
   r.eq(msg, "not found", "registry (indexer): 404 -> not found");
@@ -619,6 +687,106 @@ async function runLive() {
   return ok;
 }
 
+/** The social profile resolver (social-image-resolver.js) over a fake fetchText: which requests a
+ *  lookup makes per platform, the cache (reuse, persistence, drop on an empty answer, keep when
+ *  unreachable), shared lookups and onChange. */
+async function runSocialResolver(r) {
+  let clock = 1_000_000;
+  const mem = new Map();
+  const storage = { get: (k) => mem.get(k) ?? null, set: (k, v) => { mem.set(k, v); } };
+  const routes = new Map();
+  const calls = [];
+  const fetchText = async (url, opts) => {
+    calls.push({ url, ...opts });
+    const route = routes.get(url);
+    if (route === undefined) return { status: 404, contentType: "text/plain", text: "" };
+    if (route === null) return null;
+    if (typeof route === "function") return route(opts);
+    return { status: route.status ?? 200, contentType: route.contentType ?? "text/html", text: typeof route.body === "string" ? route.body : JSON.stringify(route.body) };
+  };
+  const make = () => new KachatSocialImageResolver({ fetchText, storage, now: () => clock });
+  const res = make();
+
+  // X: FxTwitter's one JSON answer
+  routes.set("https://api.fxtwitter.com/KaspaCurrency", { body: { code: 200, user: { avatar_url: "https://pbs.twimg.com/profile_images/1/a_normal.jpg", banner_url: "https://pbs.twimg.com/profile_banners/9/8", description: " Kaspa " } } });
+  const changes = [];
+  res.onChange((link, p) => changes.push([link, p.avatar]));
+  const a = await res.resolve("x.com/KaspaCurrency");
+  r.eq(a, { kind: "answered", profile: { avatar: "https://pbs.twimg.com/profile_images/1/a_400x400.jpg", banner: "https://pbs.twimg.com/profile_banners/9/8/1500x500", bio: "Kaspa" } }, "resolver: X through FxTwitter");
+  r.eq(calls.map((c) => [c.url, c.accept, c.agent]), [["https://api.fxtwitter.com/KaspaCurrency", "application/json", "browser"]], "resolver: X costs one JSON request");
+  r.check(calls[0].timeoutMs === 8000 && calls[0].maxBytes > 0, "resolver: each request carries the 8 s limit and a read cap");
+  r.eq(changes, [["https://x.com/KaspaCurrency", "https://pbs.twimg.com/profile_images/1/a_400x400.jpg"]], "resolver: onChange on a new answer");
+  r.check(typeof mem.get(`${socialImageCachePrefix}https://x.com/KaspaCurrency`) === "string", "resolver: cached under kachat-social-image-v1:<link>");
+  clock += 60_000;
+  await res.resolve("https://twitter.com/KaspaCurrency/");
+  r.eq(calls.length, 1, "resolver: an answer under five minutes old is reused");
+  r.eq((await make().cached("x.com/KaspaCurrency"))?.bio, "Kaspa", "resolver: the cache survives a new instance");
+
+  // shared lookups
+  calls.length = 0;
+  routes.set("https://api.github.com/users/torvalds", { contentType: "application/json", body: { avatar_url: "https://avatars.githubusercontent.com/u/1024025?v=4", bio: null } });
+  const [g1, g2] = await Promise.all([res.resolve("github.com/torvalds"), res.resolve("https://github.com/torvalds")]);
+  r.check(calls.length === 1 && g1.profile.avatar === g2.profile.avatar && g1.profile.avatar.startsWith("https://avatars."), "resolver: lookups of one link in flight are shared");
+
+  // X fallback: FxTwitter fails, X's page
+  calls.length = 0;
+  routes.set("https://api.fxtwitter.com/jack", { status: 500, body: { code: 500 } });
+  routes.set("https://x.com/jack", { body: "<meta property=\"og:image\" content=\"https://pbs.twimg.com/profile_images/2/b_200x200.jpg\"><meta property=\"og:description\" content=\"just setting up\"> profile_banners/12/34" });
+  const xf = await res.resolve("x.com/jack");
+  r.eq(xf.profile, { avatar: "https://pbs.twimg.com/profile_images/2/b_400x400.jpg", banner: "https://pbs.twimg.com/profile_banners/12/34/1500x500", bio: "just setting up" }, "resolver: X's page as the fallback");
+  r.eq(calls.map((c) => c.agent), ["browser", "crawler"], "resolver: X's page asked as a crawler");
+
+  // YouTube: the banner from the same page, else the desktop page
+  calls.length = 0;
+  const ytPage = (banner) => `<meta property="og:image" content="https://yt3.googleusercontent.com/av=s900"><meta property="og:description" content="Videos!">${banner ? "\"imageBannerViewModel\":{\"image\":{\"sources\":[{\"url\":\"https://yt3.googleusercontent.com/bn=w1060\"" : ""}`;
+  routes.set("https://www.youtube.com/@withbanner", { body: ytPage(true) });
+  const y1 = await res.resolve("youtube.com/@withbanner");
+  r.check(calls.length === 1 && y1.profile.banner === "https://yt3.googleusercontent.com/bn=w1060" && y1.profile.bio === "Videos!", "resolver: YouTube in one request when the page has the banner");
+  calls.length = 0;
+  let asked = 0;
+  routes.set("https://www.youtube.com/@twopages", (opts) => { asked += 1; return { status: 200, contentType: "text/html", text: ytPage(opts.agent === "browser") }; });
+  const y2 = await res.resolve("youtube.com/@twopages");
+  r.check(asked === 2 && y2.profile.banner === "https://yt3.googleusercontent.com/bn=w1060", "resolver: YouTube's desktop page for the banner");
+
+  // images only; Twitch boilerplate; Discord; Telegram
+  routes.set("https://www.instagram.com/nasa/", { body: "<meta property=\"og:image\" content=\"https://scontent.cdninstagram.com/a.jpg?x=1&amp;y=2\"><meta property=\"og:description\" content=\"97M Followers\">" });
+  r.eq((await res.resolve("instagram.com/nasa")).profile, { avatar: "https://scontent.cdninstagram.com/a.jpg?x=1&y=2", banner: null, bio: null }, "resolver: Instagram gives the picture, no bio");
+  routes.set("https://www.twitch.tv/speedy", { body: "<meta property=\"og:description\" content=\"Speedruns — Twitch streams live on Twitch!\"/>" });
+  r.eq((await res.resolve("twitch.tv/speedy")).profile.bio, "Speedruns", "resolver: Twitch bio without its boilerplate");
+  routes.set("https://discord.com/api/v10/invites/devs", { body: { guild: { id: "42", icon: "abc", banner: "def", description: "Devs" } } });
+  r.eq((await res.resolve("discord.gg/devs")).profile, { avatar: "https://cdn.discordapp.com/icons/42/abc.png?size=256", banner: "https://cdn.discordapp.com/banners/42/def.png?size=1024", bio: "Devs" }, "resolver: Discord invite icon, banner, description");
+  routes.set("https://t.me/someone", { body: "<meta property=\"og:image\" content=\"javascript:alert(1)\"><meta property=\"og:description\" content=\"hi &lt;b&gt;\">" });
+  r.eq((await res.resolve("t.me/someone")).profile, { avatar: null, banner: null, bio: "hi <b>" }, "resolver: a non-https picture is never kept");
+  routes.set("https://api.github.com/users/plain", { body: { avatar_url: "http://insecure.example/a.png", bio: "x" } });
+  r.eq((await res.resolve("github.com/plain")).profile.avatar, null, "resolver: an http avatar is dropped");
+
+  // moderation carries over: empty answer drops, unreachable keeps
+  clock += 1_000;
+  routes.set("https://api.github.com/users/torvalds", { status: 404, body: { message: "Not Found" } });
+  const gone = await res.resolve("github.com/torvalds", { maxAgeMs: 0 });
+  r.check(gone.kind === "answered" && gone.profile.isEmpty, "resolver: an account gone answers empty");
+  r.check((await res.cached("github.com/torvalds"))?.isEmpty === true, "resolver: the cached picture is dropped");
+  routes.set("https://api.fxtwitter.com/KaspaCurrency", null);
+  routes.set("https://x.com/KaspaCurrency", null);
+  const away = await res.resolve("x.com/KaspaCurrency", { maxAgeMs: 0 });
+  r.eq([away.kind, away.profile?.bio], ["unreachable", "Kaspa"], "resolver: unreachable keeps the last answer");
+  routes.set("https://kick.com/never", () => { throw new Error("boom"); });
+  r.eq(await res.resolve("kick.com/never"), { kind: "unreachable", profile: null }, "resolver: a throwing fetch is unreachable");
+  routes.set("https://kick.com/cut", () => ({ status: 200, contentType: "text/html", text: `${"x".repeat(3_000_000)}<meta property="og:description" content="late">` }));
+  r.eq((await res.resolve("kick.com/cut")).profile.bio, null, "resolver: nothing past the read cap is read");
+  r.eq(await res.resolve("example.com/whoever"), { kind: "answered", profile: { avatar: null, banner: null, bio: null } }, "resolver: no lookup for an unsupported link");
+
+  // profile(link): the cached answer now, a background lookup when stale
+  const res2 = make();
+  clock += 25 * 3600 * 1000;
+  routes.set("https://api.fxtwitter.com/KaspaCurrency", { body: { code: 200, user: { avatar_url: "https://pbs.twimg.com/profile_images/3/c_normal.jpg", description: "new" } } });
+  const landed = new Promise((resolve) => res2.onChange((_l, p) => resolve(p)));
+  const stale = await res2.profile("x.com/KaspaCurrency");
+  r.eq(stale?.bio, "Kaspa", "resolver: profile() answers from the stale cache");
+  r.eq((await landed).bio, "new", "resolver: and looks it up again");
+  r.eq((await res2.cached("x.com/KaspaCurrency"))?.banner, null, "resolver: a banner X no longer shows is dropped");
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const live = args.includes("--live");
@@ -637,6 +805,8 @@ async function main() {
   console.log(`+ KachatNamesRegistry over the simulated chain: ${r.pass} pass, ${r.fail} fail`);
   await runRegistryIndexer(v, r);
   console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
+  await runSocialResolver(r);
+  console.log(`+ social profile resolver: ${r.pass} pass, ${r.fail} fail`);
   for (const f of r.failures.slice(0, 40)) console.log(`  FAIL ${f}`);
   let ok = r.fail === 0;
   if (live) ok = (await runLive()) && ok;

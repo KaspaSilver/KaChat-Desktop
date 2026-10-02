@@ -2,7 +2,8 @@
 //
 // Port of iOS KaChat/Services/KachatNames/KachatNamesRegistryState.swift: what a name, gap or
 // offer looks like to the screens, the status rule (KACHAT_NAMES_INDEXER.md B5), the label rule
-// (KACHAT_NAMES.md section 7), the address profile record, the REST transaction parser, the
+// (KACHAT_NAMES.md section 7), the address profile record and its social sources (what a social
+// profile link shows, read out of a platform's answer), the REST transaction parser, the
 // indexer response shapes (Part D), and the chain walker's state with its transition decoder (a
 // port of the kachat-domains CLI's `Registry::apply`, B3) and walk loop. Pure: no DOM, no
 // network, no keys. Checked by tools/test-kachat-names-registry.mjs.
@@ -181,49 +182,94 @@ function clean(s) {
   return t.length ? t : null;
 }
 
-const linkKeys = ["website", "x", "github", "telegram", "discord", "nostr"];
-
-/** `{ website, x, github, telegram, discord, nostr }`, each a string or null. */
-export class ProfileLinks {
-  constructor(l = {}) {
-    for (const k of linkKeys) this[k] = l[k] ?? null;
+/** A pasted link as Swift URLComponents sees it: `https://` added when no scheme is given, the
+ *  host lowercased, the path split into its non-empty, percent-decoded segments. Null when it does
+ *  not parse. */
+function parseLink(raw) {
+  let t = String(raw ?? "").trim();
+  if (!t) return null;
+  const l = t.toLowerCase();
+  if (!l.startsWith("http://") && !l.startsWith("https://")) t = `https://${t}`;
+  let u;
+  try { u = new URL(t); } catch { return null; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  const host = u.hostname.toLowerCase();
+  if (!host) return null;
+  const parts = [];
+  for (const seg of u.pathname.split("/")) {
+    if (!seg) continue;
+    try { parts.push(decodeURIComponent(seg)); } catch { return null; }
   }
-  get isEmpty() { return linkKeys.every((k) => this[k] == null); }
+  return { host, parts };
 }
 
-/** The address profile record: `{ v: 1, avatar, banner, bio, links: ProfileLinks|null, primaryName }`. */
+/** Every character a letter or a number (Swift Character.isLetter / isNumber), or one of `extra`. */
+function handleChars(s, extra) {
+  for (const g of graphemes(s)) {
+    if (extra.includes(g)) continue;
+    if (!/^[\p{L}\p{N}]\p{M}*$/u.test(g)) return false;
+  }
+  return true;
+}
+
+/** The address profile record: `{ v: 1, avatar, banner, bio, linktree, primaryName }`.
+ *
+ *  `avatar`, `banner` and `bio` say where each piece comes from: a profile link on a social
+ *  platform (SocialSource) - they may be three different accounts. KaChat shows that profile's
+ *  avatar, banner or bio, looked up on each device (social-image-resolver.js), so the platform's
+ *  moderation applies. No picture or free text is ever written to the chain. `linktree` is a
+ *  Linktree page (`https://linktr.ee/<name>`): the one way to link anything else. */
 export class Profile {
-  constructor({ v = 1, avatar = null, banner = null, bio = null, links = null, primaryName = null } = {}) {
+  constructor({ v = 1, avatar = null, banner = null, bio = null, linktree = null, primaryName = null } = {}) {
     this.v = v;
     this.avatar = avatar ?? null;
     this.banner = banner ?? null;
     this.bio = bio ?? null;
-    this.links = links == null ? null : (links instanceof ProfileLinks ? links : new ProfileLinks(links));
+    this.linktree = linktree ?? null;
     this.primaryName = primaryName ?? null;
   }
 
+  /** The longest bio KaChat shows (characters), as the platform supplies it. */
   static get maxBio() { return 280; }
 
-  /** Image URLs must be `https://` or `ipfs://`. */
-  static isImageURL(s) {
-    const l = String(s).toLowerCase();
-    const n = graphemes(l).length;
-    return (l.startsWith("https://") && n > 8) || (l.startsWith("ipfs://") && n > 7);
+  /** The Linktree username in a stored link (`https://linktr.ee/<name>` -> `<name>`); "" for none. */
+  static linktreeUsername(link) {
+    const l = Profile.linktreeLink(link);
+    return l == null ? "" : l.slice("https://linktr.ee/".length);
   }
 
-  /** The record as the indexer accepts it: blanks dropped, image URLs of another scheme dropped,
-   *  the bio cut to 280 characters, the primary name normalized. */
+  /** What the Linktree field holds - a bare username (with or without `@`), or a pasted link - as
+   *  a stored link; null when it is not one. Swift `linktreeLink(username:)`. */
+  static linktreeLinkFromUsername(raw) {
+    const t = String(raw ?? "").trim();
+    if (!t) return null;
+    if (t.toLowerCase().includes("linktr.ee")) return Profile.linktreeLink(t);
+    const name = t.startsWith("@") ? t.slice(1) : t;
+    return Profile.linktreeLink(`https://linktr.ee/${name}`);
+  }
+
+  /** A pasted Linktree link, normalized to `https://linktr.ee/<name>`; null for anything else. */
+  static linktreeLink(raw) {
+    const c = clean(raw);
+    if (c == null) return null;
+    const u = parseLink(c);
+    if (!u) return null;
+    const host = u.host.startsWith("www.") ? u.host.slice(4) : u.host;
+    if (host !== "linktr.ee" || u.parts.length !== 1) return null;
+    const handle = u.parts[0];
+    if (graphemes(handle).length > 60 || !handleChars(handle, "._-")) return null;
+    return `https://linktr.ee/${handle}`;
+  }
+
+  /** The record as the indexer accepts it: a supported social link per field and a Linktree link,
+   *  normalized, anything else dropped; the primary name normalized. */
   sanitized() {
     const p = new Profile();
-    const img = (s) => { const c = clean(s); return c != null && Profile.isImageURL(c) ? c : null; };
-    p.avatar = img(this.avatar);
-    p.banner = img(this.banner);
-    const bio = clean(this.bio);
-    p.bio = bio == null ? null : graphemes(bio).slice(0, Profile.maxBio).join("");
-    if (this.links) {
-      const c = new ProfileLinks(Object.fromEntries(linkKeys.map((k) => [k, clean(this.links[k])])));
-      p.links = c.isEmpty ? null : c;
-    }
+    const src = (s, kind) => { const c = clean(s); return c == null ? null : (SocialSource.fromLink(c, kind)?.link ?? null); };
+    p.avatar = src(this.avatar, SocialKind.avatar);
+    p.banner = src(this.banner, SocialKind.banner);
+    p.bio = src(this.bio, SocialKind.bio);
+    p.linktree = Profile.linktreeLink(this.linktree);
     const pn = clean(this.primaryName);
     p.primaryName = pn == null ? null : (isValid(normalize(pn)) ? normalize(pn) : null);
     return p;
@@ -236,11 +282,7 @@ export class Profile {
     if (this.avatar != null) out.avatar = this.avatar;
     if (this.banner != null) out.banner = this.banner;
     if (this.bio != null) out.bio = this.bio;
-    if (this.links != null) {
-      const l = {};
-      for (const k of [...linkKeys].sort()) if (this.links[k] != null) l[k] = this.links[k];
-      out.links = l;
-    }
+    if (this.linktree != null) out.linktree = this.linktree;
     if (this.primaryName != null) out.primaryName = this.primaryName;
     out.v = this.v;
     return out;
@@ -266,29 +308,394 @@ export class Profile {
   }
 
   /** A Profile from a parsed JSON object, with Swift Decodable's strictness (`v` required, every
-   *  field a string or null, `links` an object); null when it does not decode. Not sanitized. */
+   *  known field a string or null; unknown fields - the old `links` too - ignored); null when it
+   *  does not decode. Not sanitized. */
   static fromJSONObject(j) {
     if (j == null || typeof j !== "object" || Array.isArray(j)) return null;
     if (typeof j.v !== "number" || !Number.isInteger(j.v)) return null;
-    const optStr = (v) => (v == null ? null : typeof v === "string" ? v : undefined);
     const fields = {};
-    for (const k of ["avatar", "banner", "bio", "primaryName"]) {
-      const v = optStr(j[k]);
-      if (v === undefined) return null;
-      fields[k] = v;
+    for (const k of ["avatar", "banner", "bio", "linktree", "primaryName"]) {
+      const v = j[k];
+      if (v != null && typeof v !== "string") return null;
+      fields[k] = v ?? null;
     }
-    let links = null;
-    if (j.links != null) {
-      if (typeof j.links !== "object" || Array.isArray(j.links)) return null;
-      const l = {};
-      for (const k of linkKeys) {
-        const v = optStr(j.links[k]);
-        if (v === undefined) return null;
-        l[k] = v;
+    return new Profile({ v: j.v, ...fields });
+  }
+}
+
+// MARK: - Social sources (where a profile's avatar, banner and bio come from)
+
+/** Which piece of the profile a social link fills. */
+export const SocialKind = Object.freeze({ avatar: "avatar", banner: "banner", bio: "bio" });
+
+const PLATFORM_INFO = Object.freeze({
+  x: { name: "X", prefix: "x.com/" },
+  youtube: { name: "YouTube", prefix: "youtube.com/@" },
+  facebook: { name: "Facebook", prefix: "facebook.com/" },
+  instagram: { name: "Instagram", prefix: "instagram.com/" },
+  tiktok: { name: "TikTok", prefix: "tiktok.com/@" },
+  twitch: { name: "Twitch", prefix: "twitch.tv/" },
+  kick: { name: "Kick", prefix: "kick.com/" },
+  github: { name: "GitHub", prefix: "github.com/" },
+  telegram: { name: "Telegram", prefix: "t.me/" },
+  linkedin: { name: "LinkedIn", prefix: "linkedin.com/in/" },
+  discord: { name: "Discord", prefix: "discord.gg/" },
+});
+
+const PLATFORM_CHOICES = Object.freeze({
+  avatar: Object.freeze(["x", "youtube", "instagram", "tiktok", "facebook", "twitch", "kick", "github", "telegram", "linkedin", "discord"]),
+  banner: Object.freeze(["x", "youtube", "discord"]),
+  bio: Object.freeze(["x", "youtube", "telegram", "twitch", "kick", "github", "discord"]),
+});
+
+/** The platforms a profile can point at (Swift `SocialSource.Platform`), by raw value. */
+export const SocialPlatform = Object.freeze({
+  x: "x", youtube: "youtube", facebook: "facebook", instagram: "instagram", tiktok: "tiktok", twitch: "twitch",
+  kick: "kick", github: "github", telegram: "telegram", linkedin: "linkedin", discord: "discord",
+  /** Every platform (Swift `allCases`). */
+  all: Object.freeze(Object.keys(PLATFORM_INFO)),
+  isPlatform(p) { return typeof p === "string" && Object.hasOwn(PLATFORM_INFO, p); },
+  /** Platforms whose banner can be read without signing in. */
+  hasBanner(p) { return PLATFORM_CHOICES.banner.includes(p); },
+  /** Platforms whose preview carries the person's own bio (see `SocialSource.bio`). */
+  hasBio(p) { return PLATFORM_CHOICES.bio.includes(p); },
+  /** What the handle field shows in front of the handle. */
+  prefix(p) { return PLATFORM_INFO[p]?.prefix ?? ""; },
+  displayName(p) { return PLATFORM_INFO[p]?.name ?? String(p ?? ""); },
+  /** The platforms that can fill a field (SocialKind), in picker order. */
+  choices(kind) { return PLATFORM_CHOICES[kind] ?? []; },
+});
+
+/** A handle segment: 1 to 100 characters, letters, numbers, `.`, `_`, `-`, `@`. */
+const okHandle = (s) => typeof s === "string" && s.length > 0 && graphemes(s).length <= 100 && handleChars(s, "._-@");
+
+/** What a social profile link shows right now: avatar, banner (X, YouTube, Discord) and bio.
+ *  `{ avatar: string|null, banner: string|null, bio: string|null }` */
+export class SocialProfile {
+  constructor({ avatar = null, banner = null, bio = null } = {}) {
+    this.avatar = typeof avatar === "string" ? avatar : null;
+    this.banner = typeof banner === "string" ? banner : null;
+    this.bio = typeof bio === "string" ? bio : null;
+  }
+  get isEmpty() { return this.avatar == null && this.banner == null && this.bio == null; }
+  /** The piece a field shows (SocialKind). */
+  piece(kind) { return kind === SocialKind.avatar ? this.avatar : kind === SocialKind.banner ? this.banner : kind === SocialKind.bio ? this.bio : null; }
+  toJSON() { return { avatar: this.avatar, banner: this.banner, bio: this.bio }; }
+}
+
+/** A JSON answer (text or an already parsed value) as an object, or null. */
+function jsonObject(data) {
+  let j = data;
+  if (typeof data === "string") { try { j = JSON.parse(data); } catch { return null; } }
+  return j != null && typeof j === "object" && !Array.isArray(j) ? j : null;
+}
+
+const META_TAG_MAX = 8192;
+const META_TAGS_MAX = 400;
+
+/** The page's `<meta ...>` tags in order (each up to its first `>`; at most 400, each at most
+ *  8 KB). One linear pass: a hostile page can't make it backtrack. */
+function metaTags(html) {
+  const s = String(html ?? "");
+  const out = [];
+  const re = /<meta/gi;
+  let m;
+  while (out.length < META_TAGS_MAX && (m = re.exec(s)) != null) {
+    const end = s.indexOf(">", m.index + 5);
+    if (end < 0) break;
+    if (end - m.index <= META_TAG_MAX) out.push(s.slice(m.index, end + 1));
+    re.lastIndex = end + 1;
+  }
+  return out;
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The first meta tag naming `key` (`property=` or `name=`, any case), or null. */
+function metaTagFor(tags, key) {
+  const re = new RegExp(`(?:property|name)=["']${escapeRe(key)}["']`, "i");
+  return tags.find((t) => re.test(t)) ?? null;
+}
+
+/**
+ * Where a profile's avatar, banner or bio comes from: a profile link on a platform that moderates
+ * what it shows (X, YouTube, Facebook, ...). The record stores only the link; each device looks
+ * the current picture or bio up and caches it (social-image-resolver.js), so something the
+ * platform takes down disappears here too. Nothing is ever uploaded.
+ *
+ * `{ platform: SocialPlatform value, link: the normalized profile link (e.g. "https://x.com/name"),
+ *    handle: the handle, channel path or invite code inside it }`. Build one with
+ * `SocialSource.fromLink(raw, kind)` (Swift `init?(link:for:)`) or `SocialSource.from(platform,
+ * handle, kind)`.
+ */
+export class SocialSource {
+  constructor({ platform, link, handle }) {
+    this.platform = platform;
+    this.link = link;
+    this.handle = handle;
+  }
+
+  /** A pasted profile link (with or without `https://`, `www.`, `m.`, trailing slash or query).
+   *  Null for an unsupported site, a post rather than a profile, or a field (SocialKind) the
+   *  platform can't fill. */
+  static fromLink(raw, kind) {
+    const u = parseLink(raw);
+    if (!u) return null;
+    let host = u.host;
+    for (const prefix of ["www.", "m.", "mobile."]) if (host.startsWith(prefix)) host = host.slice(prefix.length);
+    const parts = u.parts;
+    const p0 = parts[0] ?? "";
+    const lower0 = p0.toLowerCase();
+    let platform = null;
+    let handle = "";
+    let link = "";
+    switch (host) {
+      case "x.com": case "twitter.com":
+        if (parts.length === 1 && okHandle(p0) && !["home", "explore", "search", "i", "settings"].includes(lower0)) {
+          platform = "x"; handle = p0; link = `https://x.com/${handle}`;
+        }
+        break;
+      case "youtube.com":
+        if (parts.length >= 1 && p0.startsWith("@") && okHandle(p0)) {
+          platform = "youtube"; handle = p0; link = `https://www.youtube.com/${handle}`;
+        } else if (parts.length >= 2 && ["channel", "c", "user"].includes(p0) && okHandle(parts[1])) {
+          platform = "youtube"; handle = `${p0}/${parts[1]}`; link = `https://www.youtube.com/${handle}`;
+        }
+        break;
+      case "facebook.com": case "fb.com":
+        if (parts.length === 1 && okHandle(p0) && !["profile.php", "groups", "watch", "events"].includes(lower0)) {
+          platform = "facebook"; handle = p0; link = `https://www.facebook.com/${handle}`;
+        }
+        break;
+      case "instagram.com":
+        if (parts.length === 1 && okHandle(p0) && !["p", "reel", "reels", "explore", "stories"].includes(lower0)) {
+          platform = "instagram"; handle = p0; link = `https://www.instagram.com/${handle}/`;
+        }
+        break;
+      case "tiktok.com":
+        if (parts.length === 1 && p0.startsWith("@") && okHandle(p0)) {
+          platform = "tiktok"; handle = p0; link = `https://www.tiktok.com/${handle}`;
+        }
+        break;
+      case "twitch.tv":
+        if (parts.length === 1 && okHandle(p0)) { platform = "twitch"; handle = p0; link = `https://www.twitch.tv/${handle}`; }
+        break;
+      case "kick.com":
+        if (parts.length === 1 && okHandle(p0)) { platform = "kick"; handle = p0; link = `https://kick.com/${handle}`; }
+        break;
+      case "github.com":
+        if (parts.length === 1 && okHandle(p0)) { platform = "github"; handle = p0; link = `https://github.com/${handle}`; }
+        break;
+      case "t.me": case "telegram.me":
+        if (parts.length === 1 && okHandle(p0) && !p0.startsWith("+")) {
+          platform = "telegram"; handle = p0; link = `https://t.me/${handle}`;
+        }
+        break;
+      case "linkedin.com":
+        if (parts.length >= 2 && ["in", "company"].includes(p0) && okHandle(parts[1])) {
+          platform = "linkedin"; handle = `${p0}/${parts[1]}`; link = `https://www.linkedin.com/${handle}`;
+        }
+        break;
+      case "discord.gg":
+        if (parts.length === 1 && okHandle(p0)) { platform = "discord"; handle = p0; link = `https://discord.gg/${handle}`; }
+        break;
+      case "discord.com": case "discordapp.com":
+        if (parts.length === 2 && p0 === "invite" && okHandle(parts[1])) {
+          platform = "discord"; handle = parts[1]; link = `https://discord.gg/${handle}`;
+        }
+        break;
+      default:
+        break;
+    }
+    if (platform == null) return null;
+    if (kind === SocialKind.banner && !SocialPlatform.hasBanner(platform)) return null;
+    if (kind === SocialKind.bio && !SocialPlatform.hasBio(platform)) return null;
+    return new SocialSource({ platform, link, handle });
+  }
+
+  /** A handle typed for `platform` (with or without `@`), or a whole pasted profile link - which
+   *  may name another platform: the caller switches its picker to the result's `platform`. */
+  static from(platform, rawHandle, kind) {
+    let h = String(rawHandle ?? "").trim();
+    if (!h) return null;
+    if (h.toLowerCase().startsWith("http") || (h.includes(".") && h.includes("/"))) {
+      return SocialSource.fromLink(h, kind);
+    }
+    if (!SocialPlatform.isPlatform(platform)) return null;
+    if (h.startsWith("@")) h = h.slice(1);
+    let link;
+    if (platform === "linkedin") {
+      link = h.startsWith("in/") || h.startsWith("company/") ? `linkedin.com/${h}` : SocialPlatform.prefix(platform) + h;
+    } else if (platform === "youtube" && /^(channel|c|user)\//.test(h)) {
+      // a stored channel path shown back in the field (`displayHandle`) maps to itself
+      link = `youtube.com/${h}`;
+    } else {
+      link = SocialPlatform.prefix(platform) + h;
+    }
+    return SocialSource.fromLink(link, kind);
+  }
+
+  /** The handle as the field shows it after `SocialPlatform.prefix(platform)`. */
+  get displayHandle() {
+    switch (this.platform) {
+      case "youtube": case "tiktok": return this.handle.startsWith("@") ? this.handle.slice(1) : this.handle;
+      case "linkedin": return this.handle.startsWith("in/") ? this.handle.slice(3) : this.handle;
+      default: return this.handle;
+    }
+  }
+
+  // MARK: Reading the picture out of what the platform serves (pure, testable)
+
+  /** The `og:image` (or `og:image:secure_url`, `twitter:image`) of an HTML page, entities decoded;
+   *  `https://` only. */
+  static openGraphImage(html) {
+    const tags = metaTags(html);
+    for (const key of ["og:image", "og:image:secure_url", "twitter:image"]) {
+      const tag = metaTagFor(tags, key);
+      if (!tag) continue;
+      const c = /content=["']([^"']+)["']/.exec(tag);
+      if (!c) continue;
+      const value = SocialSource.decodeEntities(c[1]);
+      if (value.toLowerCase().startsWith("https://")) return value;
+    }
+    return null;
+  }
+
+  /** The page's `og:description` (or `description`, `twitter:description`), entities decoded. */
+  static openGraphDescription(html) {
+    const tags = metaTags(html);
+    for (const key of ["og:description", "description", "twitter:description"]) {
+      const tag = metaTagFor(tags, key);
+      if (!tag) continue;
+      const c = /content="([^"]*)"/.exec(tag) ?? /content='([^']*)'/.exec(tag);
+      if (!c) continue;
+      const value = SocialSource.decodeEntities(c[1]).trim();
+      if (value) return value;
+    }
+    return null;
+  }
+
+  /** The bio a platform shows in its preview, where that text really is the person's own (X,
+   *  YouTube, Telegram, Kick, and Twitch without its boilerplate). Instagram, TikTok, Facebook and
+   *  LinkedIn only put follower counts or site text there: no bio from them. GitHub and Discord
+   *  come from their APIs instead. */
+  static bio(platform, description) {
+    if (typeof description !== "string" || !description) return null;
+    let text;
+    switch (platform) {
+      case "x": case "youtube": case "telegram": case "kick":
+        text = description;
+        break;
+      case "twitch":
+        // "<description> — Twitch streams live on Twitch! Check out their videos ..."
+        text = description.split(" — ")[0];
+        break;
+      default:
+        return null;
+    }
+    return SocialSource.trimmedBio(text);
+  }
+
+  /** Trimmed and cut to `Profile.maxBio` characters; null when blank. */
+  static trimmedBio(s) {
+    if (typeof s !== "string") return null;
+    const t = s.trim();
+    return t ? graphemes(t).slice(0, Profile.maxBio).join("") : null;
+  }
+
+  /** GitHub's public user API (`api.github.com/users/<name>`, JSON text or parsed): `{ avatar, bio }`. */
+  static githubProfile(json) {
+    const root = jsonObject(json);
+    if (!root) return { avatar: null, bio: null };
+    return { avatar: typeof root.avatar_url === "string" ? root.avatar_url : null, bio: SocialSource.trimmedBio(root.bio) };
+  }
+
+  /** FxTwitter's user API (`api.fxtwitter.com/<handle>`, JSON text or parsed): X's avatar (400 px),
+   *  banner and bio in one small answer - X's own data, so X's moderation still applies. An empty
+   *  SocialProfile for an unknown or suspended account (`code` 404); null when the answer isn't a
+   *  user (fall back to X's page). */
+  static fxTwitterProfile(json) {
+    const root = jsonObject(json);
+    if (!root) return null;
+    const user = root.user;
+    if (root.code !== 200 || user == null || typeof user !== "object" || Array.isArray(user)) {
+      return root.code === 404 ? new SocialProfile() : null;
+    }
+    const p = new SocialProfile();
+    if (typeof user.avatar_url === "string" && user.avatar_url.startsWith("https://")) {
+      p.avatar = user.avatar_url.replaceAll("_normal.", "_400x400.");
+    }
+    if (typeof user.banner_url === "string" && user.banner_url.startsWith("https://")) {
+      p.banner = user.banner_url.endsWith("/1500x500") ? user.banner_url : `${user.banner_url}/1500x500`;
+    }
+    p.bio = SocialSource.trimmedBio(user.description);
+    return p;
+  }
+
+  /** A Discord invite's server description (`/api/v10/invites/{code}`, JSON text or parsed). */
+  static discordDescription(json) {
+    const guild = jsonObject(json)?.guild;
+    if (guild == null || typeof guild !== "object") return null;
+    return SocialSource.trimmedBio(guild.description);
+  }
+
+  /** HTML entities as they appear in meta tags: named basics plus decimal and hex numbers. */
+  static decodeEntities(s) {
+    let out = String(s ?? "");
+    if (!out.includes("&")) return out;
+    for (const [k, v] of [["&quot;", "\""], ["&apos;", "'"], ["&lt;", "<"], ["&gt;", ">"], ["&nbsp;", " "]]) out = out.replaceAll(k, v);
+    const re = /&#(x[0-9a-fA-F]+|[0-9]+);/;
+    for (let guard = 0; guard < 10_000; guard++) {
+      const m = re.exec(out);
+      if (!m) break;
+      const body = m[1];
+      const code = body.length > 12 ? NaN : (body[0] === "x" ? parseInt(body.slice(1), 16) : parseInt(body, 10));
+      const ok = Number.isInteger(code) && code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+      out = out.slice(0, m.index) + (ok ? String.fromCodePoint(code) : "") + out.slice(m.index + m[0].length);
+    }
+    // last, so "&amp;#39;" (double-encoded, as LinkedIn sends) decodes one level only
+    return out.replaceAll("&amp;", "&");
+  }
+
+  /** X's avatar from its page, upgraded from the 200px thumbnail to 400px. */
+  static xAvatar(url) { return String(url).replaceAll("_200x200.", "_400x400."); }
+
+  /** X's banner: the page names it as `profile_banners/<user id>/<version>`. */
+  static xBanner(html) {
+    const m = /profile_banners\/[0-9]+\/[0-9]+/.exec(String(html ?? ""));
+    return m ? `https://pbs.twimg.com/${m[0]}/1500x500` : null;
+  }
+
+  /** YouTube's channel banner from the page's embedded data, when the channel has one. */
+  static youtubeBanner(html) {
+    const s = String(html ?? "");
+    // The object itself (the bare name also appears earlier, in a list of renderer types).
+    const marker = "\"imageBannerViewModel\":{";
+    const start = s.indexOf(marker);
+    if (start < 0) return null;
+    const win = s.slice(start + marker.length, start + marker.length + 4000);
+    const m = /https:\/\/yt3\.googleusercontent\.com\/[^"\\]+/.exec(win);
+    return m ? m[0] : null;
+  }
+
+  /** Discord invite (JSON text or parsed) -> the server's icon (avatar) or banner. */
+  static discordImage(json, kind) {
+    const guild = jsonObject(json)?.guild;
+    if (guild == null || typeof guild !== "object" || typeof guild.id !== "string") return null;
+    if (!/^[0-9]{1,25}$/.test(guild.id)) return null;
+    const hash = (v) => (typeof v === "string" && /^[A-Za-z0-9_]{1,80}$/.test(v) ? v : null);
+    switch (kind) {
+      case SocialKind.avatar: {
+        const icon = hash(guild.icon);
+        return icon ? `https://cdn.discordapp.com/icons/${guild.id}/${icon}.png?size=256` : null;
       }
-      links = new ProfileLinks(l);
+      case SocialKind.banner: {
+        const banner = hash(guild.banner);
+        return banner ? `https://cdn.discordapp.com/banners/${guild.id}/${banner}.png?size=1024` : null;
+      }
+      default:
+        return null; // the server's description: `discordDescription`
     }
-    return new Profile({ v: j.v, ...fields, links });
   }
 }
 

@@ -16,12 +16,20 @@
 // Records from either source are only read here; every action must re-read its UTXOs from a node
 // before it builds anything. Testnet-10 only. Every I/O dependency is injected (no app imports),
 // and nothing runs at import.
+//
+// The Swift file also holds KachatSocialImageResolver (a profile's avatar, banner and bio, looked
+// up on the device from its social links). Here it lives in social-image-resolver.js and is
+// re-exported below; the app keeps one instance with its own fetch and storage.
 
 import { Failure, hex, normalize, validate, isValid, key as nameKey } from "./codec.js";
 import {
   RegistryState, TxView, Lookup, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
   addressOf, keyOf, shortAddress, p2shAddress, step,
 } from "./registry-state.js";
+
+export {
+  KachatSocialImageResolver, socialImageCachePrefix, socialFreshForMs, socialLookupDeadlineMs, socialRequestTimeoutMs, socialRecentMs,
+} from "./social-image-resolver.js";
 
 /** The storage key of the walker's cache (testnet-10). */
 export const registryCacheKey = "kachat-names-registry-testnet-v1";

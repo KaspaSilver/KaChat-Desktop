@@ -177,6 +177,55 @@
 .kl-link-field > span { flex: 0 0 auto; }
 .kl-input:disabled, .kl-textarea:disabled, .kl-select:disabled { opacity: .6; }
 
+/* ---- Edit .kachat Profile: social sources and the review card ---------------------------- */
+
+/* A platform's prefix in front of the handle (x.com/ | handle). */
+.kl-src-handle-row { justify-content: flex-start; gap: 0; cursor: text; }
+.kl-src-prefix { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
+.kl-src-handle-row .kl-input { margin-left: 1px; }
+
+/* Where a field's lookup stands. */
+.kl-src-status-wrap:empty { display: none; }
+.kmkt-form-card > .kl-src-handle-row:has(+ .kl-src-status-wrap:empty) { background-image: none; }
+.kl-src-status-wrap > .kmkt-form-row { background-image: none; }
+.kl-src-status {
+  justify-content: flex-start; gap: 10px; min-height: 0; padding-top: 10px; padding-bottom: 10px;
+  font-size: 13px; line-height: 18px; color: var(--muted);
+}
+.kl-src-status > span { min-width: 0; overflow-wrap: anywhere; }
+.kl-src-status .kmkt-ico, .kl-src-status .kl-green { flex: 0 0 auto; width: 18px; height: 18px; display: inline-flex; }
+.kl-src-status .kl-green .kmkt-ico { width: 18px; height: 18px; }
+.kl-src-status .kl-spinner { width: 16px; height: 16px; }
+.kl-src-retry {
+  margin-left: auto; flex: 0 0 auto; padding: 4px 0; border: 0; background: transparent; cursor: pointer;
+  color: var(--kaspa-ink); font: inherit; font-size: 13px; font-weight: 600;
+}
+.kl-src-retry:hover { text-decoration: underline; }
+
+/* The review card, laid out like the profile header: banner, avatar, bio. */
+.kl-review { display: flex; flex-direction: column; }
+.kl-review-banner {
+  height: 104px; overflow: hidden;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--kaspa) 55%, transparent), color-mix(in srgb, var(--kaspa) 15%, transparent));
+}
+.kl-review-banner-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.kl-review-avatar {
+  position: relative; width: 70px; height: 70px; margin: -35px 0 0 14px; flex: 0 0 auto;
+  display: grid; place-items: center; border-radius: 50%; overflow: hidden;
+  border: 3px solid var(--grouped-cell-elevated); background: var(--fill-secondary); color: var(--muted);
+}
+.kmkt-sheet-cover .kl-review-avatar { border-color: var(--grouped-row); }
+.kl-review-avatar > .kmkt-ico { width: 38px; height: 38px; }
+.kl-review-avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.kl-review-avatar-img[hidden], .kl-review-banner-img[hidden] { display: none; }
+.kl-review-body { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px 14px; }
+.kl-review-bio {
+  margin: 0; font-size: 15px; line-height: 20px; color: var(--text);
+  white-space: pre-line; overflow-wrap: anywhere;
+}
+.kl-review-notes { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: 12px; line-height: 16px; color: var(--muted); }
+.kl-review-notes .kl-review-from { font-weight: 600; }
+
 /* ---- Your Domains > .kachat ------------------------------------------------------------- */
 
 .kl-domains { display: grid; gap: 12px; }

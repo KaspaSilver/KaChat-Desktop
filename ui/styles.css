@@ -12518,3 +12518,9 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .testnet-restart-note > span { flex: 1; min-width: 0; }
 .testnet-reload-button { flex: 0 0 auto; border: 0; border-radius: 999px; padding: 6px 12px; background: var(--ios-orange); color: #fff; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
 .nc-testnet-off .settings-page-form strong { font-weight: 600; }
+
+/* Profile hero: the .kachat profile's Linktree link (testnet). */
+.profile-hero-linktree { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; color: var(--kaspa-ink); text-decoration: none; }
+.profile-hero-linktree[hidden] { display: none !important; }
+.profile-hero-linktree svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-hero-linktree:hover { text-decoration: underline; }
