@@ -19,7 +19,7 @@ import { createRpc, probeRpc, disconnectRpc, getNodeRegistrySnapshot, PUBLIC_NOD
 import { getEndpoint } from "../../engine/endpoints.js";
 import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateSendFeeDetail } from "../../engine/transactions.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "../../ui/kspt.js";
-import { looksLikeName, resolveEverywhere, primaryResolution, notFoundMessage } from "./names.js";
+import { looksLikeName, resolveEverywhere, primaryResolution, notFoundMessage, ownsAnyName, ownedNamesOfMany } from "./names.js";
 import { fetchKasPrice, peekKasPrice } from "../../engine/prices.js";
 import { getAddressInfo, fetchAddressInfo, peekAddressInfo, clearKnsCache } from "../../engine/kns.js";
 import { transferDomain as knsTransferDomain, setKnsPrimaryDomain } from "../../engine/kns-write.js";
@@ -860,9 +860,8 @@ export async function discoverSpendingAddresses(onProgress = () => {}) {
   const GAP = 60;
   const found = new Set();
   const addresses = {};
-  const knsOwns = async (address) => {
-    try { return ((await getAddressInfo(address, knsOptions()))?.allDomains || []).length > 0; } catch { return false; }
-  };
+  // Any name service (iOS 7a5b157): .kas through KNS, .k and .kaspa through their own APIs.
+  const knsOwns = (address) => ownsAnyName(address, async (a) => ((await getAddressInfo(a, knsOptions()))?.allDomains || []).length > 0);
 
   onProgress({ checkingIndex: 0, foundCount: 0 });
   Object.assign(addresses, await spendingAddressRange(0, DEEP_FLOOR));
@@ -1026,7 +1025,12 @@ export async function scanIdentityAddresses(start = 0, count = 50) {
     }
   };
   await Promise.all(Array.from({ length: 4 }, worker));
-  for (const row of rows) row.balanceSompi = balancesByAddress[row.address] ?? 0n;
+  // .k and .kaspa too: an identity can live at an address whose only trace is a name there.
+  const otherNames = await ownedNamesOfMany(rows.map((r) => r.address));
+  for (const row of rows) {
+    row.balanceSompi = balancesByAddress[row.address] ?? 0n;
+    row.otherNames = otherNames[row.address] || [];
+  }
   return { rows, currentIndex: account.identityIndex || 0 };
 }
 

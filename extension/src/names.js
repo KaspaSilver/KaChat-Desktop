@@ -232,3 +232,33 @@ export function bindOtherDomains(root, { onToggle, onPick }) {
   if (toggle) toggle.onclick = onToggle;
   for (const button of root.querySelectorAll("[data-pick-tld]")) button.onclick = () => onPick(button.dataset.pickTld);
 }
+
+// --- account discovery (iOS NameServicesClient.ownedNames(of:) / ownsAnyName) ----------------
+
+/** Names `address` owns on .k and .kaspa, without touching the Your Domains cache; failures count as none. */
+export async function ownedNamesOf(address) {
+  const key = String(address || "").trim().toLowerCase();
+  if (!key) return [];
+  const [k, kaspa] = await Promise.all([ownedDotk(key), ownedKaspaNames(key)]);
+  return [...(k || []), ...(kaspa || [])];
+}
+
+/** ownedNamesOf for many addresses, six at a time (the services rate-limit bursts). */
+export async function ownedNamesOfMany(addresses, concurrency = 6) {
+  const result = {};
+  for (let i = 0; i < addresses.length; i += concurrency) {
+    const slice = addresses.slice(i, i + concurrency);
+    const names = await Promise.all(slice.map((address) => ownedNamesOf(address)));
+    slice.forEach((address, j) => { if (names[j].length) result[address] = names[j]; });
+  }
+  return result;
+}
+
+/**
+ * Does `address` own a name on any service KaChat reads (.kas, .k, .kaspa)? Account discovery
+ * asks this so an address whose only trace is a name is still found.
+ */
+export async function ownsAnyName(address, kasOwns) {
+  const [kas, others] = await Promise.all([kasOwns(address).catch(() => false), ownedNamesOf(address)]);
+  return Boolean(kas) || others.length > 0;
+}

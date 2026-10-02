@@ -369,7 +369,7 @@ export function showManageAddress(opts) {
     $("#address-actions").onclick = addressActions;
     $("#receive").onclick = () => showQr({
       address: opts.address, balanceSompi: total, backLabel: "Close", onBack: back,
-      note: "This address is for chatting and KNS profile creation. Funding it with around 50 Kaspa is enough to create a KNS profile and send messages for a long time.",
+      note: "This address is for chatting. Funding it with around 50 Kaspa is enough to send messages for a long time.",
     });
     $("#send").onclick = () => openSend(false);
     bindTabsContent(state, { address: opts.address, repaint: paint, reloadHistory: loadHistory, reloadCoins: loadCoins, onCompound: () => openSend(true) });
@@ -938,20 +938,22 @@ function showChattingAddressPicker({ onBack, onChanged }) {
   };
 
   const paint = () => {
-    const shown = state.rows.filter((r) => r.balanceSompi > 0n || r.domains?.length || r.index === 0 || r.index === state.current);
+    const nameCount = (r) => (r.domains?.length || 0) + (r.otherNames?.length || 0);
+    const onlyName = (r) => (nameCount(r) === 1 ? (r.domains?.[0]?.fullName || r.otherNames?.[0]?.display) : null);
+    const shown = state.rows.filter((r) => r.balanceSompi > 0n || nameCount(r) > 0 || r.index === 0 || r.index === state.current);
     render(`
       ${navHeader({ title: "Chatting Address" })}
       <section class="screen manage">
         <div class="source-head">
           <h2>Choose Your Chatting Address</h2>
-          <p class="muted">If this seed already holds your identity at a different address - a KNS domain or a funded chatting balance - pick it here. Only addresses with a balance or domains are shown.</p>
+          <p class="muted">If this seed already holds your identity at a different address - a domain (.kas, .k or .kaspa) or a funded chatting balance - pick it here. Only addresses with a balance or domains are shown.</p>
         </div>
         <div class="glass list">
           ${shown.map((row) => `
             <button class="list-row identity-row" data-index="${row.index}">
               <span class="identity-index">#${row.index}</span>
               <span class="tx-meta"><span class="mono small">${esc(row.address.slice(0, 10))}...${esc(row.address.slice(-6))}</span><span class="muted tiny">${esc(wallet.formatKas(row.balanceSompi, 8))} KAS</span></span>
-              ${row.domains?.length ? `<span class="chip accent">${esc(row.domains.length === 1 ? row.domains[0].fullName : `${row.domains.length} domains`)}</span>` : ""}
+              ${nameCount(row) ? `<span class="chip accent">${esc(onlyName(row) || `${nameCount(row)} domains`)}</span>` : ""}
               <span class="${row.index === state.current ? "accent strong" : "muted strong"} tiny">${row.index === state.current ? "Current" : row.index === 0 ? "Default" : ""}</span>
               ${ICONS.chevron}
             </button>`).join("") || (state.scanning ? "" : '<div class="list-row muted">Nothing found yet.</div>')}
@@ -985,6 +987,9 @@ function showIdentityDetail({ row, current, onBack, onChanged }) {
       ${row.domains?.length ? `
         <div class="section-header">KNS Domains (${row.domains.length})</div>
         ${row.domains.map((d) => `<div class="domain-card small-card"><span class="domain-name">${esc(d.fullName)}</span>${String(d.fullName).toLowerCase() === String(row.primaryDomain || "").toLowerCase() ? '<span class="domain-badge">Primary</span>' : ""}</div>`).join("")}` : ""}
+      ${row.otherNames?.length ? `
+        <div class="section-header">.k and .kaspa Names (${row.otherNames.length})</div>
+        ${row.otherNames.map((n) => `<div class="domain-card small-card"><span class="domain-name">${esc(n.display)}</span>${n.provisional ? '<span class="domain-badge">Settling</span>' : ""}</div>`).join("")}` : ""}
       <p class="error" id="error"></p>
       <div class="spacer"></div>
       <button id="set" ${isCurrent ? "disabled" : ""}>${isCurrent ? "Current Chatting Address" : "Set as Chatting Address"}</button>

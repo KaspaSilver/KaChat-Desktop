@@ -17,6 +17,7 @@
 // on the device over a QR exchange. Accounts are kept per wallet account, like iOS keeps them
 // per wallet. Left out: the per-account receive notifications toggle (the extension has none).
 
+import { ownsAnyName } from "./names.js";
 import "./cold.css";
 import QRCode from "qrcode";
 import * as wallet from "./wallet.js";
@@ -135,6 +136,11 @@ async function ownsDomain(address) {
   }
 }
 
+// Discovery asks every name service (iOS 7a5b157: ownsAnyName), not only KNS.
+function ownsAnyNameAt(address) {
+  return ownsAnyName(address, ownsDomain);
+}
+
 /** Has it ever been used? true / false, or null when the probe failed (iOS spendingAddressUsedState). */
 async function probeUsed(address) {
   const known = await wallet.knownUsedState(address);
@@ -233,7 +239,7 @@ async function discoverAddresses(accountId, onProgress) {
     const owners = new Set();
     await Promise.all(touched
       .filter((t) => t.index < KNS_DEPTH && !funded.has(t.address))
-      .map(async (t) => { if (await ownsDomain(t.address)) owners.add(t.address); }));
+      .map(async (t) => { if (await ownsAnyNameAt(t.address)) owners.add(t.address); }));
     for (const t of touched) {
       if (funded.has(t.address) || owners.has(t.address)) {
         lastMatch = Math.max(lastMatch, t.index);
@@ -256,7 +262,7 @@ async function discoverAddresses(accountId, onProgress) {
         const address = derived[i];
         const at = index + i;
         balanceCache.set(address, balances[address] ?? 0n);
-        const matches = (balances[address] ?? 0n) > 0n || (at < KNS_DEPTH && await ownsDomain(address));
+        const matches = (balances[address] ?? 0n) > 0n || (at < KNS_DEPTH && await ownsAnyNameAt(address));
         if (matches) {
           lastMatch = at;
           matchCount += 1;

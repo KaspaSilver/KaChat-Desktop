@@ -255,14 +255,14 @@ function paintHome() {
     showQr({
       address,
       balanceSompi,
-      note: "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or KNS profile creation.",
+      note: "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting.",
       onBack: showHome,
     });
   };
   if (main) $("#chatting-qr").onclick = () => showQr({
     address: main,
     balanceSompi: mainSompi,
-    note: "This address is for chatting and KNS profile creation. Funding it with around 50 Kaspa is enough to create a KNS profile and send messages for a long time.",
+    note: "This address is for chatting. Funding it with around 50 Kaspa is enough to send messages for a long time.",
     onBack: paintHome,
   });
   for (const [kind, address] of [["chatting", main], ["spending", primary]]) {
