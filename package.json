@@ -10,10 +10,7 @@
     "setup:all": "npm run setup:wasm && npm run setup:cipher",
     "build": "bash tools/check-wasm.sh && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "serve": "npm run build && npm run preview",
-    "ext:build": "bash tools/check-wasm.sh && vite build --config extension/vite.config.mjs",
-    "ext:watch": "bash tools/check-wasm.sh && vite build --watch --config extension/vite.config.mjs",
-    "ext:package": "npm run ext:build && node tools/ext-package.mjs"
+    "serve": "npm run build && npm run preview"
   },
   "dependencies": {
     "@noble/ciphers": "^2.3.0",

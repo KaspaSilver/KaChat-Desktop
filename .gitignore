@@ -11,5 +11,3 @@ vendor/kasia-cipher/target/
 .env
 .env.local
 .env.*.local
-extension/dist-firefox/
-extension/packages/
