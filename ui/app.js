@@ -1,4 +1,5 @@
 import { KaspaEngine } from "../engine/index.js";
+import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
@@ -92,6 +93,8 @@ function labelStaticAmountUnits() {
   });
 }
 labelStaticAmountUnits();
+// Banners show whole at their own proportions (iOS c66bfc7).
+installBannerImageFit();
 // .kas profiles saved before they stopped loading are dropped (iOS d6ded9d).
 engine.dropKnsProfileCache?.();
 engine.onConnectionState?.(() => {
@@ -5445,7 +5448,10 @@ function applyKachatHeroProfile(hero) {
   const bannerEl = document.querySelector("[data-profile-hero-banner]");
   const avatarEl = document.querySelector("[data-profile-hero-avatar]");
   const bioEl = document.querySelector("[data-profile-hero-bio]");
-  if (bannerEl && current.bannerUrl) bannerEl.style.backgroundImage = `url(${JSON.stringify(String(current.bannerUrl))})`;
+  if (bannerEl && current.bannerUrl) {
+    bannerEl.style.backgroundImage = `url(${JSON.stringify(String(current.bannerUrl))})`;
+    fitBackgroundBanner(bannerEl, current.bannerUrl);
+  }
   if (avatarEl && current.avatarUrl && avatarEl.dataset.avatarUrl !== current.avatarUrl) {
     avatarEl.dataset.avatarUrl = current.avatarUrl;
     const img = document.createElement("img");
@@ -5553,7 +5559,7 @@ function updateProfileHero(info, profileInfo) {
   if (IS_TESTNET) {
     const hero = refreshKachatIdentity.hero?.address === engine.address ? refreshKachatIdentity.hero : null;
     if (bioEl && !hero?.bio) { bioEl.hidden = true; bioEl.textContent = ""; }
-    if (bannerEl && !hero?.bannerUrl) bannerEl.style.backgroundImage = "";
+    if (bannerEl && !hero?.bannerUrl) { bannerEl.style.backgroundImage = ""; fitBackgroundBanner(bannerEl, ""); }
     if (avatarEl && !hero?.avatarUrl && avatarEl.dataset.avatarUrl !== "") {
       avatarEl.dataset.avatarUrl = "";
       avatarEl.innerHTML = `<svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>`;
@@ -5563,7 +5569,7 @@ function updateProfileHero(info, profileInfo) {
   const bio = profileInfo?.profile?.bio || "";
   if (bioEl) { bioEl.hidden = !bio; bioEl.textContent = bio; }
   const bannerUrl = profileInfo?.profile?.bannerUrl || "";
-  if (bannerEl) bannerEl.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : "";
+  if (bannerEl) { bannerEl.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : ""; fitBackgroundBanner(bannerEl, bannerUrl); }
   const avatarUrl = profileInfo?.profile?.avatarUrl || "";
   // Same image as last paint: leave the element alone rather than reloading it (a cache-first
   // paint followed by a refresh would otherwise flash the avatar twice).
@@ -9228,7 +9234,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 89;
+const APP_BUILD = 90;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12169,6 +12175,7 @@ function renderKnsEditorImages() {
   if (bannerPreview) {
     bannerPreview.hidden = !currentBanner;
     bannerPreview.style.backgroundImage = currentBanner ? `url("${currentBanner}")` : "";
+    fitBackgroundBanner(bannerPreview, currentBanner);
   }
   if (removeAvatar) removeAvatar.hidden = !currentAvatar;
   if (removeBanner) removeBanner.hidden = !currentBanner;
@@ -14102,6 +14109,7 @@ async function refreshChatInfoKnsSections(contact) {
   if (banner) {
     banner.hidden = !bannerUrl;
     banner.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : "";
+    fitBackgroundBanner(banner, bannerUrl);
   }
 
   const profile = profileInfo?.profile;

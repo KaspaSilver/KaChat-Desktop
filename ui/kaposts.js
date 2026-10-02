@@ -5,6 +5,7 @@
 // the indexer feed until their txids round-trip; post/quote/like/dislike submits are held
 // behind a 5-second undo countdown — cancel and nothing ever touches the network.
 
+import { fitBackgroundBanner } from "./banner-fit.js";
 import { userFacingError } from "./dialogs.js";
 import {
   KAPOSTS_POST_CHARACTER_LIMIT,
@@ -2701,6 +2702,8 @@ function renderPanel() {
             ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong>${isMine ? `<span>${panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here."}</span>` : ""}</div>`
             : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
       </div>`;
+    // The whole banner at the full width, at its own proportions (iOS c66bfc7).
+    fitBackgroundBanner(panelBodyEl.querySelector(".kaposts-profile-banner"), safeCssUrl(profile?.bannerUrl) || "");
     // More appears only when the three-line clamp actually hid something.
     const bioEl = panelBodyEl.querySelector("[data-kaposts-profile-bio]");
     const bioMore = panelBodyEl.querySelector("[data-kaposts-bio-more]");
