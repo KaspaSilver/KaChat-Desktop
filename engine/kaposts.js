@@ -141,10 +141,10 @@ export function kaspaAddressFromPubkey(engine, pubkeyHex) {
   if (!/^(0[23])?[0-9a-f]{64}$/.test(hex)) return null;
   try {
     if (hex.length === 66) {
-      return new engine.kaspa.PublicKey(hex).toAddress("mainnet").toString();
+      return new engine.kaspa.PublicKey(hex).toAddress(NETWORK_ID).toString();
     }
     // x-only: assume even parity (02 prefix), the BIP-340 convention.
-    return new engine.kaspa.PublicKey(`02${hex}`).toAddress("mainnet").toString();
+    return new engine.kaspa.PublicKey(`02${hex}`).toAddress(NETWORK_ID).toString();
   } catch {
     return null;
   }
@@ -161,6 +161,8 @@ function kapostBaseUrl() {
 }
 
 async function kapostGet(path, query = {}) {
+  // Testnet has no KaPost indexer yet: blank means none, never the mainnet one.
+  if (!kapostBaseUrl()) throw new Error("KaPosts isn't available on Testnet yet.");
   const url = new URL(`${kapostBaseUrl()}/${path}`);
   for (const [key, value] of Object.entries(query)) {
     if (value !== null && value !== undefined && value !== "") url.searchParams.set(key, String(value));

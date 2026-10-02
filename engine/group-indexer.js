@@ -58,7 +58,10 @@ async function paginate(buildUrl, limit, startCursor, maxPages = 20) {
 }
 
 function baseUrl(indexerUrl) {
-  return trimBase(indexerUrl || getEndpoint("kasiaIndexer"));
+  const base = trimBase(indexerUrl || getEndpoint("kasiaIndexer"));
+  // Testnet has no KaChat indexer yet: blank means none, never the mainnet one.
+  if (!base) throw new Error("No KaChat indexer on this network yet.");
+  return base;
 }
 
 // One member's slice of a group's messages. Call once per group member, each with

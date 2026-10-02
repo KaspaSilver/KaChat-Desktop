@@ -1,7 +1,10 @@
 import { NETWORK_ID } from "./utils.js";
+import { IS_TESTNET } from "./network.js";
 import { getEndpoint } from "./endpoints.js";
 
-const NODE_REGISTRY_KEY = "kachat.browser.node-registry.v1";
+// One node list per network (iOS 8f98312): a mainnet node answering a kaspatest: address would
+// report the mainnet chain's coins.
+const NODE_REGISTRY_KEY = IS_TESTNET ? "kachat.browser.node-registry.testnet.v1" : "kachat.browser.node-registry.v1";
 /// KaChat's own node, kept only as a name the UI can show. Nothing connects to it on its own:
 /// the hosted mode is the public-node scan, and a user who wants this node types it in as a
 /// custom node like any other.
@@ -244,7 +247,7 @@ const RESOLVER_TIMEOUT_MS = 20000;
 // cannot be reached from where the reader is (its seed servers blocked or unreachable) even
 // though the nodes can. Same public pool, no house node; refreshed from the resolver's own
 // answers whenever it works.
-export const PUBLIC_NODE_SEEDS = [
+const MAINNET_NODE_SEEDS = [
   "wss://wrpc.kasia.fyi",
   "wss://isla.kaspa.red/kaspa/mainnet/wrpc/borsh",
   "wss://kate.kaspa.red/kaspa/mainnet/wrpc/borsh",
@@ -252,7 +255,11 @@ export const PUBLIC_NODE_SEEDS = [
   "wss://lola.kaspa.blue/kaspa/mainnet/wrpc/borsh",
   "wss://vivi.kaspa.blue/kaspa/mainnet/wrpc/borsh",
 ];
-const SEEN_NODES_KEY = "kachat-public-nodes-seen";
+// Testnet: the same public pool's testnet-10 endpoints (the resolver is asked first either way).
+export const PUBLIC_NODE_SEEDS = IS_TESTNET
+  ? MAINNET_NODE_SEEDS.filter((u) => u.includes("/kaspa/mainnet/")).map((u) => u.replace("/kaspa/mainnet/", "/kaspa/testnet-10/"))
+  : MAINNET_NODE_SEEDS;
+const SEEN_NODES_KEY = IS_TESTNET ? "kachat-public-nodes-seen-testnet" : "kachat-public-nodes-seen";
 function rememberPublicNode(url) {
   if (typeof localStorage === "undefined") return;
   try {

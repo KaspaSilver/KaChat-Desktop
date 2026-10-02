@@ -30,6 +30,7 @@ import {
   fetchNetworkStats, peekNetworkStats, formatHashrate, estimateDailyKas,
 } from "../engine/network-stats.js";
 import { validateMainnetAddress } from "../engine/utils.js";
+import { ADDRESS_PREFIX, ADDRESS_HRP, KAS_UNIT } from "../engine/network.js";
 import { resolveDomain } from "../engine/kns.js";
 import { looksLikeName, resolveEverywhere, primary as primaryName } from "../engine/name-services.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
@@ -467,8 +468,8 @@ function fmtPrice(value) {
 }
 
 function fmtKas(value) {
-  if (amountsHidden) return `${MASKED_AMOUNT} KAS`;
-  return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} KAS`;
+  if (amountsHidden) return `${MASKED_AMOUNT} ${KAS_UNIT}`;
+  return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} ${KAS_UNIT}`;
 }
 
 function fmtDate(ts) {
@@ -1002,7 +1003,7 @@ function settleNamePrompt(value) {
 /** The wallet's own chatting address, when one is loaded. */
 function chattingAddress() {
   const address = String(deps?.engine?.address || "").trim();
-  return address.startsWith("kaspa:") ? address : null;
+  return address.startsWith(ADDRESS_PREFIX) ? address : null;
 }
 
 /// `presetAddress` is "Add Chatting Address": no field to fill - the import of that address
@@ -1107,7 +1108,7 @@ function payoutBlockHtml(daily) {
       ${payoutRowHtml("Per month", daily * 30)}
     </div>
     <p class="field-hint">Your share of the network times what the network pays out in a day, at the current reward.</p>
-    ${stats?.blockRewardKas ? `<p class="field-hint">At ${formatHashrate(stats.currentHashrate)} network hashrate and a ${stats.blockRewardKas.toFixed(4)} KAS block reward. Before pool fees, power and luck, and both figures move.</p>` : ""}`;
+    ${stats?.blockRewardKas ? `<p class="field-hint">At ${formatHashrate(stats.currentHashrate)} network hashrate and a ${stats.blockRewardKas.toFixed(4)} ${KAS_UNIT} block reward. Before pool fees, power and luck, and both figures move.</p>` : ""}`;
 }
 
 /// One stat: label on the left, value on the right, with a divider between rows (iOS `statRow`).
@@ -1330,7 +1331,7 @@ const FUEL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 22h12"
 
 /** Fees are fractions of a KAS - up to eight places, so a month of messages doesn't read 0. */
 function fmtFeeKas(value) {
-  return `${(Number(value) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 8 })} KAS`;
+  return `${(Number(value) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 8 })} ${KAS_UNIT}`;
 }
 
 /// Two cards under Network Hashrate, for the active portfolio (iOS 61eff0f):
@@ -2087,7 +2088,7 @@ function looksLikeRawAddress(input) {
 }
 
 function isValidRawAddress(input) {
-  return /^kaspa:[a-z0-9]{50,90}$/.test(String(input || "").toLowerCase());
+  return new RegExp(`^${ADDRESS_HRP}:[a-z0-9]{50,90}$`).test(String(input || "").toLowerCase());
 }
 
 function shortenAddress(address) {
@@ -2298,9 +2299,9 @@ async function runAddressImport(addressRaw) {
     // validateMainnetAddress only checks the prefix — also require a plausible bech32 payload
     // so obvious typos fail here instead of as an opaque Kaspa API error. KNS domains never
     // reach this check: the field resolves them to an address before Import is enabled.
-    if (!/^kaspa:[a-z0-9]{50,90}$/.test(address)) throw new Error("bad payload");
+    if (!new RegExp(`^${ADDRESS_HRP}:[a-z0-9]{50,90}$`).test(address)) throw new Error("bad payload");
   } catch {
-    setImportProgress("That doesn't look like a valid mainnet Kaspa address.");
+    setImportProgress(`That doesn't look like a valid ${ADDRESS_HRP === "kaspa" ? "mainnet" : "testnet"} Kaspa address.`);
     return;
   }
   addressImport.busy = true;
@@ -2528,7 +2529,7 @@ function buildModals() {
           <input type="hidden" data-portfolio-editor-type value="buy" />
           <label class="portfolio-editor-field">
             <span>Quantity</span>
-            <span class="portfolio-editor-unit-row"><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-amount /><em>KAS</em></span>
+            <span class="portfolio-editor-unit-row"><input type="text" inputmode="decimal" placeholder="0.00" data-portfolio-editor-amount /><em>${KAS_UNIT}</em></span>
           </label>
           <label class="portfolio-editor-field">
             <span>Price Per Coin</span>

@@ -595,6 +595,8 @@
             <a class="profile-app-bubble" href="https://www.kaspalytics.com" target="_blank" rel="noopener"><span>📊</span>Kaspalytics</a>
             <a class="profile-app-bubble" href="https://kas-smiths.org" target="_blank" rel="noopener"><span>⚒️</span>Kas-Smiths</a>
             <a class="profile-app-bubble" href="https://t.me/kasparnd" target="_blank" rel="noopener"><span>🔬</span>Kaspa Core R&amp;D</a>
+            <!-- Free testnet-10 KAS for the app's testnet mode (iOS b79cdd2). -->
+            <a class="profile-app-bubble" href="https://faucet-tn10.kaspanet.io" target="_blank" rel="noopener"><span>💧</span>TN10 Faucet</a>
           </div>
         </div>
 
@@ -956,7 +958,7 @@
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="currency">
-                <span class="settings-row-copy"><strong data-i18n="currency">Currency</strong><small>Fiat used for KAS value display.</small></span>
+                <span class="settings-row-copy"><strong data-i18n="currency">Currency</strong><small data-kas-literal>Fiat used for KAS value display.</small></span>
                 <span class="settings-dropdown-value" data-currency-current>US Dollar (USD)</span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
@@ -1073,9 +1075,25 @@
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="connection-settings">
                 <span class="settings-row-copy"><strong>Connection Settings</strong></span>
-                <span class="settings-dropdown-caption">Mainnet</span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
+              <!-- Mainnet <-> testnet (iOS 0c1af03). Each network keeps its own connection settings,
+                   so Connection Settings above shows the testnet values while this is on. -->
+              <div class="settings-toggle-row testnet-toggle-row">
+                <span class="testnet-toggle-label">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-8.5V3"/><path d="M7.5 14h9"/></svg>
+                  <strong>Testnet</strong>
+                </span>
+                <label class="switch-control testnet-switch"><input type="checkbox" data-pref-testnet><span></span></label>
+              </div>
+              <div class="testnet-restart-note" data-testnet-restart hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M16 9.5A4.5 4.5 0 1 0 16.5 13" fill="none"/><path d="M16.5 6.5v3.2h-3.2" fill="none"/></svg>
+                <span data-testnet-restart-text></span>
+                <button type="button" class="testnet-reload-button" data-testnet-reload>Reload Now</button>
+              </div>
+            </div>
+            <p class="settings-group-footer" data-kas-literal>Testnet is for testing only - testnet KAS has no value. On testnet your account uses its kaspatest: address, with its own balance and chats, and Connection Settings holds testnet values: the testnet explorer, automatic node discovery, and no KaChat indexers until testnet ones exist. Turning it off brings your mainnet settings back.</p>
+            <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="explorer">
                 <span class="settings-row-copy"><strong>Kaspa Explorer</strong><small>Which explorer transaction and address links open in.</small></span>
                 <span class="settings-dropdown-value" data-explorer-current>explorer.kaspa.org</span>

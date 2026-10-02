@@ -1,4 +1,5 @@
 import { KaspaEngine } from "../engine/index.js";
+import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
@@ -68,6 +69,27 @@ window.__kaspaEngineStep = "kachat-shell-step-71";
 const engine = new KaspaEngine({ log: appendEngineLog });
 // The .kachat wordmark is the .kachat section's dock and Hub icon (iOS KachatTabIcon).
 document.querySelectorAll("[data-kachat-wordmark]").forEach((el) => { el.innerHTML = KACHAT_WORDMARK_SVG; });
+// Testnet: the page's static amounts ("-- KAS" placeholders, "Amount (KAS)" labels, fee pills)
+// read TKAS (iOS KaspaUnit). Runs once at load, over the markup only; market text (the KAS price,
+// "KAS value") is marked data-kas-literal and stays KAS.
+function labelStaticAmountUnits() {
+  if (!IS_TESTNET) return;
+  const literal = (el) => el?.closest?.("[data-kas-literal]");
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!/KAS/.test(node.nodeValue) || literal(node.parentElement)) continue;
+    const next = kasLabel(node.nodeValue);
+    if (next !== node.nodeValue) node.nodeValue = next;
+  }
+  document.body.querySelectorAll("[placeholder], [title], [aria-label]").forEach((el) => {
+    if (literal(el)) return;
+    for (const attr of ["placeholder", "title", "aria-label"]) {
+      const value = el.getAttribute(attr);
+      if (value && /KAS/.test(value)) el.setAttribute(attr, kasLabel(value));
+    }
+  });
+}
+labelStaticAmountUnits();
 // .kas profiles saved before they stopped loading are dropped (iOS d6ded9d).
 engine.dropKnsProfileCache?.();
 engine.onConnectionState?.(() => {
@@ -253,7 +275,7 @@ let state = loadStoredState();
 function subscriptionContactAddresses() {
   return [...new Set((state.contacts || [])
     .map((contact) => String(contact?.address || "").trim())
-    .filter((address) => address.startsWith("kaspa:") && address !== engine.address))];
+    .filter((address) => address.startsWith(ADDRESS_PREFIX) && address !== engine.address))];
 }
 
 // Own non-chatting addresses the wallet wants live UTXO events for: revealed
@@ -506,17 +528,19 @@ const DEFAULT_KASPA_EXPLORER = "kaspaOrg";
 function currentExplorer() {
   return KASPA_EXPLORERS[accountShellPrefs.explorer] || KASPA_EXPLORERS[DEFAULT_KASPA_EXPLORER];
 }
-function explorerTxUrl(txid) { return currentExplorer().tx + txid; }
-function explorerAddressUrl(address) { return currentExplorer().address + address; }
+// On testnet every link goes to kaspa.stream's testnet-10 explorer, whichever explorer is picked:
+// explorer.kaspa.org has no live testnet-10 site (iOS 421a832).
+function explorerTxUrl(txid) { return (IS_TESTNET ? "https://tn10.kaspa.stream/transactions/" : currentExplorer().tx) + txid; }
+function explorerAddressUrl(address) { return (IS_TESTNET ? "https://tn10.kaspa.stream/addresses/" : currentExplorer().address) + address; }
 
 function activeAccountMetadata() {
   const address = String(engine.address || "");
   if (!address) return { name: "No Active Account", createdAt: null };
   let all = {};
-  try { all = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { all = loadAccountMetaMap(); } catch {}
   if (!all[address]) {
     all[address] = { name: `Account ${address.slice(-6)}`, createdAt: Date.now() };
-    localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(all));
+    saveAccountMetaMap(all);
   }
   return all[address];
 }
@@ -525,7 +549,8 @@ function loadSavedAccounts() {
   let accounts = [];
   try {
     const parsed = JSON.parse(localStorage.getItem(SAVED_ACCOUNTS_KEY) || "[]");
-    if (Array.isArray(parsed)) accounts = parsed;
+    // Stored under the mainnet encoding; in memory every address is the running network's.
+    if (Array.isArray(parsed)) accounts = parsed.map((entry) => (entry?.address ? { ...entry, address: toActiveNetworkAddress(entry.address) } : entry));
   } catch {}
 
   // Migrate the pre-Step-70 single saved wallet into the account registry.
@@ -536,7 +561,7 @@ function loadSavedAccounts() {
     const privateKeyHex = String(wallet?.privateKeyHex || "").trim();
     if (address && privateKeyHex && !accounts.some((entry) => entry.address === address)) {
       let metadata = {};
-      try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+      try { metadata = loadAccountMetaMap(); } catch {}
       const meta = metadata[address] || {};
       accounts.push({
         version: 1,
@@ -551,7 +576,7 @@ function loadSavedAccounts() {
         savedAt: wallet.savedAt || new Date().toISOString(),
       });
       localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(accounts));
-      if (!localStorage.getItem(ACTIVE_ACCOUNT_KEY)) localStorage.setItem(ACTIVE_ACCOUNT_KEY, address);
+      if (!readActiveAccountAddress()) writeActiveAccountAddress(address);
     }
   } catch (error) {
     appendEngineLog?.(`Saved-account migration failed: ${error.message}`);
@@ -560,7 +585,39 @@ function loadSavedAccounts() {
 }
 
 function persistSavedAccounts(accounts) {
-  localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(accounts));
+  // One key is one account on both networks (iOS 741c005): stored under the mainnet encoding,
+  // deduplicated by key.
+  const seen = new Set();
+  const stored = [];
+  for (const entry of accounts) {
+    const address = entry?.address ? canonicalAccountAddress(entry.address) : "";
+    if (address && seen.has(address)) continue;
+    if (address) seen.add(address);
+    stored.push(address ? { ...entry, address } : entry);
+  }
+  localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(stored));
+}
+/** Account names and dates, keyed by the running network's address in memory and by the mainnet
+ *  encoding in storage - so an account keeps its name on testnet. */
+function loadAccountMetaMap() {
+  let raw = {};
+  try { raw = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}") || {}; } catch { raw = {}; }
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) out[toActiveNetworkAddress(key)] = { ...(out[toActiveNetworkAddress(key)] || {}), ...value };
+  return out;
+}
+function saveAccountMetaMap(map) {
+  const out = {};
+  for (const [key, value] of Object.entries(map || {})) out[canonicalAccountAddress(key)] = value;
+  localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(out));
+}
+function readActiveAccountAddress() {
+  const stored = String(localStorage.getItem(ACTIVE_ACCOUNT_KEY) || "").trim();
+  return stored ? toActiveNetworkAddress(stored) : "";
+}
+function writeActiveAccountAddress(address) {
+  const clean = String(address || "").trim();
+  if (clean) localStorage.setItem(ACTIVE_ACCOUNT_KEY, canonicalAccountAddress(clean));
 }
 
 function upsertSavedAccount({ address, privateKeyHex, mnemonic = "", passphrase = "", derivationPath = "", wordCount = 0, sourceFamily = "", chattingIndex = null, name, createdAt, savedAt = new Date().toISOString() }) {
@@ -592,13 +649,13 @@ function upsertSavedAccount({ address, privateKeyHex, mnemonic = "", passphrase 
   if (index >= 0) accounts[index] = record;
   else accounts.push(record);
   persistSavedAccounts(accounts);
-  localStorage.setItem(ACTIVE_ACCOUNT_KEY, cleanAddress);
+  writeActiveAccountAddress(cleanAddress);
   return record;
 }
 
 function savedAccountSummaries() {
   let metadata = {};
-  try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { metadata = loadAccountMetaMap(); } catch {}
   return loadSavedAccounts().map((entry) => ({
     ...entry,
     name: metadata[entry.address]?.name || entry.name || `Account ${entry.address.slice(-6)}`,
@@ -609,7 +666,7 @@ function savedAccountSummaries() {
 function activateSavedAccount(address) {
   const account = loadSavedAccounts().find((entry) => entry.address === address);
   if (!account) throw new Error("Saved account was not found.");
-  localStorage.setItem(ACTIVE_ACCOUNT_KEY, account.address);
+  writeActiveAccountAddress(account.address);
   localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify({
     version: 2,
     privateKeyHex: account.privateKeyHex,
@@ -768,16 +825,24 @@ function closeSavedAccountDelete() {
 function removeAccountScopedLocalData(address) {
   const cleanAddress = String(address || "").trim();
   if (!cleanAddress) return;
-  const prefix = `${ACCOUNT_DATA_PREFIX}:${cleanAddress}:`;
-  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
-    const key = localStorage.key(index);
-    if (key?.startsWith(prefix)) localStorage.removeItem(key);
+  // Removing an account clears its data on BOTH networks (iOS 741c005): one key, two addresses.
+  for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")])) {
+    const prefix = `${ACCOUNT_DATA_PREFIX}:${encoded}:`;
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(prefix)) localStorage.removeItem(key);
+    }
+    if (encoded !== cleanAddress) {
+      for (const baseKey of [STORAGE_KEY, MESSAGE_HISTORY_KEY, STATE_BACKUP_KEY]) {
+        try { chatStorageRemoveSync(accountScopedKey(baseKey, encoded)); } catch { /* not stored */ }
+      }
+    }
   }
 
   let metadata = {};
-  try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { metadata = loadAccountMetaMap(); } catch {}
   delete metadata[cleanAddress];
-  if (Object.keys(metadata).length) localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(metadata));
+  if (Object.keys(metadata).length) saveAccountMetaMap(metadata);
   else localStorage.removeItem(ACCOUNT_SHELL_META_KEY);
 
   try {
@@ -790,7 +855,7 @@ function removeAccountScopedLocalData(address) {
     if (handshakeState?.walletAddress === cleanAddress) localStorage.removeItem(HANDSHAKE_SYNC_KEY);
   } catch {}
 
-  if (localStorage.getItem(ACTIVE_ACCOUNT_KEY) === cleanAddress) {
+  if (readActiveAccountAddress() === cleanAddress) {
     localStorage.removeItem(ACTIVE_ACCOUNT_KEY);
   }
 
@@ -868,9 +933,9 @@ function renameSavedAccount(address, newName) {
   if (!cleanName) throw new Error("Enter an account name.");
 
   let metadata = {};
-  try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { metadata = loadAccountMetaMap(); } catch {}
   metadata[cleanAddress] = { ...(metadata[cleanAddress] || {}), name: cleanName };
-  localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(metadata));
+  saveAccountMetaMap(metadata);
 
   const accounts = loadSavedAccounts();
   const index = accounts.findIndex((entry) => entry.address === cleanAddress);
@@ -983,7 +1048,9 @@ const KACHAT_UNIVERSAL_LINK_HOST = "kachat.app";
 /** The kachat.app link to a person: reads cleanly without the kaspa: prefix. */
 function profileUniversalLink(address) {
   // One builder for your own link and anyone else's (iOS 44d5fa4): lowercased and trimmed.
-  return `https://${KACHAT_UNIVERSAL_LINK_HOST}/u/${String(address || "").trim().toLowerCase().replace(/^kaspa:/, "")}`;
+  // Always the mainnet encoding: the body carries its checksum, and the link must open the same
+  // person on either network.
+  return `https://${KACHAT_UNIVERSAL_LINK_HOST}/u/${canonicalAccountAddress(String(address || "").trim().toLowerCase()).replace(/^kaspa:/, "")}`;
 }
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
@@ -1005,7 +1072,9 @@ function parseKaChatInternalLink(raw) {
     if (!address.includes(":")) address = `kaspa:${address}`;
     // The bech32 alphabet first: a crafted link (non-ASCII, a stray scheme) is not an address,
     // whether or not the SDK's own check has loaded yet.
-    if (!/^kaspa:[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{61,63}$/.test(address)) return null;
+    if (!/^kaspa(test)?:[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{61,63}$/.test(address)) return null;
+    // A link is network-free: the same person, on whichever network is running.
+    address = toActiveNetworkAddress(address);
     if (!isValidKaspaAddressString(address)) return null;
     return { kind: "profile", address };
   }
@@ -2469,12 +2538,12 @@ function validateContactAddress(value) {
   const clean = String(value || "").trim();
   if (!clean) throw new Error("Enter a Kaspa address.");
   if (!engine.kaspa) throw new Error("Kaspa validation is still loading. Try again in a moment.");
-  if (!clean.startsWith("kaspa:")) throw new Error("Contact address must be a mainnet kaspa: address.");
+  if (!clean.toLowerCase().startsWith(ADDRESS_PREFIX)) throw new Error(IS_TESTNET ? "Contact address must be a testnet kaspatest: address." : "Contact address must be a mainnet kaspa: address.");
 
   try {
     const parsed = new engine.kaspa.Address(clean);
     const normalized = parsed.toString();
-    if (!normalized.startsWith("kaspa:")) throw new Error("Not a mainnet address.");
+    if (!normalized.startsWith(ADDRESS_PREFIX)) throw new Error(IS_TESTNET ? "Not a testnet address." : "Not a mainnet address.");
     return normalized;
   } catch {
     throw new Error("That Kaspa address is not valid.");
@@ -2483,7 +2552,7 @@ function validateContactAddress(value) {
 
 function getStoredTestingWalletHex() {
   try {
-    const activeAddress = String(localStorage.getItem(ACTIVE_ACCOUNT_KEY) || "").trim();
+    const activeAddress = String(readActiveAccountAddress() || "").trim();
     if (activeAddress) {
       const account = loadSavedAccounts().find((entry) => entry.address === activeAddress);
       if (account?.privateKeyHex) return String(account.privateKeyHex).trim();
@@ -2563,7 +2632,7 @@ function earlyRestoreAddress() {
   try {
     if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") return "";
     if ((accountShellPrefs.keepSignedIn ?? true) === false && !isSessionActive()) return "";
-    const active = String(localStorage.getItem(ACTIVE_ACCOUNT_KEY) || "").trim();
+    const active = String(readActiveAccountAddress() || "").trim();
     if (active && loadSavedAccounts().some((entry) => entry.address === active && entry.privateKeyHex)) return active;
     const parsed = JSON.parse(localStorage.getItem(PERSISTED_WALLET_KEY) || "null");
     if (parsed?.address && parsed?.privateKeyHex) return String(parsed.address).trim();
@@ -2826,7 +2895,7 @@ async function syncInbox({ catchUp = false } = {}) {
     const senders = [];
     for (const row of found) {
       const sender = String(row.sender || "");
-      if (!sender.startsWith("kaspa:") || sender === wallet || isChatBlocked(sender) || senders.includes(sender)) continue;
+      if (!sender.startsWith(ADDRESS_PREFIX) || sender === wallet || isChatBlocked(sender) || senders.includes(sender)) continue;
       senders.push(sender);
     }
     let added = 0;
@@ -3139,7 +3208,9 @@ function loadStoredState() {
     const raw = chatStorageGetSync(accountScopedKey(STORAGE_KEY));
     if (raw) {
       const parsed = JSON.parse(raw);
-      const contacts = Array.isArray(parsed?.contacts) ? parsed.contacts.map(normalizeContact).filter((contact) => contact.address) : [];
+      // A contact of the other network never belongs here (iOS df52425): one key is one account
+      // on both networks, so a mainnet chat restored into testnet data would decrypt fine.
+      const contacts = Array.isArray(parsed?.contacts) ? parsed.contacts.map(normalizeContact).filter((contact) => contact.address && isOnActiveNetwork(contact.address)) : [];
       const conversations = Array.isArray(parsed?.conversations)
         ? repairInflatedReactionRecency(parsed.conversations.map(normalizeConversation).filter((entry) => entry.contactId && contacts.some((contact) => contact.id === entry.contactId)))
         : [];
@@ -3149,7 +3220,8 @@ function loadStoredState() {
     // Try legacy storage below.
   }
 
-  for (const key of LEGACY_STORAGE_KEYS) {
+  // The pre-account legacy store is mainnet data: never migrated into a testnet account.
+  for (const key of IS_TESTNET ? [] : LEGACY_STORAGE_KEYS) {
     try {
       const raw = localStorage.getItem(key);
       if (!raw) continue;
@@ -3853,7 +3925,7 @@ function openOnchainConfirm({ conversationId, text }) {
   onchainSummary.innerHTML = `
     <div class="confirm-row"><span>Contact</span><strong>${escapeHtml(contact.name)}</strong></div>
     <div class="confirm-row"><span>To</span><code>${escapeHtml(shortAddress(contact.address, 18))}</code></div>
-    <div class="confirm-row"><span>Amount</span><strong>${escapeHtml(onchainAmountKas())} KAS</strong></div>
+    <div class="confirm-row"><span>Amount</span><strong>${escapeHtml(onchainAmountKas())} ${KAS_UNIT}</strong></div>
     <div class="confirm-row"><span>Payload</span><strong>${envelope.payloadBytes} bytes</strong></div>
     <div class="confirm-preview">${escapeHtml(text)}</div>
   `;
@@ -4183,7 +4255,7 @@ function updateServiceSummary() {
 
   setService(runtimeIndicator, runtimeStatus, runtimeReady ? "ready" : "busy", runtimeReady ? `Rusty Kaspa ${engine.version?.() || "ready"}` : "Starting Rusty Kaspa…");
   setService(walletIndicator, walletStatus, walletReady ? "ready" : "", walletReady ? shortAddress(engine.address) : "Not loaded");
-  setService(networkIndicator, networkStatus, networkReady ? "ready" : (connection.primary === "error" ? "error" : (walletReady ? "busy" : "")), networkReady ? `Connected · ${currentBalanceKas} KAS` : (connection.primary === "error" ? "No usable primary RPC" : (walletReady ? "Connecting…" : "Waiting for wallet")));
+  setService(networkIndicator, networkStatus, networkReady ? "ready" : (connection.primary === "error" ? "error" : (walletReady ? "busy" : "")), networkReady ? `Connected · ${currentBalanceKas} ${KAS_UNIT}` : (connection.primary === "error" ? "No usable primary RPC" : (walletReady ? "Connecting…" : "Waiting for wallet")));
   setService(standbyIndicator, standbyStatus, standbyReady ? "ready" : (connection.standby === "error" ? "error" : (networkReady ? "busy" : "")), standbyReady ? `Ready · ${engine.standbyRpc?.url || connection.standbyEndpoint || "alternate RPC"}` : (networkReady ? (connection.standby === "connecting" ? "Connecting alternate synced RPC…" : "No independent standby available yet") : "Waiting for primary RPC"));
   setService(messagingIndicator, messagingStatus, cipherReady ? "ready" : "busy", cipherReady ? "Encryption runtime ready" : "Loading encryption runtime…");
   const subscription = engine.subscriptionSnapshot?.() || { status: "idle" };
@@ -4356,10 +4428,14 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     const createdAt = Number(incoming?.createdAt || 0);
     return Number.isFinite(createdAt) && createdAt > 0 && createdAt < retentionFloor;
   };
-  const result = await engine.syncConversationFromIndexer({
-    conversationId: conversationEntry.id, contact, knownTxids,
-    cursor: conversationEntry.sync?.cursor || 0, indexerUrl,
-  });
+  // No KaChat indexer (testnet, until one exists): nothing to read messages from, but payments
+  // still come from the Kaspa REST API below.
+  const result = indexerUrl
+    ? await engine.syncConversationFromIndexer({
+      conversationId: conversationEntry.id, contact, knownTxids,
+      cursor: conversationEntry.sync?.cursor || 0, indexerUrl,
+    })
+    : { messages: [], nextCursor: conversationEntry.sync?.cursor || 0, note: "No KaChat indexer on this network yet." };
   let added = 0;
   let liveAdded = 0;
   for (const incoming of result.messages || []) {
@@ -4519,7 +4595,7 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
           m?.direction === "outgoing" && m?.messageType !== "handshake" && String(m?.text || "").trim().length > 0);
         contact.relationshipState = alreadyTalking ? "established" : "incoming-request";
       }
-      if (request.alias && (!contact.name || contact.name.startsWith("kaspa:"))) contact.name = request.alias;
+      if (request.alias && (!contact.name || /^kaspa(test)?:/.test(contact.name))) contact.name = request.alias;
       if (!conversationEntry) {
         conversationEntry = createConversation({ contactId: contact.id, createdAt: Number(request.createdAt || Date.now()) });
         state.conversations.push(conversationEntry);
@@ -4736,7 +4812,7 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
       conversationId: conversationEntry.id,
       contactId: contact.id,
       direction: "incoming",
-      text: `Received ${amountKas} KAS\nFrom: ${sender}`,
+      text: `Received ${amountKas} ${KAS_UNIT}\nFrom: ${sender}`,
       sender,
       receiver: myAddress,
       status: MESSAGE_STATUSES.CONFIRMED,
@@ -4753,7 +4829,7 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
       recordGlobalNotification({
         id: `wallet-${txid}`,
         source: "wallet",
-        title: `Received ${amountKas} KAS`,
+        title: `Received ${amountKas} ${KAS_UNIT}`,
         body: "Your chatting address",
         timestamp: Date.now(),
         targetKind: "wallet",
@@ -4780,12 +4856,14 @@ async function refreshAllConversations({ quiet = true } = {}) {
   let sweepFailures = 0;
   try {
     ensureSelfChatForSync();
-    try { added += await syncIncomingHandshakeRequests({ quiet }); }
+    // Indexer-backed passes only where there is an indexer (testnet has none yet).
+    const hasIndexer = Boolean(currentIndexerUrl());
+    if (hasIndexer) try { added += await syncIncomingHandshakeRequests({ quiet }); }
     catch (error) { sweepFailures += 1; appendEngineLog(`Incoming handshake sync failed: ${error.message}`); }
-    try { added += await syncOutgoingHandshakeEvidence({ quiet }); }
+    if (hasIndexer) try { added += await syncOutgoingHandshakeEvidence({ quiet }); }
     catch (error) { sweepFailures += 1; appendEngineLog(`Outgoing handshake sync failed: ${error.message}`); }
     // People writing to us for the first time, without a handshake (Message Requests).
-    try { added += await syncInbox({ catchUp }); }
+    if (hasIndexer) try { added += await syncInbox({ catchUp }); }
     catch (error) { appendEngineLog(`Inbox sync failed: ${error.message}`); }
     try { added += await syncStrangerPaymentsIntoSelfChat({ catchUp }); }
     catch (error) { appendEngineLog(`Stranger payment sweep failed: ${error.message}`); }
@@ -4911,7 +4989,7 @@ function renderTransportReadiness() {
     { label: "Session wallet loaded", ready: Boolean(engine.address) },
     { label: "Mainnet RPC connected", ready: Boolean(engine.rpc) },
     { label: "Live wallet and contact UTXO subscriptions", ready: engine.subscriptionSnapshot?.().status === "ready", note: `${engine.subscriptionSnapshot?.().contactCount || 0} contacts · ${engine.subscriptionSnapshot?.().status || "idle"}` },
-    { label: "Real on-chain payload transport", ready: typeof engine.sendMessageOnchain === "function", note: "enabled / 0.2 KAS default" },
+    { label: "Real on-chain payload transport", ready: typeof engine.sendMessageOnchain === "function", note: `enabled / 0.2 ${KAS_UNIT} default` },
     { label: "Incoming Kasia payload decoder", ready: typeof engine.parseKasiaPayloadHex === "function", note: "preview" },
     { label: "Real Kasia indexer sync", ready: typeof engine.syncConversationFromIndexer === "function", note: getEndpointOverride("kasiaIndexer") || ENDPOINT_DEFAULTS.kasiaIndexer },
     { label: "Manual payload import", ready: typeof engine.parseKasiaPayloadHex === "function", note: "decoder" },
@@ -5111,7 +5189,7 @@ document.querySelector("[data-custom-node-url]")?.addEventListener("input", (eve
 function currentSavedNodeMode() {
   const trusted = getEndpointOverride("trustedNode").trim();
   if (!trusted) return "scan";
-  return trusted.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "official" : "custom";
+  return DEFAULT_TRUSTED_NODE && trusted.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "official" : "custom";
 }
 function renderNodeModeCards() {
   if (selectedNodeMode == null) selectedNodeMode = currentSavedNodeMode();
@@ -5527,7 +5605,7 @@ function schedulePoolReceiptNotification({ txid, address, amountSompi, kind }) {
     // Claimed by the payment_notice while we waited: the chat bubble covered it.
     if (loadAddrActivityHandled().includes(txid)) return;
     markAddressActivityTxHandled(txid);
-    const title = `Received ${formatSompiForNotification(amountSompi)} KAS`;
+    const title = `Received ${formatSompiForNotification(amountSompi)} ${KAS_UNIT}`;
     const body = describeActivityAddress(kind, address);
     postDesktopNotification({ title, body, tag: `kachat-addr-activity-${txid}`, onClick: () => {} });
     recordGlobalNotification({
@@ -5755,7 +5833,7 @@ async function attributeAndNotifyAddressActivity(increases) {
         appendEngineLog(`Address activity: pool receive ${txid.slice(0, 12)}… awaiting payment notice`);
       } else if (!isSelfSend) {
         postDesktopNotification({
-          title: `Received ${formatSompiForNotification(toAddress)} KAS`,
+          title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
           body: describeActivityAddress(kind, address),
           tag: `kachat-addr-activity-${txid}`,
           // Clicking used to focus the window and stop there, which tells you a payment arrived
@@ -5776,7 +5854,7 @@ async function attributeAndNotifyAddressActivity(increases) {
         recordGlobalNotification({
           id: `wallet-${txid}`,
           source: "wallet",
-          title: `Received ${formatSompiForNotification(toAddress)} KAS`,
+          title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
           body: describeActivityAddress(kind, address),
           timestamp: Date.now(),
           targetKind: "wallet",
@@ -5790,7 +5868,7 @@ async function attributeAndNotifyAddressActivity(increases) {
       // Balance grew but no fetched recent tx pays this address (deep history
       // page or indexer lag) — neutral fallback rather than staying silent.
       postDesktopNotification({
-        title: `Balance increased by ${formatSompiForNotification(delta)} KAS`,
+        title: `Balance increased by ${formatSompiForNotification(delta)} ${KAS_UNIT}`,
         body: describeActivityAddress(kind, address),
         tag: `kachat-addr-activity-bal-${address.slice(-12)}-${Date.now()}`,
         onClick: () => {},
@@ -5798,7 +5876,7 @@ async function attributeAndNotifyAddressActivity(increases) {
       recordGlobalNotification({
         id: `wallet-bal-${address.slice(-12)}-${Date.now()}`,
         source: "wallet",
-        title: `Balance increased by ${formatSompiForNotification(delta)} KAS`,
+        title: `Balance increased by ${formatSompiForNotification(delta)} ${KAS_UNIT}`,
         body: describeActivityAddress(kind, address),
         timestamp: Date.now(),
         targetKind: "wallet",
@@ -6018,7 +6096,7 @@ function isPoolEstablishedConversation(conversationEntry) {
 }
 
 function isValidKaspaAddressString(address) {
-  try { return engine.kaspa?.Address?.validate ? engine.kaspa.Address.validate(address) === true : address.startsWith("kaspa:"); }
+  try { return engine.kaspa?.Address?.validate ? engine.kaspa.Address.validate(address) === true && isNetworkAddress(address) : isNetworkAddress(address); }
   catch { return false; }
 }
 
@@ -6352,7 +6430,7 @@ function acceptIncomingAddressPool(envelope, contact, conversationEntry) {
   const accepted = [];
   for (const raw of envelope.addresses.slice(0, POOL_MAX_STORED)) {
     const address = String(raw || "").trim();
-    if (!address.startsWith("kaspa:") ||
+    if (!address.startsWith(ADDRESS_PREFIX) ||
         !isValidKaspaAddressString(address) ||
         address === engine.address ||
         isReservedPoolAddress(poolState, address) ||
@@ -6491,7 +6569,7 @@ function createPaymentBubbleFromNotice(envelope, conversationEntry, contact, sou
     conversationId: conversationEntry.id,
     contactId: contact.id,
     direction: "incoming",
-    text: `Received ${amountKas} KAS`,
+    text: `Received ${amountKas} ${KAS_UNIT}`,
     sender: contact.address,
     receiver: envelope.address,
     status: MESSAGE_STATUSES.CONFIRMED,
@@ -6537,7 +6615,7 @@ async function verifyPaymentNoticeAgainstChain(conversationEntry, bubble, envelo
     applyMessagePatch(live, { status: MESSAGE_STATUSES.BROADCAST, note: "Unverified: the referenced transaction pays nothing to the claimed address." });
   } else if (paidToClaimed !== BigInt(envelope.amountSompi)) {
     const corrected = formatSompiForNotification(paidToClaimed);
-    applyMessagePatch(live, { text: `Received ${corrected} KAS`, paymentAmountKas: corrected, note: "Amount corrected from chain data." });
+    applyMessagePatch(live, { text: `Received ${corrected} ${KAS_UNIT}`, paymentAmountKas: corrected, note: "Amount corrected from chain data." });
   } else {
     return;
   }
@@ -6831,7 +6909,7 @@ function setSpendingTotal(kas) {
   const el = document.querySelector("[data-spending-total]");
   if (!el) return;
   el.hidden = kas == null;
-  el.textContent = kas == null ? "" : `Total: ${kas} KAS`;
+  el.textContent = kas == null ? "" : `Total: ${kas} ${KAS_UNIT}`;
 }
 
 let spendingTotalToken = 0;
@@ -6867,7 +6945,7 @@ async function refreshSpendingSummary() {
   const mnemonic = activeAccountMnemonic();
   if (!mnemonic || !engine.kaspa) {
     activeSpendingAddress = null;
-    if (spendingBalanceEl) spendingBalanceEl.textContent = "-- KAS";
+    if (spendingBalanceEl) spendingBalanceEl.textContent = `-- ${KAS_UNIT}`;
     setSpendingUnlocking(false);
     setSpendingTotal(null);
     return;
@@ -6875,7 +6953,7 @@ async function refreshSpendingSummary() {
   const address = deriveSpendingAddressAt(getActiveSpendingIndex());
   if (!address) {
     activeSpendingAddress = null;
-    if (spendingBalanceEl) spendingBalanceEl.textContent = "-- KAS";
+    if (spendingBalanceEl) spendingBalanceEl.textContent = `-- ${KAS_UNIT}`;
     // Said in the row rather than left as a bare "-- KAS": the keychain is still unlocking, and
     // the alternative iOS rejected was showing some other address in this one's place.
     setSpendingUnlocking(true);
@@ -6887,17 +6965,17 @@ async function refreshSpendingSummary() {
   refreshSpendingTotal();
   // Paint the last-known balance immediately; the live number replaces it when it lands.
   const cached = loadSpendingBalCache()[address];
-  if (spendingBalanceEl) spendingBalanceEl.textContent = cached?.kas != null ? `${cached.kas} KAS` : "…";
+  if (spendingBalanceEl) spendingBalanceEl.textContent = cached?.kas != null ? `${cached.kas} ${KAS_UNIT}` : "…";
   try {
     const bal = await engine.balanceForAddress(address);
     saveSpendingBalCacheEntries({ [address]: { ...(cached || {}), kas: String(bal.totalKas) } });
     // Guard against a stale response if the active address changed meanwhile.
     if (activeSpendingAddress === address && spendingBalanceEl) {
-      spendingBalanceEl.textContent = `${bal.totalKas} KAS`;
+      spendingBalanceEl.textContent = `${bal.totalKas} ${KAS_UNIT}`;
     }
   } catch (error) {
     if (activeSpendingAddress === address && spendingBalanceEl && cached?.kas == null) {
-      spendingBalanceEl.textContent = "-- KAS";
+      spendingBalanceEl.textContent = `-- ${KAS_UNIT}`;
     }
   }
 }
@@ -6966,8 +7044,8 @@ function updateSpendingTotalBalance(entries) {
   const totalEl = document.querySelector("[data-spending-total-balance]");
   if (!totalEl) return;
   const known = entries.filter((e) => e.kas != null && Number.isFinite(Number(e.kas)));
-  if (!known.length) { totalEl.textContent = "-- KAS"; return; }
-  totalEl.textContent = `${trimKas8(known.reduce((sum, e) => sum + (Number(e.kas) || 0), 0))} KAS`;
+  if (!known.length) { totalEl.textContent = `-- ${KAS_UNIT}`; return; }
+  totalEl.textContent = `${trimKas8(known.reduce((sum, e) => sum + (Number(e.kas) || 0), 0))} ${KAS_UNIT}`;
 }
 
 async function renderSpendingList() {
@@ -7005,7 +7083,7 @@ async function renderSpendingList() {
   // instantly with real numbers instead of a wall of "…" — the live refresh replaces it below.
   const balCache = loadSpendingBalCache();
   spendingListEl.innerHTML = items
-    .map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${balCache[it.address].kas} KAS` : "…", balCache[it.address]?.used ?? null, false, reservedAddresses.has(it.address)))
+    .map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${balCache[it.address].kas} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null, false, reservedAddresses.has(it.address)))
     .join("");
   updateSpendingTotalBalance(items.map((it) => ({ kas: balCache[it.address]?.kas != null ? Number(balCache[it.address].kas) : null })));
   // Enrich with live balance + used-state, then order: primary first → funded → rest.
@@ -7061,7 +7139,7 @@ async function renderSpendingList() {
   enriched.sort((a, b) => rank(a) - rank(b) || b.index - a.index);
   updateSpendingTotalBalance(enriched);
   spendingListEl.innerHTML = enriched
-    .map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} KAS` : "-- KAS", e.used, domainOwning.has(e.address), reservedAddresses.has(e.address)))
+    .map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address), reservedAddresses.has(e.address)))
     .join("");
 }
 
@@ -7118,7 +7196,7 @@ async function renderSpendingPrivacyList() {
         <span class="meta">
           <small>Address #${entry.index}${label ? ` · ${escapeHtml(label)}` : ""}</small>
           <code>${escapeHtml(shortAddress(entry.address))}</code>
-          ${kas > 0 ? `<span class="funded">${trimKas8(kas)} KAS <b>Funded</b></span>` : ""}
+          ${kas > 0 ? `<span class="funded">${trimKas8(kas)} ${KAS_UNIT} <b>Funded</b></span>` : ""}
         </span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
       </button>`;
@@ -7148,7 +7226,7 @@ document.querySelector("[data-spending-privacy-list]")?.addEventListener("click"
   const kas = Number(row.dataset.privacyKas) || 0;
   const choice = await chooseDialog({
     title: `Address ${index}`,
-    message: `${shortAddress(address)}${kas > 0 ? `\nHolding ${trimKas8(kas)} KAS` : ""}`,
+    message: `${shortAddress(address)}${kas > 0 ? `\nHolding ${trimKas8(kas)} ${KAS_UNIT}` : ""}`,
     options: [
       { id: "move", title: "Move out of Chat Payment Privacy", subtitle: kas > 0
         ? "It has been paid into, so it is no longer a fresh address. Moves it to your normal spending list where you can send from it."
@@ -7167,7 +7245,7 @@ document.querySelector("[data-spending-privacy-list]")?.addEventListener("click"
   } else if (choice === "copy") {
     try { await copyTextToClipboard(address); showCopyToast(addressCopiedToastText(address)); } catch {}
   } else if (choice === "qr") {
-    openChattingAddressScreen({ address, balanceText: `${trimKas8(kas)} KAS`, subtitle: null });
+    openChattingAddressScreen({ address, balanceText: `${trimKas8(kas)} ${KAS_UNIT}`, subtitle: null });
   }
 });
 
@@ -7271,7 +7349,7 @@ async function renderSpendingVisibilityPage() {
       const cell = spendingVisibilityList.querySelector(`[data-vis-usage="${r.index}"]`);
       if (!cell) return;
       if (usage.kas > 0) {
-        cell.textContent = `${usage.kas.toFixed(4)} KAS`;
+        cell.textContent = `${usage.kas.toFixed(4)} ${KAS_UNIT}`;
         cell.classList.add("used");
       } else {
         cell.textContent = usage.used === true ? "Used" : usage.used === false ? "Unused" : "Checking";
@@ -7569,7 +7647,7 @@ function renderSpendingDetailUtxos(address, utxos) {
     const meta = document.createElement("div"); meta.className = "manage-address-utxo-meta";
     if (label) { const l = document.createElement("span"); l.className = "manage-address-utxo-label"; l.textContent = label; meta.appendChild(l); }
     const op = document.createElement("span"); op.className = "manage-address-utxo-outpoint"; op.textContent = outpointKey; meta.appendChild(op);
-    const amt = document.createElement("span"); amt.className = "manage-address-utxo-amount"; amt.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} KAS`;
+    const amt = document.createElement("span"); amt.className = "manage-address-utxo-amount"; amt.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} ${KAS_UNIT}`;
     row.append(meta, amt);
     spendingDetailUtxoList.appendChild(row);
   }
@@ -7582,7 +7660,7 @@ async function loadSpendingDetailUtxos(address) {
     const balance = await engine.balanceForAddress(address);
     if (spendingDetailAddress !== address) return; // user navigated away
     renderSpendingDetailUtxos(address, balance.entries || []);
-    if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = `${balance.totalKas} KAS`;
+    if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = `${balance.totalKas} ${KAS_UNIT}`;
   } catch (error) {
     if (spendingDetailAddress !== address) return;
     spendingDetailUtxoList.innerHTML = `<div class="manage-address-empty">Could not load UTXOs: ${escapeHtml(error.message)}</div>`;
@@ -7815,7 +7893,7 @@ spendingConsolidateBtn?.addEventListener("click", async () => {
 
     const total = sources.reduce((sum, s) => sum + s.kas, 0);
     const ok = await confirmText(
-      `Send all Kaspa from ${sources.length} spending address${sources.length > 1 ? "es" : ""} (~${total} KAS) to your primary spending address #${primaryIndex}?\n\nThis broadcasts ${sources.length} transaction${sources.length > 1 ? "s" : ""}.`
+      `Send all Kaspa from ${sources.length} spending address${sources.length > 1 ? "es" : ""} (~${total} ${KAS_UNIT}) to your primary spending address #${primaryIndex}?\n\nThis broadcasts ${sources.length} transaction${sources.length > 1 ? "s" : ""}.`
     );
     if (!ok) return;
 
@@ -7963,7 +8041,7 @@ function spendingSendGetFeeKas() {
 function updateSpendingSendFeeSummary() {
   if (!spendingSendFeeSummary) return;
   const labels = { "0": "Normal", "0.00002": "Priority", custom: "Custom" };
-  spendingSendFeeSummary.textContent = `${labels[spendingSendFeeTier] || "Normal"} · ${spendingSendGetFeeKas()} KAS`;
+  spendingSendFeeSummary.textContent = `${labels[spendingSendFeeTier] || "Normal"} · ${spendingSendGetFeeKas()} ${KAS_UNIT}`;
 }
 function selectSpendingSendFeeTier(tier) {
   spendingSendFeeTier = tier;
@@ -8590,8 +8668,8 @@ document.querySelectorAll("[data-profile-qr-trigger]").forEach((button) => {
     try {
       const address = await freshReceiveAddress();
       if (!address) { showCopyToast("Spending address is unlocking — go back and try again."); return; }
-      let balanceText = "0 KAS";
-      try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} KAS`; } catch {}
+      let balanceText = `0 ${KAS_UNIT}`;
+      try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} ${KAS_UNIT}`; } catch {}
       openChattingAddressScreen({ address, balanceText, subtitle: RECEIVE_SUBTITLE });
     } finally {
       button.disabled = false;
@@ -8604,7 +8682,7 @@ async function openChattingAddressScreen(options = {}) {
   if (!chattingAddressScreen) return;
   const address = options.address || engine.address;
   if (!address) return;
-  const balanceText = options.balanceText != null ? options.balanceText : `${currentBalanceKas} KAS`;
+  const balanceText = options.balanceText != null ? options.balanceText : `${currentBalanceKas} ${KAS_UNIT}`;
   chattingAddressScreen.hidden = false;
   // Subtitle: default chat-fee note for the chatting address; callers pass their
   // own text (or null to hide it) — spending receive hides the chat-fee note.
@@ -8907,7 +8985,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 82;
+const APP_BUILD = 83;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -9046,7 +9124,7 @@ function recordOutgoingPaymentChat({ destination, amountKas, txid }) {
     conversationId: conversationEntry.id,
     contactId: contact.id,
     direction: "outgoing",
-    text: `Sent ${amountKas} KAS`,
+    text: `Sent ${amountKas} ${KAS_UNIT}`,
     sender: engine.address || null,
     receiver: clean,
     status: MESSAGE_STATUSES.CONFIRMED,
@@ -9089,7 +9167,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     }
     card.innerHTML = `
       <span class="send-success-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
-      <strong>Sent ${escapeHtml(String(amountKas))} KAS</strong>
+      <strong>Sent ${escapeHtml(String(amountKas))} ${KAS_UNIT}</strong>
       ${txid
         ? `<span class="send-success-label">Transaction ID</span>
            <a class="send-success-txid" href="${escapeHtml(explorerTxUrl(txid))}" target="_blank" rel="noopener noreferrer">${escapeHtml(txid)}</a>`
@@ -9118,7 +9196,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     try {
       await ensureRuntimes({ quiet: true });
       const balance = getBalance ? await getBalance() : await engine.balance();
-      if (els.balanceHint) els.balanceHint.textContent = `Available: ${balance.totalKas} KAS`;
+      if (els.balanceHint) els.balanceHint.textContent = `Available: ${balance.totalKas} ${KAS_UNIT}`;
     } catch {
       if (els.balanceHint) els.balanceHint.textContent = "";
     }
@@ -9157,7 +9235,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
 
     if (!raw) { if (els.submit) els.submit.disabled = true; return; }
 
-    if (raw.startsWith("kaspa:")) {
+    if (/^kaspa(test)?:/.test(raw)) {
       let valid = true;
       try { validateContactAddress(raw); } catch { valid = false; }
       if (els.checkEl) els.checkEl.hidden = !valid; // green check once it's a valid address
@@ -9302,7 +9380,7 @@ function sendKaspaResolveAmountKas() {
   const raw = Number(sendKaspaAmountInput?.value);
   if (!isFinite(raw) || raw <= 0) return sendKaspaAmountInput?.value || "";
   if (sendKaspaUnit === "fiat") {
-    if (!sendKaspaPrice) throw new Error("KAS price unavailable — switch back to KAS to send.");
+    if (!sendKaspaPrice) throw new Error(`KAS price unavailable — switch back to ${KAS_UNIT} to send.`);
     return trimKas8(raw / sendKaspaPrice);
   }
   return sendKaspaAmountInput?.value || "";
@@ -9315,18 +9393,18 @@ function updateSendKaspaFiatHint() {
   if (sendKaspaUnit === "kas") {
     sendKaspaFiatHint.textContent = `≈ ${formatFiatValue(raw, sendKaspaPrice)}`;
   } else {
-    sendKaspaFiatHint.textContent = `≈ ${(raw / sendKaspaPrice).toLocaleString(undefined, { maximumFractionDigits: 8 })} KAS`;
+    sendKaspaFiatHint.textContent = `≈ ${(raw / sendKaspaPrice).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
   }
   sendKaspaFiatHint.hidden = false;
 }
 
 function applySendKaspaUnit() {
   const isKas = sendKaspaUnit === "kas";
-  if (sendKaspaUnitCode) sendKaspaUnitCode.textContent = isKas ? "KAS" : sendKaspaCurrencyCode();
+  if (sendKaspaUnitCode) sendKaspaUnitCode.textContent = isKas ? KAS_UNIT : sendKaspaCurrencyCode();
   if (sendKaspaLogo) sendKaspaLogo.hidden = !isKas;
   if (sendKaspaFiatSymbol) { sendKaspaFiatSymbol.hidden = isKas; sendKaspaFiatSymbol.textContent = currencyMeta().symbol.trim(); }
   const amountWord = t("send.amount");
-  if (sendKaspaAmountLabel) sendKaspaAmountLabel.textContent = isKas ? `${amountWord} (KAS)` : `${amountWord} (${sendKaspaCurrencyCode()})`;
+  if (sendKaspaAmountLabel) sendKaspaAmountLabel.textContent = isKas ? `${amountWord} (${KAS_UNIT})` : `${amountWord} (${sendKaspaCurrencyCode()})`;
   if (sendKaspaAmountInput) sendKaspaAmountInput.placeholder = isKas ? "0.00000000" : "0.00";
   updateSendKaspaFiatHint();
 }
@@ -9373,7 +9451,7 @@ function sendKaspaGetFeeKas() {
 function updateSendKaspaFeeSummary() {
   if (!sendKaspaFeeSummary) return;
   const label = sendKaspaFeeCustomOverride ? "Custom" : (SEND_FEE_LABELS[sendKaspaFeeTier] || "Normal");
-  sendKaspaFeeSummary.textContent = `${label} · ${formatFeeKas(sendKaspaTotalFeeKas())} KAS`;
+  sendKaspaFeeSummary.textContent = `${label} · ${formatFeeKas(sendKaspaTotalFeeKas())} ${KAS_UNIT}`;
 }
 // Reflect the current total into the (editable) fee field, unless the user is typing a custom fee.
 function applySendKaspaFeeField() {
@@ -9437,7 +9515,7 @@ function updateSendKaspaCoinSummary() {
   for (const entry of sendKaspaUtxos) {
     if (sendKaspaSelected.has(utxoOutpointKey(entry.outpoint || {}))) totalSompi += BigInt(entry.amount || 0);
   }
-  sendKaspaCoinSummary.textContent = `${sendKaspaSelected.size} · ${sompiToKasDisplay(totalSompi)} KAS`;
+  sendKaspaCoinSummary.textContent = `${sendKaspaSelected.size} · ${sompiToKasDisplay(totalSompi)} ${KAS_UNIT}`;
 }
 function renderSendKaspaCoinControl() {
   sendKaspaSelected.clear();
@@ -9475,7 +9553,7 @@ function renderSendKaspaCoinControl() {
     meta.appendChild(outpointEl);
     const amountEl = document.createElement("span");
     amountEl.className = "manage-send-coin-amount";
-    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} KAS`;
+    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} ${KAS_UNIT}`;
     row.append(checkbox, meta, amountEl);
     sendKaspaCoinList.appendChild(row);
   }
@@ -9734,7 +9812,7 @@ function transactionFeeText(tx) {
   const totalOut = (tx.outputs || []).reduce((sum, o) => sum + BigInt(o?.amount || 0), 0n);
   if (totalIn < totalOut) return null;
   const kas = Number(totalIn - totalOut) / 1e8;
-  return `Fee ${kas >= 0.001 ? kas.toFixed(4) : kas.toFixed(8)} KAS`;
+  return `Fee ${kas >= 0.001 ? kas.toFixed(4) : kas.toFixed(8)} ${KAS_UNIT}`;
 }
 
 function manageAddressTxDirection(tx, address) {
@@ -9804,7 +9882,7 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
       if (info) {
         const amountEl = document.createElement("span");
         amountEl.className = `manage-address-row-amount ${info.isOutgoing ? "outgoing" : "incoming"}`;
-        amountEl.textContent = `${info.isOutgoing ? "-" : "+"}${sompiToKasDisplay(info.amountSompi)} KAS`;
+        amountEl.textContent = `${info.isOutgoing ? "-" : "+"}${sompiToKasDisplay(info.amountSompi)} ${KAS_UNIT}`;
         const feeText = transactionFeeText(tx);
         if (feeText) {
           const wrap = document.createElement("span");
@@ -9949,7 +10027,7 @@ function renderManageAddressUtxos() {
 
     const amountEl = document.createElement("span");
     amountEl.className = "manage-address-utxo-amount";
-    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} KAS`;
+    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} ${KAS_UNIT}`;
 
     const renameBtn = document.createElement("button");
     renameBtn.type = "button";
@@ -9986,7 +10064,7 @@ async function openManageAddressScreen() {
   if (!manageAddressScreen || !engine.address) return;
   manageAddressScreen.hidden = false;
   showManageView("list");
-  if (manageAddressBalanceEl) manageAddressBalanceEl.textContent = `${currentBalanceKas} KAS`;
+  if (manageAddressBalanceEl) manageAddressBalanceEl.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (manageAddressExplorerLink) manageAddressExplorerLink.href = explorerAddressUrl(engine.address);
   await Promise.all([
     loadManageAddressTransactions(engine.address),
@@ -10027,7 +10105,7 @@ function updateSendCoinSummary() {
   for (const entry of lastManageAddressUtxos) {
     if (selectedSendOutpoints.has(utxoOutpointKey(entry.outpoint || {}))) totalSompi += BigInt(entry.amount || 0);
   }
-  manageSendCoinSummary.textContent = `${selectedSendOutpoints.size} · ${sompiToKasDisplay(totalSompi)} KAS`;
+  manageSendCoinSummary.textContent = `${selectedSendOutpoints.size} · ${sompiToKasDisplay(totalSompi)} ${KAS_UNIT}`;
 }
 
 function renderSendCoinControl() {
@@ -10071,7 +10149,7 @@ function renderSendCoinControl() {
 
     const amountEl = document.createElement("span");
     amountEl.className = "manage-send-coin-amount";
-    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} KAS`;
+    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} ${KAS_UNIT}`;
 
     row.append(checkbox, meta, amountEl);
     manageSendCoinList.appendChild(row);
@@ -10106,7 +10184,7 @@ function manageSendResolveAmountKas() {
   const raw = Number(manageSendAmountInput?.value);
   if (!isFinite(raw) || raw <= 0) return manageSendAmountInput?.value || "";
   if (manageSendUnit === "fiat") {
-    if (!manageSendPrice) throw new Error("KAS price unavailable — switch back to KAS to send.");
+    if (!manageSendPrice) throw new Error(`KAS price unavailable — switch back to ${KAS_UNIT} to send.`);
     return String(raw / manageSendPrice);
   }
   return manageSendAmountInput?.value || "";
@@ -10120,14 +10198,14 @@ function updateManageSendFiatHint() {
     manageSendFiatHint.textContent = `≈ ${formatFiatValue(raw, manageSendPrice)}`;
   } else {
     const kas = raw / manageSendPrice;
-    manageSendFiatHint.textContent = `≈ ${kas.toLocaleString(undefined, { maximumFractionDigits: 8 })} KAS`;
+    manageSendFiatHint.textContent = `≈ ${kas.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
   }
   manageSendFiatHint.hidden = false;
 }
 
 function applyManageSendUnit() {
   const isKas = manageSendUnit === "kas";
-  if (manageSendUnitCode) manageSendUnitCode.textContent = isKas ? "KAS" : manageSendCurrencyCode();
+  if (manageSendUnitCode) manageSendUnitCode.textContent = isKas ? KAS_UNIT : manageSendCurrencyCode();
   // Kaspa logo in KAS mode; fiat symbol in fiat mode.
   if (manageSendLogo) manageSendLogo.hidden = !isKas;
   if (manageSendFiatSymbol) {
@@ -10135,7 +10213,7 @@ function applyManageSendUnit() {
     manageSendFiatSymbol.textContent = currencyMeta().symbol.trim();
   }
   const amountWord = t("send.amount");
-  if (manageSendAmountLabel) manageSendAmountLabel.textContent = isKas ? `${amountWord} (KAS)` : `${amountWord} (${manageSendCurrencyCode()})`;
+  if (manageSendAmountLabel) manageSendAmountLabel.textContent = isKas ? `${amountWord} (${KAS_UNIT})` : `${amountWord} (${manageSendCurrencyCode()})`;
   if (manageSendAmountInput) manageSendAmountInput.placeholder = isKas ? "0.00000000" : "0.00";
   updateManageSendFiatHint();
 }
@@ -10169,7 +10247,7 @@ function manageSendGetFeeKas() {
 }
 function updateManageSendFeeSummary() {
   if (!manageSendFeeSummary) return;
-  manageSendFeeSummary.textContent = `${FEE_TIER_LABELS[manageSendFeeTier] || "Normal"} · ${manageSendGetFeeKas()} KAS`;
+  manageSendFeeSummary.textContent = `${FEE_TIER_LABELS[manageSendFeeTier] || "Normal"} · ${manageSendGetFeeKas()} ${KAS_UNIT}`;
 }
 function selectManageSendFeeTier(tier) {
   manageSendFeeTier = tier;
@@ -10897,9 +10975,10 @@ function renderNodeChoice() {
   const saved = loadSavedNodes();
   const options = [
     { value: NODE_CHOICE_SCAN, label: "Automatic Scan (Recommended)" },
-    { value: DEFAULT_TRUSTED_NODE, label: "Kasia Public Node (Better)" },
+    // The shipped default node is a mainnet node: not offered on testnet.
+    ...(DEFAULT_TRUSTED_NODE ? [{ value: DEFAULT_TRUSTED_NODE, label: "Kasia Public Node (Better)" }] : []),
     ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address }))
-      .filter((o) => o.value.toLowerCase() !== DEFAULT_TRUSTED_NODE.toLowerCase()),
+      .filter((o) => !DEFAULT_TRUSTED_NODE || o.value.toLowerCase() !== DEFAULT_TRUSTED_NODE.toLowerCase()),
   ];
   if (custom && !options.some((o) => o.value === custom)) options.push({ value: custom, label: custom });
   select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
@@ -10908,7 +10987,7 @@ function renderNodeChoice() {
   if (note) {
     note.hidden = !current;
     note.textContent = custom
-      ? (custom.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "Connected only to Kasia's node" : "Connected only to this node")
+      ? (DEFAULT_TRUSTED_NODE && custom.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "Connected only to Kasia's node" : "Connected only to this node")
       : "A healthy public node is picked automatically";
   }
 }
@@ -10945,7 +11024,8 @@ document.querySelector("[data-reset-connection-defaults]")?.addEventListener("cl
 // IP Address Book: a user-managed list of saved Kaspa node addresses (label + address),
 // mirroring iOS's Connection Settings "IP Address Book". Save your own nodes here, then
 // "Use" one to fill the Trusted Node field above, or copy the raw address.
-const SAVED_NODES_KEY = "kachat-saved-nodes-v1";
+// One IP Address Book per network (iOS ConnectionProfile.savedNodeAddresses).
+const SAVED_NODES_KEY = IS_TESTNET ? "kachat-saved-nodes-testnet-v1" : "kachat-saved-nodes-v1";
 function loadSavedNodes() {
   try {
     const raw = JSON.parse(localStorage.getItem(SAVED_NODES_KEY) || "[]");
@@ -11415,7 +11495,7 @@ function renderKnsWizard() {
         <div class="kns-wizard-icon warn">⚠</div>
         <h3>Please fund your chatting address with at least ${KNS_WIZARD_MIN_FUNDING_KAS} Kaspa to continue.</h3>
         <p class="kns-wizard-label">Current balance</p>
-        <p class="kns-wizard-balance">${escapeHtml(formatKnsKas(w.balanceKas ?? 0))} KAS</p>
+        <p class="kns-wizard-balance">${escapeHtml(formatKnsKas(w.balanceKas ?? 0))} ${KAS_UNIT}</p>
         <p class="kns-wizard-label">Chatting address</p>
         <button type="button" class="kns-wizard-address" data-kns-wizard-action="copy-address">${escapeHtml(address)}</button>
         <button type="button" class="linklike-button" data-kns-wizard-action="show-qr">Show QR Code</button>
@@ -11445,7 +11525,7 @@ function renderKnsWizard() {
         <input class="field-input" type="text" data-kns-wizard-domain placeholder="name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63" value="${escapeHtml(d.input)}" ${d.submitting ? "disabled" : ""} />
         <p class="field-hint">${full ? escapeHtml(full) : "Use lowercase letters, numbers, and hyphen."}</p>
         ${status}
-        ${fee != null ? `<div class="kns-wizard-row"><span>Service fee</span><span>${escapeHtml(formatKnsKas(fee))} KAS</span></div>` : ""}
+        ${fee != null ? `<div class="kns-wizard-row"><span>Service fee</span><span>${escapeHtml(formatKnsKas(fee))} ${KAS_UNIT}</span></div>` : ""}
         ${d.feeError ? `<p class="field-error">${escapeHtml(d.feeError)}</p>` : ""}
         ${d.submitting ? `<p class="field-hint"><span class="kaposts-spinner small" aria-hidden="true"></span> ${escapeHtml(d.progress || "Submitting inscription... this could take a few minutes while it confirms on-chain.")}</p>` : ""}
         ${d.submitError ? `<p class="field-error">${escapeHtml(d.submitError)}</p>` : ""}
@@ -11521,7 +11601,7 @@ function renderKnsWizard() {
       };
       html = `<div class="kns-wizard-form">
         <h3>Let's add more details about yourself</h3>
-        <p class="field-hint">You need at least 2 KAS to fill in all fields.</p>
+        <p class="field-hint">You need at least 2 ${KAS_UNIT} to fill in all fields.</p>
         ${field("Bio", "bio", true)}${field("Website", "website")}${field("X (Twitter)", "x")}${field("Telegram", "telegram")}${field("Discord", "discord")}${field("GitHub", "github")}${field("Contact Email", "contactEmail")}
         ${d.submitting ? `<p class="field-hint"><span class="kaposts-spinner small" aria-hidden="true"></span> ${escapeHtml(d.progress)}<br>This could take a few minutes while it confirms on-chain.</p>` : ""}
         ${d.error ? `<p class="field-error">${escapeHtml(d.error)}</p>` : ""}
@@ -11783,7 +11863,7 @@ knsWizardBodyEl?.addEventListener("click", async (event) => {
       try { await copyTextToClipboard(engine.address); showCopyToast(addressCopiedToastText(engine.address)); } catch {}
       break;
     case "show-qr":
-      openChattingAddressScreen({ address: engine.address, balanceText: `${formatKnsKas(w.balanceKas ?? 0)} KAS`, subtitle: `Send around ${KNS_WIZARD_MIN_FUNDING_KAS} Kaspa to this address to have enough for full KNS profile creation and chatting for a while` });
+      openChattingAddressScreen({ address: engine.address, balanceText: `${formatKnsKas(w.balanceKas ?? 0)} ${KAS_UNIT}`, subtitle: `Send around ${KNS_WIZARD_MIN_FUNDING_KAS} Kaspa to this address to have enough for full KNS profile creation and chatting for a while` });
       break;
     case "refresh-domains": knsWizardScanDomains(); break;
     case "inscribe-domain": knsWizardInscribeDomain(); break;
@@ -12007,7 +12087,7 @@ document.querySelector("[data-kns-editor-save]")?.addEventListener("click", asyn
   // iOS "Confirm Changes": what will be written, and what each write costs.
   const confirmed = await confirmDialog({
     title: "Confirm Changes",
-    message: `${changes.length} change${changes.length === 1 ? "" : "s"}. Each is submitted as its own on-chain transaction from your chatting address:\n${changes.map((c) => `• ${c.label}`).join("\n")}\nEach transaction temporarily uses ~2 KAS; ~1 KAS returns immediately as change, so only the small network fee is a real cost.`,
+    message: `${changes.length} change${changes.length === 1 ? "" : "s"}. Each is submitted as its own on-chain transaction from your chatting address:\n${changes.map((c) => `• ${c.label}`).join("\n")}\nEach transaction temporarily uses ~2 ${KAS_UNIT}; ~1 ${KAS_UNIT} returns immediately as change, so only the small network fee is a real cost.`,
     confirmLabel: "Confirm",
   });
   if (!confirmed) return;
@@ -12121,13 +12201,13 @@ function saveProfileAccountName() {
   if (cleanName === current?.name) return;
 
   let metadata = {};
-  try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { metadata = loadAccountMetaMap(); } catch {}
   metadata[engine.address] = {
     ...(metadata[engine.address] || {}),
     name: cleanName,
     createdAt: metadata[engine.address]?.createdAt || current?.createdAt || new Date().toISOString(),
   };
-  localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(metadata));
+  saveAccountMetaMap(metadata);
 
   const accounts = loadSavedAccounts();
   const index = accounts.findIndex((entry) => entry.address === engine.address);
@@ -12290,10 +12370,10 @@ function updateWalletUi() {
   const address = engine.address;
   const meta = activeAccountMetadata();
   const accountName = meta?.name || (address ? "Current Account" : "No Active Account");
-  if (toolbarBalanceValue) toolbarBalanceValue.textContent = `${currentBalanceKas} KAS`;
-  else toolbarBalance.textContent = `${currentBalanceKas} KAS`;
-  if (profileBalance) profileBalance.textContent = `${currentBalanceKas} KAS`;
-  if (chattingAddressBalance) chattingAddressBalance.textContent = `${currentBalanceKas} KAS`;
+  if (toolbarBalanceValue) toolbarBalanceValue.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  else toolbarBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  if (profileBalance) profileBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  if (chattingAddressBalance) chattingAddressBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
   if (profileInitial) profileInitial.textContent = address ? accountName.trim().charAt(0).toUpperCase() || "K" : "◎";
   if (profileAccountName && document.activeElement !== profileAccountName) profileAccountName.value = accountName;
@@ -14288,7 +14368,7 @@ function openKaPostsSettings() {
           <div class="settings-toggle-row"><span><strong>Send a default tip instantly</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-instant-tip ${current > 0 ? "checked" : ""}><span></span></label></div>
           <div class="settings-toggle-row" data-kaposts-tip-amount-row ${current > 0 ? "" : "hidden"}>
             <span><strong>Default tip</strong></span>
-            <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" /><input class="field-input" type="text" inputmode="decimal" placeholder="1" data-kaposts-tip-amount value="${escapeHtml(current > 0 ? trimKas8(current) : "")}" /><span>KAS</span></span>
+            <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" /><input class="field-input" type="text" inputmode="decimal" placeholder="1" data-kaposts-tip-amount value="${escapeHtml(current > 0 ? trimKas8(current) : "")}" /><span>${KAS_UNIT}</span></span>
           </div>
         </div>
       </div>
@@ -14358,7 +14438,7 @@ async function sendInstantTip(address, name, amountKasNumber) {
   const destinationAddress = await consumePoolPaymentDestination(contact);
   const message = createMessage({
     conversationId: conversationEntry.id, contactId: contact.id, direction: "outgoing",
-    text: `Sent ${amountKas} KAS`, sender: engine.address || null, receiver: destinationAddress,
+    text: `Sent ${amountKas} ${KAS_UNIT}`, sender: engine.address || null, receiver: destinationAddress,
     status: MESSAGE_STATUSES.PENDING, transport: "kaspa-payment", createdAt: Date.now(),
   });
   applyMessagePatch(message, { messageType: "payment", paymentAmountKas: amountKas });
@@ -14366,7 +14446,7 @@ async function sendInstantTip(address, name, amountKasNumber) {
   persistState();
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
-  showCopyToast(`Sending ${amountKas} KAS tip…`);
+  showCopyToast(`Sending ${amountKas} ${KAS_UNIT} tip…`);
   try {
     const fresh = fundingAddress ? freshChangeForSpendingIndex(fundingIndex) : null;
     const result = fundingAddress
@@ -14420,7 +14500,7 @@ function tipRenderFee() {
   const el = tipQ("[data-tip-fee]");
   if (!el) return;
   const total = tipTotalFeeKas();
-  el.textContent = total ? `Network fee: ${total} KAS` : "Network fee: --";
+  el.textContent = total ? `Network fee: ${total} ${KAS_UNIT}` : "Network fee: --";
 }
 
 function tipUpdateSendEnabled() {
@@ -14512,7 +14592,7 @@ async function openTipModal({ address, name } = {}) {
     if (tipState?.address !== clean) return; // modal switched targets meanwhile
     tipState.availableKas = Number(balance.totalKas);
     if (availableEl) {
-      availableEl.textContent = `Available: ${balance.totalKas} KAS from your ${tipState.spendingFunded ? "primary spending address" : "chatting address"}`;
+      availableEl.textContent = `Available: ${balance.totalKas} ${KAS_UNIT} from your ${tipState.spendingFunded ? "primary spending address" : "chatting address"}`;
     }
   } catch {
     if (availableEl) availableEl.textContent = "Available: unavailable";
@@ -14568,7 +14648,7 @@ async function sendTipNow() {
     conversationId: conversationEntry.id,
     contactId: contact.id,
     direction: "outgoing",
-    text: `Sent ${amountKas} KAS`,
+    text: `Sent ${amountKas} ${KAS_UNIT}`,
     sender: engine.address || null,
     receiver: destinationAddress,
     status: MESSAGE_STATUSES.PENDING,
@@ -15032,6 +15112,42 @@ function showSettingsCategory(index) {
   settingsScreenEl.scrollTop = 0;
 }
 
+// --- Mainnet / testnet (iOS bdae4b7, 0c1af03) --------------------------------------------------
+// The switch only records the choice: the node, the wallet address, every endpoint and all
+// per-account data are set up for a network when the page loads, so it takes effect on reload.
+function renderTestnetToggle() {
+  const toggle = document.querySelector("[data-pref-testnet]");
+  const preferred = preferredNetwork();
+  if (toggle) toggle.checked = preferred === "testnet";
+  const note = document.querySelector("[data-testnet-restart]");
+  const text = document.querySelector("[data-testnet-restart-text]");
+  const pending = preferred !== NETWORK;
+  if (note) note.hidden = !pending;
+  if (text) text.textContent = preferred === "testnet"
+    ? "Reload KaChat to finish switching to Testnet."
+    : "Reload KaChat to finish switching back to Mainnet.";
+}
+document.querySelector("[data-pref-testnet]")?.addEventListener("change", (event) => {
+  setPreferredNetwork(event.target.checked ? "testnet" : "mainnet");
+  renderTestnetToggle();
+});
+document.querySelector("[data-testnet-reload]")?.addEventListener("click", () => { window.location.reload(); });
+renderTestnetToggle();
+
+// On testnet the Connection Settings fields say what testnet has (iOS indexerPlaceholder): KaChat's
+// indexers are blank on purpose, the REST API and KNS are the testnet-10 ones, and of the other
+// name services only .k has a testnet API.
+if (IS_TESTNET) {
+  for (const key of ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer", "translationService"]) {
+    document.querySelectorAll(`[data-endpoint="${key}"]`).forEach((input) => { input.placeholder = "No testnet indexer yet"; });
+  }
+  document.querySelectorAll('[data-endpoint="kaspaApi"]').forEach((input) => { input.placeholder = ENDPOINT_DEFAULTS.kaspaApi; });
+  const readonly = document.querySelectorAll(".connection-readonly code");
+  if (readonly[0]) readonly[0].textContent = "https://api-tn10.dotk.name/v1";
+  if (readonly[1]) { const em = document.createElement("em"); em.textContent = "Not available on this network"; readonly[1].replaceWith(em); }
+  document.querySelectorAll('[data-node-mode="official"]').forEach((card) => { card.hidden = true; });
+}
+
 // Connection Settings: one tab per kind of connection (iOS ee01f81). Every field saves as it
 // changes, so switching tabs never loses an edit.
 function showConnectionTab(name) {
@@ -15293,11 +15409,11 @@ contactForm.addEventListener("submit", async (event) => {
 
     let address;
     let resolvedDomain = null;
-    if (engine.looksLikeName(rawAddress) && !rawAddress.startsWith("kaspa:") && createChatResolvedAddress && createChatPickedName) {
+    if (engine.looksLikeName(rawAddress) && !/^kaspa(test)?:/i.test(rawAddress) && createChatResolvedAddress && createChatPickedName) {
       // The name already resolved in the field, or the one picked under Other domains.
       address = validateContactAddress(createChatResolvedAddress);
       resolvedDomain = createChatPickedName;
-    } else if (engine.looksLikeName(rawAddress) && !rawAddress.startsWith("kaspa:")) {
+    } else if (engine.looksLikeName(rawAddress) && !/^kaspa(test)?:/i.test(rawAddress)) {
       setCreateChatError("Looking up domain…");
       const resolution = await engine.resolveName(rawAddress);
       if (!resolution) throw new Error(`No domain found for ${rawAddress}. Check the name and try again.`);
@@ -16135,7 +16251,7 @@ function renderAvailableBalanceBanner(balanceText, clickable, contact) {
   availableBalanceBanner.replaceChildren();
   const value = document.createElement("span");
   value.className = `available-balance-value${clickable ? " clickable" : ""}`;
-  value.textContent = `Available ${balanceText} KAS`;
+  value.textContent = `Available ${balanceText} ${KAS_UNIT}`;
   availableBalanceBanner.append(value);
   if (contact && willPayViaFreshPoolAddress(contact.address)) {
     const arrow = document.createElement("span");
@@ -16207,13 +16323,13 @@ function refreshPaymentUnitUi() {
     paymentUnitToggle.textContent = paymentUnit === "fiat" ? symbol : "";
     paymentUnitToggle.classList.toggle("fiat", paymentUnit === "fiat");
     paymentUnitToggle.disabled = !(paymentPrice > 0);
-    paymentUnitToggle.title = paymentPrice > 0 ? (paymentUnit === "fiat" ? "Enter the amount in KAS" : `Enter the amount in ${selectedCurrency.toUpperCase()}`) : "No live price yet";
+    paymentUnitToggle.title = paymentPrice > 0 ? (paymentUnit === "fiat" ? `Enter the amount in ${KAS_UNIT}` : `Enter the amount in ${selectedCurrency.toUpperCase()}`) : "No live price yet";
   }
-  input.placeholder = paymentUnit === "fiat" ? selectedCurrency.toUpperCase() : "Amount (KAS)";
+  input.placeholder = paymentUnit === "fiat" ? selectedCurrency.toUpperCase() : `Amount (${KAS_UNIT})`;
   const kas = paymentKasFromInput();
   if (paymentConversionLabel) {
     let label = "";
-    if (kas != null) label = paymentUnit === "fiat" ? `${formatKasPlain(kas)} KAS` : (paymentPrice > 0 ? formatFiatValue(kas, paymentPrice) : "");
+    if (kas != null) label = paymentUnit === "fiat" ? `${formatKasPlain(kas)} ${KAS_UNIT}` : (paymentPrice > 0 ? formatFiatValue(kas, paymentPrice) : "");
     paymentConversionLabel.textContent = label;
     paymentConversionLabel.hidden = !label;
   }
@@ -16247,8 +16363,8 @@ async function activateComposerMode(mode) {
   composer.classList.toggle("payment-mode", composerMode === "kas");
   input.value = "";
   input.inputMode = composerMode === "kas" ? "decimal" : "text";
-  input.setAttribute("aria-label", composerMode === "kas" ? "KAS amount" : "Message");
-  setComposerHint(composerMode === "kas" ? "Amount (KAS)" : "Message");
+  input.setAttribute("aria-label", composerMode === "kas" ? `${KAS_UNIT} amount` : "Message");
+  setComposerHint(composerMode === "kas" ? `Amount (${KAS_UNIT})` : "Message");
   paymentUnit = "kas";
   if (paymentConversionLabel) paymentConversionLabel.hidden = true;
   if (composerMode === "kas") {
@@ -16265,7 +16381,7 @@ async function activateComposerMode(mode) {
     setStatus("Text message mode");
     return;
   }
-  setStatus("KAS payment mode selected");
+  setStatus(`${KAS_UNIT} payment mode selected`);
   await refreshComposerAvailableBalance();
 }
 
@@ -16351,7 +16467,7 @@ async function verifyKasPaymentBroadcast(txids, recipientAddress, amountKas) {
 function paymentAmountForMessage(message) {
   const stored = String(message?.paymentAmountKas || "").trim();
   if (stored && Number.isFinite(Number(stored)) && Number(stored) > 0) return stored;
-  const match = String(message?.text || "").match(/^Sent\s+([0-9]+(?:\.[0-9]{1,8})?)\s+KAS$/i);
+  const match = String(message?.text || "").match(/^Sent\s+([0-9]+(?:\.[0-9]{1,8})?)\s+T?KAS$/i);
   return match ? match[1] : "";
 }
 
@@ -16393,7 +16509,7 @@ function buildPaymentCard(parts, outgoing) {
   label.textContent = outgoing ? "Sent" : "Received";
   const amount = document.createElement("strong");
   amount.className = "payment-card-amount";
-  amount.textContent = `${parts.amountText} KAS`;
+  amount.textContent = `${parts.amountText} ${KAS_UNIT}`;
   body.append(label, amount);
   if (parts.note) {
     const note = document.createElement("span");
@@ -16440,7 +16556,7 @@ async function refreshPendingPaymentStatuses(conversationEntry, contact) {
 
 function normalizeKasAmount(value) {
   const cleaned = String(value || "").trim().replace(",", ".");
-  if (!/^\d*(?:\.\d{0,8})?$/.test(cleaned)) throw new Error("Enter a valid KAS amount with up to 8 decimals.");
+  if (!/^\d*(?:\.\d{0,8})?$/.test(cleaned)) throw new Error(`Enter a valid ${KAS_UNIT} amount with up to 8 decimals.`);
   const amount = Number(cleaned);
   if (!Number.isFinite(amount) || amount <= 0) throw new Error("Amount must be greater than 0.");
   return cleaned;
@@ -16472,8 +16588,8 @@ async function sendKasPayment(conversationId, rawAmount) {
     const feeReserveSompi = 10000n;
     if (requestedSompi + feeReserveSompi > balance.totalSompi) {
       await showKasPaymentAlert({
-        title: "Not Enough KAS",
-        message: `Planned spend ${amountKas} KAS, but available balance ${balance.totalKas} KAS is less than required after the network fee.`,
+        title: `Not Enough ${KAS_UNIT}`,
+        message: `Planned spend ${amountKas} ${KAS_UNIT}, but available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`,
         primaryLabel: "OK",
       });
       return;
@@ -16481,7 +16597,7 @@ async function sendKasPayment(conversationId, rawAmount) {
     if (Number(amountKas) < 0.1) {
       const proceed = await showKasPaymentAlert({
         title: "Small Amount",
-        message: "Sending less than 0.1 KAS may fail due to the network dust protection limit.",
+        message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
         primaryLabel: "Send Anyway", cancelLabel: "Cancel", allowCancel: true,
       });
       if (!proceed) return;
@@ -16497,7 +16613,7 @@ async function sendKasPayment(conversationId, rawAmount) {
       conversationId: conversationEntry.id,
       contactId: contact.id,
       direction: "outgoing",
-      text: `Sent ${amountKas} KAS`,
+      text: `Sent ${amountKas} ${KAS_UNIT}`,
       sender: engine.address || null,
       receiver: destinationAddress,
       status: MESSAGE_STATUSES.PENDING,
@@ -16514,7 +16630,7 @@ async function sendKasPayment(conversationId, rawAmount) {
     const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
     input.value = "";
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    setStatus(`Sending ${amountKas} KAS…`);
+    setStatus(`Sending ${amountKas} ${KAS_UNIT}…`);
 
     try {
       const payFresh = spendingFunded ? freshChangeForSpendingIndex(fundingIndex) : null;
@@ -17964,7 +18080,7 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
   );
   for (const archived of archive.conversations) {
     const contactAddress = String(archived?.contactAddress || "").trim();
-    if (!contactAddress) continue;
+    if (!contactAddress || !isOnActiveNetwork(contactAddress)) continue;
     if (localTombstones.has(contactAddress) || archivedTombstones.has(contactAddress)) continue;
     const archivedMessages = Array.isArray(archived?.messages) ? archived.messages : [];
     if (!archivedMessages.length) continue;
@@ -18063,7 +18179,7 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       message.note = "Imported from phone backup";
       if (message.status === MESSAGE_STATUSES.CONFIRMED) message.confirmations = Math.max(1, Number(message.confirmations || 0));
       if (message.messageType === "payment") {
-        const amount = rawContent.match(/^(?:Sent|Received)\s+([0-9][0-9.,]*)\s+KAS/i);
+        const amount = rawContent.match(/^(?:Sent|Received)\s+([0-9][0-9.,]*)\s+T?KAS/i);
         if (amount) message.paymentAmountKas = amount[1].replaceAll(",", "");
       }
       conversationEntry.messages.push(message);
@@ -18564,7 +18680,7 @@ function mergeChatArchives(remote, local) {
 
   const absorb = (conversation, isRemote) => {
     const contactAddress = String(conversation?.contactAddress || "").trim();
-    if (!contactAddress) return;
+    if (!contactAddress || !isOnActiveNetwork(contactAddress)) return;
     if (tombstones.has(contactAddress)) return;
     const metadataWins = isRemote ? remoteIsNewer : !remoteIsNewer;
     const alias = String(conversation?.contactAlias || "").trim();
@@ -19071,9 +19187,9 @@ function renderFeePill(feeKas, { estimating = false } = {}) {
   if (!feeEstimateBanner) return;
   feeEstimateBanner.classList.toggle("estimating", estimating);
   feeEstimateBanner.classList.toggle("overridden", composerFeeOverrideKas != null);
-  if (estimating && feeKas == null) feeEstimateBanner.textContent = "fee: -------- KAS";
-  else if (feeKas == null) feeEstimateBanner.textContent = "fee: -- KAS";
-  else feeEstimateBanner.textContent = `fee: ${formatKasExact(feeKas)} KAS`;
+  if (estimating && feeKas == null) feeEstimateBanner.textContent = `fee: -------- ${KAS_UNIT}`;
+  else if (feeKas == null) feeEstimateBanner.textContent = `fee: -- ${KAS_UNIT}`;
+  else feeEstimateBanner.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
   feeEstimateBanner.hidden = false;
 }
 feeEstimateBanner?.addEventListener("click", async () => {
@@ -19082,7 +19198,7 @@ feeEstimateBanner?.addEventListener("click", async () => {
   if (current == null) return;
   const typed = await promptDialog({
     title: "Adjust Network Fee",
-    label: "Fee (KAS)",
+    label: `Fee (${KAS_UNIT})`,
     message: "If the network is busy, a higher fee can help your transaction confirm faster.",
     initial: formatKasExact(current),
     confirmLabel: "Save",
@@ -19096,7 +19212,7 @@ feeEstimateBanner?.addEventListener("click", async () => {
     return;
   }
   const value = Number(normalized);
-  if (!Number.isFinite(value) || value < 0) { showCopyToast("Enter a fee in KAS."); return; }
+  if (!Number.isFinite(value) || value < 0) { showCopyToast(`Enter a fee in ${KAS_UNIT}.`); return; }
   composerFeeOverrideKas = normalized;
   renderFeePill(composerFeeOverrideKas, { estimating: false });
 });
@@ -19527,16 +19643,16 @@ createSeedConfirm?.addEventListener("change", () => {
 async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   if (!engine.kaspa) await ensureRuntimes();
   const wallet = engine.importMnemonic(phrase, passphrase);
-  if (!wallet?.privateKeyHex || !wallet?.address?.startsWith("kaspa:") || !wallet?.mnemonic) {
+  if (!wallet?.privateKeyHex || !wallet?.address?.startsWith(ADDRESS_PREFIX) || !wallet?.mnemonic) {
     engine.clearSession();
     throw new Error("Wallet generation did not produce a valid mainnet identity.");
   }
 
   const createdAt = new Date().toISOString();
   let metadata = {};
-  try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { metadata = loadAccountMetaMap(); } catch {}
   metadata[wallet.address] = { name, createdAt };
-  localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(metadata));
+  saveAccountMetaMap(metadata);
 
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   state = { contacts: [], conversations: [] };
@@ -20174,7 +20290,7 @@ function renderChattingPickerList() {
       + `<span class="chatting-picker-row-index">#${escapeHtml(String(entry.index))}</span>`
       + `<span class="chatting-picker-row-copy">`
       + `<span class="chatting-picker-row-address">${escapeHtml(shortAddress(entry.address))}</span>`
-      + `<span class="chatting-picker-row-meta"><span>${escapeHtml(formatSompiForNotification(entry.balanceSompi))} KAS</span>${pill}</span>`
+      + `<span class="chatting-picker-row-meta"><span>${escapeHtml(formatSompiForNotification(entry.balanceSompi))} ${KAS_UNIT}</span>${pill}</span>`
       + `</span>${badge}`
       + `<svg class="chatting-picker-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>`
       + `</button>`;
@@ -20310,7 +20426,7 @@ function renderChattingPickerDetail() {
     <p class="chatting-picker-detail-heading">Address #${escapeHtml(String(candidate.index))}</p>
     <button type="button" class="chatting-picker-detail-address" data-chatting-picker-copy>${escapeHtml(candidate.address)}</button>
     <p class="chatting-picker-detail-hint">Click the address to copy it.</p>
-    <div class="chatting-picker-detail-stat"><span>Balance</span><span>${escapeHtml(formatSompiForNotification(candidate.balanceSompi))} KAS</span></div>
+    <div class="chatting-picker-detail-stat"><span>Balance</span><span>${escapeHtml(formatSompiForNotification(candidate.balanceSompi))} ${KAS_UNIT}</span></div>
     ${otherNamesHtml}
     ${domainsHtml}`;
   if (chattingPickerSetBtn) {
@@ -20726,16 +20842,16 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", fa
     engine.clearSession();
     throw new Error(`Invalid recovery phrase: ${error?.message || "word list or checksum validation failed."}`);
   }
-  if (!wallet?.privateKeyHex || !wallet?.address?.startsWith("kaspa:") || !wallet?.mnemonic) {
+  if (!wallet?.privateKeyHex || !wallet?.address?.startsWith(ADDRESS_PREFIX) || !wallet?.mnemonic) {
     engine.clearSession();
     throw new Error("Recovery phrase did not produce a valid Kaspa mainnet account.");
   }
 
   const createdAt = new Date().toISOString();
   let metadata = {};
-  try { metadata = JSON.parse(localStorage.getItem(ACCOUNT_SHELL_META_KEY) || "{}"); } catch {}
+  try { metadata = loadAccountMetaMap(); } catch {}
   metadata[wallet.address] = { name: cleanName, createdAt };
-  localStorage.setItem(ACCOUNT_SHELL_META_KEY, JSON.stringify(metadata));
+  saveAccountMetaMap(metadata);
 
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   if (resetState) {
@@ -20856,7 +20972,7 @@ importWithPassphraseBtn?.addEventListener("click", () => {
 importSkipPassphraseBtn?.addEventListener("click", () => void commitImport(""));
 
 function activeSavedAccountRecord() {
-  const address = String(engine.address || localStorage.getItem(ACTIVE_ACCOUNT_KEY) || "").trim();
+  const address = String(engine.address || readActiveAccountAddress() || "").trim();
   return loadSavedAccounts().find((entry) => entry.address === address) || null;
 }
 let recoveryHoldStartedAt = 0;
@@ -22409,7 +22525,7 @@ async function groupOpFeeHint(groupId, { controlTx = 0, photoTx = 0 }) {
       total += parseFloat(await engine.estimateMessageFee(bytes) || "0") * photoTx;
     }
     if (!(total > 0)) return `\n\n(${txCount} network transaction${plural}.)`;
-    return `\n\nEstimated network fee ≈ ${total.toFixed(6)} KAS across ${txCount} transaction${plural}.`;
+    return `\n\nEstimated network fee ≈ ${total.toFixed(6)} ${KAS_UNIT} across ${txCount} transaction${plural}.`;
   } catch { return `\n\n(${txCount} network transaction${plural}.)`; }
 }
 
@@ -22624,7 +22740,7 @@ function openGroupMemberMenu(address, x, y) {
   const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and address." }];
   if (!mine) {
     options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
-    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: "Send KAS to this member from your chatting address." });
+    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: `Send ${KAS_UNIT} to this member from your chatting address.` });
   }
   options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
@@ -22928,9 +23044,9 @@ function renderGroupFeePill(feeKas, { estimating = false } = {}) {
   const pill = document.querySelector("[data-group-fee]");
   if (!pill) return;
   pill.classList.toggle("estimating", estimating);
-  if (estimating && feeKas == null) pill.textContent = "fee: -------- KAS";
-  else if (feeKas == null) pill.textContent = "fee: -- KAS";
-  else pill.textContent = `fee: ${formatKasExact(feeKas)} KAS`;
+  if (estimating && feeKas == null) pill.textContent = `fee: -------- ${KAS_UNIT}`;
+  else if (feeKas == null) pill.textContent = `fee: -- ${KAS_UNIT}`;
+  else pill.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
   pill.hidden = false;
 }
 function hideGroupFeePill() {
@@ -22967,7 +23083,7 @@ document.querySelector("[data-group-fee]")?.addEventListener("click", async () =
   if (current == null) return;
   const typed = await promptDialog({
     title: "Adjust Network Fee",
-    label: "Fee (KAS)",
+    label: `Fee (${KAS_UNIT})`,
     message: "If the network is busy, a higher fee can help your transaction confirm faster.",
     initial: formatKasExact(current),
     confirmLabel: "Save",
@@ -22976,7 +23092,7 @@ document.querySelector("[data-group-fee]")?.addEventListener("click", async () =
   const normalized = String(typed).trim().replace(",", ".");
   if (normalized === "" || normalized === "0") { groupFeeOverrideKas = null; scheduleGroupFeeEstimate(); return; }
   const value = Number(normalized);
-  if (!Number.isFinite(value) || value < 0) { showCopyToast("Enter a fee in KAS."); return; }
+  if (!Number.isFinite(value) || value < 0) { showCopyToast(`Enter a fee in ${KAS_UNIT}.`); return; }
   groupFeeOverrideKas = normalized;
   renderGroupFeePill(groupFeeOverrideKas);
 });
@@ -24249,7 +24365,8 @@ function closeGroupManage() { if (groupManageScreen) groupManageScreen.hidden = 
 // --- background sync: pull invites + new messages into the store ---
 async function syncGroupsNow({ catchUp = false } = {}) {
   const mgr = getGroupManager();
-  if (!mgr || !engine.isKasiaCipherLoaded?.()) return 0;
+  // Group chats live on the KaChat indexer: none on testnet yet, so nothing to sync.
+  if (!mgr || !engine.isKasiaCipherLoaded?.() || !currentIndexerUrl()) return 0;
   let result;
   try { result = await mgr.syncGroups(); } catch { return 0; }
   let changed = 0;
@@ -24568,7 +24685,7 @@ groupCreateSubmit?.addEventListener("click", async () => {
             ? parseFloat(await engine.estimateMessageFee(2 * (300 + groupCreatePhotoHex.length)) || "0")
             : 0;
           const total = perInvite * (members.length + 1) + perPhoto * photoTx;
-          if (total > 0) feeLine = `\n\nEstimated network fee ≈ ${total.toFixed(6)} KAS across ${txCount} transaction${txCount === 1 ? "" : "s"}.`;
+          if (total > 0) feeLine = `\n\nEstimated network fee ≈ ${total.toFixed(6)} ${KAS_UNIT} across ${txCount} transaction${txCount === 1 ? "" : "s"}.`;
         } catch {}
         if (!await confirmText(`Create "${name}" and invite ${members.length} member${members.length === 1 ? "" : "s"}?${feeLine}`)) { updateGroupCreateSubmit(); return; }
       }
@@ -25152,7 +25269,7 @@ groupManageBody?.addEventListener("click", async (event) => {
         let feeLine = `\n\n(${others} network transaction${others === 1 ? "" : "s"}.)`;
         try {
           const per = parseFloat(await engine.estimateMessageFee(2 * (300 + hex.length)) || "0");
-          if (per * others > 0) feeLine = `\n\nEstimated network fee ≈ ${(per * others).toFixed(6)} KAS across ${others} transaction${others === 1 ? "" : "s"}.`;
+          if (per * others > 0) feeLine = `\n\nEstimated network fee ≈ ${(per * others).toFixed(6)} ${KAS_UNIT} across ${others} transaction${others === 1 ? "" : "s"}.`;
         } catch {}
         if (!await confirmText(`Set this as the group photo for everyone?${feeLine}`)) { setStatus(""); return; }
         setStatus("Updating group photo…");

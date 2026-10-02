@@ -1,3 +1,4 @@
+import { IS_TESTNET } from "./network.js";
 // KNS (Kaspa Name Service) read-path integration — resolution, reverse
 // resolution, domain listing, and profile fetching against the real,
 // centralized KNS indexer API. Ported to match KaChat iOS/Android exactly
@@ -10,6 +11,8 @@
 // is read-only and makes no on-chain transactions.
 
 export const KNS_DEFAULT_MAINNET_URL = "https://api.knsdomains.org/mainnet/api/v1";
+/** The running network's KNS registry: testnet-10 on testnet (iOS defaultKNSTestnetURL). */
+export const KNS_DEFAULT_URL = IS_TESTNET ? "https://api.knsdomains.org/tn10/api/v1" : KNS_DEFAULT_MAINNET_URL;
 export const KNS_DEFAULT_TESTNET_URL = "https://api.knsdomains.org/tn10/api/v1";
 
 const DOMAIN_CACHE_KEY = "kachat-kns-domain-cache-v1";
@@ -145,7 +148,7 @@ async function fetchJson(url, { method = "GET", body = null } = {}) {
 }
 
 function apiUrl(baseUrl, path) {
-  const base = String(baseUrl || KNS_DEFAULT_MAINNET_URL).replace(/\/+$/, "");
+  const base = String(baseUrl || KNS_DEFAULT_URL).replace(/\/+$/, "");
   // A browser extension page (KaChat Wallet) reaches the KNS host directly: its host permission
   // lifts CORS, and it has no same-origin relay to go through.
   if (typeof location !== "undefined" && /^(chrome|moz|safari-web)-extension:$/.test(String(location.protocol || ""))) {
@@ -164,7 +167,7 @@ function apiUrl(baseUrl, path) {
 
 // --- forward resolution: "alice.kas" -> address ----------------------------
 
-export async function resolveDomain(domainInput, { baseUrl = KNS_DEFAULT_MAINNET_URL } = {}) {
+export async function resolveDomain(domainInput, { baseUrl = KNS_DEFAULT_URL } = {}) {
   const fullDomain = normalizeDomainName(domainInput);
   if (!fullDomain) return null;
   const url = apiUrl(baseUrl, `/${encodeURIComponent(fullDomain)}/owner`);
@@ -230,7 +233,7 @@ async function fetchDomainProfileResult(assetId, baseUrl, keys) {
 // Direct profile lookup by assetId (not by address) — used by the write path
 // to poll for confirmation of a just-submitted profile field edit, where the
 // target domain is already known and there's no need to re-resolve it.
-export async function fetchProfileByAssetId(assetId, { baseUrl = KNS_DEFAULT_MAINNET_URL, keys = null } = {}) {
+export async function fetchProfileByAssetId(assetId, { baseUrl = KNS_DEFAULT_URL, keys = null } = {}) {
   const { profileData, hadError } = await fetchDomainProfileResult(assetId, baseUrl, keys);
   if (hadError) throw new Error("Could not reach the KNS indexer.");
   return profileData?.profile ? sanitizeProfile(profileData.profile) : null;
@@ -400,7 +403,7 @@ async function fetchAddressInfoWork(address, baseUrl) {
 // starting their own or returning a possibly-stale cache snapshot. Applies
 // the same fallback chain: explicit primary, or the most recently created
 // owned domain.
-export async function fetchAddressInfo(address, { baseUrl = KNS_DEFAULT_MAINNET_URL } = {}) {
+export async function fetchAddressInfo(address, { baseUrl = KNS_DEFAULT_URL } = {}) {
   const existing = pendingFetches.get(address);
   if (existing) return existing;
 
@@ -503,7 +506,7 @@ async function fetchAddressProfileWork(address, baseUrl) {
 // the same priority chain as iOS: primaryInscriptionId -> primaryDomain name
 // match -> first owned domain. Concurrent calls for the same address share
 // and await the same in-flight request (see fetchAddressInfo).
-export async function fetchAddressProfile(address, { baseUrl = KNS_DEFAULT_MAINNET_URL } = {}) {
+export async function fetchAddressProfile(address, { baseUrl = KNS_DEFAULT_URL } = {}) {
   const existing = pendingProfileFetches.get(address);
   if (existing) return existing;
 
@@ -574,7 +577,7 @@ export function clearAllKnsCache() {
 
 // --- domain availability + fee tiers (read-only; used by phase 2 too) ------
 
-export async function checkDomainAvailability(address, domainInput, { baseUrl = KNS_DEFAULT_MAINNET_URL } = {}) {
+export async function checkDomainAvailability(address, domainInput, { baseUrl = KNS_DEFAULT_URL } = {}) {
   const normalized = normalizeDomainName(domainInput);
   if (!normalized) throw new Error("Invalid domain name");
   const url = apiUrl(baseUrl, "/domains/check");
@@ -586,7 +589,7 @@ export async function checkDomainAvailability(address, domainInput, { baseUrl = 
   return { domain: String(matched.domain || "").toLowerCase(), available: Boolean(matched.available), isReservedDomain: Boolean(matched.isReservedDomain) };
 }
 
-export async function fetchInscribeFeeTiers({ baseUrl = KNS_DEFAULT_MAINNET_URL } = {}) {
+export async function fetchInscribeFeeTiers({ baseUrl = KNS_DEFAULT_URL } = {}) {
   const url = apiUrl(baseUrl, "/fee");
   const result = await fetchJson(url);
   if (!result.ok || !result.json?.success) throw new Error(result.json?.error || result.json?.message || "KNS fee fetch failed");

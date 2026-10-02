@@ -6,6 +6,7 @@
 // cross-platform JSON payload as 1:1, sent as normal broadcast messages), and voice notes
 // via Nextcloud media upload.
 
+import { IS_TESTNET, KAS_UNIT } from "../engine/network.js";
 import {
   BROADCAST_RETENTION_MS,
   FEATURED_BROADCAST_CHANNELS,
@@ -23,6 +24,8 @@ import {
 import { confirmDialog, promptDialog, alertDialog, chooseDialog, userFacingError } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 
+// Public chain data caches are global but per network: a testnet room is not the mainnet room.
+const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
 const CHANNELS_KEY = "kachat-broadcast-channels-v1";        // account-scoped: ["name", ...]
 const HIDDEN_KEY = "kachat-broadcast-hidden-v1";            // account-scoped: { [channel]: [address, ...] }
 const NOTIFY_KEY = "kachat-broadcast-notify-v1";            // account-scoped: { [channel]: true } — the bell
@@ -43,9 +46,9 @@ const ONCHAIN_VOICE_MAX_SECONDS = 10;
 const LONG_MESSAGE_BYTES = 2000;
 const LONG_MESSAGE_PREVIEW_CHARS = 500;
 const LINK_HOST = "kachat.app"; // every shared link is https://kachat.app/... (KACHAT_APP_LINKS.md)
-const CACHE_KEY = "kachat-broadcast-messages-cache-v1";     // GLOBAL: public chain data, account-agnostic
-const REACTIONS_KEY = "kachat-broadcast-reactions-cache-v1"; // GLOBAL: public chain data, account-agnostic
-const EDITS_KEY = "kachat-broadcast-edits-cache-v1";         // GLOBAL: { [channel]: { [targetTxId]: { text, blockTime, editor, txIds } } }
+const CACHE_KEY = `kachat-broadcast-messages-cache-v1${NET_SUFFIX}`;     // GLOBAL: public chain data, account-agnostic
+const REACTIONS_KEY = `kachat-broadcast-reactions-cache-v1${NET_SUFFIX}`; // GLOBAL: public chain data, account-agnostic
+const EDITS_KEY = `kachat-broadcast-edits-cache-v1${NET_SUFFIX}`;         // GLOBAL: { [channel]: { [targetTxId]: { text, blockTime, editor, txIds } } }
 const POLL_MS = 8000;
 // Nextcloud carries the audio bytes — same 600s cap as the 1:1 Nextcloud voice notes.
 const VOICE_MAX_DURATION_SECONDS = 600;
@@ -1201,7 +1204,7 @@ function openBroadcastSenderMenu(address, x, y) {
   if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this sender." });
   options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
-    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: "Send KAS to this sender from your chatting address." });
+    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: `Send ${KAS_UNIT} to this sender from your chatting address.` });
     options.push({ id: "hide", title: "Hide User", subtitle: "Their messages disappear from this room on this device.", destructive: true });
   }
   chooseDialog({ title: senderName(address), message: address, options }).then((choice) => {
@@ -1587,9 +1590,9 @@ function renderFeePill(feeKas, { estimating = false } = {}) {
   const pill = document.querySelector("[data-broadcast-fee]");
   if (!pill) return;
   pill.classList.toggle("estimating", estimating);
-  if (estimating && feeKas == null) pill.textContent = "fee: -------- KAS";
-  else if (feeKas == null) pill.textContent = "fee: -- KAS";
-  else pill.textContent = `fee: ${formatKasExact(feeKas)} KAS`;
+  if (estimating && feeKas == null) pill.textContent = `fee: -------- ${KAS_UNIT}`;
+  else if (feeKas == null) pill.textContent = `fee: -- ${KAS_UNIT}`;
+  else pill.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
   pill.hidden = false;
 }
 function hideFeePill() {
@@ -1624,7 +1627,7 @@ async function editBroadcastFee() {
   if (current == null) return;
   const typed = await promptDialog({
     title: "Adjust Network Fee",
-    label: "Fee (KAS)",
+    label: `Fee (${KAS_UNIT})`,
     message: "If the network is busy, a higher fee can help your transaction confirm faster.",
     initial: formatKasExact(current),
     confirmLabel: "Save",
@@ -1633,7 +1636,7 @@ async function editBroadcastFee() {
   const normalized = String(typed).trim().replace(",", ".");
   if (normalized === "" || normalized === "0") { feeOverrideKas = null; scheduleBroadcastFeeEstimate(); return; }
   const value = Number(normalized);
-  if (!Number.isFinite(value) || value < 0) { deps.showToast?.("Enter a fee in KAS."); return; }
+  if (!Number.isFinite(value) || value < 0) { deps.showToast?.(`Enter a fee in ${KAS_UNIT}.`); return; }
   feeOverrideKas = normalized;
   renderFeePill(feeOverrideKas);
 }

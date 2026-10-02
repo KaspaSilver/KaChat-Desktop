@@ -3,6 +3,7 @@
 // selected contact, decrypts messages intended for the active session wallet,
 // and returns normalized incoming message objects to the UI.
 
+import { ADDRESS_PREFIX, NETWORK, KAS_UNIT } from "./network.js";
 import {
   base64ToHex,
   fromHex,
@@ -35,6 +36,8 @@ function textToHex(value) {
 
 function normalizeBaseUrl(value) {
   const raw = String(value || DEFAULT_KASIA_INDEXER_URL).trim().replace(/\/+$/, "");
+  // Testnet has no KaChat indexer yet: blank means none (never the mainnet one).
+  if (!raw) throw new Error("No KaChat indexer on this network yet.");
   if (!/^https?:\/\//i.test(raw)) throw new Error("Indexer URL must begin with http:// or https://");
   return raw;
 }
@@ -84,7 +87,7 @@ export function buildConversationSyncPlan({
     indexerUrl: normalizeBaseUrl(indexerUrl),
     alias: String(alias || DEFAULT_KASIA_ALIAS).slice(0, 16),
     transport: "kasia-indexer",
-    network: "mainnet",
+    network: NETWORK,
     createdAt: Date.now(),
   };
 }
@@ -113,8 +116,8 @@ export async function syncConversationFromIndexer({
   limit = 50,
 } = {}) {
   if (!conversationId) throw new Error("conversationId is required for sync.");
-  if (!contact?.address?.startsWith("kaspa:")) throw new Error("A kaspa: contact address is required for sync.");
-  if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before syncing real messages.");
+  if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for sync.");
+  if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing real messages.");
   if (!privateKeyHex) throw new Error("The active session private key is required to decrypt messages.");
   if (typeof decryptMessage !== "function") throw new Error("Kasia cipher decryptor is not available.");
 
@@ -190,7 +193,7 @@ export async function syncConversationFromIndexer({
         txid,
         daaScore: row.accepting_daa_score != null ? String(row.accepting_daa_score) : null,
         confirmations: row.accepting_daa_score != null ? 1 : 0,
-        network: "mainnet",
+        network: NETWORK,
         payloadHex: String(row.message_payload || ""),
         payloadBytes: Math.ceil(String(row.message_payload || "").length / 2),
         encryptedHex: payload.encryptedHex,
@@ -289,12 +292,12 @@ async function resolveHandshakeSenderFromTransaction(txid, receiver) {
         input?.previous_outpoint?.address ||
         "",
       ).trim();
-      if (address.startsWith("kaspa:") && address !== receiver) return address;
+      if (address.startsWith(ADDRESS_PREFIX) && address !== receiver) return address;
     }
     const outputs = Array.isArray(transaction?.outputs) ? transaction.outputs : [];
     for (const output of outputs) {
       const address = String(output?.script_public_key_address || output?.scriptPublicKeyAddress || "").trim();
-      if (address.startsWith("kaspa:") && address !== receiver) return address;
+      if (address.startsWith(ADDRESS_PREFIX) && address !== receiver) return address;
     }
   } catch {
     // Sender resolution is a compatibility fallback. The indexer normally supplies it.
@@ -353,7 +356,7 @@ function transactionSenderAddress(transaction, receiver) {
       input?.previous_outpoint?.address ||
       "",
     ).trim();
-    if (address.startsWith("kaspa:") && address !== receiver) return address;
+    if (address.startsWith(ADDRESS_PREFIX) && address !== receiver) return address;
   }
   return "";
 }
@@ -427,7 +430,7 @@ export async function syncIncomingHandshakesFromIndexer({
   indexerUrl = DEFAULT_KASIA_INDEXER_URL,
   limit = 50,
 } = {}) {
-  if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before syncing incoming handshakes.");
+  if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing incoming handshakes.");
   if (!privateKeyHex) throw new Error("The active private key is required to decrypt handshakes.");
   if (typeof decryptMessage !== "function") throw new Error("Kasia cipher decryptor is unavailable.");
 
@@ -492,8 +495,8 @@ export async function syncIncomingHandshakesFromIndexer({
 
     const receiver = String(row.receiver || walletAddress).trim() || walletAddress;
     let sender = String(row.sender || "").trim();
-    if (!sender.startsWith("kaspa:")) sender = await resolveHandshakeSenderFromTransaction(txid, receiver);
-    if (!sender.startsWith("kaspa:")) {
+    if (!sender.startsWith(ADDRESS_PREFIX)) sender = await resolveHandshakeSenderFromTransaction(txid, receiver);
+    if (!sender.startsWith(ADDRESS_PREFIX)) {
       unresolvedFloor = unresolvedFloor == null ? blockTime : Math.min(unresolvedFloor, blockTime);
       continue;
     }
@@ -559,7 +562,7 @@ export async function syncOutgoingHandshakesFromIndexer({ walletAddress, cursor 
     const receiver = String(row?.receiver || "").trim();
     const blockTime = Number(row?.block_time || 0);
     if (blockTime > nextCursor) nextCursor = blockTime;
-    if (!txid || !receiver.startsWith("kaspa:")) continue;
+    if (!txid || !receiver.startsWith(ADDRESS_PREFIX)) continue;
     handshakes.push({ txid, receiver, createdAt: blockTime || Date.now(), payloadHex: String(row.message_payload || "") });
   }
   return { handshakes, nextCursor, scannedCount: rows.length };
@@ -607,7 +610,7 @@ async function fetchSelfStashTransactionsFromChain({ walletAddress, cursor = 0, 
  * true only when the paging ran to its end, so a partial answer never licenses a duplicate.
  */
 export async function fetchSavedHandshakeNotes({ walletAddress, privateKeyHex, decryptMessage, indexerUrl, limit = 50, maxPages = 200 } = {}) {
-  if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before reading saved contacts.");
+  if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before reading saved contacts.");
   if (!privateKeyHex) throw new Error("The active private key is required to decrypt saved contacts.");
   if (typeof decryptMessage !== "function") throw new Error("Kasia cipher decryptor is unavailable.");
   const baseUrl = normalizeBaseUrl(indexerUrl);
@@ -662,7 +665,7 @@ export async function syncSelfStashFromChain({
   cursor = 0,
   limit = 100,
 } = {}) {
-  if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before recovering conversations.");
+  if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before recovering conversations.");
   if (!privateKeyHex) throw new Error("The active private key is required to decrypt stashed conversation data.");
   if (typeof decryptMessage !== "function") throw new Error("Kasia cipher decryptor is unavailable.");
 
@@ -706,7 +709,7 @@ export async function syncSelfStashFromChain({
 // Existing local preview helper retained for offline UI testing.
 export async function syncConversationPreview({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0 } = {}) {
   if (!conversationId) throw new Error("conversationId is required for sync.");
-  if (!contact?.address?.startsWith("kaspa:")) throw new Error("A kaspa: contact address is required for sync.");
+  if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for sync.");
 
   const plan = buildConversationSyncPlan({
     conversationId,
@@ -739,7 +742,7 @@ export async function syncConversationPreview({ conversationId, contact, walletA
     txid,
     daaScore: String(Math.floor(createdAt / 1000)),
     confirmations: 1,
-    network: "mainnet",
+    network: NETWORK,
     payloadHex: payload.payloadHex,
     payloadBytes: Math.ceil(payload.payloadHex.length / 2),
     messageType: payload.type,
@@ -768,8 +771,8 @@ const PAYMENT_PAGE_TTL_MS = 4000;
 
 export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100 } = {}) {
   if (!conversationId) throw new Error("conversationId is required for payment sync.");
-  if (!contact?.address?.startsWith("kaspa:")) throw new Error("A kaspa: contact address is required for payment sync.");
-  if (!walletAddress?.startsWith("kaspa:")) throw new Error("Load a wallet before syncing payments.");
+  if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for payment sync.");
+  if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing payments.");
 
   const addressFromOutput = (output) => String(
     output?.script_public_key_address || output?.scriptPublicKeyAddress || output?.address ||
@@ -826,7 +829,7 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     if (!txid || known.has(txid)) continue;
 
     const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
-    const inputAddresses = inputs.map(addressFromInput).filter((value) => value.startsWith("kaspa:"));
+    const inputAddresses = inputs.map(addressFromInput).filter((value) => value.startsWith(ADDRESS_PREFIX));
     if (!inputAddresses.includes(contact.address)) continue;
 
     const outputs = Array.isArray(tx?.outputs) ? tx.outputs : [];
@@ -840,8 +843,8 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     const amountKas = (Number(totalSompi) / 1e8).toFixed(8).replace(/\.?0+$/, "");
     messages.push({
       id: `payment-${txid}`, conversationId, contactId: contact.id, direction: "incoming",
-      text: `Received ${amountKas} KAS`, sender: contact.address, receiver: walletAddress,
-      status: "confirmed", txid, confirmations: 1, network: "mainnet", messageType: "payment",
+      text: `Received ${amountKas} ${KAS_UNIT}`, sender: contact.address, receiver: walletAddress,
+      status: "confirmed", txid, confirmations: 1, network: NETWORK, messageType: "payment",
       paymentAmountKas: amountKas, transport: "kaspa-payment-rest", createdAt, updatedAt: Date.now(),
     });
     known.add(txid);

@@ -1,4 +1,7 @@
-export const NETWORK_ID = "mainnet";
+import { NETWORK_ID, ADDRESS_PREFIX, IS_TESTNET } from "./network.js";
+
+// The running network (engine/network.js): fixed for the life of the page.
+export { NETWORK_ID };
 
 export function stringify(value) {
   try {
@@ -22,9 +25,12 @@ export function validatePrivateKeyHex(hex) {
   return clean;
 }
 
+/** A destination on the running network (the name predates testnet support). */
 export function validateMainnetAddress(address) {
   const clean = String(address || "").trim();
-  if (!clean.startsWith("kaspa:")) throw new Error("Destination must be a mainnet kaspa: address.");
+  if (!clean.toLowerCase().startsWith(ADDRESS_PREFIX)) {
+    throw new Error(IS_TESTNET ? "Destination must be a testnet kaspatest: address." : "Destination must be a mainnet kaspa: address.");
+  }
   return clean;
 }
 

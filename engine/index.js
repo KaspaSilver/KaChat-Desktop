@@ -1,3 +1,4 @@
+import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
@@ -343,7 +344,7 @@ export class KaspaEngine {
   setSubscriptionAddresses(addresses = [], { restart = true } = {}) {
     const normalized = [...new Set((Array.isArray(addresses) ? addresses : [])
       .map((address) => String(address || "").trim())
-      .filter((address) => address.startsWith("kaspa:") && address !== this.address))];
+      .filter((address) => address.startsWith(ADDRESS_PREFIX) && address !== this.address))];
     const changed = normalized.length !== this.subscriptionAddresses.length
       || normalized.some((address, index) => address !== this.subscriptionAddresses[index]);
     this.subscriptionAddresses = normalized;
@@ -583,7 +584,9 @@ export class KaspaEngine {
       const info = await withTimeout(rpc.getServerInfo(), 6000, "Node verification");
       if (info?.isSynced === false) throw new Error("That node is reachable but not fully synced yet.");
       const net = String(info?.networkId ?? "").toLowerCase();
-      if (net && !net.includes("mainnet")) throw new Error(`That node is on ${info.networkId}, not mainnet.`);
+      // The node must serve the running network: testnet means testnet-10.
+      const wanted = IS_TESTNET ? "testnet-10" : "mainnet";
+      if (net && !net.includes(wanted)) throw new Error(`That node is on ${info.networkId}, not ${IS_TESTNET ? "testnet-10" : "mainnet"}.`);
       return { ok: true, url: rpc.url || endpoint };
     } catch (error) {
       // A missing wRPC port is the most common cause of a timeout: a bare wss://host
@@ -1337,6 +1340,7 @@ export class KaspaEngine {
    *  out, as iOS leaves them out. */
   async resolveNameEverywhere(input) {
     const results = await nsResolveEverywhere(String(input || "").trim(), {
+      network: NETWORK,
       resolveKas: async (name) => {
         try { return (await this.resolveKnsDomain(name))?.ownerAddress || null; } catch { return null; }
       },
@@ -1357,14 +1361,14 @@ export class KaspaEngine {
   async listOtherServiceNames(address) {
     let xOnlyPubKeyHex = null;
     try { xOnlyPubKeyHex = await this.xOnlyPubKeyForAddress?.(address); } catch { xOnlyPubKeyHex = null; }
-    return nsListOwnedNames({ address, xOnlyPubKeyHex });
+    return nsListOwnedNames({ address, xOnlyPubKeyHex, network: NETWORK });
   }
 
   /** .k and .kaspa names each address owns, six lookups at a time (iOS
    *  NameServicesClient.ownedNames(of:)), for account discovery. Map of address -> names
    *  ({name, display, settling, tld}); only addresses that own a name. Failures count as none. */
   async otherServiceNamesFor(addresses) {
-    return nsOwnedNamesForAddresses(addresses, { xOnlyPubKeyFor: (address) => this.xOnlyPubKeyForAddress(address) });
+    return nsOwnedNamesForAddresses(addresses, { network: NETWORK, xOnlyPubKeyFor: (address) => this.xOnlyPubKeyForAddress(address) });
   }
 
   /** The addresses that own a name on any service KaChat reads - .kas (KNS, batched and cached),
@@ -1439,7 +1443,7 @@ export class KaspaEngine {
   kapostPubkeyForAddress(address) {
     const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     try {
-      const body = String(address || "").trim().toLowerCase().replace(/^kaspa:/, "");
+      const body = String(address || "").trim().toLowerCase().replace(/^kaspa(test)?:/, "");
       if (body.length <= 8) return null;
       const values = [];
       for (const ch of body) {

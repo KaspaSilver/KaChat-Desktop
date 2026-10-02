@@ -1,3 +1,4 @@
+import { NETWORK } from "./network.js";
 // Conversation engine for KaChat/Kasia shell.
 // This module keeps message/conversation objects consistent across preview mode,
 // local inbound previews, and future real Kasia on-chain sync.
@@ -60,7 +61,7 @@ export function createMessage({
     txid: null,
     daaScore: null,
     confirmations: 0,
-    network: "mainnet",
+    network: NETWORK,
     payloadHex: null,
     payloadBytes: null,
     messageType: null,
@@ -89,7 +90,7 @@ export function normalizeMessage(message, conversationId) {
     txid: message?.txid ? String(message.txid) : null,
     daaScore: message?.daaScore ? String(message.daaScore) : null,
     confirmations: Number(message?.confirmations || 0),
-    network: String(message?.network || "mainnet"),
+    network: String(message?.network || NETWORK),
     payloadHex: message?.payloadHex ? String(message.payloadHex) : null,
     payloadBytes: message?.payloadBytes ? Number(message.payloadBytes) : null,
     messageType: message?.messageType ? String(message.messageType) : null,

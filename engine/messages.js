@@ -5,6 +5,7 @@
 //
 // The UI still defaults to preview mode. On-chain mode is intentionally explicit.
 
+import { ADDRESS_PREFIX } from "./network.js";
 import { buildCommMessage, buildEncryptedCommMessage, buildEncryptedHandshake, buildSelfStash, parseKasiaPayloadHex, KASIA_INTEGRATION_STATUS } from "./kasia-protocol.js";
 import { encryptKasiaMessage } from "./kasia-cipher.js";
 import { sendPayloadTransaction } from "./transactions.js";
@@ -98,7 +99,7 @@ export async function createEncryptedMessageEnvelope({ conversationId, contactId
 
 export async function sendMessagePreview({ envelope, onStatus = () => {} }) {
   if (!envelope?.text?.trim()) throw new Error("Message text is required.");
-  if (!envelope?.toAddress?.startsWith("kaspa:")) throw new Error("A valid kaspa: contact address is required.");
+  if (!envelope?.toAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("A valid kaspa: contact address is required.");
 
   onStatus({
     status: "pending",
@@ -127,7 +128,7 @@ export async function sendMessagePreview({ envelope, onStatus = () => {} }) {
 
 export async function sendMessageOnchain({ engine, envelope, amountKas = KASIA_INTEGRATION_STATUS.defaultMessageAmountKas, feeKas = "0", onStatus = () => {} }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load WASM and generate/import a wallet first.");
-  if (!envelope?.toAddress?.startsWith("kaspa:")) throw new Error("A valid kaspa: contact address is required.");
+  if (!envelope?.toAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("A valid kaspa: contact address is required.");
 
   onStatus({
     status: "pending",
@@ -218,7 +219,7 @@ export async function createEncryptedHandshakeEnvelope({
 
 export async function sendHandshakeOnchain({ engine, envelope, amountKas = "0.2", feeKas = "0", onStatus = () => {} }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load a wallet before sending a communication request.");
-  if (!envelope?.toAddress?.startsWith("kaspa:")) throw new Error("A valid kaspa: recipient address is required.");
+  if (!envelope?.toAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("A valid kaspa: recipient address is required.");
   onStatus({ status: "pending", note: "Creating encrypted KaChat communication request.", messageType: "handshake", transport: "onchain" });
   await engine.connect();
   const sendResult = await sendPayloadTransaction({

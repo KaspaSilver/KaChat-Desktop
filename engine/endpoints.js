@@ -8,9 +8,13 @@
 //   pushIndexer  — Kasia push/notification indexer
 //   knsApi       — KNS domain/profile API
 //   trustedNode  — wRPC node endpoint ("" = auto-discover via the resolver)
-const ENDPOINTS_KEY = "kachat-endpoints-v1";
+import { IS_TESTNET } from "./network.js";
 
-export const ENDPOINT_DEFAULTS = Object.freeze({
+// Each network keeps its own connection settings (iOS AppSettings.connectionProfiles): switching
+// to testnet shows testnet values, switching back brings the mainnet ones back untouched.
+const ENDPOINTS_KEY = IS_TESTNET ? "kachat-endpoints-testnet-v1" : "kachat-endpoints-v1";
+
+const MAINNET_ENDPOINT_DEFAULTS = Object.freeze({
   kaspaApi: "https://api.kaspa.org",
   // KaChat's own indexer (kachat.duckdns.org) is now the default chat/message + group-chat
   // indexer, matching iOS/Android. In a browser it is routed through the same-origin proxy when the
@@ -27,6 +31,23 @@ export const ENDPOINT_DEFAULTS = Object.freeze({
   // key stays so an older stored value does not surface as an unknown endpoint.
   nodeScan: "",
 });
+// What testnet starts with (iOS ConnectionProfile.defaults(.testnet)): the public testnet-10 REST
+// API, KNS's testnet registry, automatic node discovery, and KaChat's own indexers BLANK - there
+// is no testnet infrastructure yet, and blank means none, never the mainnet servers.
+const TESTNET_ENDPOINT_DEFAULTS = Object.freeze({
+  kaspaApi: "https://api-tn10.kaspa.org",
+  kasiaIndexer: "",
+  kapostIndexer: "",
+  broadcastIndexer: "",
+  pushIndexer: "",
+  knsApi: "https://api.knsdomains.org/tn10/api/v1",
+  translationService: "",
+  trustedNode: "",
+  nodeScan: "",
+});
+export const ENDPOINT_DEFAULTS = IS_TESTNET ? TESTNET_ENDPOINT_DEFAULTS : MAINNET_ENDPOINT_DEFAULTS;
+/** The mainnet defaults, for the "No testnet indexer yet" hints and comparisons. */
+export const MAINNET_DEFAULTS = MAINNET_ENDPOINT_DEFAULTS;
 // The node "Default (Recommended)" connects to. iOS talks gRPC to toccata.kaspium.io; a browser
 // can only open wRPC over WebSocket, so the desktop's default is KaChat's own wRPC node (see
 // engine/rpc.js DEFAULT_NODE). Kept as the one place that name is spelled out for the UI.
@@ -34,7 +55,8 @@ export const ENDPOINT_DEFAULTS = Object.freeze({
 // by default (VITE_DEFAULT_MAINNET_KASPA_NODE_URL in its .env.production), wRPC over TLS with
 // Borsh encoding like everything this client speaks. Replaces KaChat's own node here, which
 // readers abroad could not always reach.
-export const DEFAULT_TRUSTED_NODE = "wss://wrpc.kasia.fyi";
+// A mainnet node: there is no default node on testnet (iOS hides it from the pickers there).
+export const DEFAULT_TRUSTED_NODE = IS_TESTNET ? "" : "wss://wrpc.kasia.fyi";
 
 // Retired / superseded chat-indexer defaults. Drop any stored override still pointing at one of
 // these so it falls back to the current default (kachat.duckdns.org): indexer.kasia.fyi is offline,
@@ -78,7 +100,7 @@ let overrides = loadStored();
 // that follows is not a fetch and is unaffected.
 // ChangeNOW too: relayed, the server attaches its own API key (vite.config.mjs), so swaps work
 // for a reader who never pasted one.
-const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$|^api\.gateio\.ws$|(^|\.)finance\.yahoo\.com$|^api(-tn\d+)?\.dotk\.name$|^kaspaname\.com$/i;
+const INDEXER_PROXY_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$|^api\.gateio\.ws$|(^|\.)finance\.yahoo\.com$|^api(-tn\d+)?\.dotk\.name$|^kaspaname\.com$/i;
 /// Where the proxy lives, relative to wherever the app is served from.
 ///
 /// The published site sits under /desktop/, so the proxy is at /desktop/nc-proxy/ - a root-absolute
@@ -217,7 +239,7 @@ installIndexerProxy();
 // requests are still reported by their own callers.
 let verboseApiLogging = false;
 let apiLogSink = null;
-const API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api\.kaspa\.org$|knsdomains\.org$/i;
+const API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|knsdomains\.org$/i;
 export function setVerboseApiLogging(enabled, sink = null) {
   verboseApiLogging = Boolean(enabled);
   if (sink) apiLogSink = sink;

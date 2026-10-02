@@ -11,6 +11,7 @@ import * as Chess from "../engine/chess.js";
 import { fetchBroadcastHistory, hasBroadcastIndexer, sendBroadcastMessage, broadcastPayloadBytes } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
 import { setServiceScanWanted } from "./broadcasts.js";
+import { KAS_UNIT } from "../engine/network.js";
 
 const ARENA_CACHE_KEY = "kachat-chess-arena-v1";   // device-wide: the arena is the same for every wallet
 const ARENA_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -250,7 +251,7 @@ async function estimateJoinFee() {
     const bytes = broadcastPayloadBytes(T.ARENA_CHANNEL, T.encodeMessage(T.messages.join("abcdefgh")));
     const fee = await deps.estimateFeeKas(bytes, { singleInput: true });
     if (fee == null) return;
-    joinFeeText = `${Number(fee).toFixed(4)} KAS`;
+    joinFeeText = `${Number(fee).toFixed(4)} ${KAS_UNIT}`;
     render();
   } catch { /* the label falls back to "Join" */ }
 }
@@ -648,8 +649,8 @@ function renderPlayTab() {
     <p class="screen-kicker">Public</p>
     ${publicRoomCardHtml()}
     <p class="field-hint">${duel
-      ? "Join and you are paired with the next person who joins. When a room fills, the game starts and the next room opens. Five minutes a side; every move is a Kaspa transaction (about 0.0017 KAS each). Games here count on the leaderboard."
-      : "There is always a public room waiting for players. When it fills, it starts and the next one opens. Eight players, single elimination, five minutes a side. Every move is a Kaspa transaction (about 0.0017 KAS each)."}</p>
+      ? `Join and you are paired with the next person who joins. When a room fills, the game starts and the next room opens. Five minutes a side; every move is a Kaspa transaction (about 0.0017 ${KAS_UNIT} each). Games here count on the leaderboard.`
+      : `There is always a public room waiting for players. When it fills, it starts and the next one opens. Eight players, single elimination, five minutes a side. Every move is a Kaspa transaction (about 0.0017 ${KAS_UNIT} each).`}</p>
     <p class="screen-kicker">Private</p>
     <div class="chess-t-list">
       ${privates.map((t) => tournamentRowHtml(t, T.tournamentStatus(t) === "open" ? (duel ? "Waiting" : `${T.seatsLeft(t)} seat${T.seatsLeft(t) === 1 ? "" : "s"} left`) : "In play")).join("")}

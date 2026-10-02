@@ -12504,3 +12504,17 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .create-chat-private-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-radius: 12px; background: var(--grouped-cell, var(--panel)); }
 .create-chat-private-label { display: inline-flex; align-items: center; gap: 10px; font-size: 17px; color: var(--text); }
 .create-chat-private-label svg { width: 18px; height: 18px; fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ==== Testnet (iOS 0c1af03): the switch under Connection Settings, orange like iOS's tint. ==== */
+.testnet-toggle-row .testnet-toggle-label { display: inline-flex; align-items: center; gap: 10px; }
+.testnet-toggle-row .testnet-toggle-label svg { width: 20px; height: 20px; fill: none; stroke: var(--text); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.testnet-toggle-row .testnet-toggle-label strong { font-weight: 400; }
+.testnet-switch input:checked + span { background: var(--ios-orange) !important; }
+.testnet-restart-note { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-top: .5px solid var(--line); font-size: 15px; color: var(--text); }
+.testnet-restart-note[hidden] { display: none !important; }
+.testnet-restart-note > svg { width: 20px; height: 20px; flex: 0 0 20px; }
+.testnet-restart-note > svg circle { fill: var(--ios-orange); stroke: none; }
+.testnet-restart-note > svg path { stroke: #fff; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.testnet-restart-note > span { flex: 1; min-width: 0; }
+.testnet-reload-button { flex: 0 0 auto; border: 0; border-radius: 999px; padding: 6px 12px; background: var(--ios-orange); color: #fff; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+.nc-testnet-off .settings-page-form strong { font-weight: 600; }

@@ -51,6 +51,7 @@ import {
 } from "../engine/kaposts.js";
 import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
+import { KAS_UNIT } from "../engine/network.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
@@ -593,6 +594,7 @@ function newPostsPillHtml() {
 }
 
 async function loadFeed() {
+  if (kapostsUnavailableHere()) { renderKaPostsUnavailable(); return; }
   syncFollowingFromChain();
   // The KaPosts tab can be clicked before initKaPosts has run (startup awaits storage/engine
   // first) — deps is still null then, and every deps.* access below would throw.
@@ -2288,7 +2290,7 @@ function scheduleComposerFeeEstimate() {
       const feeKas = await deps.estimatePostFeeKas(text);
       if (token !== composerFeeToken) return;
       if (feeKas == null) { row.hidden = true; return; }
-      row.textContent = `Est. fee: ${Number(feeKas).toFixed(8)} KAS`;
+      row.textContent = `Est. fee: ${Number(feeKas).toFixed(8)} ${KAS_UNIT}`;
       row.hidden = false;
     } catch {
       if (token === composerFeeToken) row.hidden = true;
@@ -4449,8 +4451,23 @@ export function stopKaPostsPolling() {
   stopNewPostsCheck();
 }
 
+/** No KaPost indexer on this network (testnet has none yet, iOS 0bda85e): say so, rather than
+ *  run feed work and polling against nothing - or against the mainnet indexer, which would serve
+ *  mainnet posts under testnet addresses. */
+function kapostsUnavailableHere() { return !String(getEndpoint("kapostIndexer") || "").trim(); }
+function renderKaPostsUnavailable() {
+  if (statusEl) statusEl.hidden = true;
+  if (!feedEl) return;
+  feedEl.innerHTML = `
+    <div class="no-results-card kaposts-empty">
+      <strong>KaPosts isn't available on Testnet yet</strong>
+      <span>There is no KaPost indexer for testnet. Turn off Testnet in Settings > Connection to read and post on mainnet.</span>
+    </div>`;
+}
+
 export function refreshKaPostsFeed() {
   if (!deps) return;
+  if (kapostsUnavailableHere()) { stopNewPostsCheck(); renderKaPostsUnavailable(); return; }
   // Opening the tab is what arms the check, and it only runs while the tab is the one on screen -
   // nothing polls a feed nobody is looking at.
   startNewPostsCheck();

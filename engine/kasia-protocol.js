@@ -1,3 +1,4 @@
+import { ADDRESS_PREFIX } from "./network.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 // Kasia protocol adapter for KaChatShell.
@@ -73,7 +74,7 @@ function normalizeAlias(alias) {
 
 function normalizeAddress(address) {
   const value = String(address || "").trim();
-  return value.startsWith("kaspa:") ? value : null;
+  return value.startsWith(ADDRESS_PREFIX) ? value : null;
 }
 
 function header(type) {

@@ -1,4 +1,5 @@
 import { confirmDialog } from "./dialogs.js";
+import { IS_TESTNET } from "../engine/network.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -107,12 +108,18 @@ let pickerSharingPath = null;
 // ---------------------------------------------------------------------------
 
 function loadState() {
+  // Testnet: Nextcloud is off (iOS af8ec68). The backup archive, media folder and calls are one
+  // per account across both networks, so testnet could otherwise overwrite the mainnet backup or
+  // import mainnet history. Nothing syncs, restores, uploads or rings; every option hides as if
+  // disconnected, and the mainnet connection is waiting, untouched, for the next mainnet load.
+  if (IS_TESTNET) { nc = null; return; }
   try { nc = JSON.parse(localStorage.getItem(deps.accountScopedKey(NC_KEY)) || "null"); }
   catch { nc = null; }
   if (nc && (!nc.server || !nc.username || !nc.appPassword)) nc = null;
 }
 
 function saveState() {
+  if (IS_TESTNET) return;
   if (nc) localStorage.setItem(deps.accountScopedKey(NC_KEY), JSON.stringify(nc));
   else localStorage.removeItem(deps.accountScopedKey(NC_KEY));
 }
@@ -1402,6 +1409,15 @@ function refreshConnectFormState() {
 
 function renderSettings() {
   if (!settingsEl) return;
+  if (IS_TESTNET) {
+    settingsEl.innerHTML = `
+      <div class="settings-list-card nc-testnet-off">
+        <div class="settings-page-form"><strong>Nextcloud is off while Testnet is on.</strong></div>
+      </div>
+      <p class="settings-group-footer">Backups, sync, media and calls through Nextcloud work on mainnet only, so testnet can never overwrite your mainnet backup. Turn off Testnet in Settings &gt; Connection and your Nextcloud connection comes back as it was.</p>`;
+    updateComposerButton();
+    return;
+  }
   if (!nc) {
     settingsEl.innerHTML = `
       <p class="settings-group-label">Server</p>

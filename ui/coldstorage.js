@@ -9,6 +9,7 @@
 // stays on the KasSigner device.
 
 import { getEndpoint } from "../engine/endpoints.js";
+import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
 import { kachatAddressDomainsHtml } from "./kachat-market.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
@@ -198,7 +199,7 @@ function validateKpub(kpub) {
   try {
     const generator = deps.engine.kaspa.PublicKeyGenerator.fromXPub(trimmed);
     // Prove it derives before accepting it.
-    generator.receiveAddressAsStrings("mainnet", 0, 1);
+    generator.receiveAddressAsStrings(NETWORK_ID, 0, 1);
     return trimmed;
   } catch {
     return null;
@@ -207,7 +208,7 @@ function validateKpub(kpub) {
 
 function deriveReceiveAddresses(kpub, start, end) {
   const generator = deps.engine.kaspa.PublicKeyGenerator.fromXPub(kpub);
-  return generator.receiveAddressAsStrings("mainnet", start, end);
+  return generator.receiveAddressAsStrings(NETWORK_ID, start, end);
 }
 
 function truncateMiddle(value, keep = 14) {
@@ -367,7 +368,7 @@ function addressRowHtml(account, entry) {
     : used
       ? '<span class="spending-address-usage used" data-cold-usage-cell="' + entry.index + '">Used</span>'
       : '<span class="spending-address-usage unused" data-cold-usage-cell="' + entry.index + '">Unused</span>';
-  const balanceText = entry.balanceSompi === undefined ? "… KAS" : `${fmtKasExact(entry.balanceSompi)} KAS`;
+  const balanceText = entry.balanceSompi === undefined ? `… ${KAS_UNIT}` : `${fmtKasExact(entry.balanceSompi)} ${KAS_UNIT}`;
   return `
     <div class="spending-address-row cold-address-row" data-cold-address-row="${entry.index}">
       <button type="button" class="spending-address-row-main" data-cold-addr-open="${entry.index}" aria-label="Open address #${entry.index} on explorer">
@@ -428,7 +429,7 @@ function renderDetail() {
       </div>
       <div>
         <p class="cold-summary-label">Total Balance</p>
-        <p class="cold-summary-balance">${fmtKasExact(totalSompi)} KAS</p>
+        <p class="cold-summary-balance">${fmtKasExact(totalSompi)} ${KAS_UNIT}</p>
       </div>
       <button class="primary-button cold-capsule cold-summary-actions" type="button" data-cold-actions-toggle ${detailBusy ? "disabled" : ""}>
         ${busyLabel ? deps.escapeHtml(busyLabel) : "Address Actions"}
@@ -490,7 +491,7 @@ function renderColdTransactionSheet() {
   if (!body || !tx) return;
   const when = tx.blockTime ? new Date(Number(tx.blockTime)).toLocaleString() : null;
   const summary = tx.amountSompi != null
-    ? `${tx.outgoing ? "Sent" : "Received"} ${fmtKasExact(tx.amountSompi)} KAS${when ? ` on ${when}` : ""}`
+    ? `${tx.outgoing ? "Sent" : "Received"} ${fmtKasExact(tx.amountSompi)} ${KAS_UNIT}${when ? ` on ${when}` : ""}`
     : (when || "Transaction");
   body.innerHTML = `
     <div class="modal-head">
@@ -540,7 +541,7 @@ function renderColdPortfolioPicker() {
 function coldTxSummaryLine(tx) {
   const direction = tx.outgoing ? "Sent" : "Received";
   const when = tx.blockTime ? new Date(Number(tx.blockTime)).toLocaleString() : null;
-  return `${direction} ${fmtKasExact(tx.amountSompi)} KAS${when ? ` on ${when}` : ""}`;
+  return `${direction} ${fmtKasExact(tx.amountSompi)} ${KAS_UNIT}${when ? ` on ${when}` : ""}`;
 }
 
 function fmtFiatLike(value, currency) {
@@ -581,7 +582,7 @@ function renderColdPortfolioDetails() {
           </button>`).join("")}
       </div>
       <label class="portfolio-editor-field">
-        <span>Amount (KAS)</span>
+        <span>Amount (${KAS_UNIT})</span>
         <input type="number" step="any" min="0" data-cold-pf-amount value="${deps.escapeHtml(String(d.amount))}" />
       </label>
       <label class="portfolio-editor-field">
@@ -877,7 +878,7 @@ function renderVisibility() {
       const cell = rootEl?.querySelector(`[data-cold-vis-usage="${start + i}"]`);
       if (!cell) return;
       if (usage.sompi > 0) {
-        cell.textContent = `${(usage.sompi / 1e8).toFixed(4)} KAS`;
+        cell.textContent = `${(usage.sompi / 1e8).toFixed(4)} ${KAS_UNIT}`;
         cell.classList.add("used");
       } else {
         cell.textContent = usage.used ? "Used" : "Unused";
@@ -943,7 +944,7 @@ function addressTxRowsHtml(entry) {
           ${tx.block_time ? `<span class="manage-address-row-time">${deps.escapeHtml(new Date(Number(tx.block_time)).toLocaleString())}</span>` : ""}
         </span>
         <span class="manage-address-row-trailing">
-          ${info ? `<span class="manage-address-row-amounts"><span class="manage-address-row-amount ${dirClass}">${outgoing ? "-" : "+"}${fmtKasExact(Number(info.amountSompi))} KAS</span>${deps.transactionFeeText?.(tx) ? `<span class="manage-address-row-fee">${deps.escapeHtml(deps.transactionFeeText(tx))}</span>` : ""}</span>` : ""}
+          ${info ? `<span class="manage-address-row-amounts"><span class="manage-address-row-amount ${dirClass}">${outgoing ? "-" : "+"}${fmtKasExact(Number(info.amountSompi))} ${KAS_UNIT}</span>${deps.transactionFeeText?.(tx) ? `<span class="manage-address-row-fee">${deps.escapeHtml(deps.transactionFeeText(tx))}</span>` : ""}</span>` : ""}
           <span class="manage-address-row-open" aria-hidden="true">${EXTERNAL_ICON}</span>
         </span>
       </button>`;
@@ -973,7 +974,7 @@ function addressUtxoRowsHtml(entry) {
           <span class="manage-address-utxo-outpoint">${deps.escapeHtml(key)}</span>
         </div>
         ${utxo.isCoinbase ? '<span class="cold-coinbase-tag">Coinbase</span>' : ""}
-        <span class="manage-address-utxo-amount">${fmtKasExact(Number(utxo.amount || 0))} KAS</span>
+        <span class="manage-address-utxo-amount">${fmtKasExact(Number(utxo.amount || 0))} ${KAS_UNIT}</span>
         <button type="button" class="cold-inline-icon" data-cold-utxo-rename="${deps.escapeHtml(key)}" aria-label="Rename UTXO">${PENCIL_ICON}</button>
       </div>`;
   }).join("");
@@ -998,7 +999,7 @@ function renderAddressScreen() {
     </div>
     <div class="spending-detail-balance">
       <span class="spending-detail-balance-label">Balance</span>
-      <span class="spending-detail-balance-value">${fmtKasExact(balanceSompi)} KAS</span>
+      <span class="spending-detail-balance-value">${fmtKasExact(balanceSompi)} ${KAS_UNIT}</span>
       <span class="spending-detail-balance-address">${deps.escapeHtml(shortColdAddress(entry.address))}</span>
     </div>
     <!-- History / UTXOs / .kachat on the app's underline tab bar (iOS b96d727, 718b88c). -->
@@ -1111,7 +1112,7 @@ function sendAmountSompi() {
 function sendConversionText() {
   const kas = sendAmountKas();
   if (kas === null) return null;
-  if (send.amountUnit === "fiat") return `≈ ${kas.toLocaleString(undefined, { maximumFractionDigits: 8 })} KAS`;
+  if (send.amountUnit === "fiat") return `≈ ${kas.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
   if (!send.price || send.price <= 0) return null;
   return `≈ ${deps.formatFiatValue(kas, send.price)}`;
 }
@@ -1600,7 +1601,7 @@ function renderSendFlow() {
       ${header}
       <div class="cold-send-rows">
         <div class="cold-send-row"><span>From</span><code>${deps.escapeHtml(shortFrom)}</code></div>
-        <div class="cold-send-row"><span>Available</span><strong>${fmtKasBig(send.availableSompi)} KAS</strong></div>
+        <div class="cold-send-row"><span>Available</span><strong>${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</strong></div>
       </div>
       ${send.isCompound
         // iOS's order: the section is LABELLED, then shows the address it is consolidating, then
@@ -1623,10 +1624,10 @@ function renderSendFlow() {
            </div>`}
       <span class="field-label">Amount</span>
       <div class="send-amount-field">
-        <button type="button" class="send-amount-unit" data-cold-send-unit title="Tap to switch between KAS and fiat">
+        <button type="button" class="send-amount-unit" data-cold-send-unit title="Tap to switch between ${KAS_UNIT} and fiat">
           <img src="${kaspaLogoUrl}" alt="" class="send-amount-logo" ${send.amountUnit === "kas" ? "" : "hidden"} />
           <span class="send-amount-fiat-symbol" ${send.amountUnit === "fiat" ? "" : "hidden"}>${deps.escapeHtml(deps.currencySymbol?.() || "$")}</span>
-          <span class="send-amount-unit-code">${send.amountUnit === "kas" ? "KAS" : deps.currencyCode?.() || "USD"}</span>
+          <span class="send-amount-unit-code">${send.amountUnit === "kas" ? KAS_UNIT : deps.currencyCode?.() || "USD"}</span>
         </button>
         <input class="field-input send-amount-input" type="text" inputmode="decimal" data-cold-send-amount
           placeholder="${send.amountUnit === "kas" ? "0.00000000" : "0.00"}" autocomplete="off" value="${deps.escapeHtml(send.amountText)}" />
@@ -1645,7 +1646,7 @@ function renderSendFlow() {
                <input class="field-input cold-send-fee-input" type="text" inputmode="decimal" data-cold-send-fee-input value="${deps.escapeHtml(fmtKasBig(sendEffectiveFee()))}" />
                <button class="cold-inline-link" type="button" data-cold-send-fee-commit>✓</button>
              </span>`
-          : `<button class="cold-inline-link" type="button" data-cold-send-fee-edit>~${feeText} KAS ✎</button>`}
+          : `<button class="cold-inline-link" type="button" data-cold-send-fee-edit>~${feeText} ${KAS_UNIT} ✎</button>`}
       </div>
       <p class="field-hint">If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. Tap the fee amount to set a custom fee.</p>
       ${send.isCompound ? "" : `
@@ -1697,13 +1698,13 @@ function renderSendFlow() {
             <span class="cold-coincontrol-check" aria-hidden="true">${isOn ? CHECK_ICON : CIRCLE_ICON}</span>
             <span class="cold-coincontrol-copy">
               ${label ? `<span class="cold-coincontrol-label">${deps.escapeHtml(label)}</span>` : ""}
-              <span class="cold-coincontrol-amount">${fmtKasExact(utxo.amountSompi)} KAS</span>
+              <span class="cold-coincontrol-amount">${fmtKasExact(utxo.amountSompi)} ${KAS_UNIT}</span>
               <span class="cold-coincontrol-outpoint">${deps.escapeHtml(String(utxo.transactionId).slice(0, 10))}…:${utxo.index}</span>
             </span>
           </button>`;
         }).join("")}
       </div>
-      ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${fmtKasExact(selectedTotal)} KAS (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`}
+      ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${fmtKasExact(selectedTotal)} ${KAS_UNIT} (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`}
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-cold-coincontrol-cancel>Cancel</button>
         <button class="primary-button" type="button" data-cold-coincontrol-done ${send.coinControlLoading ? "disabled" : ""}>
@@ -1719,8 +1720,8 @@ function renderSendFlow() {
       <div class="cold-send-qr-panel">
         <div class="cold-send-rows dark">
           <div class="cold-send-row"><span>From</span><code>${deps.escapeHtml(shortFrom)}</code></div>
-          <div class="cold-send-row"><span>Available</span><span>${fmtKasBig(send.availableSompi)} KAS</span></div>
-          <div class="cold-send-row"><span>Network Fee</span><span>${fmtKasBig(send.unsigned.feeSompi)} KAS</span></div>
+          <div class="cold-send-row"><span>Available</span><span>${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</span></div>
+          <div class="cold-send-row"><span>Network Fee</span><span>${fmtKasBig(send.unsigned.feeSompi)} ${KAS_UNIT}</span></div>
         </div>
         <p class="cold-send-qr-hint">Scan this on your KasSigner device</p>
         <div class="cold-qr-frame"><canvas width="480" height="480" data-cold-send-qr-canvas></canvas></div>
@@ -2306,7 +2307,7 @@ async function loadDetail({ useCache = true } = {}) {
       if (entry.balanceSompi === undefined) continue;
       balanceCache.set(entry.address, entry.balanceSompi);
       const cell = rootEl?.querySelector(`[data-cold-balance-cell="${entry.index}"]`);
-      if (cell) cell.textContent = `${fmtKasExact(entry.balanceSompi)} KAS`;
+      if (cell) cell.textContent = `${fmtKasExact(entry.balanceSompi)} ${KAS_UNIT}`;
     }
   }
   if (detailToken !== token) return;

@@ -18,9 +18,10 @@
 // own beyond what's passed in — economics (fee tiers, dust, priority fees)
 // live in KNS_ECONOMICS below, matching the documented indexer behavior.
 
+import { ADDRESS_PREFIX } from "./network.js";
 import { NETWORK_ID, sompiToKaspaDisplay } from "./utils.js";
 import {
-  KNS_DEFAULT_MAINNET_URL,
+  KNS_DEFAULT_URL,
   KNS_PROFILE_FIELD_KEYS,
   normalizeDomainLabel,
   KNSProfileLinkBuilder,
@@ -374,11 +375,11 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   const fullDomain = `${normalizedLabel}.kas`;
 
   onStatus({ status: "checking-availability" });
-  const availability = await checkDomainAvailability(engine.address, fullDomain, { baseUrl: KNS_DEFAULT_MAINNET_URL });
+  const availability = await checkDomainAvailability(engine.address, fullDomain, { baseUrl: KNS_DEFAULT_URL });
   if (!availability.available) throw new Error(`${fullDomain} is already taken.`);
 
   onStatus({ status: "fetching-fees" });
-  const feeTiers = await fetchInscribeFeeTiers({ baseUrl: KNS_DEFAULT_MAINNET_URL });
+  const feeTiers = await fetchInscribeFeeTiers({ baseUrl: KNS_DEFAULT_URL });
   const { commitAmountKas, revealAmountKas } = registrationAmounts(normalizedLabel, feeTiers, { isReservedDomain: availability.isReservedDomain });
 
   const payloadJson = buildDomainCreatePayload(normalizedLabel);
@@ -424,7 +425,7 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   clearKnsCache(engine.address);
   const verified = await pollUntil(
     async () => {
-      const resolution = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_MAINNET_URL });
+      const resolution = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL });
       return resolution && resolution.ownerAddress === engine.address ? resolution : null;
     },
     { timeoutMs: 90_000 },
@@ -472,11 +473,11 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   let recipient = String(toAddress || "").trim();
   if (recipient.toLowerCase().endsWith(".kas")) {
     onStatus({ status: "resolving-recipient" });
-    const resolution = await resolveDomain(recipient, { baseUrl: KNS_DEFAULT_MAINNET_URL });
+    const resolution = await resolveDomain(recipient, { baseUrl: KNS_DEFAULT_URL });
     if (!resolution?.ownerAddress) throw new Error("Could not resolve the recipient KNS domain.");
     recipient = resolution.ownerAddress;
   }
-  if (!recipient.startsWith("kaspa:")) throw new Error("Recipient must be a kaspa: address or a .kas domain.");
+  if (!recipient.startsWith(ADDRESS_PREFIX)) throw new Error("Recipient must be a kaspa: address or a .kas domain.");
   try {
     if (engine.kaspa.Address?.validate && engine.kaspa.Address.validate(recipient) !== true) {
       throw new Error("invalid");
@@ -491,7 +492,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   // Ownership pre-check (best-effort — a resolver miss doesn't block; the
   // chain-side inscription rules are authoritative).
   onStatus({ status: "verifying-ownership" });
-  const owned = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_MAINNET_URL }).catch(() => null);
+  const owned = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL }).catch(() => null);
   if (owned && owned.ownerAddress !== sourceAddress) {
     throw new Error("This domain is not owned by the sending address.");
   }
@@ -546,7 +547,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   clearKnsCache(recipient);
   const verified = await pollUntil(
     async () => {
-      const resolution = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_MAINNET_URL });
+      const resolution = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL });
       return resolution && resolution.ownerAddress === recipient ? resolution : null;
     },
     { timeoutMs: 90_000 },
@@ -615,7 +616,7 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
   onStatus({ status: "verifying", key });
   const verified = await pollUntil(
     async () => {
-      const profile = await fetchProfileByAssetId(assetId, { baseUrl: KNS_DEFAULT_MAINNET_URL, keys: [key] });
+      const profile = await fetchProfileByAssetId(assetId, { baseUrl: KNS_DEFAULT_URL, keys: [key] });
       const expectEmpty = value === "";
       const actual = profile?.[key] ?? null;
       if (expectEmpty) return actual == null ? { profile } : null;
@@ -678,7 +679,7 @@ async function sha256Bytes(bytes) {
 // The signed message has to match app.knsdomains.org's bytes exactly; the signature is tried in
 // the same three modes the image upload uses, because the API accepts one of them and does not
 // say which up front.
-export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFAULT_MAINNET_URL }) {
+export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFAULT_URL }) {
   if (!engine?.kaspa || !engine?.privateKey) throw new Error("Load a wallet before setting a primary domain.");
   const trimmedId = String(domainId || "").trim();
   if (!trimmedId) throw new Error("KNS domain id is missing.");
@@ -692,7 +693,7 @@ export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFA
     },
     async () => rawSchnorrSignDigest(engine.kaspa, engine.privateKey, await sha256Bytes(utf8Bytes)),
   ];
-  const base = String(baseUrl || KNS_DEFAULT_MAINNET_URL).replace(/\/+$/, "");
+  const base = String(baseUrl || KNS_DEFAULT_URL).replace(/\/+$/, "");
   const url = `${base}/domain/primary-name`;
   let lastErrorText = "";
   for (const mode of modes) {
@@ -714,7 +715,7 @@ export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFA
   throw new Error(lastErrorText || "KNS set primary failed.");
 }
 
-export async function uploadKnsProfileImage({ engine, assetId, uploadType, blob, baseUrl = KNS_DEFAULT_MAINNET_URL }) {
+export async function uploadKnsProfileImage({ engine, assetId, uploadType, blob, baseUrl = KNS_DEFAULT_URL }) {
   if (!engine?.kaspa || !engine?.privateKey) throw new Error("Load a wallet before uploading a KNS image.");
   if (uploadType !== "avatar" && uploadType !== "banner") throw new Error("uploadType must be 'avatar' or 'banner'.");
 
@@ -729,7 +730,7 @@ export async function uploadKnsProfileImage({ engine, assetId, uploadType, blob,
     async () => rawSchnorrSignDigest(engine.kaspa, engine.privateKey, await sha256Bytes(utf8Bytes)),
   ];
 
-  const base = String(baseUrl || KNS_DEFAULT_MAINNET_URL).replace(/\/+$/, "");
+  const base = String(baseUrl || KNS_DEFAULT_URL).replace(/\/+$/, "");
   const url = `${base}/upload/image`;
   const ext = blob.type === "image/png" ? "png" : "jpg";
   const filename = `${uploadType}-${assetId}.${ext}`;

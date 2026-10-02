@@ -12,6 +12,7 @@
 // .kachat Setup Guide it opens (claim, avatar, banner, details, done - each step Coming soon).
 
 import "./kachat-market.css";
+import { KAS_UNIT } from "../engine/network.js";
 
 let deps = null;
 let marketEl = null;
@@ -387,7 +388,7 @@ function listingHtml() {
 
       <ul class="kmkt-notes">
         <li>${ICON.cart}<span>Buying pays the seller and moves the name to you in one transaction.</span></li>
-        <li>${ICON.lock}<span>An offer locks your KAS on chain until the seller accepts it, you withdraw it, or it expires.</span></li>
+        <li>${ICON.lock}<span>An offer locks your ${KAS_UNIT} on chain until the seller accepts it, you withdraw it, or it expires.</span></li>
         <li>${ICON.bubbles}<span>Messages go to the seller like any KaChat chat.</span></li>
       </ul>
     </div>`;
@@ -439,11 +440,11 @@ function openOfferSheet() {
           <div class="kmkt-form-row"><span>Listed at</span>${bar(62, 13)}</div>`)}
         ${formSection(`
           <label class="kmkt-form-row kmkt-amount-row">
-            <input class="kmkt-amount-input" type="text" inputmode="decimal" placeholder="0" autocomplete="off" data-kmkt-offer-amount aria-label="Your offer in KAS" />
-            <span class="kmkt-muted">KAS</span>
+            <input class="kmkt-amount-input" type="text" inputmode="decimal" placeholder="0" autocomplete="off" data-kmkt-offer-amount aria-label="Your offer in ${KAS_UNIT}" />
+            <span class="kmkt-muted">${KAS_UNIT}</span>
           </label>`, {
           header: "Your offer",
-          footer: "Your KAS stays locked on chain until the seller accepts, you withdraw the offer, or it expires. Nobody else can touch it.",
+          footer: `Your ${KAS_UNIT} stays locked on chain until the seller accepts, you withdraw the offer, or it expires. Nobody else can touch it.`,
         })}
         ${formSection(`
           <div class="kmkt-form-row kmkt-segment-row">
@@ -479,7 +480,7 @@ function openHowItWorksSheet() {
     [ICON.atPlus, "Claim", "Pick a free name and register it on Kaspa. It's yours: your name in chats, your profile, your link."],
     [ICON.tag, "List", "Set a price. The name waits in an on-chain covenant, not with KaChat or anyone else, until someone buys it or you take it back."],
     [ICON.cart, "Buy", "Pay the listed price. The payment reaches the seller and the name reaches you in the same transaction - both happen, or neither does."],
-    [ICON.hand, "Offer", "Name your own price. Your KAS waits on chain until the seller accepts, you withdraw the offer, or it expires - and you can message the seller first."],
+    [ICON.hand, "Offer", `Name your own price. Your ${KAS_UNIT} waits on chain until the seller accepts, you withdraw the offer, or it expires - and you can message the seller first.`],
     [ICON.shieldCheck, "Trustless", "No middleman and no escrow account: Kaspa's own rules enforce every sale."],
   ].map(([icon, title, detail]) => `
     <div class="kmkt-form-row kmkt-how-row">
