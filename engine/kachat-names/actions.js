@@ -29,7 +29,7 @@ import {
 } from "./codec.js";
 import { makeOutpoint, makeUtxo, makeUtxoEntry, outpointKey } from "./transaction.js";
 import { templateScript, paramsPrice } from "./manifest.js";
-import { registerNow } from "./builder.js";
+import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { OfferInfo, Profile, Status } from "./registry-state.js";
 import { KachatNamesService, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
@@ -74,12 +74,25 @@ export const registrationsStorageKey = "kachat-names-registrations-testnet-v1";
 
 // MARK: - Errors
 
-/** Swift `KachatNamesActions.ActionError`; `code` is the case name. */
+/** A unix-ms day ("Oct 12, 2027") in `locale` (default: the runtime's), Swift
+ *  `KachatNamesActions.dayString` (DateFormatter, medium date style, no time). */
+export function dayString(ms, locale = undefined) {
+  const d = new Date(Number(ms));
+  try {
+    return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(d);
+  } catch {
+    return d.toDateString();
+  }
+}
+
+/** Swift `KachatNamesActions.ActionError`; `code` is the case name. Extra fields per case:
+ *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }` (unix ms, BigInt). */
 export class ActionError extends Error {
-  constructor(code, message) {
+  constructor(code, message, extra = {}) {
     super(message);
     this.name = "ActionError";
     this.code = code;
+    Object.assign(this, extra);
   }
 
   static noWallet() { return new ActionError("noWallet", "No testnet wallet is open."); }
@@ -87,6 +100,22 @@ export class ActionError extends Error {
   static invalidKey(what) { return new ActionError("invalidKey", `${what} is not a valid key (not on the secp256k1 curve).`); }
   static noSalt() { return new ActionError("noSalt", "The secret for this registration is missing on this device."); }
   static notRegisterable(why) { return new ActionError("notRegisterable", why); }
+  /** renew before its window: the network's time has not reached `expiresAt - renewWindowMs` */
+  static renewalNotOpen(opensMs) {
+    return new ActionError("renewalNotOpen", `Renewal opens on ${dayString(opensMs)}`, { opensMs: BigInt(opensMs) });
+  }
+  /** extend past `periodStart + maxYears` */
+  static periodFull(renewalOpensMs) {
+    return new ActionError(
+      "periodFull",
+      `This name is already paid for 2 years from the start of its period. Renewal opens on ${dayString(renewalOpensMs)}.`,
+      { renewalOpensMs: BigInt(renewalOpensMs) },
+    );
+  }
+  /** the record has no periodStart (an indexer without the field), so its state is unknown */
+  static periodUnknown() {
+    return new ActionError("periodUnknown", "The names indexer didn't send this name's paid period. Pull to refresh and try again.");
+  }
 }
 
 // MARK: - Operations
@@ -94,6 +123,9 @@ export class ActionError extends Error {
 /** Swift `KachatNamesActions.Operation`: `{ kind, ... }`. `name` is a NameInfo, `offer` an
  *  OfferInfo (registry-state.js), except `offer`'s `name` (a plain string). */
 export const Operation = Object.freeze({
+  /** add years to the current paid period (anyone, any time, up to 2 years past periodStart) */
+  extend: (name, years) => ({ kind: "extend", name, years: BigInt(years) }),
+  /** start the next period at the current expiry (anyone, once the renewal window opened) */
   renew: (name, years) => ({ kind: "renew", name, years: BigInt(years) }),
   transfer: (name, to) => ({ kind: "transfer", name, to }),
   /** price 0 delists */
@@ -253,8 +285,10 @@ export class KachatNamesActions {
   // MARK: Live records
 
   async _liveName(n, m) {
-    const u = await this.service.liveRegistryUtxo({ script: templateScript(m.name, nameState(n.fields)), outpoint: n.outpoint });
-    return { fields: n.fields, value: u.entry.amount, utxo: u };
+    const fields = n.fields;
+    if (fields == null) throw ActionError.periodUnknown();
+    const u = await this.service.liveRegistryUtxo({ script: templateScript(m.name, nameState(fields)), outpoint: n.outpoint });
+    return { fields, value: u.entry.amount, utxo: u };
   }
 
   async _liveGap(g, m) {
@@ -282,7 +316,17 @@ export class KachatNamesActions {
     const { builder: b, env, wallet } = await this._context(s);
     let plan;
     switch (op.kind) {
+      case "extend": {
+        const years = BigInt(op.years);
+        if (op.name.periodStart == null) throw ActionError.periodUnknown();
+        if (years < 1n || years > op.name.extendableYears(m.params)) throw ActionError.periodFull(op.name.renewOpens(m.params));
+        plan = b.extend({ env, wallet, name: await this._liveName(op.name, m), years });
+        break;
+      }
       case "renew":
+        // Valid only once the network's median time passes the window opening (the mempool keeps
+        // no future-dated transactions): refuse before, and say when it opens.
+        if (!renewWindowOpen(env, m.params, op.name.expiresAt)) throw ActionError.renewalNotOpen(op.name.renewOpens(m.params));
         plan = b.renew({ env, wallet, name: await this._liveName(op.name, m), years: BigInt(op.years) });
         break;
       case "transfer":
@@ -542,7 +586,9 @@ export class KachatNamesActions {
       try {
         while (!token.cancelled) {
           const address = this.myAddress;
-          if (!KachatNamesService.isEnabled || !address || address !== this._pendingWallet || !this._pending.some(needsDriving)) break;
+          // the driver stops while the registry is being upgraded (a registry v1 manifest)
+          if (!KachatNamesService.isEnabled || !address || address !== this._pendingWallet || this.service.registryUpgrading
+            || !this._pending.some(needsDriving)) break;
           for (const p of this._pending.filter(needsDriving)) {
             if (token.cancelled) break;
             try { await this._advance(p); } catch (e) { this.engine?.log?.("[KachatNames] driver step failed:", errorMessage(e)); }

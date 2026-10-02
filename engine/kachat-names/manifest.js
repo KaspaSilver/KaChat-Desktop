@@ -7,13 +7,14 @@
 // before anything trusts it.
 //
 //   Template { contract, prefix, suffix, stateLength, templateHash, dispatchTags: { entry: Uint8Array(4) } }
-//   Params   { bond, gapValue, tCommit, maxYears, graceMs: bigint, prices[5], renewPrices[5]: bigint, offerMaxFee: bigint }
+//   Params   { bond, gapValue, tCommit, maxYears, graceMs, renewWindowMs: bigint, prices[5], renewPrices[5]: bigint,
+//              offerMaxFee: bigint }
 //   Manifest { network, status, params, gap, name, offer: Template, registryCovenantId, genesisTxid,
 //              genesisOutpoint: Outpoint, genesisOutput: TxOutput, genesisState: { lo, hi }, isDryRun }
 
 import {
   Failure, hex, unhex, unhex32, concat, bytesEqual, indexOfBytes, tier, templateHash as computeTemplateHash,
-  p2shScript, gapState, covenantId, zero32, ff32, fromUtf8,
+  p2shScript, gapState, covenantId, zero32, ff32, fromUtf8, yearMs,
 } from "./codec.js";
 import { makeOutpoint, makeTxOutput } from "./transaction.js";
 
@@ -22,19 +23,25 @@ export const supportedNetwork = "testnet-10";
 /** The bundled manifest's base name (engine/kachat-names/kachat-names-testnet-10.json). */
 export const bundleResource = "kachat-names-testnet-10";
 
-/** Template hashes of the pinned build (silverc v1.0.0 @ 3ed9733), the same on every network
- *  (README "Sizes and template hashes"). The offer bakes the registry id, so it is checked
- *  against the id instead. */
+/** Template hashes of the pinned build - registry v2 (silverc v1.0.0 @ 3ed9733), the same on
+ *  every network (kachat-domains README "Sizes and template hashes"). The offer bakes the
+ *  registry id, so it is checked against the id instead. */
 export const pinnedTemplateHashes = {
+  KachatGap: "182c463cf59f6d175f75339e4efc75d2065e8e7bb8dcc515e4769d3ff805dd46",
+  KachatName: "e8ded947687947b565e10cbf6e6fec60e5c90cf992c7bce2298e6dce8db29d16",
+};
+/** The registry v1 build (117-byte name state, no `extend`, no renewal window), which the first
+ *  testnet-10 genesis runs. Recognised only to say "outdated", never trusted. */
+export const v1TemplateHashes = {
   KachatGap: "a182d59bbf460baff5ec99ca850b990d45fbafee4dfbe9a3a7a1afe21e7ba8ca",
   KachatName: "42eddf19e7ea2bc78b9aa97937f21be0505ebcf964653508f74e179dd6c7e39d",
 };
-/** State lengths per contract (gap 66, name 117, offer 75). */
-export const stateLengths = { KachatGap: 66, KachatName: 117, KachatOffer: 75 };
+/** State lengths per contract (gap 66, name 126 (registry v2), offer 75). */
+export const stateLengths = { KachatGap: 66, KachatName: 126, KachatOffer: 75 };
 /** The dispatch entries every contract must have. */
 export const entries = {
   KachatGap: ["register", "merge", "absorbed"],
-  KachatName: ["transfer", "list", "buy", "renew", "release", "reclaim"],
+  KachatName: ["transfer", "list", "buy", "extend", "renew", "release", "reclaim"],
   KachatOffer: ["accept", "withdraw", "refund"],
 };
 
@@ -71,6 +78,25 @@ export function paramsPrice(p, n) { return p.prices[tier(n)]; }
 
 /** Renewal price per year (sompi) for a name of `n` bytes. */
 export function paramsRenewPrice(p, n) { return p.renewPrices[tier(n)]; }
+
+// MARK: The paid period (registry v2, KACHAT_NAMES.md 4.1; ops.rs)
+
+/** The most years `extend` can add now (BigInt): a period (from `periodStart`) holds at most
+ *  `maxYears` (ops.rs `extendable_years`). Swift `Params.extendableYears(periodStart:expiresAt:)`. */
+export function paramsExtendableYears(p, periodStart, expiresAt) {
+  const room = BigInt(periodStart) + p.maxYears * yearMs - BigInt(expiresAt);
+  if (room < 0n) return 0n;
+  const years = room / yearMs;
+  return years < p.maxYears ? years : p.maxYears;
+}
+
+/** `paramsExtendableYears` of a NameFields. Swift `Params.extendableYears(_ f: NameFields)`. */
+export function paramsExtendableYearsOf(p, f) { return paramsExtendableYears(p, f.periodStart, f.expiresAt); }
+
+/** When `renew` becomes valid: `expiresAt - renewWindowMs` (unix ms, BigInt). The transaction is
+ *  final once the network's past median time passes its lock time, which is at least this.
+ *  Swift `Params.renewOpens(expiresAt:)`. */
+export function paramsRenewOpens(p, expiresAt) { return BigInt(expiresAt) - p.renewWindowMs; }
 
 // MARK: - Decoding
 
@@ -137,12 +163,21 @@ export function manifestFromJSON(root) {
   const status = typeof root.status === "string" ? root.status : "";
   const p = root.params;
   if (p == null || typeof p !== "object" || Array.isArray(p)) throw new Failure("manifest: params missing");
+  // a registry v1 manifest (no renewal window, 117-byte name state) describes contracts this app
+  // no longer builds for: it waits for the v2 genesis
+  const nameArtifact = root.artifacts != null && typeof root.artifacts === "object" ? root.artifacts.KachatName : undefined;
+  if (p.renewWindowMs === undefined
+    || (nameArtifact != null && typeof nameArtifact === "object" && nameArtifact.templateHash === v1TemplateHashes.KachatName)) {
+    throw Failure.outdatedRegistry();
+  }
   const params = {
     bond: u64(p.bond, "bond"),
     gapValue: u64(p.gapValue, "gapValue"),
     tCommit: u64(p.tCommit, "tCommit"),
     maxYears: u64(p.maxYears, "maxYears"),
     graceMs: u64(p.graceMs, "graceMs"),
+    /** `renew` is valid from `expiresAt - renewWindowMs` on (registry v2; 10 days) */
+    renewWindowMs: u64(p.renewWindowMs, "renewWindowMs"),
     prices: tiers(p.prices, "prices"),
     renewPrices: tiers(p.renewPrices, "renewPrices"),
     offerMaxFee: u64(p.offerMaxFee, "offerMaxFee"),
@@ -210,6 +245,7 @@ export function verifyManifest(m) {
     }
     const pinned = pinnedTemplateHashes[t.contract];
     if (pinned !== undefined && hex(t.templateHash) !== pinned) {
+      if (v1TemplateHashes[t.contract] === hex(t.templateHash)) throw Failure.outdatedRegistry();
       throw new Failure(`manifest: ${t.contract} is not the pinned build`);
     }
     for (const e of entries[t.contract] ?? []) {
@@ -222,7 +258,8 @@ export function verifyManifest(m) {
     throw new Failure("manifest: the offer is not built for this registry id and name template");
   }
   const p = m.params;
-  if (p.prices.length !== 5 || p.renewPrices.length !== 5 || p.maxYears < 1n || p.maxYears > 31n) {
+  if (p.prices.length !== 5 || p.renewPrices.length !== 5 || p.maxYears < 1n || p.maxYears > 31n
+    || !(p.renewWindowMs > 0n) || !(p.renewWindowMs < yearMs)) {
     throw new Failure("manifest: params out of range");
   }
   if (!bytesEqual(m.genesisState.lo, zero32()) || !bytesEqual(m.genesisState.hi, ff32())) {

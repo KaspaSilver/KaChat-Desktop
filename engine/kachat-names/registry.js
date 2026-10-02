@@ -68,6 +68,15 @@ function bytesOfHexOrBytes(v) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Whether `error` means the registry is being upgraded (a registry v1 manifest), not a failure:
+ *  service.js `ServiceError.registryUpgrading()` (code "registryUpgrading") or the core's
+ *  `Failure.outdatedRegistry()`. (service.js `isRegistryUpgrading`, kept here by shape so this
+ *  module needs no app imports.) */
+function isUpgradingError(error) {
+  if (error == null || typeof error !== "object") return false;
+  return error.code === "registryUpgrading" || (error instanceof Failure && error.isOutdatedRegistry === true);
+}
+
 /**
  * The registry. One per network/session; `reset()` on a network switch or logout.
  *
@@ -111,7 +120,11 @@ export class KachatNamesRegistry {
     this.isRefreshing = false;
     /** the last refresh's error message, or null */
     this.lastError = null;
-    /** unix ms (Number) of the last successful refresh, or null */
+    /** whether the last refresh failed because the registry is being upgraded (a registry v1
+     *  manifest; service.registryUpgrading says the same): show "Setting up", not `lastError` */
+    this.registryUpgrading = false;
+    /** unix ms (Number) of the last refresh attempt, successful or not (a failed one counts too,
+     *  so `refreshIfStale` waits before the next), or null */
     this.refreshedAt = null;
     /** bumped whenever registry data may have changed, so screens reload */
     this.revision = 0;
@@ -172,6 +185,7 @@ export class KachatNamesRegistry {
     this._cacheNetwork = null;
     this._ownProfiles = new Map();
     this.lastError = null;
+    this.registryUpgrading = false;
     this.refreshedAt = null;
     this._bump();
   }
@@ -204,25 +218,36 @@ export class KachatNamesRegistry {
   // MARK: - Refresh
 
   /** Walks the chain forward (no indexer) or just marks fresh data (indexer). Safe to call often:
-   *  a call while one runs returns the running one. Never throws (the error lands in `lastError`). */
+   *  a call while one runs returns the running one. Never throws (the error lands in `lastError`).
+   *  A failed refresh counts as an attempt too (`refreshIfStale` waits `maxAge` before the next)
+   *  and bumps `revision` only when the error changed, so screens that reload on `revision` (and
+   *  refresh from there) can't turn a refusal into a refresh loop. */
   refresh({ forceSourceCheck = false } = {}) {
     if (!this.deps.isEnabled()) return Promise.resolve();
     if (this._refreshing) return this._refreshing;
     this.isRefreshing = true;
     this._refreshing = (async () => {
+      const previousError = this.lastError;
+      let changed = true;
       try {
         const m = await this.prepare({ forceSourceCheck });
         if (this.source.kind === "chain") await this._walk(m);
         this.lastError = null;
+        this.registryUpgrading = false;
         this.refreshedAt = Number(this._nowMs());
       } catch (e) {
-        this.lastError = e?.message ?? String(e);
-        this.deps.log("[KachatNames] registry refresh failed:", this.lastError);
+        const message = e?.message ?? String(e);
+        const upgrading = isUpgradingError(e);
+        this.lastError = message;
+        this.registryUpgrading = upgrading;
+        this.refreshedAt = Number(this._nowMs());
+        changed = message !== previousError;
+        if (changed && !upgrading) this.deps.log("[KachatNames] registry refresh failed:", message);
       } finally {
         this.isRefreshing = false;
         this._refreshing = null;
       }
-      this._bump();
+      if (changed) this._bump();
     })();
     return this._refreshing;
   }

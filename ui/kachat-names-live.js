@@ -23,6 +23,7 @@ import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-na
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs } from "../engine/kachat-names/codec.js";
 import { paramsPrice, paramsRenewPrice } from "../engine/kachat-names/manifest.js";
+import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
 
 /** { getDeps, esc, ICON, openLayer, closeLayer, navBar, sectionHeader, hubChanged(kind), openNameDetail(info) } */
 let kit = null;
@@ -141,8 +142,33 @@ function partyText(s) {
 }
 
 function graceMs() { return kachatNames()?.registry.graceMs ?? 864_000_000n; }
-function params() { return kachatNames()?.service.manifest?.params ?? null; }
+function params() {
+  const rt = kachatNames();
+  return rt?.service.manifest?.params ?? rt?.registry.manifest?.params ?? null;
+}
 function maxYears() { const m = params()?.maxYears; return m ? Number(m) : 2; }
+
+// Registry v2: a name's paid period runs from periodStart to expiresAt and holds at most maxYears.
+/** The years an extend can still add to `info`'s paid period (0n when full or unknown). */
+function extendableYears(info, p = params()) {
+  if (!p || info?.periodStart == null) return 0n;
+  try { return info.extendableYears(p); } catch { return 0n; }
+}
+/** Whether `info`'s renewal window is open (10 days before the expiry, through grace and lapse). */
+function renewalOpen(info, p = params()) {
+  if (!p) return false;
+  try { return info.renewOpen(p); } catch { return false; }
+}
+/** Whether extending `info` by `years` fills its period to exactly maxYears (iOS KachatExtendSheet.fillsPeriod). */
+function fillsPeriod(info, years, p = params()) {
+  if (!p || info?.periodStart == null) return false;
+  return info.expiresAt + BigInt(years) * yearMs === info.periodStart + p.maxYears * yearMs;
+}
+/** "Renewal opens on Oct 2, 2027" (the day ActionError.renewalNotOpen names). */
+function renewalOpensText(info, p = params()) {
+  return p ? `Renewal opens on ${dayText(info.renewOpens(p))}` : "";
+}
+
 function myKey() { try { return kachatNames()?.actions.myKey ?? null; } catch { return null; } }
 function isMine(key) { const me = myKey(); return !!(me && key && bytesEqual(me, key)); }
 function isChainSource() { return kachatNames()?.registry.source?.kind === "chain"; }
@@ -196,6 +222,10 @@ const LI = {
   card: svg(`<rect x="3" y="5" width="18" height="14" rx="2.4"/><circle cx="9" cy="11" r="2.3"/><path d="M5.8 16.4a3.6 3.6 0 0 1 6.4 0M14.5 10h4M14.5 13.5h3"/>`),
   person: svg(`<circle cx="12" cy="8.6" r="3.9"/><path d="M4.6 20.2a7.6 7.6 0 0 1 14.8 0"/>`),
   personExclaim: svg(`<circle cx="10" cy="8.4" r="3.7"/><path d="M3.4 19.8a6.8 6.8 0 0 1 10.4-5.4"/><path d="M18.6 13v3.6M18.6 19.6h.01"/>`),
+  calendar: svg(`<rect x="3.5" y="5" width="17" height="15.5" rx="2.4"/><path d="M3.5 10h17M8 3v4M16 3v4"/>`),
+  calendarPlus: svg(`<path d="M20.5 11.5V7.4A2.4 2.4 0 0 0 18.1 5H5.9a2.4 2.4 0 0 0-2.4 2.4v10.7a2.4 2.4 0 0 0 2.4 2.4h6.6"/><path d="M3.5 10h17M8 3v4M16 3v4M18 14.5v6M15 17.5h6"/>`),
+  calendarClock: svg(`<path d="M20.5 11V7.4A2.4 2.4 0 0 0 18.1 5H5.9a2.4 2.4 0 0 0-2.4 2.4v10.7a2.4 2.4 0 0 0 2.4 2.4h5.6"/><path d="M3.5 10h17M8 3v4M16 3v4"/><circle cx="17.5" cy="17.5" r="4"/><path d="M17.5 15.6v2l1.3 1.2"/>`),
+  hammer: svg(`<path d="m13.8 7.6-9.6 9.6a1.7 1.7 0 0 0 2.4 2.4l9.6-9.6"/><path d="M11.6 5.4 14 3l1.4.6 2.2-.4 3.4 3.4-2.4 2.4-1.4-1.4-2.4 2.4-3.2-3.2Z"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
 };
 
@@ -209,6 +239,7 @@ function eventIcon(op) {
     case "list": return I.tag;
     case "delist": return LI.tagSlash;
     case "sale": case "offer_accepted": return I.cart;
+    case "extend": return LI.calendarPlus;
     case "renew": return LI.refresh;
     case "release": return LI.uturn;
     case "reclaim": return LI.reclaim;
@@ -224,6 +255,7 @@ function eventTitle(op) {
     case "delist": return "Delisted";
     case "sale": return "Sold";
     case "offer_accepted": case "offer_accept": return "Offer accepted";
+    case "extend": return "Extended";
     case "renew": return "Renewed";
     case "release": return "Released";
     case "reclaim": return "Reclaimed";
@@ -251,16 +283,18 @@ function statusPill(status) {
 
 function testnetBadge() { return `<span class="kl-testnet-badge">Testnet</span>`; }
 
-/** One name in a list (KachatLiveNameRow): the name, a line about it, its price or status. */
-function nameRowHtml(info, { showPrice = true } = {}) {
+/** One name in a list (KachatLiveNameRow): the name, a line about it, its price or status.
+ *  `showRenewal` (My Names): an active name whose renewal window is open says so. */
+function nameRowHtml(info, { showPrice = true, showRenewal = false } = {}) {
   rememberName(info);
   const status = info.status(graceMs());
   let who = "";
   if (isMine(info.owner)) who = "Yours";
   else { const a = addressOf(info.owner); if (a) who = shortAddr(a); }
-  const right = showPrice && info.isListed && status === Status.active
-    ? `<span class="kl-row-price">${esc(amountText(info.price))}</span>`
-    : status !== Status.active ? statusPill(status) : "";
+  let right = "";
+  if (showRenewal && status === Status.active && renewalOpen(info)) right = `<span class="kl-renewal-pill">Renewal open</span>`;
+  else if (showPrice && info.isListed && status === Status.active) right = `<span class="kl-row-price">${esc(amountText(info.price))}</span>`;
+  else if (status !== Status.active) right = statusPill(status);
   return `
     <button class="kmkt-row kl-name-row" type="button" data-kl-open-name="${esc(info.name)}">
       <span class="kl-at-badge">${kit.ICON.at}</span>
@@ -408,6 +442,8 @@ const hub = {
   /** null until the manifest is checked; false when it fails (the hub then stays a mockup) */
   ready: null,
   setupError: null,
+  /** The manifest is for the previous registry (v1): the hub says "Setting up", calmly. */
+  upgrading: false,
   search: { kind: "idle" },
   listings: [],
   lapsed: [],
@@ -420,6 +456,7 @@ const hub = {
 };
 let hubVisible = false;
 let hubUnsubscribe = null;
+let hubServiceUnsubscribe = null;
 let hubStarting = null;
 let hubReloading = null;
 let hubReloadAgain = false;
@@ -446,6 +483,15 @@ export function liveHubShow() {
   if (!hubUnsubscribe) {
     hubUnsubscribe = rt.registry.onChange(() => { if (liveHubIsLive()) hubReload(); });
   }
+  if (!hubServiceUnsubscribe) {
+    // The registry upgrade starts or ends (service.registryUpgrading): "Setting up", or start again.
+    hubServiceUnsubscribe = rt.service.onChange((service) => {
+      if (hub.ready === true) return;
+      hub.upgrading = Boolean(service.registryUpgrading);
+      if (!hub.upgrading && hub.ready === false) hubStart();
+      else hubChanged("ready");
+    });
+  }
   hubStart();
 }
 
@@ -454,6 +500,8 @@ export function liveHubHide() {
   hubVisible = false;
   hubUnsubscribe?.();
   hubUnsubscribe = null;
+  hubServiceUnsubscribe?.();
+  hubServiceUnsubscribe = null;
 }
 
 function hubStart() {
@@ -466,8 +514,10 @@ function hubStart() {
       await rt.registry.prepare({ forceSourceCheck: true });
       hub.ready = true;
       hub.setupError = null;
+      hub.upgrading = false;
     } catch (error) {
       hub.ready = false;
+      hub.upgrading = isRegistryUpgrading(error) || Boolean(rt.service.registryUpgrading);
       hub.setupError = errorText(error);
       hubChanged("ready");
       return;
@@ -571,9 +621,18 @@ function pricePerYear(name) {
 // Hub: hero, header, search result
 // ---------------------------------------------------------------------------------------------
 
-/** The hero's status line: the Testnet badge when live, else Coming soon (and why it isn't live). */
+/** "Setting up" (iOS KachatMarketView.settingUpPill). */
+function settingUpPill() { return `<span class="kl-setting-up-pill">${LI.hammer}<span>Setting up</span></span>`; }
+
+/** The hero's status line: the Testnet badge when live; "Setting up" while the registry is being
+ *  upgraded (a v1 manifest, iOS d2e0673); else Coming soon (and why it isn't live). */
 export function liveHeroStatusHtml(comingSoonHtml) {
   if (liveHubIsLive()) return testnetBadge();
+  if (liveEnabled() && hub.upgrading) {
+    return `
+      <span class="kl-hero-badges">${testnetBadge()}${settingUpPill()}</span>
+      <p class="kl-setup-error">${esc(registryUpgradingMessage)}</p>`;
+  }
   const error = liveEnabled() && hub.ready === false && hub.setupError
     ? `<p class="kl-setup-error">${esc(hub.setupError)}</p>` : "";
   return comingSoonHtml + error;
@@ -815,7 +874,7 @@ function marketPageHtml() {
 /** KachatLiveMyNamesPage. */
 function myNamesPageHtml() {
   const names = hub.mine.length
-    ? listCard(hub.mine.map((n) => nameRowHtml(n)).join(""))
+    ? listCard(hub.mine.map((n) => nameRowHtml(n, { showRenewal: true })).join(""))
     : `
       <div class="kmkt-empty kl-empty">
         <span class="kmkt-empty-icon">${kit.ICON.atCircle}</span>
@@ -828,7 +887,7 @@ function myNamesPageHtml() {
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
-      ${kit.sectionHeader("My Names", "Renew, list, transfer or release them, and pick the one KaChat shows for you.")}
+      ${kit.sectionHeader("My Names", "Extend, renew, list, transfer or release them, and pick the one KaChat shows for you.")}
       ${names}
       ${kit.sectionHeader("My Offers", "Offers you made. Withdraw one any time; once it passes its refund time anyone can return it to you.")}
       ${offers}
@@ -1019,6 +1078,7 @@ function walletBalanceSompi() {
 const TX_DONE_TITLES = Object.freeze({
   "Buy Name": "Name bought",
   "Make an Offer": "Offer sent",
+  "Extend": "Extended",
   "Renew": "Renewed",
   "List for Sale": "Listed for sale",
   "Change Price": "Price changed",
@@ -1326,24 +1386,67 @@ function openOfferSheet(info, owner) {
   });
 }
 
-/** KachatRenewSheet. */
+/** Registry v2 `extend` (KachatExtendSheet): years added to the current paid period (periodStart
+ *  kept), up to 2 years past its start - in practice a 1-year name extended to 2. Only the years
+ *  that still fit are offered. */
+function openExtendSheet(info, owner) {
+  let years = 1;
+  const p = params();
+  const perYear = p ? paramsRenewPrice(p, utf8(info.name).length) : 0n;
+  // the years that still fit in the period (in practice 1)
+  const extendable = Number(extendableYears(info, p));
+  const available = Math.max(1, extendable);
+  const title = () => (p && fillsPeriod(info, years, p) ? `Extend to ${p.maxYears} years` : "Extend");
+  openTxSheet({
+    owner,
+    get title() { return title(); },
+    confirmTitle: "Extend",
+    doneTitle: "Extended",
+    inputsHtml: available > 1
+      ? section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years",
+        Array.from({ length: available }, (_, i) => ({ id: i + 1, title: yearsLabel(i + 1) })), years, "Years")}</div>`)
+      : "",
+    footer: () => "Extending adds years to the current paid period, which holds at most 2 years. The price goes to the miners.",
+    rows: () => [
+      { title: "Name", value: info.display },
+      { title: "Price per year", value: amountText(perYear) },
+      { title: "Expires", value: dayText(info.expiresAt) },
+      { title: "New expiry", value: dayText(info.expiresAt + BigInt(years) * yearMs) },
+    ],
+    // the engine refuses a period it can't extend (full, or periodStart unknown) and says why
+    operation: () => Operation.extend(info, BigInt(Math.min(years, available))),
+    operationKey: () => `extend-${years}`,
+    onClick(event, sheet) {
+      const chosen = segmentedClick(event, sheet.layer.el);
+      if (chosen?.group === "years") { years = Number(chosen.id); sheet.update(); }
+    },
+  });
+}
+
+/** Registry v2 `renew` (KachatRenewSheet): the next period, from the current expiry, for 1 or 2
+ *  years - only once the renewal window is open (10 days before the expiry). Before that nothing
+ *  is built: the sheet says when it opens. */
 function openRenewSheet(info, owner) {
   let years = 1;
   const p = params();
   const perYear = p ? paramsRenewPrice(p, utf8(info.name).length) : 0n;
+  const open = () => !p || renewalOpen(info, p);
   openTxSheet({
     owner,
     title: "Renew",
     confirmTitle: "Renew",
+    doneTitle: "Renewed",
     inputsHtml: section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years", yearsOptions(), years, "Years")}</div>`),
-    footer: () => "A renewal adds to the current expiry, even after it passed. The price goes to the miners.",
+    footer: () => (open()
+      ? "A renewal starts the next period at the current expiry, so no time is lost or gained, even after it passed. The price goes to the miners."
+      : renewalOpensText(info, p)),
     rows: () => [
       { title: "Name", value: info.display },
       { title: "Price per year", value: amountText(perYear) },
-      { title: "New expiry", value: dayText(info.expiresAt + BigInt(years) * yearMs) },
+      { title: "New period", value: `${dayText(info.expiresAt)} – ${dayText(info.expiresAt + BigInt(years) * yearMs)}` },
     ],
-    operation: () => Operation.renew(info, BigInt(years)),
-    operationKey: () => `renew-${years}`,
+    operation: () => (open() ? Operation.renew(info, BigInt(years)) : null),
+    operationKey: () => `renew-${years}-${open()}`,
     onClick(event, sheet) {
       const chosen = segmentedClick(event, sheet.layer.el);
       if (chosen?.group === "years") { years = Number(chosen.id); sheet.update(); }
@@ -1641,7 +1744,7 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         ${section(
           step(1, "A hidden commit goes on chain first. Nobody can see which name it is for.")
           + step(2, "About a minute later KaChat registers the name by itself. Keep the app open; if you leave, it continues next time.")
-          + step(3, "The name is yours for the years you paid. Renew it any time before it expires."),
+          + step(3, "The name is yours for the years you paid, at most 2 ahead. A 1-year name can be extended to 2 years; from 10 days before it expires you can renew it."),
           { header: "How claiming works" },
         )}
         <div data-kl-claim-action></div>
@@ -1692,6 +1795,10 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     if (s === Status.grace && mine()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends nobody else can take it.</p>`;
     else if (s === Status.grace) note = `<p class="kl-note-inline kl-orange">Expired. It no longer resolves; the owner can still renew it.</p>`;
     else if (s === Status.lapsed) note = `<p class="kl-note-inline kl-red">Lapsed: anyone may reclaim it, and then claim it again.</p>`;
+    // registry v2: the paid period, from its start to the expiry (at most 2 years)
+    const period = d.info.periodStart != null
+      ? `<p class="kl-period">${LI.calendar}<span>${esc(`Paid from ${dayText(d.info.periodStart)} to ${dayText(d.info.expiresAt)}`)}</span></p>`
+      : "";
     return `
       <section class="kmkt-card kmkt-name-card">
         <div class="kmkt-name-art"><span class="kl-name-art-text">${esc(d.info.display)}</span></div>
@@ -1705,6 +1812,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
             <small class="kmkt-muted">${esc(`Expires ${dayText(d.info.expiresAt)}`)}</small>
           </div>
         </div>
+        ${period}
         ${note}
       </section>`;
   };
@@ -1713,22 +1821,45 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     <button class="${prominent ? "primary-button" : danger ? "secondary-button kl-danger" : "secondary-button accent"} kmkt-action" type="button"
       data-kl-act="${esc(act)}" ${disabled ? "disabled" : ""}>${icon}<span>${esc(title)}</span></button>`;
 
+  /** Registry v2 (iOS periodActions): "Extend" while the paid period holds less than 2 years
+   *  ("Extend to 2 years" when that fills it), "Renew" once the renewal window is open (10 days
+   *  before the expiry, and on through grace and lapse), otherwise "Renewal opens on <date>". */
+  const periodActions = () => {
+    const p = params();
+    if (!p) return "";
+    const s = status();
+    const extendable = extendableYears(d.info, p);
+    const renewOpen = renewalOpen(d.info, p);
+    let html = "";
+    if (extendable > 0n || renewOpen) {
+      const extendTitle = fillsPeriod(d.info, extendable, p) ? `Extend to ${p.maxYears} years` : "Extend";
+      html += `
+        <div class="kmkt-actions">
+          ${extendable > 0n ? actionButton(extendTitle, LI.calendarPlus, "extend", { prominent: s !== Status.active && !renewOpen }) : ""}
+          ${renewOpen ? actionButton("Renew", LI.refresh, "renew", { prominent: s !== Status.active }) : ""}
+        </div>`;
+    }
+    if (!renewOpen) {
+      html += `<div class="kmkt-actions">${actionButton(renewalOpensText(d.info, p), LI.calendarClock, "renewal-opens", { disabled: true })}</div>`;
+    }
+    return html;
+  };
+
   const actionButtons = () => {
     const s = status();
     const I = kit.ICON;
     if (mine()) {
-      const primary = actionButton("Set as Primary", LI.personCheck, "primary", { disabled: s !== Status.active || d.primaryWorking });
       return `
         <div class="kl-action-grid">
+          ${periodActions()}
           <div class="kmkt-actions">
-            ${actionButton("Renew", LI.refresh, "renew", { prominent: s !== Status.active })}
             ${actionButton(d.info.isListed ? "Change Price" : "List for Sale", I.tag, "list", { disabled: s !== Status.active })}
+            ${actionButton("Transfer", I.swap, "transfer")}
           </div>
           <div class="kmkt-actions">
-            ${actionButton("Transfer", I.swap, "transfer")}
-            ${d.info.isListed ? actionButton("Delist", LI.tagSlash, "delist") : primary}
+            ${d.info.isListed ? actionButton("Delist", LI.tagSlash, "delist") : ""}
+            ${actionButton("Set as Primary", LI.personCheck, "primary", { disabled: s !== Status.active || d.primaryWorking })}
           </div>
-          ${d.info.isListed ? `<div class="kmkt-actions">${primary}</div>` : ""}
           <div class="kmkt-actions">${actionButton("Release Name", LI.trash, "release", { danger: true })}</div>
         </div>`;
     }
@@ -1908,6 +2039,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
       switch (act.dataset.klAct) {
         case "buy": openBuySheet(info, owner); break;
         case "offer": openOfferSheet(info, owner); break;
+        case "extend": openExtendSheet(info, owner); break;
         case "renew": openRenewSheet(info, owner); break;
         case "list": openListSheet(info, owner); break;
         case "delist": openDelistSheet(info, owner); break;
@@ -1965,6 +2097,7 @@ export function openNameDetailLayer(info, owner = "domains") {
 
 let domainsSeq = 0;
 let domainsUnsubscribe = null;
+let domainsServiceUnsubscribe = null;
 /** container -> { token, address, load } of the render in it, so a repeat call only reloads. */
 const domainsRenders = new WeakMap();
 
@@ -2025,6 +2158,16 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
         }
         const root = current();
         if (!root) return;
+        // The manifest is for the previous registry (v1): calm, no error (iOS d2e0673).
+        if (rt.service.registryUpgrading || rt.registry.registryUpgrading) {
+          root.innerHTML = `
+            <div class="kl-domains-empty kl-domains-upgrading">
+              <span class="kl-accent">${LI.hammer}</span>
+              <strong>Setting up</strong>
+              <p>${esc(registryUpgradingMessage)}</p>
+            </div>`;
+          continue;
+        }
         root.innerHTML = names.length
           ? names.map((n) => {
             rememberName(n);
@@ -2047,6 +2190,11 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
   domainsUnsubscribe?.();
   domainsUnsubscribe = rt.registry.onChange(() => {
     if (!current()) { domainsUnsubscribe?.(); domainsUnsubscribe = null; return; }
+    load();
+  });
+  domainsServiceUnsubscribe?.();
+  domainsServiceUnsubscribe = rt.service.onChange(() => {
+    if (!current()) { domainsServiceUnsubscribe?.(); domainsServiceUnsubscribe = null; return; }
     load();
   });
   load();

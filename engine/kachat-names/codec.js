@@ -19,7 +19,20 @@ export class Failure extends Error {
     super(message);
     this.name = "KachatNamesFailure";
   }
+
+  /**
+   * The manifest describes registry v1 (the first testnet-10 genesis): this app builds for
+   * registry v2 (the 2-year cap) and waits for its genesis manifest. Not an error to show as
+   * one: the screens say the registry is being set up. (Swift `Failure.outdatedRegistry`.)
+   */
+  static outdatedRegistry() { return new Failure(outdatedRegistryMessage); }
+
+  /** Whether this is `Failure.outdatedRegistry()` (Swift `isOutdatedRegistry`). */
+  get isOutdatedRegistry() { return this.message === outdatedRegistryMessage; }
 }
+
+/** The message of `Failure.outdatedRegistry()`. */
+export const outdatedRegistryMessage = "manifest: registry v1; this app needs the registry v2 manifest (new genesis pending)";
 
 // MARK: - Constants (rusty-kaspa a41a333, kachat-domains params)
 
@@ -35,7 +48,7 @@ export const minChange = 20_000_000n;
 export const targetChange = 100_000_000n;
 /** Relay floor after Toccata: 100 sompi per gram of max(compute, normalized transient). */
 export const minFeerate = 100.0;
-/** register and renew sum at most 8 inputs and 8 outputs (the contracts' bounded loops). */
+/** register, extend and renew sum at most 8 inputs and 8 outputs (the contracts' bounded loops). */
 export const maxInputsFeeEntry = 8;
 /** Every other operation: keep transactions small anyway. */
 export const maxInputs = 24;
@@ -288,9 +301,14 @@ export function scriptNum(b) {
 /** Gap state, 66 bytes: `0x20 lo 0x20 hi`. */
 export function gapState(lo, hi) { return concat([0x20], lo, [0x20], hi); }
 
-/** Name state, 117 bytes: `0x20 key 0x20 name 0x20 owner 0x08 price 0x08 expiresAt`. */
+/**
+ * Name state (registry v2), 126 bytes:
+ * `0x20 key 0x20 name 0x20 owner 0x08 price 0x08 periodStart 0x08 expiresAt`
+ * (price at bytes 100..108, periodStart 109..117, expiresAt 118..126).
+ */
 export function nameState(f) {
-  return concat([0x20], f.key, [0x20], f.paddedName, [0x20], f.owner, [0x08], num8(f.price), [0x08], num8(f.expiresAt));
+  return concat([0x20], f.key, [0x20], f.paddedName, [0x20], f.owner, [0x08], num8(f.price), [0x08], num8(f.periodStart),
+    [0x08], num8(f.expiresAt));
 }
 
 /** Offer state, 75 bytes: `0x20 key 0x20 buyer 0x08 refundAfter`. */
@@ -306,12 +324,13 @@ export function decodeGapState(s) {
 
 /** A name state -> NameFields. */
 export function decodeNameState(s) {
-  if (s.length !== 117 || s[0] !== 0x20 || s[33] !== 0x20 || s[66] !== 0x20 || s[99] !== 0x08 || s[108] !== 0x08) {
+  if (s.length !== 126 || s[0] !== 0x20 || s[33] !== 0x20 || s[66] !== 0x20 || s[99] !== 0x08 || s[108] !== 0x08 || s[117] !== 0x08) {
     throw new Failure("not a name state");
   }
   return makeNameFields({
     key: s.slice(1, 33), paddedName: s.slice(34, 66), owner: s.slice(67, 99),
-    price: decodeNum8(s.subarray(100, 108)), expiresAt: decodeNum8(s.subarray(109, 117)),
+    price: decodeNum8(s.subarray(100, 108)), periodStart: decodeNum8(s.subarray(109, 117)),
+    expiresAt: decodeNum8(s.subarray(118, 126)),
   });
 }
 
@@ -428,32 +447,44 @@ export function profilePayload(json) {
 
 // MARK: - Typed states
 
-/** NameFields `{ key, paddedName, owner, price: BigInt, expiresAt: BigInt }`. */
-export function makeNameFields({ key: k, paddedName, owner, price, expiresAt }) {
-  return { key: k, paddedName, owner, price: BigInt(price), expiresAt: BigInt(expiresAt) };
+/**
+ * NameFields `{ key, paddedName, owner, price: BigInt, periodStart: BigInt, expiresAt: BigInt }`.
+ * `periodStart` (unix ms, registry v2) is the start of the current paid period: register sets it
+ * to `now`, `renew` to the old expiry; every other entry keeps it.
+ */
+export function makeNameFields({ key: k, paddedName, owner, price, periodStart, expiresAt }) {
+  if (periodStart == null) throw new Failure("name fields need periodStart (registry v2)");
+  return { key: k, paddedName, owner, price: BigInt(price), periodStart: BigInt(periodStart), expiresAt: BigInt(expiresAt) };
 }
 
 /** NameFields for a plain name (key and padded field derived from it). */
-export function nameFieldsFor(name, owner, price, expiresAt) {
-  return makeNameFields({ key: key(name), paddedName: padded(name), owner, price, expiresAt });
+export function nameFieldsFor(name, owner, price, periodStart, expiresAt) {
+  return makeNameFields({ key: key(name), paddedName: padded(name), owner, price, periodStart, expiresAt });
 }
 
 /** The name a NameFields holds. */
 export function nameFieldsName(f) { return unpadded(f.paddedName); }
 
-/** transfer / buy: new owner, listing cleared, expiry kept. */
+/** transfer / buy / offer accept: new owner, listing cleared, period and expiry kept. */
 export function nameFieldsWithOwner(f, owner) { return makeNameFields({ ...f, owner, price: 0n }); }
 
-/** The same name at another listing price. */
+/** list: the price, period and expiry kept. */
 export function nameFieldsWithPrice(f, price) { return makeNameFields({ ...f, price }); }
 
-/** The same name with another expiry. */
-export function nameFieldsWithExpiry(f, expiresAt) { return makeNameFields({ ...f, expiresAt }); }
+/** What `extend(years)` leaves: the same period start, the expiry `years` later. */
+export function nameFieldsExtended(f, years) {
+  return makeNameFields({ ...f, expiresAt: f.expiresAt + BigInt(years) * yearMs });
+}
+
+/** What `renew(years)` leaves: a new period from the old expiry, so no time is lost or gained. */
+export function nameFieldsRenewed(f, years) {
+  return makeNameFields({ ...f, periodStart: f.expiresAt, expiresAt: f.expiresAt + BigInt(years) * yearMs });
+}
 
 /** NameFields equality. */
 export function nameFieldsEqual(a, b) {
   return bytesEqual(a.key, b.key) && bytesEqual(a.paddedName, b.paddedName) && bytesEqual(a.owner, b.owner)
-    && a.price === b.price && a.expiresAt === b.expiresAt;
+    && a.price === b.price && a.periodStart === b.periodStart && a.expiresAt === b.expiresAt;
 }
 
 /** OfferFields `{ key, buyer, refundAfter: BigInt }`. */

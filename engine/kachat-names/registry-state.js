@@ -15,10 +15,11 @@
 import {
   Failure, hex, unhex, unhex32, bytesEqual, bytesLess, blake3, yearMs, zero32, ff32, utf8, fromUtf8,
   normalize, isValid, key as nameKey, padded, parsePushes, scriptNum, gapState, nameState, offerState,
-  makeNameFields, makeOfferFields, nameFieldsWithOwner, nameFieldsWithPrice, nameFieldsWithExpiry, maxProfileJSONBytes,
+  makeNameFields, makeOfferFields, nameFieldsWithOwner, nameFieldsWithPrice, nameFieldsExtended, nameFieldsRenewed,
+  maxProfileJSONBytes,
 } from "./codec.js";
 import { makeOutpoint, makeTxOutput, makeCovenantBinding } from "./transaction.js";
-import { templateRedeem, templateScript, templateStateOfRedeem } from "./manifest.js";
+import { templateRedeem, templateScript, templateStateOfRedeem, paramsExtendableYears, paramsRenewOpens } from "./manifest.js";
 
 const I64_MAX = 0x7fff_ffff_ffff_ffffn;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
@@ -60,14 +61,19 @@ export const Status = Object.freeze({
 
 /** A registered name, from either source (indexer or chain walker).
  *  `{ name, key: bytes32, owner: bytes32 (x-only), price: bigint (0 = not listed), expiresAt: bigint,
- *     outpoint: {txid, index}, registeredAt: bigint|null, registeredTxId: string|null, updatedAt: bigint|null }` */
+ *     periodStart: bigint|null, outpoint: {txid, index}, registeredAt: bigint|null,
+ *     registeredTxId: string|null, updatedAt: bigint|null }`
+ *  `periodStart` (unix ms, registry v2) is the start of the current paid period; null when the
+ *  source did not say (an indexer without the field): then the name can't be spent from this
+ *  record (`fields` is null) and Extend isn't offered. */
 export class NameInfo {
-  constructor({ name, key, owner, price = 0n, expiresAt, outpoint, registeredAt = null, registeredTxId = null, updatedAt = null }) {
+  constructor({ name, key, owner, price = 0n, expiresAt, periodStart = null, outpoint, registeredAt = null, registeredTxId = null, updatedAt = null }) {
     this.name = name;
     this.key = key;
     this.owner = owner;
     this.price = big(price);
     this.expiresAt = big(expiresAt);
+    this.periodStart = big(periodStart);
     this.outpoint = outpoint;
     this.registeredAt = big(registeredAt);
     this.registeredTxId = registeredTxId ?? null;
@@ -76,11 +82,29 @@ export class NameInfo {
   get id() { return this.name; }
   get display() { return `${this.name}.kachat`; }
   get isListed() { return this.price > 0n; }
-  /** The name's on-chain state fields (codec NameFields). */
+  /** The name's on-chain state fields (codec NameFields), when the period start is known; else null. */
   get fields() {
-    return makeNameFields({ key: this.key, paddedName: padded(this.name), owner: this.owner, price: this.price, expiresAt: this.expiresAt });
+    if (this.periodStart == null) return null;
+    return makeNameFields({
+      key: this.key, paddedName: padded(this.name), owner: this.owner, price: this.price, periodStart: this.periodStart, expiresAt: this.expiresAt,
+    });
   }
   status(graceMs, now = nowMs()) { return Status.of(this.expiresAt, graceMs, now); }
+
+  // MARK: The paid period (registry v2, KACHAT_NAMES.md 4.1)
+
+  /** Whole years `extend` can add now (BigInt; 0n when the period start is unknown). `p`: the
+   *  manifest's Params. */
+  extendableYears(p) {
+    return this.periodStart == null ? 0n : paramsExtendableYears(p, this.periodStart, this.expiresAt);
+  }
+
+  /** When the renewal window opens: `expiresAt - renewWindowMs` (unix ms, BigInt). */
+  renewOpens(p) { return paramsRenewOpens(p, this.expiresAt); }
+
+  /** The renewal window by the wall clock (what the screens show; the transaction itself waits
+   *  for the network's median time, a couple of minutes behind). */
+  renewOpen(p, now = nowMs()) { return big(now) >= this.renewOpens(p); }
 }
 
 /** An unregistered interval `(lo, hi)` of the key space. */
@@ -120,7 +144,7 @@ export class OfferInfo {
 }
 
 /** One registry event (history, activity). Parties are x-only keys (hex, walker) or addresses
- *  (indexer). `op`: register, transfer, list, delist, sale, renew, release, reclaim,
+ *  (indexer). `op`: register, transfer, list, delist, sale, extend, renew, release, reclaim,
  *  offer_accepted, offer, offer_accept, offer_withdraw, offer_refund. */
 export class Event {
   constructor({ txId, op, name = null, at = null, from = null, to = null, price = null, years = null }) {
@@ -908,11 +932,13 @@ function safeUnhex32(s, fallback) { try { return unhex32(s); } catch { return fa
  *  Hex strings throughout (as Swift) so the cache stays readable.
  *
  *  Gap   { txid, index, lo, hi, value: bigint }
- *  Name  { txid, index, name, key, owner, price: bigint, expiresAt: bigint, value: bigint,
- *          registeredAt: bigint|null, registeredTxId: string|null, updatedAt: bigint|null }
+ *  Name  { txid, index, name, key, owner, price: bigint, periodStart: bigint (registry v2),
+ *          expiresAt: bigint, value: bigint, registeredAt: bigint|null, registeredTxId: string|null,
+ *          updatedAt: bigint|null }
  *  Offer { txid, index, key, buyer, refundAfter: bigint, value: bigint, name: string|null, createdAt: bigint|null } */
 export class RegistryState {
-  static get formatVersion() { return 1; }
+  /** 2: registry v2 (names carry periodStart); an older cache is dropped and walked again. */
+  static get formatVersion() { return 2; }
   static get appliedKeep() { return 4096; }
   static get eventsKeep() { return 1000; }
 
@@ -996,8 +1022,16 @@ export class RegistryState {
   static nameInfo(n) {
     return new NameInfo({
       name: n.name, key: safeUnhex32(n.key, zero32), owner: safeUnhex32(n.owner, zero32),
-      price: bmax(n.price, 0n), expiresAt: n.expiresAt, outpoint: RegistryState.outpoint(n.txid, n.index),
+      price: bmax(n.price, 0n), expiresAt: n.expiresAt, periodStart: n.periodStart, outpoint: RegistryState.outpoint(n.txid, n.index),
       registeredAt: n.registeredAt ?? null, registeredTxId: n.registeredTxId ?? null, updatedAt: n.updatedAt ?? null,
+    });
+  }
+
+  /** A tracked name's on-chain state (Swift `RegistryState.fields(_ n: Name)`). */
+  static nameFields(n) {
+    return makeNameFields({
+      key: safeUnhex32(n.key, zero32), paddedName: padded(n.name), owner: safeUnhex32(n.owner, zero32),
+      price: n.price, periodStart: n.periodStart, expiresAt: n.expiresAt,
     });
   }
 
@@ -1028,7 +1062,7 @@ export class RegistryState {
       out.push({ outpoint: opKey(g.txid, g.index), script: templateScript(m.gap, gapState(lo, hi)), registry: true });
     }
     for (const n of this.names) {
-      out.push({ outpoint: opKey(n.txid, n.index), script: templateScript(m.name, nameState(RegistryState.nameInfo(n).fields)), registry: true });
+      out.push({ outpoint: opKey(n.txid, n.index), script: templateScript(m.name, nameState(RegistryState.nameFields(n))), registry: true });
     }
     for (const o of this.offers) {
       out.push({ outpoint: opKey(o.txid, o.index), script: templateScript(m.offer, offerState(RegistryState.offerInfo(o).fields)), registry: false });
@@ -1155,7 +1189,7 @@ export class RegistryState {
           const k = blake3(nameBytes);
           const pad = new Uint8Array(32);
           pad.set(nameBytes.subarray(0, 32));
-          const f = makeNameFields({ key: k, paddedName: pad, owner, price: 0n, expiresAt: now + years * yearMs });
+          const f = makeNameFields({ key: k, paddedName: pad, owner, price: 0n, periodStart: now, expiresAt: now + years * yearMs });
           predicted.push({ auth: i, p: { kind: "gap", lo: g.lo, hi: hex(k) } });
           predicted.push({ auth: i, p: { kind: "gap", lo: hex(k), hi: g.hi } });
           predicted.push({ auth: i, p: { kind: "name", f, name } });
@@ -1177,7 +1211,7 @@ export class RegistryState {
 
     for (const [i, n] of nameIns) {
       const sp = decode(m.name, i, "name");
-      const f = RegistryState.nameInfo(n).fields;
+      const f = RegistryState.nameFields(n);
       if (!bytesEqual(sp.redeem, templateRedeem(m.name, nameState(f)))) {
         throw new Failure(`${short}: name input ${i} reveals a redeem script that is not the tracked name state`);
       }
@@ -1201,9 +1235,17 @@ export class RegistryState {
           events.push(new Event({ txId: id, op: "sale", name: n.name, at: tx.at, from: n.owner, to: hex(to), price: bmax(n.price, 0n) }));
           break;
         }
-        case "renew": {
+        case "extend": {
+          // periodStart kept, expiresAt + years (the contract checked the 2-year cap)
           const years = RegistryState._argInt(sp.args, 0);
-          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsWithExpiry(f, f.expiresAt + years * yearMs), name: n.name } });
+          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsExtended(f, years), name: n.name } });
+          events.push(new Event({ txId: id, op: "extend", name: n.name, at: tx.at, years }));
+          break;
+        }
+        case "renew": {
+          // a new period from the old expiry
+          const years = RegistryState._argInt(sp.args, 0);
+          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsRenewed(f, years), name: n.name } });
           events.push(new Event({ txId: id, op: "renew", name: n.name, at: tx.at, years }));
           break;
         }
@@ -1257,7 +1299,8 @@ export class RegistryState {
         const k = hex(p.f.key);
         const before = carried.get(k);
         this.names.push({
-          txid: id, index: idx, name: p.name, key: k, owner: hex(p.f.owner), price: p.f.price, expiresAt: p.f.expiresAt, value,
+          txid: id, index: idx, name: p.name, key: k, owner: hex(p.f.owner), price: p.f.price,
+          periodStart: p.f.periodStart, expiresAt: p.f.expiresAt, value,
           registeredAt: before?.registeredAt ?? tx.at ?? null, registeredTxId: before?.registeredTxId ?? id, updatedAt: tx.at ?? null,
         });
       }
@@ -1371,9 +1414,9 @@ export class RegistryState {
 
   // MARK: Cache format (compact JSON: hex strings, BigInt as decimal strings)
   //
-  // { v: 1, network, registryCovenantId, verifiedAt: "ms"|null,
+  // { v: 2, network, registryCovenantId, verifiedAt: "ms"|null,
   //   gaps:   [[txid, index, lo, hi, value]],
-  //   names:  [[txid, index, name, key, owner, price, expiresAt, value, registeredAt|null, registeredTxId|null, updatedAt|null]],
+  //   names:  [[txid, index, name, key, owner, price, periodStart, expiresAt, value, registeredAt|null, registeredTxId|null, updatedAt|null]],
   //   offers: [[txid, index, key, buyer, refundAfter, value, name|null, createdAt|null]],
   //   applied: [txid],
   //   events: [[txId, op, name|null, at|null, from|null, to|null, price|null, years|null]] }
@@ -1386,17 +1429,22 @@ export class RegistryState {
       registryCovenantId: this.registryCovenantId,
       verifiedAt: s(this.verifiedAt),
       gaps: this.gaps.map((g) => [g.txid, g.index, g.lo, g.hi, s(g.value)]),
-      names: this.names.map((n) => [n.txid, n.index, n.name, n.key, n.owner, s(n.price), s(n.expiresAt), s(n.value), s(n.registeredAt), n.registeredTxId ?? null, s(n.updatedAt)]),
+      names: this.names.map((n) => [
+        n.txid, n.index, n.name, n.key, n.owner, s(n.price), s(n.periodStart), s(n.expiresAt), s(n.value), s(n.registeredAt),
+        n.registeredTxId ?? null, s(n.updatedAt),
+      ]),
       offers: this.offers.map((o) => [o.txid, o.index, o.key, o.buyer, s(o.refundAfter), s(o.value), o.name ?? null, s(o.createdAt)]),
       applied: [...this.applied],
       events: this.events.map(eventToJSON),
     };
   }
 
-  /** The state from `toJSON()`'s object (or its JSON text); throws on a malformed one. */
+  /** The state from `toJSON()`'s object (or its JSON text); throws on a malformed one, and on a
+   *  cache of another format (a registry v1 cache, format 1, has no periodStart: it is walked again). */
   static fromJSON(j) {
     if (typeof j === "string") j = JSON.parse(j);
     if (j == null || typeof j !== "object" || !Array.isArray(j.gaps) || !Array.isArray(j.names)) throw new Failure("not a registry cache");
+    if (j.v !== RegistryState.formatVersion) throw new Failure(`registry cache format ${j.v}, not ${RegistryState.formatVersion}`);
     const b = (v) => (v == null ? null : BigInt(v));
     const idx = (v) => { const n = Number(v); if (!Number.isInteger(n) || n < 0) throw new Failure("bad index"); return n; };
     return new RegistryState({
@@ -1406,8 +1454,8 @@ export class RegistryState {
       verifiedAt: b(j.verifiedAt),
       gaps: j.gaps.map((g) => ({ txid: g[0], index: idx(g[1]), lo: g[2], hi: g[3], value: BigInt(g[4]) })),
       names: j.names.map((n) => ({
-        txid: n[0], index: idx(n[1]), name: n[2], key: n[3], owner: n[4], price: BigInt(n[5]), expiresAt: BigInt(n[6]), value: BigInt(n[7]),
-        registeredAt: b(n[8]), registeredTxId: n[9] ?? null, updatedAt: b(n[10]),
+        txid: n[0], index: idx(n[1]), name: n[2], key: n[3], owner: n[4], price: BigInt(n[5]), periodStart: BigInt(n[6]),
+        expiresAt: BigInt(n[7]), value: BigInt(n[8]), registeredAt: b(n[9]), registeredTxId: n[10] ?? null, updatedAt: b(n[11]),
       })),
       offers: (j.offers ?? []).map((o) => ({
         txid: o[0], index: idx(o[1]), key: o[2], buyer: o[3], refundAfter: BigInt(o[4]), value: BigInt(o[5]), name: o[6] ?? null, createdAt: b(o[7]),
@@ -1516,8 +1564,9 @@ export const IndexerAPI = Object.freeze({
   },
 
   /** A name object (`GET /names/{name}` and every name in lists), decoded:
-   *  `{ name, key, registered, status, owner, ownerKey, price, expiresAt, outpoint, registeredAt,
-   *     registeredTxId, updatedAt, gap }`. Throws when the shape is wrong. */
+   *  `{ name, key, registered, status, owner, ownerKey, price, periodStart, expiresAt, outpoint,
+   *     registeredAt, registeredTxId, updatedAt, gap }` (`periodStart`: registry v2, the start of
+   *  the current paid period in unix ms; optional). Throws when the shape is wrong. */
   nameJSON(j) {
     const w = "name";
     if (j == null || typeof j !== "object") throw decodeFail(w);
@@ -1532,6 +1581,7 @@ export const IndexerAPI = Object.freeze({
       owner: optString(j, "owner", w),
       ownerKey: optString(j, "ownerKey", w),
       price: optString(j, "price", w),
+      periodStart: optInt(j, "periodStart", w),
       expiresAt: optInt(j, "expiresAt", w),
       outpoint: outpointJ == null ? null : IndexerAPI.outpoint(outpointJ),
       registeredAt: optInt(j, "registeredAt", w),
@@ -1552,7 +1602,7 @@ export const IndexerAPI = Object.freeze({
     if (!owner || owner.length !== 32) return null;
     return new NameInfo({
       name: n, key: nameKey(n), owner, price: (d.price != null ? parseU64(d.price) : null) ?? 0n, expiresAt: d.expiresAt,
-      outpoint: d.outpoint, registeredAt: d.registeredAt, registeredTxId: d.registeredTxId, updatedAt: d.updatedAt,
+      periodStart: d.periodStart ?? null, outpoint: d.outpoint, registeredAt: d.registeredAt, registeredTxId: d.registeredTxId, updatedAt: d.updatedAt,
     });
   },
 

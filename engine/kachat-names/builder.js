@@ -37,7 +37,7 @@ import {
   maxInputsFeeEntry, maxInputs, maxListPrice, sighashAll, concat, bytesEqual, bytesLess, utf8,
   validate, key as nameKey, commitment, commitRedeem, pushData, pushInt, p2shScript, p2pkScript, gapState,
   namePayload, offerPayload, nameState, offerState, nameFieldsFor, nameFieldsName, nameFieldsWithOwner,
-  nameFieldsWithPrice, nameFieldsWithExpiry, makeOfferFields, zero32,
+  nameFieldsWithPrice, nameFieldsExtended, nameFieldsRenewed, makeOfferFields, zero32,
 
 } from "./codec.js";
 import {
@@ -45,7 +45,10 @@ import {
   txId, txSighash, storageMass, computeMass, normalizedTransient, transientMass, massSize,
   networkFee as massNetworkFee, cloneTx,
 } from "./transaction.js";
-import { verifyManifest, templateRedeem, templateScript, templateTag, paramsPrice, paramsRenewPrice } from "./manifest.js";
+import {
+  verifyManifest, templateRedeem, templateScript, templateTag, paramsPrice, paramsRenewPrice, paramsExtendableYearsOf,
+  paramsRenewOpens,
+} from "./manifest.js";
 
 // MARK: - Compute budgets
 
@@ -59,6 +62,7 @@ export const BudgetRole = {
   nameTransfer: "name.transfer",
   nameList: "name.list",
   nameBuy: "name.buy",
+  nameExtend: "name.extend",
   nameRenew: "name.renew",
   nameRelease: "name.release",
   nameReclaim: "name.reclaim",
@@ -69,14 +73,14 @@ export const BudgetRole = {
 
 /** Per-input compute budgets by role. The CLI measures each input in the script engine; the app
  *  has no engine, so it commits a fixed budget per entry that covers every case (README "Cost per
- *  operation"; the vector generator checks every measured budget fits this table). An input that
- *  needs more than it committed fails, so these only ever err on the side of a slightly higher fee
- *  (100 grams per unit). */
+ *  operation"; the vector generator checks every measured budget fits this table, the vectors'
+ *  `recommendedBudgets`). An input that needs more than it committed fails, so these only ever err
+ *  on the side of a slightly higher fee (100 grams per unit). Registry v2. */
 export const recommendedBudgets = {
   "p2pk": 10, "commit": 10,
-  "gap.register": 7, "gap.merge": 3, "gap.absorbed": 0,
-  "name.transfer": 11, "name.list": 11, "name.buy": 1, "name.renew": 1, "name.release": 10, "name.reclaim": 0,
-  "offer.accept": 3, "offer.withdraw": 10, "offer.refund": 0,
+  "gap.register": 8, "gap.merge": 4, "gap.absorbed": 0,
+  "name.transfer": 12, "name.list": 12, "name.buy": 2, "name.extend": 2, "name.renew": 2, "name.release": 10, "name.reclaim": 0,
+  "offer.accept": 5, "offer.withdraw": 10, "offer.refund": 0,
 };
 
 /** The budget `budgets` commits for `role`, falling back to the recommended table, then 0. */
@@ -237,6 +241,23 @@ export function registerNow(env) {
   return a < b ? a : b;
 }
 
+/** The lock time of a renewal (ops.rs `renew_lock_time`): the registration-style `now`, but never
+ *  before the window opens -
+ *  `max(min(wall - 3 min, median time - 1 s), expiresAt - renewWindowMs)` (unix ms, BigInt).
+ *  Final (and so valid) only while it is below the median time, i.e. once the window opened.
+ *  Swift `Builder.renewLockTime(env:params:expiresAt:)`. */
+export function renewLockTime(env, params, expiresAt) {
+  return maxBig(registerNow(env), paramsRenewOpens(params, expiresAt));
+}
+
+/** Whether the renewal window is open at `env` (ops.rs `renew_window_open`): the virtual's past
+ *  median time is past `expiresAt - renewWindowMs`. Before that no renewal is valid (the mempool
+ *  keeps no future-dated transactions), so the app refuses to submit one.
+ *  Swift `Builder.renewWindowOpen(env:params:expiresAt:)`. */
+export function renewWindowOpen(env, params, expiresAt) {
+  return BigInt(env.blockTimeMs) > paramsRenewOpens(params, expiresAt);
+}
+
 /** Sizes, masses and the 100 sompi/gram floor fee of a transaction. */
 export function costs(tx) {
   const compute = computeMass(tx);
@@ -283,6 +304,10 @@ export class Builder {
 
   /** See the module-level `registerNow`. */
   static registerNow(env) { return registerNow(env); }
+  /** See the module-level `renewLockTime`. */
+  static renewLockTime(env, params, expiresAt) { return renewLockTime(env, params, expiresAt); }
+  /** See the module-level `renewWindowOpen`. */
+  static renewWindowOpen(env, params, expiresAt) { return renewWindowOpen(env, params, expiresAt); }
   /** See the module-level `costs`. */
   static costs(tx) { return costs(tx); }
   static get cancelFloorValue() { return cancelFloorValue; }
@@ -478,7 +503,8 @@ export class Builder {
   }
 
   /** Register `commit.name` for `years`: [gap.register, commit, funding] ->
-   *  [gap (lo,key), gap (key,hi), name, change]; lock time `now`, commit sequence `tCommit`.
+   *  [gap (lo,key), gap (key,hi), name (periodStart = now), change]; lock time `now`, commit
+   *  sequence `tCommit`.
    *  `now` (unix ms, BigInt) normally comes from `registerNow(env)`. */
   register({ env, wallet, gap, commit, years, now }) {
     years = BigInt(years);
@@ -499,7 +525,7 @@ export class Builder {
     const nameLength = utf8(name).length;
     const price = paramsPrice(this.params, nameLength) * years;
     const expires = now + years * yearMs;
-    const fields = nameFieldsFor(name, env.me, 0n, expires);
+    const fields = nameFieldsFor(name, env.me, 0n, now, expires);
     const notes = [];
     const matureAt = commitUtxo.entry.blockDaaScore + this.params.tCommit;
     if (env.blockDaa < matureAt) {
@@ -556,25 +582,73 @@ export class Builder {
 
   // MARK: Name entries
 
-  /** Anyone renews: expiresAt += years from the old expiry; the renewal price is miner fee. */
+  /** Anyone extends the current period (a gift needs no signature): [name.extend(years), funding]
+   *  -> [continuation (periodStart kept, expiresAt + years), change]. Lock time 0, every sequence
+   *  0. Valid any time while `expiresAt + years <= periodStart + maxYears`. */
+  extend({ env, wallet, name: n, years }) {
+    years = BigInt(years);
+    this._checkYears(years);
+    const nm = nameFieldsName(n.fields);
+    this._checkLive(nm, n.utxo, this.params.bond, this.registryId);
+    const f = n.fields;
+    const room = paramsExtendableYearsOf(this.params, f);
+    if (years > room) {
+      throw new Failure(
+        `extend ${nm} by ${years} y refused: its period (from ${f.periodStart}) may hold at most ${this.params.maxYears} y and it is `
+          + `paid until ${f.expiresAt}, so ${room} y can be added now; renew opens at ${paramsRenewOpens(this.params, f.expiresAt)}`,
+      );
+    }
+    const price = paramsRenewPrice(this.params, utf8(nm).length) * years;
+    const nf = nameFieldsExtended(f, years);
+    const d = {
+      op: `extend ${nm} (${years} y)`,
+      inputs: [this._nameInput(n, "extend", [argInt(years)], BudgetRole.nameExtend, `name extend(${years})`)],
+      outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }],
+      priceFee: price,
+      notes: [
+        `extension price ${kas(price)} left as miner fee`,
+        `expiresAt ${f.expiresAt} -> ${nf.expiresAt}; periodStart ${f.periodStart} kept (at most ${this.params.maxYears} y past it)`,
+      ],
+      payload: namePayload("extend", nm),
+    };
+    return this._finish(d, wallet, { kind: "funded", maxInputs: maxInputsFeeEntry }, env);
+  }
+
+  /** Anyone renews once the renewal window opened: [name.renew(years), funding] -> [continuation
+   *  (periodStart = old expiresAt, expiresAt + years), change]. Lock time = `renewLockTime`
+   *  (timestamp domain), every input sequence 0 (not final, as the CLTV needs). Before the window
+   *  opens the plan is built but not valid (a note says so); the actions refuse to submit it. */
   renew({ env, wallet, name: n, years }) {
     years = BigInt(years);
     this._checkYears(years);
     const nm = nameFieldsName(n.fields);
     this._checkLive(nm, n.utxo, this.params.bond, this.registryId);
+    const f = n.fields;
+    const opens = paramsRenewOpens(this.params, f.expiresAt);
+    if (!(opens >= 0n && opens >= lockTimeThreshold)) throw new Failure(`${nm}: expiresAt - renewWindowMs is not a timestamp`);
+    const lock = renewLockTime(env, this.params, f.expiresAt);
     const price = paramsRenewPrice(this.params, utf8(nm).length) * years;
-    const nf = nameFieldsWithExpiry(n.fields, n.fields.expiresAt + years * yearMs);
+    const nf = nameFieldsRenewed(f, years);
     const d = {
       op: `renew ${nm} (${years} y)`,
       inputs: [this._nameInput(n, "renew", [argInt(years)], BudgetRole.nameRenew, `name renew(${years})`)],
       outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }],
+      lockTime: lock,
       priceFee: price,
+      notes: [
+        `renewal price ${kas(price)} left as miner fee`,
+        `new period: periodStart ${f.periodStart} -> ${nf.periodStart} (the old expiry), expiresAt -> ${nf.expiresAt}`,
+        `lock time ${lock} >= window opening expiresAt - renewWindowMs = ${opens}`,
+      ],
       payload: namePayload("renew", nm),
     };
+    if (!renewWindowOpen(env, this.params, f.expiresAt)) {
+      d.notes.push(`renewal window not open: it opens at ${opens} (the network median time ${env.blockTimeMs} must pass it); use extend to add years before`);
+    }
     return this._finish(d, wallet, { kind: "funded", maxInputs: maxInputsFeeEntry }, env);
   }
 
-  /** The owner transfers: new owner, listing cleared, expiry kept. */
+  /** The owner transfers: new owner, listing cleared, period and expiry kept. */
   transfer({ env, wallet, name: n, newOwner }) {
     this._requireOwner(env, n);
     Builder._checkKey(newOwner, "the new owner");

@@ -23,6 +23,16 @@
 }
 .kmkt-hero-status { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .kl-setup-error { margin: 0; padding: 0 32px; font-size: 12px; line-height: 16px; color: var(--muted); text-align: center; }
+/* The registry is being upgraded (a v1 manifest): Testnet + "Setting up", calmly. */
+.kl-hero-badges { display: inline-flex; align-items: center; gap: 6px; }
+.kl-setting-up-pill {
+  display: inline-flex; align-items: center; gap: 4px; align-self: center;
+  padding: 4px 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent);
+  color: var(--kaspa-ink); font-size: 12px; font-weight: 700; line-height: 16px;
+}
+.kl-setting-up-pill .kmkt-ico { width: 13px; height: 13px; stroke-width: 2.2; }
+.kl-accent { color: var(--kaspa-ink); display: inline-flex; }
 
 .kl-status {
   display: inline-block; flex: 0 0 auto; padding: 3px 8px; border-radius: 999px;
@@ -71,6 +81,12 @@
 .kl-row-text small.kl-orange { color: var(--ios-orange); font-size: 11px; }
 .kl-row-price { flex: 0 0 auto; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; }
 .kl-row-value { flex: 0 0 auto; font-size: 15px; color: var(--text); white-space: nowrap; }
+/* My Names: an active name whose renewal window is open. */
+.kl-renewal-pill {
+  flex: 0 0 auto; padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+  font-size: 11px; font-weight: 700; line-height: 14px;
+  color: var(--ios-orange); background: color-mix(in srgb, var(--ios-orange) 15%, transparent);
+}
 .kl-row-buttons { display: inline-flex; gap: 6px; flex: 0 0 auto; }
 .kl-at-badge {
   width: 36px; height: 36px; flex: 0 0 auto; border-radius: 50%;
@@ -125,6 +141,9 @@
 .kl-price { font-size: 20px; font-weight: 700; line-height: 25px; color: var(--text); }
 .kl-expiry { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .kl-expiry small { font-size: 12px; }
+/* registry v2: the paid period, from its start to the expiry */
+.kl-period { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+.kl-period .kmkt-ico { width: 14px; height: 14px; flex: 0 0 auto; }
 .kl-action-grid { display: flex; flex-direction: column; gap: 10px; }
 .kl-action-grid .kmkt-action { min-height: 42px; }
 .kl-owner-icon { display: inline-flex; color: color-mix(in srgb, var(--kaspa-ink) 60%, transparent); flex: 0 0 auto; }
@@ -236,6 +255,7 @@
 .kl-domains-empty .kmkt-ico { width: 44px; height: 44px; }
 .kl-domains-empty strong { font-size: 17px; font-weight: 600; color: var(--text); }
 .kl-domains-empty p { margin: 0; font-size: 15px; color: var(--muted); }
+.kl-domains-upgrading p { max-width: 420px; }
 
 /* The finished-transaction half sheet (iOS KachatTxDoneSheet). */
 .kl-done { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 24px 20px; text-align: center; }

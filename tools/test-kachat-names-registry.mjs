@@ -62,6 +62,11 @@ function view(st, at) {
 
 const outpointKey = (u) => `${s(u.txid)}:${Number(u.index)}`;
 
+/** The vectors' end-to-end plan (README "The end-to-end run", registry v2): commits, three
+ *  registrations, extend, renew, transfer, list, buy, three offers (accept, refund, withdraw),
+ *  release, reclaim. The steps after it are edge cases on their own synthetic records. */
+const e2eCount = 19;
+
 /** Every record a step was built from must be in the walked state, exactly. */
 function checkRecords(st, state, r) {
   const label = s(st.label);
@@ -86,6 +91,7 @@ function checkRecords(st, state, r) {
       r.eq(found.key, s(n.key), `${label}: key`);
       r.eq(found.owner, s(n.owner), `${label}: owner`);
       r.eq(found.price, u64(n.price), `${label}: price`);
+      r.eq(found.periodStart, u64(n.periodStart), `${label}: periodStart`);
       r.eq(found.expiresAt, u64(n.expiresAt), `${label}: expiresAt`);
       r.eq(found.value, u64(n.value), `${label}: value`);
     }
@@ -118,7 +124,7 @@ function seeded(st, m) {
     const n = rec.name;
     state.names.push({
       txid: s(n.utxo.txid), index: Number(n.utxo.index), name: s(n.name), key: s(n.key), owner: s(n.owner),
-      price: u64(n.price), expiresAt: u64(n.expiresAt), value: u64(n.value), registeredAt: null, registeredTxId: null, updatedAt: null,
+      price: u64(n.price), periodStart: u64(n.periodStart), expiresAt: u64(n.expiresAt), value: u64(n.value), registeredAt: null, registeredTxId: null, updatedAt: null,
     });
   }
   if (rec.offer) {
@@ -136,7 +142,7 @@ function tryApply(state, tx, m) { try { return state.apply(tx, m); } catch { ret
 function runWalker(v, r) {
   const m = M.decodeManifest(v.manifest);
   const steps = v.steps;
-  const e2e = steps.slice(0, 18);
+  const e2e = steps.slice(0, e2eCount);
   const state = R.RegistryState.atGenesis(m);
   const ops = [];
   e2e.forEach((st, i) => {
@@ -150,7 +156,7 @@ function runWalker(v, r) {
     try { state.checkInvariants(); } catch (e) { r.check(false, `${s(st.label)}: invariants: ${e.message}`); }
   });
   r.eq(ops, [
-    "register alpha-tn", "register bravo-tn", "register lapse-tn", "renew alpha-tn", "transfer alpha-tn", "list alpha-tn",
+    "register alpha-tn", "register bravo-tn", "register lapse-tn", "extend alpha-tn", "renew lapse-tn", "transfer alpha-tn", "list alpha-tn",
     "sale alpha-tn", "offer bravo-tn", "offer_accepted bravo-tn", "offer_accept bravo-tn", "offer alpha-tn", "offer_refund alpha-tn",
     "offer alpha-tn", "offer_withdraw alpha-tn", "release bravo-tn", "reclaim lapse-tn",
   ], "e2e events");
@@ -163,6 +169,9 @@ function runWalker(v, r) {
   const alpha = state.name("alpha-tn");
   r.check(alpha?.registeredTxId === C.hex(hx(e2e[3].expected.txid)), "registration tx carried through every transition");
   r.eq(alpha?.registeredAt, 1_003n, "registration time carried through every transition");
+  const alphaRegister = e2e[3].args;
+  r.eq(alpha?.periodStart, u64(alphaRegister.now), "alpha-tn: periodStart = register's now, kept by extend, transfer, list and buy");
+  r.eq(alpha?.expiresAt, u64(alphaRegister.now) + 2n * C.yearMs, "alpha-tn: registered for 1 year, extended by 1");
   // applying again changes nothing
   const snapshot = state.clone();
   e2e.forEach((st, i) => tryApply(state, view(st, 1_000 + i), m));
@@ -171,9 +180,10 @@ function runWalker(v, r) {
   r.check(R.RegistryState.fromJSON(JSON.stringify(state.toJSON())).equals(state), "cache JSON round trip");
 
   // the edge cases, each on a state seeded with its own records
-  for (const st of steps.slice(18)) {
+  for (const st of steps.slice(e2eCount)) {
     const seededState = seeded(st, m);
     const label = s(st.label);
+    const before = st.records.name ? { periodStart: u64(st.records.name.periodStart), expiresAt: u64(st.records.name.expiresAt) } : null;
     try {
       const events = seededState.apply(view(st, 5), m);
       const op = s(st.op);
@@ -183,6 +193,17 @@ function runWalker(v, r) {
         case "register": r.eq(seededState.names.length, 1, `${label}: name created`); r.eq(seededState.gaps.length, 2, `${label}: gaps split`); break;
         case "reclaim": r.eq(seededState.names.length, 0, `${label}: name gone`); r.eq(seededState.gaps.length, 1, `${label}: gaps merged`); break;
         case "acceptOffer": r.eq(seededState.offers.length, 0, `${label}: offer gone`); break;
+        case "extend":
+        case "renew": {
+          const years = u64(st.args.years);
+          const after = seededState.names[0];
+          r.eq(events[0]?.op, op, `${label}: event`);
+          r.eq(events[0]?.years, years, `${label}: event years`);
+          r.eq(after?.expiresAt, before ? before.expiresAt + years * C.yearMs : null, `${label}: expiresAt + years`);
+          // extend keeps the period; renew starts the next one at the old expiry
+          r.eq(after?.periodStart, op === "extend" ? before?.periodStart : before?.expiresAt, `${label}: periodStart`);
+          break;
+        }
         default: break;
       }
       if (op === "acceptOffer") {
@@ -221,7 +242,7 @@ function runWalker(v, r) {
 /** The simulated chain of the e2e transactions: scripts by outpoint and spends. */
 function simulatedChain(v) {
   const m = M.decodeManifest(v.manifest);
-  const steps = v.steps.slice(0, 18);
+  const steps = v.steps.slice(0, e2eCount);
   const txs = steps.map((st, i) => view(st, 1_000 + i));
   const created = new Map(); // outpoint -> script
   const spentBy = new Map(); // outpoint -> txid
@@ -255,7 +276,7 @@ function simulatedChain(v) {
  *  simulated UTXO set, spends found through addresses, transactions handed back newest first. */
 async function runWalk(v, r) {
   const { m, addr, visibleUpTo } = simulatedChain(v);
-  for (const upTo of [3, 6, 10, 18]) {
+  for (const upTo of [3, 6, 7, 8, 11, e2eCount]) {
     const { visible, live, transactions } = visibleUpTo(upTo);
     const walked = R.RegistryState.atGenesis(m);
     try {
@@ -383,6 +404,28 @@ function runRules(r) {
   const k = C.concat(new Uint8Array(31).fill(0x10), [0x00]);
   r.eq(C.hex(R.step(k, -1)), C.hex(C.concat(new Uint8Array(30).fill(0x10), [0x0f, 0xff])), "key - 1 borrows");
   r.eq(C.hex(R.step(k, 1)), C.hex(C.concat(new Uint8Array(31).fill(0x10), [0x01])), "key + 1");
+  // the paid period on a NameInfo (registry v2)
+  const params = {
+    bond: 1n, gapValue: 1n, tCommit: 600n, maxYears: 2n, graceMs: g, renewWindowMs: 864_000_000n,
+    prices: [1n, 1n, 1n, 1n, 1n], renewPrices: [1n, 1n, 1n, 1n, 1n], offerMaxFee: 1n,
+  };
+  const period = info("period", now + C.yearMs, 1n);
+  r.eq(period.extendableYears(params), 0n, "period unknown: no extend");
+  r.eq(period.fields, null, "period unknown: no on-chain state");
+  period.periodStart = now;
+  r.eq(period.extendableYears(params), 1n, "1 year paid of 2: extend by 1");
+  r.eq(period.fields?.periodStart, now, "fields carry periodStart");
+  r.check(!period.renewOpen(params, now), "renewal closed a year before expiry");
+  r.eq(period.renewOpens(params), now + C.yearMs - 864_000_000n, "renewal opens 10 days before expiry");
+  r.check(period.renewOpen(params, now + C.yearMs - 864_000_000n), "renewal open at the opening");
+  period.expiresAt = now + 2n * C.yearMs;
+  r.eq(period.extendableYears(params), 0n, "2 years paid: no extend");
+
+  // a cache written before registry v2 (no periodStart, format 1) is dropped
+  const v1Cache = `{"v":1,"network":"testnet-10","registryCovenantId":"00","verifiedAt":null,"gaps":[],"names":[["00",0,"a","00","00","0","1","1",null,null,null]],"offers":[],"applied":[],"events":[]}`;
+  r.check((() => { try { R.RegistryState.fromJSON(v1Cache); return false; } catch { return true; } })(), "a registry v1 cache does not decode");
+  r.eq(R.RegistryState.formatVersion, 2, "cache format 2 (registry v2)");
+
   r.eq(R.step(C.zero32(), -1), null, "0 - 1");
   r.eq(R.step(C.ff32(), 1), null, "ff..ff + 1");
 }
@@ -426,6 +469,12 @@ function runREST(r) {
   r.eq(n?.price, 5_000_000_000n, "indexer price string");
   r.eq(n?.outpoint.index, 2, "indexer outpoint");
   r.eq(n && C.hex(n.key), C.hex(C.key("alice")), "indexer key recomputed from the name");
+  r.eq(n?.periodStart, null, "indexer without periodStart: unknown");
+  const withPeriod = JSON.parse(`{"name":"alice","registered":true,"ownerKey":"${"ab".repeat(32)}","price":"0","periodStart":1790000000000,
+    "expiresAt":1822000000000,"outpoint":{"txId":"${"cd".repeat(32)}","index":0}}`);
+  const np = R.IndexerAPI.nameInfo(withPeriod, () => null);
+  r.eq(np?.periodStart, 1_790_000_000_000n, "indexer periodStart");
+  r.eq(np?.fields?.periodStart, 1_790_000_000_000n, "indexer record spendable with its periodStart");
   const free = JSON.parse(`{"name":"bob","key":"00","registered":false,"gap":{"lo":"${"00".repeat(32)}","hi":"${"ff".repeat(32)}","outpoint":{"txId":"${"ee".repeat(32)}","index":0}}}`);
   const f = R.IndexerAPI.nameJSON(free);
   r.check(R.IndexerAPI.nameInfo(f, () => null) === null, "indexer free name has no record");
@@ -464,7 +513,7 @@ function memoryStorage() {
 
 async function runRegistryChain(v, r) {
   const { m, visibleUpTo } = simulatedChain(v);
-  const { visible, live, transactions } = visibleUpTo(18);
+  const { visible, live, transactions } = visibleUpTo(e2eCount);
   const restCalls = [];
   const fetch = async (url) => {
     restCalls.push(url);
@@ -517,7 +566,10 @@ async function runRegistryChain(v, r) {
   r.eq((await reg.lapsed()).length, 0, "registry (chain): nothing lapsed");
   const hist = await reg.history("alpha-tn");
   // the walker sees transitions of tracked UTXOs only: offers made by others never spend one
-  r.eq(hist.map((e) => e.op), ["sale", "list", "transfer", "renew", "register"], "registry (chain): history newest first");
+  r.eq(hist.map((e) => e.op), ["sale", "list", "transfer", "extend", "register"], "registry (chain): history newest first");
+  r.eq(look.info?.periodStart, alpha.periodStart, "registry (chain): lookup carries periodStart");
+  r.eq(look.info?.fields?.periodStart, alpha.periodStart, "registry (chain): a walked record is spendable (fields)");
+  r.eq(look.info?.extendableYears(m.params), 0n, "registry (chain): alpha-tn holds 2 paid years: no extend");
   r.eq((await reg.activity()).length, reg.chainState.events.length, "registry (chain): activity");
   const gaps = await reg.exitGaps(look.info);
   r.check(C.bytesEqual(gaps.below.hi, look.info.key) && C.bytesEqual(gaps.above.lo, look.info.key), "registry (chain): exit gaps around the name");
@@ -572,6 +624,59 @@ async function runRegistryChain(v, r) {
   await Promise.all([reg4.refresh(), reg4.refresh(), reg4.refresh()]);
   r.eq(reg4.revision, 1, "registry (chain): concurrent refreshes coalesce");
   r.eq(reg4.chainState?.names.length, 1, "registry (chain): coalesced refresh walked");
+}
+
+/** A refused manifest (registry v1: "being upgraded") and other refresh failures: a failed refresh
+ *  counts as an attempt and bumps `revision` only when the error changed (iOS d2e0673, the refresh
+ *  loop fix); a cache of the previous format is walked again. */
+async function runRegistryFailures(v, r) {
+  const m = M.decodeManifest(v.manifest);
+  let clock = 1_000_000;
+  let manifestCalls = 0;
+  let answer = () => { throw Object.assign(new Error("The .kachat registry on Testnet is being upgraded."), { code: "registryUpgrading" }); };
+  const logs = [];
+  const reg = new KachatNamesRegistry({
+    manifest: async () => { manifestCalls += 1; return answer(); },
+    restBase: () => "https://rest.test", indexerBase: () => "", storage: memoryStorage(),
+    // the genesis gap is live: nothing to walk
+    getUtxosByAddresses: async () => [{ outpoint: { transactionId: C.hex(m.genesisTxid), index: 0 }, covenantId: C.hex(m.registryCovenantId) }],
+    now: () => clock, log: (...a) => logs.push(a.join(" ")),
+  });
+  await reg.refresh();
+  r.check(reg.lastError != null && reg.registryUpgrading, "registry: a refused v1 manifest is registryUpgrading");
+  r.eq(reg.revision, 1, "registry: the first refusal bumps the revision");
+  r.eq(logs.length, 0, "registry: registryUpgrading is not logged as a failure");
+  r.eq(reg.refreshedAt, clock, "registry: a failed refresh counts as an attempt");
+  await reg.refreshIfStale();
+  r.eq(manifestCalls, 1, "registry: refreshIfStale waits after a failed refresh");
+  await reg.refresh();
+  r.eq(reg.revision, 1, "registry: the same refusal again does not bump the revision (no refresh loop)");
+  answer = () => { throw C.Failure.outdatedRegistry(); };
+  await reg.refresh();
+  r.check(reg.registryUpgrading, "registry: Failure.outdatedRegistry is registryUpgrading too");
+  r.eq(reg.revision, 2, "registry: another error bumps the revision");
+  answer = () => { throw new Error("no node"); };
+  await reg.refresh();
+  r.check(!reg.registryUpgrading && reg.lastError === "no node", "registry: another failure is not registryUpgrading");
+  r.eq(logs.length, 1, "registry: other failures are logged once");
+  await reg.refresh();
+  r.eq(logs.length, 1, "registry: the same failure is not logged again");
+  r.eq(reg.revision, 3, "registry: the same failure does not bump the revision");
+  clock += 61_000;
+  answer = () => m;
+  await reg.refreshIfStale();
+  r.check(reg.lastError == null && !reg.registryUpgrading && reg.revision === 4, () => `registry: a stale failure is retried, success clears it and bumps (${reg.lastError}, ${reg.revision})`);
+
+  // a cache of the previous format (registry v1, no periodStart) is walked again
+  const storage = memoryStorage();
+  const old = R.RegistryState.atGenesis(m).toJSON();
+  old.v = 1;
+  old.names = [["00".repeat(32), 0, "a", "00".repeat(32), "00".repeat(32), "0", "1", "1", null, null, null]];
+  storage.set("kachat-names-registry-testnet-v1", JSON.stringify(old));
+  const reg2 = new KachatNamesRegistry({ manifest: m, storage, getUtxosByAddresses: async () => [], log: () => {} });
+  await reg2.prepare();
+  r.eq(reg2.chainState?.names.length, 0, "registry: a format-1 cache is dropped and walked from genesis");
+  r.eq(reg2.chainState?.version, 2, "registry: the new state is format 2");
 }
 
 async function runRegistryIndexer(v, r) {
@@ -670,7 +775,7 @@ async function runLive() {
   for (const g of st.gaps) console.log(`  gap ${g.lo.slice(0, 8)}..-${g.hi.slice(0, 8)}.. at ${g.txid.slice(0, 16)}:${g.index}`);
   for (const n of st.names) {
     const status = R.Status.of(n.expiresAt, m.params.graceMs, BigInt(Date.now()));
-    console.log(`  name ${n.name}.kachat owner ${R.addressOf(C.unhex32(n.owner))} price ${n.price} expires ${new Date(Number(n.expiresAt)).toISOString()} (${status}) at ${n.txid.slice(0, 16)}:${n.index}`);
+    console.log(`  name ${n.name}.kachat owner ${R.addressOf(C.unhex32(n.owner))} price ${n.price} period from ${new Date(Number(n.periodStart)).toISOString()} expires ${new Date(Number(n.expiresAt)).toISOString()} (${status}) at ${n.txid.slice(0, 16)}:${n.index}`);
     console.log(`    resolveActive -> ${await reg.resolveActive(n.name)}`);
   }
   for (const e of st.events) console.log(`  event ${e.op} ${e.name ?? "?"} ${e.txId.slice(0, 16)}`);
@@ -803,6 +908,8 @@ async function main() {
   console.log(`+ walk over a simulated chain: ${r.pass} pass, ${r.fail} fail`);
   await runRegistryChain(v, r);
   console.log(`+ KachatNamesRegistry over the simulated chain: ${r.pass} pass, ${r.fail} fail`);
+  await runRegistryFailures(v, r);
+  console.log(`+ KachatNamesRegistry refusals and failed refreshes: ${r.pass} pass, ${r.fail} fail`);
   await runRegistryIndexer(v, r);
   console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
   await runSocialResolver(r);

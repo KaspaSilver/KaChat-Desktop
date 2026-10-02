@@ -3,9 +3,13 @@
 // written by `kachat-names-vectors` from the CLI's own builders) and the official BLAKE3 test
 // vectors. Port of iOS scripts/test_kachat_names_core.swift. Run from the repo root:
 //
-//   node tools/test-kachat-names-core.mjs [path/to/KachatNamesVectors.json]
+//   node tools/test-kachat-names-core.mjs [path/to/KachatNamesVectors.json] [fixed-budget-out.json]
+//
+// With a second path it also writes every step rebuilt with the app's fixed budgets (placeholder
+// signatures), for `kachat-names-vectors check <out.json>` in kachat-domains (Swift
+// `writeFixedBudget`).
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { blake3 } from "@noble/hashes/blake3.js";
@@ -91,7 +95,8 @@ const gapRec = (g) => ({ lo: hx(g.lo), hi: hx(g.hi), value: u64(g.value), utxo: 
 
 function nameRec(n) {
   const name = s(n.name);
-  const fields = C.makeNameFields({ key: hx(n.key), paddedName: C.padded(name), owner: hx(n.owner), price: u64(n.price), expiresAt: u64(n.expiresAt) });
+  const fields = C.makeNameFields({ key: hx(n.key), paddedName: C.padded(name), owner: hx(n.owner), price: u64(n.price),
+    periodStart: u64(n.periodStart), expiresAt: u64(n.expiresAt) });
   return { fields, value: u64(n.value), utxo: utxo(n.utxo) };
 }
 
@@ -160,8 +165,9 @@ function runCodecs(v, r) {
   r.eqHex(gs, s(g.state), "gap state");
   r.eqHex(M.templateScript(m.gap, gs), s(g.spk), "gap spk");
   const n = st.name;
-  const nf = C.nameFieldsFor(s(n.name), hx(n.owner), u64(n.price), u64(n.expiresAt));
+  const nf = C.nameFieldsFor(s(n.name), hx(n.owner), u64(n.price), u64(n.periodStart), u64(n.expiresAt));
   r.eqHex(C.nameState(nf), s(n.state), "name state");
+  r.eq(C.nameState(nf).length, 126, "name state is 126 bytes (registry v2)");
   r.eqHex(M.templateScript(m.name, C.nameState(nf)), s(n.spk), "name spk");
   r.check(C.nameFieldsEqual(C.decodeNameState(C.nameState(nf)), nf), "decode name state");
   r.eq(C.nameFieldsName(nf), s(n.name), "unpadded name");
@@ -212,21 +218,119 @@ function runManifest(v, r) {
   // the bundled testnet-10 manifest: byte-identical to iOS (when the iOS repo is here) and verified
   const bundledPath = join(repo, "engine/kachat-names/kachat-names-testnet-10.json");
   const bundled = readFileSync(bundledPath);
-  const iosPath = "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json";
-  if (existsSync(iosPath)) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
+  const iosPath = [
+    "/Users/restosaved/Everything KaChat/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
+    "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
+  ].find((x) => existsSync(x));
+  if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
+  // the bundled manifest: either a verified v2 one, or the v1 one the app shows as "setting up"
   try {
     const bm = M.decodeManifest(new Uint8Array(bundled));
     M.verifyManifest(bm);
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
     r.pass += 1;
-  } catch (e) { r.check(false, `bundled manifest verify: ${e.message}`); }
+    console.log("bundled manifest: registry v2, verified");
+  } catch (e) {
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `the bundled manifest neither verifies nor is the outdated v1 one: ${e.message}`);
+    console.log("bundled manifest: registry v1 (outdated) - the app shows .kachat as setting up until the v2 genesis manifest is bundled");
+  }
   return m;
+}
+
+/** The registry v2 period rules on their own (KACHAT_NAMES.md 4.1, ops.rs): what extend may add,
+ *  when renew opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
+function runPeriodRules(v, m, r) {
+  const p = m.params;
+  const y = C.yearMs;
+  r.eq(p.renewWindowMs, 864_000_000n, "renewWindowMs from the manifest");
+  r.eq(u64(v.renewWindowMs), p.renewWindowMs, "renewWindowMs matches the vectors");
+  const start = 2_000_000_000_000n;
+  r.eq(M.paramsExtendableYears(p, start, start + y), 1n, "1-year registration: extend by 1");
+  r.eq(M.paramsExtendableYears(p, start, start + 2n * y), 0n, "2-year registration: no extend");
+  r.eq(M.paramsExtendableYears(p, start, start + y + 1n), 0n, "a period holding just over a year: no extend");
+  r.eq(M.paramsExtendableYears(p, start, start + 3n * y), 0n, "over-full period: no extend");
+  r.eq(M.paramsExtendableYears(p, start, start), 2n, "empty period: 2 years");
+  const f = C.nameFieldsFor("alice", new Uint8Array(32).fill(7), 0n, start, start + y);
+  r.eq(M.paramsExtendableYearsOf(p, f), 1n, "extendableYears of the fields");
+  r.eq(C.nameFieldsExtended(f, 1n).periodStart, start, "extend keeps periodStart");
+  r.eq(C.nameFieldsExtended(f, 1n).expiresAt, start + 2n * y, "extend adds a year");
+  r.eq(C.nameFieldsRenewed(f, 2n).periodStart, start + y, "renew starts at the old expiry");
+  r.eq(C.nameFieldsRenewed(f, 2n).expiresAt, start + 3n * y, "renew adds from the old expiry");
+  r.eq(C.nameFieldsWithOwner(f, new Uint8Array(32).fill(9)).periodStart, start, "transfer keeps periodStart");
+  r.eq(C.nameFieldsWithPrice(f, 5n).periodStart, start, "list keeps periodStart");
+  r.check((() => { try { return C.nameFieldsEqual(C.decodeNameState(C.nameState(f)), f); } catch { return false; } })(), "126-byte state round trip");
+  r.check((() => { try { C.decodeNameState(C.nameState(f).subarray(0, 117)); return false; } catch { return true; } })(), "a 117-byte (v1) state is refused");
+  const opens = M.paramsRenewOpens(p, f.expiresAt);
+  r.eq(opens, f.expiresAt - 864_000_000n, "renew opens 10 days before expiry");
+  const before = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens - 60_000n, wallMs: opens + 60_000n });
+  r.check(!B.renewWindowOpen(before, p, f.expiresAt), "window closed while the median time is before the opening");
+  r.eq(B.renewLockTime(before, p, f.expiresAt), opens, "lock time never before the opening");
+  const at = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens, wallMs: opens + 180_000n });
+  r.check(!B.Builder.renewWindowOpen(at, p, f.expiresAt), "window closed at exactly the opening (the median time must pass it)");
+  const after = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens + 3_600_000n, wallMs: opens + 3_700_000n });
+  r.check(B.renewWindowOpen(after, p, f.expiresAt), "window open an hour later");
+  r.eq(B.Builder.renewLockTime(after, p, f.expiresAt), opens + 3_520_000n, "lock time = wall - 3 min once open");
+  // the builders refuse what the contract refuses, and say so
+  const b = new B.Builder(m);
+  const refused = (fn) => { try { fn(); return false; } catch (e) { return e instanceof C.Failure; } };
+  const ext = v.steps.find((x) => s(x.op) === "extend");
+  if (ext) {
+    const env0 = ext.env;
+    const env = B.makeEnv({ me: hx(env0.me), blockDaa: u64(env0.blockDaa), blockTimeMs: u64(env0.blockTimeMs), wallMs: u64(env0.wallMs) });
+    const n = nameRec(ext.records.name);
+    const wallet = ext.wallet.map(utxo);
+    r.check(refused(() => b.extend({ env, wallet, name: n, years: 2n })), "extend past 2 years from periodStart refused");
+    n.fields = C.nameFieldsExtended(n.fields, 1n);
+    r.check(refused(() => b.extend({ env, wallet, name: n, years: 1n })), "a second extend of a full period refused");
+    r.check(refused(() => b.extend({ env, wallet, name: n, years: 0n })), "extend by 0 refused");
+    // renew before the window: built (a note says it is not open) with the opening as lock time
+    let plan = null;
+    try { plan = b.renew({ env, wallet, name: n, years: 1n }); } catch { plan = null; }
+    if (plan) {
+      r.eq(plan.unsignedTx.lockTime, M.paramsRenewOpens(p, n.fields.expiresAt), "early renew: lock time = the window opening");
+      r.check(plan.notes.some((x) => x.startsWith("renewal window not open")), "early renew: noted as not open");
+      r.check(!B.renewWindowOpen(env, p, n.fields.expiresAt), "early renew: window closed");
+    } else {
+      r.check(false, "early renew plan not built");
+    }
+    r.check(refused(() => b.renew({ env, wallet, name: n, years: 3n })), "renew by 3 refused");
+  } else {
+    r.check(false, "no extend step in the vectors");
+  }
+  // the fixed budgets are the vectors' table, entry for entry
+  const recommended = v.recommendedBudgets;
+  const roles = Object.values(B.BudgetRole);
+  r.eq([...Object.keys(recommended)].sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
+  for (const role of roles) {
+    r.eq(BigInt(B.recommendedBudgets[role]), u64(recommended[role]), `recommended budget ${role}`);
+  }
+  // a registry v1 manifest is recognised as outdated, never trusted
+  const v1 = structuredClone(v.manifest);
+  delete v1.params.renewWindowMs;
+  try {
+    M.decodeManifest(JSON.stringify(v1));
+    r.check(false, "a manifest without renewWindowMs decoded");
+  } catch (e) {
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `a manifest without renewWindowMs is the outdated registry: ${e.message}`);
+  }
+  // desktop extras: a v1 template hash (with renewWindowMs present) is outdated too, at decode
+  // and at verify
+  const v1b = structuredClone(v.manifest);
+  v1b.artifacts.KachatName.templateHash = M.v1TemplateHashes.KachatName;
+  try {
+    M.decodeManifest(v1b);
+    r.check(false, "a manifest with the v1 name template hash decoded");
+  } catch (e) {
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `the v1 name template hash is the outdated registry: ${e.message}`);
+  }
+  r.check(C.Failure.outdatedRegistry().isOutdatedRegistry && !new C.Failure("x").isOutdatedRegistry, "Failure.outdatedRegistry / isOutdatedRegistry");
 }
 
 function build(b, op, env, wallet, args, rec) {
   switch (op) {
     case "commit": return b.commit({ env, wallet, name: s(args.name), salt: hx(args.salt) });
     case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), years: u64(args.years), now: u64(args.now) });
+    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
     case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
     case "transfer": return b.transfer({ env, wallet, name: nameRec(rec.name), newOwner: hx(args.newOwner) });
     case "list": return b.list({ env, wallet, name: nameRec(rec.name), price: u64(args.price) });
@@ -271,7 +375,22 @@ function runSteps(v, m, r) {
     try {
       plan = build(b, s(st.op), env, wallet, args, rec);
       if (st.op === "register") {
-        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 376n * 86_400_000n : 0n), `${label}: registerNow`);
+        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 741n * 86_400_000n : 0n), `${label}: registerNow`);
+      } else if (st.op === "extend") {
+        const n = nameRec(rec.name);
+        r.check(u64(args.years) <= M.paramsExtendableYearsOf(m.params, n.fields), `${label}: extendableYears covers the step`);
+        const lockAndSequences = new Set([plan.unsignedTx.lockTime, ...plan.unsignedTx.inputs.map((i) => i.sequence)]);
+        r.check(lockAndSequences.size === 1 && lockAndSequences.has(0n), `${label}: lock time 0, every sequence 0`);
+      } else if (st.op === "renew") {
+        const n = nameRec(rec.name);
+        const a = env.wallMs - 180_000n, bt = env.blockTimeMs - 1_000n;
+        const lo = a < bt ? a : bt;
+        const opens = n.fields.expiresAt - m.params.renewWindowMs;
+        const rule = lo > opens ? lo : opens;
+        r.eq(plan.unsignedTx.lockTime, rule, `${label}: lockTimeRules.renew`);
+        r.eq(plan.unsignedTx.lockTime, B.renewLockTime(env, m.params, n.fields.expiresAt), `${label}: renewLockTime`);
+        r.check(B.renewWindowOpen(env, m.params, n.fields.expiresAt), `${label}: the window is open`);
+        r.check(plan.unsignedTx.inputs.every((i) => i.sequence === 0n), `${label}: every sequence 0`);
       }
     } catch (e) {
       r.check(false, `${label}: builder threw ${e.stack || e}`);
@@ -367,7 +486,7 @@ function runSteps(v, m, r) {
 
 function runFixedBudgets(v, m, r) {
   // every step also builds with the app's fixed (recommended) budgets, as the app will run them
-  // (Swift: writeFixedBudget, which kachat-names-vectors check validates 28/28)
+  // (Swift: writeFixedBudget, which kachat-names-vectors check validates 32/32)
   const b = new B.Builder(m);
   for (const st of v.steps) {
     const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs) });
@@ -378,6 +497,51 @@ function runFixedBudgets(v, m, r) {
       r.check(false, `${st.label}: fixed-budget build threw ${e.message}`);
     }
   }
+}
+
+/** JSON with BigInt written as plain integers (u64 values above 2^53 stay exact). */
+function jsonWithBigInts(value) {
+  const marks = [];
+  const text = JSON.stringify(value, (_, x) => {
+    if (typeof x !== "bigint") return x;
+    marks.push(x.toString());
+    return `@@big${marks.length - 1}@@`;
+  }, 2);
+  return text.replace(/"@@big(\d+)@@"/g, (_, i) => marks[Number(i)]);
+}
+
+/** Builds every vector step again with the app's fixed (recommended) budgets and writes the
+ *  transactions, with placeholder signatures, for `kachat-names-vectors check` (Swift
+ *  `writeFixedBudget`). */
+function writeFixedBudget(v, m, out) {
+  const b = new B.Builder(m);
+  const entryJSON = (e) => ({
+    amount: e.amount, scriptVersion: e.scriptVersion, script: C.hex(e.script), blockDaaScore: e.blockDaaScore,
+    isCoinbase: e.isCoinbase, covenantId: e.covenantId ? C.hex(e.covenantId) : null,
+  });
+  const txs = v.steps.map((st) => {
+    const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs) });
+    // Swift's writeFixedBudget builds offers without their target
+    const rec = st.op === "offer" ? { ...st.records, target: undefined } : st.records;
+    const plan = build(b, st.op, env, st.wallet.map(utxo), st.args, rec);
+    const tx = plan.unsignedTx;
+    return {
+      label: plan.op, blockDaa: env.blockDaa, blockTimeMs: env.blockTimeMs,
+      version: tx.version, lockTime: tx.lockTime, payload: C.hex(tx.payload), storageMass: tx.storageMass,
+      networkFee: plan.networkFee, priceFee: plan.priceFee, computeMass: plan.costs.computeMass, txid: T.txIdHex(tx),
+      inputs: tx.inputs.map((i, k) => ({
+        txid: C.hex(i.outpoint.txid), index: i.outpoint.index, sequence: i.sequence, computeBudget: i.computeBudget,
+        signatureScript: C.hex(i.signatureScript), entry: entryJSON(plan.entries[k]),
+      })),
+      outputs: tx.outputs.map((o) => ({
+        value: o.value, scriptVersion: o.scriptVersion, script: C.hex(o.script),
+        covenant: o.covenant ? { authorizingInput: o.covenant.authorizingInput, covenantId: C.hex(o.covenant.covenantId) } : null,
+      })),
+    };
+  });
+  const doc = { registryCovenantId: v.manifest.registryCovenantId, signer: v.deployer.xonly, transactions: txs };
+  writeFileSync(out, jsonWithBigInts(doc));
+  console.log(`wrote ${txs.length} fixed-budget transactions to ${out}`);
 }
 
 async function runAsyncSigner(v, m, r) {
@@ -400,7 +564,8 @@ console.log(`blake3 official vectors: ${r.pass} checks pass, ${r.fail} fail`);
 runCodecs(v, r);
 console.log(`blake3 + codecs: ${r.pass} checks pass, ${r.fail} fail`);
 const m = runManifest(v, r);
-console.log(`+ manifest: ${r.pass} checks pass, ${r.fail} fail`);
+runPeriodRules(v, m, r);
+console.log(`+ manifest and period rules: ${r.pass} checks pass, ${r.fail} fail`);
 const results = runSteps(v, m, r);
 runFixedBudgets(v, m, r);
 await runAsyncSigner(v, m, r);
@@ -409,5 +574,6 @@ for (const res of results) {
 }
 console.log(`vectors: ${r.pass} checks pass, ${r.fail} fail; ${results.filter((x) => x.ok).length}/${results.length} transactions byte-identical`);
 for (const f of r.failures.slice(0, 40)) console.log("  FAIL " + f);
+if (process.argv[3]) writeFixedBudget(v, m, process.argv[3]);
 if (r.fail !== 0) process.exit(1);
 console.log("OK");

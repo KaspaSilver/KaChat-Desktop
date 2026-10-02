@@ -54,6 +54,22 @@ export class ServiceError extends Error {
   static submitMismatch(expected, got) {
     return new ServiceError("submitMismatch", `The node accepted ${got}, expected ${expected}`, { expected, got });
   }
+  /** The manifest is for registry v1; this app builds for v2 and waits for its genesis. Not a
+   *  failure to show as one: the screens say the registry is being set up. */
+  static registryUpgrading() { return new ServiceError("registryUpgrading", registryUpgradingMessage); }
+}
+
+/** The (English) message of `ServiceError.registryUpgrading()`. */
+export const registryUpgradingMessage =
+  "The .kachat registry on Testnet is being upgraded. Names open here again once the new registry is live.";
+
+/** Whether `error` means the registry is being upgraded (a v1 manifest), not a failure (Swift
+ *  `KachatNamesService.isRegistryUpgrading`): a `ServiceError` with code "registryUpgrading" or
+ *  the core's `Failure.outdatedRegistry()`. */
+export function isRegistryUpgrading(error) {
+  if (error == null || typeof error !== "object") return false;
+  if (error instanceof ServiceError && error.code === "registryUpgrading") return true;
+  return error instanceof Failure && error.isOutdatedRegistry === true;
 }
 
 // MARK: - Addresses (the registry's pure Kaspa cashaddr codec)
@@ -240,7 +256,38 @@ export class KachatNamesService {
     this.manifest = null;
     /** Where the manifest came from: "bundle" or the indexer URL. */
     this.manifestSource = null;
+    /** The manifest describes the previous registry (v1): names wait for the v2 genesis manifest.
+     *  The screens show "Setting up" instead of an error. Changes are announced to `onChange`. */
+    this.registryUpgrading = false;
+    /** Why the bundled manifest was refused. The bundle can't change while the app runs, so it is
+     *  not read and verified again on every call (until `resetManifest`). */
+    this._bundleFailure = null;
+    this._listeners = new Set();
   }
+
+  // MARK: Observing (Swift @Published registryUpgrading)
+
+  /** `listener(service)` whenever `registryUpgrading` changes; returns an unsubscribe function. */
+  onChange(listener) {
+    this._listeners.add(listener);
+    return () => this._listeners.delete(listener);
+  }
+
+  _setRegistryUpgrading(value) {
+    if (this.registryUpgrading === value) return;
+    this.registryUpgrading = value;
+    for (const l of [...this._listeners]) {
+      try { l(this); } catch (e) { this._log("[KachatNames] listener failed:", e?.message ?? e); }
+    }
+  }
+
+  _log(...args) {
+    if (typeof this.engine?.log === "function") this.engine.log(args.join(" "));
+    else console.log(...args);
+  }
+
+  /** See the module-level `isRegistryUpgrading`. */
+  static isRegistryUpgrading(error) { return isRegistryUpgrading(error); }
 
   // MARK: Gate
 
@@ -255,14 +302,32 @@ export class KachatNamesService {
   // MARK: Manifest
 
   /** The verified registry manifest: kachat-names-testnet-10.json bundled with the app, else the
-   *  indexer's `GET /names/manifest`. Cached once verified. */
+   *  indexer's `GET /names/manifest`. Cached once verified. A registry v1 manifest throws
+   *  `ServiceError.registryUpgrading()` (code "registryUpgrading") and sets `registryUpgrading`;
+   *  a refused bundled manifest is remembered and thrown again without re-reading it. */
   async loadManifest({ allowDryRun = false } = {}) {
     this.requireTestnet();
     if (this.manifest && (allowDryRun || !this.manifest.isDryRun)) return this.manifest;
+    if (this._bundleFailure) throw this._bundleFailure;
     const [data, source] = await this._manifestData();
-    const m = decodeManifest(data);
-    verifyManifest(m);
+    let m;
+    try {
+      m = decodeManifest(data);
+      verifyManifest(m);
+    } catch (error) {
+      // A registry v1 manifest is expected, not an error: say "being upgraded", once, and stop
+      // re-reading the bundle.
+      const upgrading = isRegistryUpgrading(error);
+      const refused = upgrading ? ServiceError.registryUpgrading() : error;
+      if (upgrading) {
+        if (!this.registryUpgrading) this._log(`[KachatNames] the ${source} manifest is registry v1; .kachat waits for the v2 genesis manifest`);
+        this._setRegistryUpgrading(true);
+      }
+      if (source === "bundle") this._bundleFailure = refused;
+      throw refused;
+    }
     if (m.isDryRun && !allowDryRun) throw ServiceError.dryRunManifest();
+    this._setRegistryUpgrading(false);
     this.manifest = m;
     this.manifestSource = source;
     return m;
@@ -272,6 +337,8 @@ export class KachatNamesService {
   resetManifest() {
     this.manifest = null;
     this.manifestSource = null;
+    this._bundleFailure = null;
+    this._setRegistryUpgrading(false);
   }
 
   async _manifestData() {
@@ -353,7 +420,7 @@ export class KachatNamesService {
 
   // MARK: Submit
 
-  /** Submits a signed version-1 core Tx; returns its id. Register and renew carry the price
+  /** Submits a signed version-1 core Tx; returns its id. Register, extend and renew carry the price
    *  (35-8,000 TKAS) as fee on purpose - there is no high-fee guard on this path. */
   async submit(tx) {
     this.requireTestnet();

@@ -63,7 +63,8 @@ function utxo(u) {
 const gapRec = (g) => ({ lo: hx(g.lo), hi: hx(g.hi), value: u64(g.value), utxo: utxo(g.utxo) });
 function nameRec(n) {
   const name = s(n.name);
-  const fields = C.makeNameFields({ key: hx(n.key), paddedName: C.padded(name), owner: hx(n.owner), price: u64(n.price), expiresAt: u64(n.expiresAt) });
+  const fields = C.makeNameFields({ key: hx(n.key), paddedName: C.padded(name), owner: hx(n.owner), price: u64(n.price),
+    periodStart: u64(n.periodStart), expiresAt: u64(n.expiresAt) });
   return { fields, value: u64(n.value), utxo: utxo(n.utxo) };
 }
 function offerRec(o) {
@@ -76,6 +77,7 @@ function build(b, op, env, wallet, args, rec) {
   switch (op) {
     case "commit": return b.commit({ env, wallet, name: s(args.name), salt: hx(args.salt) });
     case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), years: u64(args.years), now: u64(args.now) });
+    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
     case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
     case "transfer": return b.transfer({ env, wallet, name: nameRec(rec.name), newOwner: hx(args.newOwner) });
     case "list": return b.list({ env, wallet, name: nameRec(rec.name), price: u64(args.price) });
@@ -175,6 +177,40 @@ async function main() {
   await r.throws(() => dry.loadManifest(), (e) => e.code === "dryRunManifest", "a dry-run manifest is refused");
   const m = await dry.loadManifest({ allowDryRun: true });
   r.check(m.isDryRun, "allowDryRun loads the vectors' manifest");
+
+  // MARK: registry v1 manifest -> registryUpgrading (Swift d2e0673)
+  const v1Manifest = structuredClone(v.manifest);
+  delete v1Manifest.params.renewWindowMs;
+  const upgradingSvc = new S.KachatNamesService(fakeEngine(), { bundledManifest: v1Manifest });
+  let upgradingEvents = 0;
+  upgradingSvc.onChange((x) => { if (x === upgradingSvc) upgradingEvents += 1; });
+  r.eq(upgradingSvc.registryUpgrading, false, "registryUpgrading starts false");
+  let firstRefusal = null;
+  await r.throws(() => upgradingSvc.loadManifest({ allowDryRun: true }), (e) => {
+    firstRefusal = e;
+    return e instanceof S.ServiceError && e.code === "registryUpgrading" && e.message === S.registryUpgradingMessage;
+  }, "a registry v1 manifest is refused as registryUpgrading");
+  r.eq(upgradingSvc.registryUpgrading, true, "registryUpgrading set");
+  r.eq(upgradingEvents, 1, "onChange announces registryUpgrading");
+  r.check(S.isRegistryUpgrading(firstRefusal) && S.KachatNamesService.isRegistryUpgrading(firstRefusal), "isRegistryUpgrading(ServiceError.registryUpgrading)");
+  r.check(S.isRegistryUpgrading(C.Failure.outdatedRegistry()), "isRegistryUpgrading(Failure.outdatedRegistry)");
+  r.check(!S.isRegistryUpgrading(new C.Failure("manifest: params missing")) && !S.isRegistryUpgrading(S.ServiceError.dryRunManifest()), "isRegistryUpgrading: other errors are failures");
+  // the bundle can't change while the app runs: the refusal is remembered, not re-read
+  upgradingSvc.bundledManifest = v.manifest;
+  await r.throws(() => upgradingSvc.loadManifest({ allowDryRun: true }), (e) => e === firstRefusal, "the refused bundle is not read again");
+  r.eq(upgradingEvents, 1, "registryUpgrading announced once");
+  upgradingSvc.resetManifest();
+  r.eq(upgradingSvc.registryUpgrading, false, "resetManifest clears registryUpgrading");
+  r.check((await upgradingSvc.loadManifest({ allowDryRun: true })).isDryRun && !upgradingSvc.registryUpgrading, "after resetManifest the (new) bundle loads");
+  const v1Hash = structuredClone(v.manifest);
+  v1Hash.artifacts.KachatName.templateHash = M.v1TemplateHashes.KachatName;
+  await r.throws(() => new S.KachatNamesService(fakeEngine(), { bundledManifest: v1Hash }).loadManifest({ allowDryRun: true }),
+    (e) => e.code === "registryUpgrading", "a manifest with the v1 name template is registryUpgrading");
+  const badManifest = structuredClone(v.manifest);
+  badManifest.network = "mainnet";
+  const badSvc = new S.KachatNamesService(fakeEngine(), { bundledManifest: badManifest });
+  await r.throws(() => badSvc.loadManifest({ allowDryRun: true }), (e) => e instanceof C.Failure && !S.isRegistryUpgrading(e), "another manifest failure stays a failure");
+  r.eq(badSvc.registryUpgrading, false, "another manifest failure is not registryUpgrading");
 
   // MARK: environment
   const env0 = await dry.environment({ privateKey: sk, feerate: 50 });
@@ -365,6 +401,80 @@ async function main() {
   r.check(!(sg.address in JSON.parse(mem.get(A.registrationsStorageKey))), "an empty wallet list is dropped from storage");
   unsub();
   reloaded.stop();
+
+  // MARK: actions: extend and renew (Swift 5766c00)
+  r.eq(A.Operation.extend({ name: "x" }, 1).kind, "extend", "Operation.extend kind");
+  r.eq(A.Operation.extend({ name: "x" }, 1).years, 1n, "Operation.extend years is BigInt");
+  r.check(/^Renewal opens on .+/.test(A.ActionError.renewalNotOpen(1_822_000_000_000n).message), "renewalNotOpen message");
+  r.eq(A.ActionError.periodFull(1_822_000_000_000n).renewalOpensMs, 1_822_000_000_000n, "periodFull carries renewalOpensMs");
+  // local time zone, as Swift's DateFormatter: Sep 25 or 26, 2027
+  r.check(/^Sep 2[56], 2027$/.test(A.dayString(1_822_000_000_000n, "en-US")), `dayString: ${A.dayString(1_822_000_000_000n, "en-US")}`);
+  const nameInfoOf = (n, withPeriod = true) => new RS.NameInfo({
+    name: s(n.name), key: hx(n.key), owner: hx(n.owner), price: u64(n.price), expiresAt: u64(n.expiresAt),
+    periodStart: withPeriod ? u64(n.periodStart) : null, outpoint: T.makeOutpoint(hx(n.utxo.txid), num(n.utxo.index)),
+  });
+  /** Actions over a fake node holding the step's name UTXO and wallet, at the step's median time. */
+  const actionsAt = (st, pastMedianTime = u64(st.env.blockTimeMs)) => {
+    const n = nameRec(st.records.name);
+    const nameUtxo = plainOf(n.utxo, S.p2shAddress(n.utxo.entry.script));
+    const coins = st.wallet.map(utxo).map((u) => plainOf(u, s(v.deployer.address)));
+    const engine = {
+      ...fakeEngine({ utxos: [nameUtxo, ...coins], dag: { networkId: "testnet-10", virtualDaaScore: u64(st.env.blockDaa), pastMedianTime } }),
+      address: s(v.deployer.address), privateKeyHex: C.hex(sk),
+    };
+    const svc = new S.KachatNamesService(engine, { bundledManifest: v.manifest });
+    svc.loadManifest = async () => m;
+    const act = new A.KachatNamesActions({ engine, service: svc, registry: registryStub, storage: { get: () => null, set: () => {} } });
+    act.feerate = async () => 100;
+    return act;
+  };
+  const extStep = v.steps.find((x) => x.op === "extend");
+  const renewStep = v.steps.find((x) => x.op === "renew" && x.label.includes("in-window"));
+  if (extStep && renewStep) {
+    const ext = nameInfoOf(extStep.records.name);
+    const extActions = actionsAt(extStep);
+    try {
+      const plan = await extActions.plan(A.Operation.extend(ext, 1n));
+      r.eq(plan.op, s(extStep.label), "actions: extend plans the vector's operation");
+      r.check(plan.unsignedTx.lockTime === 0n && plan.unsignedTx.inputs.every((i) => i.sequence === 0n), "actions: extend lock time 0, sequences 0");
+    } catch (e) { r.check(false, `actions: extend threw ${e.stack || e}`); }
+    await r.throws(() => extActions.plan(A.Operation.extend(ext, 2n)),
+      (e) => e instanceof A.ActionError && e.code === "periodFull" && e.renewalOpensMs === ext.renewOpens(m.params), "actions: extend past the 2-year cap is periodFull");
+    await r.throws(() => extActions.plan(A.Operation.extend(ext, 0n)), (e) => e.code === "periodFull", "actions: extend by 0 is refused");
+    await r.throws(() => extActions.plan(A.Operation.extend(nameInfoOf(extStep.records.name, false), 1n)),
+      (e) => e.code === "periodUnknown", "actions: extend without periodStart is periodUnknown");
+    await r.throws(() => extActions.plan(A.Operation.renew(ext, 1n)),
+      (e) => e.code === "renewalNotOpen" && e.opensMs === ext.renewOpens(m.params) && e.message.startsWith("Renewal opens on "), "actions: renew before the window is renewalNotOpen");
+    await r.throws(() => extActions.plan(A.Operation.transfer(nameInfoOf(extStep.records.name, false), me)),
+      (e) => e.code === "periodUnknown", "actions: a record without periodStart is never spent");
+    const ren = nameInfoOf(renewStep.records.name);
+    const renActions = actionsAt(renewStep);
+    try {
+      const plan = await renActions.plan(A.Operation.renew(ren, 1n));
+      r.eq(plan.op, s(renewStep.label), "actions: renew in the window plans the vector's operation");
+      r.check(plan.unsignedTx.lockTime >= ren.renewOpens(m.params) && plan.unsignedTx.lockTime < u64(renewStep.env.blockTimeMs), "actions: renew lock time in the window, below the median time");
+    } catch (e) { r.check(false, `actions: renew threw ${e.stack || e}`); }
+    // exactly at the opening the median time has not passed it
+    await r.throws(() => actionsAt(renewStep, ren.renewOpens(m.params)).plan(A.Operation.renew(ren, 1n)),
+      (e) => e.code === "renewalNotOpen", "actions: renew at exactly the opening is refused");
+  } else {
+    r.check(false, "no extend / in-window renew step in the vectors");
+  }
+
+  // MARK: the registration driver stops while the registry is being upgraded
+  const drvEngine = { ...fakeEngine(), address: s(v.deployer.address), privateKeyHex: C.hex(sk) };
+  const drvMem = new Map([[A.registrationsStorageKey, JSON.stringify({ [s(v.deployer.address)]: [{ ...rec, id: "d1", stage: A.Stage.waiting }] })]]);
+  const drv = new A.KachatNamesActions({
+    engine: drvEngine, service: upgradingSvc, registry: registryStub, storage: { get: (k) => drvMem.get(k) ?? null, set: (k, val) => drvMem.set(k, val) },
+  });
+  let advanced = 0;
+  drv._advance = async () => { advanced += 1; };
+  upgradingSvc.registryUpgrading = true;
+  drv.resume();
+  await new Promise((res) => setTimeout(res, 20));
+  r.eq(advanced, 0, "driver: no step while registryUpgrading");
+  r.eq(drv._driver, null, "driver: stopped while registryUpgrading");
+  drv.stop();
 
   // MARK: report
   for (const sk2 of r.skipped) console.log(`SKIPPED ${sk2}`);
