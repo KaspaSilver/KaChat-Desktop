@@ -32,7 +32,7 @@ import { templateScript, paramsPrice } from "./manifest.js";
 import { registerNow } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { OfferInfo, Profile, Status } from "./registry-state.js";
-import { KachatNamesService, xonlyKey, fundingUtxos, newSalt } from "./service.js";
+import { KachatNamesService, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
 
 // MARK: - Registration records
 
@@ -353,6 +353,22 @@ export class KachatNamesActions {
 
   /** Writes the address profile (`kchat:1:profile:`): a self-transfer, network fee only.
    *  `profile`: a Profile (registry-state.js) or its plain fields. Returns the txid. */
+  /** What saving `profile` will cost (iOS profileFee): the profile record is a self-transfer from
+   *  the chatting address, so the network fee is all it spends. Estimated the way the save builds
+   *  it (plain coins only, same payload), never sent. BigInt sompi. */
+  async profileFee(profile) {
+    const s = this.signer();
+    const clean = (profile instanceof Profile ? profile : new Profile(profile ?? {})).sanitized();
+    const payload = profileRecordPayload(clean.recordJSON());
+    const utxos = await this.engine.getUtxosWithCovenants([s.address]);
+    const plain = utxos.filter((u) => u.covenantId == null);
+    if (!plain.length) throw new ActionError("noFunds", "No spendable coins without a covenant.");
+    const selected = plain.length === utxos.length ? null : plain.map((u) => `${u.outpoint.transactionId}:${u.outpoint.index}`);
+    const fee = await this.engine.estimatePayloadFeeSompi(payload.length, selected);
+    if (fee == null) throw new ActionError("noQuote", "Couldn't estimate the network fee.");
+    return BigInt(fee);
+  }
+
   async saveProfile(profile) {
     const s = this.signer();
     const clean = (profile instanceof Profile ? profile : new Profile(profile ?? {})).sanitized();

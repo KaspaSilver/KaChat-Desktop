@@ -2,7 +2,7 @@ import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
-import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction } from "./transactions.js";
+import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail } from "./transactions.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
 import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
@@ -1237,6 +1237,19 @@ export class KaspaEngine {
 
   async sendMessageOnchain(details) {
     return sendMessageOnchain({ engine: this, ...details });
+  }
+
+  /** The fee (BigInt sompi) of a 0.2 KAS self-transfer carrying `payloadBytes` of payload, built
+   *  the way the send builds it (optionally only from `selectedOutpoints`); null when unknown.
+   *  Used to quote a .kachat profile record before saving it (iOS profileFee). */
+  async estimatePayloadFeeSompi(payloadBytes = 0, selectedOutpoints = null) {
+    if (!this.kaspa || !this.address) return null;
+    await this.connect();
+    const detail = await estimateOnchainFeeDetail({
+      kaspa: this.kaspa, rpc: this.rpc, withRpc: this.withRpc.bind(this),
+      sourceAddress: this.address, amountKas: "0.2", payloadBytes, selectedOutpoints,
+    });
+    return detail ? detail.feeSompi : null;
   }
 
   async estimateMessageFee(payloadBytes = 0, { singleInput = false } = {}) {

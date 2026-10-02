@@ -325,7 +325,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
 // estimate of the real Kasia COMM payload's byte length for the draft text,
 // since mass (and therefore fee) scales with payload size.
 // Builds the representative tx and returns { feeSompi, massGrams } from the generator summary.
-async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
+export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
   const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
   let { entries } = withRpc
     ? await withRpc(fetchUtxos, { retries: 1, label: "Fee estimate UTXO refresh" })

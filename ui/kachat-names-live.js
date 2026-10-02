@@ -908,6 +908,105 @@ export function liveHubClick(event) {
 // The transaction sheet (KachatTxSheet)
 // ---------------------------------------------------------------------------------------------
 
+/** "X · x.com/handle" for a stored social link, or "None" (iOS KachatProfileSaveSheet.source). */
+function socialSourceText(link, kind) {
+  const source = link ? SocialSource.fromLink(link, kind) : null;
+  if (!source) return "None";
+  return `${SocialPlatform.displayName(source.platform)} · ${SocialPlatform.prefix(source.platform)}${source.displayHandle}`;
+}
+
+/** Review before a profile record goes out (iOS 7e238e5 KachatProfileSaveSheet): what will be
+ *  saved, the network fee - quoted by estimating the record the way the save builds it - and the
+ *  chatting address's balance before and after; then the device lock, then the done sheet. Used by
+ *  Edit .kachat Profile and Set as Primary. `makeProfile` builds the record when the sheet opens. */
+function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onSaved = null, owner = "market" }) {
+  const rt = kachatNames();
+  if (!rt || !kit) return null;
+  const st = { profile: null, fee: null, quoteError: null, sending: false, sendError: null, txId: null, closed: false, layer: null };
+  const body = () => {
+    const p = st.profile;
+    const rows = p ? [
+      formRow("Avatar", socialSourceText(p.avatar, SocialKind.avatar)),
+      formRow("Banner", socialSourceText(p.banner, SocialKind.banner)),
+      formRow("Bio", socialSourceText(p.bio, SocialKind.bio)),
+      formRow("Linktree", p.linktree ? String(p.linktree).replace(/^https:\/\//, "") : "None"),
+      formRow("Primary name", p.primaryName ? `${p.primaryName}.kachat` : "None"),
+    ].join("") : formRow("Your Profile", "", { valueHtml: spinner() });
+    let cost = "";
+    if (st.fee != null) {
+      cost += formRow("Network fee", amountText(st.fee));
+      const balance = walletBalanceSompi();
+      if (balance != null) {
+        cost += formRow("Chatting address balance", amountText(balance));
+        cost += formRow("Balance after", amountText(balance > st.fee ? balance - st.fee : 0n), { bold: true });
+      }
+    } else if (!st.quoteError) {
+      cost += formRow("Network fee", "", { valueHtml: spinner() });
+    }
+    const costFoot = st.quoteError
+      ? footer(st.quoteError, "kl-red")
+      : footer(readPrivacySeen()
+        ? "Saved on chain from your chatting address to itself."
+        : "Profiles are public and on chain: anyone can read them, and earlier versions stay readable after you change them.");
+    const disabled = st.fee == null || !st.profile || st.sending || st.txId;
+    const button = `<button class="kmkt-form-button" type="button" data-kl-psave-confirm ${disabled ? "disabled" : ""}>${st.sending ? spinner() : esc(confirmTitle)}</button>`;
+    return `
+      ${navHtml(title, { leading: { label: "Cancel" } })}
+      <div class="kmkt-sheet-body kmkt-form kl-tx-body">
+        ${section(rows, { header: "Your Profile" })}
+        ${section(cost, { footerHtml: costFoot })}
+        ${section(button, { footerHtml: st.sendError ? footer(st.sendError, "kl-red") : "" })}
+      </div>`;
+  };
+  const render = () => {
+    if (st.closed || !st.layer) return;
+    const sheetEl = st.layer.el.querySelector(".kmkt-sheet");
+    if (sheetEl) sheetEl.innerHTML = body();
+  };
+  const confirm = async () => {
+    if (st.fee == null || !st.profile || st.sending || st.txId) return;
+    if (!(await deviceLock()) || st.closed) return;
+    st.sending = true;
+    st.sendError = null;
+    render();
+    try {
+      const txId = await rt.actions.saveProfile(st.profile);
+      st.txId = txId;
+      writePrivacySeen();
+      identityChanged();
+      openTxDoneSheet({
+        txId, title: doneTitle, owner,
+        onClose: () => {
+          if (st.layer && !st.closed) kit.closeLayer(st.layer);
+          try { onSaved?.(txId); } catch { /* fine */ }
+        },
+      });
+    } catch (error) {
+      st.sendError = errorText(error);
+    }
+    st.sending = false;
+    render();
+  };
+  st.layer = kit.openLayer({
+    owner, kind: "tall", label: title, html: body(),
+    onClick(event) {
+      if (event.target.closest("[data-kl-psave-confirm]")) confirm();
+    },
+    onClose() { st.closed = true; },
+  });
+  (async () => {
+    try {
+      st.profile = await makeProfile();
+      render();
+      st.fee = await rt.actions.profileFee(st.profile);
+    } catch (error) {
+      st.quoteError = errorText(error);
+    }
+    render();
+  })();
+  return st.layer;
+}
+
 /** The chatting address's balance in sompi, or null while unknown. */
 function walletBalanceSompi() {
   try {
@@ -1769,42 +1868,26 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     d.active = false;
   };
 
+  // Set as Primary rewrites the profile record: the same review sheet as saving the profile.
   const setPrimary = async () => {
     const r = rt();
     if (!r || d.primaryWorking) return;
-    const ok = await confirmAsk({
-      title: `Make ${d.info.display} your primary name?`,
-      message: "KaChat shows it as your name. It's saved in your profile record on chain, for a network fee.",
-      confirmLabel: "Set as Primary",
+    openProfileSaveSheet({
+      title: "Set as Primary", confirmTitle: "Set as Primary", doneTitle: "Primary name set",
+      makeProfile: async () => {
+        const { registry, actions } = r;
+        let base = null;
+        const address = actions.myAddress;
+        if (address) {
+          base = (await registry.ownProfile(address))?.profile ?? null;
+          if (!base) { try { base = (await registry.identity(address))?.profile ?? null; } catch { base = null; } }
+        }
+        return new Profile({
+          avatar: base?.avatar ?? null, banner: base?.banner ?? null, bio: base?.bio ?? null,
+          linktree: base?.linktree ?? null, primaryName: d.info.name,
+        });
+      },
     });
-    if (!ok || !(await deviceLock())) return;
-    d.primaryWorking = true;
-    d.primaryMessage = null;
-    d.render();
-    try {
-      const { registry, actions } = r;
-      let base = null;
-      const address = actions.myAddress;
-      if (address) {
-        base = (await registry.ownProfile(address))?.profile ?? null;
-        if (!base) { try { base = (await registry.identity(address))?.profile ?? null; } catch { base = null; } }
-      }
-      const profile = new Profile({
-        avatar: base?.avatar ?? null,
-        banner: base?.banner ?? null,
-        bio: base?.bio ?? null,
-        linktree: base?.linktree ?? null,
-        primaryName: d.info.name,
-      });
-      const txId = await actions.saveProfile(profile);
-      d.primaryMessage = null;
-      identityChanged();
-      openTxDoneSheet({ txId, title: "Primary name set" });
-    } catch (error) {
-      d.primaryMessage = errorText(error);
-    }
-    d.primaryWorking = false;
-    d.render();
   };
 
   /** Clicks inside the detail. True when handled. */
@@ -2530,32 +2613,16 @@ export function openLiveProfileEditor(owner = "profile") {
     for (const k of SOCIAL_KINDS) lookUp(k);
   };
 
+  // Review before the record goes out: what will be saved, the network fee, the balance before and
+  // after (iOS 7e238e5 KachatProfileSaveSheet). Closing its done sheet closes the editor too.
   const save = async () => {
     if (saving || !loaded || blocked()) return;
-    const seen = readPrivacySeen();
-    const ok = await confirmAsk({
-      title: "Save your profile?",
-      message: seen
-        ? "It's written to the chain for a network fee."
-        : "Profiles are public and on chain: anyone can read them, and earlier versions stay readable after you change them. It's written for a network fee.",
-      confirmLabel: "Save",
+    const record = profile();
+    openProfileSaveSheet({
+      title: "Save Profile", confirmTitle: "Save Profile", doneTitle: "Profile saved",
+      makeProfile: async () => record,
+      onSaved: (txId) => { savedTx = txId; if (layer) kit.closeLayer(layer); },
     });
-    if (!ok) return;
-    writePrivacySeen();
-    if (!(await deviceLock()) || closed || blocked()) return;
-    saving = true;
-    error = null;
-    renderChrome();
-    try {
-      savedTx = await rt.actions.saveProfile(profile());
-      identityChanged();
-      // The done sheet; closing it closes the editor (iOS 0870fcc).
-      openTxDoneSheet({ txId: savedTx, title: "Profile saved", onClose: () => { if (layer) kit.closeLayer(layer); } });
-    } catch (e) {
-      error = errorText(e);
-    }
-    saving = false;
-    renderChrome();
   };
 
   const onPlatform = (select) => {
