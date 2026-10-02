@@ -841,6 +841,9 @@ function senderName(address) {
   // A .kas name is no one's identity (iOS 509c0fe): the name you gave them, else the address.
   const contactName = deps.contactNameFor?.(address);
   if (contactName) return contactName;
+  // Testnet (iOS e52357d): their .kachat name when you haven't named them (null elsewhere).
+  const identityName = deps.identityNameFor?.(address);
+  if (identityName) return identityName;
   return deps.shortAddress(address);
 }
 
@@ -2188,6 +2191,15 @@ export function refreshBroadcasts() {
   renderChannelList();
   if (activeChannel) renderRoom();
   syncScanWanted();
+}
+
+/** Repaints the names and avatars on screen (the room list and the open room) after an identity
+ *  changed - no reload, no polling. */
+export function repaintBroadcastIdentities() {
+  if (!deps) return;
+  try { renderChannelList(); } catch { /* list not mounted */ }
+  if (!activeChannel) return;
+  try { renderRoom(); } catch { /* room not mounted */ }
 }
 
 export function resetBroadcastsForAccount() {

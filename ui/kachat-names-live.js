@@ -2399,6 +2399,264 @@ export async function kachatHeroProfile(address) {
   return { avatarUrl: avatarUrl ?? null, bannerUrl: bannerUrl ?? null, bio: bio ?? null, linktreeUrl: p.linktree ?? null };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Cached identities: who an address is, readable from any render (iOS e52357d,
+// KachatNamesRegistry.cachedIdentity(for:)). Testnet only, `kaspatest:` addresses only.
+// ---------------------------------------------------------------------------------------------
+
+/** An answer is re-asked after this long, or as soon as the registry's revision moved. */
+const IDENTITY_MAX_AGE_MS = 300_000;
+/** A lookup that failed is tried again after this long (unless the registry moves first). */
+const IDENTITY_RETRY_MS = 60_000;
+/** Listeners hear about a batch of answers at most this often. */
+const IDENTITY_NOTIFY_MS = 200;
+const IDENTITY_CACHE_MAX = 2000;
+const SOCIAL_CACHE_MAX = 500;
+const IMAGE_CACHE_MAX = 300;
+
+/** lowercased address -> { identity: {address,label,names,profile}|null, sig, revision, at } */
+const cachedIdentities = new Map();
+/** addresses with a lookup in flight (one each) */
+const identityLookups = new Set();
+const identityListeners = new Set();
+let identityNotifyTimer = null;
+let identityWatching = null;
+/** a social link (as the resolver keys it) -> { profile: SocialProfile|null, loading, at } */
+const cachedSocial = new Map();
+/** a resolved image URL -> { src: string|null, state: "ready"|"loading"|"retrying"|"relayed"|"failed", referer } */
+const cachedImages = new Map();
+
+function scheduleIdentityNotify() {
+  if (identityNotifyTimer != null || identityListeners.size === 0) return;
+  identityNotifyTimer = setTimeout(() => {
+    identityNotifyTimer = null;
+    for (const fn of [...identityListeners]) { try { fn(); } catch { /* a listener's own problem */ } }
+  }, IDENTITY_NOTIFY_MS);
+}
+
+function trimMap(map, max) {
+  while (map.size > max) map.delete(map.keys().next().value);
+}
+
+const socialSig = (p) => (p ? JSON.stringify([p.avatar ?? null, p.banner ?? null, p.bio ?? null]) : "");
+
+/** Watches the registry (a new revision may change any label) and the social resolver (a lookup
+ *  landing changes a picture or a bio) once per registry. */
+function watchIdentitySources(registry) {
+  if (identityWatching === registry) return;
+  identityWatching = registry;
+  try { registry.onChange?.(() => scheduleIdentityNotify()); } catch { /* fine */ }
+  try {
+    socialImages().onChange((link, profile) => {
+      const entry = cachedSocial.get(link);
+      if (!entry) return;
+      entry.at = Date.now();
+      if (socialSig(entry.profile) === socialSig(profile)) return;
+      entry.profile = profile ?? null;
+      scheduleIdentityNotify();
+    });
+  } catch { /* fine */ }
+}
+
+/** The identity as the app shows it: the label, the active names and the profile record (this
+ *  wallet's own saved one first). Null when nothing is known. */
+function normalizedIdentity(key, identity, ownProfile) {
+  const raw = ownProfile ?? identity?.profile ?? null;
+  let profile = null;
+  if (raw) {
+    try { profile = (raw instanceof Profile ? raw : new Profile(raw)).sanitized(); } catch { profile = null; }
+  }
+  const label = typeof identity?.label === "string" && identity.label ? identity.label : null;
+  const names = Array.isArray(identity?.names) ? identity.names.filter((n) => typeof n === "string" && n) : [];
+  if (!label && names.length === 0 && !profile) return null;
+  return { address: key, label, names, profile };
+}
+
+function identitySig(identity) {
+  if (!identity) return "";
+  let profile = null;
+  try { profile = identity.profile?.toJSON?.() ?? identity.profile ?? null; } catch { profile = null; }
+  return JSON.stringify([identity.label, identity.names, profile]);
+}
+
+/** One background lookup for `key`; listeners hear about it only when the answer changed. */
+async function lookUpIdentity(registry, key) {
+  identityLookups.add(key);
+  try {
+    try { await registry.refreshIfStale({ maxAge: IDENTITY_MAX_AGE_MS / 1000 }); } catch { /* use what we have */ }
+    let identity = null;
+    let failed = false;
+    try { identity = await registry.identity(key); } catch { failed = true; }
+    let own = null;
+    try { own = (await registry.ownProfile(key))?.profile ?? null; } catch { own = null; }
+    const prev = cachedIdentities.get(key) ?? null;
+    if (failed && !own) {
+      // Keep what we had; ask again in a minute rather than on every render.
+      cachedIdentities.set(key, {
+        identity: prev?.identity ?? null, sig: prev?.sig ?? "", revision: registry.revision,
+        at: Date.now() - IDENTITY_MAX_AGE_MS + IDENTITY_RETRY_MS,
+      });
+      return;
+    }
+    const next = normalizedIdentity(key, failed ? prev?.identity : identity, own);
+    const sig = identitySig(next);
+    cachedIdentities.delete(key);
+    cachedIdentities.set(key, { identity: next, sig, revision: registry.revision, at: Date.now() });
+    trimMap(cachedIdentities, IDENTITY_CACHE_MAX);
+    if (sig !== (prev?.sig ?? "")) scheduleIdentityNotify();
+  } finally {
+    identityLookups.delete(key);
+  }
+}
+
+/**
+ * The `.kachat` identity of `address` - `{ address, label, names, profile }` - from a cache that
+ * fills in the background, so any render can call it (iOS KachatNamesRegistry.cachedIdentity).
+ * An answer is re-asked once the registry's revision moved or after five minutes (one lookup in
+ * flight per address); this wallet's own saved profile always wins for its own address. Listeners
+ * of onKachatIdentityChange hear when an answer lands. Null on mainnet, for a non-`kaspatest:`
+ * address, or while nothing is known.
+ */
+export function kachatCachedIdentity(address) {
+  const rt = kachatNames();
+  if (!rt || !address) return null;
+  const key = String(address).trim().toLowerCase();
+  if (!key.startsWith("kaspatest:")) return null;
+  const { registry } = rt;
+  watchIdentitySources(registry);
+  const entry = cachedIdentities.get(key);
+  const stale = !entry || entry.revision !== registry.revision || Date.now() - entry.at > IDENTITY_MAX_AGE_MS;
+  if (stale && !identityLookups.has(key)) lookUpIdentity(registry, key);
+  return entry?.identity ?? null;
+}
+
+/** The address's `.kachat` name ("alice.kachat"), or null. */
+export function kachatCachedLabel(address) {
+  const label = kachatCachedIdentity(address)?.label;
+  return label ? `${label}.kachat` : null;
+}
+
+/** The social profile a link shows, as far as this device knows it right now (sync); asks the
+ *  resolver behind it (cached 24 h there) when there is no answer here or it is old. */
+function cachedSocialProfile(link) {
+  if (!link) return null;
+  let key = null;
+  try { key = SocialSource.fromLink(String(link), SocialKind.avatar)?.link ?? null; } catch { key = null; }
+  if (!key) return null;
+  let entry = cachedSocial.get(key);
+  if (!entry || (!entry.loading && Date.now() - entry.at > IDENTITY_MAX_AGE_MS)) {
+    if (!entry) {
+      entry = { profile: null, loading: false, at: 0 };
+      cachedSocial.set(key, entry);
+      trimMap(cachedSocial, SOCIAL_CACHE_MAX);
+    }
+    const target = entry;
+    target.loading = true;
+    target.at = Date.now();
+    socialImages().profile(key).then((p) => {
+      target.loading = false;
+      target.at = Date.now();
+      if (p && socialSig(target.profile) !== socialSig(p)) {
+        target.profile = p;
+        scheduleIdentityNotify();
+      }
+    }, () => { target.loading = false; target.at = Date.now(); });
+  }
+  return entry.profile;
+}
+
+/** A src for a resolved picture right now (sync), or null until it can be loaded. Hosts that
+ *  serve a page's <img> load directly; the others (Facebook) through the relay, in the background. */
+function cachedImageSrc(url, referer) {
+  const safe = httpsImageUrl(url);
+  if (!safe) return null;
+  let entry = cachedImages.get(safe);
+  if (!entry) {
+    let host = "";
+    try { host = new URL(safe).hostname; } catch { return null; }
+    if (!SOCIAL_RELAY_IMAGE_HOST_RE.test(host)) {
+      entry = { src: safe, state: "ready", referer: referer ?? null };
+      cachedImages.set(safe, entry);
+    } else {
+      entry = { src: null, state: "loading", referer: referer ?? null };
+      cachedImages.set(safe, entry);
+      const target = entry;
+      kachatImageSrc(safe, { referer }).then((src) => {
+        target.src = src ?? null;
+        target.state = src ? "relayed" : "failed";
+        if (src) scheduleIdentityNotify();
+      }, () => { target.state = "failed"; });
+    }
+    trimMap(cachedImages, IMAGE_CACHE_MAX);
+  }
+  return entry.src;
+}
+
+/**
+ * For an <img> showing a src from kachatCachedAvatarUrl / kachatCachedProfilePieces that failed
+ * to load: one retry through the relay. -> Promise<string|null>, the src to try next, or null
+ * (show the glyph). Later reads of the cache return the same answer, so a re-render never asks
+ * again.
+ */
+export async function kachatRetryImage(src) {
+  if (!src) return null;
+  let url = null;
+  let entry = null;
+  for (const [u, e] of cachedImages) {
+    if (e.src === src) { url = u; entry = e; break; }
+  }
+  if (!entry) return null;
+  if (entry.state !== "ready") {
+    if (entry.state === "relayed" || entry.state === "retrying") { entry.src = null; entry.state = "failed"; }
+    return null;
+  }
+  entry.state = "retrying";
+  let next = null;
+  try { next = await kachatImageSrc(url, { viaRelay: true, referer: entry.referer }); } catch { next = null; }
+  entry.src = next && next !== src ? next : null;
+  entry.state = entry.src ? "relayed" : "failed";
+  scheduleIdentityNotify();
+  return entry.src;
+}
+
+/** The address's `.kachat` avatar, ready for <img src> (render with referrerpolicy="no-referrer";
+ *  on an error, kachatRetryImage). Null until its profile and its picture are resolved - reading it
+ *  starts that in the background. */
+export function kachatCachedAvatarUrl(address) {
+  const link = kachatCachedIdentity(address)?.profile?.avatar;
+  if (!link) return null;
+  const url = cachedSocialProfile(link)?.piece(SocialKind.avatar) ?? null;
+  return url ? cachedImageSrc(url, link) : null;
+}
+
+/** The address's `.kachat` profile as User Info shows it, best effort and sync: `{ avatarUrl,
+ *  bannerUrl, bio, linktreeUrl }` (any piece may be null). Null on mainnet. */
+export function kachatCachedProfilePieces(address) {
+  if (!kachatNames()) return null;
+  const profile = kachatCachedIdentity(address)?.profile ?? null;
+  const pieces = { avatarUrl: null, bannerUrl: null, bio: null, linktreeUrl: null };
+  if (!profile) return pieces;
+  if (profile.avatar) {
+    const url = cachedSocialProfile(profile.avatar)?.piece(SocialKind.avatar) ?? null;
+    pieces.avatarUrl = url ? cachedImageSrc(url, profile.avatar) : null;
+  }
+  if (profile.banner) {
+    const url = cachedSocialProfile(profile.banner)?.piece(SocialKind.banner) ?? null;
+    pieces.bannerUrl = url ? cachedImageSrc(url, profile.banner) : null;
+  }
+  if (profile.bio) pieces.bio = cachedSocialProfile(profile.bio)?.piece(SocialKind.bio) ?? null;
+  pieces.linktreeUrl = Profile.linktreeLink(profile.linktree) ?? null;
+  return pieces;
+}
+
+/** Calls `fn()` (debounced) whenever a cached identity, profile piece or picture changed, or the
+ *  registry moved on. Returns the unsubscribe function. */
+export function onKachatIdentityChange(fn) {
+  if (typeof fn !== "function") return () => {};
+  identityListeners.add(fn);
+  return () => identityListeners.delete(fn);
+}
+
 /** An <img> for a resolved picture, filled in by hydrateSocialImages (never a fetched page's HTML). */
 function socialImgHtml(url, cls, referer) {
   const safe = httpsImageUrl(url);

@@ -2971,6 +2971,11 @@
                otherwise. Showing all three stacked was the old shape. -->
           <span class="chat-info-address-caption" data-chat-info-address-caption></span>
           <p class="chat-info-bio" data-chat-info-bio hidden title="Click to expand"></p>
+          <!-- Testnet: the .kachat profile's Linktree link (iOS e52357d). -->
+          <a class="chat-info-linktree" data-chat-info-linktree href="#" target="_blank" rel="noopener noreferrer" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg>
+            <span data-chat-info-linktree-text></span>
+          </a>
           <!-- The profile's links live behind a disclosure (iOS's "More Info" DisclosureGroup).
                Seven always-open rows pushed everything below them off the card for a contact who
                had filled them all in. -->
@@ -3004,6 +3009,12 @@
           <button class="chat-info-row" type="button" data-chat-info-sheet="domains" data-chat-info-domains-row disabled>
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 -2.2A9 9 0 1 0 17.5 19"/></svg>
             <span class="chat-info-row-title">KNS Domains</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <!-- Testnet: the address's .kachat names, its primary marked (iOS e52357d). -->
+          <button class="chat-info-row" type="button" data-chat-info-sheet="kachat-names" data-chat-info-kachat-names-row hidden disabled>
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 -2.2A9 9 0 1 0 17.5 19"/></svg>
+            <span class="chat-info-row-title">.kachat Names</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="aliases">
@@ -3054,6 +3065,9 @@
 
             <section data-chat-info-panel="domains" hidden>
               <div class="settings-list-card chat-info-domains-card" data-chat-info-domains></div>
+            </section>
+            <section data-chat-info-panel="kachat-names" hidden>
+              <div class="settings-list-card chat-info-domains-card" data-chat-info-kachat-names></div>
             </section>
 
             <section data-chat-info-panel="aliases" hidden>

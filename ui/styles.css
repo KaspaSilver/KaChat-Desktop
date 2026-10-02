@@ -12524,3 +12524,13 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .profile-hero-linktree[hidden] { display: none !important; }
 .profile-hero-linktree svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .profile-hero-linktree:hover { text-decoration: underline; }
+
+/* ==== Testnet User Info (iOS e52357d): the .kachat banner as an <img> (no referrer), the
+   profile's Linktree link under the bio. ==== */
+.chat-info-banner:has(> .chat-info-banner-img) { overflow: hidden; }
+.chat-info-banner-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.chat-info-linktree { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; font-weight: 600; color: var(--kaspa-ink); text-decoration: none; max-width: 100%; }
+.chat-info-linktree[hidden] { display: none !important; }
+.chat-info-linktree span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-info-linktree svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.chat-info-linktree:hover { text-decoration: underline; }

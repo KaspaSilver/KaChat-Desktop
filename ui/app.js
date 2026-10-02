@@ -3,10 +3,10 @@ import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwo
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc } from "./kachat-names-live.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage } from "./kachat-names-live.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
@@ -1140,7 +1140,7 @@ function buildInternalLinkCard(link) {
   const title = isPost
     ? (entry?.authorName || "KaPosts post")
     : isProfile
-      ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : shortAddress(link.address)))
+      ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : (IS_TESTNET ? identityNameForAddress(link.address) : shortAddress(link.address))))
       : `#${link.channel}`;
   const subtitle = isPost
     ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
@@ -1454,6 +1454,7 @@ function mentionDisplayLabel(address) {
   if (address === engine.address) return "You";
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return displayNameForAddress(contact);
+  if (IS_TESTNET) return identityNameForAddress(address);
   return shortAddress(address);
 }
 
@@ -1971,9 +1972,61 @@ function updateConversationBio() {
 function personGlyphSvg() {
   return '<svg class="avatar-person-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12.2a4.6 4.6 0 1 0 0-9.2 4.6 4.6 0 0 0 0 9.2Zm0 1.9c-4.6 0-8.3 2.5-8.3 5.6V21h16.6v-1.3c0-3.1-3.7-5.6-8.3-5.6Z"/></svg>';
 }
+/// Testnet (iOS e52357d, KNSAvatarView): an address's avatar is its .kachat one - the profile's
+/// avatar social link, resolved on this device - never the KNS picture. An <img> for an avatar
+/// span, or "" while none is known (the cache fills in the background and the visible screens
+/// repaint on onKachatIdentityChange). A failed load retries once through the relay, then shows
+/// the glyph (handleKachatImageError).
+function kachatAvatarImgHtml(address, attrs = "") {
+  if (!IS_TESTNET || !address) return "";
+  const src = kachatCachedAvatarUrl(address);
+  if (!src) return "";
+  return `<img src="${escapeHtml(src)}" alt="" referrerpolicy="no-referrer" data-kachat-img="inline"${attrs} />`;
+}
+function kachatAvatarSpanHtml(address, className) {
+  const img = kachatAvatarImgHtml(address);
+  return img ? `<span class="${className}">${img}</span>` : `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
+}
+/// A .kachat picture that would not load, even through the relay: an avatar span goes back to the
+/// glyph, a persistent avatar <img> hides (its initials sibling shows), a banner hides.
+function kachatImageFailed(img) {
+  const kind = img.dataset.kachatImg;
+  if (kind === "element") {
+    img.hidden = true;
+    img.removeAttribute("src");
+    if (img.previousElementSibling) img.previousElementSibling.hidden = false;
+    return;
+  }
+  if (kind === "banner") {
+    const banner = img.closest("[data-chat-info-banner]");
+    img.remove();
+    if (banner) banner.hidden = true;
+    return;
+  }
+  const holder = img.parentElement;
+  img.remove();
+  if (holder && !holder.querySelector("img")) {
+    holder.classList.add("avatar-fallback");
+    holder.innerHTML = personGlyphSvg();
+  }
+}
+function handleKachatImageError(event) {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.hasAttribute("data-kachat-img")) return;
+  const failed = img.getAttribute("src") || "";
+  if (!failed || img.dataset.kachatRetried === failed) { kachatImageFailed(img); return; }
+  img.dataset.kachatRetried = failed;
+  kachatRetryImage(failed).then((next) => {
+    if (!img.isConnected || img.getAttribute("src") !== failed) return;
+    if (next) { img.dataset.kachatRetried = next; img.src = next; } else kachatImageFailed(img);
+  }, () => kachatImageFailed(img));
+}
+if (IS_TESTNET) document.addEventListener("error", handleKachatImageError, true);
 function avatarHtmlFor(contact, className = "chat-avatar") {
   // A user-assigned photo wins over the live KNS avatar, which wins over initials.
   if (contact?.photo) return `<span class="${className}"><img src="${escapeHtml(contact.photo)}" alt="" /></span>`;
+  // Testnet: the .kachat face, never the KNS one.
+  if (IS_TESTNET) return kachatAvatarSpanHtml(contact?.address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
@@ -1984,6 +2037,8 @@ function avatarHtmlFor(contact, className = "chat-avatar") {
 // initials. There's always something to show, even with no KNS profile at all.
 function selfAvatarHtml(className = "chat-avatar") {
   if (!engine.address) return `<span class="${className}">?</span>`;
+  // Testnet: your .kachat face (your own saved profile first), never the KNS one.
+  if (IS_TESTNET) return kachatAvatarSpanHtml(engine.address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(engine.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   const name = activeAccountMetadata()?.name || shortAddress(engine.address);
@@ -1993,6 +2048,22 @@ function selfAvatarHtml(className = "chat-avatar") {
 function updateAvatarElement(initialsEl, imageEl, contact) {
   if (initialsEl) initialsEl.innerHTML = personGlyphSvg();
   if (!imageEl) return;
+  // Testnet: the contact's photo, else their .kachat face - never the KNS one.
+  if (IS_TESTNET) {
+    const photo = contact?.photo || "";
+    const kachatSrc = photo ? "" : (kachatCachedAvatarUrl(contact?.address) || "");
+    const next = photo || kachatSrc;
+    if (next) {
+      if (kachatSrc) { imageEl.referrerPolicy = "no-referrer"; imageEl.dataset.kachatImg = "element"; } else delete imageEl.dataset.kachatImg;
+      if (imageEl.getAttribute("src") !== next) imageEl.src = next;
+      imageEl.hidden = false;
+    } else {
+      delete imageEl.dataset.kachatImg;
+      imageEl.hidden = true;
+      imageEl.src = "";
+    }
+    return;
+  }
   // User-assigned photo takes priority over the live KNS avatar.
   const src = contact?.photo || engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
   if (src) {
@@ -2475,7 +2546,18 @@ function shortAddress(address) {
 function displayNameForAddress(contact) {
   if (!contact) return "";
   if (contact.nameIsCustom) return contact.name || shortAddress(contact.address);
+  // Testnet (iOS e52357d, ContactsManager.displayName): your name for them, else their .kachat
+  // name, else the stored default (their short address) - KNS is never consulted there.
+  if (IS_TESTNET) return kachatCachedLabel(contact.address) || contact.name || shortAddress(contact.address);
   return knsDomainForAddress(contact.address) || contact.name || shortAddress(contact.address);
+}
+
+/// Who an address is when you haven't named it (iOS ContactsManager.identityName, e52357d): on
+/// testnet its .kachat name, elsewhere its KNS domain (when .kas names are identity), else the
+/// short address. For an address with no contact record; with one, use displayNameForAddress.
+function identityNameForAddress(address) {
+  if (IS_TESTNET) return kachatCachedLabel(address) || shortAddress(address);
+  return knsDomainForAddress(address) || shortAddress(address);
 }
 
 /// The KNS name to show for an address, matching iOS's ContactsManager.displayName.
@@ -2495,8 +2577,8 @@ function displayNameForAddress(contact) {
 /// profile content - and "most recently created" would misrepresent who someone is.
 function knsDomainForAddress(address) {
   // A .kas name is no one's identity in KaChat (iOS 509c0fe): with no .kachat name, people read as
-  // the name you gave them, else their address.
-  if (!address || !engine.knsNamesAsIdentity) return null;
+  // the name you gave them, else their address. On testnet identity is .kachat only (iOS e52357d).
+  if (!address || IS_TESTNET || !engine.knsNamesAsIdentity) return null;
   const info = engine.peekKnsAddressInfo?.(address);
   if (info?.explicitPrimaryDomain) return info.explicitPrimaryDomain;
   return engine.peekKnsAddressProfile?.(address)?.domainName || null;
@@ -5380,6 +5462,65 @@ function applyKachatHeroProfile(hero) {
   }
   if (bioEl && current.bio) { bioEl.hidden = false; bioEl.textContent = current.bio; }
 }
+/// Testnet (iOS e52357d): when a cached .kachat answer lands (a name, a face, a bio), repaint what
+/// is on screen - the chat list, the open chat's header (and its messages when a face in them
+/// changed), the open group's messages, the open User Info and the public rooms. At most once a
+/// second; nothing here starts a lookup that is not already bounded by the cache (one in flight per
+/// address, re-asked only when the registry moves or after five minutes). State lives on the
+/// function objects (this runs before later declarations init).
+function installKachatIdentityRepaint() {
+  if (!IS_TESTNET || installKachatIdentityRepaint.done) return;
+  installKachatIdentityRepaint.done = true;
+  onKachatIdentityChange(() => scheduleKachatIdentityRepaint());
+}
+function scheduleKachatIdentityRepaint() {
+  if (scheduleKachatIdentityRepaint.timer) return;
+  const wait = Math.max(0, 1000 - (Date.now() - (scheduleKachatIdentityRepaint.at || 0)));
+  scheduleKachatIdentityRepaint.timer = window.setTimeout(() => {
+    scheduleKachatIdentityRepaint.timer = null;
+    scheduleKachatIdentityRepaint.at = Date.now();
+    try { repaintKachatIdentities(); } catch (error) { appendEngineLog(`.kachat repaint failed: ${error?.message || error}`); }
+  }, wait);
+}
+function repaintKachatIdentities() {
+  if (!engine.address) return;
+  // The list (renderChats also draws the groups tab). On a narrow layout renderChats closes the
+  // open thread, so it waits until the thread is closed.
+  if (isWideLayout || !activeConversationId) renderChats();
+  renderMessageRequestsSheet();
+  if (activeConversationId) {
+    const entry = state.conversations.find((item) => item.id === activeConversationId);
+    const contact = contactForConversation(entry);
+    if (entry && contact) {
+      conversationName.textContent = displayNameForAddress(contact);
+      updateAvatarElement(conversationAvatarInitials, conversationAvatarImage, contact);
+      // The thread is rebuilt only when a face in it changed (its avatars are the only identity
+      // it draws); a rebuild per answer would be wasted work.
+      const sig = `${entry.id}|${avatarHtmlFor(contact, "message-avatar")}|${selfAvatarHtml("message-avatar")}`;
+      if (repaintKachatIdentities.threadSig !== sig) {
+        repaintKachatIdentities.threadSig = sig;
+        renderMessages(entry);
+      }
+    }
+  }
+  if (activeGroupId) {
+    const group = getGroupManager()?.getGroup(activeGroupId);
+    const sig = `${activeGroupId}|${(group?.members || []).map((m) => `${groupSenderLabel(m.address)}:${memberAvatarHtml(m.address, "message-avatar")}`).join(",")}`;
+    if (repaintKachatIdentities.groupSig !== sig) {
+      repaintKachatIdentities.groupSig = sig;
+      renderGroupMessages();
+    }
+  }
+  if (chatInfoOverlay && !chatInfoOverlay.hidden && chatInfoContactAddress) {
+    const contact = state.contacts.find((entry) => entry.address === chatInfoContactAddress)
+      || (chatInfoContactAddress === engine.address
+        ? { id: "self-transient", name: shortAddress(engine.address), nameIsCustom: false, address: engine.address }
+        : null);
+    paintChatInfoKachat(contact);
+  }
+  try { repaintBroadcastIdentities(); } catch { /* rooms not started */ }
+}
+
 // A background refresh of a social profile repaints the hero.
 try { onKachatSocialChange(() => { refreshKachatIdentity.at = 0; if (engine.address) refreshKachatIdentity(); }); } catch { /* mainnet / not ready */ }
 
@@ -5407,6 +5548,18 @@ function updateProfileHero(info, profileInfo) {
   // Linktree link) comes first; the KNS one otherwise (iOS ad32798, 1322216). Applied after the
   // KNS paint so a KNS refresh never overwrites it.
   window.setTimeout(() => applyKachatHeroProfile(refreshKachatIdentity.hero), 0);
+  // Testnet (iOS e52357d): no KNS fallback at all - no KNS banner, avatar or bio. What the .kachat
+  // profile paints (applyKachatHeroProfile) is left alone here, so a refresh never flashes it.
+  if (IS_TESTNET) {
+    const hero = refreshKachatIdentity.hero?.address === engine.address ? refreshKachatIdentity.hero : null;
+    if (bioEl && !hero?.bio) { bioEl.hidden = true; bioEl.textContent = ""; }
+    if (bannerEl && !hero?.bannerUrl) bannerEl.style.backgroundImage = "";
+    if (avatarEl && !hero?.avatarUrl && avatarEl.dataset.avatarUrl !== "") {
+      avatarEl.dataset.avatarUrl = "";
+      avatarEl.innerHTML = `<svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>`;
+    }
+    return;
+  }
   const bio = profileInfo?.profile?.bio || "";
   if (bioEl) { bioEl.hidden = !bio; bioEl.textContent = bio; }
   const bannerUrl = profileInfo?.profile?.bannerUrl || "";
@@ -9075,7 +9228,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 88;
+const APP_BUILD = 89;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12752,12 +12905,13 @@ function renderCreateChatPicker() {
 
   const chosen = createChatEffectiveAddress();
   list.innerHTML = rows.map((row) => {
-    const avatarUrl = engine.peekKnsAddressProfile?.(row.address)?.profile?.avatarUrl || "";
+    const avatarUrl = IS_TESTNET ? "" : (engine.peekKnsAddressProfile?.(row.address)?.profile?.avatarUrl || "");
+    const kachatImg = IS_TESTNET ? kachatAvatarImgHtml(row.address) : "";
     return `
       <button type="button" class="create-chat-picker-row${row.address === chosen ? " picked" : ""}" data-create-chat-pick="${escapeHtml(row.address)}">
-        <span class="create-chat-picker-avatar">${avatarUrl
+        <span class="create-chat-picker-avatar">${kachatImg || (avatarUrl
           ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
-          : personGlyphSvg()}</span>
+          : personGlyphSvg())}</span>
         <span class="create-chat-picker-copy">
           <span class="create-chat-picker-name">${escapeHtml(row.name)}</span>
           <span class="create-chat-picker-sub">${escapeHtml(createChatPickerSubtitle(row))}</span>
@@ -12776,7 +12930,7 @@ function buildCreateChatPickerRows(addresses, { known, youFollow, followsYou }) 
       return {
         address,
         name: contact ? displayNameForAddress(contact)
-          : (knsDomainForAddress(address) || shortAddress(address)),
+          : identityNameForAddress(address),
         isContact: known.has(address),
         youFollow: youFollow.has(address),
         followsYou: followsYou.has(address),
@@ -13742,14 +13896,15 @@ function openConversation(conversationId) {
   // KNS data has ever been fetched for this address — refresh in the
   // background and update it once real data lands, same idea as the chat
   // list's own background refresh.
-  if (!engine.peekKnsAddressInfo(contact.address)) {
+  // Testnet: identity is .kachat (the header repaints on onKachatIdentityChange); KNS isn't asked.
+  if (!IS_TESTNET && !engine.peekKnsAddressInfo(contact.address)) {
     engine.fetchKnsAddressInfo(contact.address).then(() => {
       const nameChanged = applyKnsPrimaryDomainToContact(contact);
       if (nameChanged) { persistState(); renderChats(); }
       if (activeConversationId === conversationId) conversationName.textContent = displayNameForAddress(contact);
     }).catch(() => {});
   }
-  if (!engine.peekKnsAddressProfile(contact.address)) {
+  if (!IS_TESTNET && !engine.peekKnsAddressProfile(contact.address)) {
     engine.fetchKnsAddressProfile(contact.address).then(() => {
       if (activeConversationId === conversationId) {
         updateAvatarElement(conversationAvatarInitials, conversationAvatarImage, contact);
@@ -13799,7 +13954,8 @@ function openChatInfoForAddress(address) {
   }
   if (!contact) {
     const createdAt = Date.now();
-    const name = groupSenderLabel(address) || shortAddress(address);
+    // Testnet: the stored default is the short address; their .kachat name is read live on top.
+    const name = (IS_TESTNET ? shortAddress(address) : groupSenderLabel(address)) || shortAddress(address);
     contact = {
       id: nowId(),
       name,
@@ -13861,6 +14017,17 @@ function openChatInfoFor(contact, conversationEntry) {
   if (chatInfoPhotoPick) chatInfoPhotoPick.hidden = isSelf;
   if (isSelf && chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = true;
   if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
+  // Testnet (iOS e52357d): the field holds only YOUR name for them. With none it is empty and its
+  // placeholder says who they are (their .kachat name), so Save never turns a default name into a
+  // custom one that would hide their .kachat name. Your own card's title is your .kachat name.
+  if (IS_TESTNET && chatInfoNameInput) {
+    chatInfoNameInput.placeholder = "Name";
+    if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || displayNameForAddress(contact);
+    else if (!contact.nameIsCustom) {
+      chatInfoNameInput.value = "";
+      chatInfoNameInput.placeholder = displayNameForAddress(contact);
+    }
+  }
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
   if (chatInfoAdded) chatInfoAdded.textContent = contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : "—";
@@ -13921,6 +14088,8 @@ function openChatInfoFor(contact, conversationEntry) {
 // latest primary-domain metadata — matches iOS's ChatInfoView.task.
 async function refreshChatInfoKnsSections(contact) {
   const token = ++chatInfoRequestToken;
+  // Testnet (iOS e52357d): identity is .kachat - no KNS profile fetch, pictures, bio or domains.
+  if (IS_TESTNET) { paintChatInfoKachat(contact); return; }
   const [info, profileInfo] = await Promise.all([
     engine.fetchKnsAddressInfo(contact.address).catch(() => null),
     engine.fetchKnsAddressProfile(contact.address).catch(() => null),
@@ -13954,6 +14123,108 @@ async function refreshChatInfoKnsSections(contact) {
     Array.isArray(info?.allDomains) ? info.allDomains : [],
     profileInfo?.domainName || info?.primaryDomain || null,
   );
+}
+
+/// Testnet User Info (iOS e52357d, ChatInfoView): the .kachat banner, avatar, bio (click to expand,
+/// right-click to copy) and Linktree link, your .kachat name as your own card's title, and a
+/// ".kachat Names" card listing the address's active names with its primary marked - all read from
+/// the cached identity (kachat-names-live.js) and repainted as answers land (onKachatIdentityChange).
+/// A photo you gave them still wins over the .kachat avatar. Someone else's profile needs the names
+/// indexer; without one only their label (and names) show.
+function paintChatInfoKachat(contact) {
+  if (!IS_TESTNET || !contact || chatInfoContactAddress !== contact.address) return;
+  const address = contact.address;
+  const isSelf = Boolean(engine.address) && address === engine.address;
+  const identity = kachatCachedIdentity(address);
+  const pieces = kachatCachedProfilePieces(address) || {};
+  const label = identity?.label || null;
+  const allNames = identity?.names || [];
+  const names = label && allNames.includes(label) ? [label, ...allNames.filter((n) => n !== label)] : allNames;
+
+  if (chatInfoNameInput) {
+    if (isSelf) chatInfoNameInput.value = label ? `${label}.kachat` : displayNameForAddress(contact);
+    else if (!contact.nameIsCustom) chatInfoNameInput.placeholder = displayNameForAddress(contact);
+  }
+
+  if (chatInfoAvatarImage && chatInfoAvatarInitials) {
+    if (contact.photo) delete chatInfoAvatarImage.dataset.kachatImg;
+    else if (pieces.avatarUrl) {
+      chatInfoAvatarImage.referrerPolicy = "no-referrer";
+      chatInfoAvatarImage.dataset.kachatImg = "element";
+      if (chatInfoAvatarImage.getAttribute("src") !== pieces.avatarUrl) chatInfoAvatarImage.src = pieces.avatarUrl;
+      chatInfoAvatarImage.hidden = false;
+      chatInfoAvatarInitials.hidden = true;
+    } else {
+      delete chatInfoAvatarImage.dataset.kachatImg;
+      chatInfoAvatarImage.hidden = true;
+      chatInfoAvatarImage.src = "";
+      chatInfoAvatarInitials.hidden = false;
+    }
+  }
+
+  const banner = document.querySelector("[data-chat-info-banner]");
+  if (banner) {
+    banner.style.backgroundImage = "";
+    if (pieces.bannerUrl) {
+      let img = banner.querySelector("img[data-kachat-img]");
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "chat-info-banner-img";
+        img.alt = "";
+        img.referrerPolicy = "no-referrer";
+        img.dataset.kachatImg = "banner";
+        banner.replaceChildren(img);
+      }
+      if (img.getAttribute("src") !== pieces.bannerUrl) img.src = pieces.bannerUrl;
+      banner.hidden = false;
+    } else {
+      banner.replaceChildren();
+      banner.hidden = true;
+    }
+  }
+
+  const bio = String(pieces.bio || "").trim();
+  if (chatInfoBio && chatInfoAddressCaption) {
+    if (bio) {
+      if (chatInfoBio.textContent !== bio) { chatInfoBio.textContent = bio; chatInfoBio.classList.remove("expanded"); }
+      chatInfoBio.title = "Click to expand. Right-click to copy.";
+      chatInfoBio.hidden = false;
+      chatInfoAddressCaption.hidden = true;
+    } else {
+      chatInfoBio.textContent = "";
+      chatInfoBio.hidden = true;
+      chatInfoAddressCaption.textContent = shortAddress(address);
+      chatInfoAddressCaption.hidden = false;
+    }
+  }
+
+  const linkEl = document.querySelector("[data-chat-info-linktree]");
+  if (linkEl) {
+    const url = /^https:\/\/linktr\.ee\/[^\s"'<>\\]+$/i.test(String(pieces.linktreeUrl || "")) ? pieces.linktreeUrl : "";
+    linkEl.hidden = !url;
+    linkEl.href = url || "#";
+    const text = linkEl.querySelector("[data-chat-info-linktree-text]");
+    if (text) text.textContent = url ? url.replace(/^https:\/\//, "") : "";
+  }
+
+  if (chatInfoMore) { chatInfoMore.hidden = true; chatInfoMore.open = false; }
+  const domainsRow = document.querySelector("[data-chat-info-domains-row]");
+  if (domainsRow) domainsRow.hidden = true;
+  const namesRow = document.querySelector("[data-chat-info-kachat-names-row]");
+  if (namesRow) { namesRow.hidden = false; namesRow.disabled = names.length === 0; }
+  const namesList = document.querySelector("[data-chat-info-kachat-names]");
+  if (namesList) {
+    namesList.innerHTML = names.map((name) => {
+      const full = `${name}.kachat`;
+      const primary = name === label;
+      return `
+      <button type="button" class="chat-info-domain-row" data-chat-info-copy-domain="${escapeHtml(full)}" title="Copy name">
+        <svg class="chat-info-domain-icon${primary ? " primary" : ""}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 -2.2A9 9 0 1 0 17.5 19"/></svg>
+        <strong>${escapeHtml(full)}</strong>
+        ${primary ? `<span class="profile-domain-primary">Primary</span>` : ``}
+      </button>`;
+    }).join("");
+  }
 }
 
 /// The profile's links, in iOS's order, as label + value rows behind "More Info".
@@ -14043,8 +14314,10 @@ function saveChatInfo() {
     // A non-empty typed value is always a deliberate override; clearing the
     // field back to nothing reverts to auto-naming (KNS primary domain, or
     // the shortened address if none is set).
+    // Testnet: an empty field on a contact you never named keeps its stored default as it was.
+    const keepsDefaultName = IS_TESTNET && !trimmed && !contact.nameIsCustom && Boolean(contact.name);
     contact.nameIsCustom = Boolean(trimmed);
-    contact.name = trimmed || shortAddress(contact.address);
+    contact.name = trimmed || (keepsDefaultName ? contact.name : shortAddress(contact.address));
     if (!contact.nameIsCustom) applyKnsPrimaryDomainToContact(contact);
     contact.updatedAt = Date.now();
     persistState();
@@ -14073,6 +14346,7 @@ const CHAT_INFO_SHEET_TITLES = {
   address: "Address",
   calls: "Calls",
   domains: "KNS Domains",
+  "kachat-names": ".kachat Names",
   aliases: "Aliases",
   notifications: "Notifications",
   photos: "Photos",
@@ -14113,7 +14387,7 @@ document.querySelector("[data-chat-info-share]")?.addEventListener("click", asyn
   if (!address) return;
   const url = profileUniversalLink(address);
   const contact = state.contacts.find((entry) => entry.address === address);
-  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : shortAddress(address));
+  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (IS_TESTNET ? identityNameForAddress(address) : shortAddress(address)));
   if (typeof navigator.share === "function") {
     try { await navigator.share({ title: name, url }); return; }
     catch (error) { if (error?.name === "AbortError") return; }
@@ -14147,6 +14421,15 @@ document.querySelector("[data-open-chat-info]")?.addEventListener("click", close
 
 // iOS caps the bio at five lines and expands it on tap.
 chatInfoBio?.addEventListener("click", () => chatInfoBio.classList.toggle("expanded"));
+// Testnet: the .kachat bio copies on right-click (iOS: long-press).
+if (IS_TESTNET) {
+  chatInfoBio?.addEventListener("contextmenu", async (event) => {
+    const text = String(chatInfoBio.textContent || "").trim();
+    if (!text) return;
+    event.preventDefault();
+    try { await copyTextToClipboard(text); showCopyToast("Bio copied to clipboard."); } catch { /* clipboard refused */ }
+  });
+}
 
 // Re-render the open chat info avatar + every avatar of this contact across the app.
 function refreshContactAvatars(contact) {
@@ -21977,6 +22260,9 @@ queueMicrotask(async () => {
         const contact = (state.contacts || []).find((c) => c.address === address);
         return contact ? (displayNameForAddress(contact) || "") : "";
       },
+      // Testnet (iOS e52357d): a sender you haven't named reads as their .kachat name. Kept apart
+      // from contactNameFor, which also names a new chat (a .kachat label is not your name for them).
+      identityNameFor: (address) => (IS_TESTNET ? kachatCachedLabel(address) : null),
       // Bell toggle requests OS notification permission on the spot.
       ensureNotificationPermission,
       // "Today"/"Yesterday" day pills, shared with 1:1 and group chats.
@@ -22111,6 +22397,7 @@ queueMicrotask(async () => {
   try {
     // .kachat names are live on testnet-10 (iOS 5df42b4): one shared service/registry/actions runtime.
     initKachatNamesRuntime(engine);
+    installKachatIdentityRepaint();
     try { kachatNames()?.actions.resume(); } catch (error) { appendEngineLog(`.kachat resume failed: ${error?.message || error}`); }
     initKachatMarket({
       escapeHtml, showToast: showCopyToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
@@ -22157,7 +22444,7 @@ queueMicrotask(async () => {
     displayNameFor: (address) => {
       const contact = (state.contacts || []).find((c) => c.address === address);
       if (contact) return displayNameForAddress(contact);
-      return knsDomainForAddress(address) || shortAddress(address);
+      return identityNameForAddress(address);
     },
     avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
     estimateFeeKas: (payloadBytes, opts) => engine.estimateMessageFee(payloadBytes, opts),
@@ -22177,11 +22464,15 @@ queueMicrotask(async () => {
       contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
       displayNameFor: (address) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
+        if (IS_TESTNET) return contact ? displayNameForAddress(contact) : identityNameForAddress(address);
         return contact ? displayNameForAddress(contact) : shortAddress(address);
       },
-      ownDisplayName: () => String(activeAccountMetadata()?.name || "KaChat").trim() || "KaChat",
+      // Testnet (iOS e52357d, CallService.ownDisplayName): your .kachat name when you have one.
+      ownDisplayName: () => (IS_TESTNET && engine.address && kachatCachedLabel(engine.address))
+        || String(activeAccountMetadata()?.name || "KaChat").trim() || "KaChat",
       avatarHtmlFor: (address) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
+        if (IS_TESTNET && !contact) return kachatAvatarImgHtml(address) ? kachatAvatarSpanHtml(address, "message-avatar") : "";
         return contact ? avatarHtmlFor(contact, "message-avatar") : "";
       },
       callsEnabledFor: contactCallsEnabled,
@@ -22459,6 +22750,8 @@ function groupOsPingAllowed(groupId) {
 
 function groupNotificationSenderName(senderAddress) {
   const contact = (state.contacts || []).find((c) => c.address === senderAddress);
+  // Testnet: the app's one rule (your name for them, else their .kachat name, else the address).
+  if (IS_TESTNET) return contact ? displayNameForAddress(contact) : identityNameForAddress(senderAddress);
   return (contact?.name || "").trim() || shortAddress(senderAddress);
 }
 
@@ -23015,12 +23308,14 @@ function groupSenderLabel(address) {
   if (address === engine.address) return "You";
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return displayNameForAddress(contact);
+  if (IS_TESTNET) return identityNameForAddress(address);
   return shortAddress(address);
 }
 function memberAvatarHtml(address, className = "chat-avatar") {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
   if (address === engine.address) return selfAvatarHtml(className);
+  if (IS_TESTNET) return kachatAvatarSpanHtml(address, className);
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
@@ -23534,6 +23829,8 @@ function avatarHtmlForAnyAddress(address, className = "message-avatar") {
   if (address === engine.address) return selfAvatarHtml(className);
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
+  // Testnet: their .kachat face, never the KNS one.
+  if (IS_TESTNET) return kachatAvatarSpanHtml(address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" /></span>`;
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
@@ -24065,7 +24362,7 @@ function eligibleGroupContacts(excludeAddresses = []) {
         address,
         contact,
         name: contact ? displayNameForAddress(contact)
-          : (knsDomainForAddress(address) || shortAddress(address)),
+          : identityNameForAddress(address),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
@@ -24110,6 +24407,7 @@ function renderGroupMemberPicker(excludeAddresses = []) {
 
 /// Avatar for someone with no contact record - straight off their KNS profile, initials otherwise.
 function groupPickerAvatarHtml(address, name) {
+  if (IS_TESTNET) return kachatAvatarSpanHtml(address, "chat-avatar");
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="chat-avatar"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   return `<span class="chat-avatar avatar-fallback">${personGlyphSvg()}</span>`;
@@ -24153,7 +24451,7 @@ function renderGroupSelectedMembers() {
     // have a KNS name and avatar - falling straight to the short address dropped both.
     const name = contact
       ? displayNameForAddress(contact)
-      : (knsDomainForAddress(addr) || shortAddress(addr));
+      : identityNameForAddress(addr);
     const avatar = contact
       ? avatarHtmlFor(contact, "chat-avatar")
       : groupPickerAvatarHtml(addr, name);
