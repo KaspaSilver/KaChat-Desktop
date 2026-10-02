@@ -9075,7 +9075,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 85;
+const APP_BUILD = 86;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -22122,6 +22122,13 @@ queueMicrotask(async () => {
         return requestPassword({ mode: "verify", title: "Enter Password", message: reason || "Enter your password to confirm this transaction." });
       },
       walletAddress: () => engine.address || "",
+      // The chatting address's balance in sompi (iOS currentWallet.balanceSompi), or null while unknown.
+      walletBalanceSompi: () => {
+        const text = String(currentBalanceKas ?? "");
+        if (!/^\d+(\.\d+)?$/.test(text)) return null;
+        const [whole, fraction = ""] = text.split(".");
+        return BigInt(whole) * 100000000n + BigInt((fraction + "00000000").slice(0, 8));
+      },
       contactNameFor: (address) => {
         const contact = state.contacts.find((entry) => entry.address === address);
         return contact ? displayNameForAddress(contact) : "";

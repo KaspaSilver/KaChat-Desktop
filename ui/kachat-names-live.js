@@ -657,7 +657,11 @@ function watchRegistrations() {
     let completed = false;
     for (const p of pending) {
       const before = registrationStages.get(p.id);
-      if (before && before !== Stage.registered && p.stage === Stage.registered) completed = true;
+      if (before && before !== Stage.registered && p.stage === Stage.registered) {
+        completed = true;
+        // Pops up the moment the registration lands (iOS 0870fcc).
+        if (p.registerTxId) openTxDoneSheet({ txId: p.registerTxId, title: "Name registered" });
+      }
       registrationStages.set(p.id, p.stage);
     }
     if (completed) identityChanged();
@@ -707,7 +711,10 @@ function registrationCardHtml(p) {
   const message = ui.error || (p.stage === Stage.failed ? p.lastError : null);
   const cancel = `<button class="secondary-button kl-danger kmkt-small-button" type="button" data-kl-reg-cancel="${id}" ${ui.working ? "disabled" : ""}>Cancel Commit</button>`;
   let buttons = "";
-  if (p.stage === Stage.registered) buttons = `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-done="${id}">Done</button>`;
+  if (p.stage === Stage.registered) {
+    buttons = (p.registerTxId ? `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-view="${esc(p.registerTxId)}">View Transaction</button>` : "")
+      + `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-done="${id}">Done</button>`;
+  }
   else if (p.stage === Stage.taken) buttons = cancel;
   else if (p.stage === Stage.failed) {
     buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-retry="${id}">Try Again</button>${cancel}`
@@ -746,8 +753,9 @@ async function cancelRegistration(id) {
   registrationUi.set(id, { working: true, error: null });
   hubChanged("pending");
   try {
-    await rt.actions.cancel(id);
+    const cancelTxId = await rt.actions.cancel(id);
     registrationUi.set(id, { working: false, error: null });
+    if (cancelTxId) openTxDoneSheet({ txId: cancelTxId, title: "Commit cancelled" });
   } catch (error) {
     registrationUi.set(id, { working: false, error: errorText(error) });
   }
@@ -866,6 +874,8 @@ export function liveHubClick(event) {
     }
     return true;
   }
+  const view = target.closest("[data-kl-reg-view]");
+  if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered" }); return true; }
   const done = target.closest("[data-kl-reg-done]");
   if (done) { kachatNames()?.actions.dismiss(done.dataset.klRegDone); return true; }
   const dismiss = target.closest("[data-kl-reg-dismiss]");
@@ -898,6 +908,67 @@ export function liveHubClick(event) {
 // The transaction sheet (KachatTxSheet)
 // ---------------------------------------------------------------------------------------------
 
+/** The chatting address's balance in sompi, or null while unknown. */
+function walletBalanceSompi() {
+  try {
+    const value = deps().walletBalanceSompi?.();
+    return typeof value === "bigint" ? value : null;
+  } catch { return null; }
+}
+
+/** The headline each action's finished-transaction sheet shows (iOS doneTitle). */
+const TX_DONE_TITLES = Object.freeze({
+  "Buy Name": "Name bought",
+  "Make an Offer": "Offer sent",
+  "Renew": "Renewed",
+  "List for Sale": "Listed for sale",
+  "Change Price": "Price changed",
+  "Delist": "Delisted",
+  "Transfer": "Name transferred",
+  "Release Name": "Name released",
+  "Reclaim": "Name reclaimed",
+  "Withdraw Offer": "Offer withdrawn",
+  "Refund Offer": "Offer refunded",
+  "Accept Offer": "Offer accepted",
+});
+
+/** The half sheet every finished name transaction shows (iOS KachatTxDoneSheet): what happened,
+ *  the transaction id (click to copy) and View in Explorer - the explorer picked in Settings,
+ *  testnet-10's on testnet. */
+function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", onClose = null }) {
+  if (!kit || !txId) return null;
+  const explorer = typeof deps().explorerTxUrl === "function" ? deps().explorerTxUrl(txId) : "";
+  let copied = false;
+  const body = () => `
+    <div class="kmkt-sheet-body kl-done">
+      <span class="kl-done-check kl-green">${LI.checkCircle}</span>
+      <strong class="kl-done-title">${esc(title)}</strong>
+      <p class="kmkt-muted kl-done-note">It shows here once the network accepts it, usually within seconds.</p>
+      <button class="kl-done-txid" type="button" data-kl-done-copy title="Copy transaction id">
+        <span class="kl-mono">${esc(txId)}</span>
+        <span>${copied ? "Copied" : "Copy"}</span>
+      </button>
+      ${explorer ? `<a class="kmkt-form-button kl-done-explorer" href="${esc(explorer)}" target="_blank" rel="noopener noreferrer">${LI.external}<span>View in Explorer</span></a>` : ""}
+      <button class="kl-done-close" type="button" data-kmkt-close>Done</button>
+    </div>`;
+  const layer = kit.openLayer({
+    owner,
+    kind: "sheet",
+    label: title,
+    html: body(),
+    onClick(event, l) {
+      if (event.target.closest("[data-kl-done-copy]")) {
+        try { navigator.clipboard?.writeText(txId); } catch { /* clipboard blocked */ }
+        copied = true;
+        const sheetEl = l.el.querySelector(".kmkt-sheet");
+        if (sheetEl) sheetEl.innerHTML = body();
+      }
+    },
+    onClose: () => { try { onClose?.(); } catch { /* fine */ } },
+  });
+  return layer;
+}
+
 /**
  * Every action's sheet: its inputs, what it costs (built against live UTXOs, nothing sent), one
  * Confirm - an extra warning for the destructive ones - then the device lock, then the
@@ -924,8 +995,20 @@ function openTxSheet(cfg) {
     if (sheet.plan) {
       if (sheet.plan.priceFee > 0n) rows += formRow("Price (to miners)", amountText(sheet.plan.priceFee));
       rows += formRow("Network fee", amountText(sheet.plan.networkFee));
+      // Names always spend from, and pay back to, the chatting address: its real balance and what
+      // it will be once this is sent (iOS 8ecc38c).
       const me = myKey();
-      if (me) rows += formRow("Your balance", signedAmount(balanceChange(sheet.plan, me)), { bold: true });
+      if (me) {
+        const change = balanceChange(sheet.plan, me);
+        const balance = walletBalanceSompi();
+        if (balance != null) {
+          rows += formRow("Chatting address balance", amountText(balance));
+          const after = balance + change;
+          rows += formRow("Balance after", amountText(after > 0n ? after : 0n), { bold: true });
+        } else {
+          rows += formRow("Balance change", signedAmount(change), { bold: true });
+        }
+      }
     } else if (sheet.building) {
       rows += formRow("Network fee", "", { valueHtml: spinner() });
     }
@@ -1007,6 +1090,14 @@ function openTxSheet(cfg) {
       const txId = await rt.actions.perform(op);
       sheet.txId = txId;
       try { cfg.onDone?.(txId); } catch { /* the sheet still shows it */ }
+      // Every finished name transaction opens the done half sheet; closing it closes the action
+      // (iOS 0870fcc).
+      openTxDoneSheet({
+        txId,
+        title: cfg.doneTitle || TX_DONE_TITLES[cfg.title] || "Transaction sent",
+        owner: cfg.owner,
+        onClose: () => { if (sheet.layer && !sheet.closed) kit.closeLayer(sheet.layer); },
+      });
     } catch (error) {
       sheet.sendError = errorText(error);
     }
@@ -1706,8 +1797,9 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
         primaryName: d.info.name,
       });
       const txId = await actions.saveProfile(profile);
-      d.primaryMessage = `Saved. Transaction ${String(txId).slice(0, 16)}...`;
+      d.primaryMessage = null;
       identityChanged();
+      openTxDoneSheet({ txId, title: "Primary name set" });
     } catch (error) {
       d.primaryMessage = errorText(error);
     }
@@ -2457,6 +2549,8 @@ export function openLiveProfileEditor(owner = "profile") {
     try {
       savedTx = await rt.actions.saveProfile(profile());
       identityChanged();
+      // The done sheet; closing it closes the editor (iOS 0870fcc).
+      openTxDoneSheet({ txId: savedTx, title: "Profile saved", onClose: () => { if (layer) kit.closeLayer(layer); } });
     } catch (e) {
       error = errorText(e);
     }
