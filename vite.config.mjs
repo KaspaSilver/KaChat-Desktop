@@ -90,7 +90,7 @@ function nextcloudProxy() {
   // Write methods only where the app actually writes: its own APIs (the same hosts the client
   // relays - engine/endpoints.js - plus KNS), an authenticated call (a Nextcloud app password),
   // or a Nextcloud Talk guest session (its cookie jar). Anything else is read-only.
-  const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$|^api\.knsdomains\.org$/i;
+  const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^tnkachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$|^api\.knsdomains\.org$/i;
   // Headers that would tell the target who the reader is (their IP behind a CDN or reverse
   // proxy). The relay speaks for itself.
   const CLIENT_IDENTITY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "x-forwarded-server", "forwarded", "x-real-ip", "true-client-ip", "x-client-ip", "x-cluster-client-ip", "via"];

@@ -9234,7 +9234,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 91;
+const APP_BUILD = 92;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15523,8 +15523,9 @@ renderTestnetToggle();
 // indexers are blank on purpose, the REST API and KNS are the testnet-10 ones, and of the other
 // name services only .k has a testnet API.
 if (IS_TESTNET) {
+  // The testnet-10 indexer is the default for chat, push, KaPosts and public chats (iOS 5463ab7).
   for (const key of ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"]) {
-    document.querySelectorAll(`[data-endpoint="${key}"]`).forEach((input) => { input.placeholder = "No testnet indexer yet"; });
+    document.querySelectorAll(`[data-endpoint="${key}"]`).forEach((input) => { input.placeholder = ENDPOINT_DEFAULTS[key]; });
   }
   // Translation is the same service on both networks (iOS 2ca41aa).
   document.querySelectorAll('[data-endpoint="translationService"]').forEach((input) => { input.placeholder = ENDPOINT_DEFAULTS.translationService; });
