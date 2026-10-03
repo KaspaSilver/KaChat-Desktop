@@ -41,7 +41,8 @@ const TESTNET_ENDPOINT_DEFAULTS = Object.freeze({
   broadcastIndexer: "",
   pushIndexer: "",
   knsApi: "https://api.knsdomains.org/tn10/api/v1",
-  translationService: "",
+  // Translating text has nothing to do with the chain: testnet uses the same service (iOS 2ca41aa).
+  translationService: "https://kachat.duckdns.org",
   trustedNode: "",
   nodeScan: "",
 });

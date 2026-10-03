@@ -684,11 +684,31 @@ function loadMoreFeed() {
   });
 }
 
+/** Interleaves session posts into the remote feed, newest first (iOS 77c2a89 mergeNewestFirst).
+ *  The remote list keeps the server's order exactly; each local post goes in just above the first
+ *  remote post older than it, and one older than the whole loaded window goes last. They used to
+ *  be stacked on top, which pinned a just-sent post above everything posted after it. */
+function mergeNewestFirst(local, remote) {
+  if (!local.length) return remote;
+  const localSorted = [...local].sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+  const merged = [];
+  let li = 0;
+  for (const post of remote) {
+    while (li < localSorted.length && Number(localSorted[li].timestamp || 0) >= Number(post.timestamp || 0)) {
+      merged.push(localSorted[li]);
+      li += 1;
+    }
+    merged.push(post);
+  }
+  for (; li < localSorted.length; li += 1) merged.push(localSorted[li]);
+  return merged;
+}
+
 function visibleFeedPosts() {
-  const combined = [
-    ...localPosts,
-    ...remotePosts.filter((r) => !localPosts.some((l) => l.remoteId && l.remoteId === r.remoteId)),
-  ].filter((p) => !isHiddenAuthor(p.posterAddress));
+  const combined = mergeNewestFirst(
+    localPosts,
+    remotePosts.filter((r) => !localPosts.some((l) => l.remoteId && l.remoteId === r.remoteId)),
+  ).filter((p) => !isHiddenAuthor(p.posterAddress));
   if (activeFeedTab === "following") return combined.filter((p) => prefs.following.includes(p.posterAddress));
   if (activeFeedTab === "popular") {
     return [...combined].sort((a, b) => engagementScore(b) - engagementScore(a));
