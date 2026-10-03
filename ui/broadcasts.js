@@ -41,7 +41,7 @@ const RETENTION_UNITS = [
   ["seconds", 1000], ["minutes", 60_000], ["hours", 3_600_000], ["days", 86_400_000],
 ];
 // A voice note that goes on-chain is capped hard (iOS BroadcastAudioRecording.maxDuration);
-// with Nextcloud carrying the bytes the 600s cap of 1:1 notes applies instead.
+// "Record via Nextcloud" runs to the app-wide Nextcloud cap instead.
 const ONCHAIN_VOICE_MAX_SECONDS = 10;
 const LONG_MESSAGE_BYTES = 2000;
 const LONG_MESSAGE_PREVIEW_CHARS = 500;
@@ -50,8 +50,11 @@ const CACHE_KEY = `kachat-broadcast-messages-cache-v1${NET_SUFFIX}`;     // GLOB
 const REACTIONS_KEY = `kachat-broadcast-reactions-cache-v1${NET_SUFFIX}`; // GLOBAL: public chain data, account-agnostic
 const EDITS_KEY = `kachat-broadcast-edits-cache-v1${NET_SUFFIX}`;         // GLOBAL: { [channel]: { [targetTxId]: { text, blockTime, editor, txIds } } }
 const POLL_MS = 8000;
-// Nextcloud carries the audio bytes — same 600s cap as the 1:1 Nextcloud voice notes.
-const VOICE_MAX_DURATION_SECONDS = 600;
+// Nextcloud carries the audio bytes - the same 5 minutes as every Nextcloud voice note in the app
+// (iOS ComposerMediaLimits.nextcloudVoiceSeconds); app.js hands its own figure over as a dep.
+const VOICE_MAX_DURATION_SECONDS = 300;
+// "Record via Nextcloud" chosen at the mic for the note being recorded (iOS nextcloudVoiceRequested).
+let voiceViaNextcloud = false;
 
 let deps = null;
 
@@ -1652,7 +1655,7 @@ function updateConnectionDot() {
 }
 
 // ---------------------------------------------------------------------------
-// Voice notes (Nextcloud only — desktop has no on-chain broadcast audio)
+// Voice notes: on chain (10 s), or via Nextcloud when chosen at the mic
 // ---------------------------------------------------------------------------
 
 function updateVoiceButtonVisibility() {
@@ -1663,7 +1666,9 @@ function updateVoiceButtonVisibility() {
 function ensureVoiceRecorder() {
   if (voiceRecorder || !deps.createVoiceRecorder) return voiceRecorder;
   voiceRecorder = deps.createVoiceRecorder({
-    maxDurationSeconds: () => (deps.isNextcloudMediaSendActive?.() ? VOICE_MAX_DURATION_SECONDS : ONCHAIN_VOICE_MAX_SECONDS),
+    maxDurationSeconds: () => (voiceViaNextcloud && deps.isNextcloudConnected?.()
+      ? (Number(deps.nextcloudVoiceMaxSeconds) || VOICE_MAX_DURATION_SECONDS)
+      : ONCHAIN_VOICE_MAX_SECONDS),
     onElapsed: (elapsed) => {
       voiceRecordedSeconds = elapsed;
       const el = voicePanelEl?.querySelector("[data-broadcast-voice-time]");
@@ -1682,6 +1687,18 @@ async function startVoiceRecording() {
   }
   const recorder = ensureVoiceRecorder();
   if (!recorder || recorder.isRecording()) return;
+  // With a Nextcloud server connected the mic asks on chain or via Nextcloud, like the "+" sheet's
+  // Voice Message in 1:1 and group chats (iOS 8b13460); Back closes the question. Without one it
+  // records on chain straight away.
+  const channel = activeChannel;
+  if (deps.isNextcloudConnected?.() && deps.chooseMediaRoute) {
+    const route = await deps.chooseMediaRoute("voice");
+    if (route !== "chain" && route !== "nextcloud") return;
+    if (activeChannel !== channel || recorder.isRecording()) return;
+    voiceViaNextcloud = route === "nextcloud";
+  } else {
+    voiceViaNextcloud = false;
+  }
   voiceRecordingChannel = activeChannel;
   const error = await recorder.start();
   if (error) {
@@ -1715,10 +1732,12 @@ async function sendBroadcastVoicePreview() {
   await sendBroadcastVoice({ blob: entry.blob, mimeType: entry.mimeType, channel });
 }
 async function sendBroadcastVoice({ blob, mimeType, channel }) {
-  // With Nextcloud media send on, the bytes go to the server and the room gets the share link
-  // (an audio card on every client). Otherwise, or when the upload fails, the note goes on
-  // chain in the same envelope 1:1 and group voice notes use - if it is short enough.
-  if (deps.isNextcloudMediaSendActive?.()) {
+  // "Record via Nextcloud": the bytes go to the server and the room gets the share link (an audio
+  // card on every client). Otherwise, or when the upload fails, the note goes on chain in the
+  // same envelope 1:1 and group voice notes use - if it is short enough.
+  const viaNextcloud = voiceViaNextcloud && Boolean(deps.isNextcloudConnected?.());
+  voiceViaNextcloud = false;
+  if (viaNextcloud) {
     try {
       const url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.${(deps.voiceFileName?.(mimeType) || "voice.webm").split(".").pop()}`, mimeType);
       await sendBroadcastText(channel, url);

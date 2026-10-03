@@ -6,7 +6,7 @@ import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
 import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
-import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor } from "./kasia-protocol.js";
+import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
@@ -975,6 +975,8 @@ export class KaspaEngine {
       amountKas,
       feeKas,
       selectedOutpoints: options.selectedOutpoints || null,
+      payload: options.payload || null,
+      exactAmount: Boolean(options.exactAmount),
       log: this.log,
     });
   }
@@ -1047,7 +1049,7 @@ export class KaspaEngine {
   }
 
   // Send from a spending address, signing with its derived key.
-  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, changeAddress = null }) {
+  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, changeAddress = null, payload = null, exactAmount = false }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
@@ -1062,13 +1064,16 @@ export class KaspaEngine {
       feeKas,
       selectedOutpoints,
       changeAddress,
+      payload,
+      exactAmount: Boolean(exactAmount),
       log: this.log,
     });
   }
 
   // Fee estimate ({ sdkFeeKas, policyFeeKas }) for a send FROM an arbitrary address (spending
-  // addresses), mirroring estimateSendFee for the chatting address.
-  async estimateSendFeeForAddress(address, amountKas = "0.2", selectedOutpoints = null) {
+  // addresses), mirroring estimateSendFee for the chatting address. `payloadBytes` sizes a payment
+  // that carries its encrypted payment payload (a memo makes it longer).
+  async estimateSendFeeForAddress(address, amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0) {
     if (!this.kaspa || !address) return null;
     await this.connect();
     return estimateSendFeeDetail({
@@ -1077,7 +1082,7 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       sourceAddress: address,
       amountKas: String(amountKas || "0.2"),
-      payloadBytes: 0,
+      payloadBytes: Math.max(0, Number(payloadBytes) || 0),
       selectedOutpoints,
     });
   }
@@ -1271,7 +1276,7 @@ export class KaspaEngine {
   // reflects the UTXOs actually present — matches iOS's per-amount fee estimate.
   // Returns { sdkFeeKas, policyFeeKas }: the SDK's automatic base fee, and the iOS-policy fee
   // (mass * 100 sompi/gram) the Send screen displays and pays.
-  async estimateSendFee(amountKas = "0.2", selectedOutpoints = null) {
+  async estimateSendFee(amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0) {
     if (!this.kaspa || !this.address) return null;
     await this.connect();
     return estimateSendFeeDetail({
@@ -1280,8 +1285,21 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       sourceAddress: this.address,
       amountKas: String(amountKas || "0.2"),
-      payloadBytes: 0,
+      payloadBytes: Math.max(0, Number(payloadBytes) || 0),
       selectedOutpoints,
+    });
+  }
+
+  /** A chat payment's payload, exactly as iOS builds it (KasiaTransactionBuilder.buildPaymentPayload):
+   *  ASCII "kchat:1:pay:" followed by the raw cipher bytes of the JSON
+   *  {"type":"payment","message":<memo>,"amount":<sompi>,"timestamp":<ms>,"version":1}, encrypted
+   *  to the contact's chat address. Returns { payloadBytes: Uint8Array, payloadHex }. */
+  async buildPaymentPayload({ receiver, note = "", amountSompi }) {
+    return buildEncryptedPaymentPayload({
+      receiver,
+      note,
+      amountSompi,
+      encryptMessage: encryptKasiaMessage,
     });
   }
 
@@ -1381,7 +1399,9 @@ export class KaspaEngine {
 
   async syncIncomingPayments(details) {
     if (!this.address) throw new Error("Generate or import a wallet before payment sync.");
-    return syncIncomingPaymentsFromRest({ ...details, walletAddress: this.address });
+    // The decryptor reads the memo a payment carries in its payload (kchat:1:pay:), when it has one.
+    const decryptMessage = this.privateKeyHex ? async (encryptedHex) => this.decryptKasiaMessage(encryptedHex) : null;
+    return syncIncomingPaymentsFromRest({ ...details, walletAddress: this.address, decryptMessage });
   }
 
   async syncConversationFromIndexer(details) {

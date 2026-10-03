@@ -12539,3 +12539,95 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
    (held to 1.5:1..8:1) at the full width, and the picture is shown whole inside. */
 .banner-fit { height: auto !important; background-size: contain !important; background-repeat: no-repeat !important; background-position: center !important; }
 .banner-fit > img.banner-fit-img { width: 100%; height: 100%; object-fit: contain !important; }
+
+/* ==== Chat composer + payments (iOS 8b13460, 8d208b2, 80a6aae, 2332d30, 1969c1a) ==== */
+/* The 1:1 "+" is the group chat's: 44px, radius 14 (both composers share the class). */
+.kachat-composer { grid-template-columns: 44px minmax(0, 1fr); }
+.composer-plus { width: 44px; height: 44px; border-radius: 14px; font-size: 26px; }
+
+/* The "+" sheet: a "Send" title, rows with a line under each saying what it does, sized to its
+   rows - never taller than the space above the composer, scrolling inside itself from the top so
+   the title always shows. */
+.composer-shell .composer-plus-menu.composer-plus-sheet {
+  width: min(360px, calc(100vw - 56px));
+  max-height: min(600px, calc(var(--app-h, 100dvh) - 190px));
+  overflow-y: auto; overscroll-behavior: contain;
+  gap: 2px;
+}
+.composer-plus-sheet .composer-plus-title { margin: 2px 0 6px; text-align: center; font-size: 15px; font-weight: 600; color: var(--text); }
+.composer-plus-menu .composer-plus-copy { display: grid; gap: 2px; min-width: 0; text-align: left; color: var(--text); font-size: inherit; }
+.composer-plus-menu .composer-plus-copy strong { color: var(--text); }
+.composer-plus-menu .composer-plus-copy small { font-size: 12px; line-height: 1.3; font-weight: 400; color: var(--muted); }
+.composer-shell .composer-plus-menu .composer-plus-back {
+  display: block; width: auto; min-height: 0; margin: 6px auto 0; padding: 6px 16px;
+  border-radius: 999px; text-align: center; font-size: 14px; font-weight: 600; color: var(--kaspa-ink);
+}
+.composer-shell .composer-plus-menu .composer-plus-back:hover { background: var(--primary-08); }
+.composer-plus-menu .mode-icon-kaspa { display: grid; place-items: center; }
+
+/* Send KAS sheet. */
+.pay-sheet { position: relative; width: min(100%, 420px); display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding: 22px 20px 20px; }
+.pay-sheet .pay-sheet-close { position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; font-size: 20px; border-radius: 50%; }
+.pay-sheet-head { text-align: center; padding: 4px 36px 0; }
+.pay-sheet-head h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.pay-sheet-head p { margin: 4px 0 0; color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pay-amount-entry { display: flex; align-items: baseline; justify-content: center; gap: 8px; min-height: 64px; cursor: text; max-width: 100%; overflow: hidden; }
+.pay-amount-input {
+  min-width: 1.6ch; max-width: 100%; padding: 0; border: 0; outline: none; background: transparent;
+  color: var(--text); text-align: center; font: inherit; font-size: 52px; font-weight: 700; letter-spacing: -.01em;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-variant-numeric: tabular-nums;
+}
+.pay-amount-input::placeholder { color: var(--placeholder, var(--muted)); }
+.pay-amount-unit { color: var(--muted); font-weight: 600; font-size: 29px; font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; white-space: nowrap; }
+.pay-amount-actions { display: flex; justify-content: center; gap: 10px; }
+.pay-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 14px;
+  border: 1px solid var(--glass-stroke, var(--line)); background: var(--material, var(--surface-1));
+  color: var(--text); font: inherit; font-size: 12px; cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.pay-chip svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.pay-chip:hover { background: var(--primary-08); }
+.pay-chip-max { color: var(--kaspa-ink); font-weight: 600; }
+.pay-memo {
+  display: flex; align-items: flex-start; gap: 10px; padding: 13px 16px; border-radius: 22px; cursor: text;
+  background: var(--material, var(--surface-1)); border: 1px solid var(--glass-stroke, var(--line));
+}
+.pay-memo svg { flex: 0 0 16px; width: 16px; height: 16px; margin-top: 2px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pay-memo textarea { flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; line-height: 1.35; padding: 0; max-height: 84px; }
+.pay-memo textarea::placeholder { color: var(--placeholder, var(--muted)); }
+.pay-pills { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; }
+.pay-pills .pay-fee-pill { cursor: default; text-decoration: none; border-radius: 14px; }
+.pay-pills .available-balance-banner { position: static; right: auto; }
+.pay-sheet-note { margin: 0; text-align: center; font-size: 13px; color: var(--ios-orange, #ff9500); }
+.pay-sheet-note.error { color: var(--ios-red, #ff3b30); }
+.pay-hold-button {
+  position: relative; overflow: hidden; height: 56px; width: 100%; border: 0; border-radius: 999px;
+  background: var(--kaspa); color: #fff; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.pay-hold-button:disabled { opacity: .4; cursor: default; }
+.pay-hold-button.busy { opacity: 1; }
+.pay-hold-button:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+.pay-hold-fill { position: absolute; inset: 0; background: rgba(255,255,255,.28); transform: scaleX(0); transform-origin: left center; transition: transform .2s ease-out; pointer-events: none; }
+.pay-hold-button.holding .pay-hold-fill { transform: scaleX(1); transition: transform .8s linear; }
+.pay-hold-label { position: relative; }
+@media (prefers-reduced-motion: reduce) {
+  .pay-hold-button.holding .pay-hold-fill { transition: transform .8s steps(4, end); }
+}
+
+/* A payment card opens its details on one click. */
+.message-payment-card[role="button"] { cursor: pointer; }
+.message-payment-card[role="button"]:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; border-radius: 14px; }
+
+/* Payment details half sheet. */
+.payment-detail-sheet { position: relative; display: flex; flex-direction: column; gap: 12px; padding: 24px 20px 20px; }
+.payment-detail-sheet .modal-close { position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; font-size: 20px; border-radius: 50%; }
+.payment-detail-head { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 4px 24px 4px; }
+.payment-detail-head p { margin: 0; }
+.payment-detail-logo { width: 40px; height: 40px; object-fit: contain; }
+.payment-detail-direction { font-size: 14px; font-weight: 600; color: var(--muted); }
+.payment-detail-amount { font-size: 34px; font-weight: 700; font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.payment-detail-memo { font-size: 14px; overflow-wrap: anywhere; }
+.payment-detail-content { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.payment-detail-time { font-size: 12px; color: var(--muted); }
+.payment-detail-pending { margin: 0; text-align: center; font-size: 13px; color: var(--muted); }

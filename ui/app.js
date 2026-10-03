@@ -14,7 +14,7 @@ import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
-import { initNextcloud, resetNextcloudForAccount, isNextcloudMediaSendActive, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
+import { initNextcloud, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
@@ -329,7 +329,18 @@ function persistHandshakeSyncState() {
 
 let activeConversationId = null;
 let currentBalanceKas = "--";
+// The composer only writes messages now; paying opens the Send KAS sheet (iOS 8d208b2).
 let composerMode = "message";
+// "Via Nextcloud" chosen in a "+" sheet for the photo / voice note being composed (iOS
+// nextcloudPhotoRequested / nextcloudVoiceRequested, 8b13460). Everything else - the on-chain rows,
+// paste, drop - goes on chain. Declared up here because clearPendingPhoto and the recorders read them.
+let photoViaNextcloud = false;
+let voiceViaNextcloud = false;
+let groupPhotoViaNextcloud = false;
+let groupVoiceViaNextcloud = false;
+// The chat the Send KAS sheet is open for (null while it is closed). Up here because
+// openConversation reads it.
+let paySheetConversationId = null;
 let availableBalanceHideTimer = null;
 let paymentSendInFlight = false;
 let handshakeSendInFlight = false;
@@ -9234,7 +9245,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 92;
+const APP_BUILD = 93;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -9324,7 +9335,7 @@ document.querySelector("[data-profile-donate]")?.addEventListener("click", async
     }
     setActiveAppTab("chats");
     openConversation(conversationEntry.id);
-    await activateComposerMode("kas");
+    openPaymentSheet();
   } catch (error) {
     showCopyToast(error?.message || `Couldn't resolve ${DONATE_DOMAIN}.`);
   } finally {
@@ -13626,7 +13637,27 @@ function renderMessages(conversationEntry) {
     const paymentParts = parsePaymentCardParts(message);
     if (paymentParts) {
       bubble.classList.add("has-payment-card");
-      bubble.append(buildPaymentCard(paymentParts, message.direction !== "incoming"));
+      const paymentCard = buildPaymentCard(paymentParts, message.direction !== "incoming");
+      // One click opens its details (iOS PaymentCardTaps, 80a6aae); a double-click still reacts,
+      // so the single click waits a beat and a second click cancels it.
+      paymentCard.setAttribute("role", "button");
+      paymentCard.tabIndex = 0;
+      paymentCard.setAttribute("aria-label", `${message.direction !== "incoming" ? "Sent" : "Received"} ${paymentParts.amountText} ${KAS_UNIT}. Payment details`);
+      paymentCard.addEventListener("click", (event) => {
+        if (messageSelectionMode) return;
+        if (bubble.paymentOpenTimer) { window.clearTimeout(bubble.paymentOpenTimer); bubble.paymentOpenTimer = 0; }
+        if (event.detail > 1) return;
+        bubble.paymentOpenTimer = window.setTimeout(() => {
+          bubble.paymentOpenTimer = 0;
+          openPaymentDetailSheet(conversationEntry.id, message.id);
+        }, 320);
+      });
+      paymentCard.addEventListener("keydown", (event) => {
+        if (messageSelectionMode || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        openPaymentDetailSheet(conversationEntry.id, message.id);
+      });
+      bubble.append(paymentCard);
     } else {
     const shownContent = messageContent(message);
     const imageEnvelope = parseImageEnvelope(shownContent);
@@ -13776,6 +13807,8 @@ function renderMessages(conversationEntry) {
     // into the full picker, and a reply shortcut - an explicit choice between reacting and
     // replying rather than jumping straight into reply mode.
     onDoubleGesture(bubble, (event) => {
+      // A payment card's pending single-click (its details) gives way to the double.
+      if (bubble.paymentOpenTimer) { window.clearTimeout(bubble.paymentOpenTimer); bubble.paymentOpenTimer = 0; }
       if (messageSelectionMode || isPendingHandshakeRequest) return;
       event.preventDefault();
       openQuickReactionBar(conversationEntry, message, bubble);
@@ -13885,6 +13918,8 @@ function openConversation(conversationId) {
   if (conversationAddress) conversationAddress.textContent = contact.address;
   if (syncStatus) syncStatus.textContent = syncLabel(conversationEntry);
   renderMessages(conversationEntry);
+  // A Send KAS sheet belongs to the chat it was opened in.
+  if (paySheetConversationId && paySheetConversationId !== conversationId) closePaymentSheet();
   activateComposerMode("message");
   if (composer?.elements?.message && conversationEntry.draft) {
     composer.elements.message.value = conversationEntry.draft;
@@ -14662,8 +14697,8 @@ function importNextcloudContacts(entries) {
   return { added, updated, skipped };
 }
 
-// Open (or create) the 1:1 chat with an arbitrary Kaspa address and drop the composer straight
-// into KAS-send mode. Powers the KaPosts "Tip" button — tip a poster without leaving for the
+// Open (or create) the 1:1 chat with an arbitrary Kaspa address and open the Send KAS sheet
+// over it (iOS startInPaymentMode). Powers the KaPosts "Tip" button — tip a poster without leaving for the
 // wallet screen. No-op with a toast if the address is missing/invalid or is your own.
 async function openChatWithAddressForKaspa({ address, name } = {}) {
   return openChatWithAddress({ address, name, paymentMode: true });
@@ -14696,7 +14731,8 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
   renderChats();
   setActiveAppTab("chats");
   openConversation(conversationEntry.id);
-  if (paymentMode) await activateComposerMode("kas");
+  // Pay in Kaspa from a group or public chat sender sheet, a KaPosts poster: the Send KAS sheet.
+  if (paymentMode) openPaymentSheet();
 }
 
 // --- KaPosts quick tip modal ------------------------------------------------
@@ -16612,9 +16648,12 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
 
 function closeComposerMenu() {
   if (composerPlusMenu) composerPlusMenu.hidden = true;
-  // The chess time-control menu is a second step of the same plus menu, anchored the same way.
+  // The chess time-control menu and the on-chain-or-Nextcloud step are second steps of the same
+  // plus menu, anchored the same way. Looked up per call: this can run before their consts exist.
   const tcMenu = document.querySelector("[data-chess-tc-menu]");
   if (tcMenu) tcMenu.hidden = true;
+  const routeMenu = document.querySelector("[data-composer-media-route-menu]");
+  if (routeMenu) routeMenu.hidden = true;
 }
 
 function setComposerHint(message) {
@@ -16630,13 +16669,11 @@ function hideAvailableBalanceBanner() {
   if (availableBalanceBanner) availableBalanceBanner.hidden = true;
 }
 
-// Payment-mode "Available" pill (iOS availableBalanceBubble port). Stays
-// visible for the whole KAS mode (it IS the funding-source display, not a
-// toast). Privacy ON: shows the PRIMARY SPENDING address balance — the actual
-// funding source — underlined and clickable, opening Manage Spending
-// Addresses; refreshed when that balance changes (wallet-activity bridge) and
-// after sends. Privacy OFF: the plain chatting balance, not clickable. A
-// small accent arrow marks that the next send pays a fresh pool address.
+// The Send KAS sheet's "Available" pill (iOS availableBalanceBubble). Privacy ON: the PRIMARY
+// SPENDING address balance - the actual funding source - underlined and clickable, opening Manage
+// Spending Addresses; refreshed when that balance changes (wallet-activity bridge) and after sends.
+// Privacy OFF: the plain chatting balance, not clickable. A small accent arrow marks that the next
+// send pays a fresh pool address.
 let composerBalanceToken = 0;
 
 function renderAvailableBalanceBanner(balanceText, clickable, contact) {
@@ -16658,8 +16695,8 @@ function renderAvailableBalanceBanner(balanceText, clickable, contact) {
 }
 
 async function refreshComposerAvailableBalance() {
-  if (!availableBalanceBanner || composerMode !== "kas") return;
-  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  if (!availableBalanceBanner || !isPaySheetOpen()) return;
+  const conversationEntry = state.conversations.find((entry) => entry.id === (paySheetConversationId || activeConversationId));
   const contact = contactForConversation(conversationEntry);
   const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
   const token = ++composerBalanceToken;
@@ -16675,32 +16712,55 @@ async function refreshComposerAvailableBalance() {
       currentBalanceKas = balance.totalKas; rememberLastBalance();
       balanceKas = balance.totalKas;
     }
-    if (token !== composerBalanceToken || composerMode !== "kas") return;
+    if (token !== composerBalanceToken || !isPaySheetOpen()) return;
     composerAvailableKas = Number(balanceKas);
     renderAvailableBalanceBanner(balanceKas, spendingFunded, contact);
   } catch {
-    if (token !== composerBalanceToken || composerMode !== "kas") return;
+    if (token !== composerBalanceToken || !isPaySheetOpen()) return;
     renderAvailableBalanceBanner("--", spendingFunded, contact);
   }
 }
 
 availableBalanceBanner?.addEventListener("click", () => {
-  if (composerMode !== "kas") return;
+  if (!isPaySheetOpen() || paymentSendInFlight) return;
   if (!chatsPrivacyEnabled() || !activeAccountMnemonic()) return; // OFF: not tappable
+  closePaymentSheet();
   openSpendingManageScreen();
 });
 
-// Payment-mode entry unit (iOS KaspaFiatAmountState): the leading button flips KAS/fiat and
-// carries the typed number across converted; the label beside Max shows the other unit live.
+// --- Send KAS sheet (iOS 8d208b2 paymentSheet) ------------------------------------------------
+// "Send KAS / to <name>", a big centred amount (KAS or fiat - iOS KaspaFiatAmountState - with the
+// converted value and Max under it), an encrypted memo of up to 140 characters (the payment
+// payload's note, shown in the payment bubble), the fee and Available pills, and a hold-to-send
+// button (0.8 s, a sweeping fill). Every way into a chat payment opens it: the "+" sheet's Pay in
+// Kaspa, the payment-mode chat route (Pay in Kaspa from group and public chat sender sheets, the
+// donate row). No confirmation sheet afterwards (iOS 80a6aae): the bubble is the confirmation.
+const PAYMENT_MEMO_MAX_LENGTH = 140;
+const PAYMENT_HOLD_MS = 800;
+const paySheet = document.querySelector("[data-pay-sheet]");
+const payTitleEl = paySheet?.querySelector("[data-pay-title]");
+const payRecipientEl = paySheet?.querySelector("[data-pay-recipient]");
+const payAmountInput = paySheet?.querySelector("[data-pay-amount]");
+const payUnitEl = paySheet?.querySelector("[data-pay-unit]");
+const paymentUnitToggle = paySheet?.querySelector("[data-pay-unit-toggle]");
+const paymentConversionLabel = paySheet?.querySelector("[data-pay-conversion]");
+const paymentMaxButton = paySheet?.querySelector("[data-pay-max]");
+const payMemoInput = paySheet?.querySelector("[data-pay-memo]");
+const payFeePill = paySheet?.querySelector("[data-pay-fee]");
+const payNoteEl = paySheet?.querySelector("[data-pay-note]");
+const payHoldButton = paySheet?.querySelector("[data-pay-hold]");
+const payHoldLabel = paySheet?.querySelector("[data-pay-hold-label]");
 let paymentUnit = "kas";
 let paymentPrice = null;
 let composerAvailableKas = null;
-const paymentUnitToggle = document.querySelector("[data-payment-unit-toggle]");
-const paymentConversionLabel = document.querySelector("[data-payment-conversion]");
-const paymentMaxButton = document.querySelector("[data-payment-max]");
+let paySheetError = "";
+let payFeeTimer = null;
+let payFeeToken = 0;
+
+function isPaySheetOpen() { return Boolean(paySheet && !paySheet.hidden); }
+
 function paymentKasFromInput() {
-  const input = composer?.elements?.message;
-  const entered = Number(String(input?.value || "").trim().replace(",", "."));
+  const entered = Number(String(payAmountInput?.value || "").trim().replace(",", "."));
   if (!Number.isFinite(entered) || entered <= 0) return null;
   if (paymentUnit !== "fiat") return entered;
   return paymentPrice > 0 ? entered / paymentPrice : null;
@@ -16708,96 +16768,320 @@ function paymentKasFromInput() {
 function formatKasPlain(kas) {
   return Number(kas).toFixed(8).replace(/\.?0+$/, "");
 }
-function refreshPaymentUnitUi() {
-  const input = composer?.elements?.message;
-  if (!input || composerMode !== "kas") return;
-  const symbol = currencyMeta().symbol || selectedCurrency.toUpperCase();
-  if (paymentUnitToggle) {
-    paymentUnitToggle.textContent = paymentUnit === "fiat" ? symbol : "";
-    paymentUnitToggle.classList.toggle("fiat", paymentUnit === "fiat");
-    paymentUnitToggle.disabled = !(paymentPrice > 0);
-    paymentUnitToggle.title = paymentPrice > 0 ? (paymentUnit === "fiat" ? `Enter the amount in ${KAS_UNIT}` : `Enter the amount in ${selectedCurrency.toUpperCase()}`) : "No live price yet";
-  }
-  input.placeholder = paymentUnit === "fiat" ? selectedCurrency.toUpperCase() : `Amount (${KAS_UNIT})`;
-  const kas = paymentKasFromInput();
-  if (paymentConversionLabel) {
-    let label = "";
-    if (kas != null) label = paymentUnit === "fiat" ? `${formatKasPlain(kas)} ${KAS_UNIT}` : (paymentPrice > 0 ? formatFiatValue(kas, paymentPrice) : "");
-    paymentConversionLabel.textContent = label;
-    paymentConversionLabel.hidden = !label;
-  }
+// The memo as it will be sent: one line, trimmed, at most 140 characters (counted as characters,
+// not UTF-16 units, so an emoji is one).
+function clampPaymentMemo(value) {
+  const oneLine = String(value || "").replace(/\s*[\r\n]+\s*/g, " ");
+  const chars = Array.from(oneLine);
+  return chars.length > PAYMENT_MEMO_MAX_LENGTH ? chars.slice(0, PAYMENT_MEMO_MAX_LENGTH).join("") : oneLine;
 }
-document.querySelector("[data-payment-back]")?.addEventListener("click", () => activateComposerMode("message"));
+function currentPaymentMemo() { return clampPaymentMemo(payMemoInput?.value || "").trim(); }
+
+// Digits and one decimal point; at most 8 decimals for KAS, 2 for a currency (iOS sanitizedAmount).
+function sanitizePaymentAmount(value) {
+  let text = String(value || "").replace(/,/g, ".").replace(/[^0-9.]/g, "");
+  const dot = text.indexOf(".");
+  if (dot !== -1) text = text.slice(0, dot + 1) + text.slice(dot + 1).replace(/\./g, "");
+  const [whole, fraction] = text.split(".");
+  const maxDecimals = paymentUnit === "fiat" ? 2 : 8;
+  return fraction != null ? `${whole}.${fraction.slice(0, maxDecimals)}` : whole;
+}
+
+function refreshPaymentUnitUi() {
+  if (!paySheet) return;
+  const code = selectedCurrency.toUpperCase();
+  const display = String(payAmountInput?.value || "");
+  // Big when short, smaller as it grows (iOS: 52 / 40 / 30 pt).
+  const fontSize = display.length <= 7 ? 52 : (display.length <= 10 ? 40 : 30);
+  if (payAmountInput) {
+    payAmountInput.style.fontSize = `${fontSize}px`;
+    payAmountInput.style.width = `${Math.max(1, display.length || 1) + 0.6}ch`;
+    payAmountInput.setAttribute("aria-label", paymentUnit === "fiat" ? `Amount (${code})` : `Amount (${KAS_UNIT})`);
+  }
+  if (payUnitEl) {
+    payUnitEl.textContent = paymentUnit === "fiat" ? code : KAS_UNIT;
+    payUnitEl.style.fontSize = `${Math.round(fontSize * 0.55)}px`;
+  }
+  if (paymentUnitToggle) {
+    paymentUnitToggle.hidden = !(paymentPrice > 0);
+    const kas = paymentKasFromInput();
+    let label = "";
+    if (kas != null && paymentPrice > 0) label = paymentUnit === "fiat" ? `≈ ${formatKasPlain(kas)} ${KAS_UNIT}` : `≈ ${formatFiatValue(kas, paymentPrice)}`;
+    if (paymentConversionLabel) paymentConversionLabel.textContent = label || (paymentUnit === "fiat" ? KAS_UNIT : code);
+  }
+  refreshPaymentSheetState();
+}
+
+// The red error, else the orange dust warning, and whether the hold button can be used.
+function refreshPaymentSheetState() {
+  if (!paySheet) return;
+  const kas = paymentKasFromInput();
+  const sompi = kas != null ? Math.round(kas * 1e8) : 0;
+  if (payNoteEl) {
+    payNoteEl.classList.toggle("error", Boolean(paySheetError));
+    if (paySheetError) {
+      payNoteEl.textContent = paySheetError;
+      payNoteEl.hidden = false;
+    } else if (sompi > 0 && sompi < 10_000_001) {
+      // 0.10000001 KAS = 10_000_001 sompi, the network dust limit (iOS).
+      payNoteEl.textContent = `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`;
+      payNoteEl.hidden = false;
+    } else {
+      payNoteEl.textContent = "";
+      payNoteEl.hidden = true;
+    }
+  }
+  if (payHoldButton) {
+    payHoldButton.disabled = !(sompi > 0) || paymentSendInFlight;
+    payHoldButton.classList.toggle("busy", paymentSendInFlight);
+    payHoldButton.setAttribute("aria-busy", paymentSendInFlight ? "true" : "false");
+  }
+  if (payHoldLabel) payHoldLabel.textContent = paymentSendInFlight ? "Sending…" : "Hold to Send";
+}
+
+// iOS paymentFeePill: "fee: -------- KAS" while estimating, "fee: -- KAS" when unknown.
+function renderPaymentFeePill(feeKas, { estimating = false } = {}) {
+  if (!payFeePill) return;
+  payFeePill.classList.toggle("estimating", estimating);
+  if (estimating) payFeePill.textContent = `fee: -------- ${KAS_UNIT}`;
+  else if (feeKas == null) payFeePill.textContent = `fee: -- ${KAS_UNIT}`;
+  else payFeePill.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+}
+
+// The payment payload's size for a memo: "kchat:1:pay:" + the cipher's nonce, ephemeral key and
+// tag around the payment JSON (the same overhead estimateCommPayloadBytes counts for messages).
+function estimatePaymentPayloadBytes(memo, amountSompi) {
+  const json = JSON.stringify({ type: "payment", message: String(memo || ""), amount: Number(amountSompi) || 0, timestamp: Date.now(), version: 1 });
+  return "kchat:1:pay:".length + 12 + 33 + new TextEncoder().encode(json).length + 16;
+}
+
+// The fee the payment will pay, from the address it will spend from, including its payload (so the
+// memo counts). Debounced like iOS schedulePaymentFee.
+function schedulePaymentFee() {
+  if (payFeeTimer) window.clearTimeout(payFeeTimer);
+  payFeeTimer = null;
+  const token = ++payFeeToken;
+  const kas = paymentKasFromInput();
+  if (!isPaySheetOpen() || kas == null) { renderPaymentFeePill(null); return; }
+  renderPaymentFeePill(null, { estimating: true });
+  payFeeTimer = window.setTimeout(async () => {
+    try {
+      const amountKas = formatKasPlain(kas);
+      const payloadBytes = estimatePaymentPayloadBytes(currentPaymentMemo(), Math.round(kas * 1e8));
+      const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
+      const fundingAddress = spendingFunded ? deriveSpendingAddressAt(getActiveSpendingIndex()) : null;
+      // Chat payments pay the SDK's own fee (no priority tip), so that is the figure shown.
+      const detail = fundingAddress
+        ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, null, payloadBytes)
+        : await engine.estimateSendFee(amountKas, null, payloadBytes);
+      if (token !== payFeeToken) return;
+      renderPaymentFeePill(detail?.sdkFeeKas ?? null);
+    } catch {
+      if (token === payFeeToken) renderPaymentFeePill(null);
+    }
+  }, 200);
+}
+
+function resetPaymentSheetFields() {
+  paymentUnit = "kas";
+  paySheetError = "";
+  if (payAmountInput) payAmountInput.value = "";
+  if (payMemoInput) { payMemoInput.value = ""; payMemoInput.style.height = ""; }
+  payFeeToken += 1;
+  if (payFeeTimer) window.clearTimeout(payFeeTimer);
+  payFeeTimer = null;
+  renderPaymentFeePill(null);
+}
+
+/** Opens Send KAS for the open 1:1 chat. A confirmed zero chatting balance keeps the funding gate
+ *  in charge instead, as the composer's old payment mode did. */
+function openPaymentSheet() {
+  if (!paySheet || !activeConversationId) return;
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  const contact = contactForConversation(conversationEntry);
+  if (!conversationEntry || !contact) return;
+  if (isChattingBalanceZero()) { updateChatFundingGate(); return; }
+  closeComposerMenu();
+  paySheetConversationId = conversationEntry.id;
+  resetPaymentSheetFields();
+  if (payTitleEl) payTitleEl.textContent = `Send ${KAS_UNIT}`;
+  if (payRecipientEl) payRecipientEl.textContent = `to ${displayNameForAddress(contact) || shortAddress(contact.address)}`;
+  paySheet.hidden = false;
+  refreshPaymentUnitUi();
+  fetchKasPrice(selectedCurrency).then((price) => {
+    paymentPrice = price;
+    if (isPaySheetOpen()) refreshPaymentUnitUi();
+  }).catch(() => {});
+  refreshComposerAvailableBalance();
+  // The amount is the first thing to type - after anything that was about to take focus back.
+  window.setTimeout(() => { if (isPaySheetOpen()) payAmountInput?.focus(); }, 60);
+}
+
+function closePaymentSheet({ force = false } = {}) {
+  if (!paySheet || paySheet.hidden) return;
+  // A payment on its way can't be walked away from mid-send (iOS interactiveDismissDisabled).
+  if (paymentSendInFlight && !force) return;
+  cancelPaymentHold();
+  paySheet.hidden = true;
+  paySheetConversationId = null;
+  payFeeToken += 1;
+  if (payFeeTimer) window.clearTimeout(payFeeTimer);
+  payFeeTimer = null;
+  hideAvailableBalanceBanner();
+}
+
+payAmountInput?.addEventListener("input", () => {
+  const sanitized = sanitizePaymentAmount(payAmountInput.value);
+  if (sanitized !== payAmountInput.value) payAmountInput.value = sanitized;
+  paySheetError = "";
+  refreshPaymentUnitUi();
+  schedulePaymentFee();
+});
+payMemoInput?.addEventListener("input", () => {
+  const clamped = clampPaymentMemo(payMemoInput.value);
+  if (clamped !== payMemoInput.value) payMemoInput.value = clamped;
+  payMemoInput.style.height = "auto";
+  payMemoInput.style.height = `${Math.min(payMemoInput.scrollHeight, 84)}px`;
+  paySheetError = "";
+  refreshPaymentSheetState();
+  schedulePaymentFee();
+});
+// The memo is one line: Return never adds a newline (and never sends - only the hold does).
+payMemoInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) event.preventDefault();
+});
 paymentUnitToggle?.addEventListener("click", () => {
   if (!(paymentPrice > 0)) return;
-  const input = composer?.elements?.message;
   const kas = paymentKasFromInput();
   paymentUnit = paymentUnit === "fiat" ? "kas" : "fiat";
-  if (input) input.value = kas == null ? "" : (paymentUnit === "fiat" ? (kas * paymentPrice).toFixed(2) : formatKasPlain(kas));
+  if (payAmountInput) payAmountInput.value = kas == null ? "" : (paymentUnit === "fiat" ? (kas * paymentPrice).toFixed(2) : formatKasPlain(kas));
   refreshPaymentUnitUi();
-  input?.focus();
+  payAmountInput?.focus();
 });
 paymentMaxButton?.addEventListener("click", () => {
-  const input = composer?.elements?.message;
-  if (!input) return;
+  if (!payAmountInput || paymentSendInFlight) return;
   if (composerAvailableKas == null) { showCopyToast("Balance unavailable right now."); return; }
   // The same headroom the send itself reserves for the network fee.
   const maxKas = Math.max(0, composerAvailableKas - 0.0001);
-  input.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : formatKasPlain(maxKas);
+  payAmountInput.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : formatKasPlain(maxKas);
+  paySheetError = "";
   refreshPaymentUnitUi();
-  input.focus();
+  schedulePaymentFee();
+  payAmountInput.focus();
 });
-composer?.elements?.message?.addEventListener("input", () => { if (composerMode === "kas") refreshPaymentUnitUi(); });
+paySheet?.querySelector("[data-pay-close]")?.addEventListener("click", () => closePaymentSheet());
+paySheet?.addEventListener("mousedown", (event) => { if (event.target === paySheet) closePaymentSheet(); });
+paySheet?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.preventDefault(); closePaymentSheet(); }
+});
 
-async function activateComposerMode(mode) {
-  const input = composer?.elements?.message;
-  if (!input) return;
-  composerMode = mode === "kas" ? "kas" : "message";
-  composer.classList.toggle("payment-mode", composerMode === "kas");
-  input.value = "";
-  input.inputMode = composerMode === "kas" ? "decimal" : "text";
-  input.setAttribute("aria-label", composerMode === "kas" ? `${KAS_UNIT} amount` : "Message");
-  setComposerHint(composerMode === "kas" ? `Amount (${KAS_UNIT})` : "Message");
-  paymentUnit = "kas";
-  if (paymentConversionLabel) paymentConversionLabel.hidden = true;
-  if (composerMode === "kas") {
-    refreshPaymentUnitUi();
-    fetchKasPrice(selectedCurrency).then((price) => { paymentPrice = price; refreshPaymentUnitUi(); });
-  }
-  hideFeeEstimateBanner();
-  // Message mode re-shows the handshake warning if the relationship still needs
-  // it; payment mode hides it so it can't crowd the Available/fee pills.
-  updateHandshakeWarningBanner();
-  if (composerMode === "kas") clearPendingPhoto();
-  if (composerMode !== "kas") {
-    hideAvailableBalanceBanner();
-    setStatus("Text message mode");
+// Hold to Send (iOS HoldToSendButton): the payment goes only after a 0.8 s press - mouse, touch,
+// or Space / Enter held down - while the fill sweeps across; letting go early resets it. A screen
+// reader's activation (a click with no pointer or key press behind it) is the plain action.
+let payHoldTimer = null;
+let payHoldKey = null;
+let payHoldPointerId = null;
+function startPaymentHold() {
+  if (!payHoldButton || payHoldButton.disabled || payHoldTimer) return;
+  payHoldButton.classList.add("holding");
+  payHoldTimer = window.setTimeout(() => {
+    payHoldTimer = null;
+    payHoldKey = null;
+    payHoldPointerId = null;
+    payHoldButton.classList.remove("holding");
+    submitPaymentSheet();
+  }, PAYMENT_HOLD_MS);
+}
+function cancelPaymentHold() {
+  if (payHoldTimer) window.clearTimeout(payHoldTimer);
+  payHoldTimer = null;
+  payHoldKey = null;
+  payHoldPointerId = null;
+  payHoldButton?.classList.remove("holding");
+}
+payHoldButton?.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  payHoldPointerId = event.pointerId;
+  try { payHoldButton.setPointerCapture(event.pointerId); } catch { /* fine */ }
+  startPaymentHold();
+});
+["pointerup", "pointercancel", "lostpointercapture"].forEach((type) => {
+  payHoldButton?.addEventListener(type, (event) => {
+    if (payHoldPointerId != null && event.pointerId === payHoldPointerId) cancelPaymentHold();
+  });
+});
+payHoldButton?.addEventListener("contextmenu", (event) => event.preventDefault());
+payHoldButton?.addEventListener("keydown", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  // The browser's own activation would be a click on key press; holding is what counts here.
+  event.preventDefault();
+  if (event.repeat || payHoldKey) return;
+  payHoldKey = event.key;
+  startPaymentHold();
+});
+payHoldButton?.addEventListener("keyup", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  if (payHoldKey === event.key) cancelPaymentHold();
+});
+payHoldButton?.addEventListener("blur", cancelPaymentHold);
+payHoldButton?.addEventListener("click", (event) => {
+  // Mouse and touch clicks (detail >= 1) are the end of a press the hold already handled.
+  if (event.detail !== 0 || payHoldKey || payHoldButton.disabled) return;
+  submitPaymentSheet();
+});
+
+async function submitPaymentSheet() {
+  if (!isPaySheetOpen() || paymentSendInFlight) return;
+  const conversationId = paySheetConversationId || activeConversationId;
+  if (!conversationId) return;
+  paySheetError = "";
+  const kas = paymentKasFromInput();
+  if (kas == null) {
+    paySheetError = paymentUnit === "fiat" ? "No live price to convert with." : `Enter a valid ${KAS_UNIT} amount.`;
+    refreshPaymentSheetState();
     return;
   }
-  setStatus(`${KAS_UNIT} payment mode selected`);
-  await refreshComposerAvailableBalance();
+  let amountKas;
+  try { amountKas = normalizeKasAmount(formatKasPlain(kas)); }
+  catch (error) { paySheetError = error.message; refreshPaymentSheetState(); return; }
+  if (Math.round(Number(amountKas) * 1e8) < 10_000_001) {
+    const proceed = await confirmDialog({
+      title: "Small Amount",
+      message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
+      confirmLabel: "Send Anyway",
+    });
+    if (!proceed || !isPaySheetOpen()) return;
+  }
+  const memo = currentPaymentMemo();
+  try {
+    await sendKasPayment(conversationId, amountKas, {
+      note: memo,
+      // Down as soon as a node has the transaction; the bubble in the chat is the confirmation.
+      onSubmitted: () => { closePaymentSheet({ force: true }); resetPaymentSheetFields(); },
+    });
+  } catch (error) {
+    // Shown in the sheet, which is still up.
+    paySheetError = userFacingError(error);
+    if (isPaySheetOpen()) refreshPaymentSheetState();
+    else showCopyToast(`Payment failed: ${paySheetError}`);
+  }
 }
 
-
-function showKasPaymentAlert({ title, message, primaryLabel = "OK", cancelLabel = "", allowCancel = false } = {}) {
-  return new Promise((resolve) => {
-    if (!kasPaymentAlert) return resolve(true);
-    kasPaymentAlertTitle.textContent = title || "Payment Alert";
-    kasPaymentAlertMessage.textContent = message || "";
-    kasPaymentAlertPrimary.textContent = primaryLabel;
-    kasPaymentAlertCancel.textContent = cancelLabel || "Cancel";
-    kasPaymentAlertCancel.hidden = !allowCancel;
-    kasPaymentAlert.hidden = false;
-    const finish = (value) => {
-      kasPaymentAlert.hidden = true;
-      kasPaymentAlertPrimary.onclick = null;
-      kasPaymentAlertCancel.onclick = null;
-      resolve(value);
-    };
-    kasPaymentAlertPrimary.onclick = () => finish(true);
-    kasPaymentAlertCancel.onclick = () => finish(false);
-  });
+// The composer is message-only now; this resets it for a freshly opened chat (and for staged text).
+async function activateComposerMode() {
+  const input = composer?.elements?.message;
+  if (!input) return;
+  composerMode = "message";
+  composer.classList.remove("payment-mode");
+  input.value = "";
+  input.inputMode = "text";
+  input.setAttribute("aria-label", "Message");
+  setComposerHint("Message");
+  hideFeeEstimateBanner();
+  updateHandshakeWarningBanner();
 }
+
 
 function normalizeKaspaTransactions(body) {
   if (Array.isArray(body)) return body;
@@ -16860,7 +17144,8 @@ async function verifyKasPaymentBroadcast(txids, recipientAddress, amountKas) {
 function paymentAmountForMessage(message) {
   const stored = String(message?.paymentAmountKas || "").trim();
   if (stored && Number.isFinite(Number(stored)) && Number(stored) > 0) return stored;
-  const match = String(message?.text || "").match(/^Sent\s+([0-9]+(?:\.[0-9]{1,8})?)\s+T?KAS$/i);
+  // "Sent 0.5 KAS", or with a memo "Sent 0.5 KAS — thanks" (iOS 2be75ed).
+  const match = String(message?.text || "").match(/^Sent\s+([0-9]+(?:\.[0-9]{1,8})?)\s+T?KAS(?:\s+—\s[\s\S]*)?$/i);
   return match ? match[1] : "";
 }
 
@@ -16914,6 +17199,68 @@ function buildPaymentCard(parts, outgoing) {
   return card;
 }
 
+// A payment bubble's details half sheet (iOS paymentDetailSheet, 80a6aae): what moved - amount,
+// direction, memo, when - and its transaction: View in Explorer (the explorer chosen in
+// Settings) and Copy Transaction ID. A payment that isn't on chain yet says so instead.
+function openPaymentDetailSheet(conversationId, messageId) {
+  const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
+  const message = conversationEntry?.messages?.find((entry) => entry.id === messageId);
+  if (!message) return;
+  document.querySelector("[data-payment-detail-sheet]")?.remove();
+  const parts = parsePaymentCardParts(message);
+  const outgoing = message.direction !== "incoming";
+  const txid = String(message.txid || "").trim();
+  const onChain = Boolean(txid) && !txid.startsWith("pending_")
+    && message.status !== MESSAGE_STATUSES.PENDING && message.status !== MESSAGE_STATUSES.FAILED;
+  const when = message.createdAt
+    ? new Date(message.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+    : "";
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop payment-detail-backdrop";
+  backdrop.setAttribute("data-payment-detail-sheet", "");
+  backdrop.innerHTML = `
+    <section class="contact-modal payment-detail-sheet" role="dialog" aria-modal="true" aria-label="${escapeHtml(outgoing ? "Sent payment" : "Received payment")}">
+      <button class="modal-close" type="button" data-payment-detail-close aria-label="Close">×</button>
+      <div class="payment-detail-head">
+        <img class="payment-detail-logo" src="${escapeHtml(kaspaLogoUrl)}" alt="" />
+        <p class="payment-detail-direction">${escapeHtml(outgoing ? "Sent" : "Received")}</p>
+        ${parts
+          ? `<p class="payment-detail-amount">${escapeHtml(`${parts.amountText} ${KAS_UNIT}`)}</p>${parts.note ? `<p class="payment-detail-memo">${escapeHtml(parts.note)}</p>` : ""}`
+          : `<p class="payment-detail-content">${escapeHtml(String(message.text || ""))}</p>`}
+        ${when ? `<p class="payment-detail-time">${escapeHtml(when)}</p>` : ""}
+      </div>
+      ${onChain ? `
+      <div class="cold-action-rows">
+        <button type="button" class="cold-action-row" data-payment-detail-explorer>
+          <span class="cold-action-copy"><strong>View in Explorer</strong><small>Opens this transaction in the block explorer.</small></span>
+        </button>
+        <button type="button" class="cold-action-row" data-payment-detail-copy>
+          <span class="cold-action-copy"><strong>Copy Transaction ID</strong><small>Copies the transaction ID to your clipboard.</small></span>
+        </button>
+      </div>` : `<p class="payment-detail-pending">This payment isn't on chain yet.</p>`}
+    </section>`;
+  document.body.append(backdrop);
+  const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (event) => { if (event.key === "Escape") { event.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+  backdrop.querySelector("[data-payment-detail-close]")?.addEventListener("click", close);
+  backdrop.querySelector("[data-payment-detail-explorer]")?.addEventListener("click", () => {
+    close();
+    window.open(explorerTxUrl(txid), "_blank", "noopener,noreferrer");
+  });
+  backdrop.querySelector("[data-payment-detail-copy]")?.addEventListener("click", async () => {
+    try {
+      await copyTextToClipboard(txid);
+      close();
+      showCopyToast("Transaction ID copied");
+    } catch (error) {
+      showCopyToast(userFacingError(error));
+    }
+  });
+  (backdrop.querySelector("[data-payment-detail-explorer]") || backdrop.querySelector("[data-payment-detail-close]"))?.focus();
+}
+
 async function refreshPendingPaymentStatuses(conversationEntry, contact) {
   let changed = false;
   const pendingPayments = (conversationEntry.messages || []).filter((message) =>
@@ -16955,16 +17302,18 @@ function normalizeKasAmount(value) {
   return cleaned;
 }
 
-async function sendKasPayment(conversationId, rawAmount) {
-  if (paymentSendInFlight) return;
+// A chat payment, from the Send KAS sheet. Throws (for the sheet to show) when it can't go: not
+// enough balance, the memo can't be encrypted, or the node refuses it. `onSubmitted` runs once a
+// node has the transaction, before the slower recipient-output verification.
+async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null } = {}) {
+  if (paymentSendInFlight) return false;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   const contact = contactForConversation(conversationEntry);
   if (!conversationEntry || !contact) throw new Error("Conversation contact was unavailable.");
   const amountKas = normalizeKasAmount(rawAmount);
+  const memo = clampPaymentMemo(note).trim();
   paymentSendInFlight = true;
-  const input = composer.elements.message;
-  const submitButton = composer.querySelector(".composer-send");
-  if (submitButton) submitButton.disabled = true;
+  refreshPaymentSheetState();
   try {
     // Funding source follows the per-account Chats Payment Privacy toggle
     // (iOS paymentFundingSourceAddress): ON funds from the PRIMARY SPENDING
@@ -16980,20 +17329,17 @@ async function sendKasPayment(conversationId, rawAmount) {
     const requestedSompi = BigInt(Math.round(Number(amountKas) * 1e8));
     const feeReserveSompi = 10000n;
     if (requestedSompi + feeReserveSompi > balance.totalSompi) {
-      await showKasPaymentAlert({
-        title: `Not Enough ${KAS_UNIT}`,
-        message: `Planned spend ${amountKas} ${KAS_UNIT}, but available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`,
-        primaryLabel: "OK",
-      });
-      return;
+      throw new Error(`Not enough ${KAS_UNIT}: planned spend ${amountKas} ${KAS_UNIT}, but the available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`);
     }
-    if (Number(amountKas) < 0.1) {
-      const proceed = await showKasPaymentAlert({
-        title: "Small Amount",
-        message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
-        primaryLabel: "Send Anyway", cancelLabel: "Cancel", allowCancel: true,
-      });
-      if (!proceed) return;
+    // The payment payload, as iOS writes it: kchat:1:pay: + the payment JSON (the memo is its
+    // "message") encrypted to the contact's chat address. Built before a pool address is consumed.
+    let payload = null;
+    try {
+      const built = await engine.buildPaymentPayload({ receiver: contact.address, note: memo, amountSompi: Number(requestedSompi) });
+      payload = built?.payloadBytes || null;
+    } catch (error) {
+      if (memo) throw new Error(`Couldn't encrypt the memo. (${userFacingError(error)})`);
+      appendEngineLog(`Payment payload unavailable, sending without one: ${error.message}`);
     }
     // Fresh-address payment pools: consume the contact's next unused pool
     // address (persisted immediately — a consumed address is never offered to
@@ -17002,11 +17348,13 @@ async function sendKasPayment(conversationId, rawAmount) {
     // used no matter the sender's privacy toggle.
     const destinationAddress = await consumePoolPaymentDestination(contact);
     const createdAt = Date.now();
+    // The memo goes into your own bubble now (iOS 2be75ed): it is encrypted to the recipient, so
+    // this device can never read it back from the chain.
     const message = createMessage({
       conversationId: conversationEntry.id,
       contactId: contact.id,
       direction: "outgoing",
-      text: `Sent ${amountKas} ${KAS_UNIT}`,
+      text: memo ? `Sent ${amountKas} ${KAS_UNIT} — ${memo}` : `Sent ${amountKas} ${KAS_UNIT}`,
       sender: engine.address || null,
       receiver: destinationAddress,
       status: MESSAGE_STATUSES.PENDING,
@@ -17016,15 +17364,14 @@ async function sendKasPayment(conversationId, rawAmount) {
     applyMessagePatch(message, { messageType: "payment", paymentAmountKas: amountKas });
     appendIncomingOrReactionMessage(conversationEntry, message);
     persistState();
-    renderMessages(conversationEntry);
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     // renderMessages hydrates and replaces message objects. Keep working with
     // the canonical object now stored in the conversation, not the stale local
     // reference created above.
     const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
-    input.value = "";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
     setStatus(`Sending ${amountKas} ${KAS_UNIT}…`);
 
+    let submittedTxids = [];
     try {
       const payFresh = spendingFunded ? freshChangeForSpendingIndex(fundingIndex) : null;
       const result = spendingFunded
@@ -17036,54 +17383,163 @@ async function sendKasPayment(conversationId, rawAmount) {
             amountKas,
             feeKas: "0",
             changeAddress: payFresh?.address || null,
+            payload,
+            exactAmount: true,
           })
-        : await engine.send(destinationAddress, amountKas, "0");
+        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true });
       if (payFresh) rotatePrimarySpendingTo(payFresh);
-      const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
-      const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
-      if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
-      const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
-      applyMessagePatch(liveMessage, {
-        status: MESSAGE_STATUSES.CONFIRMED,
-        txid: verifiedTxid || txid,
-        confirmations: verifiedTxid ? 1 : 0,
-        network: "mainnet",
-        note: verifiedTxid
-          ? "Kaspa payment verified at recipient output."
-          : "Kaspa node accepted and broadcast the payment transaction.",
-      });
-      setStatus(`Payment sent · ${(verifiedTxid || txid).slice(0, 12)}…`);
-      // Pool payments never touch the recipient's chatting address — send the
-      // payment_notice so their chat still shows the bubble, then top up our
-      // stored pool if it ran low. No-op for chatting-address payments.
-      handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress);
-      await refreshBalanceOnly({ quiet: true });
-      refreshComposerAvailableBalance();
+      submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
+      if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     } catch (error) {
       applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
+      conversationEntry.updatedAt = Date.now();
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
       setStatus(`Payment failed: ${error.message}`);
+      throw error;
     }
+    try { onSubmitted?.(); } catch { /* the sheet closing must not fail the payment */ }
+    const txid = submittedTxids.at(-1) || submittedTxids[0];
+    const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
+    applyMessagePatch(liveMessage, {
+      status: MESSAGE_STATUSES.CONFIRMED,
+      txid: verifiedTxid || txid,
+      confirmations: verifiedTxid ? 1 : 0,
+      network: "mainnet",
+      note: verifiedTxid
+        ? "Kaspa payment verified at recipient output."
+        : "Kaspa node accepted and broadcast the payment transaction.",
+    });
+    setStatus(`Payment sent · ${(verifiedTxid || txid).slice(0, 12)}…`);
+    // Pool payments never touch the recipient's chatting address — send the
+    // payment_notice so their chat still shows the bubble, then top up our
+    // stored pool if it ran low. No-op for chatting-address payments.
+    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress);
     conversationEntry.updatedAt = Date.now();
     persistState();
-    renderMessages(conversationEntry);
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+    await refreshBalanceOnly({ quiet: true }).catch(() => {});
+    refreshComposerAvailableBalance();
+    return true;
   } finally {
     paymentSendInFlight = false;
-    if (submitButton) submitButton.disabled = false;
-    input?.focus();
+    refreshPaymentSheetState();
   }
 }
 
+// The "+" sheet (iOS composerPlusSheet). Reopens on its first step, never on the chess or
+// on-chain-or-Nextcloud step it was closed from.
+const composerMediaRouteMenu = document.querySelector("[data-composer-media-route-menu]");
 if (composerPlusButton && composerPlusMenu) {
   composerPlusButton.addEventListener("click", () => {
     const tcMenu = document.querySelector("[data-chess-tc-menu]");
-    // The plus button always returns to step one of the menu, never leaves the chess
-    // time-control step stranded behind it.
-    if (tcMenu && !tcMenu.hidden) { tcMenu.hidden = true; composerPlusMenu.hidden = true; return; }
-    // In your own chat there is no one to shake hands with or to play.
-    const selfChat = isSelfConversation(state.conversations.find((entry) => entry.id === activeConversationId));
-    composerPlusMenu.querySelectorAll("[data-composer-handshake], [data-chess-open]").forEach((row) => { row.hidden = selfChat; });
+    const secondStepOpen = (tcMenu && !tcMenu.hidden) || (composerMediaRouteMenu && !composerMediaRouteMenu.hidden);
+    if (secondStepOpen) { closeComposerMenu(); return; }
+    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+    // In your own chat there is no one to shake hands with or to play. The handshake row is only
+    // there where first contact still needs one (iOS: canSendRequestToCommunicate && !inboxSupported).
+    const selfChat = isSelfConversation(conversationEntry);
+    composerPlusMenu.querySelectorAll("[data-chess-open]").forEach((row) => { row.hidden = selfChat; });
+    composerPlusMenu.querySelectorAll("[data-composer-handshake]").forEach((row) => { row.hidden = selfChat || inboxSupportKnown() === true; });
+    // File appears with a connected Nextcloud (nextcloud.js keeps it in step too).
+    composerPlusMenu.querySelectorAll("[data-nextcloud-pick]").forEach((row) => { row.hidden = !isNextcloudConnected(); });
     composerPlusMenu.hidden = !composerPlusMenu.hidden;
   });
+}
+composerPlusMenu?.querySelector("[data-composer-pay]")?.addEventListener("click", () => {
+  closeComposerMenu();
+  openPaymentSheet();
+});
+composerPlusMenu?.querySelectorAll("[data-composer-media]").forEach((row) => {
+  row.addEventListener("click", () => chooseComposerMedia(row.dataset.composerMedia));
+});
+
+// What each media row asks in its second step (iOS ComposerMediaRouteStep, a890102).
+const COMPOSER_MEDIA_ROUTE_COPY = {
+  camera: {
+    title: "Camera",
+    chainTitle: "Take On-Chain Photo", chainSubtitle: "Take a photo and send it on chain, compressed to fit.",
+    nextcloudTitle: "Take Photo via Nextcloud", nextcloudSubtitle: "Full quality, or a video. Uploads to your Nextcloud; the chat carries the link.",
+  },
+  photo: {
+    title: "Photo",
+    chainTitle: "Send Photo On-Chain", chainSubtitle: "Pick an image and send it on chain, compressed to fit.",
+    nextcloudTitle: "Send Photo or Video via Nextcloud", nextcloudSubtitle: "Full quality, or a video. Uploads to your Nextcloud; the chat carries the link.",
+  },
+  voice: {
+    title: "Voice Message",
+    chainTitle: "Record On-Chain", chainSubtitle: "Up to 10 seconds, sent on chain.",
+    nextcloudTitle: "Record via Nextcloud", nextcloudSubtitle: "Up to 5 minutes. Uploads to your Nextcloud; the chat carries the link.",
+  },
+};
+// A Nextcloud voice note runs to 5 minutes everywhere in the app (iOS ComposerMediaLimits).
+const NEXTCLOUD_VOICE_MAX_SECONDS = 300;
+
+/** The on-chain-or-Nextcloud question as a sheet, for the composers whose "+" is a sheet (groups)
+ *  and for public chats' mic. Resolves "chain", "nextcloud", "back" or null (dismissed). */
+async function chooseMediaRouteDialog(kind, { backLabel = "Back" } = {}) {
+  const copy = COMPOSER_MEDIA_ROUTE_COPY[kind];
+  if (!copy) return null;
+  return chooseDialog({
+    title: copy.title,
+    options: [
+      { id: "chain", title: copy.chainTitle, subtitle: copy.chainSubtitle },
+      { id: "nextcloud", title: copy.nextcloudTitle, subtitle: copy.nextcloudSubtitle },
+      { id: "back", title: backLabel },
+    ],
+  });
+}
+
+let composerMediaRouteKind = null;
+// A "+" media row: asks on chain or via Nextcloud when a server is connected, otherwise goes
+// straight to the on-chain path (iOS chooseMedia).
+function chooseComposerMedia(kind) {
+  if (!COMPOSER_MEDIA_ROUTE_COPY[kind]) return;
+  if (!isNextcloudConnected() || !composerMediaRouteMenu) {
+    closeComposerMenu();
+    startComposerMedia(kind, false);
+    return;
+  }
+  const copy = COMPOSER_MEDIA_ROUTE_COPY[kind];
+  composerMediaRouteKind = kind;
+  const set = (selector, text) => { const el = composerMediaRouteMenu.querySelector(selector); if (el) el.textContent = text; };
+  set("[data-media-route-title]", copy.title);
+  set("[data-media-route-chain-title]", copy.chainTitle);
+  set("[data-media-route-chain-subtitle]", copy.chainSubtitle);
+  set("[data-media-route-nextcloud-title]", copy.nextcloudTitle);
+  set("[data-media-route-nextcloud-subtitle]", copy.nextcloudSubtitle);
+  if (composerPlusMenu) composerPlusMenu.hidden = true;
+  composerMediaRouteMenu.hidden = false;
+  composerMediaRouteMenu.querySelector("[data-media-route]")?.focus();
+}
+composerMediaRouteMenu?.querySelectorAll("[data-media-route]").forEach((row) => {
+  row.addEventListener("click", () => {
+    const kind = composerMediaRouteKind;
+    closeComposerMenu();
+    if (kind) startComposerMedia(kind, row.dataset.mediaRoute === "nextcloud");
+  });
+});
+composerMediaRouteMenu?.querySelector("[data-media-route-back]")?.addEventListener("click", () => {
+  composerMediaRouteMenu.hidden = true;
+  if (composerPlusMenu) composerPlusMenu.hidden = false;
+});
+
+const cameraFileInput = document.querySelector("[data-camera-file-input]");
+// iOS startMedia: the camera, the library, or a recording, with the route chosen for it. Videos
+// only exist via Nextcloud - no on-chain path fits one.
+function startComposerMedia(kind, viaNextcloud) {
+  if (!activeConversationId) return;
+  const via = Boolean(viaNextcloud) && isNextcloudConnected();
+  if (kind === "camera" || kind === "photo") {
+    const input = kind === "camera" ? (cameraFileInput || photoFileInput) : photoFileInput;
+    if (!input) return;
+    photoViaNextcloud = via;
+    input.accept = via ? "image/*,video/*" : "image/*";
+    input.click();
+  } else if (kind === "voice") {
+    voiceViaNextcloud = via;
+    startVoiceRecording();
+  }
 }
 
 // --- Chess over chat (Stage 3): game state is re-derived from the conversation's
@@ -17725,6 +18181,8 @@ async function compressImageBlob(blob, { targetBytes = photoQualityTargetBytes()
 
 function clearPendingPhoto() {
   pendingPhotoAttachment = null;
+  // A discarded photo drops the route it was picked with; a send snapshots it first.
+  photoViaNextcloud = false;
   if (pendingPhotoPreview) pendingPhotoPreview.hidden = true;
   if (pendingPhotoThumb) pendingPhotoThumb.src = "";
   if (photoFileInput) photoFileInput.value = "";
@@ -17745,13 +18203,14 @@ async function attachPhotoBlob(blob) {
   setStatus("Compressing photo…");
   try {
     const attachment = await compressImageBlob(blob);
-    // Kept alongside the compressed envelope version so "Send Media via Nextcloud" can
+    // Kept alongside the compressed envelope version so a photo sent via Nextcloud can
     // upload the ORIGINAL full-quality file instead of the payload-sized recompression.
     attachment.originalBlob = blob;
     attachment.originalName = blob.name || "photo.jpg";
     setPendingPhoto(attachment);
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB`);
   } catch (error) {
+    photoViaNextcloud = false;
     showCopyToast(error.message || "Could not attach that photo.");
   }
 }
@@ -17781,10 +18240,13 @@ function buildImageEnvelopeJson(attachment, fileName = "photo.jpg") {
 // need a hand-rolled encoder to produce them.
 
 const VOICE_MAX_DURATION_SECONDS = 10; // on-chain payload cap
-// Nextcloud-uploaded voice notes aren't payload-bound — the server carries them.
-const VOICE_MAX_DURATION_NEXTCLOUD_SECONDS = 600;
+// Nextcloud-uploaded voice notes aren't payload-bound - the server carries them - so a "Record via
+// Nextcloud" note runs to the app-wide 5 minutes (iOS ComposerMediaLimits.nextcloudVoiceSeconds).
 function voiceMaxDurationSeconds() {
-  return isNextcloudMediaSendActive() ? VOICE_MAX_DURATION_NEXTCLOUD_SECONDS : VOICE_MAX_DURATION_SECONDS;
+  return voiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : VOICE_MAX_DURATION_SECONDS;
+}
+function groupVoiceMaxDurationSeconds() {
+  return groupVoiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : VOICE_MAX_DURATION_SECONDS;
 }
 const VOICE_AUDIO_BITS_PER_SECOND = 8000;
 
@@ -17977,11 +18439,12 @@ async function sendChatVoicePreview() {
   const { blob, mimeType } = entry;
   clearVoicePreview(voiceRecordingPanel);
 
-  // "Send Media via Nextcloud": upload the recording and send its share link (renders as an
-  // audio card + player on the recipient's side). Failure falls back to the on-chain envelope.
-  const voiceOnChain = voiceForcedOnChain;
-  voiceForcedOnChain = false;
-  if (isNextcloudMediaSendActive() && !voiceOnChain) {
+  // "Record via Nextcloud" (chosen in the "+" sheet): upload the recording and send its share
+  // link (renders as an audio card + player on the recipient's side). Failure falls back to the
+  // on-chain envelope.
+  const viaNextcloud = voiceViaNextcloud && isNextcloudConnected();
+  voiceViaNextcloud = false;
+  if (viaNextcloud) {
     const conversationId = activeConversationId;
     setStatus("Uploading voice note to Nextcloud…");
     try {
@@ -19364,49 +19827,61 @@ async function sendReaction(conversationEntry, targetMessage, emoji) {
 
 pendingPhotoRemove?.addEventListener("click", clearPendingPhoto);
 
-photoFileInput?.addEventListener("change", async () => {
-  const file = photoFileInput.files?.[0];
-  if (!file) return;
-  await attachPhotoBlob(file);
-  photoFileInput.value = "";
-});
+// Uploads a video picked "via Nextcloud" (camera or library) and sends its share link straight
+// away, the way a camera clip goes on iOS (sendNextcloudVideo); there is no on-chain video.
+async function sendNextcloudVideoFile(file, sendLink) {
+  const mime = String(file?.type || "video/mp4");
+  const named = /\.([a-z0-9]{2,5})$/i.exec(String(file?.name || ""));
+  const ext = (named ? named[1] : (mime.split("/")[1] || "mp4")).toLowerCase().replace("quicktime", "mov");
+  setStatus("Uploading video to Nextcloud…");
+  try {
+    const url = await uploadNextcloudMedia(file, `video_${Math.floor(Date.now() / 1000)}.${ext}`, mime);
+    await sendLink(url);
+    setStatus("Video sent via Nextcloud.");
+  } catch (error) {
+    showCopyToast(`Couldn't send that video. (${userFacingError(error)})`);
+  }
+}
 
+// The "+" sheet's Camera and Photo both land here, on chain or via Nextcloud as chosen there.
+async function handleComposerMediaFile(input) {
+  const file = input?.files?.[0];
+  if (input) { input.value = ""; input.accept = "image/*"; }
+  if (!file) { photoViaNextcloud = false; return; }
+  if (String(file.type || "").startsWith("video/")) {
+    const via = photoViaNextcloud && isNextcloudConnected();
+    photoViaNextcloud = false;
+    if (!via) { showCopyToast("Videos go via Nextcloud only. Pick a photo to send it on chain."); return; }
+    const conversationId = activeConversationId;
+    if (!conversationId) return;
+    await sendNextcloudVideoFile(file, (url) => queueConversationMessage(conversationId, url));
+    return;
+  }
+  await attachPhotoBlob(file);
+}
+photoFileInput?.addEventListener("change", () => handleComposerMediaFile(photoFileInput));
+cameraFileInput?.addEventListener("change", () => handleComposerMediaFile(cameraFileInput));
+// A closed chooser drops the route it was opened with (iOS: the camera's onCancel).
+[photoFileInput, cameraFileInput].forEach((input) => input?.addEventListener("cancel", () => {
+  input.accept = "image/*";
+  if (!pendingPhotoAttachment) photoViaNextcloud = false;
+}));
+
+// Paste (and drop / share) go on chain (iOS 8b13460): only the "+" sheet's "via Nextcloud" rows
+// upload to the server.
 composer.elements.message?.addEventListener("paste", async (event) => {
   const items = Array.from(event.clipboardData?.items || []);
   const imageItem = items.find((item) => item.type?.startsWith("image/"));
   if (!imageItem) return;
   event.preventDefault();
-  if (composerMode === "kas") await activateComposerMode("message");
   const file = imageItem.getAsFile();
-  if (file) await attachPhotoBlob(file);
+  if (!file) return;
+  photoViaNextcloud = false;
+  await attachPhotoBlob(file);
 });
 
-// The three shortcuts that live in the input bubble on iOS (camera, mic, Kaspa logo), plus the
-// desktop-only emoji picker beside them.
-// "Send On-Chain Photo" / "Send On-Chain Voice Message" in the "+" menu mean on chain even while
-// "Send Media via Nextcloud" is on; the composer bar's own camera and mic follow the switch
-// (iOS d36a82f). The flag is set by the row that started the attachment and cleared when it
-// is sent or discarded.
-let photoForcedOnChain = false;
-let voiceForcedOnChain = false;
-let groupPhotoForcedOnChain = false;
-let groupVoiceForcedOnChain = false;
-document.querySelector("[data-composer-camera]")?.addEventListener("click", () => {
-  closeComposerMenu();
-  activateComposerMode("message");
-  photoForcedOnChain = false;
-  photoFileInput?.click();
-});
-document.querySelector("[data-composer-mic]")?.addEventListener("click", () => {
-  closeComposerMenu();
-  activateComposerMode("message");
-  voiceForcedOnChain = false;
-  startVoiceRecording();
-});
-document.querySelector("[data-composer-kas]")?.addEventListener("click", () => {
-  closeComposerMenu();
-  activateComposerMode(composerMode === "kas" ? "message" : "kas");
-});
+// The input bubble keeps only the desktop's own emoji picker; camera, mic and the Kaspa logo
+// moved into the "+" sheet (iOS 8b13460).
 document.querySelector("[data-composer-emoji]")?.addEventListener("click", (event) => {
   closeComposerMenu();
   const input = composer?.elements?.message;
@@ -19427,29 +19902,16 @@ composerModeButtons.forEach((button) => {
   button.addEventListener("click", () => {
     const mode = button.dataset.composerMode;
     closeComposerMenu();
-    if (mode === "message") {
-      activateComposerMode("message");
-    } else if (mode === "kas") {
-      activateComposerMode("kas");
-    } else if (mode === "photo") {
-      activateComposerMode("message");
-      photoForcedOnChain = true;
-      photoFileInput?.click();
-    } else if (mode === "voice") {
-      activateComposerMode("message");
-      voiceForcedOnChain = true;
-      startVoiceRecording();
-    } else if (mode === "handshake") {
-      sendHandshakeFromComposer();
-    }
+    if (mode === "handshake") sendHandshakeFromComposer();
   });
 });
 
 document.addEventListener("click", (event) => {
   const plusOpen = !!composerPlusMenu && !composerPlusMenu.hidden;
   const tcOpen = !!chessTcMenu && !chessTcMenu.hidden;
-  if (!plusOpen && !tcOpen) return;
-  if (composerPlusMenu?.contains(event.target) || chessTcMenu?.contains(event.target)) return;
+  const routeOpen = !!composerMediaRouteMenu && !composerMediaRouteMenu.hidden;
+  if (!plusOpen && !tcOpen && !routeOpen) return;
+  if (composerPlusMenu?.contains(event.target) || chessTcMenu?.contains(event.target) || composerMediaRouteMenu?.contains(event.target)) return;
   if (composerPlusButton?.contains(event.target)) return;
   closeComposerMenu();
 });
@@ -19625,16 +20087,16 @@ composer.addEventListener("submit", async (event) => {
 
   if (pendingPhotoAttachment) {
     const attachment = pendingPhotoAttachment;
+    // Snapshot before clearPendingPhoto drops it: "via Nextcloud" chosen in the "+" sheet.
+    const viaNextcloud = photoViaNextcloud && isNextcloudConnected();
     input.value = "";
     autoGrowComposer();
     clearPendingPhoto();
     hideFeeEstimateBanner();
-    // "Send Media via Nextcloud": upload the full-quality original and send its share link
-    // (renders as a media bubble on the recipient's side). Any failure falls back to the
-    // on-chain envelope so the message never silently vanishes.
-    const photoOnChain = photoForcedOnChain;
-    photoForcedOnChain = false;
-    if (isNextcloudMediaSendActive() && attachment.originalBlob && !photoOnChain) {
+    // Via Nextcloud: upload the full-quality original and send its share link (renders as a
+    // media bubble on the recipient's side). Any failure falls back to the on-chain envelope so
+    // the message never silently vanishes.
+    if (viaNextcloud && attachment.originalBlob) {
       const conversationId = activeConversationId;
       setStatus("Uploading photo to Nextcloud…");
       try {
@@ -19661,18 +20123,6 @@ composer.addEventListener("submit", async (event) => {
     autoGrowComposer();
     clearConversationDraft(activeConversationId);
     await sendHandshakeFromComposer();
-    return;
-  }
-
-  if (composerMode === "kas") {
-    try {
-      // Typed in fiat: the send is always in KAS.
-      const kasAmount = paymentUnit === "fiat" ? paymentKasFromInput() : null;
-      if (paymentUnit === "fiat" && kasAmount == null) { setStatus("No live price to convert with."); return; }
-      await sendKasPayment(activeConversationId, kasAmount != null ? formatKasPlain(kasAmount) : text);
-    } catch (error) {
-      setStatus(`Payment failed: ${error.message}`);
-    }
     return;
   }
 
@@ -22226,7 +22676,10 @@ queueMicrotask(async () => {
         render: renderVoicePanel, set: setVoicePreview, clear: clearVoicePreview,
         toggle: toggleVoicePreviewPlayback, get: (panel) => voicePreviews.get(panel),
       },
-      isNextcloudMediaSendActive,
+      // Public chats' mic asks on chain or via Nextcloud while a server is connected (iOS 8b13460).
+      isNextcloudConnected,
+      chooseMediaRoute: (kind) => chooseMediaRouteDialog(kind),
+      nextcloudVoiceMaxSeconds: NEXTCLOUD_VOICE_MAX_SECONDS,
       uploadNextcloudMedia,
       // Reactions: identical wire parser and fixed tapback set across all clients.
       parseReactionEnvelope,
@@ -25357,12 +25810,12 @@ groupComposer?.addEventListener("submit", async (event) => {
   // A staged photo sends on Send (with the typed caption as a following message, if any).
   if (groupPendingPhoto) {
     const { attachment, fileName } = groupPendingPhoto;
+    // "Via Nextcloud" chosen in the "+" sheet (snapshot before the clear drops it): the
+    // full-quality original goes to the server and the group gets its share link; any failure
+    // falls back to the on-chain envelope.
+    const viaNextcloud = groupPhotoViaNextcloud && isNextcloudConnected();
     clearGroupPendingPhoto();
-    // "Send Media via Nextcloud": the full-quality original goes to the server and the group
-    // gets its share link; any failure falls back to the on-chain envelope.
-    const photoOnChain = groupPhotoForcedOnChain;
-    groupPhotoForcedOnChain = false;
-    if (isNextcloudMediaSendActive() && attachment.originalBlob && !photoOnChain) {
+    if (viaNextcloud && attachment.originalBlob) {
       try {
         const url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
         sendGroupWire(url);
@@ -25427,42 +25880,67 @@ groupCancelReplyBtn?.addEventListener("click", cancelGroupReply);
 // Plus-menu (Photo / Voice).
 function closeGroupPlusMenu() { if (groupPlusMenu) groupPlusMenu.hidden = true; }
 // The old dropdown is retired in favour of the Send sheet below; the markup stays for the
-// data-group-compose rows that other code may still target.
+// data-group-compose rows that other code may still target. Its rows go on chain.
 groupPlusMenu?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-group-compose]");
   if (!btn) return;
   closeGroupPlusMenu();
-  if (btn.dataset.groupCompose === "photo") { groupPhotoForcedOnChain = true; groupPhotoInput?.click(); }
-  else if (btn.dataset.groupCompose === "voice") { groupVoiceForcedOnChain = true; startGroupVoice(); }
+  if (btn.dataset.groupCompose === "photo") startGroupMedia("photo", false);
+  else if (btn.dataset.groupCompose === "voice") startGroupMedia("voice", false);
 });
-document.querySelector("[data-group-camera]")?.addEventListener("click", () => { closeGroupPlusMenu(); groupPhotoForcedOnChain = false; groupPhotoInput?.click(); });
-document.querySelector("[data-group-mic]")?.addEventListener("click", () => { closeGroupPlusMenu(); groupVoiceForcedOnChain = false; startGroupVoice(); });
-// The "+" (iOS plusSheet): a sheet titled Send, each row saying what it does.
+const groupCameraInput = document.querySelector("[data-group-camera-input]");
+// iOS GroupChatDetailView.startMedia: the camera, the library or a recording, on chain or via
+// Nextcloud as chosen. Videos only go via Nextcloud.
+function startGroupMedia(kind, viaNextcloud) {
+  if (!activeGroupId) return;
+  const via = Boolean(viaNextcloud) && isNextcloudConnected();
+  if (kind === "camera" || kind === "photo") {
+    const input = kind === "camera" ? (groupCameraInput || groupPhotoInput) : groupPhotoInput;
+    if (!input) return;
+    groupPhotoViaNextcloud = via;
+    input.accept = via ? "image/*,video/*" : "image/*";
+    input.click();
+  } else if (kind === "voice") {
+    groupVoiceViaNextcloud = via;
+    startGroupVoice();
+  }
+}
+// The "+" (iOS plusSheet): a sheet titled Send - Camera, Photo, Voice Message, and File once a
+// Nextcloud server is connected. No Pay in Kaspa or chess: a group has no single recipient. With
+// Nextcloud connected, Camera / Photo / Voice Message ask on chain or via Nextcloud (Back returns
+// to this sheet); without it they go straight on chain.
 groupPlusButton?.addEventListener("click", async (event) => {
   event.stopPropagation();
   closeGroupPlusMenu();
-  // "Send from Nextcloud" joins the sheet once a server is connected (iOS plusSheet).
-  // On-chain photo and voice are always offered (a Nextcloud upload is a different thing), then
-  // Send from Nextcloud once a server is connected - the order and names of the iOS sheet.
-  const options = [
-    { id: "photo", title: "Send On-Chain Photo", subtitle: "Pick an image from your library; it is sent on chain." },
-    { id: "voice", title: "Send On-Chain Voice Message", subtitle: "Record a voice message and send it to the group on chain." },
-  ];
-  if (isNextcloudConnected()) options.push({ id: "nextcloud", title: "Send from Nextcloud", subtitle: "Pick a file from your connected server." });
-  const choice = await chooseDialog({ title: "Send", options });
-  if (choice === "photo") { groupPhotoForcedOnChain = true; groupPhotoInput?.click(); }
-  else if (choice === "voice") { groupVoiceForcedOnChain = true; startGroupVoice(); }
-  else if (choice === "nextcloud") {
-    openNextcloudMediaPicker({
-      onPicked: (url) => {
-        // The share link lands in the group composer for review; Send is still yours to press.
-        if (!groupComposerInput) return;
-        const current = groupComposerInput.value;
-        groupComposerInput.value = current ? `${current.replace(/\s+$/, "")} ${url}` : url;
-        groupComposerInput.focus();
-        groupComposerInput.dispatchEvent(new Event("input", { bubbles: true }));
-      },
-    });
+  for (;;) {
+    const connected = isNextcloudConnected();
+    const options = [
+      { id: "camera", title: "Camera", subtitle: "Take a photo and send it to the group." },
+      { id: "photo", title: "Photo", subtitle: "Pick an image from your library and send it to the group." },
+      { id: "voice", title: "Voice Message", subtitle: "Record a voice message and send it to the group." },
+    ];
+    if (connected) options.push({ id: "nextcloud", title: "File", subtitle: "Send any file from your Nextcloud. It shows as a preview." });
+    const choice = await chooseDialog({ title: "Send", options });
+    if (choice === "camera" || choice === "photo" || choice === "voice") {
+      if (!connected) { startGroupMedia(choice, false); return; }
+      const route = await chooseMediaRouteDialog(choice);
+      if (route === "back") continue;
+      if (route === "chain" || route === "nextcloud") startGroupMedia(choice, route === "nextcloud");
+      return;
+    }
+    if (choice === "nextcloud") {
+      openNextcloudMediaPicker({
+        onPicked: (url) => {
+          // The share link lands in the group composer for review; Send is still yours to press.
+          if (!groupComposerInput) return;
+          const current = groupComposerInput.value;
+          groupComposerInput.value = current ? `${current.replace(/\s+$/, "")} ${url}` : url;
+          groupComposerInput.focus();
+          groupComposerInput.dispatchEvent(new Event("input", { bubbles: true }));
+        },
+      });
+    }
+    return;
   }
 });
 
@@ -25476,6 +25954,7 @@ const groupPendingPhotoRemove = document.querySelector("[data-group-pending-phot
 let groupPendingPhoto = null;
 function clearGroupPendingPhoto() {
   groupPendingPhoto = null;
+  groupPhotoViaNextcloud = false;
   if (groupPendingPhotoPreview) groupPendingPhotoPreview.hidden = true;
 }
 function setGroupPendingPhoto(attachment, fileName) {
@@ -25486,17 +25965,42 @@ function setGroupPendingPhoto(attachment, fileName) {
   groupComposerInput?.focus();
 }
 groupPendingPhotoRemove?.addEventListener("click", clearGroupPendingPhoto);
-groupPhotoInput?.addEventListener("change", async () => {
-  const file = groupPhotoInput.files?.[0];
-  groupPhotoInput.value = "";
-  if (!file || !activeGroupId) return;
+async function handleGroupMediaFile(input) {
+  const file = input?.files?.[0];
+  if (input) { input.value = ""; input.accept = "image/*"; }
+  if (!file || !activeGroupId) { groupPhotoViaNextcloud = false; return; }
+  if (String(file.type || "").startsWith("video/")) {
+    const via = groupPhotoViaNextcloud && isNextcloudConnected();
+    groupPhotoViaNextcloud = false;
+    if (!via) { showCopyToast("Videos go via Nextcloud only. Pick a photo to send it on chain."); return; }
+    const gid = activeGroupId;
+    await sendNextcloudVideoFile(file, async (url) => {
+      if (activeGroupId === gid) await sendGroupWire(url);
+      else throw new Error("The group was closed before the video was sent.");
+    });
+    return;
+  }
   try {
     setStatus("Compressing photo…");
     const attachment = await compressImageBlob(file);
+    // The original rides along so a photo sent via Nextcloud uploads at full quality.
+    attachment.originalBlob = file;
+    attachment.originalName = file.name || "photo.jpg";
+    const via = groupPhotoViaNextcloud;
     setGroupPendingPhoto(attachment, file.name || "photo.jpg");
+    groupPhotoViaNextcloud = via;
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB · press Send`);
-  } catch (error) { showCopyToast(error.message || "Could not attach that photo."); }
-});
+  } catch (error) {
+    groupPhotoViaNextcloud = false;
+    showCopyToast(error.message || "Could not attach that photo.");
+  }
+}
+groupPhotoInput?.addEventListener("change", () => handleGroupMediaFile(groupPhotoInput));
+groupCameraInput?.addEventListener("change", () => handleGroupMediaFile(groupCameraInput));
+[groupPhotoInput, groupCameraInput].forEach((input) => input?.addEventListener("cancel", () => {
+  input.accept = "image/*";
+  if (!groupPendingPhoto) groupPhotoViaNextcloud = false;
+}));
 
 // Voice send (native MediaRecorder → the same {type:"file",audio/...} envelope as 1:1).
 async function startGroupVoice() {
@@ -25516,7 +26020,7 @@ async function startGroupVoice() {
       const secs = (Date.now() - groupVoiceStartMs) / 1000;
       const el = groupVoicePanel?.querySelector("[data-group-voice-time]");
       if (el) el.textContent = formatRecordingTime(secs);
-      if (secs >= voiceMaxDurationSeconds()) finishGroupVoice(true);
+      if (secs >= groupVoiceMaxDurationSeconds()) finishGroupVoice(true);
     }, 250);
   } catch (error) { showCopyToast("Microphone access denied or unavailable."); }
 }
@@ -25545,9 +26049,10 @@ async function sendGroupVoicePreview() {
   if (!entry || !activeGroupId) return;
   const { blob, seconds: durationSec } = entry;
   clearVoicePreview(groupVoicePanel);
-  const voiceOnChain = groupVoiceForcedOnChain;
-  groupVoiceForcedOnChain = false;
-  if (isNextcloudMediaSendActive() && !voiceOnChain) {
+  // "Record via Nextcloud" (chosen in the "+" sheet): the server carries it, the group gets the link.
+  const viaNextcloud = groupVoiceViaNextcloud && isNextcloudConnected();
+  groupVoiceViaNextcloud = false;
+  if (viaNextcloud) {
     try {
       const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(groupVoiceMime).split(".").pop()}`, groupVoiceMime || "audio/webm");
       await sendGroupWire(url);

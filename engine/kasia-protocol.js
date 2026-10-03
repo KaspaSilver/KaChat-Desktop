@@ -496,6 +496,52 @@ export async function buildEncryptedHandshake({
   };
 }
 
+// A chat payment's payload - iOS KaChatTransactionBuilder.buildPaymentPayload, byte for byte:
+//
+//   bytes = ASCII("kchat:1:pay:") ++ <raw cipher bytes of the payment JSON, encrypted to the payee>
+//
+// The JSON is iOS's PaymentPayload: {"type":"payment","message":<memo>,"amount":<sompi>,
+// "timestamp":<ms>,"version":1}. `message` is the memo ("" when there is none); it is encrypted to
+// the contact's CHAT address even when the coins go to a fresh pool address, so only they (not the
+// sender) can read it back. Readers accept the legacy ciph_msg:1:pay: and ciph_msg:pay: roots too.
+export const PAYMENT_PAYLOAD_ROOTS = Object.freeze(["kchat:1:pay:", "ciph_msg:1:pay:", "ciph_msg:pay:"]);
+
+export async function buildEncryptedPaymentPayload({ receiver, note = "", amountSompi, createdAt = Date.now(), encryptMessage } = {}) {
+  if (typeof encryptMessage !== "function") throw new Error("Kasia cipher encryptor is required.");
+  const normalizedReceiver = normalizeAddress(receiver);
+  if (!normalizedReceiver) throw new Error("A valid kaspa: receiver address is required for the payment.");
+  const amount = Number(amountSompi);
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("Payment amount is required for the payment payload.");
+  const clearText = JSON.stringify({
+    type: "payment",
+    message: String(note || ""),
+    amount,
+    timestamp: Number(createdAt) || Date.now(),
+    version: 1,
+  });
+  const encrypted = await encryptMessage(normalizedReceiver, clearText);
+  const encryptedHex = String(encrypted?.encryptedHex || "").replace(/^0x/i, "");
+  if (!encryptedHex) throw new Error("Kasia cipher returned an empty payment payload.");
+  const prefixBytes = new TextEncoder().encode(PAYMENT_PAYLOAD_ROOTS[0]);
+  const cipherBytes = hexToBytes(encryptedHex);
+  const payloadBytes = new Uint8Array(prefixBytes.length + cipherBytes.length);
+  payloadBytes.set(prefixBytes, 0);
+  payloadBytes.set(cipherBytes, prefixBytes.length);
+  const payloadHex = Array.from(payloadBytes).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { payloadBytes, payloadHex, clearText };
+}
+
+/** The cipher hex inside a payment payload (any of the three roots), or "" when the hex is not one. */
+export function paymentPayloadEncryptedHex(payloadHex) {
+  const clean = String(payloadHex || "").replace(/^0x/i, "").trim().toLowerCase();
+  if (!clean) return "";
+  for (const root of PAYMENT_PAYLOAD_ROOTS) {
+    const rootHex = toHex(root);
+    if (clean.startsWith(rootHex) && clean.length > rootHex.length) return clean.slice(rootHex.length);
+  }
+  return "";
+}
+
 // Matches iOS's KaChatTransactionBuilder.buildHandshakeSelfStashTx exactly.
 // After a handshake succeeds, iOS sends a second, separate self-payment
 // transaction whose payload is the same handshake metadata encrypted to the

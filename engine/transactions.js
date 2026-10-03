@@ -51,8 +51,8 @@ export function singleInputFor(entries, amountSompi, marginSompi = 300_000n) {
   return pick ? [pick] : null;
 }
 
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, singleInput, log }));
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, singleInput, exactAmount, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
@@ -217,7 +217,7 @@ function describeKey(privateKey) {
   return `key: ${privateKey.constructor?.name || typeof privateKey} ptr=${privateKey.__wbg_ptr ?? "n/a"}`;
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, log = () => {} }) {
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas || "").trim();
   const fee = String(feeKas || "0").trim();
@@ -260,7 +260,9 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   // little under the nominal figure serves just as well - and it is the only way an account
   // funded by a 0.2 KAS handshake can ever answer it. Protocol sends only (self-spends and
   // payload-carrying sends); a plain payment keeps the strict path and its "insufficient funds".
-  const protocolSend = to === sourceAddress || Boolean(payload);
+  // A chat payment carries its (encrypted) payment payload too, but it must pay exactly what was
+  // asked for, so `exactAmount` keeps it on the strict path.
+  const protocolSend = !exactAmount && (to === sourceAddress || Boolean(payload));
   if (protocolSend && entries.length <= 80) {
     const amountSompi = BigInt(kaspa.kaspaToSompi(amount));
     const prioritySompi = BigInt(kaspa.kaspaToSompi(fee));

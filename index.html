@@ -334,7 +334,6 @@
             </div>
 
             <div class="composer-shell" data-direct-composer-shell>
-              <div class="available-balance-banner" data-available-balance-banner hidden role="status" aria-live="polite"></div>
               <div class="fee-estimate-banner" data-fee-estimate-banner hidden role="status" aria-live="polite"></div>
               <!-- Lives inside the composer shell (not as a sibling grid row) so the
                    absolutely-positioned payment/fee pills, which sit above the shell,
@@ -348,27 +347,54 @@
                 <span>The recipient won't see your messages until they message you or you ping them with a handshake. Handshakes cost 0.2 KAS and are returned to you if they accept. You lose privacy if you ping them.</span>
                 <button type="button" data-handshake-warning-send>Send Handshake</button>
               </div>
-              <div class="composer-plus-menu" data-composer-plus-menu hidden>
-                <button type="button" data-composer-mode="photo">
-                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/></svg></span>
-                  <strong>Send On-Chain Photo</strong>
+              <!-- The "+" sheet (iOS composerPlusSheet, 8b13460): the input bubble is the text field
+                   only, everything else is here - Pay in Kaspa, Camera, Photo, Voice Message, File
+                   (Nextcloud only), Play Chess, and Send Handshake where it is still needed. -->
+              <div class="composer-plus-menu composer-plus-sheet" data-composer-plus-menu hidden>
+                <p class="composer-plus-title">Send</p>
+                <button type="button" data-composer-pay>
+                  <span class="mode-icon mode-icon-kaspa" aria-hidden="true"><img src="./ui/assets/kaspa-logo.png" alt="" /></span>
+                  <span class="composer-plus-copy"><strong>Pay in Kaspa</strong><small>Send Kaspa to this contact.</small></span>
                 </button>
-                <button type="button" data-composer-mode="voice">
+                <button type="button" data-composer-media="camera">
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.1-1.6A1 1 0 0 1 9.6 4h4.8a1 1 0 0 1 .8.4L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg></span>
+                  <span class="composer-plus-copy"><strong>Camera</strong><small>Take a photo and send it.</small></span>
+                </button>
+                <button type="button" data-composer-media="photo">
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/></svg></span>
+                  <span class="composer-plus-copy"><strong>Photo</strong><small>Pick an image from your library and send it.</small></span>
+                </button>
+                <button type="button" data-composer-media="voice">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg></span>
-                  <strong>Send On-Chain Voice Message</strong>
+                  <span class="composer-plus-copy"><strong>Voice Message</strong><small>Record a voice message and send it.</small></span>
                 </button>
                 <button type="button" data-nextcloud-pick hidden>
-                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M17.5 18.5h-11a4 4 0 0 1-.6-7.96 5.5 5.5 0 0 1 10.7-1.4 4.5 4.5 0 0 1 .9 9.36Z"/></svg></span>
-                  <strong>Send from Nextcloud</strong>
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></span>
+                  <span class="composer-plus-copy"><strong>File</strong><small>Send any file from your Nextcloud. It shows as a preview.</small></span>
                 </button>
                 <button type="button" data-chess-open>
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg></span>
-                  <strong>Play Chess</strong>
+                  <span class="composer-plus-copy"><strong>Play Chess</strong><small>Invite this contact to a game on chain.</small></span>
                 </button>
                 <button type="button" data-composer-mode="handshake" data-composer-handshake>
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 11.5 3.5 15a2 2 0 0 0 2.83 2.83L9.5 14.7"/><path d="m9.5 14.7 1.5 1.5a2 2 0 0 0 2.83-2.83l-3.9-3.9a3 3 0 0 0-4.24 0L4.5 11.5"/><path d="M13.5 8.5 16 6a2 2 0 0 1 2.83 0l1.67 1.67a2 2 0 0 1 0 2.83L18 13"/><path d="M11 6.5 12.5 5a2 2 0 0 1 2.83 0"/></svg></span>
-                  <strong>Send Handshake</strong>
+                  <span class="composer-plus-copy"><strong>Send Handshake</strong><small>Asks to open an encrypted conversation.</small></span>
                 </button>
+              </div>
+              <!-- Second step after Camera / Photo / Voice Message while a Nextcloud server is
+                   connected (iOS ComposerMediaRouteStep): on chain, or via Nextcloud. Filled in by
+                   showComposerMediaRoute(); anchored like the plus menu. -->
+              <div class="composer-plus-menu composer-plus-sheet" data-composer-media-route-menu hidden>
+                <p class="composer-plus-title" data-media-route-title>Camera</p>
+                <button type="button" data-media-route="chain">
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10 13.5a4 4 0 0 0 6 .4l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7"/><path d="M14 10.5a4 4 0 0 0-6-.4l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/></svg></span>
+                  <span class="composer-plus-copy"><strong data-media-route-chain-title></strong><small data-media-route-chain-subtitle></small></span>
+                </button>
+                <button type="button" data-media-route="nextcloud">
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M17.5 18.5h-11a4 4 0 0 1-.6-7.96 5.5 5.5 0 0 1 10.7-1.4 4.5 4.5 0 0 1 .9 9.36Z"/></svg></span>
+                  <span class="composer-plus-copy"><strong data-media-route-nextcloud-title></strong><small data-media-route-nextcloud-subtitle></small></span>
+                </button>
+                <button type="button" class="composer-plus-back" data-media-route-back>Back</button>
               </div>
               <!-- Second step after "Play Chess": pick a time control. The blitz presets put
                    tcMinutes/tcIncSeconds on the invite; "Casual" omits them entirely, which is
@@ -395,6 +421,9 @@
               </div>
 
               <input type="file" accept="image/*" hidden data-photo-file-input />
+              <!-- "+" > Camera: a phone opens its camera; a computer opens the file chooser. Via
+                   Nextcloud it takes a video too (accept is set per send). -->
+              <input type="file" accept="image/*" capture="environment" hidden data-camera-file-input />
               <div class="pending-photo-preview" data-pending-photo-preview hidden>
                 <img data-pending-photo-thumb alt="Pending photo attachment" />
                 <span class="pending-photo-meta" data-pending-photo-meta></span>
@@ -427,24 +456,11 @@
                 <form class="composer kachat-composer" data-composer>
                   <button class="composer-tool composer-plus" type="button" data-composer-plus aria-label="More message options">+</button>
                   <div class="composer-field-wrap">
-                    <!-- Payment mode only (iOS paymentField): the unit toggle leads, the live
-                         conversion and Max trail the amount. -->
-                    <!-- iOS composerQuickActions: the way back out of payment mode. -->
-                    <button class="payment-back" type="button" data-payment-back aria-label="Send message" title="Send message">
-                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7.2L7.5 21v-3.5H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"/><path d="M7 10h10M7 13.5h7"/></svg>
-                      <span>Send message</span>
-                    </button>
-                    <button class="payment-unit-toggle" type="button" data-payment-unit-toggle aria-label="Switch between KAS and fiat"></button>
                     <textarea class="composer-input" name="message" placeholder="Message" autocomplete="off" rows="1"></textarea>
-                    <span class="payment-conversion" data-payment-conversion hidden></span>
-                    <button class="payment-max" type="button" data-payment-max>Max</button>
-                    <!-- iOS keeps camera, mic and the Kaspa logo inside the input bubble; the
-                         emoji picker is the desktop's own. -->
+                    <!-- The input bubble is the text field only (iOS 8b13460): camera, mic and the
+                         Kaspa logo moved into the "+" sheet. The emoji picker is the desktop's own. -->
                     <span class="composer-inline-tools">
                       <button type="button" class="composer-inline-tool" data-composer-emoji aria-label="Emoji" title="Emoji"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8M9 10h.01M15 10h.01"/></svg></button>
-                      <button type="button" class="composer-inline-tool" data-composer-camera aria-label="Take Photo" title="Take Photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.1-1.6A1 1 0 0 1 9.6 4h4.8a1 1 0 0 1 .8.4L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg></button>
-                      <button type="button" class="composer-inline-tool" data-composer-mic aria-label="Record Voice Message" title="Record Voice Message"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg></button>
-                      <button type="button" class="composer-inline-tool composer-inline-kas" data-composer-kas aria-label="Send KAS" title="Send KAS"><img src="./ui/assets/kaspa-logo.png" alt="" aria-hidden="true" /></button>
                     </span>
                     <button class="composer-send" type="submit" aria-label="Send message">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/></svg>
@@ -527,17 +543,16 @@
                   <button class="composer-tool composer-plus" type="button" data-group-plus aria-label="More message options">+</button>
                   <div class="composer-field-wrap">
                     <textarea class="composer-input" name="message" placeholder="Message" autocomplete="off" rows="1" data-group-composer-input></textarea>
-                    <!-- iOS keeps camera and mic inside the group's input bubble. -->
-                    <span class="composer-inline-tools">
-                      <button type="button" class="composer-inline-tool" data-group-camera aria-label="Take Photo" title="Take Photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.1-1.6A1 1 0 0 1 9.6 4h4.8a1 1 0 0 1 .8.4L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg></button>
-                      <button type="button" class="composer-inline-tool" data-group-mic aria-label="Record Voice Message" title="Record Voice Message"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg></button>
-                    </span>
+                    <!-- Camera and mic moved into the group's "+" sheet (iOS 8b13460); the empty
+                         slot keeps the send button in its grid column. -->
+                    <span class="composer-inline-tools" aria-hidden="true"></span>
                     <button class="composer-send" type="submit" aria-label="Send message">
                       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/></svg>
                     </button>
                   </div>
                 </form>
                 <input type="file" accept="image/*" hidden data-group-photo-input />
+                <input type="file" accept="image/*" capture="environment" hidden data-group-camera-input />
               </div>
             </div>
           </div>
@@ -2048,6 +2063,44 @@
 
 
   <!-- KaPosts quick tip: Send-Kaspa-style modal, direct send through the chat payment rules. -->
+  <!-- Send KAS (iOS 8d208b2 paymentSheet): every way into a chat payment opens this instead of
+       turning the composer into an amount field. Who it goes to, the exact amount (KAS or fiat,
+       the converted value and Max under it), an encrypted memo carried in the payment payload,
+       the fee and Available pills, and a hold-to-send button. Wired in ui/app.js (openPaymentSheet). -->
+  <div class="modal-backdrop pay-sheet-backdrop" data-pay-sheet hidden>
+    <section class="contact-modal pay-sheet" role="dialog" aria-modal="true" aria-labelledby="pay-sheet-title">
+      <button class="modal-close pay-sheet-close" type="button" data-pay-close aria-label="Close">×</button>
+      <header class="pay-sheet-head">
+        <h2 id="pay-sheet-title" data-pay-title>Send KAS</h2>
+        <p data-pay-recipient></p>
+      </header>
+      <label class="pay-amount-entry">
+        <input class="pay-amount-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0" data-pay-amount aria-label="Amount (KAS)" />
+        <span class="pay-amount-unit" data-pay-unit>KAS</span>
+      </label>
+      <div class="pay-amount-actions">
+        <button type="button" class="pay-chip" data-pay-unit-toggle aria-label="Switch between Kaspa and your currency" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 20V5m0 0L3.5 8.5M7 5l3.5 3.5M17 4v15m0 0-3.5-3.5M17 19l3.5-3.5"/></svg>
+          <span data-pay-conversion></span>
+        </button>
+        <button type="button" class="pay-chip pay-chip-max" data-pay-max>Max</button>
+      </div>
+      <label class="pay-memo">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
+        <textarea rows="1" placeholder="Add a memo (encrypted)" data-pay-memo aria-label="Add a memo (encrypted)"></textarea>
+      </label>
+      <div class="pay-pills">
+        <span class="fee-pill pay-fee-pill" data-pay-fee role="status" aria-live="polite">fee: -- KAS</span>
+        <div class="available-balance-banner" data-available-balance-banner hidden role="status" aria-live="polite"></div>
+      </div>
+      <p class="pay-sheet-note" data-pay-note hidden></p>
+      <button type="button" class="pay-hold-button" data-pay-hold aria-label="Hold to Send" disabled>
+        <span class="pay-hold-fill" aria-hidden="true"></span>
+        <span class="pay-hold-label" data-pay-hold-label>Hold to Send</span>
+      </button>
+    </section>
+  </div>
+
   <div class="modal-backdrop" data-tip-modal hidden>
     <section class="contact-modal tip-modal" role="dialog" aria-modal="true" aria-label="Send a tip">
       <div class="modal-header">

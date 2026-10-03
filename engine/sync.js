@@ -11,6 +11,7 @@ import {
   parseKasiaPayloadHex,
   selfStashEncryptedCandidates,
   parseSelfStashPayload,
+  paymentPayloadEncryptedHex,
 } from "./kasia-protocol.js";
 import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
 
@@ -769,7 +770,22 @@ export async function syncConversationPreview({ conversationId, contact, walletA
 const paymentPageCache = new Map(); // url -> { at, promise }
 const PAYMENT_PAGE_TTL_MS = 4000;
 
-export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100 } = {}) {
+// The memo an incoming payment carries (iOS PaymentPayload.message), decrypted from its
+// kchat:1:pay: payload; "" when there is no payload, no memo, or it can't be read.
+async function paymentMemoFromPayload(payloadHex, decryptMessage) {
+  if (typeof decryptMessage !== "function") return "";
+  const encryptedHex = paymentPayloadEncryptedHex(payloadHex);
+  if (!encryptedHex) return "";
+  try {
+    const parsed = JSON.parse(String(await decryptMessage(encryptedHex) || ""));
+    if (parsed?.type && parsed.type !== "payment") return "";
+    return typeof parsed?.message === "string" ? parsed.message.replace(/\s*\n\s*/g, " ").trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null } = {}) {
   if (!conversationId) throw new Error("conversationId is required for payment sync.");
   if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for payment sync.");
   if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing payments.");
@@ -841,9 +857,11 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     if (totalSompi <= 0n) continue;
 
     const amountKas = (Number(totalSompi) / 1e8).toFixed(8).replace(/\.?0+$/, "");
+    // "Received X KAS — memo" when the payer added one (iOS paymentContent).
+    const memo = await paymentMemoFromPayload(tx?.payload, decryptMessage);
     messages.push({
       id: `payment-${txid}`, conversationId, contactId: contact.id, direction: "incoming",
-      text: `Received ${amountKas} ${KAS_UNIT}`, sender: contact.address, receiver: walletAddress,
+      text: memo ? `Received ${amountKas} ${KAS_UNIT} — ${memo}` : `Received ${amountKas} ${KAS_UNIT}`, sender: contact.address, receiver: walletAddress,
       status: "confirmed", txid, confirmations: 1, network: NETWORK, messageType: "payment",
       paymentAmountKas: amountKas, transport: "kaspa-payment-rest", createdAt, updatedAt: Date.now(),
     });

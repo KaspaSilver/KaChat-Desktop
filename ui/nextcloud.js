@@ -366,10 +366,9 @@ async function adoptExistingBackupFolder() {
 }
 
 // --- Media send (photos/voice upload + share link instead of on-chain bytes) ---
-
-export function isNextcloudMediaSendActive() {
-  return Boolean(nc && nc.mediaSend);
-}
+// There is no "Send Media via Nextcloud" setting any more (iOS 8b13460): Camera, Photo and Voice
+// Message in a chat's "+" sheet ask on chain or via Nextcloud each time. A stored `mediaSend`
+// from an older version is simply ignored.
 
 async function ensureFolder(davRoot, parts) {
   let url = davRoot;
@@ -1446,12 +1445,8 @@ function renderSettings() {
     <div class="settings-list-card">
       <button class="settings-list-row" type="button" data-nc-pick-start><span class="settings-row-copy"><strong>Start Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.startFolder || "All Files")}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
     </div>
-    <p class="settings-group-footer">"Send from Nextcloud" in chats opens this folder first.</p>
-    <p class="settings-group-label">Chat Media</p>
-    <div class="settings-list-card">
-      <div class="settings-toggle-row"><span><strong>Send Media via Nextcloud</strong></span><label class="switch-control"><input type="checkbox" data-nc-media-send ${nc.mediaSend ? "checked" : ""}><span></span></label></div>
-    </div>
-    <p class="settings-group-footer">When on, photos and voice messages you send in private chats upload in full quality to this server's KaChat/Media folder, and the chat carries a share link instead — recipients see a normal media bubble. The message with the link stays end-to-end encrypted, but the files themselves are stored unencrypted on your server and are reachable by anyone who has the unguessable link. When off, media is embedded in the encrypted on-chain payload as before.</p>
+    <p class="settings-group-footer">"File" in a chat's + menu opens this folder first.</p>
+    <p class="settings-group-footer">In a chat's + menu, Camera, Photo and Voice Message ask whether to send on chain or via Nextcloud. Via Nextcloud, the file uploads in full quality to this server's KaChat/Media folder and the chat carries a share link (voice messages up to 5 minutes). The message with the link stays end-to-end encrypted, but the file itself is stored unencrypted on your server and is reachable by anyone who has the unguessable link.</p>
     <p class="settings-group-label">Message Backup</p>
     <div class="settings-list-card">
       <div class="settings-toggle-row"><span><strong>Automatic Sync</strong><small>Automatic sync works with one cloud service at a time.</small></span><label class="switch-control"><input type="checkbox" data-nc-auto ${nc.autoBackup ? "checked" : ""}><span></span></label></div>
@@ -1495,7 +1490,7 @@ function updateComposerButton() {
 // ---------------------------------------------------------------------------
 
 let pickerOnPicked = null;
-/// "Send from Nextcloud" for a composer other than the 1:1 one (group chats): the picked
+/// "File" (send from Nextcloud) for a composer other than the 1:1 one (group chats): the picked
 /// file's share link goes to `onPicked` instead of the default stager.
 export function openNextcloudMediaPicker({ onPicked = null } = {}) {
   if (!nc) { deps.showToast?.("Connect Nextcloud in Settings → Storage first."); return false; }
@@ -1865,11 +1860,6 @@ function wireSettings() {
       saveState();
       armAutoBackup();
     }
-    if (event.target.matches("[data-nc-media-send]")) {
-      if (!nc) return;
-      nc.mediaSend = event.target.checked;
-      saveState();
-    }
   });
 }
 
@@ -2045,7 +2035,7 @@ export function initNextcloud(dependencies) {
   buildModals();
   wireSettings();
 
-  // "Send from Nextcloud" in the composer's + menu (hidden until connected).
+  // "File" in the composer's + menu (hidden until connected): pick from Nextcloud.
   document.querySelector("[data-nextcloud-pick]")?.addEventListener("click", () => {
     document.querySelector("[data-composer-plus-menu]")?.setAttribute("hidden", "");
     if (!nc) { deps.showToast?.("Connect Nextcloud in Settings → Storage first."); return; }
