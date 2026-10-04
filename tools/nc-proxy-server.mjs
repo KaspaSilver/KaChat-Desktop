@@ -135,7 +135,10 @@ async function handle(req, res) {
     // Socket-inactivity timeout: if the upstream stalls (no bytes for this long) on
     // connect, headers, or body, drop it and answer 504 immediately rather than
     // letting nginx wait out its own 120s and return the 504 much later.
-    upstream.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+    // A write (a multi-megabyte Nextcloud backup PUT) can sit silent while the server stores it;
+    // cutting it short could leave a short file behind. Writes get at least two minutes.
+    const isWrite = !["GET", "HEAD", "OPTIONS"].includes(String(req.method || "GET").toUpperCase());
+    upstream.setTimeout(isWrite ? Math.max(UPSTREAM_TIMEOUT_MS, 120000) : UPSTREAM_TIMEOUT_MS, () => {
       timedOut = true;
       if (!res.headersSent) res.writeHead(504, { "content-type": "text/plain" });
       res.end("Proxy upstream timeout");

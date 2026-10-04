@@ -532,13 +532,23 @@ async function performBackup() {
   } catch (error) {
     if (!(await repairableTruncation(error))) throw error;
     // The stored file is short, not the transfer. Keep a copy under a dated name - it cannot be
-    // parsed, but it is still the user's data and this is the only copy - then carry on as though
-    // the server had nothing, which lets this backup replace it with a whole file.
-    await preserveDamagedBackup().catch(() => {});
+    // parsed, but it is still the user's data - then carry on as though the server had nothing,
+    // which lets this backup replace it with a whole file. At most one copy per damaged file and
+    // one a day: a file that keeps coming back short used to leave a new dated copy on every sync.
+    await preserveDamagedBackupOnce().catch(() => {});
     existingRemoteJson = null;
   }
   const payload = await deps.exportBackupPayload(existingRemoteJson);
   let newETag = await uploadBackup(payload);
+  // The server must hold the whole file. A short one (an upload cut off on the way) would read as
+  // damaged on the next sync; say so plainly instead of going round that loop quietly.
+  const expectedBytes = new TextEncoder().encode(payload).length;
+  const stored = await fetchBackupInfo();
+  const storedBytes = Number(stored?.size || 0);
+  if (stored && storedBytes && storedBytes < expectedBytes) {
+    deps.appendEngineLog?.(`Nextcloud stored ${storedBytes} of ${expectedBytes} backup bytes - the upload was cut short.`);
+    throw transientError(`The backup upload was cut short: the server kept ${storedBytes.toLocaleString()} of ${expectedBytes.toLocaleString()} bytes. It will be uploaded again on the next sync.`);
+  }
   if (!newETag) {
     // Some proxies strip the PUT response's ETag header; one follow-up Depth-0 PROPFIND
     // recovers it so the change watcher still recognises this device's own write.
@@ -548,6 +558,21 @@ async function performBackup() {
   // If both captures failed the stored ETag is cleared, and the watcher re-imports our own
   // upload once — which the txId/id dedupe in importPhoneArchive makes a harmless no-op.
   rememberBackupETag(newETag);
+}
+
+/// preserveDamagedBackup, but at most once per damaged file (by its ETag, else its size) and at most
+/// once a day per account, so a file that keeps arriving short can't fill the folder with copies.
+async function preserveDamagedBackupOnce() {
+  const info = await fetchBackupInfo();
+  const fingerprint = String(info?.etag || info?.size || "");
+  const lastAt = Number(nc?.lastDamagedCopyAt || 0);
+  if (fingerprint && nc?.lastDamagedCopyOf === fingerprint) return;
+  if (Date.now() - lastAt < 24 * 60 * 60 * 1000) return;
+  await preserveDamagedBackup();
+  if (!nc) return;
+  nc.lastDamagedCopyOf = fingerprint;
+  nc.lastDamagedCopyAt = Date.now();
+  saveState();
 }
 
 /// Copies a damaged backup aside before it is overwritten, under a dated name.

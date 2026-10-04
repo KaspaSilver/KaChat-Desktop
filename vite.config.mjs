@@ -358,7 +358,11 @@ function nextcloudProxy() {
           // A seed or API that never answers must not hold the relay's connection open until
           // the CDN in front gives up on it (Cloudflare's 522 is exactly that): fifteen seconds,
           // then a 504 of our own.
-          upstream.setTimeout(longPoll ? 60000 : 15000, () => upstream.destroy(new Error("upstream timed out")));
+          // A write (a multi-megabyte Nextcloud backup PUT) can sit silent while the server stores
+          // it; cutting it at 15 s could leave a short file behind and the next sync would read it
+          // as damaged. Writes get two minutes.
+          const isWrite = !["GET", "HEAD", "OPTIONS"].includes(String(req.method || "GET").toUpperCase());
+          upstream.setTimeout(isWrite ? 120000 : (longPoll ? 60000 : 15000), () => upstream.destroy(new Error("upstream timed out")));
           upstream.on("error", (error) => {
             if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
             res.end(`Proxy error: ${error.message}`);
