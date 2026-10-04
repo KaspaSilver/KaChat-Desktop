@@ -120,11 +120,18 @@ export async function sealBackupEnvelope(plaintextJson, identityPrivateKeyHex, w
 export async function openBackupEnvelope(json, identityPrivateKeyHex, walletAddress) {
   const envelope = parseBackupEnvelope(json);
   if (!envelope) return json;
+  // The error says whose file it is (NEXTCLOUD_SYNC.md §7), so the sync can decide: another
+  // wallet's file is never touched ("foreignWallet"), this wallet's unreadable one is replaced in
+  // place ("ownUnreadable"), and a hint-less envelope can't be attributed ("unattributed").
+  let ownHint = false;
   if (envelope.walletHint && walletAddress) {
     const expected = await backupWalletHint(walletAddress);
     if (String(envelope.walletHint).toLowerCase() !== expected) {
-      throw new Error(BACKUP_DECRYPT_FAILED_MESSAGE);
+      const foreign = new Error(BACKUP_DECRYPT_FAILED_MESSAGE);
+      foreign.code = "foreignWallet";
+      throw foreign;
     }
+    ownHint = true;
   }
   try {
     const key = await deriveBackupKey(identityPrivateKeyHex);
@@ -135,6 +142,8 @@ export async function openBackupEnvelope(json, identityPrivateKeyHex, walletAddr
     );
     return new TextDecoder().decode(plaintext);
   } catch {
-    throw new Error(BACKUP_DECRYPT_FAILED_MESSAGE);
+    const failed = new Error(BACKUP_DECRYPT_FAILED_MESSAGE);
+    failed.code = ownHint ? "ownUnreadable" : "unattributed";
+    throw failed;
   }
 }

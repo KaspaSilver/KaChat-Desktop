@@ -9066,8 +9066,12 @@ function renderProfileDomains() {
   const getButton = document.querySelector("[data-domains-inscribe]");
   const service = NAME_SERVICES[activeDomainsTab];
   if (getButton) {
-    getButton.hidden = !service?.getDomainLabel || Boolean(detailEl && !detailEl.hidden);
-    if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
+    // .kachat on testnet: a pinned Inscribe button that opens the .kachat marketplace (iOS e4da63d),
+    // hidden while the registry is being upgraded.
+    const kachatInscribe = activeDomainsTab === "kachat" && Boolean(kachatNames()) && !kachatNames()?.service?.registryUpgrading;
+    getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || Boolean(detailEl && !detailEl.hidden);
+    if (kachatInscribe) getButton.textContent = "Inscribe";
+    else if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
   }
   if (detailEl && !detailEl.hidden && domainDetailTarget) {
     renderDomainDetail(domainDetailTarget);
@@ -9208,6 +9212,12 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
   }
   if (event.target.closest("[data-domains-inscribe]")) {
     // Each outside service sells its own names; KaChat links to it (iOS 718724b).
+    // .kachat: the marketplace (Kaspa Hub > .kachat), whether or not it is in the dock.
+    if (activeDomainsTab === "kachat" && kachatNames()) {
+      if (domainsScreenEl) domainsScreenEl.hidden = true;
+      setActiveAppTab("kachat-names");
+      return;
+    }
     const url = NAME_SERVICES[activeDomainsTab]?.websiteURL;
     if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
@@ -9245,7 +9255,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 94;
+const APP_BUILD = 95;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -19497,10 +19507,16 @@ function parseRemoteChatArchive(json) {
   try {
     parsed = JSON.parse(json);
   } catch {
-    throw new Error("The backup already on the server is not readable JSON — nothing was uploaded and that file was left untouched. Move it aside (or pick another backup folder) to start a fresh backup.");
+    // Not a readable archive (damaged, or cut off at rest): the backup sync replaces it in place
+    // (NEXTCLOUD_SYNC.md §7); a restore reports it.
+    const unreadable = new Error("The backup already on the server is not readable JSON — nothing was uploaded and that file was left untouched. Move it aside (or pick another backup folder) to start a fresh backup.");
+    unreadable.code = "remoteUnreadable";
+    throw unreadable;
   }
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.conversations)) {
-    throw new Error("The file already on the server is not a KaChat backup — nothing was uploaded and it was left untouched. Pick a different backup folder.");
+    const unreadable = new Error("The file already on the server is not a KaChat backup — nothing was uploaded and it was left untouched. Pick a different backup folder.");
+    unreadable.code = "remoteUnreadable";
+    throw unreadable;
   }
   if (Number(parsed.schemaVersion) !== CHAT_ARCHIVE_SCHEMA_VERSION) {
     throw new Error(`The backup already on the server uses schema version ${parsed.schemaVersion}, which this version can't merge — nothing was uploaded and it was left untouched.`);

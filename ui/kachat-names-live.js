@@ -2178,7 +2178,6 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
             <div class="kl-domains-empty">
               <span class="kmkt-empty-icon">${kit.ICON.atCircle}</span>
               <strong>No .kachat names yet</strong>
-              <p>Claim one in Kaspa Hub &gt; .kachat.</p>
             </div>`;
       } while (again);
     } finally {

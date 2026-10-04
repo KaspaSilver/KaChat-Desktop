@@ -525,30 +525,35 @@ async function repairableTruncation(error) {
   return received >= serverSize;
 }
 
+// One sync = read, merge, write, verify (NEXTCLOUD_SYNC.md §4, §7). The file is only ever PUT in
+// place: no copy of any kind is made during sync - Nextcloud's own version history keeps earlier
+// contents. What happens to the server copy:
+// - a download that failed or stopped early (a transfer problem) throws before any PUT;
+// - another wallet's file, a hint-less envelope that won't open, or a newer schema throws - never
+//   touched;
+// - THIS wallet's file that can't be read (failed decrypt under our own walletHint, content that
+//   isn't a valid archive, or a file cut off at rest) is overwritten in place with this device's
+//   history. Every other device unions its own history back in on its next sync.
 async function performBackup() {
   let existingRemoteJson = null;
   try {
     existingRemoteJson = await downloadBackupFile(BACKUP_FILENAME);
   } catch (error) {
     if (!(await repairableTruncation(error))) throw error;
-    // The stored file is short, not the transfer. Keep a copy under a dated name - it cannot be
-    // parsed, but it is still the user's data - then carry on as though the server had nothing,
-    // which lets this backup replace it with a whole file. At most one copy per damaged file and
-    // one a day: a file that keeps coming back short used to leave a new dated copy on every sync.
-    await preserveDamagedBackupOnce().catch(() => {});
+    deps.appendEngineLog?.("[Nextcloud] The backup on the server is cut off; replacing it in place (Nextcloud keeps its earlier versions).");
     existingRemoteJson = null;
   }
-  const payload = await deps.exportBackupPayload(existingRemoteJson);
-  let newETag = await uploadBackup(payload);
-  // The server must hold the whole file. A short one (an upload cut off on the way) would read as
-  // damaged on the next sync; say so plainly instead of going round that loop quietly.
-  const expectedBytes = new TextEncoder().encode(payload).length;
-  const stored = await fetchBackupInfo();
-  const storedBytes = Number(stored?.size || 0);
-  if (stored && storedBytes && storedBytes < expectedBytes) {
-    deps.appendEngineLog?.(`Nextcloud stored ${storedBytes} of ${expectedBytes} backup bytes - the upload was cut short.`);
-    throw transientError(`The backup upload was cut short: the server kept ${storedBytes.toLocaleString()} of ${expectedBytes.toLocaleString()} bytes. It will be uploaded again on the next sync.`);
+  let payload;
+  try {
+    payload = await deps.exportBackupPayload(existingRemoteJson);
+  } catch (error) {
+    if (existingRemoteJson == null || (error?.code !== "ownUnreadable" && error?.code !== "remoteUnreadable")) throw error;
+    deps.appendEngineLog?.(error.code === "ownUnreadable"
+      ? "[Nextcloud] This account's backup on the server can't be decrypted; replacing it in place"
+      : "[Nextcloud] The backup on the server isn't a readable archive (damaged or cut off); replacing it in place");
+    payload = await deps.exportBackupPayload(null);
   }
+  let newETag = await uploadBackup(payload);
   if (!newETag) {
     // Some proxies strip the PUT response's ETag header; one follow-up Depth-0 PROPFIND
     // recovers it so the change watcher still recognises this device's own write.
@@ -558,42 +563,19 @@ async function performBackup() {
   // If both captures failed the stored ETag is cleared, and the watcher re-imports our own
   // upload once — which the txId/id dedupe in importPhoneArchive makes a harmless no-op.
   rememberBackupETag(newETag);
-}
-
-/// preserveDamagedBackup, but at most once per damaged file (by its ETag, else its size) and at most
-/// once a day per account, so a file that keeps arriving short can't fill the folder with copies.
-async function preserveDamagedBackupOnce() {
-  const info = await fetchBackupInfo();
-  const fingerprint = String(info?.etag || info?.size || "");
-  const lastAt = Number(nc?.lastDamagedCopyAt || 0);
-  if (fingerprint && nc?.lastDamagedCopyOf === fingerprint) return;
-  if (Date.now() - lastAt < 24 * 60 * 60 * 1000) return;
-  await preserveDamagedBackup();
-  if (!nc) return;
-  nc.lastDamagedCopyOf = fingerprint;
-  nc.lastDamagedCopyAt = Date.now();
-  saveState();
-}
-
-/// Copies a damaged backup aside before it is overwritten, under a dated name.
-///
-/// WebDAV COPY rather than MOVE: if the copy fails the original is still there, and the backup
-/// that follows is free to overwrite it either way.
-async function preserveDamagedBackup() {
-  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
-  const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const source = `${davRoot}/${folder}/${BACKUP_FILENAME}`;
-  const destinationPath = `/remote.php/dav/files/${davUser()}/${folder}/kachat-backup-damaged-${stamp}.json`;
-  await fetch(source, {
-    method: "COPY",
-    headers: {
-      Authorization: authHeader(),
-      // Absolute path on the same host; Nextcloud accepts a path-only Destination.
-      Destination: destinationPath,
-      Overwrite: "F",
-    },
-  });
+  // Verify (§4.6): the server must hold the whole file. A short one (an upload cut off on the
+  // way) would read as damaged on the next sync; say so plainly instead of looping. Only our own
+  // write counts: another device may have replaced the file in between.
+  const expectedBytes = new TextEncoder().encode(payload).length;
+  const stored = await fetchBackupInfo();
+  const storedBytes = Number(stored?.size || 0);
+  if (stored && storedBytes && storedBytes !== expectedBytes) {
+    const currentETag = await fetchBackupETag().catch(() => null);
+    if (!newETag || currentETag === newETag) {
+      deps.appendEngineLog?.(`Nextcloud stored ${storedBytes} of ${expectedBytes} backup bytes - the upload was cut off.`);
+      throw transientError(`The backup upload was cut off: the server stored ${storedBytes.toLocaleString()} of ${expectedBytes.toLocaleString()} bytes. Something between this device and Nextcloud is ending large uploads early.`);
+    }
+  }
 }
 
 async function fetchBackupInfo() {
