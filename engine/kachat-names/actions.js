@@ -6,7 +6,12 @@
 // submitted (service.js); it returns the txid and refreshes the registry once the REST API reports
 // the transaction accepted. `plan(op)` builds the same transaction without sending it (the sheets).
 // The registration is commit -> wait tCommit (+20) DAA -> register, driven automatically and
-// resumable (records in localStorage, per wallet). Testnet-10 only.
+// resumable (records in localStorage, per wallet). Testnet-10 only (KachatNamesService.isLaunched).
+//
+// Owner actions on a name one of the wallet's SPENDING addresses holds (iOS 881ada6) sign - and pay
+// their fee - with that address's derived key: the app passes `wallet` hooks (see the constructor)
+// and `signer(op)` / `ownAddress(owner)` pick the address. A KasSigner (watch-only) address is
+// recognised but never signed for.
 //
 // Nothing runs at import. The app wires ONE shared registry (registry.js) and one service:
 //
@@ -169,10 +174,15 @@ function publicRecord(r) {
 export class KachatNamesActions {
   /** `engine`: the KaspaEngine; `service`: a KachatNamesService (made from the engine when
    *  omitted); `registry`: the app's shared KachatNamesRegistry (registry.js), required.
-   *  `storage`: `{ get(key) -> string|null, set(key, string) }` (default localStorage). */
-  constructor({ engine, service = null, registry, storage = null } = {}) {
+   *  `storage`: `{ get(key) -> string|null, set(key, string) }` (default localStorage).
+   *  `wallet` (optional, the wallet's other addresses - iOS 881ada6):
+   *    `spendingAddresses()` -> [{ index, address }] (the revealed spending addresses),
+   *    `spendingPrivateKey(index)` -> hex | null (that address's derived key),
+   *    `kasSignerAddresses()` -> [{ account, index, address }] (watch-only, never signed for). */
+  constructor({ engine, service = null, registry, storage = null, wallet = null } = {}) {
     if (!registry) throw new Failure("KachatNamesActions needs the app's registry");
     this.engine = engine;
+    this.wallet = wallet ?? {};
     this.service = service ?? new KachatNamesService(engine);
     this.registry = registry;
     this.storage = storage ?? defaultStorage();
@@ -223,6 +233,61 @@ export class KachatNamesActions {
     const me = xonlyKey(key);
     if (!bytesEqual(keyOf(address), me)) throw ActionError.keyMismatch();
     return { address, privateKey: key, me };
+  }
+
+  /**
+   * Which of this wallet's own addresses holds a name whose owner is `owner` (an x-only key), iOS
+   * KachatNamesActions.ownAddress: `{ kind: "chatting", address }`, `{ kind: "spending", index,
+   * address }` (the app derives its key, so owner actions sign with it) or `{ kind: "kasSigner",
+   * account, index, address }` (watch-only: the device would have to sign). null = someone else's.
+   */
+  ownAddress(owner) {
+    if (!(owner instanceof Uint8Array)) return null;
+    const me = this.myKey;
+    if (me && bytesEqual(me, owner)) return { kind: "chatting", address: this.myAddress };
+    const list = (fn) => {
+      try { const v = typeof fn === "function" ? fn() : null; return Array.isArray(v) ? v : []; } catch { return []; }
+    };
+    const spending = list(this.wallet.spendingAddresses)
+      .filter((e) => e && Number.isInteger(e.index) && typeof e.address === "string")
+      .sort((a, b) => a.index - b.index);
+    for (const { index, address } of spending) {
+      const key = keyOf(address);
+      if (key && bytesEqual(key, owner)) return { kind: "spending", index, address: address.toLowerCase() };
+    }
+    for (const e of list(this.wallet.kasSignerAddresses)) {
+      if (!e || typeof e.address !== "string") continue;
+      const key = keyOf(e.address);
+      if (key && bytesEqual(key, owner)) {
+        return { kind: "kasSigner", account: String(e.account ?? ""), index: Number(e.index) || 0, address: e.address.toLowerCase() };
+      }
+    }
+    return null;
+  }
+
+  /** The spending address that signs and pays for `op` (iOS signer(for:)): owner-only actions
+   *  (transfer, list/delist, accept, release) on a name one of the wallet's spending addresses
+   *  holds. null = the chatting address (everything else, extend and renew included - anyone may
+   *  pay those). */
+  payerFor(op) {
+    const held = op && ["transfer", "list", "release", "accept"].includes(op.kind) ? op.name : null;
+    if (!held?.owner) return null;
+    const own = this.ownAddress(held.owner);
+    return own?.kind === "spending" ? own : null;
+  }
+
+  /** The signer for `op`: that spending address's derived key when `payerFor(op)` names one, else
+   *  the chatting address (`signer()`). */
+  signerFor(op) {
+    const payer = this.payerFor(op);
+    if (!payer) return this.signer();
+    this.service.requireTestnet();
+    let key = null;
+    try { key = this.wallet.spendingPrivateKey?.(payer.index) ?? null; } catch { key = null; }
+    if (!key) throw ActionError.noWallet();
+    const me = xonlyKey(key);
+    if (!bytesEqual(me, op.name.owner) || !bytesEqual(keyOf(payer.address), me)) throw ActionError.keyMismatch();
+    return { address: payer.address, privateKey: key, me };
   }
 
   /** The current wallet's x-only key, without touching the private key (null when none). */
@@ -307,7 +372,7 @@ export class KachatNamesActions {
    *  before the person confirms. Returns the builder's Plan (plan.fee, plan.priceFee,
    *  plan.networkFee, plan.outputs, plan.notes, plan.txid...). */
   async plan(op) {
-    const s = this.signer();
+    const s = this.signerFor(op);
     return (await this._build(op, s)).plan;
   }
 
@@ -377,7 +442,7 @@ export class KachatNamesActions {
    *  transaction is accepted. Runs in the engine's per-address send queue, so a chat message sent
    *  meanwhile cannot pick the same coin. */
   async perform(op) {
-    const s = this.signer();
+    const s = this.signerFor(op);
     const { plan, txId } = await enqueueSend(s.address, async () => {
       const { plan: p, env } = await this._build(op, s);
       return { plan: p, txId: await this.service.signAndSubmit(p, { privateKey: s.privateKey, env }) };
@@ -557,7 +622,7 @@ export class KachatNamesActions {
    *  app becomes active and after a wallet switch. */
   resume() {
     const address = this.myAddress;
-    if (!KachatNamesService.isEnabled || !address) {
+    if (!KachatNamesService.isLaunched || !address) {
       this._stopDriver();
       this._pending = [];
       this._pendingWallet = null;
@@ -587,7 +652,7 @@ export class KachatNamesActions {
         while (!token.cancelled) {
           const address = this.myAddress;
           // the driver stops while the registry is being upgraded (a registry v1 manifest)
-          if (!KachatNamesService.isEnabled || !address || address !== this._pendingWallet || this.service.registryUpgrading
+          if (!KachatNamesService.isLaunched || !address || address !== this._pendingWallet || this.service.registryUpgrading
             || !this._pending.some(needsDriving)) break;
           for (const p of this._pending.filter(needsDriving)) {
             if (token.cancelled) break;

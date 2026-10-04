@@ -12631,3 +12631,26 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .payment-detail-content { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
 .payment-detail-time { font-size: 12px; color: var(--muted); }
 .payment-detail-pending { margin: 0; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* Chats New sheet (iOS 5da8ccf..e6400d6): the one glass + on every Chats tab, and the half sheet
+   it opens - New Chat, New Group Chat, New Public Chat (its room-name step swaps in place), Fund
+   Chatting Address, Receive Kaspa. Rows reuse the cold-action-row glass rows. */
+.new-chat-fab .new-chat-fab-plus { width: 24px; height: 24px; display: block; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
+.new-chat-sheet { position: relative; width: min(100%, 440px); display: flex; flex-direction: column; gap: 12px; padding: 20px 20px 24px; }
+.new-chat-sheet .modal-close { position: absolute; top: 14px; right: 14px; display: grid; place-items: center; padding: 0; cursor: pointer; }
+.new-chat-sheet-back {
+  position: absolute; top: 14px; left: 14px; width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--fill-tertiary); color: var(--muted);
+  display: grid; place-items: center; cursor: pointer;
+}
+.new-chat-sheet-back svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.new-chat-sheet-title { margin: 4px 44px; text-align: center; font-size: 17px; font-weight: 600; letter-spacing: 0; }
+.new-chat-sheet .cold-action-icon { width: 28px; }
+.new-chat-sheet-logo { width: 24px; height: 24px; object-fit: contain; display: block; }
+.new-chat-sheet-caption { margin: 0; text-align: center; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.new-chat-sheet-field { display: flex; align-items: center; gap: 4px; padding: 14px; border-radius: 16px; background: var(--fill-tertiary); cursor: text; }
+.new-chat-sheet-field span { font-size: 17px; font-weight: 600; color: var(--muted); }
+.new-chat-sheet-field input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--text); font: inherit; font-size: 17px; padding: 0; }
+.new-chat-sheet-error { margin: 0; text-align: center; font-size: 13px; color: var(--ios-red); }
+.new-chat-sheet-join { width: 100%; padding: 14px; border-radius: 16px; font-size: 15px; font-weight: 700; }
+.new-chat-sheet-join:disabled { opacity: .4; cursor: default; }

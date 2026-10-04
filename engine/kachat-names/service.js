@@ -7,8 +7,10 @@
 // (SIGHASH_ALL over the version-1 sighash, @noble/curves), the conversion to the Kaspa WASM SDK's
 // Transaction with the Toccata fields, and submission through the engine's RPC client.
 //
-// Testnet-10 only: every entry point refuses unless engine/network.js IS_TESTNET, and the manifest
-// itself must be for testnet-10 (verifyManifest). Mainnet stays off until the contracts are audited.
+// Transactions are testnet-10 only: every entry point refuses unless engine/network.js IS_TESTNET
+// (`isLaunched`), and the manifest itself must be for testnet-10 (verifyManifest). The mainnet
+// registry stays off until the contracts are audited - but the .kachat UI and identity are on for
+// every network (`isEnabled`, iOS 7227d69).
 //
 // Nothing runs at import. `new KachatNamesService(engine)` takes the KaspaEngine (engine/index.js);
 // it uses engine.kaspa, engine.currentDagPoint(), engine.getUtxosWithCovenants(addresses),
@@ -291,12 +293,18 @@ export class KachatNamesService {
 
   // MARK: Gate
 
-  /** The only network names may run on until an audit. */
-  static get isEnabled() { return IS_TESTNET; }
+  /** The .kachat UI and identity: on every network since iOS 7227d69 - mainnet shows the same
+   *  screens as testnet (and people by their .kachat name, not KNS), in a "Coming soon" state until
+   *  its registry launches. */
+  static get isEnabled() { return true; }
   get isEnabled() { return KachatNamesService.isEnabled; }
+  /** Whether this network has a live registry the app reads and transacts with (lookups, listings,
+   *  registrations, profile saves, resolving typed names): testnet-10 only until an audit. */
+  static get isLaunched() { return IS_TESTNET; }
+  get isLaunched() { return KachatNamesService.isLaunched; }
 
   requireTestnet() {
-    if (!KachatNamesService.isEnabled) throw ServiceError.testnetOnly();
+    if (!KachatNamesService.isLaunched) throw ServiceError.testnetOnly();
   }
 
   // MARK: Manifest

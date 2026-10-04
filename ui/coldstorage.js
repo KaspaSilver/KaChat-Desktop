@@ -10,7 +10,7 @@
 
 import { getEndpoint } from "../engine/endpoints.js";
 import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
-import { kachatAddressDomainsHtml } from "./kachat-market.js";
+import { renderKachatLiveDomainsTab, kachatOwnersOfNames } from "./kachat-names-live.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
@@ -60,7 +60,8 @@ let addrTxs = { state: "idle", txs: [], error: null };
 let addrUtxos = { state: "idle", entries: [], error: null };
 let addrToken = 0;
 // Addresses of the open account that own at least one KNS domain (cached
-// engine lookups) — drives the "Contains domain" row tag and list ordering.
+// engine lookups) or a .kachat name (iOS 881ada6 ownersOfNames, where the
+// registry is launched) — drives the "Contains domain" row tag and list ordering.
 let detailDomainOwning = new Set();
 /// What the last discover on this account turned up, shown in the Address Actions sheet.
 let detailDiscoverySummary = null;
@@ -1009,7 +1010,7 @@ function renderAddressScreen() {
       <button type="button" class="domains-tab ${addressTab === "kachat" ? "active" : ""}" data-cold-tab="kachat">.kachat</button>
     </nav>
     <div class="manage-address-list cold-address-panel">
-      ${addressTab === "transactions" ? addressTxRowsHtml(entry) : addressTab === "utxos" ? addressUtxoRowsHtml(entry) : kachatAddressDomainsHtml()}
+      ${addressTab === "transactions" ? addressTxRowsHtml(entry) : addressTab === "utxos" ? addressUtxoRowsHtml(entry) : "<div data-cold-kachat-names></div>"}
     </div>
     <div class="cold-bottom-actions">
       <button class="primary-button cold-capsule" type="button" data-cold-addr-receive>
@@ -1021,6 +1022,12 @@ function renderAddressScreen() {
         Send
       </button>
     </div>`;
+  // The .kachat tab: this address's own names, live where the registry is launched (iOS 881ada6),
+  // empty on mainnet. A name opens read-only here - a KasSigner address signs on its device.
+  if (addressTab === "kachat") {
+    const namesEl = rootEl.querySelector("[data-cold-kachat-names]");
+    if (namesEl) renderKachatLiveDomainsTab(namesEl, entry.address, { variant: "address" });
+  }
 }
 
 async function openAddressScreen(index) {
@@ -2326,6 +2333,9 @@ async function loadDetail({ useCache = true } = {}) {
       const info = deps.engine.peekKnsAddressInfo?.(address);
       if (info?.allDomains?.length) owning.add(address);
     }
+    // .kachat names count too (iOS 881ada6; empty where the registry isn't launched).
+    for (const address of await kachatOwnersOfNames(derived)) owning.add(address);
+    if (detailToken !== token) return;
     const changed = owning.size !== detailDomainOwning.size || [...owning].some((a) => !detailDomainOwning.has(a));
     detailDomainOwning = owning;
     if (changed) render();
@@ -2827,7 +2837,7 @@ export function listColdWatchedAddresses() {
   for (const account of accounts) {
     try {
       const addresses = deriveReceiveAddresses(account.kpub, 0, account.maxIndex + 1);
-      for (const address of addresses) list.push({ address, label: account.label, notify: account.receiveNotifications !== false });
+      addresses.forEach((address, index) => list.push({ address, index, label: account.label, notify: account.receiveNotifications !== false }));
     } catch { /* a bad kpub just contributes nothing */ }
   }
   coldWatchedCache.fingerprint = fingerprint;

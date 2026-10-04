@@ -211,12 +211,10 @@
           </button>
         </div>
 
-        <button class="new-chat-fab" type="button" data-new-chat-fab aria-label="Create chat" title="Create chat">
-          <svg class="person-plus-icon" viewBox="0 0 32 32" focusable="false" aria-hidden="true">
-            <circle cx="12" cy="8.5" r="5.25"/>
-            <path d="M3.5 24.5c.7-5.4 4-8.7 8.5-8.7 2.3 0 4.3.8 5.8 2.3"/>
-            <circle cx="24.2" cy="21.8" r="5.3"/>
-            <path d="M24.2 18.9v5.8M21.3 21.8h5.8"/>
+        <!-- One glass + on every Chats tab, opening the New sheet (iOS 5da8ccf). -->
+        <button class="new-chat-fab" type="button" data-new-chat-fab aria-label="New" title="New">
+          <svg class="new-chat-fab-plus" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"/>
           </svg>
         </button>
       </aside>
@@ -2404,7 +2402,7 @@
           <canvas width="512" height="512" data-chatting-address-qr></canvas>
         </div>
         <p class="chatting-address-value" data-chatting-address-value>No wallet loaded</p>
-        <p class="chatting-address-subtitle" data-chatting-address-subtitle>Just send 5-10 KAS at a time, that's plenty to cover chat fees for a while (about 500 messages per KAS).</p>
+        <p class="chatting-address-subtitle" data-chatting-address-subtitle>This address should be for chatting and domains only. 1 Kaspa is enough for about 500 interactions in the app. Domains cost from 35 to 4,000 Kaspa, depending on the name.</p>
         <button class="chatting-address-copy" type="button" data-copy-engine-address>
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
           <span data-i18n="action.copyAddress">Copy Address</span>

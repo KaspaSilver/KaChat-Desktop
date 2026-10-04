@@ -126,7 +126,8 @@ function markChannelRead(channel) {
   saveRead();
   if (before > 0) deps.onUnreadChanged?.();
 }
-/** The floating button on the Public Chats tab: reveal the join/create card. */
+/** Reveal the join/create card. The Public Chats tab's floating button used to call this; the
+ *  Chats New sheet now joins in place (broadcastJoinError + joinBroadcastChannelFromSheet). */
 export function openBroadcastJoin() {
   const card = document.querySelector("[data-broadcast-join-card]");
   if (!card) return;
@@ -1818,14 +1819,36 @@ function closeRoom() {
   renderChannelList();
 }
 
+/** Why `name` (already normalized) can't be joined, or null. Shared by the join card's alert and
+ *  the Chats New sheet, which shows the message in place (iOS joinRoomFromCreateSheet). */
+function broadcastJoinProblem(name) {
+  if (!isValidBroadcastChannel(name)) return { title: "Couldn't Join Channel", message: "Channel names must be 1-36 characters with no spaces or colons." };
+  if (isServiceBroadcastChannel(name)) return { title: "That room is machinery", message: "#chess-arena carries chess tournaments. Play them from Kaspa Hub > Chess." };
+  return null;
+}
+
+/** The Chats New sheet's "New Public Chat": "" when the name is fine to join, otherwise the
+ *  sentence to show under the field. Nothing is joined here - the caller switches to the Public
+ *  Chats tab first, then calls joinBroadcastChannelFromSheet. */
+export function broadcastJoinError(rawName) {
+  if (!deps) return "Something went wrong joining that channel.";
+  return broadcastJoinProblem(normalizeBroadcastChannel(rawName))?.message || "";
+}
+
+/** Joins (or reopens) the room and opens it, as the join card does. */
+export function joinBroadcastChannelFromSheet(rawName) {
+  if (!deps) return false;
+  const name = normalizeBroadcastChannel(rawName);
+  if (broadcastJoinProblem(name)) return false;
+  joinChannel(name);
+  return true;
+}
+
 function joinChannel(rawName) {
   const name = normalizeBroadcastChannel(rawName);
-  if (!isValidBroadcastChannel(name)) {
-    alertDialog({ title: "Couldn't Join Channel", message: "Channel names must be 1-36 characters with no spaces or colons." });
-    return;
-  }
-  if (isServiceBroadcastChannel(name)) {
-    alertDialog({ title: "That room is machinery", message: "#chess-arena carries chess tournaments. Play them from Kaspa Hub > Chess." });
+  const problem = broadcastJoinProblem(name);
+  if (problem) {
+    alertDialog(problem);
     return;
   }
   if (!joinedChannels.includes(name)) {

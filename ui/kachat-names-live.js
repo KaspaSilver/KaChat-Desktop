@@ -1,10 +1,13 @@
-// The live .kachat screens, TESTNET ONLY (iOS KachatNamesLiveViews.swift, 5df42b4): the hub's
+// The live .kachat screens (iOS KachatNamesLiveViews.swift, 5df42b4): the hub's
 // search, registrations in flight, Marketplace / My Names / Activity, the name detail with its
 // actions, every transaction sheet, the Your Domains > .kachat tab, the address profile editor and
 // the profile hero's .kachat pictures, bio and Linktree link (kachatHeroProfile), looked up from the
 // profile's social links on this device (engine/kachat-names/social-image-resolver.js).
-// On mainnet none of this is reached (`kachatNames()` is null) - kachat-market.js keeps its
-// "Coming soon" mockups. Every spending or destructive action shows its cost first (built against
+// The screens are on for EVERY network (iOS 7227d69, kachatNamesUiEnabled); the registry behind them
+// is live only where it is launched (testnet-10, kachatNamesLaunched - the runtime `kachatNames()`
+// exists only there). On mainnet the hub pages, Your Domains, each address's .kachat tab and the
+// profile editor render empty under "Coming soon", and nothing reads or writes a registry.
+// Every spending or destructive action shows its cost first (built against
 // live UTXOs, nothing sent), asks to confirm, then passes the device lock (deps.deviceLock) before
 // anything is signed.
 //
@@ -13,7 +16,7 @@
 
 import "./kachat-names-live.css";
 import { KAS_UNIT, kasLabel } from "../engine/network.js";
-import { kachatNames } from "./kachat-names-runtime.js";
+import { kachatNames, kachatNamesLaunched } from "./kachat-names-runtime.js";
 import { userFacingError } from "./dialogs.js";
 import { Operation, Stage, isOpen, needsDriving, validateKey } from "../engine/kachat-names/actions.js";
 import {
@@ -25,7 +28,7 @@ import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs } from ".
 import { paramsPrice, paramsRenewPrice } from "../engine/kachat-names/manifest.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
 
-/** { getDeps, esc, ICON, openLayer, closeLayer, navBar, sectionHeader, hubChanged(kind), openNameDetail(info) } */
+/** { getDeps, esc, ICON, wordmark, openLayer, closeLayer, navBar, sectionHeader, hubChanged(kind), openNameDetail(info) } */
 let kit = null;
 
 /** Wires the live screens to the market's layers and icons. Called by initKachatMarket. */
@@ -46,7 +49,8 @@ const SOMPI_PER_KAS = 100_000_000n;
 const U64_MAX = (1n << 64n) - 1n;
 const PRIVACY_SEEN_KEY = "kachat_profile_privacy_seen";
 
-/** Whether the live screens apply here (testnet-10 with the runtime built). */
+/** Whether the registry is live here (testnet-10 with the runtime built): reads and actions run.
+ *  The screens themselves render on every network (kachatNamesUiEnabled). */
 export function liveEnabled() { return kachatNames() != null; }
 
 // ---------------------------------------------------------------------------------------------
@@ -468,6 +472,10 @@ const registrationUi = new Map();
 /** The hub is live: testnet with the manifest verified. */
 export function liveHubIsLive() { return liveEnabled() && hub.ready === true; }
 
+/** The pages have loaded - always so where the registry isn't launched (mainnet: the same pages,
+ *  empty, under "Coming soon"; iOS 7227d69). */
+function hubLoaded() { return hub.loaded || !kachatNames(); }
+
 function hubChanged(kind) {
   if (hubVisible) {
     try { kit?.hubChanged?.(kind); } catch { /* screen gone */ }
@@ -853,14 +861,14 @@ function loadErrorHtml() {
 function marketPageHtml() {
   const listings = hub.listings.length
     ? listCard(hub.listings.map((n) => nameRowHtml(n)).join(""))
-    : emptyCard(hub.loaded ? "No names are listed right now." : null);
+    : emptyCard(hubLoaded() ? "No names are listed right now." : null);
   const lapsed = hub.lapsed.length
     ? listCard(hub.lapsed.map((n) => `
         <div class="kl-split">
           ${nameRowHtml(n, { showPrice: false })}
           <button class="secondary-button accent kmkt-small-button" type="button" data-kl-reclaim="${esc(n.name)}">Reclaim</button>
         </div>`).join(""))
-    : emptyCard(hub.loaded ? "Nothing to reclaim." : null);
+    : emptyCard(hubLoaded() ? "Nothing to reclaim." : null);
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
@@ -883,7 +891,7 @@ function myNamesPageHtml() {
       </div>`;
   const offers = hub.myOffers.length
     ? listCard(hub.myOffers.map((o) => offerRowHtml(o, { isBuyer: true, isOwner: false })).join(""), 50)
-    : emptyCard(hub.loaded ? "No open offers." : null);
+    : emptyCard(hubLoaded() ? "No open offers." : null);
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
@@ -900,7 +908,7 @@ function activityPageHtml() {
   const events = hub.activity.slice(0, 100);
   const list = events.length
     ? listCard(events.map((e) => eventRowHtml(e, { showName: true })).join(""), 56)
-    : emptyCard(hub.loaded ? "Nothing yet." : null);
+    : emptyCard(hubLoaded() ? "Nothing yet." : null);
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
@@ -1143,6 +1151,8 @@ function openTxSheet(cfg) {
   const sheet = {
     plan: null, op: null, planError: null, building: false, sending: false, txId: null, sendError: null,
     key: undefined, seq: 0, timer: null, layer: null, closed: false,
+    /** the spending address that signs and pays for the plan (iOS 881ada6), else null: the chatting address */
+    payer: null,
   };
 
   const navFor = () => (sheet.txId
@@ -1154,10 +1164,16 @@ function openTxSheet(cfg) {
     if (sheet.plan) {
       if (sheet.plan.priceFee > 0n) rows += formRow("Price (to miners)", amountText(sheet.plan.priceFee));
       rows += formRow("Network fee", amountText(sheet.plan.networkFee));
-      // Names always spend from, and pay back to, the chatting address: its real balance and what
-      // it will be once this is sent (iOS 8ecc38c).
-      const me = myKey();
-      if (me) {
+      // An owner action on a name one of your spending addresses holds is signed and paid by that
+      // address (iOS 881ada6): what it changes there.
+      const payerKey = sheet.payer ? keyOf(sheet.payer.address) : null;
+      // Otherwise names spend from, and pay back to, the chatting address: its real balance and
+      // what it will be once this is sent (iOS 8ecc38c).
+      const me = payerKey ? null : myKey();
+      if (payerKey) {
+        rows += formRow("Paid from", `Spending address #${sheet.payer.index}`);
+        rows += formRow("Balance change", signedAmount(balanceChange(sheet.plan, payerKey)), { bold: true });
+      } else if (me) {
         const change = balanceChange(sheet.plan, me);
         const balance = walletBalanceSompi();
         if (balance != null) {
@@ -1211,6 +1227,7 @@ function openTxSheet(cfg) {
     sheet.key = key;
     sheet.plan = null;
     sheet.op = null;
+    sheet.payer = null;
     sheet.planError = null;
     clearTimeout(sheet.timer);
     const op = cfg.operation();
@@ -1224,6 +1241,7 @@ function openTxSheet(cfg) {
         if (seq !== sheet.seq || sheet.closed) return;
         sheet.plan = plan;
         sheet.op = op;
+        try { sheet.payer = rt.actions.payerFor?.(op) ?? null; } catch { sheet.payer = null; }
       } catch (error) {
         if (seq !== sheet.seq || sheet.closed) return;
         sheet.planError = errorText(error);
@@ -1783,16 +1801,29 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     active: true,
     layer,
     unsubscribe: [],
+    /** Which of this wallet's addresses holds the name (iOS 881ada6 heldBy): `{ kind: "chatting" }`,
+     *  `{ kind: "spending", index, address }`, `{ kind: "kasSigner", account, index, address }`, or
+     *  null for someone else's. Resolved again on every reload (the name may move). */
+    heldBy: null,
   };
   const rt = () => kachatNames();
-  const mine = () => isMine(d.info.owner);
+  const resolveHeldBy = () => {
+    try { d.heldBy = rt()?.actions.ownAddress?.(d.info.owner) ?? null; } catch { d.heldBy = null; }
+  };
+  resolveHeldBy();
+  /** Held by the chatting address: the identity, so "Set as Primary" applies. */
+  const mine = () => d.heldBy?.kind === "chatting" || (d.heldBy == null && isMine(d.info.owner));
+  /** Held by an address this app can sign for (chatting or spending): every owner action. */
+  const canActAsOwner = () => mine() || d.heldBy?.kind === "spending";
+  /** Held by any of this wallet's addresses - never offered Buy / Make an Offer. */
+  const ownedByWallet = () => d.heldBy != null || mine();
   const status = () => d.info.status(graceMs());
   const ownerAddress = () => addressOf(d.info.owner);
 
   const nameCard = () => {
     const s = status();
     let note = "";
-    if (s === Status.grace && mine()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends nobody else can take it.</p>`;
+    if (s === Status.grace && ownedByWallet()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends nobody else can take it.</p>`;
     else if (s === Status.grace) note = `<p class="kl-note-inline kl-orange">Expired. It no longer resolves; the owner can still renew it.</p>`;
     else if (s === Status.lapsed) note = `<p class="kl-note-inline kl-red">Lapsed: anyone may reclaim it, and then claim it again.</p>`;
     // registry v2: the paid period, from its start to the expiry (at most 2 years)
@@ -1848,7 +1879,10 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
   const actionButtons = () => {
     const s = status();
     const I = kit.ICON;
-    if (mine()) {
+    if (canActAsOwner()) {
+      // The primary name is the chatting address's identity: a name on a spending address can't be it.
+      const primary = mine() ? actionButton("Set as Primary", LI.personCheck, "primary", { disabled: s !== Status.active || d.primaryWorking }) : "";
+      const delist = d.info.isListed ? actionButton("Delist", LI.tagSlash, "delist") : "";
       return `
         <div class="kl-action-grid">
           ${periodActions()}
@@ -1856,13 +1890,13 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
             ${actionButton(d.info.isListed ? "Change Price" : "List for Sale", I.tag, "list", { disabled: s !== Status.active })}
             ${actionButton("Transfer", I.swap, "transfer")}
           </div>
-          <div class="kmkt-actions">
-            ${d.info.isListed ? actionButton("Delist", LI.tagSlash, "delist") : ""}
-            ${actionButton("Set as Primary", LI.personCheck, "primary", { disabled: s !== Status.active || d.primaryWorking })}
-          </div>
+          ${delist || primary ? `<div class="kmkt-actions">${delist}${primary}</div>` : ""}
           <div class="kmkt-actions">${actionButton("Release Name", LI.trash, "release", { danger: true })}</div>
         </div>`;
     }
+    // A KasSigner address holds it: read-only here (the Owner card says which); acting on it is the
+    // device's job.
+    if (d.heldBy?.kind === "kasSigner") return "";
     if (s === Status.lapsed) {
       return `<div class="kl-action-grid"><div class="kmkt-actions">${actionButton("Reclaim", LI.reclaim, "reclaim", { prominent: true })}</div></div>`;
     }
@@ -1877,7 +1911,12 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
 
   const ownerCard = () => {
     const address = ownerAddress();
-    const label = mine() ? "You" : d.ownerLabel ? `${d.ownerLabel}.kachat` : "";
+    const held = d.heldBy;
+    let label = "";
+    if (mine()) label = "You";
+    else if (held?.kind === "spending") label = `Your spending address #${held.index}`;
+    else if (held?.kind === "kasSigner") label = held.account ? `Your KasSigner address (${held.account} #${held.index})` : `Your KasSigner address #${held.index}`;
+    else if (d.ownerLabel) label = `${d.ownerLabel}.kachat`;
     return `
       <section class="kmkt-block">
         ${kit.sectionHeader("Owner")}
@@ -1887,19 +1926,19 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
             ${label ? `<strong>${esc(label)}</strong>` : ""}
             ${address ? `<span class="kl-mono">${esc(address)}</span>` : ""}
           </div>
-          ${!mine() && address ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-message>${kit.ICON.bubbles}<span>Message</span></button>` : ""}
+          ${!ownedByWallet() && address ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-message>${kit.ICON.bubbles}<span>Message</span></button>` : ""}
         </div>
       </section>`;
   };
 
   const offersSection = () => {
-    const isOwnerIndexer = mine() && !!rt()?.registry.isIndexer;
+    const isOwnerIndexer = canActAsOwner() && !!rt()?.registry.isIndexer;
     const list = d.offers.length
       ? listCard(d.offers.map((o) => offerRowHtml(o, { isBuyer: isMine(o.buyer), isOwner: isOwnerIndexer, nameInfo: d.info })).join(""), 50)
       : `<div class="kmkt-card kmkt-empty-card">No open offers.</div>`;
     return `
       <section class="kmkt-block">
-        ${kit.sectionHeader("Offers", mine() ? "Accept one to sell the name for it." : "")}
+        ${kit.sectionHeader("Offers", canActAsOwner() ? "Accept one to sell the name for it." : "")}
         ${list}
         ${chainNote()}
       </section>`;
@@ -1968,8 +2007,9 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
       const found = await registry.lookup(d.info.name);
       if (found.kind === "registered") { d.info = rememberName(found.info); d.gone = false; } else { d.gone = true; }
     } catch { /* keep what we have */ }
+    resolveHeldBy();
     const address = ownerAddress();
-    if (!mine() && address) {
+    if (!ownedByWallet() && address) {
       try { d.ownerLabel = (await registry.identity(address))?.label ?? null; } catch { /* no label */ }
     }
     try { d.offers = await registry.offersFor(d.info.name); } catch { d.offers = []; }
@@ -2096,31 +2136,80 @@ export function openNameDetailLayer(info, owner = "domains") {
 // ---------------------------------------------------------------------------------------------
 
 let domainsSeq = 0;
-let domainsUnsubscribe = null;
-let domainsServiceUnsubscribe = null;
 /** container -> { token, address, load } of the render in it, so a repeat call only reloads. */
 const domainsRenders = new WeakMap();
+/** lowercased address -> the names last shown for it, so a re-rendered tab (Cold Storage repaints
+ *  its whole screen) shows them at once and reloads behind them instead of flashing a spinner. */
+const domainsShown = new Map();
+
+/** The card badge for a name: Listed, Expired (in grace) or Lapsed (iOS KachatLiveDomainsTab.badge). */
+function domainBadge(n) {
+  switch (n.status(graceMs())) {
+    case Status.active: return n.isListed ? "Listed" : "";
+    case Status.grace: return "Expired";
+    default: return "Lapsed";
+  }
+}
+
+function domainCardsHtml(names) {
+  return names.map((n) => {
+    rememberName(n);
+    const b = domainBadge(n);
+    return `<button type="button" class="kns-domain-card" data-kl-domain-open="${esc(n.name)}">${esc(n.display)}${b ? `<span class="kns-domain-primary">${esc(b)}</span>` : ""}</button>`;
+  }).join("");
+}
+
+/** "No .kachat names yet" (Your Domains) or, for one address's tab, iOS KachatAddressLiveNamesList's
+ *  "No .kachat names on this address". */
+function domainsEmptyHtml(variant) {
+  if (variant === "address") {
+    return `
+      <div class="kachat-address-domains">
+        <span class="kachat-address-domains-mark" aria-hidden="true">${kit.wordmark || kit.ICON.atCircle}</span>
+        <strong>No .kachat names on this address</strong>
+        <p>Names this address owns show here.</p>
+      </div>`;
+  }
+  return `
+    <div class="kl-domains-empty">
+      <span class="kmkt-empty-icon">${kit.ICON.atCircle}</span>
+      <strong>No .kachat names yet</strong>
+    </div>`;
+}
 
 /**
- * Renders the .kachat tab of Your Domains into `containerEl` for `walletAddress` (testnet only):
- * a spinner, then the address's names (active, expired and lapsed) as domain cards, or "No .kachat
- * names yet". A card opens the name's live detail as a sheet. It reloads by itself when the
- * registry changes, for as long as this render is the one in the container. Returns false (and
- * leaves the container alone) on mainnet, where the caller keeps its placeholder.
+ * Renders an address's .kachat names into `containerEl` (iOS KachatLiveDomainsTab and, with
+ * `variant: "address"`, KachatAddressLiveNamesList - the .kachat tab of Manage Addresses, the
+ * chatting address and KasSigner, 881ada6): a spinner, then the address's names (active, expired
+ * and lapsed) as domain cards, or the empty note. A card opens the name's live detail as a sheet,
+ * which knows which of your addresses holds it (owner actions, or read-only for KasSigner). It
+ * reloads by itself when the registry changes, for as long as this render is the one in the
+ * container. Where the registry isn't launched (mainnet) it renders the empty note and reads
+ * nothing (iOS 7227d69). Returns false (container untouched) only before the market is wired.
  */
-export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
+export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant = "domains" } = {}) {
+  if (!containerEl || !kit) return false;
   const rt = kachatNames();
-  if (!rt || !containerEl || !kit) return false;
   const address = String(walletAddress || "").toLowerCase();
   // The same address's tab is already there (the caller re-rendered its list): reload in place,
   // without flashing the spinner.
   const previous = domainsRenders.get(containerEl);
-  if (previous && previous.address === address && containerEl.querySelector(`[data-kl-domains="${previous.token}"]`)) {
+  if (previous && previous.address === address && previous.variant === variant
+    && containerEl.querySelector(`[data-kl-domains="${previous.token}"]`)) {
     previous.load();
     return true;
   }
   const token = String(++domainsSeq);
-  containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}"><div class="kl-domains-loading">${spinner()}</div></div>`;
+  if (!rt) {
+    // Not launched here: the same tab, empty.
+    containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}">${domainsEmptyHtml(variant)}</div>`;
+    domainsRenders.set(containerEl, { token, address, variant, load: () => {} });
+    return true;
+  }
+  const shown = domainsShown.get(address);
+  containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}">${shown?.length
+    ? domainCardsHtml(shown)
+    : `<div class="kl-domains-loading">${spinner()}</div>`}</div>`;
   if (!containerEl.dataset.klDomainsBound) {
     containerEl.dataset.klDomainsBound = "1";
     containerEl.addEventListener("click", (event) => {
@@ -2133,14 +2222,6 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
   const current = () => containerEl.isConnected && containerEl.querySelector(`[data-kl-domains="${token}"]`);
   let loading = false;
   let again = false;
-
-  const badge = (n) => {
-    switch (n.status(graceMs())) {
-      case Status.active: return n.isListed ? "Listed" : "";
-      case Status.grace: return "Expired";
-      default: return "Lapsed";
-    }
-  };
 
   const load = async () => {
     if (loading) { again = true; return; }
@@ -2168,36 +2249,34 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress) {
             </div>`;
           continue;
         }
-        root.innerHTML = names.length
-          ? names.map((n) => {
-            rememberName(n);
-            const b = badge(n);
-            return `<button type="button" class="kns-domain-card" data-kl-domain-open="${esc(n.name)}">${esc(n.display)}${b ? `<span class="kns-domain-primary">${esc(b)}</span>` : ""}</button>`;
-          }).join("")
-          : `
-            <div class="kl-domains-empty">
-              <span class="kmkt-empty-icon">${kit.ICON.atCircle}</span>
-              <strong>No .kachat names yet</strong>
-            </div>`;
+        domainsShown.delete(address);
+        domainsShown.set(address, names);
+        trimMap(domainsShown, 200);
+        root.innerHTML = names.length ? domainCardsHtml(names) : domainsEmptyHtml(variant);
       } while (again);
     } finally {
       loading = false;
     }
   };
 
-  domainsRenders.set(containerEl, { token, address, load });
-  domainsUnsubscribe?.();
-  domainsUnsubscribe = rt.registry.onChange(() => {
-    if (!current()) { domainsUnsubscribe?.(); domainsUnsubscribe = null; return; }
-    load();
-  });
-  domainsServiceUnsubscribe?.();
-  domainsServiceUnsubscribe = rt.service.onChange(() => {
-    if (!current()) { domainsServiceUnsubscribe?.(); domainsServiceUnsubscribe = null; return; }
-    load();
-  });
+  domainsRenders.set(containerEl, { token, address, variant, load });
+  // This render's own subscriptions; each drops itself once its render is gone.
+  const subs = [];
+  const unsubscribeAll = () => { for (const u of subs.splice(0)) { try { u(); } catch { /* gone */ } } };
+  const onSourceChange = () => { if (!current()) { unsubscribeAll(); return; } load(); };
+  subs.push(rt.registry.onChange(onSourceChange));
+  subs.push(rt.service.onChange(onSourceChange));
   load();
   return true;
+}
+
+/** Which of `addresses` own a .kachat name (iOS KachatNamesRegistry.ownersOfNames, 881ada6): the
+ *  "Contains domain" tag and funded-first sort on Manage Addresses and KasSigner. An empty Set where
+ *  the registry isn't launched (mainnet) - nothing is read there. -> Promise<Set<string>> */
+export async function kachatOwnersOfNames(addresses) {
+  const rt = kachatNames();
+  if (!rt || !Array.isArray(addresses) || addresses.length === 0) return new Set();
+  try { return await rt.registry.ownersOfNames(addresses); } catch { return new Set(); }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2705,11 +2784,15 @@ function missingText(kind, platformName) {
  * `kchat:1:profile:` self-transfer. No free text and no uploads: what shows comes from a platform
  * that moderates it. A review card laid out like the profile header shows what others will see;
  * Save stays disabled until every filled field's lookup has finished and found its piece.
- * `owner` groups the layer (default "profile").
+ * `owner` groups the layer (default "profile"). Where the registry isn't launched (mainnet, iOS
+ * 7227d69) the editor is the same, empty, and Save stays off: nothing is written until .kachat
+ * launches there (the social lookups still run - they read the platforms, not a registry).
  */
 export function openLiveProfileEditor(owner = "profile") {
+  if (!kit) return null;
+  /** null where the registry isn't launched (mainnet) */
   const rt = kachatNames();
-  if (!rt || !kit) return null;
+  const launched = rt != null && kachatNamesLaunched();
   const resolver = socialImages();
   /** per field: the platform picked, the handle typed, and where its lookup stands
    *  (none | looking | found | empty | unreachable) */
@@ -2828,9 +2911,10 @@ export function openLiveProfileEditor(owner = "profile") {
     let foot;
     if (savedTx) foot = footer(`Saved. Transaction ${String(savedTx).slice(0, 16)}...`, "kl-green");
     else if (error) foot = footer(error, "kl-red");
+    else if (!launched) foot = footer("Profiles can be saved once .kachat launches on mainnet.");
     else foot = footer("Saving writes your profile to the chain from your address to itself, for a network fee. Profiles are public.");
     return section(
-      `<button class="kmkt-form-button" type="button" data-kl-profile-save ${saving || !loaded || blocked() ? "disabled" : ""}>
+      `<button class="kmkt-form-button" type="button" data-kl-profile-save ${saving || !loaded || blocked() || !launched ? "disabled" : ""}>
         ${saving ? spinner() : "Save Profile"}
       </button>`,
       { footerHtml: foot },
@@ -2991,9 +3075,9 @@ export function openLiveProfileEditor(owner = "profile") {
   };
 
   const load = async () => {
-    const { registry, actions } = rt;
-    const address = actions.myAddress;
-    if (address) {
+    const address = rt ? rt.actions.myAddress : null;
+    if (rt && address) {
+      const { registry } = rt;
       try { await registry.refreshIfStale(); } catch { /* use what we have */ }
       let p = null;
       try { p = (await registry.ownProfile(address))?.profile ?? null; } catch { p = null; }
@@ -3021,7 +3105,7 @@ export function openLiveProfileEditor(owner = "profile") {
   // Review before the record goes out: what will be saved, the network fee, the balance before and
   // after (iOS 7e238e5 KachatProfileSaveSheet). Closing its done sheet closes the editor too.
   const save = async () => {
-    if (saving || !loaded || blocked()) return;
+    if (!launched || saving || !loaded || blocked()) return;
     const record = profile();
     openProfileSaveSheet({
       title: "Save Profile", confirmTitle: "Save Profile", doneTitle: "Profile saved",

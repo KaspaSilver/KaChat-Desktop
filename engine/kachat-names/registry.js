@@ -95,7 +95,7 @@ function isUpgradingError(error) {
  *      once and kept
  *  - `now()`: unix ms (Number or BigInt; default Date.now)
  *  - optional: `isEnabled()` (default true; false makes refresh a no-op, as iOS
- *      KachatNamesService.isEnabled), `log(...args)` (default console.log), `cacheKey`
+ *      KachatNamesService.isLaunched - the app passes that gate), `log(...args)` (default console.log), `cacheKey`
  *      (default "kachat-names-registry-testnet-v1"), `sleep(ms)`.
  */
 export class KachatNamesRegistry {
@@ -380,6 +380,25 @@ export class KachatNamesRegistry {
     }
     const grace = this.graceMs, now = this._nowMs();
     return all.filter((n) => includeInactive || n.status(grace, now) === Status.active).sort(byRegistration);
+  }
+
+  /** Which of `addresses` own at least one .kachat name - active, in grace or lapsed, the same set
+   *  Your Domains lists (iOS ownersOfNames, 881ada6). Drives the "Contains domain" tag on Manage
+   *  Addresses and KasSigner. Empty where the registry is off (`isEnabled()` false: mainnet); an
+   *  address whose lookup fails just isn't tagged. -> Promise<Set<string>> (the addresses as given). */
+  async ownersOfNames(addresses) {
+    const list = Array.isArray(addresses) ? addresses.filter((a) => typeof a === "string" && a) : [];
+    const owners = new Set();
+    if (!this.deps.isEnabled() || list.length === 0) return owners;
+    if (this.refreshedAt == null) await this.refresh();
+    for (const address of list) {
+      const key = keyOf(address);
+      if (!key) continue;
+      try {
+        if ((await this.namesOf(key, { includeInactive: true })).length > 0) owners.add(address);
+      } catch { /* not tagged */ }
+    }
+    return owners;
   }
 
   /** Active names listed for sale, most recently changed first. */

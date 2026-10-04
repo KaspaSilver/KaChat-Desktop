@@ -4,10 +4,10 @@ import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwo
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, openBroadcastJoin, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
-import { initKachatNamesRuntime, kachatNames } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage } from "./kachat-names-live.js";
+import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames } from "./kachat-names-live.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
@@ -1154,7 +1154,7 @@ function buildInternalLinkCard(link) {
   const title = isPost
     ? (entry?.authorName || "KaPosts post")
     : isProfile
-      ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : (IS_TESTNET ? identityNameForAddress(link.address) : shortAddress(link.address))))
+      ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : (kachatNamesUiEnabled() ? identityNameForAddress(link.address) : shortAddress(link.address))))
       : `#${link.channel}`;
   const subtitle = isPost
     ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
@@ -1468,7 +1468,7 @@ function mentionDisplayLabel(address) {
   if (address === engine.address) return "You";
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return displayNameForAddress(contact);
-  if (IS_TESTNET) return identityNameForAddress(address);
+  if (kachatNamesUiEnabled()) return identityNameForAddress(address);
   return shortAddress(address);
 }
 
@@ -1992,7 +1992,7 @@ function personGlyphSvg() {
 /// repaint on onKachatIdentityChange). A failed load retries once through the relay, then shows
 /// the glyph (handleKachatImageError).
 function kachatAvatarImgHtml(address, attrs = "") {
-  if (!IS_TESTNET || !address) return "";
+  if (!kachatNamesUiEnabled() || !address) return "";
   const src = kachatCachedAvatarUrl(address);
   if (!src) return "";
   return `<img src="${escapeHtml(src)}" alt="" referrerpolicy="no-referrer" data-kachat-img="inline"${attrs} />`;
@@ -2035,12 +2035,12 @@ function handleKachatImageError(event) {
     if (next) { img.dataset.kachatRetried = next; img.src = next; } else kachatImageFailed(img);
   }, () => kachatImageFailed(img));
 }
-if (IS_TESTNET) document.addEventListener("error", handleKachatImageError, true);
+if (kachatNamesUiEnabled()) document.addEventListener("error", handleKachatImageError, true);
 function avatarHtmlFor(contact, className = "chat-avatar") {
   // A user-assigned photo wins over the live KNS avatar, which wins over initials.
   if (contact?.photo) return `<span class="${className}"><img src="${escapeHtml(contact.photo)}" alt="" /></span>`;
   // Testnet: the .kachat face, never the KNS one.
-  if (IS_TESTNET) return kachatAvatarSpanHtml(contact?.address, className);
+  if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(contact?.address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
@@ -2052,7 +2052,7 @@ function avatarHtmlFor(contact, className = "chat-avatar") {
 function selfAvatarHtml(className = "chat-avatar") {
   if (!engine.address) return `<span class="${className}">?</span>`;
   // Testnet: your .kachat face (your own saved profile first), never the KNS one.
-  if (IS_TESTNET) return kachatAvatarSpanHtml(engine.address, className);
+  if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(engine.address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(engine.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   const name = activeAccountMetadata()?.name || shortAddress(engine.address);
@@ -2062,8 +2062,8 @@ function selfAvatarHtml(className = "chat-avatar") {
 function updateAvatarElement(initialsEl, imageEl, contact) {
   if (initialsEl) initialsEl.innerHTML = personGlyphSvg();
   if (!imageEl) return;
-  // Testnet: the contact's photo, else their .kachat face - never the KNS one.
-  if (IS_TESTNET) {
+  // The contact's photo, else their .kachat face - never the KNS one (every network, iOS 7227d69).
+  if (kachatNamesUiEnabled()) {
     const photo = contact?.photo || "";
     const kachatSrc = photo ? "" : (kachatCachedAvatarUrl(contact?.address) || "");
     const next = photo || kachatSrc;
@@ -2562,7 +2562,8 @@ function displayNameForAddress(contact) {
   if (contact.nameIsCustom) return contact.name || shortAddress(contact.address);
   // Testnet (iOS e52357d, ContactsManager.displayName): your name for them, else their .kachat
   // name, else the stored default (their short address) - KNS is never consulted there.
-  if (IS_TESTNET) return kachatCachedLabel(contact.address) || contact.name || shortAddress(contact.address);
+  // Every network since iOS 7227d69 (mainnet has no registry yet, so its .kachat label is null there).
+  if (kachatNamesUiEnabled()) return kachatCachedLabel(contact.address) || contact.name || shortAddress(contact.address);
   return knsDomainForAddress(contact.address) || contact.name || shortAddress(contact.address);
 }
 
@@ -2570,7 +2571,7 @@ function displayNameForAddress(contact) {
 /// testnet its .kachat name, elsewhere its KNS domain (when .kas names are identity), else the
 /// short address. For an address with no contact record; with one, use displayNameForAddress.
 function identityNameForAddress(address) {
-  if (IS_TESTNET) return kachatCachedLabel(address) || shortAddress(address);
+  if (kachatNamesUiEnabled()) return kachatCachedLabel(address) || shortAddress(address);
   return knsDomainForAddress(address) || shortAddress(address);
 }
 
@@ -2592,7 +2593,7 @@ function identityNameForAddress(address) {
 function knsDomainForAddress(address) {
   // A .kas name is no one's identity in KaChat (iOS 509c0fe): with no .kachat name, people read as
   // the name you gave them, else their address. On testnet identity is .kachat only (iOS e52357d).
-  if (!address || IS_TESTNET || !engine.knsNamesAsIdentity) return null;
+  if (!address || kachatNamesUiEnabled() || !engine.knsNamesAsIdentity) return null;
   const info = engine.peekKnsAddressInfo?.(address);
   if (info?.explicitPrimaryDomain) return info.explicitPrimaryDomain;
   return engine.peekKnsAddressProfile?.(address)?.domainName || null;
@@ -5486,7 +5487,7 @@ function applyKachatHeroProfile(hero) {
 /// address, re-asked only when the registry moves or after five minutes). State lives on the
 /// function objects (this runs before later declarations init).
 function installKachatIdentityRepaint() {
-  if (!IS_TESTNET || installKachatIdentityRepaint.done) return;
+  if (!kachatNamesUiEnabled() || installKachatIdentityRepaint.done) return;
   installKachatIdentityRepaint.done = true;
   onKachatIdentityChange(() => scheduleKachatIdentityRepaint());
 }
@@ -5567,7 +5568,8 @@ function updateProfileHero(info, profileInfo) {
   window.setTimeout(() => applyKachatHeroProfile(refreshKachatIdentity.hero), 0);
   // Testnet (iOS e52357d): no KNS fallback at all - no KNS banner, avatar or bio. What the .kachat
   // profile paints (applyKachatHeroProfile) is left alone here, so a refresh never flashes it.
-  if (IS_TESTNET) {
+  // Every network since iOS 7227d69: mainnet shows no KNS banner, avatar or bio either.
+  if (kachatNamesUiEnabled()) {
     const hero = refreshKachatIdentity.hero?.address === engine.address ? refreshKachatIdentity.hero : null;
     if (bioEl && !hero?.bio) { bioEl.hidden = true; bioEl.textContent = ""; }
     if (bannerEl && !hero?.bannerUrl) { bannerEl.style.backgroundImage = ""; fitBackgroundBanner(bannerEl, ""); }
@@ -7390,6 +7392,8 @@ async function renderSpendingList() {
     const info = engine.peekKnsAddressInfo?.(e.address);
     if (info?.allDomains?.length) domainOwning.add(e.address);
   }
+  // .kachat names count too (iOS 881ada6 ownersOfNames; empty where the registry isn't launched).
+  for (const address of await kachatOwnersOfNames(enriched.map((e) => e.address))) domainOwning.add(address);
   if (token !== spendingListToken) return;
   // Primary first → addresses with a balance OR a KNS domain (stable within
   // the group) → fresh/unused last.
@@ -7965,6 +7969,15 @@ async function consolidateSpendingDetailUtxos() {
 function setSpendingDetailTab(tab) {
   document.querySelectorAll("[data-spending-detail-tab]").forEach((b) => b.classList.toggle("active", b.dataset.spendingDetailTab === tab));
   document.querySelectorAll("[data-spending-detail-panel]").forEach((p) => { p.hidden = p.dataset.spendingDetailPanel !== tab; });
+  if (tab === "kachat") paintKachatAddressDomains("[data-spending-detail-panel=\"kachat\"]", spendingDetailAddress);
+}
+
+/// An address screen's .kachat tab: that address's own names (iOS KachatAddressLiveNamesList,
+/// 881ada6), the same cards and name detail as Your Domains - live where the registry is launched,
+/// empty on mainnet (7227d69). A spending address's names get owner actions signed by its own key.
+function paintKachatAddressDomains(panelSelector, address) {
+  const el = document.querySelector(`${panelSelector} [data-kachat-address-domains]`);
+  if (el && address) renderKachatLiveDomainsTab(el, address, { variant: "address" });
 }
 
 async function openSpendingDetailScreen(index) {
@@ -8882,7 +8895,11 @@ applyDockLayout();
 //   2. the primary spending address, while it has seen nothing;
 //   3. a slot that has never been revealed, funded or offered.
 const RECEIVE_INDEX_KEY = "kachat-receive-address-index-v1";
-const RECEIVE_SUBTITLE = "A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting.";
+// Receive is for everything except chatting and domains; the chatting address caption below is the
+// other half (iOS 492aa53). Both go through kasLabel like every amount string (the word "Kaspa" is
+// never relabelled, only a bare KAS).
+const RECEIVE_SUBTITLE = kasLabel("A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or domains.");
+const CHATTING_ADDRESS_SUBTITLE = kasLabel("This address should be for chatting and domains only. 1 Kaspa is enough for about 500 interactions in the app. Domains cost from 35 to 4,000 Kaspa, depending on the name.");
 async function freshReceiveAddress() {
   if (!activeAccountMnemonic()) return null;
   const state = getSpendingState();
@@ -8912,28 +8929,33 @@ async function freshReceiveAddress() {
   return address;
 }
 
+// Profile's Receive Kaspa button, and the Chats New sheet's "Receive Kaspa" row (iOS e6400d6),
+// which has no button of its own to busy - one run at a time either way.
+async function openReceiveKaspaScreen(button = null) {
+  if (!engine.address || openReceiveKaspaScreen.busy) return;
+  if (!activeAccountMnemonic()) {
+    showCopyToast("Spending address is unlocking — go back and try again.");
+    return;
+  }
+  openReceiveKaspaScreen.busy = true;
+  if (button) button.disabled = true;
+  const label = button?.querySelector("span:last-child");
+  const original = label?.textContent;
+  if (label) label.textContent = "Preparing a fresh address";
+  try {
+    const address = await freshReceiveAddress();
+    if (!address) { showCopyToast("Spending address is unlocking — go back and try again."); return; }
+    let balanceText = `0 ${KAS_UNIT}`;
+    try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} ${KAS_UNIT}`; } catch {}
+    openChattingAddressScreen({ address, balanceText, subtitle: RECEIVE_SUBTITLE });
+  } finally {
+    openReceiveKaspaScreen.busy = false;
+    if (button) button.disabled = false;
+    if (label && original) label.textContent = original;
+  }
+}
 document.querySelectorAll("[data-profile-qr-trigger]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    if (!engine.address) return;
-    if (!activeAccountMnemonic()) {
-      showCopyToast("Spending address is unlocking — go back and try again.");
-      return;
-    }
-    button.disabled = true;
-    const label = button.querySelector("span:last-child");
-    const original = label?.textContent;
-    if (label) label.textContent = "Preparing a fresh address";
-    try {
-      const address = await freshReceiveAddress();
-      if (!address) { showCopyToast("Spending address is unlocking — go back and try again."); return; }
-      let balanceText = `0 ${KAS_UNIT}`;
-      try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} ${KAS_UNIT}`; } catch {}
-      openChattingAddressScreen({ address, balanceText, subtitle: RECEIVE_SUBTITLE });
-    } finally {
-      button.disabled = false;
-      if (label && original) label.textContent = original;
-    }
-  });
+  button.addEventListener("click", () => { openReceiveKaspaScreen(button); });
 });
 
 async function openChattingAddressScreen(options = {}) {
@@ -8948,7 +8970,7 @@ async function openChattingAddressScreen(options = {}) {
   if (subtitleEl) {
     if (options.subtitle === undefined) {
       subtitleEl.hidden = false;
-      subtitleEl.textContent = "This address is for chatting. Funding it with around 50 Kaspa is enough to send messages for a long time.";
+      subtitleEl.textContent = CHATTING_ADDRESS_SUBTITLE;
     } else if (options.subtitle) {
       subtitleEl.hidden = false;
       subtitleEl.textContent = options.subtitle;
@@ -9068,7 +9090,8 @@ function renderProfileDomains() {
   if (getButton) {
     // .kachat on testnet: a pinned Inscribe button that opens the .kachat marketplace (iOS e4da63d),
     // hidden while the registry is being upgraded.
-    const kachatInscribe = activeDomainsTab === "kachat" && Boolean(kachatNames()) && !kachatNames()?.service?.registryUpgrading;
+    // Every network (iOS 7227d69): on mainnet it opens the hub's "Coming soon" pages.
+    const kachatInscribe = activeDomainsTab === "kachat" && kachatNamesUiEnabled() && !kachatNames()?.service?.registryUpgrading;
     getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || Boolean(detailEl && !detailEl.hidden);
     if (kachatInscribe) getButton.textContent = "Inscribe";
     else if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
@@ -9213,7 +9236,7 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
   if (event.target.closest("[data-domains-inscribe]")) {
     // Each outside service sells its own names; KaChat links to it (iOS 718724b).
     // .kachat: the marketplace (Kaspa Hub > .kachat), whether or not it is in the dock.
-    if (activeDomainsTab === "kachat" && kachatNames()) {
+    if (activeDomainsTab === "kachat" && kachatNamesUiEnabled()) {
       if (domainsScreenEl) domainsScreenEl.hidden = true;
       setActiveAppTab("kachat-names");
       return;
@@ -9255,7 +9278,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 95;
+const APP_BUILD = 96;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10336,6 +10359,8 @@ async function openManageAddressScreen() {
   showManageView("list");
   if (manageAddressBalanceEl) manageAddressBalanceEl.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (manageAddressExplorerLink) manageAddressExplorerLink.href = explorerAddressUrl(engine.address);
+  // A .kachat tab left open repaints for this (possibly switched) wallet.
+  if (document.querySelector("[data-manage-address-panel=\"kachat\"]:not([hidden])")) paintKachatAddressDomains("[data-manage-address-panel=\"kachat\"]", engine.address);
   await Promise.all([
     loadManageAddressTransactions(engine.address),
     loadManageAddressUtxos(),
@@ -10607,6 +10632,7 @@ document.querySelectorAll("[data-manage-address-tab]").forEach((tabButton) => {
     document.querySelectorAll("[data-manage-address-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.manageAddressPanel !== target;
     });
+    if (target === "kachat") paintKachatAddressDomains("[data-manage-address-panel=\"kachat\"]", engine.address);
   });
 });
 
@@ -12933,8 +12959,8 @@ function renderCreateChatPicker() {
 
   const chosen = createChatEffectiveAddress();
   list.innerHTML = rows.map((row) => {
-    const avatarUrl = IS_TESTNET ? "" : (engine.peekKnsAddressProfile?.(row.address)?.profile?.avatarUrl || "");
-    const kachatImg = IS_TESTNET ? kachatAvatarImgHtml(row.address) : "";
+    const avatarUrl = kachatNamesUiEnabled() ? "" : (engine.peekKnsAddressProfile?.(row.address)?.profile?.avatarUrl || "");
+    const kachatImg = kachatNamesUiEnabled() ? kachatAvatarImgHtml(row.address) : "";
     return `
       <button type="button" class="create-chat-picker-row${row.address === chosen ? " picked" : ""}" data-create-chat-pick="${escapeHtml(row.address)}">
         <span class="create-chat-picker-avatar">${kachatImg || (avatarUrl
@@ -13041,6 +13067,8 @@ function setContactAddressValue(value) {
 }
 
 function showContactModal() {
+  // Opened from the Chats New sheet, the caller marks it again right after this (see newChatSheet).
+  delete contactModal.dataset.fromNewSheet;
   contactModal.hidden = false;
   setCreateChatError("");
   resetCreateChatPicker();
@@ -13082,13 +13110,17 @@ document.querySelector("[data-message-request-reject]")?.addEventListener("click
   if (ok) rejectChatRequest(conversationEntry);
 });
 
-function closeContactModal() {
+function closeContactModal(options = {}) {
   contactModal.hidden = true;
   contactForm.reset();
   updateCreateChatPrivateFooter();
   setCreateChatError("");
   resetCreateChatPicker();
   updateCreateChatAddState();
+  // From the Chats New sheet: Cancel goes back to its menu; a chat started lands on Chats.
+  const fromNewSheet = contactModal.dataset.fromNewSheet === "1";
+  delete contactModal.dataset.fromNewSheet;
+  if (fromNewSheet) settleNewChatSheetCreate("chat", options?.cancelled === true);
 }
 
 function showImportPayloadModal() {
@@ -13949,14 +13981,14 @@ function openConversation(conversationId) {
   // background and update it once real data lands, same idea as the chat
   // list's own background refresh.
   // Testnet: identity is .kachat (the header repaints on onKachatIdentityChange); KNS isn't asked.
-  if (!IS_TESTNET && !engine.peekKnsAddressInfo(contact.address)) {
+  if (!kachatNamesUiEnabled() && !engine.peekKnsAddressInfo(contact.address)) {
     engine.fetchKnsAddressInfo(contact.address).then(() => {
       const nameChanged = applyKnsPrimaryDomainToContact(contact);
       if (nameChanged) { persistState(); renderChats(); }
       if (activeConversationId === conversationId) conversationName.textContent = displayNameForAddress(contact);
     }).catch(() => {});
   }
-  if (!IS_TESTNET && !engine.peekKnsAddressProfile(contact.address)) {
+  if (!kachatNamesUiEnabled() && !engine.peekKnsAddressProfile(contact.address)) {
     engine.fetchKnsAddressProfile(contact.address).then(() => {
       if (activeConversationId === conversationId) {
         updateAvatarElement(conversationAvatarInitials, conversationAvatarImage, contact);
@@ -14007,7 +14039,7 @@ function openChatInfoForAddress(address) {
   if (!contact) {
     const createdAt = Date.now();
     // Testnet: the stored default is the short address; their .kachat name is read live on top.
-    const name = (IS_TESTNET ? shortAddress(address) : groupSenderLabel(address)) || shortAddress(address);
+    const name = (kachatNamesUiEnabled() ? shortAddress(address) : groupSenderLabel(address)) || shortAddress(address);
     contact = {
       id: nowId(),
       name,
@@ -14072,7 +14104,7 @@ function openChatInfoFor(contact, conversationEntry) {
   // Testnet (iOS e52357d): the field holds only YOUR name for them. With none it is empty and its
   // placeholder says who they are (their .kachat name), so Save never turns a default name into a
   // custom one that would hide their .kachat name. Your own card's title is your .kachat name.
-  if (IS_TESTNET && chatInfoNameInput) {
+  if (kachatNamesUiEnabled() && chatInfoNameInput) {
     chatInfoNameInput.placeholder = "Name";
     if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || displayNameForAddress(contact);
     else if (!contact.nameIsCustom) {
@@ -14141,7 +14173,7 @@ function openChatInfoFor(contact, conversationEntry) {
 async function refreshChatInfoKnsSections(contact) {
   const token = ++chatInfoRequestToken;
   // Testnet (iOS e52357d): identity is .kachat - no KNS profile fetch, pictures, bio or domains.
-  if (IS_TESTNET) { paintChatInfoKachat(contact); return; }
+  if (kachatNamesUiEnabled()) { paintChatInfoKachat(contact); return; }
   const [info, profileInfo] = await Promise.all([
     engine.fetchKnsAddressInfo(contact.address).catch(() => null),
     engine.fetchKnsAddressProfile(contact.address).catch(() => null),
@@ -14185,7 +14217,7 @@ async function refreshChatInfoKnsSections(contact) {
 /// A photo you gave them still wins over the .kachat avatar. Someone else's profile needs the names
 /// indexer; without one only their label (and names) show.
 function paintChatInfoKachat(contact) {
-  if (!IS_TESTNET || !contact || chatInfoContactAddress !== contact.address) return;
+  if (!kachatNamesUiEnabled() || !contact || chatInfoContactAddress !== contact.address) return;
   const address = contact.address;
   const isSelf = Boolean(engine.address) && address === engine.address;
   const identity = kachatCachedIdentity(address);
@@ -14368,7 +14400,7 @@ function saveChatInfo() {
     // field back to nothing reverts to auto-naming (KNS primary domain, or
     // the shortened address if none is set).
     // Testnet: an empty field on a contact you never named keeps its stored default as it was.
-    const keepsDefaultName = IS_TESTNET && !trimmed && !contact.nameIsCustom && Boolean(contact.name);
+    const keepsDefaultName = kachatNamesUiEnabled() && !trimmed && !contact.nameIsCustom && Boolean(contact.name);
     contact.nameIsCustom = Boolean(trimmed);
     contact.name = trimmed || (keepsDefaultName ? contact.name : shortAddress(contact.address));
     if (!contact.nameIsCustom) applyKnsPrimaryDomainToContact(contact);
@@ -14440,7 +14472,7 @@ document.querySelector("[data-chat-info-share]")?.addEventListener("click", asyn
   if (!address) return;
   const url = profileUniversalLink(address);
   const contact = state.contacts.find((entry) => entry.address === address);
-  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (IS_TESTNET ? identityNameForAddress(address) : shortAddress(address)));
+  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (kachatNamesUiEnabled() ? identityNameForAddress(address) : shortAddress(address)));
   if (typeof navigator.share === "function") {
     try { await navigator.share({ title: name, url }); return; }
     catch (error) { if (error?.name === "AbortError") return; }
@@ -14474,8 +14506,8 @@ document.querySelector("[data-open-chat-info]")?.addEventListener("click", close
 
 // iOS caps the bio at five lines and expands it on tap.
 chatInfoBio?.addEventListener("click", () => chatInfoBio.classList.toggle("expanded"));
-// Testnet: the .kachat bio copies on right-click (iOS: long-press).
-if (IS_TESTNET) {
+// The .kachat bio copies on right-click (iOS: long-press).
+if (kachatNamesUiEnabled()) {
   chatInfoBio?.addEventListener("contextmenu", async (event) => {
     const text = String(chatInfoBio.textContent || "").trim();
     if (!text) return;
@@ -15425,7 +15457,7 @@ document.querySelectorAll(".js-open-contact").forEach((button) => {
 });
 
 document.querySelectorAll("[data-close-contact]").forEach((button) => {
-  button.addEventListener("click", closeContactModal);
+  button.addEventListener("click", () => closeContactModal({ cancelled: true }));
 });
 
 document.querySelectorAll("[data-open-account-view]").forEach((button) => {
@@ -15729,7 +15761,7 @@ document.querySelector("[data-logged-out-settings]")?.addEventListener("click", 
 });
 
 contactModal.addEventListener("click", (event) => {
-  if (event.target === contactModal) { closeContactModal(); return; }
+  if (event.target === contactModal) { closeContactModal({ cancelled: true }); return; }
 
   const pick = event.target.closest("[data-create-chat-pick]");
   if (pick) {
@@ -16036,11 +16068,10 @@ function syncPublicChatsPane() {
   const onPublic = currentAppTab === "chats" && activeChatsListTab === "public";
   const roomEl = document.querySelector("[data-broadcast-room]");
   if (roomEl) roomEl.hidden = !(onPublic && publicRoomOpen);
-  // The floating button says what it does on this tab.
+  // The floating + is the same on every tab: it opens the New sheet (iOS 5da8ccf).
   if (newChatFab) {
-    const label = activeChatsListTab === "public" ? "Join or create a public room" : activeChatsListTab === "groups" ? "Create group" : "Create chat";
-    newChatFab.title = label;
-    newChatFab.setAttribute("aria-label", label);
+    newChatFab.title = "New";
+    newChatFab.setAttribute("aria-label", "New");
   }
   if (!onPublic) return;
   if (conversation) conversation.hidden = true;
@@ -16509,7 +16540,7 @@ deleteConfirmModal?.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !contactModal.hidden) closeContactModal();
+  if (event.key === "Escape" && !contactModal.hidden) closeContactModal({ cancelled: true });
   if (event.key === "Escape" && messageDetailsModal && !messageDetailsModal.hidden) closeMessageDetails();
   if (event.key === "Escape" && exportChoiceModal && !exportChoiceModal.hidden) closeExportChoice();
   if (event.key === "Escape" && messageSelectionMode) exitMessageSelection();
@@ -22742,7 +22773,7 @@ queueMicrotask(async () => {
       },
       // Testnet (iOS e52357d): a sender you haven't named reads as their .kachat name. Kept apart
       // from contactNameFor, which also names a new chat (a .kachat label is not your name for them).
-      identityNameFor: (address) => (IS_TESTNET ? kachatCachedLabel(address) : null),
+      identityNameFor: (address) => (kachatNamesUiEnabled() ? kachatCachedLabel(address) : null),
       // Bell toggle requests OS notification permission on the spot.
       ensureNotificationPermission,
       // "Today"/"Yesterday" day pills, shared with 1:1 and group chats.
@@ -22876,7 +22907,29 @@ queueMicrotask(async () => {
   // Kaspa Hub, 5.2: the .kachat marketplace (UI only) and KaChat Stats (the indexers' numbers).
   try {
     // .kachat names are live on testnet-10 (iOS 5df42b4): one shared service/registry/actions runtime.
-    initKachatNamesRuntime(engine);
+    initKachatNamesRuntime(engine, {
+      // The wallet's other addresses (iOS 881ada6): a name one of its spending addresses holds gets
+      // owner actions signed - and paid - by that address's derived key; a KasSigner address's
+      // names open read-only.
+      wallet: {
+        spendingAddresses: () => {
+          if (!activeAccountMnemonic()) return [];
+          const out = [];
+          const max = getSpendingState().maxIndex;
+          for (let index = 0; index <= max; index += 1) {
+            const address = deriveSpendingAddressAt(index);
+            if (address) out.push({ index, address });
+          }
+          return out;
+        },
+        spendingPrivateKey: (index) => {
+          const mnemonic = activeAccountMnemonic();
+          if (!mnemonic || !Number.isInteger(index)) return null;
+          try { return String(engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase())?.privateKeyHex || "") || null; } catch { return null; }
+        },
+        kasSignerAddresses: () => listColdWatchedAddresses().map((e) => ({ account: e.label, index: e.index, address: e.address })),
+      },
+    });
     installKachatIdentityRepaint();
     try { kachatNames()?.actions.resume(); } catch (error) { appendEngineLog(`.kachat resume failed: ${error?.message || error}`); }
     initKachatMarket({
@@ -22944,15 +22997,15 @@ queueMicrotask(async () => {
       contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
       displayNameFor: (address) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
-        if (IS_TESTNET) return contact ? displayNameForAddress(contact) : identityNameForAddress(address);
+        if (kachatNamesUiEnabled()) return contact ? displayNameForAddress(contact) : identityNameForAddress(address);
         return contact ? displayNameForAddress(contact) : shortAddress(address);
       },
       // Testnet (iOS e52357d, CallService.ownDisplayName): your .kachat name when you have one.
-      ownDisplayName: () => (IS_TESTNET && engine.address && kachatCachedLabel(engine.address))
+      ownDisplayName: () => (kachatNamesUiEnabled() && engine.address && kachatCachedLabel(engine.address))
         || String(activeAccountMetadata()?.name || "KaChat").trim() || "KaChat",
       avatarHtmlFor: (address) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
-        if (IS_TESTNET && !contact) return kachatAvatarImgHtml(address) ? kachatAvatarSpanHtml(address, "message-avatar") : "";
+        if (kachatNamesUiEnabled() && !contact) return kachatAvatarImgHtml(address) ? kachatAvatarSpanHtml(address, "message-avatar") : "";
         return contact ? avatarHtmlFor(contact, "message-avatar") : "";
       },
       callsEnabledFor: contactCallsEnabled,
@@ -23231,7 +23284,7 @@ function groupOsPingAllowed(groupId) {
 function groupNotificationSenderName(senderAddress) {
   const contact = (state.contacts || []).find((c) => c.address === senderAddress);
   // Testnet: the app's one rule (your name for them, else their .kachat name, else the address).
-  if (IS_TESTNET) return contact ? displayNameForAddress(contact) : identityNameForAddress(senderAddress);
+  if (kachatNamesUiEnabled()) return contact ? displayNameForAddress(contact) : identityNameForAddress(senderAddress);
   return (contact?.name || "").trim() || shortAddress(senderAddress);
 }
 
@@ -23788,14 +23841,14 @@ function groupSenderLabel(address) {
   if (address === engine.address) return "You";
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return displayNameForAddress(contact);
-  if (IS_TESTNET) return identityNameForAddress(address);
+  if (kachatNamesUiEnabled()) return identityNameForAddress(address);
   return shortAddress(address);
 }
 function memberAvatarHtml(address, className = "chat-avatar") {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
   if (address === engine.address) return selfAvatarHtml(className);
-  if (IS_TESTNET) return kachatAvatarSpanHtml(address, className);
+  if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, className);
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
@@ -24310,7 +24363,7 @@ function avatarHtmlForAnyAddress(address, className = "message-avatar") {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
   // Testnet: their .kachat face, never the KNS one.
-  if (IS_TESTNET) return kachatAvatarSpanHtml(address, className);
+  if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" /></span>`;
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
@@ -24887,7 +24940,7 @@ function renderGroupMemberPicker(excludeAddresses = []) {
 
 /// Avatar for someone with no contact record - straight off their KNS profile, initials otherwise.
 function groupPickerAvatarHtml(address, name) {
-  if (IS_TESTNET) return kachatAvatarSpanHtml(address, "chat-avatar");
+  if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, "chat-avatar");
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="chat-avatar"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
   return `<span class="chat-avatar avatar-fallback">${personGlyphSvg()}</span>`;
@@ -24947,7 +25000,9 @@ function renderGroupSelectedMembers() {
   }).join("");
 }
 function openGroupCreate() {
-  if (!getGroupManager()) { setStatus("Load a wallet before creating a group."); return; }
+  // Opened from the Chats New sheet, the caller marks it again right after this (see newChatSheet).
+  if (groupCreateModal) delete groupCreateModal.dataset.fromNewSheet;
+  if (!getGroupManager()) { setStatus("Load a wallet before creating a group."); return false; }
   groupModalMode = "create";
   groupModalTargetId = null;
   groupCreateSelected.clear();
@@ -24976,6 +25031,7 @@ function openGroupCreate() {
   setGroupSection(groupContactsToggle, groupContactsBody, false);
   if (groupCreateModal) groupCreateModal.hidden = false;
   window.setTimeout(() => groupNameInput?.focus(), 0);
+  return true;
 }
 function openGroupAddMember(groupId) {
   const mgr = getGroupManager();
@@ -25006,7 +25062,14 @@ function openGroupAddMember(groupId) {
   setGroupSection(groupContactsToggle, groupContactsBody, true);
   if (groupCreateModal) groupCreateModal.hidden = false;
 }
-function closeGroupCreate() { if (groupCreateModal) groupCreateModal.hidden = true; }
+function closeGroupCreate(options = {}) {
+  if (!groupCreateModal) return;
+  groupCreateModal.hidden = true;
+  // From the Chats New sheet: Cancel goes back to its menu; a group created lands on Group Chats.
+  const fromNewSheet = groupCreateModal.dataset.fromNewSheet === "1";
+  delete groupCreateModal.dataset.fromNewSheet;
+  if (fromNewSheet) settleNewChatSheetCreate("group", options?.cancelled === true);
+}
 
 // --- "Add by address" section: add someone who is not in your contacts at all ---
 
@@ -25370,9 +25433,9 @@ async function syncGroupsNow({ catchUp = false } = {}) {
 // --- events ---
 document.querySelectorAll("[data-new-group]").forEach((btn) => btn.addEventListener("click", openGroupCreate));
 document.querySelectorAll("[data-close-group-create]").forEach((button) => {
-  button.addEventListener("click", closeGroupCreate);
+  button.addEventListener("click", () => closeGroupCreate({ cancelled: true }));
 });
-groupCreateModal?.addEventListener("click", (event) => { if (event.target === groupCreateModal) closeGroupCreate(); });
+groupCreateModal?.addEventListener("click", (event) => { if (event.target === groupCreateModal) closeGroupCreate({ cancelled: true }); });
 groupNameInput?.addEventListener("input", updateGroupCreateSubmit);
 // Live-filter the member list as the user types (uses the current exclude set).
 groupMemberSearch?.addEventListener("input", () => renderGroupMemberPicker(groupPickerExclude));
@@ -25451,15 +25514,157 @@ groupMembersList?.addEventListener("click", (event) => {
   renderGroupMemberPicker(groupPickerExclude);
 });
 
-// The create button is tab-aware: Group Chats tab opens the group builder, the Chats
-// tab opens the 1:1 create screen. There are two instances (the floating one for the
-// empty state, and the inline one next to the composer Send button), so wire both.
-document.querySelectorAll("[data-new-chat-fab]").forEach((button) => {
-  button.addEventListener("click", () => {
-    if (activeChatsListTab === "groups") openGroupCreate();
-    else if (activeChatsListTab === "public") openBroadcastJoin();
-    else showContactModal();
+// The Chats "New" sheet (iOS 5da8ccf..e6400d6). The floating + used to do something different per
+// tab (create chat, group builder, join room); it is now the same + on Chats, Group Chats and
+// Public Chats, opening one sheet: New Chat, New Group Chat, New Public Chat, Fund Chatting Address
+// and Receive Kaspa.
+// - New Chat / New Group Chat swap the sheet for the existing create modals; their Cancel (or a
+//   backdrop click / Escape) comes back to this menu, and a chat or group made lands on its tab.
+// - New Public Chat swaps the sheet's content for the room-name field. Errors show in place;
+//   joining switches to Public Chats and opens the room there.
+// - Fund Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page.
+// No state lives outside the DOM: the sheet is built per open (like the payment detail sheet), and
+// "came from the sheet" is a data attribute on the create modal, so nothing here is read at load.
+function newChatSheetIcon(kind) {
+  const paths = {
+    chat: '<path d="M5 4.5h14a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-8l-5 3.8V17H5a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z"/>',
+    group: '<path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M2.5 19.5c.6-3.9 3-6.3 6.5-6.3s5.9 2.4 6.5 6.3"/><path d="M16.3 6.2a3.2 3.2 0 1 1 1.9 5.8"/><path d="M15.8 13.3c2.9.4 4.7 2.3 5.2 5.4"/>',
+    public: '<path d="M9.5 4 7.5 20M16.5 4l-2 16M4.5 9h15.5M4 15h15.5"/>',
+    fund: '<rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.2"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1.2"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1.2"/><path d="M14 14h2.8v2.8H14zM20.5 14v.01M17 20.5h3.5V17M14 20.5v.01"/>',
+  };
+  if (kind === "receive") return `<img class="new-chat-sheet-logo" src="${escapeHtml(kaspaLogoUrl)}" alt="" />`;
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[kind] || ""}</svg>`;
+}
+
+function newChatSheetMenuHtml() {
+  const rows = [
+    { id: "chat", title: "New Chat", subtitle: "Message someone by their address or name." },
+    { id: "group", title: "New Group Chat", subtitle: "Start an encrypted group with several people." },
+    // Simple Mode hides Public Chats, so it has no row here either.
+    ...(isChildModeEnabled() ? [] : [{ id: "public", title: "New Public Chat", subtitle: "Join a public room, or create one." }]),
+    { id: "fund", title: "Fund Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
+    { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
+  ];
+  return `
+    <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
+    <h2 class="new-chat-sheet-title">New</h2>
+    <div class="cold-action-rows">
+      ${rows.map((row) => `
+        <button type="button" class="cold-action-row" data-new-chat-choice="${escapeHtml(row.id)}">
+          <span class="cold-action-icon" aria-hidden="true">${newChatSheetIcon(row.id)}</span>
+          <span class="cold-action-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.subtitle)}</small></span>
+        </button>`).join("")}
+    </div>`;
+}
+
+function newChatSheetJoinHtml() {
+  return `
+    <button class="new-chat-sheet-back" type="button" data-new-chat-sheet-back aria-label="Back">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
+    </button>
+    <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
+    <h2 class="new-chat-sheet-title">New Public Chat</h2>
+    <p class="new-chat-sheet-caption">Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
+    <label class="new-chat-sheet-field">
+      <span aria-hidden="true">#</span>
+      <input type="text" data-new-chat-room-input placeholder="channel-name" maxlength="36" autocapitalize="none" autocomplete="off" spellcheck="false" aria-label="Channel name" />
+    </label>
+    <p class="new-chat-sheet-error" data-new-chat-room-error role="alert" hidden></p>
+    <button class="primary-button new-chat-sheet-join" type="button" data-new-chat-room-join disabled>Join</button>`;
+}
+
+function closeNewChatSheet() {
+  document.querySelector("[data-new-chat-sheet]")?.closeSheet?.();
+}
+
+function openNewChatSheet() {
+  closeNewChatSheet();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop new-chat-sheet-backdrop";
+  backdrop.setAttribute("data-new-chat-sheet", "");
+  backdrop.innerHTML = `<section class="contact-modal new-chat-sheet" role="dialog" aria-modal="true" aria-label="New"></section>`;
+  const sheet = backdrop.querySelector(".new-chat-sheet");
+  const showMenu = () => {
+    sheet.classList.remove("is-join");
+    sheet.setAttribute("aria-label", "New");
+    sheet.innerHTML = newChatSheetMenuHtml();
+    sheet.querySelector("[data-new-chat-choice]")?.focus();
+  };
+  const showJoin = () => {
+    sheet.classList.add("is-join");
+    sheet.setAttribute("aria-label", "New Public Chat");
+    sheet.innerHTML = newChatSheetJoinHtml();
+    sheet.querySelector("[data-new-chat-room-input]")?.focus();
+  };
+  const setJoinError = (text) => {
+    const errorEl = sheet.querySelector("[data-new-chat-room-error]");
+    if (!errorEl) return;
+    errorEl.textContent = text || "";
+    errorEl.hidden = !text;
+  };
+  const join = () => {
+    const raw = String(sheet.querySelector("[data-new-chat-room-input]")?.value || "").trim();
+    if (!raw) return;
+    const problem = broadcastJoinError(raw);
+    if (problem) { setJoinError(problem); return; }
+    close();
+    openPublicChatsTab();
+    if (!joinBroadcastChannelFromSheet(raw)) showCopyToast("Something went wrong joining that channel.");
+  };
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
+  function close() {
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey, true);
+  }
+  backdrop.closeSheet = close;
+  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+  sheet.addEventListener("click", (event) => {
+    if (event.target.closest("[data-new-chat-sheet-close]")) { close(); return; }
+    if (event.target.closest("[data-new-chat-sheet-back]")) { showMenu(); return; }
+    if (event.target.closest("[data-new-chat-room-join]")) { join(); return; }
+    const choice = event.target.closest("[data-new-chat-choice]")?.dataset.newChatChoice;
+    if (!choice) return;
+    if (choice === "public") { showJoin(); return; }
+    close();
+    if (choice === "chat") {
+      showContactModal();
+      contactModal.dataset.fromNewSheet = "1";
+    } else if (choice === "group") {
+      if (openGroupCreate() && groupCreateModal) groupCreateModal.dataset.fromNewSheet = "1";
+    } else if (choice === "fund") {
+      openChattingAddressScreen();
+    } else if (choice === "receive") {
+      openReceiveKaspaScreen();
+    }
   });
+  sheet.addEventListener("input", (event) => {
+    if (!event.target.matches("[data-new-chat-room-input]")) return;
+    setJoinError("");
+    const button = sheet.querySelector("[data-new-chat-room-join]");
+    if (button) button.disabled = !String(event.target.value || "").trim();
+  });
+  sheet.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.matches("[data-new-chat-room-input]")) { event.preventDefault(); join(); }
+  });
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(backdrop);
+  showMenu();
+}
+
+// A create modal opened from the sheet has closed: Cancel goes back to the menu (iOS AddContactView
+// onCancel); a chat or group made opens on its own tab, as iOS sets selectedListTab.
+function settleNewChatSheetCreate(kind, cancelled) {
+  if (cancelled) { openNewChatSheet(); return; }
+  selectChatsListTab(kind === "group" ? "groups" : "chats");
+}
+
+document.querySelectorAll("[data-new-chat-fab]").forEach((button) => {
+  button.addEventListener("click", openNewChatSheet);
 });
 groupMemberPicker?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-group-member-toggle]");
@@ -26398,6 +26603,6 @@ groupManageBody?.addEventListener("click", async (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (groupManageScreen && !groupManageScreen.hidden) { closeGroupManage(); return; }
-  if (groupCreateModal && !groupCreateModal.hidden) { closeGroupCreate(); return; }
+  if (groupCreateModal && !groupCreateModal.hidden) { closeGroupCreate({ cancelled: true }); return; }
   if (groupChatScreen && !groupChatScreen.hidden) { closeGroupChat(); }
 });

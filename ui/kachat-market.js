@@ -16,17 +16,22 @@
 // listings / names / offers / activity, the live name detail with its transaction sheets, and the
 // live address profile editor. This file keeps the layers and the mockups, and hands the live
 // screens what they need through initKachatLive.
+//
+// On MAINNET (iOS 7227d69: the .kachat UI is on everywhere, the registry only where launched) the
+// pages are the live ones, empty, under "Coming soon"; search says registration isn't open; the
+// profile editor is the live one with Save off. The placeholder pages remain only for a testnet
+// registry that is setting up.
 
 import "./kachat-market.css";
 import { KAS_UNIT } from "../engine/network.js";
-import { kachatNamesLive } from "./kachat-names-runtime.js";
+import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
   liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml, liveRegistrationsHtml,
   livePageHtml, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
 } from "./kachat-names-live.js";
 
-/** Your Domains > .kachat on testnet (iOS KachatLiveDomainsTab); see kachat-names-live.js. */
+/** Your Domains > .kachat and each address's .kachat tab (iOS KachatLiveDomainsTab, KachatAddressLiveNamesList); see kachat-names-live.js. */
 export { renderKachatLiveDomainsTab };
 
 let deps = null;
@@ -322,7 +327,8 @@ function activityPageHtml() {
 }
 
 function pageHtml() {
-  if (liveHubIsLive()) return livePageHtml(state.page);
+  // Live, or not launched here (mainnet): the same pages - empty on mainnet (iOS 7227d69).
+  if (liveHubIsLive() || !kachatNamesLaunched()) return livePageHtml(state.page);
   if (state.page === "myNames") return myNamesPageHtml();
   if (state.page === "activity") return activityPageHtml();
   return marketPageHtml();
@@ -651,8 +657,9 @@ function onMarketInput(event) {
 
 export function openKachatProfileEditor() {
   if (layers.some((layer) => layer.owner === "profile")) return;
-  // Testnet: the live address profile editor (iOS KachatLiveProfileEditor).
-  if (liveEnabled()) { openLiveProfileEditor("profile"); return; }
+  // The live address profile editor (iOS KachatLiveProfileEditor) on every network; on mainnet its
+  // Save stays off until .kachat launches there (iOS 7227d69).
+  if (kachatNamesUiEnabled() && openLiveProfileEditor("profile")) return;
   const fieldRows = PROFILE_FIELDS.map((field) => `<div class="kmkt-form-row kmkt-muted">${esc(field)}</div>`).join("");
   openLayer({
     owner: "profile",
@@ -704,9 +711,9 @@ function guideStepHtml(step) {
         ${guideStepHeader("Claim your .kachat name", "It's the name people see you as across KaChat - in chats, on posts and on your profile link. Without one, people see your address.", `<span class="kmkt-guide-mark">${KACHAT_WORDMARK_SVG}</span>`)}
         <div class="kmkt-guide-claim">
           <div class="kmkt-guide-field"><span class="kmkt-placeholder-text">yourname</span><span class="kmkt-search-suffix">.kachat</span></div>
-          <small class="kmkt-muted">${kachatNamesLive() ? "On Testnet, claim one in Kaspa Hub &gt; .kachat." : "Registration isn't open yet."}</small>
+          <small class="kmkt-muted">${kachatNamesLaunched() ? "On Testnet, claim one in Kaspa Hub &gt; .kachat." : "Registration isn't open yet."}</small>
         </div>
-        ${kachatNamesLive() ? "" : comingSoonPill()}`;
+        ${kachatNamesLaunched() ? "" : comingSoonPill()}`;
     case "avatar":
       return `
         ${guideStepHeader("Add a profile photo", "Your avatar shows next to your name everywhere in KaChat.", ICON.personCircle)}
@@ -787,6 +794,7 @@ export function initKachatMarket(dependencies) {
     getDeps: () => deps,
     esc,
     ICON,
+    wordmark: KACHAT_WORDMARK_SVG,
     openLayer,
     closeLayer,
     navBar,
@@ -818,9 +826,10 @@ export function hideKachatMarket() {
   state.detail?.detach();
 }
 
-/** The ".kachat" tab of every screen that shows an address's history - Manage Addresses, Cold
- *  Storage and the chatting address (iOS KachatAddressDomainsList): the .kachat names that
- *  address holds. It replaced the KNS Domains tab, and is empty until .kachat names launch. */
+/** The ".kachat" tab's static note (iOS KachatAddressDomainsList's "coming" note): what the tab
+ *  holds before an address is known. With an address, the tab is the live list of that address's
+ *  names on every network (renderKachatLiveDomainsTab(el, address, { variant: "address" }),
+ *  iOS 881ada6 / 7227d69) - empty on mainnet. */
 export function kachatAddressDomainsHtml() {
   return `<div class="kachat-address-domains">
     <span class="kachat-address-domains-mark" aria-hidden="true">${KACHAT_WORDMARK_SVG}</span>

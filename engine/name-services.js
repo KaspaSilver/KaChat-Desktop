@@ -57,11 +57,13 @@ const REQUEST_TIMEOUT_MS = 15000; // iOS: timeoutIntervalForRequest = 15
  * @property {string|null} websiteURL    Where a person gets one of these names; null for .kachat.
  * @property {string|null} websiteName   The site as people know it ("knsdomains.org"); null for .kachat.
  * @property {string|null} getDomainLabel "Get a .kas domain at knsdomains.org"; null for .kachat.
- * @property {boolean} isLive            Whether the app can read this service yet (.kachat: false).
+ * @property {boolean} isLive            Whether the app can read this service yet (.kachat: only where
+ *                                       its registry is launched - testnet-10 for now).
  */
 
 const SERVICE_TABLE = {
-  // Live on testnet only (the testnet-10 registry, iOS 25cc2c9); mainnet waits for an audit.
+  // Readable on testnet only (the testnet-10 registry, iOS 25cc2c9): resolving typed names waits for
+  // the mainnet registry to launch after an audit (iOS 7227d69 isLaunched). Its UI is on everywhere.
   kachat: { serviceName: "KaChat Names", websiteURL: null, websiteName: null, isLive: IS_TESTNET },
   kas: { serviceName: "KNS", websiteURL: "https://app.knsdomains.org", websiteName: "knsdomains.org", isLive: true },
   k: { serviceName: "dotk", websiteURL: "https://dotk.name", websiteName: "dotk.name", isLive: true },
@@ -97,10 +99,11 @@ export const NAME_SERVICES = Object.freeze(Object.fromEntries(NAME_SERVICE_TLDS.
 export const RESOLUTION_ORDER = Object.freeze(["kachat", "kas", "k", "kaspa"]);
 
 /**
- * The tab Your Domains opens on: `.kachat` once it is live, `.kas` until then.
+ * The tab Your Domains opens on: `.kachat` - its UI is on for every network, live or not (iOS
+ * 7227d69: mainnet opens on it too, empty, with its Inscribe button).
  * @type {NameServiceTLD}
  */
-export const DEFAULT_TAB = NAME_SERVICES.kachat.isLive ? "kachat" : "kas";
+export const DEFAULT_TAB = "kachat";
 
 /**
  * The read API this app calls for a service, shown in Connection Settings > Domains.
