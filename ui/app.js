@@ -9546,7 +9546,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 100;
+const APP_BUILD = 101;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -20759,6 +20759,7 @@ function hideFeeEstimateBanner() {
   if (feeEstimateDebounceTimer) window.clearTimeout(feeEstimateDebounceTimer);
   feeEstimateDebounceTimer = null;
   composerFeeEstimateKas = null;
+  composerFeeEstimateLength = null;
   if (feeEstimateBanner) feeEstimateBanner.hidden = true;
 }
 
@@ -20840,7 +20841,19 @@ function estimateCommPayloadBytes(text) {
   return prefixLen + base64Len;
 }
 
-function scheduleFeeEstimate() {
+// Composer fee estimates (1:1 and group; public rooms mirror it in broadcasts.js), as iOS
+// 0977a5b: each one fetches UTXOs and builds a transaction with the SDK, and the fee follows
+// the payload size, so while TYPING an estimate waits for a 0.6 s pause and is skipped outright
+// while the message is within 24 bytes of the length the shown estimate is for. Anything else
+// (fee override cleared, Show Fee Estimate turned on, ...) forces one after a short 0.2 s.
+function utf8ByteLength(text) {
+  return new TextEncoder().encode(String(text || "")).length;
+}
+function composerFeeEstimateIsCurrent(length, lastLength, lastFeeKas) {
+  return lastFeeKas != null && lastLength != null && Math.abs(length - lastLength) < 24;
+}
+
+function scheduleFeeEstimate({ typing = false } = {}) {
   if (!feeEstimateBanner || !accountShellPrefs.estimateFees || composerMode !== "message") {
     hideFeeEstimateBanner();
     return;
@@ -20850,28 +20863,39 @@ function scheduleFeeEstimate() {
     hideFeeEstimateBanner();
     return;
   }
+  const length = utf8ByteLength(text);
+  // Typing near the estimated length: the pill already shows the right fee - no estimate, no
+  // pill redraw. (A pending debounce still restarts below, so it fires after the pause.)
+  if (typing && !feeEstimateDebounceTimer && composerFeeOverrideKas == null && !feeEstimateBanner.hidden
+      && composerFeeEstimateIsCurrent(length, composerFeeEstimateLength, composerFeeEstimateKas)) return;
   if (feeEstimateDebounceTimer) window.clearTimeout(feeEstimateDebounceTimer);
+  feeEstimateDebounceTimer = null;
   const token = ++feeEstimateRequestToken;
   // An override the user typed stays on the pill until the message goes; no re-estimating
   // underneath it.
   if (composerFeeOverrideKas != null) { renderFeePill(composerFeeOverrideKas, { estimating: false }); return; }
   renderFeePill(composerFeeEstimateKas, { estimating: true });
   feeEstimateDebounceTimer = window.setTimeout(async () => {
+    feeEstimateDebounceTimer = null;
     try {
       const payloadBytes = estimateCommPayloadBytes(text);
       const feeKas = await engine.estimateMessageFee(payloadBytes);
       if (token !== feeEstimateRequestToken || !feeEstimateBanner) return;
       composerFeeEstimateKas = feeKas == null ? null : String(feeKas);
+      composerFeeEstimateLength = feeKas == null ? null : length;
       renderFeePill(composerFeeEstimateKas, { estimating: false });
     } catch {
-      if (token === feeEstimateRequestToken && feeEstimateBanner) renderFeePill(null, { estimating: false });
+      if (token !== feeEstimateRequestToken || !feeEstimateBanner) return;
+      composerFeeEstimateLength = null; // the pill shows "--": the next keystroke tries again
+      renderFeePill(null, { estimating: false });
     }
-  }, 450);
+  }, typing ? 600 : 200);
 }
 
 // iOS feeBubble: "fee: -------- KAS" shimmering while the estimate is in flight, the value
 // underlined once it lands (a tap edits it), "fee: -- KAS" when there is none.
 let composerFeeEstimateKas = null;
+let composerFeeEstimateLength = null; // UTF-8 bytes of the text composerFeeEstimateKas is for
 let composerFeeOverrideKas = null;
 function formatKasExact(value) {
   const number = Number(value);
@@ -20881,9 +20905,10 @@ function renderFeePill(feeKas, { estimating = false } = {}) {
   if (!feeEstimateBanner) return;
   feeEstimateBanner.classList.toggle("estimating", estimating);
   feeEstimateBanner.classList.toggle("overridden", composerFeeOverrideKas != null);
-  if (estimating && feeKas == null) feeEstimateBanner.textContent = `fee: -------- ${KAS_UNIT}`;
-  else if (feeKas == null) feeEstimateBanner.textContent = `fee: -- ${KAS_UNIT}`;
-  else feeEstimateBanner.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+  const label = estimating && feeKas == null ? `fee: -------- ${KAS_UNIT}`
+    : feeKas == null ? `fee: -- ${KAS_UNIT}` : `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+  // Only touch the DOM when the text changes (called per keystroke while a fee is overridden).
+  if (feeEstimateBanner.textContent !== label) feeEstimateBanner.textContent = label;
   feeEstimateBanner.hidden = false;
 }
 feeEstimateBanner?.addEventListener("click", async () => {
@@ -20911,7 +20936,7 @@ feeEstimateBanner?.addEventListener("click", async () => {
   renderFeePill(composerFeeOverrideKas, { estimating: false });
 });
 
-composer.elements.message?.addEventListener("input", scheduleFeeEstimate);
+composer.elements.message?.addEventListener("input", () => scheduleFeeEstimate({ typing: true }));
 
 handshakeWarningSendButton?.addEventListener("click", async () => {
   await sendHandshakeFromComposer();
@@ -21016,6 +21041,10 @@ composerInputField?.addEventListener("keydown", (event) => {
 });
 // The composer text is a per-conversation draft, restored when the chat reopens (iOS
 // ChatService.setDraft). Saved on every keystroke; the state persists with the conversations.
+// That persist serializes the whole state (every chat's messages), so a draft-only change waits
+// for a ~2 s typing pause rather than landing between words; leaving the page or hiding the tab
+// persists at once, and any other persist in the meantime carries the draft along.
+let composerDraftPersistTimer = null;
 composerInputField?.addEventListener("input", () => {
   if (composerMode !== "message" || !activeConversationId) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
@@ -21024,7 +21053,8 @@ composerInputField?.addEventListener("input", () => {
   const next = text.trim() ? text : "";
   if ((conversationEntry.draft || "") === next) return;
   conversationEntry.draft = next;
-  schedulePersistState();
+  if (composerDraftPersistTimer) window.clearTimeout(composerDraftPersistTimer);
+  composerDraftPersistTimer = window.setTimeout(() => { composerDraftPersistTimer = null; schedulePersistState(); }, 1200);
 });
 // Drafts for groups and public rooms, keyed "group:<id>" / "room:<name>" (iOS 360e5d2): saved
 // on leaving, restored on return, cleared by sending. 1:1 drafts live on the conversation.
@@ -24800,43 +24830,55 @@ document.querySelector("[data-group-funding-gate]")?.addEventListener("click", a
 // to set a fee that rides on the next message, hidden with Show Fee Estimate off.
 let groupFeeEstimateKas = null;
 let groupFeeOverrideKas = null;
+let groupFeeEstimateLength = null; // UTF-8 bytes of the text groupFeeEstimateKas is for
 let groupFeeTimer = null;
 let groupFeeToken = 0;
 function renderGroupFeePill(feeKas, { estimating = false } = {}) {
   const pill = document.querySelector("[data-group-fee]");
   if (!pill) return;
   pill.classList.toggle("estimating", estimating);
-  if (estimating && feeKas == null) pill.textContent = `fee: -------- ${KAS_UNIT}`;
-  else if (feeKas == null) pill.textContent = `fee: -- ${KAS_UNIT}`;
-  else pill.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+  const label = estimating && feeKas == null ? `fee: -------- ${KAS_UNIT}`
+    : feeKas == null ? `fee: -- ${KAS_UNIT}` : `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+  if (pill.textContent !== label) pill.textContent = label;
   pill.hidden = false;
 }
 function hideGroupFeePill() {
   if (groupFeeTimer) window.clearTimeout(groupFeeTimer);
   groupFeeTimer = null;
   groupFeeEstimateKas = null;
+  groupFeeEstimateLength = null;
   const pill = document.querySelector("[data-group-fee]");
   if (pill) pill.hidden = true;
 }
-function scheduleGroupFeeEstimate() {
+// Typing waits for a 0.6 s pause and skips the estimate while within 24 bytes of the estimated
+// length; other callers force it (see scheduleFeeEstimate, iOS 0977a5b).
+function scheduleGroupFeeEstimate({ typing = false } = {}) {
   const text = String(groupComposerInput?.value || "").trim();
   if (!activeGroupId || !text || !accountShellPrefs.estimateFees) { hideGroupFeePill(); return; }
   if (groupFeeOverrideKas != null) { renderGroupFeePill(groupFeeOverrideKas); return; }
+  const length = utf8ByteLength(text);
+  if (typing && !groupFeeTimer && !document.querySelector("[data-group-fee]")?.hidden
+      && composerFeeEstimateIsCurrent(length, groupFeeEstimateLength, groupFeeEstimateKas)) return;
   if (groupFeeTimer) window.clearTimeout(groupFeeTimer);
+  groupFeeTimer = null;
   const token = ++groupFeeToken;
   renderGroupFeePill(groupFeeEstimateKas, { estimating: true });
   groupFeeTimer = window.setTimeout(async () => {
+    groupFeeTimer = null;
     try {
       // The sealed group envelope carries the ciphertext plus its headers; the comm estimate
       // with headroom is close enough for a pill.
       const feeKas = await engine.estimateMessageFee(estimateCommPayloadBytes(text) + 160);
       if (token !== groupFeeToken) return;
       groupFeeEstimateKas = feeKas == null ? null : String(feeKas);
+      groupFeeEstimateLength = feeKas == null ? null : length;
       renderGroupFeePill(groupFeeEstimateKas);
     } catch {
-      if (token === groupFeeToken) renderGroupFeePill(null);
+      if (token !== groupFeeToken) return;
+      groupFeeEstimateLength = null;
+      renderGroupFeePill(null);
     }
-  }, 450);
+  }, typing ? 600 : 200);
 }
 document.querySelector("[data-group-fee]")?.addEventListener("click", async () => {
   const pill = document.querySelector("[data-group-fee]");
@@ -26769,7 +26811,12 @@ function groupMentionCandidates(query) {
     .filter((m) => !q || m.handle.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))
     .slice(0, 6);
 }
-function closeGroupMentions() { if (groupMentionSuggestions) { groupMentionSuggestions.hidden = true; groupMentionSuggestions.innerHTML = ""; } }
+// (Runs per keystroke while mentions are off: skip the DOM writes when already closed.)
+function closeGroupMentions() {
+  if (!groupMentionSuggestions || (groupMentionSuggestions.hidden && !groupMentionSuggestions.firstChild)) return;
+  groupMentionSuggestions.hidden = true;
+  groupMentionSuggestions.innerHTML = "";
+}
 // @mentions are off until they are rebuilt on .kachat (iOS 08dd836): no suggestions, typed
 // @names go out as plain text, and "Only Notify if I'm Mentioned" is hidden and not applied (the
 // stored choice is kept, so no group goes quiet).
@@ -26943,7 +26990,7 @@ groupComposer?.addEventListener("submit", async (event) => {
   // so we don't restore the draft (that would double up the message).
   sendGroupWire(wire, { feeKas });
 });
-groupComposerInput?.addEventListener("input", scheduleGroupFeeEstimate);
+groupComposerInput?.addEventListener("input", () => scheduleGroupFeeEstimate({ typing: true }));
 
 // Enter sends, Shift+Enter is a newline; keep the box auto-growing.
 groupComposerInput?.addEventListener("keydown", (event) => {

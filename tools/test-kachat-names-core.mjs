@@ -101,8 +101,13 @@ function nameRec(n) {
 }
 
 function offerRec(o) {
-  const fields = C.makeOfferFields({ key: hx(o.key), buyer: hx(o.buyer), refundAfter: u64(o.refundAfter) });
+  const fields = C.makeOfferFields({ key: hx(o.key), buyer: hx(o.buyer), seller: hx(o.seller), refundAfter: u64(o.refundAfter) });
   return { fields, value: u64(o.value), utxo: utxo(o.utxo), name: typeof o.name === "string" ? o.name : null };
+}
+
+function shardRec(p) {
+  const fields = C.makePriceFields({ shard: u64(p.shard), authority: hx(p.authority), prices: p.prices.map(u64) });
+  return { fields, value: u64(p.value), utxo: utxo(p.utxo) };
 }
 
 const commitRec = (c) => ({ name: s(c.name), owner: hx(c.owner), salt: hx(c.salt), value: u64(c.value), utxo: utxo(c.utxo) });
@@ -167,15 +172,22 @@ function runCodecs(v, r) {
   const n = st.name;
   const nf = C.nameFieldsFor(s(n.name), hx(n.owner), u64(n.price), u64(n.periodStart), u64(n.expiresAt));
   r.eqHex(C.nameState(nf), s(n.state), "name state");
-  r.eq(C.nameState(nf).length, 126, "name state is 126 bytes (registry v2)");
+  r.eq(C.nameState(nf).length, 126, "name state is 126 bytes");
   r.eqHex(M.templateScript(m.name, C.nameState(nf)), s(n.spk), "name spk");
   r.check(C.nameFieldsEqual(C.decodeNameState(C.nameState(nf)), nf), "decode name state");
   r.eq(C.nameFieldsName(nf), s(n.name), "unpadded name");
   const o = st.offer;
-  const of = C.makeOfferFields({ key: hx(o.key), buyer: hx(o.buyer), refundAfter: u64(o.refundAfter) });
+  const of = C.makeOfferFields({ key: hx(o.key), buyer: hx(o.buyer), seller: hx(o.seller), refundAfter: u64(o.refundAfter) });
   r.eqHex(C.offerState(of), s(o.state), "offer state");
+  r.eq(C.offerState(of).length, 108, "offer state is 108 bytes (registry v3: with the seller)");
   r.eqHex(M.templateScript(m.offer, C.offerState(of)), s(o.spk), "offer spk");
   r.check(C.offerFieldsEqual(C.decodeOfferState(C.offerState(of)), of), "decode offer state");
+  const pj = st.price;
+  const pf = C.makePriceFields({ shard: u64(pj.shard), authority: hx(pj.authority), prices: pj.prices.map(u64) });
+  r.eqHex(C.priceState(pf), s(pj.state), "price state");
+  r.eq(C.priceState(pf).length, 87, "price state is 87 bytes");
+  r.eqHex(M.templateScript(m.price, C.priceState(pf)), s(pj.spk), "price spk");
+  r.check(C.priceFieldsEqual(C.decodePriceState(C.priceState(pf)), pf), "decode price state");
   r.eq(C.hex(C.decodeGapState(gs).hi), s(g.hi), "decode gap state");
   for (const cv of c.covenantIds) {
     const outpoint = T.makeOutpoint(hx(cv.outpoint.txid), num(cv.outpoint.index));
@@ -199,12 +211,22 @@ function runCodecs(v, r) {
   r.eq(C.normalize("  Alice.KACHAT "), "alice", "normalize");
 }
 
-function verifies(m) { try { M.verifyManifest(m); return true; } catch { return false; } }
+function verifies(m, opts) { try { M.verifyManifest(m, opts); return true; } catch { return false; } }
 
 function runManifest(v, r) {
   const m = M.decodeManifest(JSON.stringify(v.manifest));
   try { M.verifyManifest(m); r.pass += 1; } catch (e) { r.check(false, `manifest verify: ${e.message}`); }
   r.check(m.isDryRun, "the vectors' manifest is a dry run");
+  // the gap and name are not pinned until the testnet genesis: an indexer-served copy is refused
+  r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with unpinned gap/name verified");
+  r.eq(C.hex(m.priceCovenantId), s(v.priceCovenantId), "price covenant id");
+  r.eq(m.genesisShards.length, num(v.priceShards), "price genesis shards");
+  r.eq(m.params.periodMs, u64(v.periodMs), "periodMs");
+  // a wrong price covenant id is caught
+  const jp = structuredClone(v.manifest);
+  jp.priceCovenantId = "cd".repeat(32);
+  jp.priceGenesis.priceCovenantId = "cd".repeat(32);
+  r.check(!verifies(M.decodeManifest(jp)), "manifest with a wrong price covenant id verified");
   // tampering is caught
   const j = structuredClone(v.manifest);
   j.registryCovenantId = "ab".repeat(32);
@@ -223,53 +245,59 @@ function runManifest(v, r) {
     "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
   ].find((x) => existsSync(x));
   if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
-  // the bundled manifest: either a verified v2 one, or the v1 one the app shows as "setting up"
+  // the bundled manifest: either a verified v3 one, or an earlier one the app shows as "setting up"
   try {
     const bm = M.decodeManifest(new Uint8Array(bundled));
     M.verifyManifest(bm);
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
     r.pass += 1;
-    console.log("bundled manifest: registry v2, verified");
+    console.log("bundled manifest: registry v3, verified");
   } catch (e) {
-    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `the bundled manifest neither verifies nor is the outdated v1 one: ${e.message}`);
-    console.log("bundled manifest: registry v1 (outdated) - the app shows .kachat as setting up until the v2 genesis manifest is bundled");
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `the bundled manifest neither verifies nor is an outdated one: ${e.message}`);
+    console.log("bundled manifest: an earlier registry (outdated) - the app shows .kachat as setting up until the v3 genesis manifest is bundled");
   }
   return m;
 }
 
-/** The registry v2 period rules on their own (KACHAT_NAMES.md 4.1, ops.rs): what extend may add,
- *  when renew opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
+/** The period rules on their own (KACHAT_NAMES.md 4.1, ops.rs) on the testnet-10 short clock
+ *  (registry v3: periodMs = renewWindowMs = graceMs = 10 minutes): what extend may add, when renew
+ *  opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
 function runPeriodRules(v, m, r) {
   const p = m.params;
-  const y = C.yearMs;
-  r.eq(p.renewWindowMs, 864_000_000n, "renewWindowMs from the manifest");
+  const y = p.periodMs;
+  r.eq(y, 600_000n, "periodMs from the manifest (10 minutes)");
+  r.eq(p.renewWindowMs, 600_000n, "renewWindowMs from the manifest");
   r.eq(u64(v.renewWindowMs), p.renewWindowMs, "renewWindowMs matches the vectors");
   const start = 2_000_000_000_000n;
-  r.eq(M.paramsExtendableYears(p, start, start + y), 1n, "1-year registration: extend by 1");
-  r.eq(M.paramsExtendableYears(p, start, start + 2n * y), 0n, "2-year registration: no extend");
-  r.eq(M.paramsExtendableYears(p, start, start + y + 1n), 0n, "a period holding just over a year: no extend");
-  r.eq(M.paramsExtendableYears(p, start, start + 3n * y), 0n, "over-full period: no extend");
-  r.eq(M.paramsExtendableYears(p, start, start), 2n, "empty period: 2 years");
+  r.eq(M.paramsExtendableYears(p, start, start + y), 1n, "1-period registration: extend by 1");
+  r.eq(M.paramsExtendableYears(p, start, start + 2n * y), 0n, "2-period registration: no extend");
+  r.eq(M.paramsExtendableYears(p, start, start + y + 1n), 0n, "just over a period paid: no extend");
+  r.eq(M.paramsExtendableYears(p, start, start + 3n * y), 0n, "over-full: no extend");
+  r.eq(M.paramsExtendableYears(p, start, start), 2n, "nothing paid: 2 periods");
   const f = C.nameFieldsFor("alice", new Uint8Array(32).fill(7), 0n, start, start + y);
   r.eq(M.paramsExtendableYearsOf(p, f), 1n, "extendableYears of the fields");
-  r.eq(C.nameFieldsExtended(f, 1n).periodStart, start, "extend keeps periodStart");
-  r.eq(C.nameFieldsExtended(f, 1n).expiresAt, start + 2n * y, "extend adds a year");
-  r.eq(C.nameFieldsRenewed(f, 2n).periodStart, start + y, "renew starts at the old expiry");
-  r.eq(C.nameFieldsRenewed(f, 2n).expiresAt, start + 3n * y, "renew adds from the old expiry");
+  r.eq(C.nameFieldsExtended(f, 1n, y).periodStart, start, "extend keeps periodStart");
+  r.eq(C.nameFieldsExtended(f, 1n, y).expiresAt, start + 2n * y, "extend adds a period");
+  r.eq(C.nameFieldsRenewed(f, 2n, y).periodStart, start + y, "renew starts at the old expiry");
+  r.eq(C.nameFieldsRenewed(f, 2n, y).expiresAt, start + 3n * y, "renew adds from the old expiry");
   r.eq(C.nameFieldsWithOwner(f, new Uint8Array(32).fill(9)).periodStart, start, "transfer keeps periodStart");
   r.eq(C.nameFieldsWithPrice(f, 5n).periodStart, start, "list keeps periodStart");
   r.check((() => { try { return C.nameFieldsEqual(C.decodeNameState(C.nameState(f)), f); } catch { return false; } })(), "126-byte state round trip");
   r.check((() => { try { C.decodeNameState(C.nameState(f).subarray(0, 117)); return false; } catch { return true; } })(), "a 117-byte (v1) state is refused");
-  const opens = M.paramsRenewOpens(p, f.expiresAt);
-  r.eq(opens, f.expiresAt - 864_000_000n, "renew opens 10 days before expiry");
+  // a 2-period name, so the window (one period before expiry) opens a period in
+  const f2 = C.nameFieldsFor("alice", new Uint8Array(32).fill(7), 0n, start, start + 2n * y);
+  const opens = M.paramsRenewOpens(p, f2.expiresAt);
+  r.eq(opens, f2.expiresAt - 600_000n, "renew opens one period before expiry");
   const before = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens - 60_000n, wallMs: opens + 60_000n });
-  r.check(!B.renewWindowOpen(before, p, f.expiresAt), "window closed while the median time is before the opening");
-  r.eq(B.renewLockTime(before, p, f.expiresAt), opens, "lock time never before the opening");
+  r.check(!B.renewWindowOpen(before, p, f2.expiresAt), "window closed while the median time is before the opening");
+  r.eq(B.renewLockTime(before, p, f2.expiresAt), opens, "lock time never before the opening");
   const at = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens, wallMs: opens + 180_000n });
-  r.check(!B.Builder.renewWindowOpen(at, p, f.expiresAt), "window closed at exactly the opening (the median time must pass it)");
-  const after = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens + 3_600_000n, wallMs: opens + 3_700_000n });
-  r.check(B.renewWindowOpen(after, p, f.expiresAt), "window open an hour later");
-  r.eq(B.Builder.renewLockTime(after, p, f.expiresAt), opens + 3_520_000n, "lock time = wall - 3 min once open");
+  r.check(!B.Builder.renewWindowOpen(at, p, f2.expiresAt), "window closed at exactly the opening (the median time must pass it)");
+  const after = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens + 300_000n, wallMs: opens + 400_000n });
+  r.check(B.renewWindowOpen(after, p, f2.expiresAt), "window open five minutes later");
+  r.eq(B.Builder.renewLockTime(after, p, f2.expiresAt), opens + 220_000n, "lock time = wall - 3 min once open");
+  // desktop extra: periodMs is required where a period is added
+  r.check((() => { try { C.nameFieldsExtended(f, 1n); return false; } catch (e) { return e instanceof C.Failure; } })(), "nameFieldsExtended without periodMs refused");
   // the builders refuse what the contract refuses, and say so
   const b = new B.Builder(m);
   const refused = (fn) => { try { fn(); return false; } catch (e) { return e instanceof C.Failure; } };
@@ -279,13 +307,18 @@ function runPeriodRules(v, m, r) {
     const env = B.makeEnv({ me: hx(env0.me), blockDaa: u64(env0.blockDaa), blockTimeMs: u64(env0.blockTimeMs), wallMs: u64(env0.wallMs) });
     const n = nameRec(ext.records.name);
     const wallet = ext.wallet.map(utxo);
-    r.check(refused(() => b.extend({ env, wallet, name: n, years: 2n })), "extend past 2 years from periodStart refused");
-    n.fields = C.nameFieldsExtended(n.fields, 1n);
-    r.check(refused(() => b.extend({ env, wallet, name: n, years: 1n })), "a second extend of a full period refused");
-    r.check(refused(() => b.extend({ env, wallet, name: n, years: 0n })), "extend by 0 refused");
+    const sh = shardRec(ext.records.shard);
+    r.check(refused(() => b.extend({ env, wallet, name: n, shard: sh, years: 2n })), "extend past 2 periods from periodStart refused");
+    n.fields = C.nameFieldsExtended(n.fields, 1n, p.periodMs);
+    r.check(refused(() => b.extend({ env, wallet, name: n, shard: sh, years: 1n })), "a second extend of a full name refused");
+    r.check(refused(() => b.extend({ env, wallet, name: n, shard: sh, years: 0n })), "extend by 0 refused");
+    // a shard with the wrong covenant id (a look-alike) is refused before anything is built
+    const fake = shardRec(ext.records.shard);
+    fake.utxo.entry.covenantId = null;
+    r.check(refused(() => b.extend({ env, wallet, name: nameRec(ext.records.name), shard: fake, years: 1n })), "a look-alike price shard refused");
     // renew before the window: built (a note says it is not open) with the opening as lock time
     let plan = null;
-    try { plan = b.renew({ env, wallet, name: n, years: 1n }); } catch { plan = null; }
+    try { plan = b.renew({ env, wallet, name: n, shard: sh, years: 1n }); } catch { plan = null; }
     if (plan) {
       r.eq(plan.unsignedTx.lockTime, M.paramsRenewOpens(p, n.fields.expiresAt), "early renew: lock time = the window opening");
       r.check(plan.notes.some((x) => x.startsWith("renewal window not open")), "early renew: noted as not open");
@@ -293,35 +326,36 @@ function runPeriodRules(v, m, r) {
     } else {
       r.check(false, "early renew plan not built");
     }
-    r.check(refused(() => b.renew({ env, wallet, name: n, years: 3n })), "renew by 3 refused");
+    r.check(refused(() => b.renew({ env, wallet, name: n, shard: sh, years: 3n })), "renew by 3 refused");
   } else {
     r.check(false, "no extend step in the vectors");
   }
   // the fixed budgets are the vectors' table, entry for entry
   const recommended = v.recommendedBudgets;
   const roles = Object.values(B.BudgetRole);
-  r.eq([...Object.keys(recommended)].sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
+  // price.update / price.follow are the CLI's (price changes); every other role is the app's
+  const appKeys = Object.keys(recommended).filter((k) => k !== "price.update" && k !== "price.follow");
+  r.eq(appKeys.sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
   for (const role of roles) {
     r.eq(BigInt(B.recommendedBudgets[role]), u64(recommended[role]), `recommended budget ${role}`);
   }
-  // a registry v1 manifest is recognised as outdated, never trusted
-  const v1 = structuredClone(v.manifest);
-  delete v1.params.renewWindowMs;
+  // an earlier registry's manifest (no registryVersion 3) is recognised as outdated, never trusted
+  const old = structuredClone(v.manifest);
+  delete old.registryVersion;
   try {
-    M.decodeManifest(JSON.stringify(v1));
-    r.check(false, "a manifest without renewWindowMs decoded");
+    M.decodeManifest(JSON.stringify(old));
+    r.check(false, "a manifest without registryVersion 3 decoded");
   } catch (e) {
-    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `a manifest without renewWindowMs is the outdated registry: ${e.message}`);
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `a manifest without registryVersion 3 is the outdated registry: ${e.message}`);
   }
-  // desktop extras: a v1 template hash (with renewWindowMs present) is outdated too, at decode
-  // and at verify
-  const v1b = structuredClone(v.manifest);
-  v1b.artifacts.KachatName.templateHash = M.v1TemplateHashes.KachatName;
+  // desktop extra: registryVersion 2 (the previous genesis) is outdated too
+  const v2 = structuredClone(v.manifest);
+  v2.registryVersion = 2;
   try {
-    M.decodeManifest(v1b);
-    r.check(false, "a manifest with the v1 name template hash decoded");
+    M.decodeManifest(v2);
+    r.check(false, "a registryVersion 2 manifest decoded");
   } catch (e) {
-    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `the v1 name template hash is the outdated registry: ${e.message}`);
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `registryVersion 2 is the outdated registry: ${e.message}`);
   }
   r.check(C.Failure.outdatedRegistry().isOutdatedRegistry && !new C.Failure("x").isOutdatedRegistry, "Failure.outdatedRegistry / isOutdatedRegistry");
 }
@@ -329,14 +363,15 @@ function runPeriodRules(v, m, r) {
 function build(b, op, env, wallet, args, rec) {
   switch (op) {
     case "commit": return b.commit({ env, wallet, name: s(args.name), salt: hx(args.salt) });
-    case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), years: u64(args.years), now: u64(args.now) });
-    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
-    case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
+    case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), shard: shardRec(rec.shard), years: u64(args.years), now: u64(args.now) });
+    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), shard: shardRec(rec.shard), years: u64(args.years) });
+    case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), shard: shardRec(rec.shard), years: u64(args.years) });
     case "transfer": return b.transfer({ env, wallet, name: nameRec(rec.name), newOwner: hx(args.newOwner) });
     case "list": return b.list({ env, wallet, name: nameRec(rec.name), price: u64(args.price) });
     case "buy": return b.buy({ env, wallet, name: nameRec(rec.name) });
-    case "offer": return b.offer({ env, wallet, name: s(args.name), amount: u64(args.amount), refundAfter: u64(args.refundAfter), target: rec.target ? nameRec(rec.target) : null });
+    case "offer": return b.offer({ env, wallet, target: nameRec(rec.target), amount: u64(args.amount), refundAfter: u64(args.refundAfter) });
     case "acceptOffer": return b.acceptOffer({ env, name: nameRec(rec.name), offer: offerRec(rec.offer) });
+    case "declineOffer": return b.declineOffer({ env, offer: offerRec(rec.offer) });
     case "withdrawOffer": return b.withdrawOffer({ env, offer: offerRec(rec.offer) });
     case "refundOffer": return b.refundOffer({ env, offer: offerRec(rec.offer) });
     case "release": return b.release({ env, parts: { below: gapRec(rec.below), name: nameRec(rec.name), above: gapRec(rec.above) } });
@@ -346,12 +381,16 @@ function build(b, op, env, wallet, args, rec) {
   }
 }
 
+/** The steps the app builds: price changes (setPrices) are built by the CLI only (the authority
+ *  signs on KasSigner); the app reads the result. */
+const appSteps = (v) => v.steps.filter((st) => st.op !== "setPrices");
+
 function runSteps(v, m, r) {
   const b = new B.Builder(m);
   const results = [];
   const recommended = v.recommendedBudgets;
-  r.eq(Object.keys(B.recommendedBudgets).length, Object.keys(recommended).length, "recommended table size");
-  for (const st of v.steps) {
+  r.eq(Object.keys(B.recommendedBudgets).length, Object.keys(recommended).length - 2, "recommended table size (less price.update / price.follow)");
+  for (const st of appSteps(v)) {
     const failBefore = r.fail;
     const failuresBefore = r.failures.length;
     const label = s(st.label);
@@ -375,7 +414,9 @@ function runSteps(v, m, r) {
     try {
       plan = build(b, s(st.op), env, wallet, args, rec);
       if (st.op === "register") {
-        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 741n * 86_400_000n : 0n), `${label}: registerNow`);
+        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 45n * 60_000n : 0n), `${label}: registerNow`);
+      } else if (st.op === "offer") {
+        r.eq(plan.newOffer ? C.hex(plan.newOffer.fields.seller) : null, s(args.seller), `${label}: made to the seller`);
       } else if (st.op === "extend") {
         const n = nameRec(rec.name);
         r.check(u64(args.years) <= M.paramsExtendableYearsOf(m.params, n.fields), `${label}: extendableYears covers the step`);
@@ -486,9 +527,9 @@ function runSteps(v, m, r) {
 
 function runFixedBudgets(v, m, r) {
   // every step also builds with the app's fixed (recommended) budgets, as the app will run them
-  // (Swift: writeFixedBudget, which kachat-names-vectors check validates 32/32)
+  // (Swift: writeFixedBudget, which kachat-names-vectors check validates 35/35)
   const b = new B.Builder(m);
-  for (const st of v.steps) {
+  for (const st of appSteps(v)) {
     const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs) });
     try {
       const plan = build(b, st.op, env, st.wallet.map(utxo), st.args, st.records);
@@ -519,11 +560,9 @@ function writeFixedBudget(v, m, out) {
     amount: e.amount, scriptVersion: e.scriptVersion, script: C.hex(e.script), blockDaaScore: e.blockDaaScore,
     isCoinbase: e.isCoinbase, covenantId: e.covenantId ? C.hex(e.covenantId) : null,
   });
-  const txs = v.steps.map((st) => {
+  const txs = appSteps(v).map((st) => {
     const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs) });
-    // Swift's writeFixedBudget builds offers without their target
-    const rec = st.op === "offer" ? { ...st.records, target: undefined } : st.records;
-    const plan = build(b, st.op, env, st.wallet.map(utxo), st.args, rec);
+    const plan = build(b, st.op, env, st.wallet.map(utxo), st.args, st.records);
     const tx = plan.unsignedTx;
     return {
       label: plan.op, blockDaa: env.blockDaa, blockTimeMs: env.blockTimeMs,
@@ -539,7 +578,9 @@ function writeFixedBudget(v, m, out) {
       })),
     };
   });
-  const doc = { registryCovenantId: v.manifest.registryCovenantId, signer: v.deployer.xonly, transactions: txs };
+  const doc = {
+    registryCovenantId: v.manifest.registryCovenantId, priceCovenantId: v.manifest.priceCovenantId, signer: v.deployer.xonly, transactions: txs,
+  };
   writeFileSync(out, jsonWithBigInts(doc));
   console.log(`wrote ${txs.length} fixed-budget transactions to ${out}`);
 }

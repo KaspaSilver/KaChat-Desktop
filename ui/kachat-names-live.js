@@ -21,15 +21,14 @@ import "./kachat-names-live.css";
 import { KAS_UNIT, kasLabel, isNetworkAddress } from "../engine/network.js";
 import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
-import { userFacingError } from "./dialogs.js";
-import { Operation, Stage, isOpen, needsDriving, validateKey } from "../engine/kachat-names/actions.js";
+import { userFacingError, chooseDialog } from "./dialogs.js";
+import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays } from "../engine/kachat-names/actions.js";
 import {
-  Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress,
+  Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress, compactAddress,
 } from "../engine/kachat-names/registry-state.js";
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
-import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs } from "../engine/kachat-names/codec.js";
-import { paramsPrice, paramsRenewPrice } from "../engine/kachat-names/manifest.js";
+import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
 
 /** { getDeps, esc, ICON, wordmark, openLayer, closeLayer, navBar, sectionHeader, hubChanged(kind), openNameDetail(info) } */
@@ -106,11 +105,31 @@ function sanitizeAmountInput(input) {
   return value;
 }
 
+/** A unix-ms day ("Oct 12, 2027"), with the time when it is within two days (testnet's
+ *  10-minute periods, or a renewal that opens tomorrow). */
 function dayText(ms) {
   if (ms == null) return "";
   const d = new Date(Number(ms));
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const near = Math.abs(d.getTime() - Date.now()) < 2 * 86_400_000;
+  return near
+    ? d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+/** A length of time: "10 min", "1 hr 30 min", "10 days" (iOS KachatLive.duration). */
+function durationText(ms) {
+  const seconds = Math.max(0, Number(ms) / 1000);
+  if (seconds >= 86_400) {
+    const days = Math.round(seconds / 86_400);
+    return days === 1 ? "1 day" : `${days} days`;
+  }
+  if (seconds >= 3_600) {
+    const h = Math.floor(seconds / 3_600);
+    const m = Math.round((seconds % 3_600) / 60);
+    return m ? `${h} hr ${m} min` : `${h} hr`;
+  }
+  return `${Math.round(seconds / 60)} min`;
 }
 
 function relativeText(ms) {
@@ -128,7 +147,8 @@ function relativeText(ms) {
   return "";
 }
 
-const yearsLabel = (y) => (Number(y) === 1 ? "1 year" : `${Number(y)} years`);
+/** `y` periods: "1 year" / "2 years", or on a short clock (testnet) "10 min" / "20 min". */
+const yearsLabel = (y) => periodsText(y);
 
 function shortAddr(address) {
   const fn = deps().shortAddress;
@@ -156,13 +176,32 @@ function params() {
 }
 function maxYears() { const m = params()?.maxYears; return m ? Number(m) : 2; }
 
-// Registry v2: a name's paid period runs from periodStart to expiresAt and holds at most maxYears.
+// Registry v3: a period is `periodMs` long - a year on mainnet, 10 minutes on the testnet clock.
+/** Whether a period is a year (mainnet), not a short test clock. */
+function yearlyPeriods() { return (params()?.periodMs ?? yearMs) === yearMs; }
+/** `count` periods: "1 year" / "2 years", or on a short clock "10 min" / "20 min". */
+function periodsText(count) {
+  const n = Number(count);
+  if (yearlyPeriods()) return n === 1 ? "1 year" : `${n} years`;
+  return durationText(n * Number(params()?.periodMs ?? yearMs));
+}
+/** "Price per year", or on a short clock "Price per 10 min". */
+function pricePerPeriodTitle() { return yearlyPeriods() ? "Price per year" : `Price per ${periodsText(1)}`; }
+/** The price per period (sompi, BigInt) for `name` from the price record (every shard holds the
+ *  same prices): the last prices read, else the genesis prices; null before any manifest. */
+function priceOf(name) {
+  const prices = kachatNames()?.registry.cachedPrices;
+  if (!Array.isArray(prices) || prices.length !== 5) return null;
+  return prices[tier(utf8(name).length)];
+}
+
+// A name's paid period runs from periodStart to expiresAt and holds at most maxYears periods.
 /** The years an extend can still add to `info`'s paid period (0n when full or unknown). */
 function extendableYears(info, p = params()) {
   if (!p || info?.periodStart == null) return 0n;
   try { return info.extendableYears(p); } catch { return 0n; }
 }
-/** Whether `info`'s renewal window is open (10 days before the expiry, through grace and lapse). */
+/** Whether `info`'s renewal window is open (renewWindowMs before the expiry, through grace and lapse). */
 function renewalOpen(info, p = params()) {
   if (!p) return false;
   try { return info.renewOpen(p); } catch { return false; }
@@ -170,7 +209,7 @@ function renewalOpen(info, p = params()) {
 /** Whether extending `info` by `years` fills its period to exactly maxYears (iOS KachatExtendSheet.fillsPeriod). */
 function fillsPeriod(info, years, p = params()) {
   if (!p || info?.periodStart == null) return false;
-  return info.expiresAt + BigInt(years) * yearMs === info.periodStart + p.maxYears * yearMs;
+  return info.expiresAt + BigInt(years) * p.periodMs === info.periodStart + p.maxYears * p.periodMs;
 }
 /** "Renewal opens on Oct 2, 2027" (the day ActionError.renewalNotOpen names). */
 function renewalOpensText(info, p = params()) {
@@ -234,6 +273,9 @@ const LI = {
   calendarPlus: svg(`<path d="M20.5 11.5V7.4A2.4 2.4 0 0 0 18.1 5H5.9a2.4 2.4 0 0 0-2.4 2.4v10.7a2.4 2.4 0 0 0 2.4 2.4h6.6"/><path d="M3.5 10h17M8 3v4M16 3v4M18 14.5v6M15 17.5h6"/>`),
   calendarClock: svg(`<path d="M20.5 11V7.4A2.4 2.4 0 0 0 18.1 5H5.9a2.4 2.4 0 0 0-2.4 2.4v10.7a2.4 2.4 0 0 0 2.4 2.4h5.6"/><path d="M3.5 10h17M8 3v4M16 3v4"/><circle cx="17.5" cy="17.5" r="4"/><path d="M17.5 15.6v2l1.3 1.2"/>`),
   hammer: svg(`<path d="m13.8 7.6-9.6 9.6a1.7 1.7 0 0 0 2.4 2.4l9.6-9.6"/><path d="M11.6 5.4 14 3l1.4.6 2.2-.4 3.4 3.4-2.4 2.4-1.4-1.4-2.4 2.4-3.2-3.2Z"/>`),
+  sliders: svg(`<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>`),
+  copy: svg(`<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.4a1.9 1.9 0 0 0-1.9-1.9H6.4a1.9 1.9 0 0 0-1.9 1.9v7.2a1.9 1.9 0 0 0 1.9 1.9h2.1"/>`),
+  check: svg(`<path d="m5 12.5 4.3 4.3L19 7.2"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
 };
 
@@ -270,6 +312,7 @@ function eventTitle(op) {
     case "offer": return "Offer made";
     case "offer_withdraw": return "Offer withdrawn";
     case "offer_refund": return "Offer refunded";
+    case "offer_decline": return "Offer declined";
     default: return "Activity";
   }
 }
@@ -334,33 +377,67 @@ function eventRowHtml(event, { showName = false } = {}) {
     </div>`;
 }
 
-/** KachatOfferRow: withdraw / refund for the buyer, Accept for the owner (indexer only). */
-function offerRowHtml(offer, { isBuyer, isOwner, nameInfo = null }) {
+/** "Expires in 2d 4h": the time until an offer becomes refundable (its refundAfter DAA score,
+ *  10 per second), or null once it is. */
+function offerExpiresIn(offer, daa) {
+  if (daa == null || offer.refundable(daa)) return null;
+  const left = offer.refundAfter > 0n ? offer.refundAfter : 0n;
+  const seconds = Math.max(60, Number(left - BigInt(daa)) / Number(DAA_PER_SECOND));
+  let text;
+  if (seconds >= 86_400) text = `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3_600)}h`;
+  else if (seconds >= 3_600) text = `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
+  else text = `${Math.floor(seconds / 60)}m`;
+  return `Expires in ${text.replace(/ 0[hm]$/, "")}`;
+}
+
+/** KachatOfferRow: withdraw / refund for the buyer; for the owner (indexer only) a tap on the row
+ *  or Accept accepts it, Decline sends it back. Expired offers go back to their buyers on their own
+ *  (actions.returnExpiredOffers); `declined` (made to an earlier owner of the name, registry v3)
+ *  can never be accepted and goes back too. */
+function offerRowHtml(offer, { isBuyer, isOwner, nameInfo = null, declined = false }) {
   rememberOffer(offer);
   if (nameInfo) rememberName(nameInfo);
-  const daa = kachatNames()?.actions.virtualDaa ?? null;
+  const actions = kachatNames()?.actions;
+  const daa = actions?.virtualDaa ?? null;
   const refundable = daa != null && offer.refundable(daa);
+  const returning = Boolean(actions?.returningOffers?.has(offer.id));
+  const withdrawing = Boolean(actions?.withdrawingOffers?.has(offer.id));
+  const acceptable = isOwner && !refundable && !declined;
   let who = "";
   if (isBuyer) who = "Your offer";
   else { const a = addressOf(offer.buyer); if (a) who = shortAddr(a); }
   const id = esc(offer.id);
   const nameAttr = nameInfo ? ` data-kl-offer-name="${esc(nameInfo.name)}"` : "";
+  let state = "";
+  if (declined || withdrawing) {
+    state = `<small class="kl-orange">${esc(isBuyer ? "Declined - the name changed hands, returning to you" : "Declined - made to an earlier owner")}</small>`;
+  } else if (refundable) {
+    const text = returning || isOwner ? (isBuyer ? "Expired - returning to you" : "Expired - returning to the buyer") : "Expired - refundable now";
+    state = `<small class="kl-orange">${esc(text)}</small>`;
+  } else {
+    const left = offerExpiresIn(offer, daa);
+    if (left) state = `<small class="kmkt-muted">${esc(left)}</small>`;
+  }
   let buttons = "";
   if (isBuyer) {
     buttons = `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="withdraw" data-kl-offer-id="${id}">Withdraw</button>`
-      + (refundable ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="refund" data-kl-offer-id="${id}">Refund</button>` : "");
-  } else if (isOwner) {
-    buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-offer-act="accept" data-kl-offer-id="${id}"${nameAttr}>Accept</button>`;
-  } else if (refundable) {
+      + (refundable && !returning ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="refund" data-kl-offer-id="${id}">Refund</button>` : "");
+  } else if (acceptable) {
+    buttons = `<button class="secondary-button kl-danger kmkt-small-button" type="button" data-kl-offer-act="decline" data-kl-offer-id="${id}">Decline</button>`
+      + `<button class="primary-button kmkt-small-button" type="button" data-kl-offer-act="accept" data-kl-offer-id="${id}"${nameAttr}>Accept</button>`;
+  } else if (refundable && !returning) {
     buttons = `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="refund" data-kl-offer-id="${id}">Refund</button>`;
   }
+  // A click anywhere on the row opens the accept flow for the owner (the buttons keep their own).
+  const rowAttrs = acceptable ? ` data-kl-offer-act="accept" data-kl-offer-id="${id}"${nameAttr} title="Accept this offer"` : "";
+  const dim = refundable || declined || withdrawing;
   return `
-    <div class="kmkt-row static compact kl-offer-row">
+    <div class="kmkt-row static compact kl-offer-row${acceptable ? " kl-offer-tappable" : ""}${dim ? " kl-offer-dim" : ""}"${rowAttrs}>
       <span class="kmkt-row-icon w24">${kit.ICON.hand}</span>
       <span class="kl-row-text">
         ${offer.name ? `<strong>${esc(`${offer.name}.kachat`)}</strong>` : ""}
         ${who ? `<small>${esc(who)}</small>` : ""}
-        ${refundable ? `<small class="kl-orange">Refundable now</small>` : ""}
+        ${state}
       </span>
       <span class="kl-row-price">${esc(amountText(offer.amount))}</span>
       ${buttons ? `<span class="kl-row-buttons">${buttons}</span>` : ""}
@@ -450,7 +527,7 @@ const hub = {
   /** null until the manifest is checked; false when it fails (the hub then stays a mockup) */
   ready: null,
   setupError: null,
-  /** The manifest is for the previous registry (v1): the hub says "Setting up", calmly. */
+  /** The manifest is an earlier registry's (not v3): the hub says "Setting up", calmly. */
   upgrading: false,
   search: { kind: "idle" },
   listings: [],
@@ -575,11 +652,19 @@ async function hubReloadOnce() {
   try {
     hub.listings = await registry.listings();
     hub.lapsed = await registry.lapsed();
+    // the prices can change at any time (registry v3): read them with the rest
+    await registry.currentPrices().catch(() => null);
     const me = myKey();
     if (me) {
       hub.mine = await registry.namesOf(me, { includeInactive: true });
       hub.myOffers = await registry.myOffers(me);
-      if (hub.myOffers.length) await actions.refreshVirtualDaa().catch(() => null);
+      if (hub.myOffers.length) {
+        await actions.refreshVirtualDaa().catch(() => null);
+        // Your own expired offers come back to you on their own, and so do the ones whose name
+        // changed hands since you made them.
+        await actions.returnExpiredOffers(hub.myOffers).catch(() => null);
+        await actions.withdrawDeclinedOffers(hub.myOffers).catch(() => null);
+      }
     } else {
       hub.mine = [];
       hub.myOffers = [];
@@ -624,10 +709,7 @@ async function hubLookup(text) {
   hubChanged("search");
 }
 
-function pricePerYear(name) {
-  const p = params();
-  return p ? paramsPrice(p, utf8(name).length) : null;
-}
+function pricePerYear(name) { return priceOf(name); }
 
 // ---------------------------------------------------------------------------------------------
 // Hub: hero, header, search result
@@ -637,7 +719,8 @@ function pricePerYear(name) {
 function settingUpPill() { return `<span class="kl-setting-up-pill">${LI.hammer}<span>Setting up</span></span>`; }
 
 /** The hero's status line: the Testnet badge when live; "Setting up" while the registry is being
- *  upgraded (a v1 manifest, iOS d2e0673); else Coming soon (and why it isn't live). */
+ *  upgraded (an earlier registry's manifest, iOS d2e0673 / e1e3455); else Coming soon (and why it
+ *  isn't live). */
 export function liveHeroStatusHtml(comingSoonHtml) {
   if (liveHubIsLive()) return testnetBadge();
   if (liveEnabled() && hub.upgrading) {
@@ -698,7 +781,7 @@ export function liveSearchResultHtml(raw) {
       <div class="kmkt-search-result">
         <div class="kmkt-search-result-copy">
           <strong>${esc(`${name}.kachat`)}</strong>
-          ${price != null ? `<small class="kl-green">${esc(`Available · ${amountText(price)} a year`)}</small>` : ""}
+          ${price != null ? `<small class="kl-green">${esc(yearlyPeriods() ? `Available · ${amountText(price)} a year` : `Available · ${amountText(price)} per ${periodsText(1)}`)}</small>` : ""}
         </div>
         <button class="primary-button kmkt-small-button" type="button" data-kl-claim="${esc(name)}" ${s.gap ? "" : "disabled"}>Claim</button>
       </div>`;
@@ -724,7 +807,12 @@ const registrationStages = new Map();
 function watchRegistrations() {
   const rt = kachatNames();
   if (!rt || registrationsUnsubscribe) return;
+  // My Offers follows what this app is sending back (expired, or made to an earlier owner)
+  const offersSig = () => `${rt.actions.returningOffers?.size ?? 0}|${rt.actions.withdrawingOffers?.size ?? 0}`;
+  let lastOffersSig = offersSig();
   registrationsUnsubscribe = rt.actions.subscribe(({ pending }) => {
+    const sig = offersSig();
+    if (sig !== lastOffersSig) { lastOffersSig = sig; if (hub.myOffers.length) hubChanged("data"); }
     let completed = false;
     for (const p of pending) {
       const before = registrationStages.get(p.id);
@@ -901,7 +989,7 @@ function myNamesPageHtml() {
       ${loadErrorHtml()}
       ${kit.sectionHeader("My Names", "Extend, renew, list, transfer or release them, and pick the one KaChat shows for you.")}
       ${names}
-      ${kit.sectionHeader("My Offers", "Offers you made. Withdraw one any time; once it passes its refund time anyone can return it to you.")}
+      ${kit.sectionHeader("My Offers", "Offers you made. Withdraw one any time; once it expires it comes back to you on its own.")}
       ${offers}
       ${chainNote()}
     </div>`;
@@ -1102,6 +1190,7 @@ const TX_DONE_TITLES = Object.freeze({
   "Withdraw Offer": "Offer withdrawn",
   "Refund Offer": "Offer refunded",
   "Accept Offer": "Offer accepted",
+  "Decline Offer": "Offer declined",
 });
 
 /** The half sheet every finished name transaction shows (iOS KachatTxDoneSheet): what happened,
@@ -1346,21 +1435,22 @@ function openBuySheet(info, owner) {
   });
 }
 
+/** Up to 7 days: the app's cap on offers (actions.js maxOfferDays). */
 const OFFER_DAYS = [
   { id: 1, title: "1 Day" },
   { id: 3, title: "3 Days" },
   { id: 7, title: "7 Days" },
-  { id: 30, title: "30 Days" },
 ];
 
-/** KachatLiveOfferSheet: an amount, when it becomes refundable, and the cost. */
+/** KachatLiveOfferSheet: an amount, when it becomes refundable, and the cost. The offer is made to
+ *  `info`'s current owner (registry v3), the only one who can accept or decline it. */
 function openOfferSheet(info, owner) {
   const name = info.name;
   let amountRaw = "";
   let days = 3;
   let virtualDaa = null;
   const amount = () => { const a = parseSompi(amountRaw); return a != null && a > 0n ? a : null; };
-  const refundAfter = () => (virtualDaa == null ? null : virtualDaa + BigInt(days) * 86_400n * DAA_PER_SECOND);
+  const refundAfter = () => (virtualDaa == null ? null : virtualDaa + BigInt(Math.min(days, Number(maxOfferDays))) * 86_400n * DAA_PER_SECOND);
   openTxSheet({
     owner,
     title: "Make an Offer",
@@ -1368,13 +1458,13 @@ function openOfferSheet(info, owner) {
     inputsHtml: `
       ${section(amountInputHtml("data-kl-offer-amount", `Your offer in ${KAS_UNIT}`), {
         header: "Your offer",
-        footerHtml: footer(kasLabel("Your KAS stays locked on chain until the owner accepts, you withdraw the offer, or it expires - then anyone can send it back to you.")),
+        footerHtml: footer(kasLabel("Your KAS stays locked on chain until the owner accepts or declines, you withdraw the offer, or it expires - then anyone can send it back to you.")),
       })}
       ${section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("days", OFFER_DAYS, days, "Refundable after")}</div>`, { header: "Refundable after" })}`,
     footer: () => {
       const a = amount();
       return info.isListed && a != null && info.price < a
-        ? "This name is listed for less than your offer. Anyone could buy the listing with your offer, so consider buying it instead."
+        ? "This name is listed for less than your offer. Consider buying it instead."
         : null;
     },
     rows: () => {
@@ -1388,7 +1478,7 @@ function openOfferSheet(info, owner) {
     operation: () => {
       const a = amount();
       const after = refundAfter();
-      return a != null && after != null ? Operation.offer(name, a, after, info) : null;
+      return a != null && after != null ? Operation.offer(info, a, after) : null;
     },
     operationKey: () => `${amount() ?? 0n}-${days}-${virtualDaa ?? 0n}`,
     onInput(event, sheet) {
@@ -1409,17 +1499,21 @@ function openOfferSheet(info, owner) {
   });
 }
 
-/** Registry v2 `extend` (KachatExtendSheet): years added to the current paid period (periodStart
- *  kept), up to 2 years past its start - in practice a 1-year name extended to 2. Only the years
- *  that still fit are offered. */
+/** `extend` (KachatExtendSheet): periods added to the current paid period (periodStart kept), up to
+ *  maxYears periods past its start - in practice a 1-period name extended to 2. Only the periods
+ *  that still fit are offered. The price per period is the price record's. */
 function openExtendSheet(info, owner) {
   let years = 1;
   const p = params();
-  const perYear = p ? paramsRenewPrice(p, utf8(info.name).length) : 0n;
+  const perYear = priceOf(info.name) ?? 0n;
+  const periodMs = p?.periodMs ?? yearMs;
   // the years that still fit in the period (in practice 1)
   const extendable = Number(extendableYears(info, p));
   const available = Math.max(1, extendable);
-  const title = () => (p && fillsPeriod(info, years, p) ? `Extend to ${p.maxYears} years` : "Extend");
+  const title = () => {
+    if (!p || !fillsPeriod(info, years, p)) return "Extend";
+    return yearlyPeriods() ? `Extend to ${p.maxYears} years` : `Extend to ${periodsText(p.maxYears)}`;
+  };
   openTxSheet({
     owner,
     get title() { return title(); },
@@ -1429,12 +1523,14 @@ function openExtendSheet(info, owner) {
       ? section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years",
         Array.from({ length: available }, (_, i) => ({ id: i + 1, title: yearsLabel(i + 1) })), years, "Years")}</div>`)
       : "",
-    footer: () => "Extending adds years to the current paid period, which holds at most 2 years. The price goes to the miners.",
+    footer: () => (yearlyPeriods()
+      ? "Extending adds years to the current paid period, which holds at most 2 years. The price goes to the miners."
+      : `Extending adds time to the current paid period, which holds at most ${periodsText(maxYears())}. The price goes to the miners.`),
     rows: () => [
       { title: "Name", value: info.display },
-      { title: "Price per year", value: amountText(perYear) },
+      { title: pricePerPeriodTitle(), value: amountText(perYear) },
       { title: "Expires", value: dayText(info.expiresAt) },
-      { title: "New expiry", value: dayText(info.expiresAt + BigInt(years) * yearMs) },
+      { title: "New expiry", value: dayText(info.expiresAt + BigInt(years) * periodMs) },
     ],
     // the engine refuses a period it can't extend (full, or periodStart unknown) and says why
     operation: () => Operation.extend(info, BigInt(Math.min(years, available))),
@@ -1446,13 +1542,14 @@ function openExtendSheet(info, owner) {
   });
 }
 
-/** Registry v2 `renew` (KachatRenewSheet): the next period, from the current expiry, for 1 or 2
- *  years - only once the renewal window is open (10 days before the expiry). Before that nothing
- *  is built: the sheet says when it opens. */
+/** `renew` (KachatRenewSheet): the next period, from the current expiry, for 1 or 2 periods - only
+ *  once the renewal window is open (renewWindowMs before the expiry). Before that nothing is
+ *  built: the sheet says when it opens. The price per period is the price record's. */
 function openRenewSheet(info, owner) {
   let years = 1;
   const p = params();
-  const perYear = p ? paramsRenewPrice(p, utf8(info.name).length) : 0n;
+  const perYear = priceOf(info.name) ?? 0n;
+  const periodMs = p?.periodMs ?? yearMs;
   const open = () => !p || renewalOpen(info, p);
   openTxSheet({
     owner,
@@ -1465,8 +1562,8 @@ function openRenewSheet(info, owner) {
       : renewalOpensText(info, p)),
     rows: () => [
       { title: "Name", value: info.display },
-      { title: "Price per year", value: amountText(perYear) },
-      { title: "New period", value: `${dayText(info.expiresAt)} – ${dayText(info.expiresAt + BigInt(years) * yearMs)}` },
+      { title: pricePerPeriodTitle(), value: amountText(perYear) },
+      { title: "New period", value: `${dayText(info.expiresAt)} – ${dayText(info.expiresAt + BigInt(years) * periodMs)}` },
     ],
     operation: () => (open() ? Operation.renew(info, BigInt(years)) : null),
     operationKey: () => `renew-${years}-${open()}`,
@@ -1629,8 +1726,18 @@ function openReclaimSheet(info, owner) {
   });
 }
 
-/** KachatOfferAction: withdraw, refund or accept an offer. */
+/** KachatOfferAction: withdraw, refund, accept or decline an offer. */
 function openOfferActionSheet(kind, offer, nameInfo, owner) {
+  if (kind === "decline") {
+    const buyer = addressOf(offer.buyer);
+    openTxSheet({
+      owner, title: "Decline Offer", confirmTitle: "Decline", doneTitle: "Offer declined",
+      footer: () => "The offer goes back to the buyer. Its network fee comes out of the offer, so declining costs you nothing.",
+      rows: () => [{ title: "Offer", value: amountText(offer.amount) }, { title: "Buyer", value: buyer ? shortAddr(buyer) : "" }],
+      operation: () => Operation.decline(offer), operationKey: () => `decline-${offer.id}`,
+    });
+    return;
+  }
   if (kind === "withdraw") {
     openTxSheet({
       owner, title: "Withdraw Offer", confirmTitle: "Withdraw",
@@ -1767,7 +1874,9 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         ${section(
           step(1, "A hidden commit goes on chain first. Nobody can see which name it is for.")
           + step(2, "About a minute later KaChat registers the name by itself. Keep the app open; if you leave, it continues next time.")
-          + step(3, "The name is yours for the years you paid, at most 2 ahead. A 1-year name can be extended to 2 years; from 10 days before it expires you can renew it."),
+          + step(3, yearlyPeriods()
+            ? "The name is yours for the years you paid, at most 2 ahead. A 1-year name can be extended to 2 years; from 10 days before it expires you can renew it."
+            : `The name is yours for the time you paid, at most ${periodsText(maxYears())} ahead. From ${durationText(Number(params()?.renewWindowMs ?? 0n))} before it expires you can renew it.`),
           { header: "How claiming works" },
         )}
         <div data-kl-claim-action></div>
@@ -1803,6 +1912,11 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     primaryWorking: false,
     primaryMessage: null,
     refreshing: false,
+    /** the Owner card's address was just copied (a checkmark for 1.5 s) */
+    ownerCopied: false,
+    ownerCopiedTimer: null,
+    /** the Manage Name sheet is up (one at a time) */
+    managing: false,
     active: true,
     layer,
     unsubscribe: [],
@@ -1831,7 +1945,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     if (s === Status.grace && ownedByWallet()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends nobody else can take it.</p>`;
     else if (s === Status.grace) note = `<p class="kl-note-inline kl-orange">Expired. It no longer resolves; the owner can still renew it.</p>`;
     else if (s === Status.lapsed) note = `<p class="kl-note-inline kl-red">Lapsed: anyone may reclaim it, and then claim it again.</p>`;
-    // registry v2: the paid period, from its start to the expiry (at most 2 years)
+    // the paid period, from its start to the expiry (at most maxYears periods)
     const period = d.info.periodStart != null
       ? `<p class="kl-period">${LI.calendar}<span>${esc(`Paid from ${dayText(d.info.periodStart)} to ${dayText(d.info.expiresAt)}`)}</span></p>`
       : "";
@@ -1857,46 +1971,76 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     <button class="${prominent ? "primary-button" : danger ? "secondary-button kl-danger" : "secondary-button accent"} kmkt-action" type="button"
       data-kl-act="${esc(act)}" ${disabled ? "disabled" : ""}>${icon}<span>${esc(title)}</span></button>`;
 
-  /** Registry v2 (iOS periodActions): "Extend" while the paid period holds less than 2 years
-   *  ("Extend to 2 years" when that fills it), "Renew" once the renewal window is open (10 days
-   *  before the expiry, and on through grace and lapse), otherwise "Renewal opens on <date>". */
-  const periodActions = () => {
-    const p = params();
-    if (!p) return "";
+  /** The owner's actions, as tiles in the Manage Name sheet (iOS manageItems): "Extend" while the
+   *  paid period holds less than maxYears periods ("Extend to 2 years" when that fills it), "Renew"
+   *  once the renewal window is open - otherwise the sheet says when it opens -, List for Sale or
+   *  Change Price and Delist, Transfer, Set as Primary (the chatting address's names only), Release. */
+  const manageItems = () => {
     const s = status();
-    const extendable = extendableYears(d.info, p);
-    const renewOpen = renewalOpen(d.info, p);
-    let html = "";
-    if (extendable > 0n || renewOpen) {
-      const extendTitle = fillsPeriod(d.info, extendable, p) ? `Extend to ${p.maxYears} years` : "Extend";
-      html += `
-        <div class="kmkt-actions">
-          ${extendable > 0n ? actionButton(extendTitle, LI.calendarPlus, "extend", { prominent: s !== Status.active && !renewOpen }) : ""}
-          ${renewOpen ? actionButton("Renew", LI.refresh, "renew", { prominent: s !== Status.active }) : ""}
-        </div>`;
+    const I = kit.ICON;
+    const items = [];
+    const p = params();
+    if (p) {
+      const extendable = extendableYears(d.info, p);
+      if (extendable > 0n) {
+        const fills = fillsPeriod(d.info, extendable, p);
+        const title = !fills ? "Extend" : yearlyPeriods() ? `Extend to ${p.maxYears} years` : `Extend to ${periodsText(p.maxYears)}`;
+        const subtitle = yearlyPeriods() ? "Pays for more years now, up to the 2-year limit."
+          : `Pays for more time now, up to the ${periodsText(p.maxYears)} limit.`;
+        items.push({ id: "extend", title, subtitle, icon: LI.calendarPlus });
+      }
+      if (renewalOpen(d.info, p)) {
+        items.push({ id: "renew", title: "Renew", subtitle: "Starts a new paid period from the expiry date.", icon: LI.refresh });
+      }
     }
-    if (!renewOpen) {
-      html += `<div class="kmkt-actions">${actionButton(renewalOpensText(d.info, p), LI.calendarClock, "renewal-opens", { disabled: true })}</div>`;
+    if (d.info.isListed) {
+      items.push({ id: "list", title: "Change Price", subtitle: "Changes the asking price.", icon: I.tag, disabled: s !== Status.active });
+      items.push({ id: "delist", title: "Delist", subtitle: "Takes the name off the market.", icon: LI.tagSlash });
+    } else {
+      items.push({ id: "list", title: "List for Sale", subtitle: "Puts the name up for sale at your price.", icon: I.tag, disabled: s !== Status.active });
     }
-    return html;
+    items.push({ id: "transfer", title: "Transfer", subtitle: "Sends the name to another address.", icon: I.swap });
+    // The primary name is the chatting address's identity: a name on a spending address can't be it.
+    if (mine()) {
+      items.push({
+        id: "primary", title: "Set as Primary", subtitle: "Shows you by this name across KaChat.", icon: LI.personCheck,
+        disabled: s !== Status.active || d.primaryWorking,
+      });
+    }
+    items.push({ id: "release", title: "Release Name", subtitle: "Gives the name up and returns its deposit.", icon: LI.trash, destructive: true });
+    return items;
+  };
+
+  /** The Manage Name half sheet (iOS manageSheet): the name, "Renewal opens on <date>" while it
+   *  hasn't, and the owner's actions as tiles; the picked one opens once the sheet has gone. */
+  const openManage = async () => {
+    if (d.managing) return;
+    const p = params();
+    const note = p && !renewalOpen(d.info, p) ? renewalOpensText(d.info, p) : "";
+    d.managing = true;
+    let choice = null;
+    try {
+      choice = await chooseDialog({ title: d.info.display, message: note, layout: "tiles", options: manageItems() });
+    } finally {
+      d.managing = false;
+    }
+    if (!choice || !d.active) return;
+    runAction(choice);
   };
 
   const actionButtons = () => {
     const s = status();
     const I = kit.ICON;
     if (canActAsOwner()) {
-      // The primary name is the chatting address's identity: a name on a spending address can't be it.
-      const primary = mine() ? actionButton("Set as Primary", LI.personCheck, "primary", { disabled: s !== Status.active || d.primaryWorking }) : "";
-      const delist = d.info.isListed ? actionButton("Delist", LI.tagSlash, "delist") : "";
+      const p = params();
+      // Expired (in grace or lapsed) and renewable: the one thing that matters now stays on the
+      // page instead of inside the menu.
+      const renew = s !== Status.active && p && renewalOpen(d.info, p) ? actionButton("Renew", LI.refresh, "renew", { prominent: true }) : "";
+      // Every owner action lives in one half sheet of tiles.
       return `
         <div class="kl-action-grid">
-          ${periodActions()}
-          <div class="kmkt-actions">
-            ${actionButton(d.info.isListed ? "Change Price" : "List for Sale", I.tag, "list", { disabled: s !== Status.active })}
-            ${actionButton("Transfer", I.swap, "transfer")}
-          </div>
-          ${delist || primary ? `<div class="kmkt-actions">${delist}${primary}</div>` : ""}
-          <div class="kmkt-actions">${actionButton("Release Name", LI.trash, "release", { danger: true })}</div>
+          ${renew ? `<div class="kmkt-actions">${renew}</div>` : ""}
+          <div class="kmkt-actions">${actionButton("Manage Name", LI.sliders, "manage", { prominent: s === Status.active })}</div>
         </div>`;
     }
     // A KasSigner address holds it: read-only here (the Owner card says which); acting on it is the
@@ -1929,7 +2073,12 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
           <span class="kl-owner-icon">${kit.ICON.personCircle}</span>
           <div class="kmkt-seller-copy">
             ${label ? `<strong>${esc(label)}</strong>` : ""}
-            ${address ? `<span class="kl-mono">${esc(address)}</span>` : ""}
+            ${address ? `
+              <button class="kl-owner-address" type="button" data-kl-copy-owner title="${esc(address)}" aria-label="${esc(address)}"
+                aria-description="Copies the address">
+                <span class="kl-mono">${esc(compactAddress(address))}</span>
+                <span class="kl-owner-copy-icon">${d.ownerCopied ? LI.check : LI.copy}</span>
+              </button>` : ""}
           </div>
           ${!ownedByWallet() && address ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-message>${kit.ICON.bubbles}<span>Message</span></button>` : ""}
         </div>
@@ -1939,11 +2088,15 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
   const offersSection = () => {
     const isOwnerIndexer = canActAsOwner() && !!rt()?.registry.isIndexer;
     const list = d.offers.length
-      ? listCard(d.offers.map((o) => offerRowHtml(o, { isBuyer: isMine(o.buyer), isOwner: isOwnerIndexer, nameInfo: d.info })).join(""), 50)
+      ? listCard(d.offers.map((o) => offerRowHtml(o, {
+        isBuyer: isMine(o.buyer), isOwner: isOwnerIndexer, nameInfo: d.info,
+        // made to an earlier owner (registry v3): never acceptable, on its way back to the buyer
+        declined: o.isDeclined(d.info.owner),
+      })).join(""), 50)
       : `<div class="kmkt-card kmkt-empty-card">No open offers.</div>`;
     return `
       <section class="kmkt-block">
-        ${kit.sectionHeader("Offers", canActAsOwner() ? "Accept one to sell the name for it." : "")}
+        ${kit.sectionHeader("Offers", canActAsOwner() ? "Tap an offer to accept it. Expired offers go back to their buyers." : "")}
         ${list}
         ${chainNote()}
       </section>`;
@@ -2019,7 +2172,14 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     }
     try { d.offers = await registry.offersFor(d.info.name); } catch { d.offers = []; }
     try { d.history = await registry.history(d.info.name); } catch { d.history = []; }
-    if (d.offers.length) await actions.refreshVirtualDaa().catch(() => null);
+    if (d.offers.length) {
+      await actions.refreshVirtualDaa().catch(() => null);
+      // Expired offers don't stay on your name: the owner's app (and the buyer's) send them back.
+      const expiredToReturn = canActAsOwner() ? d.offers : d.offers.filter((o) => isMine(o.buyer));
+      await actions.returnExpiredOffers(expiredToReturn).catch(() => null);
+      // Your offers made to an earlier owner of this name: pulled back.
+      await actions.withdrawDeclinedOffers(d.offers).catch(() => null);
+    }
     d.render();
   };
 
@@ -2028,9 +2188,15 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     if (!r || !d.active) return;
     d.detach();
     d.unsubscribe.push(r.registry.onChange(() => { d.reload(); }));
-    let lastDaa = r.actions.virtualDaa;
-    d.unsubscribe.push(r.actions.subscribe(({ virtualDaa }) => {
-      if (virtualDaa !== lastDaa) { lastDaa = virtualDaa; if (d.offers.length) d.render(); }
+    // the offer rows follow the DAA score (expiry) and what this app is sending back
+    const offerSig = () => {
+      const a = r.actions;
+      return `${a.virtualDaa}|${a.returningOffers?.size ?? 0}|${a.withdrawingOffers?.size ?? 0}|${a.decliningOffers?.size ?? 0}`;
+    };
+    let lastSig = offerSig();
+    d.unsubscribe.push(r.actions.subscribe(() => {
+      const sig = offerSig();
+      if (sig !== lastSig) { lastSig = sig; if (d.offers.length) d.render(); }
     }));
     d.reload();
   };
@@ -2041,6 +2207,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
 
   d.destroy = () => {
     d.detach();
+    clearTimeout(d.ownerCopiedTimer);
     d.active = false;
   };
 
@@ -2066,6 +2233,25 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     });
   };
 
+  /** Opens what an action button or a Manage Name tile names. */
+  const runAction = (id) => {
+    const info = d.info;
+    switch (id) {
+      case "buy": openBuySheet(info, owner); break;
+      case "offer": openOfferSheet(info, owner); break;
+      case "manage": openManage(); break;
+      case "extend": openExtendSheet(info, owner); break;
+      case "renew": openRenewSheet(info, owner); break;
+      case "list": openListSheet(info, owner); break;
+      case "delist": openDelistSheet(info, owner); break;
+      case "transfer": openTransferSheet(info, owner); break;
+      case "release": openReleaseSheet(info, owner); break;
+      case "reclaim": openReclaimSheet(info, owner); break;
+      case "primary": setPrimary(); break;
+      default: break;
+    }
+  };
+
   /** Clicks inside the detail. True when handled. */
   d.onClick = (event) => {
     const target = event.target;
@@ -2080,19 +2266,17 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     const act = target.closest("[data-kl-act]");
     if (act) {
       if (act.disabled) return true;
-      const info = d.info;
-      switch (act.dataset.klAct) {
-        case "buy": openBuySheet(info, owner); break;
-        case "offer": openOfferSheet(info, owner); break;
-        case "extend": openExtendSheet(info, owner); break;
-        case "renew": openRenewSheet(info, owner); break;
-        case "list": openListSheet(info, owner); break;
-        case "delist": openDelistSheet(info, owner); break;
-        case "transfer": openTransferSheet(info, owner); break;
-        case "release": openReleaseSheet(info, owner); break;
-        case "reclaim": openReclaimSheet(info, owner); break;
-        case "primary": setPrimary(); break;
-        default: break;
+      runAction(act.dataset.klAct);
+      return true;
+    }
+    if (target.closest("[data-kl-copy-owner]")) {
+      const address = ownerAddress();
+      if (address) {
+        try { navigator.clipboard?.writeText(address); } catch { /* clipboard blocked */ }
+        d.ownerCopied = true;
+        d.render();
+        clearTimeout(d.ownerCopiedTimer);
+        d.ownerCopiedTimer = setTimeout(() => { d.ownerCopied = false; d.render(); }, 1500);
       }
       return true;
     }

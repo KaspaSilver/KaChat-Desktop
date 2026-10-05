@@ -13009,3 +13009,20 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .testnet-faucet-copy small { font-size: 12px; color: var(--muted); line-height: 1.35; }
 .testnet-faucet-open { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .testnet-faucet-button.locked .testnet-faucet-open, .testnet-faucet-button.checking .testnet-faucet-open { display: none; }
+
+/* ==== .kachat name detail and offers (iOS 71448d8, f61b978, ba07975, 49c0baa) ====
+   The Owner card's address on one line - its network prefix and both ends - copied on click (a
+   checkmark for 1.5 s); offer rows the owner can click to accept, dimmed while an expired or
+   declined offer goes back to its buyer. Manage Name uses chooseDialog's .action-tiles. */
+.kl-owner .kl-owner-address {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; margin: 0; padding: 0;
+  border: 0; background: none; color: var(--muted); font: inherit; text-align: left; cursor: pointer;
+}
+.kl-owner .kl-owner-address .kl-mono { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kl-owner .kl-owner-address:hover .kl-mono { color: var(--text); }
+.kl-owner .kl-owner-address:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; border-radius: 4px; }
+.kl-owner-copy-icon { display: inline-flex; flex: 0 0 auto; }
+.kl-owner-copy-icon .kmkt-ico { width: 13px; height: 13px; }
+.kl-offer-row.kl-offer-tappable { cursor: pointer; }
+.kl-offer-row.kl-offer-tappable:hover { background-color: var(--row-hover); }
+.kl-offer-row.kl-offer-dim { opacity: .6; }

@@ -27,6 +27,15 @@
 //
 // Amounts, prices, DAA scores and years passed in are BigInt (Numbers are accepted and converted).
 // Registration records are plain JSON-safe objects (see PendingRegistration below).
+//
+// Registry v3: register, extend and renew read their price from a random live price shard
+// (`registry.shards()`) and are rebuilt on another shard when the node says the picked one was
+// just spent; "years" are periods of the manifest's `periodMs` (a year on mainnet, 10 minutes on
+// testnet). Offers are made to the name's current owner (the seller), capped at `maxOfferDays`;
+// only that owner accepts or declines them, and a transfer, release or accepted offer declines the
+// rest (`declineOpenOffers`). Offers past their refund time go back to the buyer from whichever app
+// sees them first (`returnExpiredOffers`), and a buyer's app pulls back its offers on a name that
+// changed hands (`withdrawDeclinedOffers`).
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
@@ -35,11 +44,11 @@ import { ADDRESS_HRP, isNetworkAddress } from "../network.js";
 import { enqueueSend, excludeReservedUtxos } from "../transactions.js";
 import {
   Failure, minFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
-  gapState, nameState, offerState,
+  gapState, nameState, offerState, priceState, priceFieldsPrice,
 } from "./codec.js";
 import { makeOutpoint, makeUtxo, makeUtxoEntry, outpointKey } from "./transaction.js";
-import { templateScript, paramsPrice } from "./manifest.js";
-import { registerNow, renewWindowOpen } from "./builder.js";
+import { templateScript } from "./manifest.js";
+import { registerNow, renewWindowOpen, BudgetRole } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { OfferInfo, Profile, Status } from "./registry-state.js";
 import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
@@ -84,15 +93,29 @@ export const registrationsStorageKey = "kachat-names-registrations-testnet-v1";
 
 // MARK: - Errors
 
-/** A unix-ms day ("Oct 12, 2027") in `locale` (default: the runtime's), Swift
- *  `KachatNamesActions.dayString` (DateFormatter, medium date style, no time). */
+/** A unix-ms day ("Oct 12, 2027") in `locale` (default: the runtime's), with the time when it is
+ *  within two days of now (testnet's 10-minute periods, or a renewal that opens tomorrow). Swift
+ *  `KachatNamesActions.dayString` (DateFormatter, medium date style, short time near the deadline). */
 export function dayString(ms, locale = undefined) {
   const d = new Date(Number(ms));
+  const near = Math.abs(Number(ms) - nowMs()) < 2 * 86_400_000;
   try {
-    return new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(d);
+    return new Intl.DateTimeFormat(locale, near ? { dateStyle: "medium", timeStyle: "short" } : { dateStyle: "medium" }).format(d);
   } catch {
-    return d.toDateString();
+    return near ? d.toString() : d.toDateString();
   }
+}
+
+/** Longest an offer can run before its buyer may take it back (the app's cap, registry v3), days. */
+export const maxOfferDays = 7n;
+/** Kaspa's DAA scores per second (offer refund times are DAA scores). */
+export const daaPerSecond = 10n;
+
+/** Whether a submit failed because an input was already spent (Swift `isSpentConflict`): a
+ *  register, extend or renew that lost its price shard is rebuilt on another. */
+export function isSpentConflict(error) {
+  const lower = errorMessage(error).toLowerCase();
+  return lower.includes("already spent") || lower.includes("double spend") || lower.includes("orphan");
 }
 
 /** Swift `KachatNamesActions.ActionError`; `code` is the case name. Extra fields per case:
@@ -116,11 +139,11 @@ export class ActionError extends Error {
   static renewalNotOpen(opensMs) {
     return new ActionError("renewalNotOpen", `Renewal opens on ${dayString(opensMs)}`, { opensMs: BigInt(opensMs) });
   }
-  /** extend past `periodStart + maxYears` */
+  /** extend past `periodStart + maxYears` periods */
   static periodFull(renewalOpensMs) {
     return new ActionError(
       "periodFull",
-      `This name is already paid for 2 years from the start of its period. Renewal opens on ${dayString(renewalOpensMs)}.`,
+      `This name is already paid up to its longest period. Renewal opens on ${dayString(renewalOpensMs)}.`,
       { renewalOpensMs: BigInt(renewalOpensMs) },
     );
   }
@@ -128,14 +151,24 @@ export class ActionError extends Error {
   static periodUnknown() {
     return new ActionError("periodUnknown", "The names indexer didn't send this name's paid period. Pull to refresh and try again.");
   }
+  /** no live price shard could be read (registry v3) */
+  static priceBusy() { return new ActionError("priceBusy", "The price record is busy right now. Try again in a moment."); }
+  /** accept on an offer past its refund time */
+  static offerExpired() { return new ActionError("offerExpired", "This offer has expired. It's going back to the buyer."); }
+  /** accept on an offer made to an earlier owner of the name */
+  static offerDeclined() {
+    return new ActionError("offerDeclined", "This offer was made before the name changed hands, so it's declined and going back to the buyer.");
+  }
+  static ownOffer() { return new ActionError("ownOffer", "You can't make an offer on your own name."); }
+  static offerTooLong() { return new ActionError("offerTooLong", "An offer can run for up to 7 days."); }
 }
 
 // MARK: - Operations
 
-/** Swift `KachatNamesActions.Operation`: `{ kind, ... }`. `name` is a NameInfo, `offer` an
- *  OfferInfo (registry-state.js), except `offer`'s `name` (a plain string). */
+/** Swift `KachatNamesActions.Operation`: `{ kind, ... }`. `name` / `target` is a NameInfo, `offer`
+ *  an OfferInfo (registry-state.js). "years" are periods of the manifest's `periodMs`. */
 export const Operation = Object.freeze({
-  /** add years to the current paid period (anyone, any time, up to 2 years past periodStart) */
+  /** add periods to the current paid period (anyone, any time, up to maxYears periods past periodStart) */
   extend: (name, years) => ({ kind: "extend", name, years: BigInt(years) }),
   /** start the next period at the current expiry (anyone, once the renewal window opened) */
   renew: (name, years) => ({ kind: "renew", name, years: BigInt(years) }),
@@ -143,10 +176,14 @@ export const Operation = Object.freeze({
   /** price 0 delists */
   list: (name, price) => ({ kind: "list", name, price: BigInt(price) }),
   buy: (name) => ({ kind: "buy", name }),
-  offer: (name, amount, refundAfterDaa, target = null) => ({ kind: "offer", name, amount: BigInt(amount), refundAfterDaa: BigInt(refundAfterDaa), target }),
+  /** made to `target`'s current owner (a NameInfo), the only one who can accept or decline it;
+   *  `refundAfterDaa` at most `maxOfferDays` ahead */
+  offer: (target, amount, refundAfterDaa) => ({ kind: "offer", target, amount: BigInt(amount), refundAfterDaa: BigInt(refundAfterDaa) }),
   withdraw: (offer) => ({ kind: "withdraw", offer }),
   refund: (offer) => ({ kind: "refund", offer }),
   accept: (offer, name) => ({ kind: "accept", offer, name }),
+  /** the seller sends it back to the buyer (registry v3); the network fee comes out of the offer */
+  decline: (offer) => ({ kind: "decline", offer }),
   release: (name) => ({ kind: "release", name }),
   reclaim: (name) => ({ kind: "reclaim", name }),
 });
@@ -200,6 +237,12 @@ export class KachatNamesActions {
     this._pendingWallet = null;
     this._driver = null;
     this._listeners = new Set();
+    /** the price shards the last `_liveShard` read (ShardInfo[]), to map a plan's shard back */
+    this._lastShards = [];
+    /** offer ids (txid:index) this app is sending back / withdrawing / declining this session */
+    this.returningOffers = new Set();
+    this.withdrawingOffers = new Set();
+    this.decliningOffers = new Set();
   }
 
   // MARK: Observing (Swift @Published pending / virtualDaa)
@@ -288,14 +331,24 @@ export class KachatNamesActions {
     return null;
   }
 
+  /** The x-only key an owner-only `op` must be signed by: the name's owner for transfer,
+   *  list/delist, accept and release; the offer's seller for decline. null for everything else. */
+  static heldBy(op) {
+    if (!op) return null;
+    if (["transfer", "list", "release", "accept"].includes(op.kind)) return op.name?.owner ?? null;
+    // the seller declines with the key the offer was made to
+    if (op.kind === "decline") return op.offer?.seller ?? null;
+    return null;
+  }
+
   /** The spending address that signs and pays for `op` (iOS signer(for:)): owner-only actions
-   *  (transfer, list/delist, accept, release) on a name one of the wallet's spending addresses
-   *  holds. null = the chatting address (everything else, extend and renew included - anyone may
-   *  pay those). */
+   *  (transfer, list/delist, accept, release, decline) on a name or offer one of the wallet's
+   *  spending addresses holds. null = the chatting address (everything else, extend and renew
+   *  included - anyone may pay those). */
   payerFor(op) {
-    const held = op && ["transfer", "list", "release", "accept"].includes(op.kind) ? op.name : null;
-    if (!held?.owner) return null;
-    const own = this.ownAddress(held.owner);
+    const held = KachatNamesActions.heldBy(op);
+    if (!held) return null;
+    const own = this.ownAddress(held);
     return own?.kind === "spending" ? own : null;
   }
 
@@ -309,7 +362,7 @@ export class KachatNamesActions {
     try { key = this.wallet.spendingPrivateKey?.(payer.index) ?? null; } catch { key = null; }
     if (!key) throw ActionError.noWallet();
     const me = xonlyKey(key);
-    if (!bytesEqual(me, op.name.owner) || !bytesEqual(keyOf(payer.address), me)) throw ActionError.keyMismatch();
+    if (!bytesEqual(me, KachatNamesActions.heldBy(op)) || !bytesEqual(keyOf(payer.address), me)) throw ActionError.keyMismatch();
     return { address: payer.address, privateKey: key, me };
   }
 
@@ -389,6 +442,32 @@ export class KachatNamesActions {
     return { fields: o.fields, value: u.entry.amount, utxo: u, name: o.name ?? null };
   }
 
+  /** A live price shard (a builder PriceRecord) for a register, extend or renew (registry v3): a
+   *  random one of the K, so paid operations at the same moment rarely pick the same shard,
+   *  skipping `avoid` (shard indexes, BigInt, a previous attempt lost to someone else) and any the
+   *  node no longer has at that state. */
+  async _liveShard(m, avoid = new Set()) {
+    const all = await this.registry.shards();
+    this._lastShards = all;
+    const fresh = shuffled(all.filter((x) => !avoid.has(x.shard)));
+    const lost = shuffled(all.filter((x) => avoid.has(x.shard)));
+    for (const sh of [...fresh, ...lost]) {
+      let u;
+      try {
+        u = await this.service.livePriceUtxo({ script: templateScript(m.price, priceState(sh.fields)), outpoint: sh.outpoint });
+      } catch { continue; }
+      return { fields: sh.fields, value: u.entry.amount, utxo: u };
+    }
+    throw ActionError.priceBusy();
+  }
+
+  /** The price shard index (BigInt) a built plan spends (register, extend, renew), or null. */
+  _shardSpentBy(plan) {
+    const u = plan.inputs.find((i) => i.role === BudgetRole.priceUse)?.utxo;
+    if (!u) return null;
+    return this._lastShards.find((x) => bytesEqual(x.outpoint.txid, u.outpoint.txid) && x.outpoint.index === u.outpoint.index)?.shard ?? null;
+  }
+
   // MARK: Operations
 
   /** Builds `op` against live UTXOs without submitting anything: the fee and outputs a sheet shows
@@ -399,7 +478,7 @@ export class KachatNamesActions {
     return (await this._build(op, s)).plan;
   }
 
-  async _build(op, s) {
+  async _build(op, s, avoidShards = new Set()) {
     const m = await this.registry.prepare();
     const { builder: b, env, wallet } = await this._context(s);
     let plan;
@@ -408,14 +487,14 @@ export class KachatNamesActions {
         const years = BigInt(op.years);
         if (op.name.periodStart == null) throw ActionError.periodUnknown();
         if (years < 1n || years > op.name.extendableYears(m.params)) throw ActionError.periodFull(op.name.renewOpens(m.params));
-        plan = b.extend({ env, wallet, name: await this._liveName(op.name, m), years });
+        plan = b.extend({ env, wallet, name: await this._liveName(op.name, m), shard: await this._liveShard(m, avoidShards), years });
         break;
       }
       case "renew":
         // Valid only once the network's median time passes the window opening (the mempool keeps
         // no future-dated transactions): refuse before, and say when it opens.
         if (!renewWindowOpen(env, m.params, op.name.expiresAt)) throw ActionError.renewalNotOpen(op.name.renewOpens(m.params));
-        plan = b.renew({ env, wallet, name: await this._liveName(op.name, m), years: BigInt(op.years) });
+        plan = b.renew({ env, wallet, name: await this._liveName(op.name, m), shard: await this._liveShard(m, avoidShards), years: BigInt(op.years) });
         break;
       case "transfer":
         validateKey(op.to, "The new owner");
@@ -433,11 +512,17 @@ export class KachatNamesActions {
         validateKey(env.me, "Your key");
         plan = b.buy({ env, wallet, name: await this._liveName(op.name, m) });
         break;
-      case "offer":
+      case "offer": {
         validateKey(env.me, "Your key");
-        // as Swift: the target only fed the builder's notes, and is not passed on
-        plan = b.offer({ env, wallet, name: op.name, amount: BigInt(op.amount), refundAfter: BigInt(op.refundAfterDaa) });
+        if (op.target == null) throw new Failure("an offer is made on a registered name");
+        if (bytesEqual(op.target.owner, env.me)) throw ActionError.ownOffer();
+        // the app's cap: the buyer's funds come back within a week at most
+        const refundAfter = BigInt(op.refundAfterDaa);
+        const cap = env.blockDaa + maxOfferDays * 86_400n * daaPerSecond;
+        if (!(refundAfter > env.blockDaa && refundAfter <= cap)) throw ActionError.offerTooLong();
+        plan = b.offer({ env, wallet, target: await this._liveName(op.target, m), amount: BigInt(op.amount), refundAfter });
         break;
+      }
       case "withdraw":
         plan = b.withdrawOffer({ env, offer: await this._liveOffer(op.offer, m) });
         break;
@@ -445,8 +530,15 @@ export class KachatNamesActions {
         plan = b.refundOffer({ env, offer: await this._liveOffer(op.offer, m) });
         break;
       case "accept":
+        // The contract would still take an expired offer; the app doesn't - it goes back.
+        if (op.offer.refundable(env.blockDaa)) throw ActionError.offerExpired();
+        // Made to an earlier owner: the contract refuses it, and it goes back to the buyer.
+        if (op.offer.isDeclined(op.name.owner)) throw ActionError.offerDeclined();
         validateKey(op.offer.buyer, "The buyer");
         plan = b.acceptOffer({ env, name: await this._liveName(op.name, m), offer: await this._liveOffer(op.offer, m) });
+        break;
+      case "decline":
+        plan = b.declineOffer({ env, offer: await this._liveOffer(op.offer, m) });
         break;
       case "release":
       case "reclaim": {
@@ -463,22 +555,120 @@ export class KachatNamesActions {
 
   /** Builds, signs and submits `op`; returns the txid. The registry refreshes once the
    *  transaction is accepted. Runs in the engine's per-address send queue, so a chat message sent
-   *  meanwhile cannot pick the same coin. */
+   *  meanwhile cannot pick the same coin. A transfer, release or accepted offer then declines the
+   *  name's other open offers made to this owner (`declineOpenOffers`). */
   async perform(op) {
     const s = this.signerFor(op);
-    const { plan, txId } = await enqueueSend(s.address, async () => {
-      const { plan: p, env } = await this._build(op, s);
-      return { plan: p, txId: await this.service.signAndSubmit(p, { privateKey: s.privateKey, env }) };
-    });
+    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s));
     if (op.kind === "offer" && plan.newOffer) {
       const o = plan.newOffer;
       await this.registry.trackOffer(new OfferInfo({
-        outpoint: o.utxo.outpoint, key: o.fields.key, name: o.name, buyer: o.fields.buyer,
+        outpoint: o.utxo.outpoint, key: o.fields.key, name: o.name, buyer: o.fields.buyer, seller: o.fields.seller,
         amount: o.value, refundAfter: o.fields.refundAfter, createdAt: BigInt(nowMs()),
       }));
     }
+    // A name that leaves this owner takes no offers with it: the ones made to this owner can never
+    // be accepted any more, so they go straight back to their buyers.
+    if (op.kind === "transfer" || op.kind === "release") this.declineOpenOffers(op.name, null);
+    else if (op.kind === "accept") this.declineOpenOffers(op.name, op.offer);
     this.registry.refreshAfter(txId);
     return txId;
+  }
+
+  /** Builds, signs and submits `op` -> `{ plan, txId }`. A register, extend or renew that lost its
+   *  price shard to someone else's transaction (the node rejects it as already spent; nothing was
+   *  sent) is rebuilt on another shard, up to twice. */
+  async _submit(op, s) {
+    const avoid = new Set();
+    for (let attempt = 0; ; attempt++) {
+      const { plan, env } = await this._build(op, s, avoid);
+      try {
+        return { plan, txId: await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env }) };
+      } catch (error) {
+        const shard = this._shardSpentBy(plan);
+        if (attempt >= 2 || shard == null || !isSpentConflict(error)) throw error;
+        avoid.add(shard);
+      }
+    }
+  }
+
+  // MARK: Offers that go back to their buyers
+
+  /** Sends expired offers (OfferInfo[]) back to their buyers. Past its refund time an offer can
+   *  still be accepted on chain until someone refunds it, so it would otherwise hang on the name.
+   *  The refund needs nobody's key and its network fee comes out of the offer itself, so whichever
+   *  app sees one first - its buyer's, or the owner's of the name it's on - returns it, at no cost
+   *  to either. Each offer is tried once per session; a refund someone else got in first just fails
+   *  quietly. Returns once the refunds are started (they finish in the background). */
+  async returnExpiredOffers(offers) {
+    if (!KachatNamesService.isLaunched || !Array.isArray(offers) || offers.length === 0) return;
+    let daa = null;
+    try { daa = await this.refreshVirtualDaa(); } catch { daa = this.virtualDaa; }
+    if (daa == null) return;
+    for (const o of offers) {
+      if (!o?.refundable?.(daa) || this.returningOffers.has(o.id)) continue;
+      this.returningOffers.add(o.id);
+      this._emit();
+      this.perform(Operation.refund(o)).then(
+        (txId) => this.engine?.log?.(`[KachatNames] returned expired offer ${o.id} to its buyer: ${txId}`),
+        (e) => this.engine?.log?.(`[KachatNames] expired offer ${o.id} not returned: ${errorMessage(e)}`),
+      );
+    }
+  }
+
+  /** Sends back every open offer on `name` (a NameInfo) made to its owner, once the name leaves
+   *  them (transfer, release, or an accepted offer - `except` is that one). Each is the seller's
+   *  `decline`, so it costs the seller nothing: the network fee comes out of the offer. Runs in the
+   *  background; returns its promise. */
+  declineOpenOffers(name, except = null) {
+    if (!KachatNamesService.isLaunched || !name) return Promise.resolve();
+    return (async () => {
+      let open = [];
+      try { open = await this.registry.offersFor(name.name); } catch { open = []; }
+      open = open.filter((o) => bytesEqual(o.seller, name.owner) && o.id !== except?.id && !this.decliningOffers.has(o.id));
+      for (const o of open) {
+        this.decliningOffers.add(o.id);
+        this._emit();
+        try {
+          const txId = await this.perform(Operation.decline(o));
+          this.engine?.log?.(`[KachatNames] declined offer ${o.id} on ${name.name} (the name left this owner): ${txId}`);
+        } catch (e) {
+          this.engine?.log?.(`[KachatNames] offer ${o.id} not declined: ${errorMessage(e)}`);
+        }
+      }
+    })();
+  }
+
+  /** Pulls this wallet's declined offers (OfferInfo[]) back: those made to an earlier owner of the
+   *  name (the contract refuses them now) or on a name since released. A withdraw, signed by the
+   *  buyer - this wallet's chatting address - and paid back to it. Before its refund time only the
+   *  buyer or the seller can return an offer, so the buyer's app does it as soon as it sees the name
+   *  changed hands; after that, `returnExpiredOffers` covers it from any app. Each offer is tried
+   *  once per session. Returns once the withdrawals are started. */
+  async withdrawDeclinedOffers(offers) {
+    const me = this.myKey;
+    if (!KachatNamesService.isLaunched || !me || !Array.isArray(offers)) return;
+    const mine = offers.filter((o) => o && bytesEqual(o.buyer, me) && !this.withdrawingOffers.has(o.id) && !this.returningOffers.has(o.id));
+    if (mine.length === 0) return;
+    /** name -> owner bytes | null (free); absent = lookup failed */
+    const ownerByName = new Map();
+    for (const o of mine) {
+      if (!o.name) continue;
+      if (!ownerByName.has(o.name)) {
+        let r;
+        try { r = await this.registry.lookup(o.name); } catch { continue; }
+        ownerByName.set(o.name, r.kind === "registered" ? r.info.owner : null);
+      }
+      const current = ownerByName.get(o.name);
+      // still made to the name's current owner: it stands
+      if (current != null && !o.isDeclined(current)) continue;
+      this.withdrawingOffers.add(o.id);
+      this._emit();
+      this.perform(Operation.withdraw(o)).then(
+        (txId) => this.engine?.log?.(`[KachatNames] withdrew declined offer ${o.id} (the name changed hands): ${txId}`),
+        (e) => this.engine?.log?.(`[KachatNames] declined offer ${o.id} not withdrawn: ${errorMessage(e)}`),
+      );
+    }
   }
 
   // MARK: Profile record (every network: profileSigner)
@@ -515,9 +705,10 @@ export class KachatNamesActions {
 
   // MARK: Registration
 
-  /** The cost of registering `name` for `years` inside `gap` (a GapInfo), estimated by building
-   *  both transactions (nothing is signed or sent). Amounts are BigInt sompi:
-   *  `{ name, years, price (price per year x years, left to miners), bond (returned on release),
+  /** The cost of registering `name` for `years` periods inside `gap` (a GapInfo), estimated by
+   *  building both transactions (nothing is signed or sent) at a live price shard's price. Amounts
+   *  are BigInt sompi:
+   *  `{ name, years, price (price per period x periods, left to miners), bond (returned on release),
    *  gapDeposit (the extra gap the registration creates, returned on release), commit (the
    *  commit's value, returned into the registration), networkFee, total (what leaves the wallet in
    *  the end: price + bond + gap deposit + network fees), spendable, affordable }`. */
@@ -528,7 +719,8 @@ export class KachatNamesActions {
     const { builder: b, env, wallet } = await this._context(s);
     const salt = newSalt();
     const spendable = wallet.reduce((a, u) => a + u.entry.amount, 0n);
-    const price = paramsPrice(m.params, utf8(name).length) * years;
+    const shard = await this._liveShard(m);
+    const price = priceFieldsPrice(shard.fields, utf8(name).length) * years;
     let commitFee = 0n;
     let registerFee = 0n;
     try {
@@ -548,7 +740,7 @@ export class KachatNamesActions {
         try {
           const reg = b.register({
             env, wallet: rest, gap: { lo: gap.lo, hi: gap.hi, value: m.params.gapValue, utxo: gapUtxo },
-            commit, years, now: registerNow(env),
+            commit, shard, years, now: registerNow(env),
           });
           registerFee = reg.networkFee;
         } catch { /* estimated below */ }
@@ -676,7 +868,7 @@ export class KachatNamesActions {
       try {
         while (!token.cancelled) {
           const address = this.myAddress;
-          // the driver stops while the registry is being upgraded (a registry v1 manifest)
+          // the driver stops while the registry is being upgraded (an earlier registry's manifest)
           if (!KachatNamesService.isLaunched || !address || address !== this._pendingWallet || this.service.registryUpgrading
             || !this._pending.some(needsDriving)) break;
           for (const p of this._pending.filter(needsDriving)) {
@@ -792,6 +984,9 @@ export class KachatNamesActions {
         const plan = b.register({
           env, wallet, gap: await this._liveGap(gap, m),
           commit: { name: p.name, owner: s.me, salt, value: commit.entry.amount, utxo: commit },
+          // a random live shard each try: one someone else just spent fails this try, and the
+          // next tick picks again
+          shard: await this._liveShard(m),
           years: BigInt(p.years), now: registerNow(env),
         });
         return this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
@@ -881,6 +1076,16 @@ export class KachatNamesActions {
 }
 
 function commitOutpoint(p) { return makeOutpoint(unhex32(p.commitTxId), 0); }
+
+/** A shuffled copy (Fisher-Yates). */
+function shuffled(xs) {
+  const a = [...xs];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 function newId() {
   const c = globalThis.crypto;

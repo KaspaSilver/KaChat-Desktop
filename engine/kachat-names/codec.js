@@ -21,9 +21,9 @@ export class Failure extends Error {
   }
 
   /**
-   * The manifest describes registry v1 (the first testnet-10 genesis): this app builds for
-   * registry v2 (the 2-year cap) and waits for its genesis manifest. Not an error to show as
-   * one: the screens say the registry is being set up. (Swift `Failure.outdatedRegistry`.)
+   * The manifest describes an earlier registry (v1 or v2): this app builds for registry v3 (the
+   * price record, seller-bound offers, periodMs) and waits for its genesis manifest. Not an error
+   * to show as one: the screens say the registry is being set up. (Swift `Failure.outdatedRegistry`.)
    */
   static outdatedRegistry() { return new Failure(outdatedRegistryMessage); }
 
@@ -32,11 +32,13 @@ export class Failure extends Error {
 }
 
 /** The message of `Failure.outdatedRegistry()`. */
-export const outdatedRegistryMessage = "manifest: registry v1; this app needs the registry v2 manifest (new genesis pending)";
+export const outdatedRegistryMessage = "manifest: an earlier registry; this app needs the registry v3 manifest (new genesis pending)";
 
 // MARK: - Constants (rusty-kaspa a41a333, kachat-domains params)
 
 export const sompiPerKas = 100_000_000n;
+/** A mainnet period. Registry v3 reads the period from the manifest (`params.periodMs`):
+ *  testnet-10 runs a 10-minute clock. */
 export const yearMs = 31_536_000_000n;
 /** rusty-kaspa `LOCK_TIME_THRESHOLD`: lock times below it are DAA scores, above unix ms. */
 export const lockTimeThreshold = 500_000_000_000n;
@@ -311,9 +313,30 @@ export function nameState(f) {
     [0x08], num8(f.expiresAt));
 }
 
-/** Offer state, 75 bytes: `0x20 key 0x20 buyer 0x08 refundAfter`. */
+/** Offer state (registry v3), 108 bytes: `0x20 key 0x20 buyer 0x20 seller 0x08 refundAfter`. */
 export function offerState(f) {
-  return concat([0x20], f.key, [0x20], f.buyer, [0x08], num8(f.refundAfter));
+  return concat([0x20], f.key, [0x20], f.buyer, [0x20], f.seller, [0x08], num8(f.refundAfter));
+}
+
+/** Price shard state (registry v3), 87 bytes: `0x08 shard 0x20 authority (0x08 price) x5`. */
+export function priceState(f) {
+  const parts = [[0x08], num8(f.shard), [0x20], f.authority];
+  for (const p of f.prices) parts.push([0x08], num8(BigInt(p)));
+  return concat(...parts);
+}
+
+/** A price shard state -> PriceFields. */
+export function decodePriceState(s) {
+  if (s.length !== 87 || s[0] !== 0x08 || s[9] !== 0x20) throw new Failure("not a price state");
+  const prices = [];
+  for (let t = 0; t < 5; t++) {
+    const at = 42 + t * 9;
+    if (s[at] !== 0x08) throw new Failure("not a price state");
+    const v = decodeNum8(s.subarray(at + 1, at + 9));
+    if (v < 0n) throw new Failure("negative price");
+    prices.push(v);
+  }
+  return makePriceFields({ shard: decodeNum8(s.subarray(1, 9)), authority: s.slice(10, 42), prices });
 }
 
 /** A gap state -> `{ lo, hi }`. */
@@ -336,8 +359,10 @@ export function decodeNameState(s) {
 
 /** An offer state -> OfferFields. */
 export function decodeOfferState(s) {
-  if (s.length !== 75 || s[0] !== 0x20 || s[33] !== 0x20 || s[66] !== 0x08) throw new Failure("not an offer state");
-  return makeOfferFields({ key: s.slice(1, 33), buyer: s.slice(34, 66), refundAfter: decodeNum8(s.subarray(67, 75)) });
+  if (s.length !== 108 || s[0] !== 0x20 || s[33] !== 0x20 || s[66] !== 0x20 || s[99] !== 0x08) throw new Failure("not an offer state");
+  return makeOfferFields({
+    key: s.slice(1, 33), buyer: s.slice(34, 66), seller: s.slice(67, 99), refundAfter: decodeNum8(s.subarray(100, 108)),
+  });
 }
 
 // MARK: Scripts
@@ -435,9 +460,10 @@ export function covenantId(outpoint, authorized) {
 /** `kchat:1:name:<op>:<name>`: informational, on every name transaction except commits. */
 export function namePayload(op, name) { return utf8(`kchat:1:name:${op}:${name}`); }
 
-/** `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<refundAfterDaa>`: how an indexer finds offers. */
+/** `kchat:1:offer:<keyHex>:<buyerXonlyHex>:<sellerXonlyHex>:<refundAfterDaa>` (registry v3):
+ *  how an indexer finds offers. */
 export function offerPayload(f) {
-  return utf8(`kchat:1:offer:${hex(f.key)}:${hex(f.buyer)}:${BigInt(f.refundAfter)}`);
+  return utf8(`kchat:1:offer:${hex(f.key)}:${hex(f.buyer)}:${hex(f.seller)}:${BigInt(f.refundAfter)}`);
 }
 
 /** `kchat:1:profile:<json>`: an address profile record (KACHAT_NAMES.md section 7). */
@@ -471,14 +497,20 @@ export function nameFieldsWithOwner(f, owner) { return makeNameFields({ ...f, ow
 /** list: the price, period and expiry kept. */
 export function nameFieldsWithPrice(f, price) { return makeNameFields({ ...f, price }); }
 
-/** What `extend(years)` leaves: the same period start, the expiry `years` later. */
-export function nameFieldsExtended(f, years) {
-  return makeNameFields({ ...f, expiresAt: f.expiresAt + BigInt(years) * yearMs });
+function periodOf(periodMs) {
+  if (periodMs == null) throw new Failure("periodMs is required (registry v3: manifest params.periodMs)");
+  return BigInt(periodMs);
+}
+
+/** What `extend(years)` leaves: the same period start, the expiry `years` periods later
+ *  (`periodMs` = manifest `params.periodMs`). */
+export function nameFieldsExtended(f, years, periodMs) {
+  return makeNameFields({ ...f, expiresAt: f.expiresAt + BigInt(years) * periodOf(periodMs) });
 }
 
 /** What `renew(years)` leaves: a new period from the old expiry, so no time is lost or gained. */
-export function nameFieldsRenewed(f, years) {
-  return makeNameFields({ ...f, periodStart: f.expiresAt, expiresAt: f.expiresAt + BigInt(years) * yearMs });
+export function nameFieldsRenewed(f, years, periodMs) {
+  return makeNameFields({ ...f, periodStart: f.expiresAt, expiresAt: f.expiresAt + BigInt(years) * periodOf(periodMs) });
 }
 
 /** NameFields equality. */
@@ -487,12 +519,31 @@ export function nameFieldsEqual(a, b) {
     && a.price === b.price && a.periodStart === b.periodStart && a.expiresAt === b.expiresAt;
 }
 
-/** OfferFields `{ key, buyer, refundAfter: BigInt }`. */
-export function makeOfferFields({ key: k, buyer, refundAfter }) {
-  return { key: k, buyer, refundAfter: BigInt(refundAfter) };
+/** OfferFields `{ key, buyer, seller, refundAfter: BigInt }`. `seller` (registry v3) is the name's
+ *  owner the offer was made to: only they can accept or decline it. */
+export function makeOfferFields({ key: k, buyer, seller, refundAfter }) {
+  if (seller == null) throw new Failure("offer fields need a seller (registry v3)");
+  return { key: k, buyer, seller, refundAfter: BigInt(refundAfter) };
 }
 
 /** OfferFields equality. */
 export function offerFieldsEqual(a, b) {
-  return bytesEqual(a.key, b.key) && bytesEqual(a.buyer, b.buyer) && a.refundAfter === b.refundAfter;
+  return bytesEqual(a.key, b.key) && bytesEqual(a.buyer, b.buyer) && bytesEqual(a.seller, b.seller)
+    && a.refundAfter === b.refundAfter;
+}
+
+/** PriceFields `{ shard: BigInt, authority, prices: BigInt[5] }` (registry v3): a price shard's
+ *  state; `prices` are sompi per period for names of 1, 2, 3, 4, 5+ bytes (register and renew). */
+export function makePriceFields({ shard, authority, prices }) {
+  if (!Array.isArray(prices) || prices.length !== 5) throw new Failure("a price shard has 5 prices");
+  return { shard: BigInt(shard), authority, prices: prices.map((p) => BigInt(p)) };
+}
+
+/** A price shard's price per period (sompi, BigInt) for a name of `n` bytes. */
+export function priceFieldsPrice(f, n) { return f.prices[tier(n)]; }
+
+/** PriceFields equality. */
+export function priceFieldsEqual(a, b) {
+  return a.shard === b.shard && bytesEqual(a.authority, b.authority) && a.prices.length === b.prices.length
+    && a.prices.every((p, i) => p === b.prices[i]);
 }

@@ -13,9 +13,9 @@
 // nil is null. The walker's state keeps hex strings (as Swift does) so its cache stays small.
 
 import {
-  Failure, hex, unhex, unhex32, bytesEqual, bytesLess, blake3, yearMs, zero32, ff32, utf8, fromUtf8,
-  normalize, isValid, key as nameKey, padded, parsePushes, scriptNum, gapState, nameState, offerState,
-  makeNameFields, makeOfferFields, nameFieldsWithOwner, nameFieldsWithPrice, nameFieldsExtended, nameFieldsRenewed,
+  Failure, hex, unhex, unhex32, bytesEqual, bytesLess, blake3, zero32, ff32, utf8, fromUtf8,
+  normalize, isValid, key as nameKey, padded, parsePushes, scriptNum, gapState, nameState, offerState, priceState,
+  makeNameFields, makeOfferFields, makePriceFields, nameFieldsWithOwner, nameFieldsWithPrice, nameFieldsExtended, nameFieldsRenewed,
   maxProfileJSONBytes,
 } from "./codec.js";
 import { makeOutpoint, makeTxOutput, makeCovenantBinding } from "./transaction.js";
@@ -93,7 +93,7 @@ export class NameInfo {
 
   // MARK: The paid period (registry v2, KACHAT_NAMES.md 4.1)
 
-  /** Whole years `extend` can add now (BigInt; 0n when the period start is unknown). `p`: the
+  /** Whole periods `extend` can add now (BigInt; 0n when the period start is unknown). `p`: the
    *  manifest's Params. */
   extendableYears(p) {
     return this.periodStart == null ? 0n : paramsExtendableYears(p, this.periodStart, this.expiresAt);
@@ -125,22 +125,40 @@ export const Lookup = Object.freeze({
   free(name, gap = null) { return { kind: "free", name, gap: gap ?? null }; },
 });
 
-/** An open offer. `{ outpoint, key, name|null, buyer: bytes32, amount: bigint, refundAfter: bigint (DAA
- *  from which anyone may refund it), createdAt: bigint|null }` */
+/** An open offer. `{ outpoint, key, name|null, buyer: bytes32, seller: bytes32, amount: bigint,
+ *  refundAfter: bigint (DAA from which anyone may refund it), createdAt: bigint|null }`.
+ *  `seller` (registry v3) is the name's owner the offer was made to: only they can accept or
+ *  decline it. */
 export class OfferInfo {
-  constructor({ outpoint, key, name = null, buyer, amount, refundAfter, createdAt = null }) {
+  constructor({ outpoint, key, name = null, buyer, seller, amount, refundAfter, createdAt = null }) {
     this.outpoint = outpoint;
     this.key = key;
     this.name = name ?? null;
     this.buyer = buyer;
+    this.seller = seller;
     this.amount = big(amount);
     this.refundAfter = big(refundAfter);
     this.createdAt = big(createdAt);
   }
   get id() { return `${hex(this.outpoint.txid)}:${this.outpoint.index}`; }
   /** The offer's on-chain state fields (codec OfferFields). */
-  get fields() { return makeOfferFields({ key: this.key, buyer: this.buyer, refundAfter: this.refundAfter }); }
+  get fields() { return makeOfferFields({ key: this.key, buyer: this.buyer, seller: this.seller, refundAfter: this.refundAfter }); }
   refundable(atDaa) { return big(atDaa) > bmax(this.refundAfter, 0n); }
+  /** Made to an earlier owner of the name (registry v3): it can never be accepted and goes back to
+   *  the buyer (withdraw, decline, or a refund once it expires). `currentOwner`: x-only bytes. */
+  isDeclined(currentOwner) { return !bytesEqual(this.seller, currentOwner); }
+}
+
+/** One price shard as the screens and the actions read it (registry v3).
+ *  `{ outpoint, fields: PriceFields, value: bigint }`; `shard` = `fields.shard`. */
+export class ShardInfo {
+  constructor({ outpoint, fields, value }) {
+    this.outpoint = outpoint;
+    this.fields = fields;
+    this.value = big(value);
+  }
+  get shard() { return this.fields.shard; }
+  get id() { return `${hex(this.outpoint.txid)}:${this.outpoint.index}`; }
 }
 
 /** One registry event (history, activity). Parties are x-only keys (hex, walker) or addresses
@@ -843,6 +861,19 @@ export function addressFromScriptPublicKey(script, hrp = addressPrefix) {
   return null;
 }
 
+/** The network prefix plus both ends of the address on one line: `kaspatest:qr4x7k...a9z2pq`
+ *  (6 characters each side). Where the full address doesn't fit (the Owner card). An address
+ *  without a prefix, or whose body is 14 characters or fewer, comes back unchanged. */
+export function compactAddress(address) {
+  const a = String(address ?? "");
+  const colon = a.indexOf(":");
+  if (colon < 0) return a;
+  const prefix = a.slice(0, colon + 1);
+  const body = [...a.slice(colon + 1)];
+  if (body.length <= 14) return a;
+  return `${prefix}${body.slice(0, 6).join("")}...${body.slice(-6).join("")}`;
+}
+
 /** `kaspatest:qr...xyz4`. */
 export function shortAddress(address) {
   const a = String(address);
@@ -927,25 +958,33 @@ const opKey = (txid, index) => `${txid}:${index}`;
 
 function safeUnhex32(s, fallback) { try { return unhex32(s); } catch { return fallback(); } }
 
-/** The registry without an indexer: the live gaps and names (and the offers this device made),
- *  decoded, moved forward one spending transaction at a time from the manifest's genesis gap.
- *  Hex strings throughout (as Swift) so the cache stays readable.
+/** The registry without an indexer: the live price shards, gaps and names (and the offers this
+ *  device made), decoded, moved forward one spending transaction at a time from the manifest's
+ *  two geneses (the price genesis's K shards and the genesis gap). Hex strings throughout (as
+ *  Swift) so the cache stays readable.
  *
+ *  Shard { txid, index, shard: bigint, authority, prices: bigint[5], value: bigint }   (registry v3)
  *  Gap   { txid, index, lo, hi, value: bigint }
  *  Name  { txid, index, name, key, owner, price: bigint, periodStart: bigint (registry v2),
  *          expiresAt: bigint, value: bigint, registeredAt: bigint|null, registeredTxId: string|null,
  *          updatedAt: bigint|null }
- *  Offer { txid, index, key, buyer, refundAfter: bigint, value: bigint, name: string|null, createdAt: bigint|null } */
+ *  Offer { txid, index, key, buyer, seller, refundAfter: bigint, value: bigint, name: string|null, createdAt: bigint|null } */
 export class RegistryState {
-  /** 2: registry v2 (names carry periodStart); an older cache is dropped and walked again. */
-  static get formatVersion() { return 2; }
+  /** 3: registry v3 (price shards, offers with a seller); an older cache is dropped and walked again. */
+  static get formatVersion() { return 3; }
   static get appliedKeep() { return 4096; }
   static get eventsKeep() { return 1000; }
 
-  constructor({ version = RegistryState.formatVersion, network, registryCovenantId, gaps = [], names = [], offers = [], applied = [], events = [], verifiedAt = null }) {
+  constructor({
+    version = RegistryState.formatVersion, network, registryCovenantId, priceCovenantId = "", shards = [], gaps = [], names = [], offers = [],
+    applied = [], events = [], verifiedAt = null,
+  }) {
     this.version = version;
     this.network = network;
     this.registryCovenantId = registryCovenantId;
+    /** the price covenant id (hex, registry v3) */
+    this.priceCovenantId = priceCovenantId;
+    this.shards = shards;
     this.gaps = gaps;
     this.names = names;
     this.offers = offers;
@@ -957,19 +996,34 @@ export class RegistryState {
     this.verifiedAt = big(verifiedAt);
   }
 
+  /** Both geneses: the price genesis's K shards and the lone genesis gap. */
   static atGenesis(m) {
     return new RegistryState({
       network: m.network,
       registryCovenantId: hex(m.registryCovenantId),
+      priceCovenantId: hex(m.priceCovenantId),
+      shards: m.genesisShards.map((s, i) => ({
+        txid: hex(m.priceGenesisTxid), index: i, shard: s.fields.shard, authority: hex(s.fields.authority),
+        prices: [...s.fields.prices], value: s.output.value,
+      })),
       gaps: [{ txid: hex(m.genesisTxid), index: 0, lo: hex(m.genesisState.lo), hi: hex(m.genesisState.hi), value: m.params.gapValue }],
-      names: [], offers: [], applied: [hex(m.genesisTxid)], events: [], verifiedAt: null,
+      names: [], offers: [], applied: [hex(m.priceGenesisTxid), hex(m.genesisTxid)], events: [], verifiedAt: null,
     });
   }
 
   /** Whether this cache belongs to `m`'s registry. */
   matches(m) {
-    return this.version === RegistryState.formatVersion && this.network === m.network && this.registryCovenantId === hex(m.registryCovenantId);
+    return this.version === RegistryState.formatVersion && this.network === m.network && this.registryCovenantId === hex(m.registryCovenantId)
+      && this.priceCovenantId === hex(m.priceCovenantId);
   }
+
+  /** Every shard, as the screens and actions read them (ShardInfo[], shard order). */
+  get shardInfos() {
+    return [...this.shards].sort((a, b) => (a.shard < b.shard ? -1 : a.shard > b.shard ? 1 : 0)).map((x) => RegistryState.shardInfo(x));
+  }
+
+  /** The current prices (PriceFields): shard 0's (every shard agrees: a change rewrites them all), or null. */
+  get currentPrices() { return this.shardInfos[0]?.fields ?? null; }
 
   /** A deep copy (Swift value semantics: walk a copy, keep it only when the walk succeeds). */
   clone() { return RegistryState.fromJSON(this.toJSON()); }
@@ -1015,6 +1069,14 @@ export class RegistryState {
         throw new Failure(`the last gap ends at ${g.hi.slice(0, 8)}`);
       }
     });
+    // the price shards: each index once, all holding the same prices and authority (a change
+    // rewrites every shard in one transaction)
+    if (this.shards.length > 0) {
+      if (new Set(this.shards.map((x) => String(x.shard))).size !== this.shards.length) throw new Failure("a price shard twice");
+      if (new Set(this.shards.map((x) => x.prices.join(","))).size !== 1 || new Set(this.shards.map((x) => x.authority)).size !== 1) {
+        throw new Failure("the price shards disagree");
+      }
+    }
   }
 
   static outpoint(txid, index) { return makeOutpoint(safeUnhex32(txid, zero32), index); }
@@ -1042,13 +1104,24 @@ export class RegistryState {
   static offerInfo(o) {
     return new OfferInfo({
       outpoint: RegistryState.outpoint(o.txid, o.index), key: safeUnhex32(o.key, zero32), name: o.name ?? null,
-      buyer: safeUnhex32(o.buyer, zero32), amount: o.value, refundAfter: o.refundAfter, createdAt: o.createdAt ?? null,
+      buyer: safeUnhex32(o.buyer, zero32), seller: safeUnhex32(o.seller, zero32), amount: o.value, refundAfter: o.refundAfter,
+      createdAt: o.createdAt ?? null,
     });
   }
 
-  /** Swift's overloaded `info(_:)`: a walked Name, Gap or Offer record as the screens read it. */
+  /** A walked price shard as the screens and actions read it (ShardInfo). */
+  static shardInfo(s) {
+    return new ShardInfo({
+      outpoint: RegistryState.outpoint(s.txid, s.index),
+      fields: makePriceFields({ shard: s.shard, authority: safeUnhex32(s.authority, zero32), prices: s.prices }),
+      value: s.value,
+    });
+  }
+
+  /** Swift's overloaded `info(_:)`: a walked Name, Gap, Offer or Shard record as the screens read it. */
   static info(x) {
     if ("buyer" in x) return RegistryState.offerInfo(x);
+    if ("authority" in x) return RegistryState.shardInfo(x);
     if ("owner" in x) return RegistryState.nameInfo(x);
     return RegistryState.gapInfo(x);
   }
@@ -1067,6 +1140,9 @@ export class RegistryState {
     for (const o of this.offers) {
       out.push({ outpoint: opKey(o.txid, o.index), script: templateScript(m.offer, offerState(RegistryState.offerInfo(o).fields)), registry: false });
     }
+    for (const x of this.shards) {
+      out.push({ outpoint: opKey(x.txid, x.index), script: templateScript(m.price, priceState(RegistryState.shardInfo(x).fields)), registry: true });
+    }
     return out;
   }
 
@@ -1077,7 +1153,7 @@ export class RegistryState {
     const txid = hex(o.outpoint.txid);
     this.offers = this.offers.filter((x) => !(x.txid === txid && x.index === o.outpoint.index));
     this.offers.push({
-      txid, index: o.outpoint.index, key: hex(o.key), buyer: hex(o.buyer), refundAfter: big(o.refundAfter),
+      txid, index: o.outpoint.index, key: hex(o.key), buyer: hex(o.buyer), seller: hex(o.seller), refundAfter: big(o.refundAfter),
       value: big(o.amount), name: o.name ?? null, createdAt: big(at),
     });
   }
@@ -1105,21 +1181,22 @@ export class RegistryState {
     return scriptNum(a[i]);
   }
 
-  /** The offer a transaction announces with `kchat:1:offer:<key>:<buyer>:<refundAfter>`, if one
-   *  of its outputs really is that offer (KACHAT_NAMES_INDEXER.md B4): `{ index, fields }` or null. */
+  /** The offer a transaction announces with the registry v3 marker
+   *  `kchat:1:offer:<key>:<buyer>:<seller>:<refundAfter>`, if one of its outputs really is that offer
+   *  (KACHAT_NAMES_INDEXER.md B4): `{ index, fields }` or null. */
   static offerFromMarker(tx, m) {
     let text;
     try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(tx.payload); } catch { return null; }
     const prefix = "kchat:1:offer:";
     if (!text.startsWith(prefix)) return null;
     const parts = text.slice(prefix.length).split(":");
-    if (parts.length !== 3) return null;
-    let k, buyer;
-    try { k = unhex32(parts[0]); buyer = unhex32(parts[1]); } catch { return null; }
-    if (!/^[+-]?[0-9]+$/.test(parts[2])) return null;
-    const refundAfter = BigInt(parts[2]);
+    if (parts.length !== 4) return null;
+    let k, buyer, seller;
+    try { k = unhex32(parts[0]); buyer = unhex32(parts[1]); seller = unhex32(parts[2]); } catch { return null; }
+    if (!/^[+-]?[0-9]+$/.test(parts[3])) return null;
+    const refundAfter = BigInt(parts[3]);
     if (refundAfter < 0n || refundAfter > I64_MAX) return null;
-    const fields = makeOfferFields({ key: k, buyer, refundAfter });
+    const fields = makeOfferFields({ key: k, buyer, seller, refundAfter });
     const script = templateScript(m.offer, offerState(fields));
     const index = tx.outputs.findIndex((o) => bytesEqual(o.script, script) && o.covenant == null);
     return index < 0 ? null : { index, fields };
@@ -1143,8 +1220,11 @@ export class RegistryState {
     const id = tx.idHex;
     if (this.applied.includes(id)) return [];
     const registryId = unhex32(this.registryCovenantId);
+    const priceId = unhex32(this.priceCovenantId);
     const regOuts = [];
-    tx.outputs.forEach((o, j) => { if (o.covenant && bytesEqual(o.covenant.covenantId, registryId)) regOuts.push(j); });
+    tx.outputs.forEach((o, j) => {
+      if (o.covenant && (bytesEqual(o.covenant.covenantId, registryId) || bytesEqual(o.covenant.covenantId, priceId))) regOuts.push(j);
+    });
     const insOf = (list) => {
       const out = [];
       tx.inputs.forEach((input, i) => {
@@ -1157,13 +1237,14 @@ export class RegistryState {
     const gapIns = insOf(this.gaps);
     const nameIns = insOf(this.names);
     const offerIns = insOf(this.offers);
+    const shardIns = insOf(this.shards);
     const newOffer = RegistryState.offerFromMarker(tx, m);
-    if (regOuts.length === 0 && gapIns.length === 0 && nameIns.length === 0 && offerIns.length === 0 && newOffer == null) {
+    if (regOuts.length === 0 && gapIns.length === 0 && nameIns.length === 0 && offerIns.length === 0 && shardIns.length === 0 && newOffer == null) {
       return [];
     }
     const short = id.slice(0, 12);
     const events = [];
-    /** [{ auth, p: { kind: "gap", lo, hi } | { kind: "name", f, name } }] */
+    /** [{ auth, p: { kind: "gap", lo, hi } | { kind: "name", f, name } | { kind: "price", f } }] */
     const predicted = [];
     const acceptsOffer = tx.inputs.some((input) => RegistryState._isOfferAccept(input, m));
     const decode = (t, i, what) => {
@@ -1189,7 +1270,7 @@ export class RegistryState {
           const k = blake3(nameBytes);
           const pad = new Uint8Array(32);
           pad.set(nameBytes.subarray(0, 32));
-          const f = makeNameFields({ key: k, paddedName: pad, owner, price: 0n, periodStart: now, expiresAt: now + years * yearMs });
+          const f = makeNameFields({ key: k, paddedName: pad, owner, price: 0n, periodStart: now, expiresAt: now + years * m.params.periodMs });
           predicted.push({ auth: i, p: { kind: "gap", lo: g.lo, hi: hex(k) } });
           predicted.push({ auth: i, p: { kind: "gap", lo: hex(k), hi: g.hi } });
           predicted.push({ auth: i, p: { kind: "name", f, name } });
@@ -1238,14 +1319,14 @@ export class RegistryState {
         case "extend": {
           // periodStart kept, expiresAt + years (the contract checked the 2-year cap)
           const years = RegistryState._argInt(sp.args, 0);
-          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsExtended(f, years), name: n.name } });
+          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsExtended(f, years, m.params.periodMs), name: n.name } });
           events.push(new Event({ txId: id, op: "extend", name: n.name, at: tx.at, years }));
           break;
         }
         case "renew": {
           // a new period from the old expiry
           const years = RegistryState._argInt(sp.args, 0);
-          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsRenewed(f, years), name: n.name } });
+          predicted.push({ auth: i, p: { kind: "name", f: nameFieldsRenewed(f, years, m.params.periodMs), name: n.name } });
           events.push(new Event({ txId: id, op: "renew", name: n.name, at: tx.at, years }));
           break;
         }
@@ -1257,6 +1338,39 @@ export class RegistryState {
           break;
         default:
           throw new Failure(`${short}: unexpected name entry ${sp.entry}`);
+      }
+    }
+
+    for (const [i, sh] of shardIns) {
+      const sp = decode(m.price, i, "price");
+      const cur = RegistryState.shardInfo(sh).fields;
+      if (!bytesEqual(sp.redeem, templateRedeem(m.price, priceState(cur)))) {
+        throw new Failure(`${short}: price input ${i} reveals a redeem script that is not the tracked shard state`);
+      }
+      switch (sp.entry) {
+        case "use":
+          predicted.push({ auth: i, p: { kind: "price", f: cur } });
+          break;
+        case "update": {
+          // shard 0 writes every shard's continuation; each is authorized by that shard's input
+          const authority = RegistryState._arg32(sp.args, 0);
+          const prices = [];
+          for (let t = 0; t < 5; t++) {
+            const v = RegistryState._argInt(sp.args, 1 + t);
+            if (v < 0n) throw new Failure(`${short}: negative price`);
+            prices.push(v);
+          }
+          for (const [j, other] of shardIns) {
+            predicted.push({ auth: j, p: { kind: "price", f: makePriceFields({ shard: other.shard, authority, prices }) } });
+          }
+          const same = prices.every((x, t) => x === cur.prices[t]);
+          events.push(new Event({ txId: id, op: same ? "price_authority" : "prices", at: tx.at, from: sh.authority, to: hex(authority), price: prices[4] }));
+          break;
+        }
+        case "follow":
+          break;
+        default:
+          throw new Failure(`${short}: unexpected price entry ${sp.entry}`);
       }
     }
 
@@ -1272,10 +1386,12 @@ export class RegistryState {
     // that predicted it (the P2SH script commits to the whole state).
     const matched = new Map();
     for (const { auth, p } of predicted) {
-      const script = p.kind === "gap"
-        ? templateScript(m.gap, gapState(unhex32(p.lo), unhex32(p.hi)))
-        : templateScript(m.name, nameState(p.f));
-      const idx = regOuts.find((j) => !matched.has(j) && bytesEqual(tx.outputs[j].script, script) && tx.outputs[j].covenant?.authorizingInput === auth);
+      let script, cov;
+      if (p.kind === "gap") { script = templateScript(m.gap, gapState(unhex32(p.lo), unhex32(p.hi))); cov = registryId; }
+      else if (p.kind === "name") { script = templateScript(m.name, nameState(p.f)); cov = registryId; }
+      else { script = templateScript(m.price, priceState(p.f)); cov = priceId; }
+      const idx = regOuts.find((j) => !matched.has(j) && bytesEqual(tx.outputs[j].script, script)
+        && tx.outputs[j].covenant?.authorizingInput === auth && bytesEqual(tx.outputs[j].covenant?.covenantId, cov));
       if (idx === undefined) throw new Failure(`${short}: predicted registry output not found (authorized by input ${auth})`);
       matched.set(idx, p);
     }
@@ -1290,11 +1406,14 @@ export class RegistryState {
     this.gaps = this.gaps.filter(kept);
     this.names = this.names.filter(kept);
     this.offers = this.offers.filter(kept);
+    this.shards = this.shards.filter(kept);
     for (const idx of [...matched.keys()].sort((a, b) => a - b)) {
       const value = tx.outputs[idx].value;
       const p = matched.get(idx);
       if (p.kind === "gap") {
         this.gaps.push({ txid: id, index: idx, lo: p.lo, hi: p.hi, value });
+      } else if (p.kind === "price") {
+        this.shards.push({ txid: id, index: idx, shard: p.f.shard, authority: hex(p.f.authority), prices: [...p.f.prices], value });
       } else {
         const k = hex(p.f.key);
         const before = carried.get(k);
@@ -1310,7 +1429,7 @@ export class RegistryState {
       const known = this.names.find((n) => n.key === hex(fields.key))?.name ?? null;
       this.offers = this.offers.filter((o) => !(o.txid === id && o.index === index));
       this.offers.push({
-        txid: id, index, key: hex(fields.key), buyer: hex(fields.buyer), refundAfter: fields.refundAfter,
+        txid: id, index, key: hex(fields.key), buyer: hex(fields.buyer), seller: hex(fields.seller), refundAfter: fields.refundAfter,
         value: tx.outputs[index].value, name: known, createdAt: tx.at ?? null,
       });
       events.push(new Event({ txId: id, op: "offer", name: known, at: tx.at, to: hex(fields.buyer), price: tx.outputs[index].value }));
@@ -1414,10 +1533,11 @@ export class RegistryState {
 
   // MARK: Cache format (compact JSON: hex strings, BigInt as decimal strings)
   //
-  // { v: 2, network, registryCovenantId, verifiedAt: "ms"|null,
+  // { v: 3, network, registryCovenantId, priceCovenantId, verifiedAt: "ms"|null,
+  //   shards: [[txid, index, shard, authority, [p1..p5], value]],
   //   gaps:   [[txid, index, lo, hi, value]],
   //   names:  [[txid, index, name, key, owner, price, periodStart, expiresAt, value, registeredAt|null, registeredTxId|null, updatedAt|null]],
-  //   offers: [[txid, index, key, buyer, refundAfter, value, name|null, createdAt|null]],
+  //   offers: [[txid, index, key, buyer, seller, refundAfter, value, name|null, createdAt|null]],
   //   applied: [txid],
   //   events: [[txId, op, name|null, at|null, from|null, to|null, price|null, years|null]] }
 
@@ -1427,20 +1547,22 @@ export class RegistryState {
       v: this.version,
       network: this.network,
       registryCovenantId: this.registryCovenantId,
+      priceCovenantId: this.priceCovenantId,
       verifiedAt: s(this.verifiedAt),
+      shards: this.shards.map((x) => [x.txid, x.index, s(x.shard), x.authority, x.prices.map((p) => s(p)), s(x.value)]),
       gaps: this.gaps.map((g) => [g.txid, g.index, g.lo, g.hi, s(g.value)]),
       names: this.names.map((n) => [
         n.txid, n.index, n.name, n.key, n.owner, s(n.price), s(n.periodStart), s(n.expiresAt), s(n.value), s(n.registeredAt),
         n.registeredTxId ?? null, s(n.updatedAt),
       ]),
-      offers: this.offers.map((o) => [o.txid, o.index, o.key, o.buyer, s(o.refundAfter), s(o.value), o.name ?? null, s(o.createdAt)]),
+      offers: this.offers.map((o) => [o.txid, o.index, o.key, o.buyer, o.seller, s(o.refundAfter), s(o.value), o.name ?? null, s(o.createdAt)]),
       applied: [...this.applied],
       events: this.events.map(eventToJSON),
     };
   }
 
   /** The state from `toJSON()`'s object (or its JSON text); throws on a malformed one, and on a
-   *  cache of another format (a registry v1 cache, format 1, has no periodStart: it is walked again). */
+   *  cache of another format (an earlier registry's cache, format 1 or 2, is walked again). */
   static fromJSON(j) {
     if (typeof j === "string") j = JSON.parse(j);
     if (j == null || typeof j !== "object" || !Array.isArray(j.gaps) || !Array.isArray(j.names)) throw new Failure("not a registry cache");
@@ -1451,14 +1573,20 @@ export class RegistryState {
       version: j.v,
       network: j.network,
       registryCovenantId: j.registryCovenantId,
+      priceCovenantId: typeof j.priceCovenantId === "string" ? j.priceCovenantId : "",
       verifiedAt: b(j.verifiedAt),
+      shards: (j.shards ?? []).map((x) => {
+        if (!Array.isArray(x[4]) || x[4].length !== 5) throw new Failure("bad price shard");
+        return { txid: x[0], index: idx(x[1]), shard: BigInt(x[2]), authority: x[3], prices: x[4].map((p) => BigInt(p)), value: BigInt(x[5]) };
+      }),
       gaps: j.gaps.map((g) => ({ txid: g[0], index: idx(g[1]), lo: g[2], hi: g[3], value: BigInt(g[4]) })),
       names: j.names.map((n) => ({
         txid: n[0], index: idx(n[1]), name: n[2], key: n[3], owner: n[4], price: BigInt(n[5]), periodStart: BigInt(n[6]),
         expiresAt: BigInt(n[7]), value: BigInt(n[8]), registeredAt: b(n[9]), registeredTxId: n[10] ?? null, updatedAt: b(n[11]),
       })),
       offers: (j.offers ?? []).map((o) => ({
-        txid: o[0], index: idx(o[1]), key: o[2], buyer: o[3], refundAfter: BigInt(o[4]), value: BigInt(o[5]), name: o[6] ?? null, createdAt: b(o[7]),
+        txid: o[0], index: idx(o[1]), key: o[2], buyer: o[3], seller: o[4], refundAfter: BigInt(o[5]), value: BigInt(o[6]), name: o[7] ?? null,
+        createdAt: b(o[8]),
       })),
       applied: Array.isArray(j.applied) ? [...j.applied] : [],
       events: (j.events ?? []).map(eventFromJSON),
@@ -1633,31 +1761,66 @@ export const IndexerAPI = Object.freeze({
     return { events: reqArray(j, "events", "events").map((x) => IndexerAPI.event(x)), next: optString(j, "next", "events") };
   },
 
-  /** An offer object -> OfferInfo|null (`name` falls back to `fallbackName`; the buyer address
-   *  must decode to an x-only key). */
+  /** An offer object -> OfferInfo|null (`name` falls back to `fallbackName`; the buyer and seller
+   *  addresses must decode to x-only keys). An indexer without the seller (registry v2) gives
+   *  null: a v3 offer can't be accepted or declined without it. */
   offerInfo(j, fallbackName = null, keyOfFn = keyOf) {
     const w = "offer";
     if (j == null || typeof j !== "object") throw decodeFail(w);
     const op = IndexerAPI.outpoint(reqObject(j, "outpoint", w));
     const buyer = reqString(j, "buyer", w);
+    const seller = optString(j, "seller", w);
     const amountS = reqString(j, "amount", w);
     const refundAfter = intOf(j.refundAfter, w);
     const createdAt = optInt(j, "createdAt", w);
     optBool(j, "refundable", w);
     const name = optString(j, "name", w);
     const buyerKey = keyOfFn(buyer);
+    const sellerKey = seller == null ? null : keyOfFn(seller);
     const amount = parseU64(amountS);
-    if (!op || !buyerKey || amount == null) return null;
+    if (!op || !buyerKey || !sellerKey || amount == null) return null;
     const raw = name ?? fallbackName;
     if (raw == null) return null;
     const n = normalize(raw);
     if (!isValid(n)) return null;
-    return new OfferInfo({ outpoint: op, key: nameKey(n), name: n, buyer: buyerKey, amount, refundAfter, createdAt });
+    return new OfferInfo({ outpoint: op, key: nameKey(n), name: n, buyer: buyerKey, seller: sellerKey, amount, refundAfter, createdAt });
   },
 
   /** `{ offers: [...] }` -> OfferInfo[]. */
   offers(j, fallbackName = null, keyOfFn = keyOf) {
     return reqArray(j, "offers", "offers").map((x) => IndexerAPI.offerInfo(x, fallbackName, keyOfFn)).filter(Boolean);
+  },
+
+  /** A `GET /names/prices` shard object -> ShardInfo|null (registry v3):
+   *  `{ shard, outpoint, authority, prices: [5 decimal strings], value }`. */
+  shard(j) {
+    const w = "price shard";
+    if (j == null || typeof j !== "object") throw decodeFail(w);
+    const shard = intOf(j.shard, w);
+    const op = IndexerAPI.outpoint(reqObject(j, "outpoint", w));
+    const auth = tryUnhex32(reqString(j, "authority", w));
+    const prices = reqArray(j, "prices", w);
+    if (!prices.every((x) => typeof x === "string")) throw decodeFail(w);
+    const value = parseU64(reqString(j, "value", w));
+    if (!op || !auth || prices.length !== 5 || value == null) return null;
+    const p = prices.map(parseU64);
+    if (p.some((x) => x == null)) return null;
+    return new ShardInfo({ outpoint: op, fields: makePriceFields({ shard, authority: auth, prices: p }), value });
+  },
+
+  /** `GET /names/prices` (registry v3): the current prices and every live shard, so a reader picks
+   *  one (the app re-reads the picked shard's UTXO from a node before spending it).
+   *  -> `{ prices: (bigint|null)[], authority: string|null, shards: ShardInfo[] }` (incomplete shards dropped). */
+  prices(j) {
+    const w = "prices";
+    if (j == null || typeof j !== "object") throw decodeFail(w);
+    const prices = reqArray(j, "prices", w);
+    if (!prices.every((x) => typeof x === "string")) throw decodeFail(w);
+    return {
+      prices: prices.map(parseU64),
+      authority: optString(j, "authority", w),
+      shards: reqArray(j, "shards", w).map((x) => IndexerAPI.shard(x)).filter(Boolean),
+    };
   },
 
   /** `GET /profiles/{address}` -> `{ address, profile: Profile|null, updatedAt, txId }`. */
@@ -1688,12 +1851,14 @@ export const IndexerAPI = Object.freeze({
     return makeIdentity({ address: reqString(j, "address", w), label: optString(j, "label", w), names, profile });
   },
 
-  /** `GET /names/status` -> `{ network, registryCovenantId, genesisTxId, indexedDaa, synced }`. */
+  /** `GET /names/status` -> `{ network, registryCovenantId, priceCovenantId, genesisTxId, indexedDaa, synced }`
+   *  (`priceCovenantId`: registry v3, the price covenant the indexer follows). */
   status(j) {
     const w = "status";
     if (j == null || typeof j !== "object") throw decodeFail(w);
     return {
       network: optString(j, "network", w), registryCovenantId: optString(j, "registryCovenantId", w),
+      priceCovenantId: optString(j, "priceCovenantId", w),
       genesisTxId: optString(j, "genesisTxId", w), indexedDaa: optInt(j, "indexedDaa", w), synced: optBool(j, "synced", w),
     };
   },

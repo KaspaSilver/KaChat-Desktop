@@ -57,8 +57,8 @@ const GUIDE_STEPS = ["claim", "avatar", "banner", "details", "finished"];
 const EXPIRY_OPTIONS = [
   { id: "1", title: "1 Day" },
   { id: "3", title: "3 Days" },
+  // up to 7 days, the app's cap on offers (actions.js maxOfferDays)
   { id: "7", title: "7 Days" },
-  { id: "30", title: "30 Days" },
 ];
 
 function fallbackEscape(value) {
@@ -476,7 +476,7 @@ function openOfferSheet() {
             <span class="kmkt-muted">${KAS_UNIT}</span>
           </label>`, {
           header: "Your offer",
-          footer: `Your ${KAS_UNIT} stays locked on chain until the seller accepts, you withdraw the offer, or it expires. Nobody else can touch it.`,
+          footer: `Your ${KAS_UNIT} stays locked on chain until the owner accepts or declines, you withdraw the offer, or it expires - then anyone can send it back to you.`,
         })}
         ${formSection(`
           <div class="kmkt-form-row kmkt-segment-row">

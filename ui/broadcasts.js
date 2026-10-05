@@ -68,6 +68,7 @@ let indexerByChannel = {};   // { [channel]: url } — Room Info's per-room inde
 let joinedAtByChannel = {};  // { [channel]: ms }
 let feeOverrideKas = null;   // the fee typed on the pill for the NEXT message
 let feeEstimateKas = null;
+let feeEstimateLength = null; // UTF-8 bytes of the text feeEstimateKas is for
 // { [channel]: true } — always-listen, own channels only. Keeps a custom room's live block
 // scan running while its screen is closed (iOS BroadcastChannel.alwaysListen). Curated rooms
 // deliberately have no toggle: they are indexer-backed, so there is nothing to keep alive.
@@ -1673,35 +1674,48 @@ function renderFeePill(feeKas, { estimating = false } = {}) {
   const pill = document.querySelector("[data-broadcast-fee]");
   if (!pill) return;
   pill.classList.toggle("estimating", estimating);
-  if (estimating && feeKas == null) pill.textContent = `fee: -------- ${KAS_UNIT}`;
-  else if (feeKas == null) pill.textContent = `fee: -- ${KAS_UNIT}`;
-  else pill.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+  const label = estimating && feeKas == null ? `fee: -------- ${KAS_UNIT}`
+    : feeKas == null ? `fee: -- ${KAS_UNIT}` : `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+  if (pill.textContent !== label) pill.textContent = label;
   pill.hidden = false;
 }
 function hideFeePill() {
   if (feeTimer) clearTimeout(feeTimer);
   feeTimer = null;
   feeEstimateKas = null;
+  feeEstimateLength = null;
   const pill = document.querySelector("[data-broadcast-fee]");
   if (pill) pill.hidden = true;
 }
-function scheduleBroadcastFeeEstimate() {
+// As the 1:1/group composers (iOS 0977a5b): each estimate fetches UTXOs and builds a transaction,
+// and the fee follows the payload size, so while TYPING it waits for a 0.6 s pause and is skipped
+// while the message is within 24 bytes of the estimated length; other callers force it.
+function scheduleBroadcastFeeEstimate({ typing = false } = {}) {
   const text = String(composerInput?.value || "").trim();
   if (!activeChannel || !text || !deps.showFeeEstimate?.() || !deps.estimateFeeKas) { hideFeePill(); return; }
   if (feeOverrideKas != null) { renderFeePill(feeOverrideKas); return; }
+  const length = new TextEncoder().encode(text).length;
+  if (typing && !feeTimer && feeEstimateKas != null && feeEstimateLength != null
+      && Math.abs(length - feeEstimateLength) < 24
+      && !document.querySelector("[data-broadcast-fee]")?.hidden) return;
   if (feeTimer) clearTimeout(feeTimer);
+  feeTimer = null;
   const token = ++feeToken;
   renderFeePill(feeEstimateKas, { estimating: true });
   feeTimer = setTimeout(async () => {
+    feeTimer = null;
     try {
       const fee = await deps.estimateFeeKas(broadcastPayloadBytes(activeChannel, text));
       if (token !== feeToken) return;
       feeEstimateKas = fee == null ? null : String(fee);
+      feeEstimateLength = fee == null ? null : length;
       renderFeePill(feeEstimateKas);
     } catch {
-      if (token === feeToken) renderFeePill(null);
+      if (token !== feeToken) return;
+      feeEstimateLength = null;
+      renderFeePill(null);
     }
-  }, 450);
+  }, typing ? 600 : 200);
 }
 async function editBroadcastFee() {
   const pill = document.querySelector("[data-broadcast-fee]");
@@ -2492,7 +2506,7 @@ export function initBroadcasts(dependencies) {
       renderChannelList();
     }
   });
-  composerInput?.addEventListener("input", scheduleBroadcastFeeEstimate);
+  composerInput?.addEventListener("input", () => scheduleBroadcastFeeEstimate({ typing: true }));
   document.querySelector("[data-broadcast-fee]")?.addEventListener("click", editBroadcastFee);
   document.querySelector("[data-broadcast-funding-gate]")?.addEventListener("click", async (event) => {
     if (!event.target.closest("[data-broadcast-funding-gate-address], [data-broadcast-funding-gate-copy]")) return;

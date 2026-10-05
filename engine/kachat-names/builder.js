@@ -13,6 +13,8 @@
 //   GapRecord    { lo, hi, value: bigint, utxo }
 //   NameRecord   { fields: NameFields, value: bigint, utxo }        (name = nameFieldsName(fields))
 //   OfferRecord  { fields: OfferFields, value: bigint, utxo, name: string | null }
+//   PriceRecord  { fields: PriceFields, value: bigint, utxo }       (registry v3: a price shard;
+//                  register / extend / renew read one and pay its price, priceRecordPrice(s, n))
 //   CommitRecord { name, owner, salt: Uint8Array(32), value: bigint, utxo: Utxo | null }
 //   ExitParts    { below: GapRecord, name: NameRecord, above: GapRecord }
 //   Arg          { kind: "bytes", data } | { kind: "int", value: bigint } | { kind: "signature" }
@@ -33,12 +35,11 @@
 // signer callback returning the 64-byte signature to `planSignedBy` / `planSignedByAsync`.
 
 import {
-  Failure, sompiPerKas, yearMs, lockTimeThreshold, commitValue, minChange, targetChange, minFeerate,
+  Failure, sompiPerKas, lockTimeThreshold, commitValue, minChange, targetChange, minFeerate,
   maxInputsFeeEntry, maxInputs, maxListPrice, sighashAll, concat, bytesEqual, bytesLess, utf8,
   validate, key as nameKey, commitment, commitRedeem, pushData, pushInt, p2shScript, p2pkScript, gapState,
   namePayload, offerPayload, nameState, offerState, nameFieldsFor, nameFieldsName, nameFieldsWithOwner,
-  nameFieldsWithPrice, nameFieldsExtended, nameFieldsRenewed, makeOfferFields, zero32,
-
+  nameFieldsWithPrice, nameFieldsExtended, nameFieldsRenewed, makeOfferFields, zero32, priceState, priceFieldsPrice,
 } from "./codec.js";
 import {
   makeTx, makeTxInput, makeTxOutput, makeUtxo, makeUtxoEntry, makeOutpoint, makeCovenantBinding, outpointKey,
@@ -46,8 +47,7 @@ import {
   networkFee as massNetworkFee, cloneTx,
 } from "./transaction.js";
 import {
-  verifyManifest, templateRedeem, templateScript, templateTag, paramsPrice, paramsRenewPrice, paramsExtendableYearsOf,
-  paramsRenewOpens,
+  verifyManifest, templateRedeem, templateScript, templateTag, paramsExtendableYearsOf, paramsRenewOpens,
 } from "./manifest.js";
 
 // MARK: - Compute budgets
@@ -67,21 +67,28 @@ export const BudgetRole = {
   nameRelease: "name.release",
   nameReclaim: "name.reclaim",
   offerAccept: "offer.accept",
+  offerDecline: "offer.decline",
   offerWithdraw: "offer.withdraw",
   offerRefund: "offer.refund",
+  priceUse: "price.use",
 };
 
 /** Per-input compute budgets by role. The CLI measures each input in the script engine; the app
  *  has no engine, so it commits a fixed budget per entry that covers every case (README "Cost per
  *  operation"; the vector generator checks every measured budget fits this table, the vectors'
  *  `recommendedBudgets`). An input that needs more than it committed fails, so these only ever err
- *  on the side of a slightly higher fee (100 grams per unit). Registry v2. */
+ *  on the side of a slightly higher fee (100 grams per unit). Registry v3. */
 export const recommendedBudgets = {
   "p2pk": 10, "commit": 10,
-  "gap.register": 8, "gap.merge": 4, "gap.absorbed": 0,
-  "name.transfer": 12, "name.list": 12, "name.buy": 2, "name.extend": 2, "name.renew": 2, "name.release": 10, "name.reclaim": 0,
-  "offer.accept": 5, "offer.withdraw": 10, "offer.refund": 0,
+  "gap.register": 11, "gap.merge": 5, "gap.absorbed": 0,
+  "name.transfer": 12, "name.list": 12, "name.buy": 2, "name.extend": 3, "name.renew": 3, "name.release": 10, "name.reclaim": 0,
+  "offer.accept": 17, "offer.decline": 10, "offer.withdraw": 10, "offer.refund": 0,
+  "price.use": 1,
 };
+
+/** A price shard's price per period (sompi, BigInt) for a name of `n` bytes
+ *  (Swift `PriceRecord.price(forLength:)`). */
+export function priceRecordPrice(s, n) { return priceFieldsPrice(s.fields, n); }
 
 /** The budget `budgets` commits for `role`, falling back to the recommended table, then 0. */
 export function budgetFor(budgets, role) {
@@ -301,6 +308,8 @@ export class Builder {
 
   get params() { return this.manifest.params; }
   get registryId() { return this.manifest.registryCovenantId; }
+  /** The price covenant id (registry v3). */
+  get priceId() { return this.manifest.priceCovenantId; }
 
   /** See the module-level `registerNow`. */
   static registerNow(env) { return registerNow(env); }
@@ -478,6 +487,21 @@ export class Builder {
     return plannedInput({ utxo: o.utxo, unlock, role, label });
   }
 
+  /** A price shard's `use()` input and its unchanged continuation, authorized by `inputIndex`
+   *  (registry v3). Returns `[PlannedInput, PlannedOutput]`. */
+  _shardRead(s, inputIndex) {
+    const shard = s.fields.shard;
+    this._checkLive(`price shard ${shard}`, s.utxo, this.params.priceValue, this.priceId);
+    const st = priceState(s.fields);
+    const unlock = { kind: "contract", redeem: templateRedeem(this.manifest.price, st), tag: templateTag(this.manifest.price, "use"), args: [] };
+    const input = plannedInput({ utxo: s.utxo, unlock, role: BudgetRole.priceUse, label: `price shard ${shard} use()` });
+    const out = makeTxOutput({
+      value: this.params.priceValue, script: templateScript(this.manifest.price, st),
+      covenant: makeCovenantBinding(inputIndex, this.priceId),
+    });
+    return [input, { output: out, label: `price shard ${shard} (unchanged)` }];
+  }
+
   _checkYears(years) {
     if (years < 1n || years > this.params.maxYears) throw new Failure(`years must be 1..${this.params.maxYears}`);
   }
@@ -502,11 +526,11 @@ export class Builder {
     return plan;
   }
 
-  /** Register `commit.name` for `years`: [gap.register, commit, funding] ->
-   *  [gap (lo,key), gap (key,hi), name (periodStart = now), change]; lock time `now`, commit
-   *  sequence `tCommit`.
-   *  `now` (unix ms, BigInt) normally comes from `registerNow(env)`. */
-  register({ env, wallet, gap, commit, years, now }) {
+  /** Register `commit.name` for `years` periods: [gap.register(.., priceIdx = 2), commit, price
+   *  shard (use), funding] -> [gap (lo,key), gap (key,hi), name (periodStart = now), the shard
+   *  unchanged, change]; lock time `now`, commit sequence `tCommit`. The price is the shard's
+   *  (registry v3). `now` (unix ms, BigInt) normally comes from `registerNow(env)`. */
+  register({ env, wallet, gap, commit, shard, years, now }) {
     years = BigInt(years);
     now = BigInt(now);
     const name = commit.name;
@@ -523,8 +547,9 @@ export class Builder {
     if (!(now > 0n && now >= lockTimeThreshold)) throw new Failure("now must be a unix-ms timestamp");
 
     const nameLength = utf8(name).length;
-    const price = paramsPrice(this.params, nameLength) * years;
-    const expires = now + years * yearMs;
+    const price = priceRecordPrice(shard, nameLength) * years;
+    const expires = now + years * this.params.periodMs;
+    const [shardIn, shardOut] = this._shardRead(shard, 2);
     const fields = nameFieldsFor(name, env.me, 0n, now, expires);
     const notes = [];
     const matureAt = commitUtxo.entry.blockDaaScore + this.params.tCommit;
@@ -539,19 +564,20 @@ export class Builder {
     const gapIn = this._gapInput(
       gap, "register",
       [argBytes(utf8(name)), argBytes(env.me), argBytes(commit.salt), argInt(now), argInt(years),
-        argBytes(this.manifest.name.prefix), argBytes(this.manifest.name.suffix)],
-      BudgetRole.gapRegister, "gap register",
+        argBytes(this.manifest.name.prefix), argBytes(this.manifest.name.suffix), argInt(2n)],
+      BudgetRole.gapRegister, "gap register (price at input 2)",
     );
     const commitIn = plannedInput({
       utxo: commitUtxo, sequence: this.params.tCommit, unlock: { kind: "commit", redeem }, role: BudgetRole.commit, label: `commit for ${name}`,
     });
     const d = {
-      op: `register ${name} (${years} y)`,
-      inputs: [gapIn, commitIn],
+      op: `register ${name} (${years} period(s))`,
+      inputs: [gapIn, commitIn, shardIn],
       outputs: [
         { output: this._gapOutput(gap.lo, k), label: "gap (lo, key)" },
         { output: this._gapOutput(k, gap.hi), label: "gap (key, hi)" },
         { output: this._nameOutput(fields), label: `name ${name}` },
+        shardOut,
       ],
       lockTime: now,
       priceFee: price,
@@ -582,10 +608,11 @@ export class Builder {
 
   // MARK: Name entries
 
-  /** Anyone extends the current period (a gift needs no signature): [name.extend(years), funding]
-   *  -> [continuation (periodStart kept, expiresAt + years), change]. Lock time 0, every sequence
-   *  0. Valid any time while `expiresAt + years <= periodStart + maxYears`. */
-  extend({ env, wallet, name: n, years }) {
+  /** Anyone extends the current period (a gift needs no signature): [name.extend(years, 1), price
+   *  shard (use), funding] -> [continuation (periodStart kept, expiresAt + years periods), the
+   *  shard unchanged, change]. Lock time 0, every sequence 0. Valid any time while
+   *  `expiresAt + years <= periodStart + maxYears` (in periods). */
+  extend({ env, wallet, name: n, shard, years }) {
     years = BigInt(years);
     this._checkYears(years);
     const nm = nameFieldsName(n.fields);
@@ -594,31 +621,36 @@ export class Builder {
     const room = paramsExtendableYearsOf(this.params, f);
     if (years > room) {
       throw new Failure(
-        `extend ${nm} by ${years} y refused: its period (from ${f.periodStart}) may hold at most ${this.params.maxYears} y and it is `
-          + `paid until ${f.expiresAt}, so ${room} y can be added now; renew opens at ${paramsRenewOpens(this.params, f.expiresAt)}`,
+        `extend ${nm} by ${years} period(s) refused: it may be paid at most ${this.params.maxYears} periods past ${f.periodStart} and it is `
+          + `paid until ${f.expiresAt}, so ${room} can be added now; renew opens at ${paramsRenewOpens(this.params, f.expiresAt)}`,
       );
     }
-    const price = paramsRenewPrice(this.params, utf8(nm).length) * years;
-    const nf = nameFieldsExtended(f, years);
+    const price = priceRecordPrice(shard, utf8(nm).length) * years;
+    const nf = nameFieldsExtended(f, years, this.params.periodMs);
+    const [shardIn, shardOut] = this._shardRead(shard, 1);
     const d = {
-      op: `extend ${nm} (${years} y)`,
-      inputs: [this._nameInput(n, "extend", [argInt(years)], BudgetRole.nameExtend, `name extend(${years})`)],
-      outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }],
+      op: `extend ${nm} (${years} period(s))`,
+      inputs: [
+        this._nameInput(n, "extend", [argInt(years), argInt(1n)], BudgetRole.nameExtend, `name extend(${years}, price at input 1)`),
+        shardIn,
+      ],
+      outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }, shardOut],
       priceFee: price,
       notes: [
         `extension price ${kas(price)} left as miner fee`,
-        `expiresAt ${f.expiresAt} -> ${nf.expiresAt}; periodStart ${f.periodStart} kept (at most ${this.params.maxYears} y past it)`,
+        `expiresAt ${f.expiresAt} -> ${nf.expiresAt}; periodStart ${f.periodStart} kept (at most ${this.params.maxYears} periods past it)`,
       ],
       payload: namePayload("extend", nm),
     };
     return this._finish(d, wallet, { kind: "funded", maxInputs: maxInputsFeeEntry }, env);
   }
 
-  /** Anyone renews once the renewal window opened: [name.renew(years), funding] -> [continuation
-   *  (periodStart = old expiresAt, expiresAt + years), change]. Lock time = `renewLockTime`
-   *  (timestamp domain), every input sequence 0 (not final, as the CLTV needs). Before the window
-   *  opens the plan is built but not valid (a note says so); the actions refuse to submit it. */
-  renew({ env, wallet, name: n, years }) {
+  /** Anyone renews once the renewal window opened: [name.renew(years, 1), price shard (use),
+   *  funding] -> [continuation (periodStart = old expiresAt, expiresAt + years periods), the shard
+   *  unchanged, change]. Lock time = `renewLockTime` (timestamp domain), every input sequence 0
+   *  (not final, as the CLTV needs). Before the window opens the plan is built but not valid (a
+   *  note says so); the actions refuse to submit it. */
+  renew({ env, wallet, name: n, shard, years }) {
     years = BigInt(years);
     this._checkYears(years);
     const nm = nameFieldsName(n.fields);
@@ -627,12 +659,16 @@ export class Builder {
     const opens = paramsRenewOpens(this.params, f.expiresAt);
     if (!(opens >= 0n && opens >= lockTimeThreshold)) throw new Failure(`${nm}: expiresAt - renewWindowMs is not a timestamp`);
     const lock = renewLockTime(env, this.params, f.expiresAt);
-    const price = paramsRenewPrice(this.params, utf8(nm).length) * years;
-    const nf = nameFieldsRenewed(f, years);
+    const price = priceRecordPrice(shard, utf8(nm).length) * years;
+    const nf = nameFieldsRenewed(f, years, this.params.periodMs);
+    const [shardIn, shardOut] = this._shardRead(shard, 1);
     const d = {
-      op: `renew ${nm} (${years} y)`,
-      inputs: [this._nameInput(n, "renew", [argInt(years)], BudgetRole.nameRenew, `name renew(${years})`)],
-      outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }],
+      op: `renew ${nm} (${years} period(s))`,
+      inputs: [
+        this._nameInput(n, "renew", [argInt(years), argInt(1n)], BudgetRole.nameRenew, `name renew(${years}, price at input 1)`),
+        shardIn,
+      ],
+      outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }, shardOut],
       lockTime: lock,
       priceFee: price,
       notes: [
@@ -643,7 +679,7 @@ export class Builder {
       payload: namePayload("renew", nm),
     };
     if (!renewWindowOpen(env, this.params, f.expiresAt)) {
-      d.notes.push(`renewal window not open: it opens at ${opens} (the network median time ${env.blockTimeMs} must pass it); use extend to add years before`);
+      d.notes.push(`renewal window not open: it opens at ${opens} (the network median time ${env.blockTimeMs} must pass it); use extend to add periods before`);
     }
     return this._finish(d, wallet, { kind: "funded", maxInputs: maxInputsFeeEntry }, env);
   }
@@ -707,20 +743,23 @@ export class Builder {
 
   // MARK: Offers
 
-  /** Lock `amount` sompi for `name`, refundable by anyone from DAA `refundAfter`; the transaction
-   *  carries the `kchat:1:offer:` marker. `target` (the NameRecord, when registered) only feeds
-   *  the notes. Sets `plan.newOffer` (the offer to track once accepted). */
-  offer({ env, wallet, name, amount, refundAfter, target = null }) {
+  /** Lock `amount` sompi for the registered name `target` (a NameRecord), made to its current
+   *  owner (registry v3: only that owner can accept or decline it, so a change of owner ends it),
+   *  refundable by anyone from DAA `refundAfter`; the transaction carries the `kchat:1:offer:`
+   *  marker (with the seller). Sets `plan.newOffer` (the offer to track once accepted). */
+  offer({ env, wallet, target, amount, refundAfter }) {
     amount = BigInt(amount);
     refundAfter = BigInt(refundAfter);
+    if (target == null || target.fields == null) throw new Failure("an offer is made on a registered name");
+    const name = nameFieldsName(target.fields);
     validate(name);
     if (!(amount > this.params.offerMaxFee + minChange)) throw new Failure("offer too small");
     if (!(refundAfter < lockTimeThreshold)) throw new Failure("refundAfter is a DAA score");
-    const fields = makeOfferFields({ key: nameKey(name), buyer: env.me, refundAfter });
+    const fields = makeOfferFields({ key: nameKey(name), buyer: env.me, seller: target.fields.owner, refundAfter });
     const out = makeTxOutput({ value: amount, script: templateScript(this.manifest.offer, offerState(fields)) });
     const d = { op: `offer ${kas(amount)} on ${name}`, inputs: [], outputs: [{ output: out, label: "offer P2SH" }], notes: [] };
-    if (target != null && target.fields.price > 0n && target.fields.price < amount) {
-      d.notes.push(`${name} is listed below this offer; anyone may match the listing with it (README open issue 7)`);
+    if (target.fields.price > 0n && target.fields.price <= amount) {
+      d.notes.push(`${name} is listed at or below this offer: buying it may be cheaper`);
     }
     d.payload = offerPayload(fields);
     const plan = this._finish(d, wallet, { kind: "funded", maxInputs }, env);
@@ -729,11 +768,13 @@ export class Builder {
     return plan;
   }
 
-  /** The owner accepts: [name.transfer(buyer, sig), offer.accept(0)] -> [continuation to the
-   *  buyer, payout to the owner = offer - fee (fee <= maxFee)]. */
+  /** The owner accepts: [name.transfer(buyer, sig), offer.accept(0, sellerSig)] -> [continuation
+   *  to the buyer, payout to the owner = offer - fee (fee <= maxFee)]. Only an offer made to this
+   *  owner (registry v3). */
   acceptOffer({ env, name: n, offer: o }) {
     this._requireOwner(env, n);
     const nm = nameFieldsName(n.fields);
+    if (!bytesEqual(o.fields.seller, env.me)) throw new Failure(`that offer was made to an earlier owner of ${nm}`);
     this._checkLive(nm, n.utxo, this.params.bond, this.registryId);
     this._checkLive("offer", o.utxo, o.value, null);
     if (!bytesEqual(o.fields.key, n.fields.key)) throw new Failure("that offer is for another name");
@@ -741,7 +782,7 @@ export class Builder {
       op: `accept offer ${kas(o.value)} on ${nm}`,
       inputs: [
         this._nameInput(n, "transfer", [argBytes(o.fields.buyer), argSignature()], BudgetRole.nameTransfer, "name transfer(buyer) (owner sig)"),
-        this._offerInput(o, "accept", [argInt(0n)], BudgetRole.offerAccept, "offer accept(0)"),
+        this._offerInput(o, "accept", [argInt(0n), argSignature()], BudgetRole.offerAccept, "offer accept(0) (seller sig)"),
       ],
       outputs: [
         { output: this._nameOutput(nameFieldsWithOwner(n.fields, o.fields.buyer)), label: `name ${nm} -> buyer` },
@@ -750,6 +791,19 @@ export class Builder {
       payload: namePayload("accept", nm),
     };
     return this._finish(d, [], { kind: "fromOutput", index: 1, cap: this.params.offerMaxFee }, env);
+  }
+
+  /** The seller turns an offer down (registry v3): [offer.decline(sellerSig)] alone -> [back to
+   *  the buyer, the offer less the network fee (<= maxFee)]. */
+  declineOffer({ env, offer: o }) {
+    if (!bytesEqual(o.fields.seller, env.me)) throw new Failure("only the seller can decline this offer");
+    this._checkLive("offer", o.utxo, o.value, null);
+    const d = {
+      op: `decline offer ${kas(o.value)}`,
+      inputs: [this._offerInput(o, "decline", [argSignature()], BudgetRole.offerDecline, "offer decline (seller sig)")],
+      outputs: [{ output: makeTxOutput({ value: 0n, script: p2pkScript(o.fields.buyer) }), label: "back to the buyer" }],
+    };
+    return this._finish(d, [], { kind: "fromOutput", index: 0, cap: this.params.offerMaxFee }, env);
   }
 
   /** The buyer takes the offer back. */

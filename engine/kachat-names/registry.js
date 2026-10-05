@@ -5,9 +5,9 @@
 // one of two sources:
 //
 // - the names indexer (KACHAT_NAMES_INDEXER.md Part D) at `indexerBase()`, used when that is set
-//   and `GET /names/status` answers 200 for this manifest's registry id;
-// - the chain walker otherwise: the registry's live UTXO set (gaps and names, plus the offers this
-//   device made) kept from the manifest's genesis gap forward. A refresh asks a node which tracked
+//   and `GET /names/status` answers 200 for this manifest's registry AND price covenant ids;
+// - the chain walker otherwise: the registry's live UTXO set (the K price shards, gaps and names,
+//   plus the offers this device made) kept from the manifest's two geneses forward. A refresh asks a node which tracked
 //   UTXOs are still unspent (`getUtxosByAddresses`), finds each spent one's spending transaction
 //   through the Kaspa REST API (`GET /addresses/{p2sh}/full-transactions`), decodes the spend like
 //   the indexer does (B3), verifies every new state against its output script and moves on.
@@ -31,7 +31,7 @@
 import { Failure, hex, normalize, validate, isValid, key as nameKey } from "./codec.js";
 import {
   RegistryState, TxView, Lookup, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
-  addressOf, keyOf, shortAddress, p2shAddress, step, decodeAddress,
+  addressOf, keyOf, shortAddress, compactAddress, p2shAddress, step, decodeAddress,
 } from "./registry-state.js";
 
 export {
@@ -92,7 +92,7 @@ function bytesOfHexOrBytes(v) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Whether `error` means the registry is being upgraded (a registry v1 manifest), not a failure:
+/** Whether `error` means the registry is being upgraded (an earlier registry's manifest), not a failure:
  *  service.js `ServiceError.registryUpgrading()` (code "registryUpgrading") or the core's
  *  `Failure.outdatedRegistry()`. (service.js `isRegistryUpgrading`, kept here by shape so this
  *  module needs no app imports.) */
@@ -144,8 +144,8 @@ export class KachatNamesRegistry {
     this.isRefreshing = false;
     /** the last refresh's error message, or null */
     this.lastError = null;
-    /** whether the last refresh failed because the registry is being upgraded (a registry v1
-     *  manifest; service.registryUpgrading says the same): show "Setting up", not `lastError` */
+    /** whether the last refresh failed because the registry is being upgraded (an earlier
+     *  registry's manifest; service.registryUpgrading says the same): show "Setting up", not `lastError` */
     this.registryUpgrading = false;
     /** unix ms (Number) of the last refresh attempt, successful or not (a failed one counts too,
      *  so `refreshIfStale` waits before the next), or null */
@@ -157,6 +157,8 @@ export class KachatNamesRegistry {
     /** the verified manifest once loaded */
     this.manifest = null;
     this._cacheNetwork = null;
+    /** the last prices read (PriceFields, registry v3), see `cachedPrices` */
+    this._currentPrices = null;
     this._ownProfiles = new Map();
     this._listeners = new Set();
     this._refreshing = null;
@@ -213,6 +215,7 @@ export class KachatNamesRegistry {
     this.source = null;
     this.chainState = null;
     this._cacheNetwork = null;
+    this._currentPrices = null;
     this._ownProfiles = new Map();
     this._profilesUnavailableUntil = 0;
     this._profileMisses = new Map();
@@ -236,7 +239,9 @@ export class KachatNamesRegistry {
     if (!base) return { kind: "chain" };
     try {
       const status = IndexerAPI.status(await this._get(base, "/names/status"));
-      if (status.registryCovenantId?.toLowerCase() === hex(m.registryCovenantId)) return { kind: "indexer", base };
+      // registry v3: the indexer must follow this registry and its price covenant
+      if (status.registryCovenantId?.toLowerCase() === hex(m.registryCovenantId)
+        && status.priceCovenantId?.toLowerCase() === hex(m.priceCovenantId)) return { kind: "indexer", base };
     } catch { /* no indexer: walk the chain */ }
     return { kind: "chain" };
   }
@@ -296,11 +301,12 @@ export class KachatNamesRegistry {
 
   async _walk(m) {
     const state = (this.chainState ?? RegistryState.atGenesis(m)).clone();
-    const registryId = hex(m.registryCovenantId);
+    // gaps and names carry the registry id, price shards the price covenant id (offers none)
+    const ids = [hex(m.registryCovenantId), hex(m.priceCovenantId)];
     const report = await state.walk({
       manifest: m,
       address: (script) => p2shAddress(script),
-      live: (addresses) => this._liveOutpoints(addresses, registryId),
+      live: (addresses) => this._liveOutpoints(addresses, ids),
       transactions: (address) => this.restTransactions(address),
     });
     state.verifiedAt = this._nowMs();
@@ -316,18 +322,20 @@ export class KachatNamesRegistry {
     return report;
   }
 
-  /** The unspent "txid:index" outpoints at those addresses, from the node (50 addresses a call). */
-  async _liveOutpoints(addresses, registryId) {
+  /** The unspent "txid:index" outpoints at those addresses, from the node (50 addresses a call).
+   *  `ids`: the covenant ids (lowercase hex) a tracked UTXO may carry. */
+  async _liveOutpoints(addresses, ids) {
+    const known = new Set(Array.isArray(ids) ? ids : [ids]);
     if (typeof this.deps.getUtxosByAddresses !== "function") throw new Failure("no node to read the registry from");
     const out = new Set();
     for (let start = 0; start < addresses.length; start += 50) {
       const chunk = addresses.slice(start, start + 50);
       for (const u of (await this.deps.getUtxosByAddresses(chunk)) ?? []) {
         // A node reports the covenant id; the REST fallback cannot (null). A UTXO carrying
-        // another id is not the registry's.
+        // another id is not the registry's (nor its price record's).
         const c = u.covenantId ?? null;
         const cs = c instanceof Uint8Array ? hex(c) : c;
-        if (typeof cs === "string" && cs.length && cs.toLowerCase() !== registryId) continue;
+        if (typeof cs === "string" && cs.length && !known.has(cs.toLowerCase())) continue;
         const op = u.outpoint ?? {};
         const txid = String(op.transactionId ?? op.txid ?? "").toLowerCase();
         out.add(`${txid}:${Number(op.index)}`);
@@ -505,7 +513,44 @@ export class KachatNamesRegistry {
     if (this.source.kind === "indexer") {
       return IndexerAPI.events(await this._get(this.source.base, "/market/activity")).events;
     }
-    return [...(this.chainState?.events ?? [])].reverse().slice(0, 200);
+    // name activity only: price changes are the registry's, not a name's
+    return (this.chainState?.events ?? []).filter((e) => !e.op.startsWith("price")).reverse().slice(0, 200);
+  }
+
+  // MARK: - The price record (registry v3)
+
+  /** Every live price shard (ShardInfo[], shard order). A register, extend or renew spends one;
+   *  the actions re-read the picked shard's UTXO from a node before building. Indexer:
+   *  `GET /names/prices`; else the walked shards. */
+  async shards() {
+    await this.prepare();
+    if (this.source.kind === "indexer") {
+      const j = IndexerAPI.prices(await this._get(this.source.base, "/names/prices"));
+      return j.shards.sort((a, b) => (a.shard < b.shard ? -1 : a.shard > b.shard ? 1 : 0));
+    }
+    return this.chainState?.shardInfos ?? [];
+  }
+
+  /** The current prices per period by name length (PriceFields, every shard holds the same ones),
+   *  or null. Also refreshes `cachedPrices`. */
+  async currentPrices() {
+    const all = await this.shards();
+    const p = all[0]?.fields ?? null;
+    if (p) {
+      const changed = !this._currentPrices || this._currentPrices.prices.some((x, i) => x !== p.prices[i]);
+      this._currentPrices = p;
+      if (changed) this._bump();
+    }
+    return p;
+  }
+
+  /** The last prices read (BigInt[5], sompi per period for names of 1, 2, 3, 4, 5+ bytes), for
+   *  screens that price names synchronously (refreshed by `currentPrices()` and every walk). Falls
+   *  back to the manifest's genesis prices; null before any manifest is loaded. */
+  get cachedPrices() {
+    const p = this._currentPrices ?? this.chainState?.currentPrices ?? null;
+    if (p) return p.prices;
+    return this.manifest?.params.genesisPrices ?? null;
   }
 
   /** The two gaps around a registered name (a NameInfo): `{ below: GapInfo, above: GapInfo }`, what
@@ -665,6 +710,8 @@ export class KachatNamesRegistry {
   static keyOf(address) { return keyOf(address); }
   /** `kaspatest:qr...xyz4`. */
   static shortAddress(address) { return shortAddress(address); }
+  /** `kaspatest:qr4x7k...a9z2pq`: the prefix plus 6 characters of each end (the Owner card). */
+  static compactAddress(address) { return compactAddress(address); }
 
   // MARK: - HTTP
 
@@ -715,4 +762,4 @@ export class KachatNamesRegistry {
   }
 }
 
-export { addressOf, keyOf, shortAddress, p2shAddress };
+export { addressOf, keyOf, shortAddress, compactAddress, p2shAddress };
