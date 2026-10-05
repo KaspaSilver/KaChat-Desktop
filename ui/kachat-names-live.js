@@ -2192,6 +2192,23 @@ function domainsEmptyHtml(variant) {
  * container. Where the registry isn't launched (mainnet) it renders the empty note and reads
  * nothing (iOS 7227d69). Returns false (container untouched) only before the market is wired.
  */
+/** How many .kachat names `walletAddress` holds - the set its .kachat tab lists (grace and lapsed
+ *  included), for the Profile's Your Domains count (iOS 10e4a1a). 0 where the registry isn't
+ *  launched; throws when the registry can't be read (callers keep the last count). */
+export async function kachatOwnedNameCount(walletAddress) {
+  const rt = kachatNames();
+  const key = rt ? keyOf(String(walletAddress || "").toLowerCase()) : null;
+  if (!key) return 0;
+  await rt.registry.refreshIfStale({ maxAge: 300 });
+  return (await rt.registry.namesOf(key, { includeInactive: true })).length;
+}
+
+/** `listener()` whenever the .kachat registry moves (a registration, sale or transfer lands);
+ *  returns an unsubscribe function. A no-op where the registry isn't launched. */
+export function onKachatRegistryChange(listener) {
+  return kachatNames()?.registry?.onChange?.(() => listener()) || (() => {});
+}
+
 export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant = "domains" } = {}) {
   if (!containerEl || !kit) return false;
   const rt = kachatNames();

@@ -2,12 +2,13 @@ import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { createGroupManager } from "../engine/group-store.js";
+import { isScriptAddress, isKachatContractTransaction } from "../engine/sync.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames } from "./kachat-names-live.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange } from "./kachat-names-live.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
@@ -281,6 +282,9 @@ setChatStorageFlushErrorHandler((error) => {
 // Read by the load-time restore below (buildFullyRestoredState), so it is declared up here: the
 // build lowers top-level const to var, and a later declaration reads undefined at load.
 const DELETED_CONTACTS_KEY = "kachat-deleted-contacts-v1";
+// Account-scoped { txid: suppressedAtMs }: transactions that are never chat payments (iOS
+// hiddenPaymentTxIds, 32fdaa4). Declared up here for the same reason as the key above.
+const SUPPRESSED_PAYMENT_TXIDS_KEY = "kachat-suppressed-payment-txids-v1";
 let state = loadStoredState();
 
 function subscriptionContactAddresses() {
@@ -3586,6 +3590,8 @@ function reloadStateFromBrowserStorage() {
   if (activeId && !state.conversations.some((entry) => entry.id === activeId)) {
     setActiveConversationId(null);
   }
+  // A restored snapshot may predate the contract-chat purge or a suppression (iOS 32fdaa4).
+  try { purgeContractAddressPaymentChats(); } catch (error) { appendEngineLog(`Contract chat purge failed: ${error?.message || error}`); }
   return state;
 }
 
@@ -3736,6 +3742,8 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // ensureSelfConversation), already first in the list.
   if (engine.address === clean) { try { ensureSelfChatForSync(); } catch { /* fine */ } }
   if (engine.address === clean) { try { revertDomainContactNamesOnce(); } catch { /* fine */ } }
+  // Payment chats older builds made from .kachat contract transactions go (iOS 32fdaa4).
+  if (engine.address === clean) { try { purgeContractAddressPaymentChats(); } catch (error) { appendEngineLog(`Contract chat purge failed: ${error?.message || error}`); } }
   refreshSubscriptionAddresses({ restart: false });
   // Per-account Chats Payment Privacy: switching accounts applies that
   // account's stored value immediately (Settings toggle included).
@@ -4586,8 +4594,11 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
         cursor: 0,
         limit: 100,
       });
+      // Contract transactions the scan skipped stay suppressed on every path (iOS 32fdaa4).
+      registerSuppressedPaymentTxIds(paymentResult.contractTxids || [], "kachat-contract");
       for (const incoming of paymentResult.messages || []) {
         if (olderThanRetention(incoming)) continue;
+        if (isSuppressedPaymentTxId(incoming.txid)) continue;
         if ((conversationEntry.messages || []).some((message) => message.txid && message.txid === incoming.txid)) continue;
         const message = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
         applyMessagePatch(message, incoming);
@@ -4880,6 +4891,126 @@ function ensureSelfChatForSync() {
   if (!hasConversation) ensureSelfConversation();
 }
 
+// --- Suppressed payments (iOS 32fdaa4: .kachat name transactions never open payment chats) ---
+// A .kachat register commit and a name's 1 KAS bond pay to contract (P2SH) addresses; read as
+// payments they made chats with strangers ("Sent 0.2 TKAS", "Sent 1 TKAS"). Three guards, as on
+// iOS: every names submit registers its txid here straight away (initKachatNamesRuntime
+// onSubmitted); every payment path skips contract transactions (isKachatContractTransaction) and
+// suppressed ids; and purgeContractAddressPaymentChats removes what older builds made.
+// Lowered to var by the build: null and undefined both mean "not read yet".
+let suppressedPaymentCache = null; // { key, map }
+
+function normalizePaymentTxId(txid) { return String(txid || "").trim().toLowerCase(); }
+
+function loadSuppressedPaymentTxIds() {
+  const key = accountScopedKey(SUPPRESSED_PAYMENT_TXIDS_KEY);
+  if (suppressedPaymentCache?.key === key) return suppressedPaymentCache.map;
+  let map = {};
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || "{}");
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) map = raw;
+  } catch { /* unreadable: start empty */ }
+  suppressedPaymentCache = { key, map };
+  return map;
+}
+
+function saveSuppressedPaymentTxIds(map) {
+  const key = accountScopedKey(SUPPRESSED_PAYMENT_TXIDS_KEY);
+  // The newest 2000 are plenty: older ones are far below every payment scan's page.
+  const kept = Object.fromEntries(Object.entries(map).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 2000));
+  suppressedPaymentCache = { key, map: kept };
+  try { localStorage.setItem(key, JSON.stringify(kept)); } catch { /* storage full: kept in memory this session */ }
+}
+
+function isSuppressedPaymentTxId(txid) {
+  const id = normalizePaymentTxId(txid);
+  return Boolean(id) && Object.prototype.hasOwnProperty.call(loadSuppressedPaymentTxIds(), id);
+}
+
+function isPaymentBubble(message) {
+  return message?.messageType === "payment" || message?.transport === "kaspa-payment" || message?.transport === "kaspa-payment-rest";
+}
+
+/// Removes the payment bubbles whose (lowercased) txid is in `txIds` from every chat, hidden for
+/// good the way a deleted message is (hiddenMessageKeys), so neither the stored history nor an
+/// archive import brings them back. Returns how many went; the caller persists.
+function removeSuppressedPaymentMessages(txIds) {
+  if (!txIds?.size) return 0;
+  let removed = 0;
+  for (const conversationEntry of state.conversations || []) {
+    const gone = (conversationEntry.messages || []).filter((message) => isPaymentBubble(message) && txIds.has(normalizePaymentTxId(message.txid)));
+    if (!gone.length) continue;
+    const goneIds = new Set(gone.map((message) => message.id));
+    conversationEntry.hiddenMessageKeys = [...new Set([
+      ...(conversationEntry.hiddenMessageKeys || []),
+      ...gone.flatMap((message) => [message.id, message.txid].filter(Boolean).map(String)),
+    ])];
+    conversationEntry.messages = conversationEntry.messages.filter((message) => !goneIds.has(message.id));
+    const goneIncoming = gone.filter((message) => message.direction === "incoming").length;
+    if (goneIncoming) conversationEntry.unreadCount = Math.max(0, Number(conversationEntry.unreadCount || 0) - goneIncoming);
+    const last = lastMessageFor(conversationEntry);
+    conversationEntry.lastActivityAt = last?.createdAt || conversationEntry.createdAt;
+    conversationEntry.updatedAt = Date.now();
+    removed += gone.length;
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+  }
+  return removed;
+}
+
+/// Marks these txids as never-a-payment and removes any bubble already made from them (iOS
+/// registerSuppressedPaymentTxIds). Cheap to call every sweep: it writes and scans only when an id
+/// is new.
+function registerSuppressedPaymentTxIds(txIds, reason) {
+  const ids = [...new Set((txIds || []).map(normalizePaymentTxId).filter(Boolean))];
+  if (!ids.length) return 0;
+  const map = { ...loadSuppressedPaymentTxIds() };
+  const now = Date.now();
+  const fresh = ids.filter((id) => !Object.prototype.hasOwnProperty.call(map, id));
+  if (!fresh.length) return 0;
+  for (const id of fresh) map[id] = now;
+  saveSuppressedPaymentTxIds(map);
+  const removed = removeSuppressedPaymentMessages(new Set(fresh));
+  if (removed) { persistState(); renderChats(); }
+  appendEngineLog(`Suppressed ${fresh.length} payment tx id${fresh.length === 1 ? "" : "s"} (${reason}); removed ${removed} bubble${removed === 1 ? "" : "s"}.`);
+  return removed;
+}
+
+/// Removes what older builds made from contract transactions (iOS purgeContractAddressPaymentChats):
+/// a chat whose other side is a script address goes through the normal chat delete (tombstoned,
+/// so no backup, Nextcloud or archive restore brings it back), and its payments - with any other
+/// payment bubble from or to a script address, e.g. "Received … From: kaspatest:p…" in your own
+/// chat - are suppressed for good. Also sweeps bubbles of already-suppressed ids that a restore put
+/// back. Idempotent and cheap (a no-op when there is nothing): runs on every load.
+function purgeContractAddressPaymentChats() {
+  if (!engine.address) return;
+  const txIds = [];
+  const doomedIds = [];
+  for (const conversationEntry of state.conversations || []) {
+    if (isSelfConversation(conversationEntry)) {
+      for (const message of conversationEntry.messages || []) {
+        if (isPaymentBubble(message) && message.txid && isScriptAddress(message.sender)) txIds.push(message.txid);
+      }
+      continue;
+    }
+    const contact = contactForConversation(conversationEntry);
+    const scriptChat = isScriptAddress(contact?.address);
+    if (scriptChat) doomedIds.push(conversationEntry.id);
+    for (const message of conversationEntry.messages || []) {
+      if (!isPaymentBubble(message) || !message.txid) continue;
+      if (scriptChat || isScriptAddress(message.sender) || isScriptAddress(message.receiver)) txIds.push(message.txid);
+    }
+  }
+  registerSuppressedPaymentTxIds(txIds, "contract-address-chat");
+  const swept = removeSuppressedPaymentMessages(new Set(Object.keys(loadSuppressedPaymentTxIds())));
+  if (doomedIds.length) {
+    appendEngineLog(`Removed ${doomedIds.length} payment chat${doomedIds.length === 1 ? "" : "s"} with a contract (script) address.`);
+    deleteConversationsByIds(doomedIds, { quiet: true });
+  } else if (swept) {
+    persistState();
+    renderChats();
+  }
+}
+
 async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   const myAddress = engine.address;
   if (!myAddress) return 0;
@@ -4903,9 +5034,15 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   const contactAddresses = new Set((state.contacts || []).map((entry) => entry.address));
   const ownSpending = new Set(activeAccountMnemonic() ? spendingWatchedAddressList() : []);
   let added = 0;
+  const contractTxids = [];
   for (const tx of txs) {
     const txid = String(tx?.transaction_id || tx?.transactionId || "").trim();
-    if (!txid || processed.has(txid)) continue;
+    if (!txid) continue;
+    // .kachat registry/offer and other contract transactions are never payments (iOS 32fdaa4) -
+    // checked before the processed set, so history an older build already read is suppressed too.
+    if (isKachatContractTransaction(tx)) { contractTxids.push(txid); processed.add(txid); continue; }
+    if (processed.has(txid)) continue;
+    if (isSuppressedPaymentTxId(txid)) { processed.add(txid); continue; }
     const blockTime = Number(tx?.block_time || tx?.blockTime || 0);
     if (!blockTime || blockTime < store.baselineMs) { processed.add(txid); continue; }
     // KaChat protocol txs (messages/handshakes/payments-with-envelopes) are owned by
@@ -4958,6 +5095,7 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   }
   store.processedTxids = [...processed].slice(-300);
   saveStrangerPaymentState(store);
+  registerSuppressedPaymentTxIds(contractTxids, "kachat-contract");
   if (added > 0) { persistState(); renderChats(); }
   return added;
 }
@@ -5424,6 +5562,11 @@ let activeDomainsTab = DEFAULT_DOMAIN_TAB;
 let otherServiceNames = { k: null, kaspa: null }; // { state, names: [{ name, display, settling }] }
 let otherServiceNamesFor = "";
 let otherServiceNamesAt = 0;
+// The account's .kachat names for the Your Domains count (iOS 10e4a1a): the set its .kachat tab
+// lists, grace and lapsed included; 0 where the registry isn't launched.
+let kachatOwnedCount = 0;
+let kachatOwnedCountFor = "";
+let kachatOwnedCountUnsubscribe = null;
 function knsEditAssetId() { return knsEditorTarget?.assetId || ownKnsAssetId; }
 function knsEditFields() { return knsEditorTarget ? knsEditorTarget.fields : ownKnsProfileFields; }
 
@@ -5625,6 +5768,8 @@ async function refreshOwnKnsProfile({ force = false } = {}) {
     otherServiceNamesAt = Date.now();
     refreshOtherServiceNames();
   }
+  // ...and the .kachat names (iOS 10e4a1a), reloaded whenever the registry moves.
+  refreshKachatOwnedCount();
   const cachedInfo = engine.peekKnsAddressInfo(address);
   const cachedProfile = engine.peekKnsAddressProfile(address);
   if (cachedInfo) applyOwnKnsProfile(cachedInfo, cachedProfile);
@@ -9178,12 +9323,31 @@ async function refreshOtherServiceNames() {
 function domainNameCardHtml(name, badge = "") {
   return `<div class="kns-domain-card static">${escapeHtml(name)}${badge ? `<span class="kns-domain-primary">${escapeHtml(badge)}</span>` : ""}</div>`;
 }
+async function refreshKachatOwnedCount() {
+  const address = engine.address;
+  if (!address) return;
+  if (!kachatOwnedCountUnsubscribe && kachatNames()) {
+    kachatOwnedCountUnsubscribe = onKachatRegistryChange(() => refreshKachatOwnedCount());
+  }
+  try {
+    const count = await kachatOwnedNameCount(address);
+    if (engine.address !== address) return; // account switched meanwhile
+    if (kachatOwnedCountFor === address && kachatOwnedCount === count) return;
+    kachatOwnedCount = count;
+    kachatOwnedCountFor = address;
+    renderProfileDomains();
+  } catch {
+    // Registry unreadable right now: keep the last count.
+  }
+}
 function renderProfileDomains() {
   const countEl = document.querySelector("[data-profile-domains-count]");
-  // Blank rather than "0" until a lookup has actually answered. The count includes .k and .kaspa.
+  // Blank rather than "0" until a lookup has actually answered. The count includes .k and .kaspa,
+  // and the .kachat names (iOS 10e4a1a).
   const otherCount = (otherServiceNamesFor === engine.address)
     ? (otherServiceNames.k?.names?.length || 0) + (otherServiceNames.kaspa?.names?.length || 0) : 0;
-  const total = ownKnsDomains.length + otherCount;
+  const kachatCount = kachatOwnedCountFor === engine.address ? kachatOwnedCount : 0;
+  const total = ownKnsDomains.length + otherCount + kachatCount;
   if (countEl) countEl.textContent = total ? String(total) : "";
   const listEl = document.querySelector("[data-profile-domains-list]");
   const detailEl = document.querySelector("[data-domain-detail]");
@@ -9382,7 +9546,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 99;
+const APP_BUILD = 100;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -9498,6 +9662,8 @@ document.querySelector("[data-profile-donate]")?.addEventListener("click", async
 function recordOutgoingPaymentChat({ destination, amountKas, txid }) {
   const clean = String(destination || "").trim();
   if (!clean || clean === engine.address) return;
+  // A contract (script) address is never a chat partner, and a suppressed tx never a payment (iOS 32fdaa4).
+  if (isScriptAddress(clean) || isSuppressedPaymentTxId(txid)) return;
   let contact = state.contacts.find((entry) => entry.address === clean);
   if (!contact) {
     const createdAt = Date.now();
@@ -16639,7 +16805,7 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
 
 // Removes chats and their contacts from this device. Shared by the Select-mode bulk bar and the
 // row menu, so both delete exactly the same way (iOS deleteConversations).
-function deleteConversationsByIds(ids) {
+function deleteConversationsByIds(ids, { quiet = false } = {}) {
   // Your chat with yourself cannot be deleted (iOS ef4f183): bulk delete skips it.
   const idsToDelete = new Set(ids.filter((id) => !isSelfConversation(state.conversations.find((entry) => entry.id === id))));
   if (!idsToDelete.size) return;
@@ -16657,7 +16823,7 @@ function deleteConversationsByIds(ids) {
   refreshSubscriptionAddresses({ restart: true });
   persistState();
   renderChats();
-  showCopyToast(idsToDelete.size === 1 ? "Chat deleted." : `${idsToDelete.size} chats deleted.`);
+  if (!quiet) showCopyToast(idsToDelete.size === 1 ? "Chat deleted." : `${idsToDelete.size} chats deleted.`);
 }
 
 // Right-click on a chat row (iOS long-press): Read/Unread show contextually (the relevant one
@@ -19600,6 +19766,8 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     const contactAddress = String(archived?.contactAddress || "").trim();
     if (!contactAddress || !isOnActiveNetwork(contactAddress)) continue;
     if (localTombstones.has(contactAddress) || archivedTombstones.has(contactAddress)) continue;
+    // A contract (script) address is never a chat - an older build's .kachat payment chat (iOS 32fdaa4).
+    if (isScriptAddress(contactAddress)) continue;
     const archivedMessages = Array.isArray(archived?.messages) ? archived.messages : [];
     if (!archivedMessages.length) continue;
 
@@ -19650,6 +19818,9 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       const id = String(archiveMessage?.id || "").trim() || nowId();
       if (txid && (knownTxids.has(txid) || hidden.has(txid))) continue;
       if (knownIds.has(id) || hidden.has(id)) continue;
+      // Never a payment: a .kachat name transaction or other contract tx (iOS 32fdaa4).
+      if (txid && isSuppressedPaymentTxId(txid)) continue;
+      if (isScriptAddress(archiveMessage?.senderAddress) || isScriptAddress(archiveMessage?.receiverAddress)) continue;
 
       const rawContent = String(archiveMessage?.content || "");
       // Pool envelopes in a phone archive are historical bookkeeping — never
@@ -23662,6 +23833,12 @@ queueMicrotask(async () => {
           try { return String(engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase())?.privateKeyHex || "") || null; } catch { return null; }
         },
         kasSignerAddresses: () => listColdWatchedAddresses().map((e) => ({ account: e.label, index: e.index, address: e.address })),
+      },
+      // A name transaction moves KAS to contracts (commit, bond, offers): keep it out of the
+      // chats from the moment it's sent, before any sync could read it as a payment (iOS 32fdaa4).
+      onSubmitted: (txId) => {
+        try { registerSuppressedPaymentTxIds([txId], "kachat-names"); }
+        catch (error) { appendEngineLog(`.kachat payment suppression failed: ${error?.message || error}`); }
       },
     });
     installKachatIdentityRepaint();

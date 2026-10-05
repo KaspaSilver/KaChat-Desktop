@@ -269,6 +269,7 @@ export class KachatNamesService {
      *  not read and verified again on every call (until `resetManifest`). */
     this._bundleFailure = null;
     this._listeners = new Set();
+    this._submitListeners = new Set();
   }
 
   // MARK: Observing (Swift @Published registryUpgrading)
@@ -277,6 +278,16 @@ export class KachatNamesService {
   onChange(listener) {
     this._listeners.add(listener);
     return () => this._listeners.delete(listener);
+  }
+
+  /** Optional: `listener(txId)` after every transaction `submit` sends and the node accepts (each
+   *  registry operation and a registration's commit; not the profile record, a plain self-send).
+   *  The app uses it to keep name transactions out of its payment chats (iOS 32fdaa4); nothing
+   *  here depends on anyone listening. Returns an unsubscribe function. */
+  onSubmitted(listener) {
+    if (typeof listener !== "function") return () => {};
+    this._submitListeners.add(listener);
+    return () => this._submitListeners.delete(listener);
   }
 
   _setRegistryUpgrading(value) {
@@ -452,6 +463,9 @@ export class KachatNamesService {
     const txId = String(await this.engine.submitRpcTransaction(wasmTx) ?? "").toLowerCase();
     this.engine.log?.(`[KachatNames] submitted ${txId}`);
     if (txId !== expected) throw ServiceError.submitMismatch(expected, txId);
+    for (const l of [...this._submitListeners]) {
+      try { l(txId); } catch (e) { this._log("[KachatNames] submit listener failed:", e?.message ?? e); }
+    }
     return txId;
   }
 

@@ -48,8 +48,10 @@ export function kachatProfilesEnabled() { return KachatNamesService.profilesEnab
  * than once. `wallet` (optional): the wallet's other addresses for owner actions on names they hold
  * (iOS 881ada6) - `{ spendingAddresses() -> [{ index, address }], spendingPrivateKey(index) -> hex|null,
  * kasSignerAddresses() -> [{ account, index, address }] }`; see engine/kachat-names/actions.js.
+ * `onSubmitted(txId)` (optional): called for every registry transaction the service submits and the
+ * node accepts (iOS 32fdaa4: the app suppresses it as a payment the moment it is sent).
  */
-export function initKachatNamesRuntime(engine, { wallet = null } = {}) {
+export function initKachatNamesRuntime(engine, { wallet = null, onSubmitted = null } = {}) {
   if (!engine) return runtime;
   if (!kachatNamesLaunched()) {
     initProfilesOnly(engine);
@@ -57,6 +59,7 @@ export function initKachatNamesRuntime(engine, { wallet = null } = {}) {
   }
   if (runtime) return runtime;
   const service = new KachatNamesService(engine);
+  if (typeof onSubmitted === "function") service.onSubmitted(onSubmitted);
   const registry = new KachatNamesRegistry({
     manifest: () => service.loadManifest(),
     isEnabled: () => KachatNamesService.isLaunched,

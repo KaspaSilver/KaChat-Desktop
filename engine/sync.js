@@ -14,6 +14,7 @@ import {
   paymentPayloadEncryptedHex,
 } from "./kasia-protocol.js";
 import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
+import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
 
 // Kept as a named export for callers, but the effective default now comes from
 // the configurable endpoint registry (Settings > Connectivity).
@@ -33,6 +34,52 @@ function textToHex(value) {
   return Array.from(new TextEncoder().encode(String(value || "")))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/** A pay-to-script-hash address (`kaspa:p…` / `kaspatest:p…`, version byte 8): a contract, never a
+ *  chat partner (iOS ChatService.isScriptAddress). Any prefix; false for anything that isn't a valid
+ *  address. */
+export function isScriptAddress(address) {
+  const clean = String(address || "").trim();
+  if (!clean) return false;
+  const decoded = decodeAddress(clean.toLowerCase());
+  return Boolean(decoded) && decoded.version === AddressVersion.scriptHash;
+}
+
+const KACHAT_CONTRACT_PAYLOAD_PREFIXES = ["kchat:1:name:", "kchat:1:offer:"].map((value) => textToHex(value));
+
+function restOutputAddress(output) {
+  return String(
+    output?.script_public_key_address || output?.scriptPublicKeyAddress || output?.address ||
+    output?.script_public_key?.address || output?.scriptPublicKey?.address || "",
+  ).trim();
+}
+
+function restInputAddress(input) {
+  return String(
+    input?.previous_outpoint_address || input?.previousOutpointAddress || input?.previous_outpoint?.address ||
+    input?.previous_outpoint?.resolved_transaction_output?.script_public_key_address ||
+    input?.previous_outpoint?.resolvedTransactionOutput?.scriptPublicKeyAddress ||
+    input?.resolved_previous_outpoint?.script_public_key_address ||
+    input?.resolvedPreviousOutpoint?.scriptPublicKeyAddress || "",
+  ).trim();
+}
+
+/**
+ * A `.kachat` registry or offer transaction, or any other contract spend (iOS 32fdaa4
+ * isKachatContractTransaction): a REST transaction with a `kchat:1:name:` / `kchat:1:offer:`
+ * payload, or one that pays to or from a script (P2SH) address - a name's commit and 1 KAS bond,
+ * the gaps, an offer's locked KAS, a KNS commit/reveal. A chat partner is always a key address, so
+ * such a transaction is never a chat payment (it still shows in the wallet history).
+ */
+export function isKachatContractTransaction(tx) {
+  let payload = String(tx?.payload || "").replace(/^0x/i, "").trim().toLowerCase();
+  if (payload.startsWith("6a") && payload.length >= 4) payload = payload.slice(4);
+  if (payload && KACHAT_CONTRACT_PAYLOAD_PREFIXES.some((prefix) => payload.startsWith(prefix))) return true;
+  const outputs = Array.isArray(tx?.outputs) ? tx.outputs : [];
+  if (outputs.some((output) => isScriptAddress(restOutputAddress(output)))) return true;
+  const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
+  return inputs.some((input) => isScriptAddress(restInputAddress(input)));
 }
 
 function normalizeBaseUrl(value) {
@@ -833,9 +880,10 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     promise.catch(() => paymentPageCache.delete(pageKey));
     transactions = await promise;
   }
-  if (!transactions.length) return { messages: [], found: 0, nextCursor: Number(cursor || 0), note: "No new Kaspa payments." };
+  if (!transactions.length) return { messages: [], contractTxids: [], found: 0, nextCursor: Number(cursor || 0), note: "No new Kaspa payments." };
 
   const messages = [];
+  const contractTxids = [];
   let nextCursor = Number(cursor || 0);
   for (const tx of transactions) {
     const txid = String(tx?.transaction_id || tx?.transactionId || tx?.hash || tx?.id || "").trim();
@@ -843,6 +891,9 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     const createdAt = blockTimeRaw > 1e12 ? blockTimeRaw : (blockTimeRaw > 0 ? blockTimeRaw * 1000 : Date.now());
     if (createdAt > nextCursor) nextCursor = createdAt;
     if (!txid || known.has(txid)) continue;
+    // .kachat registry/offer and other contract transactions are never chat payments (iOS 32fdaa4):
+    // reported so the app keeps them suppressed on every path.
+    if (isKachatContractTransaction(tx)) { contractTxids.push(txid); continue; }
 
     const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
     const inputAddresses = inputs.map(addressFromInput).filter((value) => value.startsWith(ADDRESS_PREFIX));
@@ -867,5 +918,5 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     });
     known.add(txid);
   }
-  return { messages, found: messages.length, nextCursor, note: messages.length ? `Received ${messages.length} new Kaspa payment${messages.length === 1 ? "" : "s"}.` : "No new Kaspa payments." };
+  return { messages, contractTxids, found: messages.length, nextCursor, note: messages.length ? `Received ${messages.length} new Kaspa payment${messages.length === 1 ? "" : "s"}.` : "No new Kaspa payments." };
 }
