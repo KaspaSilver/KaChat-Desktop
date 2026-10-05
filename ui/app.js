@@ -9382,7 +9382,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 98;
+const APP_BUILD = 99;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12944,6 +12944,7 @@ function updateWalletUi() {
   if (toolbarBalanceValue) toolbarBalanceValue.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   else toolbarBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (profileBalance) profileBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  installTestnetFaucetButton.render?.(); // Claim Testnet Kaspa follows the loaded account
   if (chattingAddressBalance) chattingAddressBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
   if (profileInitial) profileInitial.textContent = address ? accountName.trim().charAt(0).toUpperCase() || "K" : "◎";
@@ -23163,6 +23164,114 @@ document.querySelectorAll("[data-copy-engine-address]").forEach((button) => {
     }
   });
 });
+
+// Claim Testnet Kaspa (iOS 182ae68, 2a81767): Profile, testnet only. The official TN10 faucet sits
+// behind a Cloudflare check, so it is never claimed in the background: the button copies the
+// chatting address in its kaspatest: form and opens the faucet in a new tab. When the user comes
+// back, the chatting balance is watched for up to a minute; a rise means the claim landed and the
+// button locks for 24 hours (kept per address, with a countdown). No rise leaves it free.
+function installTestnetFaucetButton() {
+  const button = document.querySelector("[data-testnet-faucet]");
+  if (!button || !IS_TESTNET) return;
+  const FAUCET_URL = "https://faucet-tn10.kaspanet.io";
+  const LOCK_MS = 24 * 60 * 60 * 1000;
+  const icon = button.querySelector("[data-testnet-faucet-icon]");
+  const note = button.querySelector("[data-testnet-faucet-note]");
+  const ICONS = {
+    drop: '<svg viewBox="0 0 24 24"><path d="M12 2.5c-.3 0-.6.2-.8.4C9.3 5.4 5.5 10.6 5.5 14.5a6.5 6.5 0 0 0 13 0c0-3.9-3.8-9.1-5.7-11.6-.2-.2-.5-.4-.8-.4Z"/></svg>',
+    check: '<svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm4.7 7.7-5.5 5.5a1 1 0 0 1-1.4 0l-2.5-2.5a1 1 0 1 1 1.4-1.4l1.8 1.8 4.8-4.8a1 1 0 0 1 1.4 1.4Z"/></svg>',
+    hourglass: '<svg viewBox="0 0 24 24"><path d="M6 2h12v2h-1v3.2a3 3 0 0 1-.9 2.1L13.4 12l2.7 2.7a3 3 0 0 1 .9 2.1V20h1v2H6v-2h1v-3.2a3 3 0 0 1 .9-2.1l2.7-2.7-2.7-2.7A3 3 0 0 1 7 7.2V4H6V2Zm3 2v3.2c0 .3.1.5.3.7L12 10.6l2.7-2.7c.2-.2.3-.4.3-.7V4H9Z"/></svg>',
+  };
+  const DEFAULT_NOTE = "Copies your chatting address and opens the TN10 faucet: paste it, pass the check and claim the most it offers.";
+  let checking = false;
+  let balanceBefore = null;
+  let awaitingReturn = false;
+
+  const storageKey = (address) => `kachat_tn10_faucet_claimed_${String(address || "").toLowerCase()}`;
+  const claimedAt = () => {
+    try { return Number(localStorage.getItem(storageKey(engine.address))) || 0; } catch { return 0; }
+  };
+  const remainingText = (ms) => {
+    const minutes = Math.max(1, Math.ceil(ms / 60000));
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  };
+  const render = () => {
+    button.hidden = !engine.address;
+    if (button.hidden) return;
+    const left = claimedAt() + LOCK_MS - Date.now();
+    const locked = left > 0;
+    button.classList.toggle("checking", checking);
+    button.classList.toggle("locked", locked && !checking);
+    button.disabled = checking || locked;
+    if (icon) icon.innerHTML = checking ? ICONS.hourglass : locked ? ICONS.check : ICONS.drop;
+    if (note) {
+      note.textContent = checking
+        ? "Waiting for the faucet's payment..."
+        : locked ? `Claimed. You can claim again in ${remainingText(left)}.` : DEFAULT_NOTE;
+    }
+  };
+  const readBalanceSompi = async () => {
+    if (!engine.address) return null;
+    try {
+      await engine.connect();
+      return (await engine.balance()).totalSompi;
+    } catch {
+      return null;
+    }
+  };
+  // After the faucet tab: the payment usually lands within seconds, so check every 5 s for a minute.
+  const checkForClaim = async () => {
+    if (checking || balanceBefore === null) return;
+    const before = balanceBefore;
+    const address = engine.address;
+    checking = true;
+    render();
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 5000));
+        if (engine.address !== address) return; // account switched
+        const now = await readBalanceSompi();
+        if (now !== null && now > before) {
+          try { localStorage.setItem(storageKey(address), String(Date.now())); } catch { /* storage off */ }
+          refreshBalanceOnly();
+          showCopyToast("Testnet Kaspa received");
+          return;
+        }
+      }
+    } finally {
+      checking = false;
+      balanceBefore = null;
+      render();
+    }
+  };
+  const onReturn = () => {
+    if (!awaitingReturn || document.visibilityState !== "visible") return;
+    awaitingReturn = false;
+    checkForClaim();
+  };
+
+  button.addEventListener("click", async () => {
+    if (!engine.address || button.disabled) return;
+    const tn10Address = reencodeAddress(engine.address, "kaspatest") || engine.address;
+    // Open first, inside the click, so the browser doesn't block the new tab.
+    window.open(FAUCET_URL, "_blank", "noopener");
+    try {
+      await copyTextToClipboard(tn10Address);
+      showCopyToast("Your TN10 chatting address is copied. Paste it into the faucet's address field.");
+    } catch {
+      showCopyToast("Copy failed");
+    }
+    balanceBefore = await readBalanceSompi();
+    awaitingReturn = balanceBefore !== null;
+  });
+  document.addEventListener("visibilitychange", onReturn);
+  window.addEventListener("focus", onReturn);
+  window.setInterval(render, 60_000);
+  installTestnetFaucetButton.render = render;
+  render();
+}
+installTestnetFaucetButton();
 
 const hasSavedAccounts = loadSavedAccounts().length > 0;
 if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true" || !hasSavedAccounts) {

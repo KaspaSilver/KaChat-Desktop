@@ -764,6 +764,18 @@
           <!-- One row per address role. The title and balance ARE the copy affordance, and the two
                circles are Send and Manage - iOS replaced the expanding dropdowns that hid those
                same three actions behind a chevron tap (ProfileView.addressActionRow). -->
+          <!-- Testnet only (iOS 182ae68, 2a81767): free TN10 coins for the chatting address from the
+               official faucet. It sits behind a Cloudflare check, so it opens in a new tab with the
+               kaspatest: address copied; a balance rise after you come back locks it for 24 h. -->
+          <button class="profile-card testnet-faucet-button" type="button" data-testnet-faucet hidden>
+            <span class="testnet-faucet-icon" data-testnet-faucet-icon aria-hidden="true"></span>
+            <span class="testnet-faucet-copy">
+              <strong>Claim Testnet Kaspa</strong>
+              <small data-testnet-faucet-note>Copies your chatting address and opens the TN10 faucet: paste it, pass the check and claim the most it offers.</small>
+            </span>
+            <svg class="testnet-faucet-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+          </button>
+
           <div class="profile-card profile-address-row">
             <button class="profile-address-main" type="button" data-copy-engine-address>
               <span class="profile-address-title">Chatting</span>
@@ -1028,12 +1040,9 @@
           <section class="settings-group">
             <p class="settings-group-label">Connection</p>
             <div class="settings-list-card">
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="connection-settings">
-                <span class="settings-row-copy"><strong>Connection Settings</strong></span>
-                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-              </button>
-              <!-- Mainnet <-> testnet (iOS 0c1af03). Each network keeps its own connection settings,
-                   so Connection Settings above shows the testnet values while this is on. -->
+              <!-- Mainnet <-> testnet (iOS 0c1af03), first in the section with no footer (iOS 010167f).
+                   Each network keeps its own connection settings, so Connection Settings below shows
+                   the testnet values while this is on. -->
               <div class="settings-toggle-row testnet-toggle-row">
                 <span class="testnet-toggle-label">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-8.5V3"/><path d="M7.5 14h9"/></svg>
@@ -1046,8 +1055,11 @@
                 <span data-testnet-restart-text></span>
                 <button type="button" class="testnet-reload-button" data-testnet-reload>Reload Now</button>
               </div>
+              <button class="settings-list-row" type="button" data-settings-open-subscreen="connection-settings">
+                <span class="settings-row-copy"><strong>Connection Settings</strong></span>
+                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+              </button>
             </div>
-            <p class="settings-group-footer" data-kas-literal>Testnet is for testing only - testnet KAS has no value. On testnet your account uses its kaspatest: address, with its own balance and chats, and Connection Settings holds testnet values: the testnet explorer, automatic node discovery, and no KaChat indexers until testnet ones exist. Turning it off brings your mainnet settings back.</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="explorer">
                 <span class="settings-row-copy"><strong>Kaspa Explorer</strong><small>Which explorer transaction and address links open in.</small></span>

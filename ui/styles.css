@@ -12995,3 +12995,17 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .sk-coin-picker-list .cold-coincontrol-row:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 1px; }
 .sk-coin-retry { display: flex; justify-content: center; }
 .sk-coin-sheet .modal-actions { display: flex; justify-content: flex-end; }
+
+/* ==== Claim Testnet Kaspa (iOS 182ae68): Profile, testnet only, above the Chatting card. ==== */
+.testnet-faucet-button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 0; border-radius: 18px; background: color-mix(in srgb, var(--kaspa-ink, #49eacb) 15%, transparent); color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.testnet-faucet-button[hidden] { display: none !important; }
+.testnet-faucet-button.locked, .testnet-faucet-button.checking { background: color-mix(in srgb, var(--kaspa-ink, #49eacb) 6%, transparent); cursor: default; }
+.testnet-faucet-icon { width: 28px; flex: 0 0 28px; display: inline-flex; justify-content: center; color: var(--kaspa-ink, #49eacb); }
+.testnet-faucet-button.locked .testnet-faucet-icon, .testnet-faucet-button.checking .testnet-faucet-icon { color: var(--muted); }
+.testnet-faucet-icon svg { width: 22px; height: 22px; fill: currentColor; }
+.testnet-faucet-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.testnet-faucet-copy strong { font-size: 15px; font-weight: 600; }
+.testnet-faucet-button.locked .testnet-faucet-copy strong { color: var(--muted); }
+.testnet-faucet-copy small { font-size: 12px; color: var(--muted); line-height: 1.35; }
+.testnet-faucet-open { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.testnet-faucet-button.locked .testnet-faucet-open, .testnet-faucet-button.checking .testnet-faucet-open { display: none; }
