@@ -22,13 +22,12 @@ import {
   compoundInputs, unsignedToKsptBytes, broadcastSigned, isValidKaspaAddress,
   fetchSpendableUtxos, utxoKey,
 } from "./kspt.js";
-// Asset URLs must be IMPORTED, not written as paths in a string. Vite rewrites and hashes the
-// assets it can see - the ones in index.html and the stylesheet - but a path inside a template
-// literal is just text to it, so `./ui/assets/kaspa-logo.png` was never emitted into the build at
-// all and 404'd on the built site (a broken-image icon where the KAS mark should be). Importing
-// it makes the bundler responsible for both copying the file and pointing at it.
-import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import { closeActiveScanner, scanKaspaAddress, scanQrCode } from "./qr-scan.js";
+import {
+  recipientCardHtml, recipientStatusHtml, amountEntryHtml, layoutAmountEntry, sanitizeAmountText,
+  availablePillInnerHtml, infoPillHtml, feeControlsHtml, coinControlSummaryText, sendActionButtonHtml,
+  shortSendAddress,
+} from "./send-kaspa-components.js";
 import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx, historicalKasPrice } from "./portfolio.js";
 
 const COLD_ACCOUNTS_KEY = "kachat-cold-accounts-v1"; // account-scoped: [{ id, label, kpub, addedAt, maxIndex, labels, hidden }]
@@ -302,8 +301,6 @@ const QR_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" w
 const TRASH_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1.5 1.5 0 0 0 1.5 1.4h7A1.5 1.5 0 0 0 17 20l1-13M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2"/></svg>`;
 const DOTS_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>`;
 const MERGE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v6a4 4 0 0 0 4 4v6M16 4v6a4 4 0 0 1-4 4"/><path d="m9 17 3 3 3-3"/></svg>`;
-const CLIPBOARD_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="2.5" width="8" height="4" rx="1.2"/><path d="M8 4.5H6.5A1.5 1.5 0 0 0 5 6v13.5A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H16"/></svg>`;
-const SCAN_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/><path d="M3 12h18"/></svg>`;
 const PIE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.18 15.9A10 10 0 1 1 8.1 2.82"/><path d="M22 12A10 10 0 0 0 12 2v10Z"/></svg>`;
 const EXTERNAL_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4 10.5 13.5"/><path d="M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></svg>`;
 const CHECK_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M8 12.4l2.6 2.6L16 9.6"/></svg>`;
@@ -1543,37 +1540,55 @@ async function handleSignedResponse(bytes) {
 
 // --- Send flow rendering ----------------------------------------------------
 
+// The shared recipient card's status line (send-kaspa-components, iOS SendRecipientCard).
 function sendRecipientStatusHtml() {
-  const trimmed = send.toInput.trim();
-  if (!trimmed) return "";
-  if (send.resolvingKns) return '<p class="cold-send-status muted">Looking up domain…</p>';
-  if (send.knsError) return `<p class="cold-send-status bad">✕ ${deps.escapeHtml(send.knsError)}</p>`;
-  // Who the address resolves to (iOS ac0ef19): the create-chat card under the status.
-  const card = (address, domain) => deps.addressCardHtml?.(address, { domain, onLoaded: () => renderSendStatusOnly() }) || "";
-  if (send.resolvedAddress) {
-    return `<p class="cold-send-status good">✓ Resolved: ${deps.escapeHtml(send.resolvedDomain || "")}</p>
-      <p class="cold-send-status mono">${deps.escapeHtml(send.resolvedAddress)}</p>${card(send.resolvedAddress, send.resolvedDomain)}`;
-  }
-  return send.validAddress
-    ? `<p class="cold-send-status good">✓ Valid address</p>${card(trimmed, null)}`
-    : '<p class="cold-send-status bad">✕ Invalid address format</p>';
+  return recipientStatusHtml({
+    input: send.toInput,
+    resolving: send.resolvingKns,
+    error: send.knsError,
+    resolvedAddress: send.resolvedAddress,
+    resolvedName: send.resolvedDomain,
+    valid: send.validAddress,
+  });
 }
 
-/** In-place update of the "≈ …" equivalent under the amount field — runs on every
- *  keystroke, so no full re-render (that would drop the input's focus/caret). */
+/** Who the address resolves to (iOS ac0ef19): the create-chat card, in the recipient card. */
+function sendRecipientCardHtml() {
+  const trimmed = send.toInput.trim();
+  if (!trimmed || send.resolvingKns || send.knsError) return "";
+  const address = send.resolvedAddress || (send.validAddress ? trimmed : null);
+  if (!address) return "";
+  return deps.addressCardHtml?.(address, { domain: send.resolvedDomain, onLoaded: () => renderSendStatusOnly() }) || "";
+}
+
+/** The other unit's code while there's nothing to convert (iOS KaspaAmountEntry). */
+function sendConversionLabel() {
+  return sendConversionText() || (send.amountUnit === "fiat" ? KAS_UNIT : (deps.currencyCode?.() || "USD"));
+}
+
+/** In-place update of the amount entry's switch ("≈ …") and size — runs on every keystroke, so
+ *  no full re-render (that would drop the input's focus/caret). */
 function updateSendConversionHint() {
+  if (!send) return;
+  const toggle = modalsEl?.querySelector("[data-cold-send-unit]");
+  if (toggle) toggle.hidden = !(send.price > 0);
   const hint = modalsEl?.querySelector("[data-cold-send-conversion]");
-  if (!hint || !send) return;
-  const text = sendConversionText();
-  hint.hidden = !text;
-  hint.textContent = text || "";
+  if (hint) hint.textContent = sendConversionLabel();
+  layoutAmountEntry(modalsEl?.querySelector("[data-cold-send-amount]"), modalsEl?.querySelector("[data-cold-send-unit-code]"));
 }
 
 function renderSendStatusOnly() {
-  const holder = modalsEl?.querySelector("[data-cold-send-recipient-status]");
-  if (holder && send) holder.innerHTML = sendRecipientStatusHtml();
+  if (!send) return;
+  const holder = modalsEl?.querySelector("[data-cold-send-status]");
+  if (holder) holder.innerHTML = sendRecipientStatusHtml();
+  const cardHost = modalsEl?.querySelector("[data-cold-send-resolution]");
+  if (cardHost) cardHost.innerHTML = sendRecipientCardHtml();
+  const check = modalsEl?.querySelector("[data-cold-send-check]");
+  if (check) check.hidden = !(send.toInput.trim() && sendHasValidRecipient());
   const buildBtn = modalsEl?.querySelector("[data-cold-send-build]");
-  if (buildBtn && send) buildBtn.disabled = !(sendHasValidRecipient() && sendAmountSompi() !== null);
+  if (buildBtn && send.step === "form") buildBtn.disabled = !(sendHasValidRecipient() && sendAmountSompi() !== null);
+  const maxBtn = modalsEl?.querySelector("[data-cold-send-max]");
+  if (maxBtn && !send.estimatingMax) maxBtn.disabled = !(send.validAddress || send.resolvedAddress);
   updateSendConversionHint();
   scheduleSendPreview();
 }
@@ -1603,74 +1618,63 @@ function renderSendFlow() {
   if (send.step === "form" || send.step === "building") {
     const building = send.step === "building";
     const canBuild = sendHasValidRecipient() && sendAmountSompi() !== null;
-    const feeText = fmtKasBig(sendEffectiveFee());
+    const feeText = `${fmtKasBig(sendEffectiveFee())} ${KAS_UNIT}`;
+    // The same pieces as every Send Kaspa screen (send-kaspa-components.js, iOS 4d0324f): the
+    // recipient card (locked to this address for Compound UTXOs), the amount entry, the
+    // Available / From pills, the fee card with Coin Control, and - KasSigner signs, so nothing
+    // moves here - a plain Build Unsigned Transaction button instead of slide to send.
     body.innerHTML = `
       ${header}
-      <div class="cold-send-rows">
-        <div class="cold-send-row"><span>From</span><code>${deps.escapeHtml(shortFrom)}</code></div>
-        <div class="cold-send-row"><span>Available</span><strong>${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</strong></div>
-      </div>
-      ${send.isCompound
-        // iOS's order: the section is LABELLED, then shows the address it is consolidating, then
-        // explains underneath. Leading with the explanation left the address looking like an
-        // afterthought rather than the subject of the screen.
-        ? `<span class="field-label">Consolidating This Address</span>
-           <div class="cold-send-locked-recipient">${MERGE_ICON}<code>${deps.escapeHtml(send.fromAddress)}</code></div>
-           <p class="field-hint">${send.compoundHasMore
-            ? `This address has more than ${KSPT_MAX_INPUTS} UTXOs. KasSigner can sign at most ${KSPT_MAX_INPUTS} inputs per transaction, so this merges the largest ${KSPT_MAX_INPUTS} into one. Run Compound again afterward to keep combining the rest.`
-            : "Merges all of this address's UTXOs into a single one, so future sends need fewer inputs."}</p>`
-        : `<label class="field-label">Recipient Address
-             <input class="field-input cold-mono-input" type="text" data-cold-send-recipient
-               placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false"
-               value="${deps.escapeHtml(send.toInput)}" />
-           </label>
-           <div class="cold-send-recipient-status" data-cold-send-recipient-status>${sendRecipientStatusHtml()}</div>
-           <div class="cold-send-recipient-actions">
-             <button class="cold-inline-link" type="button" data-cold-send-paste>${CLIPBOARD_ICON}Paste</button>
-             <button class="cold-inline-link" type="button" data-cold-send-scan>${SCAN_ICON}Scan QR</button>
-           </div>`}
-      <span class="field-label">Amount</span>
-      <div class="send-amount-field">
-        <button type="button" class="send-amount-unit" data-cold-send-unit title="Tap to switch between ${KAS_UNIT} and fiat">
-          <img src="${kaspaLogoUrl}" alt="" class="send-amount-logo" ${send.amountUnit === "kas" ? "" : "hidden"} />
-          <span class="send-amount-fiat-symbol" ${send.amountUnit === "fiat" ? "" : "hidden"}>${deps.escapeHtml(deps.currencySymbol?.() || "$")}</span>
-          <span class="send-amount-unit-code">${send.amountUnit === "kas" ? KAS_UNIT : deps.currencyCode?.() || "USD"}</span>
-        </button>
-        <input class="field-input send-amount-input" type="text" inputmode="decimal" data-cold-send-amount
-          placeholder="${send.amountUnit === "kas" ? "0.00000000" : "0.00"}" autocomplete="off" value="${deps.escapeHtml(send.amountText)}" />
-        <button type="button" class="send-amount-max" data-cold-send-max ${send.estimatingMax || !(send.validAddress || send.resolvedAddress) ? "disabled" : ""}>${send.estimatingMax ? "…" : "Max"}</button>
-      </div>
-      <p class="field-hint cold-send-conversion" data-cold-send-conversion ${sendConversionText() ? "" : "hidden"}>${deps.escapeHtml(sendConversionText() || "")}</p>
-      <div class="settings-segmented full" role="group" aria-label="Fee tier">
-        ${["normal", "fast", "priority"].map((tier) => `
-          <button type="button" class="settings-segmented-option ${send.feeTier === tier ? "active" : ""}" data-cold-send-tier="${tier}">
-            ${tier[0].toUpperCase()}${tier.slice(1)}
-          </button>`).join("")}
-      </div>
-      <div class="cold-send-row cold-send-fee-row"><span>Network Fee</span>
-        ${send.editingFee
-          ? `<span class="cold-send-amount-wrap">
-               <input class="field-input cold-send-fee-input" type="text" inputmode="decimal" data-cold-send-fee-input value="${deps.escapeHtml(fmtKasBig(sendEffectiveFee()))}" />
-               <button class="cold-inline-link" type="button" data-cold-send-fee-commit>✓</button>
-             </span>`
-          : `<button class="cold-inline-link" type="button" data-cold-send-fee-edit>~${feeText} ${KAS_UNIT} ✎</button>`}
-      </div>
-      <p class="field-hint">If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. Tap the fee amount to set a custom fee.</p>
-      ${send.isCompound ? "" : `
-      <button type="button" class="cold-send-row cold-send-coincontrol-row" data-cold-open-coincontrol>
-        <span>Coin Control</span>
-        <span class="cold-send-row-value">${send.manualUtxoKeys?.length
-          ? `${send.manualUtxoKeys.length} UTXO${send.manualUtxoKeys.length === 1 ? "" : "s"} selected`
-          : "Automatic"}<svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></span>
-      </button>
-      <p class="field-hint">Choose exactly which UTXOs to spend instead of selecting automatically.</p>`}
-      ${send.error ? `<p class="field-error">${deps.escapeHtml(send.error)}</p>` : ""}
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-send-close>Cancel</button>
-        <button class="primary-button" type="submit" data-cold-send-build ${(!canBuild || building) ? "disabled" : ""}>
-          ${building ? "Building…" : "Build Unsigned Transaction"}
-        </button>
+      <div class="sk-screen">
+        ${recipientCardHtml({
+          prefix: "cold-send",
+          value: send.toInput,
+          lockedAddress: send.isCompound ? send.fromAddress : null,
+          valid: Boolean(send.toInput.trim()) && sendHasValidRecipient(),
+          statusHtml: send.isCompound ? "" : sendRecipientStatusHtml(),
+          cardHtml: send.isCompound ? "" : sendRecipientCardHtml(),
+        })}
+        ${send.isCompound ? `<p class="sk-caption">${send.compoundHasMore
+          ? `This address has more than ${KSPT_MAX_INPUTS} UTXOs. KasSigner can sign at most ${KSPT_MAX_INPUTS} inputs per transaction, so this merges the largest ${KSPT_MAX_INPUTS} into one. Run Compound again afterward to keep combining the rest.`
+          : "Merges all of this address's UTXOs into a single one, so future sends need fewer inputs."}</p>` : ""}
+        ${amountEntryHtml({
+          prefix: "cold-send",
+          value: send.amountText,
+          unitText: send.amountUnit === "kas" ? KAS_UNIT : (deps.currencyCode?.() || "USD"),
+          conversionText: sendConversionLabel(),
+          showToggle: send.price > 0,
+          maxDisabled: !(send.validAddress || send.resolvedAddress),
+          maxBusy: send.estimatingMax,
+          ariaLabel: send.amountUnit === "kas" ? `Amount (${KAS_UNIT})` : `Amount (${deps.currencyCode?.() || "USD"})`,
+        })}
+        <div class="sk-pills">
+          ${infoPillHtml({ innerHtml: availablePillInnerHtml({ text: `Available: ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}` }) })}
+          ${infoPillHtml({ innerHtml: deps.escapeHtml(`From ${shortSendAddress(send.fromAddress)}`) })}
+        </div>
+        ${feeControlsHtml({
+          prefix: "cold-send",
+          feeText,
+          editing: send.editingFee,
+          customValue: fmtKasBig(sendEffectiveFee()),
+          tier: send.customExtraFeeSompi !== null ? null : send.feeTier,
+          showCoinControl: !send.isCompound,
+          coinSummary: coinControlSummaryText(send.manualUtxoKeys?.length || 0),
+        })}
+        ${send.error ? `<p class="field-error sk-error">${deps.escapeHtml(send.error)}</p>` : ""}
+        ${sendActionButtonHtml({
+          attr: "cold-send-build",
+          title: "Build Unsigned Transaction",
+          requiresSlide: false,
+          disabled: !canBuild,
+          busy: building,
+          busyLabel: "Building…",
+        })}
       </div>`;
+    if (send.editingFee) {
+      const feeInput = body.querySelector("[data-cold-send-fee-custom]");
+      feeInput?.focus();
+      feeInput?.select?.();
+    }
     return;
   }
 
@@ -2035,7 +2039,7 @@ function buildModals() {
     if (event.target.closest("[data-cold-send-max]")) { sendSetMax(); return; }
 
     // --- Coin Control -------------------------------------------------------
-    if (event.target.closest("[data-cold-open-coincontrol]")) { openCoinControl(); return; }
+    if (event.target.closest("[data-cold-send-coin-toggle]")) { openCoinControl(); return; }
     if (event.target.closest("[data-cold-coincontrol-cancel]")) {
       // Cancel leaves the existing selection alone - it is a way out of the picker, not a reset.
       send.step = "form";
@@ -2076,9 +2080,9 @@ function buildModals() {
       renderSendFlow();
       return;
     }
-    const tier = event.target.closest("[data-cold-send-tier]");
+    const tier = event.target.closest("[data-cold-send-fee]");
     if (tier) {
-      send.feeTier = tier.dataset.coldSendTier;
+      send.feeTier = tier.dataset.coldSendFee;
       send.customExtraFeeSompi = null;
       send.editingFee = false;
       scheduleSendPreview();
@@ -2087,7 +2091,7 @@ function buildModals() {
     }
     if (event.target.closest("[data-cold-send-fee-edit]")) { send.editingFee = true; renderSendFlow(); return; }
     if (event.target.closest("[data-cold-send-fee-commit]")) {
-      commitCustomSendFee(sendBody.querySelector("[data-cold-send-fee-input]")?.value || "");
+      commitCustomSendFee(sendBody.querySelector("[data-cold-send-fee-custom]")?.value || "");
       return;
     }
     if (event.target.closest("[data-cold-send-build]")) { sendBuild(); return; }
@@ -2123,12 +2127,16 @@ function buildModals() {
     if (!send) return;
     if (event.target.matches("[data-cold-send-recipient]")) handleSendRecipientInput(event.target.value);
     else if (event.target.matches("[data-cold-send-amount]")) {
-      send.amountText = event.target.value;
+      // Digits and one point: 8 decimals for KAS, 2 for a currency (8 for BTC) - the shared rule.
+      const decimals = send.amountUnit === "fiat" && (deps.currencyCode?.() || "") !== "BTC" ? 2 : 8;
+      const sanitized = sanitizeAmountText(event.target.value, decimals);
+      if (sanitized !== event.target.value) event.target.value = sanitized;
+      send.amountText = sanitized;
       renderSendStatusOnly();
     }
   });
   sendBody.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && event.target.matches("[data-cold-send-fee-input]")) {
+    if (event.key === "Enter" && event.target.matches("[data-cold-send-fee-custom]")) {
       event.preventDefault();
       commitCustomSendFee(event.target.value);
     }
@@ -2824,6 +2832,32 @@ export function openColdAccountForAddress(address) {
       openAccount(account.id);
       return true;
     } catch { /* a bad kpub owns nothing */ }
+  }
+  return false;
+}
+
+/// Opens a watched Cold Storage address on its History tab (iOS 13046ad
+/// ColdStorageAddressTransactionHistoryView, for a tapped "Received" notification). The caller
+/// puts the Cold Storage tab up first. Resolves false when no account owns the address.
+export async function openColdAddressHistory(address) {
+  if (!deps) return false;
+  loadState();
+  const target = String(address || "").trim();
+  if (!target) return false;
+  for (const account of accounts) {
+    let derived = [];
+    try { derived = deriveReceiveAddresses(account.kpub, 0, account.maxIndex + 1); } catch { continue; }
+    const index = derived.indexOf(target);
+    if (index < 0) continue;
+    // A screen left open on another address must not repaint as this account's address.
+    activeAddressIndex = null;
+    const opening = openAccount(account.id);
+    // loadDetail fills detailEntries before its first await, so the address screen opens now
+    // rather than after every balance lands; an account still being discovered gets it after.
+    if (!detailEntries.some((e) => e.index === index)) await opening;
+    if (activeAccountId !== account.id || activeAddressIndex !== null) return true; // moved on meanwhile
+    await openAddressScreen(index);
+    return true;
   }
   return false;
 }

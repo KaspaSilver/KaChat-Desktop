@@ -21,7 +21,7 @@ import {
   sendBroadcastMessage,
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
-import { confirmDialog, promptDialog, alertDialog, chooseDialog, userFacingError } from "./dialogs.js";
+import { confirmDialog, promptDialog, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
@@ -185,6 +185,77 @@ export function deleteSelectedRooms() {
 }
 function listedChannels() {
   return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])].filter((name) => curatedShown(name) && !isServiceBroadcastChannel(name));
+}
+
+// --- The Chats circles row (iOS a062577 / f90a70a) ---------------------------------------------
+// The rooms show as circles above the Chats list, beside the group chats; the app draws them and
+// owns their selection. These are the room facts and actions it needs.
+
+/** The rooms in the list, each with what its circle shows: unread (messages from others since
+ *  the room was last opened), latest activity (for the row's order), and the half sheet's state. */
+export function chatCircleRooms() {
+  if (!deps) return [];
+  return listedChannels().map((name) => ({
+    name,
+    unread: unreadFor(name),
+    lastAt: Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0),
+    notify: Boolean(notifyByChannel[name]),
+    indexed: isIndexedBroadcastChannel(name),
+    joined: joinedChannels.includes(name),
+    open: name === activeChannel,
+  }));
+}
+/** Opens a room in the detail pane (the app clears whatever chat or group had it first). */
+export function openBroadcastRoom(name) {
+  if (!deps) return;
+  const clean = normalizeBroadcastChannel(name);
+  if (!clean) return;
+  openRoom(clean);
+}
+/** Closes the open room, if any - a chat or a group is taking the pane. */
+export function closeBroadcastRoom() {
+  if (deps && activeChannel) closeRoom();
+}
+/** Mark as Read / Unread for several rooms at once (the Chats Select bar, a circle's sheet). */
+export function markBroadcastRooms(names, read) {
+  if (!deps) return;
+  for (const name of names) {
+    if (read) markChannelRead(name);
+    else markedUnread[name] = true;
+  }
+  if (!read) saveRead();
+  renderChannelList();
+}
+/** Delete: a room you added is left with its messages; a default room is switched off, exactly
+ *  like its toggle in Public Chats settings (iOS removeFromList). */
+export function removeBroadcastRooms(names) {
+  if (!deps) return 0;
+  const list = [...names];
+  for (const name of list) removeFromList(name);
+  renderChannelList();
+  return list.length;
+}
+/** The room's notifications on or off, as the room's bell sets them. */
+export function setBroadcastRoomNotify(name, on) {
+  if (!deps) return;
+  const indexed = isIndexedBroadcastChannel(name);
+  if (indexed && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
+  if (on) { notifyByChannel[name] = true; deps.ensureNotificationPermission?.(); }
+  else delete notifyByChannel[name];
+  saveNotify();
+  syncScanWanted();
+  renderChannelList();
+  if (activeChannel === name) document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !on);
+  deps.showToast?.(!on
+    ? "Notifications are off for this public chat"
+    : (indexed
+      ? "You'll get notifications for new messages in this public chat, even when the app is closed"
+      : "You'll get a notification for new messages in this public chat as long as your app remains open"));
+}
+/** Copies the room's kachat.app link. */
+export function copyBroadcastRoomLink(name) {
+  if (!deps) return;
+  copyRoomLink(name);
 }
 
 // Service rooms (the chess arena) are scanned while their screen is up, on top of whatever the
@@ -733,6 +804,9 @@ function mergeMessages(channel, rows) {
       title: `#${row.channel}`,
       body: `${senderName(row.senderAddress)}: ${humanizeBroadcastContent(row.content).slice(0, 90)}`,
       tag: `kachat-broadcast-${row.txId}`,
+      // Clicking it opens the room (the app routes "room" to the detail pane).
+      route: { kind: "room", channel: row.channel },
+      onClick: () => deps.openRoomFromNotification?.(row.channel),
     });
   }
   return added + (reactionsChanged ? 1 : 0);
@@ -937,7 +1011,9 @@ function roomRowHtml(name, { title = null, subtitle = null } = {}) {
 }
 
 function renderChannelList() {
-  if (!listEl) return;
+  // The rooms are circles above the Chats list now (iOS a062577), drawn by the app: with no list
+  // mounted, this only tells the app that a room's state changed, so the circles redraw.
+  if (!listEl) { deps?.onUnreadChanged?.(); return; }
   const latest = (name) => Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0);
   const others = joinedChannels
     .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name) && curatedShown(name) && !isServiceBroadcastChannel(name))
@@ -1333,7 +1409,7 @@ function openBroadcastMessageMenu(m, x, y) {
   const share = Boolean(firstLink && deps.isNextcloudShareLink?.(firstLink));
   if (firstLink) {
     items.push({ label: "Open Link", icon: icons.explorer, onClick: () => window.open(firstLink, "_blank", "noopener,noreferrer") });
-    if (!share) items.push({ label: "Copy Link", icon: icons.copy, onClick: () => deps.copyText?.(firstLink).catch(() => {}) });
+    if (!share) items.push({ label: "Copy Link", icon: icons.link || icons.copy, onClick: () => deps.copyText?.(firstLink).catch(() => {}) });
   }
   if (text && !deps.parseAudioEnvelope?.(m.content) && !deps.isNextcloudShareLink?.(text)) {
     items.push({
@@ -1368,7 +1444,7 @@ function openBroadcastMessageMenu(m, x, y) {
     .map(([reactorAddress, entry]) => ({ emoji: entry.emoji, reactorAddress }));
   if (reactionEntries.length) {
     items.push({
-      label: `Reactions (${reactionEntries.length})`, icon: icons.info,
+      label: `Reactions (${reactionEntries.length})`, icon: icons.heart || icons.info,
       onClick: () => deps.showReactionsSheet?.({
         entries: reactionEntries,
         nameFor: (address) => senderName(address),
@@ -1456,8 +1532,8 @@ function renderRoom() {
   const inRoom = Boolean(activeChannel);
   if (inRoom && roomWindowChannel !== activeChannel) { roomWindowChannel = activeChannel; roomWindow = ROOM_WINDOW; keepInPlaceAfterOlderLoad = null; lastRenderedNewestKey = null; lastRenderedCount = 0; }
   if (roomEl) roomEl.hidden = !inRoom;
-  // The list is the Chats screen's third tab and stays where it is; the room takes the pane
-  // beside it (the app decides what that means for the layout).
+  // The room takes the detail pane beside the Chats list (the app decides what that means for
+  // the layout).
   deps.onRoomVisibility?.(inRoom);
   if (!inRoom) return;
 
@@ -1828,8 +1904,8 @@ function broadcastJoinProblem(name) {
 }
 
 /** The Chats New sheet's "New Public Chat": "" when the name is fine to join, otherwise the
- *  sentence to show under the field. Nothing is joined here - the caller switches to the Public
- *  Chats tab first, then calls joinBroadcastChannelFromSheet. */
+ *  sentence to show under the field. Nothing is joined here - the caller clears the detail pane
+ *  first, then calls joinBroadcastChannelFromSheet, which opens the room there. */
 export function broadcastJoinError(rawName) {
   if (!deps) return "Something went wrong joining that channel.";
   return broadcastJoinProblem(normalizeBroadcastChannel(rawName))?.message || "";
@@ -2228,6 +2304,8 @@ function openRetentionSheet(channel) {
 // ---------------------------------------------------------------------------
 
 export function refreshBroadcasts() {
+  // Chats (where the room circles live) can come up before the rooms are started.
+  if (!deps) return;
   tabVisible = true;
   loadState({ caches: false });
   renderChannelList();
@@ -2378,21 +2456,22 @@ export function initBroadcasts(dependencies) {
     const notifying = Boolean(notifyByChannel[name]);
     const options = [
       unread
-        ? { id: "read", title: "Mark as Read", subtitle: "Clears this room's unread count." }
-        : { id: "unread", title: "Mark as Unread", subtitle: "Keeps a badge on this room until you open it." },
+        ? { id: "read", title: "Mark as Read", subtitle: "Clears this room's unread count.", icon: ACTION_TILE_ICONS.envelopeOpen }
+        : { id: "unread", title: "Mark as Unread", subtitle: "Keeps a badge on this room until you open it.", icon: ACTION_TILE_ICONS.envelopeBadge },
       notifying
-        ? { id: "notify", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you." }
-        : { id: "notify", title: "Turn Notifications On", subtitle: indexed ? "Notifies you of new messages in this room." : "Listens and notifies while the app is open." },
-      { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room." },
+        ? { id: "notify", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you.", icon: ACTION_TILE_ICONS.bellSlash }
+        : { id: "notify", title: "Turn Notifications On", subtitle: indexed ? "Notifies you of new messages in this room." : "Listens and notifies while the app is open.", icon: ACTION_TILE_ICONS.bell },
+      { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room.", icon: ACTION_TILE_ICONS.link },
     ];
     if (!indexed && joinedChannels.includes(name)) {
-      options.push({ id: "delete", title: "Delete", subtitle: "Removes the room and its cached messages from this device.", destructive: true });
+      options.push({ id: "delete", title: "Delete", subtitle: "Removes the room and its cached messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash });
     } else if (indexed) {
       // A default room is never really deleted - it is switched off, exactly like its toggle in
       // Public Chats settings, and nothing is lost, so it needs no confirmation (iOS e08c4cc).
-      options.push({ id: "switch-off", title: "Delete", subtitle: "Switches this default room off. Turn it back on in Public Chats settings.", destructive: true });
+      options.push({ id: "switch-off", title: "Delete", subtitle: "Switches this default room off. Turn it back on in Public Chats settings.", destructive: true, icon: ACTION_TILE_ICONS.trash });
     }
-    const choice = await chooseDialog({ title: `#${name}`, options });
+    // Square tiles, three to a row, like every long-press menu (iOS cdac6d0).
+    const choice = await chooseDialog({ title: `#${name}`, layout: "tiles", options });
     if (choice === "read") { markChannelRead(name); renderChannelList(); }
     else if (choice === "unread") { markedUnread[name] = true; saveRead(); renderChannelList(); }
     else if (choice === "notify") {

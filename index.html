@@ -79,7 +79,7 @@
       </div>
       <div class="topbar-select-cluster" data-topbar-select-cluster>
         <button type="button" class="chat-select-all" data-chat-select-all hidden>Select All</button>
-        <!-- Public Chats keeps its settings (which default rooms show at all) beside Select (iOS ChatListView). -->
+        <!-- Public room settings (which default rooms show at all), next to Select at all times (iOS a062577). -->
         <button type="button" class="topbar-gear-button" data-public-chats-settings aria-label="Public Chats settings" title="Public Chats settings" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
         </button>
@@ -97,39 +97,15 @@
 
     <div class="app-body" data-app-body>
       <aside class="app-sidebar" data-app-sidebar>
-        <nav class="chats-tab-bar" data-chats-tab-bar aria-label="Chat list sections">
-          <button type="button" class="chats-tab-button active" data-chats-list-tab="chats">
-            <span class="chats-tab-label-row">
-              <span>Chats</span>
-              <span class="chats-tab-badge" data-chats-tab-badge hidden>0</span>
-            </span>
-          </button>
-          <button type="button" class="chats-tab-button" data-chats-list-tab="groups">
-            <span class="chats-tab-label-row">
-              <span>Group Chats</span>
-              <span class="chats-tab-badge" data-groups-tab-badge hidden>0</span>
-            </span>
-          </button>
-          <button type="button" class="chats-tab-button" data-chats-list-tab="public">
-            <span class="chats-tab-label-row">
-              <span>Public Chats</span>
-              <span class="chats-tab-badge" data-public-tab-badge hidden>0</span>
-            </span>
-          </button>
-        </nav>
-
-        <div class="group-actions-row" data-group-actions-row hidden>
-          <button type="button" class="new-group-button" data-new-group>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M2.5 19.5c.6-3.9 3-6.3 6.5-6.3 1.6 0 3 .5 4.1 1.4"/><path d="M17.5 13.5v6M14.5 16.5h6"/></svg>
-            <span>New Group</span>
-          </button>
-        </div>
-
+        <!-- Chats is one list (iOS a062577): the Chats / Group Chats / Public Chats tabs are gone. -->
         <section class="search-wrap" data-search-wrap aria-label="Search chats">
           <input class="search-input" type="search" placeholder="Search chats" autocomplete="off" />
         </section>
 
         <div class="sidebar-scroll">
+          <!-- Group chats and public rooms as a sideways row of circles above the chats (iOS
+               ChatCirclesStrip): click opens, right-click or long-press opens its options. -->
+          <div class="chat-circles" data-chat-circles role="group" aria-label="Group chats and public rooms" hidden></div>
           <div class="empty-state-card" data-empty-state>
             <div class="empty-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
@@ -150,50 +126,9 @@
             </button>
           </div>
 
-          <div class="group-chats-placeholder" data-group-chats-placeholder hidden>
-            <div class="empty-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-                <path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/>
-                <path d="M2.5 19.5c.6-3.9 3-6.3 6.5-6.3s5.9 2.4 6.5 6.3"/>
-                <path d="M16.3 6.2a3.2 3.2 0 1 1 1.9 5.8"/>
-                <path d="M15.8 13.3c2.9.4 4.7 2.3 5.2 5.4"/>
-              </svg>
-            </div>
-            <h1>No Group Chats Yet</h1>
-            <p>Create an encrypted group and add contacts you have already exchanged a handshake with.</p>
-            <button class="add-contact-button" type="button" data-new-group>
-              <svg class="add-contact-icon person-plus-icon" viewBox="0 0 32 32" focusable="false" aria-hidden="true">
-                <circle cx="12" cy="8.5" r="5.25"/>
-                <path d="M3.5 24.5c.7-5.4 4-8.7 8.5-8.7 2.3 0 4.3.8 5.8 2.3"/>
-                <path d="M24.2 18.9v5.8M21.3 21.8h5.8"/>
-              </svg>
-              <span>New Group</span>
-            </button>
-          </div>
-
           <div class="chat-list" data-chat-list hidden></div>
-          <div class="chat-list group-list" data-group-list hidden></div>
-          <!-- Public Chats: the broadcast rooms, the Chats screen's third tab (iOS a566da7). -->
-          <div class="broadcast-list-wrap" data-broadcast-list-wrap hidden>
-            <div class="kaposts-header">
-              <h1 class="kaposts-title">Public Chats</h1>
-            </div>
-            <p class="broadcast-intro">Public, unencrypted rooms on the Kaspa network. Anyone who joins the same channel sees the same messages.</p>
-            <div class="broadcast-list" data-broadcast-list></div>
-            <!-- Join/create card, opened by the floating button on the Public Chats tab (iOS's join alert). -->
-            <div class="broadcast-join-card" data-broadcast-join-card hidden>
-              <strong>Join or Create a Channel</strong>
-              <p>Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
-              <div class="broadcast-join-field">
-                <span class="broadcast-join-hash" aria-hidden="true">#</span>
-                <input class="kaposts-reply-input" type="text" data-broadcast-join-input placeholder="channel-name" maxlength="36" autocapitalize="none" autocomplete="off" spellcheck="false" />
-              </div>
-              <div class="broadcast-join-row">
-                <button class="secondary-button" type="button" data-broadcast-join-cancel>Cancel</button>
-                <button class="primary-button" type="button" data-broadcast-join disabled>Join</button>
-              </div>
-            </div>
-          </div>
+          <!-- Group chats and public rooms have no list of their own any more: they are the circles
+               above (iOS a062577). New ones come from the New sheet (+). -->
         </div>
 
         <div class="chat-selection-bar" data-chat-selection-bar hidden>
@@ -347,34 +282,36 @@
               </div>
               <!-- The "+" sheet (iOS composerPlusSheet, 8b13460): the input bubble is the text field
                    only, everything else is here - Pay in Kaspa, Camera, Photo, Voice Message, File
-                   (Nextcloud only), Play Chess, and Send Handshake where it is still needed. -->
-              <div class="composer-plus-menu composer-plus-sheet" data-composer-plus-menu hidden>
+                   (Nextcloud only), Play Chess, and Send Handshake where it is still needed.
+                   Square tiles, three to a row (iOS d645d78): each line under a title is the
+                   tooltip / accessible description, its <small> hidden by .composer-plus-tiles. -->
+              <div class="composer-plus-menu composer-plus-sheet composer-plus-tiles" data-composer-plus-menu hidden>
                 <p class="composer-plus-title">Send</p>
-                <button type="button" data-composer-pay>
+                <button type="button" data-composer-pay title="Send Kaspa to this contact." aria-description="Send Kaspa to this contact.">
                   <span class="mode-icon mode-icon-kaspa" aria-hidden="true"><img src="./ui/assets/kaspa-logo.png" alt="" /></span>
                   <span class="composer-plus-copy"><strong>Pay in Kaspa</strong><small>Send Kaspa to this contact.</small></span>
                 </button>
-                <button type="button" data-composer-media="camera">
+                <button type="button" data-composer-media="camera" title="Take a photo and send it." aria-description="Take a photo and send it.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.1-1.6A1 1 0 0 1 9.6 4h4.8a1 1 0 0 1 .8.4L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg></span>
                   <span class="composer-plus-copy"><strong>Camera</strong><small>Take a photo and send it.</small></span>
                 </button>
-                <button type="button" data-composer-media="photo">
+                <button type="button" data-composer-media="photo" title="Pick an image from your library and send it." aria-description="Pick an image from your library and send it.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/></svg></span>
                   <span class="composer-plus-copy"><strong>Photo</strong><small>Pick an image from your library and send it.</small></span>
                 </button>
-                <button type="button" data-composer-media="voice">
+                <button type="button" data-composer-media="voice" title="Record a voice message and send it." aria-description="Record a voice message and send it.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"/></svg></span>
                   <span class="composer-plus-copy"><strong>Voice Message</strong><small>Record a voice message and send it.</small></span>
                 </button>
-                <button type="button" data-nextcloud-pick hidden>
+                <button type="button" data-nextcloud-pick hidden title="Send any file from your Nextcloud. It shows as a preview." aria-description="Send any file from your Nextcloud. It shows as a preview.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></span>
                   <span class="composer-plus-copy"><strong>File</strong><small>Send any file from your Nextcloud. It shows as a preview.</small></span>
                 </button>
-                <button type="button" data-chess-open>
+                <button type="button" data-chess-open title="Invite this contact to a game on chain." aria-description="Invite this contact to a game on chain.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg></span>
                   <span class="composer-plus-copy"><strong>Play Chess</strong><small>Invite this contact to a game on chain.</small></span>
                 </button>
-                <button type="button" data-composer-mode="handshake" data-composer-handshake>
+                <button type="button" data-composer-mode="handshake" data-composer-handshake title="Asks to open an encrypted conversation." aria-description="Asks to open an encrypted conversation.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 11.5 3.5 15a2 2 0 0 0 2.83 2.83L9.5 14.7"/><path d="m9.5 14.7 1.5 1.5a2 2 0 0 0 2.83-2.83l-3.9-3.9a3 3 0 0 0-4.24 0L4.5 11.5"/><path d="M13.5 8.5 16 6a2 2 0 0 1 2.83 0l1.67 1.67a2 2 0 0 1 0 2.83L18 13"/><path d="M11 6.5 12.5 5a2 2 0 0 1 2.83 0"/></svg></span>
                   <span class="composer-plus-copy"><strong>Send Handshake</strong><small>Asks to open an encrypted conversation.</small></span>
                 </button>
@@ -2072,17 +2009,8 @@
         <h2 id="pay-sheet-title" data-pay-title>Send KAS</h2>
         <p data-pay-recipient></p>
       </header>
-      <label class="pay-amount-entry">
-        <input class="pay-amount-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0" data-pay-amount aria-label="Amount (KAS)" />
-        <span class="pay-amount-unit" data-pay-unit>KAS</span>
-      </label>
-      <div class="pay-amount-actions">
-        <button type="button" class="pay-chip" data-pay-unit-toggle aria-label="Switch between Kaspa and your currency" hidden>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 20V5m0 0L3.5 8.5M7 5l3.5 3.5M17 4v15m0 0-3.5-3.5M17 19l3.5-3.5"/></svg>
-          <span data-pay-conversion></span>
-        </button>
-        <button type="button" class="pay-chip pay-chip-max" data-pay-max>Max</button>
-      </div>
+      <!-- The shared amount entry and slide-to-send button (ui/send-kaspa-components.js). -->
+      <div data-sk-mount="amount"></div>
       <label class="pay-memo">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
         <textarea rows="1" placeholder="Add a memo (encrypted)" data-pay-memo aria-label="Add a memo (encrypted)"></textarea>
@@ -2092,10 +2020,7 @@
         <div class="available-balance-banner" data-available-balance-banner hidden role="status" aria-live="polite"></div>
       </div>
       <p class="pay-sheet-note" data-pay-note hidden></p>
-      <button type="button" class="pay-hold-button" data-pay-hold aria-label="Hold to Send" disabled>
-        <span class="pay-hold-fill" aria-hidden="true"></span>
-        <span class="pay-hold-label" data-pay-hold-label>Hold to Send</span>
-      </button>
+      <div data-sk-mount="action"></div>
     </section>
   </div>
 
@@ -2783,61 +2708,17 @@
         </div>
         <button class="modal-close" type="button" data-close-send-kaspa aria-label="Close">×</button>
       </div>
-      <label class="field-label"><span data-send-kaspa-recipient-label>Recipient</span>
-        <span class="send-recipient-field">
-          <input class="field-input" type="text" data-send-kaspa-recipient placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" />
-          <span class="send-recipient-check" data-send-kaspa-check hidden aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          </span>
-        </span>
-      </label>
-      <div class="send-recipient-actions">
-        <button type="button" class="cold-inline-link" data-send-kaspa-paste>Paste</button>
-        <button type="button" class="cold-inline-link" data-send-kaspa-scan>Scan QR</button>
-      </div>
-      <p class="field-hint send-compound-note" data-send-kaspa-compound-note hidden>Combines all UTXOs at this address into a single one by sending the balance back to itself, to reduce the number of inputs a future send needs.</p>
-      <p class="field-hint" data-send-kaspa-resolved hidden></p>
-
-      <span class="field-label" data-send-kaspa-amount-label>Amount (KAS)</span>
-      <div class="send-amount-field">
-        <button type="button" class="send-amount-unit" data-send-kaspa-unit title="Tap to switch between KAS and fiat">
-          <img src="./ui/assets/kaspa-logo.png" alt="" class="send-amount-logo" data-send-kaspa-logo />
-          <span class="send-amount-fiat-symbol" data-send-kaspa-fiat-symbol hidden></span>
-          <span class="send-amount-unit-code" data-send-kaspa-unit-code>KAS</span>
-        </button>
-        <input class="field-input send-amount-input" type="text" inputmode="decimal" data-send-kaspa-amount placeholder="0.00000000" autocomplete="off" />
-        <button type="button" class="send-amount-max" data-send-kaspa-max>Max</button>
-      </div>
-      <p class="field-hint" data-send-kaspa-fiat hidden></p>
-      <p class="field-hint" data-send-kaspa-balance></p>
-
-      <div class="manage-send-coin-control">
-        <button type="button" class="manage-send-coin-toggle" data-send-kaspa-coin-toggle aria-expanded="false">
-          <span class="manage-send-coin-title" data-i18n="send.coinControl">Coin Control</span>
-          <span class="manage-send-coin-summary" data-send-kaspa-coin-summary>Automatic</span>
-          <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div class="manage-send-coin-list" data-send-kaspa-coin-list hidden></div>
-      </div>
-
-      <div class="send-fee-section">
-        <div class="send-fee-header">
-          <span data-i18n="send.networkFee">Network Fee</span>
-          <span class="send-fee-summary" data-send-kaspa-fee-summary>Normal</span>
-        </div>
-        <div class="settings-segmented full" role="group" aria-label="Network fee">
-          <button type="button" class="settings-segmented-option active" data-send-kaspa-fee="normal" data-i18n="fee.normal">Normal</button>
-          <button type="button" class="settings-segmented-option" data-send-kaspa-fee="fast">Fast</button>
-          <button type="button" class="settings-segmented-option" data-send-kaspa-fee="priority" data-i18n="fee.priority">Priority</button>
-        </div>
-        <input class="field-input send-fee-custom" type="text" inputmode="decimal" data-send-kaspa-fee-custom placeholder="Network fee (KAS)" autocomplete="off" />
-      </div>
-
-      <p class="field-error" data-send-kaspa-error hidden></p>
-      <div class="kns-progress" data-send-kaspa-progress hidden></div>
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-close-send-kaspa>Cancel</button>
-        <button class="primary-button" type="button" data-send-kaspa-submit disabled>Send</button>
+      <!-- Built from ui/send-kaspa-components.js (mounted by app.js), the same pieces as the chat's
+           Send KAS sheet and KasSigner's send: recipient, amount, pills, fee controls, slide to send. -->
+      <div class="sk-screen">
+        <div data-sk-mount="recipient"></div>
+        <p class="sk-caption send-compound-note" data-send-kaspa-compound-note hidden>Combines all UTXOs at this address into a single one by sending the balance back to itself, to reduce the number of inputs a future send needs.</p>
+        <div data-sk-mount="amount"></div>
+        <div data-sk-mount="pills"></div>
+        <div data-sk-mount="fee"></div>
+        <p class="field-error sk-error" data-send-kaspa-error hidden></p>
+        <div class="kns-progress" data-send-kaspa-progress hidden></div>
+        <div data-sk-mount="action"></div>
       </div>
     </section>
   </div>

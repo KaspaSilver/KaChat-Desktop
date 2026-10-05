@@ -4,7 +4,7 @@ import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwo
 import { createGroupManager } from "../engine/group-store.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, setRoomSelectionMode, roomSelectionState, toggleSelectAllRooms, markSelectedRooms, deleteSelectedRooms } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
 import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames } from "./kachat-names-live.js";
@@ -12,8 +12,13 @@ import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfile
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
-import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openTransactionActionsSheet } from "./coldstorage.js";
+import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
+import {
+  mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
+  sanitizeAmountText, availablePillInnerHtml, infoPillHtml, feeControlsHtml, feeControls, sendActionButtonHtml,
+  createSendActionButton, openSendFromPicker, closeSendFromPicker, shortSendAddress,
+} from "./send-kaspa-components.js";
 import { initNextcloud, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
@@ -54,7 +59,7 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
-import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError } from "./dialogs.js";
+import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -1935,20 +1940,24 @@ const appDetail = document.querySelector("[data-app-detail]");
 const detailEmptyState = document.querySelector("[data-detail-empty]");
 const emptyState = document.querySelector("[data-empty-state]");
 const chatList = document.querySelector("[data-chat-list]");
-const groupChatsPlaceholder = document.querySelector("[data-group-chats-placeholder]");
-const chatsListTabButtons = document.querySelectorAll("[data-chats-list-tab]");
-const chatsTabBadge = document.querySelector("[data-chats-tab-badge]");
-const groupsTabBadge = document.querySelector("[data-groups-tab-badge]");
 const chatSelectToggle = document.querySelector("[data-chat-select-toggle]");
 const chatSelectAll = document.querySelector("[data-chat-select-all]");
 const chatSelectionBar = document.querySelector("[data-chat-selection-bar]");
-let activeChatsListTab = "chats";
 let chatSelectionModeActive = false;
 const selectedChatConversationIds = new Set();
-// Group-thread multi-select (Group Chats tab) — mirrors selectedChatConversationIds but
-// keyed by groupId. Selection mode (chatSelectionModeActive) is shared across both tabs;
-// each tab acts on its own set based on the active list tab.
+// Chats is one list with the group chats and public rooms as circles above it (iOS a062577), and
+// Select mode selects all three together: chats by conversation id, group circles by groupId,
+// room circles by channel name. Declared up here because the boot-time renderChats draws them.
 const selectedGroupIds = new Set();
+const selectedRoomNames = new Set();
+// A public room open in the detail pane (broadcasts.js reports it); owns the pane like a chat.
+let publicRoomOpen = false;
+// Whether syncPublicChatsPane last gave the pane to a room, so closing it restores the rest once.
+let publicRoomPaneApplied = false;
+// Decoded group photos for the circles, keyed by group id + photo fingerprint.
+const chatCirclePhotoCache = new Map();
+// The circles row's last markup, so an unchanged redraw keeps its scroll and hover.
+let chatCirclesLastHtml = "";
 // Group-chat manager state. Declared here (not in the group module at the end of the
 // file) because the boot-time renderChats path reaches getGroupManager before the tail
 // of the module has evaluated, and a `let` in the tail would be in its temporal dead zone.
@@ -2332,7 +2341,11 @@ window.addEventListener("kachat:notification-click", (event) => {
   try {
     if (route.kind === "chat" && route.conversationId) { setActiveAppTab("chats"); openConversation(route.conversationId); }
     else if (route.kind === "group" && route.groupId) { setActiveAppTab("chats"); openGroupChat(route.groupId); }
+    // A public room's ping opens that room straight in the detail pane (iOS a062577).
+    else if (route.kind === "room" && route.channel) { if (openPublicChatsTab()) openBroadcastChannelFromNotification(route.channel); }
     else if (route.kind === "tab" && route.tab) setActiveAppTab(route.tab);
+    // A "Received" / "Balance increased" for one address opens that address's History (iOS 13046ad).
+    else if (route.kind === "address" && route.address) routeToOwnAddress(route.address);
   } catch { /* the page may still be booting */ }
 });
 
@@ -2432,7 +2445,7 @@ let activeGroupId = null;
 // since it's also used there to hide the tab bar during that specific
 // drill-down, which placeholder tabs should NOT do.
 function updateDetailActiveClass() {
-  appBody?.classList.toggle("detail-active", Boolean(activeConversationId) || Boolean(activeGroupId) || currentAppTab !== "chats" || (activeChatsListTab === "public" && publicRoomOpen));
+  appBody?.classList.toggle("detail-active", Boolean(activeConversationId) || Boolean(activeGroupId) || currentAppTab !== "chats" || publicRoomOpen);
 }
 
 // Toggle the `.active` highlight on the currently-open chat / group row directly, without a
@@ -2448,6 +2461,8 @@ function updateActiveRowHighlight() {
 }
 
 function setActiveConversationId(id) {
+  // A chat and a public room share the detail pane too: opening a chat closes the room.
+  if (id && publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
   activeConversationId = id;
   // A 1:1 thread and a group thread can't share the detail pane — opening a real 1:1
   // dismisses any open group. Torn down inline (not via closeGroupChat) so we don't
@@ -2462,7 +2477,8 @@ function setActiveConversationId(id) {
   const onChatsTab = currentAppTab === "chats";
   // A group owning the detail pane counts as "open" for the collapse-to-detail layout, and
   // its pane must survive the background setActiveConversationId(null) refreshes.
-  const groupOwnsDetail = !id && Boolean(activeGroupId) && onChatsTab;
+  // An open public room owns it the same way (the room's own pane is shown by syncPublicChatsPane).
+  const groupOwnsDetail = !id && (Boolean(activeGroupId) || publicRoomOpen) && onChatsTab;
   appBody?.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
   // Mirrored on <body> so the toolbar (a sibling BEFORE the app body) can react on phones.
   document.body.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
@@ -2472,7 +2488,7 @@ function setActiveConversationId(id) {
   // tab's screen.
   if (conversation) conversation.hidden = !isOpen || !onChatsTab;
   if (detailEmptyState) detailEmptyState.hidden = isOpen || groupOwnsDetail || !onChatsTab;
-  if (groupOwnsDetail && groupChatScreen) groupChatScreen.hidden = false;
+  if (groupOwnsDetail && activeGroupId && groupChatScreen) groupChatScreen.hidden = false;
   updateDetailActiveClass();
   updateActiveRowHighlight();
   // Opening a 1:1 thread is enough to raise the handshake warning (no typing
@@ -5246,13 +5262,15 @@ document.querySelector("[data-notif-list]")?.addEventListener("click", (event) =
   closeNotifCenter();
   if (!notif) return;
   if (notif.targetKind === "broadcast") {
-    openPublicChatsTab();
-    // Land in the exact channel the message arrived in, not just the tab.
-    if (notif.targetId) { try { openBroadcastChannelFromNotification(notif.targetId); } catch {} }
+    // The room opens straight in the detail pane (iOS a062577); Simple Mode opens nothing.
+    if (openPublicChatsTab() && notif.targetId) { try { openBroadcastChannelFromNotification(notif.targetId); } catch {} }
   } else if (notif.targetKind === "group") {
     setActiveAppTab("chats");
     if (notif.targetId) { try { openGroupChat(notif.targetId); } catch {} }
-  } else if (notif.targetKind === "wallet") {
+  } else if (notif.targetKind === "address" && notif.targetId) {
+    // A receipt on one of your addresses opens that address on its History tab (iOS 13046ad).
+    routeToOwnAddress(notif.targetId);
+  } else if (notif.targetKind === "wallet" || notif.targetKind === "address") {
     // Received-Kaspa rows open the Portfolio tab.
     setActiveAppTab("portfolio");
   } else {
@@ -5753,6 +5771,22 @@ function freshChangeForSpendingIndex(index) {
   const address = deriveSpendingAddressAt(freshIndex);
   return address ? { index: freshIndex, address } : null;
 }
+// A chat payment from a spending address picked on the Send KAS sheet (not the primary, iOS
+// dae8a01): its change still goes to a never-used index past the all-time max, but once the node
+// has the transaction that address is only REVEALED (maxIndex moves) - the primary stays put.
+function freshSpendingChangeAddress() {
+  if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return null;
+  const freshIndex = getSpendingState().maxIndex + 1;
+  const address = deriveSpendingAddressAt(freshIndex);
+  return address ? { index: freshIndex, address } : null;
+}
+function revealSpendingChangeAddress(fresh) {
+  if (!fresh || !Number.isInteger(fresh.index)) return;
+  saveSpendingState({ maxIndex: Math.max(getSpendingState().maxIndex, fresh.index) });
+  appendEngineLog(`Payment change went to spending #${fresh.index} (${shortAddress(fresh.address)}); primary unchanged.`);
+  try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
+  try { refreshSpendingSummary?.(); } catch {}
+}
 function rotatePrimarySpendingTo(fresh) {
   if (!fresh || !Number.isInteger(fresh.index)) return;
   saveSpendingState({ activeIndex: fresh.index, maxIndex: Math.max(getSpendingState().maxIndex, fresh.index) });
@@ -6097,18 +6131,11 @@ async function attributeAndNotifyAddressActivity(increases) {
           body: describeActivityAddress(kind, address),
           tag: `kachat-addr-activity-${txid}`,
           // Clicking used to focus the window and stop there, which tells you a payment arrived
-          // and then makes you go and find it. It now opens the place the money landed: the Cold
-          // Storage account that owns the address, or Manage Addresses for a spending one.
-          onClick: () => {
-            try {
-              if (String(kind || "").startsWith("cold:")) {
-                setActiveAppTab("cold-storage");
-                openColdAccountForAddress(address);
-              } else {
-                setActiveAppTab("profile");
-              }
-            } catch { /* the focus alone is still better than nothing */ }
-          },
+          // and then makes you go and find it. It now opens the address the money landed on, on
+          // its History tab (iOS 13046ad): a spending address's detail, or the Cold Storage
+          // address. The route carries the address for a click that comes back via the worker.
+          route: addressActivityRoute(kind, address),
+          onClick: () => openAddressActivityTarget(kind, address),
         });
         // Also record it in the global notifications bell (Profile), alongside KaPosts/mentions.
         recordGlobalNotification({
@@ -6117,7 +6144,7 @@ async function attributeAndNotifyAddressActivity(increases) {
           title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
           body: describeActivityAddress(kind, address),
           timestamp: Date.now(),
-          targetKind: "wallet",
+          ...addressActivityCenterTarget(kind, address),
         });
         appendEngineLog(`Address activity: external receive ${txid.slice(0, 12)}… on ${shortAddress(address)}`);
       } else {
@@ -6131,7 +6158,8 @@ async function attributeAndNotifyAddressActivity(increases) {
         title: `Balance increased by ${formatSompiForNotification(delta)} ${KAS_UNIT}`,
         body: describeActivityAddress(kind, address),
         tag: `kachat-addr-activity-bal-${address.slice(-12)}-${Date.now()}`,
-        onClick: () => {},
+        route: addressActivityRoute(kind, address),
+        onClick: () => openAddressActivityTarget(kind, address),
       });
       recordGlobalNotification({
         id: `wallet-bal-${address.slice(-12)}-${Date.now()}`,
@@ -6139,11 +6167,78 @@ async function attributeAndNotifyAddressActivity(increases) {
         title: `Balance increased by ${formatSompiForNotification(delta)} ${KAS_UNIT}`,
         body: describeActivityAddress(kind, address),
         timestamp: Date.now(),
-        targetKind: "wallet",
+        ...addressActivityCenterTarget(kind, address),
       });
     }
   }
   saveAddrActivityHandled(handled);
+}
+
+// Where a tapped address-activity notification goes (iOS 13046ad). Each one is for one address,
+// so it carries that address and opens it on its History tab. A chat privacy (pool) address has
+// no screen of its own, so its receipts keep landing where they always did.
+function addressActivityRoute(kind, address) {
+  return kind === "pool" || !address ? { kind: "tab", tab: "profile" } : { kind: "address", address };
+}
+function addressActivityCenterTarget(kind, address) {
+  return kind === "pool" || !address ? { targetKind: "wallet" } : { targetKind: "address", targetId: address };
+}
+function openAddressActivityTarget(kind, address) {
+  try {
+    if (kind === "pool" || !address) setActiveAppTab("profile");
+    else routeToOwnAddress(address);
+  } catch { /* the focus alone is still better than nothing */ }
+}
+
+/// Which of your addresses `address` is: the chatting address, a revealed spending address (with
+/// its index) or a watched Cold Storage address. Null when it is none of them (or not yet
+/// derivable - the wallet still unlocking).
+function resolveOwnAddress(address) {
+  const target = String(address || "").trim();
+  if (!target) return null;
+  if (engine.address && target === engine.address) return { kind: "chatting" };
+  if (activeAccountMnemonic() && engine.kaspa) {
+    const maxIndex = Number(getSpendingState().maxIndex) || 0;
+    for (let index = 0; index <= maxIndex; index += 1) {
+      if (deriveSpendingAddressAt(index) === target) return { kind: "spending", index };
+    }
+  }
+  try { if (listColdWatchedAddresses().some((entry) => entry.address === target)) return { kind: "cold" }; } catch { /* not started */ }
+  return null;
+}
+
+/// Opens one of your addresses on its History tab (iOS OwnAddressHistorySheet): Manage Address for
+/// the chatting address, the spending address's detail screen, or the Cold Storage address screen.
+/// False when the address isn't one of yours.
+function openOwnAddressHistory(address) {
+  const found = resolveOwnAddress(address);
+  if (!found) return false;
+  if (found.kind === "chatting") {
+    document.querySelector('[data-manage-address-tab="transactions"]')?.click();
+    openManageAddressScreen();
+  } else if (found.kind === "spending") {
+    openSpendingDetailScreen(found.index);
+  } else {
+    setActiveAppTab("cold-storage");
+    openColdAddressHistory(address)
+      .then((opened) => { if (!opened) openColdAccountForAddress(address); })
+      .catch(() => {});
+  }
+  return true;
+}
+
+/// A notification tap for one address. On a cold start the wallet may still be unlocking, so an
+/// address that doesn't resolve yet is tried again for a while (iOS OwnAddressRoute.pending)
+/// before saying it is no longer in this wallet and landing on the wallet tab.
+function routeToOwnAddress(address, attempt = 0) {
+  if (openOwnAddressHistory(address)) return;
+  const walletReady = Boolean(engine.address) && (!activeAccountMnemonic() || Boolean(engine.kaspa));
+  if (!walletReady && attempt < 30) {
+    window.setTimeout(() => routeToOwnAddress(address, attempt + 1), 1000);
+    return;
+  }
+  showCopyToast("This address isn't in this wallet any more.");
+  setActiveAppTab("portfolio");
 }
 
 // Slow safety interval: the live subscription covers the common case, this
@@ -8430,7 +8525,7 @@ function setActiveAppTab(tab) {
   // Select lives in the topbar now, which every tab shares - but it only ever acts on the chats
   // list, so it goes away with it.
   const selectCluster = document.querySelector("[data-topbar-select-cluster]");
-  if (selectCluster) selectCluster.hidden = !isChats || activeChatsListTab === "public";
+  if (selectCluster) selectCluster.hidden = !isChats;
   // On Chats the topbar narrows to the chats list and the conversation takes the full height
   // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
   document.body.classList.toggle("chats-tab", isChats);
@@ -8441,6 +8536,11 @@ function setActiveAppTab(tab) {
   if (!isChats) {
     // Leaving Chats ends a selection, so coming back does not find Cancel and Select All waiting.
     if (chatSelectionModeActive) setChatSelectionMode(false);
+    // An open public room lives in the shared detail pane: hide it here, first, so nothing later
+    // in the switch can leave it drawn over the next tab (it showed above Profile). It stays open
+    // and comes back with Chats (syncPublicChatsPane).
+    const openRoomEl = document.querySelector("[data-broadcast-room]");
+    if (openRoomEl) openRoomEl.hidden = true;
     if (conversation) conversation.hidden = true;
     if (detailEmptyState) detailEmptyState.hidden = true;
     if (groupChatScreen) groupChatScreen.hidden = true;
@@ -8455,8 +8555,10 @@ function setActiveAppTab(tab) {
   if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummary(); }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
-  if (isChats && activeChatsListTab === "public") { refreshBroadcasts(); syncPublicChatsPane(); }
-  else stopBroadcastPolling();
+  // The room circles sit above the Chats list, so the rooms stay live while Chats is up (and an
+  // open room takes the pane back). Simple Mode hides public rooms.
+  if (isChats && !isChildModeEnabled()) { refreshBroadcasts(); syncPublicChatsPane(); }
+  else { stopBroadcastPolling(); syncPublicChatsPane(); }
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
   if (screenTab === "swaps") refreshSwaps();
@@ -9278,7 +9380,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 96;
+const APP_BUILD = 97;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -9432,9 +9534,14 @@ function recordOutgoingPaymentChat({ destination, amountKas, txid }) {
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
 }
 
-function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent } = {}) {
+function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent, slideToSend = false, onBusyChange = null } = {}) {
   let resolvedAddress = null;
   let resolveToken = 0;
+  // The shared recipient card's status line (send-kaspa-components recipientStatusHtml), when
+  // the screen has one: "Looking up domain…", "Resolved: …", "Valid address", "Invalid…".
+  function setRecipientStatus(status) {
+    if (els.statusEl) els.statusEl.innerHTML = recipientStatusHtml(status || {});
+  }
 
   // iOS WithdrawalSuccessCard parity: after a successful send the modal STAYS OPEN and flips
   // to a checkmark + "Sent" + the clickable transaction id (explorer link) until Done/close.
@@ -9480,6 +9587,9 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     if (els.recipient) els.recipient.value = "";
     if (els.amount) els.amount.value = "";
     resolvedAddress = null;
+    setRecipientStatus(null);
+    showResolutionCard(null);
+    if (els.checkEl) els.checkEl.hidden = true;
     if (els.resolvedHint) els.resolvedHint.hidden = true;
     if (els.error) els.error.hidden = true;
     if (els.progress) els.progress.hidden = true;
@@ -9497,6 +9607,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
 
   // Who the address resolves to, under the field (iOS ac0ef19) - the create-chat card.
   function cardHost() {
+    if (els.cardHost) return els.cardHost;
     const anchor = els.resolvedHint || els.recipient;
     if (!anchor) return null;
     let host = anchor.parentElement?.querySelector("[data-send-resolution-card]");
@@ -9525,6 +9636,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     if (els.checkEl) els.checkEl.hidden = true;
     if (els.error) els.error.hidden = true;
     showResolutionCard(null);
+    setRecipientStatus({ input: raw });
 
     if (!raw) { if (els.submit) els.submit.disabled = true; return; }
 
@@ -9534,14 +9646,19 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       if (els.checkEl) els.checkEl.hidden = !valid; // green check once it's a valid address
       if (els.submit) els.submit.disabled = !amountValid || !valid;
       if (valid) showResolutionCard(raw);
+      setRecipientStatus({ input: raw, valid });
       return;
     }
 
     if (engine.looksLikeName(raw)) {
       if (els.submit) els.submit.disabled = true;
+      setRecipientStatus({ input: raw, resolving: true });
       try {
         const resolution = await engine.resolveName(raw);
         if (token !== resolveToken) return; // a newer keystroke superseded this lookup
+        setRecipientStatus(resolution
+          ? { input: raw, resolvedAddress: resolution.ownerAddress, resolvedName: resolution.domain || raw }
+          : { input: raw, error: "No domain found" });
         if (resolution) {
           resolvedAddress = resolution.ownerAddress;
           if (els.resolvedHint) {
@@ -9555,11 +9672,13 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
         }
       } catch {
         // leave disabled; submit surfaces a clearer error if attempted anyway
+        if (token === resolveToken) setRecipientStatus({ input: raw, error: "No domain found" });
       }
       return;
     }
 
     if (els.submit) els.submit.disabled = true;
+    setRecipientStatus({ input: raw, valid: false });
   }
 
   async function submit() {
@@ -9578,6 +9697,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     const selectedOutpoints = getSelection?.() || [];
     const feeKas = getFeeKas ? getFeeKas() : "0";
     if (els.submit) els.submit.disabled = true;
+    try { onBusyChange?.(true); } catch { /* the button's look never blocks a send */ }
     if (els.progress) { els.progress.hidden = false; els.progress.textContent = "Broadcasting transaction…"; }
     try {
       const result = sendFn
@@ -9599,21 +9719,33 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       if (els.progress) els.progress.hidden = true;
     } finally {
       if (els.submit) els.submit.disabled = false;
+      try { onBusyChange?.(false); } catch { /* fine */ }
     }
   }
 
   els.recipient?.addEventListener("input", updateValidity);
   els.amount?.addEventListener("input", updateValidity);
-  els.submit?.addEventListener("click", submit);
+  // A slide-to-send button calls submit() itself once slid (a click on its track is not a send).
+  if (!slideToSend) els.submit?.addEventListener("click", submit);
 
-  return { open };
+  return { open, submit };
 }
 
 // Standalone Send Kaspa modal (opened from profile > Chatting Address > Send Kaspa).
 // Matches iOS WithdrawKaspaView: KNS resolution + Paste, fiat/KAS toggle + conversion,
 // Max, Network Fee tiers (Normal/Priority/Custom), and Coin Control (UTXO selection).
 const sendKaspaModal = document.querySelector("[data-send-kaspa-modal]");
-function closeSendKaspaModal() { if (sendKaspaModal) sendKaspaModal.hidden = true; }
+function closeSendKaspaModal() { closeSendFromPicker(); if (sendKaspaModal) sendKaspaModal.hidden = true; }
+// The screen is built from the shared Send Kaspa pieces (send-kaspa-components.js, iOS 4d0324f),
+// mounted before the element lookups below.
+mountSendPieces(sendKaspaModal, {
+  recipient: recipientCardHtml({ prefix: "send-kaspa" }),
+  amount: amountEntryHtml({ prefix: "send-kaspa", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, attrs: { conversion: "send-kaspa-fiat" } }),
+  pills: `<div class="sk-pills">${infoPillHtml({ attr: "send-kaspa-source-pill", button: true, disabled: true })}${infoPillHtml({ attr: "send-kaspa-from-pill" })}</div>`,
+  fee: feeControlsHtml({ prefix: "send-kaspa", coinList: true }),
+  action: sendActionButtonHtml({ attr: "send-kaspa-submit", title: "Slide to Send" }),
+});
+const sendKaspaFeeCtl = feeControls(sendKaspaModal, "send-kaspa");
 
 const sendKaspaAmountInput = document.querySelector("[data-send-kaspa-amount]");
 const sendKaspaAmountLabel = document.querySelector("[data-send-kaspa-amount-label]");
@@ -9679,16 +9811,21 @@ function sendKaspaResolveAmountKas() {
   return sendKaspaAmountInput?.value || "";
 }
 
+// The shared amount entry: the number sized to its length, and the KAS / currency switch showing
+// the converted value (the other unit's code while there's nothing to convert). The switch is
+// there only with a live price (iOS KaspaAmountEntry).
 function updateSendKaspaFiatHint() {
+  layoutAmountEntry(sendKaspaAmountInput, sendKaspaUnitCode);
+  if (sendKaspaUnitButton) sendKaspaUnitButton.hidden = !sendKaspaPrice;
   if (!sendKaspaFiatHint) return;
   const raw = Number(sendKaspaAmountInput?.value);
-  if (!isFinite(raw) || raw <= 0 || !sendKaspaPrice) { sendKaspaFiatHint.hidden = true; return; }
-  if (sendKaspaUnit === "kas") {
-    sendKaspaFiatHint.textContent = `≈ ${formatFiatValue(raw, sendKaspaPrice)}`;
-  } else {
-    sendKaspaFiatHint.textContent = `≈ ${(raw / sendKaspaPrice).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
+  let text = "";
+  if (isFinite(raw) && raw > 0 && sendKaspaPrice) {
+    text = sendKaspaUnit === "kas"
+      ? `≈ ${formatFiatValue(raw, sendKaspaPrice)}`
+      : `≈ ${(raw / sendKaspaPrice).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
   }
-  sendKaspaFiatHint.hidden = false;
+  sendKaspaFiatHint.textContent = text || (sendKaspaUnit === "kas" ? sendKaspaCurrencyCode() : KAS_UNIT);
 }
 
 function applySendKaspaUnit() {
@@ -9698,7 +9835,10 @@ function applySendKaspaUnit() {
   if (sendKaspaFiatSymbol) { sendKaspaFiatSymbol.hidden = isKas; sendKaspaFiatSymbol.textContent = currencyMeta().symbol.trim(); }
   const amountWord = t("send.amount");
   if (sendKaspaAmountLabel) sendKaspaAmountLabel.textContent = isKas ? `${amountWord} (${KAS_UNIT})` : `${amountWord} (${sendKaspaCurrencyCode()})`;
-  if (sendKaspaAmountInput) sendKaspaAmountInput.placeholder = isKas ? "0.00000000" : "0.00";
+  if (sendKaspaAmountInput) {
+    sendKaspaAmountInput.placeholder = "0";
+    sendKaspaAmountInput.setAttribute("aria-label", isKas ? `Amount (${KAS_UNIT})` : `Amount (${sendKaspaCurrencyCode()})`);
+  }
   updateSendKaspaFiatHint();
 }
 
@@ -9713,7 +9853,13 @@ sendKaspaUnitButton?.addEventListener("click", () => {
   sendKaspaUnit = sendKaspaUnit === "kas" ? "fiat" : "kas";
   applySendKaspaUnit();
 });
-sendKaspaAmountInput?.addEventListener("input", () => { updateSendKaspaFiatHint(); scheduleSendKaspaFeeEstimate(); });
+sendKaspaAmountInput?.addEventListener("input", () => {
+  // Digits and one point: 8 decimals for KAS, 2 for a currency (8 for BTC), as the chat sheet.
+  const sanitized = sanitizeAmountText(sendKaspaAmountInput.value, sendKaspaUnit === "fiat" && selectedCurrency !== "btc" ? 2 : 8);
+  if (sanitized !== sendKaspaAmountInput.value) sendKaspaAmountInput.value = sanitized;
+  updateSendKaspaFiatHint();
+  scheduleSendKaspaFeeEstimate();
+});
 
 // Network fee — matches iOS WithdrawKaspaView: an estimated base (Normal) fee scaled by the tier
 // multiplier (Normal 1x, Fast 2x, Priority 5x), shown as a real KAS amount, editable for a custom
@@ -9741,10 +9887,11 @@ function sendKaspaGetFeeKas() {
   const tip = sendKaspaTotalFeeKas() - (sendKaspaSdkBaseKas ?? 0);
   return tip > 0 ? trimKas8(tip) : "0";
 }
+// The fee card's amount (the shared SendFeeControls): what's paid; the speed buttons say the tier,
+// none lit for a custom fee.
 function updateSendKaspaFeeSummary() {
   if (!sendKaspaFeeSummary) return;
-  const label = sendKaspaFeeCustomOverride ? "Custom" : (SEND_FEE_LABELS[sendKaspaFeeTier] || "Normal");
-  sendKaspaFeeSummary.textContent = `${label} · ${formatFeeKas(sendKaspaTotalFeeKas())} ${KAS_UNIT}`;
+  sendKaspaFeeSummary.textContent = `${formatFeeKas(sendKaspaTotalFeeKas())} ${KAS_UNIT}`;
 }
 // Reflect the current total into the (editable) fee field, unless the user is typing a custom fee.
 function applySendKaspaFeeField() {
@@ -9756,14 +9903,33 @@ function applySendKaspaFeeField() {
 function selectSendKaspaFeeTier(tier) {
   sendKaspaFeeTier = tier;
   sendKaspaFeeCustomOverride = false;
-  sendKaspaFeeButtons.forEach((b) => b.classList.toggle("active", b.dataset.sendKaspaFee === tier));
+  sendKaspaFeeCtl.setTier(tier);
+  sendKaspaFeeCtl.setEditing(false);
   applySendKaspaFeeField();
 }
 sendKaspaFeeButtons.forEach((button) => button.addEventListener("click", () => selectSendKaspaFeeTier(button.dataset.sendKaspaFee)));
 sendKaspaFeeCustom?.addEventListener("input", () => {
   sendKaspaFeeCustomOverride = true;
-  sendKaspaFeeButtons.forEach((b) => b.classList.remove("active"));
+  sendKaspaFeeCtl.setTier(null);
   updateSendKaspaFeeSummary();
+});
+// Click the fee amount to type a custom fee; ✓ or Return uses it. An empty or unreadable entry
+// goes back to the selected speed.
+function commitSendKaspaCustomFee() {
+  const v = Number(sendKaspaFeeCustom?.value);
+  if (!sendKaspaFeeCustomOverride || !(String(sendKaspaFeeCustom?.value || "").trim()) || !isFinite(v) || v < 0) {
+    selectSendKaspaFeeTier(sendKaspaFeeTier);
+    return;
+  }
+  sendKaspaFeeCtl.setEditing(false);
+  updateSendKaspaFeeSummary();
+}
+sendKaspaModal?.querySelector("[data-send-kaspa-fee-edit]")?.addEventListener("click", () => {
+  sendKaspaFeeCtl.setEditing(true, trimKas8(sendKaspaTotalFeeKas()));
+});
+sendKaspaModal?.querySelector("[data-send-kaspa-fee-commit]")?.addEventListener("click", commitSendKaspaCustomFee);
+sendKaspaFeeCustom?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); commitSendKaspaCustomFee(); }
 });
 
 // Estimate the base (Normal) network fee for the CURRENT amount so it reflects the UTXOs the send
@@ -9966,18 +10132,53 @@ function resetSendKaspaExtras() {
   sendKaspaFeeCustomOverride = false;
   selectSendKaspaFeeTier("normal");
   estimateSendKaspaBaseFee();
-  if (sendKaspaFiatHint) sendKaspaFiatHint.hidden = true;
   sendKaspaPrice = null;
+  updateSendKaspaFiatHint();
   sendKaspaAvailableKas = null;
   sendKaspaUtxos = [];
   renderSendKaspaCoinControl();
+  renderSendKaspaSourcePill("…");
   fetchKasPrice(selectedCurrency).then((price) => { sendKaspaPrice = price; updateSendKaspaFiatHint(); }).catch(() => {});
+  const source = sendKaspaSourceIndex;
   sendKaspaLoadBalance().then((b) => {
+    if (source !== sendKaspaSourceIndex) return; // another source was picked meanwhile
     sendKaspaAvailableKas = Number(b.totalKas);
     sendKaspaUtxos = b.entries || [];
     renderSendKaspaCoinControl();
+    renderSendKaspaSourcePill(b.totalKas);
     if (sendKaspaCompound) applySendKaspaCompoundPrefill();
-  }).catch(() => {});
+  }).catch(() => { if (source === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
+}
+
+// The Available pill (iOS SendInfoPill): "Available: X KAS", and on a spending address's Send
+// "· Address #N ⌄" - click it to send from another spending address (iOS e994235). Compound UTXOs
+// is about its one address, so there it's shown but fixed. The From pill names the address paying.
+function spendingSourceLabel(index) {
+  const st = getSpendingState();
+  const custom = st.labels?.[index] ?? st.labels?.[String(index)];
+  const trimmed = custom != null ? String(custom).trim() : "";
+  return trimmed || `Address #${index}`;
+}
+function renderSendKaspaSourcePill(balanceText) {
+  const pill = sendKaspaModal?.querySelector("[data-send-kaspa-source-pill]");
+  const spending = sendKaspaSourceIndex != null;
+  const chooser = spending && !sendKaspaCompound;
+  if (pill) {
+    pill.innerHTML = availablePillInnerHtml({
+      text: `Available: ${balanceText} ${KAS_UNIT}`,
+      sourceLabel: spending ? spendingSourceLabel(sendKaspaSourceIndex) : null,
+      chooser,
+    });
+    pill.disabled = !chooser;
+    pill.classList.toggle("clickable", chooser);
+    if (chooser) pill.title = "Choose which spending address to send from"; else pill.removeAttribute("title");
+  }
+  const fromPill = sendKaspaModal?.querySelector("[data-send-kaspa-from-pill]");
+  if (fromPill) {
+    const from = sendKaspaSourceAddress();
+    fromPill.textContent = from ? `From ${shortSendAddress(from)}` : "";
+    fromPill.hidden = !from;
+  }
 }
 
 // Compound UTXOs mode (matches iOS's WithdrawKaspaView isCompoundMode): the Send Kaspa screen with
@@ -9987,18 +10188,19 @@ let sendKaspaCompound = false;
 function applySendKaspaCompoundUi() {
   const titleEl = document.querySelector("[data-send-kaspa-title]");
   const kickerEl = document.querySelector("[data-send-kaspa-kicker]");
-  const recipientLabel = document.querySelector("[data-send-kaspa-recipient-label]");
-  const recipient = document.querySelector("[data-send-kaspa-recipient]");
   const note = document.querySelector("[data-send-kaspa-compound-note]");
   const spending = sendKaspaSourceIndex != null;
-  if (titleEl) titleEl.textContent = sendKaspaCompound ? "Compound UTXOs" : "Send Kaspa";
+  // iOS: "Send Kaspa from Address #N" on a spending address's Send; it follows a picked source.
+  if (titleEl) titleEl.textContent = sendKaspaCompound
+    ? "Compound UTXOs"
+    : (spending ? `Send Kaspa from Address #${sendKaspaSourceIndex}` : "Send Kaspa");
   if (kickerEl) kickerEl.textContent = sendKaspaCompound
     ? "Consolidating this address"
-    : (spending ? `Spending #${sendKaspaSourceIndex} · ${shortAddress(sendKaspaSourceAddress())}` : "Real Kaspa transaction");
-  if (recipientLabel) recipientLabel.textContent = sendKaspaCompound ? "Consolidating This Address" : "Recipient";
-  if (recipient) recipient.readOnly = sendKaspaCompound;
+    : (spending ? `Spending address · ${shortAddress(sendKaspaSourceAddress())}` : "Real Kaspa transaction");
+  // The shared recipient card, locked to this address for Compound UTXOs.
+  setRecipientLocked(sendKaspaModal, "send-kaspa", sendKaspaCompound ? sendKaspaSourceAddress() : null);
   if (note) note.hidden = !sendKaspaCompound;
-  if (sendKaspaPasteButton) sendKaspaPasteButton.hidden = sendKaspaCompound;
+  sendKaspaSlider.setTitle(sendKaspaCompound ? "Slide to Consolidate" : "Slide to Send");
 }
 function applySendKaspaCompoundPrefill() {
   const recipient = document.querySelector("[data-send-kaspa-recipient]");
@@ -10009,14 +10211,17 @@ function applySendKaspaCompoundPrefill() {
 
 const sendKaspaController = makeSendController({
   recipient: document.querySelector("[data-send-kaspa-recipient]"),
-  resolvedHint: document.querySelector("[data-send-kaspa-resolved]"),
   checkEl: document.querySelector("[data-send-kaspa-check]"),
+  // The shared recipient card: its status line and the address card's spot.
+  statusEl: sendKaspaModal?.querySelector("[data-send-kaspa-status]") || null,
+  cardHost: sendKaspaModal?.querySelector("[data-send-kaspa-resolution]") || null,
   amount: sendKaspaAmountInput,
-  balanceHint: document.querySelector("[data-send-kaspa-balance]"),
   error: document.querySelector("[data-send-kaspa-error]"),
   progress: document.querySelector("[data-send-kaspa-progress]"),
   submit: document.querySelector("[data-send-kaspa-submit]"),
 }, {
+  slideToSend: true,
+  onBusyChange: (busy) => sendKaspaSlider.setBusy(busy),
   onOpen: () => { if (sendKaspaModal) sendKaspaModal.hidden = false; },
   onClose: closeSendKaspaModal,
   getBalance: sendKaspaLoadBalance,
@@ -10069,10 +10274,77 @@ function openSendKaspaModal(options = {}) {
   }
   sendKaspaCompound = Boolean(options?.compound);
   sendKaspaSourceIndex = spendingIndex;
+  closeSendFromPicker();
+  sendKaspaSlider.setBusy(false);
   applySendKaspaCompoundUi();
   resetSendKaspaExtras();
   return sendKaspaController.open();
 }
+
+// Slide to Send / Slide to Consolidate (iOS SendActionButton, afaad34): the send goes once the
+// knob reaches the right end; Return / Space or a screen reader's activation is the plain action.
+const sendKaspaSlider = createSendActionButton(sendKaspaModal?.querySelector("[data-send-kaspa-submit]"), {
+  onAction: () => sendKaspaController.submit(),
+});
+
+// Every spending address Send From can list (iOS getSpendingAddressList): the revealed range with
+// each one's label, balance (one batched lookup), hidden flag and whether it is the primary.
+async function loadSpendingSourceEntries() {
+  if (!activeAccountMnemonic()) return [];
+  await ensureRuntimes({ quiet: true });
+  const st = getSpendingState();
+  const hidden = new Set(st.hidden.map(Number));
+  const rows = [];
+  for (let i = 0; i <= st.maxIndex; i += 1) {
+    const address = deriveSpendingAddressAt(i);
+    if (address) rows.push({ index: i, address });
+  }
+  let balances = new Map();
+  try { balances = await spendingBalancesBatchSompi(rows.map((r) => r.address)); } catch { /* listed with 0 */ }
+  return rows.map((r) => ({
+    ...r,
+    label: spendingSourceLabel(r.index),
+    balanceSompi: BigInt(Math.round(Number(balances.get(r.address) || 0))),
+    isPrimary: r.index === st.activeIndex,
+    hidden: hidden.has(r.index),
+  }));
+}
+
+// Send From on a spending address's Send (iOS e994235): this send only - the fee estimate, Max,
+// the title and the send itself follow the picked address, coin control and a custom fee reset
+// (they belong to the address they were set for), and the primary stays where it is.
+function switchSendKaspaSource(index) {
+  if (!Number.isInteger(index) || index === sendKaspaSourceIndex || sendKaspaCompound) return;
+  if (!deriveSpendingAddressAt(index)) { showCopyToast("That spending address isn't ready yet."); return; }
+  sendKaspaSourceIndex = index;
+  sendKaspaMaxMode = false;
+  sendKaspaFeeCustomOverride = false;
+  selectSendKaspaFeeTier(sendKaspaFeeTier);
+  const errorEl = document.querySelector("[data-send-kaspa-error]");
+  if (errorEl) errorEl.hidden = true;
+  sendKaspaAvailableKas = null;
+  sendKaspaUtxos = [];
+  renderSendKaspaCoinControl();
+  applySendKaspaCompoundUi();
+  renderSendKaspaSourcePill("…");
+  sendKaspaLoadBalance().then((b) => {
+    if (index !== sendKaspaSourceIndex) return;
+    sendKaspaAvailableKas = Number(b.totalKas);
+    sendKaspaUtxos = b.entries || [];
+    renderSendKaspaCoinControl();
+    renderSendKaspaSourcePill(b.totalKas);
+  }).catch(() => { if (index === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
+  scheduleSendKaspaFeeEstimate();
+}
+sendKaspaModal?.querySelector("[data-send-kaspa-source-pill]")?.addEventListener("click", () => {
+  if (sendKaspaSourceIndex == null || sendKaspaCompound || sendKaspaSlider.busy) return;
+  openSendFromPicker({
+    loadEntries: loadSpendingSourceEntries,
+    currentIndex: sendKaspaSourceIndex,
+    kasUnit: KAS_UNIT,
+    onPick: (entry) => switchSendKaspaSource(entry.index),
+  });
+});
 
 document.querySelectorAll("[data-close-send-kaspa]").forEach((button) => button.addEventListener("click", closeSendKaspaModal));
 document.querySelector("[data-open-send-kaspa]")?.addEventListener("click", openSendKaspaModal);
@@ -13189,32 +13461,15 @@ function importPayloadIntoConversation(payloadValue) {
   setStatus("Kasia payload imported");
 }
 
+// The tab badges are gone with the tabs (iOS a062577); what changes unread now is the circles'
+// red counts. Kept under this name for its callers (the rooms' onUnreadChanged among them).
 function updateChatsListTabBadges() {
-  // Message Requests and blocked chats don't count (iOS 84e3402).
-  const totalUnread = state.conversations.reduce((sum, entry) => sum + (isMessageRequest(entry) || isChatBlocked(contactForConversation(entry)?.address) ? 0 : Number(entry.unreadCount || 0)), 0);
-  if (chatsTabBadge) {
-    chatsTabBadge.textContent = totalUnread > 99 ? "99+" : String(totalUnread);
-    chatsTabBadge.hidden = totalUnread <= 0;
-  }
-  // Public Chats badge: unread messages across the rooms in the list (iOS 83286b3).
-  const publicBadge = document.querySelector("[data-public-tab-badge]");
-  if (publicBadge) {
-    const publicUnread = broadcastUnreadTotal();
-    publicBadge.textContent = publicUnread > 99 ? "99+" : String(publicUnread);
-    publicBadge.hidden = publicUnread <= 0;
-  }
-  // Group Chats badge reflects unread decoded group messages (see the group module).
-  if (groupsTabBadge) {
-    const groupUnread = typeof totalGroupUnread === "function" ? totalGroupUnread() : 0;
-    groupsTabBadge.textContent = groupUnread > 99 ? "99+" : String(groupUnread);
-    groupsTabBadge.hidden = groupUnread <= 0;
-  }
+  renderChatCircles();
 }
 
-// The conversations currently shown in the chat list, honoring the active tab and
-// the search filter. Shared by renderChats and the Select All action so both agree.
+// The conversations currently shown in the chat list, honoring the search filter. Shared by
+// renderChats and the Select All action so both agree.
 function visibleChatConversations() {
-  if (activeChatsListTab === "groups") return [];
   const query = searchInput.value.trim().toLowerCase();
   return sortedConversations().filter((conversationEntry) => {
     const contact = contactForConversation(conversationEntry);
@@ -13240,31 +13495,8 @@ function renderChats() {
   // for startup/recovery only; reloading it here used to replace live conversation
   // references and make message history disappear until another mutation rerendered it.
   if (!isWideLayout) setActiveConversationId(null);
-  updateChatsListTabBadges();
-
-  const publicTabButton = document.querySelector('[data-chats-list-tab="public"]');
-  if (publicTabButton) publicTabButton.hidden = isChildModeEnabled();
-  const broadcastListWrap = document.querySelector("[data-broadcast-list-wrap]");
-  if (broadcastListWrap) broadcastListWrap.hidden = activeChatsListTab !== "public";
-  if (activeChatsListTab === "public") {
-    if (emptyState) emptyState.hidden = true;
-    if (groupChatsPlaceholder) groupChatsPlaceholder.hidden = true;
-    chatList.hidden = true;
-    chatList.innerHTML = "";
-    const groupListEl = document.querySelector("[data-group-list]");
-    if (groupListEl) groupListEl.hidden = true;
-    setChatToolRowsForGroupsTab(true);
-    return;
-  }
-  if (activeChatsListTab === "groups") {
-    if (emptyState) emptyState.hidden = true;
-    chatList.hidden = true;
-    chatList.innerHTML = "";
-    setChatToolRowsForGroupsTab(true);
-    renderGroupList();
-    return;
-  }
-  if (groupChatsPlaceholder) groupChatsPlaceholder.hidden = true;
+  // One list (iOS a062577): the group chats and public rooms are the circles above the chats.
+  renderChatCircles();
   setChatToolRowsForGroupsTab(false);
 
   const visibleConversations = visibleChatConversations();
@@ -15952,19 +16184,16 @@ chatList.addEventListener("click", (event) => {
   openConversation(conversationId);
 });
 
-// The list of groups the Group Chats tab currently shows (order matches renderGroupList).
-function visibleGroups() {
-  const mgr = getGroupManager();
-  return mgr ? mgr.listGroups() : [];
-}
-
-// Selection is per-tab: the Group Chats tab acts on selectedGroupIds, everything else on
-// selectedChatConversationIds.
-function selectionIsGroups() { return activeChatsListTab === "groups"; }
-function selectionIsRooms() { return activeChatsListTab === "public"; }
+// One selection across the chats and the circles above them (iOS a062577).
 function activeSelectionCount() {
-  if (selectionIsRooms()) { try { return roomSelectionState().count; } catch { return 0; } }
-  return selectionIsGroups() ? selectedGroupIds.size : selectedChatConversationIds.size;
+  return selectedChatConversationIds.size + selectedGroupIds.size + selectedRoomNames.size;
+}
+function isEverythingSelected() {
+  const chats = visibleChatConversations();
+  const circles = visibleChatCircles();
+  if (!chats.length && !circles.length) return false;
+  return chats.every((entry) => selectedChatConversationIds.has(entry.id))
+    && circles.every((item) => (item.kind === "group" ? selectedGroupIds.has(item.key) : selectedRoomNames.has(item.key)));
 }
 
 function updateChatSelectionBar() {
@@ -15977,194 +16206,432 @@ function updateChatSelectionBar() {
   if (markUnread) markUnread.disabled = disabled;
   if (deleteButton) deleteButton.disabled = disabled;
   if (chatSelectAll) {
-    if (selectionIsRooms()) {
-      let rooms = { total: 0, allSelected: false };
-      try { rooms = roomSelectionState(); } catch { /* not started */ }
-      chatSelectAll.textContent = rooms.allSelected ? "Deselect All" : "Select All";
-      chatSelectAll.disabled = rooms.total === 0;
-    } else if (selectionIsGroups()) {
-      const visible = visibleGroups();
-      const allSelected = visible.length > 0 && visible.every((g) => selectedGroupIds.has(g.groupId));
-      chatSelectAll.textContent = allSelected ? "Deselect All" : "Select All";
-      chatSelectAll.disabled = visible.length === 0;
-    } else {
-      const visible = visibleChatConversations();
-      const allSelected = visible.length > 0 && visible.every((entry) => selectedChatConversationIds.has(entry.id));
-      chatSelectAll.textContent = allSelected ? "Deselect All" : "Select All";
-      chatSelectAll.disabled = visible.length === 0;
-    }
+    chatSelectAll.textContent = isEverythingSelected() ? "Deselect All" : "Select All";
+    chatSelectAll.disabled = visibleChatConversations().length === 0 && visibleChatCircles().length === 0;
   }
 }
 
-/// The Public Chats settings gear sits beside Select, only on the Public Chats page and never
-/// while selecting (iOS ChatListView toolbar).
+/// The public rooms settings gear sits next to Select at all times, except while selecting
+/// (iOS a062577) - and not in Simple Mode, which hides public rooms.
 function updatePublicChatsSettingsButton() {
   const gear = document.querySelector("[data-public-chats-settings]");
-  if (gear) gear.hidden = !(currentAppTab === "chats" && activeChatsListTab === "public" && !chatSelectionModeActive);
+  if (gear) gear.hidden = !(currentAppTab === "chats" && !chatSelectionModeActive && !isChildModeEnabled());
 }
 function setChatSelectionMode(active) {
   chatSelectionModeActive = active;
-  if (!active) { selectedChatConversationIds.clear(); selectedGroupIds.clear(); }
+  if (!active) { selectedChatConversationIds.clear(); selectedGroupIds.clear(); selectedRoomNames.clear(); }
   if (chatSelectToggle) chatSelectToggle.textContent = active ? "Cancel" : "Select";
   if (chatSelectAll) chatSelectAll.hidden = !active;
   if (appSidebar) appSidebar.classList.toggle("selecting-chats", active);
-  try { setRoomSelectionMode(active && selectionIsRooms()); } catch { /* rooms not started */ }
   updatePublicChatsSettingsButton();
   updateChatSelectionBar();
   renderChats();
-  renderGroupList();
 }
 
 chatSelectToggle?.addEventListener("click", () => setChatSelectionMode(!chatSelectionModeActive));
 
+// Select All takes everything visible - chats, group circles and room circles - or clears it all.
 chatSelectAll?.addEventListener("click", () => {
   if (!chatSelectionModeActive) return;
-  if (selectionIsRooms()) { toggleSelectAllRooms(); updateChatSelectionBar(); return; }
-  if (selectionIsGroups()) {
-    const visible = visibleGroups();
-    const allSelected = visible.length > 0 && visible.every((g) => selectedGroupIds.has(g.groupId));
-    for (const g of visible) {
-      if (allSelected) selectedGroupIds.delete(g.groupId);
-      else selectedGroupIds.add(g.groupId);
+  if (isEverythingSelected()) {
+    selectedChatConversationIds.clear();
+    selectedGroupIds.clear();
+    selectedRoomNames.clear();
+  } else {
+    for (const entry of visibleChatConversations()) selectedChatConversationIds.add(entry.id);
+    for (const item of visibleChatCircles()) {
+      if (item.kind === "group") selectedGroupIds.add(item.key);
+      else selectedRoomNames.add(item.key);
     }
-    renderGroupList();
-    updateChatSelectionBar();
-    return;
-  }
-  const visible = visibleChatConversations();
-  const allSelected = visible.length > 0 && visible.every((entry) => selectedChatConversationIds.has(entry.id));
-  for (const entry of visible) {
-    if (allSelected) selectedChatConversationIds.delete(entry.id);
-    else selectedChatConversationIds.add(entry.id);
   }
   renderChats();
   updateChatSelectionBar();
 });
 
-// Chats, Group Chats, Public Chats (the broadcast rooms, iOS a566da7): one list pane, three tabs.
-function selectChatsListTab(tab) {
-  if (tab === "public" && isChildModeEnabled()) tab = "chats";
-  if (tab === activeChatsListTab) return;
-  const leavingPublic = activeChatsListTab === "public";
-  activeChatsListTab = tab;
-  chatsListTabButtons.forEach((entry) => entry.classList.toggle("active", entry.dataset.chatsListTab === tab));
-  // Switching tabs is like moving to a new screen: clear whatever chat or group was
-  // open so the new tab starts fresh with only its own items viewable.
-  setActiveConversationId(null);
-  closeGroupChat();
-  if (leavingPublic) { try { stopBroadcastPolling(); } catch {} }
-  if (chatSelectionModeActive) setChatSelectionMode(false);
-  else renderChats();
-  if (tab === "public") { try { refreshBroadcasts(); } catch {} }
-  syncPublicChatsPane();
-}
-chatsListTabButtons.forEach((button) => {
-  button.addEventListener("click", () => selectChatsListTab(button.dataset.chatsListTab));
-});
-// A room open in the Public Chats tab owns the detail pane the way a conversation does.
-let publicRoomOpen = false;
+// A public room open in the detail pane owns it the way a conversation does. Rooms open beside the
+// one Chats list now - from their circle, a notification, a room link or the New sheet (iOS a062577).
 function syncPublicChatsPane() {
   updatePublicChatsSettingsButton();
-  const onPublic = currentAppTab === "chats" && activeChatsListTab === "public";
+  const onChats = currentAppTab === "chats";
   const roomEl = document.querySelector("[data-broadcast-room]");
-  if (roomEl) roomEl.hidden = !(onPublic && publicRoomOpen);
+  if (roomEl) roomEl.hidden = !(onChats && publicRoomOpen);
   // The floating + is the same on every tab: it opens the New sheet (iOS 5da8ccf).
   if (newChatFab) {
     newChatFab.title = "New";
     newChatFab.setAttribute("aria-label", "New");
   }
-  if (!onPublic) return;
-  if (conversation) conversation.hidden = true;
-  if (groupChatScreen) groupChatScreen.hidden = true;
-  if (detailEmptyState) detailEmptyState.hidden = publicRoomOpen;
-  appBody?.classList.toggle("conversation-open", publicRoomOpen);
-  document.body.classList.toggle("conversation-open", publicRoomOpen);
+  if (!onChats) return;
+  if (publicRoomOpen) {
+    publicRoomPaneApplied = true;
+    if (conversation) conversation.hidden = true;
+    if (groupChatScreen) groupChatScreen.hidden = true;
+    if (detailEmptyState) detailEmptyState.hidden = true;
+    appBody?.classList.add("conversation-open");
+    document.body.classList.add("conversation-open");
+  } else if (publicRoomPaneApplied) {
+    // The room just closed: the pane goes back to the open group or chat, or its empty state.
+    publicRoomPaneApplied = false;
+    const groupOpen = Boolean(activeGroupId);
+    const chatOpen = Boolean(activeConversationId);
+    if (groupChatScreen) groupChatScreen.hidden = !groupOpen;
+    if (conversation) conversation.hidden = groupOpen || !chatOpen;
+    if (detailEmptyState) detailEmptyState.hidden = groupOpen || chatOpen;
+    appBody?.classList.toggle("conversation-open", groupOpen || chatOpen);
+    document.body.classList.toggle("conversation-open", groupOpen || chatOpen);
+  }
   updateDetailActiveClass();
 }
+// A room handed over from outside the list - a notification, a room link, the New sheet: Chats
+// comes up with the pane cleared for it, and the caller opens the room. Simple Mode hides public
+// rooms, so there it clears nothing and returns false.
 function openPublicChatsTab() {
+  if (isChildModeEnabled()) return false;
   setActiveAppTab("chats");
-  selectChatsListTab("public");
+  if (activeGroupId) closeGroupChat();
+  if (activeConversationId) setActiveConversationId(null);
+  return true;
 }
 
-document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () => {
-  if (selectionIsRooms()) { markSelectedRooms(true); setChatSelectionMode(false); showCopyToast("Marked as read"); return; }
-  if (selectionIsGroups()) {
-    for (const id of selectedGroupIds) setGroupUnread(id, 0);
-    setChatSelectionMode(false);
-    renderGroupList();
-    showCopyToast("Marked as read");
+// --- Chats circles (iOS ChatCirclesStrip, a062577 / f90a70a) -------------------------------------
+// Every group chat and public room as a circle in a sideways row above the chats, each with a red
+// count of messages from others since it was last opened. Click opens it in the detail pane;
+// right-click (long-press on touch) opens its half sheet; in Select mode a click selects it.
+// Pinned circles come first, newest pin first, then the rest by latest activity. Pins are saved
+// per wallet as "g:<groupId>" / "r:<room>". Everything here reads the DOM and module state at call
+// time: the boot-time renderChats reaches it before the code below has run.
+const CHAT_CIRCLE_CHECK_SVG = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.1 10.1 3.1 3.1 6.7-7"/></svg>';
+const CHAT_CIRCLE_PIN_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3.5 20.5 9l-2.2 1.1-3.6 3.6.4 4.6-1.6 1.6-3.9-3.9-4.8 4.8-.8-.8 4.8-4.8-3.9-3.9 1.6-1.6 4.6.4 3.6-3.6Z"/></svg>';
+
+function chatCirclePins() {
+  try {
+    const list = JSON.parse(localStorage.getItem(accountScopedKey("kachat-chat-circle-pins-v1")) || "[]");
+    return Array.isArray(list) ? list.filter((id) => typeof id === "string") : [];
+  } catch { return []; }
+}
+function saveChatCirclePins(pins) {
+  try { localStorage.setItem(accountScopedKey("kachat-chat-circle-pins-v1"), JSON.stringify(pins)); } catch { /* best-effort */ }
+}
+function toggleChatCirclePin(id) {
+  const pins = chatCirclePins();
+  const index = pins.indexOf(id);
+  if (index >= 0) { pins.splice(index, 1); showCopyToast("Unpinned"); }
+  else { pins.unshift(id); showCopyToast("Pinned to the front"); }
+  saveChatCirclePins(pins);
+  renderChatCircles();
+}
+/** A deleted group or room takes its pin with it. */
+function dropChatCirclePins(ids) {
+  const gone = new Set(ids);
+  const pins = chatCirclePins();
+  const kept = pins.filter((id) => !gone.has(id));
+  if (kept.length !== pins.length) saveChatCirclePins(kept);
+}
+
+// The search box filters groups by name, a member's name or address, or message text, as the
+// Group Chats list did; rooms by name.
+function groupMatchesChatSearch(g, query) {
+  if (String(g.name || "").toLowerCase().includes(query)) return true;
+  if ((g.members || []).some((m) => String(m.address || "").toLowerCase().includes(query) || groupSenderLabel(m.address).toLowerCase().includes(query))) return true;
+  return groupMessages(g.groupId).some((m) => String(m.text || "").slice(0, 4096).toLowerCase().includes(query));
+}
+
+/** The circles the row shows, in its order. Shared by the row, Select All and the select bar. */
+function visibleChatCircles() {
+  const items = [];
+  const query = String(searchInput?.value || "").trim().toLowerCase();
+  let mgr = null;
+  try { mgr = getGroupManager(); } catch { mgr = null; }
+  if (mgr) {
+    const opened = openedGroupIds();
+    for (const g of mgr.listGroups()) {
+      if (query && !groupMatchesChatSearch(g, query)) continue;
+      items.push({ id: `g:${g.groupId}`, kind: "group", key: g.groupId, title: g.name || "Group", unread: groupDisplayUnread(g, opened), at: groupLastActivityAt(g), group: g });
+    }
+  }
+  // Simple Mode hides public rooms.
+  if (!isChildModeEnabled()) {
+    let rooms = [];
+    try { rooms = chatCircleRooms(); } catch { rooms = []; }
+    for (const room of rooms) {
+      const title = `#${room.name}`;
+      if (query && !title.toLowerCase().includes(query)) continue;
+      items.push({ id: `r:${room.name}`, kind: "room", key: room.name, title, unread: room.unread, at: room.lastAt, room });
+    }
+  }
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const pinned = chatCirclePins().map((id) => byId.get(id)).filter(Boolean);
+  const pinnedIds = new Set(pinned.map((item) => item.id));
+  const rest = items.filter((item) => !pinnedIds.has(item.id)).sort((a, b) => b.at - a.at);
+  return [...pinned, ...rest];
+}
+
+function chatCircleGroupPhotoUrl(g) {
+  const hex = String(g.photoHex || "");
+  if (!hex) return "";
+  const key = `${g.groupId}|${hex.length}|${hex.slice(-64)}`;
+  let url = chatCirclePhotoCache.get(key);
+  if (url === undefined) {
+    url = groupPhotoDataUrl(hex);
+    if (chatCirclePhotoCache.size > 200) chatCirclePhotoCache.clear();
+    chatCirclePhotoCache.set(key, url);
+  }
+  return url;
+}
+
+function renderChatCircles() {
+  const strip = document.querySelector("[data-chat-circles]");
+  if (!strip) return;
+  let items = [];
+  try { items = visibleChatCircles(); } catch { items = []; }
+  if (!items.length) {
+    strip.hidden = true;
+    if (chatCirclesLastHtml) { strip.innerHTML = ""; chatCirclesLastHtml = ""; }
     return;
   }
+  const pins = new Set(chatCirclePins());
+  const selecting = chatSelectionModeActive;
+  let html = "";
+  // A boot-time render can arrive before the group module's constants are set; the next render
+  // (any message, any sync) draws the row.
+  try { html = chatCirclesHtml(items, pins, selecting); } catch { return; }
+  strip.hidden = false;
+  if (html !== chatCirclesLastHtml) { strip.innerHTML = html; chatCirclesLastHtml = html; }
+}
+
+function chatCirclesHtml(items, pins, selecting) {
+  return items.map((item) => {
+    const selected = item.kind === "group" ? selectedGroupIds.has(item.key) : selectedRoomNames.has(item.key);
+    const active = item.kind === "group" ? item.key === activeGroupId : Boolean(item.room?.open);
+    const pinned = pins.has(item.id);
+    let avatar;
+    if (item.kind === "group") {
+      const url = chatCircleGroupPhotoUrl(item.group);
+      avatar = url
+        ? `<img class="chat-circle-photo" src="${escapeHtml(url)}" alt="" />`
+        : `<span class="chat-circle-glyph">${GROUP_AVATAR_SVG || ""}</span>`;
+    } else {
+      avatar = `<span class="chat-circle-hash">#</span>`;
+    }
+    const corner = selecting
+      ? `<span class="chat-circle-check${selected ? " checked" : ""}" aria-hidden="true">${selected ? (CHAT_CIRCLE_CHECK_SVG || "") : ""}</span>`
+      : (item.unread > 0 ? `<b class="chat-circle-badge">${item.unread > 99 ? "99+" : escapeHtml(item.unread)}</b>` : "");
+    const pin = pinned && !selecting ? `<span class="chat-circle-pin" aria-hidden="true">${CHAT_CIRCLE_PIN_SVG || ""}</span>` : "";
+    const label = `${item.title}${item.unread > 0 ? `, ${item.unread} unread` : ""}${pinned ? ", pinned" : ""}`;
+    const classes = `chat-circle${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active && !selecting ? " active" : ""}`;
+    return `<button type="button" class="${classes}" data-circle-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(`${item.title} - right-click for options`)}"${selecting ? ` aria-pressed="${selected ? "true" : "false"}"` : ""}>
+      <span class="chat-circle-avatar">${avatar}${corner}${pin}</span>
+      <span class="chat-circle-title">${escapeHtml(item.title)}</span>
+    </button>`;
+  }).join("");
+}
+
+// A room from its circle: chats and groups give the pane up first. Clicking the open room's circle
+// again closes it, as with a chat row.
+function openRoomFromCircle(name) {
+  if (isChildModeEnabled()) return;
+  let rooms = [];
+  try { rooms = chatCircleRooms(); } catch { rooms = []; }
+  if (rooms.find((room) => room.name === name)?.open) { closeBroadcastRoom(); return; }
+  if (activeGroupId) closeGroupChat();
+  if (activeConversationId) setActiveConversationId(null);
+  openBroadcastRoom(name);
+}
+
+/** Simple Mode turned on or off: public rooms leave (or rejoin) the row, and an open room closes. */
+function syncChatCirclesForSimpleMode() {
+  if (isChildModeEnabled()) {
+    selectedRoomNames.clear();
+    try { closeBroadcastRoom(); stopBroadcastPolling(); } catch { /* rooms not started */ }
+  } else if (currentAppTab === "chats") {
+    try { refreshBroadcasts(); } catch { /* rooms not started */ }
+  }
+  updatePublicChatsSettingsButton();
+  renderChatCircles();
+  if (chatSelectionModeActive) updateChatSelectionBar();
+}
+
+// Hold a circle - right-click, or long-press on touch - for the same half sheet as a chat row
+// (iOS f90a70a). Group: Mark as Read / Unread, Pin to Front / Unpin, Silence / Unsilence, Delete
+// (confirmed). Room: Mark as Read / Unread, Pin to Front / Unpin, notifications on/off, Copy Room
+// Link, Delete (a custom room after a confirmation; a default room is switched off, as in Public
+// Chats settings).
+async function openChatCircleSheet(id) {
+  const pinOption = chatCirclePins().includes(id)
+    ? { id: "pin", title: "Unpin", subtitle: "Goes back to its place by latest activity.", icon: ACTION_TILE_ICONS.unpin }
+    : { id: "pin", title: "Pin to Front", subtitle: "Keeps it first in the row above your chats.", icon: ACTION_TILE_ICONS.pin };
+  if (id.startsWith("g:")) {
+    const mgr = getGroupManager();
+    const g = mgr?.getGroup(id.slice(2));
+    if (!g) return;
+    const silenced = getGroupNotify(g.groupId) === "muted";
+    const choice = await chooseDialog({
+      title: g.name || "Group",
+      layout: "tiles",
+      options: [
+        groupDisplayUnread(g) > 0
+          ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this group.", icon: ACTION_TILE_ICONS.envelopeOpen }
+          : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
+        pinOption,
+        {
+          id: "silence",
+          title: silenced ? "Unsilence" : "Silence",
+          subtitle: silenced ? "Notifications from this group resume, including mentions." : "No notification from this group, mentions included.",
+          icon: silenced ? ACTION_TILE_ICONS.bell : ACTION_TILE_ICONS.bellSlash,
+        },
+        { id: "delete", title: "Delete", subtitle: "Removes this group and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash },
+      ],
+    });
+    if (!choice) return;
+    if (choice === "read") { markGroupOpened(g.groupId); setGroupUnread(g.groupId, 0); renderChatCircles(); return; }
+    if (choice === "unread") { setGroupUnread(g.groupId, Math.max(1, groupUnreadFor(g.groupId))); renderChatCircles(); return; }
+    if (choice === "pin") { toggleChatCirclePin(id); return; }
+    if (choice === "silence") { setGroupNotify(g.groupId, silenced ? "all" : "muted"); renderChatCircles(); return; }
+    if (choice === "delete") {
+      const ok = await confirmDialog({
+        title: "Delete Group?",
+        message: "This removes this group and its messages from this device. This cannot be undone, and other members won't be notified.",
+        confirmLabel: "Delete", destructive: true,
+      });
+      if (!ok) return;
+      if (activeGroupId === g.groupId) closeGroupChat();
+      try { mgr.deleteGroup(g.groupId); } catch { /* already gone */ }
+      dropChatCirclePins([id]);
+      renderChatCircles();
+      showCopyToast("Group deleted.");
+    }
+    return;
+  }
+  if (!id.startsWith("r:") || isChildModeEnabled()) return;
+  const name = id.slice(2);
+  let room = null;
+  try { room = chatCircleRooms().find((entry) => entry.name === name) || null; } catch { room = null; }
+  if (!room) return;
+  const options = [
+    room.unread > 0
+      ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this room.", icon: ACTION_TILE_ICONS.envelopeOpen }
+      : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
+    pinOption,
+    room.notify
+      ? { id: "notify", title: "Turn Off Notifications", subtitle: "No notification for new messages in this room.", icon: ACTION_TILE_ICONS.bellSlash }
+      : { id: "notify", title: "Turn On Notifications", subtitle: room.indexed ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open.", icon: ACTION_TILE_ICONS.bell },
+    { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room.", icon: ACTION_TILE_ICONS.link },
+  ];
+  if (room.indexed) {
+    options.push({ id: "switch-off", title: "Delete", subtitle: "Switches this default room off. Turn it back on in Public Chats settings.", destructive: true, icon: ACTION_TILE_ICONS.trash });
+  } else if (room.joined) {
+    options.push({ id: "delete", title: "Delete", subtitle: "Removes this room and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash });
+  }
+  const choice = await chooseDialog({ title: `#${name}`, layout: "tiles", options });
+  if (!choice) return;
+  if (choice === "read") markBroadcastRooms([name], true);
+  else if (choice === "unread") markBroadcastRooms([name], false);
+  else if (choice === "pin") toggleChatCirclePin(id);
+  else if (choice === "notify") setBroadcastRoomNotify(name, !room.notify);
+  else if (choice === "copy") copyBroadcastRoomLink(name);
+  else if (choice === "switch-off") { removeBroadcastRooms([name]); dropChatCirclePins([id]); renderChatCircles(); }
+  else if (choice === "delete") {
+    const ok = await confirmDialog({
+      title: "Delete Room?",
+      message: "Every message cached for this room on this device is deleted. This cannot be undone - rejoining later starts with no history.",
+      confirmLabel: "Delete", destructive: true,
+    });
+    if (!ok) return;
+    removeBroadcastRooms([name]);
+    dropChatCirclePins([id]);
+    renderChatCircles();
+  }
+}
+
+{
+  const circlesEl = document.querySelector("[data-chat-circles]");
+  circlesEl?.addEventListener("click", (event) => {
+    const circle = event.target.closest("[data-circle-id]");
+    if (!circle) return;
+    const id = circle.dataset.circleId || "";
+    const key = id.slice(2);
+    if (chatSelectionModeActive) {
+      const set = id.startsWith("g:") ? selectedGroupIds : selectedRoomNames;
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      renderChatCircles();
+      updateChatSelectionBar();
+      return;
+    }
+    if (id.startsWith("g:")) {
+      // Clicking the open group's circle again closes it, as with a chat row.
+      if (key === activeGroupId) { closeGroupChat(); return; }
+      openGroupChat(key);
+    } else if (id.startsWith("r:")) {
+      openRoomFromCircle(key);
+    }
+  });
+  onContextGesture(circlesEl, (event) => {
+    const circle = event.target.closest("[data-circle-id]");
+    if (!circle || chatSelectionModeActive) return;
+    event.preventDefault();
+    openChatCircleSheet(circle.dataset.circleId || "");
+  });
+}
+
+// Mark read, mark unread and delete act on everything selected: chats, group circles and room
+// circles alike (iOS a062577).
+document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () => {
+  for (const id of selectedGroupIds) { markGroupOpened(id); setGroupUnread(id, 0); }
+  if (selectedRoomNames.size) { try { markBroadcastRooms([...selectedRoomNames], true); } catch { /* rooms not started */ } }
   for (const conversationEntry of state.conversations) {
     if (selectedChatConversationIds.has(conversationEntry.id)) conversationEntry.unreadCount = 0;
   }
-  persistState();
+  if (selectedChatConversationIds.size) persistState();
   setChatSelectionMode(false);
   showCopyToast("Marked as read");
 });
 
 document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () => {
-  if (selectionIsRooms()) { markSelectedRooms(false); setChatSelectionMode(false); showCopyToast("Marked as unread"); return; }
-  if (selectionIsGroups()) {
-    for (const id of selectedGroupIds) {
-      if (Number(groupUnreadFor(id) || 0) === 0) setGroupUnread(id, 1);
-    }
-    setChatSelectionMode(false);
-    renderGroupList();
-    showCopyToast("Marked as unread");
-    return;
+  for (const id of selectedGroupIds) {
+    if (Number(groupUnreadFor(id) || 0) === 0) setGroupUnread(id, 1);
   }
+  if (selectedRoomNames.size) { try { markBroadcastRooms([...selectedRoomNames], false); } catch { /* rooms not started */ } }
   for (const conversationEntry of state.conversations) {
     if (selectedChatConversationIds.has(conversationEntry.id) && Number(conversationEntry.unreadCount || 0) === 0) {
       conversationEntry.unreadCount = 1;
     }
   }
-  persistState();
+  if (selectedChatConversationIds.size) persistState();
   setChatSelectionMode(false);
   showCopyToast("Marked as unread");
 });
 
 document.querySelector("[data-chat-delete-selected]")?.addEventListener("click", async () => {
-  if (selectionIsRooms()) {
-    const count = roomSelectionState().count;
-    if (!count) return;
-    if (!await confirmDialog({
-      title: `Delete ${count} Public Chat${count === 1 ? "" : "s"}?`,
-      message: "Rooms you added are removed with their messages. Default rooms are only switched off - turn them back on any time in Public Chats settings (the gear).",
-      confirmLabel: "Delete", destructive: true,
-    })) return;
-    deleteSelectedRooms();
-    setChatSelectionMode(false);
-    return;
-  }
-  if (selectionIsGroups()) {
-    const count = selectedGroupIds.size;
-    if (!count) return;
-    if (!await confirmDialog({
-      title: `Delete ${count} Group${count === 1 ? "" : "s"}?`,
-      message: "This removes each selected group and its messages from this device. This cannot be undone, and other members won't be notified.",
-      confirmLabel: "Delete", destructive: true,
-    })) return;
+  const chats = selectedChatConversationIds.size;
+  const groups = selectedGroupIds.size;
+  const rooms = selectedRoomNames.size;
+  const total = chats + groups + rooms;
+  if (!total) return;
+  let title;
+  if (!groups && !rooms) title = `Delete ${chats} Chat${chats === 1 ? "" : "s"}?`;
+  else if (!chats && !rooms) title = `Delete ${groups} Group${groups === 1 ? "" : "s"}?`;
+  else if (!chats && !groups) title = `Delete ${rooms} Public Chat${rooms === 1 ? "" : "s"}?`;
+  else title = `Delete ${total} Selected?`;
+  const parts = [];
+  if (chats) parts.push("This permanently deletes every message in each selected chat from this device. This cannot be undone.");
+  if (groups) parts.push("This removes each selected group and its messages from this device. This cannot be undone, and other members won't be notified.");
+  if (rooms) parts.push("Rooms you added are removed with their messages. Default rooms are only switched off - turn them back on any time in Public Chats settings (the gear).");
+  if (!await confirmDialog({ title, message: parts.join("\n"), confirmLabel: "Delete", destructive: true })) return;
+  const chatIds = [...selectedChatConversationIds];
+  const groupIds = [...selectedGroupIds];
+  const roomNames = [...selectedRoomNames];
+  if (chatIds.length) deleteConversationsByIds(chatIds);
+  if (groupIds.length) {
     const mgr = getGroupManager();
-    const ids = new Set(selectedGroupIds);
-    if (activeGroupId && ids.has(activeGroupId)) closeGroupChat();
-    if (mgr) for (const id of ids) { try { mgr.deleteGroup(id); } catch { /* already gone */ } }
-    setChatSelectionMode(false);
-    renderGroupList();
-    showCopyToast(count === 1 ? "Group deleted." : `${count} groups deleted.`);
-    return;
+    if (activeGroupId && groupIds.includes(activeGroupId)) closeGroupChat();
+    if (mgr) for (const id of groupIds) { try { mgr.deleteGroup(id); } catch { /* already gone */ } }
   }
-  const count = selectedChatConversationIds.size;
-  if (!count) return;
-  const confirmed = await confirmDialog({
-    title: `Delete ${count} Chat${count === 1 ? "" : "s"}?`,
-    message: "This permanently deletes every message in each selected chat from this device. This cannot be undone.",
-    confirmLabel: "Delete",
-    destructive: true,
-  });
-  if (!confirmed) return;
-  deleteConversationsByIds([...selectedChatConversationIds]);
+  if (roomNames.length) { try { removeBroadcastRooms(roomNames); } catch { /* rooms not started */ } }
+  dropChatCirclePins([...groupIds.map((id) => `g:${id}`), ...roomNames.map((name) => `r:${name}`)]);
   setChatSelectionMode(false);
+  // A chats-only delete keeps deleteConversationsByIds' own toast.
+  if (groups && !chats && !rooms) showCopyToast(groups === 1 ? "Group deleted." : `${groups} groups deleted.`);
+  else if (groups || rooms) showCopyToast(`${total} deleted.`);
 });
 
 // Removes chats and their contacts from this device. Shared by the Select-mode bulk bar and the
@@ -16201,19 +16668,22 @@ onContextGesture(chatList, async (event) => {
   const contact = contactForConversation(conversationEntry);
   if (!conversationEntry || !contact) return;
   const isSilent = getContactNotifyOverride(contact.address) === "off";
+  // Square tiles, three to a row (iOS cdac6d0): every long-press half sheet uses them.
   const choice = await chooseDialog({
     title: displayNameForAddress(contact),
+    layout: "tiles",
     options: [
       conversationEntry.unreadCount > 0
-        ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this chat." }
-        : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again." },
+        ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this chat.", icon: ACTION_TILE_ICONS.envelopeOpen }
+        : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
       {
         id: "silence",
         title: isSilent ? "Unsilence" : "Silence",
         subtitle: isSilent ? "Notifications from this chat resume." : "No notification from this chat, whatever your app-wide setting says.",
+        icon: isSilent ? ACTION_TILE_ICONS.bell : ACTION_TILE_ICONS.bellSlash,
       },
       // Your own chat has no Delete (iOS ef4f183).
-      ...(isSelfConversation(conversationEntry) ? [] : [{ id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true }]),
+      ...(isSelfConversation(conversationEntry) ? [] : [{ id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash }]),
     ],
   });
   if (!choice) return;
@@ -16717,13 +17187,39 @@ function hideAvailableBalanceBanner() {
 // send pays a fresh pool address.
 let composerBalanceToken = 0;
 
+// Privacy ON (iOS dae8a01): "available: X KAS · Address #N ⌄" - the address paying (the primary
+// unless another was picked) - and clicking it opens Send From, not Manage Addresses.
 function renderAvailableBalanceBanner(balanceText, clickable, contact) {
   if (!availableBalanceBanner) return;
   availableBalanceBanner.replaceChildren();
   const value = document.createElement("span");
   value.className = `available-balance-value${clickable ? " clickable" : ""}`;
-  value.textContent = `Available ${balanceText} ${KAS_UNIT}`;
+  value.textContent = `available: ${balanceText} ${KAS_UNIT}`;
   availableBalanceBanner.append(value);
+  if (clickable) {
+    const sep = document.createElement("span");
+    sep.className = "sk-pill-sep";
+    sep.setAttribute("aria-hidden", "true");
+    sep.textContent = "·";
+    const source = document.createElement("span");
+    source.className = "sk-pill-source";
+    source.textContent = spendingSourceLabel(paymentSourceIndex ?? getActiveSpendingIndex());
+    const chevron = document.createElement("span");
+    chevron.className = "sk-pill-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>';
+    availableBalanceBanner.append(sep, source, chevron);
+  }
+  // A real control when it opens Send From (keyboard + screen readers), a status line otherwise.
+  if (clickable) {
+    availableBalanceBanner.setAttribute("role", "button");
+    availableBalanceBanner.tabIndex = 0;
+    availableBalanceBanner.title = "Choose which spending address to send from";
+  } else {
+    availableBalanceBanner.setAttribute("role", "status");
+    availableBalanceBanner.removeAttribute("tabindex");
+    availableBalanceBanner.removeAttribute("title");
+  }
   if (contact && willPayViaFreshPoolAddress(contact.address)) {
     const arrow = document.createElement("span");
     arrow.className = "available-balance-fresh";
@@ -16745,7 +17241,7 @@ async function refreshComposerAvailableBalance() {
   try {
     let balanceKas;
     if (spendingFunded) {
-      const address = deriveSpendingAddressAt(getActiveSpendingIndex());
+      const address = deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex());
       if (!address) throw new Error("No spending address");
       balanceKas = (await engine.balanceForAddress(address)).totalKas;
     } else {
@@ -16762,23 +17258,53 @@ async function refreshComposerAvailableBalance() {
   }
 }
 
-availableBalanceBanner?.addEventListener("click", () => {
+// Privacy ON: pay this one payment from another spending address (iOS dae8a01, the same Send From
+// list as a spending address's Send). Privacy OFF pays from the chatting address: nothing to pick.
+function openPaymentSourcePicker() {
   if (!isPaySheetOpen() || paymentSendInFlight) return;
   if (!chatsPrivacyEnabled() || !activeAccountMnemonic()) return; // OFF: not tappable
-  closePaymentSheet();
-  openSpendingManageScreen();
+  const primaryIndex = getActiveSpendingIndex();
+  openSendFromPicker({
+    loadEntries: loadSpendingSourceEntries,
+    currentIndex: paymentSourceIndex ?? primaryIndex,
+    kasUnit: KAS_UNIT,
+    onPick: (entry) => {
+      if (!isPaySheetOpen() || paymentSendInFlight) return;
+      paymentSourceIndex = entry.index === getActiveSpendingIndex() ? null : entry.index;
+      composerAvailableKas = null;
+      paySheetError = "";
+      refreshComposerAvailableBalance();
+      refreshPaymentSheetState();
+      schedulePaymentFee();
+    },
+  });
+}
+availableBalanceBanner?.addEventListener("click", openPaymentSourcePicker);
+availableBalanceBanner?.addEventListener("keydown", (event) => {
+  if ((event.key === "Enter" || event.key === " ") && availableBalanceBanner.getAttribute("role") === "button") {
+    event.preventDefault();
+    openPaymentSourcePicker();
+  }
 });
 
 // --- Send KAS sheet (iOS 8d208b2 paymentSheet) ------------------------------------------------
 // "Send KAS / to <name>", a big centred amount (KAS or fiat - iOS KaspaFiatAmountState - with the
 // converted value and Max under it), an encrypted memo of up to 140 characters (the payment
-// payload's note, shown in the payment bubble), the fee and Available pills, and a hold-to-send
-// button (0.8 s, a sweeping fill). Every way into a chat payment opens it: the "+" sheet's Pay in
+// payload's note, shown in the payment bubble), the fee and Available pills, and a slide-to-send
+// button (iOS afaad34). Every way into a chat payment opens it: the "+" sheet's Pay in
 // Kaspa, the payment-mode chat route (Pay in Kaspa from group and public chat sender sheets, the
 // donate row). No confirmation sheet afterwards (iOS 80a6aae): the bubble is the confirmation.
 const PAYMENT_MEMO_MAX_LENGTH = 140;
-const PAYMENT_HOLD_MS = 800;
 const paySheet = document.querySelector("[data-pay-sheet]");
+// The shared Send Kaspa pieces (send-kaspa-components.js): the amount entry and the slide-to-send
+// button, mounted before the element lookups below.
+mountSendPieces(paySheet, {
+  amount: amountEntryHtml({
+    prefix: "pay", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`,
+    attrs: { unit: "pay-unit", toggle: "pay-unit-toggle", conversion: "pay-conversion", max: "pay-max" },
+  }),
+  action: sendActionButtonHtml({ attr: "pay-hold", labelAttr: "pay-hold-label", title: "Slide to Send" }),
+});
 const payTitleEl = paySheet?.querySelector("[data-pay-title]");
 const payRecipientEl = paySheet?.querySelector("[data-pay-recipient]");
 const payAmountInput = paySheet?.querySelector("[data-pay-amount]");
@@ -16790,7 +17316,11 @@ const payMemoInput = paySheet?.querySelector("[data-pay-memo]");
 const payFeePill = paySheet?.querySelector("[data-pay-fee]");
 const payNoteEl = paySheet?.querySelector("[data-pay-note]");
 const payHoldButton = paySheet?.querySelector("[data-pay-hold]");
-const payHoldLabel = paySheet?.querySelector("[data-pay-hold-label]");
+const paySlider = createSendActionButton(payHoldButton, { onAction: () => submitPaymentSheet() });
+// The spending address this payment comes from when not the primary (Chats Payment Privacy on),
+// picked from the Available pill (iOS dae8a01). null = the primary. Reset each time the sheet
+// opens; the primary itself never changes.
+let paymentSourceIndex = null;
 let paymentUnit = "kas";
 let paymentPrice = null;
 let composerAvailableKas = null;
@@ -16820,29 +17350,16 @@ function currentPaymentMemo() { return clampPaymentMemo(payMemoInput?.value || "
 
 // Digits and one decimal point; at most 8 decimals for KAS, 2 for a currency (iOS sanitizedAmount).
 function sanitizePaymentAmount(value) {
-  let text = String(value || "").replace(/,/g, ".").replace(/[^0-9.]/g, "");
-  const dot = text.indexOf(".");
-  if (dot !== -1) text = text.slice(0, dot + 1) + text.slice(dot + 1).replace(/\./g, "");
-  const [whole, fraction] = text.split(".");
-  const maxDecimals = paymentUnit === "fiat" ? 2 : 8;
-  return fraction != null ? `${whole}.${fraction.slice(0, maxDecimals)}` : whole;
+  return sanitizeAmountText(value, paymentUnit === "fiat" ? 2 : 8);
 }
 
 function refreshPaymentUnitUi() {
   if (!paySheet) return;
   const code = selectedCurrency.toUpperCase();
-  const display = String(payAmountInput?.value || "");
-  // Big when short, smaller as it grows (iOS: 52 / 40 / 30 pt).
-  const fontSize = display.length <= 7 ? 52 : (display.length <= 10 ? 40 : 30);
-  if (payAmountInput) {
-    payAmountInput.style.fontSize = `${fontSize}px`;
-    payAmountInput.style.width = `${Math.max(1, display.length || 1) + 0.6}ch`;
-    payAmountInput.setAttribute("aria-label", paymentUnit === "fiat" ? `Amount (${code})` : `Amount (${KAS_UNIT})`);
-  }
-  if (payUnitEl) {
-    payUnitEl.textContent = paymentUnit === "fiat" ? code : KAS_UNIT;
-    payUnitEl.style.fontSize = `${Math.round(fontSize * 0.55)}px`;
-  }
+  if (payAmountInput) payAmountInput.setAttribute("aria-label", paymentUnit === "fiat" ? `Amount (${code})` : `Amount (${KAS_UNIT})`);
+  if (payUnitEl) payUnitEl.textContent = paymentUnit === "fiat" ? code : KAS_UNIT;
+  // Big when short, smaller as it grows (the shared amount entry, iOS 52 / 40 / 30 pt).
+  layoutAmountEntry(payAmountInput, payUnitEl);
   if (paymentUnitToggle) {
     paymentUnitToggle.hidden = !(paymentPrice > 0);
     const kas = paymentKasFromInput();
@@ -16872,12 +17389,8 @@ function refreshPaymentSheetState() {
       payNoteEl.hidden = true;
     }
   }
-  if (payHoldButton) {
-    payHoldButton.disabled = !(sompi > 0) || paymentSendInFlight;
-    payHoldButton.classList.toggle("busy", paymentSendInFlight);
-    payHoldButton.setAttribute("aria-busy", paymentSendInFlight ? "true" : "false");
-  }
-  if (payHoldLabel) payHoldLabel.textContent = paymentSendInFlight ? "Sending…" : "Hold to Send";
+  if (paySlider.busy !== Boolean(paymentSendInFlight)) paySlider.setBusy(paymentSendInFlight);
+  paySlider.setEnabled(sompi > 0 && !paymentSendInFlight);
 }
 
 // iOS paymentFeePill: "fee: -------- KAS" while estimating, "fee: -- KAS" when unknown.
@@ -16910,7 +17423,8 @@ function schedulePaymentFee() {
       const amountKas = formatKasPlain(kas);
       const payloadBytes = estimatePaymentPayloadBytes(currentPaymentMemo(), Math.round(kas * 1e8));
       const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
-      const fundingAddress = spendingFunded ? deriveSpendingAddressAt(getActiveSpendingIndex()) : null;
+      // The picked source (Send From), else the primary - what sendKasPayment will spend from.
+      const fundingAddress = spendingFunded ? deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex()) : null;
       // Chat payments pay the SDK's own fee (no priority tip), so that is the figure shown.
       const detail = fundingAddress
         ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, null, payloadBytes)
@@ -16944,6 +17458,7 @@ function openPaymentSheet() {
   if (isChattingBalanceZero()) { updateChatFundingGate(); return; }
   closeComposerMenu();
   paySheetConversationId = conversationEntry.id;
+  paymentSourceIndex = null;
   resetPaymentSheetFields();
   if (payTitleEl) payTitleEl.textContent = `Send ${KAS_UNIT}`;
   if (payRecipientEl) payRecipientEl.textContent = `to ${displayNameForAddress(contact) || shortAddress(contact.address)}`;
@@ -16963,6 +17478,7 @@ function closePaymentSheet({ force = false } = {}) {
   // A payment on its way can't be walked away from mid-send (iOS interactiveDismissDisabled).
   if (paymentSendInFlight && !force) return;
   cancelPaymentHold();
+  closeSendFromPicker();
   paySheet.hidden = true;
   paySheetConversationId = null;
   payFeeToken += 1;
@@ -17016,61 +17532,11 @@ paySheet?.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { event.preventDefault(); closePaymentSheet(); }
 });
 
-// Hold to Send (iOS HoldToSendButton): the payment goes only after a 0.8 s press - mouse, touch,
-// or Space / Enter held down - while the fill sweeps across; letting go early resets it. A screen
-// reader's activation (a click with no pointer or key press behind it) is the plain action.
-let payHoldTimer = null;
-let payHoldKey = null;
-let payHoldPointerId = null;
-function startPaymentHold() {
-  if (!payHoldButton || payHoldButton.disabled || payHoldTimer) return;
-  payHoldButton.classList.add("holding");
-  payHoldTimer = window.setTimeout(() => {
-    payHoldTimer = null;
-    payHoldKey = null;
-    payHoldPointerId = null;
-    payHoldButton.classList.remove("holding");
-    submitPaymentSheet();
-  }, PAYMENT_HOLD_MS);
-}
-function cancelPaymentHold() {
-  if (payHoldTimer) window.clearTimeout(payHoldTimer);
-  payHoldTimer = null;
-  payHoldKey = null;
-  payHoldPointerId = null;
-  payHoldButton?.classList.remove("holding");
-}
-payHoldButton?.addEventListener("pointerdown", (event) => {
-  if (event.pointerType === "mouse" && event.button !== 0) return;
-  payHoldPointerId = event.pointerId;
-  try { payHoldButton.setPointerCapture(event.pointerId); } catch { /* fine */ }
-  startPaymentHold();
-});
-["pointerup", "pointercancel", "lostpointercapture"].forEach((type) => {
-  payHoldButton?.addEventListener(type, (event) => {
-    if (payHoldPointerId != null && event.pointerId === payHoldPointerId) cancelPaymentHold();
-  });
-});
-payHoldButton?.addEventListener("contextmenu", (event) => event.preventDefault());
-payHoldButton?.addEventListener("keydown", (event) => {
-  if (event.key !== " " && event.key !== "Enter") return;
-  // The browser's own activation would be a click on key press; holding is what counts here.
-  event.preventDefault();
-  if (event.repeat || payHoldKey) return;
-  payHoldKey = event.key;
-  startPaymentHold();
-});
-payHoldButton?.addEventListener("keyup", (event) => {
-  if (event.key !== " " && event.key !== "Enter") return;
-  event.preventDefault();
-  if (payHoldKey === event.key) cancelPaymentHold();
-});
-payHoldButton?.addEventListener("blur", cancelPaymentHold);
-payHoldButton?.addEventListener("click", (event) => {
-  // Mouse and touch clicks (detail >= 1) are the end of a press the hold already handled.
-  if (event.detail !== 0 || payHoldKey || payHoldButton.disabled) return;
-  submitPaymentSheet();
-});
+// Slide to Send (iOS SendActionButton, afaad34) replaces the old hold: the payment goes once the
+// knob is slid to the right end; released early it springs back, and after a payment that didn't
+// start (the small-amount question, an error) it resets by itself - again when the send finishes.
+// Return / Space or a screen reader's activation is the plain action (the shared component).
+function cancelPaymentHold() { paySlider.reset(); }
 
 async function submitPaymentSheet() {
   if (!isPaySheetOpen() || paymentSendInFlight) return;
@@ -17098,6 +17564,8 @@ async function submitPaymentSheet() {
   try {
     await sendKasPayment(conversationId, amountKas, {
       note: memo,
+      // Send From (privacy on): the picked spending address, null = the primary.
+      sourceSpendingIndex: paymentSourceIndex,
       // Down as soon as a node has the transaction; the bubble in the chat is the confirmation.
       onSubmitted: () => { closePaymentSheet({ force: true }); resetPaymentSheetFields(); },
     });
@@ -17346,7 +17814,7 @@ function normalizeKasAmount(value) {
 // A chat payment, from the Send KAS sheet. Throws (for the sheet to show) when it can't go: not
 // enough balance, the memo can't be encrypted, or the node refuses it. `onSubmitted` runs once a
 // node has the transaction, before the slower recipient-output verification.
-async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null } = {}) {
+async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null } = {}) {
   if (paymentSendInFlight) return false;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   const contact = contactForConversation(conversationEntry);
@@ -17361,8 +17829,12 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     // address (falling back to the chatting address only if this account has
     // no stored mnemonic to derive from), OFF is chatting-to-chatting end to
     // end. The balance guard checks the same source the send will use.
+    // A source picked on the sheet's Available pill (iOS dae8a01) pays instead of the primary;
+    // privacy OFF ignores it (always the chatting address).
     const privacyOn = chatsPrivacyEnabled();
-    const fundingIndex = getActiveSpendingIndex();
+    const primaryIndex = getActiveSpendingIndex();
+    const fundingIndex = Number.isInteger(sourceSpendingIndex) ? sourceSpendingIndex : primaryIndex;
+    const keepsPrimary = fundingIndex !== primaryIndex;
     const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
     const spendingFunded = Boolean(fundingAddress);
     const balance = spendingFunded ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
@@ -17414,7 +17886,11 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
 
     let submittedTxids = [];
     try {
-      const payFresh = spendingFunded ? freshChangeForSpendingIndex(fundingIndex) : null;
+      // The primary's change goes to a fresh address that becomes the primary (as before); a
+      // picked address's change still goes to a fresh address, revealed but not made primary.
+      const payFresh = spendingFunded
+        ? (keepsPrimary ? freshSpendingChangeAddress() : freshChangeForSpendingIndex(fundingIndex))
+        : null;
       const result = spendingFunded
         ? await engine.sendFromSpending({
             mnemonic: activeAccountMnemonic(),
@@ -17428,7 +17904,10 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
             exactAmount: true,
           })
         : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true });
-      if (payFresh) rotatePrimarySpendingTo(payFresh);
+      if (payFresh) {
+        if (keepsPrimary) revealSpendingChangeAddress(payFresh);
+        else rotatePrimarySpendingTo(payFresh);
+      }
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     } catch (error) {
@@ -22696,8 +23175,10 @@ queueMicrotask(async () => {
       engine,
       escapeHtml,
       voiceFileName,
-      // The room owns the detail pane while open (Public Chats is a Chats list tab).
+      // The room owns the detail pane while open, beside the one Chats list (iOS a062577).
       onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
+      // A room's ping, clicked: Chats comes up and the room opens in the pane.
+      openRoomFromNotification: (channel) => { if (openPublicChatsTab()) openBroadcastChannelFromNotification(channel); },
       onUnreadChanged: () => updateChatsListTabBadges(),
       readDraft, saveDraft,
       parseEditEnvelope, applyEditToContent, isEditableContent,
@@ -22785,6 +23266,9 @@ queueMicrotask(async () => {
       // Rooms no longer feed the profile bell (iOS 2010124): the Public Chats tab counts them.
       onIncomingBroadcast: () => {},
     });
+    // The room circles sit above the Chats list: if Chats came up before the rooms started, they
+    // go live now (setActiveAppTab does it on every later visit).
+    if (currentAppTab === "chats" && !isChildModeEnabled()) refreshBroadcasts();
   } catch (error) { appendEngineLog(`initBroadcasts did not start: ${error?.message || error}`); }
 
   try {
@@ -23049,7 +23533,8 @@ queueMicrotask(async () => {
       // Toggling Child Mode re-renders the dock immediately: gated tabs vanish
       // (or return) and, if the user is sitting on a now-hidden tab, the
       // applyDockLayout snap drops them back to Chats.
-      onChildModeChanged: () => applyDockLayout(),
+      // Simple Mode also hides public rooms: their circles go, and an open room closes.
+      onChildModeChanged: () => { applyDockLayout(); try { syncChatCirclesForSimpleMode(); } catch { /* chats not ready */ } },
     });
   } catch (error) { appendEngineLog(`initChildMode did not start: ${error?.message || error}`); }
 
@@ -23671,10 +24156,6 @@ function openOrCreateOneToOne(address) {
     persistState();
   }
   closeGroupChat();
-  if (activeChatsListTab !== "chats") {
-    activeChatsListTab = "chats";
-    chatsListTabButtons.forEach((b) => b.classList.toggle("active", b.dataset.chatsListTab === "chats"));
-  }
   renderChats();
   openConversation(conversationEntry.id);
 }
@@ -23740,8 +24221,6 @@ function totalGroupUnread() {
 }
 
 // --- element refs ---
-const groupListEl = document.querySelector("[data-group-list]");
-const groupActionsRow = document.querySelector("[data-group-actions-row]");
 const chatSelectRow = document.querySelector("[data-topbar-select-cluster]");
 const groupCreateModal = document.querySelector("[data-group-create-modal]");
 const groupCreateTitle = document.querySelector("[data-group-create-title]");
@@ -23788,19 +24267,13 @@ const groupManageBody = document.querySelector("[data-group-manage-body]");
 function setChatToolRowsForGroupsTab(isGroups) {
   // Queries the DOM directly (rather than the module-tail consts) so this stays safe
   // when renderChats runs during the synchronous boot, before those consts initialize.
+  void isGroups; // one list now (iOS a062577): there is no Group Chats tab to switch rows for
   const selectRow = document.querySelector("[data-topbar-select-cluster]");
-  const actionsRow = document.querySelector("[data-group-actions-row]");
-  const listEl = document.querySelector("[data-group-list]");
-  // The Group Chats tab now uses the same Select control as the Chats tab (multi-select
-  // groups to mark read / delete). New groups are created with the floating + button, so
-  // the old "New Group" header row is retired.
   // Select sits in the topbar every tab shares but only ever acts on the chats list, so it shows
   // only while Chats is on screen. This runs on every chat list render, including ones triggered
   // by incoming messages while another tab is open, so it must not simply unhide the control.
   // The body class is setActiveAppTab's own record of that (and is safe during boot).
   if (selectRow) selectRow.hidden = !document.body.classList.contains("chats-tab");
-  if (actionsRow) actionsRow.hidden = true;
-  if (!isGroups && listEl) listEl.hidden = true;
 }
 
 const GROUP_AVATAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M2.5 19.5c.6-3.9 3-6.3 6.5-6.3s5.9 2.4 6.5 6.3"/><path d="M16.3 6.2a3.2 3.2 0 1 1 1.9 5.8"/><path d="M15.8 13.3c2.9.4 4.7 2.3 5.2 5.4"/></svg>';
@@ -23860,104 +24333,13 @@ function groupLastActivityAt(g) {
   return Number(last?.createdAt || g.updatedAt || g.createdAt || 0);
 }
 
-// --- sidebar group list ---
+// --- the group circles ---
+// The Group Chats list is gone (iOS a062577): every group is a circle above the chats, with its
+// sheet on right-click (openChatCircleSheet). Kept under this name for its many callers, which
+// call it whenever a group's messages, unread count, name or photo change.
 function renderGroupList() {
-  const mgr = getGroupManager();
-  // Order by the chat with the most recent message (newest first), like the 1:1 list.
-  const groups = (mgr ? mgr.listGroups() : []).slice().sort((a, b) => groupLastActivityAt(b) - groupLastActivityAt(a));
-  // groups-tab badge (base hides it by default; we drive it from group unread).
-  if (groupsTabBadge) {
-    const total = totalGroupUnread();
-    groupsTabBadge.textContent = total > 99 ? "99+" : String(total);
-    groupsTabBadge.hidden = total <= 0;
-  }
-  if (activeChatsListTab !== "groups") return;
-  if (!groups.length) {
-    if (groupChatsPlaceholder) groupChatsPlaceholder.hidden = false;
-    if (groupListEl) { groupListEl.hidden = true; groupListEl.innerHTML = ""; }
-    return;
-  }
-  if (groupChatsPlaceholder) groupChatsPlaceholder.hidden = true;
-  if (!groupListEl) return;
-  groupListEl.hidden = false;
-  // The search box filters groups too (iOS ChatListView): name, a member's name or address, or
-  // message text.
-  const query = String(searchInput?.value || "").trim().toLowerCase();
-  const matching = !query ? groups : groups.filter((g) => {
-    if (String(g.name || "").toLowerCase().includes(query)) return true;
-    if ((g.members || []).some((m) => String(m.address || "").toLowerCase().includes(query) || groupSenderLabel(m.address).toLowerCase().includes(query))) return true;
-    return groupMessages(g.groupId).some((m) => String(m.text || "").slice(0, 4096).toLowerCase().includes(query));
-  });
-  if (!matching.length) {
-    groupListEl.innerHTML = `<div class="no-results-card"><strong>No matching groups</strong><span>Try a different name, member, or message.</span></div>`;
-    return;
-  }
-  groupListEl.innerHTML = matching.map((g) => {
-    const msgs = groupMessages(g.groupId);
-    const last = msgs[msgs.length - 1];
-    const opened = openedGroupIds();
-    const preview = last
-      ? `${last.direction === "local" ? "You: " : ""}${groupPreviewText(groupMessageContent(g.groupId, last))}`
-      : `${g.members.length} member${g.members.length === 1 ? "" : "s"}`;
-    const time = last ? formatTime(last.createdAt) : "";
-    const unread = groupDisplayUnread(g, opened);
-    const selected = selectedGroupIds.has(g.groupId);
-    const silenced = getGroupNotify(g.groupId) === "muted";
-    return `
-      <button class="chat-row group-row${chatSelectionModeActive ? " selecting" : ""}${selected ? " selected" : ""}${g.groupId === activeGroupId ? " active" : ""}" type="button" data-group-open="${escapeHtml(g.groupId)}">
-        ${chatSelectionModeActive ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
-        <span class="chat-row-time">${escapeHtml(time)}</span>
-        <span class="chat-avatar">${groupAvatarHtml(g.photoHex)}</span>
-        <span class="chat-meta">
-          <strong>${escapeHtml(g.name || "Group")}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
-          <span>${escapeHtml(preview)}</span>
-        </span>
-        ${unread > 0 ? `<b class="unread-badge">${unread > 99 ? "99+" : unread}</b>` : ``}
-      </button>`;
-  }).join("") + `<div class="chat-list-footer">${matching.length} group${matching.length === 1 ? "" : "s"}</div>`;
+  renderChatCircles();
 }
-
-// Right-click on a group row (iOS long-press): Read/Unread, Silence/Unsilence, Delete - the
-// same shape as the 1:1 row sheet. Nothing while Select mode is active.
-onContextGesture(groupListEl, async (event) => {
-  const row = event.target.closest("[data-group-open]");
-  if (!row || chatSelectionModeActive) return;
-  event.preventDefault();
-  const mgr = getGroupManager();
-  const g = mgr?.getGroup(row.dataset.groupOpen);
-  if (!g) return;
-  const silenced = getGroupNotify(g.groupId) === "muted";
-  const choice = await chooseDialog({
-    title: g.name || "Group",
-    options: [
-      groupDisplayUnread(g) > 0
-        ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this group." }
-        : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again." },
-      {
-        id: "silence",
-        title: silenced ? "Unsilence" : "Silence",
-        subtitle: silenced ? "Notifications from this group resume." : "No notification from this group, whatever your app-wide setting says.",
-      },
-      { id: "delete", title: "Delete", subtitle: "Removes this group and its messages from this device.", destructive: true },
-    ],
-  });
-  if (!choice) return;
-  if (choice === "read") { markGroupOpened(g.groupId); setGroupUnread(g.groupId, 0); renderGroupList(); return; }
-  if (choice === "unread") { setGroupUnread(g.groupId, Math.max(1, groupUnreadFor(g.groupId))); renderGroupList(); return; }
-  if (choice === "silence") { setGroupNotify(g.groupId, silenced ? "all" : "muted"); renderGroupList(); return; }
-  if (choice === "delete") {
-    const ok = await confirmDialog({
-      title: `Delete "${g.name || "Group"}"`,
-      message: "This removes the group and its messages from this device. This cannot be undone, and other members won't be notified.",
-      confirmLabel: "Delete", destructive: true,
-    });
-    if (!ok) return;
-    if (activeGroupId === g.groupId) closeGroupChat();
-    try { mgr.deleteGroup(g.groupId); } catch { /* already gone */ }
-    renderGroupList();
-    showCopyToast("Group deleted.");
-  }
-});
 
 // --- group thread (shares the right-side detail pane with the 1:1 conversation view) ---
 // Zero-balance gate for the group composer (iOS zeroBalanceGateCard): reading stays usable,
@@ -24067,6 +24449,8 @@ function openGroupChat(groupId) {
   const mgr = getGroupManager();
   const g = mgr && mgr.getGroup(groupId);
   if (!g) return;
+  // A group and a public room share the detail pane: opening the group closes the room.
+  if (publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
   markGroupOpened(groupId);
   groupFeeOverrideKas = null;
   hideGroupFeePill();
@@ -24146,6 +24530,8 @@ const MSG_MENU_ICONS = {
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
   retry: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-9-9.4C2 7.6 4.3 4.5 7.6 4.5c1.9 0 3.4 1 4.4 2.5 1-1.5 2.5-2.5 4.4-2.5 3.3 0 5.6 3.1 4.6 6.6-1.5 4.8-9 9.4-9 9.4Z"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13.5a4 4 0 0 0 6 .4l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7"/><path d="M14 10.5a4 4 0 0 0-6-.4l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/></svg>',
 };
 
 // Shared Telegram-style right-click menu for a message. Renders a quick-reaction row at the
@@ -24199,6 +24585,32 @@ function localizedMenuLabel(label) {
   return text;
 }
 
+// What each message action does, for its tile's tooltip (iOS MessageAction subtitles, which
+// became the VoiceOver hint when the menu turned into tiles, cdac6d0). Keyed by the English label.
+function msgMenuHint(label) {
+  const text = String(label || "");
+  const hints = {
+    Reply: "Quotes this message above your reply.",
+    Edit: "Changes the text. Everyone sees the new version.",
+    "Retry Edit": "Sends your edit again.",
+    "Copy Message": "Copies the text to your clipboard.",
+    "Copy Link": "Copies the address to your clipboard.",
+    "Open Link": "Opens it in your browser.",
+    "View in Explorer": "Opens this transaction in the block explorer.",
+    "Retry Send": "Sends this message again.",
+    "Show Original": "Back to the text as it was sent.",
+    "Show Translation": "The translated text again.",
+    Select: "Pick several messages at once.",
+    "Message info": "The message and its details.",
+    "Delete for me": "Removes it from this device only.",
+  };
+  if (hints[text]) return hints[text];
+  if (/^Reactions \(\d+\)$/.test(text)) return "Who reacted, and with what.";
+  if (text.startsWith("Translate into ")) return `Shows this message in ${text.slice(15)}.`;
+  if (text.startsWith("Hide ")) return "Hides their messages in this room, on this device.";
+  return "";
+}
+
 function openMsgContextMenu({ x, y, reaction, items }) {
   document.querySelectorAll(".msg-context-menu, .group-msg-menu").forEach((m) => m.remove());
   const menu = document.createElement("div");
@@ -24227,18 +24639,25 @@ function openMsgContextMenu({ x, y, reaction, items }) {
     menu.append(row);
   }
 
+  // The actions as square tiles, three to a row (iOS MessageActionsSheet in ActionSheetTiles,
+  // cdac6d0): an icon over a short title, the line saying what it does as the tooltip and the
+  // accessible description. Same classes as chooseDialog's tiles.
   const list = document.createElement("div");
-  list.className = "msg-context-actions";
+  list.className = "msg-context-actions action-tiles";
   for (const item of items) {
     if (!item) continue;
     const b = document.createElement("button");
     b.type = "button";
-    if (item.danger) b.classList.add("danger");
+    b.className = "action-tile";
+    if (item.danger) b.classList.add("danger", "action-tile-danger");
+    const hint = item.hint || msgMenuHint(item.label);
+    if (hint) { b.title = hint; b.setAttribute("aria-description", hint); }
     const ic = document.createElement("span");
-    ic.className = "msg-context-icon";
+    ic.className = "msg-context-icon action-tile-icon";
+    ic.setAttribute("aria-hidden", "true");
     ic.innerHTML = item.icon || "";
     const lbl = document.createElement("span");
-    lbl.className = "msg-context-label";
+    lbl.className = "msg-context-label action-tile-title";
     lbl.textContent = localizedMenuLabel(item.label);
     b.append(ic, lbl);
     b.addEventListener("click", () => { cleanup(); item.onClick(); });
@@ -24393,7 +24812,7 @@ function openOneToOneMessageMenu(messageId, x, y) {
   }
   const reactionCount = (conversationEntry.reactionsByTxId?.[targetTxId] || []).length;
   if (reactionCount > 0) {
-    items.push({ label: `Reactions (${reactionCount})`, icon: MSG_MENU_ICONS.info, onClick: () => openReactionsSheet(conversationEntry, targetTxId) });
+    items.push({ label: `Reactions (${reactionCount})`, icon: MSG_MENU_ICONS.heart, onClick: () => openReactionsSheet(conversationEntry, targetTxId) });
   }
   items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterMessageSelection(message.id) });
   items.push({ label: "Message info", icon: MSG_MENU_ICONS.info, onClick: () => openMessageDetails(message.id) });
@@ -24447,7 +24866,7 @@ function openGroupMessageMenu(message, x, y) {
   const reactionRows = key ? groupReactionsFor(activeGroupId, key) : [];
   if (reactionRows.length) {
     items.push({
-      label: `Reactions (${reactionRows.length})`, icon: MSG_MENU_ICONS.info,
+      label: `Reactions (${reactionRows.length})`, icon: MSG_MENU_ICONS.heart,
       onClick: () => showReactionsSheet({
         entries: reactionRows.map((entry) => ({ emoji: entry.emoji, reactorAddress: entry.reactorAddress })),
         nameFor: (address) => groupSenderLabel(address),
@@ -25516,13 +25935,14 @@ groupMembersList?.addEventListener("click", (event) => {
 
 // The Chats "New" sheet (iOS 5da8ccf..e6400d6). The floating + used to do something different per
 // tab (create chat, group builder, join room); it is now the same + on Chats, Group Chats and
-// Public Chats, opening one sheet: New Chat, New Group Chat, New Public Chat, Fund Chatting Address
-// and Receive Kaspa.
+// Public Chats, opening one sheet of tiles: New Chat, New Group Chat, New Public Chat, Send Kaspa,
+// Receive Kaspa and Fund Chatting Address.
 // - New Chat / New Group Chat swap the sheet for the existing create modals; their Cancel (or a
 //   backdrop click / Escape) comes back to this menu, and a chat or group made lands on its tab.
 // - New Public Chat swaps the sheet's content for the room-name field. Errors show in place;
 //   joining switches to Public Chats and opens the room there.
-// - Fund Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page.
+// - Fund Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page; Send
+//   Kaspa closes it and opens Profile's Send from the current spending address.
 // No state lives outside the DOM: the sheet is built per open (like the payment detail sheet), and
 // "came from the sheet" is a data attribute on the create modal, so nothing here is read at load.
 function newChatSheetIcon(kind) {
@@ -25531,30 +25951,54 @@ function newChatSheetIcon(kind) {
     group: '<path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M2.5 19.5c.6-3.9 3-6.3 6.5-6.3s5.9 2.4 6.5 6.3"/><path d="M16.3 6.2a3.2 3.2 0 1 1 1.9 5.8"/><path d="M15.8 13.3c2.9.4 4.7 2.3 5.2 5.4"/>',
     public: '<path d="M9.5 4 7.5 20M16.5 4l-2 16M4.5 9h15.5M4 15h15.5"/>',
     fund: '<rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.2"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1.2"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1.2"/><path d="M14 14h2.8v2.8H14zM20.5 14v.01M17 20.5h3.5V17M14 20.5v.01"/>',
+    // iOS f81e8d6: arrow.up.circle / arrow.down.circle.
+    send: '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-9M8 11.5l4-4 4 4"/>',
+    receive: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v9M8 12.5l4 4 4-4"/>',
   };
-  if (kind === "receive") return `<img class="new-chat-sheet-logo" src="${escapeHtml(kaspaLogoUrl)}" alt="" />`;
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[kind] || ""}</svg>`;
 }
 
+// Square glass tiles, three to a row (iOS f81e8d6): New Chat, New Group Chat, New Public Chat /
+// Send Kaspa, Receive Kaspa, Fund Chatting Address. Each one's old line is its tooltip and
+// accessible description.
 function newChatSheetMenuHtml() {
   const rows = [
     { id: "chat", title: "New Chat", subtitle: "Message someone by their address or name." },
     { id: "group", title: "New Group Chat", subtitle: "Start an encrypted group with several people." },
-    // Simple Mode hides Public Chats, so it has no row here either.
+    // Simple Mode hides Public Chats, so it has no tile here either.
     ...(isChildModeEnabled() ? [] : [{ id: "public", title: "New Public Chat", subtitle: "Join a public room, or create one." }]),
-    { id: "fund", title: "Fund Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
+    { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from your spending address." },
     { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
+    { id: "fund", title: "Fund Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
   ];
   return `
     <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
     <h2 class="new-chat-sheet-title">New</h2>
-    <div class="cold-action-rows">
+    <div class="action-tiles new-chat-sheet-tiles">
       ${rows.map((row) => `
-        <button type="button" class="cold-action-row" data-new-chat-choice="${escapeHtml(row.id)}">
-          <span class="cold-action-icon" aria-hidden="true">${newChatSheetIcon(row.id)}</span>
-          <span class="cold-action-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.subtitle)}</small></span>
+        <button type="button" class="action-tile" data-new-chat-choice="${escapeHtml(row.id)}" title="${escapeHtml(row.subtitle)}" aria-description="${escapeHtml(row.subtitle)}">
+          <span class="action-tile-icon" aria-hidden="true">${newChatSheetIcon(row.id)}</span>
+          <span class="action-tile-title">${escapeHtml(row.title)}</span>
         </button>`).join("")}
     </div>`;
+}
+
+// The New sheet's Send Kaspa (iOS f81e8d6 SpendingSendLauncher): Profile's Send from the current
+// spending address - the same openSendKaspaModal({ spendingIndex }) its spending row's Send opens,
+// which loads that address's balance into its Available pill. Says so while the spending key is
+// still unlocking, rather than opening a send with nothing behind it.
+async function openSpendingSendFromNewSheet() {
+  if (!activeAccountMnemonic()) {
+    showCopyToast("This account has no recovery phrase, so spending sends aren't available.");
+    return;
+  }
+  try { await ensureRuntimes({ quiet: true }); } catch { /* checked just below */ }
+  const index = getActiveSpendingIndex();
+  if (!deriveSpendingAddressAt(index)) {
+    showCopyToast("Spending address is unlocking — go back and try again.");
+    return;
+  }
+  openSendKaspaModal({ spendingIndex: index });
 }
 
 function newChatSheetJoinHtml() {
@@ -25640,6 +26084,8 @@ function openNewChatSheet() {
       openChattingAddressScreen();
     } else if (choice === "receive") {
       openReceiveKaspaScreen();
+    } else if (choice === "send") {
+      openSpendingSendFromNewSheet();
     }
   });
   sheet.addEventListener("input", (event) => {
@@ -25657,10 +26103,12 @@ function openNewChatSheet() {
 }
 
 // A create modal opened from the sheet has closed: Cancel goes back to the menu (iOS AddContactView
-// onCancel); a chat or group made opens on its own tab, as iOS sets selectedListTab.
+// onCancel). A chat or group made opens where it is: one list now, with the group as a circle
+// above the chats (iOS a062577 dropped the tab switch).
 function settleNewChatSheetCreate(kind, cancelled) {
+  void kind;
   if (cancelled) { openNewChatSheet(); return; }
-  selectChatsListTab(kind === "group" ? "groups" : "chats");
+  renderChats();
 }
 
 document.querySelectorAll("[data-new-chat-fab]").forEach((button) => {
@@ -25830,22 +26278,6 @@ groupCreateSubmit?.addEventListener("click", async () => {
   }
 });
 
-groupListEl?.addEventListener("click", (event) => {
-  const row = event.target.closest("[data-group-open]");
-  if (!row) return;
-  const groupId = row.dataset.groupOpen;
-  // In select mode a tap toggles the group's checkbox instead of opening it.
-  if (chatSelectionModeActive) {
-    if (selectedGroupIds.has(groupId)) selectedGroupIds.delete(groupId);
-    else selectedGroupIds.add(groupId);
-    renderGroupList();
-    updateChatSelectionBar();
-    return;
-  }
-  // Clicking the already-open group again closes its view.
-  if (groupId === activeGroupId) { closeGroupChat(); return; }
-  openGroupChat(groupId);
-});
 document.querySelector("[data-group-chat-back]")?.addEventListener("click", closeGroupChat);
 document.querySelector("[data-open-group-manage]")?.addEventListener("click", () => { if (activeGroupId) openGroupManage(activeGroupId); });
 document.querySelector(".group-chat-header")?.addEventListener("click", (event) => {
@@ -26136,12 +26568,13 @@ groupPlusButton?.addEventListener("click", async (event) => {
   for (;;) {
     const connected = isNextcloudConnected();
     const options = [
-      { id: "camera", title: "Camera", subtitle: "Take a photo and send it to the group." },
-      { id: "photo", title: "Photo", subtitle: "Pick an image from your library and send it to the group." },
-      { id: "voice", title: "Voice Message", subtitle: "Record a voice message and send it to the group." },
+      { id: "camera", title: "Camera", subtitle: "Take a photo and send it to the group.", icon: ACTION_TILE_ICONS.camera },
+      { id: "photo", title: "Photo", subtitle: "Pick an image from your library and send it to the group.", icon: ACTION_TILE_ICONS.photo },
+      { id: "voice", title: "Voice Message", subtitle: "Record a voice message and send it to the group.", icon: ACTION_TILE_ICONS.mic },
     ];
-    if (connected) options.push({ id: "nextcloud", title: "File", subtitle: "Send any file from your Nextcloud. It shows as a preview." });
-    const choice = await chooseDialog({ title: "Send", options });
+    if (connected) options.push({ id: "nextcloud", title: "File", subtitle: "Send any file from your Nextcloud. It shows as a preview.", icon: ACTION_TILE_ICONS.file });
+    // Square tiles, three to a row (iOS d645d78); the on-chain-or-Nextcloud step stays rows.
+    const choice = await chooseDialog({ title: "Send", layout: "tiles", options });
     if (choice === "camera" || choice === "photo" || choice === "voice") {
       if (!connected) { startGroupMedia(choice, false); return; }
       const route = await chooseMediaRouteDialog(choice);

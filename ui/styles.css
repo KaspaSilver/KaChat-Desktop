@@ -12654,3 +12654,328 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .new-chat-sheet-error { margin: 0; text-align: center; font-size: 13px; color: var(--ios-red); }
 .new-chat-sheet-join { width: 100%; padding: 14px; border-radius: 16px; font-size: 15px; font-weight: 700; }
 .new-chat-sheet-join:disabled { opacity: .4; cursor: default; }
+
+/* Chats circles (iOS ChatCirclesStrip, a062577 / f90a70a): Chats is one list, and every group chat
+   and public room is a circle in a sideways row above it - a red count for messages from others
+   since it was last opened, a pin badge when pinned to the front, a checkmark in Select mode, and
+   a ring on the one open in the detail pane. Full-bleed like the chat rows below it. */
+.chat-circles {
+  flex: 0 0 auto;
+  display: flex; align-items: flex-start; gap: 14px;
+  margin: 0 -12px; width: calc(100% + 24px);
+  padding: 10px 16px;
+  overflow-x: auto; overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.chat-circles[hidden] { display: none; }
+.chat-circles::-webkit-scrollbar { display: none; }
+.chat-circle {
+  flex: 0 0 auto; width: 68px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 0; border: 0; background: transparent; color: var(--text);
+  font: inherit; cursor: pointer;
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+}
+.chat-circle-avatar {
+  position: relative; width: 60px; height: 60px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(112,199,186,.2); color: var(--kaspa-ink);
+  transition: opacity .12s linear, box-shadow .12s linear, transform .08s ease-out;
+}
+.chat-circle-photo { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.chat-circle-glyph { display: grid; place-items: center; }
+.chat-circle-glyph svg { width: 26px; height: 26px; display: block; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.chat-circle-hash { font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-size: 26px; font-weight: 700; line-height: 1; }
+.chat-circle-title {
+  width: 68px; font-size: 11px; line-height: 1.25; text-align: center; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-circle-badge {
+  position: absolute; top: -4px; right: -6px;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--ios-red, #ff3b30); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+  box-shadow: 0 0 0 2px var(--bg-plain, var(--bg));
+}
+.chat-circle-pin {
+  position: absolute; left: -2px; bottom: -2px; width: 18px; height: 18px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--kaspa); color: #fff;
+  box-shadow: 0 0 0 2px var(--bg-plain, var(--bg));
+}
+.chat-circle-pin svg { width: 10px; height: 10px; display: block; fill: currentColor; }
+.chat-circle-check {
+  position: absolute; top: -4px; right: -4px; width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  border: 1.5px solid var(--muted); background: var(--bg-plain, var(--bg)); color: #fff;
+}
+.chat-circle-check.checked { background: var(--kaspa); border-color: var(--kaspa); }
+.chat-circle-check svg { width: 13px; height: 13px; display: block; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.chat-circle.selecting:not(.selected) .chat-circle-avatar { opacity: .55; }
+.chat-circle.selected .chat-circle-avatar { box-shadow: 0 0 0 3px var(--kaspa); }
+.chat-circle.active .chat-circle-avatar { box-shadow: 0 0 0 2px var(--bg-plain, var(--bg)), 0 0 0 4px var(--kaspa); }
+.chat-circle:active .chat-circle-avatar { transform: scale(.96); }
+.chat-circle:focus-visible { outline: none; }
+.chat-circle:focus-visible .chat-circle-avatar { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+@media (hover: hover) {
+  .chat-circle:hover .chat-circle-avatar { filter: brightness(1.06); }
+}
+
+/* Send Kaspa shared pieces (ui/send-kaspa-components.js; iOS SendKaspaComponents, 4d0324f..dae8a01):
+   the recipient card, amount entry, info pills, fee card, slide-to-send button and Send From - one
+   look on the chat's Send KAS sheet, Profile's Send Kaspa, a spending address's Send and KasSigner. */
+.sk-screen { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+.sk-card {
+  display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 20px;
+  background: var(--material, var(--surface-1)); border: 1px solid var(--glass-stroke, var(--line));
+}
+.sk-card-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.sk-caption { margin: 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.sk-caption[hidden], .sk-card [hidden], .sk-screen [hidden] { display: none !important; }
+.sk-error { margin: 0; text-align: center; }
+.sk-spinner {
+  display: inline-block; width: 13px; height: 13px; margin-right: 6px; vertical-align: -2px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: sk-spin .8s linear infinite;
+}
+@keyframes sk-spin { to { transform: rotate(360deg); } }
+
+/* Recipient */
+.sk-recipient-row { display: flex; align-items: center; gap: 12px; }
+.sk-recipient-field { position: relative; flex: 1; min-width: 0; display: block; }
+.sk-recipient-input {
+  width: 100%; padding: 4px 30px 4px 0; border: 0; outline: none; background: transparent; color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px;
+}
+.sk-recipient-input::placeholder { color: var(--placeholder, var(--muted)); }
+.sk-recipient-check {
+  position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--kaspa); color: #0a0f0d;
+}
+.sk-recipient-check svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.sk-icon-button {
+  flex: 0 0 auto; display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: var(--kaspa-ink); cursor: pointer;
+}
+.sk-icon-button:hover { background: var(--primary-08); }
+.sk-icon-button:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.sk-icon-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sk-recipient-locked { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sk-recipient-locked svg { flex: 0 0 18px; width: 18px; height: 18px; fill: none; stroke: var(--kaspa-ink); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sk-recipient-locked code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; font-size: 12px; }
+.sk-recipient-resolution:empty, .sk-recipient-status:empty { display: none; }
+.sk-status { margin: 0; font-size: 12px; }
+.sk-status + .sk-status { margin-top: 2px; }
+.sk-status.good { color: var(--ios-green); }
+.sk-status.bad { color: var(--ios-red); }
+.sk-status.muted { color: var(--muted); }
+.sk-status.mono { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Amount */
+.sk-amount { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; }
+.sk-amount-entry { display: flex; align-items: baseline; justify-content: center; gap: 8px; min-height: 64px; max-width: 100%; overflow: hidden; cursor: text; }
+.sk-amount-input {
+  min-width: 1.6ch; max-width: 100%; padding: 0; border: 0; outline: none; background: transparent;
+  color: var(--text); text-align: center; font: inherit; font-size: 52px; font-weight: 700; letter-spacing: -.01em;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-variant-numeric: tabular-nums;
+}
+.sk-amount-input::placeholder { color: var(--placeholder, var(--muted)); }
+.sk-amount-unit { color: var(--muted); font-weight: 600; font-size: 29px; font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; white-space: nowrap; }
+.sk-amount-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+.sk-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 14px;
+  border: 1px solid var(--glass-stroke, var(--line)); background: var(--material, var(--surface-1));
+  color: var(--text); font: inherit; font-size: 12px; cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.sk-chip[hidden] { display: none; }
+.sk-chip svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.sk-chip:hover:not(:disabled) { background: var(--primary-08); }
+.sk-chip:disabled { opacity: .5; cursor: default; }
+.sk-chip-max { color: var(--kaspa-ink); font-weight: 600; }
+.sk-chip .sk-spinner { margin: 0; width: 11px; height: 11px; }
+
+/* Pills */
+.sk-pills { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; }
+.sk-pill {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 6px 12px; border-radius: 14px;
+  border: 1px solid var(--glass-stroke, var(--line)); background: var(--material, var(--surface-1));
+  color: var(--muted); font: inherit; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.sk-pill[hidden] { display: none; }
+.sk-pill-button { cursor: default; }
+.sk-pill-button:disabled { opacity: 1; color: var(--muted); }
+.sk-pill-button.clickable, .sk-pill-button:not(:disabled) { cursor: pointer; }
+.sk-pill-button:not(:disabled) .sk-pill-value { text-decoration: underline; text-underline-offset: 2px; }
+.sk-pill-button:not(:disabled):hover { background: var(--primary-08); }
+.sk-pill-button:focus-visible, .available-balance-banner[role="button"]:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.sk-pill-source { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.sk-pill-chevron { display: inline-flex; }
+.sk-pill-chevron svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.available-balance-banner .sk-pill-source { color: inherit; }
+
+/* Fee and coin control */
+.sk-fee-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+.sk-fee-title { font-size: 14px; }
+.sk-fee-value { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.sk-fee-text {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--kaspa-ink); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums;
+}
+.sk-fee-text > span { text-decoration: underline; text-underline-offset: 2px; }
+.sk-fee-text svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sk-fee-editor { display: inline-flex; align-items: center; gap: 4px; }
+.sk-fee-input {
+  width: 110px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; outline: none;
+  background: var(--fill-tertiary, transparent); color: var(--text); font: inherit; font-size: 14px; text-align: right;
+}
+.sk-fee-input:focus { border-color: var(--kaspa); }
+.sk-fee-estimating { display: inline-flex; color: var(--muted); }
+.sk-divider { height: 1px; background: var(--line); margin: 2px 0; }
+.sk-coin-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 2px 0; border: 0; background: none;
+  color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer;
+}
+.sk-coin-title { flex: 1; }
+.sk-coin-summary { color: var(--muted); }
+.sk-coin-chevron { display: inline-flex; color: var(--muted); transition: transform .15s ease; }
+.sk-coin-chevron svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.sk-coin-row[aria-expanded="true"] .sk-coin-chevron { transform: rotate(180deg); }
+.sk-coin-list { max-height: 240px; overflow-y: auto; border-top: 1px solid var(--line); }
+
+/* Send button: slide the white knob to the right end (or a plain button, KasSigner's Build). */
+.sk-action {
+  position: relative; display: flex; align-items: center; justify-content: center; width: 100%; height: 56px;
+  padding: 0 64px; overflow: hidden; border: 0; border-radius: 999px; background: var(--kaspa); color: #000;
+  font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.sk-action-plain { padding: 0 20px; }
+.sk-action:disabled { opacity: .4; cursor: default; }
+.sk-action.busy { opacity: 1; cursor: progress; }
+.sk-action:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+.sk-action-label { position: relative; z-index: 1; display: inline-flex; align-items: center; white-space: nowrap; pointer-events: none; }
+.sk-action-label .sk-spinner { border-color: #000; border-right-color: transparent; }
+.sk-slide { touch-action: none; cursor: default; }
+.sk-slide-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 56px; border-radius: 999px;
+  background: rgba(255,255,255,.25); pointer-events: none;
+}
+.sk-slide-knob {
+  position: absolute; left: 4px; top: 4px; z-index: 2; width: 48px; height: 48px; border-radius: 50%;
+  display: grid; place-items: center; background: #fff; color: var(--kaspa); cursor: grab;
+  box-shadow: 0 2px 8px rgba(0,0,0,.15); touch-action: none;
+}
+.sk-slide-knob svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; }
+.sk-slide-dragging .sk-slide-knob { cursor: grabbing; }
+.sk-slide:disabled .sk-slide-knob { cursor: default; }
+.sk-slide.busy .sk-slide-knob { display: none; }
+.sk-slide.busy .sk-slide-fill { width: 100% !important; }
+.sk-slide-animating .sk-slide-knob { transition: transform .35s cubic-bezier(.3,1.3,.5,1); }
+.sk-slide-animating .sk-slide-fill { transition: width .35s cubic-bezier(.3,1.3,.5,1); }
+.sk-slide-animating .sk-slide-label { transition: opacity .35s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .sk-slide-animating .sk-slide-knob, .sk-slide-animating .sk-slide-fill { transition: none; }
+}
+
+/* Send From (which spending address pays) */
+.sk-source-backdrop { z-index: 2600; }
+.sk-source-sheet { width: min(100%, 440px); max-height: min(80vh, 640px); display: flex; flex-direction: column; gap: 12px; }
+.sk-source-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 60px; }
+.sk-source-empty { margin: 12px 0; text-align: center; font-size: 13px; color: var(--muted); }
+.sk-source-empty.bad { color: var(--ios-red); }
+.sk-source-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border: 0; border-radius: 12px;
+  background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.sk-source-row:hover, .sk-source-row:focus-visible { background: var(--primary-08); outline: none; }
+.sk-source-row.current { background: rgba(112,199,186,.10); }
+.sk-source-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sk-source-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-source-primary { padding: 2px 6px; border-radius: 999px; background: rgba(112,199,186,.15); color: var(--kaspa-ink); font-size: 10px; font-weight: 700; }
+.sk-source-address { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--muted); }
+.sk-source-balance { font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sk-source-balance.empty { color: var(--muted); }
+.sk-source-check { flex: 0 0 18px; width: 18px; height: 18px; color: var(--kaspa-ink); }
+.sk-source-check svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Where the pieces sit */
+.send-kaspa-modal .sk-screen { margin-top: 8px; }
+.send-kaspa-modal .send-compound-note { margin: -4px 4px 0; }
+.cold-send-modal .sk-screen { margin-top: 0; }
+.pay-sheet .sk-amount { padding-top: 0; }
+@media (max-width: 480px) {
+  .sk-amount-entry { min-height: 56px; }
+  .sk-fee-input { width: 92px; }
+}
+
+/* ==== Square action tiles (iOS ActionSheetTiles: cdac6d0, d645d78, f81e8d6) ====
+   Long-press menus, the composers' "+" sheets and the Chats New sheet: an icon over a short title,
+   three to a row, on glass. The line that used to sit under each title is the tooltip and the
+   accessible description. chooseDialog({ layout: "tiles" }) draws these; the message menu and the
+   New sheet build the same markup. */
+.action-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.action-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  min-width: 0; height: 96px; margin: 0; padding: 8px; border-radius: 18px;
+  border: .8px solid var(--glass-stroke); background: var(--glass-fill);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-shadow);
+  color: var(--text); font: inherit; text-align: center; cursor: pointer;
+  transition: background-color .12s ease, transform .1s ease;
+}
+.action-tile:hover:not([disabled]) { background-color: var(--row-hover); }
+.action-tile:active:not([disabled]) { transform: scale(.97); }
+.action-tile:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.action-tile[disabled] { opacity: .45; cursor: default; }
+.action-tile-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; color: var(--kaspa-ink); opacity: 1; }
+.action-tile-icon svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.action-tile-icon img { width: 26px; height: 26px; object-fit: contain; border-radius: 999px; display: block; }
+.action-tile-title {
+  max-width: 100%; font-size: 12px; font-weight: 600; line-height: 1.2; letter-spacing: 0; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: break-word;
+}
+.action-tile-danger .action-tile-icon, .action-tile-danger .action-tile-title { color: var(--ios-red); }
+
+/* chooseDialog's tiles sheet: narrower than the row sheet, so three tiles stay square-ish. */
+.app-dialog.app-dialog-tiles { max-width: 400px; }
+.app-dialog.app-dialog-tiles .action-tiles { margin-top: 4px; }
+
+/* The message menu: the reaction row on top, the actions as tiles below. */
+.msg-context-menu { width: min(300px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto; }
+.msg-context-actions.action-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px; }
+.msg-context-actions .action-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  width: auto; height: 80px; padding: 6px; border-radius: 16px; text-align: center; font-size: 12px;
+  border: .8px solid var(--glass-stroke); background: var(--glass-fill);
+}
+.msg-context-actions .action-tile:hover { background: var(--primary-08); }
+.msg-context-actions .action-tile-icon { width: 26px; height: 26px; flex: 0 0 26px; }
+.msg-context-actions .action-tile-icon svg { width: 22px; height: 22px; }
+
+/* The 1:1 composer's "+" popover (iOS d645d78): Pay in Kaspa, Camera, Photo, Voice Message, File,
+   Play Chess, Send Handshake as tiles under the "Send" title. */
+.composer-shell .composer-plus-menu.composer-plus-tiles {
+  grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 12px;
+  width: min(340px, calc(100vw - 56px));
+}
+.composer-shell .composer-plus-menu.composer-plus-tiles .composer-plus-title { grid-column: 1 / -1; margin: 2px 0 2px; }
+.composer-shell .composer-plus-menu.composer-plus-tiles > button {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  width: auto; min-width: 0; min-height: 0; height: 92px; padding: 8px; border-radius: 18px; text-align: center;
+  border: .8px solid var(--glass-stroke); background: var(--glass-fill); box-shadow: var(--glass-shadow);
+}
+.composer-shell .composer-plus-menu.composer-plus-tiles > button:hover { background: var(--primary-08); }
+.composer-shell .composer-plus-menu.composer-plus-tiles .composer-plus-copy { display: block; text-align: center; min-width: 0; max-width: 100%; }
+.composer-shell .composer-plus-menu.composer-plus-tiles .composer-plus-copy strong {
+  font-size: 12px; font-weight: 600; line-height: 1.2; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: break-word;
+}
+.composer-shell .composer-plus-menu.composer-plus-tiles .composer-plus-copy small { display: none; }
+.composer-shell .composer-plus-menu.composer-plus-tiles .mode-icon { width: 30px; height: 30px; }
+.composer-shell .composer-plus-menu.composer-plus-tiles .mode-icon svg { width: 26px; height: 26px; stroke-width: 2; }
+
+/* The Chats New sheet (iOS f81e8d6): square glass tiles, three to a row. */
+.new-chat-sheet:not(.is-join) { width: min(100%, 400px); }
+.new-chat-sheet-tiles { gap: 14px; }
+.new-chat-sheet-tiles .action-tile { height: auto; aspect-ratio: 1 / 1; gap: 10px; }
