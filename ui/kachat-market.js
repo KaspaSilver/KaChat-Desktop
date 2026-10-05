@@ -652,21 +652,21 @@ function onMarketInput(event) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Edit .kachat Profile
+// Edit KaChat Profile
 // ---------------------------------------------------------------------------------------------
 
 export function openKachatProfileEditor() {
   if (layers.some((layer) => layer.owner === "profile")) return;
-  // The live address profile editor (iOS KachatLiveProfileEditor) on every network; on mainnet its
-  // Save stays off until .kachat launches there (iOS 7227d69).
+  // The live address profile editor (iOS KachatLiveProfileEditor) on every network; it saves on
+  // mainnet too, with the primary name "Coming soon" there (iOS d36fc42).
   if (kachatNamesUiEnabled() && openLiveProfileEditor("profile")) return;
   const fieldRows = PROFILE_FIELDS.map((field) => `<div class="kmkt-form-row kmkt-muted">${esc(field)}</div>`).join("");
   openLayer({
     owner: "profile",
     kind: "tall",
-    label: "Edit .kachat Profile",
+    label: "Edit KaChat Profile",
     html: `
-      ${navBar("Edit .kachat Profile", { trailing: { label: "Done", bold: true } })}
+      ${navBar("Edit KaChat Profile", { trailing: { label: "Done", bold: true } })}
       <div class="kmkt-sheet-body kmkt-form">
         ${formSection(
           `<button class="kmkt-form-row kmkt-link-row" type="button" data-kmkt-open-guide>Setup Guide</button>`,

@@ -5,8 +5,11 @@
 // profile's social links on this device (engine/kachat-names/social-image-resolver.js).
 // The screens are on for EVERY network (iOS 7227d69, kachatNamesUiEnabled); the registry behind them
 // is live only where it is launched (testnet-10, kachatNamesLaunched - the runtime `kachatNames()`
-// exists only there). On mainnet the hub pages, Your Domains, each address's .kachat tab and the
-// profile editor render empty under "Coming soon", and nothing reads or writes a registry.
+// exists only there). On mainnet the hub pages, Your Domains and each address's .kachat tab render
+// empty under "Coming soon", and nothing reads or writes a registry. Address profiles are not
+// registry data (iOS d36fc42, `kachatProfiles()`): Edit KaChat Profile saves on every network
+// (the primary name shows "Coming soon" on mainnet), and the identity cache and the profile hero
+// read profile-only identities there (no label; avatar, banner, bio and Linktree from the record).
 // Every spending or destructive action shows its cost first (built against
 // live UTXOs, nothing sent), asks to confirm, then passes the device lock (deps.deviceLock) before
 // anything is signed.
@@ -15,8 +18,9 @@
 // Nothing runs at import.
 
 import "./kachat-names-live.css";
-import { KAS_UNIT, kasLabel } from "../engine/network.js";
-import { kachatNames, kachatNamesLaunched } from "./kachat-names-runtime.js";
+import { KAS_UNIT, kasLabel, isNetworkAddress } from "../engine/network.js";
+import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
+import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
 import { userFacingError } from "./dialogs.js";
 import { Operation, Stage, isOpen, needsDriving, validateKey } from "../engine/kachat-names/actions.js";
 import {
@@ -985,9 +989,10 @@ function socialSourceText(link, kind) {
 /** Review before a profile record goes out (iOS 7e238e5 KachatProfileSaveSheet): what will be
  *  saved, the network fee - quoted by estimating the record the way the save builds it - and the
  *  chatting address's balance before and after; then the device lock, then the done sheet. Used by
- *  Edit .kachat Profile and Set as Primary. `makeProfile` builds the record when the sheet opens. */
+ *  Edit KaChat Profile and Set as Primary. `makeProfile` builds the record when the sheet opens.
+ *  Works on every network (kachatProfiles: a profile is a self-send, not registry data). */
 function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onSaved = null, owner = "market" }) {
-  const rt = kachatNames();
+  const rt = kachatProfiles();
   if (!rt || !kit) return null;
   const st = { profile: null, fee: null, quoteError: null, sending: false, sendError: null, txId: null, closed: false, layer: null };
   const body = () => {
@@ -2438,18 +2443,18 @@ export function onKachatSocialChange(listener) {
 }
 
 /**
- * The .kachat profile of `address` for the profile hero (iOS ContactsView, testnet only): the
+ * The KaChat profile of `address` for the profile hero (iOS ContactsView, every network): the
  * avatar, banner and bio its social links show right now, looked up on this device (cached 24 h;
  * a stale answer is returned at once and refreshed in the background - see onKachatSocialChange),
  * and its Linktree link. The address's own record this device wrote comes first, then the
- * registry's identity. `avatarUrl` / `bannerUrl` are ready for <img src> (kachatImageSrc: render
+ * registry's identity (on mainnet the profile-only identity: GET /profiles/{address}). `avatarUrl` / `bannerUrl` are ready for <img src> (kachatImageSrc: render
  * with referrerpolicy="no-referrer"; on an <img> error, retry with kachatImageSrc(url, { viaRelay:
  * true })). `bio` is plain text (escape it). Any piece may be null.
  * -> Promise<{ avatarUrl: string|null, bannerUrl: string|null, bio: string|null, linktreeUrl: string|null } | null>
- *    null on mainnet, before the runtime exists, or when the address has no profile record.
+ *    null before the runtime exists, or when the address has no profile record.
  */
 export async function kachatHeroProfile(address) {
-  const rt = kachatNames();
+  const rt = kachatProfiles();
   if (!rt || !address) return null;
   const { registry } = rt;
   try { await registry.refreshIfStale({ maxAge: 300 }); } catch { /* use what we have */ }
@@ -2479,12 +2484,15 @@ export async function kachatHeroProfile(address) {
 
 // ---------------------------------------------------------------------------------------------
 // Cached identities: who an address is, readable from any render (iOS e52357d,
-// KachatNamesRegistry.cachedIdentity(for:)). Testnet only, `kaspatest:` addresses only.
+// KachatNamesRegistry.cachedIdentity(for:)). Every network, addresses of the app's network only; on
+// mainnet the identities are profile-only (no label or names, iOS d36fc42).
 // ---------------------------------------------------------------------------------------------
 
 /** An answer is re-asked after this long, or as soon as the registry's revision moved. */
 const IDENTITY_MAX_AGE_MS = 300_000;
-/** A lookup that failed is tried again after this long (unless the registry moves first). */
+/** A lookup that failed is tried again after this long (unless the registry moves first). Where
+ *  identities are profile-only (mainnet) a failed address waits `profileMissPauseMs` (5 minutes),
+ *  as the engine does (registry.profileOnlyIdentity). */
 const IDENTITY_RETRY_MS = 60_000;
 /** Listeners hear about a batch of answers at most this often. */
 const IDENTITY_NOTIFY_MS = 200;
@@ -2570,9 +2578,10 @@ async function lookUpIdentity(registry, key) {
     const prev = cachedIdentities.get(key) ?? null;
     if (failed && !own) {
       // Keep what we had; ask again in a minute rather than on every render.
+      const retryMs = registry.isLaunched === false ? profileMissPauseMs : IDENTITY_RETRY_MS;
       cachedIdentities.set(key, {
         identity: prev?.identity ?? null, sig: prev?.sig ?? "", revision: registry.revision,
-        at: Date.now() - IDENTITY_MAX_AGE_MS + IDENTITY_RETRY_MS,
+        at: Date.now() - IDENTITY_MAX_AGE_MS + retryMs,
       });
       return;
     }
@@ -2592,14 +2601,15 @@ async function lookUpIdentity(registry, key) {
  * fills in the background, so any render can call it (iOS KachatNamesRegistry.cachedIdentity).
  * An answer is re-asked once the registry's revision moved or after five minutes (one lookup in
  * flight per address); this wallet's own saved profile always wins for its own address. Listeners
- * of onKachatIdentityChange hear when an answer lands. Null on mainnet, for a non-`kaspatest:`
- * address, or while nothing is known.
+ * of onKachatIdentityChange hear when an answer lands. On mainnet the identity is profile-only
+ * (label null, names []). Null before the runtime exists, for an address not on the app's network,
+ * or while nothing is known.
  */
 export function kachatCachedIdentity(address) {
-  const rt = kachatNames();
+  const rt = kachatProfiles();
   if (!rt || !address) return null;
   const key = String(address).trim().toLowerCase();
-  if (!key.startsWith("kaspatest:")) return null;
+  if (!isNetworkAddress(key)) return null;
   const { registry } = rt;
   watchIdentitySources(registry);
   const entry = cachedIdentities.get(key);
@@ -2707,10 +2717,11 @@ export function kachatCachedAvatarUrl(address) {
   return url ? cachedImageSrc(url, link) : null;
 }
 
-/** The address's `.kachat` profile as User Info shows it, best effort and sync: `{ avatarUrl,
- *  bannerUrl, bio, linktreeUrl }` (any piece may be null). Null on mainnet. */
+/** The address's KaChat profile as User Info shows it, best effort and sync: `{ avatarUrl,
+ *  bannerUrl, bio, linktreeUrl }` (any piece may be null), on every network. Null before the
+ *  runtime exists. */
 export function kachatCachedProfilePieces(address) {
-  if (!kachatNames()) return null;
+  if (!kachatProfiles()) return null;
   const profile = kachatCachedIdentity(address)?.profile ?? null;
   const pieces = { avatarUrl: null, bannerUrl: null, bio: null, linktreeUrl: null };
   if (!profile) return pieces;
@@ -2767,7 +2778,7 @@ function hydrateSocialImages(root) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Edit .kachat Profile (KachatLiveProfileEditor, KachatSourceInput, KachatSocialPreview)
+// Edit KaChat Profile (KachatLiveProfileEditor, KachatSourceInput, KachatSocialPreview)
 // ---------------------------------------------------------------------------------------------
 
 const SOCIAL_KINDS = [SocialKind.avatar, SocialKind.banner, SocialKind.bio];
@@ -2784,15 +2795,16 @@ function missingText(kind, platformName) {
  * `kchat:1:profile:` self-transfer. No free text and no uploads: what shows comes from a platform
  * that moderates it. A review card laid out like the profile header shows what others will see;
  * Save stays disabled until every filled field's lookup has finished and found its piece.
- * `owner` groups the layer (default "profile"). Where the registry isn't launched (mainnet, iOS
- * 7227d69) the editor is the same, empty, and Save stays off: nothing is written until .kachat
- * launches there (the social lookups still run - they read the platforms, not a registry).
+ * `owner` groups the layer (default "profile"). Saves on every network (iOS d36fc42): a profile is
+ * a self-send with no registry behind it. Where the registry isn't launched (mainnet) the primary
+ * name shows "Coming soon" and the profile saves without one; nothing reads the registry there.
  */
 export function openLiveProfileEditor(owner = "profile") {
   if (!kit) return null;
-  /** null where the registry isn't launched (mainnet) */
-  const rt = kachatNames();
-  const launched = rt != null && kachatNamesLaunched();
+  /** the profile runtime (every network; null only before init) */
+  const rt = kachatProfiles();
+  /** a live registry here (testnet): the primary name can be picked */
+  const launched = rt != null && kachatNames() != null && kachatNamesLaunched();
   const resolver = socialImages();
   /** per field: the platform picked, the handle typed, and where its lookup stands
    *  (none | looking | found | empty | unreachable) */
@@ -2832,12 +2844,13 @@ export function openLiveProfileEditor(owner = "profile") {
     banner: sourceOf(SocialKind.banner)?.link ?? null,
     bio: sourceOf(SocialKind.bio)?.link ?? null,
     linktree: Profile.linktreeLinkFromUsername(form.linktree),
-    primaryName: form.primary || null,
+    // the primary name needs the registry: none where it isn't launched (mainnet)
+    primaryName: launched ? form.primary || null : null,
   }).sanitized();
 
   const navFor = () => (savedTx
-    ? navHtml("Edit .kachat Profile", { leading: { label: "Done", bold: true } })
-    : navHtml("Edit .kachat Profile", { leading: { label: "Cancel" } }));
+    ? navHtml("Edit KaChat Profile", { leading: { label: "Done", bold: true } })
+    : navHtml("Edit KaChat Profile", { leading: { label: "Cancel" } }));
 
   // MARK: pieces
 
@@ -2911,10 +2924,10 @@ export function openLiveProfileEditor(owner = "profile") {
     let foot;
     if (savedTx) foot = footer(`Saved. Transaction ${String(savedTx).slice(0, 16)}...`, "kl-green");
     else if (error) foot = footer(error, "kl-red");
-    else if (!launched) foot = footer("Profiles can be saved once .kachat launches on mainnet.");
     else foot = footer("Saving writes your profile to the chain from your address to itself, for a network fee. Profiles are public.");
+    // Saves on every network: a profile is a self-send, with no registry behind it.
     return section(
-      `<button class="kmkt-form-button" type="button" data-kl-profile-save ${saving || !loaded || blocked() || !launched ? "disabled" : ""}>
+      `<button class="kmkt-form-button" type="button" data-kl-profile-save ${saving || !loaded || blocked() || !rt ? "disabled" : ""}>
         ${saving ? spinner() : "Save Profile"}
       </button>`,
       { footerHtml: foot },
@@ -2958,7 +2971,7 @@ export function openLiveProfileEditor(owner = "profile") {
         <input class="kl-input" type="text" value="${esc(form.linktree)}" placeholder="username" autocomplete="off" autocapitalize="none"
           autocorrect="off" spellcheck="false" data-kl-profile-linktree aria-label="Linktree username" />
       </label>`, { header: "Links", footerHtml: `<div data-kl-linktree-foot>${linktreeFooter()}</div>` })}
-    ${section(`
+    ${launched ? section(`
       <label class="kmkt-form-row kl-link-field">
         <span>Primary name</span>
         <select class="kl-select" data-kl-profile-primary aria-label="Primary name">
@@ -2968,6 +2981,13 @@ export function openLiveProfileEditor(owner = "profile") {
       </label>`, {
       header: ".kachat Name",
       footerHtml: footer("KaChat shows you by your primary name while you own it and it's active; otherwise by your oldest active name, or your address."),
+    }) : section(`
+      <div class="kmkt-form-row">
+        <span>Primary name</span>
+        <span class="kmkt-muted">Coming soon</span>
+      </div>`, {
+      header: ".kachat Name",
+      footerHtml: footer(".kachat names aren't on mainnet yet. Your avatar, banner, bio and links save now; you can pick a primary name once names launch."),
     })}
     <div data-kl-profile-save-wrap>${saveHtml()}</div>`;
 
@@ -3078,7 +3098,7 @@ export function openLiveProfileEditor(owner = "profile") {
     const address = rt ? rt.actions.myAddress : null;
     if (rt && address) {
       const { registry } = rt;
-      try { await registry.refreshIfStale(); } catch { /* use what we have */ }
+      if (launched) { try { await registry.refreshIfStale(); } catch { /* use what we have */ } }
       let p = null;
       try { p = (await registry.ownProfile(address))?.profile ?? null; } catch { p = null; }
       if (!p) { try { p = (await registry.identity(address))?.profile ?? null; } catch { p = null; } }
@@ -3090,7 +3110,7 @@ export function openLiveProfileEditor(owner = "profile") {
         }
         form.linktree = Profile.linktreeUsername(p.linktree);
       }
-      const key = keyOf(address);
+      const key = launched ? keyOf(address) : null;
       if (key) {
         try { activeNames = (await registry.namesOf(key, { includeInactive: false })).map((n) => n.name); } catch { activeNames = []; }
       }
@@ -3105,7 +3125,7 @@ export function openLiveProfileEditor(owner = "profile") {
   // Review before the record goes out: what will be saved, the network fee, the balance before and
   // after (iOS 7e238e5 KachatProfileSaveSheet). Closing its done sheet closes the editor too.
   const save = async () => {
-    if (!launched || saving || !loaded || blocked()) return;
+    if (!rt || saving || !loaded || blocked()) return;
     const record = profile();
     openProfileSaveSheet({
       title: "Save Profile", confirmTitle: "Save Profile", doneTitle: "Profile saved",
@@ -3127,7 +3147,7 @@ export function openLiveProfileEditor(owner = "profile") {
   layer = kit.openLayer({
     owner,
     kind: "tall",
-    label: "Edit .kachat Profile",
+    label: "Edit KaChat Profile",
     html: `
       ${navFor()}
       <div class="kmkt-sheet-body kmkt-form" data-kl-profile-body></div>`,

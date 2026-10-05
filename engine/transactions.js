@@ -51,8 +51,41 @@ export function singleInputFor(entries, amountSompi, marginSompi = 300_000n) {
   return pick ? [pick] : null;
 }
 
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, payload, selectedOutpoints, changeAddress, singleInput, exactAmount, log }));
+/** "txid:index" keys from a coin-control list: "txid:index" strings, { transactionId, index }
+ *  outpoints, or UTXO entries carrying an `outpoint`. Anything unreadable is dropped. */
+export function outpointKeysFrom(list) {
+  if (!Array.isArray(list)) return [];
+  const keys = [];
+  for (const item of list) {
+    if (typeof item === "string") { if (item.includes(":")) keys.push(item); continue; }
+    const outpoint = item?.outpoint || item;
+    const txid = outpoint?.transactionId ?? outpoint?.transaction_id;
+    const index = outpoint?.index;
+    if (txid != null && index != null && txid !== "") keys.push(`${txid}:${index}`);
+  }
+  return keys;
+}
+
+/** A non-negative whole number of sompi as BigInt; anything else (missing, negative, NaN) is 0. */
+export function extraFeeSompiFrom(value) {
+  if (value == null || value === "") return 0n;
+  try {
+    const sompi = typeof value === "bigint" ? value : BigInt(Math.round(Number(value)));
+    return sompi > 0n ? sompi : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+// `manualUtxos` (iOS manualUtxos): coin control - an outpoint list ("txid:index" strings, outpoints
+// or UTXO entries) the build may pick from; used when `selectedOutpoints` is not given. Null or
+// empty = automatic selection, as before.
+// `extraFeeSompi` (iOS extraFeeSompi): a priority fee in sompi paid on top of the minimum fee (the
+// Fast / Priority / custom extra), added to `feeKas`. 0 = unchanged behaviour.
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
+  const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : outpointKeysFrom(manualUtxos);
+  const extraFee = extraFeeSompiFrom(extraFeeSompi);
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
@@ -217,10 +250,12 @@ function describeKey(privateKey) {
   return `key: ${privateKey.constructor?.name || typeof privateKey} ptr=${privateKey.__wbg_ptr ?? "n/a"}`;
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas || "").trim();
   const fee = String(feeKas || "0").trim();
+  // The priority fee on top of the generator's own minimum: feeKas plus any extra in sompi.
+  const prioritySompi = BigInt(kaspa.kaspaToSompi(fee)) + extraFeeSompiFrom(extraFeeSompi);
   if (!amount || Number(amount) <= 0) throw new Error("Amount must be greater than 0.");
 
   const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
@@ -265,7 +300,6 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   const protocolSend = !exactAmount && (to === sourceAddress || Boolean(payload));
   if (protocolSend && entries.length <= 80) {
     const amountSompi = BigInt(kaspa.kaspaToSompi(amount));
-    const prioritySompi = BigInt(kaspa.kaspaToSompi(fee));
     const totalSompi = entries.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
     if (totalSompi >= amountSompi / 2n) {
       const draft = kaspa.createTransaction(entries, [{ address: to, amount: totalSompi - (totalSompi / 20n) }], 0n, payload || undefined);
@@ -294,7 +328,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   const result = await kaspa.createTransactions({
     entries,
     outputs: [{ address: to, amount: kaspa.kaspaToSompi(amount) }],
-    priorityFee: kaspa.kaspaToSompi(fee),
+    priorityFee: prioritySompi,
     changeAddress: changeTo,
     networkId: NETWORK_ID,
     ...(payload ? { payload } : {}),
@@ -387,6 +421,10 @@ export async function estimateSendFeeDetail(opts) {
   return {
     sdkFeeKas: sompiToKaspaDisplay(opts.kaspa, detail.feeSompi),
     policyFeeKas: sompiToKaspaDisplay(opts.kaspa, effectiveSompi),
+    // The same two figures as BigInt sompi, for screens that do fee arithmetic (the chat Send
+    // KAS sheet's Fast / Priority / custom extra).
+    sdkFeeSompi: detail.feeSompi,
+    policyFeeSompi: effectiveSompi,
   };
 }
 

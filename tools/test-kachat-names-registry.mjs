@@ -22,7 +22,10 @@ import * as C from "../engine/kachat-names/codec.js";
 import * as T from "../engine/kachat-names/transaction.js";
 import * as M from "../engine/kachat-names/manifest.js";
 import * as R from "../engine/kachat-names/registry-state.js";
-import { KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix } from "../engine/kachat-names/registry.js";
+import {
+  KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix,
+  ownProfileStorageKey, ownProfileKeyPrefixFor, profilesUnavailablePauseMs, profileMissPauseMs,
+} from "../engine/kachat-names/registry.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -733,6 +736,124 @@ async function runRegistryIndexer(v, r) {
   r.eq(reg2.source, { kind: "chain" }, "registry (indexer): another registry's indexer -> chain walker");
 }
 
+/** Where the network has no registry (isEnabled false: mainnet, iOS d36fc42): the registry is
+ *  inert and identities are profile-only - own saved record, else GET /profiles/{address}; a 503
+ *  pauses every lookup 10 minutes, any other failure that address 5 minutes. Own profiles are
+ *  stored per network. */
+async function runProfilesOnly(r) {
+  const key = new Uint8Array(32).fill(0x42);
+  const me = R.addressOf(key, "kaspa");
+  const alice = R.addressOf(new Uint8Array(32).fill(0x43), "kaspa");
+  const bob = R.addressOf(new Uint8Array(32).fill(0x44), "kaspa");
+  const tn = R.addressOf(key);
+  r.eq(ownProfileKeyPrefixFor("testnet"), "kachat-names-profile-testnet-v1", "profiles: testnet keeps its key prefix");
+  r.eq(ownProfileStorageKey(tn.toUpperCase()), `kachat-names-profile-testnet-v1:${tn}`, "profiles: testnet own-profile key (lowercased)");
+  r.eq(ownProfileStorageKey(me), `kachat-names-profile-mainnet-v1:${me}`, "profiles: mainnet own-profile key");
+
+  let clock = 1_800_000_000_000;
+  const seen = [];
+  let answers = {};
+  const fetch = async (url) => {
+    seen.push(url);
+    const p = new URL(url).pathname;
+    const a = answers[p];
+    if (typeof a === "function") return a();
+    if (a) return response(a[0], a[1]);
+    return response(404, { error: "not_found" });
+  };
+  const storage = memoryStorage();
+  let manifestCalls = 0;
+  const reg = new KachatNamesRegistry({
+    fetch, storage, indexerBase: () => "https://idx.test/", restBase: () => "https://rest.test",
+    manifest: async () => { manifestCalls += 1; throw new Error("no manifest on mainnet"); },
+    getUtxosByAddresses: async () => { throw new Error("no registry reads"); },
+    isEnabled: () => false, now: () => clock, log: () => {},
+  });
+  r.eq(reg.isLaunched, false, "profiles: registry.isLaunched false");
+
+  // the registry stays inert: no manifest, no reads, refreshes are no-ops
+  await reg.refresh();
+  await reg.refreshAfter("ab".repeat(32));
+  r.eq(reg.revision, 0, "profiles: refresh is a no-op");
+  let refused = false;
+  try { await reg.lookup("alice"); } catch { refused = true; }
+  r.check(refused, "profiles: lookup refuses without a registry");
+  refused = false;
+  try { await reg.namesOf(key); } catch { refused = true; }
+  r.check(refused, "profiles: namesOf refuses without a registry");
+  r.eq((await reg.ownersOfNames([me])).size, 0, "profiles: ownersOfNames empty");
+  r.eq(manifestCalls, 0, "profiles: the manifest is never loaded");
+
+  // GET /profiles/{address}: 200 with a profile, 200 with profile null
+  answers[`/profiles/${alice}`] = [200, { address: alice, profile: { v: 1, avatar: " x.com/alice ", primaryName: null }, updatedAt: 5, txId: "cd".repeat(32) }];
+  answers[`/profiles/${bob}`] = [200, { address: bob, profile: null }];
+  const ia = await reg.identity(alice.toUpperCase());
+  r.eq(JSON.stringify({ label: ia.label, names: ia.names, avatar: ia.profile?.avatar }), JSON.stringify({ label: null, names: [], avatar: "https://x.com/alice" }), "profiles: identity from GET /profiles (sanitized, no label)");
+  r.check(seen.includes(`https://idx.test/profiles/${alice}`), "profiles: asks GET /profiles/{address} on the indexer");
+  r.check(!seen.some((u) => u.includes("/identity/") || u.includes("/names/")), "profiles: never /identity or /names");
+  const ib = await reg.identity(bob);
+  r.eq(ib.profile, null, "profiles: profile null = no profile");
+
+  // a non-address is not asked about
+  const n0 = seen.length;
+  r.eq((await reg.identity("kaspa:not/an/address")).profile, null, "profiles: a non-address has no profile");
+  r.eq(seen.length, n0, "profiles: a non-address is never put in a URL");
+
+  // own saved record wins, stored under the mainnet key
+  await reg.noteOwnProfile({ bio: " t.me/me ", linktree: "linktr.ee/me" }, me, "ef".repeat(32));
+  r.check(storage.map.has(`kachat-names-profile-mainnet-v1:${me}`), "profiles: own mainnet profile stored per network");
+  r.check(![...storage.map.keys()].some((k) => k.startsWith("kachat-names-profile-testnet-v1:")), "profiles: nothing under the testnet key");
+  r.eq(reg.revision, 1, "profiles: noteOwnProfile bumps the revision");
+  const n1 = seen.length;
+  const im = await reg.identity(me);
+  r.eq(im.profile?.bio, "https://t.me/me", "profiles: own saved profile");
+  r.eq(seen.length, n1, "profiles: own profile needs no request");
+  const reg2 = new KachatNamesRegistry({ fetch, storage, indexerBase: () => "https://idx.test", isEnabled: () => false, now: () => clock, log: () => {} });
+  r.eq((await reg2.identity(me)).profile?.linktree, "https://linktr.ee/me", "profiles: own profile persisted per network");
+
+  // any other failure pauses that address for 5 minutes
+  const carol = R.addressOf(new Uint8Array(32).fill(0x45), "kaspa");
+  answers[`/profiles/${carol}`] = [500, { error: "boom" }];
+  refused = false;
+  try { await reg.identity(carol); } catch { refused = true; }
+  r.check(refused, "profiles: a 500 fails");
+  const n2 = seen.length;
+  answers[`/profiles/${carol}`] = [200, { address: carol, profile: { v: 1, bio: "github.com/carol" } }];
+  refused = false;
+  try { await reg.identity(carol); } catch { refused = true; }
+  r.check(refused && seen.length === n2, "profiles: a failed address is not asked again within 5 minutes");
+  r.eq((await reg.identity(alice)).profile?.avatar, "https://x.com/alice", "profiles: other addresses still answer");
+  clock += profileMissPauseMs;
+  r.eq((await reg.identity(carol)).profile?.bio, "https://github.com/carol", "profiles: asked again after 5 minutes");
+
+  // a 503 pauses every lookup for 10 minutes
+  answers = { [`/profiles/${alice}`]: [503, { error: "profiles off" }] };
+  refused = false;
+  try { await reg.identity(alice); } catch { refused = true; }
+  r.check(refused, "profiles: a 503 fails");
+  r.eq(reg.profilesPausedUntil, clock + profilesUnavailablePauseMs, "profiles: a 503 sets the 10-minute pause");
+  const n3 = seen.length;
+  for (const a of [bob, carol, alice]) { try { await reg.identity(a); } catch { /* paused */ } }
+  r.eq(seen.length, n3, "profiles: no request for any address while paused");
+  r.eq((await reg.identity(me)).profile?.bio, "https://t.me/me", "profiles: own profile still shows while paused");
+  clock += profilesUnavailablePauseMs;
+  answers[`/profiles/${bob}`] = [200, { address: bob, profile: { v: 1, bio: "x.com/bob" } }];
+  r.eq((await reg.identity(bob)).profile?.bio, "https://x.com/bob", "profiles: asked again after 10 minutes");
+
+  // no indexer: no request
+  const reg3 = new KachatNamesRegistry({ fetch, storage: memoryStorage(), indexerBase: () => "", isEnabled: () => false, now: () => clock, log: () => {} });
+  const n4 = seen.length;
+  refused = false;
+  try { await reg3.identity(bob); } catch { refused = true; }
+  r.check(refused && seen.length === n4, "profiles: no indexer -> no request");
+
+  // testnet still reads the old key
+  const tnStorage = memoryStorage();
+  tnStorage.set(`kachat-names-profile-testnet-v1:${tn}`, JSON.stringify({ address: tn, profile: { v: 1, bio: "https://x.com/tn" }, txId: "aa".repeat(32), at: 1 }));
+  const reg4 = new KachatNamesRegistry({ storage: tnStorage, log: () => {} });
+  r.eq((await reg4.ownProfile(tn))?.profile.bio, "https://x.com/tn", "profiles: testnet own profile read from the old key");
+}
+
 // MARK: - Live (read-only TN10 walk)
 
 async function runLive() {
@@ -912,6 +1033,8 @@ async function main() {
   console.log(`+ KachatNamesRegistry refusals and failed refreshes: ${r.pass} pass, ${r.fail} fail`);
   await runRegistryIndexer(v, r);
   console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
+  await runProfilesOnly(r);
+  console.log(`+ profile-only identities (no registry): ${r.pass} pass, ${r.fail} fail`);
   await runSocialResolver(r);
   console.log(`+ social profile resolver: ${r.pass} pass, ${r.fail} fail`);
   for (const f of r.failures.slice(0, 40)) console.log(`  FAIL ${f}`);

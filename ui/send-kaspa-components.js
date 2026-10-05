@@ -571,3 +571,172 @@ export function openSendFromPicker({ loadEntries, currentIndex, kasUnit = "KAS",
 export function closeSendFromPicker() {
   if (activeSourcePicker) activeSourcePicker();
 }
+
+// --- Coin Control (which coins pay) -------------------------------------------------------------
+
+/** "txid:index" for a UTXO entry ({ outpoint: { transactionId, index } } or a flat one). */
+export function utxoEntryKey(entry) {
+  const outpoint = entry?.outpoint || entry || {};
+  return `${outpoint.transactionId ?? outpoint.transaction_id ?? ""}:${outpoint.index ?? ""}`;
+}
+
+/** A UTXO entry's amount in sompi as BigInt (engine entries carry `amount`, others `amountSompi`). */
+export function utxoEntrySompi(entry) {
+  try { return BigInt(entry?.amount ?? entry?.amountSompi ?? 0); } catch { return 0n; }
+}
+
+let activeCoinPicker = null;
+
+/**
+ * Opens Coin Control over the current screen (iOS CoinControlView): the coins at the address
+ * paying, largest first, each one tickable, with Select All / Automatic (Clear Selection) and the
+ * selected total. `loadEntries()` resolves to UTXO entries; `initialSelection` is the current
+ * "txid:index" list (null = automatic). Confirming calls `onDone(selection)`, where selection is
+ * [{ key, amountSompi, entry }] or null for automatic (an empty pick means automatic, never
+ * "spend nothing"); Cancel, Escape or the backdrop leave the choice as it was. `labels` maps
+ * "txid:index" to a coin's name. A failed load says so, with Retry, instead of "no coins".
+ */
+export function openCoinControlPicker({ loadEntries, initialSelection = null, labels = {}, kasUnit = "KAS", onDone } = {}) {
+  closeCoinControlPicker();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop sk-source-backdrop sk-coin-backdrop";
+  backdrop.dataset.skCoinPicker = "";
+  backdrop.innerHTML = `
+    <section class="contact-modal sk-source-sheet sk-coin-sheet" role="dialog" aria-modal="true" aria-labelledby="sk-coin-title">
+      <div class="modal-header">
+        <div><h2 id="sk-coin-title">Coin Control</h2></div>
+        <button class="modal-close" type="button" data-sk-coin-cancel aria-label="Cancel">×</button>
+      </div>
+      <div class="sk-coin-body" data-sk-coin-body></div>
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-sk-coin-cancel>Cancel</button>
+        <button class="primary-button" type="button" data-sk-coin-done disabled>Use Automatic Selection</button>
+      </div>
+    </section>`;
+  const body = backdrop.querySelector("[data-sk-coin-body]");
+  const doneButton = backdrop.querySelector("[data-sk-coin-done]");
+  let entries = [];
+  let loading = true;
+  let loadError = "";
+  const selected = new Set(Array.isArray(initialSelection) ? initialSelection.map(String) : []);
+
+  function paint() {
+    if (doneButton) {
+      doneButton.disabled = loading;
+      doneButton.textContent = selected.size ? "Confirm Selection" : "Use Automatic Selection";
+    }
+    if (loading) {
+      body.innerHTML = '<p class="sk-source-empty"><span class="sk-spinner" aria-hidden="true"></span>Loading this address\'s UTXOs…</p>';
+      return;
+    }
+    if (!entries.length) {
+      body.innerHTML = loadError
+        ? `<p class="sk-source-empty bad">${esc(loadError)}</p><div class="sk-coin-retry"><button type="button" class="cold-inline-link" data-sk-coin-retry>Retry</button></div>`
+        : '<p class="sk-source-empty">No UTXOs found at this address.</p>';
+      return;
+    }
+    let total = 0n;
+    for (const entry of entries) if (selected.has(utxoEntryKey(entry))) total += utxoEntrySompi(entry);
+    body.innerHTML = `
+      <div class="cold-coincontrol-actions sk-coin-actions">
+        <button type="button" class="cold-inline-link" data-sk-coin-all>Select All</button>
+        <button type="button" class="cold-inline-link" data-sk-coin-none>Automatic (Clear Selection)</button>
+      </div>
+      <div class="cold-coincontrol-list sk-coin-picker-list" role="group" aria-label="UTXOs at this address">
+        ${entries.map((entry) => {
+          const key = utxoEntryKey(entry);
+          const on = selected.has(key);
+          const label = labels?.[key];
+          const [txid, index] = [key.slice(0, key.lastIndexOf(":")), key.slice(key.lastIndexOf(":") + 1)];
+          return `
+          <button type="button" class="cold-coincontrol-row${on ? " selected" : ""}" data-sk-coin-key="${esc(key)}" aria-pressed="${on ? "true" : "false"}">
+            <span class="cold-coincontrol-check" aria-hidden="true">${on ? SEND_ICONS.checkCircle : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.25"/></svg>'}</span>
+            <span class="cold-coincontrol-copy">
+              ${label ? `<span class="cold-coincontrol-label">${esc(label)}</span>` : ""}
+              <span class="cold-coincontrol-amount">${esc(formatSompiPlain(utxoEntrySompi(entry)))} ${esc(kasUnit)}</span>
+              <span class="cold-coincontrol-outpoint">${esc(txid.slice(0, 10))}…:${esc(index)}</span>
+            </span>
+          </button>`;
+        }).join("")}
+      </div>
+      ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${esc(formatSompiPlain(total))} ${esc(kasUnit)} (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`;
+  }
+
+  function load() {
+    loading = true;
+    loadError = "";
+    paint();
+    Promise.resolve()
+      .then(() => loadEntries?.())
+      .then((loaded) => {
+        if (!backdrop.isConnected) return;
+        entries = [...(loaded || [])].sort((a, b) => {
+          const x = utxoEntrySompi(a);
+          const y = utxoEntrySompi(b);
+          return x > y ? -1 : (x < y ? 1 : 0);
+        });
+        // A coin spent since it was picked can't stay ticked.
+        const live = new Set(entries.map(utxoEntryKey));
+        for (const key of [...selected]) if (!live.has(key)) selected.delete(key);
+        loading = false;
+        paint();
+      })
+      .catch((error) => {
+        if (!backdrop.isConnected) return;
+        entries = [];
+        loading = false;
+        loadError = error?.message || "Couldn't read this address's UTXOs.";
+        paint();
+      });
+  }
+
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    // Only Coin Control closes, not the send screen under it.
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    closeCoinControlPicker();
+  };
+  const close = () => {
+    window.removeEventListener("keydown", onKey, true);
+    backdrop.remove();
+    if (activeCoinPicker === close) activeCoinPicker = null;
+  };
+  activeCoinPicker = close;
+  window.addEventListener("keydown", onKey, true);
+
+  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+  backdrop.addEventListener("click", (event) => {
+    if (event.target.closest("[data-sk-coin-cancel]")) { close(); return; }
+    if (event.target.closest("[data-sk-coin-retry]")) { load(); return; }
+    if (event.target.closest("[data-sk-coin-all]")) { entries.forEach((e) => selected.add(utxoEntryKey(e))); paint(); return; }
+    if (event.target.closest("[data-sk-coin-none]")) { selected.clear(); paint(); return; }
+    if (event.target.closest("[data-sk-coin-done]")) {
+      if (loading) return;
+      const picked = entries
+        .filter((e) => selected.has(utxoEntryKey(e)))
+        .map((e) => ({ key: utxoEntryKey(e), amountSompi: utxoEntrySompi(e), entry: e }));
+      close();
+      try { onDone?.(picked.length ? picked : null); } catch { /* the screen reports its own errors */ }
+      return;
+    }
+    const row = event.target.closest("[data-sk-coin-key]");
+    if (!row) return;
+    const key = row.getAttribute("data-sk-coin-key");
+    if (selected.has(key)) selected.delete(key); else selected.add(key);
+    const list = body.querySelector(".sk-coin-picker-list");
+    const scrollTop = list?.scrollTop || 0;
+    paint();
+    const next = body.querySelector(".sk-coin-picker-list");
+    if (next) next.scrollTop = scrollTop;
+    body.querySelector(`[data-sk-coin-key="${CSS.escape(key)}"]`)?.focus?.();
+  });
+  document.body.appendChild(backdrop);
+  load();
+  return close;
+}
+
+export function closeCoinControlPicker() {
+  if (activeCoinPicker) activeCoinPicker();
+}

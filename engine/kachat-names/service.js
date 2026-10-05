@@ -7,10 +7,12 @@
 // (SIGHASH_ALL over the version-1 sighash, @noble/curves), the conversion to the Kaspa WASM SDK's
 // Transaction with the Toccata fields, and submission through the engine's RPC client.
 //
-// Transactions are testnet-10 only: every entry point refuses unless engine/network.js IS_TESTNET
-// (`isLaunched`), and the manifest itself must be for testnet-10 (verifyManifest). The mainnet
-// registry stays off until the contracts are audited - but the .kachat UI and identity are on for
-// every network (`isEnabled`, iOS 7227d69).
+// Registry transactions are testnet-10 only: every registry entry point refuses unless
+// engine/network.js IS_TESTNET (`isLaunched`), and the manifest itself must be for testnet-10
+// (verifyManifest). The mainnet registry stays off until the contracts are audited - but the
+// .kachat UI and identity are on for every network (`isEnabled`, iOS 7227d69), and the address
+// profile record is not registry data (`profilesEnabled`, iOS d36fc42): a `kchat:1:profile:`
+// self-send from the wallet's address on the network the app runs on, so it saves on mainnet too.
 //
 // Nothing runs at import. `new KachatNamesService(engine)` takes the KaspaEngine (engine/index.js);
 // it uses engine.kaspa, engine.currentDagPoint(), engine.getUtxosWithCovenants(addresses),
@@ -23,7 +25,7 @@
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import bundledManifestJson from "./kachat-names-testnet-10.json" with { type: "json" };
 
-import { IS_TESTNET } from "../network.js";
+import { IS_TESTNET, isNetworkAddress } from "../network.js";
 import { getEndpoint } from "../endpoints.js";
 import { sendKaspa } from "../transactions.js";
 import {
@@ -47,6 +49,8 @@ export class ServiceError extends Error {
   }
 
   static testnetOnly() { return new ServiceError("testnetOnly", ".kachat names run on Testnet only for now"); }
+  /** The address is not on the network the app runs on (iOS d36fc42). */
+  static wrongAddressNetwork() { return new ServiceError("wrongAddressNetwork", "This address is on a different network than the app."); }
   static noManifest(why) { return new ServiceError("noManifest", `No .kachat registry manifest: ${why}`); }
   static dryRunManifest() { return new ServiceError("dryRunManifest", "The .kachat manifest is from a dry run; that registry does not exist"); }
   static wrongNodeNetwork(n) { return new ServiceError("wrongNodeNetwork", `The node is on ${n}, not testnet-10`); }
@@ -299,9 +303,14 @@ export class KachatNamesService {
   static get isEnabled() { return true; }
   get isEnabled() { return KachatNamesService.isEnabled; }
   /** Whether this network has a live registry the app reads and transacts with (lookups, listings,
-   *  registrations, profile saves, resolving typed names): testnet-10 only until an audit. */
+   *  registrations, resolving typed names): testnet-10 only until an audit. */
   static get isLaunched() { return IS_TESTNET; }
   get isLaunched() { return KachatNamesService.isLaunched; }
+  /** Address profiles (`kchat:1:profile:`) work on every network (iOS d36fc42): a profile is a
+   *  plain self-send from the chatting address with no registry behind it, so mainnet saves and
+   *  reads them before its registry launches. Only the primary name needs the registry. */
+  static get profilesEnabled() { return KachatNamesService.isEnabled; }
+  get profilesEnabled() { return KachatNamesService.profilesEnabled; }
 
   requireTestnet() {
     if (!KachatNamesService.isLaunched) throw ServiceError.testnetOnly();
@@ -455,15 +464,17 @@ export class KachatNamesService {
 
   // MARK: Profile record
 
-  /** Writes the address profile record (KACHAT_NAMES.md section 7): a self-transfer with payload
+  /** Writes the address profile record (KACHAT_NAMES.md section 7) on any network (`profilesEnabled`;
+   *  `address` must be on the app's network): a self-transfer with payload
    *  `kchat:1:profile:<json>` through the engine's existing version-0 payload send path (the WASM
    *  SDK's generator, signed with the wallet key, in the per-address send queue). Only UTXOs
    *  without a covenant id are spent. `json` (string or UTF-8 bytes) is the whole profile (records
    *  replace, never patch), a JSON object with `"v": 1` of at most 2 KB. Returns the txid. */
   async submitProfileRecord({ json, address = this.engine?.address }) {
-    this.requireTestnet();
+    if (!KachatNamesService.profilesEnabled) throw ServiceError.testnetOnly();
     const engine = this.engine;
-    if (!address || !String(address).toLowerCase().startsWith(`${testnetPrefix}:`)) throw ServiceError.testnetOnly();
+    // The record is written from the wallet's address on the network the app runs on.
+    if (!address || !isNetworkAddress(address)) throw ServiceError.wrongAddressNetwork();
     if (!engine?.kaspa || !engine.privateKey || String(engine.address).toLowerCase() !== String(address).toLowerCase()) {
       throw new Failure("Load the wallet first.");
     }

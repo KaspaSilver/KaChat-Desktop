@@ -962,6 +962,8 @@ export class KaspaEngine {
     return String(response?.transactionId ?? "");
   }
 
+  // options.manualUtxos: coin control (outpoints the build may pick from; null = automatic).
+  // options.extraFeeSompi: a priority fee in sompi on top of the minimum (Fast / Priority / custom).
   async send(destinationAddress, amountKas, feeKas = "0", options = {}) {
     this.requireWallet();
     await this.connect();
@@ -975,6 +977,8 @@ export class KaspaEngine {
       amountKas,
       feeKas,
       selectedOutpoints: options.selectedOutpoints || null,
+      manualUtxos: options.manualUtxos || null,
+      extraFeeSompi: options.extraFeeSompi || 0,
       payload: options.payload || null,
       exactAmount: Boolean(options.exactAmount),
       log: this.log,
@@ -1049,7 +1053,8 @@ export class KaspaEngine {
   }
 
   // Send from a spending address, signing with its derived key.
-  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, changeAddress = null, payload = null, exactAmount = false }) {
+  // `manualUtxos` / `extraFeeSompi`: coin control and a priority fee on top, as for send().
+  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
@@ -1063,6 +1068,8 @@ export class KaspaEngine {
       amountKas,
       feeKas,
       selectedOutpoints,
+      manualUtxos,
+      extraFeeSompi,
       changeAddress,
       payload,
       exactAmount: Boolean(exactAmount),

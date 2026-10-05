@@ -12979,3 +12979,19 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .new-chat-sheet:not(.is-join) { width: min(100%, 400px); }
 .new-chat-sheet-tiles { gap: 14px; }
 .new-chat-sheet-tiles .action-tile { height: auto; aspect-ratio: 1 / 1; gap: 10px; }
+
+/* ==== Chat Send KAS: fee card + Coin Control (iOS 62c2773) ====
+   The sheet carries the shared SendFeeControls card now, so it scrolls when the window is short.
+   Coin Control is the shared picker (send-kaspa-components openCoinControlPicker), drawn with the
+   cold-storage coin rows over the Send From sheet's frame. */
+.pay-sheet { max-height: calc(100vh - 44px); max-height: calc(100dvh - 44px); overflow-y: auto; overscroll-behavior: contain; }
+.pay-sheet .sk-fee { margin: 0; }
+.sk-coin-backdrop { z-index: 2610; }
+.sk-coin-sheet { gap: 12px; }
+.sk-coin-body { display: flex; flex-direction: column; gap: 10px; min-height: 60px; overflow-y: auto; }
+.sk-coin-actions { justify-content: space-between; flex-wrap: wrap; }
+.sk-coin-picker-list { max-height: min(46vh, 360px); }
+.sk-coin-picker-list .cold-coincontrol-row { width: 100%; font: inherit; }
+.sk-coin-picker-list .cold-coincontrol-row:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 1px; }
+.sk-coin-retry { display: flex; justify-content: center; }
+.sk-coin-sheet .modal-actions { display: flex; justify-content: flex-end; }

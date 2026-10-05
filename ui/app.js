@@ -6,7 +6,7 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
-import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
+import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatProfiles } from "./kachat-names-runtime.js";
 import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames } from "./kachat-names-live.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -18,6 +18,7 @@ import {
   mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
   sanitizeAmountText, availablePillInnerHtml, infoPillHtml, feeControlsHtml, feeControls, sendActionButtonHtml,
   createSendActionButton, openSendFromPicker, closeSendFromPicker, shortSendAddress,
+  coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
 } from "./send-kaspa-components.js";
 import { initNextcloud, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
@@ -5426,10 +5427,11 @@ let otherServiceNamesAt = 0;
 function knsEditAssetId() { return knsEditorTarget?.assetId || ownKnsAssetId; }
 function knsEditFields() { return knsEditorTarget ? knsEditorTarget.fields : ownKnsProfileFields; }
 
-/** Testnet: reads this wallet's .kachat identity from the shared registry and repaints the hero
- *  name. State lives on the function object (renderers can run before later declarations init). */
+/** Reads this wallet's .kachat identity and repaints the hero name and profile. Testnet: from the
+ *  shared registry (label + profile); mainnet: profile-only (no label, iOS d36fc42). State lives
+ *  on the function object (renderers can run before later declarations init). */
 function refreshKachatIdentity() {
-  const runtime = kachatNames();
+  const runtime = kachatProfiles();
   const address = engine.address || "";
   if (!runtime || !address) { refreshKachatIdentity.label = ""; return; }
   refreshKachatIdentity.at = Date.now();
@@ -5577,7 +5579,7 @@ function updateProfileHero(info, profileInfo) {
       ? (domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain)
       : shortAddress(engine.address || "");
   if (nameEl) nameEl.textContent = displayName;
-  if (kachatNames() && (refreshKachatIdentity.address !== engine.address || Date.now() - (refreshKachatIdentity.at || 0) > 60_000)) {
+  if (kachatProfiles() && (refreshKachatIdentity.address !== engine.address || Date.now() - (refreshKachatIdentity.at || 0) > 60_000)) {
     refreshKachatIdentity();
   }
   // Testnet: the .kachat profile (pictures and bio looked up from its social links, and its
@@ -9380,7 +9382,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 97;
+const APP_BUILD = 98;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -17270,7 +17272,15 @@ function openPaymentSourcePicker() {
     kasUnit: KAS_UNIT,
     onPick: (entry) => {
       if (!isPaySheetOpen() || paymentSendInFlight) return;
+      const previousSource = paymentSourceIndex;
       paymentSourceIndex = entry.index === getActiveSpendingIndex() ? null : entry.index;
+      // Coin control and a custom fee belong to the address they were set for (iOS 62c2773).
+      if (paymentSourceIndex !== previousSource) {
+        paymentManualUtxos = null;
+        paymentCustomExtraFeeSompi = null;
+        payFeeCtl.setEditing(false);
+        renderPaymentFeeCard();
+      }
       composerAvailableKas = null;
       paySheetError = "";
       refreshComposerAvailableBalance();
@@ -17303,8 +17313,12 @@ mountSendPieces(paySheet, {
     prefix: "pay", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`,
     attrs: { unit: "pay-unit", toggle: "pay-unit-toggle", conversion: "pay-conversion", max: "pay-max" },
   }),
+  // iOS 62c2773: the shared SendFeeControls card in place of the fee pill. Prefix "pay-kas" so its
+  // data-pay-kas-fee="tier" buttons never collide with the sheet's other data-pay-* lookups.
+  fee: feeControlsHtml({ prefix: "pay-kas" }),
   action: sendActionButtonHtml({ attr: "pay-hold", labelAttr: "pay-hold-label", title: "Slide to Send" }),
 });
+const payFeeCtl = feeControls(paySheet, "pay-kas");
 const payTitleEl = paySheet?.querySelector("[data-pay-title]");
 const payRecipientEl = paySheet?.querySelector("[data-pay-recipient]");
 const payAmountInput = paySheet?.querySelector("[data-pay-amount]");
@@ -17313,7 +17327,7 @@ const paymentUnitToggle = paySheet?.querySelector("[data-pay-unit-toggle]");
 const paymentConversionLabel = paySheet?.querySelector("[data-pay-conversion]");
 const paymentMaxButton = paySheet?.querySelector("[data-pay-max]");
 const payMemoInput = paySheet?.querySelector("[data-pay-memo]");
-const payFeePill = paySheet?.querySelector("[data-pay-fee]");
+const payFeeCustomInput = paySheet?.querySelector("[data-pay-kas-fee-custom]");
 const payNoteEl = paySheet?.querySelector("[data-pay-note]");
 const payHoldButton = paySheet?.querySelector("[data-pay-hold]");
 const paySlider = createSendActionButton(payHoldButton, { onAction: () => submitPaymentSheet() });
@@ -17327,6 +17341,15 @@ let composerAvailableKas = null;
 let paySheetError = "";
 let payFeeTimer = null;
 let payFeeToken = 0;
+// Fee speed, a custom fee and coin control (iOS 62c2773, the same controls as every Send Kaspa
+// screen). The base is the payment's own (Normal) fee from the estimate, in sompi; the extra over
+// it - Fast 2x, Priority 5x, or what a custom fee adds - goes to the send as a priority fee.
+let paymentFeeTier = "normal";
+let paymentBaseFeeSompi = null;
+let paymentFeeEstimating = false;
+let paymentCustomExtraFeeSompi = null;
+// Coin control: null = automatic, else [{ key: "txid:index", amountSompi }] at the paying address.
+let paymentManualUtxos = null;
 
 function isPaySheetOpen() { return Boolean(paySheet && !paySheet.hidden); }
 
@@ -17393,14 +17416,98 @@ function refreshPaymentSheetState() {
   paySlider.setEnabled(sompi > 0 && !paymentSendInFlight);
 }
 
-// iOS paymentFeePill: "fee: -------- KAS" while estimating, "fee: -- KAS" when unknown.
-function renderPaymentFeePill(feeKas, { estimating = false } = {}) {
-  if (!payFeePill) return;
-  payFeePill.classList.toggle("estimating", estimating);
-  if (estimating) payFeePill.textContent = `fee: -------- ${KAS_UNIT}`;
-  else if (feeKas == null) payFeePill.textContent = `fee: -- ${KAS_UNIT}`;
-  else payFeePill.textContent = `fee: ${formatKasExact(feeKas)} ${KAS_UNIT}`;
+// The fee card (iOS SendFeeControls in the Send KAS sheet, 62c2773). The extra over the base fee:
+// a custom fee, else what the speed adds (Fast 2x, Priority 5x). Nothing while the base is unknown.
+const PAYMENT_FEE_MULTIPLIERS = { normal: 1n, fast: 2n, priority: 5n };
+function paymentExtraFeeSompi() {
+  if (paymentBaseFeeSompi == null) return 0n;
+  if (paymentCustomExtraFeeSompi != null) return paymentCustomExtraFeeSompi;
+  return paymentBaseFeeSompi * ((PAYMENT_FEE_MULTIPLIERS[paymentFeeTier] || 1n) - 1n);
 }
+function paymentTotalFeeSompi() {
+  return paymentBaseFeeSompi == null ? null : paymentBaseFeeSompi + paymentExtraFeeSompi();
+}
+// The address this payment spends from - what sendKasPayment will use: the picked spending address
+// (Send From), else the primary, with Chats Payment Privacy on; the chatting address with it off.
+function paymentFundingAddress() {
+  const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
+  return spendingFunded ? deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex()) : engine.address;
+}
+function renderPaymentFeeCard() {
+  const total = paymentTotalFeeSompi();
+  payFeeCtl.setEstimating(paymentFeeEstimating);
+  payFeeCtl.setText(total == null ? null : `${formatSompiPlain(total)} ${KAS_UNIT}`);
+  // A custom fee lights no speed; picking one goes back to it.
+  payFeeCtl.setTier(paymentCustomExtraFeeSompi != null ? null : paymentFeeTier);
+  payFeeCtl.setCoinSummary(coinControlSummaryText(paymentManualUtxos?.length || 0));
+}
+// The base fee from the estimate (BigInt sompi, null = unknown); `estimating` keeps the last base
+// behind the spinner, as iOS does.
+function renderPaymentFeePill(feeSompi, { estimating = false } = {}) {
+  paymentFeeEstimating = Boolean(estimating);
+  if (!estimating) paymentBaseFeeSompi = feeSompi == null ? null : BigInt(feeSompi);
+  renderPaymentFeeCard();
+}
+function selectPaymentFeeTier(tier) {
+  if (!PAYMENT_FEE_MULTIPLIERS[tier]) return;
+  paymentFeeTier = tier;
+  paymentCustomExtraFeeSompi = null;
+  payFeeCtl.setEditing(false);
+  renderPaymentFeeCard();
+}
+// A typed total fee below the base is raised to it (a transaction can't go out under it); an empty
+// or unreadable entry leaves the fee as it was (iOS commitPaymentCustomFee).
+function commitPaymentCustomFee() {
+  const text = String(payFeeCustomInput?.value || "").trim();
+  const kas = Number(text);
+  if (paymentBaseFeeSompi != null && text && Number.isFinite(kas) && kas >= 0) {
+    const total = BigInt(Math.round(kas * 1e8));
+    paymentCustomExtraFeeSompi = total > paymentBaseFeeSompi ? total - paymentBaseFeeSompi : 0n;
+  }
+  payFeeCtl.setEditing(false);
+  renderPaymentFeeCard();
+}
+paySheet?.querySelectorAll("[data-pay-kas-fee]").forEach((button) => {
+  button.addEventListener("click", () => { if (!paymentSendInFlight) selectPaymentFeeTier(button.getAttribute("data-pay-kas-fee")); });
+});
+paySheet?.querySelector("[data-pay-kas-fee-edit]")?.addEventListener("click", () => {
+  const total = paymentTotalFeeSompi();
+  if (total == null || paymentSendInFlight) return;
+  payFeeCtl.setEditing(true, formatSompiPlain(total));
+});
+paySheet?.querySelector("[data-pay-kas-fee-commit]")?.addEventListener("click", commitPaymentCustomFee);
+payFeeCustomInput?.addEventListener("input", () => {
+  const sanitized = sanitizeAmountText(payFeeCustomInput.value, 8);
+  if (sanitized !== payFeeCustomInput.value) payFeeCustomInput.value = sanitized;
+});
+payFeeCustomInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); commitPaymentCustomFee(); return; }
+  // Escape leaves the fee field, not the whole sheet.
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); payFeeCtl.setEditing(false); renderPaymentFeeCard(); }
+});
+// Coin Control on the address this payment comes from (iOS CoinControlView). The fee and Max follow
+// the chosen coins.
+paySheet?.querySelector("[data-pay-kas-coin-toggle]")?.addEventListener("click", () => {
+  if (!isPaySheetOpen() || paymentSendInFlight) return;
+  const address = paymentFundingAddress();
+  if (!address) { showCopyToast("No address to pay from yet."); return; }
+  const spendingFunded = address !== engine.address;
+  openCoinControlPicker({
+    loadEntries: async () => (spendingFunded ? await engine.balanceForAddress(address) : await engine.balance())?.entries || [],
+    initialSelection: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
+    labels: getUtxoLabels(address),
+    kasUnit: KAS_UNIT,
+    onDone: (selection) => {
+      // The sheet may have closed, or the source changed, while it was open.
+      if (!isPaySheetOpen() || paymentFundingAddress() !== address) return;
+      paymentManualUtxos = selection ? selection.map((coin) => ({ key: coin.key, amountSompi: coin.amountSompi })) : null;
+      paySheetError = "";
+      renderPaymentFeeCard();
+      refreshPaymentSheetState();
+      schedulePaymentFee();
+    },
+  });
+});
 
 // The payment payload's size for a memo: "kchat:1:pay:" + the cipher's nonce, ephemeral key and
 // tag around the payment JSON (the same overhead estimateCommPayloadBytes counts for messages).
@@ -17425,12 +17532,15 @@ function schedulePaymentFee() {
       const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
       // The picked source (Send From), else the primary - what sendKasPayment will spend from.
       const fundingAddress = spendingFunded ? deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex()) : null;
-      // Chat payments pay the SDK's own fee (no priority tip), so that is the figure shown.
+      // Coin control: estimate against exactly the chosen coins (iOS passes manualUtxos).
+      const selection = paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null;
+      // Chat payments pay the SDK's own fee at Normal (no priority tip), so that is the base shown;
+      // Fast / Priority / a custom fee add on top.
       const detail = fundingAddress
-        ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, null, payloadBytes)
-        : await engine.estimateSendFee(amountKas, null, payloadBytes);
+        ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, selection, payloadBytes)
+        : await engine.estimateSendFee(amountKas, selection, payloadBytes);
       if (token !== payFeeToken) return;
-      renderPaymentFeePill(detail?.sdkFeeKas ?? null);
+      renderPaymentFeePill(detail?.sdkFeeSompi ?? null);
     } catch {
       if (token === payFeeToken) renderPaymentFeePill(null);
     }
@@ -17445,6 +17555,11 @@ function resetPaymentSheetFields() {
   payFeeToken += 1;
   if (payFeeTimer) window.clearTimeout(payFeeTimer);
   payFeeTimer = null;
+  // Normal speed, no custom fee, automatic coins - each time the sheet opens (iOS 62c2773).
+  paymentFeeTier = "normal";
+  paymentCustomExtraFeeSompi = null;
+  paymentManualUtxos = null;
+  payFeeCtl.setEditing(false);
   renderPaymentFeePill(null);
 }
 
@@ -17479,6 +17594,7 @@ function closePaymentSheet({ force = false } = {}) {
   if (paymentSendInFlight && !force) return;
   cancelPaymentHold();
   closeSendFromPicker();
+  closeCoinControlPicker();
   paySheet.hidden = true;
   paySheetConversationId = null;
   payFeeToken += 1;
@@ -17517,9 +17633,13 @@ paymentUnitToggle?.addEventListener("click", () => {
 });
 paymentMaxButton?.addEventListener("click", () => {
   if (!payAmountInput || paymentSendInFlight) return;
-  if (composerAvailableKas == null) { showCopyToast("Balance unavailable right now."); return; }
-  // The same headroom the send itself reserves for the network fee.
-  const maxKas = Math.max(0, composerAvailableKas - 0.0001);
+  // Coin control: Max spends the chosen coins, else the whole balance (iOS estimateMaxPaymentAmount).
+  const manualSompi = paymentManualUtxos ? paymentManualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
+  if (manualSompi == null && composerAvailableKas == null) { showCopyToast("Balance unavailable right now."); return; }
+  const spendableKas = manualSompi != null ? Number(manualSompi) / 1e8 : composerAvailableKas;
+  // The same headroom the send itself reserves for the network fee, plus room for a Fast /
+  // Priority / custom extra on top of it.
+  const maxKas = Math.max(0, spendableKas - 0.0001 - Number(paymentExtraFeeSompi()) / 1e8);
   payAmountInput.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : formatKasPlain(maxKas);
   paySheetError = "";
   refreshPaymentUnitUi();
@@ -17566,6 +17686,9 @@ async function submitPaymentSheet() {
       note: memo,
       // Send From (privacy on): the picked spending address, null = the primary.
       sourceSpendingIndex: paymentSourceIndex,
+      // The fee card (iOS 62c2773): the speed / custom extra over the base fee, and coin control.
+      extraFeeSompi: paymentExtraFeeSompi(),
+      manualUtxos: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
       // Down as soon as a node has the transaction; the bubble in the chat is the confirmation.
       onSubmitted: () => { closePaymentSheet({ force: true }); resetPaymentSheetFields(); },
     });
@@ -17814,7 +17937,9 @@ function normalizeKasAmount(value) {
 // A chat payment, from the Send KAS sheet. Throws (for the sheet to show) when it can't go: not
 // enough balance, the memo can't be encrypted, or the node refuses it. `onSubmitted` runs once a
 // node has the transaction, before the slower recipient-output verification.
-async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null } = {}) {
+// `extraFeeSompi`: a priority fee on top of the minimum (Fast / Priority / custom); `manualUtxos`:
+// coin control, the "txid:index" coins the build may pick from (null = automatic). iOS 62c2773.
+async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null, extraFeeSompi = 0n, manualUtxos = null } = {}) {
   if (paymentSendInFlight) return false;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   const contact = contactForConversation(conversationEntry);
@@ -17840,9 +17965,23 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     const balance = spendingFunded ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
     if (!spendingFunded) currentBalanceKas = balance.totalKas; rememberLastBalance();
     const requestedSompi = BigInt(Math.round(Number(amountKas) * 1e8));
-    const feeReserveSompi = 10000n;
-    if (requestedSompi + feeReserveSompi > balance.totalSompi) {
-      throw new Error(`Not enough ${KAS_UNIT}: planned spend ${amountKas} ${KAS_UNIT}, but the available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`);
+    let extraSompi = 0n;
+    try { extraSompi = BigInt(extraFeeSompi || 0); } catch { extraSompi = 0n; }
+    if (extraSompi < 0n) extraSompi = 0n;
+    const feeReserveSompi = 10000n + extraSompi;
+    const manualKeys = Array.isArray(manualUtxos) && manualUtxos.length ? manualUtxos.map(String) : null;
+    // Coin control: only the chosen coins count, and they must still be there.
+    let spendableSompi = balance.totalSompi;
+    if (manualKeys) {
+      const wanted = new Set(manualKeys);
+      const chosen = (balance.entries || []).filter((entry) => wanted.has(utxoEntryKey(entry)));
+      if (!chosen.length) throw new Error("The coins chosen in Coin Control are no longer available. Choose again, or go back to Automatic.");
+      spendableSompi = chosen.reduce((sum, entry) => sum + utxoEntrySompi(entry), 0n);
+    }
+    if (requestedSompi + feeReserveSompi > spendableSompi) {
+      throw new Error(manualKeys
+        ? `Not enough ${KAS_UNIT} in the chosen coins: planned spend ${amountKas} ${KAS_UNIT}, but they hold ${formatSompiPlain(spendableSompi)} ${KAS_UNIT}, less than required after the network fee.`
+        : `Not enough ${KAS_UNIT}: planned spend ${amountKas} ${KAS_UNIT}, but the available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`);
     }
     // The payment payload, as iOS writes it: kchat:1:pay: + the payment JSON (the memo is its
     // "message") encrypted to the contact's chat address. Built before a pool address is consumed.
@@ -17899,11 +18038,13 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
             destinationAddress,
             amountKas,
             feeKas: "0",
+            extraFeeSompi: extraSompi,
+            manualUtxos: manualKeys,
             changeAddress: payFresh?.address || null,
             payload,
             exactAmount: true,
           })
-        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true });
+        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys });
       if (payFresh) {
         if (keepsPrimary) revealSpendingChangeAddress(payFresh);
         else rotatePrimarySpendingTo(payFresh);

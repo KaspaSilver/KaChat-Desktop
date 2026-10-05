@@ -6,7 +6,11 @@
 // submitted (service.js); it returns the txid and refreshes the registry once the REST API reports
 // the transaction accepted. `plan(op)` builds the same transaction without sending it (the sheets).
 // The registration is commit -> wait tCommit (+20) DAA -> register, driven automatically and
-// resumable (records in localStorage, per wallet). Testnet-10 only (KachatNamesService.isLaunched).
+// resumable (records in localStorage, per wallet). Testnet-10 only (KachatNamesService.isLaunched),
+// except the address profile record (`profileSigner`, `profileFee`, `saveProfile`), which works on
+// every network (KachatNamesService.profilesEnabled, iOS d36fc42): it is a self-send, not registry
+// data, so on mainnet the app builds these actions over an inert registry (isEnabled false) and
+// only the profile methods are used.
 //
 // Owner actions on a name one of the wallet's SPENDING addresses holds (iOS 881ada6) sign - and pay
 // their fee - with that address's derived key: the app passes `wallet` hooks (see the constructor)
@@ -27,6 +31,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
 import { getEndpoint } from "../endpoints.js";
+import { ADDRESS_HRP, isNetworkAddress } from "../network.js";
 import { enqueueSend, excludeReservedUtxos } from "../transactions.js";
 import {
   Failure, minFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
@@ -37,7 +42,7 @@ import { templateScript, paramsPrice } from "./manifest.js";
 import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { OfferInfo, Profile, Status } from "./registry-state.js";
-import { KachatNamesService, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
+import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
 
 // MARK: - Registration records
 
@@ -101,6 +106,8 @@ export class ActionError extends Error {
   }
 
   static noWallet() { return new ActionError("noWallet", "No testnet wallet is open."); }
+  /** No wallet (address and key) is open at all - the profile signer, on any network. */
+  static noOpenWallet() { return new ActionError("noWallet", "No wallet is open."); }
   static keyMismatch() { return new ActionError("keyMismatch", "This wallet's key does not match its address."); }
   static invalidKey(what) { return new ActionError("invalidKey", `${what} is not a valid key (not on the secp256k1 curve).`); }
   static noSalt() { return new ActionError("noSalt", "The secret for this registration is missing on this device."); }
@@ -232,6 +239,22 @@ export class KachatNamesActions {
     if (!address.startsWith("kaspatest:") || !key) throw ActionError.noWallet();
     const me = xonlyKey(key);
     if (!bytesEqual(keyOf(address), me)) throw ActionError.keyMismatch();
+    return { address, privateKey: key, me };
+  }
+
+  /** The current wallet's chatting address and key on the network the app runs on - the profile
+   *  record's signer (iOS d36fc42 profileSigner). Unlike `signer()` it isn't testnet-only: profiles
+   *  work on mainnet before its registry launches (KachatNamesService.profilesEnabled).
+   *  `{ address, privateKey: hex, me: Uint8Array(32) }`. */
+  profileSigner() {
+    if (!KachatNamesService.profilesEnabled) throw ServiceError.testnetOnly();
+    const address = String(this.engine?.address ?? "").trim().toLowerCase();
+    const key = this.engine?.privateKeyHex;
+    if (!address || !key) throw ActionError.noOpenWallet();
+    if (!isNetworkAddress(address)) throw ServiceError.wrongAddressNetwork();
+    const me = xonlyKey(key);
+    const own = keyOf(address, ADDRESS_HRP);
+    if (!own || !bytesEqual(own, me)) throw ActionError.keyMismatch();
     return { address, privateKey: key, me };
   }
 
@@ -458,15 +481,13 @@ export class KachatNamesActions {
     return txId;
   }
 
-  // MARK: Profile record
+  // MARK: Profile record (every network: profileSigner)
 
-  /** Writes the address profile (`kchat:1:profile:`): a self-transfer, network fee only.
-   *  `profile`: a Profile (registry-state.js) or its plain fields. Returns the txid. */
   /** What saving `profile` will cost (iOS profileFee): the profile record is a self-transfer from
    *  the chatting address, so the network fee is all it spends. Estimated the way the save builds
    *  it (plain coins only, same payload), never sent. BigInt sompi. */
   async profileFee(profile) {
-    const s = this.signer();
+    const s = this.profileSigner();
     const clean = (profile instanceof Profile ? profile : new Profile(profile ?? {})).sanitized();
     const payload = profileRecordPayload(clean.recordJSON());
     const utxos = await this.engine.getUtxosWithCovenants([s.address]);
@@ -478,13 +499,17 @@ export class KachatNamesActions {
     return BigInt(fee);
   }
 
+  /** Writes the address profile (`kchat:1:profile:`): a self-transfer, network fee only.
+   *  `profile`: a Profile (registry-state.js) or its plain fields. Remembers it as this wallet's own
+   *  profile (registry.noteOwnProfile, per network) and, where the registry is launched, refreshes
+   *  it once accepted. Returns the txid. */
   async saveProfile(profile) {
-    const s = this.signer();
+    const s = this.profileSigner();
     const clean = (profile instanceof Profile ? profile : new Profile(profile ?? {})).sanitized();
     const json = clean.recordJSON();
     const txId = await this.service.submitProfileRecord({ address: s.address, json });
     await this.registry.noteOwnProfile(clean, s.address, txId);
-    this.registry.refreshAfter(txId);
+    if (KachatNamesService.isLaunched) this.registry.refreshAfter(txId);
     return txId;
   }
 

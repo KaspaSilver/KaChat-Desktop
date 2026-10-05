@@ -8,9 +8,16 @@
 //    the same screens as testnet (empty, under "Coming soon") and people by assigned name, else
 //    .kachat name, else short address - never by KNS.
 //  - `kachatNamesLaunched()`: a live registry here - testnet-10 only for now (engine/network.js
-//    IS_TESTNET). The runtime is built only then, so `kachatNames()` is null on mainnet and nothing
-//    there reads or writes a registry: refresh, identity lookups, owner tags, registration resume
-//    and typed-name resolution all need the runtime.
+//    IS_TESTNET). `kachatNames()` is the registry runtime and exists only then, so it is null on
+//    mainnet and nothing there reads or writes a registry: refresh, owner tags, registration
+//    resume and typed-name resolution all need it.
+//  - `kachatProfilesEnabled()`: address profiles (iOS d36fc42) - every network. A profile is a
+//    `kchat:1:profile:` self-send, not registry data, so `kachatProfiles()` exists on mainnet too:
+//    the same `{ engine, service, registry, actions }` shape, where on mainnet the registry is inert
+//    (isEnabled false: prepare/reads refuse, refreshes are no-ops) and only the profile side runs -
+//    `registry.identity(address)` (profile-only: own saved record, else GET /profiles/{address} on
+//    the chat indexer), `registry.ownProfile` / `noteOwnProfile`, `actions.profileSigner` /
+//    `profileFee` / `saveProfile`. On testnet `kachatProfiles()` is the registry runtime itself.
 import { IS_TESTNET } from "../engine/network.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { KachatNamesService } from "../engine/kachat-names/service.js";
@@ -18,6 +25,8 @@ import { KachatNamesRegistry } from "../engine/kachat-names/registry.js";
 import { KachatNamesActions } from "../engine/kachat-names/actions.js";
 
 let runtime = null;
+/** the profile-only runtime where the registry isn't launched (mainnet) */
+let profilesRuntime = null;
 
 const localStorageAdapter = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -30,6 +39,10 @@ export function kachatNamesUiEnabled() { return KachatNamesService.isEnabled; }
 /** Whether this network has a live .kachat registry (testnet-10 for now; iOS isLaunched). */
 export function kachatNamesLaunched() { return IS_TESTNET && KachatNamesService.isLaunched; }
 
+/** Whether address profiles (save your own, read others') work here: every network (iOS
+ *  profilesEnabled, d36fc42). */
+export function kachatProfilesEnabled() { return KachatNamesService.profilesEnabled; }
+
 /**
  * Builds the runtime once the engine exists, where the registry is launched. Safe to call more
  * than once. `wallet` (optional): the wallet's other addresses for owner actions on names they hold
@@ -37,7 +50,12 @@ export function kachatNamesLaunched() { return IS_TESTNET && KachatNamesService.
  * kasSignerAddresses() -> [{ account, index, address }] }`; see engine/kachat-names/actions.js.
  */
 export function initKachatNamesRuntime(engine, { wallet = null } = {}) {
-  if (runtime || !kachatNamesLaunched() || !engine) return runtime;
+  if (!engine) return runtime;
+  if (!kachatNamesLaunched()) {
+    initProfilesOnly(engine);
+    return runtime;
+  }
+  if (runtime) return runtime;
   const service = new KachatNamesService(engine);
   const registry = new KachatNamesRegistry({
     manifest: () => service.loadManifest(),
@@ -66,5 +84,30 @@ export function initKachatNamesRuntime(engine, { wallet = null } = {}) {
   return runtime;
 }
 
-/** The shared runtime, or null where the registry is not launched (mainnet) or before init. */
+/** Mainnet: the service, an inert registry (no manifest, isEnabled false - it never reads or writes
+ *  registry data, only profiles) and the actions for the profile record. No name hooks: typed
+ *  names don't resolve where there is no registry. */
+function initProfilesOnly(engine) {
+  if (profilesRuntime || !kachatProfilesEnabled()) return profilesRuntime;
+  const service = new KachatNamesService(engine);
+  const registry = new KachatNamesRegistry({
+    manifest: null,
+    isEnabled: () => false,
+    getUtxosByAddresses: null,
+    restBase: () => "",
+    indexerBase: () => getEndpoint("kasiaIndexer"),
+    storage: localStorageAdapter,
+  });
+  const actions = new KachatNamesActions({ engine, service, registry });
+  profilesRuntime = { engine, service, registry, actions };
+  return profilesRuntime;
+}
+
+/** The shared registry runtime, or null where the registry is not launched (mainnet) or before init. */
 export function kachatNames() { return runtime; }
+
+/** The runtime for address profiles on every network (`{ engine, service, registry, actions }`):
+ *  the registry runtime where it is launched, else the profile-only one (inert registry). Null
+ *  before init. Use only the profile side of it: registry.identity / ownProfile / noteOwnProfile /
+ *  onChange / revision and actions.profileSigner / profileFee / saveProfile / myAddress. */
+export function kachatProfiles() { return runtime ?? profilesRuntime; }

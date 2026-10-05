@@ -14,6 +14,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { schnorr } from "@noble/curves/secp256k1.js";
+import { execFileSync } from "node:child_process";
 
 // engine/network.js reads the network once, at import: open the testnet gate first
 const store = new Map([["kachat-network-v1", "testnet"]]);
@@ -475,6 +476,73 @@ async function main() {
   r.eq(advanced, 0, "driver: no step while registryUpgrading");
   r.eq(drv._driver, null, "driver: stopped while registryUpgrading");
   drv.stop();
+
+  // MARK: address profiles on every network (iOS d36fc42): profileSigner, saveProfile
+  r.check(S.KachatNamesService.profilesEnabled && new S.KachatNamesService(fakeEngine()).profilesEnabled, "profilesEnabled on testnet");
+  const ps = actions.profileSigner();
+  r.check(ps.address === sg.address && C.hex(ps.me) === C.hex(sg.me) && ps.privateKey === sg.privateKey, "actions.profileSigner = the chatting signer on testnet");
+  const mainnetAddr = RS.addressOf(me, "kaspa");
+  await r.throws(() => new A.KachatNamesActions({ engine: { ...actEngine, address: mainnetAddr }, service: dry, registry: registryStub, storage }).profileSigner(),
+    (e) => e instanceof S.ServiceError && e.code === "wrongAddressNetwork", "profileSigner refuses an address of the other network");
+  await r.throws(() => new A.KachatNamesActions({ engine: { ...actEngine, privateKeyHex: C.hex(other) }, service: dry, registry: registryStub, storage }).profileSigner(),
+    (e) => e.code === "keyMismatch", "profileSigner refuses a key that is not the address's");
+  await r.throws(() => new A.KachatNamesActions({ engine: { ...actEngine, privateKeyHex: null }, service: dry, registry: registryStub, storage }).profileSigner(),
+    (e) => e.code === "noWallet", "profileSigner: no wallet");
+  await r.throws(() => dry.submitProfileRecord({ json: okJson, address: mainnetAddr }),
+    (e) => e.code === "wrongAddressNetwork", "submitProfileRecord refuses an address of the other network");
+  {
+    const calls = [];
+    const stubRegistry = { ...registryStub, noteOwnProfile: async (p, a, t) => { calls.push(["note", a, t, p.bio]); }, refreshAfter: (t) => { calls.push(["refresh", t]); } };
+    const stubService = { submitProfileRecord: async ({ address, json }) => { calls.push(["submit", address, JSON.parse(json).v]); return "ab".repeat(32); } };
+    const pa = new A.KachatNamesActions({ engine: actEngine, service: stubService, registry: stubRegistry, storage });
+    const txId = await pa.saveProfile({ bio: "github.com/me" });
+    r.eq(JSON.stringify(calls), JSON.stringify([["submit", sg.address, 1], ["note", sg.address, "ab".repeat(32), "https://github.com/me"], ["refresh", "ab".repeat(32)]]), "saveProfile on testnet: submit, note, refresh");
+    r.eq(txId, "ab".repeat(32), "saveProfile returns the txid");
+  }
+  // mainnet: engine/network.js reads the network once per process, so a child process runs it
+  {
+    const child = `
+      globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+      const S = await import("./engine/kachat-names/service.js");
+      const A = await import("./engine/kachat-names/actions.js");
+      const RS = await import("./engine/kachat-names/registry-state.js");
+      const C = await import("./engine/kachat-names/codec.js");
+      const sk = new Uint8Array(32); sk[0] = 0x5a; sk[31] = 77;
+      const me = S.xonlyKey(sk);
+      const address = RS.addressOf(me, "kaspa");
+      const out = { isLaunched: S.KachatNamesService.isLaunched, profilesEnabled: S.KachatNamesService.profilesEnabled };
+      const calls = [];
+      const registry = { noteOwnProfile: async (p, a) => { calls.push("note:" + a); }, refreshAfter: () => { calls.push("refresh"); } };
+      const service = { submitProfileRecord: async ({ address: a }) => { calls.push("submit:" + a); return "cd".repeat(32); } };
+      const engine = { address, privateKeyHex: C.hex(sk) };
+      const actions = new A.KachatNamesActions({ engine, service, registry, storage: { get: () => null, set: () => {} } });
+      const err = (f) => { try { f(); return null; } catch (e) { return e.code ?? e.message; } };
+      out.profileSigner = (() => { try { const s = actions.profileSigner(); return s.address === address && C.hex(s.me) === C.hex(me); } catch (e) { return e.code ?? e.message; } })();
+      out.signer = err(() => new A.KachatNamesActions({ engine, registry, storage: { get: () => null, set: () => {} } }).signer());
+      out.testnetAddress = err(() => new A.KachatNamesActions({ engine: { ...engine, address: RS.addressOf(me) }, service, registry, storage: { get: () => null, set: () => {} } }).profileSigner());
+      out.manifest = await new S.KachatNamesService({}).loadManifest().then(() => null, (e) => e.code);
+      out.submitTestnet = await new S.KachatNamesService({}).submitProfileRecord({ json: '{"v":1}', address: RS.addressOf(me) }).then(() => null, (e) => e.code);
+      out.submitNoWallet = await new S.KachatNamesService({}).submitProfileRecord({ json: '{"v":1}', address }).then(() => null, (e) => e.message);
+      out.saved = await actions.saveProfile({ bio: "x.com/me" });
+      out.calls = calls;
+      out.address = address;
+      console.log(JSON.stringify(out));`;
+    let res = null;
+    try {
+      res = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", child], { cwd: repo, encoding: "utf8" }).trim().split("\n").pop());
+    } catch (e) { r.check(false, `mainnet child process failed: ${e.stderr || e.message}`); }
+    if (res) {
+      r.check(res.isLaunched === false && res.profilesEnabled === true, "mainnet: registry not launched, profiles enabled");
+      r.eq(res.profileSigner, true, "mainnet: profileSigner signs for the kaspa: address");
+      r.eq(res.signer, "testnetOnly", "mainnet: the registry signer stays testnet-only");
+      r.eq(res.testnetAddress, "wrongAddressNetwork", "mainnet: profileSigner refuses a kaspatest: address");
+      r.eq(res.manifest, "testnetOnly", "mainnet: no manifest");
+      r.eq(res.submitTestnet, "wrongAddressNetwork", "mainnet: submitProfileRecord refuses a kaspatest: address");
+      r.eq(res.submitNoWallet, "Load the wallet first.", "mainnet: submitProfileRecord passes the network gate for a kaspa: address");
+      r.eq(res.saved, "cd".repeat(32), "mainnet: saveProfile returns the txid");
+      r.eq(JSON.stringify(res.calls), JSON.stringify([`submit:${res.address}`, `note:${res.address}`]), "mainnet: saveProfile submits and notes, no registry refresh");
+    }
+  }
 
   // MARK: report
   for (const sk2 of r.skipped) console.log(`SKIPPED ${sk2}`);

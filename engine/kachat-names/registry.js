@@ -14,8 +14,15 @@
 //   Cached per network in `storage`.
 //
 // Records from either source are only read here; every action must re-read its UTXOs from a node
-// before it builds anything. Testnet-10 only. Every I/O dependency is injected (no app imports),
-// and nothing runs at import.
+// before it builds anything. The registry is testnet-10 only. Every I/O dependency is injected (no
+// app imports), and nothing runs at import.
+//
+// Where the network has no registry (`isEnabled()` false: mainnet, iOS d36fc42) the registry is
+// inert - `prepare()` and every registry read refuse, refreshes are no-ops - and only the address
+// profile side works: `identity(address)` answers a profile-only identity (no label, no names) from
+// this device's own saved record, else the indexer's `GET /profiles/{address}`. A 503 there pauses
+// all profile lookups for 10 minutes, any other failure that address for 5 minutes. Own profile
+// records are stored per network (`ownProfileStorageKey`).
 //
 // The Swift file also holds KachatSocialImageResolver (a profile's avatar, banner and bio, looked
 // up on the device from its social links). Here it lives in social-image-resolver.js and is
@@ -24,7 +31,7 @@
 import { Failure, hex, normalize, validate, isValid, key as nameKey } from "./codec.js";
 import {
   RegistryState, TxView, Lookup, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
-  addressOf, keyOf, shortAddress, p2shAddress, step,
+  addressOf, keyOf, shortAddress, p2shAddress, step, decodeAddress,
 } from "./registry-state.js";
 
 export {
@@ -33,8 +40,25 @@ export {
 
 /** The storage key of the walker's cache (testnet-10). */
 export const registryCacheKey = "kachat-names-registry-testnet-v1";
-/** The storage key prefix of this device's own profile records (`<prefix>:<address>`). */
+/** The storage key prefix of this device's own profile records on testnet (`<prefix>:<address>`). */
 export const ownProfileKeyPrefix = "kachat-names-profile-testnet-v1";
+/** The own-profile storage key prefix of a network ("mainnet" | "testnet"): "kachat-names-profile-<network>-v1"
+ *  (testnet's is `ownProfileKeyPrefix`, so records saved before mainnet profiles existed are found). */
+export function ownProfileKeyPrefixFor(network) {
+  return `kachat-names-profile-${network === "mainnet" ? "mainnet" : "testnet"}-v1`;
+}
+/** The storage key of this device's own profile record for `address`, on the network its prefix
+ *  names (`kaspa:` -> mainnet, anything else -> testnet): `<ownProfileKeyPrefixFor(network)>:<address>`. */
+export function ownProfileStorageKey(address) {
+  const a = String(address ?? "").trim().toLowerCase();
+  return `${ownProfileKeyPrefixFor(a.startsWith("kaspa:") ? "mainnet" : "testnet")}:${a}`;
+}
+/** A 503 from `GET /profiles/{address}` (an indexer without the profiles follower) pauses every
+ *  profile-only lookup this long (10 minutes). */
+export const profilesUnavailablePauseMs = 600_000;
+/** Any other failed profile-only lookup pauses that address this long (5 minutes). */
+export const profileMissPauseMs = 300_000;
+const profileMissesMax = 2000;
 /** Grace when no manifest is loaded yet (10 days). */
 const defaultGraceMs = 864_000_000n;
 
@@ -136,6 +160,10 @@ export class KachatNamesRegistry {
     this._ownProfiles = new Map();
     this._listeners = new Set();
     this._refreshing = null;
+    /** unix ms until which profile-only lookups are paused (the indexer answered 503) */
+    this._profilesUnavailableUntil = 0;
+    /** lowercased address -> unix ms of its last failed profile-only lookup */
+    this._profileMisses = new Map();
   }
 
   // MARK: - Observing (Swift @Published)
@@ -165,8 +193,10 @@ export class KachatNamesRegistry {
     return m;
   }
 
-  /** The verified manifest, with the source picked and the walker's cache loaded. */
+  /** The verified manifest, with the source picked and the walker's cache loaded. Refuses where
+   *  the network has no registry (`isEnabled()` false), so no registry read runs there. */
   async prepare({ forceSourceCheck = false } = {}) {
+    if (!this.deps.isEnabled()) throw new Failure("there is no .kachat registry on this network yet");
     const m = await this._loadManifest();
     if (this.source == null || forceSourceCheck) {
       this.source = await this._chooseSource(m);
@@ -184,11 +214,16 @@ export class KachatNamesRegistry {
     this.chainState = null;
     this._cacheNetwork = null;
     this._ownProfiles = new Map();
+    this._profilesUnavailableUntil = 0;
+    this._profileMisses = new Map();
     this.lastError = null;
     this.registryUpgrading = false;
     this.refreshedAt = null;
     this._bump();
   }
+
+  /** Whether this network has a live registry (the `isEnabled()` dep): false = profiles only. */
+  get isLaunched() { return !!this.deps.isEnabled(); }
 
   /** The manifest's grace period (ms, BigInt). */
   get graceMs() { return this.manifest?.params.graceMs ?? defaultGraceMs; }
@@ -330,6 +365,7 @@ export class KachatNamesRegistry {
   /** After a submit: wait (up to ~2 minutes) for the transaction to be accepted, then refresh.
    *  Returns the promise (callers need not await it). */
   refreshAfter(txId) {
+    if (!this.deps.isEnabled()) return Promise.resolve();
     return (async () => {
       for (let attempt = 0; attempt < 40; attempt++) {
         await this.deps.sleep((attempt < 5 ? 2 : 3) * 1000);
@@ -513,10 +549,12 @@ export class KachatNamesRegistry {
 
   /** The label and profile of an address (KACHAT_NAMES.md section 7): `{ address, label, names,
    *  profile }`. Without an indexer the label comes from the walked names, and the profile is known
-   *  only for this wallet's own address (the record it last wrote). */
+   *  only for this wallet's own address (the record it last wrote). Where the network has no
+   *  registry (mainnet) it is `profileOnlyIdentity`. */
   async identity(rawAddress) {
+    const address = String(rawAddress).trim().toLowerCase();
+    if (!this.deps.isEnabled()) return this.profileOnlyIdentity(address);
     await this.prepare();
-    const address = String(rawAddress).toLowerCase();
     if (this.source.kind === "indexer") {
       return IndexerAPI.identity(await this._get(this.source.base, `/identity/${address}`));
     }
@@ -528,12 +566,63 @@ export class KachatNamesRegistry {
     return makeIdentity({ address, label: lbl, names: owned.map((n) => n.name), profile });
   }
 
+  /**
+   * An address's identity where the network has no registry yet (mainnet, iOS d36fc42
+   * profileOnlyIdentity): `{ address, label: null, names: [], profile: Profile|null }`. This
+   * device's own saved record for the address wins; else the indexer's `GET /profiles/{address}`
+   * (200 with `profile: null` = no profile). A 503 there (no profiles follower on this network)
+   * pauses every lookup for `profilesUnavailablePauseMs` (10 min); any other failure pauses that
+   * address for `profileMissPauseMs` (5 min). While paused, or with no indexer, it throws without
+   * a request, so a render loop can't become a request loop. Works on either network (it reads no
+   * registry data); `identity()` uses it where `isEnabled()` is false.
+   */
+  async profileOnlyIdentity(rawAddress) {
+    const address = String(rawAddress ?? "").trim().toLowerCase();
+    const own = (await this.ownProfile(address))?.profile ?? null;
+    if (own) return makeIdentity({ address, profile: own.sanitized() });
+    // not a Kaspa address: nothing to ask (and nothing unchecked goes into the URL)
+    if (!decodeAddress(address)) return makeIdentity({ address });
+    const now = Number(this._nowMs());
+    const base = this.indexerBase();
+    if (!base || now < this._profilesUnavailableUntil) throw new Failure("profiles are not indexed on this network yet");
+    const missed = this._profileMisses.get(address);
+    if (missed != null && now - missed < profileMissPauseMs) throw new Failure("this profile lookup failed recently");
+    const miss = (message) => {
+      this._profileMisses.delete(address);
+      this._profileMisses.set(address, now);
+      while (this._profileMisses.size > profileMissesMax) this._profileMisses.delete(this._profileMisses.keys().next().value);
+      return new Failure(message);
+    };
+    let res;
+    try {
+      res = await this._fetch(`${base}/profiles/${address}`, 15_000);
+    } catch (e) {
+      throw miss(`the names indexer could not be reached (${e?.message ?? e})`);
+    }
+    if (res.status === 503) {
+      this._profilesUnavailableUntil = now + profilesUnavailablePauseMs;
+      throw miss("the names indexer answered 503");
+    }
+    if (res.status !== 200) throw miss(res.status === 404 ? "not found" : `the names indexer answered ${res.status}`);
+    let record;
+    try {
+      record = IndexerAPI.profile(JSON.parse(await res.text()));
+    } catch {
+      throw miss("the names indexer sent an unreadable profile");
+    }
+    this._profileMisses.delete(address);
+    return makeIdentity({ address, profile: record.profile?.sanitized() ?? null });
+  }
+
+  /** Unix ms until which profile-only lookups are paused after a 503 (0 = not paused). */
+  get profilesPausedUntil() { return this._profilesUnavailableUntil; }
+
   /** The profile record this device last wrote for `address`: `{ address, profile: Profile, txId,
-   *  at: Number }` or null. Swift `ownProfile(for:)`. */
+   *  at: Number }` or null. Swift `ownProfile(for:)`. Stored per network (`ownProfileStorageKey`). */
   async ownProfile(rawAddress) {
-    const address = String(rawAddress).toLowerCase();
+    const address = String(rawAddress).trim().toLowerCase();
     if (this._ownProfiles.has(address)) return this._ownProfiles.get(address);
-    const text = await this._storageGet(`${ownProfileKeyPrefix}:${address}`);
+    const text = await this._storageGet(ownProfileStorageKey(address));
     if (!text) return null;
     try {
       const j = JSON.parse(text);
@@ -550,9 +639,10 @@ export class KachatNamesRegistry {
   /** Remember the profile record this wallet just wrote (a Profile or its plain fields). */
   async noteOwnProfile(profile, rawAddress, txId) {
     const p = profile instanceof Profile ? profile : new Profile(profile ?? {});
-    const record = { address: String(rawAddress).toLowerCase(), profile: p.sanitized(), txId, at: Number(this._nowMs()) };
+    const record = { address: String(rawAddress).trim().toLowerCase(), profile: p.sanitized(), txId, at: Number(this._nowMs()) };
     this._ownProfiles.set(record.address, record);
-    await this._storageSet(`${ownProfileKeyPrefix}:${record.address}`, JSON.stringify({ ...record, profile: record.profile.toJSON() }));
+    this._profileMisses.delete(record.address);
+    await this._storageSet(ownProfileStorageKey(record.address), JSON.stringify({ ...record, profile: record.profile.toJSON() }));
     this._bump();
   }
 

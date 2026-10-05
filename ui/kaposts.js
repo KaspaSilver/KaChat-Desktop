@@ -2709,7 +2709,7 @@ function renderPanel() {
             </button>
           </span>` : ""}
         </div>
-        ${isMine ? `<button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns>Edit .kachat Profile</button>` : ""}
+        ${isMine ? `<button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns>Edit KaChat Profile</button>` : ""}
       </div>
       <div class="kaposts-feed-tabs kaposts-profile-tabs">
         <button class="kaposts-feed-tab${panel.tab !== "replies" ? " active" : ""}" type="button" data-kaposts-profile-tab="posts">Posts</button>
