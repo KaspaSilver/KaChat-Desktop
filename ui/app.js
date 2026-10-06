@@ -14,6 +14,7 @@ import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBro
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatProfiles } from "./kachat-names-runtime.js";
 import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange } from "./kachat-names-live.js";
+import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
@@ -5599,14 +5600,16 @@ const NOTIF_SESSION_START = Date.now();
 const notifOverlay = document.querySelector("[data-notif-overlay]");
 let globalNotifications = [];
 let notifCenterLastSeenAt = 0;
-const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Public Chats", wallet: "Wallet" };
+const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Public Chats", wallet: "Wallet", kachat: ".kachat" };
 // The Profile bell is for broadcasts and for Kaspa arriving on your addresses (chatting,
 // spending, cold storage). KaPosts has its own bell inside KaPosts, and group @mentions ping
 // the chat itself, so neither lands here.
-// The profile bell is wallet activity only (iOS cda2715): public rooms carry their own unread
-// in the Chats tab, KaPosts its own badge. Rows of other kinds saved by older builds are dropped
-// on load.
-const NOTIF_CENTER_SOURCES = new Set(["wallet"]);
+// The profile bell holds Kaspa arriving on your addresses and news about your .kachat names
+// (iOS 86471dd / 4500ebc: offers, sales, renewal and expiry, what became of your offers - from
+// kachat-names-notifier.js). Never KaPosts (its own bell), and not group chats or public rooms
+// (their own unread counts in the Chats tab). Rows of other kinds saved by older builds are
+// dropped on load, and refused when recorded.
+const NOTIF_CENTER_SOURCES = new Set(["wallet", "kachat"]);
 
 function loadNotifCenter() {
   try { globalNotifications = JSON.parse(localStorage.getItem(accountScopedKey(NOTIF_CENTER_KEY)) || "[]").filter((n) => NOTIF_CENTER_SOURCES.has(n?.source)); }
@@ -5651,7 +5654,7 @@ function renderNotifCenter() {
   const list = document.querySelector("[data-notif-list]");
   if (!list) return;
   if (!globalNotifications.length) {
-    list.innerHTML = `<div class="notif-center-empty">No notifications yet<small>Kaspa arriving on your addresses shows up here.</small></div>`;
+    list.innerHTML = `<div class="notif-center-empty">No notifications yet<small>Kaspa arriving in your wallets and news about your .kachat names show up here.</small></div>`;
     return;
   }
   list.innerHTML = globalNotifications.map((n) => `
@@ -5700,6 +5703,9 @@ document.querySelector("[data-notif-list]")?.addEventListener("click", (event) =
   } else if (notif.targetKind === "wallet" || notif.targetKind === "address") {
     // Received-Kaspa rows open the Portfolio tab.
     setActiveAppTab("portfolio");
+  } else if (notif.targetKind === "kachat") {
+    // .kachat news opens the name (iOS 86471dd), the way a tapped .kachat push does.
+    openKachatNameFromBell(notif.targetId, { showTab: () => setActiveAppTab("kachat-names") });
   } else {
     setActiveAppTab("kaposts");
     // KaPosts rows deep-open the exact post/comment when a target txid was recorded.
@@ -5851,7 +5857,7 @@ let otherServiceNames = { k: null, kaspa: null }; // { state, names: [{ name, di
 let otherServiceNamesFor = "";
 let otherServiceNamesAt = 0;
 // The account's .kachat names for the Your Domains count (iOS 10e4a1a): the set its .kachat tab
-// lists, grace and lapsed included; 0 where the registry isn't launched.
+// lists - active and in grace, never lapsed (iOS aa36d2a); 0 where the registry isn't launched.
 let kachatOwnedCount = 0;
 let kachatOwnedCountFor = "";
 let kachatOwnedCountUnsubscribe = null;
@@ -9800,7 +9806,9 @@ async function refreshKachatOwnedCount() {
     kachatOwnedCountUnsubscribe = onKachatRegistryChange(() => refreshKachatOwnedCount());
   }
   try {
-    const count = await kachatOwnedNameCount(address);
+    // the names Your Domains lists (no lapsed ones); one that lapses meanwhile comes off the count
+    // right then (iOS aa36d2a)
+    const count = await kachatOwnedNameCount(address, { onLapse: () => refreshKachatOwnedCount() });
     if (engine.address !== address) return; // account switched meanwhile
     if (kachatOwnedCountFor === address && kachatOwnedCount === count) return;
     kachatOwnedCount = count;
@@ -10028,7 +10036,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 103;
+const APP_BUILD = 104;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15676,18 +15684,31 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
   if (paymentMode) openPaymentSheet();
 }
 
-// --- KaPosts quick tip modal ------------------------------------------------
-// Send-Kaspa-style tip, matching iOS's KaPostTipSheet: fixed recipient + pool-destination
-// indicator, amount with Max + the FUNDING SOURCE's real balance (primary spending address
-// when Payment Privacy is on, chatting address when off), Normal/Fast/Priority fee tiers.
-// The send routes through the exact chat-payment rules (consumePoolPaymentDestination +
-// privacy-gated funding) and drops the payment bubble into the 1:1 conversation.
-const TIP_FEE_MULTIPLIERS = { normal: 1, fast: 2, priority: 5 };
+// --- KaPosts tip sheet -------------------------------------------------------
+// The same Send Kaspa sheet as a payment in a chat (iOS 0e08006, KaPostTipSheet), built from the
+// shared pieces (send-kaspa-components.js): "Tip / to <name>", the big amount with the KAS /
+// currency switch and Max, where it goes (a fresh private address they shared, or their public
+// chatting address), the FUNDING SOURCE's available balance (primary spending address when
+// Payment Privacy is on, chatting address when off), the fee card (speed, custom fee, Coin
+// Control), the small-amount question, and slide-to-send. The send itself is unchanged: a plain
+// payment with no payload, through the exact chat-payment rules (consumePoolPaymentDestination +
+// privacy-gated funding), with the payment bubble in the 1:1 conversation. The contact is created
+// only when a tip is actually sent.
+const TIP_FEE_MULTIPLIERS = { normal: 1n, fast: 2n, priority: 5n };
 const tipModal = document.querySelector("[data-tip-modal]");
+mountSendPieces(tipModal, {
+  amount: amountEntryHtml({ prefix: "tip", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})` }),
+  // Prefix "tip-kas" so its data-tip-kas-fee="tier" buttons never collide with the other data-tip-*.
+  fee: feeControlsHtml({ prefix: "tip-kas" }),
+  action: sendActionButtonHtml({ attr: "tip-send", title: "Slide to Send" }),
+});
+const tipFeeCtl = feeControls(tipModal, "tip-kas");
 let tipState = null;
 let tipFeeEstimateToken = 0;
+let tipFeeTimer = null;
 
 function tipQ(selector) { return tipModal ? tipModal.querySelector(selector) : null; }
+const tipSlider = createSendActionButton(tipQ("[data-tip-send]"), { onAction: () => submitTipSheet() });
 
 // --- KaPosts Settings (iOS a566da7) ------------------------------------------
 // The gear in KaPosts' icon row: a default tip (tapping Tip sends it at once, no amount screen)
@@ -15835,64 +15856,200 @@ async function sendInstantTip(address, name, amountKasNumber) {
   }
 }
 
+// The red error, else the orange dust warning, and whether the slider can be used (the chat sheet's
+// refreshPaymentSheetState).
+function tipRefreshState() {
+  const tip = tipState;
+  const sompi = tipAmountSompi();
+  const note = tipQ("[data-tip-note]");
+  if (note) {
+    const error = tip?.error || "";
+    note.classList.toggle("error", Boolean(error));
+    if (error) {
+      note.textContent = error;
+      note.hidden = false;
+    } else if (sompi > 0n && sompi < 10_000_001n) {
+      // 0.10000001 KAS = 10_000_001 sompi, the network dust limit (iOS).
+      note.textContent = `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`;
+      note.hidden = false;
+    } else {
+      note.textContent = "";
+      note.hidden = true;
+    }
+  }
+  const sending = Boolean(tip?.sending);
+  if (tipSlider.busy !== sending) tipSlider.setBusy(sending);
+  tipSlider.setEnabled(Boolean(tip) && sompi > 0n && !sending);
+}
+
 function tipSetError(message) {
-  const el = tipQ("[data-tip-error]");
-  if (!el) return;
-  if (message) { el.textContent = message; el.hidden = false; }
-  else { el.textContent = ""; el.hidden = true; }
+  if (tipState) tipState.error = message || "";
+  tipRefreshState();
 }
 
-function tipTotalFeeKas() {
-  if (!tipState?.policyFeeKas) return null;
-  return trimKas8(Number(tipState.policyFeeKas) * (TIP_FEE_MULTIPLIERS[tipState.tier] || 1));
+// The fee card: the base is the tip's own (Normal) fee from the estimate, in sompi; the extra over
+// it - Fast 2x, Priority 5x, or what a custom fee adds - goes to the send as a priority fee.
+function tipExtraFeeSompi() {
+  const tip = tipState;
+  if (!tip || tip.baseFeeSompi == null) return 0n;
+  if (tip.customExtraFeeSompi != null) return tip.customExtraFeeSompi;
+  return tip.baseFeeSompi * ((TIP_FEE_MULTIPLIERS[tip.tier] || 1n) - 1n);
 }
 
-// The priority tip handed to engine.send/sendFromSpending: displayed total minus the SDK's own
-// base fee (same model as the Send Kaspa modal's sendKaspaGetFeeKas).
-function tipExtraFeeKas() {
-  const total = Number(tipTotalFeeKas() || 0);
-  const sdkBase = Number(tipState?.sdkFeeKas || 0);
-  return total > sdkBase ? trimKas8(total - sdkBase) : "0";
+function tipTotalFeeSompi() {
+  const tip = tipState;
+  return tip?.baseFeeSompi == null ? null : tip.baseFeeSompi + tipExtraFeeSompi();
 }
 
 function tipRenderFee() {
-  const el = tipQ("[data-tip-fee]");
-  if (!el) return;
-  const total = tipTotalFeeKas();
-  el.textContent = total ? `Network fee: ${total} ${KAS_UNIT}` : "Network fee: --";
+  const tip = tipState;
+  const total = tipTotalFeeSompi();
+  tipFeeCtl.setEstimating(Boolean(tip?.estimating));
+  tipFeeCtl.setText(total == null ? null : `${formatSompiPlain(total)} ${KAS_UNIT}`);
+  // A custom fee lights no speed; picking one goes back to it.
+  tipFeeCtl.setTier(tip?.customExtraFeeSompi != null ? null : (tip?.tier || "normal"));
+  tipFeeCtl.setCoinSummary(coinControlSummaryText(tip?.manualUtxos?.length || 0));
 }
 
-// The tip typed on the sheet in sompi through the one exact parser (iOS IOS-010; "1,5" is 1.5);
-// 0n when there is none.
+// The tip typed on the sheet in sompi, 0n when there is none: KAS through the one exact parser
+// (iOS IOS-010; "1,5" is 1.5); a currency amount converted at the live price, cut to whole sompi.
 function tipAmountSompi() {
-  return sompiFromUserText(String(tipQ("[data-tip-amount]")?.value || "")) ?? 0n;
-}
-
-function tipUpdateSendEnabled() {
-  const send = tipQ("[data-tip-send]");
-  if (!send) return;
-  send.disabled = !tipState || tipState.sending || !(tipAmountSompi() > 0n);
-}
-
-async function tipEstimateFee() {
-  const state = tipState;
-  if (!state) return;
-  const amountSompi = tipAmountSompi();
-  if (!(amountSompi > 0n)) { state.policyFeeKas = null; state.sdkFeeKas = null; tipRenderFee(); return; }
-  const amountKas = kasTextFromSompi(amountSompi);
-  const token = ++tipFeeEstimateToken;
-  try {
-    const detail = state.fundingAddress
-      ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas)
-      : await engine.estimateSendFee(amountKas);
-    if (token !== tipFeeEstimateToken || tipState !== state) return;
-    state.policyFeeKas = detail.policyFeeKas;
-    state.sdkFeeKas = detail.sdkFeeKas;
-  } catch {
-    if (token !== tipFeeEstimateToken || tipState !== state) return;
-    state.policyFeeKas = null;
-    state.sdkFeeKas = null;
+  const text = String(tipQ("[data-tip-amount]")?.value || "");
+  if (tipState?.unit !== "fiat") {
+    const sompi = sompiFromUserText(text);
+    return sompi != null && sompi > 0n ? sompi : 0n;
   }
+  const entered = Number(text.trim().replace(",", "."));
+  if (!Number.isFinite(entered) || entered <= 0 || !(tipState.price > 0)) return 0n;
+  const sompi = sompiFromUserText(trimKas8(entered / tipState.price));
+  return sompi != null && sompi > 0n ? sompi : 0n;
+}
+
+// The unit after the number, the KAS / currency switch with the converted value, the amount's size.
+function tipRefreshUnitUi() {
+  const tip = tipState;
+  const input = tipQ("[data-tip-amount]");
+  const unitEl = tipQ("[data-tip-unit-code]");
+  const code = selectedCurrency.toUpperCase();
+  const fiat = tip?.unit === "fiat";
+  if (input) input.setAttribute("aria-label", fiat ? `Amount (${code})` : `Amount (${KAS_UNIT})`);
+  if (unitEl) unitEl.textContent = fiat ? code : KAS_UNIT;
+  layoutAmountEntry(input, unitEl);
+  const toggle = tipQ("[data-tip-unit]");
+  if (toggle) {
+    toggle.hidden = !(tip?.price > 0);
+    const sompi = tipAmountSompi();
+    const kas = sompi > 0n ? Number(sompi) / 1e8 : null;
+    let label = "";
+    if (kas != null && tip?.price > 0) label = fiat ? `≈ ${formatKasPlain(kas)} ${KAS_UNIT}` : `≈ ${formatFiatValue(kas, tip.price)}`;
+    const conversion = tipQ("[data-tip-conversion]");
+    if (conversion) conversion.textContent = label || (fiat ? KAS_UNIT : code);
+  }
+  tipRefreshState();
+}
+
+// "Available: X KAS · Primary spending address" (or the chatting address): what the send will see.
+function tipRenderAvailable() {
+  const el = tipQ("[data-tip-available]");
+  const tip = tipState;
+  if (!el || !tip) return;
+  const manual = tip.manualUtxos ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
+  let text;
+  if (manual != null) text = `Selected: ${formatSompiPlain(manual)} ${KAS_UNIT}`;
+  else if (tip.availableSompi != null) text = `Available: ${formatSompiPlain(tip.availableSompi)} ${KAS_UNIT}`;
+  else text = tip.availableFailed ? "Available: unavailable" : "Available: …";
+  el.innerHTML = availablePillInnerHtml({ text, sourceLabel: tip.fundingAddress ? "Primary spending address" : "Chatting address" });
+}
+
+// The fee from the address the tip will spend from (and the chosen coins), debounced like the
+// chat sheet's. A plain payment: no payload bytes.
+function tipScheduleFee() {
+  if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
+  tipFeeTimer = null;
+  const state = tipState;
+  const token = ++tipFeeEstimateToken;
+  const amountSompi = tipAmountSompi();
+  if (!state) return;
+  if (!(amountSompi > 0n)) {
+    state.estimating = false;
+    state.baseFeeSompi = null;
+    tipRenderFee();
+    return;
+  }
+  state.estimating = true;
+  tipRenderFee();
+  tipFeeTimer = window.setTimeout(async () => {
+    tipFeeTimer = null;
+    let base = null;
+    try {
+      await ensureRuntimes({ quiet: true });
+      const amountKas = kasTextFromSompi(amountSompi);
+      const selection = state.manualUtxos ? state.manualUtxos.map((coin) => coin.key) : null;
+      const detail = state.fundingAddress
+        ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas, selection)
+        : await engine.estimateSendFee(amountKas, selection);
+      base = detail?.sdkFeeSompi ?? null;
+    } catch {
+      base = null;
+    }
+    if (token !== tipFeeEstimateToken || tipState !== state) return;
+    state.estimating = false;
+    try { state.baseFeeSompi = base == null ? null : BigInt(base); } catch { state.baseFeeSompi = null; }
+    tipRenderFee();
+  }, 400);
+}
+
+// Max spends the chosen coins, else the whole available balance, less the same headroom the send
+// reserves for the network fee plus any Fast / Priority / custom extra (the chat sheet's Max).
+function tipSetMax() {
+  const tip = tipState;
+  const input = tipQ("[data-tip-amount]");
+  if (!tip || !input || tip.sending) return;
+  const manual = tip.manualUtxos ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
+  if (manual == null && tip.availableSompi == null) { showCopyToast("Balance unavailable right now."); return; }
+  const spendable = manual != null ? manual : tip.availableSompi;
+  const headroom = 10000n + tipExtraFeeSompi();
+  const max = spendable > headroom ? spendable - headroom : 0n;
+  if (!(max > 0n)) return;
+  input.value = tip.unit === "fiat" && tip.price > 0 ? ((Number(max) / 1e8) * tip.price).toFixed(2) : kasTextFromSompi(max);
+  tip.error = "";
+  tipRefreshUnitUi();
+  tipScheduleFee();
+  input.focus();
+}
+
+// Coin Control on the address the tip comes from (iOS CoinControlView); the fee and Max follow.
+function tipOpenCoinControl() {
+  const tip = tipState;
+  if (!tip || tip.sending) return;
+  const address = tip.fundingAddress || engine.address;
+  if (!address) { showCopyToast("No address to pay from yet."); return; }
+  openCoinControlPicker({
+    loadEntries: async () => (tip.fundingAddress ? await engine.balanceForAddress(address) : await engine.balance())?.entries || [],
+    initialSelection: tip.manualUtxos ? tip.manualUtxos.map((coin) => coin.key) : null,
+    labels: getUtxoLabels(address),
+    kasUnit: KAS_UNIT,
+    onDone: (selection) => {
+      if (tipState !== tip) return; // the sheet closed or moved on meanwhile
+      tip.manualUtxos = selection ? selection.map((coin) => ({ key: coin.key, amountSompi: coin.amountSompi })) : null;
+      tip.error = "";
+      tipRenderFee();
+      tipRenderAvailable();
+      tipRefreshState();
+      tipScheduleFee();
+    },
+  });
+}
+
+// A typed total fee below the base is raised to it; an empty or unreadable entry leaves the fee
+// as it was (the chat sheet's commitPaymentCustomFee).
+function commitTipCustomFee() {
+  const tip = tipState;
+  const total = sompiFromUserText(String(tipQ("[data-tip-kas-fee-custom]")?.value || ""));
+  if (tip && tip.baseFeeSompi != null && total != null) {
+    tip.customExtraFeeSompi = total > tip.baseFeeSompi ? total - tip.baseFeeSompi : 0n;
+  }
+  tipFeeCtl.setEditing(false);
   tipRenderFee();
 }
 
@@ -15914,20 +16071,26 @@ async function openTipModal({ address, name } = {}) {
   const privacyOn = chatsPrivacyEnabled();
   const fundingIndex = getActiveSpendingIndex();
   const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
+  closeCoinControlPicker();
+  if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
+  tipFeeTimer = null;
+  tipFeeEstimateToken += 1;
   tipState = {
     contact, conversationEntry, address: clean, displayName, fundingIndex, fundingAddress,
     spendingFunded: Boolean(fundingAddress),
-    availableKas: null, policyFeeKas: null, sdkFeeKas: null,
-    tier: "normal", sending: false,
+    availableSompi: null, availableFailed: false,
+    // the fee card: base (Normal) fee in sompi, speed, custom extra; coin control (null = automatic)
+    baseFeeSompi: null, estimating: false, tier: "normal", customExtraFeeSompi: null, manualUtxos: null,
+    unit: "kas", price: null, error: "", sending: false,
   };
+  // (not `state`: that is the app's contacts and conversations, read above)
+  const sheet = tipState;
 
   const shownName = (contact?.name || displayName).trim() || shortAddress(clean);
-  const nameEl = tipQ("[data-tip-name]");
-  if (nameEl) nameEl.textContent = shownName;
-  const addressEl = tipQ("[data-tip-address]");
-  if (addressEl) addressEl.textContent = shortAddress(clean);
   const titleEl = tipQ("[data-tip-title]");
-  if (titleEl) titleEl.textContent = `Tip ${shownName}`;
+  if (titleEl) titleEl.textContent = "Tip";
+  const recipientEl = tipQ("[data-tip-recipient]");
+  if (recipientEl) { recipientEl.textContent = `to ${shownName}`; recipientEl.title = clean; }
   // Which privacy scenario this tip will hit (same signal as the chat composer).
   const destEl = tipQ("[data-tip-destination]");
   if (destEl) {
@@ -15939,50 +16102,83 @@ async function openTipModal({ address, name } = {}) {
   }
   const amountEl = tipQ("[data-tip-amount]");
   if (amountEl) amountEl.value = "";
-  tipSetError("");
-  tipModal.querySelectorAll("[data-tip-fee-tier]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.tipFeeTier === "normal");
-  });
+  const customFeeEl = tipQ("[data-tip-kas-fee-custom]");
+  if (customFeeEl) customFeeEl.value = "";
+  tipFeeCtl.setEditing(false);
+  tipSlider.reset();
   tipRenderFee();
-  tipUpdateSendEnabled();
-  const availableEl = tipQ("[data-tip-available]");
-  if (availableEl) availableEl.textContent = "Available: …";
-  const sendBtn = tipQ("[data-tip-send]");
-  if (sendBtn) sendBtn.textContent = "Send Tip";
+  tipRenderAvailable();
+  tipRefreshUnitUi();
   tipModal.hidden = false;
+  // The amount is the first thing to type (iOS focusOnAppear).
+  window.setTimeout(() => { if (tipState === sheet) amountEl?.focus(); }, 60);
+  fetchKasPrice(selectedCurrency).then((price) => {
+    if (tipState !== sheet) return;
+    sheet.price = price;
+    tipRefreshUnitUi();
+  }).catch(() => {});
 
   try {
     await ensureRuntimes({ quiet: true });
     const balance = fundingAddress ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
-    if (tipState?.address !== clean) return; // modal switched targets meanwhile
-    tipState.availableKas = Number(balance.totalKas);
-    if (availableEl) {
-      availableEl.textContent = `Available: ${balance.totalKas} ${KAS_UNIT} from your ${tipState.spendingFunded ? "primary spending address" : "chatting address"}`;
-    }
+    if (tipState !== sheet) return; // the sheet closed or switched targets meanwhile
+    sheet.availableSompi = BigInt(balance?.totalSompi ?? (sompiFromUserText(String(balance?.totalKas ?? "")) ?? 0n));
   } catch {
-    if (availableEl) availableEl.textContent = "Available: unavailable";
+    if (tipState !== sheet) return;
+    sheet.availableFailed = true;
   }
+  tipRenderAvailable();
 }
 
-function closeTipModal() {
+// A tip on its way can't be walked away from mid-send (iOS interactiveDismissDisabled(isSending)).
+function closeTipModal({ force = false } = {}) {
+  if (tipState?.sending && !force) return;
+  closeCoinControlPicker();
+  tipSlider.reset();
+  if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
+  tipFeeTimer = null;
+  tipFeeEstimateToken += 1;
   if (tipModal) tipModal.hidden = true;
   tipState = null;
 }
 
-async function sendTipNow() {
+// The slide finished: a tip under the network's dust limit asks first, as in a chat.
+async function submitTipSheet() {
   const tip = tipState;
   if (!tip || tip.sending) return;
   const tipSompi = tipAmountSompi();
+  if (!(tipSompi > 0n)) {
+    tipSetError(tip.unit === "fiat" && !(tip.price > 0) ? "No live price to convert with." : `Enter a valid ${KAS_UNIT} amount.`);
+    return;
+  }
+  if (tipSompi < 10_000_001n) {
+    const proceed = await confirmDialog({
+      title: "Small Amount",
+      message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
+      confirmLabel: "Send Anyway",
+    });
+    if (!proceed || tipState !== tip) return;
+  }
+  await sendTipNow(tipSompi);
+}
+
+async function sendTipNow(tipSompi) {
+  const tip = tipState;
+  if (!tip || tip.sending) return;
+  if (!(typeof tipSompi === "bigint" && tipSompi > 0n)) { tipSetError("Enter an amount."); return; }
   const amountKas = kasTextFromSompi(tipSompi);
-  if (!(tipSompi > 0n)) { tipSetError("Enter an amount."); return; }
-  if (tip.availableKas != null && Number(amountKas) > tip.availableKas) {
-    tipSetError("Amount exceeds the available balance.");
+  // Speed / custom fee and coin control from the fee card, taken now (the sheet can't change mid-send).
+  const extraFeeSompi = tipExtraFeeSompi();
+  const manualKeys = tip.manualUtxos?.length ? tip.manualUtxos.map((coin) => coin.key) : null;
+  const spendable = manualKeys
+    ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n)
+    : tip.availableSompi;
+  if (spendable != null && tipSompi + 10000n + extraFeeSompi > spendable) {
+    tipSetError(manualKeys ? "Amount exceeds the chosen coins after the network fee." : "Amount exceeds the available balance after the network fee.");
     return;
   }
   tip.sending = true;
   tipSetError("");
-  const sendBtn = tipQ("[data-tip-send]");
-  if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = "Sending…"; }
 
   // The chat with the poster is created HERE, on an actual send — not when the
   // modal opened — so a cancelled tip never leaves an orphan conversation.
@@ -16027,11 +16223,12 @@ async function sendTipNow() {
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
   const requestedSompi = kasTextToSompi(amountKas);
-  const feeKas = tipExtraFeeKas();
 
   try {
     await ensureRuntimes({ quiet: true });
     const tipFresh = tip.fundingAddress ? freshChangeForSpendingIndex(tip.fundingIndex) : null;
+    // A plain payment, no payload: the tip's on-chain shape is unchanged. The fee card's extra goes
+    // as the priority fee and coin control limits the coins, exactly as in the chat's sheet.
     const result = tip.fundingAddress
       ? await engine.sendFromSpending({
           mnemonic: activeAccountMnemonic(),
@@ -16039,10 +16236,12 @@ async function sendTipNow() {
           passphrase: activeAccountPassphrase(),
           destinationAddress,
           amountKas,
-          feeKas,
+          feeKas: "0",
+          extraFeeSompi,
+          manualUtxos: manualKeys,
           changeAddress: tipFresh?.address || null,
         })
-      : await engine.send(destinationAddress, amountKas, feeKas);
+      : await engine.send(destinationAddress, amountKas, "0", { extraFeeSompi, manualUtxos: manualKeys });
     if (tipFresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(tipFresh));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
@@ -16063,48 +16262,73 @@ async function sendTipNow() {
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
-    closeTipModal();
+    tip.sending = false;
+    if (tipState === tip) closeTipModal({ force: true });
   } catch (error) {
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     tip.sending = false;
-    tipSetError(error?.message || "Tip failed.");
-    if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = "Send Tip"; }
+    if (tipState === tip) tipSetError(userFacingError(error) || "Tip failed.");
+    else showCopyToast(`Tip failed: ${userFacingError(error)}`);
   }
 }
 
-tipModal?.querySelectorAll("[data-close-tip]").forEach((button) => button.addEventListener("click", closeTipModal));
-tipModal?.addEventListener("click", (event) => { if (event.target === tipModal) closeTipModal(); });
-tipQ("[data-tip-send]")?.addEventListener("click", sendTipNow);
-tipQ("[data-tip-amount]")?.addEventListener("input", () => {
-  tipSetError("");
-  tipUpdateSendEnabled();
-  window.clearTimeout(openTipModal.feeTimer);
-  openTipModal.feeTimer = window.setTimeout(tipEstimateFee, 400);
+tipModal?.querySelectorAll("[data-close-tip]").forEach((button) => button.addEventListener("click", () => closeTipModal()));
+tipModal?.addEventListener("mousedown", (event) => { if (event.target === tipModal) closeTipModal(); });
+tipModal?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.preventDefault(); closeTipModal(); }
 });
-tipModal?.querySelectorAll("[data-tip-fee-tier]").forEach((button) => {
+tipQ("[data-tip-amount]")?.addEventListener("input", () => {
+  const input = tipQ("[data-tip-amount]");
+  // Digits and one decimal point; at most 8 decimals for KAS, 2 for a currency.
+  const sanitized = sanitizeAmountText(input.value, tipState?.unit === "fiat" ? 2 : 8);
+  if (sanitized !== input.value) input.value = sanitized;
+  if (tipState) tipState.error = "";
+  tipRefreshUnitUi();
+  tipScheduleFee();
+});
+tipQ("[data-tip-unit]")?.addEventListener("click", () => {
+  const tip = tipState;
+  if (!tip || !(tip.price > 0) || tip.sending) return;
+  const sompi = tipAmountSompi();
+  const kas = sompi > 0n ? Number(sompi) / 1e8 : null;
+  tip.unit = tip.unit === "fiat" ? "kas" : "fiat";
+  const input = tipQ("[data-tip-amount]");
+  if (input) input.value = kas == null ? "" : (tip.unit === "fiat" ? (kas * tip.price).toFixed(2) : formatKasPlain(kas));
+  tipRefreshUnitUi();
+  input?.focus();
+});
+tipQ("[data-tip-max]")?.addEventListener("click", tipSetMax);
+tipModal?.querySelectorAll("[data-tip-kas-fee]").forEach((button) => {
   button.addEventListener("click", () => {
-    if (!tipState) return;
-    tipState.tier = button.dataset.tipFeeTier || "normal";
-    tipModal.querySelectorAll("[data-tip-fee-tier]").forEach((other) => other.classList.toggle("active", other === button));
+    const tip = tipState;
+    const tier = button.getAttribute("data-tip-kas-fee");
+    if (!tip || tip.sending || !TIP_FEE_MULTIPLIERS[tier]) return;
+    tip.tier = tier;
+    tip.customExtraFeeSompi = null;
+    tipFeeCtl.setEditing(false);
     tipRenderFee();
   });
 });
-tipQ("[data-tip-max]")?.addEventListener("click", async () => {
-  const state = tipState;
-  if (!state || state.availableKas == null) return;
-  await tipEstimateFee();
-  const total = Number(tipTotalFeeKas() || 0);
-  const max = Math.max(0, state.availableKas - total - 0.00001);
-  const amountEl = tipQ("[data-tip-amount]");
-  if (amountEl && max > 0) {
-    amountEl.value = trimKas8(max);
-    tipUpdateSendEnabled();
-    tipEstimateFee();
-  }
+tipQ("[data-tip-kas-fee-edit]")?.addEventListener("click", () => {
+  const total = tipTotalFeeSompi();
+  if (total == null || tipState?.sending) return;
+  tipFeeCtl.setEditing(true, formatSompiPlain(total));
 });
+tipQ("[data-tip-kas-fee-commit]")?.addEventListener("click", commitTipCustomFee);
+tipQ("[data-tip-kas-fee-custom]")?.addEventListener("input", (event) => {
+  const input = event.target;
+  const sanitized = sanitizeAmountText(input.value, 8);
+  if (sanitized !== input.value) input.value = sanitized;
+});
+tipQ("[data-tip-kas-fee-custom]")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); commitTipCustomFee(); return; }
+  // Escape leaves the fee field, not the whole sheet.
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); tipFeeCtl.setEditing(false); tipRenderFee(); }
+});
+tipQ("[data-tip-kas-coin-toggle]")?.addEventListener("click", tipOpenCoinControl);
 
 async function sendOutgoingHandshake(contact, conversationEntry, { accepting = false } = {}) {
   // Never to yourself: a handshake is how a stranger learns about the chat, and you are not one.
@@ -21819,22 +22043,62 @@ function resetPassphrasePreview(flow) {
 function showCreateStep(step) {
   document.querySelectorAll("[data-create-step]").forEach((el) => { el.hidden = el.dataset.createStep !== step; });
 }
+// Create Account, iOS acd879b / c6bd716: step 1 the name (local to this device), step 2 the seed
+// length as two buttons (with the warning that the seed phrase comes next), step 3 the seed phrase,
+// then the optional passphrase, which commits the account. The chosen length (12 | 24, null =
+// none yet - nothing is chosen for you, iOS 3a5c852).
+let createWordCount = null;
+const createNameNextBtn = document.querySelector("[data-create-name-next]");
+function renderCreateWordCount() {
+  document.querySelectorAll("[data-create-word-count]").forEach((button) => {
+    const chosen = Number(button.dataset.createWordCount) === createWordCount;
+    button.classList.toggle("chosen", chosen);
+    button.setAttribute("aria-checked", chosen ? "true" : "false");
+  });
+  updateGenerateAccountEnabled();
+}
 function openCreateAccountModal() {
   pendingNewAccount = null;
   if (createAccountError) { createAccountError.hidden = true; createAccountError.textContent = ""; }
   if (createAccountErrorSeed) createAccountErrorSeed.hidden = true;
-  // Neither a name nor a seed length is chosen for you (iOS 3a5c852): both must be picked, and
-  // Generate Account stays disabled until they are.
+  // Neither a name nor a seed length is chosen for you (iOS 3a5c852): each step's button stays
+  // disabled until its choice is made.
   if (createNameInput) createNameInput.value = "";
   if (createPassphraseInput) { createPassphraseInput.value = ""; createPassphraseInput.type = "password"; }
   if (createPassphraseConfirm) createPassphraseConfirm.value = "";
   if (createPassphraseError) createPassphraseError.hidden = true;
-  document.querySelectorAll('input[name="wordCount"]').forEach((input) => { input.checked = false; });
-  updateGenerateAccountEnabled();
-  showCreateStep("setup");
+  createWordCount = null;
+  renderCreateWordCount();
+  updateCreateNameNextEnabled();
+  showCreateStep("name");
   if (createAccountModal) createAccountModal.hidden = false;
   queueMicrotask(() => createNameInput?.focus());
 }
+function updateCreateNameNextEnabled() {
+  if (createNameNextBtn) createNameNextBtn.disabled = !String(createNameInput?.value || "").trim();
+}
+// STEP 1 -> STEP 2: the name is set; the seed length comes next.
+function createNameNext() {
+  if (!String(createNameInput?.value || "").trim()) return;
+  if (createAccountError) { createAccountError.hidden = true; createAccountError.textContent = ""; }
+  showCreateStep("length");
+  queueMicrotask(() => document.querySelector("[data-create-word-count]")?.focus());
+}
+createNameNextBtn?.addEventListener("click", createNameNext);
+createNameInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); createNameNext(); }
+});
+document.querySelectorAll("[data-create-word-count]").forEach((button) => button.addEventListener("click", () => {
+  if (generateAccountBtn?.dataset.busy === "1") return;
+  createWordCount = Number(button.dataset.createWordCount) === 24 ? 24 : 12;
+  if (createAccountError) createAccountError.hidden = true;
+  renderCreateWordCount();
+}));
+document.querySelector("[data-create-length-back]")?.addEventListener("click", () => {
+  if (generateAccountBtn?.dataset.busy === "1") return;
+  showCreateStep("name");
+  queueMicrotask(() => createNameInput?.focus());
+});
 function closeCreateAccountModal() {
   if (createAccountModal) createAccountModal.hidden = true;
   pendingNewAccount = null;
@@ -21855,21 +22119,20 @@ function renderSeedGrid(phrase) {
   });
 }
 
-// STEP 1 → STEP 2: generate a phrase and show it for backup (no derivation yet).
+// STEP 2 → STEP 3: generate a phrase and show it for backup (no derivation yet).
 function updateGenerateAccountEnabled() {
-  if (!generateAccountBtn) return;
+  if (!generateAccountBtn || generateAccountBtn.dataset.busy === "1") return;
   const named = String(createNameInput?.value || "").trim().length > 0;
-  const lengthPicked = Boolean(document.querySelector('input[name="wordCount"]:checked'));
-  generateAccountBtn.disabled = !(named && lengthPicked);
+  generateAccountBtn.disabled = !(named && (createWordCount === 12 || createWordCount === 24));
 }
-createNameInput?.addEventListener("input", updateGenerateAccountEnabled);
-document.querySelectorAll('input[name="wordCount"]').forEach((input) => input.addEventListener("change", updateGenerateAccountEnabled));
+createNameInput?.addEventListener("input", () => { updateCreateNameNextEnabled(); updateGenerateAccountEnabled(); });
 generateAccountBtn?.addEventListener("click", async () => {
   const name = String(createNameInput?.value || "").trim();
-  const wordCount = Number(document.querySelector('input[name="wordCount"]:checked')?.value || 0);
-  if (!name) { if (createAccountError) { createAccountError.textContent = "Enter an account name."; createAccountError.hidden = false; } return; }
+  const wordCount = createWordCount || 0;
+  if (!name) { showCreateStep("name"); queueMicrotask(() => createNameInput?.focus()); return; }
   if (![12, 24].includes(wordCount)) { if (createAccountError) { createAccountError.textContent = "Choose a 12 or 24 word seed phrase."; createAccountError.hidden = false; } return; }
   generateAccountBtn.disabled = true;
+  generateAccountBtn.dataset.busy = "1";
   if (createAccountError) createAccountError.hidden = true;
   try {
     if (!engine.kaspa) await ensureRuntimes();
@@ -21891,7 +22154,8 @@ generateAccountBtn?.addEventListener("click", async () => {
   } catch (error) {
     if (createAccountError) { createAccountError.textContent = error.message; createAccountError.hidden = false; }
   } finally {
-    generateAccountBtn.disabled = false;
+    delete generateAccountBtn.dataset.busy;
+    updateGenerateAccountEnabled();
   }
 });
 
@@ -24467,6 +24731,10 @@ queueMicrotask(async () => {
     });
     installKachatIdentityRepaint();
     try { kachatNames()?.actions.resume(); } catch (error) { appendEngineLog(`.kachat resume failed: ${error?.message || error}`); }
+    // .kachat news for the Profile bell (iOS 86471dd): offers, sales, renewal, expiry. Testnet only
+    // until names launch (no-op without the registry runtime).
+    try { startKachatNamesNotifier({ record: (row) => recordGlobalNotification(row), log: appendEngineLog }); }
+    catch (error) { appendEngineLog(`.kachat news did not start: ${error?.message || error}`); }
     initKachatMarket({
       escapeHtml, showToast: showCopyToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
       openChat: (address) => openChatWithAddress({ address }),

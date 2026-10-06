@@ -58,6 +58,10 @@ import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { KAS_UNIT } from "../engine/network.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
+// Who a poster is: their .kachat name, avatar, banner and bio (iOS 3d6fb7c, KachatLive.identityName /
+// profileBanner / profileBio). Profiles are on every network (mainnet: profile-only identities).
+import { kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, kachatRetryImage, onKachatIdentityChange } from "./kachat-names-live.js";
+import { kachatNamesUiEnabled } from "./kachat-names-runtime.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
@@ -196,20 +200,107 @@ function posterName(address) {
   // it - resolution appends it and mention suggestions match on the bare name.
   const alias = deps.contactAliasFor?.(address);
   if (alias) return alias;
-  // A .kas name is no one's identity (iOS 509c0fe).
-  const info = deps.engine.knsNamesAsIdentity ? deps.engine.peekKnsAddressInfo?.(address) : null;
-  const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
-  if (domain) return domain;
+  // Who they are: their .kachat name, like the rest of the app (iOS 3d6fb7c; a .kas domain isn't
+  // identity since 5.2). Null on mainnet until names launch; it lands on its own
+  // (onKachatIdentityChange repaints).
+  if (kachatNamesUiEnabled()) {
+    const label = kachatCachedLabel(address);
+    if (label) return label;
+  } else {
+    // A .kas name is no one's identity (iOS 509c0fe).
+    const info = deps.engine.knsNamesAsIdentity ? deps.engine.peekKnsAddressInfo?.(address) : null;
+    const domain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
+    if (domain) return domain;
+  }
   return deps.shortAddress(address);
 }
 
+const POSTER_GLYPH_SVG = '<svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>';
+
 function posterAvatarHtml(address) {
-  const avatarUrl = deps.engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
+  // The poster's .kachat avatar (yours on your own posts and profile), every network (iOS 3d6fb7c):
+  // never the KNS picture where .kachat is identity. A picture that won't load retries once through
+  // the relay, then shows the glyph (handlePosterImageError).
+  const avatarUrl = kachatNamesUiEnabled()
+    ? kachatCachedAvatarUrl(address)
+    : deps.engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) {
-    return `<span class="kaposts-avatar"><img src="${deps.escapeHtml(avatarUrl)}" alt="" loading="lazy" /></span>`;
+    const kachat = kachatNamesUiEnabled() ? ' referrerpolicy="no-referrer" data-kaposts-kachat-img="avatar"' : "";
+    return `<span class="kaposts-avatar"><img src="${deps.escapeHtml(avatarUrl)}" alt="" loading="lazy"${kachat} /></span>`;
   }
   // Person glyph fallback (4.0 look — no initials).
-  return `<span class="kaposts-avatar kaposts-avatar-fallback" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg></span>`;
+  return `<span class="kaposts-avatar kaposts-avatar-fallback" aria-hidden="true">${POSTER_GLYPH_SVG}</span>`;
+}
+
+/** The .kachat banner and bio of a profile page (iOS 3d6fb7c, KachatLive.profileBanner /
+ *  profileBio), else - only where .kachat isn't identity - the KNS profile's. */
+function posterProfilePieces(address) {
+  if (kachatNamesUiEnabled()) {
+    const pieces = kachatCachedProfilePieces(address) || {};
+    return { bannerUrl: pieces.bannerUrl || null, bio: String(pieces.bio || "").trim() || null, kachat: true };
+  }
+  const kns = deps.engine.peekKnsAddressProfile?.(address)?.profile || null;
+  return { bannerUrl: kns?.bannerUrl || null, bio: String(kns?.bio || "").trim() || null, kachat: false };
+}
+
+/** A .kachat picture in KaPosts that would not load: one retry through the relay, then the
+ *  avatar goes back to the glyph and a banner goes away. */
+function handlePosterImageError(event) {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.hasAttribute("data-kaposts-kachat-img")) return;
+  const failed = img.getAttribute("src") || "";
+  const giveUp = () => {
+    if (img.dataset.kapostsKachatImg === "banner") { img.remove(); return; }
+    const holder = img.parentElement;
+    img.remove();
+    if (holder && !holder.querySelector("img")) {
+      holder.classList.add("kaposts-avatar-fallback");
+      holder.setAttribute("aria-hidden", "true");
+      holder.innerHTML = POSTER_GLYPH_SVG;
+    }
+  };
+  if (!failed || img.dataset.kapostsRetried === failed) { giveUp(); return; }
+  img.dataset.kapostsRetried = failed;
+  kachatRetryImage(failed).then((next) => {
+    if (!img.isConnected || img.getAttribute("src") !== failed) return;
+    if (next) { img.dataset.kapostsRetried = next; img.src = next; } else giveUp();
+  }, giveUp);
+}
+
+/** When a cached .kachat answer lands (a name, a face, a banner, a bio), repaint what KaPosts has
+ *  on screen - at most once a second; offscreen it waits for the tab to come back. */
+let posterRepaintTimer = null;
+let posterRepaintAt = 0;
+let posterRepaintPending = false;
+function kapostsOnScreen() {
+  const root = kapostsScrollEl();
+  return Boolean(root && root.getClientRects().length > 0 && !document.hidden);
+}
+function schedulePosterRepaint() {
+  if (posterRepaintTimer) return;
+  const wait = Math.max(0, 1000 - (Date.now() - posterRepaintAt));
+  posterRepaintTimer = window.setTimeout(() => {
+    posterRepaintTimer = null;
+    posterRepaintAt = Date.now();
+    if (!kapostsOnScreen()) { posterRepaintPending = true; return; }
+    repaintPosterIdentities();
+  }, wait);
+}
+function repaintPosterIdentities() {
+  posterRepaintPending = false;
+  try {
+    const thread = currentThreadPost();
+    if (activePanel && (!thread || panelOverThread)) {
+      if (activePanel.type === "search") renderSearchResults(activePanel);
+      else renderPanel();
+    } else if (thread) {
+      renderThread();
+    } else {
+      renderFeed();
+    }
+  } catch (error) {
+    deps?.appendEngineLog?.(`KaPosts .kachat repaint failed: ${error?.message || error}`);
+  }
 }
 
 /**
@@ -2680,7 +2771,13 @@ function renderPanel() {
 
   if (panel.type === "profile") {
     const address = panel.address;
-    const profile = deps.engine.peekKnsAddressProfile?.(address)?.profile || null;
+    // Both profile pages - yours and a tapped poster's - show the .kachat banner and bio (iOS 3d6fb7c).
+    const profile = posterProfilePieces(address);
+    // A .kachat banner is an <img> (no referrer, one relay retry); a KNS one stays a background.
+    const kachatBanner = profile.kachat && profile.bannerUrl
+      ? `<img class="kaposts-profile-banner-img" alt="" decoding="async" referrerpolicy="no-referrer" data-banner-fit data-kaposts-kachat-img="banner" src="${deps.escapeHtml(profile.bannerUrl)}" />`
+      : "";
+    const knsBanner = profile.kachat ? "" : safeCssUrl(profile.bannerUrl);
     const isMine = address === deps.engine.address;
     const isFollowing = prefs.following.includes(address);
     // Your own profile merges session posts the indexer has not stamped yet (still pending, or
@@ -2693,12 +2790,12 @@ function renderPanel() {
       : remoteItems;
     panelBodyEl.innerHTML = `
       <div class="kaposts-profile-hero">
-        <div class="kaposts-profile-banner"${safeCssUrl(profile?.bannerUrl) ? ` style="background-image:url('${deps.escapeHtml(safeCssUrl(profile.bannerUrl))}')"` : ""}></div>
+        <div class="kaposts-profile-banner${kachatBanner ? " has-img" : ""}"${knsBanner ? ` style="background-image:url('${deps.escapeHtml(knsBanner)}')"` : ""}>${kachatBanner}</div>
         <div class="kaposts-profile-row">
           ${posterAvatarHtml(address)}
           <div class="kaposts-profile-meta">
             <strong>${deps.escapeHtml(posterName(address))}</strong>
-            ${profile?.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
+            ${profile.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
             <span class="kaposts-profile-counts">
               <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${isMine ? prefs.following.filter((a) => a !== address).length : (panel.details?.followingCount ?? "–")}</b> Following</button>&nbsp;&nbsp;
               <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? "–"}</b> Followers</button>
@@ -2726,7 +2823,8 @@ function renderPanel() {
             : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
       </div>`;
     // The whole banner at the full width, at its own proportions (iOS c66bfc7).
-    fitBackgroundBanner(panelBodyEl.querySelector(".kaposts-profile-banner"), safeCssUrl(profile?.bannerUrl) || "");
+    // A .kachat <img> banner sizes its box itself when it loads (banner-fit.js data-banner-fit).
+    fitBackgroundBanner(panelBodyEl.querySelector(".kaposts-profile-banner"), knsBanner || "");
     // More appears only when the three-line clamp actually hid something.
     const bioEl = panelBodyEl.querySelector("[data-kaposts-profile-bio]");
     const bioMore = panelBodyEl.querySelector("[data-kaposts-bio-more]");
@@ -4497,6 +4595,9 @@ export function refreshKaPostsFeed() {
   // Opening the tab is what arms the check, and it only runs while the tab is the one on screen -
   // nothing polls a feed nobody is looking at.
   startNewPostsCheck();
+  // .kachat answers that landed while the tab was away (the feed itself repaints below).
+  if (posterRepaintPending && (activePanel || currentThreadPost())) repaintPosterIdentities();
+  posterRepaintPending = false;
   if (remotePosts.length > 0 && Date.now() - lastFeedLoadAt < FEED_FRESH_MS) {
     renderFeed();
     return;
@@ -4674,6 +4775,12 @@ function attachMentionAutocomplete(textarea) {
 export function initKaPosts(dependencies) {
   deps = dependencies;
   startKaPostsNotificationPolling();
+  // .kachat names, avatars, banners and bios land on their own (iOS 3d6fb7c), on every network.
+  if (!initKaPosts.identityWired) {
+    initKaPosts.identityWired = true;
+    document.addEventListener("error", handlePosterImageError, true);
+    if (kachatNamesUiEnabled()) onKachatIdentityChange(() => schedulePosterRepaint());
+  }
 
   feedEl = document.querySelector("[data-kaposts-feed]");
   statusEl = document.querySelector("[data-kaposts-status]");
@@ -5075,7 +5182,7 @@ export function initKaPosts(dependencies) {
     }
     if (event.target.closest("[data-kaposts-edit-kns]")) { deps.editKnsProfile?.(); return; }
     if (event.target.closest("[data-kaposts-bio-more]") && activePanel?.type === "profile") {
-      const bio = deps.engine.peekKnsAddressProfile?.(activePanel.address)?.profile?.bio || "";
+      const bio = posterProfilePieces(activePanel.address).bio || "";
       deps.alertDialog?.({ title: "Bio", message: bio, confirmLabel: "Done" });
       return;
     }

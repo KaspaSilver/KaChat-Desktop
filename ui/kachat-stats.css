@@ -15,8 +15,15 @@
   --kstats-purple: #bf5af2;
   --kstats-brown: #ac8e68;
   --kstats-gray: #8e8e93;
+  /* .kachat names (iOS b2d108b): mint, a deep teal, red, amber and a slate blue */
+  --kstats-mint: #63e6e2;
+  --kstats-renewTeal: #008c80;
+  --kstats-red: var(--ios-red);
+  --kstats-amber: #d98c1a;
+  --kstats-slate: #7373bf;
 }
 :root[data-theme="light"] {
+  --kstats-mint: #00c7be;
   --kstats-cyan: #32ade6;
   --kstats-indigo: #5856d6;
   --kstats-teal: #30b0c7;

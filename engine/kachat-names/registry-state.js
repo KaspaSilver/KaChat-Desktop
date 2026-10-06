@@ -883,15 +883,18 @@ export function shortAddress(address) {
 
 // MARK: - A transaction as the walker sees it
 
-/** `{ id: bytes32, inputs: [{ outpoint, signatureScript }], outputs: TxOutput[], payload, at: bigint|null }`
- *  (`at`: unix ms of the accepting block, or the block, when known). */
+/** `{ id: bytes32, inputs: [{ outpoint, signatureScript }], outputs: TxOutput[], payload, at: bigint|null,
+ *  blueScore: bigint|null }` (`at`: unix ms of the accepting block, or the block, when known;
+ *  `blueScore`: the accepting block's blue score, when known - the walk's tie-break for
+ *  transactions that do not spend each other). */
 export class TxView {
-  constructor({ id, inputs, outputs, payload = new Uint8Array(0), at = null }) {
+  constructor({ id, inputs, outputs, payload = new Uint8Array(0), at = null, blueScore = null }) {
     this.id = id;
     this.inputs = inputs;
     this.outputs = outputs;
     this.payload = payload;
     this.at = big(at);
+    this.blueScore = big(blueScore);
   }
 
   get idHex() { return hex(this.id); }
@@ -941,6 +944,7 @@ export class TxView {
     const payload = unhex(str(j.payload) ?? "");
     const time = (v) => (typeof v === "number" && Number.isFinite(v) ? BigInt(Math.trunc(v)) : typeof v === "bigint" ? v : null);
     const at = time(j.accepting_block_time) ?? time(j.block_time);
+    const blueScore = num(j.accepting_block_blue_score);
     const byOrder = (a, b) => a[0] - b[0];
     return new TxView({
       id,
@@ -948,6 +952,7 @@ export class TxView {
       outputs: outputs.sort(byOrder).map((x) => x[1]),
       payload,
       at,
+      blueScore,
     });
   }
 }
@@ -1212,10 +1217,26 @@ export class RegistryState {
     return bytesEqual(pushes[pushes.length - 2], m.offer.dispatchTags.accept);
   }
 
+  /** Which registry template (`"gap"`, `"name"`, `"price"`) an input's revealed redeem script is,
+   *  or null (a P2PK input, an offer, a commit, anything else). */
+  static _registryTemplateOf(input, m) {
+    let pushes;
+    try { pushes = parsePushes(input.signatureScript); } catch { return null; }
+    const redeem = pushes[pushes.length - 1];
+    if (redeem === undefined) return null;
+    for (const [what, t] of [["gap", m.gap], ["name", m.name], ["price", m.price]]) {
+      try { templateStateOfRedeem(t, redeem); return what; } catch { /* not this one */ }
+    }
+    return null;
+  }
+
   /** Applies one transaction (a TxView). Returns its registry events (Event[]); an unrelated
    *  transaction returns none. Every registry output must be predicted exactly from the tracked
    *  inputs it spends (and authorized by that input), or the transaction is refused (a Failure)
-   *  and nothing changes. */
+   *  and nothing changes. A transaction that spends a registry UTXO (gap, name or price shard)
+   *  this state does not track yet is refused with `waiting: true`: an earlier transaction on
+   *  that record has not been applied yet, so applying this one now would lose that record's
+   *  spend (a reclaimed name kept). The walk applies it once the record catches up. */
   apply(tx, m) {
     const id = tx.idHex;
     if (this.applied.includes(id)) return [];
@@ -1243,6 +1264,16 @@ export class RegistryState {
       return [];
     }
     const short = id.slice(0, 12);
+    // every registry UTXO it spends must be tracked (order-independence: see above)
+    const trackedInputs = new Set([...gapIns, ...nameIns, ...offerIns, ...shardIns].map(([i]) => i));
+    tx.inputs.forEach((input, i) => {
+      if (trackedInputs.has(i)) return;
+      const what = RegistryState._registryTemplateOf(input, m);
+      if (what == null) return;
+      const f = new Failure(`${short}: ${what} input ${i} spends ${hex(input.outpoint.txid).slice(0, 12)}:${input.outpoint.index}, a registry UTXO not tracked yet`);
+      f.waiting = true;
+      throw f;
+    });
     const events = [];
     /** [{ auth, p: { kind: "gap", lo, hi } | { kind: "name", f, name } | { kind: "price", f } }] */
     const predicted = [];
@@ -1453,8 +1484,12 @@ export class RegistryState {
    *  `clone()` to keep the old one on failure). Each round: every tracked UTXO the node no longer
    *  has was spent; its spending transaction is found through its address and applied (`apply`,
    *  which decodes the spend and verifies every new state against its output's script); the new
-   *  outputs are tracked next round. A transaction that needs a registry input not tracked yet
-   *  waits for a later one in the same round.
+   *  outputs are tracked next round. A round's transactions are applied in chain order
+   *  (`_chainOrder`: after the ones they spend from, then by accepting blue score / time), and one
+   *  that spends a registry UTXO not tracked yet (`apply` refuses it as `waiting`) waits for a
+   *  later pass or round - so the result does not depend on the order the REST API lists them,
+   *  nor on how many rounds each record's chain of spends takes. Throws a Failure with `stale`
+   *  when a tracked UTXO turns out spent by a transaction already applied (an out-of-date cache).
    *
    *  - `address(script) -> string|null`: the P2SH address of a tracked script;
    *  - `live(addresses: string[]) -> Promise<Set<"txid:index">>`: which outpoints at those
@@ -1481,7 +1516,7 @@ export class RegistryState {
       for (const [a, ops] of byAddress) for (const op of ops) if (!isUnspent(op)) spent.push([a, op]);
       if (spent.length === 0) {
         report.unresolved = [];
-        return report;
+        return this._walked(report);
       }
       const candidates = new Map();
       const found = new Set();
@@ -1496,12 +1531,18 @@ export class RegistryState {
         }
       }
       report.unresolved = spent.map((x) => x[1]).filter((op) => !found.has(op)).sort();
-      if (candidates.size === 0) return report;
-      let pending = [...candidates.values()].sort((a, b) => {
-        const ta = a.at ?? 0n, tb = b.at ?? 0n;
-        if (ta !== tb) return ta < tb ? -1 : 1;
-        return a.idHex < b.idHex ? -1 : a.idHex > b.idHex ? 1 : 0;
-      });
+      if (candidates.size === 0) return this._walked(report);
+      // A tracked UTXO spent by a transaction this state already applied: the state is out of
+      // date with the chain (a cache walked out of order by an earlier version). `stale`: the
+      // caller walks again from the geneses.
+      const again = [...candidates.values()].find((tx) => this.applied.includes(tx.idHex));
+      if (again) {
+        const f = new Failure(`${again.idHex.slice(0, 12)} was applied but a UTXO it spends is still tracked`);
+        f.stale = true;
+        throw f;
+      }
+      // chain order: after every candidate it spends from, else by accepting blue score / time
+      let pending = RegistryState._chainOrder([...candidates.values()]);
       let lastError = null;
       let progressed = true;
       let appliedThisRound = 0;
@@ -1510,25 +1551,85 @@ export class RegistryState {
         const rest = [];
         for (const tx of pending) {
           try {
-            const before = this.applied.length;
             const events = this.apply(tx, m);
-            if (this.applied.length !== before || this.applied.includes(tx.idHex)) {
-              report.applied.push(tx.idHex);
-              report.events.push(...events);
-            }
+            report.applied.push(tx.idHex);
+            report.events.push(...events);
             progressed = true;
             appliedThisRound += 1;
           } catch (e) {
-            lastError = e;
+            // `waiting`: it spends a registry UTXO an earlier transaction (not applied yet) makes
+            if (!e?.waiting) lastError = e;
             rest.push(tx);
           }
         }
         pending = rest;
       }
-      // nothing applied: the same spends would fail again next round
-      if (appliedThisRound === 0 && lastError) throw lastError;
+      if (appliedThisRound === 0) {
+        // nothing applied: the same spends would fail again next round
+        if (lastError) throw lastError;
+        // only waiting ones: the transaction they wait for is not visible yet (an indexing delay
+        // of the REST API); their spends count as unresolved, the next refresh retries
+        const waits = new Set(report.unresolved);
+        const spentOps = new Set(spent.map((x) => x[1]));
+        for (const tx of pending) for (const i of tx.inputs) {
+          const op = opKey(hex(i.outpoint.txid), i.outpoint.index);
+          if (spentOps.has(op)) waits.add(op);
+        }
+        report.unresolved = [...waits].sort();
+        return this._walked(report);
+      }
     }
+    return this._walked(report);
+  }
+
+  /** The walk's end: events (the state's and the report's) in chain time order. Rounds follow
+   *  each record's spends, so a round can apply a later transaction of one record before an
+   *  earlier one of another; a stable sort by `at` puts them back in the chain's order (a
+   *  transaction's own events, and transactions at the same time, keep the applied order). */
+  _walked(report) {
+    this.events = RegistryState._chronological(this.events);
+    report.events = RegistryState._chronological(report.events);
     return report;
+  }
+
+  /** Events stably sorted by `at`; one without a time keeps the time of the event before it. */
+  static _chronological(events) {
+    let last = -1n;
+    const keyed = events.map((e, i) => {
+      if (e.at != null) last = e.at;
+      return { e, k: e.at ?? last, i };
+    });
+    keyed.sort((a, b) => (a.k < b.k ? -1 : a.k > b.k ? 1 : a.i - b.i));
+    return keyed.map((x) => x.e);
+  }
+
+  /** Transactions in chain order: each after every one in the list whose output it spends
+   *  (topological); otherwise by accepting blue score (when every one has it), then accepting
+   *  time, then id. */
+  static _chainOrder(txs) {
+    const useScore = txs.every((t) => t.blueScore != null);
+    const cmp = (a, b) => {
+      if (useScore && a.blueScore !== b.blueScore) return a.blueScore < b.blueScore ? -1 : 1;
+      const ta = a.at ?? 0n, tb = b.at ?? 0n;
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return a.idHex < b.idHex ? -1 : a.idHex > b.idHex ? 1 : 0;
+    };
+    const ids = new Set(txs.map((t) => t.idHex));
+    const parents = new Map(txs.map((t) => [
+      t.idHex, new Set(t.inputs.map((i) => hex(i.outpoint.txid)).filter((p) => p !== t.idHex && ids.has(p))),
+    ]));
+    let rest = [...txs].sort(cmp);
+    const out = [];
+    const placed = new Set();
+    while (rest.length) {
+      // the earliest whose parents are all placed (a cycle cannot happen; if it did, the earliest)
+      let k = rest.findIndex((t) => [...parents.get(t.idHex)].every((p) => placed.has(p)));
+      if (k < 0) k = 0;
+      const [t] = rest.splice(k, 1);
+      out.push(t);
+      placed.add(t.idHex);
+    }
+    return out;
   }
 
   // MARK: Cache format (compact JSON: hex strings, BigInt as decimal strings)

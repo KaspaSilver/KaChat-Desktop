@@ -9,12 +9,16 @@
 // - When the platform answers but no longer shows something (taken down, account gone), it is
 //   dropped at once, so the platform's moderation carries over. When the platform can't be
 //   reached, the last answer stays.
-// - A lookup never takes longer than 10 s (every request and fallback included), and no request
-//   longer than 8 s. An answer under five minutes old is reused, so the three fields of one account
-//   cost one request; lookups of the same link in flight are shared.
+// - A lookup never takes longer than 20 s (every request and fallback included), and each request
+//   has its own shorter timeout (5-6 s), so a slow first source can't use up the time the next one
+//   needs. An answer under five minutes old is reused, so the three fields of one account cost one
+//   request; lookups of the same link in flight are shared.
+// - A page with no profile tags at all (a login wall, a challenge, a script shell) is "couldn't
+//   look it up", never an empty answer that would read as "this account has no avatar".
 //
 // Where each piece comes from:
-//   X        FxTwitter's user API (avatar 400 px, banner, bio), X's page as the fallback
+//   X        FxTwitter's user API (avatar 400 px, banner, bio), X's page as the fallback, and
+//            unavatar.io as the last resort for the avatar alone
 //   YouTube  the channel page: og:image, og:description, the banner from its embedded data
 //   Discord  the invite API (server icon, banner, description)
 //   GitHub   the public user API (avatar, bio)
@@ -32,14 +36,14 @@
 //     null only when nothing came back (network error, timeout, refused, no relay).
 //     options:
 //       accept     the Accept header to send ("application/json" or "text/html,...")
-//       timeoutMs  give up after this long (8000); the resolver also stops waiting on its own
+//       timeoutMs  give up after this long (5000-6000); the resolver also stops waiting on its own
 //       agent      "crawler" (a link-preview crawler User-Agent, e.g. facebookexternalhit/1.1:
 //                  pages emit their Open Graph tags to it) or "browser" (a desktop browser
 //                  User-Agent: YouTube's channel page carries the banner in plain form; GitHub's
 //                  API wants a User-Agent). A hint: honor it where the platform lets you choose.
 //       maxBytes   read at most this many bytes of the body (3 MB for pages, 512 KB for JSON) and
 //                  drop the rest; `text` must never be longer than this
-//       signal     an AbortSignal, aborted when the lookup's 10 s deadline passes
+//       signal     an AbortSignal, aborted when the lookup's 20 s deadline passes
 //     It must not send the user's cookies or credentials.
 //   fetchJSON(url, options) -> Promise<{ status: number, json: any|null } | null>     (optional)
 //     As fetchText, for a JSON API; `json` null when the body isn't JSON. Derived from fetchText
@@ -76,10 +80,13 @@ const indexKey = `${socialImageCachePrefix}index`;
 
 /** An answer is fresh this long (24 h). */
 export const socialFreshForMs = 24 * 3600 * 1000;
-/** Hard limit for one lookup, every request and fallback included. */
-export const socialLookupDeadlineMs = 10_000;
-/** No request outlives this. */
-export const socialRequestTimeoutMs = 8_000;
+/** Hard limit for one lookup, every request and fallback included. Each step has its own shorter
+ *  timeout, so a slow first source can't use up the time the next one needs. */
+export const socialLookupDeadlineMs = 20_000;
+/** A request's timeout unless the step names a shorter one. */
+export const socialRequestTimeoutMs = 6_000;
+/** FxTwitter's and unavatar.io's timeout. */
+const socialQuickTimeoutMs = 5_000;
 /** `resolve` reuses an answer younger than this (five minutes). */
 export const socialRecentMs = 300_000;
 
@@ -300,13 +307,15 @@ export class KachatSocialImageResolver {
     }
   }
 
-  /** One request: the dependency's answer, or null on error or after 8 s. */
+  /** One request: the dependency's answer, or null on error or after its timeout (6 s unless the
+   *  step names a shorter one). */
   async _request(fn, url, options) {
     if (typeof fn !== "function") return null;
+    const limit = Number.isFinite(options?.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : socialRequestTimeoutMs;
     let timer = null;
-    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), socialRequestTimeoutMs); });
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), limit); });
     try {
-      const answer = await Promise.race([Promise.resolve().then(() => fn(url, { ...options, timeoutMs: socialRequestTimeoutMs })), timeout]);
+      const answer = await Promise.race([Promise.resolve().then(() => fn(url, { ...options, timeoutMs: limit })), timeout]);
       return answer ?? null;
     } catch {
       return null;
@@ -315,20 +324,20 @@ export class KachatSocialImageResolver {
     }
   }
 
-  async _text(url, { agent, signal, maxBytes = pageMaxBytes }) {
-    const r = await this._request(this.deps.fetchText, url, { accept: htmlAccept, agent, maxBytes, signal });
+  async _text(url, { agent, signal, maxBytes = pageMaxBytes, accept = htmlAccept, timeoutMs = socialRequestTimeoutMs }) {
+    const r = await this._request(this.deps.fetchText, url, { accept, agent, maxBytes, signal, timeoutMs });
     if (!r || !Number.isInteger(r.status)) return null;
     const text = typeof r.text === "string" ? r.text.slice(0, maxBytes) : "";
     return { status: r.status, contentType: String(r.contentType ?? ""), text };
   }
 
-  async _json(url, { agent = "browser", signal } = {}) {
+  async _json(url, { agent = "browser", signal, timeoutMs = socialRequestTimeoutMs } = {}) {
     if (typeof this.deps.fetchJSON === "function") {
-      const r = await this._request(this.deps.fetchJSON, url, { accept: jsonAccept, agent, maxBytes: jsonMaxBytes, signal });
+      const r = await this._request(this.deps.fetchJSON, url, { accept: jsonAccept, agent, maxBytes: jsonMaxBytes, signal, timeoutMs });
       if (!r || !Number.isInteger(r.status)) return null;
       return { status: r.status, json: r.json ?? null };
     }
-    const r = await this._request(this.deps.fetchText, url, { accept: jsonAccept, agent, maxBytes: jsonMaxBytes, signal });
+    const r = await this._request(this.deps.fetchText, url, { accept: jsonAccept, agent, maxBytes: jsonMaxBytes, signal, timeoutMs });
     if (!r || !Number.isInteger(r.status)) return null;
     let json = null;
     const text = typeof r.text === "string" ? r.text.slice(0, jsonMaxBytes) : "";
@@ -355,12 +364,15 @@ export class KachatSocialImageResolver {
       }
       case "x": {
         // FxTwitter first: one small JSON answer with avatar, banner and bio. X's own page
-        // (served to link-preview crawlers) is the fallback.
-        const r = await this._json(`https://api.fxtwitter.com/${handle}`, { signal });
+        // (served to link-preview crawlers) is the fallback, and unavatar.io the last resort for
+        // the avatar alone. Each step's outcome is logged: one network can be challenged or
+        // rate-limited where another is not.
+        const r = await this._json(`https://api.fxtwitter.com/${handle}`, { signal, timeoutMs: socialQuickTimeoutMs });
         if (r && (r.status === 200 || r.status === 404) && r.json != null) {
           const p = S.fxTwitterProfile(r.json);
           if (p) return p;
         }
+        this._log(`[KachatSocial] x ${source.handle}: FxTwitter ${r ? `HTTP ${r.status}` : "no answer"}`);
         break;
       }
       case "github": {
@@ -375,13 +387,27 @@ export class KachatSocialImageResolver {
         break;
     }
     const page = await this._text(source.link, { agent: "crawler", signal });
-    if (!page) return null;
+    if (!page) {
+      this._log(`[KachatSocial] ${source.platform} ${source.handle}: page no answer`);
+      return this._xAvatarOnly(source, signal);
+    }
     if (page.status === 404 || page.status === 410) return new SocialProfile();
-    if (page.status !== 200) return null;
-    const result = new SocialProfile();
+    if (page.status !== 200) {
+      this._log(`[KachatSocial] ${source.platform} ${source.handle}: page HTTP ${page.status}`);
+      return this._xAvatarOnly(source, signal);
+    }
     const image = S.openGraphImage(page.text);
+    const description = S.openGraphDescription(page.text);
+    // A page with no profile tags at all is not a profile without an avatar: it's a login wall, a
+    // challenge or a script shell. That is "couldn't look it up", never cached as an empty answer
+    // that would read as "this account has no avatar".
+    if (!image && !description) {
+      this._log(`[KachatSocial] ${source.platform} ${source.handle}: page has no profile tags (${page.text.length} chars)`);
+      return this._xAvatarOnly(source, signal);
+    }
+    const result = new SocialProfile();
     if (image) result.avatar = source.platform === "x" ? S.xAvatar(image) : image;
-    result.bio = S.bio(source.platform, S.openGraphDescription(page.text));
+    result.bio = S.bio(source.platform, description);
     if (source.platform === "x") {
       result.banner = S.xBanner(page.text);
     } else if (source.platform === "youtube") {
@@ -394,5 +420,22 @@ export class KachatSocialImageResolver {
       }
     }
     return result;
+  }
+
+  /** X only, when FxTwitter and X's page both failed: the avatar from unavatar.io, which answers
+   *  with the image itself (404 when the account has none). null = still unreachable. */
+  async _xAvatarOnly(source, signal) {
+    if (source.platform !== "x") return null;
+    const url = `https://unavatar.io/x/${encodeURIComponent(source.handle)}?fallback=false`;
+    const r = await this._text(url, { agent: "browser", signal, accept: "image/*", maxBytes: 65_536, timeoutMs: socialQuickTimeoutMs });
+    if (!r || r.status !== 200 || !r.text.length) {
+      this._log(`[KachatSocial] x ${source.handle}: unavatar ${r ? `HTTP ${r.status}` : "no answer"}`);
+      return null;
+    }
+    return new SocialProfile({ avatar: url });
+  }
+
+  _log(message) {
+    try { this.deps.log(message); } catch { /* fine */ }
   }
 }

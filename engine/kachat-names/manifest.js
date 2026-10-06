@@ -32,13 +32,35 @@ export const bundleResource = "kachat-names-testnet-10";
 /** Template hashes of the pinned build - registry v3 (silverc v1.0.0 @ 3ed9733). The price
  *  template bakes no covenant id, so it is the same everywhere. The gap and the name bake the
  *  price covenant id, so their hashes exist only once the price genesis does, and the offer bakes
- *  the registry id, so its hash exists once the registry genesis does: the deployment adds all
- *  three here with the bundled manifest. Until every template is pinned only a bundled manifest is
- *  trusted (`verifyManifest(m, { source })`), never one an indexer serves - an unpinned offer
+ *  the registry id, so its hash exists once the registry genesis does: those three are pinned per
+ *  deployment in `deployedTemplateHashes`. A manifest with any template unpinned is trusted only
+ *  from the bundle (`verifyManifest(m, { source })`), never from an indexer - an unpinned offer
  *  template could hold buyers' funds in a script the indexer controls (iOS 1d81a1a, IOS-059). */
 export const pinnedTemplateHashes = {
   KachatPrice: "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3",
 };
+/** The gap, name and offer builds each deployed registry was launched with, by registry covenant
+ *  id (Swift `Manifest.deployedTemplateHashes`, iOS 32b7b32). A manifest for one of these
+ *  registries must carry exactly these; any other registry (a dry run, the test vectors) has no
+ *  pins, so only a bundled manifest of it is trusted. */
+export const deployedTemplateHashes = {
+  // testnet-10 registry v3, 2026-10-06: price genesis 246d4cb6..e78b (price covenant
+  // 4d7685c0..3338), registry genesis fa8b21d2..5940
+  "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24": {
+    KachatGap: "3c2c0f4f076da46f401ee19ea232580207c1c2bcd5cbdb626ead0b7f7693a157",
+    KachatName: "973dba9aaa58ba8f59ac28a4dc45001209fae7708a89ffbcf49c1bc1ba5adfc4",
+    KachatOffer: "8d6f8cdd287b2776b4c763691f28ffc08cdbe1552d2d7b7acdce8400268d1be5",
+  },
+};
+
+/** Every pinned template hash for the registry `registryCovenantId` (Uint8Array or hex):
+ *  `pinnedTemplateHashes` merged with that deployment's `deployedTemplateHashes` (the global pin
+ *  wins on a clash, as Swift's `merging { pinned, _ in pinned }`). */
+export function templatePinsFor(registryCovenantId) {
+  const id = typeof registryCovenantId === "string" ? registryCovenantId.toLowerCase() : hex(registryCovenantId);
+  const deployed = Object.prototype.hasOwnProperty.call(deployedTemplateHashes, id) ? deployedTemplateHashes[id] : {};
+  return { ...deployed, ...pinnedTemplateHashes };
+}
 /** State lengths per contract (registry v3: price 87, gap 66, name 126, offer 108). */
 export const stateLengths = { KachatPrice: 87, KachatGap: 66, KachatName: 126, KachatOffer: 108 };
 /** The dispatch entries every contract must have. */
@@ -287,7 +309,8 @@ export function decodeManifest(data) {
 
 /** Checks everything the app relies on (KACHAT_NAMES_INDEXER.md B2, kachat-domains
  *  `manifest::load`): testnet-10 only; every template's hash recomputed from its prefix and
- *  suffix and equal to the pinned build where pinned (an indexer-served manifest needs every hash
+ *  suffix and equal to the pinned build where pinned (`templatePinsFor`: the price everywhere,
+ *  the gap, name and offer per deployed registry id; an indexer-served manifest needs every hash
  *  pinned, the offer's too - IOS-059); every dispatch tag present; the gap and name baked for this price
  *  covenant and price template, the gap for this name template, the offer for this registry id
  *  and name template; the price genesis outputs are shards 0..K-1 of the price template worth
@@ -299,11 +322,12 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
   if (m.network !== supportedNetwork) {
     throw new Failure(`manifest is for ${m.network}; only ${supportedNetwork} is enabled (mainnet waits for an audit)`);
   }
+  const pins = templatePinsFor(m.registryCovenantId);
   for (const t of [m.price, m.gap, m.name, m.offer]) {
     if (!bytesEqual(computeTemplateHash(t.prefix, t.suffix), t.templateHash)) {
       throw new Failure(`manifest: ${t.contract} template hash does not match its prefix and suffix`);
     }
-    const pinned = pinnedTemplateHashes[t.contract];
+    const pinned = Object.prototype.hasOwnProperty.call(pins, t.contract) ? pins[t.contract] : undefined;
     if (pinned !== undefined) {
       if (hex(t.templateHash) !== pinned) throw new Failure(`manifest: ${t.contract} is not the pinned build`);
     } else if (source === ManifestSource.indexer) {

@@ -12,8 +12,8 @@
 // .kachat Setup Guide it opens (claim, avatar, banner, details, done - each step Coming soon).
 //
 // On TESTNET (testnet-10, iOS 5df42b4) it is live instead (ui/kachat-names-live.js): a Testnet
-// badge, search with real availability and price, Claim, registrations in flight, the registry's
-// listings / names / offers / activity, the live name detail with its transaction sheets, and the
+// badge, search with real availability and price, Claim (its progress as a half sheet), the
+// registry's listings / reclaimable names / activity, the live name detail with its transaction sheets, and the
 // live address profile editor. This file keeps the layers and the mockups, and hands the live
 // screens what they need through initKachatLive.
 //
@@ -27,8 +27,9 @@ import { KAS_UNIT } from "../engine/network.js";
 import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
-  liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml, liveRegistrationsHtml,
+  liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml,
   livePageHtml, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
+  kachatNameTileHtml, kachatNameGridHtml,
 } from "./kachat-names-live.js";
 
 /** Your Domains > .kachat and each address's .kachat tab (iOS KachatLiveDomainsTab, KachatAddressLiveNamesList); see kachat-names-live.js. */
@@ -38,16 +39,18 @@ let deps = null;
 let marketEl = null;
 
 // Market navigation. view: "home" | "listing" | "name" (a live name, testnet). page: "market" |
-// "myNames" | "activity". detail: the live name detail while view is "name".
+// "reclaimable" | "activity". detail: the live name detail while view is "name".
 const state = { view: "home", page: "market", search: "", homeScroll: 0, detail: null };
 
 /** A listing as a real one will hand it in; no listing exists yet, so its seller is unknown and
  *  Message stays disabled. With a seller, Message opens a 1:1 chat through deps.openChat. */
 const placeholderListing = { sellerAddress: null };
 
+// Names for sale, names anyone may reclaim, and everything that happens in the registry. Your own
+// names (and the offers you made) live in Profile > Your Domains (iOS 0765ce0).
 const PAGES = [
   { id: "market", title: "Marketplace" },
-  { id: "myNames", title: "My Names" },
+  { id: "reclaimable", title: "Reclaimable" },
   { id: "activity", title: "Activity" },
 ];
 
@@ -160,15 +163,19 @@ function bindEscape() {
     if (document.querySelector(".app-dialog-backdrop:not([hidden]), [data-password-modal]:not([hidden])")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    closeLayer(layers[layers.length - 1]);
+    const top = layers[layers.length - 1];
+    // a sheet that can't be closed yet (a registration's progress, iOS interactiveDismissDisabled)
+    if (typeof top.closable === "function" && !top.closable()) return;
+    closeLayer(top);
   }, true);
 }
 
 /**
  * Presents `html` as a sheet. owner groups layers so the market can close its own on hide.
  * kind: "sheet" (centred card), "tall" (full-height card), "cover" (full-screen cover).
+ * closable: () => bool - while false, Escape leaves the sheet up (closeLayer still closes it).
  */
-function openLayer({ owner, kind = "sheet", label, html, dismissOnBackdrop = true, onClick, onInput, onClose }) {
+function openLayer({ owner, kind = "sheet", label, html, dismissOnBackdrop = true, closable = null, onClick, onInput, onClose }) {
   bindEscape();
   const backdrop = document.createElement("div");
   backdrop.className = `modal-backdrop kmkt-backdrop kmkt-backdrop-${kind}`;
@@ -176,7 +183,7 @@ function openLayer({ owner, kind = "sheet", label, html, dismissOnBackdrop = tru
     <div class="kmkt-sheet kmkt-sheet-${kind}" role="dialog" aria-modal="true" aria-label="${esc(label)}" tabindex="-1">
       ${html}
     </div>`;
-  const layer = { owner, el: backdrop, onClose, restoreFocus: document.activeElement };
+  const layer = { owner, el: backdrop, onClose, closable, restoreFocus: document.activeElement };
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop) {
       if (dismissOnBackdrop) closeLayer(layer);
@@ -215,12 +222,12 @@ function closeLayersOwnedBy(owner) {
 // Market: home (hero, search, tabs, page)
 // ---------------------------------------------------------------------------------------------
 
+/** The logo and the status (Testnet, Setting up, Coming soon): no title or description, so the
+ *  search sits higher (iOS 27a4f39). */
 function heroHtml() {
   return `
-    <section class="kmkt-hero">
+    <section class="kmkt-hero kmkt-hero-compact">
       <span class="kmkt-hero-mark">${KACHAT_WORDMARK_SVG}</span>
-      <h2 class="kmkt-hero-title">Your name on KaChat</h2>
-      <p class="kmkt-hero-body">Claim a .kachat name, or buy and sell them peer to peer. The name and the payment settle together on Kaspa - nobody holds either in between.</p>
       <div class="kmkt-hero-status" data-kmkt-hero-status>${liveHeroStatusHtml(comingSoonPill())}</div>
     </section>`;
 }
@@ -261,52 +268,31 @@ function tabsHtml() {
     </div>`;
 }
 
-function featuredPlaceholder() {
-  return `
-    <button class="kmkt-featured" type="button" data-kmkt-open-listing aria-label="Listing">
-      <span class="kmkt-featured-art">${bar(96, 15, "on-accent")}</span>
-      ${bar(62, 13)}
-      ${bar(26, 10, "accent")}
-    </button>`;
-}
-
-function listingPlaceholderRow() {
-  return `
-    <button class="kmkt-row" type="button" data-kmkt-open-listing aria-label="Listing">
-      <span class="kmkt-avatar-dot"></span>
-      <span class="kmkt-row-main">${bar(118, 13)}${bar(70, 10)}</span>
-      ${bar(58, 13)}
-      <span class="kmkt-row-chevron">${ICON.chevron}</span>
-    </button>`;
+/** A name tile's shape, redacted: no invented name or price (iOS tilePlaceholder, 27a4f39 / c488d1d). */
+function tilePlaceholderInner() {
+  return kachatNameTileHtml(bar(78, 15), bar(58, 13));
 }
 
 function marketPageHtml() {
+  const tiles = Array.from({ length: 4 }, () => `
+    <button class="kmkt-card kl-tile" type="button" data-kmkt-open-listing aria-label="Listing">${tilePlaceholderInner()}</button>`).join("");
   return `
     <div class="kmkt-page">
-      ${sectionHeader("Featured", "Names their owners have put up for sale.")}
-      <div class="kmkt-featured-strip">${Array.from({ length: 4 }, featuredPlaceholder).join("")}</div>
-
-      ${sectionHeader("Recently listed")}
-      <div class="kmkt-card kmkt-list kmkt-inset-16">${Array.from({ length: 5 }, listingPlaceholderRow).join("")}</div>
+      ${sectionHeader("For sale")}
+      ${kachatNameGridHtml(tiles)}
 
       <button class="secondary-button accent kmkt-wide-button" type="button" disabled>${ICON.tag}<span>List a Name for Sale</span></button>
       <p class="kmkt-footnote">Listings appear here once .kachat names launch.</p>
     </div>`;
 }
 
-function myNamesPageHtml() {
+function reclaimablePageHtml() {
+  const tiles = Array.from({ length: 2 }, () => `<div class="kmkt-card kl-tile" aria-hidden="true">${tilePlaceholderInner()}</div>`).join("");
   return `
-    <div class="kmkt-page kmkt-my-names">
-      <div class="kmkt-empty">
-        <span class="kmkt-empty-icon">${ICON.atCircle}</span>
-        <h3>No .kachat names yet</h3>
-        <p>Names you claim or buy show here. From here you'll set one as your name in chats, list it for sale, or send it to someone.</p>
-        <button class="primary-button kmkt-wide-button" type="button" disabled>Claim a Name</button>
-      </div>
-      <div class="kmkt-offers">
-        ${sectionHeader("Offers", "Offers you've made, and offers on names you own. Accept one, or withdraw your own, from here.")}
-        <div class="kmkt-card kmkt-empty-card">No offers yet.</div>
-      </div>
+    <div class="kmkt-page">
+      ${sectionHeader("Reclaimable", "Names whose owners let them lapse. Anyone may reclaim one: the bond goes back to its last owner, you keep the freed deposit as a bounty, and the name is free to claim.")}
+      ${kachatNameGridHtml(tiles)}
+      <p class="kmkt-footnote">Reclaimable names appear here once .kachat names launch.</p>
     </div>`;
 }
 
@@ -320,7 +306,7 @@ function activityPageHtml() {
     </div>`).join("");
   return `
     <div class="kmkt-page">
-      ${sectionHeader("Recent activity", "Claims, listings and sales across the marketplace.")}
+      ${sectionHeader("Recent activity", "Every claim, renewal, listing, sale, offer, transfer and reclaim across the registry.")}
       <div class="kmkt-card kmkt-list kmkt-inset-56">${rows}</div>
       <p class="kmkt-footnote">Activity appears here once .kachat names launch.</p>
     </div>`;
@@ -329,7 +315,7 @@ function activityPageHtml() {
 function pageHtml() {
   // Live, or not launched here (mainnet): the same pages - empty on mainnet (iOS 7227d69).
   if (liveHubIsLive() || !kachatNamesLaunched()) return livePageHtml(state.page);
-  if (state.page === "myNames") return myNamesPageHtml();
+  if (state.page === "reclaimable") return reclaimablePageHtml();
   if (state.page === "activity") return activityPageHtml();
   return marketPageHtml();
 }
@@ -348,7 +334,6 @@ function homeHtml() {
       </div>
       ${heroHtml()}
       ${searchCardHtml()}
-      <div class="kmkt-live-pending" data-kmkt-live-pending>${liveRegistrationsHtml()}</div>
       ${tabsHtml()}
       <div data-kmkt-page-body>${pageHtml()}</div>
     </div>`;
@@ -570,10 +555,10 @@ function onLiveChanged(kind) {
   }
   const set = (selector, html) => { const part = el.querySelector(selector); if (part) part.innerHTML = html; };
   if (kind === "search") { set("[data-kmkt-search-result]", searchResultHtml()); return; }
-  if (kind === "pending") { set("[data-kmkt-live-pending]", liveRegistrationsHtml()); return; }
+  // a registration in flight shows in its own progress sheet (iOS 61fb0fc), not on this page
+  if (kind === "pending") return;
   set("[data-kmkt-header-actions]", headerActionsHtml());
   set("[data-kmkt-hero-status]", liveHeroStatusHtml(comingSoonPill()));
-  set("[data-kmkt-live-pending]", liveRegistrationsHtml());
   if (kind !== "refresh") {
     set("[data-kmkt-search-result]", searchResultHtml());
     set("[data-kmkt-page-body]", pageHtml());

@@ -1665,24 +1665,37 @@
         <button class="modal-close" type="button" data-close-create-account aria-label="Close">×</button>
       </div>
 
-      <div data-create-step="setup">
-        <div class="create-warning">
-          <strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3zM12 9v5M12 17.5v.5"/></svg> Important</strong>
-          <p>You will be shown a seed phrase. This is the only way to recover your account. Write it down and store it securely.</p>
-        </div>
-        <fieldset class="seed-length-fieldset">
-          <legend>Seed Phrase Length</legend>
-          <div class="seed-length-options">
-            <label><input type="radio" name="wordCount" value="12" /><span><strong>12 words</strong><small>Standard</small></span></label>
-            <label><input type="radio" name="wordCount" value="24" /><span><strong>24 words</strong><small>Recommended</small></span></label>
-          </div>
-        </fieldset>
-        <label class="field-label">Account Name
-          <input class="field-input" data-create-name type="text" value="" maxlength="48" placeholder="Enter account name" autocomplete="off" />
-        </label>
-        <p class="field-error" data-create-account-error hidden></p>
+      <!-- Create Account is three steps (iOS acd879b / c6bd716): the name, then the seed length,
+           then the seed phrase - and after it the optional passphrase, which commits the account. -->
+      <div data-create-step="name">
+        <h3 class="create-step-title">Create a name for your wallet</h3>
+        <p class="create-step-note">This name is only stored on this device, to tell your wallets apart. No one else will ever see it.</p>
+        <input class="field-input create-name-input" data-create-name type="text" value="" maxlength="48" placeholder="Enter account name" autocomplete="off" aria-label="Account name" />
         <div class="modal-actions">
           <button class="secondary-button" type="button" data-close-create-account>Cancel</button>
+          <button class="primary-button" type="button" data-create-name-next disabled>Next</button>
+        </div>
+      </div>
+
+      <div data-create-step="length" hidden>
+        <h3 class="create-step-title">Choose seed phrase length</h3>
+        <!-- Two full-width buttons in the Generate Account style; the chosen one is filled, the other
+             outlined. Nothing is chosen until one is clicked. -->
+        <div class="seed-length-buttons" role="radiogroup" aria-label="Seed phrase length">
+          <button type="button" class="seed-length-button" role="radio" aria-checked="false" data-create-word-count="12">
+            <span class="seed-length-check" aria-hidden="true"></span>12 words
+          </button>
+          <button type="button" class="seed-length-button" role="radio" aria-checked="false" data-create-word-count="24">
+            <span class="seed-length-check" aria-hidden="true"></span>24 words
+          </button>
+        </div>
+        <div class="create-warning">
+          <strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3zM12 9v5M12 17.5v.5"/></svg> Important</strong>
+          <p>The next screen shows your seed phrase. It is the only way to recover your account: write it down and store it securely, and make sure no one can see your screen.</p>
+        </div>
+        <p class="field-error" data-create-account-error hidden></p>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-create-length-back>Back</button>
           <button class="primary-button" type="button" data-generate-account disabled>Generate Account</button>
         </div>
       </div>
@@ -2010,7 +2023,6 @@
   </div>
 
 
-  <!-- KaPosts quick tip: Send-Kaspa-style modal, direct send through the chat payment rules. -->
   <!-- Send KAS (iOS 8d208b2 paymentSheet): every way into a chat payment opens this instead of
        turning the composer into an amount field. Who it goes to, the exact amount (KAS or fiat,
        the converted value and Max under it), an encrypted memo carried in the payment payload,
@@ -2038,38 +2050,25 @@
     </section>
   </div>
 
-  <div class="modal-backdrop" data-tip-modal hidden>
-    <section class="contact-modal tip-modal" role="dialog" aria-modal="true" aria-label="Send a tip">
-      <div class="modal-header">
-        <div>
-          <p class="screen-kicker">KaPosts</p>
-          <h2 data-tip-title>Tip</h2>
-        </div>
-        <button class="modal-close" type="button" data-close-tip aria-label="Close">×</button>
-      </div>
-      <div class="tip-recipient-row">
-        <strong data-tip-name></strong>
-        <small data-tip-address></small>
-      </div>
+  <!-- KaPosts tip (iOS 0e08006): the same Send Kaspa sheet as a payment in a chat, built from the
+       shared pieces (ui/send-kaspa-components.js) - the big amount with the KAS / currency switch and
+       Max, where it goes, the available balance, the fee card (speed, custom fee, Coin Control) and
+       slide-to-send. Wired in ui/app.js (openTipModal). -->
+  <div class="modal-backdrop pay-sheet-backdrop" data-tip-modal hidden>
+    <section class="contact-modal pay-sheet tip-sheet" role="dialog" aria-modal="true" aria-labelledby="tip-sheet-title">
+      <button class="modal-close pay-sheet-close" type="button" data-close-tip aria-label="Close">×</button>
+      <header class="pay-sheet-head">
+        <h2 id="tip-sheet-title" data-tip-title>Tip</h2>
+        <p data-tip-recipient></p>
+      </header>
+      <div data-sk-mount="amount"></div>
       <p class="tip-destination" data-tip-destination></p>
-      <label class="field-label compact">Amount (KAS)
-        <div class="tip-amount-row">
-          <input class="field-input" type="text" inputmode="decimal" data-tip-amount placeholder="0.00" autocomplete="off" spellcheck="false" />
-          <button class="saved-node-btn" type="button" data-tip-max>Max</button>
-        </div>
-      </label>
-      <p class="field-hint" data-tip-available>Available: --</p>
-      <div class="settings-segmented full" role="group" aria-label="Fee tier">
-        <button type="button" class="settings-segmented-option active" data-tip-fee-tier="normal">Normal</button>
-        <button type="button" class="settings-segmented-option" data-tip-fee-tier="fast">Fast</button>
-        <button type="button" class="settings-segmented-option" data-tip-fee-tier="priority">Priority</button>
+      <div class="pay-pills">
+        <span class="sk-pill" data-tip-available role="status" aria-live="polite"></span>
       </div>
-      <p class="field-hint" data-tip-fee>Network fee: --</p>
-      <p class="field-error" data-tip-error hidden></p>
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-close-tip>Cancel</button>
-        <button class="primary-button" type="button" data-tip-send disabled>Send Tip</button>
-      </div>
+      <div data-sk-mount="fee"></div>
+      <p class="pay-sheet-note" data-tip-note hidden></p>
+      <div data-sk-mount="action"></div>
     </section>
   </div>
 

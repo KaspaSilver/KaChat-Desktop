@@ -176,25 +176,53 @@ async function main() {
 
   // MARK: manifest and gate
   r.check(S.KachatNamesService.isEnabled, "testnet gate open under kachat-network-v1=testnet");
-  // the bundled testnet manifest is still registry v2's: refused as outdated until the v3 genesis
-  // manifest is bundled, so testnet shows "Setting up" (as iOS)
+  // the bundled testnet manifest is the live testnet-10 registry v3 (iOS 32b7b32): it verifies,
+  // so testnet leaves "Setting up" (registryUpgrading stays false)
+  const BUNDLED_REGISTRY = "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24";
+  const BUNDLED_PRICE = "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338";
   const bundled = new S.KachatNamesService(fakeEngine());
+  let bundledEvents = 0;
+  bundled.onChange((x) => { if (x === bundled) bundledEvents += 1; });
   try {
     const bm = await bundled.loadManifest();
     r.eq(bundled.manifestSource, "bundle", "manifest from the bundle");
     r.eq(bm.network, "testnet-10", "bundled manifest network");
     r.check(!bm.isDryRun, "bundled manifest is not a dry run");
+    r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled manifest: registry covenant id");
+    r.eq(C.hex(bm.priceCovenantId), BUNDLED_PRICE, "bundled manifest: price covenant id");
+    r.eq(bm.genesisShards.length, 8, "bundled manifest: 8 price shards");
+    r.eq(bundled.registryUpgrading, false, "bundled v3 manifest: registryUpgrading stays false (no Setting up)");
+    r.eq(bundledEvents, 0, "bundled v3 manifest: no registryUpgrading change announced");
+    r.check((await bundled.loadManifest()) === bm, "the verified bundled manifest is cached");
+    r.check((await bundled.builder()) instanceof B.Builder, "builder() over the bundled manifest");
     console.log("bundled manifest: registry v3, verified");
   } catch (e) {
-    r.check(e.code === "registryUpgrading" && bundled.registryUpgrading, `the bundled manifest neither verifies nor is an earlier registry's: ${e.message}`);
-    console.log("bundled manifest: an earlier registry (outdated) - .kachat shows Setting up until the v3 genesis manifest is bundled");
+    r.check(false, `the bundled v3 manifest is refused: ${e.code ?? ""} ${e.message}`);
   }
+  // the same manifest served by an indexer verifies too: every template is pinned for its registry
+  const bundledBytes = readFileSync(join(repo, "engine/kachat-names/kachat-names-testnet-10.json"));
+  const realFromIndexer = new S.KachatNamesService(fakeEngine(), { bundledManifest: null });
+  realFromIndexer._manifestData = async () => [new Uint8Array(bundledBytes), "https://idx.test/names/manifest"];
+  try {
+    const im = await realFromIndexer.loadManifest();
+    r.eq(C.hex(im.registryCovenantId), BUNDLED_REGISTRY, "indexer-served v3 manifest verifies (every template pinned)");
+    r.eq(realFromIndexer.manifestSource, "https://idx.test/names/manifest", "indexer-served manifest source");
+  } catch (e) {
+    r.check(false, `the indexer-served v3 manifest is refused: ${e.message}`);
+  }
+  // a synthetic registryVersion 2 copy of the bundled manifest: the outdated path, "Setting up"
+  const realV2 = JSON.parse(bundledBytes.toString("utf8"));
+  realV2.registryVersion = 2;
+  const realV2Svc = new S.KachatNamesService(fakeEngine(), { bundledManifest: realV2 });
+  await r.throws(() => realV2Svc.loadManifest(), (e) => e.code === "registryUpgrading" && realV2Svc.registryUpgrading,
+    "a registryVersion 2 bundled manifest is registryUpgrading (Setting up)");
   const dry = new S.KachatNamesService(fakeEngine(), { bundledManifest: v.manifest });
   await r.throws(() => dry.loadManifest(), (e) => e.code === "dryRunManifest", "a dry-run manifest is refused");
   const m = await dry.loadManifest({ allowDryRun: true });
   r.check(m.isDryRun, "allowDryRun loads the vectors' manifest");
 
-  // an indexer-served manifest must have every template pinned (the gap and name are not yet)
+  // an indexer-served manifest must have every template pinned (the vectors' registry has no
+  // deployment pins)
   const fromIndexer = new S.KachatNamesService(fakeEngine(), { bundledManifest: null });
   fromIndexer._manifestData = async () => [new TextEncoder().encode(JSON.stringify(v.manifest)), "https://idx.test/names/manifest"];
   await r.throws(() => fromIndexer.loadManifest({ allowDryRun: true }),

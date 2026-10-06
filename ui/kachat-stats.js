@@ -32,6 +32,12 @@ const ICONS = {
   board: svg(`<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.3h18M3 14.7h18M9 4v16M15 4v16"/>`),
   trophy: svg(`<path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4M12 14v3M8 20h8M9 17h6"/>`),
   tray: svg(`<path d="M3 13.5 5.5 5h13l2.5 8.5V19a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5.5Z"/><path d="M3 13.5h5l1 2.5h6l1-2.5h5"/><path d="M8 8.5h8M7.3 11h9.4"/>`),
+  // .kachat names (iOS b2d108b: at.badge.plus, arrow.clockwise.circle, cart, hand.raised, tag)
+  atPlus: svg(`<circle cx="10.6" cy="12.6" r="3"/><path d="M13.6 9.6v3.9a2 2 0 0 0 4 0v-.9a7 7 0 1 0-2.8 5.6"/><path d="M19 2.6v5M16.5 5.1h5"/>`),
+  renew: svg(`<circle cx="12" cy="12" r="9"/><path d="M16 12a4 4 0 1 1-1.2-2.85"/><path d="M15.2 6.9v2.5h-2.5"/>`),
+  cart: svg(`<path d="M2.5 3.5h2.6l2.4 11.2a1.5 1.5 0 0 0 1.5 1.2h8.5a1.5 1.5 0 0 0 1.5-1.2l1.4-7.2H6.2"/><circle cx="9.6" cy="20" r="1.3"/><circle cx="17.4" cy="20" r="1.3"/>`),
+  handRaised: svg(`<path d="M8 13.2V5.6a1.5 1.5 0 0 1 3 0V11M11 10.6V4.1a1.5 1.5 0 0 1 3 0v6.5M14 10.6V5.6a1.5 1.5 0 0 1 3 0v7.2M17 9.6a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-1.2a6 6 0 0 1-4.6-2.2L4 14.7a1.6 1.6 0 0 1 2.4-2.1L8 14.2"/>`),
+  tag: svg(`<path d="M3.5 12.2V4.6a1.1 1.1 0 0 1 1.1-1.1h7.6a1.1 1.1 0 0 1 .8.3l7.7 7.7a1.1 1.1 0 0 1 0 1.6l-7.6 7.6a1.1 1.1 0 0 1-1.6 0l-7.7-7.7a1.1 1.1 0 0 1-.3-.8Z"/><circle cx="8" cy="8" r="1.4"/>`),
 };
 
 /** One kind of KaChat transaction. `key` is the key in the indexer's `GET /stats` response
@@ -47,6 +53,13 @@ const CATEGORIES = [
   { key: "kapostActions", title: "KaPost Activity", detail: "Votes, follows, edits and deletes", icon: "thumbsUp", color: "purple" },
   { key: "chessMoves", title: "Chess Moves", detail: "Moves played in Chess Online", icon: "board", color: "brown" },
   { key: "chessGames", title: "Chess Games", detail: "Games started in Chess Online", icon: "trophy", color: "yellow" },
+  // .kachat names (registry transactions, iOS b2d108b). An indexer reports them only where names
+  // are live, so on a network without the registry yet (mainnet before launch) they stay hidden.
+  { key: "kachatRegistrations", title: "Names Registered", detail: ".kachat names claimed", icon: "atPlus", color: "mint" },
+  { key: "kachatRenewals", title: "Name Renewals", detail: ".kachat names extended or renewed", icon: "renew", color: "renewTeal" },
+  { key: "kachatSales", title: "Name Sales", detail: ".kachat names bought from a listing or through an accepted offer", icon: "cart", color: "red" },
+  { key: "kachatOffers", title: "Name Offers", detail: "Offers made on .kachat names", icon: "handRaised", color: "amber" },
+  { key: "kachatActivity", title: "Name Activity", detail: "Listings, transfers, releases, reclaims and returned offers", icon: "tag", color: "slate" },
   { key: "selfStash", title: "Saved Records", detail: "Chat keys and contact notes saved to your own account", icon: "tray", color: "gray" },
 ];
 const CATEGORY_KEYS = new Set(CATEGORIES.map((c) => c.key));

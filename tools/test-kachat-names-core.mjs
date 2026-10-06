@@ -217,7 +217,9 @@ function runManifest(v, r) {
   const m = M.decodeManifest(JSON.stringify(v.manifest));
   try { M.verifyManifest(m); r.pass += 1; } catch (e) { r.check(false, `manifest verify: ${e.message}`); }
   r.check(m.isDryRun, "the vectors' manifest is a dry run");
-  // the gap and name are not pinned until the testnet genesis: an indexer-served copy is refused
+  // the vectors' registry is not a deployed one: its gap, name and offer have no pins, so an
+  // indexer-served copy is refused
+  r.check(M.deployedTemplateHashes[C.hex(m.registryCovenantId)] === undefined, "the vectors' registry has deployment pins");
   r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with unpinned gap/name verified");
   // IOS-059: the offer template must be pinned too - an unpinned one could hold buyers' funds in a
   // script the indexer controls
@@ -268,16 +270,60 @@ function runManifest(v, r) {
     "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
   ].find((x) => existsSync(x));
   if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
-  // the bundled manifest: either a verified v3 one, or an earlier one the app shows as "setting up"
-  try {
-    const bm = M.decodeManifest(new Uint8Array(bundled));
-    M.verifyManifest(bm);
+  // the bundled manifest: the live testnet-10 registry v3 (iOS 32b7b32), verified from the bundle
+  // and as an indexer would serve it (every template pinned for its registry id)
+  const BUNDLED_REGISTRY = "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24";
+  const BUNDLED_PRICE = "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338";
+  const bundledJson = JSON.parse(bundled.toString("utf8"));
+  r.eq(bundledJson.registryVersion, 3, "bundled manifest registryVersion");
+  let bm = null;
+  try { bm = M.decodeManifest(new Uint8Array(bundled)); } catch (e) { r.check(false, `bundled manifest decode: ${e.message}`); }
+  if (bm) {
+    try { M.verifyManifest(bm); r.pass += 1; } catch (e) { r.check(false, `bundled manifest verify (bundle): ${e.message}`); }
+    try { M.verifyManifest(bm, { source: M.ManifestSource.indexer }); r.pass += 1; } catch (e) { r.check(false, `bundled manifest verify (indexer): ${e.message}`); }
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
-    r.pass += 1;
-    console.log("bundled manifest: registry v3, verified");
-  } catch (e) {
-    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `the bundled manifest neither verifies nor is an outdated one: ${e.message}`);
-    console.log("bundled manifest: an earlier registry (outdated) - the app shows .kachat as setting up until the v3 genesis manifest is bundled");
+    r.eq(bm.network, "testnet-10", "bundled manifest network");
+    r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled registry covenant id");
+    r.eq(C.hex(bm.priceCovenantId), BUNDLED_PRICE, "bundled price covenant id");
+    r.eq(C.hex(bm.genesisTxid), "fa8b21d28747c664197b0dc70f63811e71aa544f407cee577fef1584a60d5940", "bundled registry genesis txid");
+    r.eq(C.hex(bm.priceGenesisTxid), "246d4cb6b28263f1b7c49fa1d4bb0ec59bdf908a08999b9cc491525b1402e78b", "bundled price genesis txid");
+    r.eq(bm.genesisShards.length, 8, "bundled manifest: 8 price shards");
+    r.eq(bm.params.periodMs, 600_000n, "bundled manifest: 10-minute testnet clock");
+    // the pins: the price everywhere, the gap / name / offer for this registry id - and they are
+    // exactly the bundled templates (iOS Manifest.deployedTemplateHashes)
+    const pins = M.templatePinsFor(bm.registryCovenantId);
+    r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer,KachatPrice", "every template pinned for the bundled registry");
+    r.eq(M.templatePinsFor(BUNDLED_REGISTRY.toUpperCase()).KachatOffer, pins.KachatOffer, "templatePinsFor takes hex in any case");
+    for (const t of [bm.price, bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled ${t.contract} is the pinned build`);
+    r.eq(pins.KachatGap, "3c2c0f4f076da46f401ee19ea232580207c1c2bcd5cbdb626ead0b7f7693a157", "pinned gap hash (iOS)");
+    r.eq(pins.KachatName, "973dba9aaa58ba8f59ac28a4dc45001209fae7708a89ffbcf49c1bc1ba5adfc4", "pinned name hash (iOS)");
+    r.eq(pins.KachatOffer, "8d6f8cdd287b2776b4c763691f28ffc08cdbe1552d2d7b7acdce8400268d1be5", "pinned offer hash (iOS)");
+    r.eq(pins.KachatPrice, "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3", "pinned price hash (iOS)");
+    // a tampered offer build (its hash recomputed so only the pin can catch it) is refused, from
+    // the bundle too: this registry's offer is pinned
+    const tampered = M.decodeManifest(new Uint8Array(bundled));
+    const suffix = tampered.offer.suffix.slice();
+    suffix[suffix.length - 1] ^= 1;
+    tampered.offer = { ...tampered.offer, suffix, templateHash: C.templateHash(tampered.offer.prefix, suffix) };
+    for (const source of [M.ManifestSource.bundle, M.ManifestSource.indexer]) {
+      let msg = "";
+      try { M.verifyManifest(tampered, { source }); } catch (e) { msg = e.message; }
+      r.check(/KachatOffer is not the pinned build/.test(msg), `a tampered offer template (${source}) is refused as not pinned: ${msg || "verified"}`);
+    }
+    // the bundled templates under another registry id lose their deployment pins: an indexer copy
+    // is refused (and the registry id binding fails anyway)
+    const moved = structuredClone(bundledJson);
+    moved.registryCovenantId = "ab".repeat(32);
+    let movedMsg = "";
+    try { M.verifyManifest(M.decodeManifest(moved), { source: M.ManifestSource.indexer }); } catch (e) { movedMsg = e.message; }
+    r.check(movedMsg !== "", "the bundled manifest under another registry id verified from an indexer");
+    // registryVersion 2 of the same manifest is an earlier registry ("setting up")
+    const v2 = structuredClone(bundledJson);
+    v2.registryVersion = 2;
+    let v2Err = null;
+    try { M.decodeManifest(v2); } catch (e) { v2Err = e; }
+    r.check(v2Err instanceof C.Failure && v2Err.isOutdatedRegistry, "a registryVersion 2 copy of the bundled manifest is outdated");
+    console.log(`bundled manifest: registry v3, verified (registry ${BUNDLED_REGISTRY.slice(0, 8)}..${BUNDLED_REGISTRY.slice(-4)}, price ${BUNDLED_PRICE.slice(0, 8)}..${BUNDLED_PRICE.slice(-4)}, every template pinned)`);
   }
   return m;
 }

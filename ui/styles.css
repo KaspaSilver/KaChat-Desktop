@@ -908,6 +908,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .notif-center-source.notif-src-kaposts { color: var(--kaspa-ink); background: rgba(112,199,186,.12); }
 .notif-center-source.notif-src-group { color: var(--ios-blue); background: rgba(122,162,255,.12); }
 .notif-center-source.notif-src-broadcast { color: #f0b23c; background: rgba(240,178,60,.12); }
+.notif-center-source.notif-src-kachat { color: var(--kaspa-ink); background: rgba(112,199,186,.12); text-transform: none; }
 .notif-center-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .notif-center-copy strong { font-size: 13.5px; font-weight: 600; }
 .notif-center-copy small { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6631,6 +6632,9 @@ body.session-logged-out [data-account-rename-modal] {
   height: 120px; background: linear-gradient(135deg, rgba(112,199,186,.5), rgba(112,199,186,.12));
   background-size: cover; background-position: center;
 }
+/* a .kachat banner (iOS 3d6fb7c) is an <img>; the gradient stays behind it until it loads */
+.kaposts-profile-banner.has-img { overflow: hidden; }
+.kaposts-profile-banner-img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .kaposts-profile-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px 14px; margin-top: -26px; }
 .kaposts-profile-row .kaposts-avatar { width: 64px; height: 64px; border: 3px solid var(--panel); }
 .kaposts-profile-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding-top: 26px; }
@@ -7410,22 +7414,12 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .kaposts-thread-chain-item { border-left: 2px solid rgba(112,199,186,.35); margin-left: 16px; }
 
-/* KaPosts quick tip modal */
+/* KaPosts tip: the chat's Send KAS sheet (.pay-sheet) plus where the tip goes (iOS 0e08006) */
 [data-tip-modal] { z-index: 1600; }
-.tip-recipient-row {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
-  padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); margin-bottom: 8px;
-}
-.tip-recipient-row strong { font-size: 14px; }
-.tip-recipient-row small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.tip-destination { margin: 0 0 14px; padding-left: 2px; font-size: 12.5px; color: var(--muted); }
+.tip-destination { margin: 0; text-align: center; font-size: 12.5px; color: var(--muted); }
 .tip-destination.tip-dest-private { color: var(--ios-green); }
 .tip-destination::before { content: "🌐 "; }
 .tip-destination.tip-dest-private::before { content: "🔒 "; }
-.tip-amount-row { display: flex; align-items: center; gap: 8px; }
-.tip-amount-row .field-input { flex: 1; }
-.tip-modal .settings-segmented.full { margin: 12px 0 6px; }
-.tip-modal .modal-actions { margin-top: 16px; }
 
 /* Broadcasts list, iOS parity: Popular + Your Channels sections of rounded cards */
 .broadcast-section-header {
@@ -10789,50 +10783,41 @@ button.chess-t-row { cursor: pointer; }
   border: 0;                                        /* was orange .25 */
 }
 
-/* "Seed Phrase Length" = headline + iOS segmented control */
-.create-account-flow .seed-length-fieldset { margin: 0 0 24px; }
-.create-account-flow .seed-length-fieldset legend { font-size: 17px; font-weight: 600; margin-bottom: 8px; color: var(--text); } /* was 800 */
-.create-account-flow .seed-length-options {
-  gap: 0;                                           /* was 10px */
-  padding: 2px;
-  border-radius: 9px;
-  background: var(--ios-fill-3);
-}
-.create-account-flow .seed-length-options span {
-  min-height: 32px;                                 /* was 58px */
-  padding: 4px 8px;                                 /* was 10px 14px */
-  gap: 0;
-  align-items: center; text-align: center;
-  border: 0;                                        /* was 1px */
-  border-radius: 7px;                               /* was 14px */
-  background: transparent;                          /* was surface-1 */
-  color: var(--text);
-}
-.create-account-flow .seed-length-options strong { font-size: 13px; font-weight: 400; line-height: 18px; }
-.create-account-flow .seed-length-options small { font-size: 11px; line-height: 13px; color: var(--muted); opacity: 1; } /* desktop-only copy, kept */
-.create-account-flow .seed-length-options input:checked + span {
-  background: var(--ios-segment-on);                /* was blue rgba(60,94,255,.17) */
-  border: 0;                                        /* was blue border */
-  box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04);  /* was blue ring */
-}
-.create-account-flow .seed-length-options input:checked + span strong { font-weight: 600; }
-.create-account-flow .seed-length-options input:focus-visible + span { outline: 2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); outline-offset: 1px; }
-
-/* "Account Name" = headline label over a .roundedBorder field */
-.create-account-flow [data-create-step="setup"] .field-label {
-  gap: 8px;                                         /* was 7px */
-  margin-bottom: 44px;                              /* 24 stack spacing + 20 spacer before Generate */
-  font-size: 17px; font-weight: 600; color: var(--text);  /* was 13/650 muted */
-}
-.create-account-flow [data-create-step="setup"] .field-input {
+/* Create Account steps 1 and 2 (iOS acd879b / c6bd716): a bold title (title2), a note under it */
+.create-account-flow .create-step-title { margin: 0 0 8px; font-size: 22px; font-weight: 700; line-height: 28px; color: var(--text); }
+.create-account-flow .create-step-note { margin: 0 0 24px; font-size: 15px; line-height: 20px; color: var(--muted); }
+/* the account name: a .roundedBorder field */
+.create-account-flow .create-name-input {
+  width: 100%;
   height: 34px;
-  padding: 0 8px;                                   /* was 12px 13px */
+  margin-bottom: 24px;
+  padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;                               /* was 14px */
+  border-radius: 6px;
   background: var(--panel);                         /* secondarySystemBackground #1c1c1e / #fff */
-  font-size: 17px; font-weight: 400;                /* label weight would otherwise inherit */
+  font-size: 17px; font-weight: 400;
 }
-.create-account-flow [data-create-step="setup"] .field-input:focus { border-color: var(--kaspa); box-shadow: none; }
+.create-account-flow .create-name-input:focus { border-color: var(--kaspa); box-shadow: none; }
+/* 12 / 24 words: two full-width buttons in the Generate Account style, the chosen one filled */
+.create-account-flow .seed-length-buttons { display: flex; flex-direction: column; gap: 12px; margin: 4px 0 24px; }
+.create-account-flow .seed-length-button {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; min-height: 54px; padding: 16px;
+  border: 1.5px solid var(--kaspa); border-radius: 12px;
+  background: transparent; color: var(--kaspa);
+  font: inherit; font-size: 17px; font-weight: 600; line-height: 22px;
+  cursor: pointer;
+}
+.create-account-flow .seed-length-button.chosen { background: var(--kaspa); color: #fff; }
+.create-account-flow .seed-length-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); outline-offset: 2px; }
+.create-account-flow .seed-length-check {
+  flex: 0 0 18px; width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor; box-sizing: border-box;
+}
+.create-account-flow .seed-length-button.chosen .seed-length-check {
+  border-color: #fff;
+  background: #fff radial-gradient(circle, var(--kaspa) 0 4px, transparent 4.5px);
+}
 
 /* Buttons (create + import): primary on top full width, Cancel under it */
 .create-account-flow .modal-actions:not(.passphrase-actions),
@@ -13045,3 +13030,49 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .kl-offer-row.kl-offer-tappable { cursor: pointer; }
 .kl-offer-row.kl-offer-tappable:hover { background-color: var(--row-hover); }
 .kl-offer-row.kl-offer-dim { opacity: .6; }
+
+/* ==== .kachat marketplace tabs and tiles (iOS 0765ce0, 27a4f39, c488d1d) ====
+   Marketplace (for sale) and Reclaimable as two-column grids of name tiles: centered, the full name
+   (it wraps and the tile grows - never truncated), ".kachat" under it, then the price asked and, on
+   a Reclaimable tile, its own Reclaim button above the overlay that opens the name. The hero keeps
+   only the logo and the status, so the search sits higher. */
+.kmkt-hero.kmkt-hero-compact .kmkt-hero-mark .kmkt-wordmark { height: 56px; }
+.kl-tile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.kl-tile {
+  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; min-height: 140px; min-width: 0; padding: 14px; border: 0; text-align: center;
+  color: var(--text); font: inherit;
+}
+button.kl-tile, .kl-tile-split { cursor: pointer; }
+button.kl-tile:hover, .kl-tile-split:hover { background: color-mix(in srgb, var(--grouped-row) 92%, var(--text)); }
+button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.kl-tile-name { max-width: 100%; font-size: 17px; font-weight: 700; line-height: 22px; overflow-wrap: anywhere; }
+.kl-tile-suffix { font-size: 12px; font-weight: 600; line-height: 16px; color: var(--kaspa-ink); }
+.kl-tile-footer { display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 100%; margin-top: 8px; }
+.kl-tile-price { max-width: 100%; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kl-tile .kmkt-bar { margin: 2px 0; }
+.kl-tile-open { position: absolute; inset: 0; margin: 0; padding: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+.kmkt-root .secondary-button.kl-tile-button { position: relative; z-index: 1; min-height: 30px; padding: 5px 12px; font-size: 13px; }
+
+/* ==== .kachat claim progress (iOS 61fb0fc): a half sheet that stays up until the name is
+   registered (Done) or the commit is cancelled. ==== */
+.kl-progress-sheet { display: flex; flex-direction: column; gap: 14px; padding: 22px 16px 20px; }
+.kl-progress-title { font-size: 17px; font-weight: 600; line-height: 22px; color: var(--text); text-align: center; overflow-wrap: anywhere; }
+.kl-progress-note { margin: 0; padding: 0 8px; font-size: 13px; line-height: 18px; text-align: center; }
+
+/* ==== .kachat Reclaim to Own (iOS ba1a734, 0c022e6) and a name that's gone (f420343) ==== */
+.kl-own-again { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 24px 16px; text-align: center; }
+.kl-own-again-icon { display: inline-flex; color: var(--kaspa-ink); }
+.kl-own-again-icon .kmkt-ico { width: 34px; height: 34px; }
+.kl-own-again-title { font-size: 17px; font-weight: 600; line-height: 22px; color: var(--text); overflow-wrap: anywhere; }
+.kl-own-again-text { margin: 0; font-size: 15px; line-height: 20px; }
+.kl-own-again-buttons { display: flex; flex-direction: column; gap: 10px; width: 100%; margin-top: 4px; }
+.kl-free-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 15px; }
+.kl-available-pill {
+  padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; line-height: 16px;
+  color: var(--ios-green); background: color-mix(in srgb, var(--ios-green) 15%, transparent);
+}
+.kl-free-price { font-size: 12px; line-height: 16px; }
+
+/* ==== Your Domains > .kachat: My Offers under your names (iOS 0765ce0) ==== */
+.kl-domains-offers { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }

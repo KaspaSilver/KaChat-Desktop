@@ -312,11 +312,14 @@ function runWalker(v, r) {
   r.eq(tryApply(st0, view(steps[0], 1), m)?.length, 0, "a commit is not a registry transaction");
 }
 
-/** The simulated chain of the e2e transactions: scripts by outpoint and spends. */
-function simulatedChain(v) {
+/** The simulated chain of the e2e transactions: scripts by outpoint and spends. `opts` (the
+ *  order tests): `at(i)` / `blueScore(i)` give step i's accepting time / blue score (default
+ *  1000 + i / none), `order(list)` the order `transactions(a)` hands them back in (default
+ *  newest first). */
+function simulatedChain(v, { at = (i) => 1_000 + i, blueScore = () => null, order = (list) => list } = {}) {
   const m = M.decodeManifest(v.manifest);
   const steps = v.steps.slice(0, e2eCount);
-  const txs = steps.map((st, i) => view(st, 1_000 + i));
+  const txs = steps.map((st, i) => { const t = view(st, 0); t.at = at(i) == null ? null : BigInt(at(i)); t.blueScore = blueScore(i) == null ? null : BigInt(blueScore(i)); return t; });
   const created = new Map(); // outpoint -> script
   const spentBy = new Map(); // outpoint -> txid
   for (const t of txs) {
@@ -339,9 +342,9 @@ function simulatedChain(v) {
       }
       return out;
     };
-    const transactions = (a) => [...visible].reverse().filter((t) =>
+    const transactions = (a) => order([...visible].reverse().filter((t) =>
       t.outputs.some((o) => addr(o.script) === a)
-      || t.inputs.some((i) => { const sc = created.get(`${C.hex(i.outpoint.txid)}:${i.outpoint.index}`); return sc != null && addr(sc) === a; }));
+      || t.inputs.some((i) => { const sc = created.get(`${C.hex(i.outpoint.txid)}:${i.outpoint.index}`); return sc != null && addr(sc) === a; })));
     return { visible, live, transactions };
   };
   return { m, txs, addr, visibleUpTo };
@@ -371,6 +374,111 @@ async function runWalk(v, r) {
       r.check(false, `walk to ${upTo} threw ${e.message}`);
     }
   }
+}
+
+/** A deterministic shuffle (mulberry32 from `seed`). */
+function shuffled(list, seed) {
+  let a = seed >>> 0;
+  const rnd = () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const out = [...list];
+  for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
+  return out;
+}
+
+/** The walk does not depend on the order the REST API lists transactions in, nor on their times
+ *  (KaChat-Desktop 2026-10-06: a reclaim walked before the earlier renewals of the name it spends
+ *  kept the reclaimed name). The simulated chain with its times reversed, shuffled or missing and
+ *  its lists reversed or shuffled walks to the in-order state, from the geneses and from a cache
+ *  walked partway; a reclaim whose name is not caught up waits. */
+async function runWalkOrder(v, r) {
+  const ref = simulatedChain(v);
+  const { m, addr } = ref;
+  const N = e2eCount;
+  // every transaction applied in order; the walk itself (in order) is the reference for what
+  // a walk sees (offers another device made are not followed)
+  const applyAll = R.RegistryState.atGenesis(m);
+  for (const t of ref.txs) applyAll.apply(t, m);
+  const reference = R.RegistryState.atGenesis(m);
+  const inOrder = ref.visibleUpTo(N);
+  await reference.walk({ manifest: m, address: addr, live: async (a) => inOrder.live(a), transactions: async (a) => inOrder.transactions(a) });
+  const ops = (xs) => sortStr(xs.map((x) => `${x.txid}:${x.index}`));
+  const eventsOf = (st) => sortStr(st.events.map((e) => `${e.txId}:${e.op}:${e.name ?? "?"}`));
+  const sameAs = (walked, want, label) => {
+    r.eq(ops(walked.gaps), ops(want.gaps), `${label}: gaps`);
+    r.eq(sortStr(walked.names.map((n) => n.name)), sortStr(want.names.map((n) => n.name)), `${label}: names`);
+    r.eq(ops(walked.names), ops(want.names), `${label}: name outpoints`);
+    r.eq(sortStr(walked.names.map((n) => `${n.name}:${n.owner}:${n.expiresAt}:${n.price}`)), sortStr(want.names.map((n) => `${n.name}:${n.owner}:${n.expiresAt}:${n.price}`)), `${label}: name records`);
+    r.eq(ops(walked.shards), ops(want.shards), `${label}: shard outpoints`);
+    r.eq(ops(walked.offers), ops(want.offers), `${label}: offers`);
+    r.eq(eventsOf(walked), eventsOf(want), `${label}: events`);
+    try { walked.checkInvariants(); } catch (e) { r.check(false, `${label}: invariants ${e.message}`); }
+  };
+  const variants = [
+    { label: "in order", opts: {} },
+    { label: "times reversed", opts: { at: (i) => 5_000 - i } },
+    { label: "times and blue scores reversed, lists oldest first", opts: { at: (i) => 5_000 - i, blueScore: (i) => 9_000 - i, order: (l) => [...l].reverse() } },
+    { label: "times shuffled, lists shuffled", opts: { at: (i) => 1_000 + shuffled([...Array(N).keys()], 7)[i], order: (l) => shuffled(l, l.length * 31 + 1) } },
+    { label: "no times, lists shuffled", opts: { at: () => null, order: (l) => shuffled(l, l.length * 17 + 5) } },
+    { label: "one time for all, blue scores shuffled", opts: { at: () => 1_000, blueScore: (i) => shuffled([...Array(N).keys()], 3)[i] } },
+  ];
+  r.eq([ops(reference.gaps), ops(reference.names), ops(reference.shards)], [ops(applyAll.gaps), ops(applyAll.names), ops(applyAll.shards)], "walk in order: the registry of every transaction applied in order");
+  const walkedEvents = new Set(reference.events.map((e) => `${e.txId}:${e.op}`));
+  r.eq(reference.events.map((e) => `${e.op} ${e.name ?? "?"}`), applyAll.events.filter((e) => walkedEvents.has(`${e.txId}:${e.op}`)).map((e) => `${e.op} ${e.name ?? "?"}`), "walk in order: events in chain order");
+  for (const { label, opts } of variants) {
+    const { visibleUpTo } = simulatedChain(v, opts);
+    const { live, transactions } = visibleUpTo(N);
+    const walked = R.RegistryState.atGenesis(m);
+    try {
+      const report = await walked.walk({ manifest: m, address: addr, live: async (a) => live(a), transactions: async (a) => transactions(a) });
+      sameAs(walked, reference, `walk ${label}`);
+      r.eq(report.unresolved, [], `walk ${label}: unresolved`);
+      r.check(report.rounds < 64, `walk ${label}: settled (${report.rounds} rounds)`);
+      r.eq(sortStr(report.applied), sortStr(reference.applied.slice(2)), `walk ${label}: every registry transaction applied once`);
+      const evs = walked.events.map((e) => `${e.op} ${e.name ?? "?"}`);
+      r.check(evs.includes("release bravo-tn") && evs.includes("reclaim lapse-tn") && evs.includes("offer_accepted bravo-tn"), `walk ${label}: release, reclaim and accept events`);
+      // with real times, events come out in chain order whatever the walk's rounds did
+      if (opts.at === undefined) r.eq(evs, reference.events.map((e) => `${e.op} ${e.name ?? "?"}`), `walk ${label}: events in chain order`);
+    } catch (e) {
+      r.check(false, `walk ${label} threw ${e.message}`);
+    }
+    // incremental: a cache walked partway (in order), then the rest in this variant's order
+    for (const upTo of [8, 14, 21]) {
+      const partial = R.RegistryState.atGenesis(m);
+      const first = ref.visibleUpTo(upTo);
+      const rest = visibleUpTo(N);
+      try {
+        await partial.walk({ manifest: m, address: addr, live: async (a) => first.live(a), transactions: async (a) => first.transactions(a) });
+        const cached = R.RegistryState.fromJSON(JSON.stringify(partial.toJSON()));
+        await cached.walk({ manifest: m, address: addr, live: async (a) => rest.live(a), transactions: async (a) => rest.transactions(a) });
+        sameAs(cached, reference, `walk ${label} from a cache at ${upTo}`);
+      } catch (e) {
+        r.check(false, `walk ${label} from a cache at ${upTo} threw ${e.message}`);
+      }
+    }
+  }
+
+  // apply: a reclaim whose name is not caught up (its renewal not applied) waits, changing nothing
+  const steps = v.steps.slice(0, N);
+  const renewLapse = 8, reclaimLapse = 22;
+  r.eq([s(steps[renewLapse].op), s(steps[reclaimLapse].op)], ["renew", "reclaim"], "order fixture: steps 8 and 22 renew and reclaim lapse-tn");
+  const behind = R.RegistryState.atGenesis(m);
+  for (let pass = 0; pass < N; pass++) ref.txs.forEach((t, i) => { if (i !== renewLapse && i !== reclaimLapse) tryApply(behind, t, m); });
+  r.check(behind.name("lapse-tn") != null && behind.name("bravo-tn") == null, "order fixture: bravo-tn released, lapse-tn at its first period");
+  const before = behind.clone();
+  let waited = null;
+  try { behind.apply(ref.txs[reclaimLapse], m); } catch (e) { waited = e; }
+  r.check(waited?.waiting === true, () => `a reclaim of a name not caught up waits (${waited?.message ?? "applied"})`);
+  r.check(behind.equals(before), "the waiting reclaim changed nothing");
+  for (let pass = 0; pass < N; pass++) ref.txs.forEach((t) => tryApply(behind, t, m));
+  r.check(behind.name("lapse-tn") == null, "the reclaim applies once the renewal has");
+  sameAs(behind, applyAll, "applied until stable in another order");
+  // chain order: spends first, then blue score, then time
+  const [a, b2, c] = [ref.txs[3], ref.txs[4], ref.txs[5]].map((t) => Object.assign(Object.create(Object.getPrototypeOf(t)), t));
+  a.blueScore = 30n; b2.blueScore = 20n; c.blueScore = 10n; // c spends b2's outputs, b2 a's
+  r.eq(R.RegistryState._chainOrder([c, b2, a]).map((t) => t.idHex), [a, b2, c].map((t) => t.idHex), "chain order: spends before blue score");
+  const [x, y] = [ref.txs[0], ref.txs[13]].map((t) => Object.assign(Object.create(Object.getPrototypeOf(t)), t));
+  x.blueScore = 50n; y.blueScore = 40n; x.at = 1n; y.at = 2n;
+  r.eq(R.RegistryState._chainOrder([x, y]).map((t) => t.idHex), [y.idHex, x.idHex], "chain order: unrelated ones by blue score");
 }
 
 function runRules(r) {
@@ -545,6 +653,7 @@ function runREST(r) {
   r.eq(t.outputs[1].covenant, null, "REST plain output");
   r.eq(t.outputs[0].value, 100_000_000n, "REST amount");
   r.eq(t.at, 1790909722989n, "REST acceptance time");
+  r.eq(t.blueScore, 574239955n, "REST accepting block blue score (the walk's chain order)");
   r.eq(R.addressFromScriptPublicKey(t.outputs[0].script, "kaspatest"), "kaspatest:pzg7r3p9wthvxxjtm74k7nlznrl9rjcfxjkx7txmslss2gyzw3xvj686vxecj", "P2SH address of the genesis gap");
   r.eq(R.p2shAddress(t.outputs[0].script), "kaspatest:pzg7r3p9wthvxxjtm74k7nlznrl9rjcfxjkx7txmslss2gyzw3xvj686vxecj", "p2shAddress of the genesis gap");
   // P2PK addresses: x-only key <-> kaspatest: address
@@ -762,6 +871,47 @@ async function runRegistryChain(v, r) {
 /** A refused manifest (registry v1: "being upgraded") and other refresh failures: a failed refresh
  *  counts as an attempt and bumps `revision` only when the error changed (iOS d2e0673, the refresh
  *  loop fix); a cache of the previous format is walked again. */
+/** A cached state the chain disagrees with (walked out of order by an earlier version) is walked
+ *  again from the geneses: one whose names and gaps no longer tile (dropped at load), and one
+ *  still tracking a UTXO a transaction it already applied spends (`stale` from the walk). */
+async function runRegistryStaleCache(v, r) {
+  const { m, txs, visibleUpTo } = simulatedChain(v);
+  const { live, transactions } = visibleUpTo(e2eCount);
+  const fetch = async (url) => {
+    const mm = new URL(url).pathname.match(/^\/addresses\/([^/]+)\/full-transactions$/);
+    return mm ? response(200, transactions(decodeURIComponent(mm[1])).map(toREST)) : response(404, {});
+  };
+  const getUtxosByAddresses = async (addresses) => [...live(addresses)].map((op) => {
+    const [transactionId, index] = op.split(":");
+    return { outpoint: { transactionId, index: Number(index) }, covenantId: null };
+  });
+  const reference = R.RegistryState.atGenesis(m);
+  await reference.walk({ manifest: m, address: (sc) => R.p2shAddress(sc), live: async (a) => live(a), transactions: async (a) => transactions(a) });
+  const accept = 14;
+  // stale: everything but the accept applied, yet the accept marked applied (bravo-tn still tracked)
+  const stale = R.RegistryState.atGenesis(m);
+  for (let pass = 0; pass < e2eCount; pass++) txs.forEach((t, i) => { if (i !== accept) tryApply(stale, t, m); });
+  stale.applied.push(txs[accept].idHex);
+  // broken: the walked registry with a reclaimed name back (what the out-of-order walk kept)
+  const broken = reference.clone();
+  const bravo = stale.name("bravo-tn");
+  broken.names.push({ ...bravo });
+  for (const [label, cache, logged] of [["a cache still tracking a spent UTXO", stale, true], ["a cache whose names and gaps do not tile", broken, false]]) {
+    const storage = memoryStorage();
+    storage.set("kachat-names-registry-testnet-v1", JSON.stringify(cache.toJSON()));
+    const logs = [];
+    const reg = new KachatNamesRegistry({ fetch, restBase: () => "https://rest.test", indexerBase: () => "", getUtxosByAddresses, storage, manifest: m, log: (...a) => logs.push(a.join(" ")) });
+    await reg.refresh();
+    r.eq(reg.lastError, null, `registry: ${label}: refreshed`);
+    r.eq(sortStr(reg.chainState.names.map((n) => `${n.name}@${n.txid}:${n.index}`)), sortStr(reference.names.map((n) => `${n.name}@${n.txid}:${n.index}`)), `registry: ${label}: walked again to the chain's names`);
+    r.eq(sortStr(reg.chainState.gaps.map((g) => `${g.txid}:${g.index}`)), sortStr(reference.gaps.map((g) => `${g.txid}:${g.index}`)), `registry: ${label}: and gaps`);
+    r.check(reg.chainState.events.some((e) => e.op === "release" && e.name === "bravo-tn"), `registry: ${label}: the release event`);
+    r.check(logs.some((l) => l.includes("walking again from the genesis")) === logged, `registry: ${label}: ${logged ? "logged" : "dropped at load"}`);
+    const saved = R.RegistryState.fromJSON(storage.map.get("kachat-names-registry-testnet-v1"));
+    r.check(saved.name("bravo-tn") == null, `registry: ${label}: the saved cache is the fixed one`);
+  }
+}
+
 async function runRegistryFailures(v, r) {
   const m = M.decodeManifest(v.manifest);
   let clock = 1_000_000;
@@ -1065,6 +1215,23 @@ async function runLive() {
   }
   const st = reg.chainState;
   try { st.checkInvariants(); } catch (e) { console.log(`live: invariants: ${e.message}`); return false; }
+  // incremental: a cache walked two rounds, then walked on, ends where the full walk did
+  try {
+    const ids = [C.hex(m.registryCovenantId), C.hex(m.priceCovenantId)];
+    const io = { manifest: m, address: (sc) => R.p2shAddress(sc), live: (a) => reg._liveOutpoints(a, ids), transactions: (a) => reg.restTransactions(a) };
+    const partial = R.RegistryState.atGenesis(m);
+    await partial.walk({ ...io, maxRounds: 2 });
+    const resumed = R.RegistryState.fromJSON(JSON.stringify(partial.toJSON()));
+    await resumed.walk(io);
+    const same = (f) => JSON.stringify(f(resumed)) === JSON.stringify(f(st));
+    const recs = (xs) => xs.map((x) => `${x.txid}:${x.index}`).sort();
+    const ok = same((x) => recs(x.gaps)) && same((x) => recs(x.names)) && same((x) => recs(x.shards))
+      && same((x) => x.events.map((e) => `${e.txId}:${e.op}`));
+    console.log(`  incremental walk (2 rounds, cached, walked on): ${ok ? "same as the full walk" : "DIFFERENT from the full walk"}`);
+    if (!ok) return false;
+  } catch (e) {
+    console.log(`  incremental walk failed: ${e.message} (not counted)`);
+  }
   console.log(`live TN10 registry ${C.hex(m.registryCovenantId).slice(0, 16)}...: ${Date.now() - t0} ms, ${st.applied.length - 1} transaction(s) walked, ${st.gaps.length} gap(s), ${st.names.length} name(s), ${st.events.length} event(s), cache ${storage.map.get("kachat-names-registry-testnet-v1")?.length ?? 0} bytes; walk ${reg.lastWalk.rounds} round(s), unresolved ${reg.lastWalk.unresolved.length}`);
   for (const g of st.gaps) console.log(`  gap ${g.lo.slice(0, 8)}..-${g.hi.slice(0, 8)}.. at ${g.txid.slice(0, 16)}:${g.index}`);
   for (const n of st.names) {
@@ -1113,7 +1280,7 @@ async function runSocialResolver(r) {
   const a = await res.resolve("x.com/KaspaCurrency");
   r.eq(a, { kind: "answered", profile: { avatar: "https://pbs.twimg.com/profile_images/1/a_400x400.jpg", banner: "https://pbs.twimg.com/profile_banners/9/8/1500x500", bio: "Kaspa" } }, "resolver: X through FxTwitter");
   r.eq(calls.map((c) => [c.url, c.accept, c.agent]), [["https://api.fxtwitter.com/KaspaCurrency", "application/json", "browser"]], "resolver: X costs one JSON request");
-  r.check(calls[0].timeoutMs === 8000 && calls[0].maxBytes > 0, "resolver: each request carries the 8 s limit and a read cap");
+  r.check(calls[0].timeoutMs === 5000 && calls[0].maxBytes > 0, "resolver: FxTwitter carries its 5 s limit and a read cap");
   r.eq(changes, [["https://x.com/KaspaCurrency", "https://pbs.twimg.com/profile_images/1/a_400x400.jpg"]], "resolver: onChange on a new answer");
   r.check(typeof mem.get(`${socialImageCachePrefix}https://x.com/KaspaCurrency`) === "string", "resolver: cached under kachat-social-image-v1:<link>");
   clock += 60_000;
@@ -1134,6 +1301,20 @@ async function runSocialResolver(r) {
   const xf = await res.resolve("x.com/jack");
   r.eq(xf.profile, { avatar: "https://pbs.twimg.com/profile_images/2/b_400x400.jpg", banner: "https://pbs.twimg.com/profile_banners/12/34/1500x500", bio: "just setting up" }, "resolver: X's page as the fallback");
   r.eq(calls.map((c) => c.agent), ["browser", "crawler"], "resolver: X's page asked as a crawler");
+  r.check(calls[1].timeoutMs === 6000, "resolver: a page request carries the 6 s limit");
+
+  // X behind a login wall (no profile tags): "couldn't look it up", unavatar.io for the avatar
+  calls.length = 0;
+  routes.set("https://api.fxtwitter.com/walled", null);
+  routes.set("https://x.com/walled", { body: "<html><script>challenge()</script></html>" });
+  routes.set("https://unavatar.io/x/walled?fallback=false", { contentType: "image/jpeg", body: "ÿØÿ" });
+  const walled = await res.resolve("x.com/walled");
+  r.eq([walled.kind, walled.profile], ["answered", { avatar: "https://unavatar.io/x/walled?fallback=false", banner: null, bio: null }], "resolver: X's login wall falls back to unavatar.io");
+  r.eq(calls.map((c) => c.url), ["https://api.fxtwitter.com/walled", "https://x.com/walled", "https://unavatar.io/x/walled?fallback=false"], "resolver: FxTwitter, X's page, then unavatar.io");
+  routes.set("https://x.com/walled2", { body: "<html></html>" });
+  routes.set("https://api.fxtwitter.com/walled2", { status: 503, body: {} });
+  r.eq(await res.resolve("x.com/walled2"), { kind: "unreachable", profile: null }, "resolver: a tagless page with no unavatar answer is unreachable, not an empty profile");
+  r.eq(await res.cached("x.com/walled2"), null, "resolver: and nothing is cached for it");
 
   // YouTube: the banner from the same page, else the desktop page
   calls.length = 0;
@@ -1172,7 +1353,7 @@ async function runSocialResolver(r) {
   routes.set("https://kick.com/never", () => { throw new Error("boom"); });
   r.eq(await res.resolve("kick.com/never"), { kind: "unreachable", profile: null }, "resolver: a throwing fetch is unreachable");
   routes.set("https://kick.com/cut", () => ({ status: 200, contentType: "text/html", text: `${"x".repeat(3_000_000)}<meta property="og:description" content="late">` }));
-  r.eq((await res.resolve("kick.com/cut")).profile.bio, null, "resolver: nothing past the read cap is read");
+  r.eq((await res.resolve("kick.com/cut")).kind, "unreachable", "resolver: nothing past the read cap is read (a page without profile tags is unreachable)");
   r.eq(await res.resolve("example.com/whoever"), { kind: "answered", profile: { avatar: null, banner: null, bio: null } }, "resolver: no lookup for an unsupported link");
 
   // profile(link): the cached answer now, a background lookup when stale
@@ -1200,8 +1381,12 @@ async function main() {
   console.log(`+ walker over the vectors: ${r.pass} pass, ${r.fail} fail`);
   await runWalk(v, r);
   console.log(`+ walk over a simulated chain: ${r.pass} pass, ${r.fail} fail`);
+  await runWalkOrder(v, r);
+  console.log(`+ walk in any order (shuffled, reversed, from a cache): ${r.pass} pass, ${r.fail} fail`);
   await runRegistryChain(v, r);
   console.log(`+ KachatNamesRegistry over the simulated chain: ${r.pass} pass, ${r.fail} fail`);
+  await runRegistryStaleCache(v, r);
+  console.log(`+ KachatNamesRegistry over an out-of-date cache: ${r.pass} pass, ${r.fail} fail`);
   await runRegistryFailures(v, r);
   console.log(`+ KachatNamesRegistry refusals and failed refreshes: ${r.pass} pass, ${r.fail} fail`);
   await runRegistryIndexer(v, r);

@@ -300,15 +300,32 @@ export class KachatNamesRegistry {
   }
 
   async _walk(m) {
-    const state = (this.chainState ?? RegistryState.atGenesis(m)).clone();
     // gaps and names carry the registry id, price shards the price covenant id (offers none)
     const ids = [hex(m.registryCovenantId), hex(m.priceCovenantId)];
-    const report = await state.walk({
-      manifest: m,
-      address: (script) => p2shAddress(script),
-      live: (addresses) => this._liveOutpoints(addresses, ids),
-      transactions: (address) => this.restTransactions(address),
-    });
+    const walkFrom = async (state) => {
+      const report = await state.walk({
+        manifest: m,
+        address: (script) => p2shAddress(script),
+        live: (addresses) => this._liveOutpoints(addresses, ids),
+        transactions: (address) => this.restTransactions(address),
+      });
+      try { state.checkInvariants(); } catch (e) { e.stale = true; throw e; }
+      return report;
+    };
+    let state = (this.chainState ?? RegistryState.atGenesis(m)).clone();
+    let report;
+    try {
+      report = await walkFrom(state);
+    } catch (e) {
+      // a state the chain disagrees with (a cache walked out of order by an earlier version):
+      // walk once more from the geneses, keeping the offers this device follows
+      if (!e?.stale) throw e;
+      this.deps.log("[KachatNames] the walked registry is out of date, walking again from the genesis:", e.message);
+      const offers = this.chainState?.clone().offers ?? [];
+      state = RegistryState.atGenesis(m);
+      state.offers = offers;
+      report = await walkFrom(state);
+    }
     state.verifiedAt = this._nowMs();
     if (report.applied.length) {
       this.deps.log(`[KachatNames] walked ${report.applied.length} registry transaction(s) in ${report.rounds} round(s)`);
@@ -426,8 +443,18 @@ export class KachatNamesRegistry {
     return all.filter((n) => includeInactive || n.status(grace, now) === Status.active).sort(byRegistration);
   }
 
-  /** Which of `addresses` own at least one .kachat name - active, in grace or lapsed, the same set
-   *  Your Domains lists (iOS ownersOfNames, 881ada6). Drives the "Contains domain" tag on Manage
+  /** The names an owner still holds, oldest first: active ones and expired ones in grace (still
+   *  renewable). A lapsed name is no longer theirs - it's in the marketplace's Reclaimable tab.
+   *  Your Domains, its count on Profile and the "Contains domain" tag all show this set
+   *  (iOS heldNames, aa36d2a). */
+  async heldNames(owner) {
+    const all = await this.namesOf(owner, { includeInactive: true });
+    const grace = this.graceMs, now = this._nowMs();
+    return all.filter((n) => n.status(grace, now) !== Status.lapsed);
+  }
+
+  /** Which of `addresses` hold at least one .kachat name - active or in grace, the same set
+   *  Your Domains lists (`heldNames`; iOS ownersOfNames, 881ada6 / aa36d2a). Drives the "Contains domain" tag on Manage
    *  Addresses and KasSigner. Empty where the registry is off (`isEnabled()` false: mainnet); an
    *  address whose lookup fails just isn't tagged. -> Promise<Set<string>> (the addresses as given). */
   async ownersOfNames(addresses) {
@@ -439,7 +466,7 @@ export class KachatNamesRegistry {
       const key = keyOf(address);
       if (!key) continue;
       try {
-        if ((await this.namesOf(key, { includeInactive: true })).length > 0) owners.add(address);
+        if ((await this.heldNames(key)).length > 0) owners.add(address);
       } catch { /* not tagged */ }
     }
     return owners;
@@ -448,10 +475,12 @@ export class KachatNamesRegistry {
   /** Active names listed for sale, most recently changed first. */
   async listings() {
     await this.prepare();
-    if (this.source.kind === "indexer") {
-      return IndexerAPI.listings(await this._get(this.source.base, "/market/listings?sort=recent"), keyOf).listings;
-    }
     const grace = this.graceMs, now = this._nowMs();
+    if (this.source.kind === "indexer") {
+      // an expired name's old listing is not for sale, whatever the indexer kept (iOS ba1a734)
+      return IndexerAPI.listings(await this._get(this.source.base, "/market/listings?sort=recent"), keyOf).listings
+        .filter((n) => n.status(grace, now) === Status.active);
+    }
     return (this.chainState?.names ?? []).map((n) => RegistryState.nameInfo(n))
       .filter((n) => n.isListed && n.status(grace, now) === Status.active)
       .sort((a, b) => { const x = a.updatedAt ?? 0n, y = b.updatedAt ?? 0n; return x > y ? -1 : x < y ? 1 : 0; });
@@ -507,10 +536,16 @@ export class KachatNamesRegistry {
     return (this.chainState?.events ?? []).filter((e) => e.name === name).reverse();
   }
 
-  /** Recent registry activity (Event[]), newest first. */
+  /** Recent registry activity (Event[]), newest first: every registration, renewal, extension,
+   *  listing, sale, offer, transfer, release and reclaim. An indexer serves it at
+   *  `GET /names/activity`; one without that endpoint yet answers only market events
+   *  (`/market/activity`). iOS 0765ce0. */
   async activity() {
     await this.prepare();
     if (this.source.kind === "indexer") {
+      try {
+        return IndexerAPI.events(await this._get(this.source.base, "/names/activity")).events.filter((e) => !e.op.startsWith("price"));
+      } catch { /* an older indexer: market events only */ }
       return IndexerAPI.events(await this._get(this.source.base, "/market/activity")).events;
     }
     // name activity only: price changes are the registry's, not a name's

@@ -352,8 +352,8 @@ export class KachatNamesService {
       // an indexer-served manifest is trusted only when every template is pinned in the app
       verifyManifest(m, { source: source === "bundle" ? ManifestSource.bundle : ManifestSource.indexer });
     } catch (error) {
-      // An earlier registry's manifest (the bundled one until the v3 genesis) is expected, not an
-      // error: say "being upgraded", once, and stop re-reading the bundle.
+      // An earlier registry's manifest (an old indexer copy; the bundle is v3 since 2026-10-06) is
+      // expected, not an error: say "being upgraded", once, and stop re-reading the bundle.
       const upgrading = isRegistryUpgrading(error);
       const refused = upgrading ? ServiceError.registryUpgrading() : error;
       if (upgrading) {

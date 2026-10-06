@@ -290,6 +290,9 @@ export class KachatNamesActions {
     this.returningOffers = new Set();
     this.withdrawingOffers = new Set();
     this.decliningOffers = new Set();
+    /** offer ids this person closed themselves (Withdraw, Refund) - not news when they disappear
+     *  (the app's .kachat notifier, iOS 86471dd KachatNamesNotifier.selfClosedOffers) */
+    this.selfClosedOffers = new Set();
   }
 
   // MARK: Observing (Swift @Published pending / virtualDaa)
@@ -621,6 +624,12 @@ export class KachatNamesActions {
     const s = this.signerFor(op);
     const cap = maxPrice == null ? null : BigInt(maxPrice);
     const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap));
+    // An offer you withdrew or refunded yourself isn't news; the ones this app returns on its own
+    // (expired, made to an earlier owner) are (iOS 86471dd).
+    if ((op.kind === "withdraw" && !this.withdrawingOffers.has(op.offer?.id))
+      || (op.kind === "refund" && !this.returningOffers.has(op.offer?.id))) {
+      if (op.offer?.id) this.selfClosedOffers.add(op.offer.id);
+    }
     if (op.kind === "offer" && plan.newOffer) {
       const o = plan.newOffer;
       await this.registry.trackOffer(new OfferInfo({
@@ -831,10 +840,18 @@ export class KachatNamesActions {
     const cap = BigInt(maxPrice);
     const name = normalize(raw);
     validate(name);
+    // One registration at a time: its progress sheet stays up until it's done (iOS 61fb0fc).
+    this._loadPending(s.address);
+    if (this._pending.some((p) => isOpen(p) && p.stage !== Stage.registered)) {
+      throw ActionError.notRegisterable("Finish the name you're claiming first.");
+    }
     await this.registry.refresh();
     const found = await this.registry.lookup(name);
-    if (found.kind === "registered") throw ActionError.notRegisterable(`${name}.kachat is already registered.`);
-    this._loadPending(s.address);
+    // A lapsed name is being reclaimed (Reclaim to Own, or by anyone): the commit can go out now,
+    // and the registration waits until the old name is cleared from the registry (iOS ba1a734).
+    if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) !== Status.lapsed) {
+      throw ActionError.notRegisterable(`${name}.kachat is already registered.`);
+    }
     let record = null;
     try {
       await enqueueSend(s.address, async () => {
@@ -1031,12 +1048,15 @@ export class KachatNamesActions {
     }
   }
 
+  /** This wallet holds `name` as a live registration (a lapsed old record of it doesn't count:
+   *  that is what a Reclaim to Own registers over; iOS ba1a734). */
   async _ownsName(name) {
     const me = this.myKey;
     if (!me) return false;
     try {
       const r = await this.registry.lookup(name);
-      return r.kind === "registered" && bytesEqual(r.info.owner, me);
+      return r.kind === "registered" && bytesEqual(r.info.owner, me)
+        && r.info.status(this.registry.graceMs, BigInt(nowMs())) !== Status.lapsed;
     } catch {
       return false;
     }
@@ -1051,6 +1071,11 @@ export class KachatNamesActions {
       await this.registry.refresh();
       const m = await this.registry.prepare();
       const found = await this.registry.lookup(p.name);
+      if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) === Status.lapsed) {
+        // the old, lapsed name is still there (its reclaim not seen yet): next tick (iOS ba1a734)
+        this._set(p, (q) => { q.lastError = `Waiting for the old ${p.name}.kachat to be cleared from the registry.`; });
+        return;
+      }
       if (found.kind === "registered") {
         if (bytesEqual(found.info.owner, s.me)) this._finishRegistered(p);
         else this._set(p, (q) => { q.stage = Stage.taken; q.lastError = null; });
