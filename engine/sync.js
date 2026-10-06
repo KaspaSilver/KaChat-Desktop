@@ -14,6 +14,7 @@ import {
   paymentPayloadEncryptedHex,
 } from "./kasia-protocol.js";
 import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
+import { kasTextFromSompi } from "./amounts.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
 
 // Kept as a named export for callers, but the effective default now comes from
@@ -96,7 +97,8 @@ function encryptedHexFromIndexerPayload(messagePayloadHex) {
     throw new Error("Indexer returned an invalid message payload.");
   }
 
-  // The indexer returns the bytes after ciph_msg:1:comm:<alias>: as hex.
+  // The indexer returns the bytes after kchat:1:comm:<alias>: (or the legacy, read-only
+  // ciph_msg:1:comm:<alias>:) as hex.
   // Kasia currently places base64(encrypted bytes) there, so decode the ASCII
   // body first and then convert the base64 bytes back to encrypted hex.
   const asciiBody = fromHex(clean).trim();
@@ -985,7 +987,8 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     }
     if (totalSompi <= 0n) continue;
 
-    const amountKas = (Number(totalSompi) / 1e8).toFixed(8).replace(/\.?0+$/, "");
+    // Exact (BigInt) text: Number(totalSompi) / 1e8 loses sompi past 2^53.
+    const amountKas = kasTextFromSompi(totalSompi);
     // "Received X KAS — memo" when the payer added one (iOS paymentContent).
     const memo = await paymentMemoFromPayload(tx?.payload, decryptMessage);
     messages.push({

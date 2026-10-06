@@ -553,6 +553,74 @@ async function main() {
     await r.throws(() => act.perform(A.Operation.extend(ext, 1n)), (e) => e.message === "double spend", "retry: gives up after three attempts");
     r.eq(submits, 3, "retry: three attempts at most");
   }
+  // MARK: actions: never pay more than the price the person confirmed (iOS 4f5d95e, IOS-054)
+  r.eq(typeof dry.requireLaunched, "function", "IOS-058: service.requireLaunched");
+  r.check((() => { try { dry.requireLaunched(); dry.requireTestnet(); return true; } catch { return false; } })(), "IOS-058: requireLaunched (and its old name) pass on testnet");
+  if (extStep) {
+    const ext = nameInfoOf(extStep.records.name);
+    const act = actionsAt(extStep);
+    act.registry = { ...act.registry, refreshAfter: () => {} };
+    let submits = 0;
+    act.service.signAndSubmit = async (plan) => { submits += 1; return T.txIdHex(plan.unsignedTx); };
+    try {
+      const shown = await act.plan(A.Operation.extend(ext, 1n));
+      r.check(shown.priceFee > 0n, "IOS-054: an extend has a price");
+      await r.throws(() => act.perform(A.Operation.extend(ext, 1n), { maxPrice: shown.priceFee - 1n }),
+        (e) => e instanceof A.ActionError && e.code === "priceChanged" && e.price === shown.priceFee && e.message.startsWith("The price changed to "),
+        "IOS-054: an extend that now costs more than confirmed is priceChanged");
+      r.eq(submits, 0, "IOS-054: nothing is sent when the price went up");
+      await act.perform(A.Operation.extend(ext, 1n), { maxPrice: shown.priceFee });
+      r.eq(submits, 1, "IOS-054: the confirmed price is paid");
+      await act.perform(A.Operation.extend(ext, 1n), { maxPrice: shown.priceFee + 1n });
+      r.eq(submits, 2, "IOS-054: a lower price than confirmed is paid");
+      await act.perform(A.Operation.extend(ext, 1n));
+      r.eq(submits, 3, "IOS-054: no cap (background actions) still sends");
+    } catch (e) { r.check(false, `IOS-054: extend threw ${e.stack || e}`); }
+
+    // the registration keeps the quoted price as its cap and stops at priceChanged when it rose
+    const reg = actionsAt(extStep, undefined, { registry: { lookup: async (name) => ({ kind: "free", name, gap: { lo: new Uint8Array(32), hi: new Uint8Array(32).fill(0xff), outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x66), 0) } }) } });
+    reg._startDriver = () => {};
+    await r.throws(() => reg.startRegistration({ name: "pricecap", years: 1 }), (e) => /maxPrice/.test(e.message), "IOS-054: startRegistration needs the confirmed price");
+    const name = "pricecap";
+    const price = C.priceFieldsPrice(shardRec(extStep.records.shard).fields, C.utf8(name).length);
+    reg._loadPending(s(v.deployer.address));
+    const now = Date.now();
+    const rec = {
+      id: "reg-cap", name, years: 1, owner: C.hex(me), commitTxId: "aa".repeat(32), commitScript: "", commitDaa: 1, registerTxId: null,
+      cancelTxId: null, stage: A.Stage.waiting, createdAt: now, updatedAt: now, lastError: null, salt: "11".repeat(32),
+      maxPrice: (price - 1n).toString(), priceChangedTo: null,
+    };
+    reg._upsert(rec);
+    let regSubmits = 0;
+    reg.service.signAndSubmit = async () => { regSubmits += 1; return "ee".repeat(32); };
+    await reg._register(reg._find("reg-cap"), null);
+    const stopped = reg.pending.find((x) => x.id === "reg-cap");
+    r.eq(stopped.stage, A.Stage.priceChanged, "IOS-054: a registration whose price rose stops at priceChanged");
+    r.eq(A.recordPrice(stopped.priceChangedTo), price, "IOS-054: priceChangedTo is what the price record asks");
+    r.eq(regSubmits, 0, "IOS-054: nothing is registered above the cap");
+    r.check(!A.needsDriving(stopped) && A.isOpen(stopped), "IOS-054: priceChanged waits for the person (not driven, still shown)");
+    reg.acceptNewPrice("reg-cap");
+    const resumed = reg.pending.find((x) => x.id === "reg-cap");
+    r.check(resumed.stage === A.Stage.waiting && A.recordPrice(resumed.maxPrice) === price && resumed.priceChangedTo == null,
+      "IOS-054: acceptNewPrice resumes capped at the new price");
+    // at the confirmed price it goes on (here to the gap read, which the fake node lacks)
+    await reg._register(reg._find("reg-cap"), null);
+    r.check(reg.pending.find((x) => x.id === "reg-cap").stage !== A.Stage.priceChanged, "IOS-054: at the confirmed price the registration goes on");
+    reg.acceptNewPrice("reg-cap");
+    r.eq(A.recordPrice(reg.pending.find((x) => x.id === "reg-cap").maxPrice), price, "IOS-054: acceptNewPrice does nothing outside priceChanged");
+  }
+
+  // MARK: actions: no offers on expired names, no renewals that stay expired (iOS 71128c4, IOS-055/056)
+  if (renewStep) {
+    const base = nameInfoOf(renewStep.records.name);
+    const act = actionsAt(renewStep);
+    const at = (expiresAt) => new RS.NameInfo({ ...base, outpoint: base.outpoint, expiresAt });
+    const longAgo = at(BigInt(Date.now()) - 3n * m.params.periodMs);
+    await r.throws(() => act.plan(A.Operation.renew(longAgo, 1n)), (e) => e.code === "expiredTooLong" && e.message.includes("reclaimed and registered again"),
+      "IOS-056: a renewal that would still end in the past is refused");
+    await r.throws(() => act.plan(A.Operation.renew(at(BigInt(Date.now()) - m.params.periodMs / 2n), 1n)), (e) => e.code !== "expiredTooLong",
+      "IOS-056: a renewal that ends in the future is not refused as too late");
+  }
   r.check(A.isSpentConflict(new Error("Rejected: already spent")) && A.isSpentConflict("orphan transaction") && !A.isSpentConflict(new Error("mass too high")), "isSpentConflict");
 
   // MARK: actions: offers to the owner, accept, decline (registry v3)
@@ -617,6 +685,30 @@ async function main() {
     r.eq(wa.payerFor(A.Operation.decline(offer))?.index, 3, "payerFor(decline): the spending address that holds the seller key");
     r.check(C.bytesEqual(wa.signerFor(A.Operation.decline(offer)).me, hx(o0.seller)), "signerFor(decline): signs with the seller key");
     r.eq(A.KachatNamesActions.heldBy(A.Operation.withdraw(offer)), null, "heldBy(withdraw): the chatting address");
+  }
+
+  // MARK: actions: no offers on, or accepts of, expired names (iOS 71128c4, IOS-055)
+  if (offerStep) {
+    const t = offerStep.records.target;
+    const otherOwner = S.xonlyKey(other);
+    const act = actionsAt({ ...offerStep, records: {} });
+    const daa = u64(offerStep.env.blockDaa);
+    const mk = (expiresAt) => new RS.NameInfo({ name: s(t.name), key: hx(t.key), owner: otherOwner, price: 0n, expiresAt, periodStart: expiresAt - m.params.periodMs, outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x56), 0) });
+    for (const [label, when] of [["in grace", BigInt(Date.now()) - 1_000n], ["lapsed", BigInt(Date.now()) - m.params.graceMs - 1_000n]]) {
+      await r.throws(() => act.plan(A.Operation.offer(mk(when), u64(offerStep.args.amount), daa + 1_000n)),
+        (e) => e.code === "offerNameNotActive", `IOS-055: an offer on a name ${label} is refused`);
+    }
+  }
+  if (acceptStep) {
+    const n = nameInfoOf(acceptStep.records.name);
+    const o0 = acceptStep.records.offer;
+    const offer = new RS.OfferInfo({
+      outpoint: T.makeOutpoint(hx(o0.utxo.txid), num(o0.utxo.index)), key: hx(o0.key), name: o0.name ?? n.name,
+      buyer: hx(o0.buyer), seller: hx(o0.seller), amount: u64(o0.value), refundAfter: u64(o0.refundAfter),
+    });
+    const expired = new RS.NameInfo({ ...n, outpoint: n.outpoint, expiresAt: BigInt(Date.now()) - 1_000n });
+    await r.throws(() => actionsAt(acceptStep).plan(A.Operation.accept(offer, expired)), (e) => e.code === "acceptNameNotActive",
+      "IOS-055: accepting an offer on an expired name is refused");
   }
 
   // MARK: actions: offers that go back (expired, declined on a changed owner, the rest after a transfer)

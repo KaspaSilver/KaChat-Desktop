@@ -54,6 +54,17 @@ export function isOnActiveNetwork(address) {
   const network = networkOfAddress(address);
   return network == null || network === NETWORK;
 }
+/** Why a valid address can't be used here: it is the other network's (iOS
+ *  KaspaAddress.otherNetworkReason, IOS-003). The output script is built from the payload alone,
+ *  so a kaspatest: address paid on mainnet would send real KAS to that key's mainnet script.
+ *  null for an address of the running network, or one that is not a valid address at all. */
+export function otherNetworkReason(address) {
+  const network = networkOfAddress(address);
+  if (!network || network === NETWORK || !isValidKaspaAddress(address)) return null;
+  return network === "testnet"
+    ? "This is a Testnet address. KaChat is on Mainnet."
+    : "This is a Mainnet address. KaChat is on Testnet.";
+}
 /** Replaces the KAS unit word in already-built text with TKAS on testnet - only as a whole ASCII
  *  word, so "Kaspa" and an existing "TKAS" are untouched. */
 export function kasLabel(text) {

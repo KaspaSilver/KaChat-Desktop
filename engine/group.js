@@ -273,7 +273,7 @@ export const GROUP_PAYLOAD_PREFIXES = Object.freeze({ gcomm: GCOMM_PREFIX, gctl:
 
 // Builds the recipient-addressed gctl wire payload. `encryptedHex` is the gctl
 // JSON already ECIES-encrypted to the recipient by the caller (KasiaCipher).
-// ciph_msg:1:gctl:{recipient_xonly_pubkey_hex}:{encrypted_hex}
+// kchat:1:gctl:{recipient_xonly_pubkey_hex}:{encrypted_hex}
 export function buildControlPayload({ recipientXOnlyPubKey, encryptedHex }) {
   return GCTL_PREFIX + bytesToHex(asBytes(recipientXOnlyPubKey)) + ":" + String(encryptedHex);
 }

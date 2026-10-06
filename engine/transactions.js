@@ -1,4 +1,6 @@
 import { NETWORK_ID, validateMainnetAddress, sompiToKaspaDisplay } from "./utils.js";
+import { kasToSompi, utxoAmountSompi, MAX_U64 } from "./amounts.js";
+import { getEndpoint } from "./endpoints.js";
 
 // Every real send (messages, handshakes, self-stash, KAS payments, KNS
 // commits) funnels through sendKaspa()'s UTXO-fetch-then-spend window below.
@@ -22,14 +24,91 @@ export function enqueueSend(sourceAddress, task) {
 
 export async function getBalance(kaspa, rpc, address) {
   const response = await rpc.getUtxosByAddresses([address]);
-  const entries = response.entries || [];
-  const totalSompi = entries.reduce((sum, u) => sum + BigInt(u.amount), 0n);
+  const entries = sanitizeUtxoEntries(response.entries);
+  const totalSompi = totalUtxoSompi(entries);
   return {
     entries,
     totalSompi,
     totalKas: sompiToKaspaDisplay(kaspa, totalSompi),
     utxoCount: entries.length,
   };
+}
+
+// Node-supplied UTXO values (iOS IOS-020): the pool connects to public peers, and a broken or
+// malicious node can report an amount that is not a whole number, or one past u64. BigInt never
+// overflows, but such a value thrown into a sort, a sum or the WASM SDK (which panics on it) took
+// the whole send down with an opaque error. An entry without a usable amount is dropped; a set
+// whose total no longer fits a u64 is refused outright.
+/** The entries with a whole, positive, u64-sized amount; anything else is left out. */
+export function sanitizeUtxoEntries(entries) {
+  return (Array.isArray(entries) ? entries : []).filter((entry) => utxoAmountSompi(entry) != null);
+}
+/** The total of sanitized entries in sompi; throws when it does not fit a u64. */
+export function totalUtxoSompi(entries) {
+  let total = 0n;
+  for (const entry of entries || []) total += utxoAmountSompi(entry) ?? 0n;
+  if (total > MAX_U64) throw new Error("Invalid UTXO data: amount overflow");
+  return total;
+}
+const bySompiAsc = (a, b) => { const x = utxoAmountSompi(a) ?? 0n; const y = utxoAmountSompi(b) ?? 0n; return x > y ? 1 : (x < y ? -1 : 0); };
+const bySompiDesc = (a, b) => bySompiAsc(b, a);
+/** The address's UTXOs, sanitized, through `withRpc` when given (a node failover) else `rpc`. */
+async function fetchUtxoEntries({ rpc, withRpc, sourceAddress, label }) {
+  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
+  const response = withRpc ? await withRpc(fetchUtxos, { retries: 1, label }) : await fetchUtxos(rpc);
+  const entries = sanitizeUtxoEntries(response?.entries);
+  totalUtxoSompi(entries);
+  return entries;
+}
+
+// A failed submit is not always a failed send (iOS IOS-014): a node can accept the transaction
+// while its answer is lost, and the retry on the standby (or the transient-UTXO retry below) then
+// hears "already in the mempool" / "already spent" for that very transaction. Reporting that as a
+// failure invites a resend that pays twice. So before an error is thrown, the transaction's own
+// id (known before the submit) is looked up: in the node's mempool, else accepted per the REST
+// API, twice a moment apart. Found means the send went out.
+const ACCEPTANCE_RECHECK_MS = 1500;
+/** Whether the network already has `txid`: in a mempool, or accepted (REST API). */
+export async function isTransactionKnown({ rpc = null, withRpc = null, txid } = {}) {
+  const id = String(txid || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(id)) return false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await sleep(ACCEPTANCE_RECHECK_MS);
+    try {
+      const lookup = async (activeRpc) => {
+        if (typeof activeRpc?.getMempoolEntry !== "function") return null;
+        return activeRpc.getMempoolEntry({ transactionId: id, includeOrphanPool: true, filterTransactionPool: false });
+      };
+      const entry = withRpc ? await withRpc(lookup, { retries: 0, label: "Mempool lookup" }) : await lookup(rpc);
+      if (entry?.mempoolEntry || entry?.entry) return true;
+    } catch { /* not in this node's mempool (or no answer): ask the REST API */ }
+    try {
+      const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+      if (base && typeof fetch === "function") {
+        const response = await fetch(`${base}/transactions/${id}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store" });
+        if (response.ok && (await response.json())?.is_accepted === true) return true;
+      }
+    } catch { /* unknown: treated as not found */ }
+  }
+  return false;
+}
+/**
+ * Submits through `submit(activeRpc)` (via `withRpc` when given) and returns the transaction id.
+ * On an error, a transaction the network already has (`txid`, computed locally) counts as sent;
+ * anything else is rethrown. Every submit in this file goes through here.
+ */
+export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, label = "Transaction broadcast", log = () => {} }) {
+  try {
+    const response = withRpc ? await withRpc(submit, { retries: 1, label }) : await submit(rpc);
+    const returned = typeof response === "string" ? response : response?.transactionId;
+    return String(returned || txid || "");
+  } catch (error) {
+    if (txid && await isTransactionKnown({ rpc, withRpc, txid })) {
+      log(`${label}: the submit reported "${error?.message || error}" but the network has ${txid}; treated as sent.`);
+      return String(txid);
+    }
+    throw error;
+  }
 }
 
 // Coins reserved by scheduled KaPosts (KAPOSTS_INDEXER.md §5.10): a signed transaction waiting
@@ -46,8 +125,8 @@ export function excludeReservedUtxos(entries) {
 /** The one coin an arena message spends (iOS builds every chess send with a single input): the
  *  largest coin that covers the amount plus a fee margin. Null when no single coin can. */
 export function singleInputFor(entries, amountSompi, marginSompi = 300_000n) {
-  const sorted = [...(entries || [])].sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? -1 : 1));
-  const pick = sorted.find((e) => BigInt(e.amount || 0) >= amountSompi + marginSompi) || null;
+  const sorted = sanitizeUtxoEntries(entries).sort(bySompiDesc);
+  const pick = sorted.find((e) => utxoAmountSompi(e) >= amountSompi + marginSompi) || null;
   return pick ? [pick] : null;
 }
 
@@ -84,6 +163,11 @@ export function extraFeeSompiFrom(value) {
 // Fast / Priority / custom extra), added to `feeKas`. 0 = unchanged behaviour.
 export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
   const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : outpointKeysFrom(manualUtxos);
+  // Coin control never falls back to coins the person didn't pick (iOS IOS-012): a non-empty pick
+  // that names no readable coin is refused, not sent as an automatic selection.
+  if (!outpoints.length && Array.isArray(manualUtxos) && manualUtxos.length) {
+    throw new Error("Selected UTXOs are no longer available - please reselect.");
+  }
   const extraFee = extraFeeSompiFrom(extraFeeSompi);
   return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, log }));
 }
@@ -98,14 +182,11 @@ export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, s
 // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85 inputs.
 const MAX_INPUTS_PER_SWEEP = 80;
 async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, log }) {
-  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
-  let { entries } = withRpc
-    ? await withRpc(fetchUtxos, { retries: 1, label: "Compound UTXO fetch" })
-    : await fetchUtxos(rpc);
+  let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Compound UTXO fetch" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs to compound.");
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
-  entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
+  entries.sort(bySompiAsc);
 
   // Built by hand, never through the generator: asking it for (total - fee) left it a few
   // hundred sompi of change, which it dutifully emitted as a second output - and an output that
@@ -116,7 +197,7 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
   for (let i = 0; i < entries.length; i += MAX_INPUTS_PER_SWEEP) chunks.push(entries.slice(i, i + MAX_INPUTS_PER_SWEEP));
   const txids = [];
   for (const [index, chunk] of chunks.entries()) {
-    const total = chunk.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+    const total = totalUtxoSompi(chunk);
     const draft = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n);
     const floorFeeSompi = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
     // The displayed policy fee is what the whole compound pays when it fits one transaction;
@@ -128,10 +209,14 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
     const tx = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount }], 0n);
     const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
     const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
-    const response = withRpc
-      ? await withRpc(submit, { retries: 1, label: "Compound broadcast" })
-      : await submit(rpc);
-    const txid = response?.transactionId || signed.id;
+    let txid;
+    try {
+      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Compound broadcast", log });
+    } catch (error) {
+      // Earlier chunks already went out: say so, and never let a retry compound them again.
+      if (txids.length) { error.submittedTxids = [...txids]; error.message = `${error.message} (${txids.length} of ${chunks.length} compound transactions were sent)`; }
+      throw error;
+    }
     txids.push(txid);
     log(`Compound txid (${index + 1}/${chunks.length}):`, txid);
   }
@@ -148,11 +233,11 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
 export async function sendMaxKaspa(args) {
   return enqueueSend(args.sourceAddress, () => sendMaxKaspaNow(args));
 }
-async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, totalFeeSompi = null, selectedOutpoints = null, log = () => {} }) {
-  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
-  let { entries } = withRpc
-    ? await withRpc(fetchUtxos, { retries: 1, label: "Max send UTXO fetch" })
-    : await fetchUtxos(rpc);
+async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress: rawDestination, totalFeeSompi = null, selectedOutpoints = null, log = () => {} }) {
+  // Like sendKaspaNow: only an address of the running network (IOS-003) - the script is built
+  // from the payload alone, so the other network's address would pay this chain's script.
+  const destinationAddress = validateMainnetAddress(rawDestination);
+  let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Max send UTXO fetch" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs to send.");
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
@@ -164,13 +249,13 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
     });
     if (entries.length === 0) throw new Error("The selected coins are no longer available.");
   }
-  entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
+  entries.sort(bySompiAsc);
   // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85
   // inputs — the generator would split into a chain, but a max send must be a single tx.
   if (entries.length > 80) {
     throw new Error("Too many coins for one transaction — run Compound UTXOs first, then send Max.");
   }
-  const total = entries.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+  const total = totalUtxoSompi(entries);
 
   // Measure the exact network-floor fee for this transaction shape (all inputs, ONE output)
   // on a draft, then build the real thing manually: outputs are exactly (total - fee), so no
@@ -186,10 +271,7 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
   const tx = kaspa.createTransaction(entries, [{ address: destinationAddress, amount }], 0n);
   const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
   const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
-  const response = withRpc
-    ? await withRpc(submit, { retries: 1, label: "Max send broadcast" })
-    : await submit(rpc);
-  const txid = response?.transactionId || signed.id;
+  const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Max send broadcast", log });
   log("Max send txid:", txid);
   return { txids: [txid], amountSompi: amount };
 }
@@ -205,6 +287,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // and never after a tx was actually accepted (a returned result never reaches the retry). This
 // makes rapid message sending reliable without needing full UTXO-chaining.
 function isTransientUtxoError(error) {
+  // Part of the send already went out (a chained send's earlier transaction): a retry would
+  // rebuild and pay again.
+  if (Array.isArray(error?.submittedTxids) && error.submittedTxids.length) return false;
   const m = String(error?.message || error || "").toLowerCase();
   return m.includes("no utxos") ||
     m.includes("insufficient") ||
@@ -250,21 +335,18 @@ export async function sendPayloadToSelf({ kaspa, rpc, withRpc = null, privateKey
   ));
 }
 async function sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, payload, log }) {
-  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
-  let { entries } = withRpc
-    ? await withRpc(fetchUtxos, { retries: 1, label: "Self-stash UTXO refresh" })
-    : await fetchUtxos(rpc);
+  let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Self-stash UTXO refresh" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
-  const sorted = [...entries].sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? -1 : 1));
+  const sorted = [...entries].sort(bySompiDesc);
 
   const chosen = [];
   let total = 0n;
   for (const entry of sorted) {
     if (chosen.length >= MAX_INPUTS_PER_SWEEP) break;
     chosen.push(entry);
-    total += BigInt(entry.amount || 0);
+    total += utxoAmountSompi(entry) ?? 0n;
     // Fee for this exact shape (these inputs, one output, the payload). Undefined means the mass
     // is over the standard limit: take another coin.
     const draft = kaspa.createTransaction(chosen, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n, payload);
@@ -277,10 +359,7 @@ async function sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAdd
     if (finalFee == null || BigInt(finalFee) > BigInt(draftFee)) continue;
     const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
     const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
-    const response = withRpc
-      ? await withRpc(submit, { retries: 1, label: "Self-stash broadcast" })
-      : await submit(rpc);
-    const txid = response?.transactionId || signed.id;
+    const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Self-stash broadcast", log });
     log("Self-stash txid:", txid, `(${chosen.length} input${chosen.length === 1 ? "" : "s"}, one output, fee ${draftFee} sompi)`);
     return { txids: [txid], amountSompi: amount, feeSompi: BigInt(draftFee) };
   }
@@ -308,16 +387,17 @@ function describeKey(privateKey) {
 
 async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
-  const amount = String(amountKas || "").trim();
-  const fee = String(feeKas || "0").trim();
+  const amount = String(amountKas ?? "").trim();
+  // Exact sompi (engine/amounts.js, iOS IOS-010): "1,5" is 1.5 KAS, never NaN, and an absurd
+  // amount is refused here rather than reaching the SDK, whose kaspaToSompi panics on it.
+  const amountSompi = kasToSompi(amountKas);
+  if (amountSompi == null || amountSompi <= 0n) throw new Error("Amount must be greater than 0.");
+  const feeSompi = kasToSompi(feeKas || "0");
+  if (feeSompi == null) throw new Error("The network fee is not a valid amount.");
   // The priority fee on top of the generator's own minimum: feeKas plus any extra in sompi.
-  const prioritySompi = BigInt(kaspa.kaspaToSompi(fee)) + extraFeeSompiFrom(extraFeeSompi);
-  if (!amount || Number(amount) <= 0) throw new Error("Amount must be greater than 0.");
+  const prioritySompi = feeSompi + extraFeeSompiFrom(extraFeeSompi);
 
-  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
-  let { entries } = withRpc
-    ? await withRpc(fetchUtxos, { retries: 1, label: "UTXO refresh" })
-    : await fetchUtxos(rpc);
+  let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "UTXO refresh" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
@@ -335,10 +415,10 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   // An arena message spends one coin when one can carry it, so the fee is the one-input fee
   // the label promised (mobile parity); a wallet of only small coins falls back to the usual pick.
   if (singleInput && !selectedOutpoints?.length) {
-    const one = singleInputFor(entries, BigInt(kaspa.kaspaToSompi(amount)));
+    const one = singleInputFor(entries, amountSompi);
     if (one) entries = one;
   }
-  entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
+  entries.sort(bySompiAsc);
 
   if (payload) {
     const payloadKind = payload instanceof Uint8Array ? "Uint8Array" : typeof payload;
@@ -355,8 +435,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   // asked for, so `exactAmount` keeps it on the strict path.
   const protocolSend = !exactAmount && (to === sourceAddress || Boolean(payload));
   if (protocolSend && entries.length <= 80) {
-    const amountSompi = BigInt(kaspa.kaspaToSompi(amount));
-    const totalSompi = entries.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+    const totalSompi = totalUtxoSompi(entries);
     if (totalSompi >= amountSompi / 2n) {
       const draft = kaspa.createTransaction(entries, [{ address: to, amount: totalSompi - (totalSompi / 20n) }], 0n, payload || undefined);
       const floorFee = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
@@ -367,10 +446,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
         const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
         const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
         const submitReduced = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
-        const response = withRpc
-          ? await withRpc(submitReduced, { retries: 1, label: "Transaction broadcast" })
-          : await submitReduced(rpc);
-        const txid = response?.transactionId || signed.id;
+        const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, label: "Transaction broadcast", log });
         log("Broadcast txid:", txid);
         return { result: { summary: { reduced: true, amountSompi: reduced, feeSompi: totalFee } }, txids: [txid] };
       }
@@ -383,7 +459,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   log("Creating transaction from", sourceAddress, "to", to, "amount", amount, "KAS", changeTo !== sourceAddress ? `(change to ${changeTo})` : "");
   const result = await kaspa.createTransactions({
     entries,
-    outputs: [{ address: to, amount: kaspa.kaspaToSompi(amount) }],
+    outputs: [{ address: to, amount: amountSompi }],
     priorityFee: prioritySompi,
     changeAddress: changeTo,
     networkId: NETWORK_ID,
@@ -401,9 +477,16 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
       throw error;
     }
     const submitSignedTransaction = (activeRpc) => pending.submit(activeRpc);
-    const txid = withRpc
-      ? await withRpc(submitSignedTransaction, { retries: 1, label: "Transaction broadcast" })
-      : await submitSignedTransaction(rpc);
+    let localId = null;
+    try { localId = pending.id ? String(pending.id) : null; } catch { localId = null; }
+    let txid;
+    try {
+      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitSignedTransaction, txid: localId, label: "Transaction broadcast", log });
+    } catch (error) {
+      // A chained send whose earlier transactions went out: never retried (that would pay again).
+      if (txids.length) error.submittedTxids = [...txids];
+      throw error;
+    }
     txids.push(txid);
     log("Broadcast txid:", txid);
   }
@@ -418,10 +501,10 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
 // since mass (and therefore fee) scales with payload size.
 // Builds the representative tx and returns { feeSompi, massGrams } from the generator summary.
 export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
-  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
-  let { entries } = withRpc
-    ? await withRpc(fetchUtxos, { retries: 1, label: "Fee estimate UTXO refresh" })
-    : await fetchUtxos(rpc);
+  // An amount that isn't one (or is past the supply) has no estimate, rather than a WASM panic.
+  const amountSompi = kasToSompi(amountKas);
+  if (amountSompi == null) return null;
+  let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Fee estimate UTXO refresh" });
   if (!entries || entries.length === 0) return null;
   // Coins a scheduled post already spends are off the table for the estimate, as for the send.
   entries = excludeReservedUtxos(entries);
@@ -437,15 +520,15 @@ export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sou
     if (entries.length === 0) return null;
   }
   if (singleInput && !selectedOutpoints?.length) {
-    const one = singleInputFor(entries, BigInt(kaspa.kaspaToSompi(amountKas)));
+    const one = singleInputFor(entries, amountSompi);
     if (one) entries = one;
   }
-  entries.sort((a, b) => BigInt(a.amount) > BigInt(b.amount) ? 1 : -1);
+  entries.sort(bySompiAsc);
 
   const result = await kaspa.createTransactions({
     entries,
-    outputs: [{ address: sourceAddress, amount: kaspa.kaspaToSompi(amountKas) }],
-    priorityFee: kaspa.kaspaToSompi("0"),
+    outputs: [{ address: sourceAddress, amount: amountSompi }],
+    priorityFee: 0n,
     changeAddress: sourceAddress,
     networkId: NETWORK_ID,
     payload: new Uint8Array(Math.max(0, payloadBytes)),

@@ -7,6 +7,7 @@
 // via Nextcloud media upload.
 
 import { IS_TESTNET, KAS_UNIT } from "../engine/network.js";
+import { sompiFromUserText, kasTextFromSompi } from "../engine/amounts.js";
 import {
   BROADCAST_RETENTION_MS,
   FEATURED_BROADCAST_CHANNELS,
@@ -1730,11 +1731,11 @@ async function editBroadcastFee() {
     confirmLabel: "Save",
   });
   if (typed == null) return;
-  const normalized = String(typed).trim().replace(",", ".");
-  if (normalized === "" || normalized === "0") { feeOverrideKas = null; scheduleBroadcastFeeEstimate(); return; }
-  const value = Number(normalized);
-  if (!Number.isFinite(value) || value < 0) { deps.showToast?.(`Enter a fee in ${KAS_UNIT}.`); return; }
-  feeOverrideKas = normalized;
+  // The one exact parser (iOS IOS-010), kept as exact KAS text.
+  const typedSompi = String(typed).trim() === "" ? 0n : sompiFromUserText(String(typed));
+  if (typedSompi === 0n) { feeOverrideKas = null; scheduleBroadcastFeeEstimate(); return; }
+  if (typedSompi == null) { deps.showToast?.(`Enter a fee in ${KAS_UNIT}.`); return; }
+  feeOverrideKas = kasTextFromSompi(typedSompi);
   renderFeePill(feeOverrideKas);
 }
 

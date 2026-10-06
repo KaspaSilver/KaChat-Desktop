@@ -323,9 +323,15 @@ export class KachatNamesService {
   static get profilesEnabled() { return KachatNamesService.isEnabled; }
   get profilesEnabled() { return KachatNamesService.profilesEnabled; }
 
-  requireTestnet() {
+  /** The gate on every registry read and write: the network the app runs on has a live registry
+   *  (`isLaunched`, testnet-10 for now). `isEnabled` only turns the UI on. Swift `requireLaunched()`
+   *  (iOS d657ee3, IOS-058). */
+  requireLaunched() {
     if (!KachatNamesService.isLaunched) throw ServiceError.testnetOnly();
   }
+
+  /** The old name of `requireLaunched()` (kept for callers of the earlier API). */
+  requireTestnet() { this.requireLaunched(); }
 
   // MARK: Manifest
 
@@ -336,7 +342,7 @@ export class KachatNamesService {
    *  (code "registryUpgrading") and sets `registryUpgrading`; a refused bundled manifest is
    *  remembered and thrown again without re-reading it. */
   async loadManifest({ allowDryRun = false } = {}) {
-    this.requireTestnet();
+    this.requireLaunched();
     if (this.manifest && (allowDryRun || !this.manifest.isDryRun)) return this.manifest;
     if (this._bundleFailure) throw this._bundleFailure;
     const [data, source] = await this._manifestData();
@@ -400,7 +406,7 @@ export class KachatNamesService {
   /** Where the next transaction is judged: the virtual's DAA score and past median time from a
    *  testnet-10 node, the wall clock, the signer's key. `feerate` in sompi/gram (min 100). */
   async environment({ privateKey, feerate = minFeerate }) {
-    this.requireTestnet();
+    this.requireLaunched();
     const dag = await this.engine.currentDagPoint();
     const network = String(dag.networkId ?? "");
     if (!network.endsWith("testnet-10")) throw ServiceError.wrongNodeNetwork(network || "an unknown network");
@@ -423,7 +429,7 @@ export class KachatNamesService {
    *  its covenant id. A registry record from the indexer is trusted only once this confirms it:
    *  the P2SH address commits to the whole state, and the covenant id to the registry lineage. */
   async liveUtxo({ script, outpoint }) {
-    this.requireTestnet();
+    this.requireLaunched();
     const address = p2shAddress(script);
     if (!address) throw ServiceError.notOnChain("a non-P2SH script");
     const utxos = await this.engine.getUtxosWithCovenants([address]);
@@ -462,7 +468,7 @@ export class KachatNamesService {
   /** Submits a signed version-1 core Tx; returns its id. Register, extend and renew carry the price
    *  (35-8,000 TKAS) as fee on purpose - there is no high-fee guard on this path. */
   async submit(tx) {
-    this.requireTestnet();
+    this.requireLaunched();
     const expected = txIdHex(tx);
     const kaspa = this.engine.kaspa;
     if (!kaspa) throw new Failure("Load Rusty Kaspa WASM first.");
@@ -482,7 +488,7 @@ export class KachatNamesService {
 
   /** Sign with the wallet key and submit; returns the txid. */
   async signAndSubmit(plan, { privateKey, env }) {
-    this.requireTestnet();
+    this.requireLaunched();
     const tx = sign(plan, { privateKey, me: env.me });
     return this.submit(tx);
   }

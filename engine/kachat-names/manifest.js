@@ -31,10 +31,11 @@ export const bundleResource = "kachat-names-testnet-10";
 
 /** Template hashes of the pinned build - registry v3 (silverc v1.0.0 @ 3ed9733). The price
  *  template bakes no covenant id, so it is the same everywhere. The gap and the name bake the
- *  price covenant id, so their hashes exist only once the price genesis does: the deployment adds
- *  them here with the bundled manifest. Until they are pinned only a bundled manifest is trusted
- *  (`verifyManifest(m, { source })`), never one an indexer serves. The offer bakes the registry
- *  id, so it is checked against the id instead. */
+ *  price covenant id, so their hashes exist only once the price genesis does, and the offer bakes
+ *  the registry id, so its hash exists once the registry genesis does: the deployment adds all
+ *  three here with the bundled manifest. Until every template is pinned only a bundled manifest is
+ *  trusted (`verifyManifest(m, { source })`), never one an indexer serves - an unpinned offer
+ *  template could hold buyers' funds in a script the indexer controls (iOS 1d81a1a, IOS-059). */
 export const pinnedTemplateHashes = {
   KachatPrice: "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3",
 };
@@ -101,6 +102,16 @@ export function paramsExtendableYearsOf(p, f) { return paramsExtendableYears(p, 
  *  final once the network's past median time passes its lock time, which is at least this.
  *  Swift `Params.renewOpens(expiresAt:)`. */
 export function paramsRenewOpens(p, expiresAt) { return BigInt(expiresAt) - p.renewWindowMs; }
+
+/** How close to expiry a name counts as "expires soon" (a buyer would have to renew it), unix ms
+ *  (BigInt): 30 days on a yearly clock, the renewal window on a short one (testnet's 10 minutes),
+ *  where 30 days would cover every name. Swift `Params.expiresSoonMs` (iOS 24d673a, IOS-060). */
+export function paramsExpiresSoonMs(p) {
+  const month = 30n * 86_400_000n;
+  const twelfth = p.periodMs / 12n;
+  const capped = twelfth < month ? twelfth : month;
+  return p.renewWindowMs > capped ? p.renewWindowMs : capped;
+}
 
 // MARK: - Decoding
 
@@ -277,7 +288,7 @@ export function decodeManifest(data) {
 /** Checks everything the app relies on (KACHAT_NAMES_INDEXER.md B2, kachat-domains
  *  `manifest::load`): testnet-10 only; every template's hash recomputed from its prefix and
  *  suffix and equal to the pinned build where pinned (an indexer-served manifest needs every hash
- *  pinned but the offer's); every dispatch tag present; the gap and name baked for this price
+ *  pinned, the offer's too - IOS-059); every dispatch tag present; the gap and name baked for this price
  *  covenant and price template, the gap for this name template, the offer for this registry id
  *  and name template; the price genesis outputs are shards 0..K-1 of the price template worth
  *  `priceValue`, and `priceCovenantId == covenant_id(price genesis outpoint, [(i, shard_i)])`;
@@ -295,7 +306,7 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
     const pinned = pinnedTemplateHashes[t.contract];
     if (pinned !== undefined) {
       if (hex(t.templateHash) !== pinned) throw new Failure(`manifest: ${t.contract} is not the pinned build`);
-    } else if (source === ManifestSource.indexer && t.contract !== "KachatOffer") {
+    } else if (source === ManifestSource.indexer) {
       throw new Failure(`manifest: ${t.contract} is not pinned in this app; only a bundled manifest is trusted`);
     }
     for (const e of entries[t.contract] ?? []) {

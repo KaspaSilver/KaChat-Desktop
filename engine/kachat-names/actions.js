@@ -36,11 +36,19 @@
 // rest (`declineOpenOffers`). Offers past their refund time go back to the buyer from whichever app
 // sees them first (`returnExpiredOffers`), and a buyer's app pulls back its offers on a name that
 // changed hands (`withdrawDeclinedOffers`).
+//
+// Prices can change at any time in the price record, so nothing pays more than the price the person
+// confirmed (iOS 4f5d95e, IOS-054): a registration keeps the quoted price as its cap
+// (`startRegistration({ maxPrice })`) and stops at `Stage.priceChanged` when the shard asks more
+// once the commit has aged, until the person confirms (`acceptNewPrice`) or cancels; an extend or
+// renew sheet passes the price it showed (`perform(op, { maxPrice })`) and a higher one throws
+// `ActionError.priceChanged`. A lower price is paid. Offers are made and accepted only on active
+// names, and a renewal that would still end in the past is refused (iOS 71128c4, IOS-055/056).
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
 import { getEndpoint } from "../endpoints.js";
-import { ADDRESS_HRP, isNetworkAddress } from "../network.js";
+import { ADDRESS_HRP, KAS_UNIT, isNetworkAddress } from "../network.js";
 import { enqueueSend, excludeReservedUtxos } from "../transactions.js";
 import {
   Failure, minFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
@@ -66,6 +74,9 @@ export const Stage = Object.freeze({
   registered: "registered",
   /** someone registered the name first; the commit can be cancelled */
   taken: "taken",
+  /** the price record now asks more than the person confirmed (`priceChangedTo`): nothing is sent
+   *  until they confirm the new price (`acceptNewPrice`) or cancel the commit (iOS 4f5d95e) */
+  priceChanged: "priceChanged",
   failed: "failed",
   cancelling: "cancelling",
   cancelled: "cancelled",
@@ -76,10 +87,19 @@ export const Stage = Object.freeze({
  * `{ id, name, years: Number, owner: x-only hex, commitTxId: hex, commitScript: hex (P2SH),
  *    commitDaa: Number|null (the commit UTXO's DAA score once seen), registerTxId: hex|null,
  *    cancelTxId: hex|null, stage: Stage, createdAt: Number (unix ms), updatedAt: Number,
- *    lastError: string|null }`.
+ *    lastError: string|null, maxPrice: decimal sompi string|null (the price the person confirmed
+ *    for the whole registration - it never pays more; null only for one started before the cap),
+ *    priceChangedTo: decimal sompi string|null (what the price record asked when it stopped at
+ *    `Stage.priceChanged`) }`. `recordPrice(p.maxPrice)` reads either as BigInt.
  * The stored copy also carries `salt` (hex) - iOS keeps it in the Keychain; `pending` never
  * exposes it.
  */
+
+/** A record's sompi string (`maxPrice`, `priceChangedTo`) as BigInt, or null. */
+export function recordPrice(v) {
+  if (v == null || v === "") return null;
+  try { return BigInt(v); } catch { return null; }
+}
 
 /** Still shown on the hub. */
 export function isOpen(p) { return p.stage !== Stage.cancelled; }
@@ -119,7 +139,8 @@ export function isSpentConflict(error) {
 }
 
 /** Swift `KachatNamesActions.ActionError`; `code` is the case name. Extra fields per case:
- *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }` (unix ms, BigInt). */
+ *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }` (unix ms, BigInt), priceChanged
+ *  `{ price }` (sompi, BigInt). */
 export class ActionError extends Error {
   constructor(code, message, extra = {}) {
     super(message);
@@ -160,6 +181,25 @@ export class ActionError extends Error {
     return new ActionError("offerDeclined", "This offer was made before the name changed hands, so it's declined and going back to the buyer.");
   }
   static ownOffer() { return new ActionError("ownOffer", "You can't make an offer on your own name."); }
+  /** the price record asks more than the price the person confirmed (iOS 4f5d95e, IOS-054) */
+  static priceChanged(price) {
+    const p = BigInt(price);
+    return new ActionError(
+      "priceChanged",
+      `The price changed to ${kasText(p)} since you confirmed. Nothing was sent. Check the new price and confirm again.`,
+      { price: p },
+    );
+  }
+  /** an offer on a name that isn't active: anyone can reclaim an expired one soon (iOS 71128c4) */
+  static offerNameNotActive() { return new ActionError("offerNameNotActive", "Offers can only be made on active names."); }
+  /** accept while the name is expired: the buyer would get a name anyone can reclaim (iOS 71128c4) */
+  static acceptNameNotActive() {
+    return new ActionError("acceptNameNotActive", "This name has expired. Offers can only be accepted while the name is active. Renew it first.");
+  }
+  /** a renewal counts from the old expiry: one that would still end in the past (iOS 71128c4) */
+  static expiredTooLong() {
+    return new ActionError("expiredTooLong", "This name has been expired too long to renew. It can only be reclaimed and registered again.");
+  }
   static offerTooLong() { return new ActionError("offerTooLong", "An offer can run for up to 7 days."); }
 }
 
@@ -200,6 +240,13 @@ export function validateKey(xonly, what) {
 }
 
 const nowMs = () => Date.now();
+/** Sompi as "12.5 KAS" / "12.5 TKAS" (the network's unit), for error messages. */
+function kasText(sompi) {
+  const v = BigInt(sompi);
+  const whole = v / 100_000_000n;
+  const frac = (v % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
+  return `${whole}${frac ? `.${frac}` : ""} ${KAS_UNIT}`;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errorMessage = (e) => (e && typeof e === "object" && "message" in e ? String(e.message) : String(e));
 
@@ -276,7 +323,7 @@ export class KachatNamesActions {
   /** The current wallet's testnet address, key and x-only key (they must agree):
    *  `{ address, privateKey: hex, me: Uint8Array(32) }`. */
   signer() {
-    this.service.requireTestnet();
+    this.service.requireLaunched();
     const address = String(this.engine?.address ?? "").toLowerCase();
     const key = this.engine?.privateKeyHex;
     if (!address.startsWith("kaspatest:") || !key) throw ActionError.noWallet();
@@ -357,7 +404,9 @@ export class KachatNamesActions {
   signerFor(op) {
     const payer = this.payerFor(op);
     if (!payer) return this.signer();
-    this.service.requireTestnet();
+    this.service.requireLaunched();
+    // a testnet address on the network the app runs on (iOS d657ee3, IOS-058)
+    if (!payer.address.startsWith("kaspatest:") || !isNetworkAddress(payer.address)) throw ServiceError.wrongAddressNetwork();
     let key = null;
     try { key = this.wallet.spendingPrivateKey?.(payer.index) ?? null; } catch { key = null; }
     if (!key) throw ActionError.noWallet();
@@ -494,6 +543,9 @@ export class KachatNamesActions {
         // Valid only once the network's median time passes the window opening (the mempool keeps
         // no future-dated transactions): refuse before, and say when it opens.
         if (!renewWindowOpen(env, m.params, op.name.expiresAt)) throw ActionError.renewalNotOpen(op.name.renewOpens(m.params));
+        // A renewal counts from the old expiry, not from today: one that would still end in the
+        // past is paid for nothing, and anyone could reclaim the name right after.
+        if (!(BigInt(op.name.expiresAt) + BigInt(op.years) * m.params.periodMs > env.wallMs)) throw ActionError.expiredTooLong();
         plan = b.renew({ env, wallet, name: await this._liveName(op.name, m), shard: await this._liveShard(m, avoidShards), years: BigInt(op.years) });
         break;
       case "transfer":
@@ -515,6 +567,8 @@ export class KachatNamesActions {
       case "offer": {
         validateKey(env.me, "Your key");
         if (op.target == null) throw new Failure("an offer is made on a registered name");
+        // an expired name can be reclaimed by anyone soon: the buyer would pay for nothing
+        if (op.target.status(m.params.graceMs, BigInt(nowMs())) !== Status.active) throw ActionError.offerNameNotActive();
         if (bytesEqual(op.target.owner, env.me)) throw ActionError.ownOffer();
         // the app's cap: the buyer's funds come back within a week at most
         const refundAfter = BigInt(op.refundAfterDaa);
@@ -532,6 +586,9 @@ export class KachatNamesActions {
       case "accept":
         // The contract would still take an expired offer; the app doesn't - it goes back.
         if (op.offer.refundable(env.blockDaa)) throw ActionError.offerExpired();
+        // The contract would hand over an expired name too; the buyer would get a name anyone can
+        // reclaim. Only an active name is accepted.
+        if (op.name.status(m.params.graceMs, BigInt(nowMs())) !== Status.active) throw ActionError.acceptNameNotActive();
         // Made to an earlier owner: the contract refuses it, and it goes back to the buyer.
         if (op.offer.isDeclined(op.name.owner)) throw ActionError.offerDeclined();
         validateKey(op.offer.buyer, "The buyer");
@@ -556,10 +613,14 @@ export class KachatNamesActions {
   /** Builds, signs and submits `op`; returns the txid. The registry refreshes once the
    *  transaction is accepted. Runs in the engine's per-address send queue, so a chat message sent
    *  meanwhile cannot pick the same coin. A transfer, release or accepted offer then declines the
-   *  name's other open offers made to this owner (`declineOpenOffers`). */
-  async perform(op) {
+   *  name's other open offers made to this owner (`declineOpenOffers`).
+   *  `maxPrice` (sompi, BigInt) is the price the person saw and confirmed (the shown plan's
+   *  `priceFee`): an extend or renew never pays more - a higher price throws
+   *  `ActionError.priceChanged(newPrice)` before anything is signed (iOS 4f5d95e, IOS-054). */
+  async perform(op, { maxPrice = null } = {}) {
     const s = this.signerFor(op);
-    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s));
+    const cap = maxPrice == null ? null : BigInt(maxPrice);
+    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap));
     if (op.kind === "offer" && plan.newOffer) {
       const o = plan.newOffer;
       await this.registry.trackOffer(new OfferInfo({
@@ -578,10 +639,12 @@ export class KachatNamesActions {
   /** Builds, signs and submits `op` -> `{ plan, txId }`. A register, extend or renew that lost its
    *  price shard to someone else's transaction (the node rejects it as already spent; nothing was
    *  sent) is rebuilt on another shard, up to twice. */
-  async _submit(op, s) {
+  async _submit(op, s, maxPrice = null) {
     const avoid = new Set();
     for (let attempt = 0; ; attempt++) {
       const { plan, env } = await this._build(op, s, avoid);
+      // never pays more than the price the person confirmed (each retry may pick another shard)
+      if (maxPrice != null && BigInt(plan.priceFee ?? 0n) > maxPrice) throw ActionError.priceChanged(plan.priceFee);
       try {
         return { plan, txId: await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env }) };
       } catch (error) {
@@ -758,10 +821,14 @@ export class KachatNamesActions {
 
   /** Starts registering `name`: a fresh salt (stored with the record), the salted commit
    *  (submitted), then the driver registers once the commit is `tCommit` deep. Returns the commit
-   *  txid. Progress arrives through `subscribe` (the record's `stage`). */
-  async startRegistration({ name: raw, years }) {
+   *  txid. Progress arrives through `subscribe` (the record's `stage`). `maxPrice` (sompi, required)
+   *  is the price the person confirmed (the quote's `price`): the registration never pays more,
+   *  and stops at `Stage.priceChanged` instead (iOS 4f5d95e, IOS-054). */
+  async startRegistration({ name: raw, years, maxPrice }) {
     const s = this.signer();
     years = BigInt(years);
+    if (maxPrice == null) throw new Failure("startRegistration needs the price the person confirmed (maxPrice)");
+    const cap = BigInt(maxPrice);
     const name = normalize(raw);
     validate(name);
     await this.registry.refresh();
@@ -782,6 +849,7 @@ export class KachatNamesActions {
           id: newId(), name, years: Number(years), owner: hex(s.me), commitTxId: hex(plan.txid),
           commitScript: hex(script), commitDaa: null, registerTxId: null, cancelTxId: null,
           stage: Stage.committing, createdAt: now, updatedAt: now, lastError: null, salt: hex(salt),
+          maxPrice: cap.toString(), priceChangedTo: null,
         };
         this._upsert(record);
         const txId = await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
@@ -825,7 +893,18 @@ export class KachatNamesActions {
   retry(p) {
     const stored = this._find(typeof p === "string" ? p : p.id);
     if (!stored) return;
-    this._set(stored, (q) => { q.stage = Stage.waiting; q.lastError = null; });
+    this._set(stored, (q) => { q.stage = Stage.waiting; q.lastError = null; q.priceChangedTo = null; });
+    this._startDriver();
+  }
+
+  /** Continue a registration stopped at `Stage.priceChanged`, now capped at the new price the
+   *  person just confirmed (the UI asks for the device lock first: paying more is a new approval).
+   *  It still stops again if the price goes up further. `p` is a record or its id. */
+  acceptNewPrice(p) {
+    const stored = this._find(typeof p === "string" ? p : p.id);
+    const price = stored ? recordPrice(stored.priceChangedTo) : null;
+    if (!stored || stored.stage !== Stage.priceChanged || price == null) return;
+    this._set(stored, (q) => { q.maxPrice = price.toString(); q.priceChangedTo = null; q.stage = Stage.waiting; q.lastError = null; });
     this._startDriver();
   }
 
@@ -979,18 +1058,29 @@ export class KachatNamesActions {
       }
       if (!found.gap) throw new Failure(`no gap for ${p.name} yet`);
       const gap = found.gap;
+      const cap = recordPrice(p.maxPrice);
+      let askedMore = null;
       const txId = await enqueueSend(s.address, async () => {
         const { builder: b, env, wallet } = await this._context(s);
+        // a random live shard each try: one someone else just spent fails this try, and the next
+        // tick picks again
+        const shard = await this._liveShard(m);
+        // Never pay more than the person confirmed: prices can change while the commit ages.
+        const years = BigInt(p.years) > 1n ? BigInt(p.years) : 1n;
+        const price = priceFieldsPrice(shard.fields, utf8(p.name).length) * years;
+        if (cap != null && price > cap) { askedMore = price; return null; }
         const plan = b.register({
           env, wallet, gap: await this._liveGap(gap, m),
           commit: { name: p.name, owner: s.me, salt, value: commit.entry.amount, utxo: commit },
-          // a random live shard each try: one someone else just spent fails this try, and the
-          // next tick picks again
-          shard: await this._liveShard(m),
-          years: BigInt(p.years), now: registerNow(env),
+          shard, years: BigInt(p.years), now: registerNow(env),
         });
+        if (cap != null && BigInt(plan.priceFee ?? 0n) > cap) { askedMore = BigInt(plan.priceFee); return null; }
         return this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
       });
+      if (askedMore != null) {
+        this._set(p, (q) => { q.stage = Stage.priceChanged; q.priceChangedTo = askedMore.toString(); q.lastError = null; });
+        return;
+      }
       this._set(p, (q) => { q.stage = Stage.registering; q.registerTxId = txId; q.lastError = null; });
       this.registry.refreshAfter(txId);
     } catch (error) {

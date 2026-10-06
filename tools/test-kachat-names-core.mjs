@@ -219,6 +219,29 @@ function runManifest(v, r) {
   r.check(m.isDryRun, "the vectors' manifest is a dry run");
   // the gap and name are not pinned until the testnet genesis: an indexer-served copy is refused
   r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with unpinned gap/name verified");
+  // IOS-059: the offer template must be pinned too - an unpinned one could hold buyers' funds in a
+  // script the indexer controls
+  {
+    const pins = M.pinnedTemplateHashes;
+    const saved = { ...pins };
+    try {
+      pins.KachatGap = C.hex(m.gap.templateHash);
+      pins.KachatName = C.hex(m.name.templateHash);
+      r.check(!verifies(m, { source: M.ManifestSource.indexer }), "IOS-059: an indexer-served manifest with an unpinned offer template verified");
+      r.check(verifies(m), "IOS-059: the same manifest from the bundle verifies");
+      pins.KachatOffer = C.hex(m.offer.templateHash);
+      r.check(verifies(m, { source: M.ManifestSource.indexer }), "IOS-059: an indexer-served manifest with every template pinned verifies");
+      pins.KachatOffer = "00".repeat(32);
+      r.check(!verifies(m, { source: M.ManifestSource.indexer }), "IOS-059: an offer template that is not the pinned build verified");
+    } finally {
+      for (const k of Object.keys(pins)) delete pins[k];
+      Object.assign(pins, saved);
+    }
+  }
+  // IOS-060: "expires soon" is 30 days on a yearly clock, the renewal window on a short one
+  r.eq(M.paramsExpiresSoonMs({ periodMs: C.yearMs, renewWindowMs: 864_000_000n }), 2_592_000_000n, "IOS-060: expiresSoonMs on a yearly clock is 30 days");
+  r.eq(M.paramsExpiresSoonMs({ periodMs: 600_000n, renewWindowMs: 600_000n }), 600_000n, "IOS-060: expiresSoonMs on a 10-minute clock is the renewal window");
+  r.eq(M.paramsExpiresSoonMs({ periodMs: 3_600_000n, renewWindowMs: 60_000n }), 300_000n, "IOS-060: expiresSoonMs is a twelfth of a short period when that is longer than the window");
   r.eq(C.hex(m.priceCovenantId), s(v.priceCovenantId), "price covenant id");
   r.eq(m.genesisShards.length, num(v.priceShards), "price genesis shards");
   r.eq(m.params.periodMs, u64(v.periodMs), "periodMs");

@@ -15,6 +15,8 @@
 //   Output:  value(8)  spkVersion(2)  spkLen(1)  spkScript(spkLen)
 
 import { getEndpoint } from "../engine/endpoints.js";
+import { isNetworkAddress, otherNetworkReason } from "../engine/network.js";
+import { submitConfirmingAcceptance } from "../engine/transactions.js";
 
 // Matches firmware MAX_INPUTS=32 as of KasSigner v1.0.5 (was 8; devices on older
 // firmware reject >8-input — and pre-1.0.5, even >5-input — transactions).
@@ -30,9 +32,18 @@ const FLAG_REDEEM = 0x02;
 export const MIN_RELAY_FEE_PER_GRAM = 100n;
 // Standard Schnorr signature script size (0x41 push + 64-byte sig + 0x01 sighash).
 const SCHNORR_SIG_SCRIPT_LEN = 66n;
-// Change-output dust threshold — matches iOS/Android Cold Storage engines and the
-// KasSigner firmware's own kspt.rs DUST_THRESHOLD.
-const CHANGE_DUST_THRESHOLD = 20_000_000n;
+// KIP-9 storage mass (iOS KasiaTransactionBuilder.storageMass / fitsStorageMass). Whether a
+// change output can stand is decided by the transaction's storage mass, not a flat floor: the old
+// 0.2 KAS CHANGE_DUST_THRESHOLD handed up to 0.2 KAS of change to the miners for change the
+// network (and KasSigner, whose own dust rule is the same storage-mass test) would accept.
+const STORAGE_MASS_PARAMETER = 1_000_000_000_000n; // C = 10^12
+export const MAX_STANDARD_MASS = 100_000n;
+// The most a send may fold into its fee when its change can't stand as an output. A change output
+// is only ever too small for storage mass below about 0.1 KAS (its own term is C / change), so a
+// larger remainder that doesn't fit means the recipient amount is what breaks the budget, and
+// folding it would pay the whole change to the miners. Anything over this is refused.
+export const MAX_FOLDED_CHANGE_SOMPI = 10_000_000n; // 0.1 KAS
+export const SMALL_SEND_MASS_MESSAGE = "This amount can't be sent from these coins without giving most of the change away as a network fee. Try a slightly larger amount, or compound this address first.";
 const NATIVE_SUBNETWORK_ID_HEX = "00".repeat(20);
 
 // ---------------------------------------------------------------------------
@@ -324,6 +335,35 @@ export function calculateMass(numInputs, outputScriptLens, payloadSize = 0, sigO
   return computeMass > doubled ? computeMass : doubled;
 }
 
+/** KIP-9 storage mass of spending `inputAmounts` into `outputAmounts` (sompi, BigInt), as
+ *  consensus computes it for one-script-per-UTXO transfers:
+ *    relaxed (one output, or one input, or exactly two of each): max(0, H(outs) - H(ins))
+ *    otherwise:                                                  max(0, H(outs) - |I| * C / mean(ins))
+ *  where H(xs) = sum of C / x. Port of iOS KasiaTransactionBuilder.storageMass. */
+export function storageMass(inputAmounts, outputAmounts) {
+  const c = STORAGE_MASS_PARAMETER;
+  const harmonic = (amounts) => amounts.reduce((sum, a) => sum + c / (BigInt(a) > 0n ? BigInt(a) : 1n), 0n);
+  const harmonicOuts = harmonic(outputAmounts);
+  const relaxed = outputAmounts.length === 1 || inputAmounts.length === 1
+    || (outputAmounts.length === 2 && inputAmounts.length === 2);
+  if (relaxed) {
+    const harmonicIns = harmonic(inputAmounts);
+    return harmonicOuts > harmonicIns ? harmonicOuts - harmonicIns : 0n;
+  }
+  const sumIns = inputAmounts.reduce((sum, a) => sum + BigInt(a), 0n);
+  const count = BigInt(Math.max(inputAmounts.length, 1));
+  const meanIns = sumIns / count > 0n ? sumIns / count : 1n;
+  const arithmeticIns = BigInt(inputAmounts.length) * (c / meanIns);
+  return harmonicOuts > arithmeticIns ? harmonicOuts - arithmeticIns : 0n;
+}
+
+/** Whether the transaction stays within the standard storage-mass budget. A zero-value output
+ *  never fits, whatever the arithmetic says. Port of iOS fitsStorageMass. */
+export function fitsStorageMass(inputAmounts, outputAmounts) {
+  if (!outputAmounts.every((a) => BigInt(a) > 0n)) return false;
+  return storageMass(inputAmounts, outputAmounts) <= MAX_STANDARD_MASS;
+}
+
 export function calculateFee(mass, rateSompiPerGram) {
   const rate = BigInt(rateSompiPerGram);
   return mass * (rate > MIN_RELAY_FEE_PER_GRAM ? rate : MIN_RELAY_FEE_PER_GRAM);
@@ -380,7 +420,9 @@ export async function fetchSpendableUtxos(engine, address) {
   return (balance.entries || []).map(normalizeUtxo);
 }
 
+/** A usable recipient: a valid address of the running network (IOS-003). */
 export function isValidKaspaAddress(engine, address) {
+  if (!isNetworkAddress(address)) return false;
   try {
     engine.kaspa.payToAddressScript(String(address || "").trim());
     return true;
@@ -462,6 +504,9 @@ function scriptFor(engine, address) {
 export async function buildUnsignedTransaction({ engine, fromAddress, toAddress, amountSompi, feeRateOverride = null, manualUtxoKeys = null }) {
   if (amountSompi <= 0n) throw new Error("Amount must be greater than zero");
   let recipientScript, changeScript;
+  // The script ignores the prefix: the other network's address would pay this chain's script
+  // for that key (IOS-003), so it is refused here as well as in the form.
+  { const reason = otherNetworkReason(toAddress); if (reason) throw new Error(reason); }
   try { recipientScript = scriptFor(engine, toAddress); } catch { throw new Error("Invalid recipient address"); }
   try { changeScript = scriptFor(engine, fromAddress); } catch { throw new Error("Invalid source address"); }
 
@@ -483,12 +528,7 @@ export async function buildUnsignedTransaction({ engine, fromAddress, toAddress,
     throw new Error(`This send would need ${selection.utxos.length} UTXOs, but KasSigner only supports ${KSPT_MAX_INPUTS} inputs per transaction. Send a smaller amount or consolidate this address first.`);
   }
 
-  const outputs = [{ valueSompi: selection.finalAmount, spkVersion: recipientScript.version, spkScriptHex: recipientScript.scriptHex }];
-  let changeSompi = 0n;
-  if (selection.changeSompi > CHANGE_DUST_THRESHOLD) {
-    changeSompi = selection.changeSompi;
-    outputs.push({ valueSompi: selection.changeSompi, spkVersion: changeScript.version, spkScriptHex: changeScript.scriptHex });
-  }
+  const { outputs, changeSompi, feeSompi, foldedChangeSompi } = planSendOutputs(selection, recipientScript, changeScript);
 
   return {
     fromAddress,
@@ -509,9 +549,37 @@ export async function buildUnsignedTransaction({ engine, fromAddress, toAddress,
     })),
     outputs,
     finalAmountSompi: selection.finalAmount,
-    feeSompi: selection.feeSompi,
+    // what is actually paid: every input sompi no output carries (a folded remainder included)
+    feeSompi,
+    // the network fee the transaction needs on its own, and the change that couldn't stand as an
+    // output and was added to it (0n when the change was kept)
+    baseFeeSompi: selection.feeSompi,
+    foldedChangeSompi,
     changeSompi,
   };
+}
+
+/** The outputs for a selection (iOS ColdStorageSendEngine, IOS-013 / DSK-021): the recipient,
+ *  plus the change whenever the transaction's storage mass allows it. Change that can't stand is
+ *  folded into the fee only up to MAX_FOLDED_CHANGE_SOMPI; a bigger one is refused. The fee
+ *  reported is inputs - outputs, so what's shown is what's paid. */
+export function planSendOutputs(selection, recipientScript, changeScript) {
+  const outputs = [{ valueSompi: selection.finalAmount, spkVersion: recipientScript.version, spkScriptHex: recipientScript.scriptHex }];
+  let changeSompi = 0n;
+  if (selection.changeSompi > 0n) {
+    const inputAmounts = selection.utxos.map((u) => u.amountSompi);
+    if (fitsStorageMass(inputAmounts, [selection.finalAmount, selection.changeSompi])) {
+      changeSompi = selection.changeSompi;
+      outputs.push({ valueSompi: selection.changeSompi, spkVersion: changeScript.version, spkScriptHex: changeScript.scriptHex });
+    } else if (selection.changeSompi > MAX_FOLDED_CHANGE_SOMPI) {
+      throw new Error(SMALL_SEND_MASS_MESSAGE);
+    }
+  }
+  const inputTotal = selection.utxos.reduce((sum, u) => sum + u.amountSompi, 0n);
+  const outputTotal = outputs.reduce((sum, o) => sum + o.valueSompi, 0n);
+  const feeSompi = inputTotal >= outputTotal ? inputTotal - outputTotal : selection.feeSompi;
+  const foldedChangeSompi = feeSompi > selection.feeSompi ? feeSompi - selection.feeSompi : 0n;
+  return { outputs, changeSompi, feeSompi, foldedChangeSompi };
 }
 
 /** Live preview of what automatic selection would pick — lets the form show an already-exact
@@ -609,8 +677,15 @@ export async function broadcastSigned({ engine, unsigned, decoded }) {
     const sigBytes = hexToBytes(decodedInput.signatureHex);
     if (!sigBytes || sigBytes.length !== 64) throw new Error(`Unexpected signature length (${sigBytes?.length ?? 0} bytes, expected 64)`);
 
+    // Only SIGHASH_ALL (IOS-019): a NONE / ANYONECANPAY signature doesn't commit to the outputs,
+    // so anyone seeing it in the mempool could redirect the funds.
+    const sighashType = decodedInput.sighashType ?? 0x01;
+    if (sighashType !== 0x01) {
+      throw new Error(`Input ${index} was signed with a signature type that doesn't cover the whole transaction, so it won't be broadcast`);
+    }
+
     // Standard P2PK signature script: push-64 opcode + 64-byte Schnorr sig + 1-byte sighash.
-    const sighash = (decodedInput.sighashType ?? 0x01).toString(16).padStart(2, "0");
+    const sighash = sighashType.toString(16).padStart(2, "0");
     const sigScriptHex = `41${decodedInput.signatureHex}${sighash}`;
 
     return {
@@ -644,9 +719,16 @@ export async function broadcastSigned({ engine, unsigned, decoded }) {
   tx.finalize();
 
   await engine.connect();
-  const response = await engine.withRpc(
-    (rpc) => rpc.submitTransaction({ transaction: tx, allowOrphan: false }),
-    { retries: 1, label: "Cold storage broadcast" }
-  );
-  return response?.transactionId || tx.id;
+  // A submit whose answer was lost but whose transaction the network has counts as sent
+  // (iOS IOS-014): the person must not be told to sign and send it again.
+  let localId = null;
+  try { localId = tx.id ? String(tx.id) : null; } catch { localId = null; }
+  const txid = await submitConfirmingAcceptance({
+    withRpc: engine.withRpc.bind(engine),
+    submit: (rpc) => rpc.submitTransaction({ transaction: tx, allowOrphan: false }),
+    txid: localId,
+    label: "Cold storage broadcast",
+    log: typeof engine.log === "function" ? engine.log : () => {},
+  });
+  return txid || tx.id;
 }

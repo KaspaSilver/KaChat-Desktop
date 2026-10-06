@@ -10,9 +10,13 @@ import { sha256 } from "@noble/hashes/sha2.js";
 // - src/service/account-service.ts
 // - cipher/src/lib.rs
 //
-// Actual Kasia wire shape for direct COMM messages:
+// Wire shape for direct COMM messages (KaChat writes the `kchat:` root; Kasia's original
+// `ciph_msg:1:comm:` root is read, never written - see WIRE_ROOT below):
 //
-//   ciph_msg:1:comm:<alias>:<base64(encrypted_message_bytes)>
+//   kchat:1:comm:<alias>:<base64(encrypted_message_bytes)>
+//
+// A first-contact message is `kchat:1:dm:<inboxTag>:<alias>:<base64>`, read as `comm` once the
+// tag is dropped (normalizeContextualPayload; NO_HANDSHAKE_MESSAGING.md).
 //
 // The whole protocol string is UTF-8 encoded and placed in the Kaspa transaction
 // payload. The message body in production should be encrypted with Kasia's
@@ -122,7 +126,7 @@ export const KASIA_PROTOCOL = Object.freeze({
 
 export const KASIA_INTEGRATION_STATUS = Object.freeze({
   protocolContainer: "matched-to-kasia",
-  directMessageHeader: "ciph_msg:1:comm:<alias>:<base64>",
+  directMessageHeader: "kchat:1:comm:<alias>:<base64>",
   encryption: "official-kasia-cipher-wasm-bridge-added",
   transactionPayload: "utf8-protocol-bytes",
   defaultMessageAmountKas: "0.2",
@@ -221,7 +225,7 @@ export function buildCommMessage({
     encryptionMode: body.encryptionMode,
     encoding: "kasia-comm-v1",
     transport: "kasia-comm-preview",
-    wireShape: "ciph_msg:1:comm:<alias>:<base64>",
+    wireShape: "kchat:1:comm:<alias>:<base64>",
     checksum: messageId,
   };
 }
@@ -259,7 +263,7 @@ export function parseCommMessage(protocolString) {
     encrypted: decoded.encrypted,
     encryptionMode: decoded.encryptionMode,
     encoding: "kasia-comm-v1",
-    wireShape: "ciph_msg:1:comm:<alias>:<base64>",
+    wireShape: "kchat:1:comm:<alias>:<base64>",
     checksum: checksumHex(raw),
   };
 }
@@ -400,7 +404,7 @@ export async function buildEncryptedCommMessage({
     encryptionMode: "kasia-cipher-wasm",
     encoding: "kasia-comm-v1",
     transport: "kasia-comm-encrypted",
-    wireShape: "ciph_msg:1:comm:<alias>:<base64>",
+    wireShape: "kchat:1:comm:<alias>:<base64>",
     checksum: messageId,
   };
 }
@@ -410,7 +414,7 @@ export async function buildEncryptedCommMessage({
 // KaChat/Services/KaChatTransactionBuilder.swift and
 // KaChatForAndroid .../util/MessageProtocol.kt + services/WalletService.kt):
 //
-//   bytes = ASCII("ciph_msg:1:handshake:") ++ <raw ECIES bytes>
+//   bytes = ASCII("kchat:1:handshake:") ++ <raw ECIES bytes>   (legacy ciph_msg:1: is read, never written)
 //
 // The encrypted body is RAW BINARY (nonce(12) + ephemeral pubkey(33) +
 // ciphertext) concatenated directly after the ASCII prefix bytes — NOT
@@ -492,7 +496,7 @@ export async function buildEncryptedHandshake({
     encrypted: true,
     encryptionMode: "official-kasia-cipher-wasm",
     transport: "kasia-handshake-onchain",
-    wireShape: "ciph_msg:1:handshake:<raw_encrypted_bytes>",
+    wireShape: "kchat:1:handshake:<raw_encrypted_bytes>",
   };
 }
 
@@ -551,7 +555,8 @@ export function paymentPayloadEncryptedHex(payloadHex) {
 // phrase, with no local database at all (e.g. after a reinstall or moving to
 // a new device). Android has no equivalent of this feature.
 //
-//   bytes = ASCII("ciph_msg:1:self_stash:saved_handshake:") ++ <raw ECIES bytes, encrypted to self>
+//   bytes = ASCII("kchat:1:self_stash:saved_handshake:") ++ <raw ECIES bytes, encrypted to self>
+//   (the legacy ciph_msg:1: root is read, never written)
 export const SELF_STASH_SCOPE = "saved_handshake";
 
 // Two shapes (MESSAGING.md §4): a handshake note carries the aliases; a CONTACT note
@@ -616,7 +621,7 @@ export async function buildSelfStash({
     encrypted: true,
     encryptionMode: "official-kasia-cipher-wasm",
     transport: "kasia-self-stash-onchain",
-    wireShape: "ciph_msg:1:self_stash:saved_handshake:<raw_encrypted_bytes>",
+    wireShape: "kchat:1:self_stash:saved_handshake:<raw_encrypted_bytes>",
   };
 }
 

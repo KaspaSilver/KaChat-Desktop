@@ -2,7 +2,8 @@ import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
-import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail } from "./transactions.js";
+import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
+import { kasToSompi } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
 import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
@@ -47,6 +48,15 @@ import {
   clearPendingKnsTransfer as knsClearPendingTransfer,
   KNS_ECONOMICS,
 } from "./kns-write.js";
+
+// A displayed total fee in KAS (a string or a number) as exact sompi; null = "the network floor".
+// An unreadable one is an error, never a silently different fee (iOS IOS-010).
+function totalFeeSompiFrom(totalFeeKas) {
+  if (totalFeeKas == null) return null;
+  const sompi = kasToSompi(totalFeeKas);
+  if (sompi == null) throw new Error("The network fee is not a valid amount.");
+  return sompi;
+}
 
 /** A node UTXO entry (the WASM SDK's UtxoEntryReference, or a plain IUtxoEntry) as a plain object
  *  with its covenant id (hex or null); see KaspaEngine.getUtxosWithCovenants. */
@@ -959,11 +969,17 @@ export class KaspaEngine {
   /** Submits a Kaspa WASM SDK Transaction as is; returns the node's transaction id. */
   async submitRpcTransaction(transaction) {
     this.requireSdk();
-    const response = await this.withRpc(
-      (rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }),
-      { retries: 1, label: "Transaction submit" },
-    );
-    return String(response?.transactionId ?? "");
+    // A submit whose answer was lost but whose transaction the network has is a send that went
+    // out (iOS IOS-014), not a failure to retry.
+    let localId = null;
+    try { localId = transaction?.id ? String(transaction.id) : null; } catch { localId = null; }
+    return submitConfirmingAcceptance({
+      withRpc: this.withRpc.bind(this),
+      submit: (rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }),
+      txid: localId,
+      label: "Transaction submit",
+      log: this.log,
+    });
   }
 
   // options.manualUtxos: coin control (outpoints the build may pick from; null = automatic).
@@ -1001,7 +1017,7 @@ export class KaspaEngine {
       privateKey: this.privateKey,
       sourceAddress: this.address,
       destinationAddress,
-      totalFeeSompi: totalFeeKas != null ? BigInt(this.kaspa.kaspaToSompi(String(totalFeeKas))) : null,
+      totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       selectedOutpoints,
       log: this.log,
     });
@@ -1019,7 +1035,7 @@ export class KaspaEngine {
       privateKey: spending.privateKey,
       sourceAddress: spending.address,
       destinationAddress,
-      totalFeeSompi: totalFeeKas != null ? BigInt(this.kaspa.kaspaToSompi(String(totalFeeKas))) : null,
+      totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       selectedOutpoints,
       log: this.log,
     });
@@ -1035,7 +1051,7 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       privateKey: this.privateKey,
       sourceAddress: this.address,
-      totalFeeSompi: totalFeeKas != null ? this.kaspa.kaspaToSompi(String(totalFeeKas)) : null,
+      totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       log: this.log,
     });
   }
@@ -1109,7 +1125,7 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       privateKey: spending.privateKey,
       sourceAddress: spending.address,
-      totalFeeSompi: totalFeeKas != null ? this.kaspa.kaspaToSompi(String(totalFeeKas)) : null,
+      totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       log: this.log,
     });
   }
@@ -1170,7 +1186,7 @@ export class KaspaEngine {
     return hex;
   }
 
-  // Broadcasts a group payload string (ciph_msg:1:gcomm: or :gctl:) as a
+  // Broadcasts a group payload string (kchat:1:gcomm: or :gctl:) as a
   // pay-to-self transaction with the string in the native payload field, the
   // same self-stash mechanism 1:1 COMM messages use.
   async sendGroupPayload(payloadString, { amountKas = KASIA_INTEGRATION_STATUS.defaultMessageAmountKas, feeKas = "0" } = {}) {

@@ -20,6 +20,10 @@
 // function) and `mountSendPieces` drops them into a static screen's placeholders. Every value
 // interpolated here is escaped.
 
+import { otherNetworkReason } from "../engine/network.js";
+
+import { sanitizeAmountInput } from "../engine/amounts.js";
+
 const KNOB_INSET = 4;
 
 export function escapeSendHtml(value) {
@@ -80,9 +84,10 @@ export function recipientStatusHtml({ input = "", resolving = false, error = nul
     return `<p class="sk-status good">✓ Resolved: ${esc(resolvedName || "")}</p>
       <p class="sk-status mono">${esc(resolvedAddress)}</p>`;
   }
-  return valid
-    ? '<p class="sk-status good">✓ Valid address</p>'
-    : '<p class="sk-status bad">✕ Invalid address format</p>';
+  if (valid) return '<p class="sk-status good">✓ Valid address</p>';
+  // The other network's address is the same key on another chain (IOS-003): say which.
+  const reason = otherNetworkReason(trimmed);
+  return `<p class="sk-status bad">✕ ${esc(reason || "Invalid address format")}</p>`;
 }
 
 /**
@@ -190,13 +195,11 @@ export function layoutAmountEntry(input, unitEl) {
   if (unitEl) unitEl.style.fontSize = `${Math.round(size * 0.55)}px`;
 }
 
-/** Digits and one decimal point, at most `maxDecimals` after it (iOS sanitizedAmount). */
+/** Digits and one decimal point, at most `maxDecimals` after it: "," and the Arabic decimal
+ *  separator read as ".", Arabic-Indic / Persian digits as ASCII (iOS KaspaUnit.sanitizeAmountInput,
+ *  the default for every amount entry, IOS-010). */
 export function sanitizeAmountText(value, maxDecimals = 8) {
-  let text = String(value || "").replace(/,/g, ".").replace(/[^0-9.]/g, "");
-  const dot = text.indexOf(".");
-  if (dot !== -1) text = text.slice(0, dot + 1) + text.slice(dot + 1).replace(/\./g, "");
-  const [whole, fraction] = text.split(".");
-  return fraction != null ? `${whole}.${fraction.slice(0, maxDecimals)}` : whole;
+  return sanitizeAmountInput(value, maxDecimals);
 }
 
 // --- Pills --------------------------------------------------------------------------------------

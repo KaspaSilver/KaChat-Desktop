@@ -22,7 +22,8 @@ import { KAS_UNIT, kasLabel, isNetworkAddress } from "../engine/network.js";
 import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
 import { userFacingError, chooseDialog } from "./dialogs.js";
-import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays } from "../engine/kachat-names/actions.js";
+import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays, recordPrice } from "../engine/kachat-names/actions.js";
+import { paramsExpiresSoonMs } from "../engine/kachat-names/manifest.js";
 import {
   Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress, compactAddress,
 } from "../engine/kachat-names/registry-state.js";
@@ -402,7 +403,10 @@ function offerRowHtml(offer, { isBuyer, isOwner, nameInfo = null, declined = fal
   const refundable = daa != null && offer.refundable(daa);
   const returning = Boolean(actions?.returningOffers?.has(offer.id));
   const withdrawing = Boolean(actions?.withdrawingOffers?.has(offer.id));
-  const acceptable = isOwner && !refundable && !declined;
+  // ...and the name itself still active: an expired name would reach the buyer only to be
+  // reclaimed (iOS 71128c4, IOS-055)
+  const nameActive = Boolean(nameInfo && nameInfo.status(graceMs()) === Status.active);
+  const acceptable = isOwner && !refundable && !declined && nameActive;
   let who = "";
   if (isBuyer) who = "Your offer";
   else { const a = addressOf(offer.buyer); if (a) who = shortAddr(a); }
@@ -840,6 +844,8 @@ function registrationStageText(p) {
     case Stage.registered: return "Registered. It's yours.";
     case Stage.taken: return kasLabel("Someone registered this name first. Cancel the commit to get its 0.2 KAS back.");
     case Stage.failed: return "The registration stopped.";
+    case Stage.priceChanged:
+      return `The price changed to ${amountText(recordPrice(p.priceChangedTo) ?? 0n)} since you confirmed, so nothing was sent. Confirm the new price to continue, or cancel the commit.`;
     case Stage.cancelling: return "Cancelling the commit...";
     case Stage.cancelled: return "Cancelled.";
     default: return "";
@@ -875,6 +881,10 @@ function registrationCardHtml(p) {
       + `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-done="${id}">Done</button>`;
   }
   else if (p.stage === Stage.taken) buttons = cancel;
+  else if (p.stage === Stage.priceChanged) {
+    // paying more than confirmed is a new approval (iOS 4f5d95e, IOS-054)
+    buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-newprice="${id}" ${ui.working ? "disabled" : ""}>Confirm New Price</button>${cancel}`;
+  }
   else if (p.stage === Stage.failed) {
     buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-retry="${id}">Try Again</button>${cancel}`
       + `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-dismiss="${id}">Dismiss</button>`;
@@ -918,6 +928,18 @@ async function cancelRegistration(id) {
   } catch (error) {
     registrationUi.set(id, { working: false, error: errorText(error) });
   }
+  hubChanged("pending");
+}
+
+/** Continues a registration stopped at "price changed" at the new price: paying more than the
+ *  person confirmed is a new approval, so it goes through the device lock like any send (iOS
+ *  4f5d95e authorizeNewPrice). */
+async function acceptNewRegistrationPrice(id) {
+  const rt = kachatNames();
+  if (!rt) return;
+  if (!(await deviceLock())) return;
+  registrationUi.delete(id);
+  rt.actions.acceptNewPrice(id);
   hubChanged("pending");
 }
 
@@ -1045,6 +1067,8 @@ export function liveHubClick(event) {
     kachatNames()?.actions.retry(retry.dataset.klRegRetry);
     return true;
   }
+  const newPrice = target.closest("[data-kl-reg-newprice]");
+  if (newPrice) { if (!newPrice.disabled) acceptNewRegistrationPrice(newPrice.dataset.klRegNewprice); return true; }
   const cancel = target.closest("[data-kl-reg-cancel]");
   if (cancel) { if (!cancel.disabled) cancelRegistration(cancel.dataset.klRegCancel); return true; }
   const reclaim = target.closest("[data-kl-reclaim]");
@@ -1358,7 +1382,9 @@ function openTxSheet(cfg) {
     sheet.sendError = null;
     sheet.render();
     try {
-      const txId = await rt.actions.perform(op);
+      // never pays more than the price shown (the price record can change at any time; iOS 4f5d95e)
+      const maxPrice = typeof sheet.plan?.priceFee === "bigint" ? sheet.plan.priceFee : null;
+      const txId = await rt.actions.perform(op, { maxPrice });
       sheet.txId = txId;
       try { cfg.onDone?.(txId); } catch { /* the sheet still shows it */ }
       // Every finished name transaction opens the done half sheet; closing it closes the action
@@ -1371,6 +1397,13 @@ function openTxSheet(cfg) {
       });
     } catch (error) {
       sheet.sendError = errorText(error);
+      // the price moved: build the plan again so the person sees the new price and confirms it
+      if (error?.code === "priceChanged" && !sheet.closed) {
+        sheet.sending = false;
+        sheet.key = undefined;
+        sheet.update();
+        return;
+      }
     }
     sheet.sending = false;
     sheet.render();
@@ -1417,13 +1450,16 @@ function txKey(info) {
 
 /** KachatLiveBuySheet. */
 function openBuySheet(info, owner) {
-  const soon = info.expiresAt - 30n * 86_400_000n < BigInt(Date.now());
+  // 30 days on mainnet's yearly clock, the renewal window on testnet's 10-minute one (IOS-060)
+  const p = params();
+  const soonMs = p ? paramsExpiresSoonMs(p) : 30n * 86_400_000n;
+  const soon = info.expiresAt - soonMs < BigInt(Date.now());
   openTxSheet({
     owner,
     title: "Buy Name",
     confirmTitle: "Confirm Purchase",
     footer: () => (soon
-      ? "Less than 30 days are left before this name expires. You'd have to renew it soon."
+      ? `Less than ${durationText(Number(soonMs))} is left before this name expires. You'd have to renew it soon.`
       : "The payment reaches the seller and the name reaches you in the same transaction - both happen, or neither does."),
     rows: () => [
       { title: "Name", value: info.display },
@@ -1558,7 +1594,7 @@ function openRenewSheet(info, owner) {
     doneTitle: "Renewed",
     inputsHtml: section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years", yearsOptions(), years, "Years")}</div>`),
     footer: () => (open()
-      ? "A renewal starts the next period at the current expiry, so no time is lost or gained, even after it passed. The price goes to the miners."
+      ? "A renewal starts the next period at the current expiry, not from today, so a name that expired a while ago gets less time. The price goes to the miners."
       : renewalOpensText(info, p)),
     rows: () => [
       { title: "Name", value: info.display },
@@ -1842,13 +1878,16 @@ function openClaimSheet({ name, gap, owner = "market" }) {
 
   const start = async () => {
     if (starting || quote?.affordable !== true) return;
+    // the price shown is the most the registration will ever pay (iOS 4f5d95e, IOS-054)
+    const q = quote;
+    if (q.years !== BigInt(years)) return;
     if (!(await deviceLock())) return;
-    if (closed) return;
+    if (closed || quote !== q) return;
     starting = true;
     startError = null;
     render();
     try {
-      await rt.actions.startRegistration({ name, years: BigInt(years) });
+      await rt.actions.startRegistration({ name, years: q.years, maxPrice: q.price });
       starting = false;
       kit.closeLayer(layer);
       hubChanged("pending");
@@ -2053,7 +2092,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
       <div class="kl-action-grid">
         <div class="kmkt-actions">
           ${d.info.isListed && s === Status.active ? actionButton("Buy Now", I.cart, "buy", { prominent: true }) : ""}
-          ${actionButton("Make an Offer", I.hand, "offer")}
+          ${s === Status.active ? actionButton("Make an Offer", I.hand, "offer") : ""}
         </div>
       </div>`;
   };
@@ -2238,7 +2277,8 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     const info = d.info;
     switch (id) {
       case "buy": openBuySheet(info, owner); break;
-      case "offer": openOfferSheet(info, owner); break;
+      // an expired name can be reclaimed by anyone soon: no offers on it (iOS 71128c4)
+      case "offer": if (info.status(graceMs()) === Status.active) openOfferSheet(info, owner); break;
       case "manage": openManage(); break;
       case "extend": openExtendSheet(info, owner); break;
       case "renew": openRenewSheet(info, owner); break;

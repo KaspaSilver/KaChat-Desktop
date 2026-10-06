@@ -47,7 +47,7 @@ import {
   networkFee as massNetworkFee, cloneTx,
 } from "./transaction.js";
 import {
-  verifyManifest, templateRedeem, templateScript, templateTag, paramsExtendableYearsOf, paramsRenewOpens,
+  verifyManifest, templateRedeem, templateScript, templateTag, paramsExtendableYearsOf, paramsRenewOpens, paramsExpiresSoonMs,
 } from "./manifest.js";
 
 // MARK: - Compute budgets
@@ -735,8 +735,9 @@ export class Builder {
       notes: [],
       payload: namePayload("buy", nm),
     };
-    if (n.fields.expiresAt - 30n * 86_400_000n < env.wallMs) {
-      d.notes.push("less than 30 days left before expiry");
+    // 30 days on a yearly clock, the renewal window on a short one (iOS 24d673a, IOS-060)
+    if (n.fields.expiresAt - paramsExpiresSoonMs(this.params) < env.wallMs) {
+      d.notes.push("expires soon: the buyer will have to renew it");
     }
     return this._finish(d, wallet, { kind: "funded", maxInputs }, env);
   }

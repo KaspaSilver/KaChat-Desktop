@@ -1,5 +1,6 @@
 // Broadcasts — public, unencrypted, many-to-many channels riding on Kaspa self-send
-// transactions (payload `ciph_msg:1:bcast:<channel>:<content>`), desktop port of the iOS/
+// transactions (payload `kchat:1:bcast:<channel>:<content>`; the legacy `ciph_msg:1:bcast:`
+// root is read, never written), desktop port of the iOS/
 // Android 4.0 feature. The curated rooms (#kaspa, #kachat-bugs and the eleven per-language
 // rooms) are backed by the KaChat
 // broadcast indexer (BROADCAST_INDEXER.md): it watches the chain 24/7 and serves history over

@@ -48,6 +48,8 @@ import {
   KAPOSTS_POLL_MIN_OPTIONS,
   KAPOSTS_POLL_MAX_OPTIONS,
   KAPOSTS_POLL_OPTION_MAX_LENGTH,
+  pollOptionLength,
+  prefixPollOption,
   KAPOSTS_SCHEDULE_MIN_MS,
   KAPOSTS_SCHEDULE_MAX_MS,
   pollClosesAt,
@@ -2469,7 +2471,7 @@ function renderComposerExtras() {
       if (list) {
         list.innerHTML = composerPoll.options.map((option, index) => `
           <div class="kaposts-poll-option-row">
-            <input class="kaposts-reply-input" type="text" maxlength="${KAPOSTS_POLL_OPTION_MAX_LENGTH}" placeholder="Option ${index + 1}" value="${deps.escapeHtml(option)}" data-kaposts-poll-option="${index}" />
+            <input class="kaposts-reply-input" type="text" placeholder="Option ${index + 1}" value="${deps.escapeHtml(option)}" data-kaposts-poll-option="${index}" />
             ${composerPoll.options.length > KAPOSTS_POLL_MIN_OPTIONS ? `<button type="button" class="kaposts-thread-segment-remove" data-kaposts-poll-option-remove="${index}" aria-label="Remove option">×</button>` : ""}
           </div>`).join("");
       }
@@ -2498,7 +2500,8 @@ function pollEditorValid() {
   if (!composerPoll) return true;
   const options = composerPoll.options.map((o) => String(o || "").trim());
   if (options.length < KAPOSTS_POLL_MIN_OPTIONS || options.length > KAPOSTS_POLL_MAX_OPTIONS) return false;
-  if (options.some((o) => !o || o.length > KAPOSTS_POLL_OPTION_MAX_LENGTH)) return false;
+  // XP-007: counted in Unicode scalars, as the indexer counts them (not UTF-16 `length`).
+  if (options.some((o) => !o || pollOptionLength(o) > KAPOSTS_POLL_OPTION_MAX_LENGTH)) return false;
   return new Set(options).size === options.length;
 }
 
@@ -4877,10 +4880,19 @@ export function initKaPosts(dependencies) {
     renderComposerExtras();
     document.querySelector(`[data-kaposts-poll-option='${composerPoll.options.length - 1}']`)?.focus();
   });
-  document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("input", (event) => {
+  // XP-007 (iOS 7842c18): an option is cut to 40 Unicode scalars at a character boundary - the
+  // indexer's unit. No `maxlength`: it counts UTF-16 units, which would stop an emoji option short
+  // (and could split a pair). Not while an IME is composing; compositionend re-runs it.
+  const syncPollOption = (event) => {
     const option = event.target.closest("[data-kaposts-poll-option]");
-    if (option && composerPoll) composerPoll.options[Number(option.dataset.kapostsPollOption)] = option.value;
-  });
+    if (!option || !composerPoll) return;
+    if (!event.isComposing && pollOptionLength(option.value) > KAPOSTS_POLL_OPTION_MAX_LENGTH) {
+      option.value = prefixPollOption(option.value, KAPOSTS_POLL_OPTION_MAX_LENGTH);
+    }
+    composerPoll.options[Number(option.dataset.kapostsPollOption)] = option.value;
+  };
+  document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("input", syncPollOption);
+  document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("compositionend", syncPollOption);
   document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("change", (event) => {
     if (event.target.matches("[data-kaposts-poll-length]") && composerPoll) composerPoll.lengthMs = Number(event.target.value) || 86400000;
   });

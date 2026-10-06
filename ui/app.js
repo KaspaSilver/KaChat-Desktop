@@ -2,7 +2,10 @@ import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
+import { otherNetworkReason } from "../engine/network.js";
+import { addressFromPrivateKey } from "../engine/wallet.js";
 import { createGroupManager } from "../engine/group-store.js";
+import { sompiFromUserText, kasTextFromSompi, kasToSompi } from "../engine/amounts.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
@@ -319,26 +322,63 @@ function refreshSubscriptionAddresses({ restart = true } = {}) {
 
 refreshSubscriptionAddresses({ restart: false });
 
-function loadHandshakeSyncState() {
+// The handshake scan's "synced up to" cursor and processed / declined txids, kept per wallet
+// address (iOS IOS-004): the address carries the network prefix, so each network keeps its own,
+// and switching network or account no longer throws the other one's away. Stored under the
+// account prefix (removed with the account). The old single global record is read once for the
+// wallet it names, then moved.
+function loadHandshakeSyncState(walletAddress = "") {
   try {
-    const parsed = JSON.parse(localStorage.getItem(HANDSHAKE_SYNC_KEY) || "{}");
+    const wallet = String(walletAddress || "").trim();
+    let raw = wallet ? localStorage.getItem(accountScopedKey(HANDSHAKE_SYNC_KEY, wallet)) : null;
+    if (raw == null) {
+      const legacy = localStorage.getItem(HANDSHAKE_SYNC_KEY);
+      let legacyWallet = "";
+      try { legacyWallet = String(JSON.parse(legacy || "null")?.walletAddress || ""); } catch { legacyWallet = ""; }
+      if (!wallet || legacyWallet === wallet) raw = legacy;
+    }
+    const parsed = JSON.parse(raw || "{}");
     const parserVersion = Number(parsed?.parserVersion || 0);
     return {
-      walletAddress: String(parsed?.walletAddress || ""),
+      walletAddress: wallet || String(parsed?.walletAddress || ""),
       cursor: parserVersion >= 3 ? Number(parsed?.cursor || 0) : 0,
       parserVersion: 3,
       processedTxids: parserVersion >= 3 && Array.isArray(parsed?.processedTxids) ? [...new Set(parsed.processedTxids.map(String))] : [],
       declinedTxids: parserVersion >= 3 && Array.isArray(parsed?.declinedTxids) ? [...new Set(parsed.declinedTxids.map(String))] : [],
     };
   } catch {
-    return { walletAddress: "", cursor: 0, parserVersion: 3, processedTxids: [], declinedTxids: [] };
+    return { walletAddress: String(walletAddress || "").trim(), cursor: 0, parserVersion: 3, processedTxids: [], declinedTxids: [] };
   }
 }
 
-let handshakeSyncState = loadHandshakeSyncState();
+let handshakeSyncState = loadHandshakeSyncState(engine.address);
 
 function persistHandshakeSyncState() {
-  localStorage.setItem(HANDSHAKE_SYNC_KEY, JSON.stringify(handshakeSyncState));
+  const wallet = String(handshakeSyncState?.walletAddress || "").trim();
+  if (!wallet) return; // no wallet, nothing synced to keep
+  localStorage.setItem(accountScopedKey(HANDSHAKE_SYNC_KEY, wallet), JSON.stringify(handshakeSyncState));
+  // The pre-IOS-004 global record, once it has moved under its wallet.
+  try {
+    if (JSON.parse(localStorage.getItem(HANDSHAKE_SYNC_KEY) || "null")?.walletAddress === wallet) localStorage.removeItem(HANDSHAKE_SYNC_KEY);
+  } catch { /* unreadable: left alone */ }
+}
+/** The scan state for the active wallet (and network), loaded when the wallet changed. */
+function ensureHandshakeSyncStateForActiveWallet() {
+  const wallet = String(engine.address || "");
+  if (!wallet || handshakeSyncState.walletAddress === wallet) return;
+  handshakeSyncState = loadHandshakeSyncState(wallet);
+  appendEngineLog(`Handshake scan for ${shortAddress(wallet)} ${handshakeSyncState.cursor ? "resumes from its saved point" : "starts from the beginning"}.`);
+}
+/** A create / import that starts the account's chats from scratch re-reads its handshakes from
+ *  the start too, on both networks (iOS: a new wallet clears both networks' cursors). */
+function resetHandshakeSyncStateFor(walletAddress) {
+  const wallet = String(walletAddress || "").trim();
+  if (!wallet) return;
+  for (const encoded of new Set([wallet, reencodeAddress(wallet, "kaspa"), reencodeAddress(wallet, "kaspatest")])) {
+    try { localStorage.removeItem(accountScopedKey(HANDSHAKE_SYNC_KEY, encoded)); } catch { /* not stored */ }
+  }
+  handshakeSyncState = { walletAddress: wallet, cursor: 0, parserVersion: 3, processedTxids: [], declinedTxids: [] };
+  persistHandshakeSyncState(); // also drops a pre-IOS-004 global record for this wallet
 }
 
 let activeConversationId = null;
@@ -779,6 +819,8 @@ function activateSavedAccount(address) {
   const account = loadSavedAccounts().find((entry) => entry.address === address);
   if (!account) throw new Error("Saved account was not found.");
   if (!account.privateKeyHex) throw new Error("Enter your password to unlock this account.");
+  // The active-wallet record is about to hold this account: the one in it now must be filed (IOS-016).
+  fileStoredWalletBeforeReplacing(account.address, account.privateKeyHex, { legacy: false });
   writeActiveAccountAddress(account.address);
   // Secrets only without a password (the sealed registry holds them otherwise); the address in the
   // mainnet encoding like the registry, so removal on either network matches it (DSK-009).
@@ -796,6 +838,35 @@ function activateSavedAccount(address) {
   })));
   localStorage.removeItem(SESSION_LOGGED_OUT_KEY);
   markSessionActive(); // survives the sign-in reload even if "Keep me signed in" is off
+}
+
+/** iOS IOS-016: before the active-wallet record (and, with `legacy`, the pre-v2 bare key) is
+ *  overwritten with another account, the account it holds must be in the saved-account registry,
+ *  filed there now and read back if it is not. Throws when that fails, so the caller changes
+ *  nothing: otherwise that account's keys would exist nowhere. Nothing to protect (no stored keys,
+ *  the same account coming back) is not an error. */
+function fileStoredWalletBeforeReplacing(newAddress, newPrivateKeyHex, { legacy = true } = {}) {
+  const failure = () => new Error("The current account's keys couldn't be backed up on this device, so nothing was changed. Try again.");
+  const newKey = String(newPrivateKeyHex || "").trim();
+  // loadSavedAccounts files a v2 record that is missing from the registry by itself (DSK-009).
+  const filedKeys = () => new Set(loadSavedAccounts().map((entry) => String(entry?.privateKeyHex || "").trim()).filter(Boolean));
+  let wallet = null;
+  try { wallet = JSON.parse(localStorage.getItem(PERSISTED_WALLET_KEY) || "null"); } catch { wallet = null; }
+  const walletKey = String(wallet?.privateKeyHex || "").trim();
+  if (walletKey && walletKey !== newKey && !sameStoredAccountAddress(wallet?.address, newAddress) && !filedKeys().has(walletKey)) throw failure();
+  if (!legacy) return;
+  const legacyKey = String(readLegacyWalletKey() || "").trim();
+  if (!legacyKey || legacyKey === newKey || filedKeys().has(legacyKey)) return;
+  try {
+    const legacyAddress = addressFromPrivateKey(new engine.kaspa.PrivateKey(legacyKey));
+    const savedAt = new Date().toISOString();
+    persistSavedAccounts([...loadSavedAccounts(), {
+      version: 1, address: legacyAddress, privateKeyHex: legacyKey, mnemonic: "", passphrase: "",
+      derivationPath: "", wordCount: 0, sourceFamily: "kaspaStandard", chattingIndex: 0,
+      name: `Account ${legacyAddress.slice(-6)}`, createdAt: savedAt, savedAt,
+    }]);
+  } catch { throw failure(); }
+  if (!filedKeys().has(legacyKey)) throw failure();
 }
 
 /** The lock: asks for the app password and opens the key vault. True once unlocked. */
@@ -1020,15 +1091,38 @@ function removeAccountScopedLocalData(address) {
   // in global stores bucketed by wallet. A pending group-message write must not put them back.
   if (groupMsgSaveTimer) { window.clearTimeout(groupMsgSaveTimer); groupMsgSaveTimer = 0; }
   groupMsgAllCache = null;
-  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY]) {
+  // Buckets are keyed by the running network's address, so both encodings go (one key, two
+  // networks), and every per-wallet bucket goes with them (iOS IOS-053): muted members, group
+  // deletion tombstones, spending addresses (indexes, hidden set, labels) and UTXO labels.
+  // Other accounts' buckets are never touched.
+  const bucketKeys = [...new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")].filter(Boolean))];
+  const removedGroupIds = new Set();
+  try {
+    const groupsAll = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
+    for (const bucketKey of bucketKeys) for (const groupId of Object.keys(groupsAll?.[bucketKey] || {})) removedGroupIds.add(groupId);
+  } catch { /* unreadable: no group ids to clear */ }
+  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
     try {
       const all = JSON.parse(localStorage.getItem(key) || "null");
-      if (all && typeof all === "object" && Object.prototype.hasOwnProperty.call(all, cleanAddress)) {
-        delete all[cleanAddress];
-        localStorage.setItem(key, JSON.stringify(all));
+      if (!all || typeof all !== "object") continue;
+      let changed = false;
+      for (const bucketKey of bucketKeys) {
+        if (Object.prototype.hasOwnProperty.call(all, bucketKey)) { delete all[bucketKey]; changed = true; }
       }
+      if (changed) localStorage.setItem(key, JSON.stringify(all));
     } catch { /* leave a store we cannot read */ }
   }
+  // Group notification modes are keyed by group id: only those of groups no other account on
+  // this device is still in.
+  try {
+    const groupsLeft = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
+    const stillUsed = new Set(Object.values(groupsLeft).flatMap((bucket) => Object.keys(bucket || {})));
+    let changed = false;
+    for (const groupId of removedGroupIds) {
+      if (!stillUsed.has(groupId) && Object.prototype.hasOwnProperty.call(groupPrefs, groupId)) { delete groupPrefs[groupId]; changed = true; }
+    }
+    if (changed) saveGroupPrefs();
+  } catch { /* prefs stay */ }
 }
 
 function removeSavedAccountFromDevice(account) {
@@ -2784,7 +2878,7 @@ function validateContactAddress(value) {
   const clean = String(value || "").trim();
   if (!clean) throw new Error("Enter a Kaspa address.");
   if (!engine.kaspa) throw new Error("Kaspa validation is still loading. Try again in a moment.");
-  if (!clean.toLowerCase().startsWith(ADDRESS_PREFIX)) throw new Error(IS_TESTNET ? "Contact address must be a testnet kaspatest: address." : "Contact address must be a mainnet kaspa: address.");
+  if (!clean.toLowerCase().startsWith(ADDRESS_PREFIX)) throw new Error(otherNetworkReason(clean) || (IS_TESTNET ? "Contact address must be a testnet kaspatest: address." : "Contact address must be a mainnet kaspa: address."));
 
   try {
     const parsed = new engine.kaspa.Address(clean);
@@ -2847,6 +2941,9 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", derivationPath =
   // With a password the registry entry below is sealed and this record keeps public fields only;
   // stored in the mainnet encoding like the registry (DSK-009).
   if (isAppLocked()) throw new Error("KaChat is locked. Enter your password before saving an account on this device.");
+  // The record and the pre-v2 key are about to be overwritten: whatever account they hold must be
+  // safely in the registry first, or this stops here (IOS-016).
+  fileStoredWalletBeforeReplacing(address, privateKeyHex);
   localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify(persistedWalletRecordForStorage({ ...payload, address: canonicalAccountAddress(address) })));
   clearLegacyWalletKey();
   upsertSavedAccount({
@@ -3116,11 +3213,18 @@ async function inboxSupported() {
  *  drops the transaction from its index altogether. */
 async function firstContactInboxTag(contact, conversationEntry) {
   const address = contact?.address;
-  if (!address || address === engine.address) return null;
+  if (!address) return null;
   const key = address.toLowerCase();
+  if (key === String(engine.address || "").toLowerCase()) return null;
   const s = chatRequestState();
   if (s.privateChats.has(key) || s.inboxTagged.has(key)) return null;
   if ((conversationEntry?.messages || []).some((m) => m?.direction === "incoming")) return null;
+  // Addresses compare case-insensitively like the checks above (iOS IOS-008): an address typed or
+  // scanned in upper case is still the established conversation, wherever its thread lives.
+  const heardFrom = (state.conversations || []).some((entry) => entry !== conversationEntry
+    && String(contactForConversation(entry)?.address || "").toLowerCase() === key
+    && (entry.messages || []).some((m) => m?.direction === "incoming"));
+  if (heardFrom) return null;
   if (!(await inboxSupported())) return null;
   return engine.inboxTagFor(address);
 }
@@ -4840,12 +4944,9 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
   if (!engine.address || !engine.isKasiaCipherLoaded?.() || typeof engine.syncIncomingHandshakesFromIndexer !== "function") return 0;
   // Handshake cursors and processed IDs must be scoped to the active wallet.
   // Step 64 reused one global cursor after wallet changes, which could skip a
-  // brand-new wallet's incoming requests completely.
-  if (handshakeSyncState.walletAddress !== engine.address) {
-    handshakeSyncState = { walletAddress: engine.address, cursor: 0, parserVersion: 3, processedTxids: [], declinedTxids: [] };
-    persistHandshakeSyncState();
-    appendEngineLog(`Handshake scan reset for active wallet ${shortAddress(engine.address)}.`);
-  }
+  // brand-new wallet's incoming requests completely. Each wallet address (so each network) now
+  // keeps its own record, loaded here (IOS-004).
+  ensureHandshakeSyncStateForActiveWallet();
   const result = await engine.syncIncomingHandshakesFromIndexer({
     knownTxids: handshakeSyncState.processedTxids,
     cursor: handshakeSyncState.cursor,
@@ -4952,6 +5053,7 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
 // — undecryptable by design; existence is the evidence).
 async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
   if (!engine.address || typeof engine.syncOutgoingHandshakesFromIndexer !== "function") return 0;
+  ensureHandshakeSyncStateForActiveWallet(); // never another wallet's (or network's) outCursor
   const result = await engine.syncOutgoingHandshakesFromIndexer({
     cursor: handshakeSyncState.outCursor || 0,
     indexerUrl: indexerUrlInput?.value || undefined,
@@ -6758,6 +6860,21 @@ function unhideActivePoolReservations() {
   } catch { return false; }
 }
 
+// A payment_notice memo as sent and shown (iOS PaymentNoticeContent.maxMemoLength): one line,
+// trimmed, at most 500 characters (code points, so an emoji is one).
+// The incoming bubble a payment_notice raises: "Received X KAS", or "Received X KAS — <memo>".
+function paymentNoticeBubbleText(amountKas, memo) {
+  const note = clampPaymentNoticeMemo(memo);
+  return note ? `Received ${amountKas} ${KAS_UNIT} — ${note}` : `Received ${amountKas} ${KAS_UNIT}`;
+}
+// (A literal, not a top-level const: this can run while the module is still evaluating.)
+function clampPaymentNoticeMemo(value) {
+  const max = 500;
+  const oneLine = String(value ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
+  const chars = Array.from(oneLine);
+  return chars.length > max ? chars.slice(0, max).join("").trim() : oneLine;
+}
+
 // Wire parser for the three pool envelope types (PaymentPoolCodec.parse).
 // Unknown `type` values fall through to the normal message pipeline; unknown
 // extra fields inside these envelopes are ignored.
@@ -6777,7 +6894,9 @@ function parsePaymentPoolEnvelope(text) {
       const amountSompi = Number(parsed.amountSompi);
       const address = String(parsed.address || "").trim();
       if (!txId || !Number.isFinite(amountSompi) || amountSompi <= 0 || !address) return null;
-      return { kind: "notice", txId, amountSompi: Math.floor(amountSompi), address };
+      // Optional payer's note (XP-004); absent or not a string reads as none, as before.
+      const memo = typeof parsed.memo === "string" ? clampPaymentNoticeMemo(parsed.memo) : "";
+      return { kind: "notice", txId, amountSompi: Math.floor(amountSompi), address, memo };
     }
     return null;
   } catch { return null; }
@@ -7260,11 +7379,13 @@ function createPaymentBubbleFromNotice(envelope, conversationEntry, contact, sou
 
   const amountKas = formatSompiForNotification(envelope.amountSompi);
   const createdAt = Number(sourceMessage.createdAt || Date.now());
+  // "Received X KAS — <memo>" when the notice carries the payer's note (XP-004): the same stored
+  // shape as a chatting-address payment with a note. Older notices have none.
   const bubble = createMessage({
     conversationId: conversationEntry.id,
     contactId: contact.id,
     direction: "incoming",
-    text: `Received ${amountKas} ${KAS_UNIT}`,
+    text: paymentNoticeBubbleText(amountKas, envelope.memo),
     sender: contact.address,
     receiver: envelope.address,
     status: MESSAGE_STATUSES.CONFIRMED,
@@ -7310,7 +7431,7 @@ async function verifyPaymentNoticeAgainstChain(conversationEntry, bubble, envelo
     applyMessagePatch(live, { status: MESSAGE_STATUSES.BROADCAST, note: "Unverified: the referenced transaction pays nothing to the claimed address." });
   } else if (paidToClaimed !== BigInt(envelope.amountSompi)) {
     const corrected = formatSompiForNotification(paidToClaimed);
-    applyMessagePatch(live, { text: `Received ${corrected} ${KAS_UNIT}`, paymentAmountKas: corrected, note: "Amount corrected from chain data." });
+    applyMessagePatch(live, { text: paymentNoticeBubbleText(corrected, envelope.memo), paymentAmountKas: corrected, note: "Amount corrected from chain data." });
   } else {
     return;
   }
@@ -7396,9 +7517,13 @@ function willPayViaFreshPoolAddress(contactAddress) {
 // Sends the payment_notice envelope after a pool-address payment was accepted
 // (fire-and-forget), then checks the low-water mark. No-op for
 // chatting-address payments — existing detection covers those.
-function handlePoolPaymentSubmitted(contact, txid, amountSompi, destinationAddress) {
+// `memo` (MESSAGING.md, since 2026-10-06, iOS 6b20d77 / XP-004): the payer's note travels in the
+// notice, the only part of a pool payment the recipient's chat reads. At most 500 characters,
+// omitted when empty, so older readers see the exact notice they always did.
+function handlePoolPaymentSubmitted(contact, txid, amountSompi, destinationAddress, memo = "") {
   if (!contact || destinationAddress === contact.address) return;
-  const payload = JSON.stringify({ type: "payment_notice", txId: String(txid).toLowerCase(), amountSompi, address: destinationAddress });
+  const note = clampPaymentNoticeMemo(memo);
+  const payload = JSON.stringify({ type: "payment_notice", txId: String(txid).toLowerCase(), amountSompi, address: destinationAddress, ...(note ? { memo: note } : {}) });
   enqueuePoolOperation(async () => {
     await sendInvisiblePoolEnvelope(contact, payload);
     appendEngineLog(`Sent payment_notice for ${String(txid).slice(0, 12)}…`);
@@ -8880,8 +9005,9 @@ let spendingSendIndex = 0;
 let spendingSendFeeTier = "0";
 
 function spendingSendGetFeeKas() {
-  const v = Number(spendingSendFeeCustom?.value);
-  return isFinite(v) && v > 0 ? String(v) : "0";
+  // The one exact parser (iOS IOS-010): "0,002" reads as a fee, and the text handed on is exact.
+  const sompi = sompiFromUserText(String(spendingSendFeeCustom?.value || ""));
+  return sompi != null && sompi > 0n ? kasTextFromSompi(sompi) : "0";
 }
 function updateSpendingSendFeeSummary() {
   if (!spendingSendFeeSummary) return;
@@ -8927,7 +9053,7 @@ const spendingSendController = makeSendController({
       selectedOutpoints: selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null,
       changeAddress: fresh?.address || null,
     });
-    if (fresh) rotatePrimarySpendingTo(fresh);
+    if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh));
     return result;
   },
 });
@@ -9902,7 +10028,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 102;
+const APP_BUILD = 103;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10154,7 +10280,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
   async function updateValidity() {
     const token = ++resolveToken;
     const raw = String(els.recipient?.value || "").trim();
-    const amountValid = Number(els.amount?.value) > 0;
+    const amountValid = (sompiFromUserText(String(els.amount?.value || "")) ?? 0n) > 0n;
     resolvedAddress = null;
     if (els.resolvedHint) els.resolvedHint.hidden = true;
     if (els.checkEl) els.checkEl.hidden = true;
@@ -10318,10 +10444,13 @@ function sendKaspaCurrencyCode() { return selectedCurrency.toUpperCase(); }
 // KAS has 8 decimals (1 sompi). Floating-point math (Max = balance − fee, fiat ÷ price) can yield
 // values like 38.251282509999996, which the "up to 8 decimals" validator rejects. Floor to 8
 // decimals (never round up past the balance) and trim trailing zeros.
+// Read through the shared exact parser (engine/amounts.js kasToSompi): Math.floor(v * 1e8) turned
+// 0.29 into 0.28999999, since 0.29 * 1e8 is 28999999.999999996 in floating point.
 function trimKas8(n) {
   const v = Number(n);
-  if (!isFinite(v)) return "0";
-  return (Math.floor(v * 1e8) / 1e8).toFixed(8).replace(/\.?0+$/, "");
+  if (!isFinite(v) || v <= 0) return "0";
+  const sompi = kasToSompi(v);
+  return sompi == null ? "0" : kasTextFromSompi(sompi);
 }
 
 // Amount to actually send, always KAS (converts from fiat when in fiat mode).
@@ -10400,8 +10529,9 @@ function formatFeeKas(kas) {
 }
 function sendKaspaTotalFeeKas() {
   if (sendKaspaFeeCustomOverride) {
-    const v = Number(sendKaspaFeeCustom?.value);
-    return isFinite(v) && v >= 0 ? v : 0;
+    // The one exact parser (iOS IOS-010): "0,002" from a comma-decimal keyboard is a fee, not 0.
+    const sompi = sompiFromUserText(String(sendKaspaFeeCustom?.value || ""));
+    return sompi != null ? Number(sompi) / 1e8 : 0;
   }
   return (sendKaspaBaseFeeKas ?? 0) * (SEND_FEE_MULTIPLIERS[sendKaspaFeeTier] || 1);
 }
@@ -10440,8 +10570,8 @@ sendKaspaFeeCustom?.addEventListener("input", () => {
 // Click the fee amount to type a custom fee; ✓ or Return uses it. An empty or unreadable entry
 // goes back to the selected speed.
 function commitSendKaspaCustomFee() {
-  const v = Number(sendKaspaFeeCustom?.value);
-  if (!sendKaspaFeeCustomOverride || !(String(sendKaspaFeeCustom?.value || "").trim()) || !isFinite(v) || v < 0) {
+  const typed = sompiFromUserText(String(sendKaspaFeeCustom?.value || ""));
+  if (!sendKaspaFeeCustomOverride || typed == null) {
     selectSendKaspaFeeTier(sendKaspaFeeTier);
     return;
   }
@@ -10779,7 +10909,7 @@ const sendKaspaController = makeSendController({
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
-      }).then((result) => { if (fresh) rotatePrimarySpendingTo(fresh); return result; });
+      }).then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh)); return result; });
     }
     return engine.send(destination, amountKas, feeKas, outpoints ? { selectedOutpoints: outpoints } : {});
   },
@@ -11276,7 +11406,7 @@ function manageSendResolveAmountKas() {
   if (!isFinite(raw) || raw <= 0) return manageSendAmountInput?.value || "";
   if (manageSendUnit === "fiat") {
     if (!manageSendPrice) throw new Error(`KAS price unavailable — switch back to ${KAS_UNIT} to send.`);
-    return String(raw / manageSendPrice);
+    return trimKas8(raw / manageSendPrice);
   }
   return manageSendAmountInput?.value || "";
 }
@@ -11316,12 +11446,18 @@ manageSendUnitButton?.addEventListener("click", () => {
   if (isFinite(raw) && raw > 0) {
     manageSendAmountInput.value = manageSendUnit === "kas"
       ? (raw * manageSendPrice).toFixed(selectedCurrency === "btc" ? 8 : 2)
-      : String(raw / manageSendPrice);
+      : trimKas8(raw / manageSendPrice);
   }
   manageSendUnit = manageSendUnit === "kas" ? "fiat" : "kas";
   applyManageSendUnit();
 });
-manageSendAmountInput?.addEventListener("input", updateManageSendFiatHint);
+manageSendAmountInput?.addEventListener("input", () => {
+  // Digits and one point, "," read as "." (iOS IOS-010): a comma-decimal amount in the currency
+  // unit is converted, never sent as if it were KAS. 8 decimals for KAS, 2 for a currency (8 BTC).
+  const sanitized = sanitizeAmountText(manageSendAmountInput.value, manageSendUnit === "fiat" && selectedCurrency !== "btc" ? 2 : 8);
+  if (sanitized !== manageSendAmountInput.value) manageSendAmountInput.value = sanitized;
+  updateManageSendFiatHint();
+});
 
 // Network fee tiers → priorityFee passed to engine.send.
 const manageSendFeeButtons = document.querySelectorAll("[data-manage-send-fee]");
@@ -11333,8 +11469,9 @@ const FEE_TIER_LABELS = { "0": "Normal", "0.00002": "Priority", custom: "Custom"
 // The fee input always shows the actual fee amount — read-only for the Normal /
 // Priority presets, editable for Custom.
 function manageSendGetFeeKas() {
-  const v = Number(manageSendFeeCustom?.value);
-  return isFinite(v) && v > 0 ? String(v) : "0";
+  // The one exact parser (iOS IOS-010): "0,002" reads as a fee, and the text handed on is exact.
+  const sompi = sompiFromUserText(String(manageSendFeeCustom?.value || ""));
+  return sompi != null && sompi > 0n ? kasTextFromSompi(sompi) : "0";
 }
 function updateManageSendFeeSummary() {
   if (!manageSendFeeSummary) return;
@@ -13573,7 +13710,7 @@ function updateCreateChatAddState() {
     }
     renderCreateChatStatus(valid
       ? '<span class="create-chat-status-good">✓ Valid address</span>'
-      : '<span class="create-chat-status-bad">✕ Invalid address format</span>');
+      : `<span class="create-chat-status-bad">✕ ${escapeHtml(otherNetworkReason(raw) || "Invalid address format")}</span>`);
     createChatAddButton.disabled = !valid;
     createChatResolvedAddress = valid ? raw : "";
     renderCreateChatPreview();
@@ -15608,8 +15745,9 @@ function openKaPostsSettings() {
   const footer = backdrop.querySelector("[data-kaposts-tip-footer]");
   const commit = () => {
     if (!toggle.checked) { setKaPostsDefaultTipKas(0); return; }
-    const value = Number(String(amount.value || "").replace(",", "."));
-    if (value > 0) setKaPostsDefaultTipKas(value);
+    // The one exact parser (iOS IOS-010): comma or dot, at most 8 decimals, capped at the supply.
+    const sompi = sompiFromUserText(String(amount.value || ""));
+    if (sompi != null && sompi > 0n) setKaPostsDefaultTipKas(Number(sompi) / 1e8);
   };
   toggle.addEventListener("change", () => {
     amountRow.hidden = !toggle.checked;
@@ -15673,14 +15811,14 @@ async function sendInstantTip(address, name, amountKasNumber) {
     const result = fundingAddress
       ? await engine.sendFromSpending({ mnemonic: activeAccountMnemonic(), index: fundingIndex, passphrase: activeAccountPassphrase(), destinationAddress, amountKas, feeKas: "0", changeAddress: fresh?.address || null })
       : await engine.send(destinationAddress, amountKas, "0");
-    if (fresh) rotatePrimarySpendingTo(fresh);
+    if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: NETWORK, note: "Kaspa node accepted and broadcast the payment transaction." });
-    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Math.round(Number(amountKas) * 1e8), destinationAddress);
-    await refreshBalanceOnly({ quiet: true });
+    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(kasTextToSompi(amountKas)), destinationAddress);
+    await refreshBalanceOnly({ quiet: true }).catch(() => {});
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -15724,23 +15862,29 @@ function tipRenderFee() {
   el.textContent = total ? `Network fee: ${total} ${KAS_UNIT}` : "Network fee: --";
 }
 
+// The tip typed on the sheet in sompi through the one exact parser (iOS IOS-010; "1,5" is 1.5);
+// 0n when there is none.
+function tipAmountSompi() {
+  return sompiFromUserText(String(tipQ("[data-tip-amount]")?.value || "")) ?? 0n;
+}
+
 function tipUpdateSendEnabled() {
   const send = tipQ("[data-tip-send]");
   if (!send) return;
-  const amount = Number(tipQ("[data-tip-amount]")?.value || 0);
-  send.disabled = !tipState || tipState.sending || !(amount > 0);
+  send.disabled = !tipState || tipState.sending || !(tipAmountSompi() > 0n);
 }
 
 async function tipEstimateFee() {
   const state = tipState;
   if (!state) return;
-  const amountKas = Number(tipQ("[data-tip-amount]")?.value || 0);
-  if (!(amountKas > 0)) { state.policyFeeKas = null; state.sdkFeeKas = null; tipRenderFee(); return; }
+  const amountSompi = tipAmountSompi();
+  if (!(amountSompi > 0n)) { state.policyFeeKas = null; state.sdkFeeKas = null; tipRenderFee(); return; }
+  const amountKas = kasTextFromSompi(amountSompi);
   const token = ++tipFeeEstimateToken;
   try {
     const detail = state.fundingAddress
-      ? await engine.estimateSendFeeForAddress(state.fundingAddress, String(amountKas))
-      : await engine.estimateSendFee(String(amountKas));
+      ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas)
+      : await engine.estimateSendFee(amountKas);
     if (token !== tipFeeEstimateToken || tipState !== state) return;
     state.policyFeeKas = detail.policyFeeKas;
     state.sdkFeeKas = detail.sdkFeeKas;
@@ -15828,8 +15972,9 @@ function closeTipModal() {
 async function sendTipNow() {
   const tip = tipState;
   if (!tip || tip.sending) return;
-  const amountKas = trimKas8(Number(tipQ("[data-tip-amount]")?.value || 0));
-  if (!(Number(amountKas) > 0)) { tipSetError("Enter an amount."); return; }
+  const tipSompi = tipAmountSompi();
+  const amountKas = kasTextFromSompi(tipSompi);
+  if (!(tipSompi > 0n)) { tipSetError("Enter an amount."); return; }
   if (tip.availableKas != null && Number(amountKas) > tip.availableKas) {
     tipSetError("Amount exceeds the available balance.");
     return;
@@ -15881,7 +16026,7 @@ async function sendTipNow() {
   persistState();
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
-  const requestedSompi = BigInt(Math.round(Number(amountKas) * 1e8));
+  const requestedSompi = kasTextToSompi(amountKas);
   const feeKas = tipExtraFeeKas();
 
   try {
@@ -15898,7 +16043,7 @@ async function sendTipNow() {
           changeAddress: tipFresh?.address || null,
         })
       : await engine.send(destinationAddress, amountKas, feeKas);
-    if (tipFresh) rotatePrimarySpendingTo(tipFresh);
+    if (tipFresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(tipFresh));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -15913,7 +16058,7 @@ async function sendTipNow() {
         : "Kaspa node accepted and broadcast the payment transaction.",
     });
     handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress);
-    await refreshBalanceOnly({ quiet: true });
+    await refreshBalanceOnly({ quiet: true }).catch(() => {});
     showCopyToast(`Tip sent · ${(verifiedTxid || txid).slice(0, 10)}…`);
     conversationEntry.updatedAt = Date.now();
     persistState();
@@ -17294,6 +17439,7 @@ messageArea.addEventListener("click", async (event) => {
     const txid = contact.incomingHandshakeTxid || "";
     contact.relationshipState = "declined";
     contact.updatedAt = Date.now();
+    ensureHandshakeSyncStateForActiveWallet();
     if (txid) handshakeSyncState.declinedTxids = [...new Set([...handshakeSyncState.declinedTxids, txid])];
     persistHandshakeSyncState();
     persistState();
@@ -17890,11 +18036,23 @@ let paymentManualUtxos = null;
 
 function isPaySheetOpen() { return Boolean(paySheet && !paySheet.hidden); }
 
+// The typed amount in sompi (BigInt), null when there is none: KAS through the one exact parser
+// (iOS IOS-010); a currency amount converted at the live price and cut to whole sompi.
+function paymentSompiFromInput() {
+  const text = String(payAmountInput?.value || "");
+  if (paymentUnit !== "fiat") {
+    const sompi = sompiFromUserText(text);
+    return sompi != null && sompi > 0n ? sompi : null;
+  }
+  const entered = Number(text.trim().replace(",", "."));
+  if (!Number.isFinite(entered) || entered <= 0 || !(paymentPrice > 0)) return null;
+  const sompi = sompiFromUserText(trimKas8(entered / paymentPrice));
+  return sompi != null && sompi > 0n ? sompi : null;
+}
+// The same amount as a KAS number, for display and conversion only (never for the send itself).
 function paymentKasFromInput() {
-  const entered = Number(String(payAmountInput?.value || "").trim().replace(",", "."));
-  if (!Number.isFinite(entered) || entered <= 0) return null;
-  if (paymentUnit !== "fiat") return entered;
-  return paymentPrice > 0 ? entered / paymentPrice : null;
+  const sompi = paymentSompiFromInput();
+  return sompi == null ? null : Number(sompi) / 1e8;
 }
 function formatKasPlain(kas) {
   return Number(kas).toFixed(8).replace(/\.?0+$/, "");
@@ -17933,8 +18091,7 @@ function refreshPaymentUnitUi() {
 // The red error, else the orange dust warning, and whether the hold button can be used.
 function refreshPaymentSheetState() {
   if (!paySheet) return;
-  const kas = paymentKasFromInput();
-  const sompi = kas != null ? Math.round(kas * 1e8) : 0;
+  const sompi = Number(paymentSompiFromInput() ?? 0n);
   if (payNoteEl) {
     payNoteEl.classList.toggle("error", Boolean(paySheetError));
     if (paySheetError) {
@@ -17995,10 +18152,9 @@ function selectPaymentFeeTier(tier) {
 // A typed total fee below the base is raised to it (a transaction can't go out under it); an empty
 // or unreadable entry leaves the fee as it was (iOS commitPaymentCustomFee).
 function commitPaymentCustomFee() {
-  const text = String(payFeeCustomInput?.value || "").trim();
-  const kas = Number(text);
-  if (paymentBaseFeeSompi != null && text && Number.isFinite(kas) && kas >= 0) {
-    const total = BigInt(Math.round(kas * 1e8));
+  // The one exact parser (iOS IOS-010): "0,002" is a fee, not NaN.
+  const total = sompiFromUserText(String(payFeeCustomInput?.value || ""));
+  if (paymentBaseFeeSompi != null && total != null) {
     paymentCustomExtraFeeSompi = total > paymentBaseFeeSompi ? total - paymentBaseFeeSompi : 0n;
   }
   payFeeCtl.setEditing(false);
@@ -18059,13 +18215,13 @@ function schedulePaymentFee() {
   if (payFeeTimer) window.clearTimeout(payFeeTimer);
   payFeeTimer = null;
   const token = ++payFeeToken;
-  const kas = paymentKasFromInput();
-  if (!isPaySheetOpen() || kas == null) { renderPaymentFeePill(null); return; }
+  const amountSompi = paymentSompiFromInput();
+  if (!isPaySheetOpen() || amountSompi == null) { renderPaymentFeePill(null); return; }
   renderPaymentFeePill(null, { estimating: true });
   payFeeTimer = window.setTimeout(async () => {
     try {
-      const amountKas = formatKasPlain(kas);
-      const payloadBytes = estimatePaymentPayloadBytes(currentPaymentMemo(), Math.round(kas * 1e8));
+      const amountKas = kasTextFromSompi(amountSompi);
+      const payloadBytes = estimatePaymentPayloadBytes(currentPaymentMemo(), Number(amountSompi));
       const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
       // The picked source (Send From), else the primary - what sendKasPayment will spend from.
       const fundingAddress = spendingFunded ? deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex()) : null;
@@ -18173,11 +18329,13 @@ paymentMaxButton?.addEventListener("click", () => {
   // Coin control: Max spends the chosen coins, else the whole balance (iOS estimateMaxPaymentAmount).
   const manualSompi = paymentManualUtxos ? paymentManualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
   if (manualSompi == null && composerAvailableKas == null) { showCopyToast("Balance unavailable right now."); return; }
-  const spendableKas = manualSompi != null ? Number(manualSompi) / 1e8 : composerAvailableKas;
+  const spendableSompi = manualSompi != null ? manualSompi : (sompiFromUserText(trimKas8(composerAvailableKas)) ?? 0n);
   // The same headroom the send itself reserves for the network fee, plus room for a Fast /
-  // Priority / custom extra on top of it.
-  const maxKas = Math.max(0, spendableKas - 0.0001 - Number(paymentExtraFeeSompi()) / 1e8);
-  payAmountInput.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : formatKasPlain(maxKas);
+  // Priority / custom extra on top of it. Exact sompi, so Max never reads back as more.
+  const headroomSompi = 10000n + paymentExtraFeeSompi();
+  const maxSompi = spendableSompi > headroomSompi ? spendableSompi - headroomSompi : 0n;
+  const maxKas = Number(maxSompi) / 1e8;
+  payAmountInput.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : kasTextFromSompi(maxSompi);
   paySheetError = "";
   refreshPaymentUnitUi();
   schedulePaymentFee();
@@ -18200,16 +18358,16 @@ async function submitPaymentSheet() {
   const conversationId = paySheetConversationId || activeConversationId;
   if (!conversationId) return;
   paySheetError = "";
-  const kas = paymentKasFromInput();
-  if (kas == null) {
-    paySheetError = paymentUnit === "fiat" ? "No live price to convert with." : `Enter a valid ${KAS_UNIT} amount.`;
+  const amountSompi = paymentSompiFromInput();
+  if (amountSompi == null) {
+    paySheetError = paymentUnit === "fiat" && !(paymentPrice > 0) ? "No live price to convert with." : `Enter a valid ${KAS_UNIT} amount.`;
     refreshPaymentSheetState();
     return;
   }
   let amountKas;
-  try { amountKas = normalizeKasAmount(formatKasPlain(kas)); }
+  try { amountKas = normalizeKasAmount(kasTextFromSompi(amountSompi)); }
   catch (error) { paySheetError = error.message; refreshPaymentSheetState(); return; }
-  if (Math.round(Number(amountKas) * 1e8) < 10_000_001) {
+  if (amountSompi < 10_000_001n) {
     const proceed = await confirmDialog({
       title: "Small Amount",
       message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
@@ -18276,7 +18434,7 @@ function kaspaOutputAmount(output) {
 
 async function transactionPaysRecipient(txid, recipientAddress, amountKas) {
   if (!String(txid || "").trim() || !String(recipientAddress || "").trim()) return false;
-  const expected = BigInt(Math.round(Number(amountKas) * 1e8));
+  const expected = kasTextToSompi(amountKas);
   const urls = [
     `${getEndpoint("kaspaApi")}/transactions/${encodeURIComponent(txid)}?resolve_previous_outpoints=light`,
     `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(recipientAddress)}/full-transactions?limit=100&offset=0&resolve_previous_outpoints=light`,
@@ -18463,12 +18621,29 @@ async function refreshPendingPaymentStatuses(conversationEntry, contact) {
   return changed;
 }
 
+// A typed KAS amount as canonical KAS text ("1,50" -> "1.5"), through the one exact parser
+// (engine/amounts.js, iOS IOS-010): comma or dot, at most 8 decimals, BigInt math, capped at the
+// supply. Throws the message the screen shows.
 function normalizeKasAmount(value) {
-  const cleaned = String(value || "").trim().replace(",", ".");
-  if (!/^\d*(?:\.\d{0,8})?$/.test(cleaned)) throw new Error(`Enter a valid ${KAS_UNIT} amount with up to 8 decimals.`);
-  const amount = Number(cleaned);
-  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Amount must be greater than 0.");
-  return cleaned;
+  const sompi = sompiFromUserText(String(value ?? ""));
+  if (sompi == null) throw new Error(`Enter a valid ${KAS_UNIT} amount with up to 8 decimals.`);
+  if (sompi <= 0n) throw new Error("Amount must be greater than 0.");
+  return kasTextFromSompi(sompi);
+}
+// Canonical KAS text (normalizeKasAmount's output) as BigInt sompi; 0n when it isn't one.
+function kasTextToSompi(amountKas) {
+  return sompiFromUserText(String(amountKas ?? "")) ?? 0n;
+}
+// Bookkeeping after a node accepted a send (rotating the change address, refreshing a balance):
+// its failure is logged, never thrown, so a send that went out is never shown as failed and
+// invited again (iOS IOS-014).
+function runPostSubmitStep(label, step) {
+  try {
+    const result = step();
+    if (result && typeof result.catch === "function") result.catch((error) => appendEngineLog(`${label} failed after the send went out: ${error?.message || error}`));
+  } catch (error) {
+    appendEngineLog(`${label} failed after the send went out: ${error?.message || error}`);
+  }
 }
 
 // A chat payment, from the Send KAS sheet. Throws (for the sheet to show) when it can't go: not
@@ -18501,7 +18676,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     const spendingFunded = Boolean(fundingAddress);
     const balance = spendingFunded ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
     if (!spendingFunded) currentBalanceKas = balance.totalKas; rememberLastBalance();
-    const requestedSompi = BigInt(Math.round(Number(amountKas) * 1e8));
+    const requestedSompi = kasTextToSompi(amountKas);
     let extraSompi = 0n;
     try { extraSompi = BigInt(extraFeeSompi || 0); } catch { extraSompi = 0n; }
     if (extraSompi < 0n) extraSompi = 0n;
@@ -18583,8 +18758,11 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
           })
         : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys });
       if (payFresh) {
-        if (keepsPrimary) revealSpendingChangeAddress(payFresh);
-        else rotatePrimarySpendingTo(payFresh);
+        // The node has the payment by now: a bookkeeping slip here must not mark it failed.
+        runPostSubmitStep("Change-address rotation", () => {
+          if (keepsPrimary) revealSpendingChangeAddress(payFresh);
+          else rotatePrimarySpendingTo(payFresh);
+        });
       }
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -18611,8 +18789,9 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     setStatus(`Payment sent · ${(verifiedTxid || txid).slice(0, 12)}…`);
     // Pool payments never touch the recipient's chatting address — send the
     // payment_notice so their chat still shows the bubble, then top up our
-    // stored pool if it ran low. No-op for chatting-address payments.
-    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress);
+    // stored pool if it ran low. No-op for chatting-address payments. The memo rides in the
+    // notice (XP-004); the payment's own payload above is sealed to the contact's chat key.
+    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress, memo);
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -19268,7 +19447,7 @@ document.querySelector("[data-chess-decline]")?.addEventListener("click", () => 
 });
 chessOverlay?.addEventListener("click", (event) => { if (event.target === chessOverlay) closeChess(); });
 
-// Photos ride the ordinary ciph_msg:1:comm: COMM payload as a JSON envelope
+// Photos ride the ordinary kchat:1:comm: COMM payload as a JSON envelope
 // (see buildImageEnvelopeJson below) — there is no separate wire type, and
 // this compression pipeline matches iOS/Android's ImagePrep exactly: JPEG
 // only (WebP/AVIF were deliberately rejected upstream for cross-platform
@@ -19415,7 +19594,7 @@ async function attachPhotoBlob(blob) {
 
 // Matches iOS's ChatService+Conversations.sendImage / Android's ImageMessage
 // exactly: photos are NOT a distinct wire type. This JSON string is sent as
-// the plaintext of an ordinary ciph_msg:1:comm: COMM message, the same way a
+// the plaintext of an ordinary kchat:1:comm: COMM message, the same way a
 // text message is — only the JSON shape signals "this is a photo" to the
 // receiving client. `type` must be the literal string "file".
 function buildImageEnvelopeJson(attachment, fileName = "photo.jpg") {
@@ -20238,8 +20417,11 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       message.note = "Imported from phone backup";
       if (message.status === MESSAGE_STATUSES.CONFIRMED) message.confirmations = Math.max(1, Number(message.confirmations || 0));
       if (message.messageType === "payment") {
-        const amount = rawContent.match(/^(?:Sent|Received)\s+([0-9][0-9.,]*)\s+T?KAS/i);
-        if (amount) message.paymentAmountKas = amount[1].replaceAll(",", "");
+        // Anchored, a bounded digit run, "," as grouping, then the exact parser (iOS IOS-011): the
+        // payer's note after the amount is never read as it, and a nonsense number is dropped.
+        const amount = rawContent.match(/^(?:Sent|Received)\s+([0-9][0-9,]{0,15}(?:\.[0-9]{1,8})?)\s+T?KAS/i);
+        const amountSompi = amount ? sompiFromUserText(amount[1].replaceAll(",", "")) : null;
+        if (amountSompi != null) message.paymentAmountKas = kasTextFromSompi(amountSompi);
       }
       conversationEntry.messages.push(message);
       knownIds.add(id);
@@ -21201,7 +21383,7 @@ function updateHandshakeWarningBanner() {
 }
 
 // Approximates the real Kasia COMM payload's byte length for this draft
-// (ciph_msg:1:comm:<alias>: prefix + base64 of nonce+pubkey+ciphertext+tag),
+// (kchat:1:comm:<alias>: prefix + base64 of nonce+pubkey+ciphertext+tag),
 // then asks the engine for the real SDK-calculated fee for a payload that
 // size — an honest estimate built from the actual send path, not a guess.
 function estimateCommPayloadBytes(text) {
@@ -21293,16 +21475,17 @@ feeEstimateBanner?.addEventListener("click", async () => {
     confirmLabel: "Save",
   });
   if (typed == null) return;
-  const normalized = String(typed).trim().replace(",", ".");
-  if (normalized === "" || normalized === "0") {
+  // The one exact parser (iOS IOS-010): comma or dot, at most 8 decimals; the override is kept as
+  // exact KAS text, so "1e-3" or a 9th decimal never reaches the send as something else.
+  const typedSompi = String(typed).trim() === "" ? 0n : sompiFromUserText(String(typed));
+  if (typedSompi === 0n) {
     // Empty or zero reads as "Use Default": back to the live estimate.
     composerFeeOverrideKas = null;
     scheduleFeeEstimate();
     return;
   }
-  const value = Number(normalized);
-  if (!Number.isFinite(value) || value < 0) { showCopyToast(`Enter a fee in ${KAS_UNIT}.`); return; }
-  composerFeeOverrideKas = normalized;
+  if (typedSompi == null) { showCopyToast(`Enter a fee in ${KAS_UNIT}.`); return; }
+  composerFeeOverrideKas = kasTextFromSompi(typedSompi);
   renderFeePill(composerFeeOverrideKas, { estimating: false });
 });
 
@@ -21739,6 +21922,7 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   state = { contacts: [], conversations: [] };
   persistState();
+  resetHandshakeSyncStateFor(wallet.address); // a new wallet starts from scratch on both networks (IOS-004)
   persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, derivationPath: wallet.derivationPath, wordCount });
 
   if (accountShellPrefs.saveAccount !== false) {
@@ -22939,6 +23123,7 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", fa
   if (resetState) {
     state = { contacts: [], conversations: [] };
     persistState();
+    resetHandshakeSyncStateFor(wallet.address); // empty chats: the handshakes are read again (IOS-004)
   }
   persistTestingWallet({
     mnemonic: wallet.mnemonic,
@@ -23126,6 +23311,16 @@ function revealRecoveryPhraseAfterHold() {
     grid.appendChild(cell);
   });
   recoveryPhraseBox.appendChild(grid);
+  // The passphrase (the "25th word") is part of the backup (iOS IOS-017): the words alone restore
+  // a different, empty wallet. Shown under them, hidden again with them.
+  const passphrase = String(account.passphrase || "");
+  if (passphrase) {
+    const box = document.createElement("div");
+    box.className = "recovery-passphrase";
+    box.innerHTML = `<span class="recovery-passphrase-label">Passphrase</span><span class="recovery-passphrase-value"></span>`;
+    box.querySelector(".recovery-passphrase-value").textContent = passphrase;
+    recoveryPhraseBox.appendChild(box);
+  }
   const copyKey = document.querySelector("[data-copy-seed-privatekey]");
   if (copyKey) copyKey.hidden = !engine.privateKeyHex;
   revealedMnemonic = account.mnemonic;
@@ -23193,6 +23388,8 @@ function closeRecoveryModal() {
 function openRecoveryModal() {
   const account = activeSavedAccountRecord();
   if (!account?.mnemonic) { showCopyToast("No recovery phrase stored for this account"); return; }
+  // Says up front that the words alone are not the whole backup (IOS-017).
+  { const note = document.querySelector("[data-recovery-passphrase-note]"); if (note) note.hidden = !account.passphrase; }
   resetRecoveryHold();
   stopRecoveryViewTimer();
   if (recoveryPhraseBox) { recoveryPhraseBox.hidden = true; recoveryPhraseBox.textContent = ""; }
@@ -24635,6 +24832,9 @@ function groupNotificationSenderName(senderAddress) {
 function maybeNotifyGroupIncoming(groupId, senderAddress, text, id, createdAt) {
   const me = engine.address || "";
   if (!me || senderAddress === me) return;
+  // The other network's sender stays silent (iOS IOS-050): one key is one account on both
+  // networks, so a roster entry from the other chain would still decrypt and ping here.
+  if (!isOnActiveNetwork(senderAddress)) return;
   const mode = getGroupNotify(groupId);
   if (mode === "muted") return;
   // Backfill floor, matching iOS: anything mined before this device learned about the group is
@@ -25290,11 +25490,11 @@ document.querySelector("[data-group-fee]")?.addEventListener("click", async () =
     confirmLabel: "Save",
   });
   if (typed == null) return;
-  const normalized = String(typed).trim().replace(",", ".");
-  if (normalized === "" || normalized === "0") { groupFeeOverrideKas = null; scheduleGroupFeeEstimate(); return; }
-  const value = Number(normalized);
-  if (!Number.isFinite(value) || value < 0) { showCopyToast(`Enter a fee in ${KAS_UNIT}.`); return; }
-  groupFeeOverrideKas = normalized;
+  // The one exact parser (iOS IOS-010), kept as exact KAS text.
+  const typedSompi = String(typed).trim() === "" ? 0n : sompiFromUserText(String(typed));
+  if (typedSompi === 0n) { groupFeeOverrideKas = null; scheduleGroupFeeEstimate(); return; }
+  if (typedSompi == null) { showCopyToast(`Enter a fee in ${KAS_UNIT}.`); return; }
+  groupFeeOverrideKas = kasTextFromSompi(typedSompi);
   renderGroupFeePill(groupFeeOverrideKas);
 });
 
@@ -26447,7 +26647,7 @@ function updateGroupAddressState() {
         : '<span class="create-chat-status-good">✓ Valid address</span>');
       if (groupAddressAddButton) groupAddressAddButton.disabled = Boolean(dupe);
     } else {
-      setGroupAddressStatus('<span class="create-chat-status-bad">✕ Invalid address format</span>');
+      setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(otherNetworkReason(raw) || "Invalid address format")}</span>`);
     }
     renderGroupAddressPreview();
     return;

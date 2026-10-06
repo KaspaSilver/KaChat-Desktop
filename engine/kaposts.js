@@ -1,7 +1,7 @@
 // KaPosts — KaChat's on-chain social feed (the K protocol), desktop port of iOS's
 // KaPostsAPIClient. Reads come from the KaChat-owned K indexer fork over REST; writes NEVER
 // touch REST — every action (post, reply, vote, follow, quote) is a Kaspa SELF-SEND
-// transaction whose `k:1:...` payload the indexer ingests from the chain. The transaction id
+// transaction whose `kchat:1:...` payload the indexer ingests from the chain. The transaction id
 // IS the content id.
 //
 // Signing: Kaspa personal-message signing (schnorr over blake2b256 keyed
@@ -9,7 +9,8 @@
 // produces, so signatures verify server-side against the embedded compressed pubkey.
 
 import { getEndpoint } from "./endpoints.js";
-import { enqueueSend, sendPayloadTransaction } from "./transactions.js";
+import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance } from "./transactions.js";
+import { utxoAmountSompi } from "./amounts.js";
 import { NETWORK_ID } from "./utils.js";
 
 // U+2060 WORD JOINER — the KaChat exclusivity marker. Invisible everywhere, survives base64
@@ -52,8 +53,10 @@ export function base64ToUtf8(encoded) {
 // ---------------------------------------------------------------------------
 
 // `kchat:` migration: KaPosts now writes the `kchat:1:<action>:` root (was `k:1:<action>:`).
-// Reads come pre-parsed from the K indexer (which dual-reads server-side), so there is no
-// on-device `k:1:` parse to update — only the write shape changes. The U+2060 marker stays.
+// Reads come pre-parsed from the KaChat indexer, which indexes `kchat:1:` ONLY (kachat-indexer
+// b137238; `k:1:` is the separate K-social network's root): pre-migration posts already in an
+// indexer's database stay, but a reindex does not bring them back (KAPOSTS_INDEXER.md "Root
+// migration"). Only the chain reader below still parses `k:1:`. The U+2060 marker stays.
 export const KAPOSTS_PROTOCOL = Object.freeze({
   prefix: "kchat:1:",
 
@@ -102,7 +105,33 @@ export const KAPOSTS_PROTOCOL = Object.freeze({
 
 export const KAPOSTS_POLL_MIN_OPTIONS = 2;
 export const KAPOSTS_POLL_MAX_OPTIONS = 4;
+// XP-007 (iOS 7842c18): the indexer counts an option in Unicode scalars (`text.chars()`) and drops
+// the WHOLE poll when one is over 40 (KAPOSTS_INDEXER.md §5.9). Options are counted and cut the same
+// way here: code points, not UTF-16 units (`String.length` counts an emoji as 2) and not what the
+// screen shows (a family emoji is one character but seven scalars).
 export const KAPOSTS_POLL_OPTION_MAX_LENGTH = 40;
+/** An option's length the way the indexer counts it: Unicode scalars (code points). */
+export function pollOptionLength(text) {
+  return Array.from(String(text ?? "")).length;
+}
+/** `text` cut to at most `max` Unicode scalars, at a character (grapheme) boundary where the
+ *  browser can find one - never half an emoji or a flag. */
+export function prefixPollOption(text, max = KAPOSTS_POLL_OPTION_MAX_LENGTH) {
+  const value = String(text ?? "");
+  if (pollOptionLength(value) <= max) return value;
+  const pieces = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+    ? Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value), (s) => s.segment)
+    : Array.from(value);
+  let out = "";
+  let used = 0;
+  for (const piece of pieces) {
+    const n = pollOptionLength(piece);
+    if (used + n > max) break;
+    out += piece;
+    used += n;
+  }
+  return out;
+}
 export const KAPOSTS_POLL_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 // XP-008: the indexer drops a poll whose closes_at is past block_time + 7 d, and block time is the
 // chain's clock, not this device's. The longest option therefore closes 5 minutes short of
@@ -441,7 +470,8 @@ function cleanMentions(engine, mentionedPubkeys) {
   return JSON.stringify(clean);
 }
 
-/** A poll: the question is the post text; 2-4 options of up to 40 characters; closes at
+/** A poll: the question is the post text; 2-4 options of up to 40 Unicode scalars each
+ *  (pollOptionLength); closes at
  *  `closesAtMs` (at most seven days out). Returns txid = poll id. */
 export async function submitKaPoll({ engine, question, options, closesAtMs, mentionedPubkeys = [] }) {
   const b64 = utf8ToBase64(KACHAT_MARKER + String(question || ""));
@@ -552,13 +582,14 @@ async function buildScheduledPostNow({ engine, text, mentionedPubkeys = [], rese
   // already reserved its coin.
   const reservedList = typeof reservedOutpoints === "function" ? reservedOutpoints() : reservedOutpoints;
   const reserved = new Set((reservedList || []).map(String));
-  const usable = (entries || [])
+  // Node-supplied amounts are checked before any sort or sum (iOS IOS-020).
+  const usable = sanitizeUtxoEntries(entries)
     .filter((e) => !reserved.has(`${e?.outpoint?.transactionId}:${e?.outpoint?.index}`))
     .filter((e) => Number(e.blockDaaScore ?? 1) > 0 && !e.isCoinbase)
-    .sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? 1 : -1));
+    .sort((a, b) => (utxoAmountSompi(a) > utxoAmountSompi(b) ? 1 : -1));
   if (!usable.length) throw new Error("No spendable coins for a scheduled post.");
   const build = (inputs) => {
-    const total = inputs.reduce((sum, e) => sum + BigInt(e.amount || 0), 0n);
+    const total = totalUtxoSompi(inputs);
     const draft = kaspa.createTransaction(inputs, [{ address: engine.address, amount: total - (total / 20n) }], 0n, payload);
     const fee = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
     const amount = total - fee;
@@ -613,8 +644,16 @@ export async function submitScheduledLocally({ engine, serialized, safeJson = nu
     try { transaction = Tx.deserializeFromObject(serialized); } catch { transaction = null; }
   }
   if (!transaction) throw new Error("This scheduled post cannot be rebuilt on this device. Cancel it and schedule again.");
-  const response = await engine.withRpc((rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }), { retries: 1, label: "Scheduled post submit" });
-  return String(response?.transactionId || serialized?.id || "");
+  // The server may already have sent it: a transaction the network has counts as sent (IOS-014).
+  let localId = null;
+  try { localId = String(transaction.id || serialized?.id || "") || null; } catch { localId = serialized?.id || null; }
+  return submitConfirmingAcceptance({
+    withRpc: engine.withRpc.bind(engine),
+    submit: (rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }),
+    txid: localId,
+    label: "Scheduled post submit",
+    log: typeof engine.log === "function" ? engine.log : () => {},
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +662,8 @@ export async function submitScheduledLocally({ engine, serialized, safeJson = nu
 // from the Kaspa REST API and parses it, so a shared link or a notification opens either way.
 // ---------------------------------------------------------------------------
 
-/** Reads the legacy `k:1:` root as well as today's `kchat:1:`, matching the indexer's dual-read.
+/** Reads the legacy `k:1:` root as well as today's `kchat:1:`, so a pre-migration post opened by
+ *  txId still reads. (The indexer indexes `kchat:1:` only - KAPOSTS_INDEXER.md "Root migration".)
  *  Returns { action, authorPubkey, message, referencedId } or null for a non-post payload. */
 export function parseChainPayload(payload) {
   const text = String(payload || "");

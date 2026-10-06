@@ -10,6 +10,7 @@
 
 import { getEndpoint } from "../engine/endpoints.js";
 import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
+import { sompiFromUserText, kasToSompi } from "../engine/amounts.js";
 import { renderKachatLiveDomainsTab, kachatOwnersOfNames } from "./kachat-names-live.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
@@ -1106,9 +1107,16 @@ function sendAmountKas() {
   return raw;
 }
 
+// KAS through the one exact parser (engine/amounts.js, iOS IOS-010): "1,5" is 1.5, never 1, and
+// nothing past the supply. A currency amount is converted at the live price, to whole sompi.
 function sendAmountSompi() {
+  if (send?.amountUnit !== "fiat") {
+    const sompi = sompiFromUserText(String(send?.amountText || ""));
+    return sompi != null && sompi > 0n ? sompi : null;
+  }
   const kas = sendAmountKas();
-  return kas === null ? null : BigInt(Math.round(kas * 1e8));
+  const sompi = kas === null ? null : kasToSompi(kas);
+  return sompi != null && sompi > 0n ? sompi : null;
 }
 
 /** Live value of whichever unit ISN'T being typed (iOS conversionLabelText):
@@ -1732,8 +1740,10 @@ function renderSendFlow() {
         <div class="cold-send-rows dark">
           <div class="cold-send-row"><span>From</span><code>${deps.escapeHtml(shortFrom)}</code></div>
           <div class="cold-send-row"><span>Available</span><span>${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</span></div>
-          <div class="cold-send-row"><span>Network Fee</span><span>${fmtKasBig(send.unsigned.feeSompi)} ${KAS_UNIT}</span></div>
+          <div class="cold-send-row"><span>Network Fee</span><span>${deps.escapeHtml(fmtKasBig(send.unsigned.feeSompi))} ${KAS_UNIT}</span></div>
         </div>
+        ${send.unsigned.foldedChangeSompi > 0n ? `
+          <p class="cold-send-fee-warning" role="note">This fee includes ${deps.escapeHtml(fmtKasBig(send.unsigned.foldedChangeSompi))} ${KAS_UNIT} of change that is too small for the network to accept as its own output, so it goes to the network instead of back to this address.</p>` : ""}
         <p class="cold-send-qr-hint">Scan this on your KasSigner device</p>
         <div class="cold-qr-frame"><canvas width="480" height="480" data-cold-send-qr-canvas></canvas></div>
         ${send.frames.length > 1 ? `
@@ -1813,9 +1823,9 @@ function renderSendFlow() {
 function commitCustomSendFee(text) {
   if (!send) return;
   send.editingFee = false;
-  const kas = Number.parseFloat(text);
-  if (!Number.isFinite(kas) || kas < 0) { renderSendFlow(); return; }
-  const totalSompi = BigInt(Math.round(kas * 1e8));
+  // The one exact parser (iOS IOS-010): parseFloat read "0,002" as 0.
+  const totalSompi = sompiFromUserText(String(text ?? ""));
+  if (totalSompi == null) { renderSendFlow(); return; }
   const base = sendDefaultFee();
   // Values below the tier-computed baseline clamp to zero extra, matching iOS.
   send.customExtraFeeSompi = totalSompi > base ? totalSompi - base : 0n;

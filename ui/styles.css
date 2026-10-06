@@ -7862,6 +7862,7 @@ body.session-logged-out [data-account-rename-modal] {
 .cold-send-qr-panel .cold-send-rows.dark { width: 100%; border-color: rgba(0,0,0,.12); background: rgba(0,0,0,.03); color: #1c2422; }
 .cold-send-qr-panel .cold-send-rows.dark span:first-child { color: rgba(0,0,0,.55); }
 .cold-send-qr-hint { margin: 0; font-size: 13.5px; color: rgba(0,0,0,.6); }
+.cold-send-fee-warning { margin: 0; width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.4; color: #7a4b00; background: rgba(230,150,0,.12); border: 1px solid rgba(230,150,0,.35); }
 .cold-send-qr-panel .cold-qr-frame canvas { display: block; width: 280px; height: 280px; }
 .cold-send-frame-dots { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; max-width: 300px; }
 .cold-send-frame-dots span { width: 8px; height: 8px; border-radius: 50%; background: #d1d5d3; }
@@ -9765,6 +9766,11 @@ body.session-logged-out [data-account-rename-modal] {
 .import-source-title { text-align: center; margin: 4px 0 6px; }
 .recovery-phrase-grid-box { word-spacing: normal; line-height: 1.3; }
 .recovery-phrase-grid-box .seed-grid { margin-bottom: 8px; }
+/* IOS-017: the BIP39 passphrase is part of the backup - a note up front, the value under the words. */
+.recovery-passphrase-note { margin: 0 0 12px; font-size: 13px; line-height: 1.4; color: var(--ios-orange); }
+.recovery-passphrase { display: grid; gap: 4px; margin: 4px 0 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
+.recovery-passphrase-label { font-family: inherit; font-size: 12px; color: var(--muted); }
+.recovery-passphrase-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; overflow-wrap: anywhere; user-select: text; }
 
 /* Blocking progress cards (iOS IncomingResyncProgressModal / ChatRestoreProgressModal). */
 .progress-blocking { z-index: 2600; }
