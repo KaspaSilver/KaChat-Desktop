@@ -720,3 +720,8 @@ COPYING COMMANDS
 - Do not add Markdown backticks.
 
 </details>
+
+## License
+
+MIT - see [LICENSE](LICENSE). Third-party code bundled here (the Kaspa WASM SDK in `kaspa/`,
+the Kasia cipher in `cipher/` and `vendor/kasia-cipher/`) keeps its own project's terms.
