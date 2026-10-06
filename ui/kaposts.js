@@ -6,6 +6,7 @@
 // behind a 5-second undo countdown — cancel and nothing ever touches the network.
 
 import { fitBackgroundBanner } from "./banner-fit.js";
+import { safeCssUrl } from "./css-url.js";
 import { userFacingError } from "./dialogs.js";
 import {
   KAPOSTS_POST_CHARACTER_LIMIT,
@@ -49,6 +50,7 @@ import {
   KAPOSTS_POLL_OPTION_MAX_LENGTH,
   KAPOSTS_SCHEDULE_MIN_MS,
   KAPOSTS_SCHEDULE_MAX_MS,
+  pollClosesAt,
 } from "../engine/kaposts.js";
 import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
@@ -429,11 +431,6 @@ function retryPager(key) {
 
 /** A banner URL fit for a CSS url(): http(s) only, with every character that could close the
  *  url() or the declaration percent-encoded (escapeHtml's entities are decoded before CSS). */
-function safeCssUrl(raw) {
-  const value = String(raw || "").trim();
-  if (!/^https?:\/\//i.test(value)) return "";
-  return value.replace(/["'()\\\s;<>]/g, (ch) => encodeURIComponent(ch));
-}
 const TX_ID_PATTERN = /^[0-9a-f]{64}$/i;
 const txIdOrNull = (value) => (TX_ID_PATTERN.test(String(value || "")) ? String(value) : null);
 function mapRemotePost(post) {
@@ -1282,6 +1279,7 @@ function postTimestamp(timestampMs) {
 function pollCardHtml(post) {
   const poll = post.poll;
   if (!poll) return "";
+  const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const closed = Boolean(poll.closesAt) && Date.now() >= poll.closesAt;
   const voted = poll.myVote != null;
   const showResults = closed || voted;
@@ -1292,7 +1290,7 @@ function pollCardHtml(post) {
     const count = Number(poll.counts?.[index]) || 0;
     const share = total > 0 ? count / total : 0;
     if (!showResults) {
-      return `<button class="kaposts-poll-option" type="button" data-kaposts-poll-vote="${post.id}" data-index="${index}" ${canVote ? "" : "disabled"}>${deps.escapeHtml(option)}</button>`;
+      return `<button class="kaposts-poll-option" type="button" data-kaposts-poll-vote="${pid}" data-index="${index}" ${canVote ? "" : "disabled"}>${deps.escapeHtml(option)}</button>`;
     }
     return `
       <div class="kaposts-poll-bar${poll.myVote === index ? " mine" : ""}">
@@ -1306,13 +1304,14 @@ function pollCardHtml(post) {
     ? `${Math.max(1, Math.floor(left / 60000))}m left`
     : left < 24 * 60 * 60 * 1000 ? `${Math.floor(left / 3600000)}h left` : `${Math.floor(left / 86400000)}d left`;
   return `
-    <div class="kaposts-poll" data-kaposts-poll="${post.id}">
+    <div class="kaposts-poll" data-kaposts-poll="${pid}">
       ${rows}
-      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"}${timeLeft ? ` · ${deps.escapeHtml(timeLeft)}` : ""}${pending ? ` · <span data-kaposts-countdown="vote:${post.id}"></span>` : ""}</div>
+      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"}${timeLeft ? ` · ${deps.escapeHtml(timeLeft)}` : ""}${pending ? ` · <span data-kaposts-countdown="vote:${pid}"></span>` : ""}</div>
     </div>`;
 }
 
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false } = {}) {
+  const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
   const isMine = post.posterAddress === deps.engine.address;
   const isFollowing = prefs.following.includes(post.posterAddress);
@@ -1341,9 +1340,9 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   const deliveryHtml = post.delivery === "pending"
     ? `<div class="kaposts-delivery pending" title="Posting"><span class="kaposts-spinner" aria-label="Posting"></span></div>`
     : post.delivery === "failed"
-      ? `<div class="kaposts-delivery failed" title="${deps.escapeHtml(post.failureReason || "Could not post")}"><button type="button" data-kaposts-retry="${post.id}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>Retry</button>${post.failureReason ? `<span class="kaposts-failure-reason">${deps.escapeHtml(post.failureReason)}</span>` : ""}</div>`
+      ? `<div class="kaposts-delivery failed" title="${deps.escapeHtml(post.failureReason || "Could not post")}"><button type="button" data-kaposts-retry="${pid}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>Retry</button>${post.failureReason ? `<span class="kaposts-failure-reason">${deps.escapeHtml(post.failureReason)}</span>` : ""}</div>`
       : sentCheck
-        ? `<div class="kaposts-delivery sent" data-kaposts-sent-check="${post.timestamp + 60_000}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>`
+        ? `<div class="kaposts-delivery sent" data-kaposts-sent-check="${(Number(post.timestamp) || 0) + 60_000}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>`
         : "";
 
   const quotedHtml = post.quoted
@@ -1354,41 +1353,41 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
     : "";
 
   return `
-    <article class="kaposts-cell${isRoot ? " root" : ""}${!isRoot ? " openable" : ""}${deleting ? " deleting" : ""}" data-kaposts-post="${post.id}"${post.remoteId ? ` data-kaposts-remote-id="${deps.escapeHtml(post.remoteId)}"` : ""}${!isRoot ? (openByRemote && post.remoteId ? ` data-kaposts-open-remote="${deps.escapeHtml(post.remoteId)}"` : ` data-kaposts-open="${post.id}"`) : ""}>
-      <span data-kaposts-profile="${post.id}" class="kaposts-avatar-tap">${posterAvatarHtml(post.posterAddress)}</span>
+    <article class="kaposts-cell${isRoot ? " root" : ""}${!isRoot ? " openable" : ""}${deleting ? " deleting" : ""}" data-kaposts-post="${pid}"${post.remoteId ? ` data-kaposts-remote-id="${deps.escapeHtml(post.remoteId)}"` : ""}${!isRoot ? (openByRemote && post.remoteId ? ` data-kaposts-open-remote="${deps.escapeHtml(post.remoteId)}"` : ` data-kaposts-open="${pid}"`) : ""}>
+      <span data-kaposts-profile="${pid}" class="kaposts-avatar-tap">${posterAvatarHtml(post.posterAddress)}</span>
       <div class="kaposts-cell-main">
         <div class="kaposts-cell-head">
-          <strong class="kaposts-cell-name" data-kaposts-profile="${post.id}">${deps.escapeHtml(name)}</strong>
-          ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${post.id}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
-          <button class="kaposts-action kaposts-more" type="button" data-kaposts-more="${post.id}" aria-label="More">
+          <strong class="kaposts-cell-name" data-kaposts-profile="${pid}">${deps.escapeHtml(name)}</strong>
+          ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${pid}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
+          <button class="kaposts-action kaposts-more" type="button" data-kaposts-more="${pid}" aria-label="More">
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
           </button>
         </div>
         <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? foldedPrefix(postDisplayText(post)) : postDisplayText(post))}</div>
-        ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${post.id}">${foldText ? "Show more" : "Show less"}</button>` : ""}
+        ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${pid}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
         ${deliveryHtml}
         <div class="kaposts-actions">
-          <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${post.id}"` : `data-kaposts-open="${post.id}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
+          <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${pid}"` : `data-kaposts-open="${pid}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}
           </button>
-          <button class="kaposts-action${post.likedByMe ? " active-like" : ""}" type="button" data-kaposts-like="${post.id}" title="Like">
-            ${countdownOrIconHtml(`like:${post.id}`, ICONS.like)}${post.likes > 0 ? `<span>${post.likes}</span>` : ""}
+          <button class="kaposts-action${post.likedByMe ? " active-like" : ""}" type="button" data-kaposts-like="${pid}" title="Like">
+            ${countdownOrIconHtml(`like:${post.id}`, ICONS.like)}${(Number(post.likes) || 0) > 0 ? `<span>${Number(post.likes) || 0}</span>` : ""}
           </button>
-          <button class="kaposts-action${post.dislikedByMe ? " active-dislike" : ""}" type="button" data-kaposts-dislike="${post.id}" title="Dislike">
-            ${countdownOrIconHtml(`dislike:${post.id}`, ICONS.dislike)}${post.dislikes > 0 ? `<span>${post.dislikes}</span>` : ""}
+          <button class="kaposts-action${post.dislikedByMe ? " active-dislike" : ""}" type="button" data-kaposts-dislike="${pid}" title="Dislike">
+            ${countdownOrIconHtml(`dislike:${post.id}`, ICONS.dislike)}${(Number(post.dislikes) || 0) > 0 ? `<span>${Number(post.dislikes) || 0}</span>` : ""}
           </button>
-          <button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${post.id}" title="Repost">
-            ${countdownOrIconHtml(`repost:${post.id}`, ICONS.repost)}${post.reposts > 0 ? `<span>${post.reposts}</span>` : ""}
+          <button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${pid}" title="Repost">
+            ${countdownOrIconHtml(`repost:${post.id}`, ICONS.repost)}${(Number(post.reposts) || 0) > 0 ? `<span>${Number(post.reposts) || 0}</span>` : ""}
           </button>
-          <button class="kaposts-action${post.bookmarkedByMe ? " active-bookmark" : ""}" type="button" data-kaposts-bookmark="${post.id}" title="${post.bookmarkedByMe ? "Remove Bookmark" : "Bookmark"}">${ICONS.bookmark}</button>
-          ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${post.id}" title="Copy share link">${ICONS.share}</button>` : ""}
-          ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${post.id}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span></button>`}
+          <button class="kaposts-action${post.bookmarkedByMe ? " active-bookmark" : ""}" type="button" data-kaposts-bookmark="${pid}" title="${post.bookmarkedByMe ? "Remove Bookmark" : "Bookmark"}">${ICONS.bookmark}</button>
+          ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${pid}" title="Copy share link">${ICONS.share}</button>` : ""}
+          ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${pid}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span></button>`}
         </div>
         <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span></div>
-        ${!inThread && isThreadRootPost(post) ? `<button class="kaposts-view-thread" type="button" data-kaposts-open="${post.id}">⤷ View thread</button>` : ""}
+        ${!inThread && isThreadRootPost(post) ? `<button class="kaposts-view-thread" type="button" data-kaposts-open="${pid}">⤷ View thread</button>` : ""}
       </div>
     </article>`;
 }
@@ -1536,7 +1535,7 @@ function renderThread() {
     const ancestors = fetchedAncestors.get(post.remoteId) || [];
     const ancestorsHtml = ancestors.length
       ? `<div class="kaposts-ancestors">${ancestors
-          .map((entry) => `<div class="kaposts-ancestor" data-kaposts-ancestor="${entry.id}">${postCellHtml(entry, { inThread: true, replyInline: true, truncates: true })}</div>`)
+          .map((entry) => `<div class="kaposts-ancestor" data-kaposts-ancestor="${deps.escapeHtml(String(entry.id))}">${postCellHtml(entry, { inThread: true, replyInline: true, truncates: true })}</div>`)
           .join("")}</div>`
       : "";
     // "Thread" is what an author calls their OWN continuation; once the chain carries other
@@ -1574,13 +1573,13 @@ function renderThread() {
                 : state === "loading"
                   ? `<p class="kaposts-inline-note">Loading replies…</p>`
                   : state === "failed"
-                    ? `<p class="kaposts-inline-note">Could not load replies. <button type="button" class="kaposts-inline-retry" data-kaposts-retry-replies="${comment.id}">Retry</button></p>`
+                    ? `<p class="kaposts-inline-note">Could not load replies. <button type="button" class="kaposts-inline-retry" data-kaposts-retry-replies="${deps.escapeHtml(String(comment.id))}">Retry</button></p>`
                     : `<p class="kaposts-inline-note">No replies</p>`}
             </div>`;
           return `
           <div class="kaposts-thread-reply">
             ${postCellHtml(comment, { inThread: true, replyInline: true })}
-            ${hasReplies ? `<button class="kaposts-show-more" type="button" data-kaposts-expand-replies="${comment.id}">${expanded ? "Hide replies" : `View ${Math.max(comment.remoteReplyCount || 0, nested.length)} ${Math.max(comment.remoteReplyCount || 0, nested.length) === 1 ? "reply" : "replies"}`}</button>` : ""}
+            ${hasReplies ? `<button class="kaposts-show-more" type="button" data-kaposts-expand-replies="${deps.escapeHtml(String(comment.id))}">${expanded ? "Hide replies" : `View ${Math.max(comment.remoteReplyCount || 0, nested.length)} ${Math.max(comment.remoteReplyCount || 0, nested.length) === 1 ? "reply" : "replies"}`}</button>` : ""}
             ${nestedHtml}
           </div>`;
         }).join("")}
@@ -1746,7 +1745,7 @@ function schedulePost(text) {
 // behind the usual 5 s undo. The card keeps its own numbers until the feed carries the
 // indexer's.
 function schedulePoll(question, options, lengthMs) {
-  const closesAt = Date.now() + lengthMs;
+  const closesAt = pollClosesAt(lengthMs); // XP-008: the 7-day option closes 5 min short
   const poll = { options, counts: options.map(() => 0), total: 0, closesAt, myVote: null };
   const post = makeLocalPost(question, { poll });
   localPosts.unshift(post);
@@ -2026,7 +2025,8 @@ function scheduleRepost(target) {
 }
 
 function playVoteBurst(postId, kind) {
-  const selector = kind === "like" ? `[data-kaposts-like="${postId}"]` : `[data-kaposts-dislike="${postId}"]`;
+  const safeId = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(String(postId)) : String(postId).replace(/["\\]/g, "\\$&");
+  const selector = kind === "like" ? `[data-kaposts-like="${safeId}"]` : `[data-kaposts-dislike="${safeId}"]`;
   document.querySelectorAll(selector).forEach((button) => {
     button.classList.remove("kaposts-burst");
     void button.offsetWidth; // restart the animation
@@ -3646,7 +3646,7 @@ function openPopover(anchor, itemsHtml) {
 
 // A menu row that says what happens, not just the verb (iOS ActionSheetRow).
 function popoverRowHtml({ action, id, title, subtitle, danger = false, extra = "" }) {
-  return `<button type="button" class="kaposts-pop-row${danger ? " danger" : ""}" data-kaposts-pop="${action}" data-kaposts-pop-id="${id}" ${extra}>
+  return `<button type="button" class="kaposts-pop-row${danger ? " danger" : ""}" data-kaposts-pop="${deps.escapeHtml(String(action))}" data-kaposts-pop-id="${deps.escapeHtml(String(id))}" ${extra}>
     <strong>${deps.escapeHtml(title)}</strong>${subtitle ? `<small>${deps.escapeHtml(subtitle)}</small>` : ""}
   </button>`;
 }
@@ -3695,7 +3695,7 @@ function openMorePopover(anchor, post) {
   }
   if (!options.length) return;
   if (typeof deps.chooseDialog !== "function") {
-    openPopover(anchor, options.map((o) => `<button type="button" data-kaposts-pop="${o.id}" data-kaposts-pop-id="${post.id}"${o.destructive ? ' class="danger"' : ""}>${deps.escapeHtml(o.title)}</button>`).join(""));
+    openPopover(anchor, options.map((o) => `<button type="button" data-kaposts-pop="${deps.escapeHtml(String(o.id))}" data-kaposts-pop-id="${deps.escapeHtml(String(post.id))}"${o.destructive ? ' class="danger"' : ""}>${deps.escapeHtml(o.title)}</button>`).join(""));
     return;
   }
   deps.chooseDialog({ title: isMine ? "Your post" : name, options }).then((choice) => {

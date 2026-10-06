@@ -104,6 +104,17 @@ export const KAPOSTS_POLL_MIN_OPTIONS = 2;
 export const KAPOSTS_POLL_MAX_OPTIONS = 4;
 export const KAPOSTS_POLL_OPTION_MAX_LENGTH = 40;
 export const KAPOSTS_POLL_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+// XP-008: the indexer drops a poll whose closes_at is past block_time + 7 d, and block time is the
+// chain's clock, not this device's. The longest option therefore closes 5 minutes short of
+// 7 days, so a device clock running a little fast (or a slow acceptance) can't push it over.
+export const KAPOSTS_POLL_CLOCK_SKEW_MS = 5 * 60 * 1000;
+/** When a poll of `lengthMs` started at `now` closes: lengths at/over the 7-day cap close at
+ *  now + 7 d - 5 min. */
+export function pollClosesAt(lengthMs, now = Date.now()) {
+  const length = Math.max(0, Number(lengthMs) || 0);
+  if (length >= KAPOSTS_POLL_MAX_MS) return now + KAPOSTS_POLL_MAX_MS - KAPOSTS_POLL_CLOCK_SKEW_MS;
+  return now + length;
+}
 export const KAPOSTS_SCHEDULE_MIN_MS = 5 * 60 * 1000;
 export const KAPOSTS_SCHEDULE_MAX_MS = 30 * 24 * 60 * 60 * 1000;
 

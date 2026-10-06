@@ -30,6 +30,13 @@ services:
       # (192.168.x, 10.x ...). The relay then may reach private addresses. Leave it unset on
       # any public deployment - otherwise anyone could use it to reach this host's network.
       KACHAT_RELAY_ALLOW_PRIVATE: ${KACHAT_RELAY_ALLOW_PRIVATE:-}
+      # Optional: the reverse proxy in front of this container (Nginx Proxy Manager, nginx ...).
+      # The relay rate-limits per client on the connection's own address and believes
+      # X-Forwarded-For only from these addresses (IPs or CIDRs, comma separated; default
+      # "loopback"). Behind a proxy in another container every request arrives from that proxy,
+      # so list its address (e.g. 172.18.0.0/16 for its Docker network) or all readers share
+      # one rate-limit bucket. Never list a range untrusted clients can connect from.
+      KACHAT_TRUSTED_PROXIES: ${KACHAT_TRUSTED_PROXIES:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

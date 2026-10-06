@@ -16,9 +16,9 @@
     "@noble/ciphers": "^2.3.0",
     "@noble/curves": "^2.3.0",
     "@noble/hashes": "^2.3.0",
-    "@vitejs/plugin-basic-ssl": "latest",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "jsqr": "^1.4.0",
-    "qrcode": "latest",
-    "vite": "latest"
+    "qrcode": "^1.5.4",
+    "vite": "^8.1.4"
   }
 }

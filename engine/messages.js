@@ -8,7 +8,7 @@
 import { ADDRESS_PREFIX } from "./network.js";
 import { buildCommMessage, buildEncryptedCommMessage, buildEncryptedHandshake, buildSelfStash, parseKasiaPayloadHex, KASIA_INTEGRATION_STATUS } from "./kasia-protocol.js";
 import { encryptKasiaMessage } from "./kasia-cipher.js";
-import { sendPayloadTransaction } from "./transactions.js";
+import { sendPayloadTransaction, sendPayloadToSelf } from "./transactions.js";
 
 function simpleHash(input) {
   let hash = 0;
@@ -251,19 +251,21 @@ export async function createSelfStashEnvelope({
   return buildSelfStash({ ourAlias, theirAlias, partnerAddress, isResponse, contactOnly, createdAt, encryptToSelf });
 }
 
-export async function sendSelfStashOnchain({ engine, envelope, amountKas = "0.0001", feeKas = "0", onStatus = () => {} }) {
+// One self-output of (chosen inputs - fee) carrying the payload, no change (iOS
+// buildSavedHandshakeStashTx; audit DSK-020). The note has no amount of its own (an `amountKas`
+// from an older caller is ignored): a nominal 0.0001 KAS output plus change was a KIP-9
+// storage-mass rejection.
+export async function sendSelfStashOnchain({ engine, envelope, onStatus = () => {} }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load a wallet before saving conversation recovery data.");
+  if (!envelope?.protocolBytes) throw new Error("The recovery note has no payload.");
   onStatus({ status: "pending", note: "Stashing encrypted conversation recovery data on-chain.", messageType: "self_stash", transport: "onchain" });
   await engine.connect();
-  const sendResult = await sendPayloadTransaction({
+  const sendResult = await sendPayloadToSelf({
     kaspa: engine.kaspa,
     rpc: engine.rpc,
     withRpc: engine.withRpc.bind(engine),
     privateKey: engine.privateKey,
     sourceAddress: engine.address,
-    destinationAddress: engine.address,
-    amountKas,
-    feeKas,
     payload: envelope.protocolBytes,
     log: engine.log,
   });

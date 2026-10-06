@@ -78,7 +78,21 @@ without any change.
 **Serving it yourself, without Docker.** `npm run serve` builds and previews in
 one step; `npm run build` alone writes the site to `dist/`. If you serve `dist/`
 with your own web server instead, `/nc-proxy` has to be reimplemented there or
-the Nextcloud features stop working.
+the Nextcloud features stop working. `tools/nc-proxy-server.mjs` is a standalone
+relay for exactly that (Node 20+, no packages): run it next to
+`tools/relay-guard.mjs` (it imports that file, so copy both) and point your web
+server's `/nc-proxy/` at it without rewriting the path.
+
+**Relay rate limit behind a reverse proxy.** The relay rate-limits per client
+on the connection's own address, and believes `X-Forwarded-For` only from the
+addresses in `KACHAT_TRUSTED_PROXIES` (IPs or CIDRs, comma separated). The
+default is `loopback`, which fits a reverse proxy on the same machine talking
+to 127.0.0.1. When the proxy reaches the relay from somewhere else (another
+container, the Docker bridge gateway such as `172.17.0.1`), list that address -
+otherwise every reader shares one rate-limit bucket - and have the proxy send
+`X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
+Setting the variable replaces the default, so include `loopback` if you still
+need it.
 
 
 ## Self-Hosted Cloud (Nextcloud) Setup
@@ -93,11 +107,26 @@ party ever sees your files.
 
 This one-paste installer brings up three things together:
 
-| Service | What it is | Default URL |
+| Service | What it is | Default URL (on the host machine) |
 |---------|-----------|-------------|
-| **Nextcloud** | Your private cloud (files, photos, videos) with photo/video previews enabled | `http://YOUR-IP:8080` |
-| **Portainer** | A web UI to see and manage all your Docker containers | `https://YOUR-IP:9443` |
-| **Nginx Proxy Manager** | A web UI to create reverse-proxy hosts + free Let's Encrypt SSL | `http://YOUR-IP:81` |
+| **Nextcloud** | Your private cloud (files, photos, videos) with photo/video previews enabled | `http://127.0.0.1:8080` |
+| **Portainer** | A web UI to see and manage all your Docker containers | `https://127.0.0.1:9443` |
+| **Nginx Proxy Manager** | A web UI to create reverse-proxy hosts + free Let's Encrypt SSL | `http://127.0.0.1:81` |
+
+The three admin/plain-HTTP pages above listen **on the host machine only** (127.0.0.1): Portainer
+controls Docker (root on the machine) and none of them should ever face the internet. Only Nginx
+Proxy Manager's ports **80/443** are published to the network, and that is how other devices reach
+Nextcloud (Step 3b). To open an admin page from another computer, use an SSH tunnel:
+
+```bash
+ssh -L 8081:127.0.0.1:81 -L 9443:127.0.0.1:9443 -L 8080:127.0.0.1:8080 you@YOUR-IP
+# then browse http://localhost:8081 (NPM), https://localhost:9443 (Portainer), http://localhost:8080 (Nextcloud)
+```
+
+Image versions are pinned (Nginx Proxy Manager 2.16.0, Portainer CE 2.45.1, Nextcloud
+34.0.4-apache, MariaDB 10.11.19, Redis 7.4.11-alpine, aio-imaginary 20260929_105435, DuckDNS
+d860cc34-ls92). To upgrade, change the tag in `kachat-cloud/docker-compose.yml` (Nextcloud one major
+version at a time) and run `docker compose up -d --build`.
 
 Everything runs in Docker, in a folder called `kachat-cloud` in your home directory. Media
 previews are pre-configured: **Imaginary** handles images (including iPhone HEIC), and **ffmpeg**
@@ -235,10 +264,16 @@ DUCKDNS_SUBDOMAIN=changeme
 DUCKDNS_TOKEN=changeme
 EOF
   fi
+  # Nginx Proxy Manager's admin login, pre-seeded so the admin page is never left unclaimed.
+  # Added to an older .env too (NPM only uses it on its very first start).
+  grep -q '^NPM_ADMIN_PASSWORD=' .env || printf 'NPM_ADMIN_EMAIL=admin@example.com\nNPM_ADMIN_PASSWORD=%s\n' "$(gen)" >> .env
+  # Where plain-HTTP Nextcloud (port 8080) listens. 127.0.0.1 = this machine only. Set 0.0.0.0
+  # only for a home-network-only setup behind a router that does NOT forward port 8080.
+  grep -q '^NC_HTTP_BIND=' .env || echo 'NC_HTTP_BIND=127.0.0.1' >> .env
 
   # 4) Custom Nextcloud image with ffmpeg (needed for video thumbnails)
   cat > Dockerfile.nextcloud <<'EOF'
-FROM nextcloud:stable
+FROM nextcloud:34.0.4-apache
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
@@ -249,23 +284,28 @@ EOF
 name: kachat-cloud
 services:
   npm:
-    image: jc21/nginx-proxy-manager:latest
+    image: jc21/nginx-proxy-manager:2.16.0
     restart: unless-stopped
-    ports: ["80:80", "443:443", "81:81"]
+    # 80/443 are the public entrance. The admin page (81) listens on this machine only.
+    ports: ["80:80", "443:443", "127.0.0.1:81:81"]
+    environment:
+      INITIAL_ADMIN_EMAIL: ${NPM_ADMIN_EMAIL}
+      INITIAL_ADMIN_PASSWORD: ${NPM_ADMIN_PASSWORD}
     volumes:
       - npm_data:/data
       - npm_letsencrypt:/etc/letsencrypt
     networks: [cloud]
   portainer:
-    image: portainer/portainer-ce:latest
+    image: portainer/portainer-ce:2.45.1
     restart: unless-stopped
-    ports: ["9443:9443"]
+    # Portainer holds the Docker socket (root on this machine): this machine only.
+    ports: ["127.0.0.1:9443:9443"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
     networks: [cloud]
   nextcloud-db:
-    image: mariadb:10.11
+    image: mariadb:10.11.19
     restart: unless-stopped
     command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW
     environment:
@@ -276,11 +316,11 @@ services:
     volumes: ["nextcloud_db:/var/lib/mysql"]
     networks: [cloud]
   nextcloud-redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     restart: unless-stopped
     networks: [cloud]
   imaginary:
-    image: nextcloud/aio-imaginary:latest
+    image: nextcloud/aio-imaginary:20260929_105435
     restart: unless-stopped
     cap_add: ["SYS_NICE"]
     environment:
@@ -291,7 +331,8 @@ services:
       context: .
       dockerfile: Dockerfile.nextcloud
     restart: unless-stopped
-    ports: ["8080:80"]
+    # Plain HTTP: this machine only (NC_HTTP_BIND in .env). Other devices go through NPM.
+    ports: ["${NC_HTTP_BIND:-127.0.0.1}:8080:80"]
     environment:
       MYSQL_HOST: nextcloud-db
       MYSQL_DATABASE: nextcloud
@@ -306,7 +347,7 @@ services:
     volumes: ["nextcloud_data:/var/www/html"]
     networks: [cloud]
   duckdns:
-    image: linuxserver/duckdns:latest
+    image: linuxserver/duckdns:d860cc34-ls92
     restart: unless-stopped
     profiles: [public]
     environment:
@@ -355,11 +396,19 @@ EOF
 
   echo ""
   echo "================ KaChat cloud is ready ================"
-  echo "Nextcloud            ->  http://${LAN_IP}:8080"
-  echo "Nginx Proxy Manager  ->  http://${LAN_IP}:81   (first login: admin@example.com / changeme)"
-  echo "Portainer            ->  https://${LAN_IP}:9443 (create your admin user within 5 min)"
+  NPM_EMAIL=$(grep '^NPM_ADMIN_EMAIL=' .env | cut -d= -f2)
+  echo "On THIS machine:"
+  echo "  Nextcloud            ->  http://127.0.0.1:8080"
+  echo "  Nginx Proxy Manager  ->  http://127.0.0.1:81   (login: ${NPM_EMAIL} + NPM_ADMIN_PASSWORD from .env)"
+  echo "  Portainer            ->  https://127.0.0.1:9443 (create your admin user within 5 min)"
   echo ""
-  echo "Your Nextcloud admin username/password is saved in:  ${KC_DIR}/.env"
+  echo "The admin pages only listen on this machine. From another computer, use an SSH tunnel:"
+  echo "  ssh -L 8081:127.0.0.1:81 -L 9443:127.0.0.1:9443 -L 8080:127.0.0.1:8080 ${USER}@${LAN_IP}"
+  echo "  then open http://localhost:8081 (NPM), https://localhost:9443 (Portainer), http://localhost:8080 (Nextcloud)"
+  echo "Other devices reach Nextcloud through Nginx Proxy Manager on 80/443 (README: Step 3b)."
+  echo ""
+  echo "Your Nextcloud and Nginx Proxy Manager logins are saved in:  ${KC_DIR}/.env"
+  echo "(If Nginx Proxy Manager was already set up before, its existing login still applies.)"
   echo "======================================================"
 }
 kachat_install
@@ -381,7 +430,8 @@ Write-Host "Waiting for the Docker engine to be ready..."
 while (-not (docker info 2>$null)) { Start-Sleep 3 }
 
 # 2) Secrets + LAN IP
-function Gen { -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) }
+# Secrets come from the OS crypto RNG (Get-Random is not meant for passwords).
+function Gen { $b = New-Object byte[] 16; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { '{0:x2}' -f $_ }) }
 $LAN = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*' } | Select-Object -First 1).IPAddress
 if (-not $LAN) { $LAN = "127.0.0.1" }
 if (-not (Test-Path .env)) {
@@ -396,10 +446,21 @@ DUCKDNS_SUBDOMAIN=changeme
 DUCKDNS_TOKEN=changeme
 "@ | Set-Content -Encoding ASCII .env
 }
+# Nginx Proxy Manager's admin login, pre-seeded so the admin page is never left unclaimed.
+# Added to an older .env too (NPM only uses it on its very first start).
+if (-not (Select-String -Path .env -Pattern '^NPM_ADMIN_PASSWORD=' -Quiet)) {
+  Add-Content -Encoding ASCII .env "NPM_ADMIN_EMAIL=admin@example.com"
+  Add-Content -Encoding ASCII .env "NPM_ADMIN_PASSWORD=$(Gen)"
+}
+# Where plain-HTTP Nextcloud (port 8080) listens. 127.0.0.1 = this machine only. Set 0.0.0.0
+# only for a home-network-only setup behind a router that does NOT forward port 8080.
+if (-not (Select-String -Path .env -Pattern '^NC_HTTP_BIND=' -Quiet)) {
+  Add-Content -Encoding ASCII .env "NC_HTTP_BIND=127.0.0.1"
+}
 
 # 3) Custom Nextcloud image with ffmpeg (needed for video thumbnails)
 @'
-FROM nextcloud:stable
+FROM nextcloud:34.0.4-apache
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
@@ -410,23 +471,28 @@ RUN apt-get update \
 name: kachat-cloud
 services:
   npm:
-    image: jc21/nginx-proxy-manager:latest
+    image: jc21/nginx-proxy-manager:2.16.0
     restart: unless-stopped
-    ports: ["80:80", "443:443", "81:81"]
+    # 80/443 are the public entrance. The admin page (81) listens on this machine only.
+    ports: ["80:80", "443:443", "127.0.0.1:81:81"]
+    environment:
+      INITIAL_ADMIN_EMAIL: ${NPM_ADMIN_EMAIL}
+      INITIAL_ADMIN_PASSWORD: ${NPM_ADMIN_PASSWORD}
     volumes:
       - npm_data:/data
       - npm_letsencrypt:/etc/letsencrypt
     networks: [cloud]
   portainer:
-    image: portainer/portainer-ce:latest
+    image: portainer/portainer-ce:2.45.1
     restart: unless-stopped
-    ports: ["9443:9443"]
+    # Portainer holds the Docker socket (root on this machine): this machine only.
+    ports: ["127.0.0.1:9443:9443"]
     volumes:
       - //var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
     networks: [cloud]
   nextcloud-db:
-    image: mariadb:10.11
+    image: mariadb:10.11.19
     restart: unless-stopped
     command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW
     environment:
@@ -437,11 +503,11 @@ services:
     volumes: ["nextcloud_db:/var/lib/mysql"]
     networks: [cloud]
   nextcloud-redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     restart: unless-stopped
     networks: [cloud]
   imaginary:
-    image: nextcloud/aio-imaginary:latest
+    image: nextcloud/aio-imaginary:20260929_105435
     restart: unless-stopped
     cap_add: ["SYS_NICE"]
     environment:
@@ -452,7 +518,8 @@ services:
       context: .
       dockerfile: Dockerfile.nextcloud
     restart: unless-stopped
-    ports: ["8080:80"]
+    # Plain HTTP: this machine only (NC_HTTP_BIND in .env). Other devices go through NPM.
+    ports: ["${NC_HTTP_BIND:-127.0.0.1}:8080:80"]
     environment:
       MYSQL_HOST: nextcloud-db
       MYSQL_DATABASE: nextcloud
@@ -467,7 +534,7 @@ services:
     volumes: ["nextcloud_data:/var/www/html"]
     networks: [cloud]
   duckdns:
-    image: linuxserver/duckdns:latest
+    image: linuxserver/duckdns:d860cc34-ls92
     restart: unless-stopped
     profiles: [public]
     environment:
@@ -512,11 +579,19 @@ occ app:install previewgenerator 2>$null
 
 Write-Host ""
 Write-Host "================ KaChat cloud is ready ================"
-Write-Host "Nextcloud            ->  http://$LAN:8080"
-Write-Host "Nginx Proxy Manager  ->  http://$LAN:81   (first login: admin@example.com / changeme)"
-Write-Host "Portainer            ->  https://$LAN:9443 (create your admin user within 5 min)"
+$NPM_EMAIL = (Select-String -Path .env -Pattern '^NPM_ADMIN_EMAIL=(.*)').Matches.Groups[1].Value
+Write-Host "On THIS machine:"
+Write-Host "  Nextcloud            ->  http://127.0.0.1:8080"
+Write-Host "  Nginx Proxy Manager  ->  http://127.0.0.1:81   (login: $NPM_EMAIL + NPM_ADMIN_PASSWORD from .env)"
+Write-Host "  Portainer            ->  https://127.0.0.1:9443 (create your admin user within 5 min)"
 Write-Host ""
-Write-Host "Your Nextcloud admin username/password is saved in:  $KC\.env"
+Write-Host "The admin pages only listen on this machine. From another computer, use an SSH tunnel"
+Write-Host "(needs the Windows OpenSSH server), or open them on this PC:"
+Write-Host "  ssh -L 8081:127.0.0.1:81 -L 9443:127.0.0.1:9443 -L 8080:127.0.0.1:8080 $env:USERNAME@$LAN"
+Write-Host "Other devices reach Nextcloud through Nginx Proxy Manager on 80/443 (README: Step 3b)."
+Write-Host ""
+Write-Host "Your Nextcloud and Nginx Proxy Manager logins are saved in:  $KC\.env"
+Write-Host "(If Nginx Proxy Manager was already set up before, its existing login still applies.)"
 Write-Host "======================================================"
 }
 ```
@@ -529,17 +604,25 @@ Write-Host "======================================================"
 
 ### Step 2 — Log in and grab your passwords
 
-Your generated admin password lives in `kachat-cloud/.env` (the `NC_ADMIN_PASSWORD` line). Open
-`http://YOUR-IP:8080`, sign in as `admin` with that password, and you're in.
+Your generated passwords live in `kachat-cloud/.env`. On the host machine (or through the SSH
+tunnel above), open `http://127.0.0.1:8080`, sign in as `admin` with the `NC_ADMIN_PASSWORD` value,
+and you're in.
 
-- **Portainer** (`https://YOUR-IP:9443`) — set an admin user on first visit to manage/monitor all containers.
-- **Nginx Proxy Manager** (`http://YOUR-IP:81`) — first login is `admin@example.com` / `changeme`; it forces you to set a real email and password immediately.
+- **Portainer** (`https://127.0.0.1:9443`) — set an admin user on first visit (within 5 minutes of
+  start) to manage/monitor all containers.
+- **Nginx Proxy Manager** (`http://127.0.0.1:81`) — log in with `NPM_ADMIN_EMAIL` /
+  `NPM_ADMIN_PASSWORD` from `.env` (generated by the installer; change them in NPM afterwards if you
+  like). An NPM set up by an older version of this installer keeps the login you gave it.
 
 ### Step 3a — Run it locally (on your own network)
 
-If you only want to use it inside your home, you're already done. From any device on the same
-Wi-Fi/router, open `http://YOUR-IP:8080`. Nothing needs to be exposed to the internet, and no
-router changes are required.
+If you only want to use it on the host machine itself, you're already done:
+`http://127.0.0.1:8080`. Nothing is exposed to the internet, and no router changes are required.
+
+To reach plain-HTTP Nextcloud from other devices on the same Wi-Fi/router **only**, set
+`NC_HTTP_BIND=0.0.0.0` in `kachat-cloud/.env` and run `docker compose up -d` from the
+`kachat-cloud` folder; then open `http://YOUR-IP:8080`. Do this only on a machine whose port 8080 is
+**not** reachable from the internet (no router port-forward, not a VPS) — otherwise use Step 3b.
 
 > To reach it from other devices by the IP shown above, give the host machine a **static/reserved
 > IP** in your router's DHCP settings so the address doesn't change.
@@ -567,7 +650,8 @@ anywhere, with an automatic Let's Encrypt certificate managed by Nginx Proxy Man
    **443** (TCP) to the **internal IP of the host machine**. These go to Nginx Proxy Manager,
    which handles SSL and routing — you do **not** forward Nextcloud's 8080 directly.
 
-4. **Create the proxy host in Nginx Proxy Manager** (`http://YOUR-IP:81`):
+4. **Create the proxy host in Nginx Proxy Manager** (`http://127.0.0.1:81` on the host, or through
+   the SSH tunnel above; log in with `NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` from `.env`):
    - **Hosts → Proxy Hosts → Add Proxy Host**
    - **Domain Names:** `yourname.duckdns.org`
    - **Scheme:** `http` · **Forward Hostname:** `nextcloud` · **Forward Port:** `80`

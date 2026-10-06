@@ -5,7 +5,7 @@ import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importM
 import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail } from "./transactions.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
-import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexer, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
+import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
 import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
@@ -41,6 +41,10 @@ import {
   uploadKnsProfileImage as knsUploadProfileImage, setKnsPrimaryDomain as knsSetPrimaryDomain,
   peekPendingKnsCommit,
   clearPendingKnsCommit,
+  resumeKnsTransfer as knsResumeTransfer,
+  listPendingKnsTransfers as knsListPendingTransfers,
+  getPendingKnsTransfer as knsGetPendingTransfer,
+  clearPendingKnsTransfer as knsClearPendingTransfer,
   KNS_ECONOMICS,
 } from "./kns-write.js";
 
@@ -1416,8 +1420,12 @@ export class KaspaEngine {
     if (!this.isKasiaCipherLoaded()) throw new Error("Load Kasia Cipher WASM before real sync.");
     const peerAddress = details?.contact?.address;
     const aliases = await this.deriveConversationAliases(peerAddress);
-    return syncConversationFromIndexer({
+    // XP-003 (iOS hybrid mode): the deterministic myAlias always, plus any legacy/random alias
+    // the peer announced in a handshake (contact.legacyIncomingAliases) - deduped by txid.
+    const legacyAliases = Array.isArray(details?.legacyAliases) ? details.legacyAliases : (details?.contact?.legacyIncomingAliases || []);
+    return syncConversationFromIndexerWithLegacyAliases({
       ...details,
+      legacyAliases,
       alias: aliases.myAlias,
       deterministicAliases: aliases,
       walletAddress: this.address,
@@ -1669,7 +1677,39 @@ export class KaspaEngine {
       const spending = this.deriveSpendingWallet(mnemonic, spendingIndex, passphrase);
       signer = { privateKey: spending.privateKey, address: spending.address };
     }
-    return knsTransferDomain({ engine: this, domain, assetId, toAddress, signer, changeAddress, onStatus, log: this.log });
+    // `source` goes into the pending-transfer record so Finish transfer can derive the same key.
+    const source = spendingIndex != null ? { kind: "spending", index: Number(spendingIndex) } : { kind: "identity" };
+    return knsTransferDomain({ engine: this, domain, assetId, toAddress, signer, source, changeAddress, onStatus, log: this.log });
+  }
+
+  // Unfinished .kas transfers (commit sent, reveal not accepted yet) on this network; with
+  // `sourceAddress`, only those that address started (audit EXT-005).
+  async listPendingKnsTransfers({ sourceAddress = null } = {}) {
+    return knsListPendingTransfers({ sourceAddress });
+  }
+
+  async getPendingKnsTransfer(assetId) {
+    return knsGetPendingTransfer(assetId);
+  }
+
+  async clearPendingKnsTransfer(assetId) {
+    return knsClearPendingTransfer(assetId);
+  }
+
+  // Finish transfer / Retry reveal: re-derives the key the transfer was started with (the
+  // record's `source`) and reveals the commit. A spending-address transfer needs the mnemonic.
+  async resumeKnsTransfer({ assetId, mnemonic = null, passphrase = "", onStatus = () => {} }) {
+    this.requireWallet();
+    await this.connect();
+    const record = await knsGetPendingTransfer(assetId);
+    if (!record) throw new Error("There is no unfinished transfer for this domain.");
+    let signer = null;
+    if (record.source?.kind === "spending" && record.source.index != null) {
+      if (!mnemonic) throw new Error("The account mnemonic is required to sign from a spending address.");
+      const spending = this.deriveSpendingWallet(mnemonic, Number(record.source.index), passphrase);
+      signer = { privateKey: spending.privateKey, address: spending.address };
+    }
+    return knsResumeTransfer({ engine: this, assetId, signer, onStatus, log: this.log });
   }
 
   async submitKnsProfileField(assetId, key, value, { onStatus = () => {} } = {}) {

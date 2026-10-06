@@ -215,20 +215,76 @@ function isTransientUtxoError(error) {
 }
 
 async function sendKaspaWithUtxoRetry(params) {
+  return retryOnTransientUtxo(() => sendKaspaNow(params), params.log);
+}
+
+async function retryOnTransientUtxo(run, log) {
   const maxAttempts = 5;
   const retryDelayMs = 1200;
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await sendKaspaNow(params);
+      return await run();
     } catch (error) {
       lastError = error;
       if (attempt >= maxAttempts || !isTransientUtxoError(error)) throw error;
-      params.log?.(`Send attempt ${attempt} hit a transient UTXO state (${error.message}); retrying in ${retryDelayMs}ms.`);
+      log?.(`Send attempt ${attempt} hit a transient UTXO state (${error.message}); retrying in ${retryDelayMs}ms.`);
       await sleep(retryDelayMs);
     }
   }
   throw lastError;
+}
+
+// A payload-carrying transaction back to the source address with exactly ONE output of
+// (chosen inputs - fee) and no change: iOS KaChatTransactionBuilder.buildSavedHandshakeStashTx.
+// Used for the self-stash recovery notes, which carry no amount of their own. Built by hand like
+// sweepAllToSelf / sendMaxKaspa: the generator path (a 0.0001 KAS output plus change) leaves a
+// tiny output whose KIP-9 storage mass is far over the limit (audit DSK-020). With a single output
+// the storage mass is C/out - sum(C/in), which is nil when out is the inputs less a fee.
+// Coins are taken largest first (iOS), one at a time until the fee is covered and the mass fits.
+export async function sendPayloadToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, payload, log = () => {} }) {
+  if (!payload) throw new Error("Payload is required for a self-stash transaction.");
+  return enqueueSend(sourceAddress, () => retryOnTransientUtxo(
+    () => sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, payload, log }),
+    log,
+  ));
+}
+async function sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, payload, log }) {
+  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
+  let { entries } = withRpc
+    ? await withRpc(fetchUtxos, { retries: 1, label: "Self-stash UTXO refresh" })
+    : await fetchUtxos(rpc);
+  if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
+  entries = excludeReservedUtxos(entries);
+  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
+  const sorted = [...entries].sort((a, b) => (BigInt(a.amount) > BigInt(b.amount) ? -1 : 1));
+
+  const chosen = [];
+  let total = 0n;
+  for (const entry of sorted) {
+    if (chosen.length >= MAX_INPUTS_PER_SWEEP) break;
+    chosen.push(entry);
+    total += BigInt(entry.amount || 0);
+    // Fee for this exact shape (these inputs, one output, the payload). Undefined means the mass
+    // is over the standard limit: take another coin.
+    const draft = kaspa.createTransaction(chosen, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n, payload);
+    const draftFee = kaspa.calculateTransactionFee(NETWORK_ID, draft, 1);
+    if (draftFee == null) continue;
+    const amount = total - BigInt(draftFee);
+    if (amount <= 0n) continue;
+    const tx = kaspa.createTransaction(chosen, [{ address: sourceAddress, amount }], 0n, payload);
+    const finalFee = kaspa.calculateTransactionFee(NETWORK_ID, tx, 1);
+    if (finalFee == null || BigInt(finalFee) > BigInt(draftFee)) continue;
+    const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+    const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+    const response = withRpc
+      ? await withRpc(submit, { retries: 1, label: "Self-stash broadcast" })
+      : await submit(rpc);
+    const txid = response?.transactionId || signed.id;
+    log("Self-stash txid:", txid, `(${chosen.length} input${chosen.length === 1 ? "" : "s"}, one output, fee ${draftFee} sompi)`);
+    return { txids: [txid], amountSompi: amount, feeSompi: BigInt(draftFee) };
+  }
+  throw new Error("Balance too low to pay the self-stash network fee.");
 }
 
 // The SDK takes a private key as "a string or an instance of PrivateKey". The string form can

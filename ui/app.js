@@ -1,8 +1,10 @@
 import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
+import { safeCssUrl } from "./css-url.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { isScriptAddress, isKachatContractTransaction } from "../engine/sync.js";
+import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
+import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
@@ -64,6 +66,8 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
+import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH } from "./key-vault.js";
+import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
 // Step 25 shell:
@@ -382,6 +386,8 @@ let contactStashState = null;        // { wallet, known: Set, complete, pending:
 let contactStashFlushing = false;
 let contactNotesReadBackFor = null;  // the wallet this session already read back for
 let contactNotesRetryAt = 0;         // after a failed read-back, not before this time
+let contactStashRetryAt = 0;         // after a failed note send, the queue waits until then
+let contactStashFailures = 0;        // consecutive failed note sends (backoff exponent)
 // Everything with a block time before this instant is history, whatever sweep happens to
 // deliver it: no banner, no unread. The catch-up flag above only covers the FIRST sweep, and a
 // freshly imported account's history spans many - one page per conversation per sweep, and
@@ -415,33 +421,17 @@ function persistAccountShellPreferences() {
   localStorage.setItem(ACCOUNT_SHELL_PREFS_KEY, JSON.stringify(accountShellPrefs));
 }
 
-// --- App password (replaces the mockup "biometrics" toggles). A single password
-// is stored as a salted SHA-256 hash, never in plaintext. It gates revealing the
-// seed phrase / private key and signing in, when the matching toggle is on. ---
-const APP_PASSWORD_KEY = "kachat-app-password-v1";
-function loadStoredPassword() {
-  try { return JSON.parse(localStorage.getItem(APP_PASSWORD_KEY) || "null"); } catch { return null; }
-}
-function hasAppPassword() {
-  const stored = loadStoredPassword();
-  return !!(stored && stored.hash && stored.salt);
-}
-async function hashPassword(password, saltHex) {
-  const data = new TextEncoder().encode(`${saltHex}:${password}`);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-async function setAppPassword(password) {
-  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-  const salt = [...saltBytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-  const hash = await hashPassword(password, salt);
-  localStorage.setItem(APP_PASSWORD_KEY, JSON.stringify({ salt, hash }));
-}
-async function verifyAppPassword(password) {
-  const stored = loadStoredPassword();
-  if (!stored) return false;
-  return (await hashPassword(password, stored.salt)) === stored.hash;
-}
+// --- App password (replaces the mockup "biometrics" toggles). With a password set, every saved
+// account's private key, recovery phrase and passphrase is encrypted at rest (ui/key-vault.js:
+// PBKDF2-SHA256 600k wraps a random AES-256-GCM data key) and KaChat opens locked in each new
+// tab until the password is entered (DSK-006/007). Without one, keys stay unencrypted in this
+// browser, and Settings says so. The password also gates revealing the seed phrase / private key
+// and signing in, when the matching toggle is on. Wrong answers back off like Simple Mode's. ---
+configureKeyVault({ canonicalize: canonicalAccountAddress });
+unlockKeyVaultFromSession(); // a reload in a tab that already unlocked: no second prompt
+function hasAppPassword() { return vaultHasAppPassword(); }
+async function setAppPassword(password) { await vaultSetAppPassword(password); }
+async function verifyAppPassword(password) { return unlockKeyVault(password); }
 
 // Promise-based password prompt. mode "verify" asks for the password; mode "set"
 // asks for a new password + confirmation. Resolves true on success, false if
@@ -468,11 +458,14 @@ function closePasswordModal(result) {
   passwordResolver = null;
   if (resolve) resolve(result);
 }
-function requestPassword({ mode = "verify", title, message } = {}) {
+function requestPassword({ mode = "verify", title, message, allowForgot = false } = {}) {
   return new Promise((resolve) => {
     if (passwordResolver) { const prev = passwordResolver; passwordResolver = null; prev(false); }
     passwordMode = mode;
     passwordResolver = resolve;
+    // "Forgot password?" only on the lock (signed out, vault locked): offered inside an unlocked
+    // session it would be a way around the seed-reveal password.
+    { const forgot = document.querySelector("[data-password-forgot]"); if (forgot) forgot.hidden = !(allowForgot && mode === "verify" && isAppLocked()); }
     if (passwordTitleEl) passwordTitleEl.textContent = title || (mode === "set" ? "Set Password" : "Enter Password");
     if (passwordMessageEl) { passwordMessageEl.textContent = message || ""; passwordMessageEl.hidden = !message; }
     if (passwordConfirmLabel) passwordConfirmLabel.hidden = mode !== "set";
@@ -487,15 +480,49 @@ passwordForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const pw = String(passwordInput?.value || "");
   if (passwordErrorEl) passwordErrorEl.hidden = true;
+  const submitButton = passwordForm.querySelector("[data-password-submit]");
+  if (submitButton?.disabled) return; // a 600k-round key derivation is already running
   if (passwordMode === "set") {
-    if (pw.length < 4) { showPasswordError("Use at least 4 characters."); return; }
+    if (pw.length < MIN_APP_PASSWORD_LENGTH) { showPasswordError(`Use at least ${MIN_APP_PASSWORD_LENGTH} characters.`); return; }
     if (pw !== String(passwordConfirmInput?.value || "")) { showPasswordError("Passwords do not match."); return; }
-    await setAppPassword(pw);
+    if (submitButton) submitButton.disabled = true;
+    try {
+      // Encrypts every saved account's keys with the new password (re-encrypts on a change).
+      await setAppPassword(pw);
+    } catch (error) {
+      showPasswordError(userFacingError(error));
+      return;
+    } finally {
+      if (submitButton) submitButton.disabled = false;
+    }
     closePasswordModal(true);
   } else {
-    if (!(await verifyAppPassword(pw))) { showPasswordError("Incorrect password."); return; }
+    const lockout = appPasswordLockoutMessage();
+    if (lockout) { showPasswordError(lockout); return; }
+    if (submitButton) submitButton.disabled = true;
+    let ok = false;
+    try { ok = await verifyAppPassword(pw); } finally { if (submitButton) submitButton.disabled = false; }
+    if (!ok) { showPasswordError(appPasswordLockoutMessage() || "Incorrect password."); return; }
     closePasswordModal(true);
   }
+});
+// Forgotten password: the encrypted keys cannot be opened, so the way back is the recovery phrase.
+document.querySelector("[data-password-forgot]")?.addEventListener("click", async () => {
+  if (!isAppLocked() || engine.privateKeyHex) return;
+  closePasswordModal(false);
+  const confirmed = await confirmDialog({
+    title: "Forgot your password?",
+    message: "Your saved accounts' keys on this device are encrypted with your password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys of every saved account from this browser. Your chats and settings stay. Afterwards, import each account again with its recovery phrase. Without the recovery phrase, an account cannot be restored.",
+    confirmLabel: "Reset Password",
+    destructive: true,
+  });
+  if (!confirmed) return;
+  const removed = resetForgottenAppPassword();
+  for (const key of ["passwordForSeed", "passwordForLogin", "passwordForSpendingKey"]) accountShellPrefs[key] = false;
+  persistAccountShellPreferences();
+  refreshPasswordStatus();
+  renderSavedAccountsScreen();
+  showCopyToast(removed ? "Password reset. Import your account with its recovery phrase." : "Password reset.");
 });
 document.querySelectorAll("[data-password-cancel]").forEach((b) => b.addEventListener("click", () => closePasswordModal(false)));
 passwordModal?.addEventListener("click", (event) => { if (event.target === passwordModal) closePasswordModal(false); });
@@ -509,7 +536,25 @@ async function ensureAppPassword(message) {
 
 const passwordStatusEl = document.querySelector("[data-password-status]");
 function refreshPasswordStatus() {
-  if (passwordStatusEl) passwordStatusEl.textContent = hasAppPassword() ? "Password set" : "No password set";
+  const hasPassword = hasAppPassword();
+  if (passwordStatusEl) passwordStatusEl.textContent = hasPassword ? "Password set. Keys on this device are encrypted." : "No password set. Keys on this device are not encrypted.";
+  // Honest about what is at rest (DSK-006): no password = plaintext in this browser.
+  const saveNote = document.querySelector("[data-save-account-note]");
+  if (saveNote) {
+    saveNote.textContent = hasPassword
+      ? "Keys are encrypted with your password. If you forget it, you'll need your recovery phrase."
+      : "Without a password, keys are stored unencrypted in this browser. Set a password to encrypt them.";
+  }
+  const keepNote = document.querySelector("[data-keep-signed-in-note]");
+  if (keepNote) {
+    keepNote.textContent = hasPassword
+      ? "Restore the active account when KaChat opens, after you enter your password."
+      : "Restore the active account when KaChat opens.";
+  }
+  for (const [selector, key] of [["[data-pref-password-seed]", "passwordForSeed"], ["[data-pref-password-login]", "passwordForLogin"], ["[data-pref-password-spending-key]", "passwordForSpendingKey"]]) {
+    const toggle = document.querySelector(selector);
+    if (toggle) toggle.checked = !!accountShellPrefs[key] && hasPassword;
+  }
 }
 function initSecurityToggle(toggle, key) {
   if (!toggle) return;
@@ -535,10 +580,45 @@ initSecurityToggle(document.querySelector("[data-pref-password-login]"), "passwo
 initSecurityToggle(document.querySelector("[data-pref-password-spending-key]"), "passwordForSpendingKey");
 refreshPasswordStatus();
 document.querySelector("[data-change-password]")?.addEventListener("click", async () => {
-  if (hasAppPassword() && !(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
-  if (await requestPassword({ mode: "set", title: "New Password", message: "Create a new password." })) {
-    showCopyToast("Password updated");
-    refreshPasswordStatus();
+  if (!hasAppPassword()) {
+    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Your saved accounts' keys will be encrypted with it. If you forget it, you'll need your recovery phrase.` })) {
+      showCopyToast("Password set. Your keys are now encrypted.");
+      refreshPasswordStatus();
+    }
+    return;
+  }
+  const choice = await chooseDialog({
+    title: "App Password",
+    options: [
+      { id: "change", title: "Change Password", subtitle: "Re-encrypts your saved accounts' keys with the new password." },
+      { id: "remove", title: "Remove Password", subtitle: "Stores your keys unencrypted in this browser.", destructive: true },
+      { id: "cancel", title: "Cancel" },
+    ],
+  });
+  if (choice === "change") {
+    if (!(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
+    if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. If you forget it, you'll need your recovery phrase.` })) {
+      showCopyToast("Password updated");
+      refreshPasswordStatus();
+    }
+  } else if (choice === "remove") {
+    if (!(await requestPassword({ mode: "verify", title: "Remove Password", message: "Enter your current password." }))) return;
+    const confirmed = await confirmDialog({
+      title: "Remove password?",
+      message: "Your recovery phrases, passphrases and private keys will be stored UNENCRYPTED in this browser. Anyone who can read this browser's data, or a malicious script or extension, could take them and your funds. KaChat will no longer ask for a password.",
+      confirmLabel: "Remove Password",
+      destructive: true,
+    });
+    if (!confirmed) return;
+    try {
+      vaultRemoveAppPassword(); // decrypts back to plaintext and checks it before deleting the record
+      for (const key of ["passwordForSeed", "passwordForLogin", "passwordForSpendingKey"]) accountShellPrefs[key] = false;
+      persistAccountShellPreferences();
+      refreshPasswordStatus();
+      showCopyToast("Password removed. Keys on this device are no longer encrypted.");
+    } catch (error) {
+      showCopyToast(userFacingError(error));
+    }
   }
 });
 
@@ -574,18 +654,21 @@ function activeAccountMetadata() {
 function loadSavedAccounts() {
   let accounts = [];
   try {
-    const parsed = JSON.parse(localStorage.getItem(SAVED_ACCOUNTS_KEY) || "[]");
+    // Through the key vault: with a password set the secrets are sealed at rest and come back
+    // here only while unlocked (entries are public-only and `locked` otherwise).
+    const parsed = readAccountRecords();
     // Stored under the mainnet encoding; in memory every address is the running network's.
     if (Array.isArray(parsed)) accounts = parsed.map((entry) => (entry?.address ? { ...entry, address: toActiveNetworkAddress(entry.address) } : entry));
   } catch {}
 
-  // Migrate the pre-Step-70 single saved wallet into the account registry.
+  // Migrate the pre-Step-70 single saved wallet into the account registry. Compared as one key on
+  // either network (DSK-009): a record written on the other network is not a new account.
   try {
     const raw = localStorage.getItem(PERSISTED_WALLET_KEY);
     const wallet = raw ? JSON.parse(raw) : null;
-    const address = String(wallet?.address || "").trim();
+    const address = wallet?.address ? toActiveNetworkAddress(String(wallet.address).trim()) : "";
     const privateKeyHex = String(wallet?.privateKeyHex || "").trim();
-    if (address && privateKeyHex && !accounts.some((entry) => entry.address === address)) {
+    if (address && privateKeyHex && !accounts.some((entry) => sameStoredAccountAddress(entry?.address, address))) {
       let metadata = {};
       try { metadata = loadAccountMetaMap(); } catch {}
       const meta = metadata[address] || {};
@@ -601,7 +684,8 @@ function loadSavedAccounts() {
         createdAt: meta.createdAt || wallet.savedAt || new Date().toISOString(),
         savedAt: wallet.savedAt || new Date().toISOString(),
       });
-      localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(accounts));
+      // Canonical encoding and, with a password, sealed (throws while locked: retried on unlock).
+      persistSavedAccounts(accounts);
       if (!readActiveAccountAddress()) writeActiveAccountAddress(address);
     }
   } catch (error) {
@@ -621,7 +705,9 @@ function persistSavedAccounts(accounts) {
     if (address) seen.add(address);
     stored.push(address ? { ...entry, address } : entry);
   }
-  localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(stored));
+  // Seals privateKeyHex / mnemonic / passphrase when a password is set (fresh IV per write);
+  // plaintext otherwise. Refuses to write a secret in plaintext while the vault is locked.
+  writeAccountRecords(stored);
 }
 /** Account names and dates, keyed by the running network's address in memory and by the mainnet
  *  encoding in storage - so an account keeps its name on testnet. */
@@ -692,8 +778,11 @@ function savedAccountSummaries() {
 function activateSavedAccount(address) {
   const account = loadSavedAccounts().find((entry) => entry.address === address);
   if (!account) throw new Error("Saved account was not found.");
+  if (!account.privateKeyHex) throw new Error("Enter your password to unlock this account.");
   writeActiveAccountAddress(account.address);
-  localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify({
+  // Secrets only without a password (the sealed registry holds them otherwise); the address in the
+  // mainnet encoding like the registry, so removal on either network matches it (DSK-009).
+  localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify(persistedWalletRecordForStorage({
     version: 2,
     privateKeyHex: account.privateKeyHex,
     mnemonic: String(account.mnemonic || ""),
@@ -702,11 +791,41 @@ function activateSavedAccount(address) {
     wordCount: Number(account.wordCount || 0),
     sourceFamily: String(account.sourceFamily || "kaspaStandard"),
     chattingIndex: Number(account.chattingIndex || 0),
-    address: account.address,
+    address: canonicalAccountAddress(account.address),
     savedAt: account.savedAt || new Date().toISOString(),
-  }));
+  })));
   localStorage.removeItem(SESSION_LOGGED_OUT_KEY);
   markSessionActive(); // survives the sign-in reload even if "Keep me signed in" is off
+}
+
+/** The lock: asks for the app password and opens the key vault. True once unlocked. */
+async function unlockAppWithPassword(message) {
+  if (!isAppLocked()) return true;
+  const ok = await requestPassword({
+    mode: "verify",
+    title: "Unlock KaChat",
+    message: message || "Your saved accounts are encrypted on this device. Enter your password to unlock them.",
+    allowForgot: true,
+  });
+  if (ok) refreshPasswordStatus();
+  return ok && !isAppLocked();
+}
+
+/** A new tab with a password set opens on the sign-in screen, locked. With "Keep me signed in" on
+ *  it asks for the password straight away and then opens the active account (iOS: the app
+ *  password gates the login screen). Nothing is imported before the vault is open. */
+async function promptUnlockAtLaunch() {
+  if ((accountShellPrefs.keepSignedIn ?? true) === false) return;
+  const active = readActiveAccountAddress();
+  const account = active ? loadSavedAccounts().find((entry) => sameStoredAccountAddress(entry?.address, active)) : null;
+  if (!account) return;
+  if (!(await unlockAppWithPassword())) return;
+  try {
+    activateSavedAccount(account.address);
+    location.reload();
+  } catch (error) {
+    showCopyToast(userFacingError(error));
+  }
 }
 
 let pendingSavedAccountRemoval = null;
@@ -736,7 +855,10 @@ function renderSavedAccountsScreen() {
     signInButton.querySelector("small").textContent = shortAddress(account.address);
     signInButton.addEventListener("click", async () => {
       try {
-        if (accountShellPrefs.passwordForLogin && hasAppPassword()) {
+        if (isAppLocked()) {
+          // The keys are encrypted: nothing signs in until the password opens them (DSK-007).
+          if (!(await unlockAppWithPassword())) return;
+        } else if (accountShellPrefs.passwordForLogin && hasAppPassword()) {
           const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to sign in." });
           if (!ok) return;
         }
@@ -853,6 +975,8 @@ function removeAccountScopedLocalData(address) {
   if (!cleanAddress) return;
   // Removing an account clears its data on BOTH networks (iOS 741c005): one key, two addresses.
   for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")])) {
+    // The pre-DSK-011 faucet lock lived outside the account prefix under a global key.
+    try { localStorage.removeItem(`kachat_tn10_faucet_claimed_${String(encoded || "").toLowerCase()}`); } catch { /* not stored */ }
     const prefix = `${ACCOUNT_DATA_PREFIX}:${encoded}:`;
     for (let index = localStorage.length - 1; index >= 0; index -= 1) {
       const key = localStorage.key(index);
@@ -872,13 +996,15 @@ function removeAccountScopedLocalData(address) {
   else localStorage.removeItem(ACCOUNT_SHELL_META_KEY);
 
   try {
+    // Same key on either network (DSK-009): a record written on the other network must go too,
+    // or loadSavedAccounts' migration would bring the account (and its seed) straight back.
     const persisted = JSON.parse(localStorage.getItem(PERSISTED_WALLET_KEY) || "null");
-    if (persisted?.address === cleanAddress) localStorage.removeItem(PERSISTED_WALLET_KEY);
+    if (sameStoredAccountAddress(persisted?.address, cleanAddress)) localStorage.removeItem(PERSISTED_WALLET_KEY);
   } catch {}
 
   try {
     const handshakeState = JSON.parse(localStorage.getItem(HANDSHAKE_SYNC_KEY) || "null");
-    if (handshakeState?.walletAddress === cleanAddress) localStorage.removeItem(HANDSHAKE_SYNC_KEY);
+    if (sameStoredAccountAddress(handshakeState?.walletAddress, cleanAddress)) localStorage.removeItem(HANDSHAKE_SYNC_KEY);
   } catch {}
 
   if (readActiveAccountAddress() === cleanAddress) {
@@ -2682,7 +2808,8 @@ function getStoredTestingWalletHex() {
       const parsed = JSON.parse(raw);
       if (parsed?.privateKeyHex) return String(parsed.privateKeyHex).trim();
     }
-    const legacy = localStorage.getItem(LEGACY_PERSISTED_WALLET_KEY);
+    // The pre-v2 bare key: plaintext without a password, sealed in the vault with one.
+    const legacy = readLegacyWalletKey();
     if (legacy) return String(legacy).trim();
   } catch (error) {
     appendEngineLog(`Wallet storage read failed: ${error.message}`);
@@ -2717,8 +2844,11 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", derivationPath =
     address,
     savedAt: new Date().toISOString(),
   };
-  localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify(payload));
-  localStorage.removeItem(LEGACY_PERSISTED_WALLET_KEY);
+  // With a password the registry entry below is sealed and this record keeps public fields only;
+  // stored in the mainnet encoding like the registry (DSK-009).
+  if (isAppLocked()) throw new Error("KaChat is locked. Enter your password before saving an account on this device.");
+  localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify(persistedWalletRecordForStorage({ ...payload, address: canonicalAccountAddress(address) })));
+  clearLegacyWalletKey();
   upsertSavedAccount({
     address,
     privateKeyHex,
@@ -2740,7 +2870,7 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", derivationPath =
 
 function clearPersistedTestingWallet() {
   localStorage.removeItem(PERSISTED_WALLET_KEY);
-  localStorage.removeItem(LEGACY_PERSISTED_WALLET_KEY);
+  clearLegacyWalletKey(); // plaintext and sealed copies
 }
 
 // The address of the account a reload will restore, known from local storage alone - so the
@@ -2751,11 +2881,13 @@ let preScopedAddress = "";
 function earlyRestoreAddress() {
   try {
     if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") return "";
+    // Password set and not entered in this tab: the account's chats stay closed (DSK-007).
+    if (isAppLocked()) return "";
     if ((accountShellPrefs.keepSignedIn ?? true) === false && !isSessionActive()) return "";
     const active = String(readActiveAccountAddress() || "").trim();
     if (active && loadSavedAccounts().some((entry) => entry.address === active && entry.privateKeyHex)) return active;
     const parsed = JSON.parse(localStorage.getItem(PERSISTED_WALLET_KEY) || "null");
-    if (parsed?.address && parsed?.privateKeyHex) return String(parsed.address).trim();
+    if (parsed?.address && parsed?.privateKeyHex) return toActiveNetworkAddress(String(parsed.address).trim());
   } catch { /* nothing to pre-scope */ }
   return "";
 }
@@ -2773,6 +2905,12 @@ function restorePersistedTestingWallet() {
   if (!engine.kaspa) return false;
   if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") {
     appendEngineLog("Stored account remains on device, but the session is logged out.");
+    return false;
+  }
+  // A password is set and has not been entered in this tab: the keys are encrypted and nothing
+  // signs in until the lock screen opens them (DSK-007). "Keep me signed in" cannot bypass it.
+  if (isAppLocked()) {
+    appendEngineLog("KaChat is locked: the password opens the saved accounts.");
     return false;
   }
   // "Keep me signed in" off → don't auto-enter on a fresh launch; the saved
@@ -2824,6 +2962,9 @@ function normalizeContact(contact) {
     handshakeTxid: String(contact?.handshakeTxid || ""),
     incomingHandshakeTxid: String(contact?.incomingHandshakeTxid || ""),
     peerConversationId: String(contact?.peerConversationId || ""),
+    // XP-003: legacy/random aliases the peer announced in a handshake; fetched alongside the
+    // deterministic alias. Absent = not scanned yet (backfilled from the stored handshake).
+    ...(Array.isArray(contact?.legacyIncomingAliases) ? { legacyIncomingAliases: legacyWireAliases(contact.legacyIncomingAliases) } : {}),
   };
 }
 
@@ -3842,7 +3983,7 @@ function protocolSummary(message) {
     ["Status", statusLabel(message.status)],
     ["Direction", message.direction || "outgoing"],
     ["Protocol", `${message.protocol || "kasia"} v${message.protocolVersion || 1}`],
-    ["Network", message.network || "mainnet"],
+    ["Network", message.network || NETWORK],
     ["Type", message.messageType || "not created yet"],
     ["Transport", message.transport || "preview"],
     ["Payload bytes", message.payloadBytes ?? "--"],
@@ -3893,7 +4034,7 @@ function rawMessageRecord(message) {
     direction: message.direction,
     protocol: message.protocol,
     protocolVersion: message.protocolVersion,
-    network: message.network,
+    network: message.network || NETWORK,
     messageType: message.messageType,
     transport: message.transport,
     payloadBytes: message.payloadBytes,
@@ -4454,6 +4595,8 @@ async function connectAndRefresh({ quiet = false } = {}) {
     updateServiceSummary();
     if (!quiet) setStatus("Ready");
     appendEngineLog(`Balance: ${currentBalanceKas} KAS / UTXOs: ${balance.entries.length}`);
+    // Wallet open: offer to finish a .kas transfer interrupted between commit and reveal (EXT-005).
+    offerPendingKnsTransferResume().catch(() => {});
   } catch (error) {
     setService(networkIndicator, networkStatus, "error", "Connection needs attention");
     if (!quiet) setStatus("Network unavailable");
@@ -4554,6 +4697,8 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     const createdAt = Number(incoming?.createdAt || 0);
     return Number.isFinite(createdAt) && createdAt > 0 && createdAt < retentionFloor;
   };
+  // XP-003: learn a legacy/random handshake alias for contacts stored before it was remembered.
+  if (indexerUrl) { try { await backfillLegacyIncomingAliases(contact, conversationEntry); } catch {} }
   // No KaChat indexer (testnet, until one exists): nothing to read messages from, but payments
   // still come from the Kaspa REST API below.
   const result = indexerUrl
@@ -4659,6 +4804,38 @@ function scheduleReplyGapRefetch(conversationEntry, { force = false, onlyTxid = 
   return true;
 }
 
+// XP-003 (iOS hybrid mode, DETERMINISTIC_ALIASES.md §3.2): the alias a peer announces in its
+// handshake is the alias its messages to us carry. For deterministic peers that is our own
+// deterministic myAlias (filtered out at fetch time); for a legacy/random-alias peer (old Kasia,
+// Android's random handshake alias) it is the only alias their messages can be found under.
+function rememberLegacyIncomingAlias(contact, alias) {
+  // Not scanned yet: leave it to backfillLegacyIncomingAliases, which reads this handshake too
+  // (it is stored in the conversation with its encrypted body) along with any older ones.
+  if (!contact || !Array.isArray(contact.legacyIncomingAliases)) return false;
+  const current = contact.legacyIncomingAliases;
+  const next = legacyWireAliases([String(alias || "").trim(), ...current]);
+  const changed = next.length !== current.length || next.some((value, i) => value !== current[i]);
+  if (changed) contact.legacyIncomingAliases = next;
+  return changed;
+}
+
+// Contacts stored before aliases were remembered: read the alias back out of the handshake the
+// conversation already holds (encrypted to us), once. Afterwards the field exists, even if empty.
+async function backfillLegacyIncomingAliases(contact, conversationEntry) {
+  if (!contact || Array.isArray(contact.legacyIncomingAliases)) return false;
+  if (typeof engine.decryptKasiaMessage !== "function") return false;
+  const found = [];
+  for (const message of conversationEntry?.messages || []) {
+    if (message?.messageType !== "handshake" || message?.direction !== "incoming" || !message?.encryptedHex) continue;
+    try {
+      const parsed = JSON.parse(String(await engine.decryptKasiaMessage(message.encryptedHex) || ""));
+      if (parsed && typeof parsed === "object" && parsed.alias) found.push(String(parsed.alias));
+    } catch {}
+  }
+  contact.legacyIncomingAliases = legacyWireAliases(found);
+  return true;
+}
+
 async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
   if (!engine.address || !engine.isKasiaCipherLoaded?.() || typeof engine.syncIncomingHandshakesFromIndexer !== "function") return 0;
   // Handshake cursors and processed IDs must be scoped to the active wallet.
@@ -4730,6 +4907,7 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
         state.conversations.push(conversationEntry);
       }
     }
+    rememberLegacyIncomingAlias(contact, request.wireAlias);
     const exists = (conversationEntry.messages || []).some((message) => message.txid === request.txid);
     if (!exists) {
       const message = createMessage({
@@ -4830,7 +5008,16 @@ async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
 // flood in; internal moves from the own spending chain surface nowhere.
 // ---------------------------------------------------------------------------
 const STRANGER_PAYMENT_STATE_KEY = "kachat-stranger-payment-state-v1"; // account-scoped: { baselineMs, processedTxids }
-const KACHAT_PAYLOAD_HEX_PREFIX = "636970685f6d7367"; // "ciph_msg" — handled by the normal message sync
+// DSK-012: both wire roots are protocol - "kchat:" (6b636861743a, what every client writes now)
+// and the legacy "ciph_msg:" (636970685f6d73673a). Those txs are handled by the normal message sync.
+const KACHAT_PAYLOAD_HEX_PREFIXES = Object.freeze([
+  String(KASIA_PROTOCOL?.prefix?.hex || "6b636861743a").toLowerCase(),
+  String(KASIA_PROTOCOL?.legacyPrefix?.hex || "636970685f6d73673a").toLowerCase(),
+]);
+function isKachatProtocolPayloadHex(payloadHex) {
+  const payload = String(payloadHex || "").toLowerCase();
+  return KACHAT_PAYLOAD_HEX_PREFIXES.some((prefix) => prefix && payload.startsWith(prefix));
+}
 
 function loadStrangerPaymentState() {
   try {
@@ -5047,8 +5234,7 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     if (!blockTime || blockTime < store.baselineMs) { processed.add(txid); continue; }
     // KaChat protocol txs (messages/handshakes/payments-with-envelopes) are owned by
     // the normal per-contact sync — only PLAIN payments belong here.
-    const payload = String(tx?.payload || "").toLowerCase();
-    if (payload.startsWith(KACHAT_PAYLOAD_HEX_PREFIX)) { processed.add(txid); continue; }
+    if (isKachatProtocolPayloadHex(tx?.payload)) { processed.add(txid); continue; }
     const receivedSompi = (Array.isArray(tx?.outputs) ? tx.outputs : [])
       .filter((output) => (output?.script_public_key_address || output?.scriptPublicKeyAddress) === myAddress)
       .reduce((sum, output) => sum + Number(output?.amount || 0), 0);
@@ -5567,6 +5753,11 @@ let otherServiceNamesAt = 0;
 let kachatOwnedCount = 0;
 let kachatOwnedCountFor = "";
 let kachatOwnedCountUnsubscribe = null;
+// Unfinished .kas transfers (commit sent, reveal not accepted; audit EXT-005) this account
+// started, for Your Domains' Finish transfer, and the wallet the open-time offer was made for.
+let pendingKnsTransfers = [];
+let pendingKnsTransfersFor = "";
+let knsTransferResumeOfferedFor = "";
 function knsEditAssetId() { return knsEditorTarget?.assetId || ownKnsAssetId; }
 function knsEditFields() { return knsEditorTarget ? knsEditorTarget.fields : ownKnsProfileFields; }
 
@@ -5623,9 +5814,11 @@ function applyKachatHeroProfile(hero) {
   const bannerEl = document.querySelector("[data-profile-hero-banner]");
   const avatarEl = document.querySelector("[data-profile-hero-avatar]");
   const bioEl = document.querySelector("[data-profile-hero-bio]");
-  if (bannerEl && current.bannerUrl) {
-    bannerEl.style.backgroundImage = `url(${JSON.stringify(String(current.bannerUrl))})`;
-    fitBackgroundBanner(bannerEl, current.bannerUrl);
+  // DSK-016: .kachat banners may be relayed blob: URLs, so local schemes are allowed here.
+  const heroBannerSafe = safeCssUrl(current.bannerUrl, { allowLocal: true });
+  if (bannerEl && heroBannerSafe) {
+    bannerEl.style.backgroundImage = `url("${heroBannerSafe}")`;
+    fitBackgroundBanner(bannerEl, heroBannerSafe);
   }
   if (avatarEl && current.avatarUrl && avatarEl.dataset.avatarUrl !== current.avatarUrl) {
     avatarEl.dataset.avatarUrl = current.avatarUrl;
@@ -5744,7 +5937,7 @@ function updateProfileHero(info, profileInfo) {
   }
   const bio = profileInfo?.profile?.bio || "";
   if (bioEl) { bioEl.hidden = !bio; bioEl.textContent = bio; }
-  const bannerUrl = profileInfo?.profile?.bannerUrl || "";
+  const bannerUrl = safeCssUrl(profileInfo?.profile?.bannerUrl); // DSK-016: remote KNS URL, http(s) only
   if (bannerEl) { bannerEl.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : ""; fitBackgroundBanner(bannerEl, bannerUrl); }
   const avatarUrl = profileInfo?.profile?.avatarUrl || "";
   // Same image as last paint: leave the element alone rather than reloading it (a cache-first
@@ -8055,16 +8248,86 @@ const knsTransferSendBtn = document.querySelector("[data-kns-transfer-send]");
 let knsTransferContext = null;
 let knsTransferInFlight = false;
 
-function openKnsTransferModal({ domain, assetId, spendingIndex = null }) {
+// Opens Send Domain. A domain with an unfinished transfer (EXT-005) opens in resume mode instead:
+// the recipient is fixed to the recorded one and the button finishes that transfer (no new
+// commit). `pending` passes the record when the caller already has it.
+function openKnsTransferModal({ domain, assetId, spendingIndex = null, pending = null }) {
   if (!knsTransferModal) return;
-  knsTransferContext = { domain, assetId, spendingIndex };
+  knsTransferContext = { domain, assetId, spendingIndex, resume: null };
   if (knsTransferDomainEl) knsTransferDomainEl.textContent = domain;
-  if (knsTransferRecipientInput) knsTransferRecipientInput.value = "";
+  if (knsTransferRecipientInput) { knsTransferRecipientInput.value = ""; knsTransferRecipientInput.readOnly = false; }
   if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
   if (knsTransferStatusEl) knsTransferStatusEl.hidden = true;
-  if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
+  if (knsTransferSendBtn) { knsTransferSendBtn.disabled = false; knsTransferSendBtn.textContent = "Send Domain"; }
+  const known = pending || pendingKnsTransferFor(assetId);
+  if (known) setKnsTransferResumeMode(known);
   knsTransferModal.hidden = false;
   knsTransferRecipientInput?.focus();
+  // The cached list can lag (another window, a fresh load): ask storage directly too.
+  if (!known && assetId) {
+    const context = knsTransferContext;
+    engine.getPendingKnsTransfer(assetId).then((record) => {
+      if (record && knsTransferContext === context && !knsTransferInFlight && knsTransferBelongsToAccount(record, engine.address)) setKnsTransferResumeMode(record);
+    }).catch(() => {});
+  }
+}
+
+function setKnsTransferResumeMode(record) {
+  if (!knsTransferContext || !record) return;
+  knsTransferContext.resume = record;
+  if (knsTransferRecipientInput) { knsTransferRecipientInput.value = record.recipient || ""; knsTransferRecipientInput.readOnly = true; }
+  if (knsTransferSendBtn) knsTransferSendBtn.textContent = record.status === "reveal-failed" ? "Retry reveal" : "Finish transfer";
+  if (knsTransferStatusEl) {
+    knsTransferStatusEl.textContent = `A transfer of ${record.domain || "this domain"} to ${shortAddress(record.recipient || "")} was started but not finished. Finishing it reveals the commit already sent; no new 2 KAS commit is made.`;
+    knsTransferStatusEl.hidden = false;
+  }
+}
+
+function pendingKnsTransferFor(assetId) {
+  if (!assetId || pendingKnsTransfersFor !== engine.address) return null;
+  return pendingKnsTransfers.find((record) => record.assetId === assetId) || null;
+}
+
+/** A pending transfer belongs to this account when it was started from the chatting address or
+ *  from one of this account's spending addresses. */
+function knsTransferBelongsToAccount(record, address) {
+  const from = record?.source?.address;
+  if (!from || !address) return false;
+  if (from === address) return true;
+  if (record.source?.kind === "spending" && record.source.index != null) {
+    try { return deriveSpendingAddressAt(Number(record.source.index)) === from; } catch { return false; }
+  }
+  return false;
+}
+
+async function refreshPendingKnsTransfers() {
+  const address = engine.address;
+  if (!address) return [];
+  let list = [];
+  try { list = await engine.listPendingKnsTransfers(); } catch { list = []; }
+  if (engine.address !== address) return [];
+  pendingKnsTransfers = list.filter((record) => knsTransferBelongsToAccount(record, address));
+  pendingKnsTransfersFor = address;
+  renderProfileDomains();
+  return pendingKnsTransfers;
+}
+
+/** Once per wallet per session (on wallet open): offer to finish an interrupted transfer. */
+async function offerPendingKnsTransferResume() {
+  const address = engine.address;
+  if (!address || knsTransferResumeOfferedFor === address) return;
+  knsTransferResumeOfferedFor = address;
+  const mine = await refreshPendingKnsTransfers();
+  if (!mine.length || engine.address !== address || knsTransferInFlight) return;
+  const first = mine[0];
+  const more = mine.length - 1;
+  const ok = await confirmDialog({
+    title: "Finish domain transfer?",
+    message: `Sending ${first.domain} to ${shortAddress(first.recipient || "")} was interrupted after its commit was sent.${more ? `\n${more} more domain transfer${more === 1 ? " is" : "s are"} unfinished too.` : ""}\nFinish it now? You can also do it later from Your Domains.`,
+    confirmLabel: "Finish transfer",
+  });
+  if (!ok || engine.address !== address) return;
+  openKnsTransferModal({ domain: first.domain, assetId: first.assetId, pending: first });
 }
 
 function closeKnsTransferModal() {
@@ -8081,10 +8344,67 @@ const KNS_TRANSFER_STATUS_LABELS = {
   "revealing": "Broadcasting reveal inscription…",
   "revealed": "Reveal accepted…",
   "verifying": "Waiting for the KNS indexer…",
+  "locating-commit": "Looking for the commit on chain…",
 };
+
+function showKnsTransferStatus(patch) {
+  const label = KNS_TRANSFER_STATUS_LABELS[patch?.status];
+  if (label && knsTransferStatusEl) { knsTransferStatusEl.textContent = label; knsTransferStatusEl.hidden = false; }
+}
+
+// Finish transfer / Retry reveal: reveals the commit an earlier attempt already sent.
+async function finishKnsTransfer() {
+  const context = knsTransferContext;
+  const record = context?.resume;
+  if (!record || knsTransferInFlight) return;
+  knsTransferInFlight = true;
+  if (knsTransferSendBtn) knsTransferSendBtn.disabled = true;
+  if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
+  const fromSpending = record.source?.kind === "spending";
+  try {
+    const result = await engine.resumeKnsTransfer({
+      assetId: record.assetId,
+      mnemonic: fromSpending ? activeAccountMnemonic() : null,
+      passphrase: fromSpending ? activeAccountPassphrase() : "",
+      onStatus: showKnsTransferStatus,
+    });
+    knsTransferInFlight = false;
+    if (result.status === "no-commit") {
+      // No commit on chain and none recorded: it never went out, or it is too fresh to show.
+      if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
+      if (Date.now() - Number(record.createdAt || 0) < 10 * 60_000) {
+        if (knsTransferErrorEl) { knsTransferErrorEl.textContent = "The commit has not shown up on chain yet. Try again in a minute."; knsTransferErrorEl.hidden = false; }
+        return;
+      }
+      const discard = await confirmDialog({
+        title: "Discard unfinished transfer?",
+        message: `No commit for ${record.domain} was found on chain, so it was never sent and no KAS were spent on it.\nDiscard it so the domain can be sent again?`,
+        confirmLabel: "Discard",
+      });
+      if (!discard) return;
+      await engine.clearPendingKnsTransfer(record.assetId);
+      await refreshPendingKnsTransfers();
+      closeKnsTransferModal();
+      showCopyToast(`Unfinished transfer of ${record.domain} discarded.`);
+      return;
+    }
+    await refreshPendingKnsTransfers();
+    closeKnsTransferModal();
+    showCopyToast(result.verified
+      ? `${record.domain} sent to ${shortAddress(result.recipientAddress)}.`
+      : `${record.domain} transfer finished — the indexer may take a moment to reflect it.`);
+  } catch (error) {
+    knsTransferInFlight = false;
+    if (error?.pendingTransfer && knsTransferContext === context) setKnsTransferResumeMode(error.pendingTransfer);
+    if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
+    if (knsTransferErrorEl) { knsTransferErrorEl.textContent = error.message; knsTransferErrorEl.hidden = false; }
+    refreshPendingKnsTransfers();
+  }
+}
 
 async function submitKnsTransfer() {
   if (!knsTransferContext || knsTransferInFlight) return;
+  if (knsTransferContext.resume) { finishKnsTransfer(); return; }
   const recipient = String(knsTransferRecipientInput?.value || "").trim();
   if (!recipient) {
     if (knsTransferErrorEl) { knsTransferErrorEl.textContent = "Enter a recipient address or .kas domain."; knsTransferErrorEl.hidden = false; }
@@ -8093,7 +8413,9 @@ async function submitKnsTransfer() {
   knsTransferInFlight = true;
   if (knsTransferSendBtn) knsTransferSendBtn.disabled = true;
   if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
-  const { domain, assetId, spendingIndex } = knsTransferContext;
+  const context = knsTransferContext;
+  const { domain, assetId, spendingIndex } = context;
+  let committed = false;
   try {
     const fresh = spendingIndex != null ? freshChangeForSpendingIndex(spendingIndex) : null;
     const result = await engine.transferKnsDomain({
@@ -8105,21 +8427,37 @@ async function submitKnsTransfer() {
       passphrase: spendingIndex != null ? activeAccountPassphrase() : "",
       changeAddress: fresh?.address || null,
       onStatus: (patch) => {
-        const label = KNS_TRANSFER_STATUS_LABELS[patch?.status];
-        if (label && knsTransferStatusEl) { knsTransferStatusEl.textContent = label; knsTransferStatusEl.hidden = false; }
+        showKnsTransferStatus(patch);
         // The primary moves once the node has accepted the commit (the reveal's change follows it).
-        if (patch?.status === "committed" && fresh) rotatePrimarySpendingTo(fresh);
+        if (patch?.status === "committed") {
+          committed = true;
+          if (fresh) rotatePrimarySpendingTo(fresh);
+        }
       },
     });
     knsTransferInFlight = false;
+    refreshPendingKnsTransfers();
     closeKnsTransferModal();
     showCopyToast(result.verified
       ? `${domain} sent to ${shortAddress(result.recipientAddress)}.`
       : `${domain} transfer broadcast — the indexer may take a moment to reflect it.`);
   } catch (error) {
     knsTransferInFlight = false;
-    if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
-    if (knsTransferStatusEl) knsTransferStatusEl.hidden = true;
+    // Once a commit is out (or one from an earlier attempt is unfinished), Send must not come
+    // back: pressing it would commit another 2 KAS. The button becomes Retry reveal (EXT-005).
+    // A commit whose broadcast ended unclear (a timeout) also left a record: Finish transfer
+    // then looks it up on chain.
+    const record = error?.pendingTransfer || await engine.getPendingKnsTransfer(assetId).catch(() => null);
+    if (committed || record) {
+      if (record && knsTransferContext === context) {
+        setKnsTransferResumeMode(record);
+        if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
+      }
+      refreshPendingKnsTransfers();
+    } else {
+      if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
+      if (knsTransferStatusEl) knsTransferStatusEl.hidden = true;
+    }
     if (knsTransferErrorEl) { knsTransferErrorEl.textContent = error.message; knsTransferErrorEl.hidden = false; }
   }
 }
@@ -8183,20 +8521,18 @@ async function consolidateSpendingDetailUtxos() {
   try { balance = await engine.balanceForAddress(address); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
   if (entries.length < 2) { showCopyToast("Nothing to consolidate — this address has a single UTXO."); return; }
-  const maxKas = Number(balance.totalKas) - 0.001; // headroom for the network fee (many inputs)
-  if (!(maxKas > 0)) { showCopyToast("Balance too low to consolidate."); return; }
+  if (!(BigInt(balance.totalSompi ?? 0) > 0n)) { showCopyToast("Balance too low to consolidate."); return; }
   if (!await confirmText(`Combine ${entries.length} UTXOs at this address into one? This sends the balance back to this same address and pays a small network fee.`)) return;
   spendingConsolidateInFlight = true;
   showCopyToast("Consolidating UTXOs…");
   try {
-    await engine.sendFromSpending({
+    // Exact single-output sweep (total - fee, no change), audit DSK-019: a self-send of
+    // "balance minus a fixed headroom" left the unspent headroom as a tiny change output that
+    // KIP-9 storage mass rejects.
+    await engine.compoundSpending({
       mnemonic: activeAccountMnemonic(),
       index,
       passphrase: activeAccountPassphrase(),
-      destinationAddress: address, // self-send merges the inputs into one output
-      amountKas: trimKas8(maxKas),
-      feeKas: "0",
-      selectedOutpoints: null,
     });
     showCopyToast("UTXOs consolidated.");
     if (spendingDetailAddress === address) loadSpendingDetailUtxos(address);
@@ -8398,34 +8734,30 @@ spendingConsolidateBtn?.addEventListener("click", async () => {
       if (!addr) continue;
       try {
         const bal = await engine.balanceForAddress(addr);
-        const kas = Number(bal?.totalKas) || 0;
-        if (kas > 0) sources.push({ index: i, kas });
+        const sompi = BigInt(bal?.totalSompi ?? 0);
+        if (sompi > 0n) sources.push({ index: i, sompi });
       } catch { /* skip on lookup failure */ }
     }
     if (!sources.length) { showCopyToast("No non-primary spending addresses hold a balance."); return; }
 
-    const total = sources.reduce((sum, s) => sum + s.kas, 0);
+    // BigInt sompi throughout (audit DSK-019): float KAS sums could carry more than 8 decimals.
+    const total = sources.reduce((sum, s) => sum + s.sompi, 0n);
     const ok = await confirmText(
-      `Send all Kaspa from ${sources.length} spending address${sources.length > 1 ? "es" : ""} (~${total} ${KAS_UNIT}) to your primary spending address #${primaryIndex}?\n\nThis broadcasts ${sources.length} transaction${sources.length > 1 ? "s" : ""}.`
+      `Send all Kaspa from ${sources.length} spending address${sources.length > 1 ? "es" : ""} (~${sompiToKasDisplay(total)} ${KAS_UNIT}) to your primary spending address #${primaryIndex}?\n\nThis broadcasts ${sources.length} transaction${sources.length > 1 ? "s" : ""}.`
     );
     if (!ok) return;
 
     if (label) label.textContent = "Sending…";
-    // 0.0001 KAS headroom over the network fee — same buffer the Max button uses.
-    const FEE_BUFFER = 0.0001;
     let sent = 0;
     for (const src of sources) {
-      const amountKas = src.kas - FEE_BUFFER;
-      if (amountKas <= 0) continue;
       try {
-        await engine.sendFromSpending({
+        // Exact single-output Max send (total - fee, no change): a fixed fee headroom left a
+        // tiny change output that KIP-9 storage mass rejects (audit DSK-019).
+        await engine.sendMaxFromSpending({
           mnemonic: activeAccountMnemonic(),
           index: src.index,
           passphrase: activeAccountPassphrase(),
           destinationAddress: primaryAddress,
-          amountKas: String(amountKas),
-          feeKas: "0",
-          selectedOutpoints: null,
         });
         sent += 1;
       } catch (error) {
@@ -8680,6 +9012,9 @@ function setActiveAppTab(tab) {
   appTabScreens.forEach((screen) => {
     screen.hidden = screen.dataset.appTabScreen !== screenTab;
   });
+  // Looked up here: the startup tab restore runs this before `groupChatScreen` (declared far below)
+  // is initialised, which throws in dev (the build lowers const to var, so production was spared).
+  const groupScreenEl = document.querySelector("[data-group-chat-screen]");
   if (!isChats) {
     // Leaving Chats ends a selection, so coming back does not find Cancel and Select All waiting.
     if (chatSelectionModeActive) setChatSelectionMode(false);
@@ -8690,11 +9025,11 @@ function setActiveAppTab(tab) {
     if (openRoomEl) openRoomEl.hidden = true;
     if (conversation) conversation.hidden = true;
     if (detailEmptyState) detailEmptyState.hidden = true;
-    if (groupChatScreen) groupChatScreen.hidden = true;
+    if (groupScreenEl) groupScreenEl.hidden = true;
   } else {
     // Back on Chats: a group thread owns the pane if one is open, else the 1:1 does.
     const groupOpen = Boolean(activeGroupId);
-    if (groupChatScreen) groupChatScreen.hidden = !groupOpen;
+    if (groupScreenEl) groupScreenEl.hidden = !groupOpen;
     if (conversation) conversation.hidden = groupOpen || !activeConversationId;
     if (detailEmptyState) detailEmptyState.hidden = groupOpen || Boolean(activeConversationId);
   }
@@ -9320,6 +9655,15 @@ async function refreshOtherServiceNames() {
   otherServiceNamesFor = address;
   renderProfileDomains();
 }
+// Unfinished .kas transfers (EXT-005), pinned above the .kas list until they are finished.
+function pendingKnsTransfersHtml() {
+  if (pendingKnsTransfersFor !== engine.address || !pendingKnsTransfers.length) return "";
+  return pendingKnsTransfers.map((record) => `
+    <div class="kns-pending-transfer">
+      <p class="field-hint">Sending <strong>${escapeHtml(record.domain || "a domain")}</strong> to ${escapeHtml(shortAddress(record.recipient || ""))} is not finished: its commit was sent but the reveal was not accepted yet.</p>
+      <button type="button" class="primary-button" data-kns-finish-transfer="${escapeHtml(record.assetId)}">${record.status === "reveal-failed" ? "Retry reveal" : "Finish transfer"}</button>
+    </div>`).join("");
+}
 function domainNameCardHtml(name, badge = "") {
   return `<div class="kns-domain-card static">${escapeHtml(name)}${badge ? `<span class="kns-domain-primary">${escapeHtml(badge)}</span>` : ""}</div>`;
 }
@@ -9380,9 +9724,9 @@ function renderProfileDomains() {
     return;
   }
   if (activeDomainsTab === "kas") {
-    listEl.innerHTML = ownKnsDomains.length
+    listEl.innerHTML = pendingKnsTransfersHtml() + (ownKnsDomains.length
       ? ownKnsDomains.map((domain) => knsDomainCardHtml(domain)).join("")
-      : '<p class="spending-address-empty">No domains yet.</p>';
+      : '<p class="spending-address-empty">No domains yet.</p>');
     return;
   }
   const owned = otherServiceNamesFor === engine.address ? otherServiceNames[activeDomainsTab] : null;
@@ -9409,6 +9753,8 @@ function renderDomainDetail(domain) {
   const assetId = String(domain.inscriptionId || "").trim();
   const listed = String(domain.status || "").trim().toLowerCase() === "listed";
   const canSend = Boolean(assetId) && !listed;
+  // An unfinished transfer (EXT-005) blocks a new Send until it is finished.
+  const pendingTransfer = pendingKnsTransferFor(assetId);
   const busy = settingPrimaryAssetId === assetId;
   if (listEl) listEl.hidden = true;
   if (inscribe) inscribe.hidden = true;
@@ -9427,8 +9773,11 @@ function renderDomainDetail(domain) {
           : ""}
       ${!isPrimary && setPrimaryError && !settingPrimaryAssetId ? `<p class="profile-domain-detail-error">${escapeHtml(setPrimaryError)}</p>` : ""}
       ${listed ? `<div class="profile-domain-detail-row"><span>Status</span><span>Listed</span></div>` : ""}
+      ${pendingTransfer ? `<p class="field-hint">A transfer of this domain to ${escapeHtml(shortAddress(pendingTransfer.recipient || ""))} is not finished. Finish it before sending it anywhere else.</p>` : ""}
     </div>
-    <button type="button" class="chatting-address-copy domains-inscribe-button primary-button" data-domain-send="${escapeHtml(assetId)}" ${canSend ? "" : "disabled"}>Send</button>`;
+    ${pendingTransfer
+      ? `<button type="button" class="chatting-address-copy domains-inscribe-button primary-button" data-kns-finish-transfer="${escapeHtml(assetId)}">${pendingTransfer.status === "reveal-failed" ? "Retry reveal" : "Finish transfer"}</button>`
+      : `<button type="button" class="chatting-address-copy domains-inscribe-button primary-button" data-domain-send="${escapeHtml(assetId)}" ${canSend ? "" : "disabled"}>Send</button>`}`;
 }
 
 function closeDomainDetail() {
@@ -9496,6 +9845,12 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
     if (domainDetailTarget) closeDomainDetail(); else renderProfileDomains();
     return;
   }
+  const finish = event.target.closest("[data-kns-finish-transfer]");
+  if (finish) {
+    const record = pendingKnsTransferFor(finish.dataset.knsFinishTransfer);
+    if (record) openKnsTransferModal({ domain: record.domain, assetId: record.assetId, pending: record });
+    return;
+  }
   const send = event.target.closest("[data-domain-send]");
   if (send && domainDetailTarget && !send.disabled) {
     openKnsTransferModal({ domain: domainDetailTarget.fullName, assetId: domainDetailTarget.inscriptionId });
@@ -9517,6 +9872,7 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
 document.querySelector("[data-open-domains-screen]")?.addEventListener("click", () => {
   renderProfileDomains();
   refreshOtherServiceNames();
+  refreshPendingKnsTransfers(); // Finish transfer for an interrupted .kas transfer (EXT-005)
   if (domainsScreenEl) domainsScreenEl.hidden = false;
 });
 document.querySelector("[data-close-domains-screen]")?.addEventListener("click", () => {
@@ -9546,7 +9902,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 101;
+const APP_BUILD = 102;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10699,13 +11055,13 @@ async function consolidateManageAddressUtxos() {
   try { balance = await engine.balance(); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
   if (entries.length < 2) { showCopyToast("Nothing to consolidate — this address has a single UTXO."); return; }
-  const maxKas = Number(balance.totalKas) - 0.001; // headroom for the network fee (many inputs)
-  if (!(maxKas > 0)) { showCopyToast("Balance too low to consolidate."); return; }
+  if (!(BigInt(balance.totalSompi ?? 0) > 0n)) { showCopyToast("Balance too low to consolidate."); return; }
   if (!await confirmText(`Combine ${entries.length} UTXOs at this address into one? This sends the balance back to this same address and pays a small network fee.`)) return;
   manageConsolidateInFlight = true;
   showCopyToast("Consolidating UTXOs…");
   try {
-    await engine.send(address, trimKas8(maxKas), "0", {}); // self-send merges the inputs
+    // Exact single-output sweep (sweepAllToSelf: total - fee, no change), audit DSK-019.
+    await engine.compoundUtxos();
     showCopyToast("UTXOs consolidated.");
     loadManageAddressUtxos();
     refreshBalanceOnly?.({ quiet: true });
@@ -11250,8 +11606,11 @@ revealPrivatekeyButton?.addEventListener("click", async () => {
 // pasteboard is a key waiting to be pasted somewhere it should not be.
 let privateKeyClipboardTimer = null;
 copyPrivatekeyButton?.addEventListener("click", async () => {
-  if (!engine.privateKeyHex) return;
-  await copyTextToClipboard(engine.privateKeyHex);
+  // DSK-008: copy exactly what the reveal shows (a spending-address key when the modal was
+  // opened for one), never silently fall back to the identity key behind an override.
+  const value = privatekeyRevealValue || engine.privateKeyHex;
+  if (!value) return;
+  await copyTextToClipboard(value);
   showCopyToast("Private key copied. Clipboard will clear in 30s.");
   if (privateKeyClipboardTimer) window.clearTimeout(privateKeyClipboardTimer);
   privateKeyClipboardTimer = window.setTimeout(() => { copyTextToClipboard(" ").catch(() => {}); }, 30_000);
@@ -12661,8 +13020,10 @@ function renderKnsEditorImages() {
   }
   if (bannerPreview) {
     bannerPreview.hidden = !currentBanner;
-    bannerPreview.style.backgroundImage = currentBanner ? `url("${currentBanner}")` : "";
-    fitBackgroundBanner(bannerPreview, currentBanner);
+    // DSK-016: a picked picture is a data: URL; the saved one is a remote KNS URL.
+    const safeBanner = safeCssUrl(currentBanner, { allowLocal: true });
+    bannerPreview.style.backgroundImage = safeBanner ? `url("${safeBanner}")` : "";
+    fitBackgroundBanner(bannerPreview, safeBanner);
   }
   if (removeAvatar) removeAvatar.hidden = !currentAvatar;
   if (removeBanner) removeBanner.hidden = !currentBanner;
@@ -13604,7 +13965,7 @@ function importPayloadIntoConversation(payloadValue) {
     txid,
     daaScore: String(Math.floor(createdAt / 1000)),
     confirmations: 1,
-    network: "mainnet",
+    network: NETWORK,
     payloadHex,
     payloadBytes: Math.ceil(payloadHex.length / 2),
     messageType: parsed.type || "comm",
@@ -14583,7 +14944,7 @@ async function refreshChatInfoKnsSections(contact) {
 
   renderChatInfoDomains(info);
   const banner = document.querySelector("[data-chat-info-banner]");
-  const bannerUrl = profileInfo?.profile?.bannerUrl || "";
+  const bannerUrl = safeCssUrl(profileInfo?.profile?.bannerUrl); // DSK-016: remote KNS URL, http(s) only
   if (banner) {
     banner.hidden = !bannerUrl;
     banner.style.backgroundImage = bannerUrl ? `url("${bannerUrl}")` : "";
@@ -15317,7 +15678,7 @@ async function sendInstantTip(address, name, amountKasNumber) {
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
-    applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: "mainnet", note: "Kaspa node accepted and broadcast the payment transaction." });
+    applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: NETWORK, note: "Kaspa node accepted and broadcast the payment transaction." });
     handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Math.round(Number(amountKas) * 1e8), destinationAddress);
     await refreshBalanceOnly({ quiet: true });
     conversationEntry.updatedAt = Date.now();
@@ -15546,7 +15907,7 @@ async function sendTipNow() {
       status: MESSAGE_STATUSES.CONFIRMED,
       txid: verifiedTxid || txid,
       confirmations: verifiedTxid ? 1 : 0,
-      network: "mainnet",
+      network: NETWORK,
       note: verifiedTxid
         ? "Kaspa payment verified at recipient output."
         : "Kaspa node accepted and broadcast the payment transaction.",
@@ -15721,6 +16082,8 @@ function ensureContactStash(contact, conversationEntry) {
 /** Each note is its own small transaction; a few per pass, the rest on the next one. */
 async function flushContactStashQueue() {
   if (contactStashFlushing) return;
+  // A failed send backs the whole queue off instead of retrying on every 5 s sweep (DSK-020).
+  if (Date.now() < contactStashRetryAt) return;
   const s = contactStash();
   if (!s.pending.length || !engine.address || isChattingBalanceZero()) return;
   contactStashFlushing = true;
@@ -15737,13 +16100,20 @@ async function flushContactStashQueue() {
       try {
         const envelope = await engine.createSelfStashEnvelope({ partnerAddress: address, contactOnly: true });
         const result = await engine.sendSelfStashOnchain({ envelope });
+        contactStashFailures = 0;
+        contactStashRetryAt = 0;
         appendEngineLog(`Contact note saved on-chain: ${result.txid || ""}`);
       } catch (error) {
-        // Not sent: back in the queue for the next pass.
+        // Not sent: back in the queue, after a backoff (30 s doubling to 30 min). A KIP-9
+        // storage-mass rejection will not fix itself on the next pass, so it waits 6 hours.
         s.known.delete(address);
         if (!s.pending.includes(address)) s.pending.unshift(address);
         saveContactStash(s);
-        appendEngineLog(`Contact note deferred (non-fatal): ${error.message}`);
+        contactStashFailures += 1;
+        const storageMass = /storage mass|mass.*exceeds/i.test(String(error?.message || ""));
+        const delayMs = storageMass ? 6 * 60 * 60_000 : Math.min(30_000 * 2 ** (contactStashFailures - 1), 30 * 60_000);
+        contactStashRetryAt = Date.now() + delayMs;
+        appendEngineLog(`Contact note deferred (non-fatal${storageMass ? ", storage mass" : ""}; retry in ${Math.round(delayMs / 60_000) || 1} min): ${error.message}`);
         return;
       }
     }
@@ -18233,7 +18603,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       status: MESSAGE_STATUSES.CONFIRMED,
       txid: verifiedTxid || txid,
       confirmations: verifiedTxid ? 1 : 0,
-      network: "mainnet",
+      network: NETWORK,
       note: verifiedTxid
         ? "Kaspa payment verified at recipient output."
         : "Kaspa node accepted and broadcast the payment transaction.",
@@ -22861,6 +23231,7 @@ document.querySelector("[data-confirm-logout]")?.addEventListener("click", async
     closeLogoutModal();
     await engine.disconnect?.();
     engine.clearSession();
+    lockKeyVault(); // with a password, signing back in asks for it again
     setActiveConversationId(null);
     state = { contacts: [], conversations: [] };
     currentBalanceKas = "--";
@@ -23187,6 +23558,7 @@ async function dangerWipeEverything() {
     for (const key of keys) localStorage.removeItem(key);
   } catch {}
   try { clearSessionActive(); } catch {}
+  try { lockKeyVault(); } catch {} // the tab's copy of the data key (sessionStorage)
   // The chat store is IndexedDB-backed when available (see ui/storage.js DB_NAME).
   try { indexedDB.deleteDatabase("kachat-desktop"); } catch {}
   window.location.reload();
@@ -23205,9 +23577,17 @@ Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
 });
 
 
-document.querySelector("[data-logged-out-create]")?.addEventListener("click", openCreateAccountModal);
+// With a password set the new account is saved encrypted, which takes the unlocked vault. A
+// forgotten password is reset from the lock ("Forgot password?"), and then this is not asked.
+async function unlockBeforeAddingAccount(open) {
+  if (isAppLocked() && accountShellPrefs.saveAccount !== false) {
+    if (!(await unlockAppWithPassword("Your saved accounts are encrypted with your password. Enter it to add another account to this device."))) return;
+  }
+  open();
+}
+document.querySelector("[data-logged-out-create]")?.addEventListener("click", () => unlockBeforeAddingAccount(openCreateAccountModal));
 
-document.querySelector("[data-logged-out-import]")?.addEventListener("click", openImportAccountModal);
+document.querySelector("[data-logged-out-import]")?.addEventListener("click", () => unlockBeforeAddingAccount(openImportAccountModal));
 
 document.querySelector("[data-copy-balance]")?.addEventListener("click", async () => {
   try { await copyTextToClipboard(Number(currentBalanceKas).toFixed(8)); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
@@ -23388,9 +23768,22 @@ function installTestnetFaucetButton() {
   let balanceBefore = null;
   let awaitingReturn = false;
 
-  const storageKey = (address) => `kachat_tn10_faucet_claimed_${String(address || "").toLowerCase()}`;
+  // DSK-011: account-scoped, so removing the account wipes the lock with the rest of its data.
+  // The old global key (kachat_tn10_faucet_claimed_<address>) is moved over on first read.
+  const storageKey = (address) => accountScopedKey("kachat-tn10-faucet-claimed", address);
+  const legacyStorageKey = (address) => `kachat_tn10_faucet_claimed_${String(address || "").toLowerCase()}`;
   const claimedAt = () => {
-    try { return Number(localStorage.getItem(storageKey(engine.address))) || 0; } catch { return 0; }
+    const address = engine.address;
+    if (!address) return 0;
+    try {
+      const current = localStorage.getItem(storageKey(address));
+      if (current !== null) return Number(current) || 0;
+      const legacy = localStorage.getItem(legacyStorageKey(address));
+      if (legacy === null) return 0;
+      localStorage.setItem(storageKey(address), legacy);
+      localStorage.removeItem(legacyStorageKey(address));
+      return Number(legacy) || 0;
+    } catch { return 0; }
   };
   const remainingText = (ms) => {
     const minutes = Math.max(1, Math.ceil(ms / 60000));
@@ -23478,6 +23871,10 @@ const hasSavedAccounts = loadSavedAccounts().length > 0;
 if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true" || !hasSavedAccounts) {
   localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
   showLoggedOutScreen();
+} else if (isAppLocked()) {
+  // Password set, new tab: the lock (sign-in screen + password), never an auto-restore (DSK-007).
+  showLoggedOutScreen();
+  promptUnlockAtLaunch();
 } else {
   hideLoggedOutScreen();
   // The account's chats come up from IndexedDB now, not after the SDK has loaded.

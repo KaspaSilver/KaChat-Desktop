@@ -4961,6 +4961,19 @@ body.session-logged-out [data-account-rename-modal] {
   cursor: pointer;
 }
 .kns-domain-card:disabled { opacity: .55; cursor: default; }
+/* An unfinished .kas transfer (commit sent, reveal pending), above the Your Domains list. */
+.kns-pending-transfer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border: 1px solid color-mix(in srgb, #f5a623 55%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, #f5a623 10%, transparent);
+}
+.kns-pending-transfer .field-hint { margin: 0; }
 .kns-domain-card strong { font-size: 14.5px; }
 .kns-domain-card small { color: var(--muted); font-size: 11.5px; }
 .kns-domain-note {

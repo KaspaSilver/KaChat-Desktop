@@ -277,6 +277,81 @@ export async function syncConversationFromIndexer({
   };
 }
 
+// --- Hybrid alias read (XP-003; iOS DETERMINISTIC_ALIASES.md §3.2/§4.2) ------------------------
+// A peer whose handshake carried a legacy/random alias (old Kasia web, Android builds that send a
+// fresh random alias) writes its messages to us under THAT alias, not our deterministic myAlias.
+// iOS keeps such contacts in hybrid mode and fetches both; this is the desktop equivalent.
+
+/** Whether `alias` can be a wire alias: what goes between `comm:` and the next `:` (Kasia's are
+ *  12 hex; the plan truncates to 16, so anything longer could never match a row anyway). */
+export function isUsableWireAlias(alias) {
+  return /^[0-9A-Za-z_-]{1,16}$/.test(String(alias || ""));
+}
+
+/** Clean, de-duplicated legacy incoming aliases (at most `max`), dropping `exclude`. */
+export function legacyWireAliases(list, { exclude = [], max = 4 } = {}) {
+  const skip = new Set((Array.isArray(exclude) ? exclude : [exclude]).map((value) => String(value || "")));
+  const out = [];
+  for (const raw of Array.isArray(list) ? list : []) {
+    const alias = String(raw || "").trim();
+    if (!isUsableWireAlias(alias) || skip.has(alias) || out.includes(alias)) continue;
+    out.push(alias);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** syncConversationFromIndexer under the deterministic alias, plus every legacy incoming alias.
+ *  Messages are de-duplicated by txid across the fetches. The returned cursor never passes a
+ *  window an alias has not been read through: an alias that came back with a full page caps it
+ *  at that page's newest row, and an alias whose fetch failed holds it where it started. */
+export async function syncConversationFromIndexerWithLegacyAliases({ legacyAliases = [], ...details } = {}) {
+  const primary = await syncConversationFromIndexer(details);
+  const extras = legacyWireAliases(legacyAliases, { exclude: [primary.plan.alias] });
+  if (!extras.length) return primary;
+
+  const pageLimit = Math.max(1, Math.min(50, Number(details.limit) || 50));
+  const known = new Set([...(Array.isArray(details.knownTxids) ? details.knownTxids : []), ...primary.messages.map((m) => m.txid)].filter(Boolean));
+  const messages = [...primary.messages];
+  let scannedCount = Number(primary.scannedCount || 0);
+  let decryptFailures = Number(primary.decryptFailures || 0);
+  let newest = Number(primary.nextCursor || 0);
+  let cap = scannedCount >= pageLimit ? newest : Infinity;
+  const errors = [];
+  for (const alias of extras) {
+    try {
+      const result = await syncConversationFromIndexer({ ...details, alias, knownTxids: [...known] });
+      for (const message of result.messages || []) {
+        if (!message?.txid || known.has(message.txid)) continue;
+        known.add(message.txid);
+        messages.push(message);
+      }
+      scannedCount += Number(result.scannedCount || 0);
+      decryptFailures += Number(result.decryptFailures || 0);
+      newest = Math.max(newest, Number(result.nextCursor || 0));
+      if (Number(result.scannedCount || 0) >= pageLimit) cap = Math.min(cap, Number(result.nextCursor || 0));
+    } catch (error) {
+      cap = Math.min(cap, Number(primary.cursor || 0));
+      errors.push(`legacy alias: ${error?.message || error}`);
+    }
+  }
+  messages.sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  const nextCursor = Math.max(Number(primary.cursor || 0), Math.min(newest, cap));
+  return {
+    ...primary,
+    nextCursor,
+    scannedCount,
+    decryptFailures,
+    found: messages.length,
+    messages,
+    legacyAliasesFetched: extras.length,
+    errors,
+    note: messages.length
+      ? `Real sync received ${messages.length} encrypted Kasia message${messages.length === 1 ? "" : "s"} (${extras.length + 1} aliases).`
+      : `Real sync complete: no new decryptable messages (${scannedCount} indexed row${scannedCount === 1 ? "" : "s"} checked across ${extras.length + 1} aliases).`,
+  };
+}
+
 
 // --- No-handshake first contact (NO_HANDSHAKE_MESSAGING.md §5.3) -----------------------------
 /** Whether the indexer answers inbox lookups: true on an answer, false on 404 (an indexer
@@ -456,6 +531,9 @@ function parseHandshakeMetadata(clearText) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
     return {
       alias: String(parsed.alias || parsed.displayName || parsed.name || "").trim(),
+      // XP-003: the `alias` field ALONE is the sender's outgoing (wire) alias - what their
+      // contextual messages to us carry. displayName/name are labels, never routing.
+      wireAlias: String(parsed.alias || "").trim(),
       conversationId: String(parsed.conversationId || parsed.conversation_id || "").trim(),
       isResponse: Boolean(parsed.isResponse ?? parsed.is_response ?? false),
       recipientAddress: String(parsed.recipientAddress || parsed.recipient_address || "").trim(),
@@ -563,7 +641,7 @@ export async function syncIncomingHandshakesFromIndexer({
     }
 
     handshakes.push({
-      txid, sender, receiver, alias: metadata.alias, conversationId: metadata.conversationId,
+      txid, sender, receiver, alias: metadata.alias, wireAlias: metadata.wireAlias || "", conversationId: metadata.conversationId,
       // `blockTime` raw, 0 when the indexer gave none - callers that compare against a deletion
       // tombstone need to tell "before the deletion" from "no time in hand", which createdAt's
       // Date.now() fallback hides.

@@ -1,5 +1,6 @@
 import { confirmDialog } from "./dialogs.js";
 import { IS_TESTNET } from "../engine/network.js";
+import { cssUrlValue } from "./css-url.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -1637,8 +1638,9 @@ async function hydratePickerThumbnails() {
     const path = cell.dataset.ncThumb;
     const url = await thumbnailURL(path);
     if (!pickerOpen) return;
-    if (url && cell.isConnected) {
-      cell.style.backgroundImage = `url("${url}")`;
+    const background = cssUrlValue(url, { allowLocal: true }); // a blob: object URL (DSK-016)
+    if (background && cell.isConnected) {
+      cell.style.backgroundImage = background;
       cell.classList.add("has-thumb");
     }
   }

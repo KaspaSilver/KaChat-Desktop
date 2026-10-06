@@ -18,7 +18,7 @@
 // own beyond what's passed in — economics (fee tiers, dust, priority fees)
 // live in KNS_ECONOMICS below, matching the documented indexer behavior.
 
-import { ADDRESS_PREFIX } from "./network.js";
+import { ADDRESS_PREFIX, NETWORK } from "./network.js";
 import { NETWORK_ID, sompiToKaspaDisplay } from "./utils.js";
 import {
   KNS_DEFAULT_URL,
@@ -31,7 +31,7 @@ import {
   fetchProfileByAssetId,
   clearKnsCache,
 } from "./kns.js";
-import { sendPayloadTransaction } from "./transactions.js";
+import { sendKaspa } from "./transactions.js";
 
 const KNS_TITLE_BYTES = new TextEncoder().encode("kns");
 const MAX_PAYLOAD_BYTES = 520;
@@ -199,23 +199,64 @@ export function buildRevealSignatureScript(builder, signatureHex) {
 // derived P2SH address, since Kaspa's Version::ScriptHash address encoding
 // produces byte-identical scriptPublicKey bytes to
 // ScriptBuilder.createPayToScriptHashScript().
-export async function sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, log = () => {} }) {
-  if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load a wallet before starting a KNS transaction.");
+//
+// The commit carries no payload (the inscription lives in the redeem script, revealed later), so
+// it goes through sendKaspa as a plain payment with `exactAmount: true`: the P2SH output must hold
+// exactly the commit amount the reveal is built against. (It used to go through
+// sendPayloadTransaction, which refuses a missing payload, so no KNS write could ever broadcast:
+// audit DSK-017.)
+//
+// `signer` ({ privateKey, address }) funds and signs the commit; it defaults to the chatting
+// identity. `changeAddress` redirects the change (default: back to the funding address).
+// `commitScriptPublicKey` / `commitAmountSompi`, when given, are used to find which output of
+// which broadcast transaction is the commit (the generator may first chain batch transactions
+// when the wallet holds many coins; the commit is in the final one).
+export async function sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, signer = null, changeAddress = null, commitScriptPublicKey = null, commitAmountSompi = null, log = () => {} }) {
+  const privateKey = signer?.privateKey || engine?.privateKey;
+  const sourceAddress = signer?.address || engine?.address;
+  if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before starting a KNS transaction.");
   await engine.connect();
-  const sendResult = await sendPayloadTransaction({
+  const sendResult = await sendKaspa({
     kaspa: engine.kaspa,
     rpc: engine.rpc,
     withRpc: engine.withRpc.bind(engine),
-    privateKey: engine.privateKey,
-    sourceAddress: engine.address,
+    privateKey,
+    sourceAddress,
     destinationAddress: commitAddressString,
     amountKas: String(commitAmountKas),
     feeKas: "0",
+    changeAddress,
+    exactAmount: true,
     log,
   });
-  const txid = sendResult.txids?.[0];
-  if (!txid) throw new Error("Commit transaction did not return a transaction id.");
-  return { txid, sendResult };
+  const located = locateKnsCommitOutput(sendResult, commitScriptPublicKey, commitAmountSompi);
+  if (!located.txid) throw new Error("Commit transaction did not return a transaction id.");
+  return { txid: located.txid, outputIndex: located.index, sendResult };
+}
+
+/** The commit's { txid, index }: the output paying `commitScriptPublicKey` exactly
+ *  `commitAmountSompi`, searched from the last broadcast transaction back. Falls back to the
+ *  last transaction's output 0 (the generator puts the requested outputs before change). */
+export function locateKnsCommitOutput(sendResult, commitScriptPublicKey, commitAmountSompi) {
+  const txids = Array.isArray(sendResult?.txids) ? sendResult.txids : [];
+  const pendings = Array.isArray(sendResult?.result?.transactions) ? sendResult.result.transactions : [];
+  const wantScript = String(commitScriptPublicKey?.script ?? commitScriptPublicKey ?? "").toLowerCase();
+  if (wantScript && commitAmountSompi != null) {
+    const wantAmount = BigInt(commitAmountSompi);
+    for (let i = Math.min(pendings.length, txids.length) - 1; i >= 0; i--) {
+      try {
+        const outputs = pendings[i]?.transaction?.outputs || [];
+        for (let j = 0; j < outputs.length; j++) {
+          const spk = outputs[j]?.scriptPublicKey;
+          const script = String(typeof spk === "string" ? spk : spk?.script ?? "").toLowerCase();
+          if (script === wantScript && BigInt(outputs[j].value) === wantAmount) return { txid: txids[i], index: j };
+        }
+      } catch {
+        // An SDK object we cannot read: fall through to the default below.
+      }
+    }
+  }
+  return { txid: txids.length ? txids[txids.length - 1] : null, index: 0 };
 }
 
 // --- reveal transaction (manually constructed, spends the commit output) ---
@@ -238,9 +279,12 @@ const SIGHASH_ALL = 0;
 // and a real, market-accurate fee, so the commit amount is deliberately
 // funded ~5% above the target (see registrationAmounts) specifically to
 // leave this fee-derived remainder landing close to the intended amount.
+// `commitOutputIndex` is the commit output's index in the commit transaction (0 unless the
+// commit was located elsewhere, see locateKnsCommitOutput).
 export async function buildAndSubmitKnsReveal({
   engine,
   commitTxId,
+  commitOutputIndex = 0,
   commitAmountSompi,
   commitScriptPublicKey,
   builder,
@@ -259,7 +303,7 @@ export async function buildAndSubmitKnsReveal({
 
   const utxoEntry = {
     address: undefined,
-    outpoint: { transactionId: commitTxId, index: 0 },
+    outpoint: { transactionId: commitTxId, index: commitOutputIndex },
     amount: commitAmountSompi,
     scriptPublicKey: commitScriptPublicKey,
     blockDaaScore: 0n,
@@ -276,7 +320,7 @@ export async function buildAndSubmitKnsReveal({
   const draftTx = new kaspa.Transaction({
     version: 0,
     inputs: [{
-      previousOutpoint: { transactionId: commitTxId, index: 0 },
+      previousOutpoint: { transactionId: commitTxId, index: commitOutputIndex },
       signatureScript: placeholderSigScript,
       sequence: 0n,
       sigOpCount: 1,
@@ -310,7 +354,7 @@ export async function buildAndSubmitKnsReveal({
   const signatureHex = kaspa.createInputSignature(draftTx, 0, privateKey, SIGHASH_ALL);
   const finalSigScript = buildRevealSignatureScript(builder, signatureHex);
   draftTx.inputs = [{
-    previousOutpoint: { transactionId: commitTxId, index: 0 },
+    previousOutpoint: { transactionId: commitTxId, index: commitOutputIndex },
     signatureScript: finalSigScript,
     sequence: 0n,
     sigOpCount: 1,
@@ -320,7 +364,22 @@ export async function buildAndSubmitKnsReveal({
 
   log("Broadcasting KNS reveal transaction...");
   const submit = (rpc) => rpc.submitTransaction({ transaction: draftTx, allowOrphan: false });
-  const response = await engine.withRpc(submit, { retries: 1, label: "KNS reveal broadcast" });
+  // The reveal spends an output the node has only just seen in its mempool; a node that has not
+  // seen the commit yet (a failover to another node) calls it an orphan / unknown outpoint. A few
+  // short waits cover that before the caller has to offer "Retry reveal".
+  let response = null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      response = await engine.withRpc(submit, { retries: 1, label: "KNS reveal broadcast" });
+      break;
+    } catch (error) {
+      const message = String(error?.message || error || "").toLowerCase();
+      const commitNotSeen = message.includes("orphan") || (message.includes("outpoint") && !message.includes("already"));
+      if (!commitNotSeen || attempt >= 3) throw error;
+      log(`KNS reveal attempt ${attempt} did not find the commit yet (${error?.message || error}); retrying.`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
   const revealTxId = response?.transactionId || draftTx.id;
   return { txid: revealTxId, actualRevealAmountSompi: finalOutputValue, fee: totalFee };
 }
@@ -347,6 +406,131 @@ export function peekPendingKnsCommit() {
 
 export function clearPendingKnsCommit() {
   try { localStorage.removeItem(PENDING_COMMIT_KEY); } catch {}
+}
+
+// --- pending domain transfers (audit EXT-005) -----------------------------------
+// A transfer is a commit (2 KAS into a P2SH whose redeem script embeds the transfer payload)
+// followed by a reveal that spends it. If the reveal is refused or the page dies in between, the
+// commit sits in the P2SH and only this wallet's key plus the exact payload can spend it. So the
+// transfer is written down BEFORE the commit is broadcast, the commit txid is added once it is,
+// and the record is cleared only when the reveal has been accepted (or the commit provably never
+// went out). Everything needed to rebuild the redeem script is in the record: the payload is
+// deterministic from (assetId, recipient) and the key from `source`.
+//
+// Records live in one map per network ({ [assetId]: record }) behind a storage adapter, so the
+// browser extension can plug in chrome.storage.local: setKnsPendingStorage({ getItem, setItem,
+// removeItem }), each may return a value or a Promise. The default is window.localStorage.
+
+const PENDING_TRANSFER_KEY_PREFIX = "kachat-kns-pending-transfer-v1";
+
+const localStorageAdapter = Object.freeze({
+  getItem(key) {
+    try { return globalThis.localStorage ? globalThis.localStorage.getItem(key) : null; } catch { return null; }
+  },
+  setItem(key, value) {
+    if (!globalThis.localStorage) throw new Error("No storage is available to save the transfer's recovery record.");
+    globalThis.localStorage.setItem(key, value);
+  },
+  removeItem(key) {
+    try { globalThis.localStorage?.removeItem(key); } catch { /* nothing to remove */ }
+  },
+});
+let pendingStorage = localStorageAdapter;
+
+/** Plugs in the storage pending-transfer records are kept in; null restores localStorage. */
+export function setKnsPendingStorage(adapter) {
+  if (adapter && (typeof adapter.getItem !== "function" || typeof adapter.setItem !== "function" || typeof adapter.removeItem !== "function")) {
+    throw new Error("A KNS pending storage adapter needs getItem, setItem and removeItem.");
+  }
+  pendingStorage = adapter || localStorageAdapter;
+}
+
+/** The storage key holding the pending transfers of `network` ("mainnet" | "testnet"). */
+export function pendingKnsTransferKey(network = NETWORK) {
+  return `${PENDING_TRANSFER_KEY_PREFIX}:${network}`;
+}
+
+const bigintToString = (_, v) => (typeof v === "bigint" ? v.toString() : v);
+
+async function readPendingTransfers() {
+  let raw = null;
+  try { raw = await pendingStorage.getItem(pendingKnsTransferKey()); } catch { raw = null; }
+  if (!raw) return {};
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writePendingTransfers(map) {
+  const key = pendingKnsTransferKey();
+  if (!Object.keys(map).length) { await pendingStorage.removeItem(key); return; }
+  await pendingStorage.setItem(key, JSON.stringify(map, bigintToString));
+}
+
+async function savePendingTransfer(record) {
+  const map = await readPendingTransfers();
+  map[record.assetId] = { ...record, updatedAt: Date.now() };
+  await writePendingTransfers(map);
+  return map[record.assetId];
+}
+
+async function patchPendingTransfer(assetId, patch) {
+  const map = await readPendingTransfers();
+  if (!map[assetId]) return null;
+  map[assetId] = { ...map[assetId], ...patch, updatedAt: Date.now() };
+  await writePendingTransfers(map);
+  return map[assetId];
+}
+
+/** Every pending transfer on this network; `sourceAddress` keeps those one address started. */
+export async function listPendingKnsTransfers({ sourceAddress = null } = {}) {
+  const records = Object.values(await readPendingTransfers()).filter((r) => r && r.kind === "transfer" && r.network === NETWORK);
+  return sourceAddress ? records.filter((r) => r.source?.address === sourceAddress) : records;
+}
+
+/** The pending transfer of one domain (by asset id) on this network, or null. */
+export async function getPendingKnsTransfer(assetId) {
+  const record = (await readPendingTransfers())[String(assetId || "").trim()];
+  return record && record.kind === "transfer" && record.network === NETWORK ? record : null;
+}
+
+/** Forgets a pending transfer. Only for a commit that is resolved or provably never sent. */
+export async function clearPendingKnsTransfer(assetId) {
+  const map = await readPendingTransfers();
+  const key = String(assetId || "").trim();
+  if (!(key in map)) return;
+  delete map[key];
+  await writePendingTransfers(map);
+}
+
+/** Failures the commit build raises before anything is broadcast: nothing moved, so the record
+ *  written ahead of the commit can go. Anything else (a timeout, a dropped socket) may have
+ *  reached the node, so the record stays and Finish transfer looks the commit up on chain. */
+function isPreBroadcastFailure(error) {
+  const m = String(error?.message || error || "").toLowerCase();
+  return m.includes("insufficient") || m.includes("no utxos") || m.includes("amount must") ||
+    m.includes("destination must") || m.includes("reserved by a scheduled") || m.includes("storage mass") ||
+    m.includes("load a wallet");
+}
+
+/** A reveal refused because its input is already spent: only this key can spend the commit, so
+ *  an earlier reveal of ours already went through (the page died before it was cleared). */
+function isAlreadyRevealedError(error) {
+  const m = String(error?.message || error || "").toLowerCase();
+  return m.includes("already spent") || m.includes("already in the mempool") || m.includes("double spend") || m.includes("already accepted");
+}
+
+function revealPendingError(error, record) {
+  const reason = error?.message || String(error);
+  const wrapped = new Error(`The domain's commit was sent, but its reveal did not go through (${reason}). Your 2 KAS are safe: use Retry reveal to finish the transfer.`);
+  wrapped.code = "knsTransferRevealPending";
+  wrapped.assetId = record.assetId;
+  wrapped.pendingTransfer = record;
+  wrapped.cause = error;
+  return wrapped;
 }
 
 // --- verification polling ---------------------------------------------------
@@ -393,11 +577,12 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   const revealAmountSompi = engine.kaspa.kaspaToSompi(String(revealAmountKas));
 
   onStatus({ status: "committing", commitAmountKas, redeemScriptHex });
-  const commit = await sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, log });
+  const commit = await sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, commitScriptPublicKey, commitAmountSompi, log });
   savePendingCommit({
     kind: "domain",
     label: normalizedLabel,
     commitTxId: commit.txid,
+    commitOutputIndex: commit.outputIndex,
     commitAmountSompi,
     commitScriptPublicKeyHex: commitScriptPublicKey.script,
     redeemScriptHex,
@@ -411,6 +596,7 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   const reveal = await buildAndSubmitKnsReveal({
     engine,
     commitTxId: commit.txid,
+    commitOutputIndex: commit.outputIndex,
     commitAmountSompi,
     commitScriptPublicKey,
     builder,
@@ -459,7 +645,10 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
 // fixed 2 KAS commit; the reveal output is commit minus the actual fee.
 // `revealPriorityFeeSompi` is the fee picked on the Send Domain sheet (iOS WithdrawFeeTier: 0.02 KAS
 // x Normal 1 / Fast 2 / Priority 5); left out, the 0.02 KAS default.
-export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, changeAddress = null, revealPriorityFeeSompi = KNS_ECONOMICS.revealPriorityFeeSompi, onStatus = () => {}, log = () => {} }) {
+// `source` is an opaque, JSON-safe description of where the signer comes from (desktop:
+// { kind: "identity" } or { kind: "spending", index }), kept in the pending-transfer record so
+// "Finish transfer" can derive the same key again; the signer's address is added to it.
+export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, source = null, changeAddress = null, revealPriorityFeeSompi = KNS_ECONOMICS.revealPriorityFeeSompi, onStatus = () => {}, log = () => {} }) {
   const privateKey = signer?.privateKey || engine?.privateKey;
   const sourceAddress = signer?.address || engine?.address;
   if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before transferring a domain.");
@@ -468,6 +657,17 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   if (!cleanAssetId) throw new Error("Missing domain asset id.");
   const fullDomain = String(domain || "").trim().toLowerCase();
   if (!fullDomain) throw new Error("Missing domain name.");
+
+  // One transfer per domain at a time: a commit already out must be revealed (or found never to
+  // have gone out) before another 2 KAS are committed for the same domain.
+  const unfinished = await getPendingKnsTransfer(cleanAssetId);
+  if (unfinished) {
+    const error = new Error(`A transfer of ${unfinished.domain || fullDomain} is not finished yet. Finish it before starting another.`);
+    error.code = "knsTransferPending";
+    error.assetId = cleanAssetId;
+    error.pendingTransfer = unfinished;
+    throw error;
+  }
 
   // Recipient may be a .kas domain — resolve it to its owner address.
   let recipient = String(toAddress || "").trim();
@@ -504,44 +704,88 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   const { builder, commitScriptPublicKey, commitAddressString } = buildKnsRedeemScript(engine.kaspa, xOnlyPubkeyHex, payloadJson);
 
   const commitAmountKas = 2;
-  const commitAmountSompi = engine.kaspa.kaspaToSompi(String(commitAmountKas));
+  const commitAmountSompi = BigInt(engine.kaspa.kaspaToSompi(String(commitAmountKas)));
 
-  onStatus({ status: "committing", commitAmountKas });
-  await engine.connect();
   // Funded by the primary spending address: the commit's change and the reveal's output both
   // land on the fresh address the caller chose, so the primary can rotate there (iOS e53ea11).
   const changeTo = changeAddress || sourceAddress;
-  const commitSend = await sendPayloadTransaction({
-    kaspa: engine.kaspa,
-    rpc: engine.rpc,
-    withRpc: engine.withRpc.bind(engine),
-    privateKey,
-    sourceAddress,
-    destinationAddress: commitAddressString,
-    amountKas: String(commitAmountKas),
-    feeKas: "0",
-    changeAddress: changeTo,
-    log,
+
+  // Written before the commit goes out (EXT-005); a storage failure stops the transfer here,
+  // before any KAS moves.
+  let record = await savePendingTransfer({
+    kind: "transfer",
+    version: 1,
+    network: NETWORK,
+    assetId: cleanAssetId,
+    domain: fullDomain,
+    recipient,
+    source: { ...(source && typeof source === "object" ? source : {}), address: sourceAddress },
+    commitAddress: commitAddressString,
+    commitAmountSompi,
+    commitTxId: null,
+    commitOutputIndex: 0,
+    revealTargetAddress: changeTo,
+    revealPriorityFeeSompi: BigInt(revealPriorityFeeSompi ?? KNS_ECONOMICS.revealPriorityFeeSompi),
+    status: "committing",
+    lastError: null,
+    createdAt: Date.now(),
   });
-  const commitTxId = commitSend.txids?.[0];
-  if (!commitTxId) throw new Error("Commit transaction did not return a transaction id.");
-  onStatus({ status: "committed", commitTxid: commitTxId });
+
+  onStatus({ status: "committing", commitAmountKas });
+  let commit;
+  try {
+    commit = await sendKnsCommitTransaction({
+      engine,
+      commitAddressString,
+      commitAmountKas,
+      signer: { privateKey, address: sourceAddress },
+      changeAddress: changeTo,
+      commitScriptPublicKey,
+      commitAmountSompi,
+      log,
+    });
+  } catch (error) {
+    if (isPreBroadcastFailure(error)) await clearPendingKnsTransfer(cleanAssetId).catch(() => {});
+    else await patchPendingTransfer(cleanAssetId, { status: "commit-unknown", lastError: error?.message || String(error) }).catch(() => {});
+    throw error;
+  }
+  record = (await patchPendingTransfer(cleanAssetId, { commitTxId: commit.txid, commitOutputIndex: commit.outputIndex, status: "committed" }).catch(() => null)) || record;
+  onStatus({ status: "committed", commitTxid: commit.txid });
 
   onStatus({ status: "revealing" });
-  const reveal = await buildAndSubmitKnsReveal({
-    engine,
-    commitTxId,
-    commitAmountSompi,
-    commitScriptPublicKey,
-    builder,
-    revealTargetAddress: changeTo,
-    revealAmountSompi: commitAmountSompi, // pre-fee placeholder; real value = commit - fee
-    signer: { privateKey, address: sourceAddress },
-    revealPriorityFeeSompi,
-    log,
-  });
+  let reveal;
+  try {
+    reveal = await buildAndSubmitKnsReveal({
+      engine,
+      commitTxId: commit.txid,
+      commitOutputIndex: commit.outputIndex,
+      commitAmountSompi,
+      commitScriptPublicKey,
+      builder,
+      revealTargetAddress: changeTo,
+      revealAmountSompi: commitAmountSompi, // pre-fee placeholder; real value = commit - fee
+      signer: { privateKey, address: sourceAddress },
+      revealPriorityFeeSompi,
+      log,
+    });
+  } catch (error) {
+    const failed = (await patchPendingTransfer(cleanAssetId, { status: "reveal-failed", lastError: error?.message || String(error) }).catch(() => null)) || record;
+    throw revealPendingError(error, failed);
+  }
+  await clearPendingKnsTransfer(cleanAssetId).catch(() => {});
   onStatus({ status: "revealed", revealTxid: reveal.txid });
 
+  const verified = await verifyKnsTransfer({ fullDomain, sourceAddress, recipient, onStatus });
+  return {
+    domain: fullDomain,
+    recipientAddress: recipient,
+    commitTxid: commit.txid,
+    revealTxid: reveal.txid,
+    verified: Boolean(verified),
+  };
+}
+
+async function verifyKnsTransfer({ fullDomain, sourceAddress, recipient, onStatus }) {
   onStatus({ status: "verifying" });
   clearKnsCache(sourceAddress);
   clearKnsCache(recipient);
@@ -553,14 +797,107 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
     { timeoutMs: 90_000 },
   );
   onStatus({ status: verified ? "confirmed" : "pending-confirmation", domain: fullDomain });
+  return verified;
+}
 
-  return {
-    domain: fullDomain,
-    recipientAddress: recipient,
-    commitTxid: commitTxId,
-    revealTxid: reveal.txid,
-    verified: Boolean(verified),
-  };
+// Finishes a transfer left between commit and reveal ("Finish transfer" / "Retry reveal"):
+// rebuilds the redeem script from the signer's key and the recorded payload, finds the commit
+// output (on chain at the P2SH address, else the recorded commit txid, which may still be in the
+// mempool) and reveals it. `signer` must be the key that started the transfer (the record's
+// `source` says which). Returns { status: "revealed" | "already-transferred" | "no-commit", ... }:
+// - "already-transferred": the domain already belongs to the recipient; the record is cleared.
+// - "no-commit": no commit was ever recorded or found. The record is kept, since a just-sent
+//   commit can take a moment to show; the caller may offer clearPendingKnsTransfer to discard it.
+export async function resumeKnsTransfer({ engine, assetId, signer = null, onStatus = () => {}, log = () => {} }) {
+  const privateKey = signer?.privateKey || engine?.privateKey;
+  const sourceAddress = signer?.address || engine?.address;
+  if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before finishing a domain transfer.");
+  const record = await getPendingKnsTransfer(assetId);
+  if (!record) throw new Error("There is no unfinished transfer for this domain.");
+  if (record.source?.address && record.source.address !== sourceAddress) {
+    throw new Error("This transfer was started from another address. Open the account that sent it to finish it.");
+  }
+  const fullDomain = record.domain;
+  const recipient = record.recipient;
+
+  const payloadJson = buildTransferPayload(record.assetId, recipient);
+  const xOnlyPubkeyHex = xOnlyPublicKeyHexFromPrivateKey(privateKey);
+  const { builder, commitScriptPublicKey, commitAddressString } = buildKnsRedeemScript(engine.kaspa, xOnlyPubkeyHex, payloadJson);
+  if (record.commitAddress && record.commitAddress !== commitAddressString) {
+    throw new Error("This key does not match the unfinished transfer's commit address.");
+  }
+
+  await engine.connect();
+  onStatus({ status: "locating-commit" });
+  const lookup = (rpc) => rpc.getUtxosByAddresses([commitAddressString]);
+  const found = await engine.withRpc(lookup, { retries: 1, label: "KNS commit lookup" }).catch(() => null);
+  const entries = Array.isArray(found?.entries) ? found.entries : [];
+  const wantAmount = record.commitAmountSompi != null ? BigInt(record.commitAmountSompi) : null;
+  const entry = entries.find((e) => e?.outpoint?.transactionId === record.commitTxId)
+    || entries.find((e) => wantAmount != null && BigInt(e?.amount ?? 0) === wantAmount)
+    || entries[0]
+    || null;
+
+  let commitTxId;
+  let commitOutputIndex;
+  let commitAmountSompi;
+  if (entry) {
+    commitTxId = entry.outpoint.transactionId;
+    commitOutputIndex = Number(entry.outpoint.index) || 0;
+    commitAmountSompi = BigInt(entry.amount);
+  } else {
+    // Nothing unspent at the commit address. Either the reveal already went through (the
+    // domain moved), the commit is still only in the mempool (use the recorded txid), or it
+    // never went out.
+    const owner = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL }).catch(() => null);
+    if (owner?.ownerAddress === recipient) {
+      await clearPendingKnsTransfer(record.assetId).catch(() => {});
+      onStatus({ status: "confirmed", domain: fullDomain });
+      return { status: "already-transferred", domain: fullDomain, recipientAddress: recipient, verified: true };
+    }
+    if (!record.commitTxId) {
+      onStatus({ status: "no-commit" });
+      return { status: "no-commit", domain: fullDomain, recipientAddress: recipient, record };
+    }
+    commitTxId = record.commitTxId;
+    commitOutputIndex = Number(record.commitOutputIndex) || 0;
+    commitAmountSompi = BigInt(record.commitAmountSompi);
+  }
+  if (commitTxId !== record.commitTxId || commitOutputIndex !== Number(record.commitOutputIndex || 0)) {
+    await patchPendingTransfer(record.assetId, { commitTxId, commitOutputIndex, status: "committed" }).catch(() => {});
+  }
+
+  onStatus({ status: "revealing" });
+  let reveal;
+  try {
+    reveal = await buildAndSubmitKnsReveal({
+      engine,
+      commitTxId,
+      commitOutputIndex,
+      commitAmountSompi,
+      commitScriptPublicKey,
+      builder,
+      revealTargetAddress: record.revealTargetAddress || sourceAddress,
+      revealAmountSompi: commitAmountSompi,
+      signer: { privateKey, address: sourceAddress },
+      revealPriorityFeeSompi: record.revealPriorityFeeSompi != null ? BigInt(record.revealPriorityFeeSompi) : KNS_ECONOMICS.revealPriorityFeeSompi,
+      log,
+    });
+  } catch (error) {
+    if (isAlreadyRevealedError(error)) {
+      // Our own earlier reveal is in (only this key can spend the commit).
+      await clearPendingKnsTransfer(record.assetId).catch(() => {});
+      onStatus({ status: "revealed", revealTxid: null });
+      const verified = await verifyKnsTransfer({ fullDomain, sourceAddress, recipient, onStatus });
+      return { status: "revealed", domain: fullDomain, recipientAddress: recipient, commitTxid: commitTxId, revealTxid: null, verified: Boolean(verified) };
+    }
+    const failed = (await patchPendingTransfer(record.assetId, { status: "reveal-failed", lastError: error?.message || String(error) }).catch(() => null)) || record;
+    throw revealPendingError(error, failed);
+  }
+  await clearPendingKnsTransfer(record.assetId).catch(() => {});
+  onStatus({ status: "revealed", revealTxid: reveal.txid });
+  const verified = await verifyKnsTransfer({ fullDomain, sourceAddress, recipient, onStatus });
+  return { status: "revealed", domain: fullDomain, recipientAddress: recipient, commitTxid: commitTxId, revealTxid: reveal.txid, verified: Boolean(verified) };
 }
 
 // --- profile field editing orchestration -------------------------------------
@@ -584,12 +921,13 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
   const revealTargetAddress = engine.address;
 
   onStatus({ status: "committing", key });
-  const commit = await sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, log });
+  const commit = await sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, commitScriptPublicKey, commitAmountSompi, log });
   savePendingCommit({
     kind: "profile",
     assetId,
     key,
     commitTxId: commit.txid,
+    commitOutputIndex: commit.outputIndex,
     commitAmountSompi,
     commitScriptPublicKeyHex: commitScriptPublicKey.script,
     redeemScriptHex,
@@ -603,6 +941,7 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
   const reveal = await buildAndSubmitKnsReveal({
     engine,
     commitTxId: commit.txid,
+    commitOutputIndex: commit.outputIndex,
     commitAmountSompi,
     commitScriptPublicKey,
     builder,

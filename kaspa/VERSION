@@ -1,0 +1,32 @@
+Kaspa browser SDK (rusty-kaspa wasm, web target) - provenance of kaspa/kaspa.js + kaspa/kaspa_bg.wasm
+Recorded 2026-10-05 for audit finding DSK-005. Checksums: kaspa/SHA256SUMS (verified by tools/check-wasm.sh).
+
+KNOWN
+  sdk version():      2.0.1        (what kaspa.version() returns from this binary; the rusty-kaspa
+                                    workspace version it was built from)
+  committed in:       KaChat-Desktop c60c96d (2026-07-28), the only commit that touches kaspa_bg.wasm
+  source at the time: a local "rusty-kaspa-master-2.zip" (a snapshot of rusty-kaspa master), vendored
+                      as vendor/rusty-kaspa-master-2.zip and removed from the repo in 15d6d6d
+  build command:      tools/setup-wasm-from-rusty-zip.sh -> (cd rusty-kaspa/wasm && ./build-web --sdk),
+                      copying wasm/web/kaspa/{kaspa.js,kaspa_bg.wasm}
+  build host:         Linux x86_64, rustup "stable-x86_64-unknown-linux-gnu" toolchain
+                      (paths embedded in the binary), not the macOS flow the setup script documents
+  rustc commit:       59807616e1fa2540724bfbac14d7976d7e4a3860 (embedded rustc/<hash> path)
+  crates seen in the binary: wasm-bindgen 0.2.100, workflow-* 0.18.0, secp256k1 0.29.1
+  sha256 kaspa_bg.wasm: c1768cd48dfeafb2b07077fa21700075370696e76ab9c180376c32cef8cac80d
+  sha256 kaspa.js:      f481d7a0df21fc2557809c34891af2f2ecf4e5d69889591665c8937734db4075
+
+UNKNOWN (not recoverable from the repo or the binary)
+  rusty-kaspa commit / tag:  UNKNOWN - the zip was a "master" snapshot and was deleted; no commit hash
+                             is embedded. 2.0.1 narrows it to the 2.0.x line on master.
+  rustc release number:      UNKNOWN - only the commit hash above is known.
+  wasm-pack version:         UNKNOWN
+  reproducibility:           NOT verified - nobody has rebuilt this binary and matched the checksum.
+
+TO CLOSE THE GAP
+  Rebuild from a pinned rusty-kaspa tag/commit, record it here with the wasm-pack and rustc
+  versions, and update kaspa/SHA256SUMS in the same commit (bash tools/check-wasm.sh --update).
+
+Kasia cipher (cipher/) for comparison: built from vendor/kasia-cipher (in this repo; Cargo.lock pins
+rusty-kaspa v1.0.0 = eb71df4d284593fccd1342094c37edc8c000da85 for kaspa-addresses / kaspa-wallet-keys)
+with the same Linux toolchain (rustc 59807616...). Checksums: cipher/SHA256SUMS.

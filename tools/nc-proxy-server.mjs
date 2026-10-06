@@ -1,164 +1,64 @@
 #!/usr/bin/env node
-// Standalone /nc-proxy server for the STATIC (nginx-served) test deployment.
+// Standalone /nc-proxy server for STATIC (nginx-served) deployments: kachat.app/desktop and
+// kachatdesktoptest.duckdns.org, where there is no Vite server to provide the relay.
 //
-// The app routes several cross-origin, CORS-less calls through a same-origin
-//   /nc-proxy/<encodeURIComponent(origin)>/<path>
-// passthrough that the Vite dev server provides via vite.config.mjs's nextcloudProxy().
-// A static `vite build` has no dev server, so this tiny server reproduces that endpoint for:
-//   - KNS name resolution        (engine/kns.js — always proxied; some endpoints omit CORS)
-//   - link-preview og: scraping  (ui/app.js — x-preview: crawler UA)
-//   - Nextcloud WebDAV/OCS        (ui/nextcloud.js — opt-in)
-// (Indexer + api.kaspa.org are NOT proxied in a production build — they go direct with CORS.)
+// All relay behaviour lives in ./relay-guard.mjs, shared with vite.config.mjs, so the two can no
+// longer drift apart. DEPLOY BOTH FILES side by side (e.g. /opt/kachat-ncproxy/nc-proxy-server.mjs
+// and /opt/kachat-ncproxy/relay-guard.mjs); this file alone will not start. Node 20+, no packages.
 //
-// SSRF hardening: unlike the dev-server version (which allows RFC1918 for a LAN Nextcloud), this
-// is PUBLIC-facing and proxies arbitrary user-pasted URLs (link previews), so it RESOLVES the
-// target host and blocks any private / loopback / link-local / metadata / CGNAT address — on the
-// initial target and on every redirect hop. Public URLs (KNS, link targets, hosted Nextcloud)
-// keep working; a request that would reach the server's own network is refused.
+// This server is PUBLIC-facing, so private/LAN addresses are never reachable from it (unlike a
+// private dev server with KACHAT_RELAY_ALLOW_PRIVATE=1).
 //
-// Keep the forwarding behavior in sync with nextcloudProxy() in vite.config.mjs.
+// Environment:
+//   NC_PROXY_PORT / NC_PROXY_HOST     listen address (default 0.0.0.0:8790)
+//   NC_PROXY_UPSTREAM_TIMEOUT_MS      read inactivity limit (default 30000; writes get >= 120 s)
+//   KACHAT_TRUSTED_PROXIES            peers whose X-Forwarded-For is believed for rate limiting.
+//                                     Default `loopback`. In a container the reverse proxy on the
+//                                     host arrives from the bridge gateway (e.g. 172.17.0.1), so
+//                                     set e.g. KACHAT_TRUSTED_PROXIES=172.17.0.1 there, and have
+//                                     nginx send `X-Forwarded-For $remote_addr`. See relay-guard.mjs.
+//   KACHAT_TRUST_CF_CONNECTING_IP=1   also believe cf-connecting-ip from a trusted proxy (only when
+//                                     that proxy really sits behind Cloudflare)
+//   KACHAT_RELAY_RATE_MAX             requests per client per minute (default 600)
+//   CHANGENOW_API_KEY                 optional server ChangeNOW key for the app's swap calls; it
+//                                     needs nginx to pass the public Host (proxy_set_header Host $host)
+//   KACHAT_CHANGENOW_RATE_MAX         key-attached ChangeNOW calls per client per minute (default 30)
 import http from "node:http";
-import https from "node:https";
-import dns from "node:dns/promises";
+import { createRelay } from "./relay-guard.mjs";
 
 const PORT = Number(process.env.NC_PROXY_PORT || 8790);
 const HOST = process.env.NC_PROXY_HOST || "0.0.0.0";
-const MAX_REDIRECT_HOPS = 5;
-// A slow or wedged upstream (a busy api.kaspa.org query, a dead link-preview host)
-// must not hang the request until nginx's 120s read-timeout turns it into a 504.
-// Fail fast on socket inactivity instead, so the client gets a prompt error.
-const UPSTREAM_TIMEOUT_MS = Number(process.env.NC_PROXY_UPSTREAM_TIMEOUT_MS || 30000);
 
-function ipIsBlocked(ip) {
-  const v4 = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (v4) {
-    const a = Number(v4[1]), b = Number(v4[2]);
-    if (a === 0 || a === 10 || a === 127) return true;         // this-host, 10/8, loopback
-    if (a === 169 && b === 254) return true;                    // link-local + cloud metadata
-    if (a === 172 && b >= 16 && b <= 31) return true;           // 172.16/12
-    if (a === 192 && b === 168) return true;                    // 192.168/16
-    if (a === 100 && b >= 64 && b <= 127) return true;          // CGNAT 100.64/10
-    return false;
-  }
-  const low = ip.toLowerCase();
-  if (low === "::1" || low === "::") return true;
-  if (low.startsWith("::ffff:")) return ipIsBlocked(low.slice("::ffff:".length)); // v4-mapped
-  if (low.startsWith("fe80") || low.startsWith("fc") || low.startsWith("fd")) return true; // link-local + ULA
-  return false;
-}
+const relay = createRelay({
+  allowPrivate: false,
+  trustedProxies: process.env.KACHAT_TRUSTED_PROXIES,
+  trustCfConnectingIp: String(process.env.KACHAT_TRUST_CF_CONNECTING_IP || "") === "1",
+  readTimeoutMs: Number(process.env.NC_PROXY_UPSTREAM_TIMEOUT_MS || 30000),
+  rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
+  changenowApiKey: () => process.env.CHANGENOW_API_KEY || "",
+  changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
+  log: (line) => console.warn(line),
+});
 
-async function hostBlocked(hostname) {
-  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
-  if (!h || h === "localhost" || h.endsWith(".localhost") || h === "metadata.google.internal") return true;
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h) || h.includes(":")) return ipIsBlocked(h);
-  try {
-    const addrs = await dns.lookup(h, { all: true });
-    return addrs.length === 0 || addrs.some((a) => ipIsBlocked(a.address));
-  } catch {
-    return true; // unresolvable -> refuse
-  }
-}
-
-async function handle(req, res) {
+const server = http.createServer((req, res) => {
   // Cheap liveness endpoint for the container healthcheck (not proxied).
   if (req.url === "/health" || req.url === "/healthz") {
-    res.statusCode = 200; res.setHeader("content-type", "text/plain"); res.end("ok"); return;
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+    return;
   }
-  // nginx passes the full (still URL-encoded) path; strip the mount prefix to mirror connect's
-  // behavior. Accept an optional /desktop prefix so the same server works whether the app is
-  // hosted at the origin root (/nc-proxy/...) or under a subpath (/desktop/nc-proxy/...). We do
-  // NOT use an nginx `rewrite` for the strip because rewrite decodes %2F and corrupts the encoded
-  // origin — nginx just proxy_pass'es the raw URI and we strip it here.
-  let rest = (req.url || "").replace(/^(?:\/desktop)?\/nc-proxy(?=\/|$)/, "");
-  const match = /^\/([^/]+)(\/.*)?$/.exec(rest);
-  let origin = null;
-  try { origin = match ? new URL(decodeURIComponent(match[1])) : null; } catch { /* below */ }
-  if (!origin || (origin.protocol !== "http:" && origin.protocol !== "https:")) {
-    res.statusCode = 400; res.end("Bad proxy target"); return;
-  }
-  if (await hostBlocked(origin.hostname)) {
-    res.statusCode = 403; res.end("Proxy target not allowed"); return;
-  }
-
-  const headers = { ...req.headers, host: origin.host };
-  delete headers.origin;
-  delete headers.referer;
-  if (headers["x-preview"] === "1") {
-    const h = origin.hostname.replace(/^www\./, "").toLowerCase();
-    const browserUaHosts = new Set(["x.com", "twitter.com", "mobile.twitter.com"]);
-    headers["user-agent"] = browserUaHosts.has(h)
-      ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-      : "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
-    delete headers.accept;
-    headers.accept = "text/html,application/xhtml+xml";
-  }
-  delete headers["x-preview"];
-  const soft404 = headers["x-proxy-soft-404"] === "1";
-  delete headers["x-proxy-soft-404"];
-
-  function forward(target, hop) {
-    const client = target.protocol === "http:" ? http : https;
-    const upstream = client.request(
-      {
-        protocol: target.protocol,
-        hostname: target.hostname,
-        port: target.port || (target.protocol === "http:" ? 80 : 443),
-        method: req.method,
-        path: `${target.pathname}${target.search}` || "/",
-        headers: { ...headers, host: target.host },
-      },
-      (upstreamRes) => {
-        const status = upstreamRes.statusCode || 502;
-        const location = upstreamRes.headers.location;
-        if (location && status >= 300 && status < 400 && hop < MAX_REDIRECT_HOPS
-            && (req.method === "GET" || req.method === "HEAD")) {
-          upstreamRes.resume();
-          let next = null;
-          try { next = new URL(location, target); } catch { next = null; }
-          if (next && (next.protocol === "http:" || next.protocol === "https:")) {
-            // A redirect must obey the same SSRF guard as the original target.
-            hostBlocked(next.hostname).then((blocked) => {
-              if (blocked) { if (!res.headersSent) res.writeHead(403); res.end("Redirect target not allowed"); }
-              else forward(next, hop + 1);
-            });
-            return;
-          }
-        }
-        const mask404 = soft404 && upstreamRes.statusCode === 404;
-        const responseHeaders = { ...upstreamRes.headers };
-        if (mask404) responseHeaders["x-upstream-status"] = "404";
-        res.writeHead(mask404 ? 200 : status, responseHeaders);
-        upstreamRes.pipe(res);
-      },
-    );
-    let timedOut = false;
-    // Socket-inactivity timeout: if the upstream stalls (no bytes for this long) on
-    // connect, headers, or body, drop it and answer 504 immediately rather than
-    // letting nginx wait out its own 120s and return the 504 much later.
-    // A write (a multi-megabyte Nextcloud backup PUT) can sit silent while the server stores it;
-    // cutting it short could leave a short file behind. Writes get at least two minutes.
-    const isWrite = !["GET", "HEAD", "OPTIONS"].includes(String(req.method || "GET").toUpperCase());
-    upstream.setTimeout(isWrite ? Math.max(UPSTREAM_TIMEOUT_MS, 120000) : UPSTREAM_TIMEOUT_MS, () => {
-      timedOut = true;
-      if (!res.headersSent) res.writeHead(504, { "content-type": "text/plain" });
-      res.end("Proxy upstream timeout");
-      upstream.destroy();
-    });
-    upstream.on("error", (error) => {
-      if (timedOut) return; // already answered 504 on timeout
-      if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
-      res.end(`Proxy error: ${error.message}`);
-    });
-    if (hop === 0) req.pipe(upstream); else upstream.end();
-  }
-  forward(new URL(match[2] || "/", `${origin.protocol}//${origin.host}`), 0);
-}
-
-http.createServer((req, res) => {
-  handle(req, res).catch((e) => {
+  // nginx passes the raw (still URL-encoded) URI; strip the mount here. An optional /desktop
+  // prefix lets the same server sit behind /nc-proxy/ or /desktop/nc-proxy/. Do NOT use an nginx
+  // `rewrite` for this: it decodes %2F and corrupts the encoded origin.
+  const rest = String(req.url || "").replace(/^(?:\/desktop)?\/nc-proxy(?=\/|\?|$)/, "");
+  try {
+    relay.handle(req, res, rest);
+  } catch (error) {
     if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
-    res.end(`nc-proxy error: ${e?.message || e}`);
-  });
-}).listen(PORT, HOST, () => {
-  console.log(`nc-proxy listening on ${HOST}:${PORT}`);
+    res.end(`nc-proxy error: ${error?.message || error}`);
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`nc-proxy listening on ${HOST}:${server.address().port}`);
 });
