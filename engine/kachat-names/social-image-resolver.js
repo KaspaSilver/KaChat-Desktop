@@ -103,6 +103,8 @@ const socialQuickTimeoutMs = 5_000;
 export const socialRecentMs = 300_000;
 
 const maxEntries = 500;
+/** iOS 6ef968a's one-time flag: empty cached answers were dropped once. */
+export const socialEmptyRecheckKey = "kachat_social_empty_rechecked_v1";
 const pageMaxBytes = 3_000_000;
 const jsonMaxBytes = 512_000;
 const htmlAccept = "text/html,application/xhtml+xml";
@@ -222,8 +224,34 @@ export class KachatSocialImageResolver {
    *  entry its index lists is copied here unless this cache has that link already, then the old
    *  keys go. Resolves the number of entries moved. Never throws. */
   migrated() {
-    if (!this._migration) this._migration = this._migrateLegacy().catch(() => 0);
+    if (!this._migration) {
+      this._migration = this._migrateLegacy().catch(() => 0)
+        .then(async (moved) => { await this._recheckEmptyOnce().catch(() => {}); return moved; });
+    }
     return this._migration;
+  }
+
+  /** Once (iOS 6ef968a, flag `kachat_social_empty_rechecked_v1`): stored answers with nothing at all
+   *  are dropped so they are looked up again - earlier builds cached FxTwitter's wrong "User not
+   *  found" as an account with no avatar, banner or bio. */
+  async _recheckEmptyOnce() {
+    if (!this.deps.storage) return;
+    if (await this._storageGet(socialEmptyRecheckKey)) return;
+    const index = parseIndex(await this._storageGet(this._indexKey));
+    let dropped = 0;
+    for (const link of [...index.keys()]) {
+      const text = await this._storageGet(this._prefix + link);
+      let empty = false;
+      try { empty = cleanProfile(JSON.parse(text)?.profile).isEmpty; } catch { empty = false; }
+      if (empty) {
+        index.delete(link);
+        await this._storageRemove(this._prefix + link);
+        dropped += 1;
+      }
+    }
+    if (dropped) await this._storageSet(this._indexKey, JSON.stringify([...index.entries()]));
+    await this._storageSet(socialEmptyRecheckKey, "1");
+    if (dropped) this._log(`[KachatSocial] ${dropped} empty cached answer(s) will be looked up again`);
   }
 
   async _migrateLegacy() {
@@ -456,9 +484,12 @@ export class KachatSocialImageResolver {
         // the avatar alone. Each step's outcome is logged: one network can be challenged or
         // rate-limited where another is not.
         const r = await this._json(`https://api.fxtwitter.com/${handle}`, { signal, timeoutMs: socialQuickTimeoutMs });
-        if (r && (r.status === 200 || r.status === 404) && r.json != null) {
+        // Only a profile is taken from FxTwitter (iOS 6ef968a). Its "User not found" is not final: it
+        // says that for real accounts too (@Curiousbeing99, 2026-10-07), so X's own page below decides
+        // whether the account is gone (only ITS 404/410 does), then unavatar.io for the avatar.
+        if (r && r.status === 200 && r.json != null) {
           const p = S.fxTwitterProfile(r.json);
-          if (p) return p;
+          if (p && !p.isEmpty) return p;
         }
         this._log(`[KachatSocial] x ${source.handle}: FxTwitter ${r ? `HTTP ${r.status}` : "no answer"}`);
         break;

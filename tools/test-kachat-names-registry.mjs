@@ -1483,6 +1483,19 @@ async function runSocialResolver(r) {
   r.eq(calls.map((c) => c.agent), ["browser", "crawler"], "resolver: X's page asked as a crawler");
   r.check(calls[1].timeoutMs === 6000, "resolver: a page request carries the 6 s limit");
 
+  // iOS 6ef968a: FxTwitter's "User not found" (404) is not final - X's own page decides
+  calls.length = 0;
+  routes.set("https://api.fxtwitter.com/curiousbeing99", { status: 404, body: { code: 404, message: "User not found" } });
+  routes.set("https://x.com/curiousbeing99", { body: "<meta property=\"og:image\" content=\"https://pbs.twimg.com/profile_images/7/c_200x200.jpg\"><meta property=\"og:description\" content=\"real account\">" });
+  const curious = await res.resolve("x.com/curiousbeing99");
+  r.eq([curious.kind, curious.profile?.avatar, curious.profile?.bio], ["answered", "https://pbs.twimg.com/profile_images/7/c_400x400.jpg", "real account"], "resolver: FxTwitter 404 falls through to X's page (a real account still shows)");
+  r.eq(calls.map((c) => c.url), ["https://api.fxtwitter.com/curiousbeing99", "https://x.com/curiousbeing99"], "resolver: FxTwitter 404, then X's page");
+  // a 200 with an empty profile also falls through; only X's page 404 means gone
+  routes.set("https://api.fxtwitter.com/emptyfx", { body: { code: 200, user: {} } });
+  routes.set("https://x.com/emptyfx", { status: 404, body: "" });
+  const emptyFx = await res.resolve("x.com/emptyfx");
+  r.eq([emptyFx.kind, emptyFx.profile], ["answered", { avatar: null, banner: null, bio: null }], "resolver: an empty FxTwitter 200 falls through; X's page 404 means gone");
+
   // X behind a login wall (no profile tags): "couldn't look it up", unavatar.io for the avatar
   calls.length = 0;
   routes.set("https://api.fxtwitter.com/walled", null);
@@ -1643,10 +1656,28 @@ async function runProfileCache(r) {
   bigMem.set(`${socialImageLegacyCachePrefix}index`, JSON.stringify(legacyIndex));
   await new KachatSocialImageResolver({ fetchText, storage: bigStorage }).migrated();
   r.check(JSON.parse(bigMem.get(`${socialImageCachePrefix}index`)).length === 500 && !bigMem.has(`${socialImageCachePrefix}https://x.com/u0`) && bigMem.has(`${socialImageCachePrefix}https://x.com/u509`), "profile cache: the move keeps the 500-entry bound (oldest out)");
-  r.check([...bigMem.keys()].every((k) => k.startsWith(socialImageCachePrefix)), "profile cache: no old key left after a bounded move");
+  r.check([...bigMem.keys()].every((k) => k.startsWith(socialImageCachePrefix) || k === "kachat_social_empty_rechecked_v1"), "profile cache: no old key left after a bounded move");
   const noMove = new Map([[`${socialImageLegacyCachePrefix}index`, JSON.stringify([["https://x.com/a", 1]])], [`${socialImageLegacyCachePrefix}https://x.com/a`, entry("a", 1)]]);
   await new KachatSocialImageResolver({ fetchText, storage: { get: (k) => noMove.get(k) ?? null, set: (k, v) => noMove.set(k, v) }, legacyPrefix: null }).cached("x.com/a");
   r.check(noMove.has(`${socialImageLegacyCachePrefix}index`), "profile cache: legacyPrefix null moves nothing");
+
+  // iOS 6ef968a: stored answers with nothing at all are dropped once, so they're looked up again
+  {
+    const emem = new Map();
+    const estorage = { get: (k) => emem.get(k) ?? null, set: (k, v) => { emem.set(k, v); }, remove: (k) => { emem.delete(k); } };
+    emem.set(`${socialImageCachePrefix}https://x.com/stuck`, JSON.stringify({ profile: { avatar: null, banner: null, bio: null }, checkedAt: 5 }));
+    emem.set(`${socialImageCachePrefix}https://x.com/fine`, entry("has a bio", 6));
+    emem.set(`${socialImageCachePrefix}index`, JSON.stringify([["https://x.com/stuck", 5], ["https://x.com/fine", 6]]));
+    const er = new KachatSocialImageResolver({ fetchText, storage: estorage, now: () => clock });
+    r.eq(await er.cached("x.com/stuck"), null, "profile cache: an empty cached answer is dropped once (looked up again)");
+    r.eq((await er.cached("x.com/fine"))?.bio, "has a bio", "profile cache: a non-empty cached answer stays");
+    r.eq(JSON.parse(emem.get(`${socialImageCachePrefix}index`)).map((e) => e[0]), ["https://x.com/fine"], "profile cache: the dropped answer leaves the index");
+    r.eq(emem.get("kachat_social_empty_rechecked_v1"), "1", "profile cache: the one-time flag is set");
+    emem.set(`${socialImageCachePrefix}https://x.com/later`, JSON.stringify({ profile: { avatar: null, banner: null, bio: null }, checkedAt: 7 }));
+    emem.set(`${socialImageCachePrefix}index`, JSON.stringify([["https://x.com/fine", 6], ["https://x.com/later", 7]]));
+    const er2 = new KachatSocialImageResolver({ fetchText, storage: estorage, now: () => clock });
+    r.check((await er2.cached("x.com/later")) != null, "profile cache: after the flag, an empty answer (a real gone account) is kept");
+  }
 
   // clearAll: memory and storage; a lookup in flight answers but stores nothing
   smem.set("kachat-names-profile-mainnet-v1:kaspa:qown", "{\"own\":1}");
