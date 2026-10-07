@@ -2446,6 +2446,8 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
         let base = null;
         const address = actions.myAddress;
         if (address) {
+          // the newest profile, wherever it was saved, so the new primary keeps its pictures and bio
+          try { await registry.syncOwnProfile?.(address); } catch { /* the device copy stays */ }
           base = (await registry.ownProfile(address))?.profile ?? null;
           if (!base) { try { base = (await registry.identity(address))?.profile ?? null; } catch { base = null; } }
         }
@@ -2960,7 +2962,8 @@ export function onKachatSocialChange(listener) {
  * The KaChat profile of `address` for the profile hero (iOS ContactsView, every network): the
  * avatar, banner and bio its social links show right now, looked up on this device (cached 24 h;
  * a stale answer is returned at once and refreshed in the background - see onKachatSocialChange),
- * and its Linktree link. The address's own record this device wrote comes first, then the
+ * and its Linktree link. The address's own record on this device comes first (the one it wrote,
+ * or the newer one registry.syncOwnProfile adopted from the chain - the app syncs before this), then the
  * registry's identity (on mainnet the profile-only identity: GET /profiles/{address}). `avatarUrl` / `bannerUrl` are ready for <img src> (kachatImageSrc: render
  * with referrerpolicy="no-referrer"; on an <img> error, retry with kachatImageSrc(url, { viaRelay:
  * true })). `bio` is plain text (escape it). Any piece may be null.
@@ -3624,6 +3627,9 @@ export function openLiveProfileEditor(owner = "profile") {
     if (rt && address) {
       const { registry } = rt;
       if (launched) { try { await registry.refreshIfStale(); } catch { /* use what we have */ } }
+      // Start from the newest profile, wherever it was saved (another device included; iOS
+      // 5d4ce87), so a save here never overwrites it with an older one.
+      try { await registry.syncOwnProfile?.(address); } catch { /* the device copy stays */ }
       let p = null;
       try { p = (await registry.ownProfile(address))?.profile ?? null; } catch { p = null; }
       if (!p) { try { p = (await registry.identity(address))?.profile ?? null; } catch { p = null; } }

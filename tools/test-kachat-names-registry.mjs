@@ -27,7 +27,7 @@ import * as M from "../engine/kachat-names/manifest.js";
 import * as R from "../engine/kachat-names/registry-state.js";
 import {
   KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix,
-  ownProfileStorageKey, ownProfileKeyPrefixFor, profilesUnavailablePauseMs, profileMissPauseMs,
+  ownProfileStorageKey, ownProfileKeyPrefixFor, profilesUnavailablePauseMs, profileMissPauseMs, ownProfileSyncDecision,
 } from "../engine/kachat-names/registry.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1156,6 +1156,149 @@ async function runProfilesOnly(r) {
   r.eq((await reg4.ownProfile(tn))?.profile.bio, "https://x.com/tn", "profiles: testnet own profile read from the old key");
 }
 
+/** This wallet's own profile follows the chain (iOS 5d4ce87 syncOwnProfile), on both networks:
+ *  GET /profiles/{address} is adopted when the device has no copy (a fresh import) or it is a
+ *  different record newer than the device's last save; the device copy stays when it is the same
+ *  record or newer (indexer lag right after a save). Under the profile pauses. */
+async function runOwnProfileSync(r) {
+  const txA = "a1".repeat(32), txB = "b2".repeat(32), txC = "c3".repeat(32);
+  const P = (bio) => new R.Profile({ bio });
+
+  // the rule on its own
+  r.eq(ownProfileSyncDecision(null, null), "none", "own sync rule: no indexer record -> none");
+  r.eq(ownProfileSyncDecision(null, { profile: null, txId: txA, updatedAt: 5n }), "none", "own sync rule: profile null -> none");
+  r.eq(ownProfileSyncDecision(null, { profile: P("x.com/a"), txId: null, updatedAt: 5n }), "none", "own sync rule: no txId -> none");
+  r.eq(ownProfileSyncDecision(null, { profile: P("x.com/a"), txId: txA, updatedAt: 5n }), "adopt", "own sync rule: no local copy (fresh import) -> adopt");
+  r.eq(ownProfileSyncDecision(null, { profile: P("x.com/a"), txId: txA, updatedAt: null }), "adopt", "own sync rule: no local copy, no updatedAt -> adopt");
+  r.eq(ownProfileSyncDecision({ txId: txA, at: 10 }, { profile: P("x.com/a"), txId: txA, updatedAt: 99n }), "keep", "own sync rule: same txId -> keep");
+  r.eq(ownProfileSyncDecision({ txId: txA, at: 10 }, { profile: P("x.com/a"), txId: txA.toUpperCase(), updatedAt: 99n }), "keep", "own sync rule: same txId (any case) -> keep");
+  r.eq(ownProfileSyncDecision({ txId: txA, at: 100 }, { profile: P("x.com/a"), txId: txB, updatedAt: 50n }), "keep", "own sync rule: other txId but older than the save (indexer lag) -> keep");
+  r.eq(ownProfileSyncDecision({ txId: txA, at: 100 }, { profile: P("x.com/a"), txId: txB, updatedAt: 100n }), "keep", "own sync rule: other txId, same time -> keep");
+  r.eq(ownProfileSyncDecision({ txId: txA, at: 100 }, { profile: P("x.com/a"), txId: txB, updatedAt: null }), "keep", "own sync rule: other txId without updatedAt -> keep");
+  r.eq(ownProfileSyncDecision({ txId: txA, at: 100 }, { profile: P("x.com/a"), txId: txB, updatedAt: 101n }), "adopt", "own sync rule: other txId, newer -> adopt");
+
+  for (const [network, hrp, enabled] of [["mainnet", "kaspa", false], ["testnet", "kaspatest", true]]) {
+    const me = R.addressOf(new Uint8Array(32).fill(0x51), hrp);
+    let clock = 1_800_000_000_000;
+    const seen = [];
+    let answer = null;
+    const fetch = async (url) => {
+      seen.push(url);
+      const a = typeof answer === "function" ? await answer() : answer;
+      return a ? response(a[0], a[1]) : response(404, { error: "not_found" });
+    };
+    const storage = memoryStorage();
+    let manifestCalls = 0;
+    const mk = () => new KachatNamesRegistry({
+      fetch, storage, indexerBase: () => "https://idx.test/", isEnabled: () => enabled, now: () => clock, log: () => {},
+      manifest: async () => { manifestCalls += 1; throw new Error("not needed"); },
+      getUtxosByAddresses: async () => { throw new Error("no registry reads"); },
+    });
+    const reg = mk();
+    const t = (s) => `own sync (${network}): ${s}`;
+
+    // a fresh import: no local copy -> the chain's record is adopted, stored like a save
+    answer = [200, { address: me, profile: { v: 1, avatar: "x.com/me", banner: "youtube.com/@me", bio: "x.com/me", linktree: "linktr.ee/me" }, updatedAt: clock - 5000, txId: txA }];
+    const rev0 = reg.revision;
+    r.eq(await reg.syncOwnProfile(me.toUpperCase()), true, t("fresh import adopts the chain's profile"));
+    r.check(seen[seen.length - 1] === `https://idx.test/profiles/${me}`, t("asks GET /profiles/{address} (lowercased)"));
+    r.eq(reg.revision, rev0 + 1, t("adopting bumps the revision"));
+    let own = await reg.ownProfile(me);
+    r.eq({ txId: own?.txId, at: own?.at, avatar: own?.profile.avatar, linktree: own?.profile.linktree },
+      { txId: txA, at: clock - 5000, avatar: "https://x.com/me", linktree: "https://linktr.ee/me" }, t("stored {profile (sanitized), txId, at = updatedAt}"));
+    const stored = JSON.parse(storage.map.get(ownProfileStorageKey(me)) ?? "null");
+    r.eq(stored && Object.keys(stored).sort(), ["address", "at", "profile", "txId"], t("stored under the per-network own-profile key"));
+    r.check(String(ownProfileStorageKey(me)).startsWith(`kachat-names-profile-${network}-v1:`), t("network key prefix"));
+    r.eq((await mk().ownProfile(me))?.profile.bio, "https://x.com/me", t("a new registry reads the adopted profile"));
+    if (!enabled) r.eq((await mk().identity(me)).profile?.bio, "https://x.com/me", t("profile-only identity shows the adopted profile"));
+    r.eq(manifestCalls, 0, t("no manifest / registry read"));
+
+    // the same record again: kept, nothing bumps
+    const rev1 = reg.revision;
+    r.eq(await reg.syncOwnProfile(me), false, t("same txId keeps the local copy"));
+    r.eq(reg.revision, rev1, t("keeping does not bump"));
+
+    // saved here, the indexer still shows the older record (lag): the local save stays
+    clock += 60_000;
+    await reg.noteOwnProfile({ bio: "x.com/newer" }, me, txB);
+    answer = [200, { address: me, profile: { v: 1, bio: "x.com/older" }, updatedAt: clock - 30_000, txId: txA }];
+    r.eq(await reg.syncOwnProfile(me), false, t("indexer lag right after a save: local save kept"));
+    r.eq((await reg.ownProfile(me))?.profile.bio, "https://x.com/newer", t("local save still shown"));
+
+    // saved on another device later: adopted
+    clock += 60_000;
+    answer = [200, { address: me, profile: { v: 1, bio: "x.com/other-device" }, updatedAt: clock - 1000, txId: txC }];
+    r.eq(await reg.syncOwnProfile(me), true, t("a newer record from another device is adopted"));
+    own = await reg.ownProfile(me);
+    r.eq({ txId: own?.txId, bio: own?.profile.bio }, { txId: txC, bio: "https://x.com/other-device" }, t("the other device's profile replaces the local copy"));
+    r.eq((await mk().ownProfile(me))?.txId, txC, t("adopted record persisted"));
+
+    // the indexer has no profile / answers for another address: local copy stays
+    answer = [200, { address: me, profile: null }];
+    r.eq(await reg.syncOwnProfile(me), false, t("profile null keeps the local copy"));
+    answer = [200, { address: R.addressOf(new Uint8Array(32).fill(0x52), hrp), profile: { v: 1, bio: "x.com/x" }, updatedAt: clock + 1, txId: txA }];
+    r.eq(await reg.syncOwnProfile(me), false, t("a record for another address is ignored"));
+    r.eq((await reg.ownProfile(me))?.txId, txC, t("local copy unchanged"));
+
+    // maxAgeMs: an address answered that recently is not asked again
+    let n = seen.length;
+    r.eq(await reg.syncOwnProfile(me, { maxAgeMs: 30_000 }), false, t("maxAgeMs skips a recently answered address"));
+    r.eq(seen.length, n, t("no request inside maxAgeMs"));
+    clock += 30_000;
+    answer = [200, { address: me, profile: { v: 1, bio: "x.com/other-device" }, updatedAt: clock - 60_000, txId: txC }];
+    await reg.syncOwnProfile(me, { maxAgeMs: 30_000 });
+    r.eq(seen.length, n + 1, t("asked again after maxAgeMs"));
+
+    // one sync per address at a time
+    n = seen.length;
+    let release;
+    answer = () => new Promise((res) => { release = () => res([200, { address: me, profile: { v: 1, bio: "x.com/other-device" }, updatedAt: clock, txId: txC }]); });
+    const a1 = reg.syncOwnProfile(me), a2 = reg.syncOwnProfile(me);
+    r.check(a1 === a2, t("a call while one runs joins it"));
+    await new Promise((res) => setTimeout(res, 0));
+    release();
+    await Promise.all([a1, a2]);
+    r.eq(seen.length, n + 1, t("joined calls make one request"));
+
+    // a not-address is never put in a URL
+    n = seen.length;
+    r.eq(await reg.syncOwnProfile("kaspa:not/an/address"), false, t("a non-address is not synced"));
+    r.eq(seen.length, n, t("a non-address makes no request"));
+
+    // pauses: a failure pauses the address 5 minutes (shared with profile-only lookups), a 503 all lookups 10
+    const fresh = R.addressOf(new Uint8Array(32).fill(0x53), hrp);
+    answer = [500, { error: "boom" }];
+    r.eq(await reg.syncOwnProfile(fresh), false, t("a 500 resolves false (never throws)"));
+    n = seen.length;
+    answer = [200, { address: fresh, profile: { v: 1, bio: "x.com/f" }, updatedAt: clock, txId: txA }];
+    r.eq(await reg.syncOwnProfile(fresh), false, t("a failed address is not asked again within 5 minutes"));
+    r.eq(seen.length, n, t("no request during the miss pause"));
+    clock += profileMissPauseMs;
+    r.eq(await reg.syncOwnProfile(fresh), true, t("asked again after 5 minutes"));
+    const other = R.addressOf(new Uint8Array(32).fill(0x54), hrp);
+    answer = [503, { error: "profiles off" }];
+    r.eq(await reg.syncOwnProfile(other), false, t("a 503 resolves false"));
+    r.eq(reg.profilesPausedUntil, clock + profilesUnavailablePauseMs, t("a 503 sets the 10-minute pause"));
+    n = seen.length;
+    r.eq(await reg.syncOwnProfile(me), false, t("no sync while profiles are paused"));
+    r.eq(seen.length, n, t("no request while paused"));
+    r.eq((await reg.ownProfile(me))?.txId, txC, t("own profile still there while paused"));
+
+    // no indexer: no request
+    const reg0 = new KachatNamesRegistry({ fetch, storage: memoryStorage(), indexerBase: () => "", isEnabled: () => enabled, now: () => clock, log: () => {} });
+    n = seen.length;
+    r.eq(await reg0.syncOwnProfile(me), false, t("no indexer -> false"));
+    r.eq(seen.length, n, t("no indexer -> no request"));
+  }
+
+  // an old record written as {profile, txId, savedAt} is still read (and compared)
+  const tn = R.addressOf(new Uint8Array(32).fill(0x55));
+  const st = memoryStorage();
+  st.set(ownProfileStorageKey(tn), JSON.stringify({ address: tn, profile: { v: 1, bio: "https://x.com/tn" }, txId: txA, savedAt: 1234 }));
+  const regS = new KachatNamesRegistry({ storage: st, log: () => {} });
+  r.eq((await regS.ownProfile(tn))?.at, 1234, "own sync: a savedAt record is read as at");
+}
+
 // MARK: - Live (read-only TN10 walk)
 
 async function runLive() {
@@ -1429,6 +1572,8 @@ async function main() {
   console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
   await runProfilesOnly(r);
   console.log(`+ profile-only identities (no registry): ${r.pass} pass, ${r.fail} fail`);
+  await runOwnProfileSync(r);
+  console.log(`+ own profile follows the chain (adopt / keep, both networks): ${r.pass} pass, ${r.fail} fail`);
   await runSocialResolver(r);
   console.log(`+ social profile resolver: ${r.pass} pass, ${r.fail} fail`);
   for (const f of r.failures.slice(0, 40)) console.log(`  FAIL ${f}`);

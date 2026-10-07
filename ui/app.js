@@ -3958,6 +3958,9 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { loadNotifCenter(); } catch { /* not yet initialized */ }
   // .kachat registrations in flight (testnet) pick up again for this wallet (iOS resume()).
   try { refreshKachatIdentity.at = 0; window.setTimeout(() => { try { kachatNames()?.actions.resume(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
+  // An imported or switched-to wallet's own profile comes from the chain (iOS 5d4ce87): a fresh
+  // import has no local copy, so the one saved on iOS / Android / another desktop is adopted.
+  try { window.setTimeout(() => { try { syncOwnKachatProfile(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
   const clean = String(address || "").trim();
   if (!clean) {
     state = { contacts: [], conversations: [] };
@@ -5883,6 +5886,9 @@ function refreshKachatIdentity() {
     runtime.registry.onChange?.(() => { refreshKachatIdentity.at = 0; });
   }
   runtime.registry.refreshIfStale({ maxAge: 300 })
+    // A profile saved on another device since this one's last save replaces the local copy (iOS
+    // 5d4ce87); answered at most once a minute here, the app-active hook asks on its own.
+    .then(() => syncOwnKachatProfile({ maxAgeMs: 60_000, repaint: false }))
     .then(() => runtime.registry.identity(address))
     .then((identity) => {
       if (engine.address !== address) return;
@@ -5902,6 +5908,28 @@ function refreshKachatIdentity() {
       applyKachatHeroProfile(refreshKachatIdentity.hero);
     })
     .catch(() => { /* registry unreadable: the short address stays */ });
+}
+
+/** This wallet's own profile follows the chain on every network (iOS 5d4ce87,
+ *  KachatNamesRegistry.syncOwnProfile): GET /profiles/{chatting address} is adopted when this
+ *  device has no copy (a fresh import) or the chain's is a different, newer record. Runs on app
+ *  start, when the app comes back to the front, after an import / account change and before the
+ *  Profile hero reads the profile. The registry keeps the profile pauses (no request without an
+ *  indexer, after a 503 or a recent failure) and `maxAgeMs` skips a recently answered address.
+ *  When it adopted and `repaint` is on, the hero is read again. Resolves true when it adopted. */
+function syncOwnKachatProfile({ maxAgeMs = 0, repaint = true } = {}) {
+  const runtime = kachatProfiles();
+  const address = engine.address || "";
+  if (!runtime || !address || typeof runtime.registry.syncOwnProfile !== "function") return Promise.resolve(false);
+  return runtime.registry.syncOwnProfile(address, { maxAgeMs })
+    .then((adopted) => {
+      if (adopted && repaint && engine.address === address) {
+        refreshKachatIdentity.at = 0;
+        refreshKachatIdentity();
+      }
+      return adopted;
+    })
+    .catch(() => false);
 }
 
 /** Paints the .kachat profile over the hero (testnet). `hero` = { avatarUrl, bannerUrl, bio,
@@ -10036,7 +10064,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 107;
+const APP_BUILD = 108;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -16729,6 +16757,8 @@ function renderTestnetToggle() {
 // .kachat registrations in flight resume when the app comes back to the front (iOS app-active).
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") { try { kachatNames()?.actions.resume(); } catch { /* not ready */ } }
+  // Every network: a profile saved on another device shows here too (iOS 5d4ce87 resume()).
+  if (document.visibilityState === "visible") { try { syncOwnKachatProfile({ maxAgeMs: 30_000 }); } catch { /* not ready */ } }
 });
 document.querySelector("[data-pref-testnet]")?.addEventListener("change", (event) => {
   setPreferredNetwork(event.target.checked ? "testnet" : "mainnet");
@@ -24807,6 +24837,8 @@ queueMicrotask(async () => {
     });
     installKachatIdentityRepaint();
     try { kachatNames()?.actions.resume(); } catch (error) { appendEngineLog(`.kachat resume failed: ${error?.message || error}`); }
+    // App start, every network: this wallet's own profile follows the chain (iOS 5d4ce87).
+    try { syncOwnKachatProfile(); } catch (error) { appendEngineLog(`.kachat profile sync failed: ${error?.message || error}`); }
     // .kachat news for the Profile bell (iOS 86471dd): offers, sales, renewal, expiry. Testnet only
     // until names launch (no-op without the registry runtime).
     try { startKachatNamesNotifier({ record: (row) => recordGlobalNotification(row), log: appendEngineLog }); }
