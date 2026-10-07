@@ -13072,3 +13072,12 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 
 /* ==== Your Domains > .kachat: My Offers under your names (iOS 0765ce0) ==== */
 .kl-domains-offers { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+
+/* ==== Avatars always fill their circle, whatever the photo's shape. These circles are grids whose
+   row was sized by the photo, so `height: 100%` followed the image: a tall picture drew as a tall
+   oval past the circle (it pushed the chat circle's name off the strip). One fixed cell the size of
+   the circle, with the photo cropped to it. ==== */
+.chat-circle-avatar, .call-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar { grid-template: 100% / 100%; }
+:is(.chat-circle-avatar, .call-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar) > img {
+  width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; border-radius: 50%;
+}
