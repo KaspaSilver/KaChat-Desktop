@@ -49,10 +49,16 @@
 //     As fetchText, for a JSON API; `json` null when the body isn't JSON. Derived from fetchText
 //     when not given.
 //   storage: { get(key) -> string|null, set(key, string), remove?(key) }               (optional)
-//     sync or async. The 24 h cache: one entry per profile link under
-//     "kachat-social-image-v1:<link>" (`{"profile":{"avatar","banner","bio"},"checkedAt":ms}`) and
-//     an index under "kachat-social-image-v1:index"; at most 500 entries, the oldest dropped
-//     (`remove`, or `set(key, "")` without it). Without storage the cache lives in memory only.
+//     sync or async. The 24 h cache, part of the profile cache (profile-cache.js, iOS
+//     KachatProfileCache): one entry per profile link under
+//     "kachat-profile-cache-v1:social:<link>" (`{"profile":{"avatar","banner","bio"},"checkedAt":ms}`)
+//     and an index under "kachat-profile-cache-v1:social:index"; at most 500 entries, the oldest
+//     dropped (`remove`, or `set(key, "")` without it). Without storage the cache lives in memory
+//     only. Entries under the old prefix ("kachat-social-image-v1:", listed by its index) are moved
+//     here once, before the first read (iOS 5e408f7), and the old keys removed.
+//   prefix        the key prefix (default `socialImageCachePrefix`)                    (optional)
+//   legacyPrefix  the old prefix to move entries from (default
+//                 `socialImageLegacyCachePrefix`; null: none)                          (optional)
 //   now() -> number   unix ms (default Date.now)                                        (optional)
 //   log(...args)      (default: silent)                                                 (optional)
 //
@@ -71,12 +77,18 @@
 //   resolver.onChange(listener(link, SocialProfile)) -> unsubscribe()
 //     Called whenever a lookup stores a new answer.
 //   resolver.forget(link)   drops the cached answer for one link
+//   resolver.clearAll() -> Promise   forgets every cached answer, in memory and in storage; a
+//     lookup in flight still answers its caller but stores and reports nothing (Settings > Storage
+//     > Cache > Profiles, iOS clearAll)
+//   resolver.migrated() -> Promise<number>   the one-time move from the old prefix (entries moved)
 
 import { SocialSource, SocialProfile, SocialKind } from "./registry-state.js";
 
-/** Storage key prefix of the cache. */
-export const socialImageCachePrefix = "kachat-social-image-v1:";
-const indexKey = `${socialImageCachePrefix}index`;
+/** Storage key prefix of the cache: inside the profile cache (profile-cache.js
+ *  `profileCacheSocialPrefix`). */
+export const socialImageCachePrefix = "kachat-profile-cache-v1:social:";
+/** Where the cache lived before 2026-10-07 (moved once to `socialImageCachePrefix`). */
+export const socialImageLegacyCachePrefix = "kachat-social-image-v1:";
 
 /** An answer is fresh this long (24 h). */
 export const socialFreshForMs = 24 * 3600 * 1000;
@@ -111,6 +123,18 @@ function cleanProfile(p) {
   });
 }
 
+/** A stored index: [[link, checkedAt], ...] -> Map (anything malformed dropped). */
+function parseIndex(text) {
+  if (typeof text !== "string" || !text) return new Map();
+  try {
+    const j = JSON.parse(text);
+    if (!Array.isArray(j)) return new Map();
+    return new Map(j.filter((e) => Array.isArray(e) && typeof e[0] === "string" && Number.isFinite(Number(e[1]))).map(([k, at]) => [k, Number(at)]));
+  } catch {
+    return new Map();
+  }
+}
+
 function sourceOf(sourceOrLink) {
   if (sourceOrLink instanceof SocialSource) return SocialSource.fromLink(sourceOrLink.link, SocialKind.avatar);
   if (typeof sourceOrLink === "string") return SocialSource.fromLink(sourceOrLink, SocialKind.avatar);
@@ -138,6 +162,13 @@ export class KachatSocialImageResolver {
     this._inFlight = new Map();
     this._listeners = new Set();
     this._index = null;
+    this._prefix = typeof deps.prefix === "string" && deps.prefix ? deps.prefix : socialImageCachePrefix;
+    this._indexKey = `${this._prefix}index`;
+    this._legacyPrefix = deps.legacyPrefix === undefined ? socialImageLegacyCachePrefix
+      : (typeof deps.legacyPrefix === "string" && deps.legacyPrefix ? deps.legacyPrefix : null);
+    this._migration = null;
+    /** bumped by clearAll: what was read or looked up before it is not stored again */
+    this._generation = 0;
   }
 
   _now() { return Number(this.deps.now()); }
@@ -176,18 +207,60 @@ export class KachatSocialImageResolver {
 
   async _entry(link) {
     if (this._entries.has(link)) return this._entries.get(link);
+    const generation = this._generation;
     let loading = this._loading.get(link);
     if (!loading) {
       loading = this._readEntry(link);
       this._loading.set(link, loading);
     }
     const read = await loading;
-    if (read && !this._entries.has(link)) this._entries.set(link, read);
+    if (read && generation === this._generation && !this._entries.has(link)) this._entries.set(link, read);
     return this._entries.get(link) ?? null;
   }
 
+  /** The one-time move from the old prefix (iOS: UserDefaults -> KachatProfileCache): every
+   *  entry its index lists is copied here unless this cache has that link already, then the old
+   *  keys go. Resolves the number of entries moved. Never throws. */
+  migrated() {
+    if (!this._migration) this._migration = this._migrateLegacy().catch(() => 0);
+    return this._migration;
+  }
+
+  async _migrateLegacy() {
+    const old = this._legacyPrefix;
+    if (!old || old === this._prefix || !this.deps.storage) return 0;
+    const oldIndexKey = `${old}index`;
+    const oldText = await this._storageGet(oldIndexKey);
+    if (typeof oldText !== "string" || !oldText) return 0;
+    const legacy = parseIndex(oldText);
+    const index = parseIndex(await this._storageGet(this._indexKey));
+    let moved = 0;
+    for (const [link, at] of legacy) {
+      if (!index.has(link)) {
+        const text = await this._storageGet(old + link);
+        if (typeof text === "string" && text && text.length <= 16_384) {
+          await this._storageSet(this._prefix + link, text);
+          index.set(link, at);
+          moved += 1;
+        }
+      }
+      await this._storageRemove(old + link);
+    }
+    if (index.size > maxEntries) {
+      const oldest = [...index.entries()].sort((a, b) => a[1] - b[1]).slice(0, index.size - maxEntries);
+      for (const [k] of oldest) {
+        index.delete(k);
+        await this._storageRemove(this._prefix + k);
+      }
+    }
+    await this._storageSet(this._indexKey, JSON.stringify([...index.entries()]));
+    await this._storageRemove(oldIndexKey);
+    return moved;
+  }
+
   async _readEntry(link) {
-    const text = await this._storageGet(socialImageCachePrefix + link);
+    await this.migrated();
+    const text = await this._storageGet(this._prefix + link);
     if (typeof text !== "string" || !text || text.length > 16_384) return null;
     try {
       const j = JSON.parse(text);
@@ -207,20 +280,14 @@ export class KachatSocialImageResolver {
 
   async _loadIndex() {
     if (this._index) return this._index;
-    let list = [];
-    const text = await this._storageGet(indexKey);
-    if (typeof text === "string" && text) {
-      try {
-        const j = JSON.parse(text);
-        if (Array.isArray(j)) list = j.filter((e) => Array.isArray(e) && typeof e[0] === "string" && Number.isFinite(Number(e[1])));
-      } catch { list = []; }
-    }
-    this._index = new Map(list.map(([k, at]) => [k, Number(at)]));
+    await this.migrated();
+    const read = parseIndex(await this._storageGet(this._indexKey));
+    if (!this._index) this._index = read;
     return this._index;
   }
 
   async _persist(link, entry) {
-    await this._storageSet(socialImageCachePrefix + link, JSON.stringify({ profile: entry.profile.toJSON(), checkedAt: entry.checkedAt }));
+    await this._storageSet(this._prefix + link, JSON.stringify({ profile: entry.profile.toJSON(), checkedAt: entry.checkedAt }));
     const index = await this._loadIndex();
     index.delete(link);
     index.set(link, entry.checkedAt);
@@ -229,10 +296,28 @@ export class KachatSocialImageResolver {
       for (const [k] of oldest) {
         index.delete(k);
         this._drop(k);
-        await this._storageRemove(socialImageCachePrefix + k);
+        await this._storageRemove(this._prefix + k);
       }
     }
-    await this._storageSet(indexKey, JSON.stringify([...index.entries()]));
+    await this._storageSet(this._indexKey, JSON.stringify([...index.entries()]));
+  }
+
+  /** Forgets every cached answer, in memory and in storage (Settings > Storage > Cache >
+   *  Profiles). A lookup in flight still answers its caller, but stores and reports nothing. */
+  async clearAll() {
+    this._generation += 1;
+    const links = new Set(this._entries.keys());
+    this._entries.clear();
+    this._loading.clear();
+    this._inFlight.clear();
+    this._index = null;
+    const index = await this._loadIndex();
+    for (const k of index.keys()) links.add(k);
+    this._index = new Map();
+    this._entries.clear();
+    this._loading.clear();
+    for (const k of links) await this._storageRemove(this._prefix + k);
+    await this._storageRemove(this._indexKey);
   }
 
   /** The cached answer for `link` (any age), no lookup. */
@@ -248,8 +333,8 @@ export class KachatSocialImageResolver {
     if (!source) return;
     this._drop(source.link);
     const index = await this._loadIndex();
-    if (index.delete(source.link)) await this._storageSet(indexKey, JSON.stringify([...index.entries()]));
-    await this._storageRemove(socialImageCachePrefix + source.link);
+    if (index.delete(source.link)) await this._storageSet(this._indexKey, JSON.stringify([...index.entries()]));
+    await this._storageRemove(this._prefix + source.link);
   }
 
   /** The cached profile for `link` (fresh or stale), starting a lookup in the background when
@@ -276,6 +361,7 @@ export class KachatSocialImageResolver {
     if (entry && this._now() - entry.checkedAt < maxAgeMs) return { kind: "answered", profile: entry.profile };
     const running = this._inFlight.get(key);
     if (running) return running;
+    const generation = this._generation;
     const task = (async () => {
       const started = this._now();
       let outcome = null;
@@ -283,6 +369,8 @@ export class KachatSocialImageResolver {
       try { this.deps.log(`[KachatSocial] ${source.platform} ${outcome == null ? "unreachable" : "answered"} in ${((this._now() - started) / 1000).toFixed(1)}s`); } catch { /* fine */ }
       if (outcome == null) return { kind: "unreachable", profile: (await this._entry(key))?.profile ?? null }; // keep the last answer
       const answered = cleanProfile(outcome);
+      // cleared while it ran: the caller gets the answer, the cache stays empty
+      if (generation !== this._generation) return { kind: "answered", profile: answered };
       const fresh = { profile: answered, checkedAt: this._now() };
       this._entries.set(key, fresh);
       await this._persist(key, fresh);

@@ -41,7 +41,7 @@ import {
 } from "./registry-state.js";
 
 export {
-  KachatSocialImageResolver, socialImageCachePrefix, socialFreshForMs, socialLookupDeadlineMs, socialRequestTimeoutMs, socialRecentMs,
+  KachatSocialImageResolver, socialImageCachePrefix, socialImageLegacyCachePrefix, socialFreshForMs, socialLookupDeadlineMs, socialRequestTimeoutMs, socialRecentMs,
 } from "./social-image-resolver.js";
 
 /** The storage key of the walker's cache (testnet-10). */

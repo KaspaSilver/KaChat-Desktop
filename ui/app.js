@@ -13,7 +13,7 @@ import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange } from "./kachat-names-live.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -56,7 +56,7 @@ import {
   lastMessage as engineLastMessage,
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
-import { KNSProfileLinkBuilder, safeExternalHref } from "../engine/kns.js";
+import { KNSProfileLinkBuilder, safeExternalHref, clearAllKnsCache } from "../engine/kns.js";
 import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import * as Chess from "../engine/chess.js";
@@ -10064,7 +10064,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 108;
+const APP_BUILD = 109;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -16846,7 +16846,14 @@ function cacheCategoryDefs() { return [
   { id: "broadcasts", title: "Public Chats History", detail: "Messages and reactions from Public Chats.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
   { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
   { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
-  { id: "kns", title: "KNS Profiles", detail: "Names and profile details looked up for addresses.", match: (k) => k.startsWith("kachat-kns-") && k.includes("cache") },
+  // iOS 5e408f7: one Profiles cache on every network - the identities (who has which avatar, banner,
+  // bio and Linktree; this network's 1000 most recent, loaded stale at launch), the avatar, banner
+  // and bio looked up from each social link (and their pre-2026-10-07 keys), and the .kas name
+  // lookups. Clearing it resets them in memory too. This device's own saved profile record
+  // ("kachat-names-profile-<network>-v1:<address>") is not cache and never matches here.
+  { id: "profiles", title: "Profiles", detail: "Avatars, banners and bios of your profile and of the people you see. Loaded again when you next see them.",
+    match: (k) => k.startsWith("kachat-profile-cache-v1:") || k.startsWith("kachat-social-image-v1:") || (k.startsWith("kachat-kns-") && k.includes("cache")),
+    clear: () => { kachatClearProfileCache().catch(() => {}); try { clearAllKnsCache(); } catch {} } },
 ]; }
 function formatCacheBytes(bytes) {
   if (!(bytes > 0)) return "0 KB";
@@ -16859,11 +16866,19 @@ function cacheCategories() {
   return cacheCategoryDefs().map((category) => {
     const owned = keys.filter((k) => k && category.match(k));
     let bytes = 0;
-    for (const key of owned) { try { bytes += (key.length + (localStorage.getItem(key) || "").length) * 2; } catch {} }
+    for (const key of owned) {
+      try {
+        const value = localStorage.getItem(key) || "";
+        // an emptied store ("{}" left by a reset) holds nothing
+        if (value && value !== "{}" && value !== "[]") bytes += (key.length + value.length) * 2;
+      } catch {}
+    }
     return { ...category, keys: owned, bytes };
   });
 }
 function clearCacheCategory(category) {
+  // the in-memory half first, so nothing held there is written back over the cleared keys
+  try { category.clear?.(); } catch {}
   for (const key of category.keys) { try { localStorage.removeItem(key); } catch {} }
 }
 function renderCachePage() {

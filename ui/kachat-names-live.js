@@ -19,7 +19,7 @@
 // Nothing runs at import.
 
 import "./kachat-names-live.css";
-import { KAS_UNIT, kasLabel, isNetworkAddress } from "../engine/network.js";
+import { KAS_UNIT, kasLabel, isNetworkAddress, NETWORK } from "../engine/network.js";
 import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
 import { userFacingError, chooseDialog } from "./dialogs.js";
@@ -29,6 +29,7 @@ import {
   Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress, compactAddress,
 } from "../engine/kachat-names/registry-state.js";
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
+import { ProfileIdentityStore } from "../engine/kachat-names/profile-cache.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
@@ -3017,8 +3018,13 @@ const IDENTITY_CACHE_MAX = 2000;
 const SOCIAL_CACHE_MAX = 500;
 const IMAGE_CACHE_MAX = 300;
 
-/** lowercased address -> { identity: {address,label,names,profile}|null, sig, revision, at } */
+/** lowercased address -> { identity: {address,label,names,profile}|null, sig, revision, at,
+ *  confirmedAt (unix ms of the last lookup that answered; 0 = never), fromDisk (loaded at launch
+ *  and not looked up since) } */
 const cachedIdentities = new Map();
+/** The identities kept across launches (profile-cache.js, iOS 5e408f7 KachatProfileCache): this
+ *  network's only, at most 1000, loaded once marked stale and written 2 s after a change. */
+let identityStore = null;
 /** addresses with a lookup in flight (one each) */
 const identityLookups = new Set();
 const identityListeners = new Set();
@@ -3042,6 +3048,38 @@ function trimMap(map, max) {
 }
 
 const socialSig = (p) => (p ? JSON.stringify([p.avatar ?? null, p.banner ?? null, p.bio ?? null]) : "");
+
+/** The identity store, made on first use: what the last run knew is loaded into the cache marked
+ *  stale (revision -1), so avatars and bios show at once and each is looked up again the first
+ *  time it is read - under the registry's pauses (a 503 pauses profile lookups for 10 minutes, a
+ *  failed address for 5), and a failed lookup keeps the loaded identity. */
+function profileIdentityStore() {
+  if (identityStore) return identityStore;
+  identityStore = new ProfileIdentityStore({
+    storage: SOCIAL_STORAGE,
+    network: NETWORK,
+    entries: () => {
+      const out = [];
+      for (const [key, e] of cachedIdentities) if (e.identity && e.confirmedAt > 0) out.push([key, { identity: e.identity, at: e.confirmedAt }]);
+      return out;
+    },
+  });
+  try {
+    for (const [key, saved] of identityStore.load()) {
+      if (cachedIdentities.has(key) || !isNetworkAddress(key)) continue;
+      const identity = normalizedIdentity(key, saved.identity, null);
+      if (!identity) continue;
+      cachedIdentities.set(key, { identity, sig: identitySig(identity), revision: -1, at: 0, confirmedAt: saved.at, fromDisk: true });
+    }
+    trimMap(cachedIdentities, IDENTITY_CACHE_MAX);
+  } catch { /* an unreadable store: start empty */ }
+  try {
+    const flush = () => { try { identityStore?.flush(); } catch { /* fine */ } };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); });
+  } catch { /* no window (tests) */ }
+  return identityStore;
+}
 
 /** Watches the registry (a new revision may change any label) and the social resolver (a lookup
  *  landing changes a picture or a bio) once per registry. */
@@ -3094,19 +3132,24 @@ async function lookUpIdentity(registry, key) {
     try { own = (await registry.ownProfile(key))?.profile ?? null; } catch { own = null; }
     const prev = cachedIdentities.get(key) ?? null;
     if (failed && !own) {
-      // Keep what we had; ask again in a minute rather than on every render.
+      // Keep what we had (the copy loaded at launch too); ask again in a minute rather than on
+      // every render.
       const retryMs = registry.isLaunched === false ? profileMissPauseMs : IDENTITY_RETRY_MS;
       cachedIdentities.set(key, {
         identity: prev?.identity ?? null, sig: prev?.sig ?? "", revision: registry.revision,
         at: Date.now() - IDENTITY_MAX_AGE_MS + retryMs,
+        confirmedAt: prev?.confirmedAt ?? 0, fromDisk: prev?.fromDisk === true,
       });
       return;
     }
     const next = normalizedIdentity(key, failed ? prev?.identity : identity, own);
     const sig = identitySig(next);
+    const now = Date.now();
     cachedIdentities.delete(key);
-    cachedIdentities.set(key, { identity: next, sig, revision: registry.revision, at: Date.now() });
+    cachedIdentities.set(key, { identity: next, sig, revision: registry.revision, at: now, confirmedAt: now, fromDisk: false });
     trimMap(cachedIdentities, IDENTITY_CACHE_MAX);
+    // kept across launches: written when it changed, or when a copy from the last run was confirmed
+    if (sig !== (prev?.sig ?? "") || prev?.fromDisk) { try { profileIdentityStore().schedule(); } catch { /* memory only */ } }
     if (sig !== (prev?.sig ?? "")) scheduleIdentityNotify();
   } finally {
     identityLookups.delete(key);
@@ -3129,6 +3172,7 @@ export function kachatCachedIdentity(address) {
   if (!isNetworkAddress(key)) return null;
   const { registry } = rt;
   watchIdentitySources(registry);
+  profileIdentityStore();
   const entry = cachedIdentities.get(key);
   const stale = !entry || entry.revision !== registry.revision || Date.now() - entry.at > IDENTITY_MAX_AGE_MS;
   if (stale && !identityLookups.has(key)) lookUpIdentity(registry, key);
@@ -3253,6 +3297,30 @@ export function kachatCachedProfilePieces(address) {
   if (profile.bio) pieces.bio = cachedSocialProfile(profile.bio)?.piece(SocialKind.bio) ?? null;
   pieces.linktreeUrl = Profile.linktreeLink(profile.linktree) ?? null;
   return pieces;
+}
+
+/**
+ * Settings > Storage > Cache > Profiles (iOS 5e408f7 CacheManager.resetProfilesInMemory): forgets
+ * every cached identity, social lookup (avatar, banner and bio from each link) and profile picture,
+ * in memory and in storage, and repaints; views look them up again as they need them. Only this
+ * network's stored identities are known here - the caller also removes every key under
+ * `profileCachePrefix` (the other network's too). This device's own saved profile record
+ * (`ownProfileStorageKey`) is not cache and stays. -> Promise (never rejects)
+ */
+export async function kachatClearProfileCache() {
+  try { profileIdentityStore().clear(); } catch { /* fine */ }
+  cachedIdentities.clear();
+  cachedSocial.clear();
+  for (const entry of cachedImages.values()) {
+    if (entry.state === "relayed" && entry.src?.startsWith("blob:")) { try { URL.revokeObjectURL(entry.src); } catch { /* fine */ } }
+  }
+  cachedImages.clear();
+  const blobs = [...socialImageBlobs.values()];
+  socialImageBlobs.clear();
+  for (const pending of blobs) pending.then((src) => { if (src) { try { URL.revokeObjectURL(src); } catch { /* fine */ } } }, () => {});
+  scheduleIdentityNotify();
+  try { await socialImages().clearAll(); } catch { /* storage blocked: memory is clear */ }
+  scheduleIdentityNotify();
 }
 
 /** Calls `fn()` (debounced) whenever a cached identity, profile piece or picture changed, or the

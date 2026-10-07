@@ -26,9 +26,10 @@ import * as T from "../engine/kachat-names/transaction.js";
 import * as M from "../engine/kachat-names/manifest.js";
 import * as R from "../engine/kachat-names/registry-state.js";
 import {
-  KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix,
+  KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix, socialImageLegacyCachePrefix,
   ownProfileStorageKey, ownProfileKeyPrefixFor, profilesUnavailablePauseMs, profileMissPauseMs, ownProfileSyncDecision,
 } from "../engine/kachat-names/registry.js";
+import * as PC from "../engine/kachat-names/profile-cache.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -1461,7 +1462,7 @@ async function runSocialResolver(r) {
   r.eq(calls.map((c) => [c.url, c.accept, c.agent]), [["https://api.fxtwitter.com/KaspaCurrency", "application/json", "browser"]], "resolver: X costs one JSON request");
   r.check(calls[0].timeoutMs === 5000 && calls[0].maxBytes > 0, "resolver: FxTwitter carries its 5 s limit and a read cap");
   r.eq(changes, [["https://x.com/KaspaCurrency", "https://pbs.twimg.com/profile_images/1/a_400x400.jpg"]], "resolver: onChange on a new answer");
-  r.check(typeof mem.get(`${socialImageCachePrefix}https://x.com/KaspaCurrency`) === "string", "resolver: cached under kachat-social-image-v1:<link>");
+  r.check(typeof mem.get(`${socialImageCachePrefix}https://x.com/KaspaCurrency`) === "string", "resolver: cached under kachat-profile-cache-v1:social:<link>");
   clock += 60_000;
   await res.resolve("https://twitter.com/KaspaCurrency/");
   r.eq(calls.length, 1, "resolver: an answer under five minutes old is reused");
@@ -1546,6 +1547,130 @@ async function runSocialResolver(r) {
   r.eq((await res2.cached("x.com/KaspaCurrency"))?.banner, null, "resolver: a banner X no longer shows is dropped");
 }
 
+/** The profile cache (profile-cache.js, iOS 5e408f7): identities kept per network and bounded,
+ *  loaded stale, written with a debounce; the social lookups moved once from their old keys and
+ *  cleared with clearAll; the own-profile record is never under the cache prefix. */
+async function runProfileCache(r) {
+  // keys
+  r.eq(PC.profileIdentitiesKey("mainnet"), "kachat-profile-cache-v1:identities:mainnet", "profile cache: mainnet identities key");
+  r.eq(PC.profileIdentitiesKey("testnet"), "kachat-profile-cache-v1:identities:testnet", "profile cache: testnet identities key");
+  r.check((() => { try { PC.profileIdentitiesKey("devnet"); return false; } catch { return true; } })(), "profile cache: an unknown network is refused");
+  r.eq(socialImageCachePrefix, PC.profileCacheSocialPrefix, "profile cache: the social lookups live under the profile cache prefix");
+  r.check(socialImageCachePrefix.startsWith(PC.profileCachePrefix), "profile cache: social prefix inside kachat-profile-cache-v1:");
+  r.check(!ownProfileStorageKey("kaspa:qown").startsWith(PC.profileCachePrefix) && !ownProfileStorageKey("kaspatest:qown").startsWith(PC.profileCachePrefix), "profile cache: the own-profile record is never under the cache prefix (Clear keeps it)");
+
+  // identities: encode / decode, stale on load, network kept apart, sanitized
+  const id = (address, extra = {}) => ({ address, label: null, names: [], profile: null, ...extra });
+  const entries = [
+    ["kaspa:qalice", { identity: id("kaspa:qalice", { label: "alice", names: ["alice", "al"], profile: new R.Profile({ avatar: "https://x.com/alice", bio: "javascript:alert(1)" }) }), at: 5 }],
+    ["kaspa:qempty", { identity: id("kaspa:qempty"), at: 6 }],
+    ["kaspa:qnull", { identity: null, at: 7 }],
+    ["kaspatest:qother", { identity: id("kaspatest:qother", { label: "other" }), at: 8 }],
+    ["KASPA:QUPPER", { identity: id("kaspa:qupper", { label: "up" }), at: 9 }],
+  ];
+  const text = PC.encodeProfileIdentities("mainnet", entries);
+  const back = PC.decodeProfileIdentities("mainnet", text);
+  r.eq([...back.keys()], ["kaspa:qalice", "kaspa:qupper"], "profile cache: empty, unknown and other-network identities are not kept; addresses lowercased");
+  const alice = back.get("kaspa:qalice");
+  r.check(alice?.stale === true, "profile cache: a loaded identity is marked stale");
+  r.check(alice?.identity.profile instanceof R.Profile && alice.identity.profile.avatar === "https://x.com/alice" && alice.identity.profile.bio == null, "profile cache: the loaded profile is a sanitized Profile (bad links dropped)");
+  r.eq([alice?.identity.label, alice?.identity.names, alice?.at], ["alice", ["alice", "al"], 5], "profile cache: label, names and confirmation time kept");
+  r.eq(PC.decodeProfileIdentities("testnet", text).size, 0, "profile cache: another network's store is never read as this one's");
+  r.eq(PC.decodeProfileIdentities("mainnet", "{not json").size, 0, "profile cache: unreadable store = empty");
+  r.eq(PC.decodeProfileIdentities("mainnet", JSON.stringify({ v: 1, network: "mainnet", entries: [["kaspa:qx", 1, "no", [], 1], ["kaspa:q<b>", "x", [], null, 1], ["kaspa:qy", "y", [], null, "late"]] })).size, 0, "profile cache: malformed rows dropped");
+
+  // the bound: at most 1000, the least recently confirmed out first
+  const many = [];
+  for (let i = 0; i < 1005; i += 1) many.push([`kaspa:q${i}`, { identity: id(`kaspa:q${i}`, { label: `n${i}` }), at: 10_000 - i }]);
+  const bounded = PC.decodeProfileIdentities("mainnet", PC.encodeProfileIdentities("mainnet", many));
+  r.eq(bounded.size, PC.profileIdentitiesMax, "profile cache: at most 1000 identities kept");
+  r.check(bounded.has("kaspa:q0") && bounded.has("kaspa:q999") && !bounded.has("kaspa:q1000") && !bounded.has("kaspa:q1004"), "profile cache: the oldest confirmed identities dropped first");
+  r.eq(PC.decodeProfileIdentities("mainnet", PC.encodeProfileIdentities("mainnet", many, { max: 3000 }), { max: 2 }).size, 2, "profile cache: the bound applies on load too");
+
+  // the store: debounced writes, flush, clear
+  const mem = new Map();
+  const storage = { get: (k) => mem.get(k) ?? null, set: (k, v) => { mem.set(k, v); }, remove: (k) => { mem.delete(k); } };
+  const timers = [];
+  let live = [["kaspa:qbob", { identity: id("kaspa:qbob", { label: "bob" }), at: 1 }]];
+  const store = new PC.ProfileIdentityStore({
+    storage, network: "mainnet", entries: () => live,
+    setTimer: (fn, ms) => { timers.push({ fn, ms, cleared: false }); return timers.length - 1; },
+    clearTimer: (t) => { timers[t].cleared = true; },
+  });
+  store.schedule();
+  store.schedule();
+  r.check(timers.length === 1 && timers[0].ms === PC.profileCachePersistDelayMs && store.pending, "profile cache: changes in a burst share one delayed write");
+  r.check(!mem.has(store.key), "profile cache: nothing written before the delay");
+  timers[0].fn();
+  r.check(!store.pending && PC.decodeProfileIdentities("mainnet", mem.get(store.key)).has("kaspa:qbob"), "profile cache: written after the delay");
+  r.check(new PC.ProfileIdentityStore({ storage, network: "mainnet" }).load().get("kaspa:qbob")?.stale === true, "profile cache: a new run loads it, stale");
+  r.check(new PC.ProfileIdentityStore({ storage, network: "testnet" }).load().size === 0, "profile cache: the other network's store is separate");
+  live = [];
+  store.schedule();
+  store.flush();
+  r.check(timers[1].cleared && PC.decodeProfileIdentities("mainnet", mem.get(store.key)).size === 0, "profile cache: flush writes a waiting change at once");
+  live = [["kaspa:qcarol", { identity: id("kaspa:qcarol", { label: "carol" }), at: 2 }]];
+  store.schedule();
+  store.clear();
+  r.check(timers[2].cleared && !mem.has(store.key) && !store.pending, "profile cache: clear removes the store and drops a waiting write");
+
+  // the social lookups: moved once from kachat-social-image-v1:, bounded, then cleared
+  const smem = new Map();
+  const sstorage = { get: (k) => smem.get(k) ?? null, set: (k, v) => { smem.set(k, v); }, remove: (k) => { smem.delete(k); } };
+  const entry = (bio, at) => JSON.stringify({ profile: { avatar: null, banner: null, bio }, checkedAt: at });
+  smem.set(`${socialImageLegacyCachePrefix}https://x.com/old`, entry("old one", 100));
+  smem.set(`${socialImageLegacyCachePrefix}https://github.com/kept`, entry("legacy copy", 50));
+  smem.set(`${socialImageLegacyCachePrefix}index`, JSON.stringify([["https://x.com/old", 100], ["https://github.com/kept", 50]]));
+  smem.set(`${socialImageCachePrefix}https://github.com/kept`, entry("new copy", 200));
+  smem.set(`${socialImageCachePrefix}index`, JSON.stringify([["https://github.com/kept", 200]]));
+  let fetched = 0;
+  const fetchText = async () => { fetched += 1; return { status: 200, contentType: "application/json", text: JSON.stringify({ code: 200, user: { description: "fresh" } }) }; };
+  let clock = 1_000;
+  const res = new KachatSocialImageResolver({ fetchText, storage: sstorage, now: () => clock });
+  r.eq((await res.cached("x.com/old"))?.bio, "old one", "profile cache: a lookup from the old keys is found after the move");
+  r.eq((await res.cached("github.com/kept"))?.bio, "new copy", "profile cache: the move never overwrites a newer entry");
+  r.check(![...smem.keys()].some((k) => k.startsWith(socialImageLegacyCachePrefix)), "profile cache: the old keys are removed");
+  r.eq(JSON.parse(smem.get(`${socialImageCachePrefix}index`)).map((e) => e[0]).sort(), ["https://github.com/kept", "https://x.com/old"], "profile cache: the moved entries are indexed");
+  r.eq(await res.migrated(), 1, "profile cache: the move runs once (one entry moved)");
+  r.eq(await new KachatSocialImageResolver({ fetchText, storage: sstorage }).migrated(), 0, "profile cache: nothing to move on the next run");
+  const bigMem = new Map();
+  const bigStorage = { get: (k) => bigMem.get(k) ?? null, set: (k, v) => { bigMem.set(k, v); }, remove: (k) => { bigMem.delete(k); } };
+  const legacyIndex = [];
+  for (let i = 0; i < 510; i += 1) {
+    bigMem.set(`${socialImageLegacyCachePrefix}https://x.com/u${i}`, entry(`u${i}`, i));
+    legacyIndex.push([`https://x.com/u${i}`, i]);
+  }
+  bigMem.set(`${socialImageLegacyCachePrefix}index`, JSON.stringify(legacyIndex));
+  await new KachatSocialImageResolver({ fetchText, storage: bigStorage }).migrated();
+  r.check(JSON.parse(bigMem.get(`${socialImageCachePrefix}index`)).length === 500 && !bigMem.has(`${socialImageCachePrefix}https://x.com/u0`) && bigMem.has(`${socialImageCachePrefix}https://x.com/u509`), "profile cache: the move keeps the 500-entry bound (oldest out)");
+  r.check([...bigMem.keys()].every((k) => k.startsWith(socialImageCachePrefix)), "profile cache: no old key left after a bounded move");
+  const noMove = new Map([[`${socialImageLegacyCachePrefix}index`, JSON.stringify([["https://x.com/a", 1]])], [`${socialImageLegacyCachePrefix}https://x.com/a`, entry("a", 1)]]);
+  await new KachatSocialImageResolver({ fetchText, storage: { get: (k) => noMove.get(k) ?? null, set: (k, v) => noMove.set(k, v) }, legacyPrefix: null }).cached("x.com/a");
+  r.check(noMove.has(`${socialImageLegacyCachePrefix}index`), "profile cache: legacyPrefix null moves nothing");
+
+  // clearAll: memory and storage; a lookup in flight answers but stores nothing
+  smem.set("kachat-names-profile-mainnet-v1:kaspa:qown", "{\"own\":1}");
+  await res.clearAll();
+  r.check(![...smem.keys()].some((k) => k.startsWith(socialImageCachePrefix)), "profile cache: clearAll removes every social key and the index");
+  r.check(smem.has("kachat-names-profile-mainnet-v1:kaspa:qown"), "profile cache: clearAll leaves the own-profile record");
+  r.eq(await res.cached("x.com/old"), null, "profile cache: nothing cached after clearAll");
+  let release = null;
+  const slow = new KachatSocialImageResolver({
+    fetchText: () => new Promise((resolve) => { release = () => resolve({ status: 200, contentType: "application/json", text: JSON.stringify({ code: 200, user: { description: "late" } }) }); }),
+    storage: sstorage, now: () => clock,
+  });
+  const heard = [];
+  slow.onChange((l) => heard.push(l));
+  const pending = slow.resolve("x.com/slow");
+  for (let i = 0; i < 20 && !release; i += 1) await new Promise((r2) => setTimeout(r2, 0));
+  await slow.clearAll();
+  release?.();
+  const late = await pending;
+  r.check(late.kind === "answered" && late.profile.bio === "late", "profile cache: a lookup in flight during clearAll still answers its caller");
+  r.check(heard.length === 0 && (await slow.cached("x.com/slow")) == null && !smem.has(`${socialImageCachePrefix}https://x.com/slow`), "profile cache: but stores and reports nothing");
+  r.eq(fetched, 0, "profile cache: moving and reading cached lookups made no request");
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const live = args.includes("--live");
@@ -1576,6 +1701,8 @@ async function main() {
   console.log(`+ own profile follows the chain (adopt / keep, both networks): ${r.pass} pass, ${r.fail} fail`);
   await runSocialResolver(r);
   console.log(`+ social profile resolver: ${r.pass} pass, ${r.fail} fail`);
+  await runProfileCache(r);
+  console.log(`+ profile cache (identities, bound, stale on load, social move, clear): ${r.pass} pass, ${r.fail} fail`);
   for (const f of r.failures.slice(0, 40)) console.log(`  FAIL ${f}`);
   let ok = r.fail === 0;
   if (live) ok = (await runLive()) && ok;
