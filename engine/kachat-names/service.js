@@ -60,7 +60,7 @@ export class ServiceError extends Error {
   static submitMismatch(expected, got) {
     return new ServiceError("submitMismatch", `The node accepted ${got}, expected ${expected}`, { expected, got });
   }
-  /** The manifest is an earlier registry's (v1 or v2); this app builds for v3 and waits for its
+  /** The manifest is an earlier registry's (v1 - v3); this app builds for v4 and waits for its
    *  genesis. Not a failure to show as one: the screens say the registry is being set up. */
   static registryUpgrading() { return new ServiceError("registryUpgrading", registryUpgradingMessage); }
 }
@@ -262,7 +262,7 @@ export class KachatNamesService {
     this.manifest = null;
     /** Where the manifest came from: "bundle" or the indexer URL. */
     this.manifestSource = null;
-    /** The manifest describes an earlier registry (v1 or v2): names wait for the v3 genesis manifest.
+    /** The manifest describes an earlier registry (v1 - v3): names wait for the v4 genesis manifest.
      *  The screens show "Setting up" instead of an error. Changes are announced to `onChange`. */
     this.registryUpgrading = false;
     /** Why the bundled manifest was refused. The bundle can't change while the app runs, so it is
@@ -338,7 +338,7 @@ export class KachatNamesService {
   /** The verified registry manifest: kachat-names-testnet-10.json bundled with the app, else the
    *  indexer's `GET /names/manifest`. Cached once verified. An indexer-served manifest is trusted
    *  only when every template is pinned in the app (`verifyManifest(m, { source: "indexer" })`).
-   *  An earlier registry's manifest (not registry v3) throws `ServiceError.registryUpgrading()`
+   *  An earlier registry's manifest (not registry v4) throws `ServiceError.registryUpgrading()`
    *  (code "registryUpgrading") and sets `registryUpgrading`; a refused bundled manifest is
    *  remembered and thrown again without re-reading it. */
   async loadManifest({ allowDryRun = false } = {}) {
@@ -352,12 +352,12 @@ export class KachatNamesService {
       // an indexer-served manifest is trusted only when every template is pinned in the app
       verifyManifest(m, { source: source === "bundle" ? ManifestSource.bundle : ManifestSource.indexer });
     } catch (error) {
-      // An earlier registry's manifest (an old indexer copy; the bundle is v3 since 2026-10-06) is
+      // An earlier registry's manifest (an old indexer copy; the bundle is v4 since 2026-10-07) is
       // expected, not an error: say "being upgraded", once, and stop re-reading the bundle.
       const upgrading = isRegistryUpgrading(error);
       const refused = upgrading ? ServiceError.registryUpgrading() : error;
       if (upgrading) {
-        if (!this.registryUpgrading) this._log(`[KachatNames] the ${source} manifest is an earlier registry; .kachat waits for the v3 genesis manifest`);
+        if (!this.registryUpgrading) this._log(`[KachatNames] the ${source} manifest is an earlier registry; .kachat waits for the v4 genesis manifest`);
         this._setRegistryUpgrading(true);
       }
       if (source === "bundle") this._bundleFailure = refused;
@@ -449,14 +449,6 @@ export class KachatNamesService {
     return u;
   }
 
-  /** `liveUtxo` for a price shard, which must also carry the price covenant id (registry v3). */
-  async livePriceUtxo({ script, outpoint }) {
-    const m = await this.loadManifest();
-    const u = await this.liveUtxo({ script, outpoint });
-    if (!bytesEqual(u.entry.covenantId, m.priceCovenantId)) throw ServiceError.notOnChain("a price shard");
-    return u;
-  }
-
   // MARK: Salts, signing, conversion
 
   static newSalt() { return newSalt(); }
@@ -466,7 +458,7 @@ export class KachatNamesService {
   // MARK: Submit
 
   /** Submits a signed version-1 core Tx; returns its id. Register, extend and renew carry the price
-   *  (35-8,000 TKAS) as fee on purpose - there is no high-fee guard on this path. */
+   *  (fixed tables, registry v4) as fee on purpose - there is no high-fee guard on this path. */
   async submit(tx) {
     this.requireLaunched();
     const expected = txIdHex(tx);

@@ -72,20 +72,16 @@ function offerRec(o) {
   const fields = C.makeOfferFields({ key: hx(o.key), buyer: hx(o.buyer), seller: hx(o.seller), refundAfter: u64(o.refundAfter) });
   return { fields, value: u64(o.value), utxo: utxo(o.utxo), name: typeof o.name === "string" ? o.name : null };
 }
-function shardRec(p) {
-  const fields = C.makePriceFields({ shard: u64(p.shard), authority: hx(p.authority), prices: p.prices.map(u64) });
-  return { fields, value: u64(p.value), utxo: utxo(p.utxo) };
-}
-/** The steps the app builds (price changes are the CLI's: the authority signs on KasSigner). */
-const appSteps = (v) => v.steps.filter((st) => st.op !== "setPrices");
+/** The steps the app builds: every one (registry v4 has no price changes). */
+const appSteps = (v) => v.steps;
 const commitRec = (c) => ({ name: s(c.name), owner: hx(c.owner), salt: hx(c.salt), value: u64(c.value), utxo: utxo(c.utxo) });
 
 function build(b, op, env, wallet, args, rec) {
   switch (op) {
     case "commit": return b.commit({ env, wallet, name: s(args.name), salt: hx(args.salt) });
-    case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), shard: shardRec(rec.shard), years: u64(args.years), now: u64(args.now) });
-    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), shard: shardRec(rec.shard), years: u64(args.years) });
-    case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), shard: shardRec(rec.shard), years: u64(args.years) });
+    case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), years: u64(args.years), now: u64(args.now) });
+    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
+    case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
     case "transfer": return b.transfer({ env, wallet, name: nameRec(rec.name), newOwner: hx(args.newOwner) });
     case "list": return b.list({ env, wallet, name: nameRec(rec.name), price: u64(args.price) });
     case "buy": return b.buy({ env, wallet, name: nameRec(rec.name) });
@@ -176,10 +172,9 @@ async function main() {
 
   // MARK: manifest and gate
   r.check(S.KachatNamesService.isEnabled, "testnet gate open under kachat-network-v1=testnet");
-  // the bundled testnet manifest is the live testnet-10 registry v3 (iOS 32b7b32): it verifies,
+  // the bundled testnet manifest is the live testnet-10 registry v4 (iOS d82dfb2): it verifies,
   // so testnet leaves "Setting up" (registryUpgrading stays false)
-  const BUNDLED_REGISTRY = "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24";
-  const BUNDLED_PRICE = "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338";
+  const BUNDLED_REGISTRY = "bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f";
   const bundled = new S.KachatNamesService(fakeEngine());
   let bundledEvents = 0;
   bundled.onChange((x) => { if (x === bundled) bundledEvents += 1; });
@@ -189,15 +184,15 @@ async function main() {
     r.eq(bm.network, "testnet-10", "bundled manifest network");
     r.check(!bm.isDryRun, "bundled manifest is not a dry run");
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled manifest: registry covenant id");
-    r.eq(C.hex(bm.priceCovenantId), BUNDLED_PRICE, "bundled manifest: price covenant id");
-    r.eq(bm.genesisShards.length, 8, "bundled manifest: 8 price shards");
-    r.eq(bundled.registryUpgrading, false, "bundled v3 manifest: registryUpgrading stays false (no Setting up)");
-    r.eq(bundledEvents, 0, "bundled v3 manifest: no registryUpgrading change announced");
+    r.check(bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
+    r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "bundled manifest: the pinned register table");
+    r.eq(bundled.registryUpgrading, false, "bundled v4 manifest: registryUpgrading stays false (no Setting up)");
+    r.eq(bundledEvents, 0, "bundled v4 manifest: no registryUpgrading change announced");
     r.check((await bundled.loadManifest()) === bm, "the verified bundled manifest is cached");
     r.check((await bundled.builder()) instanceof B.Builder, "builder() over the bundled manifest");
-    console.log("bundled manifest: registry v3, verified");
+    console.log("bundled manifest: registry v4, verified");
   } catch (e) {
-    r.check(false, `the bundled v3 manifest is refused: ${e.code ?? ""} ${e.message}`);
+    r.check(false, `the bundled v4 manifest is refused: ${e.code ?? ""} ${e.message}`);
   }
   // the same manifest served by an indexer verifies too: every template is pinned for its registry
   const bundledBytes = readFileSync(join(repo, "engine/kachat-names/kachat-names-testnet-10.json"));
@@ -205,17 +200,17 @@ async function main() {
   realFromIndexer._manifestData = async () => [new Uint8Array(bundledBytes), "https://idx.test/names/manifest"];
   try {
     const im = await realFromIndexer.loadManifest();
-    r.eq(C.hex(im.registryCovenantId), BUNDLED_REGISTRY, "indexer-served v3 manifest verifies (every template pinned)");
+    r.eq(C.hex(im.registryCovenantId), BUNDLED_REGISTRY, "indexer-served v4 manifest verifies (every template pinned)");
     r.eq(realFromIndexer.manifestSource, "https://idx.test/names/manifest", "indexer-served manifest source");
   } catch (e) {
-    r.check(false, `the indexer-served v3 manifest is refused: ${e.message}`);
+    r.check(false, `the indexer-served v4 manifest is refused: ${e.message}`);
   }
-  // a synthetic registryVersion 2 copy of the bundled manifest: the outdated path, "Setting up"
+  // a synthetic registryVersion 3 copy of the bundled manifest: the outdated path, "Setting up"
   const realV2 = JSON.parse(bundledBytes.toString("utf8"));
-  realV2.registryVersion = 2;
+  realV2.registryVersion = 3;
   const realV2Svc = new S.KachatNamesService(fakeEngine(), { bundledManifest: realV2 });
   await r.throws(() => realV2Svc.loadManifest(), (e) => e.code === "registryUpgrading" && realV2Svc.registryUpgrading,
-    "a registryVersion 2 bundled manifest is registryUpgrading (Setting up)");
+    "a registryVersion 3 bundled manifest is registryUpgrading (Setting up)");
   const dry = new S.KachatNamesService(fakeEngine(), { bundledManifest: v.manifest });
   await r.throws(() => dry.loadManifest(), (e) => e.code === "dryRunManifest", "a dry-run manifest is refused");
   const m = await dry.loadManifest({ allowDryRun: true });
@@ -239,7 +234,7 @@ async function main() {
   await r.throws(() => upgradingSvc.loadManifest({ allowDryRun: true }), (e) => {
     firstRefusal = e;
     return e instanceof S.ServiceError && e.code === "registryUpgrading" && e.message === S.registryUpgradingMessage;
-  }, "a manifest without registryVersion 3 is refused as registryUpgrading");
+  }, "a manifest without registryVersion 4 is refused as registryUpgrading");
   r.eq(upgradingSvc.registryUpgrading, true, "registryUpgrading set");
   r.eq(upgradingEvents, 1, "onChange announces registryUpgrading");
   r.check(S.isRegistryUpgrading(firstRefusal) && S.KachatNamesService.isRegistryUpgrading(firstRefusal), "isRegistryUpgrading(ServiceError.registryUpgrading)");
@@ -392,17 +387,9 @@ async function main() {
     const svc2 = new S.KachatNamesService(fakeEngine({ utxos: [noCov] }), { bundledManifest: v.manifest });
     svc2.loadManifest = async () => m;
     await r.throws(() => svc2.liveRegistryUtxo({ script: n.utxo.entry.script, outpoint: n.utxo.outpoint }), (e) => e.code === "notOnChain", "liveRegistryUtxo: no registry covenant id");
-    // a price shard must carry the price covenant id (registry v3)
-    const sh = shardRec(reg.records.shard);
-    const shAddr = S.p2shAddress(sh.utxo.entry.script);
-    const svc3 = new S.KachatNamesService(fakeEngine({ utxos: [plainOf(sh.utxo, shAddr)] }), { bundledManifest: v.manifest });
-    svc3.loadManifest = async () => m;
-    const liveShard = await svc3.livePriceUtxo({ script: sh.utxo.entry.script, outpoint: sh.utxo.outpoint });
-    r.check(T.utxoEntryEqual(liveShard.entry, sh.utxo.entry), "livePriceUtxo reads the shard UTXO back");
-    await r.throws(() => svc3.liveRegistryUtxo({ script: sh.utxo.entry.script, outpoint: sh.utxo.outpoint }), (e) => e.code === "notOnChain", "a shard is not a registry UTXO");
-    const svc4 = new S.KachatNamesService(fakeEngine({ utxos: [{ ...plainOf(sh.utxo, shAddr), covenantId: C.hex(m.registryCovenantId) }] }), { bundledManifest: v.manifest });
-    svc4.loadManifest = async () => m;
-    await r.throws(() => svc4.livePriceUtxo({ script: sh.utxo.entry.script, outpoint: sh.utxo.outpoint }), (e) => e.code === "notOnChain", "livePriceUtxo: a look-alike under the registry id");
+    // registry v4: no price shard to read (livePriceUtxo is gone), and no step carries a shard
+    r.eq(typeof svc.livePriceUtxo, "undefined", "registry v4: service.livePriceUtxo is gone");
+    r.check(v.steps.every((x) => x.records.shard === undefined && x.records.shards === undefined), "registry v4: no vector step carries a price shard");
   }
   const wallet = v.steps[0].wallet.map(utxo);
   const plain = wallet.map((u) => plainOf(u, s(v.deployer.address)));
@@ -431,7 +418,7 @@ async function main() {
   const registryStub = {
     prepare: async () => m, refresh: async () => {}, lookup: async (name) => ({ kind: "free", name, gap: null }),
     isAccepted: async () => false, refreshAfter: () => {}, trackOffer: async () => {}, exitGaps: async () => { throw new Error("no gaps"); },
-    noteOwnProfile: async () => {},
+    noteOwnProfile: async () => {}, graceMs: m.params.graceMs,
   };
   const actions = new A.KachatNamesActions({ engine: actEngine, service: dry, registry: registryStub, storage });
   const sg = actions.signer();
@@ -479,12 +466,11 @@ async function main() {
   });
   /** A record's UTXO as the fake node serves it. */
   const nodeUtxo = (u) => plainOf(u, S.p2shAddress(u.entry.script));
-  /** Actions over a fake node holding the step's records (name, shard, offer) and wallet, at the
+  /** Actions over a fake node holding the step's records (name, offer) and wallet, at the
    *  step's median time. `extra`: more node UTXOs; `registry`: overrides of the registry stub. */
   const actionsAt = (st, pastMedianTime = u64(st.env.blockTimeMs), { extra = [], registry = {}, blockDaa = u64(st.env.blockDaa) } = {}) => {
     const rec = st.records;
-    const shardInfo = rec.shard ? new RS.ShardInfo({ outpoint: shardRec(rec.shard).utxo.outpoint, fields: shardRec(rec.shard).fields, value: u64(rec.shard.value) }) : null;
-    const held = [rec.name && nameRec(rec.name).utxo, rec.shard && shardRec(rec.shard).utxo, rec.offer && offerRec(rec.offer).utxo].filter(Boolean).map(nodeUtxo);
+    const held = [rec.name && nameRec(rec.name).utxo, rec.offer && offerRec(rec.offer).utxo].filter(Boolean).map(nodeUtxo);
     const coins = st.wallet.map(utxo).map((u) => plainOf(u, s(v.deployer.address)));
     const engine = {
       ...fakeEngine({ utxos: [...held, ...extra, ...coins], dag: { networkId: "testnet-10", virtualDaaScore: blockDaa, pastMedianTime } }),
@@ -493,7 +479,7 @@ async function main() {
     const svc = new S.KachatNamesService(engine, { bundledManifest: v.manifest });
     svc.loadManifest = async () => m;
     const act = new A.KachatNamesActions({
-      engine, service: svc, registry: { ...registryStub, shards: async () => (shardInfo ? [shardInfo] : []), ...registry }, storage: { get: () => null, set: () => {} },
+      engine, service: svc, registry: { ...registryStub, ...registry }, storage: { get: () => null, set: () => {} },
     });
     act.feerate = async () => 100;
     return act;
@@ -507,13 +493,14 @@ async function main() {
       const plan = await extActions.plan(A.Operation.extend(ext, 1n));
       r.eq(plan.op, s(extStep.label), "actions: extend plans the vector's operation");
       r.check(plan.unsignedTx.lockTime === 0n && plan.unsignedTx.inputs.every((i) => i.sequence === 0n), "actions: extend lock time 0, sequences 0");
+      r.eq(plan.priceFee, M.paramsRenewPrice(m.params, C.utf8(ext.name).length), "actions: extend pays the fixed renewal price (registry v4)");
+      r.check(plan.inputs.every((i) => i.role !== "price.use") && plan.outputs.length === 2, "actions: extend spends no price shard (name continuation + change)");
     } catch (e) { r.check(false, `actions: extend threw ${e.stack || e}`); }
     await r.throws(() => extActions.plan(A.Operation.extend(ext, 2n)),
       (e) => e instanceof A.ActionError && e.code === "periodFull" && e.renewalOpensMs === ext.renewOpens(m.params)
         && e.message.startsWith("This name is already paid up to its longest period."), "actions: extend past the 2-period cap is periodFull");
-    // no live price shard: the price record is busy
-    await r.throws(() => actionsAt(extStep, undefined, { registry: { shards: async () => [] } }).plan(A.Operation.extend(ext, 1n)),
-      (e) => e instanceof A.ActionError && e.code === "priceBusy", "actions: extend without a live price shard is priceBusy");
+    // registry v4: no shard read, so no registry.shards() call is needed
+    r.eq(typeof A.ActionError.priceBusy, "undefined", "registry v4: ActionError.priceBusy is gone");
     await r.throws(() => extActions.plan(A.Operation.extend(ext, 0n)), (e) => e.code === "periodFull", "actions: extend by 0 is refused");
     await r.throws(() => extActions.plan(A.Operation.extend(nameInfoOf(extStep.records.name, false), 1n)),
       (e) => e.code === "periodUnknown", "actions: extend without periodStart is periodUnknown");
@@ -530,6 +517,7 @@ async function main() {
     try {
       const plan = await renActions.plan(A.Operation.renew(ren, 1n));
       r.eq(plan.op, s(renewStep.label), "actions: renew in the window plans the vector's operation");
+      r.eq(plan.priceFee, M.paramsRenewPrice(m.params, C.utf8(ren.name).length), "actions: renew pays the fixed renewal price (registry v4)");
       r.check(plan.unsignedTx.lockTime >= ren.renewOpens(m.params) && plan.unsignedTx.lockTime < u64(renewStep.env.blockTimeMs), "actions: renew lock time in the window, below the median time");
     } catch (e) { r.check(false, `actions: renew threw ${e.stack || e}`); }
     // exactly at the opening the median time has not passed it
@@ -539,47 +527,16 @@ async function main() {
     r.check(false, "no extend / in-window renew step in the vectors");
   }
 
-  // MARK: actions: a lost price shard is retried on another (registry v3)
+  // MARK: actions: one build, one submit (registry v4: no shard to lose, nothing to retry)
   if (extStep) {
     const ext = nameInfoOf(extStep.records.name);
     const act = actionsAt(extStep);
-    const sh0 = shardRec(extStep.records.shard);
-    // a second shard (index 1) at another outpoint, on the fake node
-    const f1 = C.makePriceFields({ ...sh0.fields, shard: 1n });
-    const sh1Utxo = T.makeUtxo(T.makeOutpoint(new Uint8Array(32).fill(0x77), 1), T.makeUtxoEntry({
-      amount: m.params.priceValue, script: M.templateScript(m.price, C.priceState(f1)), blockDaaScore: 1n, covenantId: m.priceCovenantId,
-    }));
-    act.engine.getUtxosWithCovenants = ((orig) => async (addresses) => [...await orig(addresses), ...(addresses.includes(S.p2shAddress(sh1Utxo.entry.script)) ? [nodeUtxo(sh1Utxo)] : [])])(act.engine.getUtxosWithCovenants.bind(act.engine));
-    const infos = [
-      new RS.ShardInfo({ outpoint: sh0.utxo.outpoint, fields: sh0.fields, value: sh0.value }),
-      new RS.ShardInfo({ outpoint: sh1Utxo.outpoint, fields: f1, value: m.params.priceValue }),
-    ];
-    act.registry = { ...act.registry, shards: async () => infos, refreshAfter: () => {} };
-    const spentShards = [];
+    act.registry = { ...act.registry, refreshAfter: () => {} };
     let submits = 0;
-    act.service.signAndSubmit = async (plan) => {
-      submits += 1;
-      const used = plan.inputs.find((i) => i.role === B.BudgetRole.priceUse).utxo.outpoint.index;
-      spentShards.push(used);
-      if (submits === 1) throw new Error("transaction rejected: already spent by another transaction in the mempool");
-      return T.txIdHex(plan.unsignedTx);
-    };
-    try {
-      const txId = await act.perform(A.Operation.extend(ext, 1n));
-      r.check(/^[0-9a-f]{64}$/.test(txId), "retry: the second attempt is submitted");
-      r.eq(submits, 2, "retry: two submits");
-      r.check(spentShards[0] !== spentShards[1], `retry: the second attempt picks the other shard (${spentShards})`);
-    } catch (e) { r.check(false, `retry: perform threw ${e.stack || e}`); }
-    // anything other than a spend conflict is not retried
-    submits = 0;
-    act.service.signAndSubmit = async () => { submits += 1; throw new Error("insufficient funds"); };
-    await r.throws(() => act.perform(A.Operation.extend(ext, 1n)), (e) => e.message === "insufficient funds", "retry: another error is thrown");
-    r.eq(submits, 1, "retry: another error is not retried");
-    // at most three attempts
-    submits = 0;
-    act.service.signAndSubmit = async () => { submits += 1; throw new Error("double spend"); };
-    await r.throws(() => act.perform(A.Operation.extend(ext, 1n)), (e) => e.message === "double spend", "retry: gives up after three attempts");
-    r.eq(submits, 3, "retry: three attempts at most");
+    act.service.signAndSubmit = async () => { submits += 1; throw new Error("transaction rejected: already spent by another transaction in the mempool"); };
+    await r.throws(() => act.perform(A.Operation.extend(ext, 1n)), (e) => /already spent/.test(e.message), "submit: a spend conflict is thrown");
+    r.eq(submits, 1, "submit: not retried (registry v4 has no price shard to pick again)");
+    r.eq(typeof A.isSpentConflict, "undefined", "registry v4: isSpentConflict is gone");
   }
   // MARK: actions: never pay more than the price the person confirmed (iOS 4f5d95e, IOS-054)
   r.eq(typeof dry.requireLaunched, "function", "IOS-058: service.requireLaunched");
@@ -605,37 +562,242 @@ async function main() {
       r.eq(submits, 3, "IOS-054: no cap (background actions) still sends");
     } catch (e) { r.check(false, `IOS-054: extend threw ${e.stack || e}`); }
 
-    // the registration keeps the quoted price as its cap and stops at priceChanged when it rose
-    const reg = actionsAt(extStep, undefined, { registry: { lookup: async (name) => ({ kind: "free", name, gap: { lo: new Uint8Array(32), hi: new Uint8Array(32).fill(0xff), outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x66), 0) } }) } });
-    reg._startDriver = () => {};
-    await r.throws(() => reg.startRegistration({ name: "pricecap", years: 1 }), (e) => /maxPrice/.test(e.message), "IOS-054: startRegistration needs the confirmed price");
-    const name = "pricecap";
-    const price = C.priceFieldsPrice(shardRec(extStep.records.shard).fields, C.utf8(name).length);
-    reg._loadPending(s(v.deployer.address));
-    const now = Date.now();
-    const rec = {
-      id: "reg-cap", name, years: 1, owner: C.hex(me), commitTxId: "aa".repeat(32), commitScript: "", commitDaa: 1, registerTxId: null,
-      cancelTxId: null, stage: A.Stage.waiting, createdAt: now, updatedAt: now, lastError: null, salt: "11".repeat(32),
-      maxPrice: (price - 1n).toString(), priceChangedTo: null,
+  }
+
+  // MARK: the registration driver registers at the fixed price, never above the confirmed one
+  const regStep = v.steps.find((x) => x.op === "register");
+  if (regStep) {
+    const rc = regStep.records;
+    const g0 = gapRec(rc.gap);
+    const c0 = commitRec(rc.commit);
+    const gapInfo = new RS.GapInfo({ lo: g0.lo, hi: g0.hi, outpoint: g0.utxo.outpoint });
+    const freeLookup = async (name) => ({ kind: "free", name, gap: gapInfo });
+    const regAt = (lookup = freeLookup) => {
+      const act = actionsAt({ ...regStep, records: {} }, undefined, { extra: [nodeUtxo(g0.utxo)], registry: { lookup } });
+      act._startDriver = () => {};
+      act._loadPending(s(v.deployer.address));
+      return act;
     };
-    reg._upsert(rec);
-    let regSubmits = 0;
-    reg.service.signAndSubmit = async () => { regSubmits += 1; return "ee".repeat(32); };
-    await reg._register(reg._find("reg-cap"), null);
-    const stopped = reg.pending.find((x) => x.id === "reg-cap");
-    r.eq(stopped.stage, A.Stage.priceChanged, "IOS-054: a registration whose price rose stops at priceChanged");
-    r.eq(A.recordPrice(stopped.priceChangedTo), price, "IOS-054: priceChangedTo is what the price record asks");
-    r.eq(regSubmits, 0, "IOS-054: nothing is registered above the cap");
-    r.check(!A.needsDriving(stopped) && A.isOpen(stopped), "IOS-054: priceChanged waits for the person (not driven, still shown)");
-    reg.acceptNewPrice("reg-cap");
-    const resumed = reg.pending.find((x) => x.id === "reg-cap");
-    r.check(resumed.stage === A.Stage.waiting && A.recordPrice(resumed.maxPrice) === price && resumed.priceChangedTo == null,
-      "IOS-054: acceptNewPrice resumes capped at the new price");
-    // at the confirmed price it goes on (here to the gap read, which the fake node lacks)
-    await reg._register(reg._find("reg-cap"), null);
-    r.check(reg.pending.find((x) => x.id === "reg-cap").stage !== A.Stage.priceChanged, "IOS-054: at the confirmed price the registration goes on");
-    reg.acceptNewPrice("reg-cap");
-    r.eq(A.recordPrice(reg.pending.find((x) => x.id === "reg-cap").maxPrice), price, "IOS-054: acceptNewPrice does nothing outside priceChanged");
+    const price = M.paramsRegisterCost(m.params, C.utf8(c0.name).length, u64(regStep.args.years));
+    r.eq(price, m.params.registerPrices[C.tier(C.utf8(c0.name).length)], "registry v4: a 1-period registration costs the registration price");
+    const recordFor = (id, cap, extra = {}) => ({
+      id, name: c0.name, years: Number(regStep.args.years), owner: C.hex(me), commitTxId: C.hex(c0.utxo.outpoint.txid), commitScript: C.hex(c0.utxo.entry.script),
+      commitDaa: Number(c0.utxo.entry.blockDaaScore), registerTxId: null, reclaimTxId: null, commitSentAt: Date.now(), commitResends: null, cancelTxId: null,
+      stage: A.Stage.waiting, createdAt: Date.now(), updatedAt: Date.now(), lastError: null, salt: C.hex(c0.salt), maxPrice: cap.toString(), ...extra,
+    });
+    // above the confirmed price: nothing is sent, the registration fails (the person decides)
+    const low = regAt();
+    let lowSubmits = 0;
+    low.service.signAndSubmit = async () => { lowSubmits += 1; return "ee".repeat(32); };
+    low._upsert(recordFor("reg-cap", price - 1n));
+    await low._register(low._find("reg-cap"), c0.utxo);
+    const stopped = low.pending.find((x) => x.id === "reg-cap");
+    r.eq(lowSubmits, 0, "IOS-054: nothing is registered above the confirmed price");
+    r.eq(stopped.stage, A.Stage.failed, "IOS-054: a registration that would pay more fails (no priceChanged stage in v4)");
+    r.check(/^The price changed to /.test(stopped.lastError ?? ""), `IOS-054: and says the price changed (${stopped.lastError})`);
+    // at the confirmed price it registers
+    const ok = regAt();
+    const sent = [];
+    ok.service.signAndSubmit = async (plan) => { sent.push(plan); return T.txIdHex(plan.unsignedTx); };
+    ok._upsert(recordFor("reg-ok", price));
+    await ok._register(ok._find("reg-ok"), c0.utxo);
+    const going = ok.pending.find((x) => x.id === "reg-ok");
+    r.eq(going.stage, A.Stage.registering, () => `the registration is sent at the confirmed price (${going.lastError})`);
+    r.eq(sent.length, 1, "one register transaction");
+    r.eq(sent[0]?.priceFee, price, "register pays registerCost (registry v4)");
+    r.check(sent[0]?.inputs.length >= 2 && sent[0].inputs[0].role === "gap.register" && sent[0].inputs[1].role === "commit" && sent[0].inputs.every((x) => x.role !== "price.use"),
+      "register spends [gap, commit, funding] - no price shard");
+    r.eq(going.registerTxId, sent[0] && T.txIdHex(sent[0].unsignedTx), "the record keeps the register txid");
+    r.eq(typeof A.Stage.priceChanged, "undefined", "registry v4: Stage.priceChanged is gone");
+    r.eq(typeof ok.acceptNewPrice, "undefined", "registry v4: acceptNewPrice is gone");
+
+    // MARK: claiming an expired name frees it first (iOS eea52b2, 4f0bd33)
+    const lapsedInfo = new RS.NameInfo({
+      name: c0.name, key: C.key(c0.name), owner: S.xonlyKey(other), price: 0n,
+      expiresAt: BigInt(Date.now()) - m.params.graceMs - 60_000n, periodStart: BigInt(Date.now()) - m.params.graceMs - 60_000n - m.params.periodMs,
+      outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x58), 2),
+    });
+    let accepted = false;
+    let refreshes = 0;
+    const claim = regAt(async (name) => ({ kind: "registered", name, info: lapsedInfo }));
+    claim.registry = { ...claim.registry, isAccepted: async () => accepted, refresh: async () => { refreshes += 1; } };
+    const performed = [];
+    claim.perform = async (op) => { performed.push(op); return "5c".repeat(32); };
+    let claimSubmits = 0;
+    claim.service.signAndSubmit = async () => { claimSubmits += 1; return "ee".repeat(32); };
+    claim._upsert(recordFor("claim", price));
+    await claim._register(claim._find("claim"), c0.utxo);
+    let cr = claim.pending.find((x) => x.id === "claim");
+    r.eq(performed.map((o) => `${o.kind}:${o.name?.name}`).join(","), `reclaim:${c0.name}`, "claim: the driver sends the reclaim of the expired record itself");
+    r.eq(cr.reclaimTxId, "5c".repeat(32), "claim: the record keeps the reclaim txid");
+    r.eq(cr.lastError, `Freeing ${c0.name}.kachat for you...`, "claim: the card says the name is being freed");
+    r.eq(cr.stage, A.Stage.waiting, "claim: still waiting (registers once the gap shows)");
+    r.eq(claimSubmits, 0, "claim: nothing registered before the old record is gone");
+    // not accepted yet, sent just now: wait (the retry measures from when it was sent - iOS 4f0bd33)
+    await claim._register(claim._find("claim"), c0.utxo);
+    cr = claim.pending.find((x) => x.id === "claim");
+    r.eq(performed.length, 1, "claim: no second reclaim while the first one is young");
+    r.eq(cr.reclaimTxId, "5c".repeat(32), "claim: the reclaim txid kept while it is young");
+    // never accepted after two minutes: dropped, so the next tick sends it again
+    claim._pending = claim._pending.map((x) => (x.id === "claim" ? { ...x, updatedAt: Date.now() - 121_000 } : x));
+    await claim._register(claim._find("claim"), c0.utxo);
+    cr = claim.pending.find((x) => x.id === "claim");
+    r.eq(cr.reclaimTxId, null, "claim: a reclaim not accepted after two minutes is dropped");
+    await claim._register(claim._find("claim"), c0.utxo);
+    r.eq(performed.length, 2, "claim: and sent again on the next tick");
+    // accepted: the registry is refreshed (the gap shows on a later tick)
+    accepted = true;
+    const before = refreshes;
+    await claim._register(claim._find("claim"), c0.utxo);
+    r.check(refreshes > before && performed.length === 2, "claim: an accepted reclaim refreshes the registry, nothing sent again");
+    // the gap shows: it registers
+    claim.registry = { ...claim.registry, lookup: freeLookup };
+    claim.service.signAndSubmit = async (plan) => { claimSubmits += 1; return T.txIdHex(plan.unsignedTx); };
+    await claim._register(claim._find("claim"), c0.utxo);
+    cr = claim.pending.find((x) => x.id === "claim");
+    r.check(cr.stage === A.Stage.registering && claimSubmits === 1 && cr.lastError == null, `claim: once freed the name registers (${cr.stage}, ${cr.lastError})`);
+    // a name held by its owner (not lapsed) is taken; our own is registered
+    const taken = regAt(async (name) => ({ kind: "registered", name, info: new RS.NameInfo({ ...lapsedInfo, outpoint: lapsedInfo.outpoint, expiresAt: BigInt(Date.now()) + 600_000n }) }));
+    taken._upsert(recordFor("taken", price));
+    await taken._register(taken._find("taken"), c0.utxo);
+    r.eq(taken.pending.find((x) => x.id === "taken").stage, A.Stage.taken, "claim: an active name of someone else is taken");
+
+    // MARK: startRegistration: claims side by side, an expired name can be claimed (iOS b219bb0, eea52b2)
+    const starter = regAt();
+    starter._upsert(recordFor("open-one", price));
+    let commits = 0;
+    starter.service.signAndSubmit = async (plan) => { commits += 1; return T.txIdHex(plan.unsignedTx); };
+    try {
+      const txId = await starter.startRegistration({ name: "second-claim", years: 1, maxPrice: price });
+      r.check(/^[0-9a-f]{64}$/.test(txId) && commits === 1, "startRegistration: a second claim starts while one is open");
+      const second = starter.pending.find((x) => x.name === "second-claim");
+      r.check(second && second.stage === A.Stage.waiting && typeof second.commitSentAt === "number" && second.reclaimTxId === null && second.commitResends === null,
+        "startRegistration: the record carries commitSentAt, reclaimTxId and commitResends");
+      r.eq(starter.openRegistrations.length, 2, "openRegistrations lists both claims");
+    } catch (e) { r.check(false, `startRegistration (second claim) threw ${e.stack || e}`); }
+    const lapsedStarter = regAt(async (name) => ({ kind: "registered", name, info: lapsedInfo }));
+    lapsedStarter.service.signAndSubmit = async (plan) => T.txIdHex(plan.unsignedTx);
+    try {
+      await lapsedStarter.startRegistration({ name: c0.name, years: 1, maxPrice: price });
+      r.check(lapsedStarter.pending.some((x) => x.name === c0.name), "startRegistration: an expired name (past grace) can be claimed");
+    } catch (e) { r.check(false, `startRegistration of an expired name threw ${e.stack || e}`); }
+    const activeStarter = regAt(async (name) => ({ kind: "registered", name, info: new RS.NameInfo({ ...lapsedInfo, outpoint: lapsedInfo.outpoint, expiresAt: BigInt(Date.now()) - 1_000n }) }));
+    await r.throws(() => activeStarter.startRegistration({ name: c0.name, years: 1, maxPrice: price }),
+      (e) => e.code === "notRegisterable" && e.message === `${c0.name}.kachat is already registered.`, "startRegistration: a name in grace is still its owner's");
+    await r.throws(() => regAt().startRegistration({ name: "pricecap", years: 1 }), (e) => /maxPrice/.test(e.message), "IOS-054: startRegistration needs the confirmed price");
+
+    // MARK: a commit a busy network dropped is sent again (iOS b219bb0)
+    const commitStep = v.steps.find((x) => x.op === "commit");
+    const cAct = actionsAt(commitStep);
+    cAct._startDriver = () => {};
+    cAct._loadPending(s(v.deployer.address));
+    const cSalt = hx(commitStep.args.salt);
+    const cName = s(commitStep.args.name);
+    const cScript = C.hex(C.p2shScript(C.commitRedeem(C.commitment(cName, me, cSalt), me)));
+    const pendingCommit = (id, extra) => ({
+      id, name: cName, years: 1, owner: C.hex(me), commitTxId: "cc".repeat(32), commitScript: cScript, commitDaa: null, registerTxId: null,
+      reclaimTxId: null, commitSentAt: Date.now(), commitResends: null, cancelTxId: null, stage: A.Stage.waiting, createdAt: Date.now(),
+      updatedAt: Date.now(), lastError: null, salt: C.hex(cSalt), maxPrice: "1", ...extra,
+    });
+    let inPool = false;
+    cAct.engine.getMempoolEntry = async () => (inPool ? { transaction: {} } : null);
+    let resends = 0;
+    const realResend = cAct._resendCommit.bind(cAct);
+    cAct._resendCommit = async () => { resends += 1; };
+    cAct._upsert(pendingCommit("fresh", {}));
+    r.eq(await cAct._commitStillPending(cAct._find("fresh")), true, "commit: just sent - wait");
+    r.eq(resends, 0, "commit: no resend in the first 30 s");
+    inPool = true;
+    cAct._upsert(pendingCommit("pool", { commitSentAt: Date.now() - 40_000 }));
+    r.eq(await cAct._commitStillPending(cAct._find("pool")), true, "commit: still in the mempool - wait");
+    r.eq(cAct._find("pool").lastError, null, "commit: no note in the first minute");
+    cAct._upsert(pendingCommit("busy", { commitSentAt: Date.now() - 70_000 }));
+    await cAct._commitStillPending(cAct._find("busy"));
+    r.eq(cAct._find("busy").lastError, "The network is busy. Your commit is waiting for a block.", "commit: after a minute in the mempool the card says the network is busy");
+    inPool = false;
+    cAct._upsert(pendingCommit("dropped", { commitSentAt: Date.now() - 40_000 }));
+    r.eq(await cAct._commitStillPending(cAct._find("dropped")), true, "commit: dropped from the mempool - still pending");
+    r.eq(resends, 1, "commit: dropped -> sent again");
+    cAct._upsert(pendingCommit("gaveup", { commitSentAt: Date.now() - 40_000, commitResends: 3 }));
+    r.eq(await cAct._commitStillPending(cAct._find("gaveup")), false, "commit: after 3 resends it is past saving");
+    r.eq(resends, 1, "commit: no fourth resend");
+    // the driver fails it then (Try Again)
+    cAct._liveCommit = async () => null;
+    cAct._ownsName = async () => false;
+    await cAct._advance(cAct._find("gaveup"));
+    r.check(cAct._find("gaveup").stage === A.Stage.failed && cAct._find("gaveup").lastError === "The commit never reached the chain.", "commit: a commit past saving fails the claim");
+    await cAct._advance(cAct._find("fresh"));
+    r.eq(cAct._find("fresh").stage, A.Stage.waiting, "commit: a young commit keeps waiting in the driver");
+    // the resend itself: same salt, same script, the new txid and a count
+    cAct._resendCommit = realResend;
+    const resent = [];
+    cAct.service.signAndSubmit = async (plan) => { resent.push(plan); return T.txIdHex(plan.unsignedTx); };
+    cAct._upsert(pendingCommit("resend", { commitSentAt: Date.now() - 40_000 }));
+    await cAct._resendCommit(cAct._find("resend"));
+    const rs = cAct._find("resend");
+    r.check(resent.length === 1 && C.hex(resent[0].newCommit.utxo.entry.script) === cScript, "resend: the same commit script (same salt)");
+    r.check(rs.commitTxId === T.txIdHex(resent[0].unsignedTx) && rs.commitResends === 1 && Date.now() - rs.commitSentAt < 5_000,
+      "resend: the record takes the new txid, the count and the time");
+    r.eq(rs.lastError, "The network is busy, so the commit was sent again.", "resend: the card says it was sent again");
+    cAct._upsert(pendingCommit("mismatch", { commitScript: "aa20" + "00".repeat(32) + "87" }));
+    await cAct._resendCommit(cAct._find("mismatch"));
+    const mm = cAct._find("mismatch");
+    r.check(mm.commitResends === 1 && mm.lastError === "commit: a different script" && resent.length === 1, "resend: a different script is never sent (counted as a try)");
+    // the mempool lookup goes through the engine (getMempoolEntry) or its withRpc
+    const viaRpc = new A.KachatNamesActions({ engine: { withRpc: async (f) => f({ getMempoolEntry: async ({ transactionId }) => (transactionId === "ab".repeat(32) ? { mempoolEntry: {} } : null) }) }, service: dry, registry: registryStub, storage });
+    r.eq(await viaRpc._inMempool("ab".repeat(32)), true, "inMempool: through withRpc");
+    r.eq(await viaRpc._inMempool("cd".repeat(32)), false, "inMempool: not there");
+    r.eq(await viaRpc._inMempool("not-a-txid"), false, "inMempool: a malformed id is never asked");
+  }
+
+  // MARK: the fee rate (iOS b219bb0): read twice, else 10x the floor
+  {
+    r.eq(A.unknownFeerate, 1000, "unknownFeerate = 10 x the 100 sompi/gram floor");
+    const realFetch = globalThis.fetch;
+    const act = new A.KachatNamesActions({ engine: actEngine, service: dry, registry: registryStub, storage });
+    let calls = 0;
+    try {
+      globalThis.fetch = async () => { calls += 1; throw new Error("offline"); };
+      r.eq(await act.feerate(), 1000, "feerate: unreadable -> unknownFeerate");
+      r.eq(calls, 2, "feerate: read twice before falling back");
+      calls = 0;
+      globalThis.fetch = async () => { calls += 1; return calls === 1 ? { status: 503, json: async () => ({}) } : { status: 200, json: async () => ({ priorityBucket: { feerate: 250.5 } }) }; };
+      r.eq(await act.feerate(), 250.5, "feerate: the second read answers");
+      globalThis.fetch = async () => ({ status: 200, json: async () => ({ priorityBucket: { feerate: 12 } }) });
+      r.eq(await act.feerate(), 100, "feerate: never below the floor");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  // MARK: the claim progress sheet comes back once per launch; claims list (iOS b219bb0)
+  {
+    const mem3 = new Map();
+    const st3 = { get: (k) => mem3.get(k) ?? null, set: (k, val) => mem3.set(k, val) };
+    const addr = s(v.deployer.address);
+    const now = Date.now();
+    const base = { years: 1, owner: C.hex(me), commitTxId: "11".repeat(32), commitScript: "", commitDaa: null, registerTxId: null, cancelTxId: null, createdAt: now, updatedAt: now, lastError: null, salt: "33".repeat(32), maxPrice: "1" };
+    mem3.set(A.registrationsStorageKey, JSON.stringify({ [addr]: [
+      { ...base, id: "done", name: "done", stage: A.Stage.registered },
+      { ...base, id: "run", name: "run", stage: A.Stage.waiting },
+      { ...base, id: "gone", name: "gone", stage: A.Stage.cancelled },
+      // a record from before registry v4, stopped at the old price-changed stage
+      { ...base, id: "old", name: "old", stage: "priceChanged", priceChangedTo: "5" },
+    ] }));
+    const act = new A.KachatNamesActions({ engine: actEngine, service: dry, registry: registryStub, storage: st3 });
+    act._startDriver = () => {};
+    const snaps = [];
+    act.subscribe((x) => snaps.push(x.autoPresentedRegistration));
+    act.resume();
+    r.eq(act.autoPresentedRegistration, "run", "resume: a claim in progress brings its sheet up");
+    r.check(snaps.includes("run"), "resume: subscribers see autoPresentedRegistration");
+    r.eq(act.openRegistrations.map((x) => x.id).join(","), "done,run,old", "openRegistrations: every one not cancelled");
+    const old = act.pending.find((x) => x.id === "old");
+    r.check(old.stage === A.Stage.failed && !("priceChangedTo" in old), "a stored priceChanged record loads as failed (registry v4)");
+    act.clearAutoPresented();
+    r.eq(act.autoPresentedRegistration, null, "clearAutoPresented: the sheet went down, the claim keeps running");
+    act.resume();
+    r.eq(act.autoPresentedRegistration, null, "resume again: only once per launch");
   }
 
   // MARK: actions: no offers on expired names, no renewals that stay expired (iOS 71128c4, IOS-055/056)
@@ -649,7 +811,6 @@ async function main() {
     await r.throws(() => act.plan(A.Operation.renew(at(BigInt(Date.now()) - m.params.periodMs / 2n), 1n)), (e) => e.code !== "expiredTooLong",
       "IOS-056: a renewal that ends in the future is not refused as too late");
   }
-  r.check(A.isSpentConflict(new Error("Rejected: already spent")) && A.isSpentConflict("orphan transaction") && !A.isSpentConflict(new Error("mass too high")), "isSpentConflict");
 
   // MARK: actions: offers to the owner, accept, decline (registry v3)
   const offerStep = v.steps.find((x) => x.op === "offer");

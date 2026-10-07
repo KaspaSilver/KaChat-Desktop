@@ -28,22 +28,27 @@
 // Amounts, prices, DAA scores and years passed in are BigInt (Numbers are accepted and converted).
 // Registration records are plain JSON-safe objects (see PendingRegistration below).
 //
-// Registry v3: register, extend and renew read their price from a random live price shard
-// (`registry.shards()`) and are rebuilt on another shard when the node says the picked one was
-// just spent; "years" are periods of the manifest's `periodMs` (a year on mainnet, 10 minutes on
-// testnet). Offers are made to the name's current owner (the seller), capped at `maxOfferDays`;
+// Registry v4: register, extend and renew pay the fixed prices baked into the pinned gap and name
+// templates (the manifest's `registerPrices` / `renewPrices`; register charges the registration
+// price for the first period and the renewal price for each further one, extend and renew the
+// renewal price) - no price shard is read or spent; "years" are periods of the manifest's
+// `periodMs` (a year on mainnet, 10 minutes on testnet). Offers are made to the name's current owner (the seller), capped at `maxOfferDays`;
 // only that owner accepts or declines them, and a transfer, release or accepted offer declines the
 // rest (`declineOpenOffers`). Offers past their refund time go back to the buyer from whichever app
 // sees them first (`returnExpiredOffers`), and a buyer's app pulls back its offers on a name that
 // changed hands (`withdrawDeclinedOffers`).
 //
-// Prices can change at any time in the price record, so nothing pays more than the price the person
-// confirmed (iOS 4f5d95e, IOS-054): a registration keeps the quoted price as its cap
-// (`startRegistration({ maxPrice })`) and stops at `Stage.priceChanged` when the shard asks more
-// once the commit has aged, until the person confirms (`acceptNewPrice`) or cancels; an extend or
-// renew sheet passes the price it showed (`perform(op, { maxPrice })`) and a higher one throws
-// `ActionError.priceChanged`. A lower price is paid. Offers are made and accepted only on active
-// names, and a renewal that would still end in the past is refused (iOS 71128c4, IOS-055/056).
+// Nothing pays more than the price the person confirmed (iOS 4f5d95e, IOS-054; with v4's fixed
+// prices a safeguard): a registration keeps the quoted price as its cap (`startRegistration({
+// maxPrice })`) and fails with `ActionError.priceChanged` rather than pay more; an extend or renew
+// sheet passes the price it showed (`perform(op, { maxPrice })`) and a higher one throws
+// `ActionError.priceChanged`. Offers are made and accepted only on active names, and a renewal that
+// would still end in the past is refused (iOS 71128c4, IOS-055/056).
+//
+// A name past its grace is free to claim (iOS eea52b2): the registration driver frees the old
+// record itself (a reclaim: the bond goes back to the old owner, the freed deposit to the claimer)
+// and then registers, so Claim is one step. Claims can run side by side (iOS b219bb0), and a
+// commit a busy network dropped from its mempool is sent again (same salt, same script).
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
@@ -52,11 +57,11 @@ import { ADDRESS_HRP, KAS_UNIT, isNetworkAddress } from "../network.js";
 import { enqueueSend, excludeReservedUtxos } from "../transactions.js";
 import {
   Failure, minFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
-  gapState, nameState, offerState, priceState, priceFieldsPrice,
+  gapState, nameState, offerState,
 } from "./codec.js";
 import { makeOutpoint, makeUtxo, makeUtxoEntry, outpointKey } from "./transaction.js";
-import { templateScript } from "./manifest.js";
-import { registerNow, renewWindowOpen, BudgetRole } from "./builder.js";
+import { templateScript, paramsRegisterCost } from "./manifest.js";
+import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { OfferInfo, Profile, Status } from "./registry-state.js";
 import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
@@ -74,9 +79,6 @@ export const Stage = Object.freeze({
   registered: "registered",
   /** someone registered the name first; the commit can be cancelled */
   taken: "taken",
-  /** the price record now asks more than the person confirmed (`priceChangedTo`): nothing is sent
-   *  until they confirm the new price (`acceptNewPrice`) or cancel the commit (iOS 4f5d95e) */
-  priceChanged: "priceChanged",
   failed: "failed",
   cancelling: "cancelling",
   cancelled: "cancelled",
@@ -86,16 +88,18 @@ export const Stage = Object.freeze({
  * A registration in flight (Swift `PendingRegistration`), JSON-safe:
  * `{ id, name, years: Number, owner: x-only hex, commitTxId: hex, commitScript: hex (P2SH),
  *    commitDaa: Number|null (the commit UTXO's DAA score once seen), registerTxId: hex|null,
- *    cancelTxId: hex|null, stage: Stage, createdAt: Number (unix ms), updatedAt: Number,
- *    lastError: string|null, maxPrice: decimal sompi string|null (the price the person confirmed
- *    for the whole registration - it never pays more; null only for one started before the cap),
- *    priceChangedTo: decimal sompi string|null (what the price record asked when it stopped at
- *    `Stage.priceChanged`) }`. `recordPrice(p.maxPrice)` reads either as BigInt.
+ *    reclaimTxId: hex|null (the reclaim this registration sent to free a lapsed old record of the
+ *    name first, iOS eea52b2), commitSentAt: Number|null (unix ms the current commit went out),
+ *    commitResends: Number|null (how many times it was sent again after a node dropped it, iOS
+ *    b219bb0), cancelTxId: hex|null, stage: Stage, createdAt: Number (unix ms), updatedAt: Number,
+ *    lastError: string|null (an error, or while it still runs what the driver is doing),
+ *    maxPrice: decimal sompi string|null (the price the person confirmed for the whole
+ *    registration - it never pays more) }`. `recordPrice(p.maxPrice)` reads it as BigInt.
  * The stored copy also carries `salt` (hex) - iOS keeps it in the Keychain; `pending` never
  * exposes it.
  */
 
-/** A record's sompi string (`maxPrice`, `priceChangedTo`) as BigInt, or null. */
+/** A record's sompi string (`maxPrice`) as BigInt, or null. */
 export function recordPrice(v) {
   if (v == null || v === "") return null;
   try { return BigInt(v); } catch { return null; }
@@ -131,12 +135,10 @@ export const maxOfferDays = 7n;
 /** Kaspa's DAA scores per second (offer refund times are DAA scores). */
 export const daaPerSecond = 10n;
 
-/** Whether a submit failed because an input was already spent (Swift `isSpentConflict`): a
- *  register, extend or renew that lost its price shard is rebuilt on another. */
-export function isSpentConflict(error) {
-  const lower = errorMessage(error).toLowerCase();
-  return lower.includes("already spent") || lower.includes("double spend") || lower.includes("orphan");
-}
+/** The fee rate (sompi/gram) when the fee estimate can't be read: well above the floor, since the
+ *  floor is exactly what a busy network drops (testnet-10 asked 115-894 sompi/gram on 2026-10-07).
+ *  Still a tiny fee on these small transactions. Swift `unknownFeerate` (iOS b219bb0). */
+export const unknownFeerate = minFeerate * 10;
 
 /** Swift `KachatNamesActions.ActionError`; `code` is the case name. Extra fields per case:
  *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }` (unix ms, BigInt), priceChanged
@@ -172,8 +174,6 @@ export class ActionError extends Error {
   static periodUnknown() {
     return new ActionError("periodUnknown", "The names indexer didn't send this name's paid period. Pull to refresh and try again.");
   }
-  /** no live price shard could be read (registry v3) */
-  static priceBusy() { return new ActionError("priceBusy", "The price record is busy right now. Try again in a moment."); }
   /** accept on an offer past its refund time */
   static offerExpired() { return new ActionError("offerExpired", "This offer has expired. It's going back to the buyer."); }
   /** accept on an offer made to an earlier owner of the name */
@@ -181,7 +181,7 @@ export class ActionError extends Error {
     return new ActionError("offerDeclined", "This offer was made before the name changed hands, so it's declined and going back to the buyer.");
   }
   static ownOffer() { return new ActionError("ownOffer", "You can't make an offer on your own name."); }
-  /** the price record asks more than the price the person confirmed (iOS 4f5d95e, IOS-054) */
+  /** the transaction would pay more than the price the person confirmed (iOS 4f5d95e, IOS-054) */
   static priceChanged(price) {
     const p = BigInt(price);
     return new ActionError(
@@ -284,8 +284,12 @@ export class KachatNamesActions {
     this._pendingWallet = null;
     this._driver = null;
     this._listeners = new Set();
-    /** the price shards the last `_liveShard` read (ShardInfo[]), to map a plan's shard back */
-    this._lastShards = [];
+    /** The registration whose progress sheet the app shows by itself (iOS b219bb0
+     *  `autoPresentedRegistration`): set once per launch by `resume()` when a claim is still in
+     *  progress, since it needs the app open to finish. The UI clears it when that sheet closes
+     *  (`clearAutoPresented()`). */
+    this.autoPresentedRegistration = null;
+    this._autoPresentedThisLaunch = false;
     /** offer ids (txid:index) this app is sending back / withdrawing / declining this session */
     this.returningOffers = new Set();
     this.withdrawingOffers = new Set();
@@ -300,14 +304,26 @@ export class KachatNamesActions {
   /** This wallet's registrations, newest last (copies, without salts). */
   get pending() { return this._pending.map(publicRecord); }
 
-  /** `listener({ pending, virtualDaa })` after every change; returns an unsubscribe function. */
+  /** The registrations still open (in progress, or finished and not yet dismissed): the .kachat
+   *  screen's claims button lists them (iOS b219bb0 `openRegistrations`). */
+  get openRegistrations() { return this.pending.filter(isOpen); }
+
+  /** The auto-presented progress sheet went down (swiped away or closed): the claim keeps running. */
+  clearAutoPresented() {
+    if (this.autoPresentedRegistration == null) return;
+    this.autoPresentedRegistration = null;
+    this._emit();
+  }
+
+  /** `listener({ pending, virtualDaa, autoPresentedRegistration })` after every change; returns an
+   *  unsubscribe function. */
   subscribe(listener) {
     this._listeners.add(listener);
     return () => this._listeners.delete(listener);
   }
 
   _emit() {
-    const snapshot = { pending: this.pending, virtualDaa: this.virtualDaa };
+    const snapshot = { pending: this.pending, virtualDaa: this.virtualDaa, autoPresentedRegistration: this.autoPresentedRegistration };
     for (const l of [...this._listeners]) {
       try { l(snapshot); } catch (e) { this.engine?.log?.("[KachatNames] listener failed:", errorMessage(e)); }
     }
@@ -431,18 +447,22 @@ export class KachatNamesActions {
 
   static validateKey(xonly, what) { return validateKey(xonly, what); }
 
-  /** `max(100, the REST API's priority fee rate)` in sompi per gram (a Number). */
+  /** `max(100, the REST API's priority fee rate)` in sompi per gram (a Number). The estimate is
+   *  read twice; when it can't be read, `unknownFeerate` (iOS b219bb0). */
   async feerate() {
-    try {
-      const base = trimSlash(getEndpoint("kaspaApi"));
-      const res = await fetch(`${base}/info/fee-estimate`, { headers: { Accept: "application/json" }, cache: "no-store" });
-      if (res.status !== 200) return minFeerate;
-      const j = await res.json();
-      const rate = Number(j?.priorityBucket?.feerate);
-      return Number.isFinite(rate) ? Math.max(minFeerate, rate) : minFeerate;
-    } catch {
-      return minFeerate;
+    let base;
+    try { base = trimSlash(getEndpoint("kaspaApi")); } catch { return unknownFeerate; }
+    if (!base) return unknownFeerate;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`${base}/info/fee-estimate`, { headers: { Accept: "application/json" }, cache: "no-store" });
+        if (res.status !== 200) continue;
+        const j = await res.json();
+        const rate = Number(j?.priorityBucket?.feerate);
+        if (Number.isFinite(rate)) return Math.max(minFeerate, rate);
+      } catch { /* try again, then the fallback */ }
     }
+    return unknownFeerate;
   }
 
   /** The wallet's node UTXOs (with covenant ids), less coins a scheduled KaPost reserved. */
@@ -494,32 +514,6 @@ export class KachatNamesActions {
     return { fields: o.fields, value: u.entry.amount, utxo: u, name: o.name ?? null };
   }
 
-  /** A live price shard (a builder PriceRecord) for a register, extend or renew (registry v3): a
-   *  random one of the K, so paid operations at the same moment rarely pick the same shard,
-   *  skipping `avoid` (shard indexes, BigInt, a previous attempt lost to someone else) and any the
-   *  node no longer has at that state. */
-  async _liveShard(m, avoid = new Set()) {
-    const all = await this.registry.shards();
-    this._lastShards = all;
-    const fresh = shuffled(all.filter((x) => !avoid.has(x.shard)));
-    const lost = shuffled(all.filter((x) => avoid.has(x.shard)));
-    for (const sh of [...fresh, ...lost]) {
-      let u;
-      try {
-        u = await this.service.livePriceUtxo({ script: templateScript(m.price, priceState(sh.fields)), outpoint: sh.outpoint });
-      } catch { continue; }
-      return { fields: sh.fields, value: u.entry.amount, utxo: u };
-    }
-    throw ActionError.priceBusy();
-  }
-
-  /** The price shard index (BigInt) a built plan spends (register, extend, renew), or null. */
-  _shardSpentBy(plan) {
-    const u = plan.inputs.find((i) => i.role === BudgetRole.priceUse)?.utxo;
-    if (!u) return null;
-    return this._lastShards.find((x) => bytesEqual(x.outpoint.txid, u.outpoint.txid) && x.outpoint.index === u.outpoint.index)?.shard ?? null;
-  }
-
   // MARK: Operations
 
   /** Builds `op` against live UTXOs without submitting anything: the fee and outputs a sheet shows
@@ -530,7 +524,7 @@ export class KachatNamesActions {
     return (await this._build(op, s)).plan;
   }
 
-  async _build(op, s, avoidShards = new Set()) {
+  async _build(op, s) {
     const m = await this.registry.prepare();
     const { builder: b, env, wallet } = await this._context(s);
     let plan;
@@ -539,7 +533,7 @@ export class KachatNamesActions {
         const years = BigInt(op.years);
         if (op.name.periodStart == null) throw ActionError.periodUnknown();
         if (years < 1n || years > op.name.extendableYears(m.params)) throw ActionError.periodFull(op.name.renewOpens(m.params));
-        plan = b.extend({ env, wallet, name: await this._liveName(op.name, m), shard: await this._liveShard(m, avoidShards), years });
+        plan = b.extend({ env, wallet, name: await this._liveName(op.name, m), years });
         break;
       }
       case "renew":
@@ -549,7 +543,7 @@ export class KachatNamesActions {
         // A renewal counts from the old expiry, not from today: one that would still end in the
         // past is paid for nothing, and anyone could reclaim the name right after.
         if (!(BigInt(op.name.expiresAt) + BigInt(op.years) * m.params.periodMs > env.wallMs)) throw ActionError.expiredTooLong();
-        plan = b.renew({ env, wallet, name: await this._liveName(op.name, m), shard: await this._liveShard(m, avoidShards), years: BigInt(op.years) });
+        plan = b.renew({ env, wallet, name: await this._liveName(op.name, m), years: BigInt(op.years) });
         break;
       case "transfer":
         validateKey(op.to, "The new owner");
@@ -645,23 +639,12 @@ export class KachatNamesActions {
     return txId;
   }
 
-  /** Builds, signs and submits `op` -> `{ plan, txId }`. A register, extend or renew that lost its
-   *  price shard to someone else's transaction (the node rejects it as already spent; nothing was
-   *  sent) is rebuilt on another shard, up to twice. */
+  /** Builds, signs and submits `op` -> `{ plan, txId }`, rebuilt against live UTXOs. It never
+   *  pays more than `maxPrice`, the price the person confirmed. */
   async _submit(op, s, maxPrice = null) {
-    const avoid = new Set();
-    for (let attempt = 0; ; attempt++) {
-      const { plan, env } = await this._build(op, s, avoid);
-      // never pays more than the price the person confirmed (each retry may pick another shard)
-      if (maxPrice != null && BigInt(plan.priceFee ?? 0n) > maxPrice) throw ActionError.priceChanged(plan.priceFee);
-      try {
-        return { plan, txId: await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env }) };
-      } catch (error) {
-        const shard = this._shardSpentBy(plan);
-        if (attempt >= 2 || shard == null || !isSpentConflict(error)) throw error;
-        avoid.add(shard);
-      }
-    }
+    const { plan, env } = await this._build(op, s);
+    if (maxPrice != null && BigInt(plan.priceFee ?? 0n) > maxPrice) throw ActionError.priceChanged(plan.priceFee);
+    return { plan, txId: await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env }) };
   }
 
   // MARK: Offers that go back to their buyers
@@ -778,9 +761,10 @@ export class KachatNamesActions {
   // MARK: Registration
 
   /** The cost of registering `name` for `years` periods inside `gap` (a GapInfo), estimated by
-   *  building both transactions (nothing is signed or sent) at a live price shard's price. Amounts
-   *  are BigInt sompi:
-   *  `{ name, years, price (price per period x periods, left to miners), bond (returned on release),
+   *  building both transactions (nothing is signed or sent) at the fixed prices (registry v4).
+   *  Amounts are BigInt sompi:
+   *  `{ name, years, price (the registration price for the first period plus the renewal price for
+   *  each further one, left to miners), bond (returned on release),
    *  gapDeposit (the extra gap the registration creates, returned on release), commit (the
    *  commit's value, returned into the registration), networkFee, total (what leaves the wallet in
    *  the end: price + bond + gap deposit + network fees), spendable, affordable }`. */
@@ -791,8 +775,7 @@ export class KachatNamesActions {
     const { builder: b, env, wallet } = await this._context(s);
     const salt = newSalt();
     const spendable = wallet.reduce((a, u) => a + u.entry.amount, 0n);
-    const shard = await this._liveShard(m);
-    const price = priceFieldsPrice(shard.fields, utf8(name).length) * years;
+    const price = paramsRegisterCost(m.params, utf8(name).length, years);
     let commitFee = 0n;
     let registerFee = 0n;
     try {
@@ -812,7 +795,7 @@ export class KachatNamesActions {
         try {
           const reg = b.register({
             env, wallet: rest, gap: { lo: gap.lo, hi: gap.hi, value: m.params.gapValue, utxo: gapUtxo },
-            commit, shard, years, now: registerNow(env),
+            commit, years, now: registerNow(env),
           });
           registerFee = reg.networkFee;
         } catch { /* estimated below */ }
@@ -831,8 +814,9 @@ export class KachatNamesActions {
   /** Starts registering `name`: a fresh salt (stored with the record), the salted commit
    *  (submitted), then the driver registers once the commit is `tCommit` deep. Returns the commit
    *  txid. Progress arrives through `subscribe` (the record's `stage`). `maxPrice` (sompi, required)
-   *  is the price the person confirmed (the quote's `price`): the registration never pays more,
-   *  and stops at `Stage.priceChanged` instead (iOS 4f5d95e, IOS-054). */
+   *  is the price the person confirmed (the quote's `price`): the registration never pays more
+   *  (iOS 4f5d95e, IOS-054). Several claims can run side by side (iOS b219bb0). A name past its
+   *  grace can be claimed: the driver frees the old record first (iOS eea52b2). */
   async startRegistration({ name: raw, years, maxPrice }) {
     const s = this.signer();
     years = BigInt(years);
@@ -840,15 +824,11 @@ export class KachatNamesActions {
     const cap = BigInt(maxPrice);
     const name = normalize(raw);
     validate(name);
-    // One registration at a time: its progress sheet stays up until it's done (iOS 61fb0fc).
     this._loadPending(s.address);
-    if (this._pending.some((p) => isOpen(p) && p.stage !== Stage.registered)) {
-      throw ActionError.notRegisterable("Finish the name you're claiming first.");
-    }
     await this.registry.refresh();
     const found = await this.registry.lookup(name);
-    // A lapsed name is being reclaimed (Reclaim to Own, or by anyone): the commit can go out now,
-    // and the registration waits until the old name is cleared from the registry (iOS ba1a734).
+    // Expired past grace: free to claim. The commit goes out now; the driver frees the old record
+    // (a reclaim) and then registers (iOS eea52b2).
     if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) !== Status.lapsed) {
       throw ActionError.notRegisterable(`${name}.kachat is already registered.`);
     }
@@ -864,13 +844,13 @@ export class KachatNamesActions {
         const now = nowMs();
         record = {
           id: newId(), name, years: Number(years), owner: hex(s.me), commitTxId: hex(plan.txid),
-          commitScript: hex(script), commitDaa: null, registerTxId: null, cancelTxId: null,
-          stage: Stage.committing, createdAt: now, updatedAt: now, lastError: null, salt: hex(salt),
-          maxPrice: cap.toString(), priceChangedTo: null,
+          commitScript: hex(script), commitDaa: null, registerTxId: null, reclaimTxId: null, commitSentAt: null, commitResends: null,
+          cancelTxId: null, stage: Stage.committing, createdAt: now, updatedAt: now, lastError: null, salt: hex(salt),
+          maxPrice: cap.toString(),
         };
         this._upsert(record);
         const txId = await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
-        record = { ...record, commitTxId: txId, stage: Stage.waiting, updatedAt: nowMs() };
+        record = { ...record, commitTxId: txId, commitSentAt: nowMs(), stage: Stage.waiting, updatedAt: nowMs() };
         this._upsert(record);
       });
     } catch (error) {
@@ -910,18 +890,7 @@ export class KachatNamesActions {
   retry(p) {
     const stored = this._find(typeof p === "string" ? p : p.id);
     if (!stored) return;
-    this._set(stored, (q) => { q.stage = Stage.waiting; q.lastError = null; q.priceChangedTo = null; });
-    this._startDriver();
-  }
-
-  /** Continue a registration stopped at `Stage.priceChanged`, now capped at the new price the
-   *  person just confirmed (the UI asks for the device lock first: paying more is a new approval).
-   *  It still stops again if the price goes up further. `p` is a record or its id. */
-  acceptNewPrice(p) {
-    const stored = this._find(typeof p === "string" ? p : p.id);
-    const price = stored ? recordPrice(stored.priceChangedTo) : null;
-    if (!stored || stored.stage !== Stage.priceChanged || price == null) return;
-    this._set(stored, (q) => { q.maxPrice = price.toString(); q.priceChangedTo = null; q.stage = Stage.waiting; q.lastError = null; });
+    this._set(stored, (q) => { q.stage = Stage.waiting; q.lastError = null; });
     this._startDriver();
   }
 
@@ -944,6 +913,16 @@ export class KachatNamesActions {
     }
     this._loadPending(address);
     this._startDriver();
+    // A claim still in progress when the app starts: its progress sheet comes back up once
+    // (iOS b219bb0).
+    if (!this._autoPresentedThisLaunch) {
+      const open = this._pending.find(needsDriving);
+      if (open) {
+        this._autoPresentedThisLaunch = true;
+        this.autoPresentedRegistration = open.id;
+        this._emit();
+      }
+    }
   }
 
   /** Stops the driver (logout, network switch); `resume()` starts it again. */
@@ -990,14 +969,13 @@ export class KachatNamesActions {
 
   /** One step of one registration. */
   async _advance(p) {
-    const age = nowMs() - p.createdAt;
     const sinceUpdate = nowMs() - p.updatedAt;
     switch (p.stage) {
       case Stage.committing:
       case Stage.waiting: {
         const commit = await this._liveCommit(p);
         if (!commit) {
-          if (p.commitDaa == null && age < 10 * 60_000) return;
+          if (p.commitDaa == null && await this._commitStillPending(p)) return;
           // the commit is gone: registered by us (another device?), or never confirmed
           if (await this._ownsName(p.name)) {
             this._finishRegistered(p);
@@ -1048,8 +1026,77 @@ export class KachatNamesActions {
     }
   }
 
+  /** A commit not on chain yet: still waiting in a node's mempool (true), sent again because a
+   *  node dropped it (true), or past saving (false: the caller fails it). On a busy network a
+   *  low-fee transaction is evicted instead of mined, so silence must not mean "wait" (iOS
+   *  b219bb0). */
+  async _commitStillPending(p) {
+    const sinceSent = nowMs() - (p.commitSentAt ?? p.createdAt);
+    if (sinceSent < 30_000) return true; // just sent: give it time to show up
+    if (await this._inMempool(p.commitTxId)) {
+      if (sinceSent > 60_000 && p.lastError == null) {
+        this._set(p, (q) => { q.lastError = "The network is busy. Your commit is waiting for a block."; });
+      }
+      return true;
+    }
+    if ((p.commitResends ?? 0) >= 3) return false;
+    await this._resendCommit(p);
+    return true;
+  }
+
+  /** Whether a node's mempool holds `txId` (the engine's `getMempoolEntry`, else its `withRpc`;
+   *  false when neither answers). */
+  async _inMempool(txId) {
+    const id = String(txId ?? "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) return false;
+    try {
+      if (typeof this.engine?.getMempoolEntry === "function") return (await this.engine.getMempoolEntry(id)) != null;
+      if (typeof this.engine?.withRpc === "function") {
+        const entry = await this.engine.withRpc(async (rpc) => {
+          if (typeof rpc?.getMempoolEntry !== "function") return null;
+          return rpc.getMempoolEntry({ transactionId: id, includeOrphanPool: true, filterTransactionPool: false });
+        }, { retries: 0, label: "Mempool lookup" });
+        return !!(entry?.mempoolEntry || entry?.entry);
+      }
+    } catch { /* not in this node's mempool (or no answer) */ }
+    return false;
+  }
+
+  /** Sends the commit again - same name, owner and salt, so the same commit script - with the
+   *  current fee, after a node dropped the first one (iOS b219bb0). */
+  async _resendCommit(p) {
+    try {
+      const s = this.signer();
+      if (hex(s.me) !== p.owner) return;
+      const stored = this._find(p.id) ?? p;
+      if (!stored.salt) throw ActionError.noSalt();
+      const salt = unhex32(stored.salt);
+      const txId = await enqueueSend(s.address, async () => {
+        const { builder: b, env, wallet } = await this._context(s);
+        const plan = b.commit({ env, wallet, name: p.name, salt });
+        const script = plan.newCommit?.utxo?.entry?.script;
+        if (!script || hex(script) !== p.commitScript) throw new Failure("commit: a different script");
+        return this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
+      });
+      this.engine?.log?.(`[KachatNames] commit for ${p.name} sent again: ${txId}`);
+      this._set(p, (q) => {
+        q.commitTxId = txId;
+        q.commitSentAt = nowMs();
+        q.commitResends = (q.commitResends ?? 0) + 1;
+        q.lastError = "The network is busy, so the commit was sent again.";
+      });
+    } catch (error) {
+      this.engine?.log?.(`[KachatNames] resending the commit for ${p.name} failed: ${errorMessage(error)}`);
+      this._set(p, (q) => {
+        q.commitSentAt = nowMs();
+        q.commitResends = (q.commitResends ?? 0) + 1;
+        q.lastError = errorMessage(error);
+      });
+    }
+  }
+
   /** This wallet holds `name` as a live registration (a lapsed old record of it doesn't count:
-   *  that is what a Reclaim to Own registers over; iOS ba1a734). */
+   *  that is what claiming an expired name registers over; iOS eea52b2). */
   async _ownsName(name) {
     const me = this.myKey;
     if (!me) return false;
@@ -1072,8 +1119,23 @@ export class KachatNamesActions {
       const m = await this.registry.prepare();
       const found = await this.registry.lookup(p.name);
       if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) === Status.lapsed) {
-        // the old, lapsed name is still there (its reclaim not seen yet): next tick (iOS ba1a734)
-        this._set(p, (q) => { q.lastError = `Waiting for the old ${p.name}.kachat to be cleared from the registry.`; });
+        // An expired name is free to claim: this registration frees the old record first (anyone
+        // may; its bond goes back to the old owner and the freed deposit comes to you), then
+        // registers on a later tick once the registry shows the gap (iOS eea52b2). Only sending
+        // the reclaim touches the record, so `updatedAt` is when it went out (iOS 4f0bd33).
+        if (p.reclaimTxId) {
+          if (await this.registry.isAccepted(p.reclaimTxId)) {
+            await this.registry.refresh();
+          } else if (nowMs() - p.updatedAt > 120_000) {
+            this._set(p, (q) => { q.reclaimTxId = null; }); // never accepted: send it again
+          }
+          return;
+        }
+        const reclaimTxId = await this.perform(Operation.reclaim(found.info));
+        this._set(p, (q) => {
+          q.reclaimTxId = reclaimTxId;
+          q.lastError = `Freeing ${p.name}.kachat for you...`;
+        });
         return;
       }
       if (found.kind === "registered") {
@@ -1084,28 +1146,17 @@ export class KachatNamesActions {
       if (!found.gap) throw new Failure(`no gap for ${p.name} yet`);
       const gap = found.gap;
       const cap = recordPrice(p.maxPrice);
-      let askedMore = null;
       const txId = await enqueueSend(s.address, async () => {
         const { builder: b, env, wallet } = await this._context(s);
-        // a random live shard each try: one someone else just spent fails this try, and the next
-        // tick picks again
-        const shard = await this._liveShard(m);
-        // Never pay more than the person confirmed: prices can change while the commit ages.
-        const years = BigInt(p.years) > 1n ? BigInt(p.years) : 1n;
-        const price = priceFieldsPrice(shard.fields, utf8(p.name).length) * years;
-        if (cap != null && price > cap) { askedMore = price; return null; }
         const plan = b.register({
           env, wallet, gap: await this._liveGap(gap, m),
           commit: { name: p.name, owner: s.me, salt, value: commit.entry.amount, utxo: commit },
-          shard, years: BigInt(p.years), now: registerNow(env),
+          years: BigInt(p.years), now: registerNow(env),
         });
-        if (cap != null && BigInt(plan.priceFee ?? 0n) > cap) { askedMore = BigInt(plan.priceFee); return null; }
+        // Never pay more than the person confirmed (the fixed prices make this a safeguard).
+        if (cap != null && BigInt(plan.priceFee ?? 0n) > cap) throw ActionError.priceChanged(plan.priceFee);
         return this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
       });
-      if (askedMore != null) {
-        this._set(p, (q) => { q.stage = Stage.priceChanged; q.priceChangedTo = askedMore.toString(); q.lastError = null; });
-        return;
-      }
       this._set(p, (q) => { q.stage = Stage.registering; q.registerTxId = txId; q.lastError = null; });
       this.registry.refreshAfter(txId);
     } catch (error) {
@@ -1160,7 +1211,7 @@ export class KachatNamesActions {
     this._stopDriver();
     this._pendingWallet = a;
     const list = this._readAll()[a];
-    this._pending = Array.isArray(list) ? list.filter((r) => r && typeof r.id === "string" && typeof r.name === "string") : [];
+    this._pending = Array.isArray(list) ? list.filter((r) => r && typeof r.id === "string" && typeof r.name === "string").map(migrateRecord) : [];
     this._emit();
   }
 
@@ -1192,14 +1243,12 @@ export class KachatNamesActions {
 
 function commitOutpoint(p) { return makeOutpoint(unhex32(p.commitTxId), 0); }
 
-/** A shuffled copy (Fisher-Yates). */
-function shuffled(xs) {
-  const a = [...xs];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
+/** A stored record from before registry v4: the price-changed stage is gone (fixed prices can't
+ *  change), so one stopped there is failed - Try Again or Cancel Commit. */
+function migrateRecord(r) {
+  if (r.stage !== "priceChanged") return r;
+  const { priceChangedTo: _gone, ...rest } = r;
+  return { ...rest, stage: Stage.failed, lastError: r.lastError ?? "The registration stopped." };
 }
 
 function newId() {

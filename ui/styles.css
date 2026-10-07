@@ -13032,10 +13032,10 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .kl-offer-row.kl-offer-dim { opacity: .6; }
 
 /* ==== .kachat marketplace tabs and tiles (iOS 0765ce0, 27a4f39, c488d1d) ====
-   Marketplace (for sale) and Reclaimable as two-column grids of name tiles: centered, the full name
+   Marketplace (for sale) and Available as two-column grids of name tiles: centered, the full name
    (it wraps and the tile grows - never truncated), ".kachat" under it, then the price asked and, on
-   a Reclaimable tile, its own Reclaim button above the overlay that opens the name. The hero keeps
-   only the logo and the status, so the search sits higher. */
+   an Available tile, its own Claim button above the overlay that opens the name (iOS eea52b2). The
+   hero keeps only the logo and the status, so the search sits higher. */
 .kmkt-hero.kmkt-hero-compact .kmkt-hero-mark .kmkt-wordmark { height: 56px; }
 .kl-tile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .kl-tile {
@@ -13052,21 +13052,17 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .kl-tile-price { max-width: 100%; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kl-tile .kmkt-bar { margin: 2px 0; }
 .kl-tile-open { position: absolute; inset: 0; margin: 0; padding: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
-.kmkt-root .secondary-button.kl-tile-button { position: relative; z-index: 1; min-height: 30px; padding: 5px 12px; font-size: 13px; }
+.kmkt-root .kl-tile-button { position: relative; z-index: 1; min-height: 30px; padding: 5px 12px; font-size: 13px; }
 
-/* ==== .kachat claim progress (iOS 61fb0fc): a half sheet that stays up until the name is
-   registered (Done) or the commit is cancelled. ==== */
+/* ==== .kachat claim progress (iOS b219bb0): a half sheet that opens when a claim starts; closing
+   it leaves the claim running (the claims button lists it). ==== */
 .kl-progress-sheet { display: flex; flex-direction: column; gap: 14px; padding: 22px 16px 20px; }
 .kl-progress-title { font-size: 17px; font-weight: 600; line-height: 22px; color: var(--text); text-align: center; overflow-wrap: anywhere; }
 .kl-progress-note { margin: 0; padding: 0 8px; font-size: 13px; line-height: 18px; text-align: center; }
+.kl-progress-sheet .kl-done-close { align-self: center; }
 
-/* ==== .kachat Reclaim to Own (iOS ba1a734, 0c022e6) and a name that's gone (f420343) ==== */
-.kl-own-again { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px 24px 16px; text-align: center; }
-.kl-own-again-icon { display: inline-flex; color: var(--kaspa-ink); }
-.kl-own-again-icon .kmkt-ico { width: 34px; height: 34px; }
-.kl-own-again-title { font-size: 17px; font-weight: 600; line-height: 22px; color: var(--text); overflow-wrap: anywhere; }
-.kl-own-again-text { margin: 0; font-size: 15px; line-height: 20px; }
-.kl-own-again-buttons { display: flex; flex-direction: column; gap: 10px; width: 100%; margin-top: 4px; }
+/* ==== A .kachat name that's free to claim: gone (released or reclaimed, f420343) or expired past
+   grace (iOS eea52b2) ==== */
 .kl-free-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 15px; }
 .kl-available-pill {
   padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; line-height: 16px;

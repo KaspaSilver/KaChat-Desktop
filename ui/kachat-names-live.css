@@ -40,7 +40,8 @@
 }
 .kl-status-active { color: var(--ios-green); background: color-mix(in srgb, var(--ios-green) 15%, transparent); }
 .kl-status-grace { color: var(--ios-orange); background: color-mix(in srgb, var(--ios-orange) 15%, transparent); }
-.kl-status-lapsed { color: var(--ios-red); background: color-mix(in srgb, var(--ios-red) 15%, transparent); }
+/* past grace a name is free to claim: "Available" (iOS eea52b2) */
+.kl-status-lapsed { color: var(--ios-green); background: color-mix(in srgb, var(--ios-green) 15%, transparent); }
 
 .kl-note { margin: 0; padding: 0 4px; font-size: 13px; line-height: 18px; color: var(--muted); }
 .kl-note-inline { margin: 0; font-size: 13px; line-height: 18px; }
@@ -124,6 +125,24 @@
 .kl-progress { height: 4px; border-radius: 999px; background: var(--fill-tertiary); overflow: hidden; }
 .kl-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--kaspa); transition: width .4s ease; }
 .kl-reg-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+/* what the claim driver is doing or waiting on: a busy network, freeing an expired name (iOS b219bb0) */
+.kl-reg-note { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+
+/* The claims button next to How it works, with its count, and the list behind it (iOS b219bb0). */
+.kl-claims-button { position: relative; }
+.kl-claims-count {
+  position: absolute; top: 0; right: -2px; min-width: 15px; height: 15px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 999px; background: var(--kaspa); color: #fff; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center;
+  pointer-events: none;
+}
+.kl-claims-body { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+
+/* A For sale tile's expiry, and "Expires soon" when little is left (iOS ad184c3). */
+.kl-tile-footer .kl-tile-expiry { margin-top: -6px; font-size: 11px; line-height: 14px; color: var(--muted); }
+.kl-tile-soon {
+  padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 14px;
+  color: var(--ios-orange); background: color-mix(in srgb, var(--ios-orange) 15%, transparent);
+}
 
 /* Destructive bordered buttons (iOS role: .destructive). */
 .kmkt-root .secondary-button.kl-danger, .kmkt-sheet .secondary-button.kl-danger {

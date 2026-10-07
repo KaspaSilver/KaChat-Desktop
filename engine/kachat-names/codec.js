@@ -21,8 +21,8 @@ export class Failure extends Error {
   }
 
   /**
-   * The manifest describes an earlier registry (v1 or v2): this app builds for registry v3 (the
-   * price record, seller-bound offers, periodMs) and waits for its genesis manifest. Not an error
+   * The manifest describes an earlier registry (v1 - v3): this app builds for registry v4 (fixed
+   * register and renew tables, no price record) and waits for its genesis manifest. Not an error
    * to show as one: the screens say the registry is being set up. (Swift `Failure.outdatedRegistry`.)
    */
   static outdatedRegistry() { return new Failure(outdatedRegistryMessage); }
@@ -32,7 +32,7 @@ export class Failure extends Error {
 }
 
 /** The message of `Failure.outdatedRegistry()`. */
-export const outdatedRegistryMessage = "manifest: an earlier registry; this app needs the registry v3 manifest (new genesis pending)";
+export const outdatedRegistryMessage = "manifest: an earlier registry; this app needs the registry v4 manifest (new genesis pending)";
 
 // MARK: - Constants (rusty-kaspa a41a333, kachat-domains params)
 
@@ -318,27 +318,6 @@ export function offerState(f) {
   return concat([0x20], f.key, [0x20], f.buyer, [0x20], f.seller, [0x08], num8(f.refundAfter));
 }
 
-/** Price shard state (registry v3), 87 bytes: `0x08 shard 0x20 authority (0x08 price) x5`. */
-export function priceState(f) {
-  const parts = [[0x08], num8(f.shard), [0x20], f.authority];
-  for (const p of f.prices) parts.push([0x08], num8(BigInt(p)));
-  return concat(...parts);
-}
-
-/** A price shard state -> PriceFields. */
-export function decodePriceState(s) {
-  if (s.length !== 87 || s[0] !== 0x08 || s[9] !== 0x20) throw new Failure("not a price state");
-  const prices = [];
-  for (let t = 0; t < 5; t++) {
-    const at = 42 + t * 9;
-    if (s[at] !== 0x08) throw new Failure("not a price state");
-    const v = decodeNum8(s.subarray(at + 1, at + 9));
-    if (v < 0n) throw new Failure("negative price");
-    prices.push(v);
-  }
-  return makePriceFields({ shard: decodeNum8(s.subarray(1, 9)), authority: s.slice(10, 42), prices });
-}
-
 /** A gap state -> `{ lo, hi }`. */
 export function decodeGapState(s) {
   if (s.length !== 66 || s[0] !== 0x20 || s[33] !== 0x20) throw new Failure("not a gap state");
@@ -530,20 +509,4 @@ export function makeOfferFields({ key: k, buyer, seller, refundAfter }) {
 export function offerFieldsEqual(a, b) {
   return bytesEqual(a.key, b.key) && bytesEqual(a.buyer, b.buyer) && bytesEqual(a.seller, b.seller)
     && a.refundAfter === b.refundAfter;
-}
-
-/** PriceFields `{ shard: BigInt, authority, prices: BigInt[5] }` (registry v3): a price shard's
- *  state; `prices` are sompi per period for names of 1, 2, 3, 4, 5+ bytes (register and renew). */
-export function makePriceFields({ shard, authority, prices }) {
-  if (!Array.isArray(prices) || prices.length !== 5) throw new Failure("a price shard has 5 prices");
-  return { shard: BigInt(shard), authority, prices: prices.map((p) => BigInt(p)) };
-}
-
-/** A price shard's price per period (sompi, BigInt) for a name of `n` bytes. */
-export function priceFieldsPrice(f, n) { return f.prices[tier(n)]; }
-
-/** PriceFields equality. */
-export function priceFieldsEqual(a, b) {
-  return a.shard === b.shard && bytesEqual(a.authority, b.authority) && a.prices.length === b.prices.length
-    && a.prices.every((p, i) => p === b.prices[i]);
 }

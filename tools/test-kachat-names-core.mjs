@@ -105,11 +105,6 @@ function offerRec(o) {
   return { fields, value: u64(o.value), utxo: utxo(o.utxo), name: typeof o.name === "string" ? o.name : null };
 }
 
-function shardRec(p) {
-  const fields = C.makePriceFields({ shard: u64(p.shard), authority: hx(p.authority), prices: p.prices.map(u64) });
-  return { fields, value: u64(p.value), utxo: utxo(p.utxo) };
-}
-
 const commitRec = (c) => ({ name: s(c.name), owner: hx(c.owner), salt: hx(c.salt), value: u64(c.value), utxo: utxo(c.utxo) });
 
 function runBlake3Official(r) {
@@ -182,12 +177,8 @@ function runCodecs(v, r) {
   r.eq(C.offerState(of).length, 108, "offer state is 108 bytes (registry v3: with the seller)");
   r.eqHex(M.templateScript(m.offer, C.offerState(of)), s(o.spk), "offer spk");
   r.check(C.offerFieldsEqual(C.decodeOfferState(C.offerState(of)), of), "decode offer state");
-  const pj = st.price;
-  const pf = C.makePriceFields({ shard: u64(pj.shard), authority: hx(pj.authority), prices: pj.prices.map(u64) });
-  r.eqHex(C.priceState(pf), s(pj.state), "price state");
-  r.eq(C.priceState(pf).length, 87, "price state is 87 bytes");
-  r.eqHex(M.templateScript(m.price, C.priceState(pf)), s(pj.spk), "price spk");
-  r.check(C.priceFieldsEqual(C.decodePriceState(C.priceState(pf)), pf), "decode price state");
+  // registry v4: no price record (codec.js has no price state any more)
+  r.check(st.price === undefined && C.priceState === undefined && m.price === undefined, "registry v4 has no price shard state");
   r.eq(C.hex(C.decodeGapState(gs).hi), s(g.hi), "decode gap state");
   for (const cv of c.covenantIds) {
     const outpoint = T.makeOutpoint(hx(cv.outpoint.txid), num(cv.outpoint.index));
@@ -217,10 +208,12 @@ function runManifest(v, r) {
   const m = M.decodeManifest(JSON.stringify(v.manifest));
   try { M.verifyManifest(m); r.pass += 1; } catch (e) { r.check(false, `manifest verify: ${e.message}`); }
   r.check(m.isDryRun, "the vectors' manifest is a dry run");
-  // the vectors' registry is not a deployed one: its gap, name and offer have no pins, so an
-  // indexer-served copy is refused
+  // the gap and name are pinned (registry v4 bakes only params), the offer only once the registry
+  // genesis exists: the vectors' registry is not a deployed one, so an indexer-served copy is refused
   r.check(M.deployedTemplateHashes[C.hex(m.registryCovenantId)] === undefined, "the vectors' registry has deployment pins");
-  r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with unpinned gap/name verified");
+  r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with an unpinned offer verified");
+  r.eq(C.hex(m.gap.templateHash), M.pinnedTemplateHashes.KachatGap, "the vectors' gap is the pinned v4 build");
+  r.eq(C.hex(m.name.templateHash), M.pinnedTemplateHashes.KachatName, "the vectors' name is the pinned v4 build");
   // IOS-059: the offer template must be pinned too - an unpinned one could hold buyers' funds in a
   // script the indexer controls
   {
@@ -244,14 +237,32 @@ function runManifest(v, r) {
   r.eq(M.paramsExpiresSoonMs({ periodMs: C.yearMs, renewWindowMs: 864_000_000n }), 2_592_000_000n, "IOS-060: expiresSoonMs on a yearly clock is 30 days");
   r.eq(M.paramsExpiresSoonMs({ periodMs: 600_000n, renewWindowMs: 600_000n }), 600_000n, "IOS-060: expiresSoonMs on a 10-minute clock is the renewal window");
   r.eq(M.paramsExpiresSoonMs({ periodMs: 3_600_000n, renewWindowMs: 60_000n }), 300_000n, "IOS-060: expiresSoonMs is a twelfth of a short period when that is longer than the window");
-  r.eq(C.hex(m.priceCovenantId), s(v.priceCovenantId), "price covenant id");
-  r.eq(m.genesisShards.length, num(v.priceShards), "price genesis shards");
   r.eq(m.params.periodMs, u64(v.periodMs), "periodMs");
-  // a wrong price covenant id is caught
+  // the fixed tables (registry v4) and the rule the contracts charge by
+  r.eq(m.params.registerPrices.join(","), v.registerPrices.map(u64).join(","), "register prices");
+  r.eq(m.params.renewPrices.join(","), v.renewPrices.map(u64).join(","), "renew prices");
+  r.eq(m.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "register prices = the pinned table");
+  r.eq(m.params.renewPrices.join(","), M.pinnedRenewPrices.join(","), "renew prices = the pinned table");
+  for (let len = 1; len <= 6; len++) {
+    for (const years of [1n, 2n]) {
+      const t = C.tier(len);
+      const expect = m.params.registerPrices[t] + m.params.renewPrices[t] * (years - 1n);
+      r.eq(M.paramsRegisterCost(m.params, len, years), expect, `register cost, ${len} chars x${years}`);
+    }
+    r.eq(M.paramsRegisterPrice(m.params, len), m.params.registerPrices[C.tier(len)], `register price, ${len} chars`);
+    r.eq(M.paramsRenewPrice(m.params, len), m.params.renewPrices[C.tier(len)], `renew price, ${len} chars`);
+  }
+  // a manifest that claims other prices than the pinned templates bake is refused
   const jp = structuredClone(v.manifest);
-  jp.priceCovenantId = "cd".repeat(32);
-  jp.priceGenesis.priceCovenantId = "cd".repeat(32);
-  r.check(!verifies(M.decodeManifest(jp)), "manifest with a wrong price covenant id verified");
+  jp.params.prices.register.len1 = 1;
+  r.check(!verifies(M.decodeManifest(jp)), "manifest with other prices than the templates bake verified");
+  // desktop extra: the renew table too, and a missing table
+  const jr = structuredClone(v.manifest);
+  jr.params.prices.renew.len5plus = 8_750_001;
+  r.check(!verifies(M.decodeManifest(jr)), "manifest with another renew table verified");
+  const jm = structuredClone(v.manifest);
+  delete jm.params.prices.renew;
+  r.check((() => { try { M.decodeManifest(jm); return false; } catch (e) { return e instanceof C.Failure && /prices\.renew/.test(e.message); } })(), "manifest without a renew table decoded");
   // tampering is caught
   const j = structuredClone(v.manifest);
   j.registryCovenantId = "ab".repeat(32);
@@ -270,12 +281,11 @@ function runManifest(v, r) {
     "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
   ].find((x) => existsSync(x));
   if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
-  // the bundled manifest: the live testnet-10 registry v3 (iOS 32b7b32), verified from the bundle
+  // the bundled manifest: the live testnet-10 registry v4 (iOS d82dfb2), verified from the bundle
   // and as an indexer would serve it (every template pinned for its registry id)
-  const BUNDLED_REGISTRY = "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24";
-  const BUNDLED_PRICE = "4d7685c06d5e3d37d8670fd68f7ac19b9d558398f3af268b310e9ad673f93338";
+  const BUNDLED_REGISTRY = "bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f";
   const bundledJson = JSON.parse(bundled.toString("utf8"));
-  r.eq(bundledJson.registryVersion, 3, "bundled manifest registryVersion");
+  r.eq(bundledJson.registryVersion, 4, "bundled manifest registryVersion");
   let bm = null;
   try { bm = M.decodeManifest(new Uint8Array(bundled)); } catch (e) { r.check(false, `bundled manifest decode: ${e.message}`); }
   if (bm) {
@@ -284,21 +294,21 @@ function runManifest(v, r) {
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
     r.eq(bm.network, "testnet-10", "bundled manifest network");
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled registry covenant id");
-    r.eq(C.hex(bm.priceCovenantId), BUNDLED_PRICE, "bundled price covenant id");
-    r.eq(C.hex(bm.genesisTxid), "fa8b21d28747c664197b0dc70f63811e71aa544f407cee577fef1584a60d5940", "bundled registry genesis txid");
-    r.eq(C.hex(bm.priceGenesisTxid), "246d4cb6b28263f1b7c49fa1d4bb0ec59bdf908a08999b9cc491525b1402e78b", "bundled price genesis txid");
-    r.eq(bm.genesisShards.length, 8, "bundled manifest: 8 price shards");
+    r.eq(C.hex(bm.genesisTxid), "b1f28a5f3ff917dc567fa038c80dc50539d42fa6f088bb2e008d5dad82f685a1", "bundled registry genesis txid");
+    r.check(bm.price === undefined && bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
     r.eq(bm.params.periodMs, 600_000n, "bundled manifest: 10-minute testnet clock");
-    // the pins: the price everywhere, the gap / name / offer for this registry id - and they are
-    // exactly the bundled templates (iOS Manifest.deployedTemplateHashes)
+    r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "bundled manifest: the pinned register table");
+    r.eq(bm.params.renewPrices.join(","), M.pinnedRenewPrices.join(","), "bundled manifest: the pinned renew table");
+    // the pins: the gap and name everywhere, the offer for this registry id - and they are exactly
+    // the bundled templates (iOS Manifest.pinnedTemplateHashes / deployedTemplateHashes)
     const pins = M.templatePinsFor(bm.registryCovenantId);
-    r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer,KachatPrice", "every template pinned for the bundled registry");
+    r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer", "every template pinned for the bundled registry");
     r.eq(M.templatePinsFor(BUNDLED_REGISTRY.toUpperCase()).KachatOffer, pins.KachatOffer, "templatePinsFor takes hex in any case");
-    for (const t of [bm.price, bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled ${t.contract} is the pinned build`);
-    r.eq(pins.KachatGap, "3c2c0f4f076da46f401ee19ea232580207c1c2bcd5cbdb626ead0b7f7693a157", "pinned gap hash (iOS)");
-    r.eq(pins.KachatName, "973dba9aaa58ba8f59ac28a4dc45001209fae7708a89ffbcf49c1bc1ba5adfc4", "pinned name hash (iOS)");
-    r.eq(pins.KachatOffer, "8d6f8cdd287b2776b4c763691f28ffc08cdbe1552d2d7b7acdce8400268d1be5", "pinned offer hash (iOS)");
-    r.eq(pins.KachatPrice, "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3", "pinned price hash (iOS)");
+    for (const t of [bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled ${t.contract} is the pinned build`);
+    r.eq(pins.KachatGap, "85cf57f8d300331c2acc5191794065d60fafdd29cac90e3b82e3e1ba1c3876f0", "pinned gap hash (iOS)");
+    r.eq(pins.KachatName, "394204b612f345787412156521c0aabbd36bba30311f008302964d4c4ece685a", "pinned name hash (iOS)");
+    r.eq(pins.KachatOffer, "226def4b7fea21b21957c55fd47331b1d2f510fa2a63f8e7543bafaed4898e7d", "pinned offer hash (iOS)");
+    r.eq(Object.keys(M.templatePinsFor("ab".repeat(32))).sort().join(","), "KachatGap,KachatName", "another registry: only the gap and name pinned");
     // a tampered offer build (its hash recomputed so only the pin can catch it) is refused, from
     // the bundle too: this registry's offer is pinned
     const tampered = M.decodeManifest(new Uint8Array(bundled));
@@ -310,6 +320,14 @@ function runManifest(v, r) {
       try { M.verifyManifest(tampered, { source }); } catch (e) { msg = e.message; }
       r.check(/KachatOffer is not the pinned build/.test(msg), `a tampered offer template (${source}) is refused as not pinned: ${msg || "verified"}`);
     }
+    // the same for the gap (pinned everywhere in v4)
+    const tamperedGap = M.decodeManifest(new Uint8Array(bundled));
+    const gsuffix = tamperedGap.gap.suffix.slice();
+    gsuffix[gsuffix.length - 1] ^= 1;
+    tamperedGap.gap = { ...tamperedGap.gap, suffix: gsuffix, templateHash: C.templateHash(tamperedGap.gap.prefix, gsuffix) };
+    let gapMsg = "";
+    try { M.verifyManifest(tamperedGap); } catch (e) { gapMsg = e.message; }
+    r.check(/KachatGap is not the pinned build/.test(gapMsg), `a tampered gap template is refused as not pinned: ${gapMsg || "verified"}`);
     // the bundled templates under another registry id lose their deployment pins: an indexer copy
     // is refused (and the registry id binding fails anyway)
     const moved = structuredClone(bundledJson);
@@ -317,19 +335,19 @@ function runManifest(v, r) {
     let movedMsg = "";
     try { M.verifyManifest(M.decodeManifest(moved), { source: M.ManifestSource.indexer }); } catch (e) { movedMsg = e.message; }
     r.check(movedMsg !== "", "the bundled manifest under another registry id verified from an indexer");
-    // registryVersion 2 of the same manifest is an earlier registry ("setting up")
-    const v2 = structuredClone(bundledJson);
-    v2.registryVersion = 2;
-    let v2Err = null;
-    try { M.decodeManifest(v2); } catch (e) { v2Err = e; }
-    r.check(v2Err instanceof C.Failure && v2Err.isOutdatedRegistry, "a registryVersion 2 copy of the bundled manifest is outdated");
-    console.log(`bundled manifest: registry v3, verified (registry ${BUNDLED_REGISTRY.slice(0, 8)}..${BUNDLED_REGISTRY.slice(-4)}, price ${BUNDLED_PRICE.slice(0, 8)}..${BUNDLED_PRICE.slice(-4)}, every template pinned)`);
+    // registryVersion 3 of the same manifest is an earlier registry ("setting up")
+    const v3 = structuredClone(bundledJson);
+    v3.registryVersion = 3;
+    let v3Err = null;
+    try { M.decodeManifest(v3); } catch (e) { v3Err = e; }
+    r.check(v3Err instanceof C.Failure && v3Err.isOutdatedRegistry, "a registryVersion 3 copy of the bundled manifest is outdated");
+    console.log(`bundled manifest: registry v4, verified (registry ${BUNDLED_REGISTRY.slice(0, 8)}..${BUNDLED_REGISTRY.slice(-4)}, every template pinned)`);
   }
   return m;
 }
 
 /** The period rules on their own (KACHAT_NAMES.md 4.1, ops.rs) on the testnet-10 short clock
- *  (registry v3: periodMs = renewWindowMs = graceMs = 10 minutes): what extend may add, when renew
+ *  (registry v4: periodMs = renewWindowMs = 10 minutes): what extend may add, when renew
  *  opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
 function runPeriodRules(v, m, r) {
   const p = m.params;
@@ -376,18 +394,17 @@ function runPeriodRules(v, m, r) {
     const env = B.makeEnv({ me: hx(env0.me), blockDaa: u64(env0.blockDaa), blockTimeMs: u64(env0.blockTimeMs), wallMs: u64(env0.wallMs) });
     const n = nameRec(ext.records.name);
     const wallet = ext.wallet.map(utxo);
-    const sh = shardRec(ext.records.shard);
-    r.check(refused(() => b.extend({ env, wallet, name: n, shard: sh, years: 2n })), "extend past 2 periods from periodStart refused");
+    r.check(refused(() => b.extend({ env, wallet, name: n, years: 2n })), "extend past 2 periods from periodStart refused");
     n.fields = C.nameFieldsExtended(n.fields, 1n, p.periodMs);
-    r.check(refused(() => b.extend({ env, wallet, name: n, shard: sh, years: 1n })), "a second extend of a full name refused");
-    r.check(refused(() => b.extend({ env, wallet, name: n, shard: sh, years: 0n })), "extend by 0 refused");
-    // a shard with the wrong covenant id (a look-alike) is refused before anything is built
-    const fake = shardRec(ext.records.shard);
+    r.check(refused(() => b.extend({ env, wallet, name: n, years: 1n })), "a second extend of a full name refused");
+    r.check(refused(() => b.extend({ env, wallet, name: n, years: 0n })), "extend by 0 refused");
+    // desktop extra: a name with the wrong covenant id (a look-alike) is refused before anything is built
+    const fake = nameRec(ext.records.name);
     fake.utxo.entry.covenantId = null;
-    r.check(refused(() => b.extend({ env, wallet, name: nameRec(ext.records.name), shard: fake, years: 1n })), "a look-alike price shard refused");
+    r.check(refused(() => b.extend({ env, wallet, name: fake, years: 1n })), "a look-alike name record refused");
     // renew before the window: built (a note says it is not open) with the opening as lock time
     let plan = null;
-    try { plan = b.renew({ env, wallet, name: n, shard: sh, years: 1n }); } catch { plan = null; }
+    try { plan = b.renew({ env, wallet, name: n, years: 1n }); } catch { plan = null; }
     if (plan) {
       r.eq(plan.unsignedTx.lockTime, M.paramsRenewOpens(p, n.fields.expiresAt), "early renew: lock time = the window opening");
       r.check(plan.notes.some((x) => x.startsWith("renewal window not open")), "early renew: noted as not open");
@@ -395,36 +412,36 @@ function runPeriodRules(v, m, r) {
     } else {
       r.check(false, "early renew plan not built");
     }
-    r.check(refused(() => b.renew({ env, wallet, name: n, shard: sh, years: 3n })), "renew by 3 refused");
+    r.check(refused(() => b.renew({ env, wallet, name: n, years: 3n })), "renew by 3 refused");
   } else {
     r.check(false, "no extend step in the vectors");
   }
   // the fixed budgets are the vectors' table, entry for entry
   const recommended = v.recommendedBudgets;
   const roles = Object.values(B.BudgetRole);
-  // price.update / price.follow are the CLI's (price changes); every other role is the app's
-  const appKeys = Object.keys(recommended).filter((k) => k !== "price.update" && k !== "price.follow");
-  r.eq(appKeys.sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
+  r.eq(Object.keys(recommended).sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
   for (const role of roles) {
     r.eq(BigInt(B.recommendedBudgets[role]), u64(recommended[role]), `recommended budget ${role}`);
   }
-  // an earlier registry's manifest (no registryVersion 3) is recognised as outdated, never trusted
+  // an earlier registry's manifest (no registryVersion 4) is recognised as outdated, never trusted
   const old = structuredClone(v.manifest);
   delete old.registryVersion;
   try {
     M.decodeManifest(JSON.stringify(old));
-    r.check(false, "a manifest without registryVersion 3 decoded");
+    r.check(false, "a manifest without registryVersion 4 decoded");
   } catch (e) {
-    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `a manifest without registryVersion 3 is the outdated registry: ${e.message}`);
+    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `a manifest without registryVersion 4 is the outdated registry: ${e.message}`);
   }
-  // desktop extra: registryVersion 2 (the previous genesis) is outdated too
-  const v2 = structuredClone(v.manifest);
-  v2.registryVersion = 2;
-  try {
-    M.decodeManifest(v2);
-    r.check(false, "a registryVersion 2 manifest decoded");
-  } catch (e) {
-    r.check(e instanceof C.Failure && e.isOutdatedRegistry, `registryVersion 2 is the outdated registry: ${e.message}`);
+  // desktop extra: registryVersion 3 (the previous genesis) and 2 are outdated too
+  for (const ver of [3, 2]) {
+    const older = structuredClone(v.manifest);
+    older.registryVersion = ver;
+    try {
+      M.decodeManifest(older);
+      r.check(false, `a registryVersion ${ver} manifest decoded`);
+    } catch (e) {
+      r.check(e instanceof C.Failure && e.isOutdatedRegistry, `registryVersion ${ver} is the outdated registry: ${e.message}`);
+    }
   }
   r.check(C.Failure.outdatedRegistry().isOutdatedRegistry && !new C.Failure("x").isOutdatedRegistry, "Failure.outdatedRegistry / isOutdatedRegistry");
 }
@@ -432,9 +449,9 @@ function runPeriodRules(v, m, r) {
 function build(b, op, env, wallet, args, rec) {
   switch (op) {
     case "commit": return b.commit({ env, wallet, name: s(args.name), salt: hx(args.salt) });
-    case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), shard: shardRec(rec.shard), years: u64(args.years), now: u64(args.now) });
-    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), shard: shardRec(rec.shard), years: u64(args.years) });
-    case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), shard: shardRec(rec.shard), years: u64(args.years) });
+    case "register": return b.register({ env, wallet, gap: gapRec(rec.gap), commit: commitRec(rec.commit), years: u64(args.years), now: u64(args.now) });
+    case "extend": return b.extend({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
+    case "renew": return b.renew({ env, wallet, name: nameRec(rec.name), years: u64(args.years) });
     case "transfer": return b.transfer({ env, wallet, name: nameRec(rec.name), newOwner: hx(args.newOwner) });
     case "list": return b.list({ env, wallet, name: nameRec(rec.name), price: u64(args.price) });
     case "buy": return b.buy({ env, wallet, name: nameRec(rec.name) });
@@ -450,15 +467,15 @@ function build(b, op, env, wallet, args, rec) {
   }
 }
 
-/** The steps the app builds: price changes (setPrices) are built by the CLI only (the authority
- *  signs on KasSigner); the app reads the result. */
-const appSteps = (v) => v.steps.filter((st) => st.op !== "setPrices");
+/** The steps the app builds: every one (registry v4 has no price changes). */
+const appSteps = (v) => v.steps;
 
 function runSteps(v, m, r) {
   const b = new B.Builder(m);
   const results = [];
   const recommended = v.recommendedBudgets;
-  r.eq(Object.keys(B.recommendedBudgets).length, Object.keys(recommended).length - 2, "recommended table size (less price.update / price.follow)");
+  r.eq(Object.keys(B.recommendedBudgets).length, Object.keys(recommended).length, "recommended table size");
+  r.check(v.steps.every((st) => st.op !== "setPrices"), "registry v4 vectors have no price changes");
   for (const st of appSteps(v)) {
     const failBefore = r.fail;
     const failuresBefore = r.failures.length;
@@ -483,11 +500,15 @@ function runSteps(v, m, r) {
     try {
       plan = build(b, s(st.op), env, wallet, args, rec);
       if (st.op === "register") {
-        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 45n * 60_000n : 0n), `${label}: registerNow`);
+        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 65n * 60_000n : 0n), `${label}: registerNow`);
+        // registry v4: the registration price for the first period, the renewal price after
+        r.eq(plan.priceFee, M.paramsRegisterCost(m.params, C.utf8(s(rec.commit.name)).length, u64(args.years)), `${label}: registerCost`);
+        r.check(plan.inputs.every((i) => i.role !== "price.use"), `${label}: no price shard input`);
       } else if (st.op === "offer") {
         r.eq(plan.newOffer ? C.hex(plan.newOffer.fields.seller) : null, s(args.seller), `${label}: made to the seller`);
       } else if (st.op === "extend") {
         const n = nameRec(rec.name);
+        r.eq(plan.priceFee, M.paramsRenewPrice(m.params, C.utf8(C.nameFieldsName(n.fields)).length) * u64(args.years), `${label}: renewPrice x years`);
         r.check(u64(args.years) <= M.paramsExtendableYearsOf(m.params, n.fields), `${label}: extendableYears covers the step`);
         const lockAndSequences = new Set([plan.unsignedTx.lockTime, ...plan.unsignedTx.inputs.map((i) => i.sequence)]);
         r.check(lockAndSequences.size === 1 && lockAndSequences.has(0n), `${label}: lock time 0, every sequence 0`);
@@ -648,7 +669,7 @@ function writeFixedBudget(v, m, out) {
     };
   });
   const doc = {
-    registryCovenantId: v.manifest.registryCovenantId, priceCovenantId: v.manifest.priceCovenantId, signer: v.deployer.xonly, transactions: txs,
+    registryCovenantId: v.manifest.registryCovenantId, signer: v.deployer.xonly, transactions: txs,
   };
   writeFileSync(out, jsonWithBigInts(doc));
   console.log(`wrote ${txs.length} fixed-budget transactions to ${out}`);

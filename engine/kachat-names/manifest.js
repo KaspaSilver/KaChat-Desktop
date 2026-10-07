@@ -4,23 +4,21 @@
 // `kachat-names-<network>.json` is written by the kachat-domains CLI's `genesis` and served by
 // the indexer at `GET /names/manifest`; the testnet-10 one is bundled next to this file
 // (kachat-names-testnet-10.json, byte-identical to the iOS resource). `verifyManifest` must pass
-// before anything trusts it. Registry v3 only (`registryVersion: 3`): an earlier manifest throws
+// before anything trusts it. Registry v4 only (`registryVersion: 4`): an earlier manifest throws
 // `Failure.outdatedRegistry()` (the screens say the registry is being set up).
 //
 //   Template { contract, prefix, suffix, stateLength, templateHash, dispatchTags: { entry: Uint8Array(4) } }
 //   Params   { bond, gapValue, tCommit, maxYears, periodMs, graceMs, renewWindowMs: bigint,
-//              genesisPrices[5]: bigint, priceShards: bigint, priceValue: bigint, offerMaxFee: bigint }
-//   Manifest { network, status, params, price, gap, name, offer: Template, priceCovenantId, priceGenesisTxid,
-//              priceGenesisOutpoint: Outpoint, genesisShards: [{ output: TxOutput, fields: PriceFields }],
-//              registryCovenantId, genesisTxid, genesisOutpoint: Outpoint, genesisOutput: TxOutput,
-//              genesisState: { lo, hi }, isDryRun }
+//              registerPrices[5]: bigint, renewPrices[5]: bigint, offerMaxFee: bigint }
+//   Manifest { network, status, params, gap, name, offer: Template, registryCovenantId, genesisTxid,
+//              genesisOutpoint: Outpoint, genesisOutput: TxOutput, genesisState: { lo, hi }, isDryRun }
 //
-// Prices are not in Params: registering and renewing pay what a price shard says (PriceFields,
-// codec.js), which the authority can change; `genesisPrices` are only what the shards started with.
+// The prices are fixed (registry v4): baked into the gap and name templates, whose hashes are
+// pinned, so `registerPrices` / `renewPrices` are what the contracts charge (no price record).
 
 import {
   Failure, hex, unhex, unhex32, concat, bytesEqual, indexOfBytes, tier, templateHash as computeTemplateHash,
-  p2shScript, gapState, covenantId, zero32, ff32, fromUtf8, yearMs, priceState, makePriceFields,
+  p2shScript, gapState, covenantId, zero32, ff32, fromUtf8, yearMs,
 } from "./codec.js";
 import { makeOutpoint, makeTxOutput } from "./transaction.js";
 
@@ -29,27 +27,30 @@ export const supportedNetwork = "testnet-10";
 /** The bundled manifest's base name (engine/kachat-names/kachat-names-testnet-10.json). */
 export const bundleResource = "kachat-names-testnet-10";
 
-/** Template hashes of the pinned build - registry v3 (silverc v1.0.0 @ 3ed9733). The price
- *  template bakes no covenant id, so it is the same everywhere. The gap and the name bake the
- *  price covenant id, so their hashes exist only once the price genesis does, and the offer bakes
- *  the registry id, so its hash exists once the registry genesis does: those three are pinned per
- *  deployment in `deployedTemplateHashes`. A manifest with any template unpinned is trusted only
- *  from the bundle (`verifyManifest(m, { source })`), never from an indexer - an unpinned offer
- *  template could hold buyers' funds in a script the indexer controls (iOS 1d81a1a, IOS-059). */
+/** Template hashes of the pinned build - registry v4 (silverc v1.0.0 @ 3ed9733), testnet-10
+ *  params (kachat-domains artifacts/testnet10/build-info.json). The gap and the name bake only the
+ *  params - their fixed prices included - so they are pinned before any genesis. The offer bakes
+ *  the registry id, so its hash exists once the registry genesis does: the deployment adds it in
+ *  `deployedTemplateHashes`. A manifest with any template unpinned is trusted only from the
+ *  bundle (`verifyManifest(m, { source })`), never from an indexer - an unpinned offer template
+ *  could hold buyers' funds in a script the indexer controls (iOS 1d81a1a, IOS-059). */
 export const pinnedTemplateHashes = {
-  KachatPrice: "d225c3a302b91866a8a7cb09d513b3375715794adf4f1e05eec872b32cb781d3",
+  KachatGap: "85cf57f8d300331c2acc5191794065d60fafdd29cac90e3b82e3e1ba1c3876f0",
+  KachatName: "394204b612f345787412156521c0aabbd36bba30311f008302964d4c4ece685a",
 };
-/** The gap, name and offer builds each deployed registry was launched with, by registry covenant
- *  id (Swift `Manifest.deployedTemplateHashes`, iOS 32b7b32). A manifest for one of these
- *  registries must carry exactly these; any other registry (a dry run, the test vectors) has no
- *  pins, so only a bundled manifest of it is trusted. */
+/** The price tables the pinned gap and name bake (kachat-domains params/testnet10.json), sompi by
+ *  name length 1, 2, 3, 4, 5+ bytes: a manifest whose params say otherwise would show and charge
+ *  prices the contracts don't (Swift `Manifest.pinnedRegisterPrices` / `pinnedRenewPrices`). */
+export const pinnedRegisterPrices = Object.freeze([4_000_000_000n, 2_000_000_000n, 1_000_000_000n, 250_000_000n, 35_000_000n]);
+export const pinnedRenewPrices = Object.freeze([1_000_000_000n, 500_000_000n, 250_000_000n, 62_500_000n, 8_750_000n]);
+/** The offer build each deployed registry was launched with, by registry covenant id (Swift
+ *  `Manifest.deployedTemplateHashes`). A manifest for one of these registries must carry exactly
+ *  this; any other registry (a dry run, the test vectors) has no offer pin, so only a bundled
+ *  manifest of it is trusted. */
 export const deployedTemplateHashes = {
-  // testnet-10 registry v3, 2026-10-06: price genesis 246d4cb6..e78b (price covenant
-  // 4d7685c0..3338), registry genesis fa8b21d2..5940
-  "90f56bd1babeda8e901639eaffacd9dba211c32d3f4f2587916f419140ee6d24": {
-    KachatGap: "3c2c0f4f076da46f401ee19ea232580207c1c2bcd5cbdb626ead0b7f7693a157",
-    KachatName: "973dba9aaa58ba8f59ac28a4dc45001209fae7708a89ffbcf49c1bc1ba5adfc4",
-    KachatOffer: "8d6f8cdd287b2776b4c763691f28ffc08cdbe1552d2d7b7acdce8400268d1be5",
+  // testnet-10 registry v4, 2026-10-07: genesis b1f28a5f..85a1
+  "bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f": {
+    KachatOffer: "226def4b7fea21b21957c55fd47331b1d2f510fa2a63f8e7543bafaed4898e7d",
   },
 };
 
@@ -61,11 +62,10 @@ export function templatePinsFor(registryCovenantId) {
   const deployed = Object.prototype.hasOwnProperty.call(deployedTemplateHashes, id) ? deployedTemplateHashes[id] : {};
   return { ...deployed, ...pinnedTemplateHashes };
 }
-/** State lengths per contract (registry v3: price 87, gap 66, name 126, offer 108). */
-export const stateLengths = { KachatPrice: 87, KachatGap: 66, KachatName: 126, KachatOffer: 108 };
+/** State lengths per contract (registry v4: gap 66, name 126, offer 108). */
+export const stateLengths = { KachatGap: 66, KachatName: 126, KachatOffer: 108 };
 /** The dispatch entries every contract must have. */
 export const entries = {
-  KachatPrice: ["use", "update", "follow"],
   KachatGap: ["register", "merge", "absorbed"],
   KachatName: ["transfer", "list", "buy", "extend", "renew", "release", "reclaim"],
   KachatOffer: ["accept", "decline", "withdraw", "refund"],
@@ -99,11 +99,24 @@ export function templateStateOfRedeem(t, redeem) {
   return redeem.slice(start, start + t.stateLength);
 }
 
-// MARK: - Params (kachat-domains params/<network>.json, registry v3)
+// MARK: - Params (kachat-domains params/<network>.json, registry v4)
 
-/** A genesis price per period (sompi) for a name of `n` bytes: only what the price shards started
- *  with. What a name costs now is its live shard's `priceFieldsPrice` (codec.js). */
-export function paramsGenesisPrice(p, n) { return p.genesisPrices[tier(n)]; }
+// MARK: Prices (registry v4: KachatGap.priceFor, KachatName.renewPrice)
+
+/** What a name of `n` bytes costs for its first period (sompi, BigInt).
+ *  Swift `Params.registerPrice(forLength:)`. */
+export function paramsRegisterPrice(p, n) { return p.registerPrices[tier(n)]; }
+
+/** What every further period of a name of `n` bytes costs (extend, renew, registering past one
+ *  period), sompi BigInt. Swift `Params.renewPrice(forLength:)`. */
+export function paramsRenewPrice(p, n) { return p.renewPrices[tier(n)]; }
+
+/** What `register` charges for `years` periods (BigInt): the first at the registration price,
+ *  every further one at the renewal price. Swift `Params.registerCost(forLength:years:)`. */
+export function paramsRegisterCost(p, n, years) {
+  const y = BigInt(years);
+  return paramsRegisterPrice(p, n) + paramsRenewPrice(p, n) * (y - 1n > 0n ? y - 1n : 0n);
+}
 
 // MARK: The paid period (KACHAT_NAMES.md 4.1; ops.rs)
 
@@ -203,15 +216,15 @@ function outpointOf(v, what) {
 function isObject(v) { return v != null && typeof v === "object" && !Array.isArray(v); }
 
 /** A Manifest from its parsed JSON object (no verification; call `verifyManifest`). Throws
- *  `Failure.outdatedRegistry()` for anything but `registryVersion: 3`. */
+ *  `Failure.outdatedRegistry()` for anything but `registryVersion: 4`. */
 export function manifestFromJSON(root) {
   if (!isObject(root)) throw new Failure("manifest: not a JSON object");
   const network = str(root.network, "network");
   const status = typeof root.status === "string" ? root.status : "";
-  // registry v1 / v2 manifests describe contracts this app no longer builds for: it waits for the
-  // v3 geneses (Swift `(root["registryVersion"] as? NSNumber)?.intValue == 3`)
+  // registry v1 - v3 manifests describe contracts this app no longer builds for: it waits for the
+  // v4 genesis (Swift `(root["registryVersion"] as? NSNumber)?.intValue == 4`)
   const rv = root.registryVersion;
-  if (!((typeof rv === "number" && Math.trunc(rv) === 3) || rv === 3n)) throw Failure.outdatedRegistry();
+  if (!((typeof rv === "number" && Math.trunc(rv) === 4) || rv === 4n)) throw Failure.outdatedRegistry();
   const p = root.params;
   if (!isObject(p)) throw new Failure("manifest: params missing");
   const params = {
@@ -225,47 +238,17 @@ export function manifestFromJSON(root) {
     graceMs: u64(p.graceMs, "graceMs"),
     /** `renew` is valid from `expiresAt - renewWindowMs` on */
     renewWindowMs: u64(p.renewWindowMs, "renewWindowMs"),
-    /** the price shards' genesis prices, sompi per period for names of 1, 2, 3, 4, 5+ bytes */
-    genesisPrices: tiers(p.prices, "prices"),
-    priceShards: u64(p.priceShards, "priceShards"),
-    /** exact value of every price shard */
-    priceValue: u64(p.priceValue, "priceValue"),
+    /** sompi for a name's first period, by length 1, 2, 3, 4, 5+ bytes */
+    registerPrices: tiers(isObject(p.prices) ? p.prices.register : undefined, "prices.register"),
+    /** sompi for every further period (extend, renew, registering past one period) */
+    renewPrices: tiers(isObject(p.prices) ? p.prices.renew : undefined, "prices.renew"),
     offerMaxFee: u64(p.offerMaxFee, "offerMaxFee"),
   };
   const artifacts = root.artifacts;
   if (!isObject(artifacts)) throw new Failure("manifest: artifacts missing");
-  const price = template(artifacts, "KachatPrice");
   const gap = template(artifacts, "KachatGap");
   const name = template(artifacts, "KachatName");
   const offer = template(artifacts, "KachatOffer");
-  const priceCovenantId = unhex32(str(root.priceCovenantId, "priceCovenantId"));
-  const pg = root.priceGenesis;
-  if (!isObject(pg)) throw new Failure("manifest: priceGenesis missing");
-  if (!bytesEqual(unhex32(str(pg.priceCovenantId, "priceGenesis.priceCovenantId")), priceCovenantId)) {
-    throw new Failure("manifest: priceGenesis is for another price covenant");
-  }
-  const priceGenesisTxid = unhex32(str(pg.txid, "priceGenesis.txid"));
-  const priceGenesisOutpoint = outpointOf(pg.outpoint, "priceGenesis.outpoint");
-  const authority = unhex32(str(pg.authority, "priceGenesis.authority"));
-  if (!Array.isArray(pg.authorizedOutputs)) throw new Failure("manifest: priceGenesis outputs missing");
-  const genesisShards = pg.authorizedOutputs.map((o, i) => {
-    if (!isObject(o)) throw new Failure("manifest: priceGenesis outputs missing");
-    if (!isNumber(o.index) || intOf(o.index) !== i) throw new Failure(`manifest: price shard ${i} is not output ${i}`);
-    const st = o.state;
-    if (!isObject(st) || !Array.isArray(st.prices) || st.prices.length !== 5 || !st.prices.every(isNumber)) {
-      throw new Failure(`manifest: price shard ${i} state`);
-    }
-    const fields = makePriceFields({ shard: BigInt(i), authority, prices: st.prices.map((v) => u64(v, `price shard ${i} state`)) });
-    const spkVersion = u64(o.scriptPublicKeyVersion, `price shard ${i} spk version`);
-    if (spkVersion > 0xffffn) throw new Failure(`manifest: price shard ${i} spk version`);
-    const output = makeTxOutput({
-      value: u64(o.value, `price shard ${i} value`),
-      scriptVersion: Number(spkVersion),
-      script: unhex(str(o.scriptPublicKey, `price shard ${i} spk`)),
-      covenant: null,
-    });
-    return { output, fields };
-  });
   const registryCovenantId = unhex32(str(root.registryCovenantId, "registryCovenantId"));
   const g = root.genesis;
   if (!isObject(g)) throw new Failure("manifest: genesis missing");
@@ -289,8 +272,7 @@ export function manifestFromJSON(root) {
   if (st == null || typeof st !== "object" || Array.isArray(st)) throw new Failure("manifest: genesis state missing");
   const genesisState = { lo: unhex32(str(st.lo, "genesis lo")), hi: unhex32(str(st.hi, "genesis hi")) };
   return {
-    network, status, params, price, gap, name, offer,
-    priceCovenantId, priceGenesisTxid, priceGenesisOutpoint, genesisShards,
+    network, status, params, gap, name, offer,
     registryCovenantId, genesisTxid, genesisOutpoint, genesisOutput, genesisState,
     /** A manifest from a dry run describes a registry that does not exist. */
     isDryRun: status.startsWith("dry run"),
@@ -309,13 +291,12 @@ export function decodeManifest(data) {
 
 /** Checks everything the app relies on (KACHAT_NAMES_INDEXER.md B2, kachat-domains
  *  `manifest::load`): testnet-10 only; every template's hash recomputed from its prefix and
- *  suffix and equal to the pinned build where pinned (`templatePinsFor`: the price everywhere,
- *  the gap, name and offer per deployed registry id; an indexer-served manifest needs every hash
- *  pinned, the offer's too - IOS-059); every dispatch tag present; the gap and name baked for this price
- *  covenant and price template, the gap for this name template, the offer for this registry id
- *  and name template; the price genesis outputs are shards 0..K-1 of the price template worth
- *  `priceValue`, and `priceCovenantId == covenant_id(price genesis outpoint, [(i, shard_i)])`;
- *  the genesis output is the genesis gap `(00..00, ff..ff)` worth `gapValue`; and
+ *  suffix and equal to the pinned build where pinned (`templatePinsFor`: the gap and name
+ *  everywhere, the offer per deployed registry id; an indexer-served manifest needs every hash
+ *  pinned, the offer's too - IOS-059); every dispatch tag present; the gap baked for this name
+ *  template, the offer for this registry id and name template; both price tables complete, in
+ *  range and equal to the ones the pinned gap and name bake (`pinnedRegisterPrices` /
+ *  `pinnedRenewPrices`); the genesis output is the genesis gap `(00..00, ff..ff)` worth `gapValue`; and
  *  `registryCovenantId == covenant_id(genesis outpoint, [(0, genesis gap)])`. Throws a Failure.
  *  `source` is `ManifestSource.bundle` (default) or `ManifestSource.indexer`. */
 export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
@@ -323,7 +304,7 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
     throw new Failure(`manifest is for ${m.network}; only ${supportedNetwork} is enabled (mainnet waits for an audit)`);
   }
   const pins = templatePinsFor(m.registryCovenantId);
-  for (const t of [m.price, m.gap, m.name, m.offer]) {
+  for (const t of [m.gap, m.name, m.offer]) {
     if (!bytesEqual(computeTemplateHash(t.prefix, t.suffix), t.templateHash)) {
       throw new Failure(`manifest: ${t.contract} template hash does not match its prefix and suffix`);
     }
@@ -339,34 +320,22 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
       }
     }
   }
-  for (const t of [m.gap, m.name]) {
-    if (indexOfBytes(t.suffix, m.priceCovenantId) < 0 || indexOfBytes(t.suffix, m.price.templateHash) < 0) {
-      throw new Failure(`manifest: the ${t.contract} is not built for this price covenant and price template`);
-    }
-  }
   if (indexOfBytes(m.gap.suffix, m.name.templateHash) < 0) throw new Failure("manifest: the gap is not built for this name template");
   if (indexOfBytes(m.offer.suffix, m.registryCovenantId) < 0 || indexOfBytes(m.offer.suffix, m.name.templateHash) < 0) {
     throw new Failure("manifest: the offer is not built for this registry id and name template");
   }
   const p = m.params;
-  if (p.genesisPrices.length !== 5 || p.maxYears < 1n || p.maxYears > 31n
+  const priceCap = 100_000_000_000_000_000n; // scripts/build.py
+  if (p.registerPrices.length !== 5 || p.renewPrices.length !== 5
+    || ![...p.registerPrices, ...p.renewPrices].every((v) => v <= priceCap)
+    || p.maxYears < 1n || p.maxYears > 31n
     || p.periodMs < 60_000n || p.periodMs > yearMs || !(p.maxYears * p.periodMs < 1_000_000_000_000n)
-    || !(p.renewWindowMs > 0n) || !(p.renewWindowMs <= p.periodMs)
-    || p.priceShards < 1n || p.priceShards > 8n) {
+    || !(p.renewWindowMs > 0n) || !(p.renewWindowMs <= p.periodMs)) {
     throw new Failure("manifest: params out of range");
   }
-  if (BigInt(m.genesisShards.length) !== p.priceShards) {
-    throw new Failure(`manifest: ${m.genesisShards.length} price shards, params say ${p.priceShards}`);
-  }
-  m.genesisShards.forEach((s, i) => {
-    if (s.output.value !== p.priceValue || s.output.scriptVersion !== 0
-      || !bytesEqual(s.output.script, templateScript(m.price, priceState(s.fields))) || s.fields.shard !== BigInt(i)) {
-      throw new Failure(`manifest: price genesis output ${i} is not shard ${i} of the price template`);
-    }
-  });
-  const pid = covenantId(m.priceGenesisOutpoint, m.genesisShards.map((s, i) => ({ index: i, output: s.output })));
-  if (!bytesEqual(pid, m.priceCovenantId)) {
-    throw new Failure(`manifest: price covenant id ${hex(m.priceCovenantId)} != covenant_id(price genesis) ${hex(pid)}`);
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  if (!same(p.registerPrices, pinnedRegisterPrices) || !same(p.renewPrices, pinnedRenewPrices)) {
+    throw new Failure("manifest: the price tables are not the ones the pinned gap and name bake");
   }
   if (!bytesEqual(m.genesisState.lo, zero32()) || !bytesEqual(m.genesisState.hi, ff32())) {
     throw new Failure("manifest: genesis gap is not (00..00, ff..ff)");

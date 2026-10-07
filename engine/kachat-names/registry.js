@@ -5,9 +5,10 @@
 // one of two sources:
 //
 // - the names indexer (KACHAT_NAMES_INDEXER.md Part D) at `indexerBase()`, used when that is set
-//   and `GET /names/status` answers 200 for this manifest's registry AND price covenant ids;
-// - the chain walker otherwise: the registry's live UTXO set (the K price shards, gaps and names,
-//   plus the offers this device made) kept from the manifest's two geneses forward. A refresh asks a node which tracked
+//   and `GET /names/status` answers 200 for this manifest's registry covenant id (registry v4:
+//   no price covenant);
+// - the chain walker otherwise: the registry's live UTXO set (gaps and names, plus the offers this
+//   device made) kept from the manifest's genesis forward. A refresh asks a node which tracked
 //   UTXOs are still unspent (`getUtxosByAddresses`), finds each spent one's spending transaction
 //   through the Kaspa REST API (`GET /addresses/{p2sh}/full-transactions`), decodes the spend like
 //   the indexer does (B3), verifies every new state against its output script and moves on.
@@ -30,7 +31,7 @@
 
 import { Failure, hex, normalize, validate, isValid, key as nameKey } from "./codec.js";
 import {
-  RegistryState, TxView, Lookup, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
+  RegistryState, TxView, Lookup, GapInfo, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
   addressOf, keyOf, shortAddress, compactAddress, p2shAddress, step, decodeAddress,
 } from "./registry-state.js";
 
@@ -157,8 +158,6 @@ export class KachatNamesRegistry {
     /** the verified manifest once loaded */
     this.manifest = null;
     this._cacheNetwork = null;
-    /** the last prices read (PriceFields, registry v3), see `cachedPrices` */
-    this._currentPrices = null;
     this._ownProfiles = new Map();
     this._listeners = new Set();
     this._refreshing = null;
@@ -215,7 +214,6 @@ export class KachatNamesRegistry {
     this.source = null;
     this.chainState = null;
     this._cacheNetwork = null;
-    this._currentPrices = null;
     this._ownProfiles = new Map();
     this._profilesUnavailableUntil = 0;
     this._profileMisses = new Map();
@@ -239,9 +237,8 @@ export class KachatNamesRegistry {
     if (!base) return { kind: "chain" };
     try {
       const status = IndexerAPI.status(await this._get(base, "/names/status"));
-      // registry v3: the indexer must follow this registry and its price covenant
-      if (status.registryCovenantId?.toLowerCase() === hex(m.registryCovenantId)
-        && status.priceCovenantId?.toLowerCase() === hex(m.priceCovenantId)) return { kind: "indexer", base };
+      // registry v4: the indexer is matched on the registry id alone (no price covenant)
+      if (status.registryCovenantId?.toLowerCase() === hex(m.registryCovenantId)) return { kind: "indexer", base };
     } catch { /* no indexer: walk the chain */ }
     return { kind: "chain" };
   }
@@ -300,8 +297,8 @@ export class KachatNamesRegistry {
   }
 
   async _walk(m) {
-    // gaps and names carry the registry id, price shards the price covenant id (offers none)
-    const ids = [hex(m.registryCovenantId), hex(m.priceCovenantId)];
+    // gaps and names carry the registry id (offers none; registry v4 has no price record)
+    const ids = [hex(m.registryCovenantId)];
     const walkFrom = async (state) => {
       const report = await state.walk({
         manifest: m,
@@ -318,7 +315,7 @@ export class KachatNamesRegistry {
       report = await walkFrom(state);
     } catch (e) {
       // a state the chain disagrees with (a cache walked out of order by an earlier version):
-      // walk once more from the geneses, keeping the offers this device follows
+      // walk once more from the genesis, keeping the offers this device follows
       if (!e?.stale) throw e;
       this.deps.log("[KachatNames] the walked registry is out of date, walking again from the genesis:", e.message);
       const offers = this.chainState?.clone().offers ?? [];
@@ -349,7 +346,7 @@ export class KachatNamesRegistry {
       const chunk = addresses.slice(start, start + 50);
       for (const u of (await this.deps.getUtxosByAddresses(chunk)) ?? []) {
         // A node reports the covenant id; the REST fallback cannot (null). A UTXO carrying
-        // another id is not the registry's (nor its price record's).
+        // another id is not the registry's.
         const c = u.covenantId ?? null;
         const cs = c instanceof Uint8Array ? hex(c) : c;
         if (typeof cs === "string" && cs.length && !known.has(cs.toLowerCase())) continue;
@@ -444,7 +441,8 @@ export class KachatNamesRegistry {
   }
 
   /** The names an owner still holds, oldest first: active ones and expired ones in grace (still
-   *  renewable). A lapsed name is no longer theirs - it's in the marketplace's Reclaimable tab.
+   *  renewable). A name past its grace is no longer theirs - it's Available to anyone in the
+   *  marketplace (iOS eea52b2).
    *  Your Domains, its count on Profile and the "Contains domain" tag all show this set
    *  (iOS heldNames, aa36d2a). */
   async heldNames(owner) {
@@ -486,7 +484,8 @@ export class KachatNamesRegistry {
       .sort((a, b) => { const x = a.updatedAt ?? 0n, y = b.updatedAt ?? 0n; return x > y ? -1 : x < y ? 1 : 0; });
   }
 
-  /** Lapsed names anyone may reclaim, oldest expiry first. */
+  /** Names expired past their grace (`Status.lapsed`): back on the market, available to anyone at
+   *  the normal price (claiming one frees the old record first). Oldest expiry first. */
   async lapsed() {
     await this.prepare();
     if (this.source.kind === "indexer") {
@@ -544,48 +543,44 @@ export class KachatNamesRegistry {
     await this.prepare();
     if (this.source.kind === "indexer") {
       try {
-        return IndexerAPI.events(await this._get(this.source.base, "/names/activity")).events.filter((e) => !e.op.startsWith("price"));
+        return IndexerAPI.events(await this._get(this.source.base, "/names/activity")).events;
       } catch { /* an older indexer: market events only */ }
       return IndexerAPI.events(await this._get(this.source.base, "/market/activity")).events;
     }
-    // name activity only: price changes are the registry's, not a name's
-    return (this.chainState?.events ?? []).filter((e) => !e.op.startsWith("price")).reverse().slice(0, 200);
+    return (this.chainState?.events ?? []).slice().reverse().slice(0, 200);
   }
 
-  // MARK: - The price record (registry v3)
+  // MARK: - Prices (registry v4: fixed, baked into the pinned gap and name templates)
 
-  /** Every live price shard (ShardInfo[], shard order). A register, extend or renew spends one;
-   *  the actions re-read the picked shard's UTXO from a node before building. Indexer:
-   *  `GET /names/prices`; else the walked shards. */
-  async shards() {
-    await this.prepare();
-    if (this.source.kind === "indexer") {
-      const j = IndexerAPI.prices(await this._get(this.source.base, "/names/prices"));
-      return j.shards.sort((a, b) => (a.shard < b.shard ? -1 : a.shard > b.shard ? 1 : 0));
+  /** sompi for a name's first period, by length 1, 2, 3, 4, 5+ bytes (BigInt[5]); null until a
+   *  manifest loads. Swift `registerPrices`. */
+  get registerPrices() { return this.manifest?.params.registerPrices ?? null; }
+
+  /** sompi for every further period (extend, renew, registering past one period), BigInt[5]; null
+   *  until a manifest loads. Swift `renewPrices`. */
+  get renewPrices() { return this.manifest?.params.renewPrices ?? null; }
+
+  // MARK: - Claiming an expired name (iOS eea52b2)
+
+  /** The free gap a lapsed name's reclaim reopens - the two gaps around it, merged: where a claim
+   *  of it registers. The claim sheet prices with it; the registration driver reclaims the old
+   *  record first and then looks the gap up again. -> GapInfo. Swift `claimGap(for:)`. */
+  async claimGap(n) {
+    const gaps = await this.exitGaps(n);
+    return new GapInfo({ lo: gaps.below.lo, hi: gaps.above.hi, outpoint: gaps.below.outpoint });
+  }
+
+  /** `lookup` as the app shows a name to someone who wants it: a lapsed name is free to claim
+   *  (claiming it frees the old record and registers it in one go - see the driver), in the gap
+   *  its reclaim reopens. Swift `claimLookup(_:)`. */
+  async claimLookup(raw) {
+    const found = await this.lookup(raw);
+    if (found.kind === "registered" && found.info.status(this.graceMs, this._nowMs()) === Status.lapsed) {
+      let gap = null;
+      try { gap = await this.claimGap(found.info); } catch { gap = null; }
+      return Lookup.free(found.info.name, gap);
     }
-    return this.chainState?.shardInfos ?? [];
-  }
-
-  /** The current prices per period by name length (PriceFields, every shard holds the same ones),
-   *  or null. Also refreshes `cachedPrices`. */
-  async currentPrices() {
-    const all = await this.shards();
-    const p = all[0]?.fields ?? null;
-    if (p) {
-      const changed = !this._currentPrices || this._currentPrices.prices.some((x, i) => x !== p.prices[i]);
-      this._currentPrices = p;
-      if (changed) this._bump();
-    }
-    return p;
-  }
-
-  /** The last prices read (BigInt[5], sompi per period for names of 1, 2, 3, 4, 5+ bytes), for
-   *  screens that price names synchronously (refreshed by `currentPrices()` and every walk). Falls
-   *  back to the manifest's genesis prices; null before any manifest is loaded. */
-  get cachedPrices() {
-    const p = this._currentPrices ?? this.chainState?.currentPrices ?? null;
-    if (p) return p.prices;
-    return this.manifest?.params.genesisPrices ?? null;
+    return found;
   }
 
   /** The two gaps around a registered name (a NameInfo): `{ below: GapInfo, above: GapInfo }`, what

@@ -1,7 +1,8 @@
 // The Profile bell's .kachat news (iOS 86471dd, KachatNamesNotifier in KachatNamesRegistry.swift):
 // turns registry changes into notification-centre rows, so news about your names still leaves a
-// trace - an offer on one of your names, a name sold or reclaimed, its renewal window opening, its
-// expiry and lapse, and what became of your own offers (accepted, declined, expired, returned).
+// trace - an offer on one of your names, a name sold or freed, its renewal window opening, its
+// expiry and the end of its grace (no longer yours: Available to anyone, iOS eea52b2), and what
+// became of your own offers (accepted, declined, expired, returned).
 //
 // It compares what the registry says now with what it saw on the last check (stored per wallet),
 // after registry refreshes and when the app comes back to the front. The first check of a wallet
@@ -104,7 +105,7 @@ export async function checkKachatNamesNews() {
       } catch { /* the bell's own problem */ }
     };
 
-    // Your names: renewal open, expired (grace), lapsed - once per paid period.
+    // Your names: renewal open, expired (grace), past grace (no longer yours) - once per paid period.
     for (const n of owned) {
       const display = `${n.name}.kachat`;
       const expiresAt = String(n.expiresAt);
@@ -132,16 +133,16 @@ export async function checkKachatNamesNews() {
           s.renewNoted = true;
           s.graceNoted = true;
           if (!s.lapsedNoted) {
-            post(`lapsed-${n.name}-${expiresAt}`, n.name, `${display} has lapsed`,
-              "Anyone can claim it now. Reclaim it yourself to get your bond back.");
+            post(`lapsed-${n.name}-${expiresAt}`, n.name, `${display} is no longer yours`,
+              "It expired and wasn't renewed, so it's now available to anyone in the marketplace. Your bond comes back to you when someone claims it.");
             s.lapsedNoted = true;
           }
       }
       next.names[n.name] = s;
     }
 
-    // Names that left this wallet: sold, bought through an offer, or reclaimed by someone. A
-    // transfer or release is your own doing and needs no notice.
+    // Names that left this wallet: sold, bought through an offer, or freed (reclaimed - claiming an
+    // expired name frees it first). A transfer or release is your own doing and needs no notice.
     for (const name of Object.keys(old?.names || {})) {
       if (next.names[name]) continue;
       let history = [];
@@ -154,7 +155,7 @@ export async function checkKachatNamesNews() {
       } else if (last.op === "offer_accepted" || last.op === "offer_accept") {
         post(`sold-${last.txId}`, name, `${display} sold`, "You accepted an offer for it.");
       } else if (last.op === "reclaim") {
-        post(`reclaimed-${last.txId}`, name, `${display} was reclaimed`, "It lapsed and someone reclaimed it. It's free to register again.");
+        post(`reclaimed-${last.txId}`, name, `${display} was freed`, "It expired and was cleared from the registry. Your bond is back with you.");
       }
     }
 
@@ -197,8 +198,9 @@ export async function checkKachatNamesNews() {
 
 /**
  * A tapped .kachat row (iOS 86471dd: the name, the way a tapped .kachat push opens it). `showTab()`
- * brings the .kachat screen up; a registered name then opens its own sheet over it, a name that is
- * free again (reclaimed, released) leaves you on the screen to claim it.
+ * brings the .kachat screen up; a registered name then opens its own sheet over it - one past its
+ * grace shows there as free to claim, with Claim (iOS eea52b2) - and a name that is free again
+ * (reclaimed, released) leaves you on the screen to claim it.
  */
 export async function openKachatNameFromNotification(name, { showTab = null } = {}) {
   const clean = String(name || "").trim().toLowerCase().replace(/\.kachat$/, "");

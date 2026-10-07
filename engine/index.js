@@ -945,6 +945,24 @@ export class KaspaEngine {
     try { return (await this.currentDagPoint()).virtualDaaScore; } catch { return null; }
   }
 
+  /** The node's mempool entry for `txId` (orphan pool included), or null when the node doesn't
+   *  have it or can't be asked. The .kachat claim driver uses it to tell a commit still waiting
+   *  for a block from one a busy network dropped (iOS b219bb0). */
+  async getMempoolEntry(txId) {
+    this.requireSdk();
+    const id = String(txId || "").trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) return null;
+    try {
+      const response = await this.withRpc(async (rpc) => {
+        if (typeof rpc?.getMempoolEntry !== "function") return null;
+        return rpc.getMempoolEntry({ transactionId: id, includeOrphanPool: true, filterTransactionPool: false });
+      }, { retries: 0, label: "Mempool lookup" });
+      return response?.mempoolEntry || response?.entry || null;
+    } catch {
+      return null;
+    }
+  }
+
   /** UTXOs of `addresses` WITH their covenant ids, as plain objects:
    *  `{ outpoint: { transactionId, index }, amount: bigint, scriptPublicKey: hex (script only),
    *  scriptVersion, blockDaaScore: bigint, isCoinbase, covenantId: hex | null }`. 50 addresses

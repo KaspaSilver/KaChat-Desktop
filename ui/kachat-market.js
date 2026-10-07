@@ -12,8 +12,9 @@
 // .kachat Setup Guide it opens (claim, avatar, banner, details, done - each step Coming soon).
 //
 // On TESTNET (testnet-10, iOS 5df42b4) it is live instead (ui/kachat-names-live.js): a Testnet
-// badge, search with real availability and price, Claim (its progress as a half sheet), the
-// registry's listings / reclaimable names / activity, the live name detail with its transaction sheets, and the
+// badge, search with real availability and price, Claim (its progress as a half sheet, and every
+// open claim behind the claims button), the registry's listings / expired names Available to anyone /
+// activity, the live name detail with its transaction sheets, and the
 // live address profile editor. This file keeps the layers and the mockups, and hands the live
 // screens what they need through initKachatLive.
 //
@@ -29,7 +30,7 @@ import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
   liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml,
   livePageHtml, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
-  kachatNameTileHtml, kachatNameGridHtml,
+  kachatNameTileHtml, kachatNameGridHtml, liveClaimsButtonHtml, openClaimsList,
 } from "./kachat-names-live.js";
 
 /** Your Domains > .kachat and each address's .kachat tab (iOS KachatLiveDomainsTab, KachatAddressLiveNamesList); see kachat-names-live.js. */
@@ -39,18 +40,18 @@ let deps = null;
 let marketEl = null;
 
 // Market navigation. view: "home" | "listing" | "name" (a live name, testnet). page: "market" |
-// "reclaimable" | "activity". detail: the live name detail while view is "name".
+// "available" | "activity". detail: the live name detail while view is "name".
 const state = { view: "home", page: "market", search: "", homeScroll: 0, detail: null };
 
 /** A listing as a real one will hand it in; no listing exists yet, so its seller is unknown and
  *  Message stays disabled. With a seller, Message opens a 1:1 chat through deps.openChat. */
 const placeholderListing = { sellerAddress: null };
 
-// Names for sale, names anyone may reclaim, and everything that happens in the registry. Your own
-// names (and the offers you made) live in Profile > Your Domains (iOS 0765ce0).
+// Names for sale, expired names anyone may claim, and everything that happens in the registry.
+// Your own names (and the offers you made) live in Profile > Your Domains (iOS 0765ce0, eea52b2).
 const PAGES = [
   { id: "market", title: "Marketplace" },
-  { id: "reclaimable", title: "Reclaimable" },
+  { id: "available", title: "Available" },
   { id: "activity", title: "Activity" },
 ];
 
@@ -286,13 +287,13 @@ function marketPageHtml() {
     </div>`;
 }
 
-function reclaimablePageHtml() {
+function availablePageHtml() {
   const tiles = Array.from({ length: 2 }, () => `<div class="kmkt-card kl-tile" aria-hidden="true">${tilePlaceholderInner()}</div>`).join("");
   return `
     <div class="kmkt-page">
-      ${sectionHeader("Reclaimable", "Names whose owners let them lapse. Anyone may reclaim one: the bond goes back to its last owner, you keep the freed deposit as a bounty, and the name is free to claim.")}
+      ${sectionHeader("Available")}
       ${kachatNameGridHtml(tiles)}
-      <p class="kmkt-footnote">Reclaimable names appear here once .kachat names launch.</p>
+      <p class="kmkt-footnote">Expired names appear here once .kachat names launch.</p>
     </div>`;
 }
 
@@ -315,14 +316,15 @@ function activityPageHtml() {
 function pageHtml() {
   // Live, or not launched here (mainnet): the same pages - empty on mainnet (iOS 7227d69).
   if (liveHubIsLive() || !kachatNamesLaunched()) return livePageHtml(state.page);
-  if (state.page === "reclaimable") return reclaimablePageHtml();
+  if (state.page === "available") return availablePageHtml();
   if (state.page === "activity") return activityPageHtml();
   return marketPageHtml();
 }
 
-/** How it works, and on testnet the refresh control (iOS pull to refresh). */
+/** How it works, on testnet the refresh control (iOS pull to refresh), and the claims button with
+ *  its count while names are being claimed (iOS b219bb0 KachatClaimsButton). */
 function headerActionsHtml() {
-  return `${liveRefreshButtonHtml()}<button class="kaposts-icon-button" type="button" data-kmkt-how aria-label="How it works" title="How it works">${ICON.question}</button>`;
+  return `${liveRefreshButtonHtml()}${liveClaimsButtonHtml()}<button class="kaposts-icon-button" type="button" data-kmkt-how aria-label="How it works" title="How it works">${ICON.question}</button>`;
 }
 
 function homeHtml() {
@@ -555,8 +557,9 @@ function onLiveChanged(kind) {
   }
   const set = (selector, html) => { const part = el.querySelector(selector); if (part) part.innerHTML = html; };
   if (kind === "search") { set("[data-kmkt-search-result]", searchResultHtml()); return; }
-  // a registration in flight shows in its own progress sheet (iOS 61fb0fc), not on this page
-  if (kind === "pending") return;
+  // a claim in flight shows in its own progress sheet and the claims list (iOS b219bb0), not on
+  // this page: only the claims button's count follows it
+  if (kind === "pending") { set("[data-kmkt-header-actions]", headerActionsHtml()); return; }
   set("[data-kmkt-header-actions]", headerActionsHtml());
   set("[data-kmkt-hero-status]", liveHeroStatusHtml(comingSoonPill()));
   if (kind !== "refresh") {
@@ -592,6 +595,7 @@ function onMarketClick(event) {
   if (state.view === "name") { state.detail?.onClick(event); return; }
   if (target.closest("[data-kmkt-how]")) { openHowItWorksSheet(); return; }
   if (target.closest("[data-kmkt-refresh]")) { liveHubRefresh(); return; }
+  if (target.closest("[data-kl-claims]")) { openClaimsList("market"); return; }
 
   const tab = target.closest("[data-kmkt-page]");
   if (tab) {

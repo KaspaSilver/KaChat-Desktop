@@ -11,8 +11,11 @@
 //
 // `--live` also walks the LIVE testnet-10 registry from the bundled manifest, read-only, through
 // api-tn10.kaspa.org (UTXO liveness from GET /addresses/{a}/utxos instead of a node, spends from
-// GET /addresses/{a}/full-transactions) and prints what it found. An unreachable network is
-// reported, not failed.
+// GET /addresses/{a}/full-transactions) and prints what it found, then compares it with the
+// testnet-10 names indexer (read-only GETs: /names/status, /names/{name}, /names/gap/{key},
+// /names/activity at KACHAT_NAMES_INDEXER or https://tnkachat.duckdns.org:7443). An unreachable
+// network is reported, not failed; an indexer that answers with another registry or other records
+// is reported as a mismatch (the app would walk the chain itself then).
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -65,17 +68,11 @@ function view(st, at) {
 
 const outpointKey = (u) => `${s(u.txid)}:${Number(u.index)}`;
 
-/** The vectors' end-to-end plan (README "The end-to-end run", registry v3), after both geneses:
- *  commits, three registrations, a price change, extend, renew, another price change, transfer,
- *  list, buy, four offers (accept, decline, refund, withdraw), release, reclaim. The steps after
- *  it are edge cases on their own synthetic records. */
-const e2eCount = 23;
-
-/** A step's price shard records: `shard` (register, extend, renew) or `shards` (a price change). */
-function shardRecords(rec) {
-  if (rec.shard) return [rec.shard];
-  return Array.isArray(rec.shards) ? rec.shards : [];
-}
+/** The vectors' end-to-end plan (README "The end-to-end run", registry v4), after the genesis:
+ *  commits, three registrations, extend, renew, transfer, list, buy, four offers (accept,
+ *  decline, refund, withdraw), release, reclaim. The steps after it are edge cases on their own
+ *  synthetic records. */
+const e2eCount = 21;
 
 /** Every record a step was built from must be in the walked state, exactly. */
 function checkRecords(st, state, r) {
@@ -118,23 +115,12 @@ function checkRecords(st, state, r) {
       r.eq(found.value, u64(o.value), `${label}: offer value`);
     }
   }
-  for (const sh of shardRecords(rec)) {
-    const found = state.shards.find((x) => `${x.txid}:${x.index}` === outpointKey(sh.utxo));
-    r.check(!!found, `${label}: price shard ${sh.shard} at ${outpointKey(sh.utxo).slice(0, 16)} not in the walked state`);
-    if (found) {
-      r.eq(found.shard, u64(sh.shard), `${label}: shard index`);
-      r.eq(found.authority, s(sh.authority), `${label}: shard authority`);
-      r.eq(found.prices, sh.prices.map(u64), `${label}: shard prices`);
-      r.eq(found.value, u64(sh.value), `${label}: shard value`);
-    }
-  }
 }
 
 /** A state holding exactly a step's records (the edge cases run on synthetic registry UTXOs). */
 function seeded(st, m) {
   const state = R.RegistryState.atGenesis(m);
   state.gaps = [];
-  state.shards = [];
   state.applied = [];
   const rec = st.records;
   for (const k of ["gap", "below", "above"]) {
@@ -154,12 +140,6 @@ function seeded(st, m) {
     state.offers.push({
       txid: s(o.utxo.txid), index: Number(o.utxo.index), key: s(o.key), buyer: s(o.buyer), seller: s(o.seller), refundAfter: u64(o.refundAfter),
       value: u64(o.value), name: typeof o.name === "string" ? o.name : null, createdAt: null,
-    });
-  }
-  for (const sh of shardRecords(rec)) {
-    state.shards.push({
-      txid: s(sh.utxo.txid), index: Number(sh.utxo.index), shard: u64(sh.shard), authority: s(sh.authority),
-      prices: sh.prices.map(u64), value: u64(sh.value),
     });
   }
   return state;
@@ -184,7 +164,7 @@ function runWalker(v, r) {
     try { state.checkInvariants(); } catch (e) { r.check(false, `${s(st.label)}: invariants: ${e.message}`); }
   });
   r.eq(ops, [
-    "register alpha-tn", "register bravo-tn", "register lapse-tn", "prices ?", "extend alpha-tn", "renew lapse-tn", "prices ?",
+    "register alpha-tn", "register bravo-tn", "register lapse-tn", "extend alpha-tn", "renew lapse-tn",
     "transfer alpha-tn", "list alpha-tn", "sale alpha-tn", "offer bravo-tn", "offer_accepted bravo-tn", "offer_accept bravo-tn",
     "offer alpha-tn", "offer_decline alpha-tn", "offer alpha-tn", "offer_refund alpha-tn",
     "offer alpha-tn", "offer_withdraw alpha-tn", "release bravo-tn", "reclaim lapse-tn",
@@ -192,15 +172,9 @@ function runWalker(v, r) {
   r.eq(state.names.map((n) => n.name), ["alpha-tn"], "names left after the e2e plan");
   r.eq(state.gaps.length, 2, "gaps left after the e2e plan");
   r.eq(state.offers.length, 0, "offers left after the e2e plan");
-  // the price record: all K shards, carried through every register / extend / renew, at the
-  // last change's prices
-  const lastChange = [...e2e].reverse().find((x) => x.op === "setPrices").args;
-  const K = Number(m.params.priceShards);
-  r.eq(state.shards.length, K, "every price shard tracked");
-  r.eq(state.currentPrices?.prices, lastChange.prices.map(u64), "current prices = the last change's");
-  r.eq(state.currentPrices && C.hex(state.currentPrices.authority), s(lastChange.newAuthority), "current authority");
-  r.eq(state.shardInfos.map((x) => x.shard), [...Array(K).keys()].map(BigInt), "shards in order");
-  r.eq(state.events.filter((e) => e.op === "prices").map((e) => e.price), [70_000_000n, 35_000_000n], "price events carry the 5+ price");
+  // registry v4: no price record to follow, no price events
+  r.check(state.shards === undefined && state.priceCovenantId === undefined, "registry v4: the state has no price shards");
+  r.check(!state.events.some((e) => e.op.startsWith("price")), "registry v4: no price events");
   const accepted = state.events.find((e) => e.op === "offer_accepted");
   const payout = accepted?.price ?? 0n;
   r.check(payout > 9n * 100_000_000n && payout < 10n * 100_000_000n, `accepted offer payout is the offer less the fee (${payout})`);
@@ -231,19 +205,9 @@ function runWalker(v, r) {
       switch (op) {
         case "register":
           r.eq(seededState.names.length, 1, `${label}: name created`); r.eq(seededState.gaps.length, 2, `${label}: gaps split`);
-          r.eq(seededState.shards.length, 1, `${label}: the shard came back`);
           break;
         case "reclaim": r.eq(seededState.names.length, 0, `${label}: name gone`); r.eq(seededState.gaps.length, 1, `${label}: gaps merged`); break;
         case "acceptOffer": case "declineOffer": r.eq(seededState.offers.length, 0, `${label}: offer gone`); break;
-        case "setPrices": {
-          const a = st.args;
-          const K = Number(m.params.priceShards);
-          r.eq(seededState.shards.length, K, `${label}: every shard continues`);
-          r.eq(seededState.currentPrices?.prices, a.prices.map(u64), `${label}: new prices`);
-          r.eq(seededState.shardInfos.map((x) => x.shard), [...Array(K).keys()].map(BigInt), `${label}: each shard once, in order`);
-          r.eq([...new Set(seededState.shards.map((x) => x.authority))], [s(a.newAuthority)], `${label}: every shard at the new authority`);
-          break;
-        }
         case "extend":
         case "renew": {
           const years = u64(st.args.years);
@@ -251,7 +215,6 @@ function runWalker(v, r) {
           r.eq(events[0]?.op, op, `${label}: event`);
           r.eq(events[0]?.years, years, `${label}: event years`);
           r.eq(after?.expiresAt, before ? before.expiresAt + years * m.params.periodMs : null, `${label}: expiresAt + periods`);
-          r.eq(seededState.shards.length, 1, `${label}: the shard came back`);
           // extend keeps the period; renew starts the next one at the old expiry
           r.eq(after?.periodStart, op === "extend" ? before?.periodStart : before?.expiresAt, `${label}: periodStart`);
           break;
@@ -287,27 +250,6 @@ function runWalker(v, r) {
   badRedeem.inputs[0].signatureScript = C.concat(...pushes.map((p) => C.pushData(p)), C.pushData(redeem));
   r.check(tryApply(st0, badRedeem, m) === null, "a spend revealing another redeem script was accepted");
   r.check(st0.equals(genesis), "refusals left the state alone");
-  // the price record: a shard continuation at another state, or a change missing a shard
-  const stReg = R.RegistryState.atGenesis(m);
-  for (const st of steps.slice(0, 3)) tryApply(stReg, view(st, 1), m);
-  const beforeReg = stReg.clone();
-  const shardTamper = view(reg, 2);
-  shardTamper.outputs[3].script[5] ^= 0x01;
-  r.check(tryApply(stReg, shardTamper, m) === null, "a register whose shard continuation holds another state was accepted");
-  const shardOther = view(reg, 2);
-  shardOther.outputs[3].covenant.covenantId = m.registryCovenantId;
-  r.check(tryApply(stReg, shardOther, m) === null, "a shard continuation under the registry id was accepted");
-  r.check(stReg.equals(beforeReg), "refused shard spends left the state alone");
-  const stPrices = R.RegistryState.atGenesis(m);
-  for (const st of steps.slice(0, 6)) tryApply(stPrices, view(st, 1), m);
-  const beforePrices = stPrices.clone();
-  const changeTamper = view(steps[6], 7);
-  changeTamper.outputs[5].script[5] ^= 0x01;
-  r.check(tryApply(stPrices, changeTamper, m) === null, "a price change with one shard at other prices was accepted");
-  const changeDropped = view(steps[6], 7);
-  changeDropped.outputs.splice(7, 1);
-  r.check(tryApply(stPrices, changeDropped, m) === null, "a price change missing a shard continuation was accepted");
-  r.check(stPrices.equals(beforePrices), "refused price changes left the state alone");
   // an unrelated transaction is ignored
   r.eq(tryApply(st0, view(steps[0], 1), m)?.length, 0, "a commit is not a registry transaction");
 }
@@ -326,9 +268,8 @@ function simulatedChain(v, { at = (i) => 1_000 + i, blueScore = () => null, orde
     t.outputs.forEach((o, k) => created.set(`${t.idHex}:${k}`, o.script));
     for (const i of t.inputs) spentBy.set(`${C.hex(i.outpoint.txid)}:${i.outpoint.index}`, t.idHex);
   }
-  // the genesis gap lives at the manifest's genesis outpoint, the shards at the price genesis
+  // the genesis gap lives at the manifest's genesis outpoint
   created.set(`${C.hex(m.genesisTxid)}:0`, m.genesisOutput.script);
-  m.genesisShards.forEach((sh, i) => created.set(`${C.hex(m.priceGenesisTxid)}:${i}`, sh.output.script));
   const addr = (script) => R.addressFromScriptPublicKey(script, "kaspatest");
   const visibleUpTo = (upTo) => {
     const visible = txs.slice(0, upTo);
@@ -337,7 +278,7 @@ function simulatedChain(v, { at = (i) => 1_000 + i, blueScore = () => null, orde
       const out = new Set();
       for (const [op, script] of created) {
         if (addresses.includes(addr(script) ?? "")
-          && (op.startsWith(C.hex(m.genesisTxid)) || op.startsWith(C.hex(m.priceGenesisTxid)) || visibleIds.has(op.slice(0, 64)))
+          && (op.startsWith(C.hex(m.genesisTxid)) || visibleIds.has(op.slice(0, 64)))
           && !(spentBy.has(op) && visibleIds.has(spentBy.get(op)))) out.add(op);
       }
       return out;
@@ -365,8 +306,6 @@ async function runWalk(v, r) {
       r.eq(ops(walked.gaps), ops(reference.gaps), `walk to ${upTo}: gaps`);
       r.eq(sortStr(walked.names.map((n) => n.name)), sortStr(reference.names.map((n) => n.name)), `walk to ${upTo}: names`);
       r.eq(ops(walked.names), ops(reference.names), `walk to ${upTo}: name outpoints`);
-      r.eq(ops(walked.shards), ops(reference.shards), `walk to ${upTo}: shard outpoints`);
-      r.eq(walked.currentPrices, reference.currentPrices, `walk to ${upTo}: prices`);
       r.eq(ops(walked.offers), ops(reference.offers), `walk to ${upTo}: offers`);
       r.check(report.unresolved.length === 0, `walk to ${upTo}: unresolved ${report.unresolved}`);
       try { walked.checkInvariants(); } catch (e) { r.check(false, `walk to ${upTo}: invariants ${e.message}`); }
@@ -388,7 +327,7 @@ function shuffled(list, seed) {
 /** The walk does not depend on the order the REST API lists transactions in, nor on their times
  *  (KaChat-Desktop 2026-10-06: a reclaim walked before the earlier renewals of the name it spends
  *  kept the reclaimed name). The simulated chain with its times reversed, shuffled or missing and
- *  its lists reversed or shuffled walks to the in-order state, from the geneses and from a cache
+ *  its lists reversed or shuffled walks to the in-order state, from the genesis and from a cache
  *  walked partway; a reclaim whose name is not caught up waits. */
 async function runWalkOrder(v, r) {
   const ref = simulatedChain(v);
@@ -408,7 +347,6 @@ async function runWalkOrder(v, r) {
     r.eq(sortStr(walked.names.map((n) => n.name)), sortStr(want.names.map((n) => n.name)), `${label}: names`);
     r.eq(ops(walked.names), ops(want.names), `${label}: name outpoints`);
     r.eq(sortStr(walked.names.map((n) => `${n.name}:${n.owner}:${n.expiresAt}:${n.price}`)), sortStr(want.names.map((n) => `${n.name}:${n.owner}:${n.expiresAt}:${n.price}`)), `${label}: name records`);
-    r.eq(ops(walked.shards), ops(want.shards), `${label}: shard outpoints`);
     r.eq(ops(walked.offers), ops(want.offers), `${label}: offers`);
     r.eq(eventsOf(walked), eventsOf(want), `${label}: events`);
     try { walked.checkInvariants(); } catch (e) { r.check(false, `${label}: invariants ${e.message}`); }
@@ -421,7 +359,7 @@ async function runWalkOrder(v, r) {
     { label: "no times, lists shuffled", opts: { at: () => null, order: (l) => shuffled(l, l.length * 17 + 5) } },
     { label: "one time for all, blue scores shuffled", opts: { at: () => 1_000, blueScore: (i) => shuffled([...Array(N).keys()], 3)[i] } },
   ];
-  r.eq([ops(reference.gaps), ops(reference.names), ops(reference.shards)], [ops(applyAll.gaps), ops(applyAll.names), ops(applyAll.shards)], "walk in order: the registry of every transaction applied in order");
+  r.eq([ops(reference.gaps), ops(reference.names), ops(reference.offers)], [ops(applyAll.gaps), ops(applyAll.names), ops(applyAll.offers)], "walk in order: the registry of every transaction applied in order");
   const walkedEvents = new Set(reference.events.map((e) => `${e.txId}:${e.op}`));
   r.eq(reference.events.map((e) => `${e.op} ${e.name ?? "?"}`), applyAll.events.filter((e) => walkedEvents.has(`${e.txId}:${e.op}`)).map((e) => `${e.op} ${e.name ?? "?"}`), "walk in order: events in chain order");
   for (const { label, opts } of variants) {
@@ -433,7 +371,7 @@ async function runWalkOrder(v, r) {
       sameAs(walked, reference, `walk ${label}`);
       r.eq(report.unresolved, [], `walk ${label}: unresolved`);
       r.check(report.rounds < 64, `walk ${label}: settled (${report.rounds} rounds)`);
-      r.eq(sortStr(report.applied), sortStr(reference.applied.slice(2)), `walk ${label}: every registry transaction applied once`);
+      r.eq(sortStr(report.applied), sortStr(reference.applied.slice(1)), `walk ${label}: every registry transaction applied once`);
       const evs = walked.events.map((e) => `${e.op} ${e.name ?? "?"}`);
       r.check(evs.includes("release bravo-tn") && evs.includes("reclaim lapse-tn") && evs.includes("offer_accepted bravo-tn"), `walk ${label}: release, reclaim and accept events`);
       // with real times, events come out in chain order whatever the walk's rounds did
@@ -442,7 +380,7 @@ async function runWalkOrder(v, r) {
       r.check(false, `walk ${label} threw ${e.message}`);
     }
     // incremental: a cache walked partway (in order), then the rest in this variant's order
-    for (const upTo of [8, 14, 21]) {
+    for (const upTo of [7, 13, 19]) {
       const partial = R.RegistryState.atGenesis(m);
       const first = ref.visibleUpTo(upTo);
       const rest = visibleUpTo(N);
@@ -459,8 +397,8 @@ async function runWalkOrder(v, r) {
 
   // apply: a reclaim whose name is not caught up (its renewal not applied) waits, changing nothing
   const steps = v.steps.slice(0, N);
-  const renewLapse = 8, reclaimLapse = 22;
-  r.eq([s(steps[renewLapse].op), s(steps[reclaimLapse].op)], ["renew", "reclaim"], "order fixture: steps 8 and 22 renew and reclaim lapse-tn");
+  const renewLapse = 7, reclaimLapse = 20;
+  r.eq([s(steps[renewLapse].op), s(steps[reclaimLapse].op)], ["renew", "reclaim"], "order fixture: steps 7 and 20 renew and reclaim lapse-tn");
   const behind = R.RegistryState.atGenesis(m);
   for (let pass = 0; pass < N; pass++) ref.txs.forEach((t, i) => { if (i !== renewLapse && i !== reclaimLapse) tryApply(behind, t, m); });
   r.check(behind.name("lapse-tn") != null && behind.name("bravo-tn") == null, "order fixture: bravo-tn released, lapse-tn at its first period");
@@ -593,7 +531,7 @@ function runRules(r) {
   // the paid period on a NameInfo (mainnet's clock: a year, a 10-day window)
   const params = {
     bond: 1n, gapValue: 1n, tCommit: 600n, maxYears: 2n, periodMs: C.yearMs, graceMs: g, renewWindowMs: 864_000_000n,
-    genesisPrices: [1n, 1n, 1n, 1n, 1n], priceShards: 8n, priceValue: 100_000_000n, offerMaxFee: 1n,
+    registerPrices: [1n, 1n, 1n, 1n, 1n], renewPrices: [1n, 1n, 1n, 1n, 1n], offerMaxFee: 1n,
   };
   const period = info("period", now + C.yearMs, 1n);
   r.eq(period.extendableYears(params), 0n, "period unknown: no extend");
@@ -609,7 +547,7 @@ function runRules(r) {
   // testnet's 10-minute clock
   const tn = {
     bond: 1n, gapValue: 1n, tCommit: 600n, maxYears: 2n, periodMs: 600_000n, graceMs: 600_000n, renewWindowMs: 600_000n,
-    genesisPrices: [1n, 1n, 1n, 1n, 1n], priceShards: 8n, priceValue: 100_000_000n, offerMaxFee: 1n,
+    registerPrices: [1n, 1n, 1n, 1n, 1n], renewPrices: [1n, 1n, 1n, 1n, 1n], offerMaxFee: 1n,
   };
   const short = info("short", now + 600_000n, 1n);
   short.periodStart = now;
@@ -626,12 +564,14 @@ function runRules(r) {
   r.check(offer.isDeclined(me), "an offer to an earlier owner is declined");
   r.eq(offer.fields.seller, seller, "offer fields carry the seller");
 
-  // a cache written before registry v3 (format 1 or 2: no shards, offers without a seller) is dropped
+  // a cache written before registry v4 (format 1 - 3) is dropped
   const v1Cache = `{"v":1,"network":"testnet-10","registryCovenantId":"00","verifiedAt":null,"gaps":[],"names":[["00",0,"a","00","00","0","1","1",null,null,null]],"offers":[],"applied":[],"events":[]}`;
   r.check((() => { try { R.RegistryState.fromJSON(v1Cache); return false; } catch { return true; } })(), "a registry v1 cache does not decode");
   const v2Cache = `{"v":2,"network":"testnet-10","registryCovenantId":"00","verifiedAt":null,"gaps":[],"names":[],"offers":[],"applied":[],"events":[]}`;
   r.check((() => { try { R.RegistryState.fromJSON(v2Cache); return false; } catch { return true; } })(), "a registry v2 cache does not decode");
-  r.eq(R.RegistryState.formatVersion, 3, "cache format 3 (registry v3)");
+  const v3Cache = `{"v":3,"network":"testnet-10","registryCovenantId":"00","priceCovenantId":"00","verifiedAt":null,"shards":[],"gaps":[],"names":[],"offers":[],"applied":[],"events":[]}`;
+  r.check((() => { try { R.RegistryState.fromJSON(v3Cache); return false; } catch { return true; } })(), "a registry v3 cache does not decode");
+  r.eq(R.RegistryState.formatVersion, 4, "cache format 4 (registry v4)");
 
   r.eq(R.step(C.zero32(), -1), null, "0 - 1");
   r.eq(R.step(C.ff32(), 1), null, "ff..ff + 1");
@@ -698,11 +638,11 @@ function runREST(r) {
   r.eq(o && C.hex(o.seller), cd, "indexer offer seller");
   r.eq(o?.amount, 500_000_000n, "indexer offer amount");
   r.eq(R.IndexerAPI.offerInfo(JSON.parse(`{"outpoint":{"txId":"${cd}","index":0},"buyer":"kaspatest:buyer","amount":"500000000","refundAfter":7,"name":"alice"}`), null, keyOfFake), null, "an offer without a seller is dropped");
-  const pj = R.IndexerAPI.prices(JSON.parse(`{"prices":["1","2","3","4","5"],"authority":"${ab}","shards":[{"shard":0,"outpoint":{"txId":"${cd}","index":0},"authority":"${ab}","prices":["1","2","3","4","5"],"value":"100000000"},
-     {"shard":1,"outpoint":{"txId":"${cd}","index":1},"authority":"${ab}","prices":["1","2","3"],"value":"100000000"}]}`));
-  r.eq(pj.shards.map((x) => x.shard), [0n], "indexer shards: a malformed one dropped");
-  r.eq(pj.shards[0] && C.priceFieldsPrice(pj.shards[0].fields, 9), 5n, "indexer shard price for a long name");
-  r.eq(R.IndexerAPI.status({ network: "testnet-10", priceCovenantId: ab }).priceCovenantId, ab, "indexer status: the price covenant id");
+  // registry v4: no /names/prices, and the status is matched on the registry id alone
+  r.check(R.IndexerAPI.prices === undefined && R.IndexerAPI.shard === undefined, "registry v4: no price shard decoders");
+  const st = R.IndexerAPI.status({ network: "testnet-10", registryCovenantId: ab, priceCovenantId: cd });
+  r.eq(st.registryCovenantId, ab, "indexer status: the registry covenant id");
+  r.check(!("priceCovenantId" in st), "indexer status: a price covenant id is not read (registry v4)");
 }
 
 // MARK: - The KachatNamesRegistry class over a simulated chain and a fake indexer
@@ -746,20 +686,18 @@ async function runRegistryChain(v, r) {
     return response(404, { error: "not_found" });
   };
   const registryId = C.hex(m.registryCovenantId);
-  const priceId = C.hex(m.priceCovenantId);
-  // the covenant id a node reports per outpoint: gaps and names the registry's, shards the price
-  // covenant's (registry v3), offers none
+  // the covenant id a node reports per outpoint: gaps and names the registry's, offers none
+  // (registry v4: no price covenant)
   const covenantOf = new Map();
   covenantOf.set(`${C.hex(m.genesisTxid)}:0`, registryId);
-  m.genesisShards.forEach((_, i) => covenantOf.set(`${C.hex(m.priceGenesisTxid)}:${i}`, priceId));
   for (const t of visible) t.outputs.forEach((o, k) => covenantOf.set(`${t.idHex}:${k}`, o.covenant ? C.hex(o.covenant.covenantId) : null));
-  let shardIdsSeen = 0;
+  let registryIdsSeen = 0;
   const getUtxosByAddresses = async (addresses) => {
     r.check(addresses.length <= 50, "node asked for at most 50 addresses");
     return [...live(addresses)].map((op) => {
       const [transactionId, index] = op.split(":");
       const covenantId = covenantOf.get(op) ?? null;
-      if (covenantId === priceId) shardIdsSeen += 1;
+      if (covenantId === registryId) registryIdsSeen += 1;
       return { outpoint: { transactionId, index: Number(index) }, amount: 1n, scriptPublicKey: "", blockDaaScore: 0n, isCoinbase: false, covenantId };
     });
   };
@@ -777,14 +715,12 @@ async function runRegistryChain(v, r) {
   r.eq(reg.source, { kind: "chain" }, "registry (chain): no indexer -> chain walker");
   r.check(changes === 1 && reg.revision === 1, "registry (chain): one change per refresh");
   r.eq(reg.chainState.names.map((n) => n.name), ["alpha-tn"], "registry (chain): walked names");
-  r.check(shardIdsSeen > 0, "registry (chain): the node reported price shards with the price covenant id");
-  r.eq(reg.lastWalk?.unresolved, [], "registry (chain): live shards (price covenant id) are not taken for spent");
-  r.eq(reg.chainState.shards.length, Number(m.params.priceShards), "registry (chain): every price shard walked");
-  // the price record (registry v3)
-  const lastChange = [...v.steps.slice(0, e2eCount)].reverse().find((x) => x.op === "setPrices").args;
-  r.eq((await reg.shards()).map((x) => x.shard), [...Array(Number(m.params.priceShards)).keys()].map(BigInt), "registry (chain): shards() in order");
-  r.eq(reg.cachedPrices, lastChange.prices.map(u64), "registry (chain): cachedPrices from the walked shards");
-  r.eq((await reg.currentPrices())?.prices, lastChange.prices.map(u64), "registry (chain): currentPrices = the last change's");
+  r.check(registryIdsSeen > 0, "registry (chain): the node reported registry UTXOs with the registry covenant id");
+  r.eq(reg.lastWalk?.unresolved, [], "registry (chain): live registry UTXOs (registry id) are not taken for spent");
+  // the fixed prices (registry v4): the manifest's tables, no shards
+  r.check(reg.shards === undefined && reg.currentPrices === undefined && reg.cachedPrices === undefined, "registry (chain): no price shard reads (registry v4)");
+  r.eq(reg.registerPrices, m.params.registerPrices, "registry (chain): registerPrices = the manifest's table");
+  r.eq(reg.renewPrices, m.params.renewPrices, "registry (chain): renewPrices = the manifest's table");
   r.check(reg.chainState.verifiedAt === BigInt(clock), "registry (chain): verifiedAt set");
   r.check(storage.map.has("kachat-names-registry-testnet-v1"), "registry (chain): cache saved under its key");
 
@@ -809,8 +745,8 @@ async function runRegistryChain(v, r) {
   r.eq(look.info?.periodStart, alpha.periodStart, "registry (chain): lookup carries periodStart");
   r.eq(look.info?.fields?.periodStart, alpha.periodStart, "registry (chain): a walked record is spendable (fields)");
   r.eq(look.info?.extendableYears(m.params), 0n, "registry (chain): alpha-tn holds 2 paid years: no extend");
-  r.eq((await reg.activity()).length, reg.chainState.events.filter((e) => !e.op.startsWith("price")).length, "registry (chain): activity");
-  r.check((await reg.activity()).every((e) => !e.op.startsWith("price")), "registry (chain): activity leaves out price changes");
+  r.eq((await reg.activity()).length, reg.chainState.events.length, "registry (chain): activity");
+  r.eq((await reg.activity())[0]?.txId, reg.chainState.events[reg.chainState.events.length - 1]?.txId, "registry (chain): activity newest first");
   const gaps = await reg.exitGaps(look.info);
   r.check(C.bytesEqual(gaps.below.hi, look.info.key) && C.bytesEqual(gaps.above.lo, look.info.key), "registry (chain): exit gaps around the name");
 
@@ -826,8 +762,23 @@ async function runRegistryChain(v, r) {
   r.eq(await reg.resolveActive("alpha-tn"), null, "registry (chain): a name in grace does not resolve");
   r.eq((await reg.namesOf(ownerKey)).length, 0, "registry (chain): namesOf hides a name in grace");
   r.eq((await reg.namesOf(ownerKey, { includeInactive: true })).length, 1, "registry (chain): includeInactive shows it");
+  // claimLookup: in grace still the owner's
+  r.eq((await reg.claimLookup("alpha-tn")).kind, "registered", "registry (chain): claimLookup of a name in grace is registered");
+  r.eq((await reg.heldNames(ownerKey)).map((n) => n.name), ["alpha-tn"], "registry (chain): heldNames keeps a name in grace");
   clock = Number(alpha.expiresAt + m.params.graceMs) + 1_000;
   r.eq((await reg.lapsed()).map((n) => n.name), ["alpha-tn"], "registry (chain): lapsed after grace");
+  // past grace a name is Available (iOS eea52b2): claimLookup shows it free, in the gap its reclaim reopens
+  const claim = await reg.claimLookup("Alpha-TN.kachat");
+  r.eq(claim.kind, "free", "registry (chain): claimLookup of a lapsed name is free");
+  r.eq(claim.name, "alpha-tn", "registry (chain): claimLookup keeps the canonical name");
+  const exits = await reg.exitGaps(look.info);
+  r.check(claim.gap != null && C.bytesEqual(claim.gap.lo, exits.below.lo) && C.bytesEqual(claim.gap.hi, exits.above.hi)
+    && C.bytesEqual(claim.gap.outpoint.txid, exits.below.outpoint.txid) && claim.gap.outpoint.index === exits.below.outpoint.index,
+  "registry (chain): claimGap = the two gaps around it, merged, at the lower one's outpoint");
+  r.check(claim.gap?.contains(C.key("alpha-tn")) === true, "registry (chain): the claim gap holds the name");
+  r.eq((await reg.lookup("alpha-tn")).kind, "registered", "registry (chain): plain lookup still sees the old record");
+  r.eq((await reg.heldNames(ownerKey)).length, 0, "registry (chain): heldNames drops a lapsed name");
+  r.eq((await reg.claimLookup("bravo-tn")).kind, "free", "registry (chain): claimLookup of a free name is free");
   clock = Number(alpha.expiresAt) - 3_600_000;
 
   // identity: label from the walked names, own profile only
@@ -851,7 +802,7 @@ async function runRegistryChain(v, r) {
   await reg2.prepare();
   r.eq(reg2.chainState?.names.map((n) => n.name), ["alpha-tn"], "registry (chain): cache loaded");
   r.eq(reg2.chainState?.offers.length, 1, "registry (chain): cached tracked offer");
-  r.eq(reg2.chainState?.shards.length, Number(m.params.priceShards), "registry (chain): cached price shards");
+  r.eq(reg2.chainState?.version, 4, "registry (chain): cache format 4");
   await reg2.refresh();
   r.check(reg2.lastError != null && reg2.chainState.names.length === 1, "registry (chain): a failed refresh keeps the state and reports the error");
   // a cache for another registry is ignored
@@ -872,7 +823,7 @@ async function runRegistryChain(v, r) {
  *  counts as an attempt and bumps `revision` only when the error changed (iOS d2e0673, the refresh
  *  loop fix); a cache of the previous format is walked again. */
 /** A cached state the chain disagrees with (walked out of order by an earlier version) is walked
- *  again from the geneses: one whose names and gaps no longer tile (dropped at load), and one
+ *  again from the genesis: one whose names and gaps no longer tile (dropped at load), and one
  *  still tracking a UTXO a transaction it already applied spends (`stale` from the walk). */
 async function runRegistryStaleCache(v, r) {
   const { m, txs, visibleUpTo } = simulatedChain(v);
@@ -887,7 +838,7 @@ async function runRegistryStaleCache(v, r) {
   });
   const reference = R.RegistryState.atGenesis(m);
   await reference.walk({ manifest: m, address: (sc) => R.p2shAddress(sc), live: async (a) => live(a), transactions: async (a) => transactions(a) });
-  const accept = 14;
+  const accept = 12;
   // stale: everything but the accept applied, yet the accept marked applied (bravo-tn still tracked)
   const stale = R.RegistryState.atGenesis(m);
   for (let pass = 0; pass < e2eCount; pass++) txs.forEach((t, i) => { if (i !== accept) tryApply(stale, t, m); });
@@ -921,10 +872,9 @@ async function runRegistryFailures(v, r) {
   const reg = new KachatNamesRegistry({
     manifest: async () => { manifestCalls += 1; return answer(); },
     restBase: () => "https://rest.test", indexerBase: () => "", storage: memoryStorage(),
-    // the genesis gap and the price genesis's shards are live: nothing to walk
+    // the genesis gap is live: nothing to walk
     getUtxosByAddresses: async () => [
       { outpoint: { transactionId: C.hex(m.genesisTxid), index: 0 }, covenantId: C.hex(m.registryCovenantId) },
-      ...m.genesisShards.map((_, i) => ({ outpoint: { transactionId: C.hex(m.priceGenesisTxid), index: i }, covenantId: C.hex(m.priceCovenantId) })),
     ],
     now: () => clock, log: (...a) => logs.push(a.join(" ")),
   });
@@ -962,19 +912,20 @@ async function runRegistryFailures(v, r) {
   const reg2 = new KachatNamesRegistry({ manifest: m, storage, getUtxosByAddresses: async () => [], log: () => {} });
   await reg2.prepare();
   r.eq(reg2.chainState?.names.length, 0, "registry: a format-1 cache is dropped and walked from genesis");
-  r.eq(reg2.chainState?.version, 3, "registry: the new state is format 3");
-  // a format-2 cache (registry v2: no shards, offers without a seller) is walked again too
-  const storage2 = memoryStorage();
-  const old2 = R.RegistryState.atGenesis(m).toJSON();
-  old2.v = 2;
-  delete old2.shards;
-  delete old2.priceCovenantId;
-  old2.names = [["00".repeat(32), 0, "a", "00".repeat(32), "00".repeat(32), "0", "1", "1", "1", null, null, null]];
-  storage2.set("kachat-names-registry-testnet-v1", JSON.stringify(old2));
-  const reg3 = new KachatNamesRegistry({ manifest: m, storage: storage2, getUtxosByAddresses: async () => [], log: () => {} });
-  await reg3.prepare();
-  r.eq(reg3.chainState?.names.length, 0, "registry: a format-2 cache is dropped and walked from genesis");
-  r.eq(reg3.chainState?.shards.length, Number(m.params.priceShards), "registry: the new state starts at both geneses");
+  r.eq(reg2.chainState?.version, 4, "registry: the new state is format 4");
+  // a format-2 cache (registry v2) and a format-3 one (registry v3: price shards) are walked again too
+  for (const [ver, extra] of [[2, {}], [3, { priceCovenantId: "00".repeat(32), shards: [["00".repeat(32), 0, "0", "00".repeat(32), ["1", "1", "1", "1", "1"], "100000000"]] }]]) {
+    const storage2 = memoryStorage();
+    const old2 = { ...R.RegistryState.atGenesis(m).toJSON(), ...extra };
+    old2.v = ver;
+    old2.names = [["00".repeat(32), 0, "a", "00".repeat(32), "00".repeat(32), "0", "1", "1", "1", null, null, null]];
+    storage2.set("kachat-names-registry-testnet-v1", JSON.stringify(old2));
+    const reg3 = new KachatNamesRegistry({ manifest: m, storage: storage2, getUtxosByAddresses: async () => [], log: () => {} });
+    await reg3.prepare();
+    r.eq(reg3.chainState?.names.length, 0, `registry: a format-${ver} cache is dropped and walked from genesis`);
+    r.eq(reg3.chainState?.gaps.length, 1, `registry: after a format-${ver} cache the new state starts at the genesis gap`);
+    r.eq(reg3.chainState?.applied, [C.hex(m.genesisTxid)], `registry: after a format-${ver} cache only the genesis is applied`);
+  }
 }
 
 async function runRegistryIndexer(v, r) {
@@ -992,11 +943,8 @@ async function runRegistryIndexer(v, r) {
     const u = new URL(url);
     const p = u.pathname;
     if (p === "/names/status") {
-      return response(200, { network: "testnet-10", registryCovenantId: C.hex(m.registryCovenantId).toUpperCase(), priceCovenantId: C.hex(m.priceCovenantId), synced: true });
-    }
-    if (p === "/names/prices") {
-      const sh = (i) => ({ shard: i, outpoint: { txId: "ab".repeat(32), index: i }, authority: "cd".repeat(32), prices: ["5", "4", "3", "2", "1"], value: "100000000" });
-      return response(200, { prices: ["5", "4", "3", "2", "1"], authority: "cd".repeat(32), shards: [sh(1), sh(0)] });
+      // registry v4: no priceCovenantId; matched on the registry id alone
+      return response(200, { network: "testnet-10", registryCovenantId: C.hex(m.registryCovenantId).toUpperCase(), synced: true });
     }
     if (p === "/names/alice") return response(200, nameObj("alice"));
     if (p === "/names/old") return response(200, nameObj("old", { status: "grace", expiresAt: nowMs - 1 }));
@@ -1028,9 +976,10 @@ async function runRegistryIndexer(v, r) {
   r.eq((await reg.listings()).map((n) => n.price), [700n], "registry (indexer): listings");
   r.eq((await reg.history("alice")).map((e) => e.price), [700n], "registry (indexer): history");
   r.eq((await reg.offersFor("alice")).map((o) => o.name), ["alice"], "registry (indexer): offers take the asked name (one without a seller dropped)");
-  r.eq((await reg.shards()).map((x) => x.shard), [0n, 1n], "registry (indexer): GET /names/prices shards, in order");
-  r.eq((await reg.currentPrices())?.prices, [5n, 4n, 3n, 2n, 1n], "registry (indexer): current prices");
-  r.eq(reg.cachedPrices, [5n, 4n, 3n, 2n, 1n], "registry (indexer): cachedPrices after currentPrices()");
+  r.eq(reg.registerPrices, m.params.registerPrices, "registry (indexer): registerPrices from the manifest");
+  r.eq(reg.renewPrices, m.params.renewPrices, "registry (indexer): renewPrices from the manifest");
+  r.check(!seen.some((u) => u.includes("/names/prices")), "registry (indexer): GET /names/prices is never called (registry v4)");
+  r.eq((await reg.claimLookup("alice")).kind, "registered", "registry (indexer): claimLookup of an active name");
   const id = await reg.identity(owner);
   r.eq({ label: id.label, bio: id.profile?.bio }, { label: "alice", bio: "https://github.com/yo" }, "registry (indexer): identity sanitized");
   let msg = "";
@@ -1044,15 +993,16 @@ async function runRegistryIndexer(v, r) {
   });
   await reg2.prepare();
   r.eq(reg2.source, { kind: "chain" }, "registry (indexer): another registry's indexer -> chain walker");
-  r.eq(reg2.cachedPrices, m.genesisShards[0].fields.prices, "registry (chain at genesis): cachedPrices = the genesis shards'");
-  // an indexer that follows the registry but not (or another) price covenant is not used either
+  r.eq(reg2.registerPrices, m.params.registerPrices, "registry (chain at genesis): registerPrices = the manifest's");
+  // registry v4: an indexer that still reports a (v3) price covenant id next to this registry id
+  // is used - the registry id alone decides
   for (const priceCovenantId of [undefined, "00".repeat(32)]) {
     const reg3 = new KachatNamesRegistry({
       fetch: async () => response(200, { registryCovenantId: C.hex(m.registryCovenantId), priceCovenantId }), restBase: () => "https://rest.test",
       indexerBase: () => "https://idx.test", getUtxosByAddresses: async () => [], storage: memoryStorage(), manifest: m, now: () => nowMs, log: () => {},
     });
     await reg3.prepare();
-    r.eq(reg3.source, { kind: "chain" }, `registry (indexer): price covenant ${priceCovenantId ? "mismatch" : "missing"} -> chain walker`);
+    r.eq(reg3.source, { kind: "indexer", base: "https://idx.test" }, `registry (indexer): price covenant ${priceCovenantId ? "present" : "missing"} -> still the indexer (registry id matches)`);
   }
   r.eq(KachatNamesRegistry.compactAddress(owner), `kaspatest:${owner.slice(10, 16)}...${owner.slice(-6)}`, "compactAddress: prefix + 6 ... 6");
   r.eq(R.compactAddress("kaspatest:abc"), "kaspatest:abc", "compactAddress: a short body unchanged");
@@ -1217,7 +1167,7 @@ async function runLive() {
   try { st.checkInvariants(); } catch (e) { console.log(`live: invariants: ${e.message}`); return false; }
   // incremental: a cache walked two rounds, then walked on, ends where the full walk did
   try {
-    const ids = [C.hex(m.registryCovenantId), C.hex(m.priceCovenantId)];
+    const ids = [C.hex(m.registryCovenantId)];
     const io = { manifest: m, address: (sc) => R.p2shAddress(sc), live: (a) => reg._liveOutpoints(a, ids), transactions: (a) => reg.restTransactions(a) };
     const partial = R.RegistryState.atGenesis(m);
     await partial.walk({ ...io, maxRounds: 2 });
@@ -1225,7 +1175,7 @@ async function runLive() {
     await resumed.walk(io);
     const same = (f) => JSON.stringify(f(resumed)) === JSON.stringify(f(st));
     const recs = (xs) => xs.map((x) => `${x.txid}:${x.index}`).sort();
-    const ok = same((x) => recs(x.gaps)) && same((x) => recs(x.names)) && same((x) => recs(x.shards))
+    const ok = same((x) => recs(x.gaps)) && same((x) => recs(x.names)) && same((x) => recs(x.offers))
       && same((x) => x.events.map((e) => `${e.txId}:${e.op}`));
     console.log(`  incremental walk (2 rounds, cached, walked on): ${ok ? "same as the full walk" : "DIFFERENT from the full walk"}`);
     if (!ok) return false;
@@ -1250,7 +1200,64 @@ async function runLive() {
   const g = txs.find((t) => t.idHex === C.hex(m.genesisTxid));
   const ok = !!g && g.outputs[0].covenant != null && C.bytesEqual(g.outputs[0].covenant.covenantId, m.registryCovenantId) && C.bytesEqual(g.outputs[0].script, m.genesisOutput.script);
   console.log(`  REST full-transactions of ${genesisAddress}: ${txs.length} tx(s); genesis parsed with its covenant binding: ${ok}`);
+  await compareWithIndexer(m, st);
   return ok;
+}
+
+/** The live walk next to the testnet-10 names indexer, read-only. Prints whether the indexer
+ *  follows the bundled registry (`/names/status`, matched on the registry id alone - registry
+ *  v4) and whether its names, gaps and activity agree with the walk. Never fails the run: the
+ *  indexer is an optional source (the app walks the chain when it disagrees). */
+async function compareWithIndexer(m, st) {
+  const base = String(process.env.KACHAT_NAMES_INDEXER || "https://tnkachat.duckdns.org:7443").replace(/\/+$/, "");
+  const get = async (path) => {
+    const res = await fetch(base + path, { signal: AbortSignal.timeout(20_000), headers: { Accept: "application/json" } });
+    if (res.status !== 200) throw new C.Failure(`GET ${path}: ${res.status}`);
+    return parseJSONExact(await res.text());
+  };
+  let status;
+  try { status = R.IndexerAPI.status(await get("/names/status")); } catch (e) {
+    console.log(`  indexer ${base}: /names/status unreachable (${e?.cause?.code ?? e.message}); not compared`);
+    return;
+  }
+  const want = C.hex(m.registryCovenantId);
+  const follows = status.registryCovenantId?.toLowerCase() === want;
+  console.log(`  indexer ${base}: /names/status registry ${status.registryCovenantId ?? "-"} (${follows ? "matches the bundled v4 registry" : `MISMATCH: the bundled registry is ${want}`}), synced ${status.synced}, indexedDaa ${status.indexedDaa ?? "-"}, genesis ${status.genesisTxId ?? "-"}`);
+  if (!follows) {
+    console.log("  indexer: the app would ignore it and walk the chain itself (as this run did)");
+    return;
+  }
+  const diffs = [];
+  try {
+    for (const n of st.names) {
+      const info = R.IndexerAPI.nameInfo(R.IndexerAPI.nameJSON(await get(`/names/${encodeURIComponent(n.name)}`)), R.keyOf);
+      if (!info) { diffs.push(`${n.name}: not registered on the indexer`); continue; }
+      const same = C.hex(info.owner) === n.owner && info.expiresAt === n.expiresAt && C.hex(info.outpoint.txid) === n.txid && info.outpoint.index === n.index;
+      if (!same) diffs.push(`${n.name}: indexer owner ${C.hex(info.owner).slice(0, 8)} expires ${info.expiresAt} at ${C.hex(info.outpoint.txid).slice(0, 12)}:${info.outpoint.index}`);
+    }
+    for (const gp of st.gaps) {
+      const k = R.step(C.unhex32(gp.lo), 1);
+      if (!k) continue;
+      const gi = R.IndexerAPI.gap(await get(`/names/gap/${C.hex(k)}`));
+      if (!gi || C.hex(gi.lo) !== gp.lo || C.hex(gi.hi) !== gp.hi || C.hex(gi.outpoint.txid) !== gp.txid || gi.outpoint.index !== gp.index) {
+        diffs.push(`gap ${gp.lo.slice(0, 8)}..: indexer ${gi ? `${C.hex(gi.lo).slice(0, 8)}..-${C.hex(gi.hi).slice(0, 8)}.. at ${C.hex(gi.outpoint.txid).slice(0, 12)}:${gi.outpoint.index}` : "none"}`);
+      }
+    }
+    let activity = null;
+    try { activity = R.IndexerAPI.events(await get("/names/activity")).events; } catch { activity = null; }
+    if (activity) {
+      const walked = new Set(st.events.map((e) => `${e.txId}:${e.op}`));
+      const indexed = new Set(activity.map((e) => `${e.txId}:${e.op}`));
+      const missing = [...walked].filter((x) => !indexed.has(x));
+      const extra = [...indexed].filter((x) => !walked.has(x));
+      if (missing.length || extra.length) diffs.push(`activity: ${missing.length} walked event(s) not on the indexer, ${extra.length} indexer event(s) not walked`);
+      console.log(`  indexer activity: ${activity.length} event(s), walk ${st.events.length}`);
+    }
+  } catch (e) {
+    console.log(`  indexer comparison stopped: ${e.message} (not counted)`);
+    return;
+  }
+  console.log(diffs.length ? `  indexer DIFFERS from the walk:\n    ${diffs.join("\n    ")}` : `  indexer agrees with the walk (${st.names.length} name(s), ${st.gaps.length} gap(s))`);
 }
 
 /** The social profile resolver (social-image-resolver.js) over a fake fetchText: which requests a

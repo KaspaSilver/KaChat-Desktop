@@ -1,5 +1,6 @@
 // The live .kachat screens (iOS KachatNamesLiveViews.swift, 5df42b4): the hub's
-// search, the registration progress sheet, Marketplace / Reclaimable / Activity, the name detail with its
+// search, the claims in progress (their progress sheet and the claims list), Marketplace / Available /
+// Activity, the name detail with its
 // actions, every transaction sheet, the Your Domains > .kachat tab, the address profile editor and
 // the profile hero's .kachat pictures, bio and Linktree link (kachatHeroProfile), looked up from the
 // profile's social links on this device (engine/kachat-names/social-image-resolver.js).
@@ -22,11 +23,10 @@ import { KAS_UNIT, kasLabel, isNetworkAddress } from "../engine/network.js";
 import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
 import { userFacingError, chooseDialog } from "./dialogs.js";
-import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays, recordPrice } from "../engine/kachat-names/actions.js";
+import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays } from "../engine/kachat-names/actions.js";
 import { paramsExpiresSoonMs } from "../engine/kachat-names/manifest.js";
 import {
   Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress, compactAddress,
-  GapInfo,
 } from "../engine/kachat-names/registry-state.js";
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
@@ -178,7 +178,7 @@ function params() {
 }
 function maxYears() { const m = params()?.maxYears; return m ? Number(m) : 2; }
 
-// Registry v3: a period is `periodMs` long - a year on mainnet, 10 minutes on the testnet clock.
+// Registry v4: a period is `periodMs` long - a year on mainnet, 10 minutes on the testnet clock.
 /** Whether a period is a year (mainnet), not a short test clock. */
 function yearlyPeriods() { return (params()?.periodMs ?? yearMs) === yearMs; }
 /** `count` periods: "1 year" / "2 years", or on a short clock "10 min" / "20 min". */
@@ -189,10 +189,18 @@ function periodsText(count) {
 }
 /** "Price per year", or on a short clock "Price per 10 min". */
 function pricePerPeriodTitle() { return yearlyPeriods() ? "Price per year" : `Price per ${periodsText(1)}`; }
-/** The price per period (sompi, BigInt) for `name` from the price record (every shard holds the
- *  same prices): the last prices read, else the genesis prices; null before any manifest. */
+/** What registering `name` costs for its first period (sompi, BigInt; registry v4: fixed, baked
+ *  into the pinned templates - the manifest's register table); null before any manifest. Each
+ *  further period costs `renewPriceOf` (iOS c8f1086 KachatLive.price). */
 function priceOf(name) {
-  const prices = kachatNames()?.registry.cachedPrices;
+  const prices = params()?.registerPrices;
+  if (!Array.isArray(prices) || prices.length !== 5) return null;
+  return prices[tier(utf8(name).length)];
+}
+/** What one more period of `name` costs: extend, renew, and registering past the first period
+ *  (the manifest's renew table; iOS c8f1086 KachatLive.renewPrice). */
+function renewPriceOf(name) {
+  const prices = params()?.renewPrices;
   if (!Array.isArray(prices) || prices.length !== 5) return null;
   return prices[tier(utf8(name).length)];
 }
@@ -278,6 +286,7 @@ const LI = {
   sliders: svg(`<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>`),
   copy: svg(`<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.4a1.9 1.9 0 0 0-1.9-1.9H6.4a1.9 1.9 0 0 0-1.9 1.9v7.2a1.9 1.9 0 0 0 1.9 1.9h2.1"/>`),
   check: svg(`<path d="m5 12.5 4.3 4.3L19 7.2"/>`),
+  hourglass: svg(`<path d="M6.5 3.5h11M6.5 20.5h11"/><path d="M7.5 3.5c0 4.2 4.5 5.6 4.5 8.5s-4.5 4.3-4.5 8.5M16.5 3.5c0 4.2-4.5 5.6-4.5 8.5s4.5 4.3 4.5 8.5"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
 };
 
@@ -330,7 +339,8 @@ const rememberName = (info) => { nameIndex.set(info.name, info); return info; };
 const rememberOffer = (offer) => { offerIndex.set(offer.id, offer); return offer; };
 
 function statusPill(status) {
-  const label = status === Status.active ? "Active" : status === Status.grace ? "Expired" : "Lapsed";
+  // past grace a name is free to claim (iOS eea52b2)
+  const label = status === Status.active ? "Active" : status === Status.grace ? "Expired" : "Available";
   return `<span class="kl-status kl-status-${esc(status)}">${esc(label)}</span>`;
 }
 
@@ -510,10 +520,11 @@ const hub = {
   /** null until the manifest is checked; false when it fails (the hub then stays a mockup) */
   ready: null,
   setupError: null,
-  /** The manifest is an earlier registry's (not v3): the hub says "Setting up", calmly. */
+  /** The manifest is an earlier registry's (not v4): the hub says "Setting up", calmly. */
   upgrading: false,
   search: { kind: "idle" },
   listings: [],
+  /** names expired past grace: back on the market, Available to anyone (iOS eea52b2) */
   lapsed: [],
   mine: [],
   myOffers: [],
@@ -635,8 +646,6 @@ async function hubReloadOnce() {
   try {
     hub.listings = await registry.listings();
     hub.lapsed = await registry.lapsed();
-    // the prices can change at any time (registry v3): read them with the rest
-    await registry.currentPrices().catch(() => null);
     const me = myKey();
     if (me) {
       hub.mine = await registry.namesOf(me, { includeInactive: true });
@@ -680,7 +689,8 @@ async function hubLookup(text) {
   hub.search = { kind: "checking", name: typed };
   hubChanged("search");
   try {
-    const r = await rt.registry.lookup(typed);
+    // an expired name (past grace) searches as free to claim (iOS eea52b2 claimLookup)
+    const r = await rt.registry.claimLookup(typed);
     if (seq !== lookupSeq) return;
     hub.search = r.kind === "registered"
       ? { kind: "registered", name: r.info.name, info: rememberName(r.info) }
@@ -747,13 +757,14 @@ export function liveSearchResultHtml(raw) {
         else line = "Taken";
         break;
       case Status.grace: line = "Expired - the owner can still renew it"; cls = "kl-orange"; break;
-      default: line = "Lapsed - reclaim it, then claim it"; cls = "kl-red"; break;
+      // never reached: a lapsed name searches as free to claim (claimLookup)
+      default: line = ""; break;
     }
     return `
       <button class="kmkt-search-result kl-search-link" type="button" data-kl-open-name="${esc(n.name)}">
         <div class="kmkt-search-result-copy">
           <strong>${esc(n.display)}</strong>
-          <small class="${cls}">${esc(line)}</small>
+          ${line ? `<small class="${cls}">${esc(line)}</small>` : ""}
         </div>
         <span class="kmkt-row-chevron">${kit.ICON.chevron}</span>
       </button>`;
@@ -785,8 +796,9 @@ export function liveSearchResultHtml(raw) {
 let registrationsUnsubscribe = null;
 const registrationStages = new Map();
 
-/** One subscription for the app's lifetime: the registration progress sheet follows it, and a
- *  registration that completes tells the app its identity may have changed (the profile hero). */
+/** One subscription for the app's lifetime: the claim progress sheet, the claims list and the
+ *  claims button follow it, and a registration that completes tells the app its identity may have
+ *  changed (the profile hero). */
 function watchRegistrations() {
   const rt = kachatNames();
   if (!rt || registrationsUnsubscribe) return;
@@ -808,9 +820,13 @@ function watchRegistrations() {
     }
     if (completed) identityChanged();
     renderRegistrationProgress();
+    renderClaimsList();
+    // the claims button's count (iOS b219bb0 KachatClaimsButton)
+    hubChanged("pending");
   });
   for (const p of rt.actions.pending) registrationStages.set(p.id, p.stage);
-  // an open registration (after a relaunch, too) brings its progress sheet back up
+  // a claim still in progress when the app starts brings its progress sheet up once (resume()
+  // sets actions.autoPresentedRegistration, iOS b219bb0)
   renderRegistrationProgress();
 }
 
@@ -825,8 +841,6 @@ function registrationStageText(p) {
     case Stage.registered: return "Registered. It's yours.";
     case Stage.taken: return kasLabel("Someone registered this name first. Cancel the commit to get its 0.2 KAS back.");
     case Stage.failed: return "The registration stopped.";
-    case Stage.priceChanged:
-      return `The price changed to ${amountText(recordPrice(p.priceChangedTo) ?? 0n)} since you confirmed, so nothing was sent. Confirm the new price to continue, or cancel the commit.`;
     case Stage.cancelling: return "Cancelling the commit...";
     case Stage.cancelled: return "Cancelled.";
     default: return "";
@@ -855,6 +869,8 @@ function registrationCardHtml(p) {
       <small class="kmkt-muted">${esc(`About ${left} s to go`)}</small>`;
   }
   const message = ui.error || (p.stage === Stage.failed ? p.lastError : null);
+  // what the driver is doing or waiting on (a busy network, freeing an expired name; iOS b219bb0)
+  const note = !message && needsDriving(p) && p.lastError ? p.lastError : null;
   const cancel = `<button class="secondary-button kl-danger kmkt-small-button" type="button" data-kl-reg-cancel="${id}" ${ui.working ? "disabled" : ""}>Cancel Commit</button>`;
   let buttons = "";
   if (p.stage === Stage.registered) {
@@ -862,10 +878,6 @@ function registrationCardHtml(p) {
       + `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-done="${id}">Done</button>`;
   }
   else if (p.stage === Stage.taken) buttons = cancel;
-  else if (p.stage === Stage.priceChanged) {
-    // paying more than confirmed is a new approval (iOS 4f5d95e, IOS-054)
-    buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-newprice="${id}" ${ui.working ? "disabled" : ""}>Confirm New Price</button>${cancel}`;
-  }
   else if (p.stage === Stage.failed) {
     buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-retry="${id}">Try Again</button>${cancel}`
       + `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-dismiss="${id}">Dismiss</button>`;
@@ -878,18 +890,19 @@ function registrationCardHtml(p) {
       </div>
       <p class="kl-reg-text">${esc(registrationStageText(p))}</p>
       ${progress}
-      ${message ? `<p class="kl-error">${esc(message)}</p>` : ""}
+      ${message ? `<p class="kl-error">${esc(message)}</p>` : note ? `<p class="kl-reg-note">${esc(note)}</p>` : ""}
       ${buttons ? `<div class="kl-reg-buttons">${buttons}</div>` : ""}
     </section>`;
 }
 
-// A registration's progress as a half sheet that can't be closed until it's done (iOS 61fb0fc
-// KachatRegistrationProgressSheet + KachatRegistrationPresenter): claiming takes the app being
-// open - the commit has to age about a minute before the name registers - and one name is claimed
-// at a time. It opens when a claim starts, and comes back up on its own whenever this wallet has an
-// open registration (after a relaunch too, on any screen). It closes once the registration is
-// dismissed (Done) or its commit was cancelled. Owner "kachat-registration": leaving the .kachat
-// screen doesn't close it.
+// A claim's progress as a half sheet (iOS b219bb0 KachatRegistrationProgressSheet +
+// KachatRegistrationPresenter): it opens when a claim starts, and comes back up once on its own
+// when the app starts with a claim still in progress (actions.autoPresentedRegistration, set by
+// resume()) - claiming takes the app being open, the commit has to age about a minute before the
+// name registers. Closing it (Close, Escape, the backdrop) leaves the claim running: the .kachat
+// screen's claims button lists every open claim (`liveClaimsButtonHtml`, `openClaimsList`). It
+// closes by itself once its registration is dismissed (Done) or its commit was cancelled. Owner
+// "kachat-registration": leaving the .kachat screen doesn't close it.
 
 const progressSheet = { layer: null, id: null };
 
@@ -898,16 +911,19 @@ function progressRegistration() {
   return id ? kachatNames()?.actions.pending.find((p) => p.id === id) ?? null : null;
 }
 
+const KEEP_OPEN_NOTE = "Keep KaChat open: the name is registered about a minute after the hidden commit confirms. If you leave, it picks up where it left off when you come back.";
+
 function progressBodyHtml(p) {
   return `
     <div class="kmkt-sheet-body kl-progress-sheet">
       <strong class="kl-progress-title">${esc(`Claiming ${p.name}.kachat`)}</strong>
       ${registrationCardHtml(p)}
-      ${needsDriving(p) ? `<p class="kmkt-muted kl-progress-note">Keep KaChat open: the name is registered about a minute after the hidden commit confirms. If you leave, it picks up where it left off when you come back.</p>` : ""}
+      ${needsDriving(p) ? `<p class="kmkt-muted kl-progress-note">${esc(KEEP_OPEN_NOTE)}</p>` : ""}
+      <button class="kl-done-close" type="button" data-kmkt-close>Close</button>
     </div>`;
 }
 
-/** The registration buttons inside the progress sheet. */
+/** The registration buttons inside the progress sheet and the claims list. */
 function registrationActionClick(target) {
   const view = target.closest("[data-kl-reg-view]");
   if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered", owner: "kachat-registration" }); return; }
@@ -921,16 +937,43 @@ function registrationActionClick(target) {
     kachatNames()?.actions.retry(retry.dataset.klRegRetry);
     return;
   }
-  const newPrice = target.closest("[data-kl-reg-newprice]");
-  if (newPrice) { if (!newPrice.disabled) acceptNewRegistrationPrice(newPrice.dataset.klRegNewprice); return; }
   const cancel = target.closest("[data-kl-reg-cancel]");
   if (cancel && !cancel.disabled) cancelRegistration(cancel.dataset.klRegCancel);
 }
 
-/** Repaints the progress sheet, closes it once its registration is over, and opens it for the
- *  wallet's open registration when none is up. */
+/** Opens the progress sheet of registration `id` (a claim that just started, or the one the app
+ *  brings up by itself), replacing another one's. */
+function openRegistrationProgress(id) {
+  const p = kachatNames()?.actions.pending.find((x) => x.id === id) ?? null;
+  if (!kit || !p || !isOpen(p)) return;
+  if (progressSheet.layer) {
+    if (progressSheet.id === id) { renderRegistrationProgress(); return; }
+    const old = progressSheet.layer;
+    progressSheet.layer = null;
+    progressSheet.id = null;
+    kit.closeLayer(old);
+  }
+  progressSheet.id = id;
+  const layer = kit.openLayer({
+    owner: "kachat-registration",
+    kind: "sheet",
+    label: `Claiming ${p.name}.kachat`,
+    html: progressBodyHtml(p),
+    onClick(event) { registrationActionClick(event.target); },
+    onClose() {
+      if (progressSheet.layer === layer) { progressSheet.layer = null; progressSheet.id = null; }
+      // swiped away: the claim keeps running (iOS b219bb0)
+      try { kachatNames()?.actions.clearAutoPresented?.(); } catch { /* fine */ }
+    },
+  });
+  progressSheet.layer = layer;
+}
+
+/** Repaints the progress sheet and closes it once its registration is over; with none up, opens
+ *  the one the app brings up by itself (once per launch). */
 function renderRegistrationProgress() {
   if (!kit) return;
+  const actions = kachatNames()?.actions;
   if (progressSheet.layer) {
     const p = progressRegistration();
     if (!p || !isOpen(p)) {
@@ -941,25 +984,64 @@ function renderRegistrationProgress() {
     } else {
       const sheetEl = progressSheet.layer.el.querySelector(".kmkt-sheet");
       if (sheetEl) sheetEl.innerHTML = progressBodyHtml(p);
-      return;
     }
+    return;
   }
-  const p = kachatNames()?.actions.pending.find(isOpen);
-  if (!p) return;
-  progressSheet.id = p.id;
+  const auto = actions?.autoPresentedRegistration;
+  if (!auto) return;
+  const p = actions.pending.find((x) => x.id === auto);
+  if (p && isOpen(p)) openRegistrationProgress(auto);
+  else actions.clearAutoPresented?.();
+}
+
+/** The .kachat screen's claims button, next to How it works (iOS b219bb0 KachatClaimsButton): the
+ *  names being claimed right now (and finished ones not yet dismissed), with a count. Hidden when
+ *  there are none, and where the registry isn't launched (mainnet). */
+export function liveClaimsButtonHtml() {
+  const open = kachatNames()?.actions.openRegistrations ?? [];
+  if (!open.length) return "";
+  const count = String(open.length);
+  return `<button class="kaposts-icon-button kl-claims-button" type="button" data-kl-claims aria-label="Names being claimed" title="Names being claimed">
+    ${LI.hourglass}<span class="kl-claims-count">${esc(count)}</span></button>`;
+}
+
+const claimsList = { layer: null };
+
+function claimsListBodyHtml() {
+  const open = kachatNames()?.actions.openRegistrations ?? [];
+  return `
+    ${navHtml("Claiming", { trailing: { label: "Done", bold: true } })}
+    <div class="kmkt-sheet-body kl-claims-body">
+      ${open.map((p) => registrationCardHtml(p)).join("")}
+      <p class="kmkt-muted kl-progress-note">${esc(KEEP_OPEN_NOTE)}</p>
+    </div>`;
+}
+
+/** Every open claim with its progress: the list behind the claims button (iOS b219bb0
+ *  KachatClaimsListSheet). It closes by itself once the last one is dismissed. */
+export function openClaimsList(owner = "market") {
+  if (!kit || claimsList.layer || !(kachatNames()?.actions.openRegistrations ?? []).length) return;
   const layer = kit.openLayer({
-    owner: "kachat-registration",
-    kind: "sheet",
-    label: `Claiming ${p.name}.kachat`,
-    html: progressBodyHtml(p),
-    dismissOnBackdrop: false,
-    // Escape doesn't close it while the registration is open (a stranded sheet - the registry
-    // gone, say - still can be)
-    closable: () => { const q = progressRegistration(); return !q || !isOpen(q); },
+    owner,
+    kind: "tall",
+    label: "Claiming",
+    html: claimsListBodyHtml(),
     onClick(event) { registrationActionClick(event.target); },
-    onClose() { if (progressSheet.layer === layer) { progressSheet.layer = null; progressSheet.id = null; } },
+    onClose() { if (claimsList.layer === layer) claimsList.layer = null; },
   });
-  progressSheet.layer = layer;
+  claimsList.layer = layer;
+}
+
+function renderClaimsList() {
+  if (!kit || !claimsList.layer) return;
+  if (!(kachatNames()?.actions.openRegistrations ?? []).length) {
+    const layer = claimsList.layer;
+    claimsList.layer = null;
+    kit.closeLayer(layer);
+    return;
+  }
+  const sheetEl = claimsList.layer.el.querySelector(".kmkt-sheet");
+  if (sheetEl) sheetEl.innerHTML = claimsListBodyHtml();
 }
 
 async function cancelRegistration(id) {
@@ -974,6 +1056,7 @@ async function cancelRegistration(id) {
   if (!ok || !(await deviceLock())) return;
   registrationUi.set(id, { working: true, error: null });
   renderRegistrationProgress();
+  renderClaimsList();
   try {
     const cancelTxId = await rt.actions.cancel(id);
     registrationUi.set(id, { working: false, error: null });
@@ -982,18 +1065,7 @@ async function cancelRegistration(id) {
     registrationUi.set(id, { working: false, error: errorText(error) });
   }
   renderRegistrationProgress();
-}
-
-/** Continues a registration stopped at "price changed" at the new price: paying more than the
- *  person confirmed is a new approval, so it goes through the device lock like any send (iOS
- *  4f5d95e authorizeNewPrice). */
-async function acceptNewRegistrationPrice(id) {
-  const rt = kachatNames();
-  if (!rt) return;
-  if (!(await deviceLock())) return;
-  registrationUi.delete(id);
-  rt.actions.acceptNewPrice(id);
-  renderRegistrationProgress();
+  renderClaimsList();
 }
 
 /** Drops a failed registration from the list (desktop addition: a commit that never reached the
@@ -1039,14 +1111,24 @@ export function kachatNameGridHtml(tilesHtml) {
   return `<div class="kl-tile-grid">${tilesHtml}</div>`;
 }
 
-/** KachatLiveMarketPage: names for sale only (iOS 0765ce0), as tiles with the asking price. */
+/** KachatLiveMarketPage: names for sale only (iOS 0765ce0), as tiles with the asking price and,
+ *  under it, when the name expires - "Expires soon" when less than expiresSoonMs is left (30 days
+ *  on mainnet, the renewal window on testnet), so a buyer sees what they get before opening it
+ *  (iOS ad184c3). */
 function marketPageHtml() {
+  const p = params();
+  const soonMs = p ? paramsExpiresSoonMs(p) : 30n * 86_400_000n;
+  const now = BigInt(Date.now());
   const listings = hub.listings.length
     ? kachatNameGridHtml(hub.listings.map((n) => {
       rememberName(n);
+      const soon = n.expiresAt - soonMs < now;
       return `
         <button class="kmkt-card kl-tile" type="button" data-kl-open-name="${esc(n.name)}" aria-label="${esc(n.display)}">
-          ${kachatNameTileHtml(esc(n.name), `<span class="kl-tile-price">${esc(amountText(n.price))}</span>`)}
+          ${kachatNameTileHtml(esc(n.name), `
+            <span class="kl-tile-price">${esc(amountText(n.price))}</span>
+            <span class="kl-tile-expiry">${esc(`Expires ${dayText(n.expiresAt)}`)}</span>
+            ${soon ? `<span class="kl-tile-soon">Expires soon</span>` : ""}`)}
         </button>`;
     }).join(""))
     : emptyCard(hubLoaded() ? "No names are listed right now." : null);
@@ -1058,10 +1140,11 @@ function marketPageHtml() {
     </div>`;
 }
 
-/** KachatLiveReclaimablePage (iOS 0765ce0): names that expired and stayed unrenewed through grace.
- *  A tile opens the name; its Reclaim button keeps its own click. The price is what claiming it
- *  costs once reclaimed - the current price for its length (iOS c488d1d). */
-function reclaimablePageHtml() {
+/** KachatLiveAvailablePage (iOS eea52b2): names that expired and stayed unrenewed through the
+ *  grace period - back on the market at the normal price. A tile opens the name; its Claim button
+ *  keeps its own click and starts the claim (the driver frees the old record and registers it in
+ *  one go, with the progress sheet). The price is the registration price for its length. */
+function availablePageHtml() {
   const lapsed = hub.lapsed.length
     ? kachatNameGridHtml(hub.lapsed.map((n) => {
       rememberName(n);
@@ -1071,16 +1154,26 @@ function reclaimablePageHtml() {
           <button class="kl-tile-open" type="button" data-kl-open-name="${esc(n.name)}" aria-label="${esc(n.display)}"></button>
           ${kachatNameTileHtml(esc(n.name), `
             ${price != null ? `<span class="kl-tile-price">${esc(amountText(price))}</span>` : ""}
-            <button class="secondary-button accent kmkt-small-button kl-tile-button" type="button" data-kl-reclaim="${esc(n.name)}">Reclaim</button>`)}
+            <button class="primary-button kmkt-small-button kl-tile-button" type="button" data-kl-claim-expired="${esc(n.name)}">Claim</button>`)}
         </div>`;
     }).join(""))
-    : emptyCard(hubLoaded() ? "Nothing to reclaim." : null);
+    : emptyCard(hubLoaded() ? "No expired names right now." : null);
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
-      ${kit.sectionHeader("Reclaimable", "Names whose owners let them lapse. Anyone may reclaim one: the bond goes back to its last owner, you keep the freed deposit as a bounty, and the name is free to claim.")}
+      ${kit.sectionHeader("Available")}
       ${lapsed}
     </div>`;
+}
+
+/** Claim on an expired name (an Available tile, or the name's own page): the claim sheet on the
+ *  gap its reclaim reopens (registry.claimGap); the driver frees the old record first. */
+async function claimExpired(info, owner = "market") {
+  const rt = kachatNames();
+  if (!rt || !info) return;
+  let gap = null;
+  try { gap = await rt.registry.claimGap(info); } catch { gap = null; }
+  if (gap) openClaimSheet({ name: info.name, gap, owner });
 }
 
 /** KachatLiveActivityPage: every registry event (iOS 0765ce0). */
@@ -1097,10 +1190,10 @@ function activityPageHtml() {
     </div>`;
 }
 
-/** The selected tab's live page: Marketplace, Reclaimable or Activity. Your own names and the
- *  offers you made live in Profile > Your Domains (iOS 0765ce0). */
+/** The selected tab's live page: Marketplace, Available or Activity. Your own names and the offers
+ *  you made live in Profile > Your Domains (iOS 0765ce0). */
 export function livePageHtml(page) {
-  if (page === "reclaimable") return reclaimablePageHtml();
+  if (page === "available") return availablePageHtml();
   if (page === "activity") return activityPageHtml();
   return marketPageHtml();
 }
@@ -1108,13 +1201,15 @@ export function livePageHtml(page) {
 /** Clicks on the live hub (search result, registrations, pages). True when handled. */
 export function liveHubClick(event) {
   const target = event.target;
-  // first: a Reclaimable tile's Reclaim button keeps its own click (the tile opens the name)
-  const reclaimButton = target.closest("[data-kl-reclaim]");
-  if (reclaimButton) {
-    const info = nameIndex.get(reclaimButton.dataset.klReclaim);
-    if (info) openReclaimSheet(info, "market");
+  // first: an Available tile's Claim button keeps its own click (the tile opens the name)
+  const claimButton = target.closest("[data-kl-claim-expired]");
+  if (claimButton) {
+    const info = nameIndex.get(claimButton.dataset.klClaimExpired);
+    if (info) claimExpired(info, "market");
     return true;
   }
+  // the claims button next to How it works (iOS b219bb0)
+  if (target.closest("[data-kl-claims]")) { openClaimsList("market"); return true; }
   const open = target.closest("[data-kl-open-name]");
   if (open) {
     const info = nameIndex.get(open.dataset.klOpenName);
@@ -1129,7 +1224,7 @@ export function liveHubClick(event) {
     }
     return true;
   }
-  // (a registration in flight shows in its own progress sheet, not on the hub: iOS 61fb0fc)
+  // (a claim in flight shows in its own progress sheet and the claims list, not on the hub: iOS b219bb0)
   const offerAct = target.closest("[data-kl-offer-act]");
   if (offerAct) {
     const offer = offerIndex.get(offerAct.dataset.klOfferId);
@@ -1263,7 +1358,6 @@ const TX_DONE_TITLES = Object.freeze({
   "Delist": "Delisted",
   "Transfer": "Name transferred",
   "Release Name": "Name released",
-  "Reclaim": "Name reclaimed",
   "Withdraw Offer": "Offer withdrawn",
   "Refund Offer": "Offer refunded",
   "Accept Offer": "Offer accepted",
@@ -1435,7 +1529,7 @@ function openTxSheet(cfg) {
     sheet.sendError = null;
     sheet.render();
     try {
-      // never pays more than the price shown (the price record can change at any time; iOS 4f5d95e)
+      // never pays more than the price shown (iOS 4f5d95e; with v4's fixed prices a safeguard)
       const maxPrice = typeof sheet.plan?.priceFee === "bigint" ? sheet.plan.priceFee : null;
       const txId = await rt.actions.perform(op, { maxPrice });
       sheet.txId = txId;
@@ -1480,7 +1574,7 @@ function openTxSheet(cfg) {
     onClose() {
       sheet.closed = true;
       clearTimeout(sheet.timer);
-      // after the layer is gone: what comes next (Reclaim to Own's "Register it again?")
+      // after the layer is gone: what comes next, if anything
       try { cfg.onClose?.(sheet.txId); } catch { /* optional */ }
     },
   });
@@ -1595,11 +1689,11 @@ function openOfferSheet(info, owner) {
 
 /** `extend` (KachatExtendSheet): periods added to the current paid period (periodStart kept), up to
  *  maxYears periods past its start - in practice a 1-period name extended to 2. Only the periods
- *  that still fit are offered. The price per period is the price record's. */
+ *  that still fit are offered. Each period costs the renewal price (registry v4, iOS c8f1086). */
 function openExtendSheet(info, owner) {
   let years = 1;
   const p = params();
-  const perYear = priceOf(info.name) ?? 0n;
+  const perYear = renewPriceOf(info.name) ?? 0n;
   const periodMs = p?.periodMs ?? yearMs;
   // the years that still fit in the period (in practice 1)
   const extendable = Number(extendableYears(info, p));
@@ -1638,11 +1732,12 @@ function openExtendSheet(info, owner) {
 
 /** `renew` (KachatRenewSheet): the next period, from the current expiry, for 1 or 2 periods - only
  *  once the renewal window is open (renewWindowMs before the expiry). Before that nothing is
- *  built: the sheet says when it opens. The price per period is the price record's. */
+ *  built: the sheet says when it opens. Each period costs the renewal price (registry v4, iOS
+ *  c8f1086). */
 function openRenewSheet(info, owner) {
   let years = 1;
   const p = params();
-  const perYear = priceOf(info.name) ?? 0n;
+  const perYear = renewPriceOf(info.name) ?? 0n;
   const periodMs = p?.periodMs ?? yearMs;
   const open = () => !p || renewalOpen(info, p);
   openTxSheet({
@@ -1804,22 +1899,6 @@ function openReleaseSheet(info, owner) {
   });
 }
 
-/** KachatReclaimSheet. */
-function openReclaimSheet(info, owner) {
-  openTxSheet({
-    owner,
-    title: "Reclaim",
-    confirmTitle: "Reclaim",
-    footer: () => "The name's bond goes back to its last owner, you keep the freed registry deposit (less the fee) as a bounty, and the name is free. To own it, claim it afterwards.",
-    rows: () => [
-      { title: "Name", value: info.display },
-      { title: "Bond to the last owner", value: amountText(params()?.bond ?? 0n) },
-    ],
-    operation: () => Operation.reclaim(info),
-    operationKey: () => `reclaim-${txKey(info)}`,
-  });
-}
-
 /** KachatOfferAction: withdraw, refund, accept or decline an offer. */
 function openOfferActionSheet(kind, offer, nameInfo, owner) {
   if (kind === "decline") {
@@ -1877,8 +1956,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
   const costHtml = () => {
     let rows;
     if (quote) {
-      const y = quote.years > 0n ? quote.years : 1n;
-      rows = formRow("Price (to miners)", `${amountText(quote.price / y)} × ${quote.years}`)
+      // the first period at the registration price, any further one at the renewal price (registry v4)
+      rows = formRow("Price (to miners)", amountText(quote.price))
         + formRow("Bond (returned on release)", amountText(quote.bond))
         + formRow("Registry deposit (returned on release)", amountText(quote.gapDeposit))
         + formRow("Commit (returned at registration)", amountText(quote.commit))
@@ -1945,11 +2024,13 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     startError = null;
     render();
     try {
-      await rt.actions.startRegistration({ name, years: q.years, maxPrice: q.price });
+      const commitTxId = await rt.actions.startRegistration({ name, years: q.years, maxPrice: q.price });
       starting = false;
-      // the claim becomes its progress half sheet, which stays up until it's done (iOS 61fb0fc)
+      // the claim becomes its progress half sheet; closing that leaves the claim running (iOS b219bb0)
+      const started = rt.actions.pending.find((x) => x.commitTxId === commitTxId)
+        ?? [...rt.actions.pending].reverse().find((x) => x.name === name && isOpen(x));
       kit.closeLayer(layer);
-      renderRegistrationProgress();
+      if (started) openRegistrationProgress(started.id);
       return;
     } catch (error) {
       startError = errorText(error);
@@ -2022,12 +2103,9 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
      *  `{ kind: "spending", index, address }`, `{ kind: "kasSigner", account, index, address }`, or
      *  null for someone else's. Resolved again on every reload (the name may move). */
     heldBy: null,
-    /** The free gap the name now sits in, once it's gone (released or reclaimed): Claim uses it (iOS f420343). */
+    /** The free gap the name sits in once it's gone (released or reclaimed; iOS f420343), or the
+     *  one claiming an expired name reopens (registry.claimGap, iOS eea52b2): Claim uses it. */
     freeGap: null,
-    /** Reclaim to Own (your own name, lapsed; iOS ba1a734): the gaps around it before the reclaim
-     *  (the merged gap the reclaim creates spans them), and the reclaim's txid once it went out. */
-    reclaimSpan: null,
-    reclaimedTxId: null,
   };
   const rt = () => kachatNames();
   const resolveHeldBy = () => {
@@ -2041,13 +2119,16 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
   /** Held by any of this wallet's addresses - never offered Buy / Make an Offer. */
   const ownedByWallet = () => d.heldBy != null || mine();
   const status = () => d.info.status(graceMs());
+  /** Free to claim: released or reclaimed, or expired past grace - claiming frees the old record
+   *  first (iOS eea52b2). */
+  const isFree = () => d.gone || status() === Status.lapsed;
   const ownerAddress = () => addressOf(d.info.owner);
 
   /** The name's art and, under it, what it is now: free to claim once it's gone (released or
-   *  reclaimed - the old record is history; iOS f420343, with b799091's price line), else the
-   *  live record. */
+   *  reclaimed) or expired past grace - the old record (its expiry, period, listing) is history;
+   *  iOS f420343 / eea52b2, with b799091's price line - else the live record. */
   const nameCard = () => {
-    if (d.gone) {
+    if (isFree()) {
       const price = priceOf(d.info.name);
       const priceLine = price == null ? ""
         : yearlyPeriods() ? `Available · ${amountText(price)} a year` : `Available · ${amountText(price)} per ${periodsText(1)}`;
@@ -2067,13 +2148,12 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
   /** The live record: price, status, expiry, paid period, and what expiry means. */
   const recordCard = () => {
     const s = status();
-    // A listing only stands while the name is active: an expired or lapsed name's old asking
-    // price is never shown - it can't be bought, only renewed or reclaimed (iOS ba1a734).
+    // A listing only stands while the name is active: an expired name's old asking price is
+    // never shown - it can't be bought, only renewed (or, past grace, claimed; iOS ba1a734).
     const forSale = d.info.isListed && s === Status.active;
     let note = "";
     if (s === Status.grace && ownedByWallet()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends nobody else can take it.</p>`;
     else if (s === Status.grace) note = `<p class="kl-note-inline kl-orange">Expired. It no longer resolves; the owner can still renew it.</p>`;
-    else if (s === Status.lapsed) note = `<p class="kl-note-inline kl-red">Lapsed: anyone may reclaim it, and then claim it again.</p>`;
     // the paid period, from its start to the expiry (at most maxYears periods)
     const period = d.info.periodStart != null
       ? `<p class="kl-period">${LI.calendar}<span>${esc(`Paid from ${dayText(d.info.periodStart)} to ${dayText(d.info.expiresAt)}`)}</span></p>`
@@ -2107,11 +2187,6 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
   const manageItems = () => {
     const s = status();
     const I = kit.ICON;
-    // Lapsed: the name is past saving - listing, transferring or making it primary means nothing
-    // now. The one way back is to clear it and register it again (iOS ba1a734).
-    if (s === Status.lapsed) {
-      return [{ id: "reclaimToOwn", title: "Reclaim to Own", subtitle: "Clear the lapsed name and get your bond back, then register it again.", icon: LI.reclaim }];
-    }
     const items = [];
     const p = params();
     if (p) {
@@ -2167,12 +2242,10 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     const I = kit.ICON;
     if (canActAsOwner()) {
       const p = params();
-      // Expired and renewable: the one thing that matters now stays on the page instead of inside
-      // the menu. Lapsed (past grace): a renewal can't bring it back, so the way back is to clear
-      // it (your bond comes back) and register it again - Reclaim to Own (iOS ba1a734).
+      // Expired (in grace) and renewable: the one thing that matters now stays on the page instead
+      // of inside the menu. (A name past grace shows as free to claim, iOS eea52b2.)
       let first = "";
-      if (s === Status.lapsed) first = actionButton("Reclaim to Own", LI.reclaim, "reclaimToOwn", { prominent: true });
-      else if (s !== Status.active && p && renewalOpen(d.info, p)) first = actionButton("Renew", LI.refresh, "renew", { prominent: true });
+      if (s !== Status.active && p && renewalOpen(d.info, p)) first = actionButton("Renew", LI.refresh, "renew", { prominent: true });
       // Every owner action lives in one half sheet of tiles.
       return `
         <div class="kl-action-grid">
@@ -2183,9 +2256,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     // A KasSigner address holds it: read-only here (the Owner card says which); acting on it is the
     // device's job.
     if (d.heldBy?.kind === "kasSigner") return "";
-    if (s === Status.lapsed) {
-      return `<div class="kl-action-grid"><div class="kmkt-actions">${actionButton("Reclaim", LI.reclaim, "reclaim", { prominent: true })}</div></div>`;
-    }
+    // an expired name is free to claim soon: no offers on it
     return `
       <div class="kl-action-grid">
         <div class="kmkt-actions">
@@ -2250,9 +2321,11 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
 
   const contentHtml = () => `
     ${nameCard()}
-    ${d.gone
+    ${isFree()
       ? `${d.freeGap ? `<div class="kl-action-grid"><div class="kmkt-actions">${actionButton("Claim", kit.ICON.atPlus, "claim", { prominent: true })}</div></div>` : ""}
-         <p class="kl-note">This name was released or reclaimed. It's free to claim again.</p>`
+         <p class="kl-note">${esc(d.gone
+          ? "This name was released or reclaimed. It's free to claim again."
+          : "This name expired and wasn't renewed, so anyone can claim it at the normal price. The old owner's bond goes back to them.")}</p>`
       : `${actionButtons()}
          ${d.primaryMessage ? `<p class="kl-note">${esc(d.primaryMessage)}</p>` : ""}
          ${ownerCard()}
@@ -2304,20 +2377,19 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
       if (found.kind === "registered") {
         d.info = rememberName(found.info);
         d.gone = false;
-        d.freeGap = null;
+        // lapsed: free to claim, in the gap claiming it reopens (iOS eea52b2; an if, not a
+        // ternary, as iOS 5a4ea36)
+        if (found.info.status(graceMs()) === Status.lapsed) {
+          try { d.freeGap = await registry.claimGap(found.info); } catch { d.freeGap = null; }
+        } else {
+          d.freeGap = null;
+        }
       } else {
         d.gone = true;
         d.freeGap = found.gap ?? null;
       }
     } catch { /* keep what we have */ }
     resolveHeldBy();
-    // your own lapsed name: note the gaps around it now, for Reclaim to Own
-    if (!d.gone && !d.reclaimSpan && canActAsOwner() && status() === Status.lapsed) {
-      try {
-        const gaps = await registry.exitGaps(d.info);
-        d.reclaimSpan = { lo: gaps.below.lo, hi: gaps.above.hi };
-      } catch { /* fetched again when Reclaim to Own starts */ }
-    }
     const address = ownerAddress();
     if (!ownedByWallet() && address) {
       try { d.ownerLabel = (await registry.identity(address))?.label ?? null; } catch { /* no label */ }
@@ -2385,93 +2457,15 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     });
   };
 
-  /** Reclaim to Own, step 2 (iOS 0c022e6 KachatOwnAgainSheet): "Register <name> again?" as a half
-   *  sheet; Register Again opens the claim sheet once it has gone, Not Now (or closing it) drops it. */
-  const askOwnAgain = () => {
-    if (!d.active || !kit) return;
-    let again = false;
-    kit.openLayer({
-      owner,
-      kind: "sheet",
-      label: `Register ${d.info.display} again?`,
-      html: `
-        <div class="kmkt-sheet-body kl-own-again">
-          <span class="kl-own-again-icon">${kit.ICON.atPlus}</span>
-          <strong class="kl-own-again-title">${esc(`Register ${d.info.display} again?`)}</strong>
-          <p class="kmkt-muted kl-own-again-text">It's free now. Pick how long to hold it, like any new name: the hidden commit goes first and the name is registered about a minute later.</p>
-          <div class="kl-own-again-buttons">
-            <button class="primary-button kmkt-wide-button" type="button" data-kl-own-again="yes">Register Again</button>
-            <button class="secondary-button accent kmkt-wide-button" type="button" data-kmkt-close>Not Now</button>
-          </div>
-        </div>`,
-      onClick(event, l) {
-        if (event.target.closest("[data-kl-own-again]")) { again = true; kit.closeLayer(l); }
-      },
-      onClose() {
-        if (again) { registerAgain(); return; }
-        d.reclaimedTxId = null;
-        d.reclaimSpan = null;
-      },
-    });
-  };
-
-  /** Reclaim to Own, step 3: the claim sheet for the freed name, on the gap the reclaim created
-   *  (its output 0, spanning the two gaps around the old name). The registration itself looks the
-   *  gap up again; until the reclaim is seen it waits for the old name to be cleared. */
-  const registerAgain = () => {
-    const txId = d.reclaimedTxId;
-    const span = d.reclaimSpan;
-    d.reclaimedTxId = null;
-    let gap = null;
-    if (txId && span) {
-      try { gap = new GapInfo({ lo: span.lo, hi: span.hi, outpoint: { txid: unhex32(String(txId).toLowerCase()), index: 0 } }); } catch { gap = null; }
-    }
-    gap = gap ?? d.freeGap;
-    if (gap && d.active) openClaimSheet({ name: d.info.name, gap, owner });
-  };
-
-  /** Reclaim to Own, step 1 (your own name, lapsed; iOS ba1a734): the reclaim - your bond comes
-   *  back and you keep the freed deposit - then "Register it again?". The gaps around the name
-   *  (which the reclaim merges) are noted on load; fetched here if that hasn't happened yet. */
-  const startReclaimToOwn = async () => {
-    const r = rt();
-    if (!r) return;
-    const info = d.info;
-    d.reclaimedTxId = null;
-    if (!d.reclaimSpan) {
-      try {
-        const gaps = await r.registry.exitGaps(info);
-        d.reclaimSpan = { lo: gaps.below.lo, hi: gaps.above.hi };
-      } catch { /* the claim sheet then waits for the freed gap */ }
-    }
-    if (!d.active) return;
-    openTxSheet({
-      owner,
-      title: "Reclaim to Own",
-      confirmTitle: "Reclaim",
-      doneTitle: "Name reclaimed",
-      footer: () => "Your name lapsed, so it can't be renewed any more. Reclaiming clears it from the registry: your bond comes back to you, and you also keep the freed registry deposit, less the network fee. Then you can register it again.",
-      rows: () => [
-        { title: "Name", value: info.display },
-        { title: "Bond back to you", value: amountText(params()?.bond ?? 0n) },
-      ],
-      operation: () => Operation.reclaim(info),
-      operationKey: () => `reclaim-own-${txKey(info)}`,
-      onDone: (txId) => { d.reclaimedTxId = txId; },
-      // once the reclaim's sheets have gone down: offer to register the name again
-      onClose: () => { if (d.reclaimedTxId) askOwnAgain(); },
-    });
-  };
-
   /** Opens what an action button or a Manage Name tile names. */
   const runAction = (id) => {
     const info = d.info;
     switch (id) {
-      case "reclaimToOwn": startReclaimToOwn(); break;
-      // gone (released or reclaimed): claim it on the gap it sits in (iOS f420343)
-      case "claim": if (d.gone && d.freeGap) openClaimSheet({ name: info.name, gap: d.freeGap, owner }); break;
+      // free (released or reclaimed, or expired past grace): claim it on the gap it sits in, or the
+      // one its reclaim reopens - the driver frees the old record first (iOS f420343 / eea52b2)
+      case "claim": if (isFree() && d.freeGap) openClaimSheet({ name: info.name, gap: d.freeGap, owner }); break;
       case "buy": openBuySheet(info, owner); break;
-      // an expired name can be reclaimed by anyone soon: no offers on it (iOS 71128c4)
+      // an expired name is free to claim soon: no offers on it (iOS 71128c4 / eea52b2)
       case "offer": if (info.status(graceMs()) === Status.active) openOfferSheet(info, owner); break;
       case "manage": openManage(); break;
       case "extend": openExtendSheet(info, owner); break;
@@ -2480,7 +2474,6 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
       case "delist": openDelistSheet(info, owner); break;
       case "transfer": openTransferSheet(info, owner); break;
       case "release": openReleaseSheet(info, owner); break;
-      case "reclaim": openReclaimSheet(info, owner); break;
       case "primary": setPrimary(); break;
       default: break;
     }
@@ -2565,12 +2558,14 @@ const domainsRenders = new WeakMap();
  *  its whole screen) shows them at once and reloads behind them instead of flashing a spinner. */
 const domainsShown = new Map();
 
-/** The card badge for a name: Listed, Expired (in grace) or Lapsed (iOS KachatLiveDomainsTab.badge). */
+/** The card badge for a name: Listed, or Expired (in grace) (iOS KachatLiveDomainsTab.badge). Your
+ *  Domains and the per-address lists show only held names (`heldNames`), so "Available" (past
+ *  grace, iOS eea52b2) is never on a card. */
 function domainBadge(n) {
   switch (n.status(graceMs())) {
     case Status.active: return n.isListed ? "Listed" : "";
     case Status.grace: return "Expired";
-    default: return "Lapsed";
+    default: return "Available";
   }
 }
 
@@ -2604,9 +2599,9 @@ function domainsEmptyHtml(variant) {
  * Renders an address's .kachat names into `containerEl` (iOS KachatLiveDomainsTab and, with
  * `variant: "address"`, KachatAddressLiveNamesList - the .kachat tab of Manage Addresses, the
  * chatting address and KasSigner, 881ada6): a spinner, then the address's names as domain cards, or
- * the empty note - Your Domains lists the names still held (active, and expired in grace; a lapsed
- * one moves to the marketplace's Reclaimable tab, iOS e26562e) with My Offers under them (iOS
- * 0765ce0); an address's tab lists all it owns, lapsed included. A card opens the name's live detail as a sheet,
+ * the empty note - Your Domains and an address's tab list the names still held (active, and expired
+ * in grace; one past grace is no longer theirs - it's Available to anyone in the marketplace, iOS
+ * e26562e / eea52b2), Your Domains with My Offers under them (iOS 0765ce0). A card opens the name's live detail as a sheet,
  * which knows which of your addresses holds it (owner actions, or read-only for KasSigner). It
  * reloads by itself when the registry changes, for as long as this render is the one in the
  * container. Where the registry isn't launched (mainnet) it renders the empty note and reads
@@ -2726,12 +2721,10 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         if (key) {
           try {
             if (rt.registry.refreshedAt == null) await rt.registry.refresh();
-            // Your Domains: a lapsed name is no longer yours - it moves to the marketplace's
-            // Reclaimable tab; expired names in grace stay, to be renewed (iOS e26562e / aa36d2a).
-            // One address's tab still lists every name it owns (iOS KachatAddressLiveNamesList).
-            names = variant === "domains"
-              ? await rt.registry.heldNames(key)
-              : await rt.registry.namesOf(key, { includeInactive: true });
+            // A name past grace is no longer theirs - it's Available to anyone in the marketplace
+            // (and the bell says so); expired names in grace stay, to be renewed. Your Domains and
+            // each address's tab alike (iOS e26562e / aa36d2a / eea52b2).
+            names = await rt.registry.heldNames(key);
           } catch { names = []; }
           if (variant === "domains") {
             try { offers = await rt.registry.myOffers(key); } catch { offers = []; }
@@ -2762,7 +2755,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         shownOffers = offers;
         paint(root);
         // a name that lapses while this is open leaves right then (iOS aa36d2a)
-        if (variant === "domains") scheduleLapse(`tab:${token}`, names, () => { if (current()) load(); });
+        scheduleLapse(`tab:${token}`, names, () => { if (current()) load(); });
       } while (again);
     } finally {
       loading = false;
