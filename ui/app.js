@@ -10036,7 +10036,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 106;
+const APP_BUILD = 107;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -22099,7 +22099,30 @@ document.querySelector("[data-create-length-back]")?.addEventListener("click", (
   showCreateStep("name");
   queueMicrotask(() => createNameInput?.focus());
 });
+// "What is this?" under Generate Account (iOS dd0aab1 SeedPhraseExplainerSheet): what a seed phrase
+// is, in a half sheet over the length step. Done, Escape or a click outside closes it.
+const seedExplainerModal = document.querySelector("[data-seed-explainer-modal]");
+const seedExplainerOpenBtn = document.querySelector("[data-seed-explainer-open]");
+function onSeedExplainerKey(event) {
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSeedExplainer(); }
+}
+function openSeedExplainer() {
+  if (!seedExplainerModal) return;
+  seedExplainerModal.hidden = false;
+  document.addEventListener("keydown", onSeedExplainerKey, true);
+  queueMicrotask(() => seedExplainerModal.querySelector("[data-seed-explainer-done]")?.focus());
+}
+function closeSeedExplainer() {
+  if (!seedExplainerModal || seedExplainerModal.hidden) return;
+  seedExplainerModal.hidden = true;
+  document.removeEventListener("keydown", onSeedExplainerKey, true);
+  seedExplainerOpenBtn?.focus();
+}
+seedExplainerOpenBtn?.addEventListener("click", openSeedExplainer);
+seedExplainerModal?.querySelector("[data-seed-explainer-done]")?.addEventListener("click", closeSeedExplainer);
+seedExplainerModal?.addEventListener("mousedown", (event) => { if (event.target === seedExplainerModal) closeSeedExplainer(); });
 function closeCreateAccountModal() {
+  closeSeedExplainer();
   if (createAccountModal) createAccountModal.hidden = true;
   pendingNewAccount = null;
   if (!engine.address || localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") showLoggedOutScreen();
@@ -23067,6 +23090,18 @@ const importSeedCount = document.querySelector("[data-import-seed-count]");
 let importWordCount = 24;
 let importWords = Array(24).fill("");
 let importActiveSlot = 0;
+// The length chosen on Import's length step (iOS dd0aab1 ImportLengthStep): 12 | 24, null = none
+// yet. Nothing is chosen for you; a pasted phrase of the other length switches it.
+let importChosenLength = null;
+function renderImportLengthChoice() {
+  document.querySelectorAll("[data-import-word-count]").forEach((button) => {
+    const chosen = Number(button.dataset.importWordCount) === importChosenLength;
+    button.classList.toggle("chosen", chosen);
+    button.setAttribute("aria-checked", chosen ? "true" : "false");
+  });
+  const next = document.querySelector("[data-import-length-next]");
+  if (next) next.disabled = !(importChosenLength === 12 || importChosenLength === 24);
+}
 
 function importSeedSlots() { return importWords.slice(0, importWordCount); }
 function importSeedPhrase() { return importSeedSlots().map((w) => w.trim().toLowerCase()).filter(Boolean).join(" "); }
@@ -23134,7 +23169,8 @@ document.querySelector("[data-import-seed-paste]")?.addEventListener("click", as
   importWordCount = pasted.length;
   importWords = Array(24).fill("");
   pasted.forEach((w, i) => { importWords[i] = w; });
-  document.querySelectorAll("[data-import-word-count]").forEach((b) => b.classList.toggle("active", Number(b.dataset.importWordCount) === importWordCount));
+  importChosenLength = importWordCount;
+  renderImportLengthChoice();
   importActiveSlot = importWordCount - 1;
   renderImportSeedGrid();
   try { await navigator.clipboard.writeText(""); } catch { /* fine */ }
@@ -23170,11 +23206,10 @@ function resetImportSeedGrid() {
     });
   }
 }
+// Import's length step: the same two buttons as Create Account. The words grid takes the length on Next.
 document.querySelectorAll("[data-import-word-count]").forEach((button) => button.addEventListener("click", () => {
-  importWordCount = Number(button.dataset.importWordCount) === 12 ? 12 : 24;
-  document.querySelectorAll("[data-import-word-count]").forEach((b) => b.classList.toggle("active", b === button));
-  if (importActiveSlot >= importWordCount) importActiveSlot = importWordCount - 1;
-  renderImportSeedGrid();
+  importChosenLength = Number(button.dataset.importWordCount) === 12 ? 12 : 24;
+  renderImportLengthChoice();
 }));
 importSeedGrid?.addEventListener("focusin", (event) => {
   const input = event.target.closest("[data-import-slot]");
@@ -23191,7 +23226,8 @@ importSeedGrid?.addEventListener("input", (event) => {
     parts.forEach((word, offset) => { if (i + offset < 24) importWords[i + offset] = word; });
     if (parts.length >= 12 && i === 0 && (parts.length === 12 || parts.length === 24)) {
       importWordCount = parts.length;
-      document.querySelectorAll("[data-import-word-count]").forEach((b) => b.classList.toggle("active", Number(b.dataset.importWordCount) === importWordCount));
+      importChosenLength = importWordCount;
+      renderImportLengthChoice();
     }
     renderImportSeedGrid();
     focusImportSlot(Math.min(importWordCount - 1, i + parts.length));
@@ -23228,7 +23264,7 @@ importSeedSuggestions?.addEventListener("mousedown", (event) => {
   event.preventDefault(); // keep focus on the grid
   commitImportWord(chip.dataset.seedSuggest);
 });
-document.querySelector("[data-import-name]")?.addEventListener("input", updateImportSeedState);
+document.querySelector("[data-import-name]")?.addEventListener("input", () => { updateImportNameNextEnabled(); updateImportSeedState(); });
 const importAccountError = document.querySelector("[data-import-account-error]");
 const importContinueBtn = document.querySelector("[data-import-continue]");
 const importPassphraseInput = document.querySelector("[data-import-passphrase]");
@@ -23324,6 +23360,9 @@ function selectedImportSourceFamily() {
 
 function showImportStep(step) {
   document.querySelectorAll("[data-import-step]").forEach((el) => { el.hidden = el.dataset.importStep !== step; });
+  // The name and length steps carry iOS's large title, as Create Account's do; the rest stay inline.
+  const flow = importAccountModal?.querySelector(".import-account-flow");
+  if (flow) flow.dataset.importAt = step;
 }
 function showImportError(message) {
   if (importAccountError) { importAccountError.textContent = message; importAccountError.hidden = false; }
@@ -23333,7 +23372,12 @@ function openImportAccountModal() {
   importSourceSelection = 0;
   if (importAccountError) { importAccountError.hidden = true; importAccountError.textContent = ""; }
   if (importPassphraseError) importPassphraseError.hidden = true;
-  if (importNameInput) importNameInput.value = "Imported Account";
+  // Neither a name nor a length is chosen for you (iOS dd0aab1, as Create Account).
+  if (importNameInput) importNameInput.value = "";
+  updateImportNameNextEnabled();
+  importChosenLength = null;
+  renderImportLengthChoice();
+  importWordCount = 24;
   resetImportSeedGrid();
   if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
   renderImportSourceList();
@@ -23348,9 +23392,41 @@ function closeImportAccountModal() {
 document.querySelectorAll("[data-close-import-account]").forEach((button) => button.addEventListener("click", closeImportAccountModal));
 importAccountModal?.addEventListener("click", (event) => { if (event.target === importAccountModal) closeImportAccountModal(); });
 
-document.querySelector("[data-import-source-continue]")?.addEventListener("click", () => {
+// Import Account, iOS dd0aab1: source -> name (Create Account's screen) -> seed length -> words ->
+// the optional passphrase.
+const importNameNextBtn = document.querySelector("[data-import-name-next]");
+function updateImportNameNextEnabled() {
+  if (importNameNextBtn) importNameNextBtn.disabled = !String(importNameInput?.value || "").trim();
+}
+function importShowNameStep() {
+  showImportStep("name");
+  queueMicrotask(() => importNameInput?.focus());
+}
+function importNameNext() {
+  if (!String(importNameInput?.value || "").trim()) return;
+  showImportStep("length");
+  queueMicrotask(() => document.querySelector("[data-import-word-count]")?.focus());
+}
+document.querySelector("[data-import-source-continue]")?.addEventListener("click", importShowNameStep);
+importNameNextBtn?.addEventListener("click", importNameNext);
+importNameInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); importNameNext(); }
+});
+document.querySelector("[data-import-name-back]")?.addEventListener("click", () => showImportStep("source"));
+document.querySelector("[data-import-length-back]")?.addEventListener("click", importShowNameStep);
+document.querySelector("[data-import-length-next]")?.addEventListener("click", () => {
+  if (importChosenLength !== 12 && importChosenLength !== 24) return;
+  importWordCount = importChosenLength;
+  if (importActiveSlot >= importWordCount) importActiveSlot = importWordCount - 1;
+  if (importAccountError) { importAccountError.hidden = true; importAccountError.textContent = ""; }
+  renderImportSeedGrid();
   showImportStep("form");
-  queueMicrotask(() => focusImportSlot(0));
+  const firstOpen = importSeedSlots().findIndex((w) => !isBip39Word(w));
+  queueMicrotask(() => focusImportSlot(firstOpen < 0 ? importWordCount - 1 : firstOpen));
+});
+document.querySelector("[data-import-words-back]")?.addEventListener("click", () => {
+  showImportStep("length");
+  queueMicrotask(() => document.querySelector("[data-import-word-count].chosen, [data-import-word-count]")?.focus());
 });
 
 // `resetState: false` is used only by the chatting-address switch: that is a
@@ -23440,7 +23516,7 @@ importContinueBtn?.addEventListener("click", async () => {
   const phrase = importSeedPhrase();
   const words = phrase.split(" ").filter(Boolean);
   if (importAccountError) importAccountError.hidden = true;
-  if (!name) { showImportError("Enter an account name."); return; }
+  if (!name) { importShowNameStep(); return; } // the name is its own step now (iOS dd0aab1)
   if (words.length !== importWordCount || !importSeedAllValid()) { showImportError(`Enter all ${importWordCount} recovery words.`); return; }
   importContinueBtn.disabled = true;
   try {

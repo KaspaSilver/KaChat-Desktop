@@ -986,6 +986,35 @@ async function runRegistryIndexer(v, r) {
   try { await reg.lapsed(); } catch (e) { msg = e.message; }
   r.eq(msg, "not found", "registry (indexer): 404 -> not found");
 
+  // iOS 7aa6c6d: an indexer that isn't synced, or is more than 600 DAA behind the network, is not used;
+  // the source is re-checked on every refresh, so it comes back once the indexer catches up
+  {
+    let statusBody = { registryCovenantId: C.hex(m.registryCovenantId), synced: true, indexedDaa: 10_000 };
+    let virtual = 10_500n;
+    const lagFetch = async (url) => (new URL(url).pathname === "/names/status" ? response(200, statusBody) : response(404, { error: "not_found" }));
+    const logs = [];
+    const lagReg = new KachatNamesRegistry({ fetch: lagFetch, restBase: () => "https://rest.test", indexerBase: () => "https://idx.test", getUtxosByAddresses: async () => [], storage: memoryStorage(), manifest: async () => m, now: () => nowMs, virtualDaaScore: async () => virtual, log: (...a) => logs.push(a.join(" ")) });
+    await lagReg.refresh();
+    r.eq(lagReg.source?.kind, "indexer", "registry (indexer lag): 500 DAA behind is used");
+    virtual = 10_601n;
+    await lagReg.refresh();
+    r.eq(lagReg.source?.kind, "chain", "registry (indexer lag): 601 DAA behind -> the chain, on the next refresh");
+    r.check(logs.some((l) => l.includes("registry source: the chain")), "registry (indexer lag): the source change is logged");
+    virtual = 10_100n;
+    await lagReg.refresh();
+    r.eq(lagReg.source?.kind, "indexer", "registry (indexer lag): back to the indexer once it caught up");
+    statusBody = { ...statusBody, synced: false };
+    await lagReg.refresh();
+    r.eq(lagReg.source?.kind, "chain", "registry (indexer lag): synced:false -> the chain");
+    statusBody = { registryCovenantId: C.hex(m.registryCovenantId), synced: true, indexedDaa: 1 };
+    const noDag = new KachatNamesRegistry({ fetch: lagFetch, restBase: () => "https://rest.test", indexerBase: () => "https://idx.test", getUtxosByAddresses: async () => [], storage: memoryStorage(), manifest: async () => m, now: () => nowMs, log: () => {} });
+    await noDag.refresh();
+    r.eq(noDag.source?.kind, "indexer", "registry (indexer lag): without a network position the indexer's synced is trusted");
+    const dagFails = new KachatNamesRegistry({ fetch: lagFetch, restBase: () => "https://rest.test", indexerBase: () => "https://idx.test", getUtxosByAddresses: async () => [], storage: memoryStorage(), manifest: async () => m, now: () => nowMs, virtualDaaScore: async () => { throw new Error("no node"); }, log: () => {} });
+    await dagFails.refresh();
+    r.eq(dagFails.source?.kind, "indexer", "registry (indexer lag): a failed DAG read trusts the indexer's synced");
+  }
+
   // an indexer for another registry is not used
   const reg2 = new KachatNamesRegistry({
     fetch: async () => response(200, { registryCovenantId: "00".repeat(32) }), restBase: () => "https://rest.test", indexerBase: () => "https://idx.test",

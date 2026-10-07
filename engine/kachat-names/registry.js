@@ -119,6 +119,9 @@ function isUpgradingError(error) {
  *  - `manifest`: a verified Manifest (manifest.js), or a (sync/async) function returning one; called
  *      once and kept
  *  - `now()`: unix ms (Number or BigInt; default Date.now)
+ *  - optional: `virtualDaaScore()` -> Promise<BigInt|number> the network's virtual DAA score (desktop:
+ *      engine.currentDagPoint().virtualDaaScore). With it, an indexer more than `maxIndexerLagDaa`
+ *      behind the network isn't used (iOS 7aa6c6d); without it, the indexer's own `synced` is trusted.
  *  - optional: `isEnabled()` (default true; false makes refresh a no-op, as iOS
  *      KachatNamesService.isLaunched - the app passes that gate), `log(...args)` (default console.log), `cacheKey`
  *      (default "kachat-names-registry-testnet-v1"), `sleep(ms)`.
@@ -134,6 +137,7 @@ export class KachatNamesRegistry {
       manifest: deps.manifest ?? null,
       now: deps.now ?? (() => Date.now()),
       isEnabled: deps.isEnabled ?? (() => true),
+      virtualDaaScore: deps.virtualDaaScore ?? null,
       log: deps.log ?? ((...a) => console.log(...a)),
       cacheKey: deps.cacheKey ?? registryCacheKey,
       sleep: deps.sleep ?? sleep,
@@ -200,7 +204,12 @@ export class KachatNamesRegistry {
     if (!this.deps.isEnabled()) throw new Failure("there is no .kachat registry on this network yet");
     const m = await this._loadManifest();
     if (this.source == null || forceSourceCheck) {
-      this.source = await this._chooseSource(m);
+      const chosen = await this._chooseSource(m);
+      if (this.source && this.source.kind !== chosen.kind) {
+        this.deps.log("[KachatNames] registry source:", chosen.kind === "chain"
+          ? "the chain (the indexer is behind or elsewhere)" : "the indexer");
+      }
+      this.source = chosen;
     }
     if (this.source.kind === "chain" && (this.chainState == null || this._cacheNetwork !== m.network)) {
       this.chainState = (await this._loadCache(m)) ?? RegistryState.atGenesis(m);
@@ -232,13 +241,26 @@ export class KachatNamesRegistry {
   /** Whether the names indexer is the source. */
   get isIndexer() { return this.source?.kind === "indexer"; }
 
+  /** An indexer further behind the network than this many DAA (about a minute) isn't used: its
+   *  names would be stale - a name just claimed or sold missing, a registration waiting on it - so
+   *  the app walks the chain itself until it catches up (iOS 7aa6c6d `maxIndexerLagDaa`). */
+  static get maxIndexerLagDaa() { return 600n; }
+
   async _chooseSource(m) {
     const base = this.indexerBase();
     if (!base) return { kind: "chain" };
     try {
       const status = IndexerAPI.status(await this._get(base, "/names/status"));
       // registry v4: the indexer is matched on the registry id alone (no price covenant)
-      if (status.registryCovenantId?.toLowerCase() === hex(m.registryCovenantId)) return { kind: "indexer", base };
+      if (status.registryCovenantId?.toLowerCase() !== hex(m.registryCovenantId)) return { kind: "chain" };
+      if (status.synced === false) return { kind: "chain" };
+      // Without a network position to compare with, the indexer's own "synced" is trusted.
+      if (status.indexedDaa != null && typeof this.deps.virtualDaaScore === "function") {
+        let virtual = null;
+        try { virtual = BigInt(await this.deps.virtualDaaScore()); } catch { virtual = null; }
+        if (virtual != null && virtual > BigInt(status.indexedDaa) + KachatNamesRegistry.maxIndexerLagDaa) return { kind: "chain" };
+      }
+      return { kind: "indexer", base };
     } catch { /* no indexer: walk the chain */ }
     return { kind: "chain" };
   }
@@ -259,7 +281,9 @@ export class KachatNamesRegistry {
    *  A failed refresh counts as an attempt too (`refreshIfStale` waits `maxAge` before the next)
    *  and bumps `revision` only when the error changed, so screens that reload on `revision` (and
    *  refresh from there) can't turn a refusal into a refresh loop. */
-  refresh({ forceSourceCheck = false } = {}) {
+  /** Every refresh re-checks the source (iOS 7aa6c6d), so an indexer that fell behind is dropped and
+   *  one that caught up is used again (an old `{ forceSourceCheck }` argument is ignored). */
+  refresh() {
     if (!this.deps.isEnabled()) return Promise.resolve();
     if (this._refreshing) return this._refreshing;
     this.isRefreshing = true;
@@ -267,7 +291,7 @@ export class KachatNamesRegistry {
       const previousError = this.lastError;
       let changed = true;
       try {
-        const m = await this.prepare({ forceSourceCheck });
+        const m = await this.prepare({ forceSourceCheck: true });
         if (this.source.kind === "chain") await this._walk(m);
         this.lastError = null;
         this.registryUpgrading = false;

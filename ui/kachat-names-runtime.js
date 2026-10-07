@@ -66,6 +66,8 @@ export function initKachatNamesRuntime(engine, { wallet = null, onSubmitted = nu
     getUtxosByAddresses: (addresses) => engine.utxosForRegistry(addresses),
     restBase: () => getEndpoint("kaspaApi"),
     indexerBase: () => getEndpoint("kasiaIndexer"),
+    // An indexer more than ~1 minute behind the network is skipped (iOS 7aa6c6d).
+    virtualDaaScore: async () => (await engine.currentDagPoint()).virtualDaaScore,
     storage: localStorageAdapter,
   });
   const actions = new KachatNamesActions({ engine, service, registry, wallet });

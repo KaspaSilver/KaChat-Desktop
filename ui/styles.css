@@ -13081,3 +13081,55 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 :is(.chat-circle-avatar, .call-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar) > img {
   width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; border-radius: 50%;
 }
+
+/* ==== Import Account matches Create Account; "What is this?" for seed phrases (iOS dd0aab1) ====
+   Import's name and length steps reuse Create Account's markup, so its step styles apply to both
+   flows. The explainer is a half sheet over the Create Account modal. */
+.import-account-flow[data-import-at="name"] .modal-header h2,
+.import-account-flow[data-import-at="length"] .modal-header h2 { font-size: 34px; font-weight: 700; line-height: 41px; letter-spacing: .011em; }
+.import-account-flow .create-step-title { margin: 0 0 8px; font-size: 22px; font-weight: 700; line-height: 28px; color: var(--text); }
+.import-account-flow .create-step-note { margin: 0 0 24px; font-size: 15px; line-height: 20px; color: var(--muted); }
+.import-account-flow [data-import-step="length"] .create-step-note { margin-bottom: 12px; }
+.import-account-flow .create-name-input {
+  width: 100%; height: 34px; margin-bottom: 24px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  font-size: 17px; font-weight: 400;
+}
+.import-account-flow .create-name-input:focus { border-color: var(--kaspa); box-shadow: none; }
+.import-account-flow .seed-length-buttons { display: flex; flex-direction: column; gap: 12px; margin: 4px 0 24px; }
+.import-account-flow .seed-length-button {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; min-height: 54px; padding: 16px;
+  border: 1.5px solid var(--kaspa); border-radius: 12px;
+  background: transparent; color: var(--kaspa);
+  font: inherit; font-size: 17px; font-weight: 600; line-height: 22px;
+  cursor: pointer;
+}
+.import-account-flow .seed-length-button.chosen { background: var(--kaspa); color: #fff; }
+.import-account-flow .seed-length-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); outline-offset: 2px; }
+.import-account-flow .seed-length-check {
+  flex: 0 0 18px; width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor; box-sizing: border-box;
+}
+.import-account-flow .seed-length-button.chosen .seed-length-check {
+  border-color: #fff;
+  background: #fff radial-gradient(circle, var(--kaspa) 0 4px, transparent 4.5px);
+}
+/* "What is this?": a plain accent link with questionmark.circle, under Generate Account */
+.create-account-flow .seed-explainer-link {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; margin-top: 4px;
+  font-size: 15px; font-weight: 600; line-height: 20px; color: var(--kaspa);
+}
+.create-account-flow .seed-explainer-link svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+/* The sheet itself: above the Create Account modal, signed in or out (that one is 2000 / 2100) */
+.modal-backdrop.seed-explainer-backdrop { z-index: 2200; }
+.seed-explainer-sheet { display: flex; flex-direction: column; gap: 4px; padding: 0 0 8px; max-height: min(70vh, 560px); overflow: hidden; }
+.seed-explainer-head {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  min-height: 52px; padding: 0 72px; flex: 0 0 auto;
+}
+.seed-explainer-head h2 { margin: 0; font-size: 17px; font-weight: 600; line-height: 22px; text-align: center; }
+.seed-explainer-head [data-seed-explainer-done] { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); font-size: 17px; color: var(--kaspa); }
+.seed-explainer-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 16px 16px; overflow-y: auto; }
+.seed-explainer-body p { margin: 0; font-size: 15px; line-height: 20px; color: var(--muted); }
