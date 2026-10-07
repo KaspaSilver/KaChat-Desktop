@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import * as K from "../engine/kns-write.js";
-import { sendPayloadToSelf, sendPayloadTransaction } from "../engine/transactions.js";
+import { sendPayloadToSelf, sendPayloadTransaction, submitConfirmingAcceptance, isOrphanRejection } from "../engine/transactions.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -56,12 +56,14 @@ function stubRpc() {
     utxos: new Map(),
     submitted: [],
     refuse: null,
+    attempts: [],
     async getUtxosByAddresses(addresses) {
       const list = (Array.isArray(addresses) ? addresses : addresses?.addresses || []).map(String);
       return { entries: list.flatMap((a) => rpc.utxos.get(a) || []) };
     },
-    async submitTransaction({ transaction }) {
-      const refusal = rpc.refuse?.(transaction);
+    async submitTransaction({ transaction, allowOrphan = false }) {
+      rpc.attempts.push({ id: String(transaction.id), allowOrphan: Boolean(allowOrphan) });
+      const refusal = rpc.refuse?.(transaction, Boolean(allowOrphan));
       if (refusal) throw new Error(refusal);
       rpc.submitted.push(transaction);
       return { transactionId: transaction.id };
@@ -300,6 +302,63 @@ async function main() {
     r.check(mass != null && BigInt(mass) <= 100_000n, `self-stash: mass within the standard limit (${mass})`);
     const storage = kaspa.calculateStorageMass(NET, [Number(3n * KAS)], [Number(tx.outputs[0].value)]);
     r.check(storage != null && BigInt(storage) < 100n, `self-stash: storage mass is negligible (${storage})`);
+  }
+
+  // MARK: iOS 4eb492f - an orphan rejection waits for the parent instead of failing
+  {
+    const orphan = "transaction 00ab is an orphan where orphan is disallowed";
+    r.check(isOrphanRejection(new Error(orphan)), "orphan rejection recognised");
+    r.check(!isOrphanRejection(new Error("insufficient funds")), "other errors are not orphan rejections");
+
+    // Refused once as an orphan, then accepted: the same signed transaction, sent twice.
+    {
+      const rpc = stubRpc();
+      rpc.utxos.set(ownerAddress, [utxo(ownerAddress, 2n * KAS)]);
+      let refusals = 0;
+      rpc.refuse = () => (refusals++ === 0 ? orphan : null);
+      const started = Date.now();
+      const sent = await sendPayloadTransaction({ kaspa, rpc, privateKey: ownerKey, sourceAddress: ownerAddress, destinationAddress: recipientAddress, amountKas: "0.2", payload: "aa".repeat(40) });
+      r.check(Date.now() - started >= 1400, "orphan once: waited ~1.5s before the resubmit");
+      r.eq(rpc.submitted.length, 1, "orphan once: one transaction accepted");
+      r.eq(rpc.attempts.length, 2, "orphan once: two submits");
+      r.eq(rpc.attempts[0].id, rpc.attempts[1].id, "orphan once: the resubmit is the same transaction");
+      r.eq(rpc.attempts[1].allowOrphan, false, "orphan once: resubmit still disallows orphans");
+      r.eq(sent.txids[0], rpc.attempts[0].id, "orphan once: the send reports that transaction");
+    }
+
+    // Still an orphan after the wait: the node is asked to hold it (allowOrphan), nothing rebuilt.
+    {
+      const rpc = stubRpc();
+      rpc.utxos.set(ownerAddress, [utxo(ownerAddress, 2n * KAS)]);
+      rpc.refuse = (_tx, allowOrphan) => (allowOrphan ? null : orphan);
+      const sent = await sendPayloadTransaction({ kaspa, rpc, privateKey: ownerKey, sourceAddress: ownerAddress, destinationAddress: recipientAddress, amountKas: "0.2", payload: "bb".repeat(40) });
+      r.eq(rpc.attempts.length, 3, "orphan twice: three submits");
+      r.check(rpc.attempts.every((a) => a.id === rpc.attempts[0].id), "orphan twice: every submit is the same transaction");
+      r.eq(rpc.attempts.map((a) => a.allowOrphan).join(","), "false,false,true", "orphan twice: last submit allows an orphan");
+      r.eq(rpc.submitted.length, 1, "orphan twice: one transaction accepted");
+      r.eq(sent.txids[0], rpc.attempts[0].id, "orphan twice: the send reports that transaction");
+    }
+
+    // submitConfirmingAcceptance directly: a refused orphan rethrows the original error once both
+    // retries fail; a non-orphan error is not retried.
+    {
+      const calls = [];
+      await r.throws(
+        () => submitConfirmingAcceptance({ submit: async (_rpc, opts) => { calls.push(opts?.allowOrphan); throw new Error(calls.length === 1 ? orphan : "rejected"); }, txid: null, orphanWaitMs: 0 }),
+        (e) => e.message === orphan,
+        "orphan never accepted: the original error is thrown",
+      );
+      r.eq(calls.join(","), "false,false,true", "orphan never accepted: wait, resubmit, then allow orphan");
+      const plain = [];
+      await r.throws(
+        () => submitConfirmingAcceptance({ submit: async (_rpc, opts) => { plain.push(opts?.allowOrphan); throw new Error("bad signature"); }, txid: null, orphanWaitMs: 0 }),
+        (e) => e.message === "bad signature",
+        "non-orphan error: thrown as is",
+      );
+      r.eq(plain.length, 1, "non-orphan error: no resubmit");
+      const legacy = await submitConfirmingAcceptance({ submit: async () => ({ transactionId: "f".repeat(64) }), txid: null });
+      r.eq(legacy, "f".repeat(64), "a submit that ignores the options still works");
+    }
   }
 
   for (const f of r.failures) console.log(`FAIL ${f}`);

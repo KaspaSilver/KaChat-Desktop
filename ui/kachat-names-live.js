@@ -135,6 +135,66 @@ function durationText(ms) {
   return `${Math.round(seconds / 60)} min`;
 }
 
+/** Time left until a moment, for a live countdown (iOS KachatLive.countdown, cb3c27d): "2d 5h"
+ *  while days remain, else "1:04:09" or "4:09" (hours, minutes, seconds); "0:00" once it passed. */
+export function countdownText(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) / 1000));
+  if (!Number.isFinite(total)) return "";
+  if (total >= 86_400) {
+    const days = Math.floor(total / 86_400);
+    const hours = Math.floor((total % 86_400) / 3_600);
+    return hours ? `${days}d ${hours}h` : `${days}d`;
+  }
+  const h = Math.floor(total / 3_600);
+  const m = Math.floor((total % 3_600) / 60);
+  const sec = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
+// Live countdowns (iOS TimelineView, every second): each `[data-kl-countdown]` shows the time left
+// until its unix-ms moment. One timer while any is on screen; it stops when none is visible and
+// starts again with the next one rendered. One with `data-kl-countdown-reload` reloads the hub
+// when it reaches zero - once - so a released name moves from Expired to Available (iOS cb3c27d).
+let countdownTimer = null;
+const countdownReloaded = new Set();
+
+/** A live countdown to `atMs` (unix ms); `reloadKey`: reload the hub once when it reaches zero. */
+function countdownHtml(atMs, { reloadKey = null } = {}) {
+  ensureCountdownTicker();
+  const at = Number(atMs);
+  return `<span class="kl-countdown" data-kl-countdown="${esc(String(at))}"${reloadKey ? ` data-kl-countdown-reload="${esc(reloadKey)}"` : ""}>${esc(countdownText(at - Date.now()))}</span>`;
+}
+
+function ensureCountdownTicker() {
+  if (countdownTimer != null || typeof setInterval !== "function") return;
+  countdownTimer = setInterval(tickCountdowns, 1_000);
+}
+
+function tickCountdowns() {
+  const all = typeof document === "undefined" ? [] : [...document.querySelectorAll("[data-kl-countdown]")];
+  // a hidden screen (another tab) keeps its markup: only what is on screen counts
+  const shown = all.filter((el) => el.getClientRects().length > 0);
+  if (!shown.length) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+    return;
+  }
+  const now = Date.now();
+  let released = false;
+  for (const el of shown) {
+    const left = Number(el.dataset.klCountdown) - now;
+    const text = countdownText(left);
+    if (el.textContent !== text) el.textContent = text;
+    const key = el.dataset.klCountdownReload;
+    if (key && left <= 0 && !countdownReloaded.has(key)) {
+      countdownReloaded.add(key);
+      released = true;
+    }
+  }
+  if (released && liveHubIsLive()) hubReload();
+}
+
 function relativeText(ms) {
   if (ms == null) return "";
   const t = Number(ms);
@@ -527,6 +587,8 @@ const hub = {
   listings: [],
   /** names expired past grace: back on the market, Available to anyone (iOS eea52b2) */
   lapsed: [],
+  /** expired and still in grace: the Expired tab, each counting down to its release (iOS cb3c27d) */
+  grace: [],
   mine: [],
   myOffers: [],
   activity: [],
@@ -647,6 +709,7 @@ async function hubReloadOnce() {
   try {
     hub.listings = await registry.listings();
     hub.lapsed = await registry.lapsed();
+    hub.grace = await registry.inGrace().catch(() => []);
     const me = myKey();
     if (me) {
       hub.mine = await registry.namesOf(me, { includeInactive: true });
@@ -1167,6 +1230,36 @@ function availablePageHtml() {
     </div>`;
 }
 
+/** KachatLiveExpiredPage (iOS cb3c27d): names that expired and are still in their grace period -
+ *  only their owner can renew them - soonest release first, each with a live countdown to the
+ *  moment it is released to Available and its claim price. When one reaches zero the hub reloads
+ *  and it moves to Available. A tile opens the name. */
+function expiredPageHtml() {
+  const grace = graceMs();
+  const names = hub.grace.length
+    ? kachatNameGridHtml(hub.grace.map((n) => {
+      rememberName(n);
+      const releaseAt = n.expiresAt + grace;
+      const price = priceOf(n.name);
+      return `
+        <button class="kmkt-card kl-tile" type="button" data-kl-open-name="${esc(n.name)}" aria-label="${esc(n.display)}">
+          ${kachatNameTileHtml(esc(n.name), `
+            <span class="kl-tile-release">
+              <small>Released in</small>
+              ${countdownHtml(releaseAt, { reloadKey: `${n.name}:${releaseAt}` })}
+            </span>
+            ${price != null ? `<span class="kl-tile-expiry">${esc(amountText(price))}</span>` : ""}`)}
+        </button>`;
+    }).join(""))
+    : emptyCard(hubLoaded() ? "No names are in their grace period right now." : null);
+  return `
+    <div class="kmkt-page">
+      ${loadErrorHtml()}
+      ${kit.sectionHeader("Expired")}
+      ${names}
+    </div>`;
+}
+
 /** Claim on an expired name (an Available tile, or the name's own page): the claim sheet on the
  *  gap its reclaim reopens (registry.claimGap); the driver frees the old record first. */
 async function claimExpired(info, owner = "market") {
@@ -1191,10 +1284,11 @@ function activityPageHtml() {
     </div>`;
 }
 
-/** The selected tab's live page: Marketplace, Available or Activity. Your own names and the offers
- *  you made live in Profile > Your Domains (iOS 0765ce0). */
+/** The selected tab's live page: Marketplace, Available, Expired or Activity (iOS 73128b3). Your
+ *  own names and the offers you made live in Profile > Your Domains (iOS 0765ce0). */
 export function livePageHtml(page) {
   if (page === "available") return availablePageHtml();
+  if (page === "expired") return expiredPageHtml();
   if (page === "activity") return activityPageHtml();
   return marketPageHtml();
 }
@@ -1408,7 +1502,7 @@ function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", o
  * transaction. Shows the txid when it is sent.
  *
  * cfg: { owner, title, confirmTitle, warning?, footer?: () => string|null, rows?: () => [{title, value}],
- *        inputsHtml?: string, operation: () => op|null, operationKey: () => string,
+ *        inputsHtml?: string, operation: () => op|null, operationKey: () => string, back?: () => void,
  *        onInput?(event, sheet), onClick?(event, sheet), onOpen?(sheet), onDone?(txId), onClose?(txId|null) }
  */
 function openTxSheet(cfg) {
@@ -1421,9 +1515,21 @@ function openTxSheet(cfg) {
     payer: null,
   };
 
-  const navFor = () => (sheet.txId
-    ? navHtml(cfg.title, { trailing: { label: "Done", bold: true } })
-    : navHtml(cfg.title, { leading: { label: "Cancel" } }));
+  // a step of a flow (`cfg.back`, Renew after "How long?"; iOS 26bd5dc): Back, not Cancel, leads
+  // back until it's sent
+  const navFor = () => {
+    if (sheet.txId) return navHtml(cfg.title, { trailing: { label: "Done", bold: true } });
+    if (cfg.back) {
+      return `<div class="kl-nav" data-kl-nav>
+        <header class="kmkt-navbar">
+          <button class="kmkt-nav-button leading" type="button" data-kl-tx-back>Back</button>
+          <h2 class="kmkt-navbar-title">${esc(cfg.title)}</h2>
+          <span></span>
+        </header>
+      </div>`;
+    }
+    return navHtml(cfg.title, { leading: { label: "Cancel" } });
+  };
 
   const summaryHtml = () => {
     let rows = (cfg.rows?.() ?? []).map((r) => formRow(r.title, r.value)).join("");
@@ -1569,6 +1675,13 @@ function openTxSheet(cfg) {
       </div>`,
     onClick(event) {
       if (event.target.closest("[data-kl-tx-confirm]")) { confirm(); return; }
+      if (event.target.closest("[data-kl-tx-back]")) {
+        if (!sheet.sending && !sheet.txId) {
+          kit.closeLayer(sheet.layer);
+          try { cfg.back?.(); } catch { /* optional */ }
+        }
+        return;
+      }
       cfg.onClick?.(event, sheet);
     },
     onInput: (event) => cfg.onInput?.(event, sheet),
@@ -1731,12 +1844,29 @@ function openExtendSheet(info, owner) {
   });
 }
 
-/** `renew` (KachatRenewSheet): the next period, from the current expiry, for 1 or 2 periods - only
- *  once the renewal window is open (renewWindowMs before the expiry). Before that nothing is
- *  built: the sheet says when it opens. Each period costs the renewal price (registry v4, iOS
- *  c8f1086). */
-function openRenewSheet(info, owner) {
-  let years = 1;
+/** `renew` (KachatRenewSheet, iOS 26bd5dc): the next period, from the current expiry, for 1 or 2
+ *  periods - only once the renewal window is open (renewWindowMs before the expiry). Two steps:
+ *  "How long?" first (the periods as full-width choices - 10 min / 20 min on testnet's clock,
+ *  1 / 2 years on mainnet's - with what each costs), then the review with the fee and Renew; its
+ *  Back leads to "How long?" again. Each period costs the renewal price (registry v4, iOS c8f1086). */
+async function openRenewSheet(info, owner) {
+  const perYear = renewPriceOf(info.name) ?? 0n;
+  const choice = await chooseDialog({
+    kicker: "Renew",
+    title: "How long?",
+    message: "A renewal starts the next period at the current expiry, not from today.",
+    options: Array.from({ length: Math.max(1, maxYears()) }, (_, i) => ({
+      id: String(i + 1), title: yearsLabel(i + 1), subtitle: amountText(perYear * BigInt(i + 1)),
+    })),
+  });
+  const years = Number(choice);
+  if (!choice || !Number.isInteger(years) || years < 1) return;
+  openRenewReview(info, owner, years);
+}
+
+/** Renew, step 2: what the chosen period costs, and Renew. Before the renewal window opens nothing
+ *  is built: the sheet says when it opens. */
+function openRenewReview(info, owner, years) {
   const p = params();
   const perYear = renewPriceOf(info.name) ?? 0n;
   const periodMs = p?.periodMs ?? yearMs;
@@ -1746,7 +1876,7 @@ function openRenewSheet(info, owner) {
     title: "Renew",
     confirmTitle: "Renew",
     doneTitle: "Renewed",
-    inputsHtml: section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years", yearsOptions(), years, "Years")}</div>`),
+    back: () => { openRenewSheet(info, owner); },
     footer: () => (open()
       ? "A renewal starts the next period at the current expiry, not from today, so a name that expired a while ago gets less time. The price goes to the miners."
       : renewalOpensText(info, p)),
@@ -1757,10 +1887,6 @@ function openRenewSheet(info, owner) {
     ],
     operation: () => (open() ? Operation.renew(info, BigInt(years)) : null),
     operationKey: () => `renew-${years}-${open()}`,
-    onClick(event, sheet) {
-      const chosen = segmentedClick(event, sheet.layer.el);
-      if (chosen?.group === "years") { years = Number(chosen.id); sheet.update(); }
-    },
   });
 }
 
@@ -2159,6 +2285,14 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     const period = d.info.periodStart != null
       ? `<p class="kl-period">${LI.calendar}<span>${esc(`Paid from ${dayText(d.info.periodStart)} to ${dayText(d.info.expiresAt)}`)}</span></p>`
       : "";
+    // in grace: when it ends, and a live countdown to it - then anyone can claim it (iOS fde757f)
+    const graceEnds = s === Status.grace ? d.info.expiresAt + graceMs() : null;
+    const graceLine = graceEnds != null
+      ? `<p class="kl-grace-line kl-orange">${LI.hourglass}<span class="kl-grace-copy">
+          <span>${esc(`Grace period ends ${dayText(graceEnds)}`)}</span>
+          <span>Released in ${countdownHtml(graceEnds)}</span>
+        </span></p>`
+      : "";
     return `
       <section class="kmkt-card kmkt-name-card">
         <div class="kmkt-name-art"><span class="kl-name-art-text">${esc(d.info.display)}</span></div>
@@ -2173,6 +2307,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
           </div>
         </div>
         ${period}
+        ${graceLine}
         ${note}
       </section>`;
   };

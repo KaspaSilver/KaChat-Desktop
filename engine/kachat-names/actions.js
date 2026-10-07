@@ -63,7 +63,7 @@ import { makeOutpoint, makeUtxo, makeUtxoEntry, outpointKey } from "./transactio
 import { templateScript, paramsRegisterCost } from "./manifest.js";
 import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
-import { OfferInfo, Profile, Status } from "./registry-state.js";
+import { GapInfo, OfferInfo, Profile, Status } from "./registry-state.js";
 import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
 
 // MARK: - Registration records
@@ -89,7 +89,9 @@ export const Stage = Object.freeze({
  * `{ id, name, years: Number, owner: x-only hex, commitTxId: hex, commitScript: hex (P2SH),
  *    commitDaa: Number|null (the commit UTXO's DAA score once seen), registerTxId: hex|null,
  *    reclaimTxId: hex|null (the reclaim this registration sent to free a lapsed old record of the
- *    name first, iOS eea52b2), commitSentAt: Number|null (unix ms the current commit went out),
+ *    name first, iOS eea52b2), reclaimLo / reclaimHi: hex|null (the gap that reclaim reopens -
+ *    its output 0, the two gaps around the name merged - so the driver registers into it as soon
+ *    as a node has it, iOS beb9c45), commitSentAt: Number|null (unix ms the current commit went out),
  *    commitResends: Number|null (how many times it was sent again after a node dropped it, iOS
  *    b219bb0), cancelTxId: hex|null, stage: Stage, createdAt: Number (unix ms), updatedAt: Number,
  *    lastError: string|null (an error, or while it still runs what the driver is doing),
@@ -827,10 +829,14 @@ export class KachatNamesActions {
     this._loadPending(s.address);
     await this.registry.refresh();
     const found = await this.registry.lookup(name);
-    // Expired past grace: free to claim. The commit goes out now; the driver frees the old record
-    // (a reclaim) and then registers (iOS eea52b2).
-    if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) !== Status.lapsed) {
-      throw ActionError.notRegisterable(`${name}.kachat is already registered.`);
+    // Expired past grace: free to claim. The commit and the reclaim that frees the old record both
+    // go out now; the driver registers once the commit has aged (iOS eea52b2, beb9c45).
+    let lapsed = null;
+    if (found.kind === "registered") {
+      if (found.info.status(this.registry.graceMs, BigInt(nowMs())) !== Status.lapsed) {
+        throw ActionError.notRegisterable(`${name}.kachat is already registered.`);
+      }
+      lapsed = found.info;
     }
     let record = null;
     try {
@@ -844,7 +850,8 @@ export class KachatNamesActions {
         const now = nowMs();
         record = {
           id: newId(), name, years: Number(years), owner: hex(s.me), commitTxId: hex(plan.txid),
-          commitScript: hex(script), commitDaa: null, registerTxId: null, reclaimTxId: null, commitSentAt: null, commitResends: null,
+          commitScript: hex(script), commitDaa: null, registerTxId: null, reclaimTxId: null, reclaimLo: null, reclaimHi: null,
+          commitSentAt: null, commitResends: null,
           cancelTxId: null, stage: Stage.committing, createdAt: now, updatedAt: now, lastError: null, salt: hex(salt),
           maxPrice: cap.toString(),
         };
@@ -861,6 +868,13 @@ export class KachatNamesActions {
         this._startDriver();
       }
       throw error;
+    }
+    // The reclaim needs nothing from the wallet (its fee comes out of the freed deposit), so it
+    // runs while the commit ages instead of after. If it fails, the driver sends it (iOS beb9c45).
+    if (lapsed) {
+      try { await this._sendReclaim(lapsed, record); } catch (e) {
+        this.engine?.log?.(`[KachatNames] reclaim of ${name} not sent yet: ${errorMessage(e)}`);
+      }
     }
     this._startDriver();
     return record.commitTxId;
@@ -950,7 +964,9 @@ export class KachatNamesActions {
             if (token.cancelled) break;
             try { await this._advance(p); } catch (e) { this.engine?.log?.("[KachatNames] driver step failed:", errorMessage(e)); }
           }
-          await sleep(5_000);
+          // waiting for a registration's acceptance: check often, so the receipt shows within a
+          // couple of seconds of it (iOS d65fd1a)
+          await sleep(this._pending.some((x) => x.stage === Stage.registering) ? 2_000 : 5_000);
         }
       } finally {
         if (this._driver === token) this._driver = null;
@@ -1003,8 +1019,11 @@ export class KachatNamesActions {
       }
       case Stage.registering: {
         if (p.registerTxId && await this.registry.isAccepted(p.registerTxId)) {
-          await this.registry.refresh();
-          if (await this._ownsName(p.name)) this._finishRegistered(p);
+          // Accepted is registered: the gap only accepts a register that mints this owner's name.
+          // The receipt shows now; the registry catches up in the background instead of first (a
+          // chain walk while the indexer follows another registry; iOS d65fd1a).
+          this._finishRegistered(p);
+          Promise.resolve().then(() => this.registry.refresh()).catch(() => {});
           return;
         }
         // not accepted after two minutes and the commit is still there: register again
@@ -1118,33 +1137,39 @@ export class KachatNamesActions {
       await this.registry.refresh();
       const m = await this.registry.prepare();
       const found = await this.registry.lookup(p.name);
+      let gap = null;
       if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) === Status.lapsed) {
         // An expired name is free to claim: this registration frees the old record first (anyone
         // may; its bond goes back to the old owner and the freed deposit comes to you), then
-        // registers on a later tick once the registry shows the gap (iOS eea52b2). Only sending
-        // the reclaim touches the record, so `updatedAt` is when it went out (iOS 4f0bd33).
-        if (p.reclaimTxId) {
-          if (await this.registry.isAccepted(p.reclaimTxId)) {
-            await this.registry.refresh();
-          } else if (nowMs() - p.updatedAt > 120_000) {
-            this._set(p, (q) => { q.reclaimTxId = null; }); // never accepted: send it again
+        // registers into the gap that reopens (iOS eea52b2). Only sending the reclaim touches the
+        // record, so `updatedAt` is when it went out (iOS 4f0bd33).
+        if (!p.reclaimTxId) {
+          await this._sendReclaim(found.info, p);
+          return;
+        }
+        // The freed gap is the reclaim's output 0: register into it as soon as a node has it,
+        // without waiting for the registry (a chain walk, or the indexer) to notice (iOS beb9c45).
+        const freed = freedGap(p);
+        if (freed) {
+          try {
+            await this._liveGap(freed, m);
+            gap = freed;
+          } catch { /* not on a node yet */ }
+        }
+        if (!gap) {
+          if (nowMs() - p.updatedAt > 120_000) {
+            this._set(p, (q) => { q.reclaimTxId = null; q.reclaimLo = null; q.reclaimHi = null; }); // never accepted: send it again
           }
           return;
         }
-        const reclaimTxId = await this.perform(Operation.reclaim(found.info));
-        this._set(p, (q) => {
-          q.reclaimTxId = reclaimTxId;
-          q.lastError = `Freeing ${p.name}.kachat for you...`;
-        });
-        return;
-      }
-      if (found.kind === "registered") {
+      } else if (found.kind === "registered") {
         if (bytesEqual(found.info.owner, s.me)) this._finishRegistered(p);
         else this._set(p, (q) => { q.stage = Stage.taken; q.lastError = null; });
         return;
+      } else {
+        if (!found.gap) throw new Failure(`no gap for ${p.name} yet`);
+        gap = found.gap;
       }
-      if (!found.gap) throw new Failure(`no gap for ${p.name} yet`);
-      const gap = found.gap;
       const cap = recordPrice(p.maxPrice);
       const txId = await enqueueSend(s.address, async () => {
         const { builder: b, env, wallet } = await this._context(s);
@@ -1170,6 +1195,19 @@ export class KachatNamesActions {
         if (fatal) q.stage = Stage.failed;
       });
     }
+  }
+
+  /** Frees a lapsed old record of `p`'s name (a reclaim) and notes the gap it reopens - the two
+   *  gaps around the name, merged, which is the reclaim's output 0 (iOS beb9c45). */
+  async _sendReclaim(n, p) {
+    const gaps = await this.registry.exitGaps(n);
+    const txId = await this.perform(Operation.reclaim(n));
+    this._set(p, (q) => {
+      q.reclaimTxId = txId;
+      q.reclaimLo = hex(gaps.below.lo);
+      q.reclaimHi = hex(gaps.above.hi);
+      q.lastError = `Freeing ${p.name}.kachat for you...`;
+    });
   }
 
   _finishRegistered(p) {
@@ -1255,6 +1293,17 @@ function newId() {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
   return hex(newSalt()).slice(0, 32);
+}
+
+/** The gap a registration's reclaim reopens (its output 0), as a GapInfo; null until the reclaim
+ *  went out with its bounds noted (iOS beb9c45). */
+export function freedGap(p) {
+  if (!p?.reclaimTxId || !p.reclaimLo || !p.reclaimHi) return null;
+  try {
+    return new GapInfo({ lo: unhex32(p.reclaimLo), hi: unhex32(p.reclaimHi), outpoint: makeOutpoint(unhex32(p.reclaimTxId), 0) });
+  } catch {
+    return null;
+  }
 }
 
 /** localStorage when the page has it, else memory (Node tests). */

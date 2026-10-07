@@ -993,7 +993,7 @@ export class KaspaEngine {
     try { localId = transaction?.id ? String(transaction.id) : null; } catch { localId = null; }
     return submitConfirmingAcceptance({
       withRpc: this.withRpc.bind(this),
-      submit: (rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }),
+      submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction, allowOrphan }),
       txid: localId,
       label: "Transaction submit",
       log: this.log,

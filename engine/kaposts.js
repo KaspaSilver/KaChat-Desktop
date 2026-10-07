@@ -649,7 +649,7 @@ export async function submitScheduledLocally({ engine, serialized, safeJson = nu
   try { localId = String(transaction.id || serialized?.id || "") || null; } catch { localId = serialized?.id || null; }
   return submitConfirmingAcceptance({
     withRpc: engine.withRpc.bind(engine),
-    submit: (rpc) => rpc.submitTransaction({ transaction, allowOrphan: false }),
+    submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction, allowOrphan }),
     txid: localId,
     label: "Scheduled post submit",
     log: typeof engine.log === "function" ? engine.log : () => {},

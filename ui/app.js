@@ -3138,6 +3138,37 @@ function isMessageRequest(conversationEntry) {
   if (!Number.isFinite(first)) return Boolean(contact.inboxDiscovered);
   return first >= s.startedAt;
 }
+/** Chats that existed before Message Requests arrived stay ordinary chats for good (iOS
+ *  60c9fd0). `isMessageRequest` judges from the messages this device still holds, so an old
+ *  chat whose early messages were removed (message retention, a cleared history) would turn
+ *  into a request - leaving the chat list and its notifications. Decided once, while the first
+ *  messages are still here, and recorded as accepted. Runs after the catch-up sweep and before
+ *  a retention pass deletes anything. Returns how many were recorded. */
+function grandfatherPreexistingChats() {
+  if (!engine.address) return 0;
+  const s = chatRequestState();
+  const self = String(engine.address).toLowerCase();
+  const preexisting = [];
+  for (const entry of state.conversations || []) {
+    const contact = contactForConversation(entry);
+    const key = String(contact?.address || "").toLowerCase();
+    if (!key || key === self || preexisting.includes(key)) continue;
+    if (s.accepted.has(key) || s.privateChats.has(key) || s.blocked.has(key)) continue;
+    // Only a chat someone else started can ever be a request.
+    if (!contact.inboxDiscovered && contact.relationshipState !== "incoming-request") continue;
+    let first = Infinity;
+    for (const m of entry.messages || []) {
+      const at = Number(m?.createdAt || 0);
+      if (at > 0 && at < first) first = at;
+    }
+    if (Number.isFinite(first) && first < s.startedAt) preexisting.push(key);
+  }
+  if (!preexisting.length) return 0;
+  for (const key of preexisting) s.accepted.add(key);
+  saveChatRequestState(s);
+  appendEngineLog(`${preexisting.length} chat${preexisting.length === 1 ? "" : "s"} from before Message Requests kept as ordinary chats.`);
+  return preexisting.length;
+}
 function messageRequestConversations() {
   return sortedConversations().filter((entry) => isMessageRequest(entry))
     .sort((a, b) => Number(lastMessageFor(b)?.createdAt || 0) - Number(lastMessageFor(a)?.createdAt || 0));
@@ -5440,6 +5471,9 @@ async function refreshAllConversations({ quiet = true } = {}) {
     }));
     try { added += await syncGroupsNow({ catchUp }); }
     catch (error) { appendEngineLog(`Group sync failed: ${error.message}`); }
+    // After the catch-up sweep: old chats whose first messages could later be removed stay
+    // ordinary chats (iOS 60c9fd0).
+    if (catchUp) try { grandfatherPreexistingChats(); } catch { /* retried after the next catch-up */ }
     // Persist and re-render ONLY when the sweep actually changed something. state holds
     // every inline base64 photo/voice message, so the unconditional persist here was two
     // full multi-MB JSON.stringify passes + a string compare on the main thread every 5
@@ -10064,7 +10098,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 110;
+const APP_BUILD = 111;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11899,6 +11933,8 @@ function applyMessageRetention() {
   if (!engine.address) return 0;
   const cutoff = messageRetentionCutoffMs();
   if (!cutoff) return 0;
+  // Before old messages go: a chat from before Message Requests must not become one (iOS 60c9fd0).
+  try { grandfatherPreexistingChats(); } catch { /* the next pass tries again */ }
   let removed = 0;
   for (const entry of state.conversations || []) {
     const messages = entry.messages || [];
@@ -15691,11 +15727,16 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
   if (!contact) {
     const createdAt = Date.now();
     const displayName = String(name || "").trim();
+    // A regular contact of yours (you started the chat, iOS aee16f0): never an inbox-found
+    // stranger, and the name shown is NOT stored as custom - the caller's label is often just the
+    // short address, which would otherwise pin it over their .kachat name for good. A deletion
+    // tombstone from an earlier chat is lifted, as every other "start a chat" path does.
     contact = {
-      id: nowId(), name: displayName, nameIsCustom: Boolean(displayName), address: clean,
+      id: nowId(), name: displayName || shortAddress(clean), nameIsCustom: false, address: clean,
       avatar: initialsFor(displayName || clean), createdAt, updatedAt: createdAt,
       relationshipState: "legacy-manual", handshakeTxid: "",
     };
+    clearDeletedContactAddress(clean);
     state.contacts.push(contact);
   }
   let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
@@ -15706,6 +15747,7 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
   }
   persistState();
   renderChats();
+  // Chats wherever it lives - its dock tab or Kaspa Hub (setActiveAppTab routes a Hub tab there).
   setActiveAppTab("chats");
   openConversation(conversationEntry.id);
   // Pay in Kaspa from a group or public chat sender sheet, a KaPosts poster: the Send KAS sheet.
@@ -22144,30 +22186,32 @@ document.querySelector("[data-create-length-back]")?.addEventListener("click", (
   showCreateStep("name");
   queueMicrotask(() => createNameInput?.focus());
 });
-// "What is this?" under Generate Account (iOS dd0aab1 SeedPhraseExplainerSheet): what a seed phrase
-// is, in a half sheet over the length step. Done, Escape or a click outside closes it.
-const seedExplainerModal = document.querySelector("[data-seed-explainer-modal]");
+// "What is this?" under Generate Account (iOS 712bb4d SeedPhraseExplainerPage): what a seed phrase
+// is, on its own page in the Create Account flow - pushed like "What is a passphrase?", not a half
+// sheet over the length step. Back (or Escape) returns to the length step, choice kept.
+const seedExplainerStep = document.querySelector('[data-create-step="seed-explainer"]');
 const seedExplainerOpenBtn = document.querySelector("[data-seed-explainer-open]");
 function onSeedExplainerKey(event) {
   if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSeedExplainer(); }
 }
 function openSeedExplainer() {
-  if (!seedExplainerModal) return;
-  seedExplainerModal.hidden = false;
+  if (!seedExplainerStep) return;
+  showCreateStep("seed-explainer");
   document.addEventListener("keydown", onSeedExplainerKey, true);
-  queueMicrotask(() => seedExplainerModal.querySelector("[data-seed-explainer-done]")?.focus());
+  queueMicrotask(() => seedExplainerStep.querySelector("[data-seed-explainer-back]")?.focus());
 }
-function closeSeedExplainer() {
-  if (!seedExplainerModal || seedExplainerModal.hidden) return;
-  seedExplainerModal.hidden = true;
+/** Leaves the page (back to the length step) when it is showing; `refocus` false when the whole
+ *  modal is closing. */
+function closeSeedExplainer({ refocus = true } = {}) {
   document.removeEventListener("keydown", onSeedExplainerKey, true);
-  seedExplainerOpenBtn?.focus();
+  if (!seedExplainerStep || seedExplainerStep.hidden) return;
+  showCreateStep("length");
+  if (refocus) seedExplainerOpenBtn?.focus();
 }
 seedExplainerOpenBtn?.addEventListener("click", openSeedExplainer);
-seedExplainerModal?.querySelector("[data-seed-explainer-done]")?.addEventListener("click", closeSeedExplainer);
-seedExplainerModal?.addEventListener("mousedown", (event) => { if (event.target === seedExplainerModal) closeSeedExplainer(); });
+seedExplainerStep?.querySelector("[data-seed-explainer-back]")?.addEventListener("click", () => closeSeedExplainer());
 function closeCreateAccountModal() {
-  closeSeedExplainer();
+  closeSeedExplainer({ refocus: false });
   if (createAccountModal) createAccountModal.hidden = true;
   pendingNewAccount = null;
   if (!engine.address || localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") showLoggedOutScreen();

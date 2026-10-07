@@ -1698,11 +1698,26 @@
           <button class="secondary-button" type="button" data-create-length-back>Back</button>
           <button class="primary-button" type="button" data-generate-account disabled>Generate Account</button>
         </div>
-        <!-- iOS dd0aab1: what a seed phrase is, in a half sheet. -->
+        <!-- iOS dd0aab1 / 712bb4d: what a seed phrase is, on its own page in this flow. -->
         <button class="linklike-button full seed-explainer-link" type="button" data-seed-explainer-open>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.85.85c0 1.7-2.45 2.2-2.45 3.85"/><path d="M12 17v.5"/></svg>
           What is this?
         </button>
+      </div>
+
+      <!-- "What is this?" on the seed length step (iOS 712bb4d SeedPhraseExplainerPage): a full page
+           in the same flow, like "What is a passphrase?" - not a half sheet over it. Back returns. -->
+      <div data-create-step="seed-explainer" hidden>
+        <h3 class="create-step-title" id="seed-explainer-title">What is a seed phrase?</h3>
+        <div class="passphrase-explainer seed-explainer-page" role="region" aria-labelledby="seed-explainer-title">
+          <section><h4>The short version</h4><p>A seed phrase is a list of 12 or 24 ordinary words that works as the master key to your account. Your wallet, your chatting address and your messages all come from it.</p></section>
+          <section><h4>Anyone with it can take everything</h4><p>Anyone who has these words can take everything in your account. If you lose them and lose this device, nobody can get your account back, not even KaChat.</p></section>
+          <section><h4>How to keep it safe</h4><p>Write the words on paper, in order, and keep them somewhere safe and private. Never type them into a website, send them in a chat, or keep them in a screenshot or cloud notes.</p></section>
+          <section><h4>12 or 24 words?</h4><p>12 words are already very secure. 24 words add even more protection.</p></section>
+        </div>
+        <div class="modal-actions passphrase-actions">
+          <button class="secondary-button full" type="button" data-seed-explainer-back>Back</button>
+        </div>
       </div>
 
       <div data-create-step="seed" hidden>
@@ -1778,22 +1793,6 @@
       </div>
       </div>
     </div>
-  </div>
-
-  <!-- "What is this?" on Create Account's seed length step (iOS SeedPhraseExplainerSheet, dd0aab1). -->
-  <div class="modal-backdrop seed-explainer-backdrop" data-seed-explainer-modal hidden>
-    <section class="contact-modal seed-explainer-sheet" role="dialog" aria-modal="true" aria-labelledby="seed-explainer-title">
-      <div class="seed-explainer-head">
-        <h2 id="seed-explainer-title">What is a seed phrase?</h2>
-        <button class="linklike-button strong" type="button" data-seed-explainer-done>Done</button>
-      </div>
-      <div class="seed-explainer-body">
-        <p>A seed phrase is a list of 12 or 24 ordinary words that works as the master key to your account. Your wallet, your chatting address and your messages all come from it.</p>
-        <p>Anyone who has these words can take everything in your account. If you lose them and lose this device, nobody can get your account back, not even KaChat.</p>
-        <p>Write the words on paper, in order, and keep them somewhere safe and private. Never type them into a website, send them in a chat, or keep them in a screenshot or cloud notes.</p>
-        <p>12 words are already very secure. 24 words add even more protection.</p>
-      </div>
-    </section>
   </div>
 
   <!-- Post-onboarding catch-up. Finish on the last guide step hands over to this rather than

@@ -13122,14 +13122,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   font-size: 15px; font-weight: 600; line-height: 20px; color: var(--kaspa);
 }
 .create-account-flow .seed-explainer-link svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-/* The sheet itself: above the Create Account modal, signed in or out (that one is 2000 / 2100) */
-.modal-backdrop.seed-explainer-backdrop { z-index: 2200; }
-.seed-explainer-sheet { display: flex; flex-direction: column; gap: 4px; padding: 0 0 8px; max-height: min(70vh, 560px); overflow: hidden; }
-.seed-explainer-head {
-  position: relative; display: flex; align-items: center; justify-content: center;
-  min-height: 52px; padding: 0 72px; flex: 0 0 auto;
-}
-.seed-explainer-head h2 { margin: 0; font-size: 17px; font-weight: 600; line-height: 22px; text-align: center; }
-.seed-explainer-head [data-seed-explainer-done] { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); font-size: 17px; color: var(--kaspa); }
-.seed-explainer-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 16px 16px; overflow-y: auto; }
-.seed-explainer-body p { margin: 0; font-size: 15px; line-height: 20px; color: var(--muted); }
+/* "What is a seed phrase?" is a page in the Create Account flow now (iOS 712bb4d): the
+   passphrase explainer's headline-and-text sections, a little taller since it is the whole step. */
+.create-account-flow .seed-explainer-page { max-height: min(60vh, 560px); margin: 4px 0 8px; }

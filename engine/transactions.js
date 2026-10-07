@@ -92,17 +92,44 @@ export async function isTransactionKnown({ rpc = null, withRpc = null, txid } = 
   }
   return false;
 }
+// "Orphan where orphan is disallowed" (iOS 4eb492f, NodePoolService.submitTransaction): the
+// inputs came from a node that already has their parent transaction (the UTXO query), but the
+// node this submit reached hasn't caught up yet - a reaction or message sent right after the
+// previous one, or a chained send's next transaction. The parent is given a moment to propagate
+// and the SAME signed transaction is submitted once more; then the node is asked to hold it as an
+// orphan until the parent arrives. Nothing is rebuilt here, so nothing can be paid twice.
+export const ORPHAN_WAIT_MS = 1500;
+/** Whether a submit error is the node's orphan rejection. */
+export function isOrphanRejection(error) {
+  return String(error?.message || error || "").toLowerCase().includes("orphan");
+}
 /**
- * Submits through `submit(activeRpc)` (via `withRpc` when given) and returns the transaction id.
- * On an error, a transaction the network already has (`txid`, computed locally) counts as sent;
- * anything else is rethrown. Every submit in this file goes through here.
+ * Submits through `submit(activeRpc, { allowOrphan })` (via `withRpc` when given) and returns the
+ * transaction id. `submit` should pass `allowOrphan` on to `submitTransaction` (default false).
+ * An orphan rejection waits `orphanWaitMs`, resubmits once, then submits allowing an orphan (see
+ * above). On any other error, a transaction the network already has (`txid`, computed locally)
+ * counts as sent; anything else is rethrown. Every submit in this file goes through here.
  */
-export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, label = "Transaction broadcast", log = () => {} }) {
-  try {
-    const response = withRpc ? await withRpc(submit, { retries: 1, label }) : await submit(rpc);
+export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS }) {
+  const submitOnce = async (allowOrphan) => {
+    const run = (activeRpc) => submit(activeRpc, { allowOrphan });
+    const response = withRpc ? await withRpc(run, { retries: 1, label }) : await run(rpc);
     const returned = typeof response === "string" ? response : response?.transactionId;
     return String(returned || txid || "");
+  };
+  try {
+    return await submitOnce(false);
   } catch (error) {
+    if (isOrphanRejection(error)) {
+      log(`${label}: the node called ${txid || "the transaction"} an orphan (its parent hasn't reached it yet); waiting ${orphanWaitMs}ms and submitting the same transaction again.`);
+      await sleep(orphanWaitMs);
+      try { return await submitOnce(false); } catch { /* still not there: let the node hold it */ }
+      try {
+        const sent = await submitOnce(true);
+        log(`${label}: ${String(sent).slice(0, 12)} submitted as an orphan: its parent hadn't reached that node yet.`);
+        return sent;
+      } catch { /* fall through to the acceptance check with the original error */ }
+    }
     if (txid && await isTransactionKnown({ rpc, withRpc, txid })) {
       log(`${label}: the submit reported "${error?.message || error}" but the network has ${txid}; treated as sent.`);
       return String(txid);
@@ -208,7 +235,7 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
     if (amount <= 0n) throw new Error("Balance too low to compound after network fees.");
     const tx = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount }], 0n);
     const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
-    const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+    const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
     let txid;
     try {
       txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Compound broadcast", log });
@@ -270,7 +297,7 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
 
   const tx = kaspa.createTransaction(entries, [{ address: destinationAddress, amount }], 0n);
   const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
-  const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+  const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
   const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Max send broadcast", log });
   log("Max send txid:", txid);
   return { txids: [txid], amountSompi: amount };
@@ -358,7 +385,7 @@ async function sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAdd
     const finalFee = kaspa.calculateTransactionFee(NETWORK_ID, tx, 1);
     if (finalFee == null || BigInt(finalFee) > BigInt(draftFee)) continue;
     const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
-    const submit = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+    const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
     const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Self-stash broadcast", log });
     log("Self-stash txid:", txid, `(${chosen.length} input${chosen.length === 1 ? "" : "s"}, one output, fee ${draftFee} sompi)`);
     return { txids: [txid], amountSompi: amount, feeSompi: BigInt(draftFee) };
@@ -445,7 +472,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
         log(`Balance holds the amount but not the fee; sending ${reduced} sompi as one output (total minus fee).`);
         const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
         const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
-        const submitReduced = (activeRpc) => activeRpc.submitTransaction({ transaction: signed, allowOrphan: false });
+        const submitReduced = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
         const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, label: "Transaction broadcast", log });
         log("Broadcast txid:", txid);
         return { result: { summary: { reduced: true, amountSompi: reduced, feeSompi: totalFee } }, txids: [txid] };
@@ -476,7 +503,11 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
       log("Signing failed:", describeKey(privateKey), String(error));
       throw error;
     }
-    const submitSignedTransaction = (activeRpc) => pending.submit(activeRpc);
+    // pending.submit() never allows an orphan; the orphan-allowed resubmit sends the same signed
+    // transaction through submitTransaction itself.
+    const submitSignedTransaction = (activeRpc, { allowOrphan = false } = {}) => (allowOrphan
+      ? activeRpc.submitTransaction({ transaction: pending.transaction, allowOrphan: true })
+      : pending.submit(activeRpc));
     let localId = null;
     try { localId = pending.id ? String(pending.id) : null; } catch { localId = null; }
     let txid;

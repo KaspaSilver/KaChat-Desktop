@@ -40,18 +40,20 @@ let deps = null;
 let marketEl = null;
 
 // Market navigation. view: "home" | "listing" | "name" (a live name, testnet). page: "market" |
-// "available" | "activity". detail: the live name detail while view is "name".
+// "available" | "expired" | "activity". detail: the live name detail while view is "name".
 const state = { view: "home", page: "market", search: "", homeScroll: 0, detail: null };
 
 /** A listing as a real one will hand it in; no listing exists yet, so its seller is unknown and
  *  Message stays disabled. With a seller, Message opens a 1:1 chat through deps.openChat. */
 const placeholderListing = { sellerAddress: null };
 
-// Names for sale, expired names anyone may claim, and everything that happens in the registry.
+// Names for sale, expired names anyone may claim, names in their grace period (counting down to
+// release), and everything that happens in the registry - in that order (iOS cb3c27d, 73128b3).
 // Your own names (and the offers you made) live in Profile > Your Domains (iOS 0765ce0, eea52b2).
 const PAGES = [
   { id: "market", title: "Marketplace" },
   { id: "available", title: "Available" },
+  { id: "expired", title: "Expired" },
   { id: "activity", title: "Activity" },
 ];
 
@@ -297,6 +299,18 @@ function availablePageHtml() {
     </div>`;
 }
 
+/** Names in their grace period, redacted (iOS expiredPage, cb3c27d): two tile shapes with a
+ *  "00:00" countdown footer. */
+function expiredPageHtml() {
+  const tiles = Array.from({ length: 2 }, () => `<div class="kmkt-card kl-tile" aria-hidden="true">${kachatNameTileHtml(bar(78, 15), `<span class="kmkt-muted">00:00</span>`)}</div>`).join("");
+  return `
+    <div class="kmkt-page">
+      ${sectionHeader("Expired")}
+      ${kachatNameGridHtml(tiles)}
+      <p class="kmkt-footnote">Names in their grace period appear here once .kachat names launch.</p>
+    </div>`;
+}
+
 function activityPageHtml() {
   const icons = [ICON.tag, ICON.cart, ICON.at, ICON.swap];
   const rows = icons.map((icon) => `
@@ -317,6 +331,7 @@ function pageHtml() {
   // Live, or not launched here (mainnet): the same pages - empty on mainnet (iOS 7227d69).
   if (liveHubIsLive() || !kachatNamesLaunched()) return livePageHtml(state.page);
   if (state.page === "available") return availablePageHtml();
+  if (state.page === "expired") return expiredPageHtml();
   if (state.page === "activity") return activityPageHtml();
   return marketPageHtml();
 }

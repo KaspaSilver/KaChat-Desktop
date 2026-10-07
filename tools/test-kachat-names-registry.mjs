@@ -740,6 +740,7 @@ async function runRegistryChain(v, r) {
   r.eq((await reg.namesOf(alpha.owner, true)).map((n) => n.name), ["alpha-tn"], "registry (chain): namesOf(hex, includeInactive)");
   r.eq((await reg.listings()).length, 0, "registry (chain): alpha-tn was sold, so not listed");
   r.eq((await reg.lapsed()).length, 0, "registry (chain): nothing lapsed");
+  r.eq((await reg.inGrace()).length, 0, "registry (chain): inGrace: nothing in grace while active (iOS cb3c27d)");
   const hist = await reg.history("alpha-tn");
   // the walker sees transitions of tracked UTXOs only: offers made by others never spend one
   r.eq(hist.map((e) => e.op), ["sale", "list", "transfer", "extend", "register"], "registry (chain): history newest first");
@@ -766,8 +767,11 @@ async function runRegistryChain(v, r) {
   // claimLookup: in grace still the owner's
   r.eq((await reg.claimLookup("alpha-tn")).kind, "registered", "registry (chain): claimLookup of a name in grace is registered");
   r.eq((await reg.heldNames(ownerKey)).map((n) => n.name), ["alpha-tn"], "registry (chain): heldNames keeps a name in grace");
+  r.eq((await reg.inGrace()).map((n) => n.name), ["alpha-tn"], "registry (chain): inGrace lists a name in grace (the Expired tab, iOS cb3c27d)");
+  r.eq((await reg.lapsed()).length, 0, "registry (chain): a name in grace is not Available yet");
   clock = Number(alpha.expiresAt + m.params.graceMs) + 1_000;
   r.eq((await reg.lapsed()).map((n) => n.name), ["alpha-tn"], "registry (chain): lapsed after grace");
+  r.eq((await reg.inGrace()).length, 0, "registry (chain): inGrace drops a name once its grace ends (it moves to Available)");
   // past grace a name is Available (iOS eea52b2): claimLookup shows it free, in the gap its reclaim reopens
   const claim = await reg.claimLookup("Alpha-TN.kachat");
   r.eq(claim.kind, "free", "registry (chain): claimLookup of a lapsed name is free");
@@ -939,6 +943,7 @@ async function runRegistryIndexer(v, r) {
     expiresAt: nowMs + 1_000_000, outpoint: { txId: "cd".repeat(32), index: 2 }, registeredAt: 1_790_000_000_000, ...extra,
   });
   const seen = [];
+  let graceServed = true;
   const fetch = async (url) => {
     seen.push(url);
     const u = new URL(url);
@@ -949,6 +954,11 @@ async function runRegistryIndexer(v, r) {
     }
     if (p === "/names/alice") return response(200, nameObj("alice"));
     if (p === "/names/old") return response(200, nameObj("old", { status: "grace", expiresAt: nowMs - 1 }));
+    if (p === "/names/grace" && graceServed) {
+      // iOS cb3c27d: names in grace; an active or a lapsed one the indexer kept is filtered out
+      return response(200, { names: [nameObj("later", { status: "grace", expiresAt: nowMs - 1 }), nameObj("alice"),
+        nameObj("gone", { status: "expired", expiresAt: nowMs - Number(m.params.graceMs) - 5 }), nameObj("old", { status: "grace", expiresAt: nowMs - 1_000 })] });
+    }
     if (p === "/names/bob") return response(200, { name: "bob", key: "00", registered: false, gap: { lo: "00".repeat(32), hi: "ff".repeat(32), outpoint: { txId: "ee".repeat(32), index: 0 } } });
     if (p === `/names/by-owner/${owner}`) return response(200, { names: [nameObj("zed", { registeredAt: 5 }), nameObj("alice")] });
     if (p === "/market/listings") return response(200, { listings: [nameObj("alice", { price: "700" })], next: null });
@@ -981,6 +991,11 @@ async function runRegistryIndexer(v, r) {
   r.eq(reg.renewPrices, m.params.renewPrices, "registry (indexer): renewPrices from the manifest");
   r.check(!seen.some((u) => u.includes("/names/prices")), "registry (indexer): GET /names/prices is never called (registry v4)");
   r.eq((await reg.claimLookup("alice")).kind, "registered", "registry (indexer): claimLookup of an active name");
+  r.eq((await reg.inGrace()).map((n) => n.name), ["old", "later"], "registry (indexer): inGrace reads /names/grace, only names in grace, soonest release first (iOS cb3c27d)");
+  r.check(seen.some((u) => new URL(u).pathname === "/names/grace"), "registry (indexer): inGrace URL");
+  graceServed = false;
+  r.eq((await reg.inGrace()).length, 0, "registry (indexer): an indexer without /names/grace falls back to the device's walk (none here), no error");
+  graceServed = true;
   const id = await reg.identity(owner);
   r.eq({ label: id.label, bio: id.profile?.bio }, { label: "alice", bio: "https://github.com/yo" }, "registry (indexer): identity sanitized");
   let msg = "";
@@ -1426,6 +1441,10 @@ async function compareWithIndexer(m, st) {
       if (missing.length || extra.length) diffs.push(`activity: ${missing.length} walked event(s) not on the indexer, ${extra.length} indexer event(s) not walked`);
       console.log(`  indexer activity: ${activity.length} event(s), walk ${st.events.length}`);
     }
+    // the Expired tab's source (iOS cb3c27d): informational, the app falls back to its walk
+    let grace = null;
+    try { grace = R.IndexerAPI.names(await get("/names/grace"), R.keyOf); } catch { grace = null; }
+    console.log(grace ? `  indexer /names/grace: ${grace.length} name(s)` : "  indexer /names/grace: not served (the app falls back to its walk)");
   } catch (e) {
     console.log(`  indexer comparison stopped: ${e.message} (not counted)`);
     return;

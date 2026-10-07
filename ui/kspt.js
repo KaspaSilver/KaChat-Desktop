@@ -725,7 +725,7 @@ export async function broadcastSigned({ engine, unsigned, decoded }) {
   try { localId = tx.id ? String(tx.id) : null; } catch { localId = null; }
   const txid = await submitConfirmingAcceptance({
     withRpc: engine.withRpc.bind(engine),
-    submit: (rpc) => rpc.submitTransaction({ transaction: tx, allowOrphan: false }),
+    submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction: tx, allowOrphan }),
     txid: localId,
     label: "Cold storage broadcast",
     log: typeof engine.log === "function" ? engine.log : () => {},

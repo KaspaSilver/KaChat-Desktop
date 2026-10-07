@@ -617,45 +617,75 @@ async function main() {
       expiresAt: BigInt(Date.now()) - m.params.graceMs - 60_000n, periodStart: BigInt(Date.now()) - m.params.graceMs - 60_000n - m.params.periodMs,
       outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x58), 2),
     });
-    let accepted = false;
+    // the reclaim's output 0 is the freed gap: the two gaps around the name, merged (iOS beb9c45)
+    const reclaimTx = "5c".repeat(32);
+    const nameKey = C.key(c0.name);
+    const exitGaps = async () => ({
+      below: new RS.GapInfo({ lo: g0.lo, hi: nameKey, outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x61), 0) }),
+      above: new RS.GapInfo({ lo: nameKey, hi: g0.hi, outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x62), 0) }),
+    });
+    const freedUtxo = { ...g0.utxo, outpoint: T.makeOutpoint(C.unhex32(reclaimTx), 0) };
     let refreshes = 0;
-    const claim = regAt(async (name) => ({ kind: "registered", name, info: lapsedInfo }));
-    claim.registry = { ...claim.registry, isAccepted: async () => accepted, refresh: async () => { refreshes += 1; } };
+    const lapsedLookup = async (name) => ({ kind: "registered", name, info: lapsedInfo });
+    const claimAt = (live) => {
+      const act = actionsAt({ ...regStep, records: {} }, undefined, {
+        extra: live ? [nodeUtxo(freedUtxo)] : [],
+        registry: { lookup: lapsedLookup, exitGaps, refresh: async () => { refreshes += 1; } },
+      });
+      act._startDriver = () => {};
+      act._loadPending(s(v.deployer.address));
+      return act;
+    };
+    const claim = claimAt(false);
     const performed = [];
-    claim.perform = async (op) => { performed.push(op); return "5c".repeat(32); };
+    claim.perform = async (op) => { performed.push(op); return reclaimTx; };
     let claimSubmits = 0;
     claim.service.signAndSubmit = async () => { claimSubmits += 1; return "ee".repeat(32); };
     claim._upsert(recordFor("claim", price));
     await claim._register(claim._find("claim"), c0.utxo);
     let cr = claim.pending.find((x) => x.id === "claim");
     r.eq(performed.map((o) => `${o.kind}:${o.name?.name}`).join(","), `reclaim:${c0.name}`, "claim: the driver sends the reclaim of the expired record itself");
-    r.eq(cr.reclaimTxId, "5c".repeat(32), "claim: the record keeps the reclaim txid");
+    r.eq(cr.reclaimTxId, reclaimTx, "claim: the record keeps the reclaim txid");
+    r.eq(`${cr.reclaimLo}-${cr.reclaimHi}`, `${C.hex(g0.lo)}-${C.hex(g0.hi)}`, "claim: the record keeps the gap the reclaim reopens (iOS beb9c45)");
     r.eq(cr.lastError, `Freeing ${c0.name}.kachat for you...`, "claim: the card says the name is being freed");
-    r.eq(cr.stage, A.Stage.waiting, "claim: still waiting (registers once the gap shows)");
+    r.eq(cr.stage, A.Stage.waiting, "claim: still waiting (registers once the freed gap is on a node)");
     r.eq(claimSubmits, 0, "claim: nothing registered before the old record is gone");
-    // not accepted yet, sent just now: wait (the retry measures from when it was sent - iOS 4f0bd33)
+    r.eq(A.freedGap(cr)?.outpoint.index, 0, "freedGap: the reclaim's output 0");
+    r.check(A.freedGap(cr) && C.bytesEqual(A.freedGap(cr).outpoint.txid, C.unhex32(reclaimTx)) && A.freedGap(cr).contains(nameKey), "freedGap: at the reclaim txid, holding the name");
+    r.eq(A.freedGap({ ...cr, reclaimLo: null }), null, "freedGap: null without the noted bounds (a record from before iOS beb9c45)");
+    // the freed gap not on a node yet, sent just now: wait (the retry measures from when it was sent - iOS 4f0bd33)
     await claim._register(claim._find("claim"), c0.utxo);
     cr = claim.pending.find((x) => x.id === "claim");
     r.eq(performed.length, 1, "claim: no second reclaim while the first one is young");
-    r.eq(cr.reclaimTxId, "5c".repeat(32), "claim: the reclaim txid kept while it is young");
+    r.eq(cr.reclaimTxId, reclaimTx, "claim: the reclaim txid kept while it is young");
     // never accepted after two minutes: dropped, so the next tick sends it again
     claim._pending = claim._pending.map((x) => (x.id === "claim" ? { ...x, updatedAt: Date.now() - 121_000 } : x));
     await claim._register(claim._find("claim"), c0.utxo);
     cr = claim.pending.find((x) => x.id === "claim");
-    r.eq(cr.reclaimTxId, null, "claim: a reclaim not accepted after two minutes is dropped");
+    r.check(cr.reclaimTxId === null && cr.reclaimLo === null && cr.reclaimHi === null, "claim: a reclaim not accepted after two minutes is dropped");
     await claim._register(claim._find("claim"), c0.utxo);
     r.eq(performed.length, 2, "claim: and sent again on the next tick");
-    // accepted: the registry is refreshed (the gap shows on a later tick)
-    accepted = true;
-    const before = refreshes;
-    await claim._register(claim._find("claim"), c0.utxo);
-    r.check(refreshes > before && performed.length === 2, "claim: an accepted reclaim refreshes the registry, nothing sent again");
-    // the gap shows: it registers
-    claim.registry = { ...claim.registry, lookup: freeLookup };
-    claim.service.signAndSubmit = async (plan) => { claimSubmits += 1; return T.txIdHex(plan.unsignedTx); };
-    await claim._register(claim._find("claim"), c0.utxo);
-    cr = claim.pending.find((x) => x.id === "claim");
-    r.check(cr.stage === A.Stage.registering && claimSubmits === 1 && cr.lastError == null, `claim: once freed the name registers (${cr.stage}, ${cr.lastError})`);
+    // a node has the freed gap: it registers into it at once, while the registry still shows the
+    // old record (no wait for a chain walk or the indexer; iOS beb9c45)
+    const claimLive = claimAt(true);
+    claimLive.perform = async (op) => { performed.push(op); return reclaimTx; };
+    const liveSent = [];
+    claimLive.service.signAndSubmit = async (plan) => { liveSent.push(plan); return T.txIdHex(plan.unsignedTx); };
+    claimLive._upsert({ ...claim._find("claim") });
+    await claimLive._register(claimLive._find("claim"), c0.utxo);
+    cr = claimLive.pending.find((x) => x.id === "claim");
+    r.check(cr.stage === A.Stage.registering && liveSent.length === 1 && cr.lastError == null, `claim: registers into the freed gap as soon as a node has it (${cr.stage}, ${cr.lastError})`);
+    r.check(liveSent[0] && liveSent[0].inputs[0].role === "gap.register" && C.bytesEqual(liveSent[0].unsignedTx.inputs[0].previousOutpoint?.txid ?? liveSent[0].inputs[0].utxo?.outpoint?.txid ?? new Uint8Array(), C.unhex32(reclaimTx)),
+      "claim: the register spends the reclaim's output 0");
+    r.eq(performed.length, 2, "claim: no reclaim sent again once the gap is there");
+    // the registry caught up first (it shows the gap): it registers there
+    const caught = regAt();
+    let caughtSubmits = 0;
+    caught.service.signAndSubmit = async (plan) => { caughtSubmits += 1; return T.txIdHex(plan.unsignedTx); };
+    caught._upsert({ ...claim._find("claim"), id: "claim-caught" });
+    await caught._register(caught._find("claim-caught"), c0.utxo);
+    cr = caught.pending.find((x) => x.id === "claim-caught");
+    r.check(cr.stage === A.Stage.registering && caughtSubmits === 1 && cr.lastError == null, `claim: once the registry shows the gap the name registers (${cr.stage}, ${cr.lastError})`);
     // a name held by its owner (not lapsed) is taken; our own is registered
     const taken = regAt(async (name) => ({ kind: "registered", name, info: new RS.NameInfo({ ...lapsedInfo, outpoint: lapsedInfo.outpoint, expiresAt: BigInt(Date.now()) + 600_000n }) }));
     taken._upsert(recordFor("taken", price));
@@ -675,12 +705,37 @@ async function main() {
         "startRegistration: the record carries commitSentAt, reclaimTxId and commitResends");
       r.eq(starter.openRegistrations.length, 2, "openRegistrations lists both claims");
     } catch (e) { r.check(false, `startRegistration (second claim) threw ${e.stack || e}`); }
-    const lapsedStarter = regAt(async (name) => ({ kind: "registered", name, info: lapsedInfo }));
+    const lapsedStarter = claimAt(false);
     lapsedStarter.service.signAndSubmit = async (plan) => T.txIdHex(plan.unsignedTx);
+    const startPerformed = [];
+    lapsedStarter.perform = async (op) => { startPerformed.push(op); return reclaimTx; };
     try {
       await lapsedStarter.startRegistration({ name: c0.name, years: 1, maxPrice: price });
-      r.check(lapsedStarter.pending.some((x) => x.name === c0.name), "startRegistration: an expired name (past grace) can be claimed");
+      const started = lapsedStarter.pending.find((x) => x.name === c0.name);
+      r.check(started != null, "startRegistration: an expired name (past grace) can be claimed");
+      r.eq(startPerformed.map((o) => o.kind).join(","), "reclaim", "startRegistration: the reclaim goes out right after the commit, while it ages (iOS beb9c45)");
+      r.check(started?.reclaimTxId === reclaimTx && started?.reclaimLo === C.hex(g0.lo) && started?.reclaimHi === C.hex(g0.hi) && started?.stage === A.Stage.waiting,
+        "startRegistration: the record notes the reclaim and the gap it reopens");
     } catch (e) { r.check(false, `startRegistration of an expired name threw ${e.stack || e}`); }
+    // a reclaim that can't go out at the start doesn't stop the claim: the driver sends it
+    const failingStarter = claimAt(false);
+    failingStarter.service.signAndSubmit = async (plan) => T.txIdHex(plan.unsignedTx);
+    failingStarter.perform = async () => { throw new Error("node busy"); };
+    try {
+      await failingStarter.startRegistration({ name: c0.name, years: 1, maxPrice: price });
+      const started = failingStarter.pending.find((x) => x.name === c0.name);
+      r.check(started?.stage === A.Stage.waiting && started.reclaimTxId === null, "startRegistration: a failed early reclaim leaves the claim waiting, reclaim to the driver");
+    } catch (e) { r.check(false, `startRegistration with a failing reclaim threw ${e.stack || e}`); }
+
+    // MARK: the claim receipt shows as soon as the registration is accepted (iOS d65fd1a)
+    const acc = regAt(async (name) => ({ kind: "free", name, gap: gapInfo })); // the registry hasn't caught up
+    let accRefreshes = 0;
+    acc.registry = { ...acc.registry, isAccepted: async () => true, refresh: async () => { accRefreshes += 1; } };
+    acc._upsert(recordFor("accepted", price, { stage: A.Stage.registering, registerTxId: "ab".repeat(32) }));
+    await acc._advance(acc._find("accepted"));
+    r.eq(acc.pending.find((x) => x.id === "accepted").stage, A.Stage.registered, "registering: accepted is registered, without waiting for the registry");
+    await new Promise((res) => setTimeout(res, 0));
+    r.eq(accRefreshes, 1, "registering: the registry refreshes in the background");
     const activeStarter = regAt(async (name) => ({ kind: "registered", name, info: new RS.NameInfo({ ...lapsedInfo, outpoint: lapsedInfo.outpoint, expiresAt: BigInt(Date.now()) - 1_000n }) }));
     await r.throws(() => activeStarter.startRegistration({ name: c0.name, years: 1, maxPrice: price }),
       (e) => e.code === "notRegisterable" && e.message === `${c0.name}.kachat is already registered.`, "startRegistration: a name in grace is still its owner's");

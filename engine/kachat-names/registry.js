@@ -553,6 +553,29 @@ export class KachatNamesRegistry {
       .sort((a, b) => (a.expiresAt < b.expiresAt ? -1 : a.expiresAt > b.expiresAt ? 1 : 0));
   }
 
+  /** Names that expired and are still in their grace period (`Status.grace`: only their owner can
+   *  renew them), soonest release first: each is free to claim at `expiresAt + graceMs`. The
+   *  indexer serves `GET /names/grace` (kachat-indexer docs/KACHAT_NAMES_GRACE.md); an indexer
+   *  without it yet is answered from this device's own chain walk when it has one. Swift
+   *  `inGrace()` (iOS cb3c27d). */
+  async inGrace() {
+    await this.prepare();
+    const grace = this.graceMs, now = this._nowMs();
+    const fromChain = () => (this.chainState?.names ?? []).map((n) => RegistryState.nameInfo(n));
+    let all;
+    if (this.source.kind === "indexer") {
+      try {
+        all = IndexerAPI.names(await this._get(this.source.base, "/names/grace"), keyOf);
+      } catch {
+        all = fromChain();
+      }
+    } else {
+      all = fromChain();
+    }
+    return all.filter((n) => n.status(grace, now) === Status.grace)
+      .sort((a, b) => (a.expiresAt < b.expiresAt ? -1 : a.expiresAt > b.expiresAt ? 1 : 0));
+  }
+
   /** Open offers on a name, highest first. Without an indexer only the offers this device made
    *  are known. Swift `offers(for:)`. */
   async offersFor(name) {
