@@ -4,7 +4,7 @@
 // found in the walked state), the edge cases, refusals, the walk loop over a simulated chain, the
 // status / label / profile rules, the REST transaction parser and the indexer shapes. On top of
 // the Swift script: the KachatNamesRegistry class itself, over a simulated chain served through a
-// fake fetch and node (lookups, owners, history, exit gaps, resolveActive, the cache round trip)
+// fake fetch and node (lookups, owners, history, exit gaps, resolveActive / resolveHeld, the cache round trip)
 // and over a fake names indexer. Run from the repo root:
 //
 //   node tools/test-kachat-names-registry.mjs [--live] [path/to/KachatNamesVectors.json]
@@ -185,7 +185,7 @@ function runWalker(v, r) {
   const alphaRegister = e2e[3].args;
   r.eq(alpha?.periodStart, u64(alphaRegister.now), "alpha-tn: periodStart = register's now, kept by extend, transfer, list and buy");
   r.eq(alpha?.expiresAt, u64(alphaRegister.now) + 2n * m.params.periodMs, "alpha-tn: registered for 1 period, extended by 1");
-  r.eq(m.params.periodMs, 600_000n, "testnet vectors run the 10-minute clock");
+  r.eq(m.params.periodMs, 86_400_000n, "testnet vectors run the 24-hour clock");
   // applying again changes nothing
   const snapshot = state.clone();
   e2e.forEach((st, i) => tryApply(state, view(st, 1_000 + i), m));
@@ -429,12 +429,17 @@ function runRules(r) {
   const me = new Uint8Array(32).fill(7);
   const info = (n, exp, reg) => new R.NameInfo({ name: n, key: C.key(n), owner: me, price: 0n, expiresAt: exp, outpoint: T.makeOutpoint(C.zero32(), 0), registeredAt: reg });
   const now = 10_000_000_000_000n;
-  const owned = [info("zeta", now + 5n, 10n), info("alpha", now + 5n, 20n), info("old", now - 5n, 1n)];
-  r.eq(R.label(owned, null, g, now), "zeta", "label: the oldest active name");
+  // "grace" expired but is in its grace period; "gone" lapsed (back on the market). A name in
+  // grace still labels its owner (iOS f7c371a / 07cb8da); only a lapsed one doesn't.
+  const owned = [info("zeta", now + 5n, 10n), info("alpha", now + 5n, 20n),
+    info("grace", now - 5n, 5n), info("gone", now - g - 5n, 1n)];
+  r.eq(R.label(owned, null, g, now), "grace", "label: the oldest held name (one in grace counts)");
   r.eq(R.label(owned, "Alpha.kachat", g, now), "alpha", "label: the primary name");
-  r.eq(R.label(owned, "old", g, now), "zeta", "label: a primary name in grace is skipped");
-  r.eq(R.label(owned, "notmine", g, now), "zeta", "label: a primary name not owned is skipped");
-  r.eq(R.label([owned[2]], null, g, now), null, "label: no active name");
+  r.eq(R.label(owned, "grace", g, now), "grace", "label: a primary name in grace still labels");
+  r.eq(R.label(owned, "gone", g, now), "grace", "label: a lapsed primary name is skipped");
+  r.eq(R.label(owned, "notmine", g, now), "grace", "label: a primary name not owned is skipped");
+  r.eq(R.label([owned[0], owned[1]], null, g, now), "zeta", "label: the oldest active name");
+  r.eq(R.label([owned[3]], null, g, now), null, "label: only a lapsed name");
 
   const p = new R.Profile({
     avatar: " x.com/KaspaCurrency/ ", banner: "youtube.com/@KaspaCurrency", bio: "instagram.com/instagram",
@@ -754,6 +759,9 @@ async function runRegistryChain(v, r) {
 
   const ownerAddress = R.addressOf(ownerKey);
   r.eq(await reg.resolveActive("alpha-tn.kachat"), ownerAddress, "registry (chain): resolveActive -> owner address");
+  r.eq(await reg.resolveHeld("alpha-tn.kachat"), ownerAddress, "registry (chain): resolveHeld -> owner address");
+  r.eq(await reg.resolveHeld("bravo-tn"), null, "registry (chain): resolveHeld: a free name does not resolve");
+  r.eq(await reg.resolveHeld("not valid!"), null, "registry (chain): resolveHeld: an invalid name does not resolve");
   r.check(ownerAddress.startsWith("kaspatest:q"), "registry (chain): resolved to a kaspatest: P2PK address");
   r.eq(await reg.resolveActive("bravo-tn"), null, "registry (chain): a free name does not resolve");
   r.eq(await reg.resolveActive("not valid!"), null, "registry (chain): an invalid name does not resolve");
@@ -761,7 +769,11 @@ async function runRegistryChain(v, r) {
   await reg.refreshIfStale();
   r.eq(restCalls.length, callsBefore, "registry (chain): a fresh registry is not refreshed again");
   clock = Number(alpha.expiresAt) + 1_000; // in grace
-  r.eq(await reg.resolveActive("alpha-tn"), null, "registry (chain): a name in grace does not resolve");
+  r.eq(await reg.resolveActive("alpha-tn"), null, "registry (chain): resolveActive: a name in grace is not active");
+  // iOS f7c371a: a name in grace still resolves to its owner, and still labels them
+  r.eq(await reg.resolveHeld("alpha-tn"), ownerAddress, "registry (chain): a name in grace still resolves to its owner");
+  const idGrace = await reg.identity(ownerAddress);
+  r.eq({ label: idGrace.label, names: idGrace.names }, { label: "alpha-tn", names: ["alpha-tn"] }, "registry (chain): a name in grace still labels its owner (identity)");
   r.eq((await reg.namesOf(ownerKey)).length, 0, "registry (chain): namesOf hides a name in grace");
   r.eq((await reg.namesOf(ownerKey, { includeInactive: true })).length, 1, "registry (chain): includeInactive shows it");
   // claimLookup: in grace still the owner's
@@ -783,6 +795,9 @@ async function runRegistryChain(v, r) {
   r.check(claim.gap?.contains(C.key("alpha-tn")) === true, "registry (chain): the claim gap holds the name");
   r.eq((await reg.lookup("alpha-tn")).kind, "registered", "registry (chain): plain lookup still sees the old record");
   r.eq((await reg.heldNames(ownerKey)).length, 0, "registry (chain): heldNames drops a lapsed name");
+  r.eq(await reg.resolveHeld("alpha-tn"), null, "registry (chain): a lapsed name does not resolve");
+  const idLapsed = await reg.identity(ownerAddress);
+  r.eq({ label: idLapsed.label, names: idLapsed.names }, { label: null, names: [] }, "registry (chain): a lapsed name no longer labels its owner (identity)");
   r.eq((await reg.claimLookup("bravo-tn")).kind, "free", "registry (chain): claimLookup of a free name is free");
   clock = Number(alpha.expiresAt) - 3_600_000;
 
@@ -954,6 +969,7 @@ async function runRegistryIndexer(v, r) {
     }
     if (p === "/names/alice") return response(200, nameObj("alice"));
     if (p === "/names/old") return response(200, nameObj("old", { status: "grace", expiresAt: nowMs - 1 }));
+    if (p === "/names/gone") return response(200, nameObj("gone", { status: "expired", expiresAt: nowMs - Number(m.params.graceMs) - 5 }));
     if (p === "/names/grace" && graceServed) {
       // iOS cb3c27d: names in grace; an active or a lapsed one the indexer kept is filtered out
       return response(200, { names: [nameObj("later", { status: "grace", expiresAt: nowMs - 1 }), nameObj("alice"),
@@ -981,7 +997,10 @@ async function runRegistryIndexer(v, r) {
   const bob = await reg.lookup("bob");
   r.check(bob.kind === "free" && bob.gap?.contains(C.key("bob")), "registry (indexer): free with its gap");
   r.eq(await reg.resolveActive("alice"), owner, "registry (indexer): resolveActive");
-  r.eq(await reg.resolveActive("old"), null, "registry (indexer): grace does not resolve");
+  r.eq(await reg.resolveActive("old"), null, "registry (indexer): resolveActive: grace is not active");
+  r.eq(await reg.resolveHeld("alice"), owner, "registry (indexer): resolveHeld");
+  r.eq(await reg.resolveHeld("old"), owner, "registry (indexer): a name in grace still resolves to its owner (iOS f7c371a)");
+  r.eq(await reg.resolveHeld("gone"), null, "registry (indexer): a lapsed name does not resolve");
   r.eq((await reg.namesOf(ownerKey)).map((n) => n.name), ["zed", "alice"], "registry (indexer): namesOf oldest first");
   r.check(seen.some((u) => u.endsWith(`/names/by-owner/${owner}?includeInactive=false`)), "registry (indexer): by-owner URL");
   r.eq((await reg.listings()).map((n) => n.price), [700n], "registry (indexer): listings");
@@ -1375,7 +1394,7 @@ async function runLive() {
   for (const n of st.names) {
     const status = R.Status.of(n.expiresAt, m.params.graceMs, BigInt(Date.now()));
     console.log(`  name ${n.name}.kachat owner ${R.addressOf(C.unhex32(n.owner))} price ${n.price} period from ${new Date(Number(n.periodStart)).toISOString()} expires ${new Date(Number(n.expiresAt)).toISOString()} (${status}) at ${n.txid.slice(0, 16)}:${n.index}`);
-    console.log(`    resolveActive -> ${await reg.resolveActive(n.name)}`);
+    console.log(`    resolveHeld -> ${await reg.resolveHeld(n.name)}`);
   }
   for (const e of st.events) console.log(`  event ${e.op} ${e.name ?? "?"} ${e.txId.slice(0, 16)}`);
   // the REST parser on the live API: the genesis transaction through the genesis gap's address

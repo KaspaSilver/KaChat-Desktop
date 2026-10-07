@@ -541,8 +541,9 @@ function entry(tld, canonical, address, failed) {
   return { tld, name: `${canonical}.${tld}`, address: failed ? null : (address ?? null), state };
 }
 
-// `.kachat`: not live on mainnet (reported as notLive). On testnet the registry's owner of an
-// ACTIVE name - a name in grace or lapsed does not resolve (KACHAT_NAMES.md section 4). The app
+// `.kachat`: not live on mainnet (reported as notLive). On testnet the registry's owner of a name
+// that is active or in its grace period - only a lapsed name does not resolve (KACHAT_NAMES.md
+// section 4, iOS f7c371a). The app
 // supplies the lookup (`resolveKachat(canonical) -> address|null`, throws when unreadable).
 async function resolveKachatEntry(label, resolveKachat) {
   if (!NAME_SERVICES.kachat.isLive) {

@@ -176,15 +176,16 @@ export class Event {
 
 // MARK: - Label rule (KACHAT_NAMES.md section 7)
 
-/** The label an address is shown with: its `primaryName` if it owns that name and it is active;
- *  otherwise its oldest active name; otherwise null (the caller shows the address). */
+/** The label an address is shown with: its `primaryName` if it still holds that name (active or
+ *  in grace); otherwise its oldest held name; otherwise null (the caller shows the address). A
+ *  name in grace keeps labelling its owner until it lapses and is back on the market (iOS f7c371a). */
 export function label(owned, primaryName, graceMs, now = nowMs()) {
-  const active = owned.filter((n) => Status.of(n.expiresAt, graceMs, now) === Status.active);
+  const held = owned.filter((n) => Status.of(n.expiresAt, graceMs, now) !== Status.lapsed);
   if (primaryName != null) {
     const p = normalize(primaryName);
-    if (active.some((n) => n.name === p)) return p;
+    if (held.some((n) => n.name === p)) return p;
   }
-  const oldest = [...active].sort(byRegistration);
+  const oldest = [...held].sort(byRegistration);
   return oldest.length ? oldest[0].name : null;
 }
 

@@ -686,16 +686,32 @@ export class KachatNamesRegistry {
 
   // MARK: - Resolution (iOS 25cc2c9, NameServicesClient.resolveKachat)
 
+  /** The `kaspatest:` address a name resolves to - the owner of a name that is active or in its
+   *  grace period (an owner stays reachable until the name is back on the market) - or null (not
+   *  registered, lapsed, or not a valid name). What sends, add contact and search by name use (iOS
+   *  f7c371a, NameServicesClient.resolveKachat: `status != .lapsed`). Refreshes first when the data
+   *  is older than a minute. Throws when the registry cannot be read (the caller shows the lookup
+   *  as failed). */
+  async resolveHeld(raw) {
+    return this._resolve(raw, (s) => s !== Status.lapsed);
+  }
+
   /** The `kaspatest:` address an ACTIVE name resolves to, or null (not registered, in grace,
-   *  lapsed, or not a valid name). Refreshes first when the data is older than a minute. Throws
-   *  when the registry cannot be read (the caller shows the lookup as failed). */
+   *  lapsed, or not a valid name). No longer what the app resolves typed names with - that is
+   *  `resolveHeld` (a name in grace still resolves, iOS f7c371a); kept for callers that need an
+   *  active name. Refreshes first when the data is older than a minute. Throws when the registry
+   *  cannot be read. */
   async resolveActive(raw) {
+    return this._resolve(raw, (s) => s === Status.active);
+  }
+
+  async _resolve(raw, accepts) {
     const name = normalize(raw);
     if (!isValid(name)) return null;
     await this.refreshIfStale();
     const r = await this.lookup(name);
     if (r.kind !== "registered") return null;
-    if (r.info.status(this.graceMs, this._nowMs()) !== Status.active) return null;
+    if (!accepts(r.info.status(this.graceMs, this._nowMs()))) return null;
     return addressOf(r.info.owner);
   }
 
@@ -714,7 +730,8 @@ export class KachatNamesRegistry {
     }
     const k = keyOf(address);
     if (!k) return makeIdentity({ address });
-    const owned = await this.namesOf(k, { includeInactive: false });
+    // held names: a name in grace still labels and resolves to its owner (iOS f7c371a)
+    const owned = await this.heldNames(k);
     const profile = (await this.ownProfile(address))?.profile ?? null;
     const lbl = labelOf(owned, profile?.primaryName ?? null, this.graceMs, this._nowMs());
     return makeIdentity({ address, label: lbl, names: owned.map((n) => n.name), profile });

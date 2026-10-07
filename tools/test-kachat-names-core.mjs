@@ -281,9 +281,10 @@ function runManifest(v, r) {
     "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
   ].find((x) => existsSync(x));
   if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
-  // the bundled manifest: the live testnet-10 registry v4 (iOS d82dfb2), verified from the bundle
-  // and as an indexer would serve it (every template pinned for its registry id)
-  const BUNDLED_REGISTRY = "bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f";
+  // the bundled manifest: the live testnet-10 registry v4 on the day clock (iOS 08107e1; the
+  // 10-minute registry bff18554..0e2f is retired), verified from the bundle and as an indexer would
+  // serve it (every template pinned for its registry id)
+  const BUNDLED_REGISTRY = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
   const bundledJson = JSON.parse(bundled.toString("utf8"));
   r.eq(bundledJson.registryVersion, 4, "bundled manifest registryVersion");
   let bm = null;
@@ -294,9 +295,11 @@ function runManifest(v, r) {
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
     r.eq(bm.network, "testnet-10", "bundled manifest network");
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled registry covenant id");
-    r.eq(C.hex(bm.genesisTxid), "b1f28a5f3ff917dc567fa038c80dc50539d42fa6f088bb2e008d5dad82f685a1", "bundled registry genesis txid");
+    r.eq(C.hex(bm.genesisTxid), "5ffdd006230bcba0ee52c3ce7b69fba2b9a4d489b57fee93e2b103eb1622a777", "bundled registry genesis txid");
     r.check(bm.price === undefined && bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
-    r.eq(bm.params.periodMs, 600_000n, "bundled manifest: 10-minute testnet clock");
+    r.eq(bm.params.periodMs, 86_400_000n, "bundled manifest: 24-hour testnet clock");
+    r.eq(bm.params.graceMs, 21_600_000n, "bundled manifest: 6-hour grace");
+    r.eq(bm.params.renewWindowMs, 7_200_000n, "bundled manifest: 2-hour renewal window");
     r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "bundled manifest: the pinned register table");
     r.eq(bm.params.renewPrices.join(","), M.pinnedRenewPrices.join(","), "bundled manifest: the pinned renew table");
     // the pins: the gap and name everywhere, the offer for this registry id - and they are exactly
@@ -305,9 +308,10 @@ function runManifest(v, r) {
     r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer", "every template pinned for the bundled registry");
     r.eq(M.templatePinsFor(BUNDLED_REGISTRY.toUpperCase()).KachatOffer, pins.KachatOffer, "templatePinsFor takes hex in any case");
     for (const t of [bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled ${t.contract} is the pinned build`);
-    r.eq(pins.KachatGap, "85cf57f8d300331c2acc5191794065d60fafdd29cac90e3b82e3e1ba1c3876f0", "pinned gap hash (iOS)");
-    r.eq(pins.KachatName, "394204b612f345787412156521c0aabbd36bba30311f008302964d4c4ece685a", "pinned name hash (iOS)");
-    r.eq(pins.KachatOffer, "226def4b7fea21b21957c55fd47331b1d2f510fa2a63f8e7543bafaed4898e7d", "pinned offer hash (iOS)");
+    r.eq(pins.KachatGap, "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5", "pinned gap hash (iOS)");
+    r.eq(pins.KachatName, "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b", "pinned name hash (iOS)");
+    r.eq(pins.KachatOffer, "5a7e22af319bac406769563b6b4b39b05c3aac145375ccaaada4095960372a7a", "pinned offer hash (iOS)");
+    r.eq(M.templatePinsFor("bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f").KachatOffer, undefined, "the retired 10-minute registry has no offer pin");
     r.eq(Object.keys(M.templatePinsFor("ab".repeat(32))).sort().join(","), "KachatGap,KachatName", "another registry: only the gap and name pinned");
     // a tampered offer build (its hash recomputed so only the pin can catch it) is refused, from
     // the bundle too: this registry's offer is pinned
@@ -346,14 +350,15 @@ function runManifest(v, r) {
   return m;
 }
 
-/** The period rules on their own (KACHAT_NAMES.md 4.1, ops.rs) on the testnet-10 short clock
- *  (registry v4: periodMs = renewWindowMs = 10 minutes): what extend may add, when renew
+/** The period rules on their own (KACHAT_NAMES.md 4.1, ops.rs) on the testnet-10 day clock
+ *  (registry v4: periodMs 24 hours, renewWindowMs 2 hours, graceMs 6 hours): what extend may add, when renew
  *  opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
 function runPeriodRules(v, m, r) {
   const p = m.params;
   const y = p.periodMs;
-  r.eq(y, 600_000n, "periodMs from the manifest (10 minutes)");
-  r.eq(p.renewWindowMs, 600_000n, "renewWindowMs from the manifest");
+  r.eq(y, 86_400_000n, "periodMs from the manifest (24 hours)");
+  r.eq(p.renewWindowMs, 7_200_000n, "renewWindowMs from the manifest (2 hours)");
+  r.eq(p.graceMs, 21_600_000n, "graceMs from the manifest (6 hours)");
   r.eq(u64(v.renewWindowMs), p.renewWindowMs, "renewWindowMs matches the vectors");
   const start = 2_000_000_000_000n;
   r.eq(M.paramsExtendableYears(p, start, start + y), 1n, "1-period registration: extend by 1");
@@ -371,10 +376,10 @@ function runPeriodRules(v, m, r) {
   r.eq(C.nameFieldsWithPrice(f, 5n).periodStart, start, "list keeps periodStart");
   r.check((() => { try { return C.nameFieldsEqual(C.decodeNameState(C.nameState(f)), f); } catch { return false; } })(), "126-byte state round trip");
   r.check((() => { try { C.decodeNameState(C.nameState(f).subarray(0, 117)); return false; } catch { return true; } })(), "a 117-byte (v1) state is refused");
-  // a 2-period name, so the window (one period before expiry) opens a period in
+  // a 2-period name: the window opens 2 hours before its expiry
   const f2 = C.nameFieldsFor("alice", new Uint8Array(32).fill(7), 0n, start, start + 2n * y);
   const opens = M.paramsRenewOpens(p, f2.expiresAt);
-  r.eq(opens, f2.expiresAt - 600_000n, "renew opens one period before expiry");
+  r.eq(opens, f2.expiresAt - 7_200_000n, "renew opens 2 hours before expiry");
   const before = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens - 60_000n, wallMs: opens + 60_000n });
   r.check(!B.renewWindowOpen(before, p, f2.expiresAt), "window closed while the median time is before the opening");
   r.eq(B.renewLockTime(before, p, f2.expiresAt), opens, "lock time never before the opening");
@@ -500,7 +505,7 @@ function runSteps(v, m, r) {
     try {
       plan = build(b, s(st.op), env, wallet, args, rec);
       if (st.op === "register") {
-        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 65n * 60_000n : 0n), `${label}: registerNow`);
+        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 55n * 3_600_000n : 0n), `${label}: registerNow`);
         // registry v4: the registration price for the first period, the renewal price after
         r.eq(plan.priceFee, M.paramsRegisterCost(m.params, C.utf8(s(rec.commit.name)).length, u64(args.years)), `${label}: registerCost`);
         r.check(plan.inputs.every((i) => i.role !== "price.use"), `${label}: no price shard input`);

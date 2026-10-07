@@ -6076,8 +6076,8 @@ function updateProfileHero(info, profileInfo) {
   // Your domain name (a .kachat name, once they exist) or your short address - never the account
   // name, which is your own label, and never a .kas name (iOS 3041164, 509c0fe).
   const domain = engine.knsNamesAsIdentity ? (info?.explicitPrimaryDomain || info?.primaryDomain || "") : "";
-  // Testnet: your .kachat label (your primary name while active, else your oldest active name -
-  // KACHAT_NAMES.md section 7) is your name on the hero (iOS 5df42b4).
+  // Testnet: your .kachat label (your primary name while you hold it - active or in grace - else
+  // your oldest held name; KACHAT_NAMES.md section 7, iOS f7c371a) is your name on the hero (iOS 5df42b4).
   const kachatLabel = refreshKachatIdentity.address === engine.address ? refreshKachatIdentity.label : "";
   const displayName = kachatLabel
     ? `${kachatLabel}.kachat`
@@ -10098,7 +10098,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 111;
+const APP_BUILD = 112;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15183,7 +15183,7 @@ async function refreshChatInfoKnsSections(contact) {
 
 /// Testnet User Info (iOS e52357d, ChatInfoView): the .kachat banner, avatar, bio (click to expand,
 /// right-click to copy) and Linktree link, your .kachat name as your own card's title, and a
-/// ".kachat Names" card listing the address's active names with its primary marked - all read from
+/// ".kachat Names" card listing the address's held names (active or in grace) with its primary marked - all read from
 /// the cached identity (kachat-names-live.js) and repainted as answers land (onKachatIdentityChange).
 /// A photo you gave them still wins over the .kachat avatar. Someone else's profile needs the names
 /// indexer; without one only their label (and names) show.

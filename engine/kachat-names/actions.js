@@ -32,7 +32,7 @@
 // templates (the manifest's `registerPrices` / `renewPrices`; register charges the registration
 // price for the first period and the renewal price for each further one, extend and renew the
 // renewal price) - no price shard is read or spent; "years" are periods of the manifest's
-// `periodMs` (a year on mainnet, 10 minutes on testnet). Offers are made to the name's current owner (the seller), capped at `maxOfferDays`;
+// `periodMs` (a year on mainnet, 24 hours on testnet). Offers are made to the name's current owner (the seller), capped at `maxOfferDays`;
 // only that owner accepts or declines them, and a transfer, release or accepted offer declines the
 // rest (`declineOpenOffers`). Offers past their refund time go back to the buyer from whichever app
 // sees them first (`returnExpiredOffers`), and a buyer's app pulls back its offers on a name that
@@ -120,7 +120,7 @@ export const registrationsStorageKey = "kachat-names-registrations-testnet-v1";
 // MARK: - Errors
 
 /** A unix-ms day ("Oct 12, 2027") in `locale` (default: the runtime's), with the time when it is
- *  within two days of now (testnet's 10-minute periods, or a renewal that opens tomorrow). Swift
+ *  within two days of now (testnet's 24-hour periods, or a renewal that opens tomorrow). Swift
  *  `KachatNamesActions.dayString` (DateFormatter, medium date style, short time near the deadline). */
 export function dayString(ms, locale = undefined) {
   const d = new Date(Number(ms));

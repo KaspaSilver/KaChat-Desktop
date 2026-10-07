@@ -38,7 +38,7 @@ export const outdatedRegistryMessage = "manifest: an earlier registry; this app 
 
 export const sompiPerKas = 100_000_000n;
 /** A mainnet period. Registry v3 reads the period from the manifest (`params.periodMs`):
- *  testnet-10 runs a 10-minute clock. */
+ *  testnet-10 runs a 24-hour clock. */
 export const yearMs = 31_536_000_000n;
 /** rusty-kaspa `LOCK_TIME_THRESHOLD`: lock times below it are DAA scores, above unix ms. */
 export const lockTimeThreshold = 500_000_000_000n;

@@ -172,9 +172,10 @@ async function main() {
 
   // MARK: manifest and gate
   r.check(S.KachatNamesService.isEnabled, "testnet gate open under kachat-network-v1=testnet");
-  // the bundled testnet manifest is the live testnet-10 registry v4 (iOS d82dfb2): it verifies,
-  // so testnet leaves "Setting up" (registryUpgrading stays false)
-  const BUNDLED_REGISTRY = "bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f";
+  // the bundled testnet manifest is the live testnet-10 registry v4 on the day clock (iOS 08107e1;
+  // the 10-minute registry bff18554..0e2f is retired): it verifies, so testnet leaves "Setting up"
+  // (registryUpgrading stays false)
+  const BUNDLED_REGISTRY = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
   const bundled = new S.KachatNamesService(fakeEngine());
   let bundledEvents = 0;
   bundled.onChange((x) => { if (x === bundled) bundledEvents += 1; });
@@ -504,8 +505,8 @@ async function main() {
     await r.throws(() => extActions.plan(A.Operation.extend(ext, 0n)), (e) => e.code === "periodFull", "actions: extend by 0 is refused");
     await r.throws(() => extActions.plan(A.Operation.extend(nameInfoOf(extStep.records.name, false), 1n)),
       (e) => e.code === "periodUnknown", "actions: extend without periodStart is periodUnknown");
-    // on the 10-minute clock a 1-period name's window is open at once: a 2-period one's opens a
-    // period in
+    // a name paid a period further out: its window (renewWindowMs - 2 hours on the testnet day
+    // clock - before the expiry) is not open yet
     const ext2 = nameInfoOf(extStep.records.name);
     ext2.expiresAt += m.params.periodMs;
     await r.throws(() => extActions.plan(A.Operation.renew(ext2, 1n)),

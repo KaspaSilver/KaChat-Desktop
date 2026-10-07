@@ -72,11 +72,12 @@ export function initKachatNamesRuntime(engine, { wallet = null, onSubmitted = nu
   });
   const actions = new KachatNamesActions({ engine, service, registry, wallet });
   // Name lookups and account discovery read the same registry (iOS 25cc2c9): a typed alice or
-  // alice.kachat resolves to the owner of an ACTIVE name, refreshed when older than a minute.
+  // alice.kachat resolves to the owner of a name that is active or in grace - only a lapsed name
+  // stops resolving (iOS f7c371a) - refreshed when older than a minute.
   engine.setKachatNameHooks?.({
     resolve: async (canonical) => {
       await registry.refreshIfStale();
-      return registry.resolveActive(canonical);
+      return registry.resolveHeld(canonical);
     },
     ownsAny: async (address) => {
       const key = KachatNamesRegistry.keyOf(address);

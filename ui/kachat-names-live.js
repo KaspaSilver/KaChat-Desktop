@@ -109,7 +109,7 @@ function sanitizeAmountInput(input) {
 }
 
 /** A unix-ms day ("Oct 12, 2027"), with the time when it is within two days (testnet's
- *  10-minute periods, or a renewal that opens tomorrow). */
+ *  24-hour periods, or a renewal that opens tomorrow). */
 function dayText(ms) {
   if (ms == null) return "";
   const d = new Date(Number(ms));
@@ -239,7 +239,7 @@ function params() {
 }
 function maxYears() { const m = params()?.maxYears; return m ? Number(m) : 2; }
 
-// Registry v4: a period is `periodMs` long - a year on mainnet, 10 minutes on the testnet clock.
+// Registry v4: a period is `periodMs` long - a year on mainnet, 24 hours on the testnet clock.
 /** Whether a period is a year (mainnet), not a short test clock. */
 function yearlyPeriods() { return (params()?.periodMs ?? yearMs) === yearMs; }
 /** `count` periods: "1 year" / "2 years", or on a short clock "10 min" / "20 min". */
@@ -1716,7 +1716,7 @@ function txKey(info) {
 
 /** KachatLiveBuySheet. */
 function openBuySheet(info, owner) {
-  // 30 days on mainnet's yearly clock, the renewal window on testnet's 10-minute one (IOS-060)
+  // 30 days on mainnet's yearly clock, the renewal window on testnet's 24-hour one (IOS-060)
   const p = params();
   const soonMs = p ? paramsExpiresSoonMs(p) : 30n * 86_400_000n;
   const soon = info.expiresAt - soonMs < BigInt(Date.now());
@@ -1846,7 +1846,7 @@ function openExtendSheet(info, owner) {
 
 /** `renew` (KachatRenewSheet, iOS 26bd5dc): the next period, from the current expiry, for 1 or 2
  *  periods - only once the renewal window is open (renewWindowMs before the expiry). Two steps:
- *  "How long?" first (the periods as full-width choices - 10 min / 20 min on testnet's clock,
+ *  "How long?" first (the periods as full-width choices - 1 day / 2 days on testnet's clock,
  *  1 / 2 years on mainnet's - with what each costs), then the review with the fee and Renew; its
  *  Back leads to "How long?" again. Each period costs the renewal price (registry v4, iOS c8f1086). */
 async function openRenewSheet(info, owner) {
@@ -1971,11 +1971,12 @@ function openTransferSheet(info, owner) {
       const rt = kachatNames();
       const r = await rt.registry.lookup(name);
       if (mySeq !== seq) return;
-      if (r.kind === "registered" && r.info.status(graceMs()) === Status.active) {
+      // a name in grace still points to its owner, like everywhere else it resolves (iOS f7c371a)
+      if (r.kind === "registered" && r.info.status(graceMs()) !== Status.lapsed) {
         const a = addressOf(r.info.owner);
         if (a) resolved = { address: a, key: r.info.owner };
       } else {
-        resolveError = "No active .kachat name by that name.";
+        resolveError = "No .kachat name by that name.";
       }
     } catch {
       if (mySeq !== seq) return;
@@ -2279,8 +2280,8 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     // never shown - it can't be bought, only renewed (or, past grace, claimed; iOS ba1a734).
     const forSale = d.info.isListed && s === Status.active;
     let note = "";
-    if (s === Status.grace && ownedByWallet()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends nobody else can take it.</p>`;
-    else if (s === Status.grace) note = `<p class="kl-note-inline kl-orange">Expired. It no longer resolves; the owner can still renew it.</p>`;
+    if (s === Status.grace && ownedByWallet()) note = `<p class="kl-note-inline kl-orange">Expired - renew to keep it. Until the grace period ends it still resolves to you and nobody else can take it.</p>`;
+    else if (s === Status.grace) note = `<p class="kl-note-inline kl-orange">Expired. It still resolves to its owner until the grace period ends, and the owner can still renew it.</p>`;
     // the paid period, from its start to the expiry (at most maxYears periods)
     const period = d.info.periodStart != null
       ? `<p class="kl-period">${LI.calendar}<span>${esc(`Paid from ${dayText(d.info.periodStart)} to ${dayText(d.info.expiresAt)}`)}</span></p>`
