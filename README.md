@@ -45,13 +45,6 @@ Accounts and settings live in the browser you open it with, not in the
 container, so `docker compose down` loses nothing and there is no volume to
 back up.
 
-The Swaps tab needs a ChangeNOW key. It is read at run time rather than baked
-into the image, so put it in a `.env` next to the compose file:
-
-```
-VITE_CHANGENOW_API_KEY=your-key-here
-```
-
 **What the container serves.** A production build, not the dev server. It runs
 `npm run build` at start and serves the result with `vite preview`. The build
 gives every asset a content-hashed filename, which is the only cache-busting
@@ -60,9 +53,9 @@ identical to the one they cached, or a different URL. The dev server's
 unhashed filenames could hand someone one old file and one new one, and the app
 would run a mix of two versions.
 
-The build runs at container start rather than image build because Vite inlines
-every `VITE_` variable into the bundle when it builds, and `VITE_CHANGENOW_API_KEY`
-is passed as a run-time environment variable. It takes well under a second.
+The build runs at container start rather than image build, so every release is
+built from the code that is actually in the container. It takes well under a
+second.
 
 The Nextcloud `/nc-proxy` route is a connect middleware in `vite.config.mjs`,
 mounted on both `configureServer` and `configurePreviewServer`, so it works the
@@ -92,7 +85,14 @@ container, the Docker bridge gateway such as `172.17.0.1`), list that address -
 otherwise every reader shares one rate-limit bucket - and have the proxy send
 `X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
 Setting the variable replaces the default, so include `loopback` if you still
-need it.
+need it. An IPv6 reader counts by its /64, and a flood of new addresses never
+resets the counters of readers already being counted.
+
+**What the relay will write to.** Reads go to any public host. Writes (PUT,
+MKCOL, DELETE, POST, PROPFIND ...) go only to the app's own API hosts, or to the
+one Nextcloud the app names in the `x-kachat-nextcloud-origin` header (the app
+sends it on every Nextcloud and Talk call), and there only under `/remote.php/`
+or `/ocs/` with an app password, or as a Talk guest session.
 
 
 ## Self-Hosted Cloud (Nextcloud) Setup

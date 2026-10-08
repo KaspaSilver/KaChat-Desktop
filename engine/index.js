@@ -2,7 +2,7 @@ import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
-import { getBalance, sendKaspa, sendMaxKaspa, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
+import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
 import { kasToSompi } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
@@ -11,8 +11,8 @@ import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryp
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
-import { queryGroupMessages, queryGroupMessagesSince, queryGroupControlByRecipient, queryGroupControlBySender } from "./group-indexer.js";
-import { extractBroadcastHitsFromBlock, normalizeBroadcastChannel } from "./broadcasts.js";
+import { queryGroupMessages, queryGroupMessagesSince, queryGroupControlByRecipient, queryGroupControlByRecipientPage, queryGroupControlBySender } from "./group-indexer.js";
+import { extractBroadcastHitsFromBlock, normalizeBroadcastChannel, BroadcastSenderVerifier, BROADCAST_SENDER } from "./broadcasts.js";
 import {
   KNS_DEFAULT_MAINNET_URL,
   normalizeDomainName as knsNormalizeDomainName,
@@ -56,6 +56,11 @@ function totalFeeSompiFrom(totalFeeKas) {
   const sompi = kasToSompi(totalFeeKas);
   if (sompi == null) throw new Error("The network fee is not a valid amount.");
   return sompi;
+}
+
+// The optional Max-send settings a caller may pass (see sendMax), and nothing else.
+function maxSendOptions({ extraFeeSompi = 0, manualUtxos = null, payload = null, expectedAmountSompi = null, expectedOutpoints = null } = {}) {
+  return { extraFeeSompi, manualUtxos, payload, expectedAmountSompi, expectedOutpoints };
 }
 
 /** A node UTXO entry (the WASM SDK's UtxoEntryReference, or a plain IUtxoEntry) as a plain object
@@ -144,6 +149,9 @@ export class KaspaEngine {
     this.blockScanReconnectHandler = null;
     this.blockScanStartPromise = null;
     this.blockScanUnusableLogged = false;
+    // Who really sent a public-chat post (audit DSK-045): input 0's address, accepted only when
+    // output 0 pays it back. Shared by the block stream and indexer-row verification.
+    this.broadcastSenderVerifier = new BroadcastSenderVerifier({ log: (message) => this.log(message) });
     this.blockScanState = {
       status: "idle",   // idle | starting | scanning | error | unsupported
       channels: [],
@@ -170,7 +178,8 @@ export class KaspaEngine {
 
   /** Subscribe to live broadcast hits. The listener gets an array of rows shaped exactly
    *  like the indexer's (`{ txId, channel, senderAddress, content, blockTime }`), already
-   *  filtered to the wanted channels. Returns an unsubscribe function. */
+   *  filtered to the wanted channels, with `senderAddress` VERIFIED from input 0 (DSK-045;
+   *  forged or unverifiable posts never arrive). Returns an unsubscribe function. */
   onBroadcastBlockHits(listener) {
     if (typeof listener !== "function") return () => {};
     this.blockScanListeners.add(listener);
@@ -224,27 +233,75 @@ export class KaspaEngine {
   }
 
   /** Off the hot path: one block in, zero or more hits out, fanned out to the listeners.
-   *  Almost every block has no broadcast payload, so this returns after a cheap prefix scan. */
+   *  Almost every block has no broadcast payload, so this returns after a cheap prefix scan.
+   *
+   *  Only posts whose sender is VERIFIED reach the listeners (DSK-045): input 0 spends from
+   *  the same address output 0 pays, and that address is the sender. A forged post (output 0
+   *  pays someone else) is dropped and logged with its txid; one whose input address is not
+   *  known yet is looked up (REST, with retries) and delivered later only if it verifies -
+   *  it is never shown under output 0's address. */
   handleBlockAddedEvent(event) {
     if (this.blockScanChannels.size === 0) return;
     this.blockScanState.lastBlockAt = Date.now();
+    const verifier = this.broadcastSenderVerifier;
     let hits = [];
     try {
       hits = extractBroadcastHitsFromBlock(this.kaspa, event, {
         networkId: NETWORK_ID,
         onUnusable: (reason) => this.reportUnusableBroadcastPayload(reason),
+        resolveOutpointAddress: (transactionId, index) => verifier.outpointAddress(transactionId, index),
       });
     } catch (error) {
       this.setBroadcastScanState({ lastError: error?.message || String(error) });
       return;
     }
     if (hits.length === 0) return;
+    // Every broadcast's outputs, wanted room or not: the poster's next post usually spends one.
+    for (const hit of hits) verifier.rememberOutputs(hit.txId, hit.outputAddresses);
     const wanted = hits.filter((hit) => this.blockScanChannels.has(hit.channel));
     if (wanted.length === 0) return;
     this.setBroadcastScanState({ status: "scanning", lastHitAt: Date.now(), lastError: "" });
-    for (const listener of this.blockScanListeners) {
-      try { listener(wanted); } catch { /* a bad listener must not kill the stream */ }
+    const ready = [];
+    for (const hit of wanted) {
+      const judged = verifier.settleHit(hit);
+      if (judged.verdict === BROADCAST_SENDER.VERIFIED) ready.push(this.verifiedBroadcastRow(hit, judged));
+      else if (judged.verdict === BROADCAST_SENDER.FORGED) verifier.logDropped(hit.txId, hit.channel, BroadcastSenderVerifier.dropReason(judged));
+      else this.verifyBroadcastHitLater(hit);
     }
+    if (ready.length) this.emitBroadcastHits(ready);
+  }
+
+  /** The row listeners get: the indexer's shape, with the verified sender. */
+  verifiedBroadcastRow(hit, judged) {
+    return { txId: hit.txId, channel: hit.channel, senderAddress: judged.senderAddress, content: hit.content, blockTime: hit.blockTime };
+  }
+
+  emitBroadcastHits(rows) {
+    for (const listener of this.blockScanListeners) {
+      try { listener(rows); } catch { /* a bad listener must not kill the stream */ }
+    }
+  }
+
+  /** A live post whose input address is not known locally: ask the REST API (with retries),
+   *  deliver it if it verifies, drop + log it otherwise. */
+  verifyBroadcastHitLater(hit) {
+    const verifier = this.broadcastSenderVerifier;
+    verifier.verifyHit(hit).then((judged) => {
+      if (judged.verdict === BROADCAST_SENDER.VERIFIED) this.emitBroadcastHits([this.verifiedBroadcastRow(hit, judged)]);
+      else verifier.logDropped(hit.txId, hit.channel, BroadcastSenderVerifier.dropReason(judged));
+    }).catch(() => verifier.logDropped(hit.txId, hit.channel, BroadcastSenderVerifier.dropReason(null)));
+  }
+
+  /** Final sender verdict for a public-chat txid, if this engine has one:
+   *  `{ verdict: "verified" | "forged", senderAddress }` or null. */
+  broadcastSenderVerdict(txId) {
+    return this.broadcastSenderVerifier.verdictFor(txId);
+  }
+
+  /** Verifies public-chat rows read from an indexer against the chain (REST): resolves
+   *  `{ accepted, forged, unknown }`, `accepted` carrying the verified `senderAddress`. */
+  verifyBroadcastRows(rows, options = {}) {
+    return this.broadcastSenderVerifier.verifyRows(rows, options);
   }
 
   async startBroadcastBlockScan() {
@@ -834,30 +891,33 @@ export class KaspaEngine {
     return generateMnemonicPhrase(this.kaspa, wordCount);
   }
 
-  importMnemonic(phrase, passphrase = "") {
+  // `passphraseForm`: "nfkd" (default, BIP39 - audit EXT-010) or "raw" (an account saved before
+  // EXT-010 whose passphrase NFKD changes; see wallet.js passphraseFormForRecord).
+  importMnemonic(phrase, passphrase = "", { passphraseForm = "nfkd" } = {}) {
     this.requireSdk();
-    return this.setWallet(importMnemonic(this.kaspa, phrase, passphrase));
+    return this.setWallet(importMnemonic(this.kaspa, phrase, passphrase, { passphraseForm }));
   }
 
   // Family-aware identity import (iOS WalletSourceFamily port): derives the
   // chatting identity where the seed's source wallet actually kept it
   // (standard / legacy-972 / OneKey-tweaked), optionally at a nonzero index
   // (the import-time chatting-address picker). Async — OneKey needs WebCrypto.
-  async importMnemonicWithFamily(phrase, passphrase = "", { family = "kaspaStandard", index = 0 } = {}) {
+  async importMnemonicWithFamily(phrase, passphrase = "", { family = "kaspaStandard", index = 0, passphraseForm = "nfkd" } = {}) {
     this.requireSdk();
-    const wallet = await importMnemonicWithFamily(this.kaspa, phrase, passphrase, { family, index });
+    const wallet = await importMnemonicWithFamily(this.kaspa, phrase, passphrase, { family, index, passphraseForm });
     return this.setWallet(wallet);
   }
 
   // Derives one family identity address WITHOUT touching the engine's active
   // wallet — the chatting-address picker's batch scanner.
-  async deriveIdentityCandidate(phrase, passphrase = "", { family = "kaspaStandard", index = 0 } = {}) {
+  async deriveIdentityCandidate(phrase, passphrase = "", { family = "kaspaStandard", index = 0, passphraseForm = "nfkd" } = {}) {
     this.requireSdk();
-    return importMnemonicWithFamily(this.kaspa, phrase, passphrase, { family, index });
+    return importMnemonicWithFamily(this.kaspa, phrase, passphrase, { family, index, passphraseForm });
   }
 
   // One batch of identity addresses for the chatting-address picker, derived
-  // off a single master key — never touches the engine's active wallet.
+  // off a single master key — never touches the engine's active wallet. `options`:
+  // { family, start, count, passphraseForm }.
   async deriveIdentityAddressRange(phrase, passphrase = "", options = {}) {
     this.requireSdk();
     return deriveIdentityAddressRange(this.kaspa, phrase, passphrase, options);
@@ -1025,7 +1085,13 @@ export class KaspaEngine {
 
   // True "Max" send from the chatting address: exact-fee single-output sweep to the
   // recipient (see sendMaxKaspa — near-max amounts with change get rejected by KIP-9).
-  async sendMax(destinationAddress, totalFeeKas = null, selectedOutpoints = null) {
+  // `options` (audits DSK-042 / DSK-043, all optional): `extraFeeSompi` (on top of the network
+  // floor when `totalFeeKas` is null), `manualUtxos` (coin control), `payload` (a chat payment's
+  // kchat:1:pay:, built for `expectedAmountSompi`), and the pin `expectedAmountSompi` /
+  // `expectedOutpoints` (from estimateMaxSend): a changed coin set or fee throws
+  // MAX_AMOUNT_CHANGED instead of sending a different amount. Returns { txids, amountSompi,
+  // feeSompi, outpoints }.
+  async sendMax(destinationAddress, totalFeeKas = null, selectedOutpoints = null, options = {}) {
     this.requireWallet();
     await this.connect();
     return sendMaxKaspa({
@@ -1037,15 +1103,16 @@ export class KaspaEngine {
       destinationAddress,
       totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       selectedOutpoints,
+      ...maxSendOptions(options),
       log: this.log,
     });
   }
 
-  // True "Max" send from a spending address (same exact-fee, single-output build).
-  async sendMaxFromSpending({ mnemonic, index, passphrase = "", destinationAddress, totalFeeKas = null, selectedOutpoints = null }) {
+  // True "Max" send from a spending address (same exact-fee, single-output build and options).
+  async sendMaxFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, totalFeeKas = null, selectedOutpoints = null, ...options }) {
     this.requireSdk();
     await this.connect();
-    const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
+    const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
     return sendMaxKaspa({
       kaspa: this.kaspa,
       rpc: this.rpc,
@@ -1055,7 +1122,33 @@ export class KaspaEngine {
       destinationAddress,
       totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       selectedOutpoints,
+      ...maxSendOptions(options),
       log: this.log,
+    });
+  }
+
+  // What Max would send, without sending (DSK-042 / DSK-043): the coins at `sourceAddress` (default
+  // the chatting address) fetched now, the same choice and fee as sendMax / sendMaxFromSpending.
+  // `payloadBytes` sizes a payload not built yet, or `payloadFor(totalSompi)` builds the one to price
+  // with (async, BigInt total of the chosen coins; a chat payment's). Returns { amountSompi, feeSompi, floorFeeSompi,
+  // totalSompi, outpoints, inputCount, availableSompi } (BigInt sompi; availableSompi = every
+  // coin no scheduled KaPost reserves). Throws when Max is impossible (too low, too many coins).
+  async estimateMaxSend({ sourceAddress = null, destinationAddress = null, totalFeeKas = null, selectedOutpoints = null, ...options } = {}) {
+    this.requireSdk();
+    await this.connect();
+    const from = sourceAddress || this.address;
+    if (!from) throw new Error("No address to send from.");
+    return estimateMaxSend({
+      kaspa: this.kaspa,
+      rpc: this.rpc,
+      withRpc: this.withRpc.bind(this),
+      sourceAddress: from,
+      destinationAddress,
+      totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
+      selectedOutpoints,
+      ...maxSendOptions(options),
+      payloadBytes: Math.max(0, Number(options.payloadBytes) || 0),
+      payloadFor: typeof options.payloadFor === "function" ? options.payloadFor : null,
     });
   }
 
@@ -1077,10 +1170,11 @@ export class KaspaEngine {
   // --- Spending-address chain (m/44'/111111'/1'/0/<index>) ---
   // Derive a spending address/key from the account's recovery phrase. Does NOT
   // change the active (chatting) wallet. `passphrase` must match what the seed
-  // was created with ("" for the common no-passphrase case).
-  deriveSpendingWallet(mnemonic, index, passphrase = "") {
+  // was created with ("" for the common no-passphrase case), and `passphraseForm` the account's
+  // form ("nfkd" default; "raw" for an account saved before EXT-010).
+  deriveSpendingWallet(mnemonic, index, passphrase = "", { passphraseForm = "nfkd" } = {}) {
     this.requireSdk();
-    return deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
+    return deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
   }
   spendingDerivationPath(index) { return spendingDerivationPath(index); }
 
@@ -1092,10 +1186,10 @@ export class KaspaEngine {
 
   // Send from a spending address, signing with its derived key.
   // `manualUtxos` / `extraFeeSompi`: coin control and a priority fee on top, as for send().
-  async sendFromSpending({ mnemonic, index, passphrase = "", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false }) {
+  async sendFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false }) {
     this.requireSdk();
     await this.connect();
-    const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
+    const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
     return sendKaspa({
       kaspa: this.kaspa,
       rpc: this.rpc,
@@ -1133,10 +1227,10 @@ export class KaspaEngine {
   }
 
   // Compound: sweep every UTXO at a spending address into one (self-send, no change).
-  async compoundSpending({ mnemonic, index, passphrase = "", totalFeeKas = null }) {
+  async compoundSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", totalFeeKas = null }) {
     this.requireSdk();
     await this.connect();
-    const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase);
+    const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
     return sweepAllToSelf({
       kaspa: this.kaspa,
       rpc: this.rpc,
@@ -1245,6 +1339,17 @@ export class KaspaEngine {
   async scanGroupControlByRecipient(cursor = null, limit = 50) {
     this.requireWallet();
     return queryGroupControlByRecipient({ indexerUrl: getEndpoint("kasiaIndexer"), recipient: this.address, cursor, limit });
+  }
+  // One page of the by-recipient stream after `cursor`: { rows, nextCursor, rawCount }. The group
+  // store owns the persisted cursor and the page budget (DSK-041, iOS catchUpGroupControlByRecipient).
+  async scanGroupControlByRecipientPage(cursor = null, limit = 50) {
+    this.requireWallet();
+    return queryGroupControlByRecipientPage({ indexerUrl: getEndpoint("kasiaIndexer"), recipient: this.address, cursor, limit });
+  }
+  // The indexer the group reads go to. A stored stream cursor is only meaningful to the indexer
+  // that issued it, so the group store keys its cursor by this too.
+  groupIndexerUrl() {
+    return String(getEndpoint("kasiaIndexer") || "");
   }
   async scanGroupControlBySender(sender, cursor = null, limit = 50) {
     return queryGroupControlBySender({ indexerUrl: getEndpoint("kasiaIndexer"), sender, cursor, limit });
@@ -1702,13 +1807,13 @@ export class KaspaEngine {
   // passphrase) makes a derived spending address the owner/funder/signer of
   // the commit/reveal pair — iOS's fromSpendingAddressIndex analog; omitted,
   // the chatting identity transfers its own domain.
-  async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", changeAddress = null, onStatus = () => {} }) {
+  async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", passphraseForm = "nfkd", changeAddress = null, onStatus = () => {} }) {
     this.requireWallet();
     await this.connect();
     let signer = null;
     if (spendingIndex != null) {
       if (!mnemonic) throw new Error("The account mnemonic is required to sign from a spending address.");
-      const spending = this.deriveSpendingWallet(mnemonic, spendingIndex, passphrase);
+      const spending = this.deriveSpendingWallet(mnemonic, spendingIndex, passphrase, { passphraseForm });
       signer = { privateKey: spending.privateKey, address: spending.address };
     }
     // `source` goes into the pending-transfer record so Finish transfer can derive the same key.
@@ -1732,7 +1837,7 @@ export class KaspaEngine {
 
   // Finish transfer / Retry reveal: re-derives the key the transfer was started with (the
   // record's `source`) and reveals the commit. A spending-address transfer needs the mnemonic.
-  async resumeKnsTransfer({ assetId, mnemonic = null, passphrase = "", onStatus = () => {} }) {
+  async resumeKnsTransfer({ assetId, mnemonic = null, passphrase = "", passphraseForm = "nfkd", onStatus = () => {} }) {
     this.requireWallet();
     await this.connect();
     const record = await knsGetPendingTransfer(assetId);
@@ -1740,7 +1845,7 @@ export class KaspaEngine {
     let signer = null;
     if (record.source?.kind === "spending" && record.source.index != null) {
       if (!mnemonic) throw new Error("The account mnemonic is required to sign from a spending address.");
-      const spending = this.deriveSpendingWallet(mnemonic, Number(record.source.index), passphrase);
+      const spending = this.deriveSpendingWallet(mnemonic, Number(record.source.index), passphrase, { passphraseForm });
       signer = { privateKey: spending.privateKey, address: spending.address };
     }
     return knsResumeTransfer({ engine: this, assetId, signer, onStatus, log: this.log });
@@ -1773,7 +1878,7 @@ export class KaspaEngine {
   }
 }
 
-export { normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
+export { normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES, PASSPHRASE_FORMS, normalizePassphraseForm, passphraseIsNfkd, seedPassphrase, passphraseFormForRecord } from "./wallet.js";
 export * from "./conversations.js";
 export * from "./sync.js";
 export * from "./kasia-protocol.js";

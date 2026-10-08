@@ -1,5 +1,6 @@
 // Web-app plumbing: the service worker, the phone viewport, and the "installed" state.
 // Loaded from index.html as its own module so it runs before the app has to care.
+import { shouldRegisterServiceWorker } from "./origin-migration.js";
 
 // The app is not always served from the root: the published site lives under /desktop/, so every
 // path the web-app plumbing uses is built on Vite's base rather than written as root-absolute.
@@ -8,7 +9,9 @@ function appBase() {
 }
 
 // ---- Service worker (offline shell + iOS notifications, see public/sw.js) -------------------
-if ("serviceWorker" in navigator) {
+// Not on the old kachat.app/desktop/ address: it only hands accounts over to desktop.kachat.app
+// now, and an installed copy must load that screen fresh, never a cached app (DSK-013).
+if ("serviceWorker" in navigator && shouldRegisterServiceWorker()) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register(`${appBase()}sw.js`, { scope: appBase() }).catch((error) => {
       console.warn("Service worker registration failed:", error);

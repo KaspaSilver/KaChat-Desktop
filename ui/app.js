@@ -1,11 +1,13 @@
+import { originMigrationGate } from "./origin-migration.js";
 import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
-import { addressFromPrivateKey } from "../engine/wallet.js";
+import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { sompiFromUserText, kasTextFromSompi, kasToSompi } from "../engine/amounts.js";
+import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi } from "../engine/amounts.js";
+import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
@@ -37,7 +39,6 @@ import {
 } from "./send-kaspa-components.js";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
-import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
 import {
@@ -78,7 +79,7 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
-import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH } from "./key-vault.js";
+import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
@@ -88,6 +89,11 @@ import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPo
 // - Refactors local chat state into Contacts + Conversations so future Kasia/Kaspa wiring
 //   can attach txid, DAA score, status, unread state, and conversation metadata cleanly.
 // - Messages still do not touch Kaspa/Kasia networking yet.
+
+// DSK-013: the move from kachat.app/desktop/ to desktop.kachat.app runs before anything below
+// touches storage. On the old address (and while the new one receives a hand-off) it takes over
+// the page and never resolves, so the app does not start underneath it (ui/origin-migration.js).
+await originMigrationGate();
 
 window.KaspaEngineClass = KaspaEngine;
 window.__kaspaEngineStep = "kachat-shell-step-71";
@@ -145,15 +151,56 @@ const STATE_BACKUP_KEY = "kachat-shell-state-backup-v1";
 const STATE_BACKUP_MIN_INTERVAL_MS = 60_000;
 let lastStateBackupWriteAt = 0;
 const ACCOUNT_DATA_PREFIX = "kachat-account-data-v1";
+// The Swap app was removed (iOS f94db5a). Its leftovers - the device-level API key override and,
+// per account, the terms consent and swap history - are swept at boot. Idempotent: once they are
+// gone this finds nothing, and it also clears them again if an old backup brings them back.
+(() => {
+  const SWAP_BASE_KEYS = ["kachat-swap-history-v1", "kachat-swap-disclaimer-agreed-v1", "kachat-changenow-api-key-v1"];
+  try {
+    const doomed = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i) || "";
+      if (SWAP_BASE_KEYS.some((base) => key === base || key.endsWith(`:${base}`))) doomed.push(key);
+    }
+    doomed.forEach((key) => localStorage.removeItem(key));
+  } catch { /* storage unavailable: nothing to sweep */ }
+})();
 const SESSION_LOGGED_OUT_KEY = "kachat-session-logged-out-v1";
-// Marks that an account is active for THIS browser session (sessionStorage:
-// survives reload, cleared when the tab/window closes). Lets "Keep me signed in"
-// off still allow a manual sign-in to survive its own reload, while a fresh
-// launch lands on the sign-in screen.
+// Marks that an account is active in THIS page. Memory only (DSK-023): browsers keep
+// sessionStorage on disk and give it back on "Reopen closed tab", session restore and Duplicate
+// tab, so a flag there would sign those in with "Keep me signed in" off. KaChat's own reloads
+// (reloadKaChat: sign-in, account and network switch) hand it to the next page load as a
+// one-time { active, expiresAt } entry that is taken once and refused after 15 s. A manual
+// refresh, or a fresh launch, with "Keep me signed in" off lands on the sign-in screen.
 const SESSION_ACTIVE_KEY = "kachat-session-active-v1";
-function markSessionActive() { try { sessionStorage.setItem(SESSION_ACTIVE_KEY, "1"); } catch {} }
-function clearSessionActive() { try { sessionStorage.removeItem(SESSION_ACTIVE_KEY); } catch {} }
-function isSessionActive() { try { return sessionStorage.getItem(SESSION_ACTIVE_KEY) === "1"; } catch { return false; } }
+let sessionActive = takeSessionActiveHandoff();
+function takeSessionActiveHandoff() {
+  let raw = null;
+  try { raw = sessionStorage.getItem(SESSION_ACTIVE_KEY); sessionStorage.removeItem(SESSION_ACTIVE_KEY); } catch { return false; }
+  try {
+    const handoff = JSON.parse(raw || "null");
+    const left = Number(handoff?.expiresAt) - Date.now();
+    return handoff?.active === true && Number.isFinite(left) && left >= 0 && left <= VAULT_HANDOFF_TTL_MS;
+  } catch { return false; }
+}
+function markSessionActive() { sessionActive = true; }
+function clearSessionActive() { sessionActive = false; try { sessionStorage.removeItem(SESSION_ACTIVE_KEY); } catch {} }
+function isSessionActive() { return sessionActive; }
+/** Every reload KaChat itself starts goes through here: the unlocked vault and the signed-in
+ *  session are handed to the next page load once, for 15 s (DSK-023), so these reloads don't ask
+ *  for the password again. Nothing else leaves them in browser storage. */
+function reloadKaChat() {
+  writeKeyVaultHandoff();
+  if (sessionActive) {
+    const value = JSON.stringify({ active: true, expiresAt: Date.now() + VAULT_HANDOFF_TTL_MS });
+    try {
+      sessionStorage.setItem(SESSION_ACTIVE_KEY, value);
+      // Gone again should the reload not happen (e.g. a "Leave site?" prompt was cancelled).
+      setTimeout(() => { try { if (sessionStorage.getItem(SESSION_ACTIVE_KEY) === value) sessionStorage.removeItem(SESSION_ACTIVE_KEY); } catch {} }, VAULT_HANDOFF_TTL_MS);
+    } catch {}
+  }
+  location.reload();
+}
 
 // Per-contact preferences (Chat Info): incoming-notification and photo-display
 // overrides, keyed by contact address. { [address]: { notify, photos } }.
@@ -483,12 +530,60 @@ function persistAccountShellPreferences() {
 
 // --- App password (replaces the mockup "biometrics" toggles). With a password set, every saved
 // account's private key, recovery phrase and passphrase is encrypted at rest (ui/key-vault.js:
-// PBKDF2-SHA256 600k wraps a random AES-256-GCM data key) and KaChat opens locked in each new
-// tab until the password is entered (DSK-006/007). Without one, keys stay unencrypted in this
-// browser, and Settings says so. The password also gates revealing the seed phrase / private key
-// and signing in, when the matching toggle is on. Wrong answers back off like Simple Mode's. ---
+// PBKDF2-SHA256 600k wraps a random AES-256-GCM data key) and KaChat opens locked until the
+// password is entered (DSK-006/007): in each new tab, after closing and reopening a tab, and after
+// a manual refresh, since the data key lives only in this page's memory (DSK-023). Without one,
+// keys stay unencrypted in this browser, and Settings says so. The password also gates revealing
+// the seed phrase / private key and signing in, when the matching toggle is on. Wrong answers back
+// off like Simple Mode's. ---
 configureKeyVault({ canonicalize: canonicalAccountAddress });
-unlockKeyVaultFromSession(); // a reload in a tab that already unlocked: no second prompt
+unlockKeyVaultFromSession(); // only after KaChat's own reload (reloadKaChat's 15 s one-time hand-off)
+// A password change (or removal, or a first password) in another tab replaces the data key this
+// tab holds: lock at once and ask for the password over the current screen (DSK-022). The vault
+// also locks by itself, and tells us, when a read or write finds the key stale first.
+let lockedByAnotherTabPromptOpen = false;
+async function handleLockedByAnotherTab() {
+  refreshPasswordStatus();
+  if (!isAppLocked()) return; // no password left to enter (it was removed there)
+  if (!engine.privateKeyHex) { renderSavedAccountsScreen(); return; } // signed out: the sign-in screen is the lock
+  if (lockedByAnotherTabPromptOpen) return;
+  lockedByAnotherTabPromptOpen = true;
+  try {
+    const ok = await unlockAppWithPassword(LOCKED_IN_ANOTHER_TAB_MESSAGE, { allowForgot: false });
+    if (ok) { showCopyToast("Unlocked."); return; }
+    if (isAppLocked() && engine.privateKeyHex) await signOutLockedTab();
+  } finally {
+    lockedByAnotherTabPromptOpen = false;
+  }
+}
+/** Cancelled unlock after another tab locked this one: back to the sign-in screen (the lock),
+ *  without saving the account (its keys are sealed under a key this tab no longer has) and without
+ *  marking every tab logged out. */
+async function signOutLockedTab() {
+  try {
+    persistState();
+    clearSessionActive();
+    await engine.disconnect?.();
+    engine.clearSession();
+    setActiveConversationId(null);
+    state = { contacts: [], conversations: [] };
+    currentBalanceKas = "--";
+    updateWalletUi();
+    updateServiceSummary();
+    renderChats();
+    showLoggedOutScreen();
+  } catch (error) {
+    appendEngineLog(`Lock failed: ${error.message}`);
+  }
+}
+onKeyVaultLockedByAnotherTab(() => { handleLockedByAnotherTab(); });
+window.addEventListener("storage", (event) => {
+  if (event.storageArea && event.storageArea !== localStorage) return;
+  if (event.key !== null && event.key !== APP_PASSWORD_KEY && event.key !== APP_PASSWORD_PENDING_KEY) return;
+  const wasUnlocked = keyVaultStorageChanged(event.key);
+  if (wasUnlocked && !hasAppPassword()) showCopyToast("The app password was removed in another tab.");
+  handleLockedByAnotherTab();
+});
 function hasAppPassword() { return vaultHasAppPassword(); }
 async function setAppPassword(password) { await vaultSetAppPassword(password); }
 async function verifyAppPassword(password) { return unlockKeyVault(password); }
@@ -572,7 +667,7 @@ document.querySelector("[data-password-forgot]")?.addEventListener("click", asyn
   closePasswordModal(false);
   const confirmed = await confirmDialog({
     title: "Forgot your password?",
-    message: "Your saved accounts' keys on this device are encrypted with your password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys of every saved account from this browser. Your chats and settings stay. Afterwards, import each account again with its recovery phrase. Without the recovery phrase, an account cannot be restored.",
+    message: "Your saved accounts' keys on this device are encrypted with your password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys of every saved account from this browser, along with the encrypted Nextcloud app password (connect Nextcloud again afterwards). Your chats and settings stay. Afterwards, import each account again with its recovery phrase. Without the recovery phrase, an account cannot be restored.",
     confirmLabel: "Reset Password",
     destructive: true,
   });
@@ -608,7 +703,7 @@ function refreshPasswordStatus() {
   const keepNote = document.querySelector("[data-keep-signed-in-note]");
   if (keepNote) {
     keepNote.textContent = hasPassword
-      ? "Restore the active account when KaChat opens, after you enter your password."
+      ? "Restore the active account when KaChat opens, after you enter your password. Closing the tab locks KaChat, and a manual refresh asks for the password again."
       : "Restore the active account when KaChat opens.";
   }
   for (const [selector, key] of [["[data-pref-password-seed]", "passwordForSeed"], ["[data-pref-password-login]", "passwordForLogin"], ["[data-pref-password-spending-key]", "passwordForSpendingKey"]]) {
@@ -641,7 +736,7 @@ initSecurityToggle(document.querySelector("[data-pref-password-spending-key]"), 
 refreshPasswordStatus();
 document.querySelector("[data-change-password]")?.addEventListener("click", async () => {
   if (!hasAppPassword()) {
-    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Your saved accounts' keys will be encrypted with it. If you forget it, you'll need your recovery phrase.` })) {
+    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Your saved accounts' keys will be encrypted with it, and KaChat will ask for it each time it opens, including after you close the tab or refresh the page. If you forget it, you'll need your recovery phrase.` })) {
       showCopyToast("Password set. Your keys are now encrypted.");
       refreshPasswordStatus();
     }
@@ -665,7 +760,7 @@ document.querySelector("[data-change-password]")?.addEventListener("click", asyn
     if (!(await requestPassword({ mode: "verify", title: "Remove Password", message: "Enter your current password." }))) return;
     const confirmed = await confirmDialog({
       title: "Remove password?",
-      message: "Your recovery phrases, passphrases and private keys will be stored UNENCRYPTED in this browser. Anyone who can read this browser's data, or a malicious script or extension, could take them and your funds. KaChat will no longer ask for a password.",
+      message: "Your recovery phrases, passphrases and private keys, and your Nextcloud app password, will be stored UNENCRYPTED in this browser. Anyone who can read this browser's data, or a malicious script or extension, could take them and your funds. KaChat will no longer ask for a password.",
       confirmLabel: "Remove Password",
       destructive: true,
     });
@@ -720,6 +815,23 @@ function loadSavedAccounts() {
     // Stored under the mainnet encoding; in memory every address is the running network's.
     if (Array.isArray(parsed)) accounts = parsed.map((entry) => (entry?.address ? { ...entry, address: toActiveNetworkAddress(entry.address) } : entry));
   } catch {}
+
+  // EXT-010 one-time migration: an account saved before the BIP39 NFKD fix with a passphrase that
+  // NFKD changes was derived from the raw (as-typed) bytes. Flag it "raw" so it keeps deriving
+  // exactly as before. The flag is a public field, but the passphrase is only readable unlocked,
+  // so a `locked` entry is flagged on the first read after unlock; until then (or if this write
+  // fails) passphraseFormForRecord gives the same answer from the passphrase itself.
+  try {
+    let flagged = false;
+    accounts = accounts.map((entry) => {
+      if (!entry || typeof entry !== "object" || entry.locked || entry.passphraseForm || passphraseIsNfkd(entry.passphrase)) return entry;
+      flagged = true;
+      return { ...entry, passphraseForm: "raw" };
+    });
+    if (flagged) persistSavedAccounts(accounts);
+  } catch (error) {
+    appendEngineLog?.(`Saved-account passphrase migration failed: ${error.message}`);
+  }
 
   // Migrate the pre-Step-70 single saved wallet into the account registry. Compared as one key on
   // either network (DSK-009): a record written on the other network is not a new account.
@@ -792,13 +904,23 @@ function writeActiveAccountAddress(address) {
   if (clean) localStorage.setItem(ACTIVE_ACCOUNT_KEY, canonicalAccountAddress(clean));
 }
 
-function upsertSavedAccount({ address, privateKeyHex, mnemonic = "", passphrase = "", derivationPath = "", wordCount = 0, sourceFamily = "", chattingIndex = null, name, createdAt, savedAt = new Date().toISOString() }) {
+function upsertSavedAccount({ address, privateKeyHex, mnemonic = "", passphrase = "", passphraseForm = "", derivationPath = "", wordCount = 0, sourceFamily = "", chattingIndex = null, name, createdAt, savedAt = new Date().toISOString() }) {
   const cleanAddress = String(address || "").trim();
   const cleanKey = String(privateKeyHex || "").trim();
   if (!cleanAddress || !cleanKey) throw new Error("Account address or private key is missing.");
   const accounts = loadSavedAccounts();
   const index = accounts.findIndex((entry) => entry.address === cleanAddress);
   const existing = index >= 0 ? accounts[index] : null;
+  // An entry whose secrets could not be read (vault locked, or sealed under another key) is never
+  // replaced: its recovery phrase and passphrase would be lost to blanks (DSK-022).
+  if (existing?.locked) throw new Error("This account's saved keys couldn't be read, so they were left unchanged.");
+  // EXT-010: the caller's form, else the saved record's flag, else what the passphrase says (a
+  // non-NFKD one can only be a pre-EXT-010 "raw" account). "nfkd" accounts store the passphrase
+  // in NFKD, so the record reads back as "nfkd" even without its flag; "raw" ones keep it as typed.
+  const storedPassphrase = String(passphrase || existing?.passphrase || "");
+  const cleanPassphraseForm = passphraseForm
+    ? normalizePassphraseForm(passphraseForm)
+    : (existing?.passphraseForm ? passphraseFormForRecord(existing) : passphraseFormForRecord({ passphrase: storedPassphrase }));
   const record = {
     version: 1,
     address: cleanAddress,
@@ -807,7 +929,10 @@ function upsertSavedAccount({ address, privateKeyHex, mnemonic = "", passphrase 
     // BIP39 passphrase ("25th word"). Needed to re-derive spending addresses that
     // match iOS/Android. Persisted alongside the (already-plaintext) mnemonic; iOS
     // stores both together too (Secure-Enclave-wrapped). "" means no passphrase.
-    passphrase: String(passphrase || existing?.passphrase || ""),
+    passphrase: cleanPassphraseForm === "raw" ? storedPassphrase : storedPassphrase.normalize("NFKD"),
+    // "raw" = derive from the passphrase as stored (pre-EXT-010); "nfkd" = BIP39. Public field (the
+    // key vault seals only privateKeyHex / mnemonic / passphrase), so it is readable while locked.
+    passphraseForm: cleanPassphraseForm,
     derivationPath: String(derivationPath || existing?.derivationPath || ""),
     wordCount: Number(wordCount || existing?.wordCount || 0),
     // Identity derivation family (import source-wallet chooser) + the chosen
@@ -849,6 +974,7 @@ function activateSavedAccount(address) {
     privateKeyHex: account.privateKeyHex,
     mnemonic: String(account.mnemonic || ""),
     passphrase: String(account.passphrase || ""),
+    passphraseForm: passphraseFormForRecord(account),
     derivationPath: String(account.derivationPath || ""),
     wordCount: Number(account.wordCount || 0),
     sourceFamily: String(account.sourceFamily || "kaspaStandard"),
@@ -890,13 +1016,13 @@ function fileStoredWalletBeforeReplacing(newAddress, newPrivateKeyHex, { legacy 
 }
 
 /** The lock: asks for the app password and opens the key vault. True once unlocked. */
-async function unlockAppWithPassword(message) {
+async function unlockAppWithPassword(message, { allowForgot = true } = {}) {
   if (!isAppLocked()) return true;
   const ok = await requestPassword({
     mode: "verify",
     title: "Unlock KaChat",
     message: message || "Your saved accounts are encrypted on this device. Enter your password to unlock them.",
-    allowForgot: true,
+    allowForgot,
   });
   if (ok) refreshPasswordStatus();
   return ok && !isAppLocked();
@@ -913,7 +1039,7 @@ async function promptUnlockAtLaunch() {
   if (!(await unlockAppWithPassword())) return;
   try {
     activateSavedAccount(account.address);
-    location.reload();
+    reloadKaChat();
   } catch (error) {
     showCopyToast(userFacingError(error));
   }
@@ -954,7 +1080,7 @@ function renderSavedAccountsScreen() {
           if (!ok) return;
         }
         activateSavedAccount(account.address);
-        location.reload();
+        reloadKaChat();
       } catch (error) {
         showCopyToast(userFacingError(error));
       }
@@ -1126,7 +1252,7 @@ function removeAccountScopedLocalData(address) {
     const groupsAll = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
     for (const bucketKey of bucketKeys) for (const groupId of Object.keys(groupsAll?.[bucketKey] || {})) removedGroupIds.add(groupId);
   } catch { /* unreadable: no group ids to clear */ }
-  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
+  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
     try {
       const all = JSON.parse(localStorage.getItem(key) || "null");
       if (!all || typeof all !== "object") continue;
@@ -2604,13 +2730,13 @@ window.addEventListener("kachat:notification-click", (event) => {
 // in-app toast when browser notifications are unavailable/denied.
 function postDesktopNotification({ title, body, tag, onClick, route = null } = {}) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") {
-    showCopyToast(body ? `${title} — ${body}` : title);
+    showCopyToast(body ? `${title}: ${body}` : title);
     return;
   }
   showAppNotification({
     title, body, tag, route, onClick,
     silent: (accountShellPrefs.notificationSound ?? true) === false,
-  }).catch(() => showCopyToast(body ? `${title} — ${body}` : title));
+  }).catch(() => showCopyToast(body ? `${title}: ${body}` : title));
 }
 
 // Per-event-type gate for KaPosts notification pings (iOS
@@ -2942,7 +3068,7 @@ function getStoredTestingWalletHex() {
   return "";
 }
 
-function persistTestingWallet({ mnemonic = "", passphrase = "", derivationPath = "", wordCount = 0, sourceFamily = "", chattingIndex = null } = {}) {
+function persistTestingWallet({ mnemonic = "", passphrase = "", passphraseForm = "", derivationPath = "", wordCount = 0, sourceFamily = "", chattingIndex = null } = {}) {
   const privateKeyHex = String(engine.privateKeyHex || "").trim();
   if (!privateKeyHex) throw new Error("Wallet private key was unavailable for browser storage.");
   const address = String(engine.address || "").trim();
@@ -2954,11 +3080,29 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", derivationPath =
   }
   const meta = activeAccountMetadata();
   const existingAccount = loadSavedAccounts().find((entry) => entry.address === address);
+  // Create / import pass the new secrets; the background saves (tab hidden or closed, Log Out,
+  // restore) pass none and must never fail or overwrite anything when they cannot read (DSK-022).
+  const explicitSecrets = !!(mnemonic || passphrase);
+  const lockedMessage = "KaChat is locked. Enter your password before saving an account on this device.";
+  if (isAppLocked()) {
+    if (explicitSecrets) throw new Error(lockedMessage);
+    appendEngineLog(`Account not saved (KaChat is locked): ${address}`);
+    return false;
+  }
+  // Its saved entry could not be opened (sealed under a key this tab does not hold): replacing it
+  // would put a blank recovery phrase and passphrase over the real ones. Leave it as it is.
+  if (existingAccount?.locked) {
+    if (explicitSecrets) throw new Error("This account is already saved on this device, but its saved keys couldn't be read, so they were left unchanged.");
+    appendEngineLog(`Account not saved (its saved keys couldn't be read): ${address}`);
+    return false;
+  }
   const payload = {
     version: 3,
     privateKeyHex,
     mnemonic: String(mnemonic || existingAccount?.mnemonic || ""),
     passphrase: String(passphrase || existingAccount?.passphrase || ""),
+    // EXT-010: how the passphrase reaches the seed; "" = keep the saved record's (upsertSavedAccount).
+    passphraseForm: passphraseForm ? normalizePassphraseForm(passphraseForm) : (existingAccount ? passphraseFormForRecord(existingAccount) : ""),
     derivationPath: String(derivationPath || existingAccount?.derivationPath || ""),
     wordCount: Number(wordCount || existingAccount?.wordCount || 0),
     // Identity derivation family + chatting index (iOS WalletSourceFamily):
@@ -2971,17 +3115,18 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", derivationPath =
   };
   // With a password the registry entry below is sealed and this record keeps public fields only;
   // stored in the mainnet encoding like the registry (DSK-009).
-  if (isAppLocked()) throw new Error("KaChat is locked. Enter your password before saving an account on this device.");
   // The record and the pre-v2 key are about to be overwritten: whatever account they hold must be
   // safely in the registry first, or this stops here (IOS-016).
   fileStoredWalletBeforeReplacing(address, privateKeyHex);
   localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify(persistedWalletRecordForStorage({ ...payload, address: canonicalAccountAddress(address) })));
+  // Read and filed just above; a sealed copy this tab cannot open is never deleted (DSK-022).
   clearLegacyWalletKey();
   upsertSavedAccount({
     address,
     privateKeyHex,
     mnemonic: payload.mnemonic,
     passphrase: payload.passphrase,
+    passphraseForm: payload.passphraseForm,
     derivationPath: payload.derivationPath,
     wordCount: payload.wordCount,
     sourceFamily: payload.sourceFamily,
@@ -3968,12 +4113,12 @@ function persistState() {
       persistStateWrites({ includeBackup: false });
       if (!storageQuotaToastShown) {
         storageQuotaToastShown = true;
-        try { showCopyToast("Browser storage was full — trimmed the oldest phone-backup messages to keep saving."); } catch { /* early init */ }
+        try { showCopyToast("Browser storage was full. Trimmed the oldest phone-backup messages to keep saving."); } catch { /* early init */ }
       }
       return;
     } catch { /* still full — trim harder */ }
   }
-  throw new Error("Local storage is full — could not save conversation state.");
+  throw new Error("Local storage is full. Could not save conversation state.");
 }
 
 let chatStorageFlushErrorNotified = false;
@@ -3988,7 +4133,7 @@ function handleChatStorageFlushError(error) {
   appendEngineLog(`IndexedDB save failed (${userFacingError(error)}) — writing localStorage fallback copy.`);
   if (!chatStorageFlushErrorNotified) {
     chatStorageFlushErrorNotified = true;
-    try { showCopyToast("Saving chats to IndexedDB failed — using localStorage fallback."); } catch { /* early init */ }
+    try { showCopyToast("Saving chats to IndexedDB failed. Using localStorage fallback."); } catch { /* early init */ }
   }
   const writeLocal = (includeBackup) => {
     const serialized = JSON.stringify(state);
@@ -4015,7 +4160,6 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetColdStorageForAccount(); } catch { /* not yet initialized */ }
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
   try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
-  try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
   // The Address Book is per wallet: its screens go back to the list (the store reads the new
   // wallet's book on its next read).
   try { resetAddressBookForAccount(); } catch { /* not yet initialized */ }
@@ -5906,7 +6050,7 @@ document.querySelector("[data-node-apply]")?.addEventListener("click", async (ev
   }
 });
 
-// Step 102/104 — 5-tab bottom-center navigation. Cold Storage/Portfolio/Swaps
+// Step 102/104 — 5-tab bottom-center navigation. Cold Storage/Portfolio
 // are placeholder screens for now; Chats is the existing sidebar+detail view;
 // Profile is its own full-tab screen (mocked up to match iOS 3.0's design).
 const sidebarTabButtons = document.querySelectorAll("[data-app-tab]");
@@ -6256,6 +6400,13 @@ function activeAccountPassphrase() {
   return activeSavedAccountRecord()?.passphrase || "";
 }
 
+// How the active account's passphrase reaches the seed (audit EXT-010): "nfkd" (BIP39, every new
+// account) or "raw" (saved before EXT-010 with a passphrase NFKD changes; keeps its addresses).
+// Every derivation from activeAccountPassphrase() passes this along.
+function activeAccountPassphraseForm() {
+  return passphraseFormForRecord(activeSavedAccountRecord());
+}
+
 // Identity derivation family + chatting-chain index chosen at import (iOS
 // WalletManager.currentWalletSourceFamily / currentChattingAddressIndex).
 // Persisted on the saved-account record, so they survive reloads and are
@@ -6351,7 +6502,7 @@ function deriveSpendingAddressAt(index) {
   const cached = spendingAddressMemo.get(memoKey);
   if (cached) return cached;
   try {
-    const address = engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase()).address;
+    const address = engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() }).address;
     if (address) spendingAddressMemo.set(memoKey, address);
     return address;
   }
@@ -8592,6 +8743,7 @@ async function finishKnsTransfer() {
       assetId: record.assetId,
       mnemonic: fromSpending ? activeAccountMnemonic() : null,
       passphrase: fromSpending ? activeAccountPassphrase() : "",
+      passphraseForm: activeAccountPassphraseForm(),
       onStatus: showKnsTransferStatus,
     });
     knsTransferInFlight = false;
@@ -8618,7 +8770,7 @@ async function finishKnsTransfer() {
     closeKnsTransferModal();
     showCopyToast(result.verified
       ? `${record.domain} sent to ${shortAddress(result.recipientAddress)}.`
-      : `${record.domain} transfer finished — the indexer may take a moment to reflect it.`);
+      : `${record.domain} transfer finished. The indexer may take a moment to reflect it.`);
   } catch (error) {
     knsTransferInFlight = false;
     if (error?.pendingTransfer && knsTransferContext === context) setKnsTransferResumeMode(error.pendingTransfer);
@@ -8651,6 +8803,7 @@ async function submitKnsTransfer() {
       mnemonic: spendingIndex != null ? activeAccountMnemonic() : null,
       spendingIndex,
       passphrase: spendingIndex != null ? activeAccountPassphrase() : "",
+      passphraseForm: activeAccountPassphraseForm(),
       changeAddress: fresh?.address || null,
       onStatus: (patch) => {
         showKnsTransferStatus(patch);
@@ -8666,7 +8819,7 @@ async function submitKnsTransfer() {
     closeKnsTransferModal();
     showCopyToast(result.verified
       ? `${domain} sent to ${shortAddress(result.recipientAddress)}.`
-      : `${domain} transfer broadcast — the indexer may take a moment to reflect it.`);
+      : `${domain} transfer broadcast. The indexer may take a moment to reflect it.`);
   } catch (error) {
     knsTransferInFlight = false;
     // Once a commit is out (or one from an earlier attempt is unfinished), Send must not come
@@ -8746,7 +8899,7 @@ async function consolidateSpendingDetailUtxos() {
   let balance;
   try { balance = await engine.balanceForAddress(address); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
-  if (entries.length < 2) { showCopyToast("Nothing to consolidate — this address has a single UTXO."); return; }
+  if (entries.length < 2) { showCopyToast("Nothing to consolidate: this address has a single UTXO."); return; }
   if (!(BigInt(balance.totalSompi ?? 0) > 0n)) { showCopyToast("Balance too low to consolidate."); return; }
   if (!await confirmText(`Combine ${entries.length} UTXOs at this address into one? This sends the balance back to this same address and pays a small network fee.`)) return;
   spendingConsolidateInFlight = true;
@@ -8758,7 +8911,7 @@ async function consolidateSpendingDetailUtxos() {
     await engine.compoundSpending({
       mnemonic: activeAccountMnemonic(),
       index,
-      passphrase: activeAccountPassphrase(),
+      passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
     });
     showCopyToast("UTXOs consolidated.");
     if (spendingDetailAddress === address) loadSpendingDetailUtxos(address);
@@ -8877,8 +9030,7 @@ spendingGenerateBtn?.addEventListener("click", async () => {
   await revealNextSpendingAddress();
 });
 // Reveals the next never-used spending address and returns its index (iOS
-// WalletManager.generateNextSpendingAddress). Shared by Manage Addresses' Generate and the
-// swap payout picker's Generate New Address.
+// WalletManager.generateNextSpendingAddress). Used by Manage Addresses' Generate.
 async function revealNextSpendingAddress({ toast = true } = {}) {
   if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
   if (spendingGenerateBusy) return null;
@@ -8982,7 +9134,7 @@ spendingConsolidateBtn?.addEventListener("click", async () => {
         await engine.sendMaxFromSpending({
           mnemonic: activeAccountMnemonic(),
           index: src.index,
-          passphrase: activeAccountPassphrase(),
+          passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
           destinationAddress: primaryAddress,
         });
         sent += 1;
@@ -9147,7 +9299,7 @@ const spendingSendController = makeSendController({
     const result = await engine.sendFromSpending({
       mnemonic: activeAccountMnemonic(),
       index: spendingSendIndex,
-      passphrase: activeAccountPassphrase(),
+      passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
       destinationAddress: destination,
       amountKas,
       feeKas,
@@ -9204,6 +9356,8 @@ function setActiveAppTab(tab) {
   // Child Mode choke point: every tab switch (dock click, restore, deep link,
   // programmatic) funnels through here, so gated tabs simply become Chats.
   if (isChildModeEnabled() && CHILD_HIDDEN_TABS.includes(tab)) tab = "chats";
+  // Swap was removed: an old notification route or deep link naming it lands on Chats.
+  if (tab === "swaps") tab = "chats";
   // A tab that lives in the Hub is REACHED through the Hub, so asking for it directly - a deep
   // link, a notification tap, the restored spot - opens it there rather than failing.
   if (tab !== "hub" && !dockPrefs.dock.includes(tab) && dockPrefs.hub.includes(tab)) {
@@ -9270,7 +9424,6 @@ function setActiveAppTab(tab) {
   else { stopBroadcastPolling(); syncPublicChatsPane(); }
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
-  if (screenTab === "swaps") refreshSwaps();
   // Chess keeps the arena scanned only while its screen is up (iOS acquire/release).
   if (screenTab === "chess") showChessTournaments(); else hideChessTournaments();
   try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
@@ -9312,12 +9465,12 @@ const DOCK_PINNED = ["hub", "profile"];
 // .kachat and KaChat Stats (iOS 5.2) are Hub sections like the rest: first in the Hub on a fresh
 // install, appended for an existing arrangement (normalizeDockPrefs), assignable to the dock.
 // Address Book (iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book"]; // Public Chats live under Chats now (iOS a566da7)
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
-const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
+const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book"]; // Public Chats live under Chats now (iOS a566da7)
+const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kaposts", "apps", "chess"];
+const DOCK_DEFAULT =["cold-storage", "portfolio", "chats", "hub", "profile"];
+const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kaposts", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -9747,7 +9900,7 @@ async function freshReceiveAddress() {
 async function openReceiveKaspaScreen(button = null) {
   if (!engine.address || openReceiveKaspaScreen.busy) return;
   if (!activeAccountMnemonic()) {
-    showCopyToast("Spending address is unlocking — go back and try again.");
+    showCopyToast("Spending address is unlocking. Go back and try again.");
     return;
   }
   openReceiveKaspaScreen.busy = true;
@@ -9757,7 +9910,7 @@ async function openReceiveKaspaScreen(button = null) {
   if (label) label.textContent = "Preparing a fresh address";
   try {
     const address = await freshReceiveAddress();
-    if (!address) { showCopyToast("Spending address is unlocking — go back and try again."); return; }
+    if (!address) { showCopyToast("Spending address is unlocking. Go back and try again."); return; }
     let balanceText = `0 ${KAS_UNIT}`;
     try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} ${KAS_UNIT}`; } catch {}
     openChattingAddressScreen({ address, balanceText, subtitle: RECEIVE_SUBTITLE });
@@ -9995,7 +10148,7 @@ function renderDomainDetail(domain) {
     <div class="domains-back-row"><button type="button" data-domain-detail-back>‹ Your Domains</button></div>
     ${knsDomainCardHtml(domain, { clickable: false })}
     <div class="profile-domain-detail-rows">
-      <div class="profile-domain-detail-row"><span>Asset ID</span><span class="kns-asset-id" title="${escapeHtml(assetId)}">${escapeHtml(assetId || "—")}</span></div>
+      <div class="profile-domain-detail-row"><span>Asset ID</span><span class="kns-asset-id" title="${escapeHtml(assetId)}">${escapeHtml(assetId || "--")}</span></div>
       ${assetId ? `<button type="button" class="profile-domain-detail-row actionable" data-domain-customize="${escapeHtml(assetId)}"><span>Customize Profile</span><span class="star">◉</span></button>` : ""}
       ${isPrimary
         ? `<div class="profile-domain-detail-row"><span>Primary Domain</span><span class="star">★</span></div>`
@@ -10133,7 +10286,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 115;
+const APP_BUILD = 116;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10465,9 +10618,13 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
       if (els.progress) els.progress.hidden = true;
+      // The amount that actually went out (audit DSK-043): a Max send reports it, and so does a
+      // self-send the engine reduced to fit the fee; otherwise it is exactly the field's amount.
+      const sentSompi = result?.amountSompi ?? (result?.result?.summary?.reduced ? result.result.summary.amountSompi : null);
+      const sentKas = sentSompi != null ? kasTextFromSompi(sentSompi) : amountKas;
       // Keep the modal open and flip to the success card (checkmark + clickable txid).
-      showSendSuccess(txid, amountKas);
-      try { onSent?.({ txid, destination, amountKas }); } catch { /* chat bookkeeping must never break the send UI */ }
+      showSendSuccess(txid, sentKas);
+      try { onSent?.({ txid, destination, amountKas: sentKas }); } catch { /* chat bookkeeping must never break the send UI */ }
       refreshBalanceOnly({ quiet: true }).catch(() => {});
     } catch (error) {
       // WASM helpers sometimes throw plain strings — surface those too, never a bare
@@ -10528,6 +10685,10 @@ let sendKaspaAvailableKas = null; // available balance for the Max button
 // True while the amount field holds an untouched Max fill — the send then goes through the
 // exact-fee single-output max path instead of the normal amount+change build.
 let sendKaspaMaxMode = false;
+// What a Max fill was computed from (audit DSK-043): { source, selectionKey, totalFeeKas,
+// amountSompi, outpoints }. The send pays exactly amountSompi from exactly those coins, or refuses.
+let sendKaspaMaxPin = null;
+let sendKaspaMaxToken = 0;
 let sendKaspaFeeTier = "normal";
 let sendKaspaUtxos = [];           // UTXO entries at the source address, for coin control
 const sendKaspaSelected = new Set();
@@ -10567,7 +10728,7 @@ function sendKaspaResolveAmountKas() {
   const raw = Number(sendKaspaAmountInput?.value);
   if (!isFinite(raw) || raw <= 0) return sendKaspaAmountInput?.value || "";
   if (sendKaspaUnit === "fiat") {
-    if (!sendKaspaPrice) throw new Error(`KAS price unavailable — switch back to ${KAS_UNIT} to send.`);
+    if (!sendKaspaPrice) throw new Error(`KAS price unavailable. Switch back to ${KAS_UNIT} to send.`);
     return trimKas8(raw / sendKaspaPrice);
   }
   return sendKaspaAmountInput?.value || "";
@@ -10607,7 +10768,13 @@ function applySendKaspaUnit() {
 sendKaspaUnitButton?.addEventListener("click", () => {
   if (!sendKaspaPrice) { showCopyToast("KAS price unavailable right now."); return; }
   const raw = Number(sendKaspaAmountInput?.value);
-  if (isFinite(raw) && raw > 0) {
+  const pinnedMax = sendKaspaMaxMode && !sendKaspaCompound ? sendKaspaMaxPin : null;
+  if (pinnedMax) {
+    // A pinned Max converts from its exact sompi, the currency side rounded down (DSK-042/043).
+    sendKaspaAmountInput.value = sendKaspaUnit === "kas"
+      ? fiatTextFloorFromSompi(pinnedMax.amountSompi, sendKaspaPrice, selectedCurrency === "btc" ? 8 : 2)
+      : kasTextFromSompi(pinnedMax.amountSompi);
+  } else if (isFinite(raw) && raw > 0) {
     sendKaspaAmountInput.value = sendKaspaUnit === "kas"
       ? (raw * sendKaspaPrice).toFixed(selectedCurrency === "btc" ? 8 : 2)
       : trimKas8(raw / sendKaspaPrice);
@@ -10670,7 +10837,14 @@ function selectSendKaspaFeeTier(tier) {
   sendKaspaFeeCtl.setEditing(false);
   applySendKaspaFeeField();
 }
-sendKaspaFeeButtons.forEach((button) => button.addEventListener("click", () => selectSendKaspaFeeTier(button.dataset.sendKaspaFee)));
+// Audit DSK-043: in Max mode a fee change re-runs Max at once, so the field always shows what goes out.
+function refillSendKaspaMaxIfActive() {
+  if (sendKaspaMaxMode) fillMaxAmount();
+}
+sendKaspaFeeButtons.forEach((button) => button.addEventListener("click", () => {
+  selectSendKaspaFeeTier(button.dataset.sendKaspaFee);
+  refillSendKaspaMaxIfActive();
+}));
 sendKaspaFeeCustom?.addEventListener("input", () => {
   sendKaspaFeeCustomOverride = true;
   sendKaspaFeeCtl.setTier(null);
@@ -10682,10 +10856,12 @@ function commitSendKaspaCustomFee() {
   const typed = sompiFromUserText(String(sendKaspaFeeCustom?.value || ""));
   if (!sendKaspaFeeCustomOverride || typed == null) {
     selectSendKaspaFeeTier(sendKaspaFeeTier);
+    refillSendKaspaMaxIfActive();
     return;
   }
   sendKaspaFeeCtl.setEditing(false);
   updateSendKaspaFeeSummary();
+  refillSendKaspaMaxIfActive();
 }
 sendKaspaModal?.querySelector("[data-send-kaspa-fee-edit]")?.addEventListener("click", () => {
   sendKaspaFeeCtl.setEditing(true, trimKas8(sendKaspaTotalFeeKas()));
@@ -10699,6 +10875,9 @@ sendKaspaFeeCustom?.addEventListener("keydown", (event) => {
 // would actually spend (matches iOS). Debounced, since it runs on every amount keystroke.
 let sendKaspaFeeEstimateTimer = null;
 async function estimateSendKaspaBaseFee() {
+  // A Max fill owns the fee it was computed with (audit DSK-043): an amount estimate landing
+  // afterwards must not move it, or the shown Max would no longer match the fee.
+  if (sendKaspaMaxMode) return;
   try {
     let amountKas = Number(sendKaspaResolveAmountKas());
     if (!isFinite(amountKas) || amountKas <= 0) amountKas = 0.2;
@@ -10708,6 +10887,7 @@ async function estimateSendKaspaBaseFee() {
     }
     const selection = sendKaspaGetSelection();
     const detail = await sendKaspaEstimateFee(String(amountKas), selection.length ? selection : null);
+    if (sendKaspaMaxMode) return; // Max was filled while this estimate ran
     const policy = Number(detail?.policyFeeKas);
     if (isFinite(policy) && policy > 0) {
       sendKaspaBaseFeeKas = policy;
@@ -10757,7 +10937,9 @@ function renderSendKaspaCoinControl() {
     checkbox.className = "manage-send-coin-check";
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) sendKaspaSelected.add(outpointKey); else sendKaspaSelected.delete(outpointKey);
-      sendKaspaMaxMode = false; // a changed input set invalidates a filled Max — re-click Max
+      // A changed input set re-runs a filled Max for the new coins (audit DSK-043); the stale
+      // amount can't be sent meanwhile, since its pin names the old selection.
+      refillSendKaspaMaxIfActive();
       updateSendKaspaCoinSummary();
       scheduleSendKaspaFeeEstimate();
     });
@@ -10803,12 +10985,16 @@ function sendKaspaSpendableKas() {
 // subset) - not the 1-input base fee. Estimating against those exact outpoints makes the mass (and
 // thus the policy fee = mass * 100/gram) reflect the real input count, matching iOS. Then
 // amount = spendable - fee, so amount + fee = balance and the send doesn't fail on "insufficient".
+// Send (not Compound) then asks the engine for the exact amount (estimateMaxSend: the coins at the
+// address now, reserved ones left out, the same fee the send pays) and pins it (audit DSK-043).
 async function fillMaxAmount() {
+  const token = ++sendKaspaMaxToken;
+  const source = sendKaspaSourceIndex;
   if (sendKaspaAvailableKas == null) {
     try {
-      const b = await sendKaspaLoadBalance();
+      const b = sendKaspaUnreservedBalance(await sendKaspaLoadBalance());
       sendKaspaAvailableKas = Number(b.totalKas);
-      if (!sendKaspaUtxos.length) { sendKaspaUtxos = b.entries || []; renderSendKaspaCoinControl(); }
+      if (!sendKaspaUtxos.length) { sendKaspaUtxos = b.entries; renderSendKaspaCoinControl(); }
     } catch { /* handled below */ }
   }
   const spendable = sendKaspaSpendableKas();
@@ -10831,27 +11017,110 @@ async function fillMaxAmount() {
       // The SDK's own automatic base fee is ~1 sompi/gram of the same mass; the send path
       // passes total - sdkBase as the priority tip, so this keeps paid == displayed.
       sendKaspaSdkBaseKas = Number(mass) / 1e8;
-      sendKaspaFeeCustomOverride = false;
+      // A custom fee stays (a fee change in Max mode re-runs Max with it, DSK-043).
       applySendKaspaFeeField();
     }
   } catch { /* keep whatever base fee we have */ }
+  if (token !== sendKaspaMaxToken || source !== sendKaspaSourceIndex) return; // superseded
 
-  const totalFeeKas = sendKaspaTotalFeeKas();
-  // Exact, no slack: the max send path spends (balance - fee) precisely so the generator
-  // emits a single output. Leaving even a sompi-sized remainder used to create a dust
-  // change output that Kaspa's KIP-9 storage-mass rule rejected — "Send failed." every time.
-  const maxKas = spendable - totalFeeKas;
-  if (!(maxKas > 0)) { showCopyToast("Balance too low after network fees."); return; }
+  const fiatDecimals = selectedCurrency === "btc" ? 8 : 2;
+  if (sendKaspaCompound) {
+    // Compound shows what the sweep will leave; the sweep itself (sweepAllToSelf) pays the fee.
+    const maxKas = spendable - sendKaspaTotalFeeKas();
+    if (!(maxKas > 0)) { showCopyToast("Balance too low after network fees."); return; }
+    const maxSompi = kasToSompi(trimKas8(maxKas)) ?? 0n;
+    sendKaspaAmountInput.value = (sendKaspaUnit === "fiat" && sendKaspaPrice)
+      ? fiatTextFloorFromSompi(maxSompi, sendKaspaPrice, fiatDecimals)
+      : kasTextFromSompi(maxSompi);
+    updateSendKaspaFiatHint();
+    sendKaspaAmountInput.dispatchEvent(new Event("input"));
+    sendKaspaMaxMode = true;
+    return;
+  }
+
+  // Exact, no slack: the max send spends (coins - fee) as ONE output, so no change can exist
+  // (a sompi-sized remainder used to become a dust change output that KIP-9 rejected).
+  const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
+  const selectedOutpoints = sendKaspaGetSelection();
+  let plan;
+  try {
+    plan = await engine.estimateMaxSend({
+      sourceAddress: sendKaspaSourceAddress(),
+      destinationAddress: sendKaspaMaxDestination(),
+      totalFeeKas,
+      selectedOutpoints: selectedOutpoints.length ? selectedOutpoints : null,
+    });
+  } catch (error) {
+    if (token === sendKaspaMaxToken) showCopyToast(userFacingError(error) || "Balance too low after network fees.");
+    return;
+  }
+  if (token !== sendKaspaMaxToken || source !== sendKaspaSourceIndex) return; // superseded
+  // Available follows the coins Max was just computed from (reserved ones left out).
+  sendKaspaAvailableKas = Number(plan.availableSompi) / 1e8;
+  renderSendKaspaSourcePill(kasTextFromSompi(plan.availableSompi));
+  // A currency amount is rounded DOWN (DSK-042); the send pays the pinned sompi either way.
   sendKaspaAmountInput.value = (sendKaspaUnit === "fiat" && sendKaspaPrice)
-    ? (maxKas * sendKaspaPrice).toFixed(selectedCurrency === "btc" ? 8 : 2)
-    : trimKas8(maxKas);
+    ? fiatTextFloorFromSompi(plan.amountSompi, sendKaspaPrice, fiatDecimals)
+    : kasTextFromSompi(plan.amountSompi);
   updateSendKaspaFiatHint();
-  // Re-run send validity (enables Send). The re-estimate this triggers uses the same near-full
-  // amount, so it lands on the same all-input fee and doesn't disturb the reserved Max.
+  // Re-run send validity (enables Send). The fee estimate it schedules stands down in Max mode.
   sendKaspaAmountInput.dispatchEvent(new Event("input"));
   // Route the actual send through the exact-fee max path (set AFTER the dispatch above —
   // the amount listener clears this flag on every USER edit).
   sendKaspaMaxMode = true;
+  sendKaspaMaxPin = {
+    source,
+    selectionKey: sendKaspaSelectionKey(selectedOutpoints),
+    totalFeeKas,
+    amountSompi: plan.amountSompi,
+    outpoints: plan.outpoints,
+  };
+}
+// The coin-control pick as one comparable string.
+function sendKaspaSelectionKey(selection) {
+  return [...(selection || [])].map(String).sort().join(",");
+}
+// The address Max is priced for: the typed recipient when it is an address, else the source
+// (only the output script's size matters, and only when a custom fee is under the network floor).
+function sendKaspaMaxDestination() {
+  const raw = String(document.querySelector("[data-send-kaspa-recipient]")?.value || "").trim();
+  if (/^kaspa(test)?:/.test(raw)) {
+    try { validateContactAddress(raw); return raw; } catch { /* not an address yet */ }
+  }
+  return sendKaspaSourceAddress();
+}
+// Available and Max leave out coins a scheduled KaPost has reserved, as the send does (DSK-043).
+function sendKaspaUnreservedBalance(balance) {
+  const entries = excludeReservedUtxos(balance?.entries || []);
+  let sompi = 0n;
+  for (const entry of entries) {
+    try { sompi += BigInt(entry.amount || 0); } catch { /* an unreadable coin counts as nothing */ }
+  }
+  return { entries, totalSompi: sompi, totalKas: kasTextFromSompi(sompi) };
+}
+// The Max slide (DSK-043): exactly the pinned amount from exactly the pinned coins. A changed fee
+// or coin choice, or coins that changed at the address (the engine checks), re-runs Max and
+// refuses this slide; nothing different is ever sent silently.
+async function sendKaspaPinnedMax(destination, selectedOutpoints) {
+  const pin = sendKaspaMaxPin;
+  const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
+  if (!pin || pin.source !== sendKaspaSourceIndex || pin.totalFeeKas !== totalFeeKas || pin.selectionKey !== sendKaspaSelectionKey(selectedOutpoints)) {
+    await fillMaxAmount();
+    throw new Error(MAX_AMOUNT_CHANGED_MESSAGE);
+  }
+  const pinned = { expectedAmountSompi: pin.amountSompi, expectedOutpoints: pin.outpoints };
+  const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null;
+  try {
+    return sendKaspaSourceIndex == null
+      ? await engine.sendMax(destination, totalFeeKas, outpoints, pinned)
+      : await engine.sendMaxFromSpending({
+        mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
+        destinationAddress: destination, totalFeeKas, selectedOutpoints: outpoints, ...pinned,
+      });
+  } catch (error) {
+    if (error?.code === MAX_AMOUNT_CHANGED) await fillMaxAmount();
+    throw error;
+  }
 }
 sendKaspaMaxButton?.addEventListener("click", () => { fillMaxAmount(); });
 // Any USER edit of the amount leaves max mode (the programmatic fill from fillMaxAmount
@@ -10863,7 +11132,7 @@ sendKaspaPasteButton?.addEventListener("click", async () => {
     const text = await navigator.clipboard.readText();
     const recipient = document.querySelector("[data-send-kaspa-recipient]");
     if (recipient && text) { recipient.value = text.trim(); recipient.dispatchEvent(new Event("input")); }
-  } catch { showCopyToast("Clipboard unavailable — paste manually."); }
+  } catch { showCopyToast("Clipboard unavailable. Paste manually."); }
 });
 
 const sendKaspaScanButton = document.querySelector("[data-send-kaspa-scan]");
@@ -10892,6 +11161,8 @@ sendKaspaModal?.querySelector("[data-send-kaspa-address-book]")?.addEventListene
 function resetSendKaspaExtras() {
   sendKaspaUnit = "kas";
   sendKaspaMaxMode = false;
+  sendKaspaMaxPin = null;
+  sendKaspaMaxToken += 1; // a Max still computing for the previous screen must not land here
   applySendKaspaUnit();
   // Clear any stale "valid address" check from a previous open (e.g. a compound self-send) - the
   // recipient starts empty, so the check stays hidden until a valid address is entered.
@@ -10912,10 +11183,11 @@ function resetSendKaspaExtras() {
   renderSendKaspaSourcePill("…");
   fetchKasPrice(selectedCurrency).then((price) => { sendKaspaPrice = price; updateSendKaspaFiatHint(); }).catch(() => {});
   const source = sendKaspaSourceIndex;
-  sendKaspaLoadBalance().then((b) => {
+  sendKaspaLoadBalance().then((loaded) => {
     if (source !== sendKaspaSourceIndex) return; // another source was picked meanwhile
+    const b = sendKaspaUnreservedBalance(loaded); // reserved coins are neither Available nor Max (DSK-043)
     sendKaspaAvailableKas = Number(b.totalKas);
-    sendKaspaUtxos = b.entries || [];
+    sendKaspaUtxos = b.entries;
     renderSendKaspaCoinControl();
     renderSendKaspaSourcePill(b.totalKas);
     if (sendKaspaCompound) applySendKaspaCompoundPrefill();
@@ -11010,21 +11282,13 @@ const sendKaspaController = makeSendController({
       const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
       return sendKaspaSourceIndex == null
         ? engine.compoundUtxos({ totalFeeKas })
-        : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), totalFeeKas });
+        : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(), totalFeeKas });
     }
-    if (sendKaspaMaxMode) {
-      const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
-      return sendKaspaSourceIndex == null
-        ? engine.sendMax(destination, totalFeeKas, outpoints)
-        : engine.sendMaxFromSpending({
-          mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(),
-          destinationAddress: destination, totalFeeKas, selectedOutpoints: outpoints,
-        });
-    }
+    if (sendKaspaMaxMode) return sendKaspaPinnedMax(destination, selectedOutpoints);
     if (sendKaspaSourceIndex != null) {
       const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex);
       return engine.sendFromSpending({
-        mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(),
+        mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
@@ -11109,10 +11373,11 @@ function switchSendKaspaSource(index) {
   renderSendKaspaCoinControl();
   applySendKaspaCompoundUi();
   renderSendKaspaSourcePill("…");
-  sendKaspaLoadBalance().then((b) => {
+  sendKaspaLoadBalance().then((loaded) => {
     if (index !== sendKaspaSourceIndex) return;
+    const b = sendKaspaUnreservedBalance(loaded); // reserved coins are neither Available nor Max (DSK-043)
     sendKaspaAvailableKas = Number(b.totalKas);
-    sendKaspaUtxos = b.entries || [];
+    sendKaspaUtxos = b.entries;
     renderSendKaspaCoinControl();
     renderSendKaspaSourcePill(b.totalKas);
   }).catch(() => { if (index === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
@@ -11312,7 +11577,7 @@ async function consolidateManageAddressUtxos() {
   let balance;
   try { balance = await engine.balance(); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
-  if (entries.length < 2) { showCopyToast("Nothing to consolidate — this address has a single UTXO."); return; }
+  if (entries.length < 2) { showCopyToast("Nothing to consolidate: this address has a single UTXO."); return; }
   if (!(BigInt(balance.totalSompi ?? 0) > 0n)) { showCopyToast("Balance too low to consolidate."); return; }
   if (!await confirmText(`Combine ${entries.length} UTXOs at this address into one? This sends the balance back to this same address and pays a small network fee.`)) return;
   manageConsolidateInFlight = true;
@@ -11533,7 +11798,7 @@ function manageSendResolveAmountKas() {
   const raw = Number(manageSendAmountInput?.value);
   if (!isFinite(raw) || raw <= 0) return manageSendAmountInput?.value || "";
   if (manageSendUnit === "fiat") {
-    if (!manageSendPrice) throw new Error(`KAS price unavailable — switch back to ${KAS_UNIT} to send.`);
+    if (!manageSendPrice) throw new Error(`KAS price unavailable. Switch back to ${KAS_UNIT} to send.`);
     return trimKas8(raw / manageSendPrice);
   }
   return manageSendAmountInput?.value || "";
@@ -11848,10 +12113,10 @@ document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("c
     if (!ok) return;
   }
   try {
-    const spending = engine.deriveSpendingWallet(mnemonic, spendingDetailIndex, activeAccountPassphrase());
+    const spending = engine.deriveSpendingWallet(mnemonic, spendingDetailIndex, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() });
     const key = String(spending?.privateKeyHex || "").trim();
     if (!key) { showCopyToast("Could not derive this address's private key."); return; }
-    openPrivatekeyModal(key, `This is the private key for spending address #${spendingDetailIndex}. Anyone with it can spend from this address — never share it.`);
+    openPrivatekeyModal(key, `This is the private key for spending address #${spendingDetailIndex}. Anyone with it can spend from this address. Never share it.`);
   } catch (error) {
     showCopyToast(`Could not derive private key: ${userFacingError(error)}`);
   }
@@ -13285,7 +13550,7 @@ function openKnsEditor(target = null) {
   const nameEl = document.querySelector("[data-kns-editor-domain-name]");
   const assetEl = document.querySelector("[data-kns-editor-asset-id]");
   if (nameEl) nameEl.textContent = knsEditorTarget?.name || ownKnsPrimaryDomain || "KNS Profile";
-  if (assetEl) { assetEl.textContent = knsEditAssetId() || "—"; assetEl.title = knsEditAssetId() || ""; }
+  if (assetEl) { assetEl.textContent = knsEditAssetId() || "--"; assetEl.title = knsEditAssetId() || ""; }
   renderKnsEditorImages();
   knsEditorModal.hidden = false;
 }
@@ -13716,7 +13981,7 @@ function updateWalletUi() {
   const profileAccountNameText = document.querySelector("[data-profile-account-name-text]");
   if (profileAccountNameText) profileAccountNameText.textContent = accountName;
   if (profileSessionState) profileSessionState.textContent = "";
-  if (profileCreated) profileCreated.textContent = meta?.createdAt ? new Date(meta.createdAt).toLocaleString() : "—";
+  if (profileCreated) profileCreated.textContent = meta?.createdAt ? new Date(meta.createdAt).toLocaleString() : "--";
   if (settingsAccountName) settingsAccountName.textContent = accountName;
   if (settingsAccountAddress) settingsAccountAddress.textContent = address ? shortAddress(address) : "No wallet loaded";
   if (accountModalName) accountModalName.textContent = accountName;
@@ -15116,7 +15381,7 @@ function openChatInfoFor(contact, conversationEntry) {
   }
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
-  if (chatInfoAdded) chatInfoAdded.textContent = contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : "—";
+  if (chatInfoAdded) chatInfoAdded.textContent = contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : "--";
 
   // There is no conversation at all when this is User Info for someone never messaged.
   const messages = conversationEntry?.messages || [];
@@ -15129,7 +15394,7 @@ function openChatInfoFor(contact, conversationEntry) {
   if (chatInfoLastMessage) {
     // Under a day reads as a relative time; past that iOS counts whole days, which stays
     // legible where a bare date does not tell you how long it has been.
-    if (!last) chatInfoLastMessage.textContent = "—";
+    if (!last) chatInfoLastMessage.textContent = "--";
     else {
       const elapsed = Date.now() - Number(last.createdAt || 0);
       if (elapsed < 86_400_000) chatInfoLastMessage.textContent = formatRelativeTime(last.createdAt);
@@ -15776,6 +16041,9 @@ const tipFeeCtl = feeControls(tipModal, "tip-kas");
 let tipState = null;
 let tipFeeEstimateToken = 0;
 let tipFeeTimer = null;
+// The tip sheet's exact Max (tipSetMax, DSK-042 / DSK-043): a token for the latest one, a debounce.
+let tipMaxToken = 0;
+let tipMaxTimer = null;
 
 function tipQ(selector) { return tipModal ? tipModal.querySelector(selector) : null; }
 const tipSlider = createSendActionButton(tipQ("[data-tip-send]"), { onAction: () => submitTipSheet() });
@@ -15900,7 +16168,7 @@ async function sendInstantTip(address, name, amountKasNumber) {
   try {
     const fresh = fundingAddress ? freshChangeForSpendingIndex(fundingIndex) : null;
     const result = fundingAddress
-      ? await engine.sendFromSpending({ mnemonic: activeAccountMnemonic(), index: fundingIndex, passphrase: activeAccountPassphrase(), destinationAddress, amountKas, feeKas: "0", changeAddress: fresh?.address || null })
+      ? await engine.sendFromSpending({ mnemonic: activeAccountMnemonic(), index: fundingIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(), destinationAddress, amountKas, feeKas: "0", changeAddress: fresh?.address || null })
       : await engine.send(destinationAddress, amountKas, "0");
     if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
@@ -15984,6 +16252,8 @@ function tipRenderFee() {
 // The tip typed on the sheet in sompi, 0n when there is none: KAS through the one exact parser
 // (iOS IOS-010; "1,5" is 1.5); a currency amount converted at the live price, cut to whole sompi.
 function tipAmountSompi() {
+  const pinned = activeTipMax();
+  if (pinned) return pinned.amountSompi;
   const text = String(tipQ("[data-tip-amount]")?.value || "");
   if (tipState?.unit !== "fiat") {
     const sompi = sompiFromUserText(text);
@@ -16038,6 +16308,8 @@ function tipScheduleFee() {
   tipFeeTimer = null;
   const state = tipState;
   const token = ++tipFeeEstimateToken;
+  // At Max the fee is the exact send-all fee Max was computed with; a coin change re-runs Max.
+  if (activeTipMax()) { scheduleTipMaxRefill(300); return; }
   const amountSompi = tipAmountSompi();
   if (!state) return;
   if (!(amountSompi > 0n)) {
@@ -16069,23 +16341,64 @@ function tipScheduleFee() {
   }, 400);
 }
 
-// Max spends the chosen coins, else the whole available balance, less the same headroom the send
-// reserves for the network fee plus any Fast / Priority / custom extra (the chat sheet's Max).
-function tipSetMax() {
+// Max spends the chosen coins, else every coin the tip can spend (reserved ones left out), as ONE
+// output of (total - fee): the exact network floor for that transaction plus any Fast / Priority /
+// custom extra, so no change is left (audit DSK-042; the chat sheet's Max). A tip carries no
+// payload, so this is plain sendMaxKaspa. The amount is pinned (DSK-043): tip.max =
+// { amountSompi, outpoints, extraFeeSompi, settingsKey, text, unit }.
+function activeTipMax() {
+  const tip = tipState;
+  const max = tip?.max;
+  return max && String(tipQ("[data-tip-amount]")?.value || "") === max.text && tip.unit === max.unit ? max : null;
+}
+function tipMaxSettingsKey(tip) {
+  return JSON.stringify([tip?.fundingAddress || engine.address || "", [...(tip?.manualUtxos || []).map((coin) => coin.key)].sort(), tip?.tier || "normal", tip?.customExtraFeeSompi == null ? null : String(tip.customExtraFeeSompi)]);
+}
+async function tipSetMax() {
   const tip = tipState;
   const input = tipQ("[data-tip-amount]");
   if (!tip || !input || tip.sending) return;
-  const manual = tip.manualUtxos ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
-  if (manual == null && tip.availableSompi == null) { showCopyToast("Balance unavailable right now."); return; }
-  const spendable = manual != null ? manual : tip.availableSompi;
-  const headroom = 10000n + tipExtraFeeSompi();
-  const max = spendable > headroom ? spendable - headroom : 0n;
-  if (!(max > 0n)) return;
-  input.value = tip.unit === "fiat" && tip.price > 0 ? ((Number(max) / 1e8) * tip.price).toFixed(2) : kasTextFromSompi(max);
+  const token = ++tipMaxToken;
+  const settingsKey = tipMaxSettingsKey(tip);
   tip.error = "";
+  tip.estimating = true;
+  tipRenderFee();
+  let plan;
+  try {
+    await ensureRuntimes({ quiet: true });
+    plan = await engine.estimateMaxSend({
+      sourceAddress: tip.fundingAddress || engine.address,
+      destinationAddress: tip.address,
+      manualUtxos: tip.manualUtxos ? tip.manualUtxos.map((coin) => coin.key) : null,
+    });
+  } catch (error) {
+    if (token !== tipMaxToken || tipState !== tip) return;
+    tip.estimating = false;
+    tipRenderFee();
+    tipSetError(userFacingError(error) || "Balance too low after network fees.");
+    return;
+  }
+  if (token !== tipMaxToken || tipState !== tip) return;
+  // The coins or fee changed while this ran: compute again for what is there now.
+  if (tipMaxSettingsKey(tip) !== settingsKey) { scheduleTipMaxRefill(0); return; }
+  // The fee card's base is this exact transaction's floor, so the speed's extra is computed from it.
+  const floor = plan.floorFeeSompi;
+  const extra = tip.customExtraFeeSompi != null ? tip.customExtraFeeSompi : floor * ((TIP_FEE_MULTIPLIERS[tip.tier] || 1n) - 1n);
+  const amountSompi = plan.amountSompi - extra;
+  tip.estimating = false;
+  tip.baseFeeSompi = floor;
+  tipRenderFee();
+  if (amountSompi <= 0n) { tip.max = null; tipSetError("Balance too low after network fees."); return; }
+  // A currency amount is rounded DOWN (DSK-042); the tip pays the pinned sompi either way.
+  const text = tip.unit === "fiat" && tip.price > 0 ? fiatTextFloorFromSompi(amountSompi, tip.price, 2) : kasTextFromSompi(amountSompi);
+  input.value = text;
+  tip.max = { amountSompi, outpoints: plan.outpoints, extraFeeSompi: extra, settingsKey, text, unit: tip.unit };
   tipRefreshUnitUi();
-  tipScheduleFee();
   input.focus();
+}
+function scheduleTipMaxRefill(delayMs = 300) {
+  if (tipMaxTimer) window.clearTimeout(tipMaxTimer);
+  tipMaxTimer = window.setTimeout(() => { tipMaxTimer = null; tipSetMax(); }, delayMs);
 }
 
 // Coin Control on the address the tip comes from (iOS CoinControlView); the fee and Max follow.
@@ -16121,6 +16434,7 @@ function commitTipCustomFee() {
   }
   tipFeeCtl.setEditing(false);
   tipRenderFee();
+  if (activeTipMax()) scheduleTipMaxRefill(0); // Max follows the fee at once (DSK-043)
 }
 
 async function openTipModal({ address, name } = {}) {
@@ -16145,7 +16459,11 @@ async function openTipModal({ address, name } = {}) {
   if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
   tipFeeTimer = null;
   tipFeeEstimateToken += 1;
+  tipMaxToken += 1;
+  if (tipMaxTimer) window.clearTimeout(tipMaxTimer);
+  tipMaxTimer = null;
   tipState = {
+    max: null, // an exact Max, pinned (tipSetMax)
     contact, conversationEntry, address: clean, displayName, fundingIndex, fundingAddress,
     spendingFunded: Boolean(fundingAddress),
     availableSompi: null, availableFailed: false,
@@ -16208,6 +16526,9 @@ function closeTipModal({ force = false } = {}) {
   if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
   tipFeeTimer = null;
   tipFeeEstimateToken += 1;
+  tipMaxToken += 1;
+  if (tipMaxTimer) window.clearTimeout(tipMaxTimer);
+  tipMaxTimer = null;
   if (tipModal) tipModal.hidden = true;
   tipState = null;
 }
@@ -16237,13 +16558,37 @@ async function sendTipNow(tipSompi) {
   if (!tip || tip.sending) return;
   if (!(typeof tipSompi === "bigint" && tipSompi > 0n)) { tipSetError("Enter an amount."); return; }
   const amountKas = kasTextFromSompi(tipSompi);
+  // Max (DSK-042 / DSK-043): exactly the amount shown, from exactly the coins it was computed from.
+  const max = activeTipMax();
+  if (max && (max.amountSompi !== tipSompi || max.settingsKey !== tipMaxSettingsKey(tip))) {
+    await tipSetMax();
+    if (tipState === tip) tipSetError(MAX_AMOUNT_CHANGED_MESSAGE);
+    return;
+  }
   // Speed / custom fee and coin control from the fee card, taken now (the sheet can't change mid-send).
-  const extraFeeSompi = tipExtraFeeSompi();
+  const extraFeeSompi = max ? max.extraFeeSompi : tipExtraFeeSompi();
   const manualKeys = tip.manualUtxos?.length ? tip.manualUtxos.map((coin) => coin.key) : null;
   const spendable = manualKeys
     ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n)
     : tip.availableSompi;
-  if (spendable != null && tipSompi + 10000n + extraFeeSompi > spendable) {
+  if (max) {
+    // The coins must still be the ones Max was computed from - checked before a pool address is
+    // used or a bubble is written, and again by the engine at the send.
+    let live = null;
+    try {
+      await ensureRuntimes({ quiet: true });
+      live = (tip.fundingAddress ? await engine.balanceForAddress(tip.fundingAddress) : await engine.balance())?.entries || [];
+    } catch (error) {
+      tipSetError(userFacingError(error) || "Balance unavailable right now.");
+      return;
+    }
+    if (tipState !== tip) return;
+    if (!sameCoinKeys(maxCoinKeys(live, manualKeys), max.outpoints)) {
+      await tipSetMax();
+      if (tipState === tip) tipSetError(MAX_AMOUNT_CHANGED_MESSAGE);
+      return;
+    }
+  } else if (spendable != null && tipSompi + 10000n + extraFeeSompi > spendable) {
     tipSetError(manualKeys ? "Amount exceeds the chosen coins after the network fee." : "Amount exceeds the available balance after the network fee.");
     return;
   }
@@ -16296,14 +16641,28 @@ async function sendTipNow(tipSompi) {
 
   try {
     await ensureRuntimes({ quiet: true });
-    const tipFresh = tip.fundingAddress ? freshChangeForSpendingIndex(tip.fundingIndex) : null;
+    // A Max tip leaves no change, so no fresh change address is used.
+    const tipFresh = tip.fundingAddress && !max ? freshChangeForSpendingIndex(tip.fundingIndex) : null;
     // A plain payment, no payload: the tip's on-chain shape is unchanged. The fee card's extra goes
     // as the priority fee and coin control limits the coins, exactly as in the chat's sheet.
-    const result = tip.fundingAddress
+    // Max: one output of exactly the shown amount from exactly its coins (DSK-042), or nothing if
+    // the coins changed (DSK-043) - plain sendMaxKaspa, still no payload.
+    const maxPin = max ? { extraFeeSompi, manualUtxos: manualKeys, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
+    const result = maxPin
+      ? (tip.fundingAddress
+        ? await engine.sendMaxFromSpending({
+            mnemonic: activeAccountMnemonic(),
+            index: tip.fundingIndex,
+            passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
+            destinationAddress,
+            ...maxPin,
+          })
+        : await engine.sendMax(destinationAddress, null, null, maxPin))
+      : tip.fundingAddress
       ? await engine.sendFromSpending({
           mnemonic: activeAccountMnemonic(),
           index: tip.fundingIndex,
-          passphrase: activeAccountPassphrase(),
+          passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
           destinationAddress,
           amountKas,
           feeKas: "0",
@@ -16335,6 +16694,18 @@ async function sendTipNow(tipSompi) {
     tip.sending = false;
     if (tipState === tip) closeTipModal({ force: true });
   } catch (error) {
+    if (error?.code === MAX_AMOUNT_CHANGED) {
+      // Nothing was sent: no failed bubble, and the new Max goes in the field.
+      conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      tip.sending = false;
+      if (tipState === tip) {
+        await tipSetMax();
+        if (tipState === tip) tipSetError(MAX_AMOUNT_CHANGED_MESSAGE);
+      }
+      return;
+    }
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
     conversationEntry.updatedAt = Date.now();
     persistState();
@@ -16350,7 +16721,8 @@ tipModal?.addEventListener("mousedown", (event) => { if (event.target === tipMod
 tipModal?.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { event.preventDefault(); closeTipModal(); }
 });
-tipQ("[data-tip-amount]")?.addEventListener("input", () => {
+tipQ("[data-tip-amount]")?.addEventListener("input", (event) => {
+  if (event.isTrusted && tipState) tipState.max = null; // a typed amount is no longer Max
   const input = tipQ("[data-tip-amount]");
   // Digits and one decimal point; at most 8 decimals for KAS, 2 for a currency.
   const sanitized = sanitizeAmountText(input.value, tipState?.unit === "fiat" ? 2 : 8);
@@ -16364,13 +16736,25 @@ tipQ("[data-tip-unit]")?.addEventListener("click", () => {
   if (!tip || !(tip.price > 0) || tip.sending) return;
   const sompi = tipAmountSompi();
   const kas = sompi > 0n ? Number(sompi) / 1e8 : null;
+  const pinned = activeTipMax();
   tip.unit = tip.unit === "fiat" ? "kas" : "fiat";
   const input = tipQ("[data-tip-amount]");
-  if (input) input.value = kas == null ? "" : (tip.unit === "fiat" ? (kas * tip.price).toFixed(2) : formatKasPlain(kas));
+  if (pinned && input) {
+    // Max converts from its exact sompi, the currency side rounded down (DSK-042), and stays Max.
+    pinned.text = tip.unit === "fiat" ? fiatTextFloorFromSompi(pinned.amountSompi, tip.price, 2) : kasTextFromSompi(pinned.amountSompi);
+    pinned.unit = tip.unit;
+    input.value = pinned.text;
+  } else if (input) input.value = kas == null ? "" : (tip.unit === "fiat" ? (kas * tip.price).toFixed(2) : formatKasPlain(kas));
   tipRefreshUnitUi();
   input?.focus();
 });
-tipQ("[data-tip-max]")?.addEventListener("click", tipSetMax);
+tipQ("[data-tip-max]")?.addEventListener("click", () => {
+  // An amount fee estimate still on its way must not move the base Max sets.
+  if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
+  tipFeeTimer = null;
+  tipFeeEstimateToken += 1;
+  tipSetMax();
+});
 tipModal?.querySelectorAll("[data-tip-kas-fee]").forEach((button) => {
   button.addEventListener("click", () => {
     const tip = tipState;
@@ -16380,6 +16764,7 @@ tipModal?.querySelectorAll("[data-tip-kas-fee]").forEach((button) => {
     tip.customExtraFeeSompi = null;
     tipFeeCtl.setEditing(false);
     tipRenderFee();
+    if (activeTipMax()) scheduleTipMaxRefill(0); // Max follows the fee at once (DSK-043)
   });
 });
 tipQ("[data-tip-kas-fee-edit]")?.addEventListener("click", () => {
@@ -16808,7 +17193,7 @@ document.querySelector("[data-pref-testnet]")?.addEventListener("change", (event
   setPreferredNetwork(event.target.checked ? "testnet" : "mainnet");
   renderTestnetToggle();
 });
-document.querySelector("[data-testnet-reload]")?.addEventListener("click", () => { window.location.reload(); });
+document.querySelector("[data-testnet-reload]")?.addEventListener("click", () => { reloadKaChat(); });
 renderTestnetToggle();
 
 // On testnet the Connection Settings fields say what testnet has (iOS indexerPlaceholder): KaChat's
@@ -18324,12 +18709,27 @@ let paymentFeeEstimating = false;
 let paymentCustomExtraFeeSompi = null;
 // Coin control: null = automatic, else [{ key: "txid:index", amountSompi }] at the paying address.
 let paymentManualUtxos = null;
+// An exact Max on the sheet (audits DSK-042 / DSK-043), null when the amount is typed:
+// { amountSompi, outpoints, floorFeeSompi, extraFeeSompi, settingsKey, text, unit } (settingsKey:
+// the source, memo, coin control and fee it was computed with). While the field still shows
+// `text`, the amount IS amountSompi (also in a currency) and the payment goes out as one exact
+// output from exactly those coins.
+let paymentMax = null;
+let paymentMaxToken = 0;
+let paymentMaxTimer = null;
 
 function isPaySheetOpen() { return Boolean(paySheet && !paySheet.hidden); }
+
+// The Max pin, while the field still shows what Max wrote.
+function activePaymentMax() {
+  return paymentMax && String(payAmountInput?.value || "") === paymentMax.text && paymentUnit === paymentMax.unit ? paymentMax : null;
+}
 
 // The typed amount in sompi (BigInt), null when there is none: KAS through the one exact parser
 // (iOS IOS-010); a currency amount converted at the live price and cut to whole sompi.
 function paymentSompiFromInput() {
+  const pinned = activePaymentMax();
+  if (pinned) return pinned.amountSompi;
   const text = String(payAmountInput?.value || "");
   if (paymentUnit !== "fiat") {
     const sompi = sompiFromUserText(text);
@@ -18439,6 +18839,7 @@ function selectPaymentFeeTier(tier) {
   paymentCustomExtraFeeSompi = null;
   payFeeCtl.setEditing(false);
   renderPaymentFeeCard();
+  if (activePaymentMax()) schedulePaymentMaxRefill(0); // Max follows the fee at once (DSK-043)
 }
 // A typed total fee below the base is raised to it (a transaction can't go out under it); an empty
 // or unreadable entry leaves the fee as it was (iOS commitPaymentCustomFee).
@@ -18450,6 +18851,7 @@ function commitPaymentCustomFee() {
   }
   payFeeCtl.setEditing(false);
   renderPaymentFeeCard();
+  if (activePaymentMax()) schedulePaymentMaxRefill(0); // Max follows the fee at once (DSK-043)
 }
 paySheet?.querySelectorAll("[data-pay-kas-fee]").forEach((button) => {
   button.addEventListener("click", () => { if (!paymentSendInFlight) selectPaymentFeeTier(button.getAttribute("data-pay-kas-fee")); });
@@ -18500,12 +18902,94 @@ function estimatePaymentPayloadBytes(memo, amountSompi) {
   return "kchat:1:pay:".length + 12 + 33 + new TextEncoder().encode(json).length + 16;
 }
 
+// Max on the Send KAS sheet, exact like iOS estimateMaxPaymentAmount (audit DSK-042): every coin
+// the payment can spend (coin control respected, reserved coins left out) into ONE output of
+// (total - fee), the fee being the network floor for exactly that transaction with its payment
+// payload (built, as iOS does, with the whole total as its amount) plus the Fast / Priority /
+// custom extra. Nothing is left for a change output. The amount is pinned (DSK-043).
+function paymentMaxSettings() {
+  const conversationEntry = state.conversations.find((entry) => entry.id === (paySheetConversationId || activeConversationId));
+  const contact = contactForConversation(conversationEntry);
+  return {
+    contact,
+    address: paymentFundingAddress(),
+    memo: currentPaymentMemo(),
+    manualKeys: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
+    tier: paymentFeeTier,
+    custom: paymentCustomExtraFeeSompi,
+  };
+}
+function paymentMaxSettingsKey(settings) {
+  return JSON.stringify([settings.address || "", settings.memo, [...(settings.manualKeys || [])].sort(), settings.tier, settings.custom == null ? null : String(settings.custom)]);
+}
+async function fillPaymentMax() {
+  if (!payAmountInput || paymentSendInFlight || !isPaySheetOpen()) return;
+  const settings = paymentMaxSettings();
+  if (!settings.contact || !settings.address) { showCopyToast("Balance unavailable right now."); return; }
+  const token = ++paymentMaxToken;
+  paySheetError = "";
+  renderPaymentFeePill(null, { estimating: true });
+  let plan;
+  try {
+    await ensureRuntimes({ quiet: true });
+    plan = await engine.estimateMaxSend({
+      sourceAddress: settings.address,
+      destinationAddress: settings.contact.address,
+      manualUtxos: settings.manualKeys,
+      payloadFor: async (totalSompi) => {
+        try {
+          return (await engine.buildPaymentPayload({ receiver: settings.contact.address, note: settings.memo, amountSompi: Number(totalSompi) }))?.payloadBytes || null;
+        } catch (error) {
+          if (settings.memo) throw new Error(`Couldn't encrypt the memo. (${userFacingError(error)})`);
+          return null; // the payment goes without a payload then, as sendKasPayment does
+        }
+      },
+    });
+  } catch (error) {
+    if (token !== paymentMaxToken || !isPaySheetOpen()) return;
+    renderPaymentFeePill(paymentBaseFeeSompi);
+    paySheetError = userFacingError(error) || "Balance too low after network fees.";
+    refreshPaymentSheetState();
+    return;
+  }
+  if (token !== paymentMaxToken || !isPaySheetOpen()) return;
+  // The memo, coins, source or fee changed while this ran: compute again for what is there now.
+  if (paymentMaxSettingsKey(paymentMaxSettings()) !== paymentMaxSettingsKey(settings)) { schedulePaymentMaxRefill(0); return; }
+  // The fee card shows the floor of this exact transaction as its base, so the speed's extra is
+  // computed from it and the card reads what is paid.
+  const floor = plan.floorFeeSompi;
+  const extra = settings.custom != null ? settings.custom : floor * ((PAYMENT_FEE_MULTIPLIERS[settings.tier] || 1n) - 1n);
+  const amountSompi = plan.amountSompi - extra;
+  renderPaymentFeePill(floor);
+  if (amountSompi <= 0n) {
+    paymentMax = null;
+    paySheetError = "Balance too low after network fees.";
+    refreshPaymentSheetState();
+    return;
+  }
+  // A currency amount is rounded DOWN (DSK-042); the payment pays the pinned sompi either way.
+  const text = paymentUnit === "fiat" && paymentPrice > 0 ? fiatTextFloorFromSompi(amountSompi, paymentPrice, 2) : kasTextFromSompi(amountSompi);
+  payAmountInput.value = text;
+  paymentMax = {
+    amountSompi, outpoints: plan.outpoints, floorFeeSompi: floor, extraFeeSompi: extra,
+    settingsKey: paymentMaxSettingsKey(settings), text, unit: paymentUnit,
+  };
+  refreshPaymentUnitUi();
+}
+function schedulePaymentMaxRefill(delayMs = 300) {
+  if (paymentMaxTimer) window.clearTimeout(paymentMaxTimer);
+  paymentMaxTimer = window.setTimeout(() => { paymentMaxTimer = null; fillPaymentMax(); }, delayMs);
+}
+
 // The fee the payment will pay, from the address it will spend from, including its payload (so the
 // memo counts). Debounced like iOS schedulePaymentFee.
 function schedulePaymentFee() {
   if (payFeeTimer) window.clearTimeout(payFeeTimer);
   payFeeTimer = null;
   const token = ++payFeeToken;
+  // At Max the fee is the exact send-all fee Max was computed with; a memo or coin change re-runs
+  // Max instead (DSK-042 / DSK-043).
+  if (activePaymentMax()) { schedulePaymentMaxRefill(300); return; }
   const amountSompi = paymentSompiFromInput();
   if (!isPaySheetOpen() || amountSompi == null) { renderPaymentFeePill(null); return; }
   renderPaymentFeePill(null, { estimating: true });
@@ -18543,6 +19027,10 @@ function resetPaymentSheetFields() {
   paymentFeeTier = "normal";
   paymentCustomExtraFeeSompi = null;
   paymentManualUtxos = null;
+  paymentMax = null;
+  paymentMaxToken += 1;
+  if (paymentMaxTimer) window.clearTimeout(paymentMaxTimer);
+  paymentMaxTimer = null;
   payFeeCtl.setEditing(false);
   renderPaymentFeePill(null);
 }
@@ -18584,10 +19072,14 @@ function closePaymentSheet({ force = false } = {}) {
   payFeeToken += 1;
   if (payFeeTimer) window.clearTimeout(payFeeTimer);
   payFeeTimer = null;
+  paymentMaxToken += 1; // a Max still computing has no sheet to fill
+  if (paymentMaxTimer) window.clearTimeout(paymentMaxTimer);
+  paymentMaxTimer = null;
   hideAvailableBalanceBanner();
 }
 
-payAmountInput?.addEventListener("input", () => {
+payAmountInput?.addEventListener("input", (event) => {
+  if (event.isTrusted) paymentMax = null; // a typed amount is no longer Max
   const sanitized = sanitizePaymentAmount(payAmountInput.value);
   if (sanitized !== payAmountInput.value) payAmountInput.value = sanitized;
   paySheetError = "";
@@ -18610,26 +19102,25 @@ payMemoInput?.addEventListener("keydown", (event) => {
 paymentUnitToggle?.addEventListener("click", () => {
   if (!(paymentPrice > 0)) return;
   const kas = paymentKasFromInput();
+  const pinned = activePaymentMax();
   paymentUnit = paymentUnit === "fiat" ? "kas" : "fiat";
-  if (payAmountInput) payAmountInput.value = kas == null ? "" : (paymentUnit === "fiat" ? (kas * paymentPrice).toFixed(2) : formatKasPlain(kas));
+  if (pinned && payAmountInput) {
+    // Max converts from its exact sompi, the currency side rounded down (DSK-042), and stays Max.
+    pinned.text = paymentUnit === "fiat" ? fiatTextFloorFromSompi(pinned.amountSompi, paymentPrice, 2) : kasTextFromSompi(pinned.amountSompi);
+    pinned.unit = paymentUnit;
+    payAmountInput.value = pinned.text;
+  } else if (payAmountInput) payAmountInput.value = kas == null ? "" : (paymentUnit === "fiat" ? (kas * paymentPrice).toFixed(2) : formatKasPlain(kas));
   refreshPaymentUnitUi();
   payAmountInput?.focus();
 });
 paymentMaxButton?.addEventListener("click", () => {
   if (!payAmountInput || paymentSendInFlight) return;
-  // Coin control: Max spends the chosen coins, else the whole balance (iOS estimateMaxPaymentAmount).
-  const manualSompi = paymentManualUtxos ? paymentManualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
-  if (manualSompi == null && composerAvailableKas == null) { showCopyToast("Balance unavailable right now."); return; }
-  const spendableSompi = manualSompi != null ? manualSompi : (sompiFromUserText(trimKas8(composerAvailableKas)) ?? 0n);
-  // The same headroom the send itself reserves for the network fee, plus room for a Fast /
-  // Priority / custom extra on top of it. Exact sompi, so Max never reads back as more.
-  const headroomSompi = 10000n + paymentExtraFeeSompi();
-  const maxSompi = spendableSompi > headroomSompi ? spendableSompi - headroomSompi : 0n;
-  const maxKas = Number(maxSompi) / 1e8;
-  payAmountInput.value = paymentUnit === "fiat" && paymentPrice > 0 ? (maxKas * paymentPrice).toFixed(2) : kasTextFromSompi(maxSompi);
-  paySheetError = "";
-  refreshPaymentUnitUi();
-  schedulePaymentFee();
+  // Coin control: Max spends the chosen coins, else the whole balance - the exact send-all amount
+  // (iOS estimateMaxPaymentAmount), see fillPaymentMax.
+  if (payFeeTimer) window.clearTimeout(payFeeTimer);
+  payFeeTimer = null;
+  payFeeToken += 1;
+  fillPaymentMax();
   payAmountInput.focus();
 });
 paySheet?.querySelector("[data-pay-close]")?.addEventListener("click", () => closePaymentSheet());
@@ -18667,18 +19158,35 @@ async function submitPaymentSheet() {
     if (!proceed || !isPaySheetOpen()) return;
   }
   const memo = currentPaymentMemo();
+  // Max (DSK-042 / DSK-043): exactly the amount shown, from exactly the coins it was computed from.
+  // Settings changed since (memo, source, coins, fee) and it is recomputed and this slide refused.
+  const max = activePaymentMax();
+  if (max && max.settingsKey !== paymentMaxSettingsKey(paymentMaxSettings())) {
+    await fillPaymentMax();
+    paySheetError = MAX_AMOUNT_CHANGED_MESSAGE;
+    refreshPaymentSheetState();
+    return;
+  }
   try {
     await sendKasPayment(conversationId, amountKas, {
       note: memo,
       // Send From (privacy on): the picked spending address, null = the primary.
       sourceSpendingIndex: paymentSourceIndex,
       // The fee card (iOS 62c2773): the speed / custom extra over the base fee, and coin control.
-      extraFeeSompi: paymentExtraFeeSompi(),
+      extraFeeSompi: max ? max.extraFeeSompi : paymentExtraFeeSompi(),
       manualUtxos: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
+      max,
       // Down as soon as a node has the transaction; the bubble in the chat is the confirmation.
       onSubmitted: () => { closePaymentSheet({ force: true }); resetPaymentSheetFields(); },
     });
   } catch (error) {
+    if (error?.code === MAX_AMOUNT_CHANGED && isPaySheetOpen()) {
+      // The coins changed under the Max: the new one goes in the field, and nothing was sent.
+      await fillPaymentMax();
+      paySheetError = MAX_AMOUNT_CHANGED_MESSAGE;
+      refreshPaymentSheetState();
+      return;
+    }
     // Shown in the sheet, which is still up.
     paySheetError = userFacingError(error);
     if (isPaySheetOpen()) refreshPaymentSheetState();
@@ -18942,7 +19450,25 @@ function runPostSubmitStep(label, step) {
 // node has the transaction, before the slower recipient-output verification.
 // `extraFeeSompi`: a priority fee on top of the minimum (Fast / Priority / custom); `manualUtxos`:
 // coin control, the "txid:index" coins the build may pick from (null = automatic). iOS 62c2773.
-async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null, extraFeeSompi = 0n, manualUtxos = null } = {}) {
+// The coins a Max send would spend right now (DSK-042 / DSK-043): every coin no scheduled KaPost
+// reserves, narrowed to the coin-control pick when there is one, as "txid:index" keys.
+function maxCoinKeys(entries, manualKeys = null) {
+  let list = excludeReservedUtxos(entries || []);
+  if (manualKeys && manualKeys.length) {
+    const wanted = new Set(manualKeys.map(String));
+    list = list.filter((entry) => wanted.has(utxoEntryKey(entry)));
+  }
+  return list.map((entry) => utxoEntryKey(entry));
+}
+function sameCoinKeys(a, b) {
+  const left = new Set((a || []).map(String));
+  const right = (b || []).map(String);
+  return left.size === right.length && right.every((key) => left.has(key));
+}
+
+// `max`: the sheet's pinned Max (fillPaymentMax) - the payment then goes as ONE exact output of
+// that amount from exactly its coins, with no change (DSK-042), or not at all (DSK-043).
+async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null, extraFeeSompi = 0n, manualUtxos = null, max = null } = {}) {
   if (paymentSendInFlight) return false;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   const contact = contactForConversation(conversationEntry);
@@ -18981,7 +19507,16 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       if (!chosen.length) throw new Error("The coins chosen in Coin Control are no longer available. Choose again, or go back to Automatic.");
       spendableSompi = chosen.reduce((sum, entry) => sum + utxoEntrySompi(entry), 0n);
     }
-    if (requestedSompi + feeReserveSompi > spendableSompi) {
+    if (max) {
+      // Max carries its own exact fee; what must hold is that the coins are still the ones it was
+      // computed from - checked here before a pool address is used or a bubble is written, and
+      // again by the engine at the send.
+      if (requestedSompi !== max.amountSompi || !sameCoinKeys(maxCoinKeys(balance.entries, manualKeys), max.outpoints)) {
+        const changed = new Error(MAX_AMOUNT_CHANGED_MESSAGE);
+        changed.code = MAX_AMOUNT_CHANGED;
+        throw changed;
+      }
+    } else if (requestedSompi + feeReserveSompi > spendableSompi) {
       throw new Error(manualKeys
         ? `Not enough ${KAS_UNIT} in the chosen coins: planned spend ${amountKas} ${KAS_UNIT}, but they hold ${formatSompiPlain(spendableSompi)} ${KAS_UNIT}, less than required after the network fee.`
         : `Not enough ${KAS_UNIT}: planned spend ${amountKas} ${KAS_UNIT}, but the available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`);
@@ -19030,14 +19565,28 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     try {
       // The primary's change goes to a fresh address that becomes the primary (as before); a
       // picked address's change still goes to a fresh address, revealed but not made primary.
-      const payFresh = spendingFunded
+      // A Max payment leaves no change, so no fresh change address is used.
+      const payFresh = spendingFunded && !max
         ? (keepsPrimary ? freshSpendingChangeAddress() : freshChangeForSpendingIndex(fundingIndex))
         : null;
-      const result = spendingFunded
+      // Max: one output of exactly the shown amount from exactly its coins, the payment payload on
+      // it, nothing left for change (DSK-042); the engine refuses if the coins changed (DSK-043).
+      const maxPin = max ? { extraFeeSompi: extraSompi, manualUtxos: manualKeys, payload, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
+      const result = maxPin
+        ? (spendingFunded
+          ? await engine.sendMaxFromSpending({
+              mnemonic: activeAccountMnemonic(),
+              index: fundingIndex,
+              passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
+              destinationAddress,
+              ...maxPin,
+            })
+          : await engine.sendMax(destinationAddress, null, null, maxPin))
+        : spendingFunded
         ? await engine.sendFromSpending({
             mnemonic: activeAccountMnemonic(),
             index: fundingIndex,
-            passphrase: activeAccountPassphrase(),
+            passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
             destinationAddress,
             amountKas,
             feeKas: "0",
@@ -19058,6 +19607,14 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     } catch (error) {
+      if (error?.code === MAX_AMOUNT_CHANGED) {
+        // Nothing was sent: the Max is recomputed on the sheet, so no failed bubble is left.
+        conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
+        persistState();
+        if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+        setStatus("");
+        throw error;
+      }
       applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
       conversationEntry.updatedAt = Date.now();
       persistState();
@@ -20121,7 +20678,7 @@ async function sendChatVoicePreview() {
       setStatus("Voice note sent via Nextcloud.");
       return;
     } catch (error) {
-      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
+      showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
     }
   }
 
@@ -20779,7 +21336,7 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     }
     if (!persisted) {
       reloadStateFromBrowserStorage();
-      throw new Error("Backup too large to store — not enough local storage space to merge the phone backup.");
+      throw new Error("Backup too large to store: not enough local storage space to merge the phone backup.");
     }
     quotaTrimmed = true;
   }
@@ -20842,7 +21399,7 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     renderChats();
     if (importedGroups) { try { renderGroupList(); } catch { /* group UI not ready */ } }
   }
-  if (quotaTrimmed) showCopyToast("Backup too large to store fully — imported what fit.");
+  if (quotaTrimmed) showCopyToast("Backup too large to store fully. Imported what fit.");
   return { conversations: touchedConversationIds.size, messages: mergedMessages, groups: importedGroups };
 }
 
@@ -21195,21 +21752,21 @@ function parseRemoteChatArchive(json) {
   } catch {
     // Not a readable archive (damaged, or cut off at rest): the backup sync replaces it in place
     // (NEXTCLOUD_SYNC.md §7); a restore reports it.
-    const unreadable = new Error("The backup already on the server is not readable JSON — nothing was uploaded and that file was left untouched. Move it aside (or pick another backup folder) to start a fresh backup.");
+    const unreadable = new Error("The backup already on the server is not readable JSON. Nothing was uploaded and that file was left untouched. Move it aside (or pick another backup folder) to start a fresh backup.");
     unreadable.code = "remoteUnreadable";
     throw unreadable;
   }
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.conversations)) {
-    const unreadable = new Error("The file already on the server is not a KaChat backup — nothing was uploaded and it was left untouched. Pick a different backup folder.");
+    const unreadable = new Error("The file already on the server is not a KaChat backup. Nothing was uploaded and it was left untouched. Pick a different backup folder.");
     unreadable.code = "remoteUnreadable";
     throw unreadable;
   }
   if (Number(parsed.schemaVersion) !== CHAT_ARCHIVE_SCHEMA_VERSION) {
-    throw new Error(`The backup already on the server uses schema version ${parsed.schemaVersion}, which this version can't merge — nothing was uploaded and it was left untouched.`);
+    throw new Error(`The backup already on the server uses schema version ${parsed.schemaVersion}, which this version can't merge. Nothing was uploaded and it was left untouched.`);
   }
   const remoteWallet = String(parsed.walletAddress || "").trim();
   if (remoteWallet && engine.address && remoteWallet !== engine.address) {
-    throw new Error(`The backup already on the server belongs to a different wallet (${shortAddress(remoteWallet)}) — nothing was uploaded. Choose a separate backup folder for this wallet.`);
+    throw new Error(`The backup already on the server belongs to a different wallet (${shortAddress(remoteWallet)}). Nothing was uploaded. Choose a separate backup folder for this wallet.`);
   }
   return parsed;
 }
@@ -21503,7 +22060,7 @@ function reactionStatusIndicator(key) {
   } else {
     el.className = "reaction-status failed";
     el.textContent = "!";
-    el.title = "Reaction failed to send — click to retry";
+    el.title = "Reaction failed to send. Click to retry.";
     el.addEventListener("click", (event) => {
       event.stopPropagation();
       entry.retry?.();
@@ -21866,7 +22423,7 @@ composer.addEventListener("submit", async (event) => {
         setStatus("Photo sent via Nextcloud.");
         return;
       } catch (error) {
-        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
+        showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
       }
     }
     queueConversationMessage(activeConversationId, buildImageEnvelopeJson(attachment));
@@ -22312,7 +22869,9 @@ createSeedConfirm?.addEventListener("change", () => {
 // launch the setup guide (new accounts only), matching iOS's justCreatedNewWallet.
 async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   if (!engine.kaspa) await ensureRuntimes();
-  const wallet = engine.importMnemonic(phrase, passphrase);
+  // BIP39 (audit EXT-010): derived from, and stored as, the NFKD passphrase.
+  passphrase = String(passphrase || "").normalize("NFKD");
+  const wallet = engine.importMnemonic(phrase, passphrase, { passphraseForm: "nfkd" });
   if (!wallet?.privateKeyHex || !wallet?.address?.startsWith(ADDRESS_PREFIX) || !wallet?.mnemonic) {
     engine.clearSession();
     throw new Error("Wallet generation did not produce a valid mainnet identity.");
@@ -22328,7 +22887,7 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   state = { contacts: [], conversations: [] };
   persistState();
   resetHandshakeSyncStateFor(wallet.address); // a new wallet starts from scratch on both networks (IOS-004)
-  persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, derivationPath: wallet.derivationPath, wordCount });
+  persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, passphraseForm: "nfkd", derivationPath: wallet.derivationPath, wordCount });
 
   if (accountShellPrefs.saveAccount !== false) {
     const saved = loadSavedAccounts().find((entry) => entry.address === wallet.address);
@@ -22986,7 +23545,7 @@ async function scanChattingAddressBatch() {
   try {
     let derived = [];
     try {
-      derived = await engine.deriveIdentityAddressRange(mnemonic, passphrase, { family, start, count: CHATTING_PICKER_BATCH });
+      derived = await engine.deriveIdentityAddressRange(mnemonic, passphrase, { family, start, count: CHATTING_PICKER_BATCH, passphraseForm: activeAccountPassphraseForm() });
     } catch (error) {
       appendEngineLog(`Chatting address scan failed: ${error.message}`);
     }
@@ -23131,6 +23690,7 @@ async function performChattingAddressSwitch() {
   // the account's existing family, and the name/passphrase belong to the seed.
   const family = activeAccountSourceFamily();
   const passphrase = String(record?.passphrase || "");
+  const passphraseForm = passphraseFormForRecord(record); // a "raw" (pre-EXT-010) account stays raw
   const name = String(activeAccountMetadata()?.name || record?.name || "My Account");
   const previousAddress = String(engine.address || "");
   chattingPickerSwitching = true;
@@ -23140,6 +23700,7 @@ async function performChattingAddressSwitch() {
       name,
       recoveryPhrase: mnemonic,
       passphrase,
+      passphraseForm,
       family,
       chattingIndex: candidate.index,
       resetState: false,
@@ -23551,8 +24112,13 @@ document.querySelector("[data-import-words-back]")?.addEventListener("click", ()
 // clean identity SELECTION on a seed the app already holds, not a new import,
 // so whatever chats the target address already has in its own storage scope
 // stay put (activateWalletDataScope has just restored them).
-async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", family = "kaspaStandard", chattingIndex = 0, resetState = true }) {
+async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", passphraseForm = "nfkd", family = "kaspaStandard", chattingIndex = 0, resetState = true }) {
   if (!engine.kaspa) await ensureRuntimes();
+  // BIP39 (audit EXT-010): an import derives from the NFKD passphrase and stores it that way, so the
+  // record reads back as "nfkd". Only the chatting-address switch of a pre-EXT-010 "raw" account
+  // passes passphraseForm "raw" and keeps the passphrase as it was.
+  const cleanPassphraseForm = normalizePassphraseForm(passphraseForm);
+  passphrase = cleanPassphraseForm === "raw" ? String(passphrase || "") : String(passphrase || "").normalize("NFKD");
   const cleanName = String(name || "").trim();
   const cleanPhrase = String(recoveryPhrase || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (!cleanName) throw new Error("Enter an account name.");
@@ -23561,7 +24127,7 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", fa
 
   let wallet;
   try {
-    wallet = await engine.importMnemonicWithFamily(cleanPhrase, passphrase, { family, index: chattingIndex });
+    wallet = await engine.importMnemonicWithFamily(cleanPhrase, passphrase, { family, index: chattingIndex, passphraseForm: cleanPassphraseForm });
   } catch (error) {
     engine.clearSession();
     throw new Error(`Invalid recovery phrase: ${error?.message || "word list or checksum validation failed."}`);
@@ -23586,6 +24152,7 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", fa
   persistTestingWallet({
     mnemonic: wallet.mnemonic,
     passphrase,
+    passphraseForm: cleanPassphraseForm,
     derivationPath: wallet.derivationPath,
     wordCount: words.length,
     sourceFamily: wallet.sourceFamily || family,
@@ -24213,7 +24780,7 @@ async function dangerWipeEverything() {
     for (const key of keys) localStorage.removeItem(key);
   } catch {}
   try { clearSessionActive(); } catch {}
-  try { lockKeyVault(); } catch {} // the tab's copy of the data key (sessionStorage)
+  try { lockKeyVault(); } catch {} // the data key in memory; a plain reload hands nothing over
   // The chat store is IndexedDB-backed when available (see ui/storage.js DB_NAME).
   try { indexedDB.deleteDatabase("kachat-desktop"); } catch {}
   window.location.reload();
@@ -24803,33 +25370,6 @@ queueMicrotask(async () => {
     });
   } catch (error) { appendEngineLog(`initColdStorage did not start: ${error?.message || error}`); }
   try {
-    initSwaps({
-      engine, escapeHtml, shortAddress, accountScopedKey, showToast: showCopyToast, appendEngineLog,
-      explorerAddressUrl, addressCopiedToastText, copyTextToClipboard,
-      currencySymbol: () => currencyMeta().symbol.trim(),
-      currencyCode: () => selectedCurrency.toUpperCase(),
-      // Swap payouts land on a fresh spending address (iOS SwapService): the picker lists the
-      // wallet's spending addresses with their used flags, and can reveal a new one.
-      listSpendingAddresses: async () => {
-        if (!activeAccountMnemonic()) return [];
-        const state = getSpendingState();
-        const hidden = new Set(state.hidden.map(Number));
-        const entries = [];
-        for (let i = 0; i <= state.maxIndex; i += 1) {
-          const address = deriveSpendingAddressAt(i);
-          if (!address) continue;
-          const usage = await spendingUsageFor(address);
-          entries.push({ index: i, address, label: spendingLabelFor(state, i), kas: usage.kas, used: usage.used, hidden: hidden.has(i) && i !== state.activeIndex });
-        }
-        return entries;
-      },
-      nextFreshSpendingIndex: () => { const st = getSpendingState(); return Math.max(st.maxIndex, st.activeIndex) + 1; },
-      spendingAddressAt: (index) => deriveSpendingAddressAt(index),
-      revealNextSpendingAddress: () => revealNextSpendingAddress({ toast: false }),
-      openSpendingAddresses: () => openSpendingManageScreen(),
-    });
-  } catch (error) { appendEngineLog(`initSwaps did not start: ${error?.message || error}`); }
-  try {
     initNextcloud({
       accountScopedKey, escapeHtml, appendEngineLog,
       showToast: showCopyToast,
@@ -24911,7 +25451,7 @@ queueMicrotask(async () => {
         spendingPrivateKey: (index) => {
           const mnemonic = activeAccountMnemonic();
           if (!mnemonic || !Number.isInteger(index)) return null;
-          try { return String(engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase())?.privateKeyHex || "") || null; } catch { return null; }
+          try { return String(engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() })?.privateKeyHex || "") || null; } catch { return null; }
         },
         kasSignerAddresses: () => listColdWatchedAddresses().map((e) => ({ account: e.label, index: e.index, address: e.address })),
       },
@@ -25111,8 +25651,6 @@ queueMicrotask(async () => {
 
   if (wasmReady) {
     const restored = restorePersistedTestingWallet();
-    // Swap derived its receive address before the runtime existed; derive it now.
-    if (restored) { try { resetSwapsForAccount(); } catch { /* not started */ } }
     updateWalletUi();
     updateServiceSummary();
     if (!restored && !engine.address && loggedOutScreen && loggedOutScreen.hidden) {
@@ -25311,7 +25849,7 @@ function isReplyToMyGroupMessage(text) {
 // Shared gate for every OS-level group ping: the Settings > Notifications > Chats master
 // toggle (default ON, same check maybeNotifyIncoming makes for 1:1), and never ping for the
 // group you are already looking at in a focused window. Child Mode is deliberately NOT a gate
-// here: it hides Swaps/KaPosts/Broadcasts only, and chats plus group chats stay fully
+// here: it hides KaPosts/Broadcasts only, and chats plus group chats stay fully
 // available while it is on, exactly as the existing 1:1 and mention paths behave.
 function groupOsPingAllowed(groupId) {
   if ((accountShellPrefs.chatNotifications ?? true) === false) return false;
@@ -27313,7 +27851,7 @@ function openGroupManage(groupId) {
       <button type="button" class="group-manage-row" data-group-rename><span class="group-manage-row-icon">${icPencil}</span> Rename Group</button>
       <button type="button" class="group-manage-row" data-group-resend-invites><span class="group-manage-row-icon">${icResend}</span> Resend invites to all</button>
       <button type="button" class="group-manage-row" data-group-add-member><span class="group-manage-row-icon">${icAdd}</span> Add Members</button>
-      <p class="group-manage-footer">Resends the group invite to every member (or use a member's ↻ to resend just theirs) — use this if someone didn't receive the group. Adding members rotates the group key, so new members see messages from when they join onward.</p>
+      <p class="group-manage-footer">Resends the group invite to every member (or use a member's ↻ to resend just theirs). Use this if someone didn't receive the group. Adding members rotates the group key, so new members see messages from when they join onward.</p>
     </div>` : ``}
     <div class="group-manage-section">
       <!-- iOS shows Delete Group to everyone, admin or not. A non-admin was being offered "Leave
@@ -27567,7 +28105,7 @@ async function openSpendingSendFromNewSheet() {
   try { await ensureRuntimes({ quiet: true }); } catch { /* checked just below */ }
   const index = getActiveSpendingIndex();
   if (!deriveSpendingAddressAt(index)) {
-    showCopyToast("Spending address is unlocking — go back and try again.");
+    showCopyToast("Spending address is unlocking. Go back and try again.");
     return;
   }
   openSendKaspaModal({ spendingIndex: index });
@@ -28050,7 +28588,7 @@ groupComposer?.addEventListener("submit", async (event) => {
         const url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
         sendGroupWire(url);
       } catch (error) {
-        showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
+        showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
         sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
       }
     } else {
@@ -28289,7 +28827,7 @@ async function sendGroupVoicePreview() {
       await sendGroupWire(url);
       return;
     } catch (error) {
-      showCopyToast(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
+      showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
     }
   }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
@@ -28375,6 +28913,9 @@ groupManageBody?.addEventListener("click", async (event) => {
       </section>`;
     document.body.appendChild(modal);
     try {
+      // Re-walk the control stream from the start too (iOS refreshGroup drops the gctl-recipient
+      // cursor): it is what re-acquires an epoch root this device missed (DSK-041).
+      getGroupManager()?.resetGroupControlCursor?.();
       const changed = await syncGroupsNow({ catchUp: true });
       const recovered = Number(changed) || 0;
       modal.querySelector(".group-refresh-body").innerHTML = `

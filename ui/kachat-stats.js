@@ -252,7 +252,7 @@ function heroHtml(rows) {
   const sum = snapshot ? total(rows) : null;
   let number;
   if (snapshot && sum !== null) number = `<span>${esc(numberFormat.format(sum))}</span>`;
-  else if (snapshot) number = `<span>—</span>`;
+  else if (snapshot) number = `<span>--</span>`;
   else number = `<span class="kstats-redacted" aria-hidden="true">000,000</span>`;
   // A kind counted all time only has no number for 24 Hours / 7 Days, so the total leaves it
   // out - say so rather than let the total look complete.
@@ -297,7 +297,7 @@ function categoryListHtml(rows) {
             + (sum > 0 ? `<small>${esc(percentFormat.format(value / sum))}</small>` : "");
         } else {
           // Reported, but without this range - the indexer keeps an all-time counter only.
-          valueHtml = `<strong class="kstats-dash">—</strong>` + (allRange ? "" : `<small>All-time only</small>`);
+          valueHtml = `<strong class="kstats-dash">--</strong>` + (allRange ? "" : `<small>All-time only</small>`);
         }
         return categoryRowHtml(category, valueHtml);
       }).join("")}

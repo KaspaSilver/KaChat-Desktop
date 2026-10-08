@@ -4,8 +4,8 @@
 //   node tools/test-relay-guard.mjs
 //
 // Covers DSK-001 (scheme-relative SSRF, blocked ranges, redirect hops), DSK-002 (navigation
-// refusal, response sandboxing/stripping, request cookie stripping) and DSK-003 (rate-limit key,
-// write gate, ChangeNOW key gate).
+// refusal, response sandboxing/stripping, request cookie stripping) and DSK-003 (rate-limit key and
+// eviction, IPv6 /64 buckets, write gate bound to the declared Nextcloud origin).
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -183,28 +183,60 @@ check("same-origin redirect is followed", redirSame.status === 200 && JSON.parse
 const soft = await request(relayPort, `/nc-proxy/${UP}/missing`, { headers: { "x-proxy-soft-404": "1" } });
 check("soft 404 (KNS)", soft.status === 200 && soft.headers["x-upstream-status"] === "404");
 
-// Write gate (DSK-003).
+// Write gate (DSK-003): writes only to the Nextcloud the app declares, on /remote.php/ or /ocs/.
 const basic = `Basic ${Buffer.from("alice:app-password").toString("base64")}`;
+const NC = { "x-kachat-nextcloud-origin": `http://upstream.test:${upstreamPort}` };
+const OTHER_NC = { "x-kachat-nextcloud-origin": "https://cloud.example" };
 const writes = [
-  ["POST without auth refused", "POST", "/api/form", {}, 403],
-  ["junk Authorization refused", "POST", "/remote.php/dav/files/alice/x", { authorization: "x" }, 403],
-  ["Basic on a non-Nextcloud path refused", "PUT", "/upload", { authorization: basic }, 403],
-  ["WebDAV PUT with Basic allowed", "PUT", "/remote.php/dav/files/alice/backup.json", { authorization: basic }, 200],
-  ["WebDAV MKCOL with Basic allowed", "MKCOL", "/remote.php/dav/files/alice/KaChat", { authorization: basic }, 200],
-  ["OCS share POST with Basic allowed", "POST", "/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json", { authorization: basic, "ocs-apirequest": "true" }, 200],
-  ["Bearer on index.php allowed", "POST", "/index.php/apps/x", { authorization: "Bearer tok123" }, 200],
-  ["Talk guest (jar + OCS) allowed", "POST", "/ocs/v2.php/apps/spreed/api/v4/room/tok/participants/active", { "x-proxy-jar": "jarJarJar1234", "ocs-apirequest": "true" }, 200],
-  ["jar without OCS-APIRequest refused", "POST", "/ocs/v2.php/apps/spreed/api/v4/room/tok/participants/active", { "x-proxy-jar": "jarJarJar1234" }, 403],
-  ["jar on a WebDAV path refused", "PUT", "/remote.php/dav/files/x", { "x-proxy-jar": "jarJarJar1234", "ocs-apirequest": "true" }, 403],
-  ["dot-segment escape refused", "POST", "/remote.php/../admin", { authorization: basic }, 403],
+  ["POST without auth refused", "POST", "/api/form", { ...NC }, 403],
+  ["junk Authorization refused", "POST", "/remote.php/dav/files/alice/x", { ...NC, authorization: "x" }, 403],
+  ["Basic on a non-Nextcloud path refused", "PUT", "/upload", { ...NC, authorization: basic }, 403],
+  ["WebDAV PUT with Basic to the declared origin allowed", "PUT", "/remote.php/dav/files/alice/backup.json", { ...NC, authorization: basic }, 200],
+  ["WebDAV MKCOL with Basic allowed", "MKCOL", "/remote.php/dav/files/alice/KaChat", { ...NC, authorization: basic }, 200],
+  ["WebDAV PROPFIND with Basic allowed", "PROPFIND", "/remote.php/dav/files/alice/", { ...NC, authorization: basic, depth: "1" }, 200],
+  ["WebDAV DELETE with Basic allowed", "DELETE", "/remote.php/dav/files/alice/old.json", { ...NC, authorization: basic }, 200],
+  ["OCS share POST with Basic allowed", "POST", "/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json", { ...NC, authorization: basic, "ocs-apirequest": "true" }, 200],
+  ["Bearer on /ocs/ allowed", "POST", "/ocs/v2.php/apps/x", { ...NC, authorization: "Bearer tok123" }, 200],
+  ["Talk guest (jar + OCS) allowed", "POST", "/ocs/v2.php/apps/spreed/api/v4/room/tok/participants/active", { ...NC, "x-proxy-jar": "jarJarJar1234", "ocs-apirequest": "true" }, 200],
+  ["jar without OCS-APIRequest refused", "POST", "/ocs/v2.php/apps/spreed/api/v4/room/tok/participants/active", { ...NC, "x-proxy-jar": "jarJarJar1234" }, 403],
+  ["jar on a WebDAV path refused", "PUT", "/remote.php/dav/files/x", { ...NC, "x-proxy-jar": "jarJarJar1234", "ocs-apirequest": "true" }, 403],
+  ["dot-segment escape refused", "POST", "/remote.php/../admin", { ...NC, authorization: basic }, 403],
+  // index.php is only ever read by the app (previews), so it is no longer a write root.
+  ["Bearer on /index.php/ refused", "POST", "/index.php/apps/x", { ...NC, authorization: "Bearer tok123" }, 403],
+  ["Basic PUT on /index.php/ refused", "PUT", "/index.php/apps/files/x", { ...NC, authorization: basic }, 403],
+  // The declared origin must be the target's origin.
+  ["no declared origin refused", "PUT", "/remote.php/dav/files/alice/backup.json", { authorization: basic }, 403],
+  ["write to a different host than declared refused", "PUT", "/remote.php/dav/files/alice/backup.json", { ...OTHER_NC, authorization: basic }, 403],
+  ["declared origin with another port refused", "PUT", "/remote.php/dav/files/alice/backup.json", { "x-kachat-nextcloud-origin": "http://upstream.test:1", authorization: basic }, 403],
+  ["declared origin with another scheme refused", "PUT", "/remote.php/dav/files/alice/backup.json", { "x-kachat-nextcloud-origin": `https://upstream.test:${upstreamPort}`, authorization: basic }, 403],
+  ["garbage declared origin refused", "PUT", "/remote.php/dav/files/alice/backup.json", { "x-kachat-nextcloud-origin": "not a url", authorization: basic }, 403],
+  ["Talk guest declaring another host refused", "POST", "/ocs/v2.php/apps/spreed/api/v4/room/tok/participants/active", { ...OTHER_NC, "x-proxy-jar": "jarJarJar1234", "ocs-apirequest": "true" }, 403],
+  ["declared origin with a path/trailing slash still matches", "PUT", "/remote.php/dav/files/alice/c.json", { "x-kachat-nextcloud-origin": `HTTP://UPSTREAM.test:${upstreamPort}/nextcloud/`, authorization: basic }, 200],
 ];
 for (const [name, method, path, headers, want] of writes) {
-  const r = await request(relayPort, `/nc-proxy/${UP}${path}`, { method, headers, body: "x" });
+  const r = await request(relayPort, `/nc-proxy/${UP}${path}`, { method, headers, body: method === "DELETE" ? null : "x" });
   check(`write gate: ${name}`, r.status === want, `got ${r.status} ${r.body.slice(0, 80)}`);
 }
-const writeSeen = await request(relayPort, `/nc-proxy/${UP}/remote.php/dav/files/alice/b.json`, { method: "PUT", headers: { authorization: basic }, body: "payload" });
+const writeSeen = await request(relayPort, `/nc-proxy/${UP}/remote.php/dav/files/alice/b.json`, { method: "PUT", headers: { ...NC, authorization: basic }, body: "payload" });
 const writeEcho = JSON.parse(writeSeen.body);
 check("PUT body + Authorization reach Nextcloud", writeEcho.body === "payload" && writeEcho.headers.authorization === basic);
+check("declared-origin header is not forwarded", writeEcho.headers["x-kachat-nextcloud-origin"] === undefined);
+// Reads are unaffected by the write gate: no header, a foreign header, index.php.
+for (const [name, path, headers] of [
+  ["GET without a declared origin", "/echo", {}],
+  ["GET declaring another host", "/remote.php/dav/files/alice/a.json", { ...OTHER_NC, authorization: basic }],
+  ["GET on /index.php/ (previews)", "/index.php/core/preview.png?file=%2Fa.jpg", { authorization: basic }],
+]) {
+  const r = await request(relayPort, `/nc-proxy/${UP}${path}`, { headers });
+  check(`reads unaffected: ${name}`, r.status === 200, `got ${r.status}`);
+}
+const headRead = await request(relayPort, `/nc-proxy/${UP}/echo`, { method: "HEAD", headers: OTHER_NC });
+check("reads unaffected: HEAD declaring another host", headRead.status === 200, `got ${headRead.status}`);
+// The app's own API hosts keep their write access without the header (engine/endpoints.js).
+const apiHost = (hostname) => new URL(`https://${hostname}/v1/x`);
+const fakeReq = (headers = {}) => ({ socket: { remoteAddress: "127.0.0.1" }, headers });
+check("API host write needs no declared origin", relay.writeAllowed(fakeReq(), apiHost("api.kaspa.org")) && relay.writeAllowed(fakeReq(), apiHost("indexer.kasia.wtf")));
+check("ChangeNOW is no longer a write host", !relay.writeAllowed(fakeReq(), apiHost("api.changenow.io")));
 
 // Cookie jar for Talk.
 const jar = "talkJar_0123456789";
@@ -243,26 +275,42 @@ for (let i = 0; i < 4; i += 1) tStatuses.push((await request(trustingPort, "/nc-
 check("behind a trusted proxy, each client has its own bucket", tStatuses.every((s) => s === 400), tStatuses.join(","));
 trusting.server.close();
 
-// --- 5. ChangeNOW key gate (DSK-003) -----------------------------------------------------------
-const cnUrl = (path) => new URL(`https://api.changenow.io${path}`);
-const app = { host: "kachat.app", "sec-fetch-site": "same-origin" };
-const cnCases = [
-  ["app GET quote (Referer)", "GET", "/v2/exchange/estimated-amount", { ...app, referer: "https://kachat.app/desktop/" }, true],
-  ["app POST create (Origin)", "POST", "/v2/exchange", { ...app, origin: "https://kachat.app" }, true],
-  ["app GET status", "GET", "/v2/exchange/by-id", { ...app, referer: "https://kachat.app/desktop/#swaps" }, true],
-  ["foreign Origin", "POST", "/v2/exchange", { ...app, origin: "https://evil.example" }, false],
-  ["no Origin, foreign Referer", "GET", "/v2/exchange/min-amount", { ...app, referer: "https://evil.example/" }, false],
-  ["no Origin, no Referer", "GET", "/v2/exchange/min-amount", { ...app }, false],
-  ["no Fetch Metadata", "GET", "/v2/exchange/min-amount", { host: "kachat.app", referer: "https://kachat.app/desktop/" }, false],
-  ["unlisted endpoint", "GET", "/v2/exchange/currencies", { ...app, referer: "https://kachat.app/desktop/" }, false],
-  ["wrong method", "DELETE", "/v2/exchange", { ...app, origin: "https://kachat.app" }, false],
-];
-for (const [name, method, path, headers, want] of cnCases) {
-  check(`changenow key: ${name}`, relay.changenowKeyAllowed(fake("127.0.0.1", headers), method, cnUrl(path)) === want);
+// --- 5. Limiter eviction + IPv6 /64 buckets (DSK-003) -----------------------------------------
+// Rotating thousands of fresh addresses must not reset anyone already being counted.
+const evict = createRelay({ rateMax: 3 });
+const limited = "198.51.100.1";   // already over its limit
+const midQuota = "198.51.100.2";  // two of its three requests used
+const over = [];
+for (let i = 0; i < 4; i += 1) over.push(evict.overRate(limited));
+evict.overRate(midQuota); evict.overRate(midQuota);
+check("limiter: the limited client is over before the flood", over.join(",") === "false,false,false,true", over.join(","));
+let floodLimited = 0;
+for (let i = 0; i < 6000; i += 1) if (evict.overRate(`2001:db8:${(i >> 8).toString(16)}:${(i & 0xff).toString(16)}::/64`)) floodLimited += 1;
+check("limiter: 6000 one-off clients each get their own fresh window", floodLimited === 0, String(floodLimited));
+check("limiter: 6000 rotating clients do not reset a limited client", evict.overRate(limited) === true);
+check("limiter: 6000 rotating clients do not reset a mid-quota client", evict.overRate(midQuota) === false && evict.overRate(midQuota) === true);
+// Over the bound with only repeat callers, the oldest goes - one at a time, never all.
+const small = createRelay({ rateMax: 3, rateMaxKeys: 3 });
+for (const k of ["a", "b", "c"]) { small.overRate(k); small.overRate(k); }
+small.overRate("d"); small.overRate("d"); // evicts "a" only
+check("limiter: full of repeat callers, only the oldest is evicted", [1, 2].map(() => small.overRate("b")).join(",") === "false,true"
+  && [1, 2, 3].map(() => small.overRate("a")).join(",") === "false,false,false");
+
+// Clients in one IPv6 /64 share a bucket; IPv4-mapped IPv6 counts as the IPv4 address.
+check("IPv6 /64 key", relay.clientKey(fake("2001:db8:1:2::1")) === "2001:db8:1:2::/64", relay.clientKey(fake("2001:db8:1:2::1")));
+check("IPv6 addresses in one /64 share a key", relay.clientKey(fake("2001:db8:1:2::1")) === relay.clientKey(fake("2001:0db8:0001:0002:abcd:ef01:2345:6789")));
+check("IPv6 addresses in different /64s do not", relay.clientKey(fake("2001:db8:1:2::1")) !== relay.clientKey(fake("2001:db8:1:3::1")));
+check("IPv4-mapped IPv6 keys as IPv4", relay.clientKey(fake("::ffff:198.51.100.7")) === "198.51.100.7" && relay.clientKey(fake("::ffff:c633:6407")) === "198.51.100.7");
+check("IPv6 from a trusted proxy's XFF keys by /64", relay.clientKey(fake("127.0.0.1", { "x-forwarded-for": "2001:db8:aa:bb:1::9" })) === "2001:db8:aa:bb::/64");
+const v6 = relayServer({ rateMax: 2 }); // loopback trusted by default
+const v6Port = await listen(v6.server);
+const v6Statuses = [];
+for (const addr of ["2001:db8:5:6::1", "2001:db8:5:6::2", "2001:db8:5:6:ffff:ffff:ffff:fffe"]) {
+  v6Statuses.push((await request(v6Port, "/nc-proxy/bad", { headers: { "x-forwarded-for": addr } })).status);
 }
-check("changenow key: not over http", !relay.changenowKeyAllowed(fake("127.0.0.1", { ...app, referer: "https://kachat.app/" }), "GET", new URL("http://api.changenow.io/v2/exchange/by-id")));
-check("changenow key: X-Forwarded-Host from a trusted proxy", relay.changenowKeyAllowed(fake("127.0.0.1", { host: "127.0.0.1:8790", "x-forwarded-host": "kachat.app", "sec-fetch-site": "same-origin", referer: "https://kachat.app/desktop/" }), "GET", cnUrl("/v2/exchange/by-id")));
-check("changenow key: X-Forwarded-Host ignored from an untrusted peer", !relay.changenowKeyAllowed(fake("203.0.113.5", { host: "127.0.0.1:8790", "x-forwarded-host": "kachat.app", "sec-fetch-site": "same-origin", referer: "https://kachat.app/desktop/" }), "GET", cnUrl("/v2/exchange/by-id")));
+v6Statuses.push((await request(v6Port, "/nc-proxy/bad", { headers: { "x-forwarded-for": "2001:db8:5:7::1" } })).status);
+check("rotating addresses inside one /64 share a bucket; the next /64 does not", v6Statuses.join(",") === "400,400,429,400", v6Statuses.join(","));
+v6.server.close();
 
 server.close();
 upstream.close();

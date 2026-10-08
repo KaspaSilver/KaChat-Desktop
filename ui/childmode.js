@@ -2,7 +2,7 @@
 // ChildModeSettingsView + the WelcomeGuide "Who will use KaChat?" step.
 //
 // While Simple Mode is ON the app is strictly Chats, Group Chats, Portfolio,
-// Cold Storage and Profile/Settings: Swaps, KaPosts and Broadcasts are removed
+// Cold Storage and Profile/Settings: KaPosts and Broadcasts are removed
 // everywhere. The actual gating lives at app.js's single choke point
 // (setActiveAppTab + dockVisibleTabs) using `isChildModeEnabled()` and
 // `CHILD_HIDDEN_TABS` from here — derived at render time, never written into
@@ -31,7 +31,7 @@ const USER_TYPE_KEY = "kachat-user-type-choice-v1";
 
 /** Tabs removed everywhere while Simple Mode is on (dock, programmatic switches,
  * the Customize Dock page). */
-export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts", "chess", "kachat-names"]; // .kachat is a marketplace (iOS b064468); Stats stays (read-only)
+export const CHILD_HIDDEN_TABS = ["kaposts", "broadcasts", "chess", "kachat-names"]; // .kachat is a marketplace (iOS b064468); Stats stays (read-only)
 
 let deps = {
   escapeHtml: (value) => String(value ?? ""),
@@ -277,7 +277,7 @@ export function renderUserTypeGuideStep(container) {
   if (isChildModeEnabled()) {
     // Replay with Simple Mode already on: informational only — offering "Full"
     // here would be a password-free way out.
-    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; Swap, KaPosts and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
+    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; KaPosts and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
     return;
   }
   const rows = [
@@ -285,7 +285,7 @@ export function renderUserTypeGuideStep(container) {
     { key: "child", title: "Simple", sub: "Chats, Portfolio and Cold Storage only. A password unlocks the rest later." },
   ];
   container.innerHTML = `
-    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. Swap, KaPosts and Public Chats stay hidden until the password unlocks them.</p>
+    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. KaPosts and Public Chats stay hidden until the password unlocks them.</p>
     <div class="setup-choice-list">
       ${rows.map((row) => `<button type="button" class="setup-node-row${guideChoice === row.key ? " selected" : ""}" data-cm-usertype="${row.key}"><span class="setup-node-dot"></span><span class="setup-node-copy"><strong>${row.title}</strong><small>${row.sub}</small></span></button>`).join("")}
     </div>
@@ -369,7 +369,7 @@ const ABOUT_CARD_HTML = `
     <div class="settings-page-form">
       <p class="child-mode-heading">What stays available</p>
       <p class="child-mode-keeps"><strong>Chats &amp; Group Chats · Portfolio · Cold Storage</strong></p>
-      <p class="field-hint">While Simple Mode is on, Swap, KaPosts and Public Chats are removed everywhere — the dock, the Customize Dock page and every other entry point. Only the password turns it off.</p>
+      <p class="field-hint">While Simple Mode is on, KaPosts and Public Chats are removed everywhere: the dock, the Customize Dock page and every other entry point. Only the password turns it off.</p>
     </div>
   </div>`;
 
@@ -386,7 +386,7 @@ export function renderChildModeSettingsPage() {
           <p class="child-mode-heading">Set a Password</p>
           ${passwordFieldHtml("setup-password", "Password")}
           ${passwordFieldHtml("setup-confirm", "Confirm password")}
-          <p class="field-hint">4 digits, 8 digits, or anything you like — just don't forget it. It's needed to turn Simple Mode off later.</p>
+          <p class="field-hint">4 digits, 8 digits, or anything you like, just don't forget it. It's needed to turn Simple Mode off later.</p>
           <p class="field-error" data-cm-error="setup" hidden></p>
           <button class="primary-button" type="button" data-cm-action="setup">Set Password &amp; Turn On</button>
         </div>
@@ -397,7 +397,7 @@ export function renderChildModeSettingsPage() {
       <div class="settings-list-card">
         <div class="settings-toggle-row"><span><strong>Simple Mode</strong><small>${enabled
           ? "Simple Mode is on. Turning it off requires the password."
-          : "A password is already set — turning Simple Mode on doesn't ask for it."}</small></span><label class="switch-control"><input type="checkbox" data-cm-toggle${enabled ? " checked" : ""}><span></span></label></div>
+          : "A password is already set, so turning Simple Mode on doesn't ask for it."}</small></span><label class="switch-control"><input type="checkbox" data-cm-toggle${enabled ? " checked" : ""}><span></span></label></div>
         <div class="settings-page-form child-mode-prompt" data-cm-turnoff-prompt hidden>
           ${passwordFieldHtml("turnoff-password", "Password")}
           <p class="field-hint">Enter the Simple Mode password to turn it off.</p>

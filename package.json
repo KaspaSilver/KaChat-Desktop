@@ -10,6 +10,8 @@
     "setup:cipher": "bash tools/setup-kasia-cipher.sh",
     "setup:all": "npm run setup:wasm && npm run setup:cipher",
     "build": "bash tools/check-wasm.sh && vite build",
+    "build:desktop-origin": "bash tools/check-wasm.sh && vite build --base=/",
+    "build:desktop-subpath": "bash tools/check-wasm.sh && vite build --base=/desktop/",
     "preview": "vite preview --host 0.0.0.0",
     "serve": "npm run build && npm run preview"
   },

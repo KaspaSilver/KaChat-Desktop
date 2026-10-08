@@ -192,6 +192,8 @@ export class NextcloudTalkClient {
       "OCS-APIRequest": "true",
       Accept: "application/json",
       "x-proxy-jar": this.jarId,
+      // The relay writes only to the Nextcloud this header names (DSK-003).
+      "x-kachat-nextcloud-origin": (() => { try { return new URL(this.server).origin; } catch { return ""; } })(),
     };
     if (longPoll) headers["x-proxy-long-poll"] = "1";
     if (this.auth?.kind === "basic") headers.Authorization = "Basic " + btoa(`${this.auth.username}:${this.auth.appPassword}`);

@@ -257,50 +257,166 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
 // dust change output, and Kaspa's KIP-9 storage-mass rule rejects the transaction (the same
 // reason sweepAllToSelf above is a two-pass exact sweep). `totalFeeSompi` is the UI's
 // displayed policy fee; it is clamped up to the generator's own base fee if too low.
+//
+// Options shared by sendMaxKaspa, sendMaxWithPayload and estimateMaxSend (audits DSK-042, DSK-043):
+// - `selectedOutpoints` / `manualUtxos`: coin control (as sendKaspa); otherwise every coin the
+//   address holds that no scheduled KaPost reserves.
+// - fee: `totalFeeSompi` (a displayed total, raised to the network floor when below it), else the
+//   network floor for this exact shape (all inputs, one output, the payload) + `extraFeeSompi`.
+// - `payload`: carried by the one output's transaction (a chat payment's kchat:1:pay:). A payload
+//   that states the amount must be built for `expectedAmountSompi`.
+// - pin ("send exactly what's shown"): `expectedOutpoints` is the exact coin set Max was computed
+//   from, and `expectedAmountSompi` the amount the person saw. A different coin set, or a fee that
+//   no longer fits (total - expected below the fee, or above it by more than
+//   MAX_PIN_FEE_SLACK_SOMPI), throws a MAX_AMOUNT_CHANGED error carrying the new plan and nothing
+//   is sent. Within the slack the shown amount is sent and those few sompi go to the fee.
+export const MAX_SEND_INPUT_LIMIT = 80;
+// A few bytes of payload or address script at the 100 sompi/gram floor (a payload byte is ~200
+// sompi, an address-script byte ~1100): far below any fee-tier step.
+export const MAX_PIN_FEE_SLACK_SOMPI = 5000n;
+export const MAX_AMOUNT_CHANGED = "maxAmountChanged";
+export const MAX_AMOUNT_CHANGED_MESSAGE = "The available amount changed. Check the new amount and slide again.";
+const TOO_MANY_COINS_FOR_MAX = "Too many coins for one transaction. Run Compound UTXOs first, then send Max.";
+const outpointKeyOf = (entry) => `${entry?.outpoint?.transactionId}:${entry?.outpoint?.index}`;
+
+/** The coins a Max send spends from the address's sanitized entries: reserved coins dropped, then
+ *  narrowed to the coin-control pick when there is one. Throws when nothing is left. */
+export function maxSendEntries(entries, selectedOutpoints = null) {
+  let list = Array.isArray(entries) ? [...entries] : [];
+  if (list.length === 0) throw new Error("No UTXOs to send.");
+  list = excludeReservedUtxos(list);
+  if (list.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
+  if (selectedOutpoints && selectedOutpoints.length) {
+    const wanted = new Set(selectedOutpoints);
+    list = list.filter((entry) => wanted.has(outpointKeyOf(entry)));
+    if (list.length === 0) throw new Error("The selected coins are no longer available.");
+  }
+  return list.sort(bySompiAsc);
+}
+
+/**
+ * The exact single-output Max for `entries` (already chosen): no change can exist, so nothing is
+ * left for KIP-9 to reject. Pure and synchronous: the same numbers the send uses.
+ * Returns { entries, outpoints, totalSompi, floorFeeSompi, feeSompi, amountSompi }.
+ */
+export function planMaxSend({ kaspa, entries, destinationAddress, payload = null, totalFeeSompi = null, extraFeeSompi = 0 }) {
+  const chosen = [...(entries || [])].sort(bySompiAsc);
+  if (chosen.length === 0) throw new Error("No UTXOs to send.");
+  // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85
+  // inputs; the generator would split into a chain, but a max send must be a single tx.
+  if (chosen.length > MAX_SEND_INPUT_LIMIT) throw new Error(TOO_MANY_COINS_FOR_MAX);
+  const total = totalUtxoSompi(chosen);
+  const payloadArg = payload && payload.length ? payload : undefined;
+  // The exact network-floor fee for this shape (all inputs, ONE output, the payload), measured on
+  // a draft. Undefined means the mass is over the standard limit.
+  const draft = kaspa.createTransaction(chosen, [{ address: destinationAddress, amount: total - (total / 20n) }], 0n, payloadArg);
+  const floorRaw = kaspa.calculateTransactionFee(NETWORK_ID, draft, 1);
+  if (floorRaw == null) throw new Error(TOO_MANY_COINS_FOR_MAX);
+  const floorFeeSompi = BigInt(floorRaw);
+  let feeSompi;
+  if (totalFeeSompi != null) {
+    feeSompi = BigInt(totalFeeSompi);
+    if (feeSompi < floorFeeSompi) feeSompi = floorFeeSompi;
+  } else {
+    feeSompi = floorFeeSompi + extraFeeSompiFrom(extraFeeSompi);
+  }
+  const amountSompi = total - feeSompi;
+  if (amountSompi <= 0n) throw new Error("Balance too low after network fees.");
+  return { entries: chosen, outpoints: chosen.map(outpointKeyOf), totalSompi: total, floorFeeSompi, feeSompi, amountSompi };
+}
+
+/** The error a pinned Max throws when what it would send is no longer what was shown. */
+function maxAmountChangedError(plan) {
+  const error = new Error(MAX_AMOUNT_CHANGED_MESSAGE);
+  error.code = MAX_AMOUNT_CHANGED;
+  error.amountSompi = plan.amountSompi;
+  error.feeSompi = plan.feeSompi;
+  error.outpoints = plan.outpoints;
+  return error;
+}
+
+/** Checks a plan against the pin; returns { amountSompi, feeSompi } to send, or throws. */
+export function applyMaxPin(plan, { expectedAmountSompi = null, expectedOutpoints = null } = {}) {
+  if (expectedOutpoints != null) {
+    const expected = new Set(outpointKeysFrom(expectedOutpoints));
+    const same = expected.size === plan.outpoints.length && plan.outpoints.every((key) => expected.has(key));
+    if (!same) throw maxAmountChangedError(plan);
+  }
+  if (expectedAmountSompi == null) return { amountSompi: plan.amountSompi, feeSompi: plan.feeSompi };
+  const expected = BigInt(expectedAmountSompi);
+  const fee = plan.totalSompi - expected;
+  if (expected <= 0n || fee < plan.feeSompi || fee > plan.feeSompi + MAX_PIN_FEE_SLACK_SOMPI) throw maxAmountChangedError(plan);
+  return { amountSompi: expected, feeSompi: fee };
+}
+
+function maxPickFrom(selectedOutpoints, manualUtxos) {
+  const picked = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : outpointKeysFrom(manualUtxos);
+  // Coin control never falls back to coins the person didn't pick (iOS IOS-012).
+  if (!picked.length && Array.isArray(manualUtxos) && manualUtxos.length) {
+    throw new Error("Selected UTXOs are no longer available - please reselect.");
+  }
+  return picked.length ? picked : null;
+}
+
+/**
+ * Max without sending (the Max buttons): the address's coins fetched now, the same choice and fee
+ * as the send. `payloadBytes` (a length) or `payloadFor(totalSompi)` stands in for a payload not
+ * built yet. Returns the plan (without its entries) plus `availableSompi`, every unreserved coin
+ * at the address.
+ */
+export async function estimateMaxSend({ kaspa, rpc, withRpc = null, sourceAddress, destinationAddress = null, selectedOutpoints = null, manualUtxos = null, payload = null, payloadBytes = 0, payloadFor = null, totalFeeSompi = null, extraFeeSompi = 0 }) {
+  const picked = maxPickFrom(selectedOutpoints, manualUtxos);
+  const fetched = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Max estimate UTXO fetch" });
+  const availableSompi = totalUtxoSompi(excludeReservedUtxos(fetched));
+  const entries = maxSendEntries(fetched, picked);
+  const length = Math.max(0, Number(payloadBytes) || 0);
+  // `payloadFor(totalSompi)`: the payload built for the chosen coins' total (iOS prices a payment
+  // payload with the whole balance as its amount: never shorter than the real one).
+  let priced = payload || (length ? new Uint8Array(length) : null);
+  if (!priced && typeof payloadFor === "function") priced = (await payloadFor(totalUtxoSompi(entries))) || null;
+  const plan = planMaxSend({
+    kaspa, entries,
+    destinationAddress: validateMainnetAddress(destinationAddress || sourceAddress),
+    payload: priced,
+    totalFeeSompi, extraFeeSompi,
+  });
+  return {
+    outpoints: plan.outpoints, totalSompi: plan.totalSompi, floorFeeSompi: plan.floorFeeSompi,
+    feeSompi: plan.feeSompi, amountSompi: plan.amountSompi, inputCount: plan.outpoints.length, availableSompi,
+  };
+}
+
 export async function sendMaxKaspa(args) {
   return enqueueSend(args.sourceAddress, () => sendMaxKaspaNow(args));
 }
-async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress: rawDestination, totalFeeSompi = null, selectedOutpoints = null, log = () => {} }) {
+/** sendMaxKaspa with a payload (a chat payment at Max): one output, no change, the payload on it. */
+export async function sendMaxWithPayload(args) {
+  if (!args?.payload) throw new Error("Payload is required for a pay-max-with-payload send.");
+  return sendMaxKaspa(args);
+}
+async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress: rawDestination, totalFeeSompi = null, extraFeeSompi = 0, selectedOutpoints = null, manualUtxos = null, payload = null, expectedAmountSompi = null, expectedOutpoints = null, log = () => {} }) {
   // Like sendKaspaNow: only an address of the running network (IOS-003) - the script is built
   // from the payload alone, so the other network's address would pay this chain's script.
   const destinationAddress = validateMainnetAddress(rawDestination);
-  let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Max send UTXO fetch" });
-  if (!entries || entries.length === 0) throw new Error("No UTXOs to send.");
-  entries = excludeReservedUtxos(entries);
-  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
-  if (selectedOutpoints && selectedOutpoints.length) {
-    const wanted = new Set(selectedOutpoints);
-    entries = entries.filter((entry) => {
-      const outpoint = entry.outpoint || {};
-      return wanted.has(`${outpoint.transactionId}:${outpoint.index}`);
-    });
-    if (entries.length === 0) throw new Error("The selected coins are no longer available.");
-  }
-  entries.sort(bySompiAsc);
-  // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85
-  // inputs — the generator would split into a chain, but a max send must be a single tx.
-  if (entries.length > 80) {
-    throw new Error("Too many coins for one transaction — run Compound UTXOs first, then send Max.");
-  }
-  const total = totalUtxoSompi(entries);
+  const picked = maxPickFrom(selectedOutpoints, manualUtxos);
+  const fetched = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Max send UTXO fetch" });
+  const entries = maxSendEntries(fetched, picked);
 
-  // Measure the exact network-floor fee for this transaction shape (all inputs, ONE output)
-  // on a draft, then build the real thing manually: outputs are exactly (total - fee), so no
-  // change output can ever exist — the generator's own change/dust handling is what kept
-  // tripping KIP-9 on near-max amounts. Mirrors the KNS reveal's manual-build approach.
-  const draft = kaspa.createTransaction(entries, [{ address: destinationAddress, amount: total - (total / 20n) }], 0n);
-  const floorFeeSompi = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
-  let totalFee = totalFeeSompi != null ? BigInt(totalFeeSompi) : floorFeeSompi;
-  if (totalFee < floorFeeSompi) totalFee = floorFeeSompi;
-  const amount = total - totalFee;
-  if (amount <= 0n) throw new Error("Balance too low after network fees.");
-
-  const tx = kaspa.createTransaction(entries, [{ address: destinationAddress, amount }], 0n);
+  // Built by hand, never through the generator: the output is exactly (total - fee), so no change
+  // output can ever exist (the generator's own change/dust handling is what kept tripping KIP-9 on
+  // near-max amounts). Mirrors the KNS reveal's manual-build approach.
+  const plan = planMaxSend({ kaspa, entries, destinationAddress, payload, totalFeeSompi, extraFeeSompi });
+  const { amountSompi: amount, feeSompi } = applyMaxPin(plan, { expectedAmountSompi, expectedOutpoints });
+  const payloadArg = payload && payload.length ? payload : undefined;
+  const tx = kaspa.createTransaction(plan.entries, [{ address: destinationAddress, amount }], 0n, payloadArg);
+  const finalFloor = kaspa.calculateTransactionFee(NETWORK_ID, tx, 1);
+  if (finalFloor == null) throw new Error(TOO_MANY_COINS_FOR_MAX);
+  if (BigInt(finalFloor) > feeSompi) throw new Error("Balance too low after network fees.");
   const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
   const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
   const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Max send broadcast", log });
-  log("Max send txid:", txid);
-  return { txids: [txid], amountSompi: amount };
+  log("Max send txid:", txid, `(${plan.entries.length} input${plan.entries.length === 1 ? "" : "s"}, one output, fee ${feeSompi} sompi)`);
+  return { txids: [txid], amountSompi: amount, feeSompi, outpoints: plan.outpoints };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

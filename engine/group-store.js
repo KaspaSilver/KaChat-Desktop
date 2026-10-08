@@ -14,6 +14,17 @@ const GROUPS_KEY = "kachat-groups-v1";
 // `deleted` blocks a group from ever being re-added by discovery/recovery; `published` tracks
 // which tombstones have been written on-chain (so the delete survives a seedless re-import).
 const GROUP_TOMBSTONES_KEY = "kachat-group-tombstones-v1";
+// Per-wallet cursor for the by-recipient control stream (DSK-041; iOS groupCatchUpCursors
+// "gctl-recipient|<wallet>"): { [wallet]: { cursor, indexer, caughtUp, updatedAt } }. Its own
+// key, bucketed by wallet exactly like the two above (a bucket of kachat-groups-v1 is a map of
+// group id -> record, so it cannot hold anything else), and wiped with them on account removal.
+// The wallet key is the running network's address (kaspa:/kaspatest:), which keeps the two
+// networks apart; `indexer` is the indexer that issued the cursor - another one starts over.
+export const GROUP_CONTROL_CURSOR_KEY = "kachat-group-control-cursor-v1";
+// Pages of the by-recipient stream per sync pass (iOS: 40 x 50). A walk that spends it resumes
+// from the stored cursor on the next pass - never from the start.
+export const CONTROL_PAGE_LIMIT = 50;
+export const CONTROL_PAGE_BUDGET = 40;
 
 // Deep-ish clone via JSON is fine — records are plain data (hex strings, numbers).
 function loadAll() {
@@ -29,6 +40,13 @@ function loadTombstonesAll() {
 }
 function saveTombstonesAll(all) {
   try { localStorage.setItem(GROUP_TOMBSTONES_KEY, JSON.stringify(all)); } catch {}
+}
+function loadControlCursorsAll() {
+  try { return JSON.parse(localStorage.getItem(GROUP_CONTROL_CURSOR_KEY) || "{}") || {}; }
+  catch { return {}; }
+}
+function saveControlCursorsAll(all) {
+  try { localStorage.setItem(GROUP_CONTROL_CURSOR_KEY, JSON.stringify(all)); } catch {}
 }
 
 export class GroupManager {
@@ -130,6 +148,66 @@ export class GroupManager {
     all[this.walletAddress] = bucket;
     saveTombstonesAll(all);
   }
+  // --- by-recipient control stream cursor (DSK-041) ---
+  /** This wallet's stored by-recipient cursor state, or null (never walked / wiped / reset). */
+  groupControlCursor(wallet = this.walletAddress) {
+    const entry = loadControlCursorsAll()[wallet];
+    return entry && typeof entry === "object" ? entry : null;
+  }
+  _saveGroupControlCursor(wallet, state) {
+    if (!wallet) return;
+    const all = loadControlCursorsAll();
+    all[wallet] = { ...state, updatedAt: Date.now() };
+    saveControlCursorsAll(all);
+  }
+  /** Forget this wallet's cursor, so the next pass walks the control stream from the start again
+   *  (iOS refreshGroup drops "gctl-recipient|<wallet>" the same way). Idempotent to re-walk. */
+  resetGroupControlCursor(wallet = this.walletAddress) {
+    const all = loadControlCursorsAll();
+    if (!Object.prototype.hasOwnProperty.call(all, wallet)) return;
+    delete all[wallet];
+    saveControlCursorsAll(all);
+  }
+
+  // Invites / rotations / photos / delete markers addressed to us, read from the persisted cursor
+  // (iOS catchUpGroupControlByRecipient). Rules:
+  //  - no cursor (fresh import, wiped, reset, other indexer): walk from the start of the stream;
+  //  - a cursor: start after it, so steady state is one request that comes back empty;
+  //  - the cursor is written AFTER a page's rows are applied, never before, so an interruption
+  //    (error, reload, wallet switch) re-reads that page rather than skipping it;
+  //  - at most CONTROL_PAGE_BUDGET pages a pass; the next pass resumes from the stored cursor;
+  //  - re-reading is harmless: applyControl ignores a root it already holds, archives an older
+  //    one, and a photo control not newer than the last one applied.
+  async _catchUpControlByRecipient(events) {
+    const wallet = this.walletAddress;
+    if (!wallet || typeof this.engine.scanGroupControlByRecipientPage !== "function") return;
+    const indexer = String(this.engine.groupIndexerUrl?.() || "");
+    const stored = this.groupControlCursor(wallet);
+    let cursor = stored && String(stored.indexer || "") === indexer && stored.cursor ? String(stored.cursor) : null;
+    for (let pagesLeft = CONTROL_PAGE_BUDGET; pagesLeft > 0; pagesLeft -= 1) {
+      if (this.walletAddress !== wallet) return; // switched mid-walk: the cursor is not this wallet's
+      const page = await this.engine.scanGroupControlByRecipientPage(cursor, CONTROL_PAGE_LIMIT);
+      if (this.walletAddress !== wallet) return;
+      for (const row of page?.rows || []) {
+        // One row that throws must not pin the cursor in front of it forever.
+        try {
+          const ev = await this.applyControl(row.payloadString, row.sender, row.blockTime);
+          if (ev) events.push(ev);
+        } catch (error) {
+          this.engine.log?.(`Group control row skipped: ${error?.message || error}`);
+        }
+      }
+      const next = page?.nextCursor != null ? String(page.nextCursor) : null;
+      const advanced = next != null && next !== cursor;
+      if (advanced) cursor = next;
+      const atEnd = Number(page?.rawCount ?? page?.rows?.length ?? 0) < CONTROL_PAGE_LIMIT || !advanced;
+      if (cursor) this._saveGroupControlCursor(wallet, { cursor, indexer, caughtUp: atEnd });
+      if (atEnd) return;
+    }
+    // Budget spent mid-stream: the walk up to `cursor` was contiguous, so the next pass resumes
+    // from it and loses nothing (already stored above, marked not caught up).
+  }
+
   // Self-addressed, self-signed delete marker. Only our own key can produce one, and only our
   // own key can read it — see verifyTombstonePayload + the signing_pub === self check on receipt.
   async _publishTombstone(groupId) {
@@ -517,10 +595,12 @@ export class GroupManager {
       const record = this.getGroup(payload.group_id);
       if (!record) return null;
       if (payload.signing_pub !== record.adminSigningPub || !G.verifyPhotoPayload(payload)) return null;
-      // The by-recipient control scan has no cursor, so it re-returns historical controls every
-      // sync. Photo controls oscillate photoHex (set/clear), which would re-apply and re-emit a
-      // system message on every poll. Guard by block time: ignore any photo control not strictly
-      // newer than the last one we applied. (photoUpdatedAt is preserved across root rebuilds.)
+      // The by-recipient control scan reads from a persisted cursor (DSK-041), but historical
+      // controls still come round again: the first walk after an import, a "Refresh Messages"
+      // re-walk (the cursor is reset), or two passes overlapping. Photo controls oscillate
+      // photoHex (set/clear), which would re-apply and re-emit a system message each time. Guard
+      // by block time: ignore any photo control not strictly newer than the last one we applied.
+      // (photoUpdatedAt is preserved across root rebuilds.)
       const bt = Number(blockTime || 0);
       if (bt > 0 && bt <= Number(record.photoUpdatedAt || 0)) return null;
       const newHex = String(payload.photo || "");
@@ -561,7 +641,7 @@ export class GroupManager {
       this._archivePreviousRoot(existing, payload.epoch, payload.group_root_epoch);
       return null;
     }
-    // The same root seen again - the recipient control read re-serves every root on every sweep -
+    // The same root seen again - a re-walk of the recipient control stream re-serves old roots -
     // changes nothing: no member lookups, no write, no event, and so no re-render of the open
     // thread (which also stopped a playing voice note). Anything that differs still applies.
     if (existing && payload.epoch === existing.currentEpoch
@@ -740,14 +820,12 @@ export class GroupManager {
       }
     }
 
-    // 1. Discover invites / rotations addressed to us.
+    // 1. Discover invites / rotations addressed to us, from the persisted cursor (DSK-041). The
+    // by-sender read per known admin (iOS catchUpGroupControl) is not used here: by-recipient
+    // already carries every control addressed to this key, admin rotations included.
     try {
-      const recips = await this.engine.scanGroupControlByRecipient();
-      for (const row of recips) {
-        const ev = await this.applyControl(row.payloadString, row.sender, row.blockTime);
-        if (ev) events.push(ev);
-      }
-    } catch { /* indexer hiccup — try messages anyway */ }
+      await this._catchUpControlByRecipient(events);
+    } catch { /* indexer hiccup — the cursor holds at the last applied page; try messages anyway */ }
 
     // 2. Live traffic (iOS a56fb98): one POST /group-messages/since carrying every member's
     // blinded id of every group, starting 10 s before the last answer, rows deduped by txId.
@@ -765,20 +843,40 @@ export class GroupManager {
         }
       }
       try {
+        // A full page (`SINCE_LIMIT` rows) is followed straight away (GROUP_MESSAGES_INDEXER.md §2,
+        // DSK-040): from latestBlockTime - 1, since the read is strictly newer-than, so rows that
+        // share the page's newest time come back and dedupe; when that does not move (more than a
+        // page shares one time) it steps to latestBlockTime. At most SINCE_MAX_PAGES per chunk; a
+        // chunk that hits the cap holds the cursor at the newest row it read.
+        const SINCE_LIMIT = 200;
+        const SINCE_MAX_PAGES = 20;
         let latest = this.sinceBlockTime;
+        let cap = Infinity;
         for (let i = 0; i < ids.length; i += 256) {
-          const { messages: rows, latestBlockTime } = await this.engine.scanGroupMessagesSince(ids.slice(i, i + 256), this.sinceBlockTime - 10_000, 200);
-          latest = Math.max(latest, Number(latestBlockTime) || 0);
-          for (const row of rows) {
-            if (!row.txId || this._sinceSeen.has(row.txId)) continue;
-            this._sinceSeen.add(row.txId);
-            if (this._sinceSeen.size > 4000) { for (const old of [...this._sinceSeen].slice(0, 2000)) this._sinceSeen.delete(old); }
-            const parsed = G.parseGroupMessagePayload(row.payloadString);
-            const decoded = this.processMessage(parsed);
-            if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+          const chunk = ids.slice(i, i + 256);
+          let since = this.sinceBlockTime - 10_000;
+          let full = false;
+          for (let page = 0; page < SINCE_MAX_PAGES; page += 1) {
+            const { messages: rows, latestBlockTime, count } = await this.engine.scanGroupMessagesSince(chunk, since, SINCE_LIMIT);
+            const pageLatest = Number(latestBlockTime) || 0;
+            latest = Math.max(latest, pageLatest);
+            for (const row of rows) {
+              if (!row.txId || this._sinceSeen.has(row.txId)) continue;
+              this._sinceSeen.add(row.txId);
+              if (this._sinceSeen.size > 4000) { for (const old of [...this._sinceSeen].slice(0, 2000)) this._sinceSeen.delete(old); }
+              const parsed = G.parseGroupMessagePayload(row.payloadString);
+              const decoded = this.processMessage(parsed);
+              if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+            }
+            full = Number(count ?? rows.length) >= SINCE_LIMIT;
+            if (!full) break;
+            if (pageLatest - 1 > since) since = pageLatest - 1;
+            else if (pageLatest > since) since = pageLatest;
+            else break; // no progress reported: leave it to the next pass / the full scan
           }
+          if (full) cap = Math.min(cap, since);
         }
-        this.sinceBlockTime = latest;
+        this.sinceBlockTime = Math.max(this.sinceBlockTime, Math.min(latest, cap));
         this._sincePasses = (this._sincePasses || 0) + 1;
         usedSince = true;
       } catch (error) {

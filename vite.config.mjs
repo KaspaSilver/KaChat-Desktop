@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import { createRelay } from "./tools/relay-guard.mjs";
+import { securityHeaders } from "./tools/security-headers.mjs";
 
 // Same-origin relay. The desktop app runs in a browser, and stock Nextcloud (and several other
 // hosts the app talks to) send no CORS headers - so the app routes those calls through
@@ -8,7 +9,7 @@ import { createRelay } from "./tools/relay-guard.mjs";
 // links are NOT proxied - recipients open those on the real server.
 //
 // The relay itself (SSRF guard with DNS pinning, navigation refusal, response sandboxing, cookie
-// jars for Nextcloud Talk, write/rate/ChangeNOW controls) lives in tools/relay-guard.mjs and is
+// jars for Nextcloud Talk, write and rate controls) lives in tools/relay-guard.mjs and is
 // shared with the standalone sidecar (tools/nc-proxy-server.mjs) that serves static deployments.
 function nextcloudProxy() {
   // One handler, mounted on BOTH the dev server and the preview server. `configureServer` alone
@@ -22,10 +23,6 @@ function nextcloudProxy() {
     // proxy in another container, list that proxy's address here.
     trustedProxies: process.env.KACHAT_TRUSTED_PROXIES,
     trustCfConnectingIp: String(process.env.KACHAT_TRUST_CF_CONNECTING_IP || "") === "1",
-    // ChangeNOW: the key lives on the server (CHANGENOW_API_KEY, or the VITE_CHANGENOW_API_KEY
-    // docker-compose already passes) and is attached only to the app's own swap calls.
-    changenowApiKey: () => process.env.CHANGENOW_API_KEY || process.env.VITE_CHANGENOW_API_KEY || "",
-    changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
     rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
     // A seed or API that never answers must not hold the connection until the CDN in front gives
     // up (Cloudflare's 522): fifteen seconds for reads; writes get two minutes, long polls one.
@@ -84,5 +81,12 @@ export default defineConfig({
   preview: {
     host: "0.0.0.0",
     allowedHosts: [".duckdns.org"],
+    // DSK-014: CSP (no inline script, wasm allowed, framing refused), X-Frame-Options, nosniff and
+    // Referrer-Policy on the page and every built asset. Vite applies these to static files and
+    // index.html only, never to the /nc-proxy relay above, which sends its own sandbox CSP. This
+    // is the http-tolerant variant (a LAN install may talk plain http/ws to a local node); the
+    // https site's nginx uses the stricter one, see docs/SECURITY_HEADERS.md. The dev server is
+    // left without it so HMR and the dev overlay keep working untouched.
+    headers: securityHeaders({ https: false }),
   },
 });

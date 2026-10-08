@@ -39,7 +39,7 @@ function normalizeRpcError(error, source) {
   if (!msg || msg === "[object Object]" || msg === "undefined") {
     try { const j = JSON.stringify(error); if (j && j !== "{}") msg = j; } catch { /* ignore */ }
   }
-  return new Error(msg || `${source} failed — the node client returned no error detail (often a blocked wss:// connection or an unreachable resolver).`);
+  return new Error(msg || `${source} failed: the node client returned no error detail (often a blocked wss:// connection or an unreachable resolver).`);
 }
 
 function emptyRegistry() {

@@ -1,6 +1,7 @@
 import { confirmDialog } from "./dialogs.js";
 import { IS_TESTNET } from "../engine/network.js";
 import { cssUrlValue } from "./css-url.js";
+import { readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged } from "./key-vault.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -26,13 +27,17 @@ import { cssUrlValue } from "./css-url.js";
 // routing all API traffic through vite.config.mjs's same-origin /nc-proxy passthrough (see
 // apiBase()). The connect screen still detects total-failure shapes and
 // tells the user to allow this origin on their server/reverse proxy. Credentials live in
-// account-scoped localStorage — same trust model as the rest of this desktop build (the wallet
-// itself persists there too).
+// account-scoped localStorage, with the same trust model as the wallet keys: plaintext without an
+// app password; with one, the Nextcloud app password is sealed with the key vault's data key
+// (ui/key-vault.js readNextcloudAccount / writeNextcloudAccount) and only ever held opened in
+// this page's memory while KaChat is unlocked. While locked nothing here runs (no backup, sync
+// watcher, media or Talk); Settings still shows the server and login.
 
 // Account-scoped (per wallet), which is also what makes `lastBackupEtag` and `autoRestoreDone`
 // per-wallet the way iOS scopes them by wallet hash suffix:
 // { server, username, appPassword, startFolder, backupFolder, autoBackup, lastAutoBackup,
-//   lastBackupEtag, autoRestoreDone }
+//   lastBackupEtag, autoRestoreDone }   (with an app password set, appPasswordSealed
+//   { v, iv, ct } is stored instead of appPassword; in memory `nc` always has the opened one)
 const NC_KEY = "kachat-nextcloud-v1";
 // ONE shared backup file across iPhone, Android and desktop: same name, same
 // ChatHistoryArchive schema, so any device can restore any other device's
@@ -75,7 +80,9 @@ const AUTO_SYNC_MIN_MS = 90_000;
 const ACTIVITY_COALESCE_MS = 400;
 
 let deps = null;
-let nc = null;              // null = not connected; else the stored account object
+let nc = null;              // null = not connected (or locked); else the account, app password opened
+let ncLocked = null;        // a stored connection that cannot be used now: public fields only,
+                            // { locked: true } while KaChat is locked, + unreadable when it never opens
 let settingsEl = null;
 let modalsEl = null;
 let thumbCache = new Map(); // path -> object URL
@@ -113,16 +120,44 @@ function loadState() {
   // per account across both networks, so testnet could otherwise overwrite the mainnet backup or
   // import mainnet history. Nothing syncs, restores, uploads or rings; every option hides as if
   // disconnected, and the mainnet connection is waiting, untouched, for the next mainnet load.
+  ncLocked = null;
   if (IS_TESTNET) { nc = null; return; }
-  try { nc = JSON.parse(localStorage.getItem(deps.accountScopedKey(NC_KEY)) || "null"); }
-  catch { nc = null; }
-  if (nc && (!nc.server || !nc.username || !nc.appPassword)) nc = null;
+  let account = null;
+  try { account = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { account = null; }
+  // Locked (or a sealed password that does not open): nothing may run, and nothing is ever sent
+  // without the real password, so `nc` stays null; Settings shows the connection from ncLocked.
+  if (account && (account.locked || !account.appPassword)) { nc = null; ncLocked = account; return; }
+  nc = account;
 }
 
-function saveState() {
+/** Writes the connection (the app password sealed when an app password is set). A write the
+ *  vault refuses (locked, or a stale key after another tab's password change) writes nothing:
+ *  logged, or thrown with `strict`. Never removes the stored connection; see clearStoredState. */
+function saveState({ strict = false } = {}) {
+  if (IS_TESTNET || !nc) return;
+  try { writeNextcloudAccount(deps.accountScopedKey(NC_KEY), nc); }
+  catch (error) {
+    if (strict) throw error;
+    deps.appendEngineLog?.(`[Nextcloud] Connection settings not saved: ${error.message}`);
+  }
+}
+
+/** Disconnect: removes the stored connection (allowed while locked; nothing secret is written). */
+function clearStoredState() {
   if (IS_TESTNET) return;
-  if (nc) localStorage.setItem(deps.accountScopedKey(NC_KEY), JSON.stringify(nc));
-  else localStorage.removeItem(deps.accountScopedKey(NC_KEY));
+  localStorage.removeItem(deps.accountScopedKey(NC_KEY));
+}
+
+/** The vault locked, unlocked or was reset: reload the connection when what can be used changed
+ *  (a lock retires the opened password and stops everything; an unlock starts it as today). */
+function handleVaultStateChanged() {
+  if (!deps || IS_TESTNET) return;
+  let next = null;
+  try { next = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { next = null; }
+  const state = (account, locked) => (account ? `open\u0000${account.server}\u0000${account.username}\u0000${account.appPassword}` : locked ? `locked\u0000${locked.unreadable ? 1 : 0}` : "none");
+  const usable = next && !next.locked && next.appPassword ? next : null;
+  if (state(usable, usable ? null : next) === state(nc, ncLocked)) return;
+  resetNextcloudForAccount();
 }
 
 function normalizedServer(input) {
@@ -134,6 +169,8 @@ function normalizedServer(input) {
 }
 
 function authHeader(account = nc) {
+  // Never an empty or placeholder password: locked (or disconnected) means no request at all.
+  if (!account?.username || !account?.appPassword) throw new Error("Nextcloud is unavailable while KaChat is locked.");
   return "Basic " + btoa(`${account.username}:${account.appPassword}`);
 }
 
@@ -143,6 +180,16 @@ function authHeader(account = nc) {
  *  proxied; recipients open those on the real server. */
 function apiBase(server = nc?.server) {
   return `${import.meta.env.BASE_URL}nc-proxy/${encodeURIComponent(String(server || "").replace(/\/+$/, ""))}`;
+}
+
+/** fetch() for an apiBase() URL. Every relayed call names the Nextcloud it is for in
+ *  x-kachat-nextcloud-origin, and the relay accepts writes (PUT/MKCOL/DELETE/POST/PROPFIND...)
+ *  only to that origin (DSK-003). The origin is the server encoded into the apiBase() URL. */
+function ncFetch(url, init = {}) {
+  const headers = new Headers(init.headers || {});
+  const encoded = /nc-proxy\/([^/?#]+)/.exec(String(url))?.[1];
+  try { if (encoded) headers.set("x-kachat-nextcloud-origin", new URL(decodeURIComponent(encoded)).origin); } catch { /* not a relay URL */ }
+  return fetch(url, { ...init, headers });
 }
 
 function corsHint(error) {
@@ -159,7 +206,7 @@ function corsHint(error) {
 // ---------------------------------------------------------------------------
 
 async function verifyCredentials(server, username, appPassword) {
-  const response = await fetch(`${apiBase(server)}/ocs/v2.php/cloud/user?format=json`, {
+  const response = await ncFetch(`${apiBase(server)}/ocs/v2.php/cloud/user?format=json`, {
     headers: {
       Authorization: "Basic " + btoa(`${username}:${appPassword}`),
       "OCS-APIRequest": "true",
@@ -212,7 +259,7 @@ async function listFolder(relativePath = "") {
   const davBasePath = `/remote.php/dav/files/${davUser()}`;
   const listedPath = relativePath.split("/").filter(Boolean).join("/");
   const url = `${apiBase()}${davBasePath}${listedPath ? "/" + listedPath.split("/").map(encodeURIComponent).join("/") : ""}`;
-  const response = await fetch(url, {
+  const response = await ncFetch(url, {
     method: "PROPFIND",
     headers: {
       Authorization: authHeader(),
@@ -267,7 +314,7 @@ async function createPublicShareLink(relativePath) {
   const endpoint = `${apiBase()}/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json`;
   // Read-only (permissions=1): a link to a photo or a note is for viewing, never for editing.
   const body = `path=${encodeURIComponent("/" + relativePath)}&shareType=3&permissions=1`;
-  const response = await fetch(endpoint, {
+  const response = await ncFetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: authHeader(),
@@ -284,7 +331,7 @@ async function createPublicShareLink(relativePath) {
     if (url) return url;
   }
   // Creating can fail when a link share already exists — reuse it.
-  const lookup = await fetch(`${endpoint}&path=${encodeURIComponent("/" + relativePath)}`, {
+  const lookup = await ncFetch(`${endpoint}&path=${encodeURIComponent("/" + relativePath)}`, {
     headers: { Authorization: authHeader(), "OCS-APIRequest": "true" },
     cache: "no-store",
   });
@@ -301,7 +348,7 @@ async function thumbnailURL(path) {
   if (thumbCache.has(path)) return thumbCache.get(path);
   try {
     const url = `${apiBase()}/index.php/core/preview.png?file=${encodeURIComponent("/" + path)}&x=256&y=256&a=1`;
-    const response = await fetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
+    const response = await ncFetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
     if (!response.ok) throw new Error(String(response.status));
     const blob = await response.blob();
     if (!blob.size) throw new Error("empty");
@@ -375,7 +422,7 @@ async function ensureFolder(davRoot, parts) {
   let url = davRoot;
   for (const part of parts) {
     url = `${url}/${encodeURIComponent(part)}`;
-    const mkcol = await fetch(url, { method: "MKCOL", headers: { Authorization: authHeader() } });
+    const mkcol = await ncFetch(url, { method: "MKCOL", headers: { Authorization: authHeader() } });
     if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
     if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the media folder (HTTP ${mkcol.status}).`);
   }
@@ -397,7 +444,7 @@ export async function uploadToKaChatFolder(body, filename, contentType, { keepSp
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = await ensureFolder(davRoot, parts);
   const storedName = kaChatFolderFileName(filename, { keepSpaces });
-  const put = await fetch(`${folderURL}/${encodeURIComponent(storedName)}`, {
+  const put = await ncFetch(`${folderURL}/${encodeURIComponent(storedName)}`, {
     method: "PUT",
     headers: { Authorization: authHeader(), "Content-Type": contentType || "application/octet-stream" },
     body,
@@ -423,7 +470,7 @@ export async function downloadNextcloudText(path, { maxBytes = 10_000_000 } = {}
   if (!nc) throw new Error("Nextcloud is not connected.");
   await ensureDavUser();
   const encoded = String(path || "").split("/").filter(Boolean).map(encodeURIComponent).join("/");
-  const response = await fetch(`${apiBase()}/remote.php/dav/files/${davUser()}/${encoded}`, {
+  const response = await ncFetch(`${apiBase()}/remote.php/dav/files/${davUser()}/${encoded}`, {
     headers: { Authorization: authHeader() },
     cache: "no-store",
   });
@@ -453,7 +500,7 @@ export async function uploadNextcloudMedia(blob, filename, contentType) {
   const unique = `${Math.random().toString(36).slice(2, 10)}_${safeName}`;
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = await ensureFolder(davRoot, ["KaChat", "Media"]);
-  const put = await fetch(`${folderURL}/${encodeURIComponent(unique)}`, {
+  const put = await ncFetch(`${folderURL}/${encodeURIComponent(unique)}`, {
     method: "PUT",
     headers: { Authorization: authHeader(), "Content-Type": contentType || "application/octet-stream" },
     body: blob,
@@ -469,7 +516,7 @@ export async function uploadNextcloudMedia(blob, filename, contentType) {
 async function uploadBackup(payloadJson) {
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}`;
-  const mkcol = await fetch(folderURL, { method: "MKCOL", headers: { Authorization: authHeader() } });
+  const mkcol = await ncFetch(folderURL, { method: "MKCOL", headers: { Authorization: authHeader() } });
   if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the backup folder (HTTP ${mkcol.status}).`);
 
@@ -477,7 +524,7 @@ async function uploadBackup(payloadJson) {
   // or another device) is in flight and answers 423. Waited out on a short backoff - half a
   // minute in all - and only a lock that never clears surfaces, with what to do about it.
   for (let attempt = 0; ; attempt += 1) {
-    const put = await fetch(`${folderURL}/${BACKUP_FILENAME}`, {
+    const put = await ncFetch(`${folderURL}/${BACKUP_FILENAME}`, {
       method: "PUT",
       headers: { Authorization: authHeader(), "Content-Type": "application/json" },
       body: payloadJson,
@@ -642,7 +689,7 @@ async function readBodyWithProgress(response, onProgress) {
 async function downloadBackupFile(filename, { onProgress = null } = {}) {
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const url = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(filename)}`;
-  const response = await fetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
+  const response = await ncFetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
   if (response.status === 404) return null;
   if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
   if (!response.ok) throw new Error(`Backup download failed (HTTP ${response.status}).`);
@@ -711,7 +758,7 @@ async function fetchBackupETag() {
   if (!nc) return null;
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const url = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(BACKUP_FILENAME)}`;
-  const response = await fetch(url, {
+  const response = await ncFetch(url, {
     method: "PROPFIND",
     headers: { Authorization: authHeader(), Depth: "0", "Content-Type": "application/xml" },
     body: `<?xml version="1.0"?>\n<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>`,
@@ -1441,6 +1488,27 @@ function renderSettings() {
     updateComposerButton();
     return;
   }
+  if (!nc && ncLocked) {
+    // A stored connection whose app password is sealed and not open: say where it is connected,
+    // run nothing. Unlocking KaChat reloads it (handleVaultStateChanged).
+    const lockedHost = (() => { try { return new URL(ncLocked.server).host; } catch { return ncLocked.server; } })();
+    const note = ncLocked.unreadable
+      ? "The stored app password could not be decrypted on this device. Disconnect, then connect again with an app password."
+      : "Your Nextcloud app password is encrypted with your KaChat password. Backup, sync, media and calls through Nextcloud start once KaChat is unlocked.";
+    settingsEl.innerHTML = `
+      <p class="settings-group-label">Connected Account</p>
+      <div class="settings-list-card">
+        <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Server</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(lockedHost)}</span></div>
+        <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Username</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(ncLocked.username)}</span></div>
+      </div>
+      <p class="settings-group-footer" data-nc-locked-note>Connected to ${deps.escapeHtml(lockedHost)} as ${deps.escapeHtml(ncLocked.username)}. ${deps.escapeHtml(note)}</p>
+      <div class="settings-list-card danger-list-card">
+        <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
+      </div>
+      <p class="settings-group-footer">Disconnecting removes the stored app password from this device. Nothing changes on your Nextcloud server.</p>`;
+    updateComposerButton();
+    return;
+  }
   if (!nc) {
     settingsEl.innerHTML = `
       <p class="settings-group-label">Server</p>
@@ -1452,7 +1520,7 @@ function renderSettings() {
         <p class="field-error" data-nc-connect-error hidden></p>
         <button class="primary-button full" type="button" data-nc-connect disabled>Connect</button>
       </div>
-      <p class="settings-group-footer">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions — don't use your account password. KaChat stores it on this device.</p>`;
+      <p class="settings-group-footer">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions. Don't use your account password. KaChat stores it on this device, encrypted with your KaChat password when you have set one.</p>`;
     updateComposerButton();
     return;
   }
@@ -1817,7 +1885,9 @@ function wireSettings() {
         // on the reader's own server is the one cross-device channel, and a connection that
         // then sat idle until a toggle was found is a connection that did nothing.
         nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: true, lastAutoBackup: 0 };
-        saveState();
+        try { saveState({ strict: true }); }
+        catch (error) { nc = null; throw error; } // locked meanwhile: not connected, nothing stored
+        ncLocked = null;
         renderSettings();
         armAutoBackup();
         deps.showToast?.("Nextcloud connected.");
@@ -1835,10 +1905,11 @@ function wireSettings() {
       const ok = await confirmDialog({ title: "Disconnect Nextcloud", message: "The app password is removed from this device. You can reconnect any time.", confirmLabel: "Disconnect", destructive: true });
       if (!ok) return;
       nc = null;
+      ncLocked = null;
       syncDirty = false;
       lastAutoSyncAt = 0;
       if (restore.phase !== "running") closeRestoreOverlay();
-      saveState();
+      clearStoredState();
       armAutoBackup();  // stops the watcher, the heartbeat and the debounce
       renderSettings();
       return;
@@ -1900,7 +1971,7 @@ export async function deleteRemoteNextcloudBackup() {
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
   for (const name of [BACKUP_FILENAME, LEGACY_DESKTOP_BACKUP_FILENAME]) {
-    const response = await fetch(`${davRoot}/${folder}/${encodeURIComponent(name)}`, { method: "DELETE", headers: { Authorization: authHeader() } });
+    const response = await ncFetch(`${davRoot}/${folder}/${encodeURIComponent(name)}`, { method: "DELETE", headers: { Authorization: authHeader() } });
     if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
     if (!(response.ok || response.status === 404)) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
   }
@@ -1928,7 +1999,7 @@ export async function nextcloudTalkCallsAvailable({ force = false } = {}) {
   if (!force && talkProbe && talkProbe.server === account.server && Date.now() - talkProbe.at < (talkProbe.value ? 6 * 3600_000 : 60_000)) return talkProbe.value;
   let value = false;
   try {
-    const response = await fetch(`${apiBase(account.server)}/ocs/v2.php/cloud/capabilities?format=json`, {
+    const response = await ncFetch(`${apiBase(account.server)}/ocs/v2.php/cloud/capabilities?format=json`, {
       headers: {
         Authorization: "Basic " + btoa(`${account.username}:${account.appPassword}`),
         "OCS-APIRequest": "true",
@@ -1971,6 +2042,8 @@ export function initNextcloud(dependencies) {
   deps = dependencies;
   settingsEl = document.querySelector("[data-nextcloud-settings]");
   loadState();
+  // With an app password the app password opens only while KaChat is unlocked: follow the vault.
+  onKeyVaultStateChanged(() => handleVaultStateChanged());
   buildModals();
   wireSettings();
 

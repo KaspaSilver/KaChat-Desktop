@@ -14,9 +14,7 @@
 # now mounted on `configurePreviewServer` too, so the built site keeps it.
 #
 # The build runs at CONTAINER START rather than image build, so every release is
-# built from the code that is actually in the container. The ChangeNOW key is
-# CHANGENOW_API_KEY, a run-time environment variable read by the relay on the
-# server; it is never inlined into the bundle.
+# built from the code that is actually in the container.
 
 FROM node:22-alpine
 

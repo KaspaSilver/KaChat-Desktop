@@ -6,8 +6,8 @@ node_modules/
 dist/
 .rusty-build/
 
-# A .env copied in here would put the ChangeNOW key inside the image for anyone
-# who pulls it. Pass it at run time instead: `-e CHANGENOW_API_KEY=...`.
+# A .env copied in here would put its settings inside the image for anyone who
+# pulls it. Pass them at run time instead (`-e NAME=...`).
 .env
 .env.*
 !.env.example

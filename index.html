@@ -7,15 +7,9 @@
        og:image, an avatar a KNS profile points at, a leftover ws:// node) is upgraded to https/wss
        before it leaves the browser. One such request is enough for Chrome and Brave to mark the
        whole tab "Not secure" until the next navigation. Only on https: an http page on the LAN
-       must keep talking plain http/ws to a local node. -->
-  <script>
-    if (location.protocol === "https:") {
-      var csp = document.createElement("meta");
-      csp.httpEquiv = "Content-Security-Policy";
-      csp.content = "upgrade-insecure-requests";
-      document.head.appendChild(csp);
-    }
-  </script>
+       must keep talking plain http/ws to a local node. A file, not inline, so the CSP needs no
+       'unsafe-inline' for scripts (DSK-014); see public/upgrade-insecure.js. -->
+  <script src="/upgrade-insecure.js"></script>
   <title>KaChat Desktop</title>
   <link rel="stylesheet" href="./ui/styles.css?v=385" />
   <meta name="theme-color" content="#000000" />
@@ -506,16 +500,12 @@
           <div class="hub-empty" data-hub-empty hidden>
             <img src="./ui/assets/kaspa-logo.png" alt="" class="hub-empty-logo" />
             <h3>Nothing here right now</h3>
-            <p>KaPosts, Public Chats, ChangeNOW Swap, Kaspa Websites and Chess Online appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
+            <p>KaPosts, Public Chats, Kaspa Websites and Chess Online appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
           </div>
         </div>
 
         <div class="portfolio-screen profile-screen" data-app-tab-screen="cold-storage" hidden>
           <div data-cold-root></div>
-        </div>
-
-        <div class="portfolio-screen profile-screen" data-app-tab-screen="swaps" hidden>
-          <div data-swaps-root></div>
         </div>
 
         <div class="portfolio-screen profile-screen" data-app-tab-screen="portfolio" hidden>
@@ -839,8 +829,8 @@
 
           <p class="profile-section-label">About</p>
           <div class="profile-card profile-about-card">
-            <div class="profile-about-row"><strong>Created</strong><span data-profile-created>—</span></div>
-            <div class="profile-about-row"><strong>Version</strong><span data-profile-version>—</span></div>
+            <div class="profile-about-row"><strong>Created</strong><span data-profile-created>--</span></div>
+            <div class="profile-about-row"><strong>Version</strong><span data-profile-version>--</span></div>
             <a class="profile-about-row profile-about-link" href="https://linktr.ee/Kachat_" target="_blank" rel="noopener"><strong>Website</strong><span>linktr.ee/Kachat_</span></a>
             <a class="profile-about-row profile-about-link" href="mailto:kaspasilver@gmail.com"><strong>Support Email</strong><span>kaspasilver@gmail.com</span></a>
             <button class="profile-about-row profile-about-link" type="button" data-profile-donate><strong>Donate</strong><span data-profile-donate-label>kachat.kas</span></button>
@@ -868,10 +858,6 @@
       <button class="sidebar-tab" type="button" data-app-tab="kaposts" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897l12.682-12.68Z"/><path d="M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg></span>
         <span>KaPosts</span>
-      </button>
-      <button class="sidebar-tab" type="button" data-app-tab="swaps" hidden>
-        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span>
-        <span>Swap</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="apps" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg></span>
@@ -1009,7 +995,7 @@
                 <div class="hub-grid dock-editor-grid" data-dock-hub-grid></div>
                 <p class="dock-editor-empty" data-dock-hub-empty hidden>Everything is in your dock. Click a dock item to move it back here.</p>
                 <p class="field-hint dock-editor-refusal" data-dock-refusal hidden></p>
-                <p class="field-hint" data-child-dock-note hidden>Swap, KaPosts and Public Chats are hidden while Simple Mode is on. The password brings them back in Settings &gt; Security &gt; Simple Mode.</p>
+                <p class="field-hint" data-child-dock-note hidden>KaPosts and Public Chats are hidden while Simple Mode is on. The password brings them back in Settings &gt; Security &gt; Simple Mode.</p>
 
                 <div class="dock-editor-head dock-editor-head-split">
                   <strong>Your Dock</strong>
@@ -1025,7 +1011,7 @@
             <p class="settings-group-label">Security</p>
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Password for Seed Phrase</strong><small>Require your password to reveal the seed phrase or private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-seed><span></span></label></div>
-              <div class="settings-toggle-row"><span><strong>Password for Account Login</strong><small>Also ask for your password when switching to a saved account. With a password set, KaChat always asks for it when it opens, because your keys are encrypted with it.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-login><span></span></label></div>
+              <div class="settings-toggle-row"><span><strong>Password for Account Login</strong><small>Also ask for your password when switching to a saved account. With a password set, KaChat always asks for it when it opens, because your keys are encrypted with it: closing the tab locks KaChat, and a manual refresh asks again.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-login><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Password for Address Private Keys</strong><small>Require your password to reveal a spending address's private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-spending-key><span></span></label></div>
               <button class="settings-list-row" type="button" data-change-password><span class="settings-row-copy"><strong>Change Password</strong><small data-password-status>No password set</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Simple Mode</strong><small>Limit KaChat to Chats, Portfolio and Cold Storage.</small></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
@@ -1371,7 +1357,7 @@
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon">◉</span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong></span></button>
             </div>
-            <p class="settings-group-footer">Exports app/device info, connection settings, local message counts, and recent app logs as a file — for troubleshooting with support. No private keys, seed phrases, or decrypted message content are included.</p>
+            <p class="settings-group-footer">Exports app/device info, connection settings, local message counts, and recent app logs as a file, for troubleshooting with support. No private keys, seed phrases, or decrypted message content are included.</p>
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Verbose API Logging</strong></span><label class="switch-control"><input type="checkbox" data-pref-verbose-api-logging><span></span></label></div>
             </div>
@@ -2252,8 +2238,8 @@
         <label class="field-label compact">GitHub<input class="field-input" type="text" data-kns-editor-field="github" maxlength="64" autocapitalize="none" /></label>
         <label class="field-label compact">Redirect URL<input class="field-input" type="url" data-kns-editor-field="redirectUrl" maxlength="2048" autocapitalize="none" /></label>
         <p class="kns-editor-section">Domain</p>
-        <div class="broadcast-info-row"><span>Name</span><strong data-kns-editor-domain-name>—</strong></div>
-        <div class="broadcast-info-row"><span>Asset ID</span><strong class="kns-asset-id" data-kns-editor-asset-id>—</strong></div>
+        <div class="broadcast-info-row"><span>Name</span><strong data-kns-editor-domain-name>--</strong></div>
+        <div class="broadcast-info-row"><span>Asset ID</span><strong class="kns-asset-id" data-kns-editor-asset-id>--</strong></div>
         <p class="field-error" data-kns-editor-error hidden></p>
         <div class="kns-progress" data-kns-editor-progress hidden></div>
       </div>
@@ -3109,9 +3095,9 @@
 
             <section data-chat-info-panel="info" hidden>
               <div class="profile-card chat-info-stats-card">
-                <div class="profile-about-row"><strong>Added</strong><span data-chat-info-added>—</span></div>
-                <div class="profile-about-row"><strong>Last Message</strong><span data-chat-info-last-message>—</span></div>
-                <div class="profile-about-row" data-chat-info-chess-row hidden><strong>Chess Stats</strong><span data-chat-info-chess>—</span></div>
+                <div class="profile-about-row"><strong>Added</strong><span data-chat-info-added>--</span></div>
+                <div class="profile-about-row"><strong>Last Message</strong><span data-chat-info-last-message>--</span></div>
+                <div class="profile-about-row" data-chat-info-chess-row hidden><strong>Chess Stats</strong><span data-chat-info-chess>--</span></div>
                 <div class="chat-info-stats-row">
                   <div class="chat-info-stat"><strong data-chat-info-sent>0</strong><small>Sent</small></div>
                   <div class="chat-info-stat-divider" aria-hidden="true"></div>

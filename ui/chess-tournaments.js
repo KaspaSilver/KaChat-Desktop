@@ -28,7 +28,9 @@ const END_OVERLAY_MS = 2_400;
 
 let deps = null;
 let screenEl = null;
-let rows = new Map();          // txId -> { txId, senderAddress, content, blockTime, local? }
+let rows = new Map();          // txId -> { txId, senderAddress, content, blockTime, local?, verified? }
+/** Cached rows from a build before sender verification (DSK-045): held back until verified. */
+let unverifiedCachedRows = [];
 let tournaments = {};
 let leaderboardRows = [];
 let active = false;            // the Chess screen is on
@@ -78,14 +80,19 @@ const keyOf = (tid, gid) => `${tid}|${gid}`;
 
 function loadCache() {
   rows = new Map();
+  unverifiedCachedRows = [];
   try {
     const list = JSON.parse(localStorage.getItem(ARENA_CACHE_KEY) || "[]");
     const cutoff = Date.now() - ARENA_RETENTION_MS;
     for (const r of Array.isArray(list) ? list : []) {
       if (!r?.txId || Number(r.blockTime || 0) < cutoff) continue;
-      rows.set(r.txId, { txId: r.txId, senderAddress: r.senderAddress || "", content: r.content || "", blockTime: Number(r.blockTime) || 0, local: Boolean(r.local) });
+      const row = { txId: r.txId, senderAddress: r.senderAddress || "", content: r.content || "", blockTime: Number(r.blockTime) || 0, local: Boolean(r.local), verified: Boolean(r.verified) };
+      // A row cached before DSK-045 may carry an impersonated sender: verify it before the
+      // reducer sees it. This device's own sends are trusted - it signed them.
+      if (row.verified || row.local) rows.set(r.txId, row);
+      else unverifiedCachedRows.push(row);
     }
-  } catch { rows = new Map(); }
+  } catch { rows = new Map(); unverifiedCachedRows = []; }
 }
 let saveTimer = null;
 function saveCache() {
@@ -98,20 +105,57 @@ function saveCache() {
   }, 500);
 }
 
-/** Merges indexer or scan rows. A row this device sent was stamped with its own clock; the
- *  chain's block time replaces it when the scan or the indexer sees it (iOS 64aca7c). */
+/** Merges VERIFIED indexer or scan rows (DSK-045: only `verifiedArenaRows` output and live
+ *  block hits, which the engine verified, come here). A row this device sent was stamped with
+ *  its own clock; the chain's block time replaces it when the scan or the indexer sees it
+ *  (iOS 64aca7c). */
 function mergeRows(list) {
   let changed = 0;
   for (const r of list || []) {
-    if (!r?.txId || !T.decodeMessage(r.content)) continue;
+    if (!r?.txId || !r.senderAddress || !T.decodeMessage(r.content)) continue;
     const existing = rows.get(r.txId);
     const blockTime = Number(r.blockTime) || 0;
     if (existing && existing.blockTime === blockTime && !existing.local) continue;
-    rows.set(r.txId, { txId: r.txId, senderAddress: r.senderAddress || "", content: r.content || "", blockTime });
+    rows.set(r.txId, { txId: r.txId, senderAddress: r.senderAddress, content: r.content || "", blockTime, verified: true });
     changed += 1;
   }
   if (changed) { saveCache(); reduceArena(); }
   return changed;
+}
+
+/**
+ * Chess moves must not be impersonable (DSK-045). A `#chess-arena` post is unsigned, and an
+ * indexer row names only the indexer's guess of its sender, so every indexer row is checked
+ * against the chain before the reducer sees it: input 0's address (Kaspa REST API) must equal
+ * output 0's, and that address becomes the sender. Rows already verified (or sent by this
+ * device) skip the lookup. Resolves `{ accepted, unknown }`; forged rows are dropped and logged
+ * by the engine, unknown ones (REST had no answer yet) wait for a later poll.
+ */
+async function verifiedArenaRows(list) {
+  const accepted = [];
+  const ask = [];
+  for (const r of list || []) {
+    if (!r?.txId || !T.decodeMessage(r.content)) continue;
+    const existing = rows.get(r.txId);
+    if (existing && (existing.verified || existing.local)) { accepted.push({ ...r, senderAddress: existing.senderAddress }); continue; }
+    ask.push(r);
+  }
+  if (!ask.length) return { accepted, unknown: [] };
+  if (typeof deps?.engine?.verifyBroadcastRows !== "function") return { accepted, unknown: ask };
+  const result = await deps.engine.verifyBroadcastRows(ask, { channel: T.ARENA_CHANNEL });
+  return { accepted: accepted.concat(result.accepted || []), unknown: result.unknown || [] };
+}
+
+/** Rows cached by an older build, verified once before they count (see loadCache). */
+async function verifyCachedArenaRows() {
+  if (!unverifiedCachedRows.length) return;
+  const list = unverifiedCachedRows;
+  unverifiedCachedRows = [];
+  try {
+    const { accepted, unknown } = await verifiedArenaRows(list);
+    unverifiedCachedRows = unknown;
+    mergeRows(accepted);
+  } catch { unverifiedCachedRows = list; }
 }
 
 let backfillInFlight = null;
@@ -122,6 +166,7 @@ function backfill(opts = {}) {
   return backfillInFlight;
 }
 async function backfillNow({ full = false } = {}) {
+  await verifyCachedArenaRows();
   if (!hasBroadcastIndexer()) { historyReady = true; return; }
   try {
     let before = null;
@@ -130,7 +175,8 @@ async function backfillNow({ full = false } = {}) {
     for (let page = 0; page < pages; page += 1) {
       // An incremental poll needs only the newest rows; the full walk pages 500 at a time.
       const result = await fetchBroadcastHistory({ channel: T.ARENA_CHANNEL, limit: pages === 1 ? 100 : 500, before });
-      mergeRows(result.messages);
+      // Not trusted as served: the sender is verified against the chain first (DSK-045).
+      mergeRows((await verifiedArenaRows(result.messages)).accepted);
       if (!result.hasMore || !result.messages?.length) break;
       const oldest = result.messages.reduce((min, m) => Math.min(min, Number(m.blockTime) || Infinity), Infinity);
       if (!Number.isFinite(oldest) || oldest < cutoff) break;
@@ -146,6 +192,7 @@ async function backfillNow({ full = false } = {}) {
 }
 
 function handleHits(hits) {
+  // Live hits arrive with the sender already verified by the engine (DSK-045).
   const mine = (hits || []).filter((h) => h?.channel === T.ARENA_CHANNEL);
   if (mine.length) mergeRows(mine);
 }

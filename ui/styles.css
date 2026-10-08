@@ -404,7 +404,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   position: relative;
 }
 
-/* Non-chats tab screens (Profile, Portfolio, Storage, Swaps) are full-width
+/* Non-chats tab screens (Profile, Portfolio, Storage) are full-width
    focused screens, not a sidebar+detail split — so hide the chat sidebar, let
    the screen fill the width, and center the dock on the window. `:not(.conversation-open)`
    keeps the real Chats split (sidebar list + open conversation) intact. */
@@ -6984,7 +6984,7 @@ body.session-logged-out [data-account-rename-modal] {
   flex: 0 0 auto;
 }
 
-/* Portfolio / Cold Storage / Swaps (4.0 desktop) */
+/* Portfolio / Cold Storage (4.0 desktop) */
 /* Robinhood-style picker cards (iOS PortfolioPickerHeader) */
 /* The Portfolio screen is a stack of distinct cards, so each needs room to read as its own
    thing. Everything sat a few pixels apart and ran together into one slab. */
@@ -7164,20 +7164,6 @@ body.session-logged-out [data-account-rename-modal] {
 .portfolio-editor-actions .primary-button { margin-left: auto; }
 .portfolio-import-note { color: var(--muted); font-size: 12.5px; line-height: 1.45; margin: 0; }
 .portfolio-import-progress { color: var(--kaspa-ink); font-size: 12.5px; min-height: 15px; margin: 0; }
-.swap-disclaimer-text { color: var(--muted); font-size: 13.5px; line-height: 1.5; margin: 0 0 10px; }
-.swap-terms-check { display: flex; align-items: flex-start; gap: 10px; margin: 14px 0; font-size: 13px; cursor: pointer; }
-.swap-terms-check input { margin-top: 2px; accent-color: var(--kaspa); }
-.swap-form { display: flex; flex-direction: column; gap: 10px; }
-.swap-form-row { display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
-.swap-form-row span { color: var(--muted); min-width: 120px; }
-.swap-form-row input, .swap-form-row select {
-  border: 1px solid var(--line); border-radius: 10px; background: var(--surface-1);
-  color: var(--text); padding: 9px 11px; font: inherit; font-size: 13.5px; flex: 1;
-}
-.swap-status { font-weight: 750; }
-.swap-status.finished { color: var(--ios-green); }
-.swap-status.failed, .swap-status.refunded { color: var(--ios-red); }
-.swap-status.waiting, .swap-status.confirming, .swap-status.exchanging, .swap-status.sending { color: var(--ios-orange); }
 
 /* Profile 4.0: KNS hero + Apps grid */
 .profile-hero-card { padding: 0; overflow: hidden; }
@@ -9831,74 +9817,6 @@ body.session-logged-out [data-account-rename-modal] {
 .field-hint.bad { color: var(--ios-red); }
 .kaposts-spinner.small { width: 12px; height: 12px; border-width: 2px; vertical-align: middle; }
 
-/* ChangeNOW Swap (iOS SwapView). */
-.swap-tab-bar { margin: 0 0 12px; }
-.swap-page { display: grid; gap: 12px; position: relative; }
-.swap-card { padding: 14px 16px; }
-.swap-card-row { display: flex; align-items: center; gap: 12px; }
-.swap-amount-input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font-size: 22px; font-weight: 700; outline: none; }
-.swap-amount-static { flex: 1; min-width: 0; font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.swap-coin-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; background: var(--surface-2); border: 0; color: var(--text); font-size: 13px; font-weight: 800; white-space: nowrap; }
-.swap-coin-badge.pickable { cursor: pointer; }
-.swap-coin-badge svg { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
-.swap-coin-icon { width: 20px; height: 20px; border-radius: 999px; object-fit: cover; flex: 0 0 auto; }
-.swap-coin-icon.text { display: inline-grid; place-items: center; color: #fff; font-size: 7px; font-weight: 800; letter-spacing: -.02em; }
-.swap-action-row { display: flex; align-items: center; gap: 12px; }
-.swap-flip { width: 40px; height: 40px; border-radius: 999px; border: 0; background: var(--kaspa); color: #000; display: grid; place-items: center; cursor: pointer; flex: 0 0 auto; }
-.swap-flip svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.swap-go { flex: 1; height: 40px; border: 0; border-radius: 999px; background: var(--kaspa); color: #000; font-weight: 800; cursor: pointer; }
-.swap-go.disabled { background: var(--surface-2); color: var(--muted); cursor: default; }
-.swap-payout-input { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
-.swap-address-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; }
-.swap-address-copy { display: grid; gap: 2px; min-width: 0; }
-.swap-address-copy small { color: var(--muted); font-size: 11px; }
-.swap-address-copy strong { font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; }
-.swap-address-copy b.used { color: var(--ios-orange); font-size: 10.5px; }
-.swap-address-copy b.unused { color: var(--ios-green); font-size: 10.5px; }
-.swap-rate-card { display: grid; gap: 4px; padding: 12px 14px; font-size: 12px; color: var(--muted); }
-.swap-rate-card .bad { color: var(--ios-red); }
-.swap-result-card { display: grid; gap: 10px; justify-items: start; }
-.swap-result-link { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 700; cursor: pointer; padding: 0; }
-.swap-qr { width: 180px !important; height: 180px !important; max-width: 100%; padding: 12px; border-radius: 12px; background: #fff; justify-self: center; cursor: pointer; box-sizing: border-box; }
-.swap-mono-button { border: 0; background: transparent; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; text-align: left; word-break: break-all; cursor: pointer; padding: 0; }
-.swap-mono-button.light { color: var(--text); }
-.swap-result-card small, .swap-details small { color: var(--muted); font-size: 12px; }
-.swap-result-actions, .swap-details-actions { display: flex; justify-content: space-between; width: 100%; gap: 12px; }
-.swap-powered { text-align: center; font-size: 12px; color: var(--kaspa-ink); text-decoration: underline; }
-.swap-disclaimer-overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.72); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-radius: 18px; z-index: 5; padding: 16px; }
-.swap-disclaimer-card { max-width: 340px; display: grid; gap: 14px; padding: 24px; border-radius: 20px; background: var(--panel-2, #151a21); border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
-.swap-disclaimer-actions { display: flex; justify-content: space-between; }
-.linklike-button.strong { font-weight: 800; }
-.swap-history-list { display: grid; gap: 12px; }
-.swap-history-item { display: flex; align-items: center; gap: 8px; }
-.swap-history-row { flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; margin: 0; text-align: left; cursor: pointer; color: var(--text); }
-.swap-history-copy { display: grid; gap: 4px; min-width: 0; }
-.swap-history-copy strong { font-size: 14px; }
-.swap-history-copy small { color: var(--muted); font-size: 12px; }
-.swap-history-delete { width: 32px; height: 32px; border: 0; background: transparent; color: var(--ios-red); cursor: pointer; display: grid; place-items: center; }
-.swap-history-delete svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.swap-status { font-weight: 800; font-size: 12.5px; }
-.swap-status.ok { color: var(--ios-green); }
-.swap-status.bad { color: var(--ios-red); }
-.swap-status.warn { color: var(--ios-orange); }
-.swap-sheet { max-width: 440px; display: grid; gap: 10px; }
-.swap-sheet-header { display: flex; align-items: center; justify-content: space-between; }
-.swap-sheet-header h2 { margin: 0; font-size: 17px; }
-.swap-picker-list { display: grid; gap: 2px; max-height: 50vh; overflow-y: auto; }
-.swap-picker-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 10px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); text-align: left; cursor: pointer; font-size: 14px; }
-.swap-picker-row span { flex: 1; }
-.swap-picker-row.indented { padding-left: 38px; }
-.swap-picker-row.generate { color: var(--kaspa-ink); font-weight: 700; border-bottom: 0; }
-.swap-picker-row.address { justify-content: space-between; }
-.swap-picker-row.address .swap-address-copy { flex: 1; }
-.swap-address-kas { font-weight: 700; font-size: 13px; }
-.swap-check { width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: var(--kaspa); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
-.swap-chevron { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: var(--muted); stroke-width: 2; transition: transform .2s; }
-.swap-chevron.open { transform: rotate(180deg); }
-.swap-details { display: grid; gap: 8px; justify-items: start; }
-.swap-details-head { display: grid; gap: 4px; }
-.swap-details-status { display: flex; justify-content: space-between; width: 100%; align-items: center; }
-
 /* Portfolio transaction editor (iOS PortfolioTransactionEditor) and empty state. */
 .portfolio-editor-unit-row { display: flex; align-items: center; gap: 8px; }
 .portfolio-editor-unit-row input { flex: 1; min-width: 0; }
@@ -10065,7 +9983,6 @@ html.app-h .logged-out-screen { height: var(--app-h); }
      reads at 16px on touch - the one deliberately larger field keeps its size. */
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
   textarea, select { font-size: 16px !important; }
-  .swap-amount-input { font-size: 22px !important; }
   /* A long-press is the message menu (see ui/touch.js), not a text selection or Safari's
      link callout. Same for chat and room rows. */
   .message-bubble, .message-bubble *, .chat-row, .chat-row *, .broadcast-message, .broadcast-message *,
@@ -10200,10 +10117,6 @@ html.standalone .ios-install-hint { display: none; }
   .portfolio-summary-grid { flex-direction: column; gap: 8px; }
   .portfolio-stat.right { align-items: flex-start; text-align: left; }
   .portfolio-stat-value { white-space: nowrap; font-size: 15px; }
-
-  /* Swap form rows: the label loses its 120px floor and the field can shrink. */
-  .swap-form-row span { min-width: 0; flex: 0 0 96px; }
-  .swap-form-row input, .swap-form-row select { min-width: 0; }
 
   /* The chess board takes the width it is given rather than a desktop-sized margin. */
   .chess-board { width: min(560px, 56vh, calc(100% - 22px)); }
@@ -11335,7 +11248,6 @@ button.chess-t-row { cursor: pointer; }
 
 .modal-backdrop { background: var(--dim); -webkit-backdrop-filter: none; backdrop-filter: none; }
 .account-overlay, .chatting-address-screen, .manage-address-screen, .chess-promo, .kaposts-composer-backdrop, .profile-qr-overlay { background: var(--dim); }
-.swap-disclaimer-overlay { background: rgba(0,0,0,.6); }
 .contact-modal { border: .5px solid var(--line); border-radius: 22px; background: var(--sheet-bg); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
 .modal-header h2, .account-overlay-title { font-size: 17px; font-weight: 600; letter-spacing: 0; }
 .modal-close { width: 30px; height: 30px; border: 0; border-radius: 50%; background: var(--fill-tertiary); color: var(--muted); font-size: 20px; font-weight: 600; }
@@ -11345,8 +11257,6 @@ button.chess-t-row { cursor: pointer; }
 .account-overlay-header { border-bottom: .5px solid var(--line); padding: 12px 16px; }
 .account-overlay-body { padding: 8px 16px 32px; }
 .manage-address-card { background: var(--bg-plain); border: .5px solid var(--line); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
-.swap-disclaimer-card { background: var(--glass-fill); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
-  border: 0; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,.2); }
 
 .cold-action-rows { gap: 12px; }
 .cold-action-row { padding: 14px; gap: 12px; border: .8px solid var(--glass-stroke); border-radius: 16px;
@@ -11385,7 +11295,6 @@ button.chess-t-row { cursor: pointer; }
 /* Plain screens (iOS systemBackground) are white in light mode; grouped ones stay #F2F2F7. */
 :root[data-theme="light"] body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])),
 :root[data-theme="light"] body:has([data-app-tab-screen="cold-storage"]:not([hidden])),
-:root[data-theme="light"] body:has([data-app-tab-screen="swaps"]:not([hidden])),
 :root[data-theme="light"] body:has([data-app-tab-screen="hub"]:not([hidden])),
 :root[data-theme="light"] body:has([data-app-tab-screen="apps"]:not([hidden])),
 :root[data-theme="light"] body:has(.kaposts-screen:not([hidden])) { background: var(--bg-plain); }
@@ -11526,23 +11435,6 @@ button.chess-t-row { cursor: pointer; }
 .portfolio-tx-row.picked { background: rgba(112,199,186,.12); }
 .portfolio-tx-check.on { color: #fff; }
 .portfolio-menu, .portfolio-card-actions { background: var(--sheet-bg); border: .5px solid var(--line); box-shadow: 0 10px 30px rgba(0,0,0,.2); }
-
-/* ==== iOS theme: Swap ==== */
-.swap-card { padding: 16px; }
-.swap-amount-input { font-size: 22px; font-weight: 600; }
-.swap-coin-badge { background: var(--ios-gray5); font-size: 15px; font-weight: 700; }
-.swap-flip { color: var(--on-accent-strong); }
-.swap-go { color: var(--on-accent-strong); font-size: 17px; font-weight: 700; }
-.swap-go.disabled { background: var(--ios-gray5); color: var(--muted); }
-.swap-rate-card, .swap-address-row { border-radius: 14px; padding: 12px; }
-.swap-rate-card .bad { color: var(--ios-red); }
-.swap-qr { background: #fff; border-radius: 12px; padding: 12px; }
-.swap-status.finished, .swap-status.ok { color: var(--ios-green); }
-.swap-status.failed, .swap-status.refunded, .swap-status.bad { color: var(--ios-red); }
-.swap-status.waiting, .swap-status.confirming, .swap-status.exchanging, .swap-status.sending, .swap-status.warn { color: var(--ios-orange); }
-.swap-history-delete { color: var(--ios-red); }
-.swap-address-copy b.used { color: var(--ios-orange); }
-.swap-address-copy b.unused { color: var(--ios-green); }
 
 /* ==== iOS theme: KaPosts (flat rows, not cards) ==== */
 .kaposts-feed { gap: 0; }

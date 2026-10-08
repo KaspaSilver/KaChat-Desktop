@@ -295,7 +295,7 @@ export function feeControlsHtml({
           </span>
           <span class="sk-fee-estimating" data-${p}-fee-estimating ${estimating && !editing ? "" : "hidden"} aria-label="Estimating fee"><span class="sk-spinner" aria-hidden="true"></span></span>
           <button type="button" class="sk-fee-text" data-${p}-fee-edit ${showButton ? "" : "hidden"} title="Set a custom fee">
-            <span data-${p}-fee-summary>${esc(feeText ?? "—")}</span>${SEND_ICONS.pencil}
+            <span data-${p}-fee-summary>${esc(feeText ?? "--")}</span>${SEND_ICONS.pencil}
           </button>
         </span>
       </div>
@@ -342,7 +342,7 @@ export function feeControls(root, prefix) {
         b.setAttribute("aria-pressed", on ? "true" : "false");
       });
     },
-    setText(text) { const el = q("fee-summary"); if (el) el.textContent = text ?? "—"; },
+    setText(text) { const el = q("fee-summary"); if (el) el.textContent = text ?? "--"; },
     setEstimating(on) { estimating = Boolean(on); paint(); },
     setEditing(on, value = null) {
       editing = Boolean(on);

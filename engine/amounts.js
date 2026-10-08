@@ -108,3 +108,16 @@ export function utxoAmountSompi(entry) {
   } catch { return null; }
   return value > 0n && value <= MAX_U64 ? value : null;
 }
+
+/**
+ * A KAS amount in sompi as currency text, rounded DOWN to `decimals` places (audit DSK-042): a Max
+ * shown in a currency must never convert back to more than the balance. "" without a price.
+ */
+export function fiatTextFloorFromSompi(sompi, price, decimals = 2) {
+  const p = Number(price);
+  let value;
+  try { value = Number(BigInt(sompi ?? 0)) / 1e8; } catch { return ""; }
+  if (!(p > 0) || !Number.isFinite(value) || value < 0) return "";
+  const scale = 10 ** decimals;
+  return (Math.floor(value * p * scale) / scale).toFixed(decimals);
+}

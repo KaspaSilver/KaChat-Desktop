@@ -19,10 +19,8 @@
 //                                     nginx send `X-Forwarded-For $remote_addr`. See relay-guard.mjs.
 //   KACHAT_TRUST_CF_CONNECTING_IP=1   also believe cf-connecting-ip from a trusted proxy (only when
 //                                     that proxy really sits behind Cloudflare)
-//   KACHAT_RELAY_RATE_MAX             requests per client per minute (default 600)
-//   CHANGENOW_API_KEY                 optional server ChangeNOW key for the app's swap calls; it
-//                                     needs nginx to pass the public Host (proxy_set_header Host $host)
-//   KACHAT_CHANGENOW_RATE_MAX         key-attached ChangeNOW calls per client per minute (default 30)
+//   KACHAT_RELAY_RATE_MAX             requests per client per minute (default 600; an IPv6 client
+//                                     counts by its /64)
 import http from "node:http";
 import { createRelay } from "./relay-guard.mjs";
 
@@ -35,8 +33,6 @@ const relay = createRelay({
   trustCfConnectingIp: String(process.env.KACHAT_TRUST_CF_CONNECTING_IP || "") === "1",
   readTimeoutMs: Number(process.env.NC_PROXY_UPSTREAM_TIMEOUT_MS || 30000),
   rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
-  changenowApiKey: () => process.env.CHANGENOW_API_KEY || "",
-  changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
   log: (line) => console.warn(line),
 });
 

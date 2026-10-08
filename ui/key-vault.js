@@ -21,13 +21,23 @@
 //       JSON { privateKeyHex, mnemonic, passphrase }, AAD = "kachat-account-secrets-v1|" +
 //       canonical address). Fresh random IV on every write.
 //
+//   <account scope>:kachat-nextcloud-v1 - the Nextcloud connection keeps server, login and options
+//     readable and carries the app password as appPasswordSealed: { v: 1, iv, ct } (AAD = storage
+//     key + server + username). See "the Nextcloud app password" below.
 //   kachat-shell-testing-wallet-v2 - the active-wallet record keeps public fields only.
 //   kachat-vault-legacy-wallet-v1 - a sealed copy of the pre-v2 bare-hex wallet key, if any.
-//   kachat-vault-session-v1 (sessionStorage) - the data key for this tab session, so the
-//     reloads KaChat does (account switch, network switch) don't ask again. Closing the tab
-//     forgets it; Log Out removes it.
+//   kachat-vault-handoff-v1 (sessionStorage) - a one-time hand-off { key: hex(32), expiresAt }
+//     written only just before a reload KaChat itself starts (sign-in, account switch, network
+//     switch), so those don't ask again. The next page load takes it once and deletes it at once;
+//     it is refused when expired (15 s), malformed or not this vault's key (DSK-023). Nothing else
+//     ever puts the key in browser storage, so closing the tab locks KaChat, and "Reopen closed
+//     tab", session restore, Duplicate tab and a manual refresh all ask for the password.
+//     (kachat-vault-session-v1, the pre-DSK-023 per-tab copy, is deleted and never honoured.)
 //
-// The data key is a random 256-bit key held in memory while unlocked. AES-GCM runs through
+// The data key is a random 256-bit key held in this page's memory only while unlocked. Every
+// write checks it still matches the stored password record (or the pending one): a tab whose key
+// was replaced by a password change in another tab is locked instead of sealing anything the new
+// password cannot open (DSK-022). AES-GCM runs through
 // @noble/ciphers (standard AES-256-GCM, 12-byte IV, 16-byte tag; interoperable with WebCrypto),
 // because the account store is read and written synchronously all over the app; the password KDF
 // and all randomness are WebCrypto.
@@ -40,7 +50,10 @@ export const SAVED_ACCOUNTS_KEY = "kachat-saved-accounts-v1";
 export const PERSISTED_WALLET_KEY = "kachat-shell-testing-wallet-v2";
 export const LEGACY_PERSISTED_WALLET_KEY = "kachat-shell-testing-wallet-private-key";
 export const VAULT_LEGACY_WALLET_KEY = "kachat-vault-legacy-wallet-v1";
-export const VAULT_SESSION_KEY = "kachat-vault-session-v1";
+export const VAULT_SESSION_KEY = "kachat-vault-session-v1"; // pre-DSK-023: deleted, never read
+export const VAULT_HANDOFF_KEY = "kachat-vault-handoff-v1";
+export const VAULT_HANDOFF_TTL_MS = 15_000;
+export const LOCKED_IN_ANOTHER_TAB_MESSAGE = "KaChat was locked in another tab. Enter your password to continue.";
 export const VAULT_PBKDF2_ITERATIONS = 600_000;
 export const MIN_APP_PASSWORD_LENGTH = 8;
 const FAILED_ATTEMPTS_KEY = "kachat-app-password-failed-attempts";
@@ -61,15 +74,20 @@ const vault = {
   dataKey: null,          // Uint8Array(32) while unlocked
   legacyVerified: false,  // pre-vault password verified, but the upgrade could not be written
   opened: new Map(),      // ct hex -> opened secrets (cleared on lock / key change)
+  verifiedFor: null,      // the stored record + pending text the data key was last checked against
+  lockListeners: new Set(), // told when another tab's password change locked this one
+  stateListeners: new Set(), // told (after the call unwinds) whenever the vault locks or unlocks
+  now: () => Date.now(),
 };
 
 /** Wires storage (tests pass in-memory stand-ins), the address canonicalizer and, for tests only,
- *  a lower iteration count for NEW records. */
-export function configureKeyVault({ storage, session, canonicalize, iterations } = {}) {
+ *  a lower iteration count for NEW records and a clock. */
+export function configureKeyVault({ storage, session, canonicalize, iterations, now } = {}) {
   if (storage !== undefined) vault.storage = storage;
   if (session !== undefined) vault.session = session;
   if (typeof canonicalize === "function") vault.canonicalize = canonicalize;
   if (Number.isInteger(iterations) && iterations > 0) vault.iterations = iterations;
+  if (typeof now === "function") vault.now = now;
 }
 
 function ls() { return vault.storage || globalThis.localStorage; }
@@ -135,9 +153,10 @@ function loadPendingRecord() {
 export function hasAppPassword() { return !!(loadPasswordRecord() || loadPendingRecord()); }
 /** Saved-account secrets are (or are to be) stored encrypted. */
 export function isVaultEnabled() { return isVaultRecord(loadPasswordRecord()) || !!loadPendingRecord(); }
-export function isVaultUnlocked() { return !!vault.dataKey; }
-/** A password exists and has not been entered in this tab session: nothing may sign in. */
-export function isAppLocked() { return hasAppPassword() && !vault.dataKey && !vault.legacyVerified; }
+export function isVaultUnlocked() { checkKeyStillCurrent(); return !!vault.dataKey; }
+/** A password exists and has not been entered in this page (or another tab changed it since):
+ *  nothing may sign in. */
+export function isAppLocked() { checkKeyStillCurrent(); return hasAppPassword() && !vault.dataKey && !vault.legacyVerified; }
 
 // --- lockout (childmode.js's escalating backoff) -----------------------------------------------
 /** Seconds left before another attempt is accepted, null when attempts are open. Five wrong
@@ -168,33 +187,144 @@ function keyMatchesRecord(key, record) {
   if (!record?.keyCheck) return true;
   try { return dec.decode(openBytes(key, record.keyCheck, KEY_CHECK_TEXT)) === KEY_CHECK_TEXT; } catch { return false; }
 }
+/** `key` is the one the stored password record wraps (or the pending record of a password change
+ *  that is being written). A record from before keyCheck existed is checked against the store. */
+function keyIsCurrent(key) {
+  if (!key || key.length !== 32) return false;
+  const record = loadPasswordRecord();
+  const pending = loadPendingRecord();
+  if (isVaultRecord(record) && (record.keyCheck ? keyMatchesRecord(key, record) : keyOpensStore(key))) return true;
+  return !!(pending?.keyCheck && keyMatchesRecord(key, pending));
+}
+function storedRecordsText() {
+  return `${ls().getItem(APP_PASSWORD_KEY)}\u0000${ls().getItem(APP_PASSWORD_PENDING_KEY)}`;
+}
+function notifyStateListeners() {
+  for (const listener of vault.stateListeners) {
+    const call = () => { try { listener(); } catch { /* the listener's problem */ } };
+    if (typeof queueMicrotask === "function") queueMicrotask(call); else setTimeout(call, 0);
+  }
+}
 function setUnlocked(key) {
   vault.dataKey = key;
   vault.legacyVerified = false;
   vault.opened.clear();
-  try { ss()?.setItem(VAULT_SESSION_KEY, bytesToHex(key)); } catch { /* reloads will ask again */ }
+  vault.verifiedFor = null;
+  // Memory only (DSK-023): nothing here survives the page. See writeKeyVaultHandoff.
+  notifyStateListeners();
 }
-/** Forgets the data key and every opened secret (Log Out). */
+function clearSessionCopies() {
+  try { ss()?.removeItem(VAULT_HANDOFF_KEY); } catch { /* nothing stored */ }
+  try { ss()?.removeItem(VAULT_SESSION_KEY); } catch { /* nothing stored */ }
+}
+/** Forgets the data key and every opened secret (Log Out, or locked by another tab). */
 export function lockKeyVault() {
+  const wasOpen = !!(vault.dataKey || vault.legacyVerified);
   vault.dataKey = null;
   vault.legacyVerified = false;
   vault.opened.clear();
-  try { ss()?.removeItem(VAULT_SESSION_KEY); } catch { /* nothing stored */ }
+  vault.verifiedFor = null;
+  clearSessionCopies();
+  if (wasOpen) notifyStateListeners();
 }
-/** Same tab session as an earlier unlock (KaChat reloads itself on account and network
- *  switches): take the data key back from sessionStorage. Synchronous. */
-export function unlockKeyVaultFromSession() {
-  if (vault.dataKey) return true;
-  if (!isVaultEnabled()) return false;
-  let key = null;
-  try { key = hexToBytes(ss()?.getItem(VAULT_SESSION_KEY) || ""); } catch { key = null; }
-  if (!key || key.length !== 32) return false;
-  const record = loadPasswordRecord();
-  const pending = loadPendingRecord();
-  if (!(isVaultRecord(record) && keyMatchesRecord(key, record)) && !(pending && keyMatchesRecord(key, pending))) {
-    try { ss()?.removeItem(VAULT_SESSION_KEY); } catch { /* stale */ }
-    return false;
+
+/** Called when the data key turned out to be stale: lock, and tell the app (once the current
+ *  call has unwound) so it can show the unlock prompt. */
+function lockBecauseOfAnotherTab() {
+  lockKeyVault();
+  for (const listener of vault.lockListeners) {
+    const call = () => { try { listener(); } catch { /* the app's problem */ } };
+    if (typeof queueMicrotask === "function") queueMicrotask(call); else setTimeout(call, 0);
   }
+}
+/** True while the data key in memory still matches the stored password record (or the pending
+ *  one). Otherwise another tab changed or removed the password: this tab is locked and false is
+ *  returned (DSK-022). Cheap when nothing changed (the record text is compared first). */
+function checkKeyStillCurrent() {
+  if (!vault.dataKey) {
+    // Pre-vault password verified in this tab: any change to the record elsewhere ends that.
+    if (vault.legacyVerified && vault.verifiedFor !== storedRecordsText()) { lockBecauseOfAnotherTab(); return false; }
+    return true;
+  }
+  const text = storedRecordsText();
+  if (vault.verifiedFor === text) return true;
+  if (keyIsCurrent(vault.dataKey)) { vault.verifiedFor = text; return true; }
+  lockBecauseOfAnotherTab();
+  return false;
+}
+/** Throws (and locks) unless `key` is this tab's data key and still the stored record's. */
+function requireCurrentKey(key) {
+  if (!key || key !== vault.dataKey) throw new Error("KaChat is locked. Enter your password first.");
+  if (!checkKeyStillCurrent()) throw new Error(LOCKED_IN_ANOTHER_TAB_MESSAGE);
+}
+
+/** `listener()` runs when a write or read found this tab's data key replaced by another tab's
+ *  password change and locked the vault. Returns an unsubscribe function. */
+export function onKeyVaultLockedByAnotherTab(listener) {
+  if (typeof listener !== "function") return () => {};
+  vault.lockListeners.add(listener);
+  return () => vault.lockListeners.delete(listener);
+}
+/** `listener()` runs (in a microtask) whenever this page's vault unlocks, locks (Log Out, another
+ *  tab, a removed password) or is reset: anything holding an opened secret (the Nextcloud app
+ *  password) reloads it then. Returns an unsubscribe function. */
+export function onKeyVaultStateChanged(listener) {
+  if (typeof listener !== "function") return () => {};
+  vault.stateListeners.add(listener);
+  return () => vault.stateListeners.delete(listener);
+}
+/**
+ * For the `storage` event (fired only in OTHER tabs): when the password record or the pending
+ * record changed elsewhere, this tab is locked at once, whatever the change was (a new password,
+ * a removed one, a first one). `key` null means the other tab cleared storage. Returns true when
+ * this tab held the key (or a verified pre-vault password) and is now locked. The caller shows the
+ * lock: `isAppLocked()` says whether a password now has to be entered.
+ */
+export function keyVaultStorageChanged(key) {
+  if (key != null && key !== APP_PASSWORD_KEY && key !== APP_PASSWORD_PENDING_KEY) return false;
+  if (!vault.dataKey && !vault.legacyVerified) return false;
+  lockKeyVault();
+  return true;
+}
+
+/**
+ * Just before a reload KaChat itself starts (sign-in, account switch, network switch): leaves the
+ * data key for the next page load as a one-time hand-off that expires in 15 s. Also removed by a
+ * timer after 15 s should the reload not happen. Returns whether one was written.
+ */
+export function writeKeyVaultHandoff() {
+  if (!vault.dataKey || !checkKeyStillCurrent()) return false;
+  const value = JSON.stringify({ key: bytesToHex(vault.dataKey), expiresAt: vault.now() + VAULT_HANDOFF_TTL_MS });
+  try { ss()?.setItem(VAULT_HANDOFF_KEY, value); } catch { return false; }
+  try {
+    const timer = setTimeout(() => {
+      try { if (ss()?.getItem(VAULT_HANDOFF_KEY) === value) ss()?.removeItem(VAULT_HANDOFF_KEY); } catch { /* gone */ }
+    }, VAULT_HANDOFF_TTL_MS);
+    timer?.unref?.();
+  } catch { /* expiry is checked on read anyway */ }
+  return true;
+}
+/** Removes an unused hand-off (e.g. the reload was cancelled). */
+export function clearKeyVaultHandoff() {
+  try { ss()?.removeItem(VAULT_HANDOFF_KEY); } catch { /* nothing stored */ }
+}
+/** Page load after one of KaChat's own reloads: takes the hand-off once (it is deleted before
+ *  anything else), and unlocks only if it is well-formed, not expired and this vault's key.
+ *  A reopened, restored or duplicated tab, or a manual refresh, has none and stays locked.
+ *  Synchronous. */
+export function unlockKeyVaultFromSession() {
+  let raw = null;
+  try { raw = ss()?.getItem(VAULT_HANDOFF_KEY) ?? null; } catch { raw = null; }
+  clearSessionCopies(); // one read only; the pre-DSK-023 per-tab copy is never honoured
+  if (vault.dataKey) return true;
+  if (!raw || !isVaultEnabled()) return false;
+  let handoff = null;
+  try { handoff = JSON.parse(raw); } catch { return false; }
+  if (!handoff || typeof handoff !== "object" || typeof handoff.key !== "string" || !/^[0-9a-f]{64}$/i.test(handoff.key)) return false;
+  const left = Number(handoff.expiresAt) - vault.now();
+  if (!Number.isFinite(left) || left < 0 || left > VAULT_HANDOFF_TTL_MS) return false;
+  const key = hexToBytes(handoff.key);
+  if (!keyIsCurrent(key)) return false;
   setUnlocked(key);
   return true;
 }
@@ -244,6 +374,7 @@ function readRawAccounts() {
  * back keeps a blob it could not open.
  */
 export function readAccountRecords() {
+  checkKeyStillCurrent(); // a key another tab's password change replaced opens nothing (DSK-022)
   return readRawAccounts().map((entry) => {
     if (!entry || typeof entry !== "object" || !entry.sealed) return entry;
     if (vault.dataKey) {
@@ -275,6 +406,9 @@ function sealEntries(key, entries) {
  */
 export function writeAccountRecords(entries) {
   const list = Array.isArray(entries) ? entries : [];
+  // Another tab changed or removed the password: this tab's list was read under the old state
+  // and its key would seal what the new password cannot open. Lock and write nothing (DSK-022).
+  if ((vault.dataKey || vault.legacyVerified) && !checkKeyStillCurrent()) throw new Error(LOCKED_IN_ANOTHER_TAB_MESSAGE);
   if (!isVaultEnabled()) {
     ls().setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(list.map((entry) => {
       if (!entry || typeof entry !== "object") return entry;
@@ -300,15 +434,184 @@ export function persistedWalletRecordForStorage(payload) {
 export function readLegacyWalletKey() {
   const plain = String(ls().getItem(LEGACY_PERSISTED_WALLET_KEY) || "").trim();
   if (plain) return plain;
-  if (!vault.dataKey) return "";
+  if (!vault.dataKey || !checkKeyStillCurrent()) return "";
   try {
     const sealed = JSON.parse(ls().getItem(VAULT_LEGACY_WALLET_KEY) || "null");
     return sealed ? dec.decode(openBytes(vault.dataKey, sealed, LEGACY_WALLET_AAD)).trim() : "";
   } catch { return ""; }
 }
+/** Deletes the pre-v2 key once the caller has read it (and filed it). A sealed copy this tab
+ *  cannot open (locked, or sealed under a key another tab made) was never read, so it stays
+ *  (DSK-022). Returns whether no copy is left. */
 export function clearLegacyWalletKey() {
   ls().removeItem(LEGACY_PERSISTED_WALLET_KEY);
+  const raw = ls().getItem(VAULT_LEGACY_WALLET_KEY);
+  if (raw == null) return true;
+  if (!vault.dataKey || !checkKeyStillCurrent()) return false;
+  try { openBytes(vault.dataKey, JSON.parse(raw), LEGACY_WALLET_AAD); } catch { return false; }
   ls().removeItem(VAULT_LEGACY_WALLET_KEY);
+  return true;
+}
+
+// --- the Nextcloud app password ---------------------------------------------------------------
+// ui/nextcloud.js keeps one connection per wallet under accountScopedKey("kachat-nextcloud-v1")
+// (`kachat-account-data-v1:<address>:kachat-nextcloud-v1`; the bare key when no wallet is active).
+// Without the vault: { server, username, appPassword, ... } in plaintext, as before. With it, the
+// app password is the only secret and the only sealed field:
+//   { server, username, userId, startFolder, backupFolder, autoBackup, ...,
+//     appPasswordSealed: { v: 1, iv: hex(12), ct: hex } }
+//   ct = AES-256-GCM(dataKey, UTF-8 app password, AAD = "kachat-nextcloud-app-password-v1|" +
+//        JSON [storage key (names the wallet), server, username]); fresh IV on every write.
+// So a sealed password cannot be moved to another wallet, server or login. The rest stays
+// readable: Settings can show "Connected to <server> as <user>" while KaChat is locked.
+export const NEXTCLOUD_STORAGE_KEY = "kachat-nextcloud-v1";
+const NEXTCLOUD_AAD_PREFIX = "kachat-nextcloud-app-password-v1|";
+const NEXTCLOUD_PRIVATE_FIELDS = ["appPassword", "appPasswordSealed", "locked", "unreadable"];
+
+function isNextcloudStorageKey(key) {
+  const name = String(key ?? "");
+  return name === NEXTCLOUD_STORAGE_KEY || name.endsWith(`:${NEXTCLOUD_STORAGE_KEY}`);
+}
+function nextcloudStorageKeys() {
+  const out = [];
+  const store = ls();
+  for (let i = 0; i < Number(store.length || 0); i += 1) {
+    const key = store.key(i);
+    if (key != null && isNextcloudStorageKey(key)) out.push(key);
+  }
+  return out;
+}
+function nextcloudPublicPart(record) {
+  const out = { ...record };
+  for (const field of NEXTCLOUD_PRIVATE_FIELDS) delete out[field];
+  return out;
+}
+function nextcloudAad(storageKey, record) {
+  return NEXTCLOUD_AAD_PREFIX + JSON.stringify([String(storageKey), String(record?.server || ""), String(record?.username || "")]);
+}
+function readRawNextcloud(storageKey) {
+  try {
+    const parsed = JSON.parse(ls().getItem(storageKey) || "null");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+function hasPlainNextcloudPassword(record) { return typeof record?.appPassword === "string" && record.appPassword !== ""; }
+function hasSealedNextcloudPassword(record) { return !!(record?.appPasswordSealed?.iv && record?.appPasswordSealed?.ct); }
+/** The stored record with its password sealed under `key` (checked to open again). */
+function sealNextcloudWith(key, storageKey, record, password) {
+  const value = String(password);
+  const sealed = { v: 1, ...sealBytes(key, enc.encode(value), nextcloudAad(storageKey, record)) };
+  if (openNextcloudWith(key, storageKey, record, sealed) !== value) throw new Error("Encrypted Nextcloud password failed verification.");
+  return { ...nextcloudPublicPart(record), appPasswordSealed: sealed };
+}
+/** Throws when the key is wrong or the blob / server / login / wallet was altered. */
+function openNextcloudWith(key, storageKey, record, sealed = record?.appPasswordSealed) {
+  return dec.decode(openBytes(key, sealed, nextcloudAad(storageKey, record)));
+}
+
+/**
+ * The Nextcloud connection stored under `storageKey`, or null when there is none. With the app
+ * password in memory (`appPassword`) when it can be used: no app password set, or the vault is
+ * unlocked and opens it. Otherwise public fields only, with `locked: true` (KaChat is locked) or
+ * also `unreadable: true` (unlocked, but the sealed password does not open: reconnect). Never
+ * returns an empty or made-up password. A plaintext password found while the vault is unlocked
+ * is sealed on the spot.
+ */
+export function readNextcloudAccount(storageKey) {
+  const record = readRawNextcloud(storageKey);
+  if (!record || !record.server || !record.username) return null;
+  checkKeyStillCurrent(); // a key another tab's password change replaced opens nothing (DSK-022)
+  const pub = nextcloudPublicPart(record);
+  if (isAppLocked()) return { ...pub, locked: true };
+  if (hasPlainNextcloudPassword(record)) {
+    const account = { ...pub, appPassword: record.appPassword };
+    if (isVaultEnabled() && vault.dataKey) {
+      try { writeNextcloudAccount(storageKey, account); } catch { /* sealed at the next write or unlock */ }
+    }
+    return account;
+  }
+  if (hasSealedNextcloudPassword(record) && vault.dataKey) {
+    try {
+      const appPassword = openNextcloudWith(vault.dataKey, storageKey, record);
+      if (appPassword) return { ...pub, appPassword };
+    } catch { /* wrong key or tampered */ }
+  }
+  return { ...pub, locked: true, unreadable: true };
+}
+
+/**
+ * Writes the Nextcloud connection under `storageKey` (null removes it, allowed even while
+ * locked: Disconnect). With the vault enabled the app password is sealed with a fresh IV and
+ * checked to open; refuses while locked, or with a data key another tab's password change
+ * replaced (DSK-022), rather than ever writing it in plaintext or under a stale key. Without the
+ * vault: plaintext, as before. A record without a password in memory is refused, so a locked
+ * copy can never overwrite the sealed one.
+ */
+export function writeNextcloudAccount(storageKey, account) {
+  if ((vault.dataKey || vault.legacyVerified) && !checkKeyStillCurrent()) throw new Error(LOCKED_IN_ANOTHER_TAB_MESSAGE);
+  if (!isNextcloudStorageKey(storageKey)) throw new Error("Not a Nextcloud connection key.");
+  if (account == null) { ls().removeItem(storageKey); return; }
+  if (!account.server || !account.username || !hasPlainNextcloudPassword(account)) throw new Error("The Nextcloud app password is not available. Nothing was saved.");
+  if (!isVaultEnabled()) {
+    ls().setItem(storageKey, JSON.stringify({ ...nextcloudPublicPart(account), appPassword: account.appPassword }));
+    return;
+  }
+  if (!vault.dataKey) throw new Error("KaChat is locked. Enter your password before saving the Nextcloud connection.");
+  requireCurrentKey(vault.dataKey);
+  ls().setItem(storageKey, JSON.stringify(sealNextcloudWith(vault.dataKey, storageKey, account, account.appPassword)));
+}
+
+/** Every stored Nextcloud connection with its password in plaintext form (sealed ones opened
+ *  with `key`). One that carries no password, or whose sealed password does not open with `key`
+ *  (nobody can open it any more), comes back with `appPassword: null`: migrations delete it, so
+ *  the user reconnects. */
+function collectPlainNextcloud(key) {
+  return nextcloudStorageKeys().map((storageKey) => {
+    const raw = ls().getItem(storageKey);
+    const record = readRawNextcloud(storageKey);
+    if (!record) return null; // not JSON: not ours to touch
+    let appPassword = null;
+    if (hasPlainNextcloudPassword(record)) appPassword = record.appPassword;
+    else if (hasSealedNextcloudPassword(record) && key) {
+      try { appPassword = openNextcloudWith(key, storageKey, record) || null; } catch { appPassword = null; }
+    }
+    return { storageKey, raw, record: nextcloudPublicPart(record), appPassword };
+  }).filter(Boolean);
+}
+function restoreNextcloud(items) {
+  for (const item of items) {
+    try { if (item.raw == null) ls().removeItem(item.storageKey); else ls().setItem(item.storageKey, item.raw); } catch { /* best effort */ }
+  }
+}
+/** Writes every connection sealed under `key` (or in plaintext when `key` is null), reads each
+ *  back and checks it, and restores all previous values if anything does not match. */
+function writeNextcloudVerified(key, items) {
+  try {
+    for (const item of items) {
+      if (!item.appPassword || !item.record.server || !item.record.username) { ls().removeItem(item.storageKey); continue; }
+      const stored = key
+        ? sealNextcloudWith(key, item.storageKey, item.record, item.appPassword)
+        : { ...item.record, appPassword: item.appPassword };
+      ls().setItem(item.storageKey, JSON.stringify(stored));
+      const back = readRawNextcloud(item.storageKey);
+      const opened = key ? openNextcloudWith(key, item.storageKey, back) : back?.appPassword;
+      if (opened !== item.appPassword || (key && hasPlainNextcloudPassword(back))) throw new Error("mismatch");
+    }
+  } catch {
+    restoreNextcloud(items);
+    throw new Error("The Nextcloud connection could not be written back. Nothing was changed.");
+  }
+}
+/** At unlock: seals any Nextcloud password still in plaintext (a connection made before the
+ *  password, or by a build without this). Returns how many it sealed. */
+function sealPlaintextNextcloud() {
+  const key = vault.dataKey;
+  if (!key) return 0;
+  requireCurrentKey(key);
+  const items = collectPlainNextcloud(null).filter((item) => item.appPassword);
+  if (!items.length) return 0;
+  writeNextcloudVerified(key, items);
+  return items.length;
 }
 
 // --- migration ------------------------------------------------------------------------------
@@ -353,6 +656,7 @@ function writeSealedVerified(key, entries) {
 }
 /** Seals the legacy key (verified) and only then deletes the plaintext copy. */
 function sealLegacyWalletKey(key, hex) {
+  requireCurrentKey(key);
   if (!hex) { ls().removeItem(VAULT_LEGACY_WALLET_KEY); return; }
   const sealed = sealBytes(key, enc.encode(hex), LEGACY_WALLET_AAD);
   if (dec.decode(openBytes(key, sealed, LEGACY_WALLET_AAD)) !== hex) throw new Error("Legacy wallet key failed verification.");
@@ -375,6 +679,7 @@ function scrubPersistedWallet() {
 function migratePlaintextIntoVault() {
   const key = vault.dataKey;
   if (!key) return 0;
+  requireCurrentKey(key);
   const raw = readRawAccounts();
   let wallet = null;
   try { wallet = JSON.parse(ls().getItem(PERSISTED_WALLET_KEY) || "null"); } catch { wallet = null; }
@@ -481,7 +786,12 @@ export async function unlockKeyVault(password) {
     if (!(await legacyPasswordMatches(record, value))) { recordFailedAttempt(); return false; }
     clearFailedAttempts();
     try { await writeNewVault(value); }
-    catch { vault.legacyVerified = true; /* stays plaintext; tried again at the next unlock */ }
+    catch {
+      // Another tab upgraded the same record meanwhile: open what it wrote, with the same password.
+      if (isVaultRecord(loadPasswordRecord()) || loadPendingRecord()) return unlockKeyVault(value);
+      vault.legacyVerified = true; // stays plaintext; tried again at the next unlock
+      vault.verifiedFor = storedRecordsText();
+    }
     return true;
   }
   if (!key) { recordFailedAttempt(); return false; }
@@ -492,6 +802,7 @@ export async function unlockKeyVault(password) {
   if (pending && keyOpensStore(key)) ls().removeItem(APP_PASSWORD_PENDING_KEY);
   setUnlocked(key);
   try { migratePlaintextIntoVault(); } catch { /* plaintext copies stay until the next unlock */ }
+  try { sealPlaintextNextcloud(); } catch { /* the plaintext Nextcloud password stays until the next write or unlock */ }
   // A record from a weaker work factor: the password is known good right now, so re-wrap.
   const current = loadPasswordRecord();
   if (isVaultRecord(current) && Number(current.iterations) < VAULT_PBKDF2_ITERATIONS && vault.iterations >= VAULT_PBKDF2_ITERATIONS) {
@@ -508,6 +819,7 @@ export async function unlockKeyVault(password) {
  * unlocked the vault). A fresh data key and salt are made and every secret is re-encrypted.
  * Order, so a crash at any point leaves something the user's password opens:
  *   1. pending record (new password)  2. registry sealed with the new key, read back and checked
+ *   2b. every Nextcloud app password sealed with the new key, read back and checked
  *   3. the record itself  4. pending removed  5. legacy key sealed, active-wallet record scrubbed.
  */
 export async function setAppPassword(password) {
@@ -516,16 +828,38 @@ export async function setAppPassword(password) {
   await writeNewVault(value);
 }
 async function writeNewVault(value) {
+  if ((vault.dataKey || vault.legacyVerified) && !checkKeyStillCurrent()) throw new Error(LOCKED_IN_ANOTHER_TAB_MESSAGE);
   if (isVaultEnabled() && !vault.dataKey) throw new Error("Enter your current password first.");
   const oldKey = vault.dataKey;
-  const entries = collectPlainAccounts(oldKey);
-  const legacyHex = plainLegacyWalletKey(oldKey);
+  const recordsBefore = storedRecordsText();
+  // Fail fast, before the slow key derivation, if something does not open.
+  collectPlainAccounts(oldKey);
+  plainLegacyWalletKey(oldKey);
   const dataKey = randomBytes(32);
   const record = await buildVaultRecord(value, dataKey);
+  // The derivation took a while: another tab may have changed the password meanwhile (two tabs
+  // upgrading a pre-vault record, or two password changes). Then this one stops (DSK-022).
+  if (storedRecordsText() !== recordsBefore || vault.dataKey !== oldKey) {
+    if (vault.dataKey === oldKey && oldKey) lockBecauseOfAnotherTab();
+    throw new Error(LOCKED_IN_ANOTHER_TAB_MESSAGE);
+  }
+  // Collected again now, so accounts another tab saved during the derivation are not lost.
+  const entries = collectPlainAccounts(oldKey);
+  const legacyHex = plainLegacyWalletKey(oldKey);
+  // The Nextcloud app passwords too (a sealed one that does not open with the old key is lost
+  // already, and is deleted: that wallet reconnects Nextcloud).
+  const nextcloud = collectPlainNextcloud(oldKey);
   const recordJson = JSON.stringify(record);
+  const accountsBefore = ls().getItem(SAVED_ACCOUNTS_KEY);
   ls().setItem(APP_PASSWORD_PENDING_KEY, recordJson);
   try {
     writeSealedVerified(dataKey, entries);
+    try {
+      writeNextcloudVerified(dataKey, nextcloud);
+    } catch (error) {
+      if (accountsBefore == null) ls().removeItem(SAVED_ACCOUNTS_KEY); else ls().setItem(SAVED_ACCOUNTS_KEY, accountsBefore);
+      throw error;
+    }
   } catch (error) {
     ls().removeItem(APP_PASSWORD_PENDING_KEY);
     throw error;
@@ -540,10 +874,12 @@ async function writeNewVault(value) {
 
 /**
  * Removes the password (the caller has verified it, which unlocked the vault): every secret is
- * written back as plaintext and checked, and only then is the password record deleted.
+ * written back as plaintext and checked (account keys, then the Nextcloud app passwords), and
+ * only then is the password record deleted.
  */
 export function removeAppPassword() {
   if (!hasAppPassword()) return;
+  if ((vault.dataKey || vault.legacyVerified) && !checkKeyStillCurrent()) throw new Error(LOCKED_IN_ANOTHER_TAB_MESSAGE);
   if (isVaultEnabled() && !vault.dataKey) throw new Error("Enter your password first.");
   const key = vault.dataKey;
   const entries = collectPlainAccounts(key).map((entry) => {
@@ -562,6 +898,13 @@ export function removeAppPassword() {
     if (previous == null) ls().removeItem(SAVED_ACCOUNTS_KEY); else ls().setItem(SAVED_ACCOUNTS_KEY, previous);
     throw new Error("Accounts could not be written back. The password was kept.");
   }
+  // The Nextcloud app passwords back to plaintext too (checked), before the record goes.
+  try {
+    writeNextcloudVerified(null, collectPlainNextcloud(key));
+  } catch {
+    if (previous == null) ls().removeItem(SAVED_ACCOUNTS_KEY); else ls().setItem(SAVED_ACCOUNTS_KEY, previous);
+    throw new Error("The Nextcloud connection could not be written back. The password was kept.");
+  }
   if (legacyHex) ls().setItem(LEGACY_PERSISTED_WALLET_KEY, legacyHex);
   ls().removeItem(VAULT_LEGACY_WALLET_KEY);
   ls().removeItem(APP_PASSWORD_KEY);
@@ -574,6 +917,7 @@ export function removeAppPassword() {
  * Forgotten password: the encrypted keys cannot be opened by anyone, so this deletes the
  * password record and every saved account's sealed keys from this device (their public entries,
  * chats and settings stay). The user imports each account again with its recovery phrase.
+ * Every Nextcloud connection with a sealed app password is removed too (the user reconnects).
  * Returns the number of accounts whose keys were removed.
  */
 export function resetForgottenAppPassword() {
@@ -586,9 +930,17 @@ export function resetForgottenAppPassword() {
     return out;
   })));
   ls().removeItem(VAULT_LEGACY_WALLET_KEY);
+  // A sealed Nextcloud app password cannot be opened either: the connection is removed, and the
+  // user reconnects Nextcloud (a plaintext one, which needs no password, stays).
+  for (const storageKey of nextcloudStorageKeys()) {
+    const record = readRawNextcloud(storageKey);
+    if (record && !hasPlainNextcloudPassword(record) && hasSealedNextcloudPassword(record)) ls().removeItem(storageKey);
+  }
   ls().removeItem(APP_PASSWORD_KEY);
   ls().removeItem(APP_PASSWORD_PENDING_KEY);
   clearFailedAttempts();
+  const wasOpen = !!(vault.dataKey || vault.legacyVerified);
   lockKeyVault();
+  if (!wasOpen) notifyStateListeners(); // the Nextcloud connection is gone: let it reload
   return raw.length - kept.length;
 }

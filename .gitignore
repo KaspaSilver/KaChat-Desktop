@@ -6,7 +6,7 @@ dist/
 vendor/kasia-cipher/target/
 .claude/
 
-# Build-time secrets (ChangeNOW key etc.) — inlined into the bundle by Vite, never committed.
+# Local settings and secrets — never committed.
 # Mirrors iOS Secrets.xcconfig / Android local.properties. See .env.example.
 .env
 .env.local

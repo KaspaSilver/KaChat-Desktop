@@ -715,6 +715,27 @@ function appliedRowsFor(channel) {
   if (set.size > 5000) set.clear();
   return set;
 }
+/**
+ * Sender check for every row entering the store (audit DSK-045). Live block-stream rows are
+ * already verified by the engine (input 0's address, accepted only as a self-send), so they
+ * pass unchanged. Indexer rows (`/get-broadcasts`) carry only the indexer's own guess of the
+ * sender - no inputs, no outputs, nothing to check it against here - so they are still shown
+ * as the indexer names them, as before: fixing the indexer's sender pick is out of scope for
+ * this client. The one thing done here is to apply a verdict the engine already reached for the
+ * same txid: a post it proved forged is dropped, a verified one shows its verified sender.
+ * (The chess arena verifies its indexer rows in full; see ui/chess-tournaments.js.)
+ */
+function withKnownSenderVerdicts(rows) {
+  const out = [];
+  for (const row of rows || []) {
+    const known = row?.txId ? deps.engine?.broadcastSenderVerdict?.(row.txId) : null;
+    if (!known) { out.push(row); continue; }
+    if (known.verdict !== "verified") continue;
+    out.push(known.senderAddress === row.senderAddress ? row : { ...row, senderAddress: known.senderAddress });
+  }
+  return out;
+}
+
 function mergeMessages(channel, rows) {
   const existing = messageCache[channel] || [];
   const seen = new Set(existing.map((m) => m.txId));
@@ -724,7 +745,7 @@ function mergeMessages(channel, rows) {
   const freshIncoming = [];
   // Oldest first, so an edit in this page can see the message it targets; the indexer pages
   // newest-first. The sender of a target is looked up in what is stored or in this page.
-  const ordered = [...(rows || [])].sort((a, b) => (Number(a?.blockTime) || 0) - (Number(b?.blockTime) || 0));
+  const ordered = withKnownSenderVerdicts(rows).sort((a, b) => (Number(a?.blockTime) || 0) - (Number(b?.blockTime) || 0));
   const senderOf = (txId) => {
     const hit = existing.find((m) => m.txId === txId) || ordered.find((r) => r?.txId === txId);
     return hit ? String(hit.senderAddress || "") : null;
@@ -1836,7 +1857,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel }) {
       renderChannelList();
       return;
     } catch (error) {
-      deps.showToast?.(`Nextcloud upload failed — sending on-chain instead. (${userFacingError(error)})`);
+      deps.showToast?.(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
       deps.appendEngineLog?.(`Broadcast voice note upload failed: ${error.message}`);
     }
   }
@@ -2101,7 +2122,7 @@ function broadcastReactionStatusEl(key) {
   } else {
     el.className = "reaction-status failed";
     el.textContent = "!";
-    el.title = "Reaction failed to send — click to retry";
+    el.title = "Reaction failed to send. Click to retry.";
     el.addEventListener("click", (event) => {
       event.stopPropagation();
       entry.retry?.();

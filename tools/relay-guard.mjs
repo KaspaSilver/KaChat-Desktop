@@ -9,7 +9,7 @@
 //   - Nextcloud Talk                 (ui/talk.js: Basic auth, or a guest session in a cookie jar)
 //   - KNS name resolution            (engine/kns.js)
 //   - link previews + preview images (ui/app.js, ui/kachat-names-live.js: x-preview, x-preview-image)
-//   - indexers, api.kaspa.org, node seeds, ChangeNOW ... (engine/endpoints.js fetch wrapper)
+//   - indexers, api.kaspa.org, node seeds ...  (engine/endpoints.js fetch wrapper)
 //
 // What this module guarantees for every request:
 //   * The host actually connected to is the host that was checked: the target URL is built first
@@ -24,9 +24,12 @@
 //     with cookies, auth challenges, refresh/link, clear-site-data and hop-by-hop headers removed.
 //   * The browser's cookies for THIS origin never leave, and nothing that identifies the reader
 //     (forwarding headers, cf-*) is passed on.
-//   * Write methods go only where the app writes: its own API hosts, Nextcloud-shaped requests
-//     (Basic/Bearer auth on /remote.php/, /ocs/, /index.php/), or a Talk guest session (jar + OCS).
-//   * Rate limits key on the socket peer; forwarding headers count only from a trusted proxy.
+//   * Write methods go only where the app writes: its own API hosts, or the ONE Nextcloud the app
+//     names in x-kachat-nextcloud-origin - on /remote.php/ or /ocs/ with Basic/Bearer auth, or a
+//     Talk guest session (jar + OCS).
+//   * Rate limits key on the socket peer (an IPv6 client by its /64); forwarding headers count only
+//     from a trusted proxy. A flood of new addresses evicts expired and one-off entries, never
+//     everyone's counters at once.
 //
 // Node 20+, no dependencies: the sidecar copy runs as-is under node:20-alpine.
 import http from "node:http";
@@ -67,20 +70,16 @@ const CLIENT_IDENTITY_HEADERS = [
 const NAVIGATION_DESTS = new Set(["document", "iframe", "frame", "embed", "object"]);
 
 // Hosts the app itself writes to (the hosts engine/endpoints.js relays, plus KNS).
-const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^tnkachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|(^|\.)changenow\.io$|^api\.knsdomains\.org$/i;
-// Nextcloud's API roots: WebDAV (remote.php), OCS (ocs/v1.php, ocs/v2.php incl. Talk/spreed),
-// and index.php routes (previews). ui/nextcloud.js and ui/talk.js write only under these.
-const NEXTCLOUD_PATH_RE = /^\/(?:remote\.php|ocs|index\.php)\//i;
+const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^tnkachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|^api\.knsdomains\.org$/i;
+// Nextcloud's write roots: WebDAV (remote.php) and OCS (ocs/v1.php, ocs/v2.php incl. Talk/spreed).
+// ui/nextcloud.js and ui/talk.js write only under these; index.php (previews) is only ever read.
+const NEXTCLOUD_WRITE_PATH_RE = /^\/(?:remote\.php|ocs)\//i;
 const JAR_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
-
-// ChangeNOW: the server's API key is attached only to the swap calls ui/swaps.js makes.
-const CHANGENOW_HOST = "api.changenow.io";
-const CHANGENOW_KEY_ROUTES = new Set([
-  "GET /v2/exchange/estimated-amount",
-  "GET /v2/exchange/min-amount",
-  "GET /v2/exchange/by-id",
-  "POST /v2/exchange",
-]);
+// The Nextcloud origin the app is talking to, sent by ui/nextcloud.js and ui/talk.js on every
+// relayed Nextcloud call. Writes to a non-API host must go to exactly this origin.
+export const NEXTCLOUD_ORIGIN_HEADER = "x-kachat-nextcloud-origin";
+// Rate-limit bookkeeping: at most this many client keys are tracked per limiter.
+const RATE_MAX_KEYS = 5000;
 
 // --- Addresses -------------------------------------------------------------------------------
 
@@ -193,6 +192,20 @@ function normalizePeer(address) {
   return mapped ? mapped[1] : ip;
 }
 
+/** The rate-limit bucket for a client address: an IPv4 address as-is (IPv4-mapped IPv6 counts as
+ *  the IPv4 address), an IPv6 address by its /64 - one subscriber's whole allocation, which costs
+ *  nothing to rotate through. Anything else (no peer) is returned unchanged. */
+export function rateKeyFor(address) {
+  const ip = normalizePeer(address);
+  if (net.isIP(ip) !== 6) return ip;
+  const bytes = ipv6Bytes(ip);
+  if (!bytes) return ip;
+  if (bytes.slice(0, 10).every((x) => x === 0) && bytes[10] === 0xff && bytes[11] === 0xff) return bytes.slice(12).join(".");
+  const groups = [];
+  for (let i = 0; i < 8; i += 2) groups.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
+  return `${groups.join(":")}::/64`;
+}
+
 /** KACHAT_TRUSTED_PROXIES: comma/space separated IPs or CIDRs, plus the word `loopback`
  *  (127.0.0.0/8 and ::1) or `none`. Unset or empty means `loopback` - the sidecar and the
  *  preview server sit behind a reverse proxy on the same machine. Setting it REPLACES the
@@ -230,10 +243,9 @@ export function parseTrustedProxies(spec) {
  * @param {string}  [options.trustedProxies] KACHAT_TRUSTED_PROXIES syntax (default: loopback)
  * @param {boolean} [options.trustCfConnectingIp] honour cf-connecting-ip from a trusted proxy
  *                  (only when the trusted proxy is Cloudflare-fronted and clears the header otherwise)
- * @param {string|function} [options.changenowApiKey] server ChangeNOW key (or a getter)
  * @param {number}  [options.readTimeoutMs]   GET/HEAD/OPTIONS socket inactivity limit
  * @param {number}  [options.rateMax]          requests per client per minute
- * @param {number}  [options.changenowRateMax] key-attached ChangeNOW calls per client per minute
+ * @param {number}  [options.rateMaxKeys]      client keys tracked by the limiter (default 5000)
  * @param {function} [options.resolveAllowed]  (hostname) => {address,family}|null - tests only
  * @param {function} [options.log]
  */
@@ -241,13 +253,12 @@ export function createRelay(options = {}) {
   const allowPrivate = Boolean(options.allowPrivate);
   const isTrustedProxy = parseTrustedProxies(options.trustedProxies);
   const trustCf = Boolean(options.trustCfConnectingIp);
-  const changenowKey = () => String((typeof options.changenowApiKey === "function" ? options.changenowApiKey() : options.changenowApiKey) || "").trim();
   const readTimeoutMs = Number(options.readTimeoutMs) > 0 ? Number(options.readTimeoutMs) : 15000;
   const longPollTimeoutMs = Math.max(60000, readTimeoutMs);
   const writeTimeoutMs = Math.max(120000, readTimeoutMs);
   const RATE_WINDOW_MS = 60_000;
   const rateMax = Number(options.rateMax) > 0 ? Number(options.rateMax) : 600;
-  const changenowRateMax = Number(options.changenowRateMax) > 0 ? Number(options.changenowRateMax) : 30;
+  const rateMaxKeys = Number(options.rateMaxKeys) > 0 ? Number(options.rateMaxKeys) : RATE_MAX_KEYS;
   const resolveTarget = typeof options.resolveAllowed === "function"
     ? options.resolveAllowed
     : (hostname) => resolveAllowed(hostname, { allowPrivate });
@@ -278,8 +289,9 @@ export function createRelay(options = {}) {
 
   /** Who is asking: the socket peer, unless the peer is a trusted proxy, in which case the
    *  right-most X-Forwarded-For entry that is not itself a trusted proxy (so a client-supplied
-   *  XFF prefix, which nginx's $proxy_add_x_forwarded_for keeps, cannot choose the key). */
-  const clientKey = (req) => {
+   *  XFF prefix, which nginx's $proxy_add_x_forwarded_for keeps, cannot choose the key).
+   *  The answer is a rate-limit bucket (rateKeyFor): an IPv6 client counts by its /64. */
+  const clientAddress = (req) => {
     const peer = normalizePeer(req.socket?.remoteAddress) || "?";
     if (!isTrustedProxy(peer)) return peer;
     if (trustCf) {
@@ -290,58 +302,76 @@ export function createRelay(options = {}) {
     for (let i = hops.length - 1; i >= 0; i -= 1) if (!isTrustedProxy(hops[i])) return hops[i];
     return hops[0] || peer;
   };
+  const clientKey = (req) => rateKeyFor(clientAddress(req));
 
-  const makeLimiter = (max) => {
-    const byKey = new Map();
+  /** A fixed-window counter per client key, holding at most `maxKeys` keys. When full it forgets
+   *  expired windows first, then the oldest keys seen only ONCE in their window (forgetting one
+   *  costs at most a single extra request), and only then the oldest repeat callers. A flood of
+   *  fresh addresses therefore never resets a client that is actually using (or over) its quota,
+   *  and nothing ever clears every counter at once. */
+  const makeLimiter = (max, maxKeys = rateMaxKeys) => {
+    // Both maps are in insertion order. `once` only ever receives a key at its window start, so
+    // it is also in window order; `repeat` is in promotion order (close to window order).
+    const once = new Map();   // key -> { start, count: 1 }
+    const repeat = new Map(); // key -> { start, count >= 2 }
+    const expired = (entry, now) => now - entry.start > RATE_WINDOW_MS;
+    const size = () => once.size + repeat.size;
+    const makeRoom = (now) => {
+      if (size() < maxKeys) return;
+      for (const [key, entry] of once) { if (!expired(entry, now)) break; once.delete(key); }
+      while (size() >= maxKeys && once.size) once.delete(once.keys().next().value);
+      if (size() < maxKeys) return;
+      for (const [key, entry] of repeat) if (expired(entry, now)) repeat.delete(key);
+      while (size() >= maxKeys && repeat.size) repeat.delete(repeat.keys().next().value);
+    };
     return (key) => {
       const now = Date.now();
-      let entry = byKey.get(key);
-      if (!entry || now - entry.start > RATE_WINDOW_MS) {
-        if (byKey.size > 5000) byKey.clear();
+      let entry = repeat.get(key);
+      if (entry) {
+        if (expired(entry, now)) { repeat.delete(key); entry = null; }
+      } else {
+        entry = once.get(key) || null;
+        if (entry) {
+          once.delete(key);
+          if (expired(entry, now)) entry = null;
+          else repeat.set(key, entry); // second call in this window: promoted
+        }
+      }
+      if (!entry) {
+        makeRoom(now);
         entry = { start: now, count: 0 };
-        byKey.set(key, entry);
+        once.set(key, entry);
       }
       entry.count += 1;
       return entry.count > max;
     };
   };
   const overRate = makeLimiter(rateMax);
-  const overChangenowRate = makeLimiter(changenowRateMax);
   let lastRateLog = 0;
   const noteRateLimited = (key, what) => {
     const now = Date.now();
     if (now - lastRateLog > 60_000) { lastRateLog = now; log(`nc-proxy: ${what} rate limit hit for ${key}`); }
   };
 
-  /** The host this request was addressed to (the site the app is served from). */
-  const requestHost = (req) => {
-    const peerTrusted = isTrustedProxy(req.socket?.remoteAddress);
-    const forwarded = peerTrusted ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
-    return (forwarded || String(req.headers.host || "")).trim().toLowerCase();
+  /** The Nextcloud origin the app declared for this call (NEXTCLOUD_ORIGIN_HEADER), normalised
+   *  the way URL.origin is (lower-case host, default port dropped), or "" when absent/invalid. */
+  const declaredNextcloudOrigin = (req) => {
+    const raw = String(req.headers[NEXTCLOUD_ORIGIN_HEADER] || "").trim();
+    if (!raw) return "";
+    try {
+      const url = new URL(raw);
+      return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password ? url.origin : "";
+    } catch { return ""; }
   };
-
-  /** A same-origin call from the page itself: Fetch Metadata says so AND the Origin (or, for a
-   *  GET, which carries none, the Referer) names the host the request was sent to. */
-  const sameOriginCaller = (req) => {
-    if (String(req.headers["sec-fetch-site"] || "").toLowerCase() !== "same-origin") return false;
-    const expected = requestHost(req);
-    if (!expected) return false;
-    const hostOf = (value) => { try { return new URL(String(value)).host.toLowerCase(); } catch { return ""; } };
-    if (req.headers.origin !== undefined) return hostOf(req.headers.origin) === expected;
-    return Boolean(req.headers.referer) && hostOf(req.headers.referer) === expected;
-  };
-
-  /** Should the server's ChangeNOW key ride on this call? */
-  const changenowKeyAllowed = (req, method, target) => target.protocol === "https:"
-    && target.hostname.toLowerCase() === CHANGENOW_HOST
-    && CHANGENOW_KEY_ROUTES.has(`${method} ${target.pathname.replace(/\/+$/, "")}`)
-    && sameOriginCaller(req);
 
   /** May this write (non GET/HEAD/OPTIONS) go to `target`? */
   const writeAllowed = (req, target) => {
     if (WRITE_API_HOST_RE.test(target.hostname)) return true;
-    if (!NEXTCLOUD_PATH_RE.test(target.pathname)) return false;
-    // A Nextcloud app password (Basic) or token (Bearer), on a Nextcloud API path.
+    // Only to the Nextcloud the app is connected to, and only on its WebDAV/OCS roots.
+    const declared = declaredNextcloudOrigin(req);
+    if (!declared || declared !== target.origin) return false;
+    if (!NEXTCLOUD_WRITE_PATH_RE.test(target.pathname)) return false;
+    // A Nextcloud app password (Basic) or token (Bearer).
     if (/^(basic|bearer)\s+\S+/i.test(String(req.headers.authorization || "").trim())) return true;
     // A Talk guest session: its cookie jar, on an OCS path, flagged as an OCS API call.
     return JAR_ID_RE.test(String(req.headers["x-proxy-jar"] || "").trim())
@@ -413,6 +443,7 @@ export function createRelay(options = {}) {
     for (const name of HOP_BY_HOP) delete headers[name];
     const jarId = String(headers["x-proxy-jar"] || "").trim();
     delete headers["x-proxy-jar"];
+    delete headers[NEXTCLOUD_ORIGIN_HEADER];
     const jarCookies = JAR_ID_RE.test(jarId) ? jarFor(jarId, origin.origin) : null;
     if (jarCookies && jarCookies.size) headers.cookie = [...jarCookies].map(([n, v]) => `${n}=${v}`).join("; ");
     // Talk's signaling channel is a long poll the server holds for up to 30s.
@@ -441,17 +472,6 @@ export function createRelay(options = {}) {
     }
     delete headers["x-preview-image"];
     delete headers["x-preview-referer"];
-    // ChangeNOW: the server key (never shipped in the page) rides only on the app's own swap calls.
-    // A key the page sends itself (a reader's own, from Settings) wins and is just passed on.
-    const serverKey = changenowKey();
-    if (serverKey && !String(headers["x-changenow-api-key"] || "").trim() && changenowKeyAllowed(req, method, target)) {
-      if (overChangenowRate(who)) {
-        noteRateLimited(who, "ChangeNOW");
-        refuse(res, 429, "Too many swap requests", { "retry-after": "60" });
-        return;
-      }
-      headers["x-changenow-api-key"] = serverKey;
-    }
     // Opt-in "soft 404" (KNS): an upstream 404 comes back as 200 + x-upstream-status: 404.
     const soft404 = headers["x-proxy-soft-404"] === "1";
     delete headers["x-proxy-soft-404"];
@@ -477,14 +497,13 @@ export function createRelay(options = {}) {
         if (opts && opts.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
         else callback(null, pinned.address, pinned.family);
       };
-      // A redirect to another origin gets a clean request: Authorization, jar cookies and the
-      // ChangeNOW key belong to the origin that was asked for.
+      // A redirect to another origin gets a clean request: Authorization and jar cookies belong
+      // to the origin that was asked for.
       const sameOrigin = hopTarget.origin === origin.origin;
       const hopHeaders = { ...headers, host: hopTarget.host };
       if (!sameOrigin) {
         delete hopHeaders.authorization;
         delete hopHeaders.cookie;
-        delete hopHeaders["x-changenow-api-key"];
       }
       const client = hopTarget.protocol === "http:" ? http : https;
       const upstream = client.request({
@@ -549,5 +568,5 @@ export function createRelay(options = {}) {
     forward(target, 0).catch(() => fail(502, "Proxy error"));
   };
 
-  return { handle, clientKey, writeAllowed, changenowKeyAllowed, sameOriginCaller };
+  return { handle, clientKey, writeAllowed, overRate };
 }

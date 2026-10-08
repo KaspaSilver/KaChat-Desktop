@@ -34,17 +34,63 @@ export function generateMnemonicWallet(kaspa, wordCount = 24, passphrase = "") {
   return importMnemonic(kaspa, mnemonic.phrase, passphrase);
 }
 
+// --- BIP39 passphrase normalization (audit EXT-010) ---------------------------
+//
+// BIP39 derives the seed as PBKDF2-HMAC-SHA512(NFKD(mnemonic), "mnemonic" + NFKD(passphrase),
+// 2048). iOS (BIP39.swift mnemonicToSeed, decomposedStringWithCompatibilityMapping) and every
+// standard wallet normalize; the Kaspa WASM `Mnemonic.toSeed` does NOT, so the passphrase is
+// normalized here before it reaches the WASM. A passphrase with a composed character (é, ü, ñ,
+// full-width forms...) used to derive a different wallet on this desktop than on iPhone.
+//
+// Accounts saved before this fix with such a passphrase derived from the raw (as-typed) bytes.
+// They keep that derivation: `passphraseForm: "raw"`. Every other account is "nfkd" (the
+// standard). A passphrase that is already NFKD (plain ASCII included) derives the same either way.
+export const PASSPHRASE_FORMS = ["nfkd", "raw"];
+
+/** "raw" only when asked for explicitly; anything else is the standard ("nfkd"). */
+export function normalizePassphraseForm(form) {
+  return form === "raw" ? "raw" : "nfkd";
+}
+
+/** True when NFKD leaves the passphrase unchanged (so "raw" and "nfkd" derive the same seed). */
+export function passphraseIsNfkd(passphrase) {
+  const pass = String(passphrase || "");
+  return pass === pass.normalize("NFKD");
+}
+
+/** The passphrase string handed to `Mnemonic.toSeed`: NFKD (BIP39), or as stored for a
+ *  `legacy` ("raw") account saved before EXT-010. */
+export function seedPassphrase(passphrase, { legacy = false } = {}) {
+  const pass = String(passphrase || "");
+  return legacy ? pass : pass.normalize("NFKD");
+}
+
+/** The form a saved-account record derives with. Its `passphraseForm` flag when set; otherwise a
+ *  record with a non-NFKD passphrase was written before EXT-010 (every newer record stores its
+ *  passphrase in NFKD), so it is "raw"; anything else is "nfkd". */
+export function passphraseFormForRecord(record) {
+  if (record?.passphraseForm === "raw" || record?.passphraseForm === "nfkd") return record.passphraseForm;
+  return passphraseIsNfkd(record?.passphrase) ? "nfkd" : "raw";
+}
+
+// The one place a seed is made from a phrase + passphrase: every derivation below goes through it.
+function seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm) {
+  const legacy = normalizePassphraseForm(passphraseForm) === "raw";
+  const mnemonic = new kaspa.Mnemonic(legacy ? cleanPhrase : cleanPhrase.normalize("NFKD"));
+  return mnemonic.toSeed(seedPassphrase(passphrase, { legacy }));
+}
+
 // `passphrase` is the optional BIP39 25th word — it changes the derived seed,
 // so the same phrase with a different passphrase yields a different wallet.
-export function importMnemonic(kaspa, phrase, passphrase = "") {
+// `passphraseForm`: "nfkd" (default, BIP39) or "raw" (an account saved before EXT-010).
+export function importMnemonic(kaspa, phrase, passphrase = "", { passphraseForm = "nfkd" } = {}) {
   if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (!cleanPhrase) throw new Error("Enter a recovery phrase.");
   const pass = String(passphrase || "");
-  const mnemonic = new kaspa.Mnemonic(cleanPhrase);
-  const seed = mnemonic.toSeed(pass);
+  const seed = seedFromPhrase(kaspa, cleanPhrase, pass, passphraseForm);
   const master = new kaspa.XPrv(seed);
   const accountKey = master.derivePath("m/44'/111111'/0'/0/0").toPrivateKey();
   const privateKeyHex = accountKey.toString();
@@ -122,7 +168,7 @@ export async function oneKeyTweakPrivateKeyHex(kaspa, privateKeyHex) {
   if (!/^0[23][0-9a-fA-F]{64}$/.test(compressed)) {
     // Guard: never derive a silently-wrong key if the wasm build encodes
     // public keys differently than expected.
-    throw new Error("This Rusty Kaspa build does not expose compressed public keys — OneKey import is unavailable.");
+    throw new Error("This Rusty Kaspa build does not expose compressed public keys, so OneKey import is unavailable.");
   }
   let d = BigInt(`0x${privateKeyHex}`) % SECP256K1_N;
   if (compressed.startsWith("03")) d = (SECP256K1_N - d) % SECP256K1_N;
@@ -137,7 +183,7 @@ export async function oneKeyTweakPrivateKeyHex(kaspa, privateKeyHex) {
 // OneKey tweak needs WebCrypto SHA-256; standard/legacy families resolve
 // immediately. Returns the same wallet shape as importMnemonic plus
 // { sourceFamily, chattingIndex }.
-export async function importMnemonicWithFamily(kaspa, phrase, passphrase = "", { family = "kaspaStandard", index = 0 } = {}) {
+export async function importMnemonicWithFamily(kaspa, phrase, passphrase = "", { family = "kaspaStandard", index = 0, passphraseForm = "nfkd" } = {}) {
   if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
@@ -146,8 +192,7 @@ export async function importMnemonicWithFamily(kaspa, phrase, passphrase = "", {
   const pass = String(passphrase || "");
   const cleanFamily = normalizeSourceFamily(family);
   const cleanIndex = Math.max(0, Math.floor(Number(index) || 0));
-  const mnemonic = new kaspa.Mnemonic(cleanPhrase);
-  const seed = mnemonic.toSeed(pass);
+  const seed = seedFromPhrase(kaspa, cleanPhrase, pass, passphraseForm);
   const master = new kaspa.XPrv(seed);
   const path = identityDerivationPath(cleanFamily, cleanIndex);
   let privateKeyHex = master.derivePath(path).toPrivateKey().toString();
@@ -169,7 +214,7 @@ export async function importMnemonicWithFamily(kaspa, phrase, passphrase = "", {
 // and only the final per-index step repeats — the same reasoning as iOS's
 // shared base node. Returns [{ index, address }] in index order; indices that
 // fail to derive are skipped rather than aborting the batch.
-export async function deriveIdentityAddressRange(kaspa, phrase, passphrase = "", { family = "kaspaStandard", start = 0, count = 50 } = {}) {
+export async function deriveIdentityAddressRange(kaspa, phrase, passphrase = "", { family = "kaspaStandard", start = 0, count = 50, passphraseForm = "nfkd" } = {}) {
   if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
@@ -178,8 +223,7 @@ export async function deriveIdentityAddressRange(kaspa, phrase, passphrase = "",
   const cleanFamily = normalizeSourceFamily(family);
   const first = Math.max(0, Math.floor(Number(start) || 0));
   const total = Math.max(1, Math.floor(Number(count) || 1));
-  const mnemonic = new kaspa.Mnemonic(cleanPhrase);
-  const master = new kaspa.XPrv(mnemonic.toSeed(String(passphrase || "")));
+  const master = new kaspa.XPrv(seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm));
   const results = [];
   for (let index = first; index < first + total; index += 1) {
     try {
@@ -202,15 +246,14 @@ export function spendingDerivationPath(index) {
   const i = Math.max(0, Math.floor(Number(index) || 0));
   return `m/44'/111111'/${SPENDING_ACCOUNT_INDEX}'/0/${i}`;
 }
-export function deriveSpendingWallet(kaspa, phrase, index, passphrase = "") {
+export function deriveSpendingWallet(kaspa, phrase, index, passphrase = "", { passphraseForm = "nfkd" } = {}) {
   if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (!cleanPhrase) throw new Error("A recovery phrase is required to derive spending addresses.");
   const path = spendingDerivationPath(index);
-  const mnemonic = new kaspa.Mnemonic(cleanPhrase);
-  const seed = mnemonic.toSeed(String(passphrase || ""));
+  const seed = seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm);
   const master = new kaspa.XPrv(seed);
   const accountKey = master.derivePath(path).toPrivateKey();
   const wallet = importPrivateKey(kaspa, accountKey.toString());

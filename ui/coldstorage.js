@@ -10,7 +10,7 @@
 
 import { getEndpoint } from "../engine/endpoints.js";
 import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
-import { sompiFromUserText, kasToSompi } from "../engine/amounts.js";
+import { sompiFromUserText, kasToSompi, fiatTextFloorFromSompi } from "../engine/amounts.js";
 import { renderKachatLiveDomainsTab, kachatOwnersOfNames } from "./kachat-names-live.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
@@ -1339,9 +1339,10 @@ async function sendSetMax() {
     });
     if (!send) return;
     const maxKas = Number(maxSompi) / 1e8;
-    // Reflect Max into whichever unit is currently being typed (iOS setMaxKas).
+    // Reflect Max into whichever unit is currently being typed (iOS setMaxKas). A currency amount
+    // is rounded DOWN, so it never converts back to more than Max (audit DSK-042).
     send.amountText = send.amountUnit === "fiat" && send.price > 0
-      ? (maxKas * send.price).toFixed((deps.currencyCode?.() || "") === "BTC" ? 8 : 2)
+      ? fiatTextFloorFromSompi(maxSompi, send.price, (deps.currencyCode?.() || "") === "BTC" ? 8 : 2)
       : maxKas.toFixed(8);
   } catch { /* leave amount as-is */ }
   if (!send) return;
@@ -1485,7 +1486,7 @@ async function startSendScan() {
     send.step = "qr";
     renderSendFlow();
     startSendFrameTimer();
-    deps.showToast?.("Camera unavailable — cannot scan the signed transaction.");
+    deps.showToast?.("Camera unavailable. Cannot scan the signed transaction.");
     return;
   }
   video.srcObject = sendScanStream;
@@ -2028,7 +2029,7 @@ function buildModals() {
           if (input) input.value = text;
           handleSendRecipientInput(text);
         }
-      } catch { deps.showToast?.("Clipboard unavailable — paste into the field directly."); }
+      } catch { deps.showToast?.("Clipboard unavailable. Paste into the field directly."); }
       return;
     }
     // Camera scan for the recipient, matching iOS ColdStorageView's "Scan QR" button. The

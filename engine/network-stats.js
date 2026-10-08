@@ -107,7 +107,7 @@ export const BLOCKS_PER_SECOND = 10;
 /// hit exactly that and left the note; both endpoints agree at ~317 PH/s.
 export function formatHashrate(hs) {
   const value = Number(hs);
-  if (!Number.isFinite(value) || value <= 0) return "—";
+  if (!Number.isFinite(value) || value <= 0) return "--";
   const phs = value / 1e15;
   if (phs >= 1000) return `${(phs / 1000).toFixed(2)} EH/s`;
   if (phs >= 1) return `${phs.toFixed(1)} PH/s`;

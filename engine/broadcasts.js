@@ -5,7 +5,9 @@
 // rooms) are backed by the KaChat
 // broadcast indexer (BROADCAST_INDEXER.md): it watches the chain 24/7 and serves history over
 // REST, so clients backfill on room open and poll while the room stays visible. Messages are
-// deduped by txid; there is no signature scheme — the sender authenticated the transaction.
+// deduped by txid. There is no signature scheme: the sender is whoever signed the inputs, and a
+// post is accepted only as a self-send whose output 0 pays that same address (audit DSK-045,
+// see "Sender verification" below).
 
 import { getEndpoint } from "./endpoints.js";
 import { sendPayloadTransaction } from "./transactions.js";
@@ -184,16 +186,28 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+const KASPA_ADDRESS_RE = /^kaspa(?:test)?:[a-z0-9]+$/;
+/** A well-formed `kaspa:` / `kaspatest:` address string, or "". */
+function cleanAddress(value) {
+  if (value == null) return "";
+  const text = String(typeof value === "object" && typeof value.toString === "function" ? value.toString() : value).trim();
+  return KASPA_ADDRESS_RE.test(text) ? text : "";
+}
+
 /**
- * Sender address for a broadcast: broadcasts are self-sends, so the first output pays the
- * sender (iOS reads `tx.outputs.first` the same way). Prefer the node's own verbose data,
- * fall back to deriving it from the script public key with the WASM SDK.
+ * Address paid by output 0. On its own this is NOT the sender (audit DSK-045): output 0 can
+ * pay anyone, so it is only ever compared with the address input 0 spends from - see
+ * `judgeBroadcastSender`. Prefer the node's own verbose data, fall back to deriving it from
+ * the script public key with the WASM SDK.
  */
-function outputSenderAddress(kaspa, output, networkId) {
+function outputAddress(kaspa, output, networkId) {
   const verbose = output?.verboseData || output?.verbose_data || null;
-  const direct = verbose?.scriptPublicKeyAddress || verbose?.script_public_key_address || "";
-  if (direct) return String(direct);
-  const scriptPublicKey = output?.scriptPublicKey ?? output?.script_public_key ?? null;
+  const direct = cleanAddress(verbose?.scriptPublicKeyAddress || verbose?.script_public_key_address || "");
+  if (direct) return direct;
+  return addressFromScriptPublicKey(kaspa, output?.scriptPublicKey ?? output?.script_public_key ?? null, networkId);
+}
+
+function addressFromScriptPublicKey(kaspa, scriptPublicKey, networkId) {
   if (scriptPublicKey == null || typeof kaspa?.addressFromScriptPublicKey !== "function") return "";
   const attempts = [scriptPublicKey];
   // A plain `{ version, script }` object (how wRPC serialises it) may not cast directly —
@@ -210,6 +224,88 @@ function outputSenderAddress(kaspa, output, networkId) {
     } catch { /* try the next shape */ }
   }
   return "";
+}
+
+// ---------------------------------------------------------------------------
+// Sender verification (audit DSK-045)
+//
+// A `kchat:1:bcast:` post carries no signature, so its author has to come from the
+// transaction itself. The author is whoever signed the inputs: the address input 0 spends
+// from (its previous outpoint's script). Output 0 alone proves nothing - anyone can pay 0.2
+// KAS to someone else's address with a broadcast payload and so "post as" them. A post is
+// therefore accepted only in the self-send shape every KaChat client writes: output 0 pays
+// the SAME address input 0 spends from, and that address is the sender. Anything else is
+// dropped (logged with its txid, never shown, never counted, never notified). When input 0's
+// address cannot be found out, the post is NOT attributed to output 0: it is retried, then
+// dropped.
+//
+// Where input 0's address comes from, cheapest first:
+//   1. the node's own data, when it attaches the spent UTXO to the input (verbose
+//      `utxoEntry`); block-added notifications from today's nodes leave it out,
+//   2. the outputs of a broadcast transaction this engine already saw in the stream (an
+//      honest poster's next post usually spends the previous post's change),
+//   3. the Kaspa REST API (`getEndpoint("kaspaApi")`): `/transactions/{id}` or
+//      `POST /transactions/search` with `resolve_previous_outpoints=light`, whose inputs carry
+//      `previous_outpoint_address`.
+// ---------------------------------------------------------------------------
+
+export const BROADCAST_SENDER = Object.freeze({
+  VERIFIED: "verified", // self-send shape: sender = input 0's address = output 0's address
+  FORGED: "forged",     // output 0 pays someone other than the input-0 spender: drop
+  UNKNOWN: "unknown",   // input 0's (or output 0's) address not known (yet): never shown as-is
+});
+
+/** Input 0's previous outpoint as `{ transactionId, index }`, or null. */
+export function broadcastInputOutpoint(tx) {
+  const input = Array.isArray(tx?.inputs) ? tx.inputs[0] : null;
+  const outpoint = input?.previousOutpoint || input?.previous_outpoint || input?.outpoint || null;
+  const transactionId = String(outpoint?.transactionId || outpoint?.transaction_id || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(transactionId)) return null;
+  const index = Number(outpoint?.index ?? 0);
+  if (!Number.isInteger(index) || index < 0) return null;
+  return { transactionId, index };
+}
+
+/** Input 0's address from the node's own data (the spent UTXO attached to the input), or "". */
+function inputVerboseAddress(kaspa, input, networkId) {
+  const verbose = input?.verboseData || input?.verbose_data || null;
+  const entry = verbose?.utxoEntry || verbose?.utxo_entry || input?.utxoEntry || input?.utxo_entry || input?.utxo || null;
+  if (!entry || typeof entry !== "object") return "";
+  const entryVerbose = entry.verboseData || entry.verbose_data || null;
+  const direct = cleanAddress(entryVerbose?.scriptPublicKeyAddress || entryVerbose?.script_public_key_address || entry.address || "");
+  if (direct) return direct;
+  return addressFromScriptPublicKey(kaspa, entry.scriptPublicKey ?? entry.script_public_key ?? null, networkId);
+}
+
+/**
+ * The one acceptance rule. `{ verdict, senderAddress }`: VERIFIED only when both addresses are
+ * known and equal (sender = that address); FORGED when they differ; UNKNOWN otherwise.
+ */
+export function judgeBroadcastSender(inputAddress, outputAddress0) {
+  const input = cleanAddress(inputAddress);
+  const output = cleanAddress(outputAddress0);
+  if (!input || !output) return { verdict: BROADCAST_SENDER.UNKNOWN, senderAddress: "" };
+  if (input !== output) return { verdict: BROADCAST_SENDER.FORGED, senderAddress: "", inputAddress: input, outputAddress: output };
+  return { verdict: BROADCAST_SENDER.VERIFIED, senderAddress: input };
+}
+
+/** Input 0's previous-outpoint address and output 0's address of a Kaspa REST transaction. */
+export function restBroadcastSenderShape(restTx) {
+  const first = (list) => {
+    const items = Array.isArray(list) ? list : [];
+    const byIndex = items.find((item) => item && item.index != null && Number(item.index) === 0);
+    if (byIndex) return byIndex;
+    return items[0] && items[0].index == null ? items[0] : null;
+  };
+  const input = first(restTx?.inputs);
+  const output = first(restTx?.outputs);
+  return {
+    inputAddress: cleanAddress(
+      input?.previous_outpoint_address || input?.previousOutpointAddress
+      || input?.previous_outpoint_resolved?.script_public_key_address
+      || input?.previousOutpointResolved?.scriptPublicKeyAddress || ""),
+    outputAddress: cleanAddress(output?.script_public_key_address || output?.scriptPublicKeyAddress || ""),
+  };
 }
 
 /**
@@ -230,11 +326,19 @@ export function blockFromBlockAddedEvent(event) {
 /**
  * Every broadcast payload carried by one block, as
  * `{ txId, channel, senderAddress, content, blockTime }` rows — the SAME row shape
- * `fetchBroadcastHistory` returns, so both paths feed one merge/dedupe function upstream.
- * Pure and allocation-light: the common case is a block with zero broadcast payloads, which
- * costs one string comparison per transaction.
+ * `fetchBroadcastHistory` returns, so both paths feed one merge/dedupe function upstream —
+ * plus the sender-verification fields (DSK-045):
+ *   `senderVerdict`  BROADCAST_SENDER.VERIFIED | FORGED | UNKNOWN
+ *   `senderAddress`  the verified sender, "" unless VERIFIED (never output 0 on its own)
+ *   `outputAddress`  output 0's address ("" if unreadable), `inputAddress` input 0's ("" if
+ *                    not known here), `inputOutpoint` input 0's `{ transactionId, index }`,
+ *   `outputAddresses` every output's address in order (for resolving later posts locally).
+ * UNKNOWN rows must go through `BroadcastSenderVerifier.verifyHit` before they are shown.
+ * `resolveOutpointAddress(transactionId, index)` may supply input 0's address from data the
+ * caller already holds. Allocation-light: the common case is a block with zero broadcast
+ * payloads, which costs one string comparison per transaction.
  */
-export function extractBroadcastHitsFromBlock(kaspa, eventOrBlock, { networkId = "mainnet", onUnusable = null } = {}) {
+export function extractBroadcastHitsFromBlock(kaspa, eventOrBlock, { networkId = "mainnet", onUnusable = null, resolveOutpointAddress = null } = {}) {
   const block = blockFromBlockAddedEvent(eventOrBlock);
   if (!block) return [];
   const transactions = Array.isArray(block.transactions) ? block.transactions : [];
@@ -261,17 +365,260 @@ export function extractBroadcastHitsFromBlock(kaspa, eventOrBlock, { networkId =
     // invisible) failure - the caller logs it rather than dropping the message in silence.
     if (!txId) { onUnusable?.("the node sent no transaction id with the block"); continue; }
     const outputs = Array.isArray(tx?.outputs) ? tx.outputs : [];
-    const senderAddress = outputSenderAddress(kaspa, outputs[0], networkId);
-    if (!senderAddress) { onUnusable?.("the sender address could not be read from the first output"); continue; }
+    const outputAddresses = outputs.map((output) => outputAddress(kaspa, output, networkId));
+    const inputOutpoint = broadcastInputOutpoint(tx);
+    let inputAddress = inputVerboseAddress(kaspa, Array.isArray(tx?.inputs) ? tx.inputs[0] : null, networkId);
+    if (!inputAddress && inputOutpoint && typeof resolveOutpointAddress === "function") {
+      try { inputAddress = cleanAddress(resolveOutpointAddress(inputOutpoint.transactionId, inputOutpoint.index)); }
+      catch { inputAddress = ""; }
+    }
+    const judged = judgeBroadcastSender(inputAddress, outputAddresses[0] || "");
     hits.push({
       txId,
       channel: parsed.channel,
-      senderAddress,
+      senderAddress: judged.senderAddress,
       content: parsed.content,
       blockTime: toNumber(verbose?.blockTime || verbose?.block_time) || headerTime || Date.now(),
+      senderVerdict: judged.verdict,
+      outputAddress: outputAddresses[0] || "",
+      inputAddress,
+      inputOutpoint,
+      outputAddresses,
     });
   }
   return hits;
+}
+
+/** Wait before each REST attempt for a live post (~95 s in all): the REST API indexes a block a
+ *  moment after the node streams it, so the first look waits too. */
+const LIVE_VERIFY_DELAYS_MS = Object.freeze([1_500, 3_000, 5_000, 10_000, 25_000, 50_000]);
+const REST_TIMEOUT_MS = 12_000;
+const REST_BATCH = 100;
+const MAX_REMEMBERED = 20_000;
+
+function rememberBounded(map, key, value) {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  if (map.size > MAX_REMEMBERED) map.delete(map.keys().next().value);
+}
+
+/**
+ * Decides who really sent a public-chat post (DSK-045) for every path that ingests them: the
+ * live block stream (`verifyHit`), and rows read from an indexer (`verifyRows`). Final verdicts
+ * (VERIFIED / FORGED) are remembered per txid; UNKNOWN never is, so it is asked again later.
+ * Everything network-facing is injectable for tests.
+ */
+export class BroadcastSenderVerifier {
+  constructor({
+    fetchImpl = null,
+    restBase = () => getEndpoint("kaspaApi"),
+    log = () => {},
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now = () => Date.now(),
+    liveDelaysMs = LIVE_VERIFY_DELAYS_MS,
+  } = {}) {
+    this.fetchImpl = fetchImpl || ((...args) => fetch(...args));
+    this.restBase = restBase;
+    this.log = log;
+    this.sleep = sleep;
+    this.now = now;
+    this.liveDelaysMs = liveDelaysMs;
+    this.verdicts = new Map();      // txId -> { verdict, senderAddress } (final verdicts only)
+    this.outputs = new Map();       // txId -> [address per output index] (broadcast txs seen live)
+    this.inflight = new Map();      // txId -> Promise<verdict> (live verification under way)
+    this.rowBackoff = new Map();    // txId -> { attempts, nextAt } (indexer rows still UNKNOWN)
+    this.droppedLogged = new Set();
+  }
+
+  /** `{ verdict, senderAddress }` once a txid has a final verdict, else null. */
+  verdictFor(txId) {
+    return this.verdicts.get(String(txId || "").toLowerCase()) || null;
+  }
+
+  remember(txId, judged) {
+    const key = String(txId || "").toLowerCase();
+    if (!key || !judged || judged.verdict === BROADCAST_SENDER.UNKNOWN) return;
+    rememberBounded(this.verdicts, key, { verdict: judged.verdict, senderAddress: judged.senderAddress || "" });
+    this.rowBackoff.delete(key);
+  }
+
+  /** A post this engine signed and sent itself: its sender is known without asking anyone. */
+  rememberOwnBroadcast(txId, address) {
+    const sender = cleanAddress(address);
+    if (sender) this.remember(txId, { verdict: BROADCAST_SENDER.VERIFIED, senderAddress: sender });
+  }
+
+  /** Outputs of a broadcast transaction seen in the stream, so a later post spending one of
+   *  them resolves its input 0 without a lookup. */
+  rememberOutputs(txId, addresses) {
+    const key = String(txId || "").toLowerCase();
+    if (!key || !Array.isArray(addresses) || addresses.length === 0) return;
+    rememberBounded(this.outputs, key, addresses.map((address) => cleanAddress(address)));
+  }
+
+  outpointAddress(transactionId, index) {
+    const list = this.outputs.get(String(transactionId || "").toLowerCase());
+    return (list && list[Number(index)]) || "";
+  }
+
+  /** Logs a dropped post once per txid. */
+  logDropped(txId, channel, reason) {
+    const key = String(txId || "").toLowerCase();
+    if (this.droppedLogged.has(key)) return;
+    this.droppedLogged.add(key);
+    if (this.droppedLogged.size > MAX_REMEMBERED) this.droppedLogged.clear();
+    this.log(`Public chat: dropped a #${channel || "?"} post, tx ${txId}: ${reason}.`);
+  }
+
+  /** Why a verdict means "not shown", for the log line. */
+  static dropReason(judged) {
+    if (judged?.verdict === BROADCAST_SENDER.FORGED) {
+      return `output 0 pays ${judged.outputAddress} but input 0 spends from ${judged.inputAddress} (not a self-send, possible impersonation)`;
+    }
+    return "the address input 0 spends from could not be found out, so the sender is unverified";
+  }
+
+  /** Sync verdict for a live hit from what is already known (no network). */
+  settleHit(hit) {
+    const cached = this.verdictFor(hit?.txId);
+    if (cached) return cached;
+    let judged = hit?.senderVerdict && hit.senderVerdict !== BROADCAST_SENDER.UNKNOWN
+      ? judgeBroadcastSender(hit.inputAddress, hit.outputAddress)
+      : { verdict: BROADCAST_SENDER.UNKNOWN, senderAddress: "" };
+    if (judged.verdict === BROADCAST_SENDER.UNKNOWN && hit?.inputOutpoint) {
+      const local = this.outpointAddress(hit.inputOutpoint.transactionId, hit.inputOutpoint.index);
+      if (local) judged = judgeBroadcastSender(local, hit.outputAddress);
+    }
+    this.remember(hit?.txId, judged);
+    return judged;
+  }
+
+  /**
+   * Final verdict for a live hit, asking the REST API with retries when nothing local settles
+   * it. Resolves UNKNOWN after the last attempt - the caller drops the post (never shows it
+   * under output 0's address). One verification per txid at a time: the same transaction
+   * arrives once per DAG block that carries it.
+   */
+  verifyHit(hit) {
+    const key = String(hit?.txId || "").toLowerCase();
+    const settled = this.settleHit(hit);
+    if (settled.verdict !== BROADCAST_SENDER.UNKNOWN) return Promise.resolve(settled);
+    if (this.inflight.has(key)) return this.inflight.get(key);
+    const run = (async () => {
+      for (const delay of this.liveDelaysMs) {
+        await this.sleep(delay);
+        const local = this.settleHit(hit);
+        if (local.verdict !== BROADCAST_SENDER.UNKNOWN) return local;
+        let shape = null;
+        try { shape = (await this.lookupRest([key])).get(key) || null; }
+        catch { shape = null; }
+        if (!shape) continue;
+        // Output 0 as the node streamed it when it was readable, else as the REST API has it.
+        const judged = judgeBroadcastSender(shape.inputAddress, hit.outputAddress || shape.outputAddress);
+        if (judged.verdict !== BROADCAST_SENDER.UNKNOWN) { this.remember(key, judged); return judged; }
+      }
+      return { verdict: BROADCAST_SENDER.UNKNOWN, senderAddress: "" };
+    })().finally(() => { this.inflight.delete(key); });
+    this.inflight.set(key, run);
+    return run;
+  }
+
+  /**
+   * Verifies rows read from a broadcast indexer (`{ txId, senderAddress, ... }`, where
+   * `senderAddress` is only the indexer's guess). Resolves `{ accepted, forged, unknown }`:
+   * `accepted` rows carry the VERIFIED sender in `senderAddress`; `forged` rows are dropped and
+   * logged; `unknown` rows (the REST API had no answer yet) back off and are asked again on a
+   * later call, never shown in the meantime.
+   */
+  async verifyRows(rows, { channel = "" } = {}) {
+    const accepted = [];
+    const forged = [];
+    const unknown = [];
+    const ask = [];
+    const nowMs = this.now();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String(row?.txId || "").toLowerCase();
+      if (!key) continue;
+      const cached = this.verdictFor(key);
+      if (cached) {
+        if (cached.verdict === BROADCAST_SENDER.VERIFIED) accepted.push({ ...row, senderAddress: cached.senderAddress });
+        else forged.push(row);
+        continue;
+      }
+      const backoff = this.rowBackoff.get(key);
+      if (backoff && backoff.nextAt > nowMs) { unknown.push(row); continue; }
+      ask.push(row);
+    }
+    if (ask.length) {
+      let shapes = new Map();
+      try { shapes = await this.lookupRest(ask.map((row) => String(row.txId).toLowerCase())); }
+      catch { shapes = new Map(); }
+      for (const row of ask) {
+        const key = String(row.txId).toLowerCase();
+        const shape = shapes.get(key);
+        const judged = shape ? judgeBroadcastSender(shape.inputAddress, shape.outputAddress)
+          : { verdict: BROADCAST_SENDER.UNKNOWN, senderAddress: "" };
+        if (judged.verdict === BROADCAST_SENDER.VERIFIED) {
+          this.remember(key, judged);
+          accepted.push({ ...row, senderAddress: judged.senderAddress });
+        } else if (judged.verdict === BROADCAST_SENDER.FORGED) {
+          this.remember(key, judged);
+          forged.push(row);
+          this.logDropped(row.txId, row.channel || channel, BroadcastSenderVerifier.dropReason(judged));
+        } else {
+          const attempts = (this.rowBackoff.get(key)?.attempts || 0) + 1;
+          rememberBounded(this.rowBackoff, key, { attempts, nextAt: nowMs + Math.min(60_000, 1_000 * 2 ** (attempts - 1)) });
+          unknown.push(row);
+        }
+      }
+    }
+    return { accepted, forged, unknown };
+  }
+
+  /**
+   * `Map<txId, { inputAddress, outputAddress }>` from the Kaspa REST API. One id: GET
+   * `/transactions/{id}`; several: `POST /transactions/search` in batches (falling back to one
+   * GET each if the search endpoint refuses). A txid the API does not know is simply absent.
+   */
+  async lookupRest(txIds) {
+    const ids = [...new Set((txIds || []).map((id) => String(id || "").toLowerCase()).filter((id) => /^[0-9a-f]{64}$/.test(id)))];
+    const out = new Map();
+    const base = String(this.restBase?.() || "").trim().replace(/\/+$/, "");
+    if (!base || ids.length === 0) return out;
+    const put = (tx) => {
+      const id = String(tx?.transaction_id || tx?.transactionId || "").toLowerCase();
+      if (id) out.set(id, restBroadcastSenderShape(tx));
+    };
+    const getOne = async (id) => {
+      const url = `${base}/transactions/${id}?inputs=true&outputs=true&resolve_previous_outpoints=light`;
+      const response = await this.fetchJson(url);
+      if (response) put(response);
+    };
+    if (ids.length === 1) { await getOne(ids[0]); return out; }
+    for (let i = 0; i < ids.length; i += REST_BATCH) {
+      const batch = ids.slice(i, i + REST_BATCH);
+      const url = `${base}/transactions/search?fields=transaction_id,inputs,outputs&resolve_previous_outpoints=light`;
+      const list = await this.fetchJson(url, { method: "POST", body: JSON.stringify({ transactionIds: batch }) });
+      if (Array.isArray(list)) { for (const tx of list) put(tx); continue; }
+      for (const id of batch) { try { await getOne(id); } catch { /* absent = unknown */ } }
+    }
+    return out;
+  }
+
+  /** Parsed JSON, or null for a non-OK answer. Throws on a network error or timeout. */
+  async fetchJson(url, { method = "GET", body = undefined } = {}) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), REST_TIMEOUT_MS) : null;
+    try {
+      const headers = { Accept: "application/json" };
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const response = await this.fetchImpl(url, { method, headers, body, cache: "no-store", signal: controller?.signal });
+      if (!response?.ok) return null;
+      return await response.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 }
 
 /** Publishes a broadcast into `channel`. Returns the txid (= the message id). */
@@ -307,6 +654,9 @@ export async function sendBroadcastMessage({ engine, channel, content, feeKas = 
   });
   const txid = sendResult.txids?.[0] || "";
   if (!txid) throw new Error("Broadcast transaction returned no txid.");
+  // This engine signed it, so its sender is known: when the post comes back from the chain it
+  // is accepted without a REST lookup (DSK-045).
+  try { engine.broadcastSenderVerifier?.rememberOwnBroadcast?.(txid, engine.address); } catch { /* verified the slow way */ }
   return txid;
 }
 

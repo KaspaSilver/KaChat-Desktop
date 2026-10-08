@@ -2797,8 +2797,8 @@ function renderPanel() {
             <strong>${deps.escapeHtml(posterName(address))}</strong>
             ${profile.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
             <span class="kaposts-profile-counts">
-              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${isMine ? prefs.following.filter((a) => a !== address).length : (panel.details?.followingCount ?? "–")}</b> Following</button>&nbsp;&nbsp;
-              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? "–"}</b> Followers</button>
+              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${isMine ? prefs.following.filter((a) => a !== address).length : (panel.details?.followingCount ?? "--")}</b> Following</button>&nbsp;&nbsp;
+              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? "--"}</b> Followers</button>
             </span>
           </div>
           ${!isMine ? `<span class="kaposts-profile-actions">

@@ -119,6 +119,95 @@ export function rewoundCursor(cursor) {
   return value > 0 ? Math.max(0, value - SYNC_REWIND_MS) : 0;
 }
 
+// --- Block-time paging (audit DSK-040; iOS KaChatAPIClient.getPaginated) ----------------------
+// Most kasia-indexer list reads take `block_time` + `limit` and answer the rows with
+// block_time >= the given one, ascending, at most `limit` (50 for the message and handshake
+// reads). One page per sync froze a conversation for good once 50+ rows fell inside the rewind
+// window: every sync re-read the same 50 and the cursor never passed them.
+export const SYNC_MAX_PAGES = 20;
+
+/**
+ * Reads one block_time-keyed list to its end, the way iOS getPaginated does.
+ * - The first page starts at `startBlockTime` (callers pass `rewoundCursor(cursor)` where they
+ *   rewind). While a page comes back full (`limit` rows), the next one starts at that page's
+ *   newest block_time. The read is inclusive, so rows sharing that time come back again and are
+ *   de-duplicated by txid.
+ * - A full page that does not move the time (more than `limit` rows share one block_time) steps
+ *   to newest + 1 instead of stopping, so no later sync stays stuck on it. The rows past `limit`
+ *   at that single block_time can't be reached with a block_time-only cursor (the indexer
+ *   returns no other cursor field for these reads).
+ * - It stops on a short page, after `maxPages` pages, or on a page whose newest row is older than
+ *   the time it asked from (an indexer that ignores block_time).
+ * `fetchPage({ blockTime, limit })` resolves to the page's row array. A failed first page throws.
+ * A failure on a later page keeps what was read (`complete: false`, `error`), which is safe
+ * because the pages read are contiguous from the start.
+ * Returns { rows (deduped, in arrival order), newest (max block_time read, 0 for none),
+ *   pages, complete (true only when a short page ended it), error }.
+ */
+export async function fetchBlockTimePages({
+  fetchPage,
+  startBlockTime = 0,
+  limit = 50,
+  maxPages = SYNC_MAX_PAGES,
+  txidOf = (row) => row?.tx_id,
+} = {}) {
+  if (typeof fetchPage !== "function") throw new Error("fetchPage is required.");
+  const pageLimit = Math.max(1, Math.floor(Number(limit) || 50));
+  const pageCap = Math.max(1, Math.floor(Number(maxPages) || SYNC_MAX_PAGES));
+  const rows = [];
+  const seen = new Set();
+  let blockTime = Math.max(0, Number(startBlockTime) || 0);
+  let newest = 0;
+  let pages = 0;
+  let complete = false;
+  let error = null;
+  while (pages < pageCap) {
+    let page;
+    try {
+      page = await fetchPage({ blockTime, limit: pageLimit });
+    } catch (failure) {
+      if (pages === 0) throw failure;
+      error = failure;
+      break;
+    }
+    if (!Array.isArray(page)) page = [];
+    pages += 1;
+    let pageNewest = 0;
+    for (const row of page) {
+      const rowTime = Number(row?.block_time || 0);
+      if (rowTime > pageNewest) pageNewest = rowTime;
+      const txid = String(txidOf(row) || "");
+      if (txid) {
+        if (seen.has(txid)) continue;
+        seen.add(txid);
+      }
+      rows.push(row);
+    }
+    if (pageNewest > newest) newest = pageNewest;
+    if (page.length < pageLimit) { complete = true; break; }
+    if (pageNewest > blockTime) blockTime = pageNewest;   // follow from this page's newest row
+    else if (pageNewest === blockTime) blockTime += 1;    // > limit rows share one block_time: step past it
+    else break;                                           // went backwards: the indexer ignored block_time
+  }
+  return { rows, newest, pages, complete, error };
+}
+
+/** One GET of a JSON row array from the indexer; `label` names the read in the error. */
+async function fetchIndexerRows(url, label) {
+  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.json();
+      detail = body?.error ? ` ${body.error}` : "";
+    } catch {}
+    throw new Error(`${label} failed (${response.status}).${detail}`);
+  }
+  const rows = await response.json();
+  if (!Array.isArray(rows)) throw new Error(`${label}: the indexer returned an unexpected response.`);
+  return rows;
+}
+
 export function buildConversationSyncPlan({
   conversationId,
   contactAddress,
@@ -181,33 +270,26 @@ export async function syncConversationFromIndexer({
     alias,
   });
 
-  const query = new URLSearchParams({
-    address: contact.address,
-    alias: textToHex(plan.alias),
-    // Always a buffer behind the cursor, never cursor + 1: the indexer does not surface messages
-    // in block-time order (acceptance in the DAG is not monotonic, and an indexer catching up
-    // serves what it has), so a message served late would otherwise be skipped for good. The
-    // overlap comes back and is deduped by txid.
-    block_time: String(rewoundCursor(plan.cursor)),
-    limit: String(Math.max(1, Math.min(50, Number(limit) || 50))),
+  const pageLimit = Math.max(1, Math.min(50, Number(limit) || 50));
+  // The first page starts a buffer behind the cursor, never at cursor + 1: the indexer does not
+  // surface messages in block-time order (acceptance in the DAG is not monotonic, and an indexer
+  // catching up serves what it has), so a message served late would otherwise be skipped for
+  // good. The overlap comes back and is deduped by txid. Full pages are followed from their
+  // newest block_time (fetchBlockTimePages, DSK-040).
+  const paged = await fetchBlockTimePages({
+    startBlockTime: rewoundCursor(plan.cursor),
+    limit: pageLimit,
+    fetchPage: ({ blockTime, limit: pageSize }) => {
+      const query = new URLSearchParams({
+        address: contact.address,
+        alias: textToHex(plan.alias),
+        block_time: String(blockTime),
+        limit: String(pageSize),
+      });
+      return fetchIndexerRows(`${plan.indexerUrl}/contextual-messages/by-sender?${query.toString()}`, "Kasia indexer request");
+    },
   });
-  const url = `${plan.indexerUrl}/contextual-messages/by-sender?${query.toString()}`;
-  const response = await fetch(url, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.json();
-      detail = body?.error ? ` ${body.error}` : "";
-    } catch {}
-    throw new Error(`Kasia indexer request failed (${response.status}).${detail}`);
-  }
-
-  const rows = await response.json();
-  if (!Array.isArray(rows)) throw new Error("Kasia indexer returned an unexpected response.");
+  const rows = paged.rows;
 
   const known = new Set(plan.knownTxids);
   const messages = [];
@@ -270,6 +352,9 @@ export async function syncConversationFromIndexer({
     nextCursor,
     scanned: true,
     scannedCount: rows.length,
+    pages: paged.pages,
+    complete: paged.complete,
+    pageError: paged.error ? String(paged.error?.message || paged.error) : null,
     decryptFailures,
     found: messages.length,
     messages,
@@ -305,20 +390,20 @@ export function legacyWireAliases(list, { exclude = [], max = 4 } = {}) {
 
 /** syncConversationFromIndexer under the deterministic alias, plus every legacy incoming alias.
  *  Messages are de-duplicated by txid across the fetches. The returned cursor never passes a
- *  window an alias has not been read through: an alias that came back with a full page caps it
- *  at that page's newest row, and an alias whose fetch failed holds it where it started. */
+ *  window an alias has not been read through: an alias whose paging did not reach a short page
+ *  (page cap, or a later page failed) caps it at the newest row it read, and an alias whose fetch
+ *  failed holds it where it started. */
 export async function syncConversationFromIndexerWithLegacyAliases({ legacyAliases = [], ...details } = {}) {
   const primary = await syncConversationFromIndexer(details);
   const extras = legacyWireAliases(legacyAliases, { exclude: [primary.plan.alias] });
   if (!extras.length) return primary;
 
-  const pageLimit = Math.max(1, Math.min(50, Number(details.limit) || 50));
   const known = new Set([...(Array.isArray(details.knownTxids) ? details.knownTxids : []), ...primary.messages.map((m) => m.txid)].filter(Boolean));
   const messages = [...primary.messages];
   let scannedCount = Number(primary.scannedCount || 0);
   let decryptFailures = Number(primary.decryptFailures || 0);
   let newest = Number(primary.nextCursor || 0);
-  let cap = scannedCount >= pageLimit ? newest : Infinity;
+  let cap = primary.complete === false ? newest : Infinity;
   const errors = [];
   for (const alias of extras) {
     try {
@@ -331,7 +416,7 @@ export async function syncConversationFromIndexerWithLegacyAliases({ legacyAlias
       scannedCount += Number(result.scannedCount || 0);
       decryptFailures += Number(result.decryptFailures || 0);
       newest = Math.max(newest, Number(result.nextCursor || 0));
-      if (Number(result.scannedCount || 0) >= pageLimit) cap = Math.min(cap, Number(result.nextCursor || 0));
+      if (result.complete === false) cap = Math.min(cap, Number(result.nextCursor || 0));
     } catch (error) {
       cap = Math.min(cap, Number(primary.cursor || 0));
       errors.push(`legacy alias: ${error?.message || error}`);
@@ -372,33 +457,27 @@ export async function probeInboxSupport(indexerUrl = DEFAULT_KASIA_INDEXER_URL) 
   }
 }
 
-/** First-contact messages filed under `tag` (the recipient's inbox tag), ascending, newer than
- *  `cursor`: [{ sender, txid, blockTime }]. Pages until the indexer runs dry or `maxPages`. */
-export async function fetchInboxMessages({ tag, cursor = 0, indexerUrl = DEFAULT_KASIA_INDEXER_URL, limit = 100, maxPages = 20 } = {}) {
+/** First-contact messages filed under `tag` (the recipient's inbox tag), ascending, from
+ *  `cursor` on: [{ sender, txid, blockTime }]. Pages until the indexer runs dry or `maxPages`
+ *  (fetchBlockTimePages: a full page whose rows all share one block_time steps past it, DSK-040). */
+export async function fetchInboxMessages({ tag, cursor = 0, indexerUrl = DEFAULT_KASIA_INDEXER_URL, limit = 100, maxPages = SYNC_MAX_PAGES } = {}) {
   if (!/^[0-9a-f]{32}$/.test(String(tag || ""))) throw new Error("A 32-hex inbox tag is required.");
   const baseUrl = normalizeBaseUrl(indexerUrl);
-  const out = [];
-  const seen = new Set();
-  let since = Number(cursor) || 0;
-  for (let page = 0; page < maxPages; page += 1) {
-    const query = new URLSearchParams({ tag, block_time: String(since), limit: String(Math.max(1, Math.min(500, limit))) });
-    const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store" });
-    if (!response.ok) throw new Error(`Inbox lookup failed (${response.status}).`);
-    const rows = await response.json();
-    if (!Array.isArray(rows) || !rows.length) break;
-    let newest = since;
-    for (const row of rows) {
-      const txid = String(row?.tx_id || "");
-      const blockTime = Number(row?.block_time || 0);
-      if (blockTime > newest) newest = blockTime;
-      if (!txid || seen.has(txid)) continue;
-      seen.add(txid);
-      out.push({ sender: String(row?.sender || ""), txid, blockTime });
-    }
-    if (rows.length < limit || newest <= since) break;
-    since = newest;
-  }
-  return out;
+  const paged = await fetchBlockTimePages({
+    startBlockTime: Number(cursor) || 0,
+    limit: Math.max(1, Math.min(500, Number(limit) || 100)),
+    maxPages,
+    fetchPage: async ({ blockTime, limit: pageSize }) => {
+      const query = new URLSearchParams({ tag, block_time: String(blockTime), limit: String(pageSize) });
+      const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(`Inbox lookup failed (${response.status}).`);
+      const rows = await response.json();
+      return Array.isArray(rows) ? rows : [];
+    },
+  });
+  return paged.rows
+    .filter((row) => String(row?.tx_id || ""))
+    .map((row) => ({ sender: String(row?.sender || ""), txid: String(row.tx_id), blockTime: Number(row?.block_time || 0) }));
 }
 
 async function resolveHandshakeSenderFromTransaction(txid, receiver) {
@@ -564,23 +643,29 @@ export async function syncIncomingHandshakesFromIndexer({
 
   const known = new Set((knownTxids || []).map(String));
   const baseUrl = normalizeBaseUrl(indexerUrl);
-  const query = new URLSearchParams({
-    address: walletAddress,
-    block_time: String(rewoundCursor(cursor)),
-    limit: String(Math.max(1, Math.min(50, Number(limit) || 50))),
-  });
 
   let indexerRows = [];
   let restRows = [];
   const errors = [];
+  // Set when the indexer paging stopped before a short page (page cap, or a later page failed):
+  // the cursor then must not pass the newest indexer row read, whatever the REST scan found.
+  let indexerIncompleteAt = null;
+  let indexerPages = 0;
   try {
-    const response = await fetch(`${baseUrl}/handshakes/by-receiver?${query.toString()}`, {
-      headers: { Accept: "application/json" }, cache: "no-store",
+    // First page a buffer behind the cursor (late-served rows), full pages followed from their
+    // newest block_time (DSK-040, as for messages).
+    const paged = await fetchBlockTimePages({
+      startBlockTime: rewoundCursor(cursor),
+      limit: Math.max(1, Math.min(50, Number(limit) || 50)),
+      fetchPage: ({ blockTime, limit: pageSize }) => {
+        const query = new URLSearchParams({ address: walletAddress, block_time: String(blockTime), limit: String(pageSize) });
+        return fetchIndexerRows(`${baseUrl}/handshakes/by-receiver?${query.toString()}`, "Incoming handshake request");
+      },
     });
-    if (!response.ok) throw new Error(`Incoming handshake request failed (${response.status}).`);
-    const rows = await response.json();
-    if (!Array.isArray(rows)) throw new Error("Handshake indexer returned an unexpected response.");
-    indexerRows = rows.map((row) => ({ ...row, source: "kasia-indexer" }));
+    indexerRows = paged.rows.map((row) => ({ ...row, source: "kasia-indexer" }));
+    indexerPages = paged.pages;
+    if (!paged.complete) indexerIncompleteAt = paged.newest;
+    if (paged.error) errors.push(`Indexer (page ${paged.pages + 1}): ${paged.error?.message || paged.error}`);
   } catch (error) {
     errors.push(`Indexer: ${error.message}`);
   }
@@ -656,10 +741,12 @@ export async function syncIncomingHandshakesFromIndexer({
     known.add(txid);
   }
 
+  if (indexerIncompleteAt != null) nextCursor = Math.min(nextCursor, Math.max(Number(cursor || 0), indexerIncompleteAt));
   if (unresolvedFloor != null && unresolvedFloor > 0) nextCursor = Math.min(nextCursor, Math.max(0, unresolvedFloor - 1));
   return {
     handshakes, nextCursor, scannedCount: rows.length,
     indexerScannedCount: indexerRows.length, restScannedCount: restRows.length, errors,
+    indexerPages, indexerComplete: indexerIncompleteAt == null,
   };
 }
 
@@ -672,17 +759,16 @@ export async function syncIncomingHandshakesFromIndexer({
  */
 export async function syncOutgoingHandshakesFromIndexer({ walletAddress, cursor = 0, limit = 50, indexerUrl } = {}) {
   const baseUrl = normalizeBaseUrl(indexerUrl || DEFAULT_KASIA_INDEXER_URL);
-  const query = new URLSearchParams({
-    address: walletAddress,
-    block_time: String(Number(cursor || 0)),
-    limit: String(Math.max(1, Math.min(50, Number(limit) || 50))),
+  // From the cursor itself (no rewind, as before), full pages followed (fetchBlockTimePages).
+  const paged = await fetchBlockTimePages({
+    startBlockTime: Number(cursor || 0),
+    limit: Math.max(1, Math.min(50, Number(limit) || 50)),
+    fetchPage: ({ blockTime, limit: pageSize }) => {
+      const query = new URLSearchParams({ address: walletAddress, block_time: String(blockTime), limit: String(pageSize) });
+      return fetchIndexerRows(`${baseUrl}/handshakes/by-sender?${query.toString()}`, "Outgoing handshake request");
+    },
   });
-  const response = await fetch(`${baseUrl}/handshakes/by-sender?${query.toString()}`, {
-    headers: { Accept: "application/json" }, cache: "no-store",
-  });
-  if (!response.ok) throw new Error(`Outgoing handshake request failed (${response.status}).`);
-  const rows = await response.json();
-  if (!Array.isArray(rows)) throw new Error("Handshake indexer returned an unexpected response.");
+  const rows = paged.rows;
   let nextCursor = Number(cursor || 0);
   const handshakes = [];
   for (const row of rows) {
@@ -693,7 +779,7 @@ export async function syncOutgoingHandshakesFromIndexer({ walletAddress, cursor 
     if (!txid || !receiver.startsWith(ADDRESS_PREFIX)) continue;
     handshakes.push({ txid, receiver, createdAt: blockTime || Date.now(), payloadHex: String(row.message_payload || "") });
   }
-  return { handshakes, nextCursor, scannedCount: rows.length };
+  return { handshakes, nextCursor, scannedCount: rows.length, pages: paged.pages, complete: paged.complete };
 }
 
 function isSelfStashPayloadHex(payloadHex) {

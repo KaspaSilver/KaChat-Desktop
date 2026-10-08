@@ -108,6 +108,9 @@ export async function queryGroupMessagesSince({ indexerUrl, blindedGroupIds, sin
   const rows = Array.isArray(json?.messages) ? json.messages : [];
   return {
     latestBlockTime: Number(json?.latestBlockTime || sinceBlockTime),
+    // Rows the indexer sent, before dropping unreadable payloads: `count >= limit` is a full page
+    // the caller follows (DSK-040).
+    count: rows.length,
     messages: rows.map((r) => mapMessageRow(r)).filter((m) => m.payloadString),
   };
 }
@@ -125,7 +128,8 @@ function mapControlRow(r) {
 
 // Recipient-addressed control messages for our own wallet address — discovers
 // group invites (gctl_root) before we know the admin. Safe to call with zero
-// local groups.
+// local groups. Capped at maxPages (20 x 50 rows) from `cursor`: syncGroups does NOT use this
+// any more (DSK-041) - it walks queryGroupControlByRecipientPage with a persisted cursor.
 export async function queryGroupControlByRecipient({ indexerUrl, recipient, cursor = null, limit = 50 } = {}) {
   if (!recipient) throw new Error("recipient address is required.");
   const base = baseUrl(indexerUrl);
@@ -135,6 +139,27 @@ export async function queryGroupControlByRecipient({ indexerUrl, recipient, curs
     return `${base}/group-control/by-recipient?${q.toString()}`;
   }, limit, cursor);
   return rows.map(mapControlRow).filter((m) => m.payloadString);
+}
+
+// ONE page of the by-recipient control stream, for a caller that keeps its own persisted
+// cursor (group-store's catch-up, DSK-041; iOS catchUpGroupControlByRecipient). `cursor` is the
+// last row already read (the indexer answers rows after it, oldest first). Returns
+//   { rows, nextCursor, rawCount }
+// where `nextCursor` is the cursor of the last RAW row - taken before rows with an unreadable
+// payload are filtered out, so a junk row at the end of a page cannot stall the walk - and
+// `rawCount` is the indexer's row count, which says whether the page was full (more may follow).
+export async function queryGroupControlByRecipientPage({ indexerUrl, recipient, cursor = null, limit = 50 } = {}) {
+  if (!recipient) throw new Error("recipient address is required.");
+  const base = baseUrl(indexerUrl);
+  const q = new URLSearchParams({ recipient, limit: String(limit) });
+  if (cursor) q.set("cursor", String(cursor));
+  const raw = await fetchRows(`${base}/group-control/by-recipient?${q.toString()}`);
+  const last = raw.length ? raw[raw.length - 1]?.cursor : null;
+  return {
+    rows: raw.map(mapControlRow).filter((m) => m.payloadString),
+    nextCursor: last != null ? String(last) : null,
+    rawCount: raw.length,
+  };
 }
 
 // Control messages from a known admin's address (epoch rotations, renames).

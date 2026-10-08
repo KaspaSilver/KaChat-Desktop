@@ -670,10 +670,10 @@ function pickerCard(portfolio) {
         <span class="portfolio-card-name">${deps.escapeHtml(portfolio.name)}</span>
         <button class="portfolio-card-menu-btn" type="button" data-portfolio-card-menu="${portfolio.id}" aria-label="Portfolio options">⋯</button>
       </div>
-      <div class="portfolio-card-value">${price ? fmtFiat(summary.currentValue) : "—"}</div>
+      <div class="portfolio-card-value">${price ? fmtFiat(summary.currentValue) : "--"}</div>
       ${change
         ? `<div class="portfolio-card-change ${positive ? "gain" : "loss"}">${positive ? "↑" : "↓"} ${Math.abs(change.percent).toFixed(2)}%</div>`
-        : `<div class="portfolio-card-change muted">—</div>`}
+        : `<div class="portfolio-card-change muted">--</div>`}
 
     </div>`;
 }
@@ -686,7 +686,7 @@ function summaryCardHtml(summary) {
       <div class="portfolio-summary-head">
         <div>
           <p class="profile-card-label" data-portfolio-price-label>KAS Price</p>
-          <div class="portfolio-summary-price" data-portfolio-price-value>${price ? fmtPrice(price.price) : "—"}</div>
+          <div class="portfolio-summary-price" data-portfolio-price-value>${price ? fmtPrice(price.price) : "--"}</div>
         </div>
         ${change !== null ? `
           <div class="portfolio-summary-24h ${positive ? "gain" : "loss"}" data-portfolio-price-24h>
@@ -790,8 +790,8 @@ function squaresHtml(summary) {
           <span class="portfolio-square-title">Kaspa</span>
           <span class="portfolio-square-chev">›</span>
         </div>
-        <div class="portfolio-square-value">${price ? fmtPrice(price.price) : "—"}</div>
-        ${change !== null ? `<div class="portfolio-square-change ${pPos ? "gain" : "loss"}">${pPos ? "↑" : "↓"} ${Math.abs(change).toFixed(2)}%</div>` : `<div class="portfolio-square-change muted">—</div>`}
+        <div class="portfolio-square-value">${price ? fmtPrice(price.price) : "--"}</div>
+        ${change !== null ? `<div class="portfolio-square-change ${pPos ? "gain" : "loss"}">${pPos ? "↑" : "↓"} ${Math.abs(change).toFixed(2)}%</div>` : `<div class="portfolio-square-change muted">--</div>`}
       </button>
       <button class="portfolio-square" type="button" data-portfolio-open="value">
         <div class="portfolio-square-head">
@@ -1319,7 +1319,7 @@ function hashrateCardHtml() {
       <span class="portfolio-hashrate-ico" aria-hidden="true">${PICKAXE_SVG}</span>
       <span class="portfolio-hashrate-copy">
         <span class="portfolio-hashrate-label">Network Hashrate</span>
-        <span class="portfolio-hashrate-value">${stats ? formatHashrate(stats.currentHashrate) : "—"}</span>
+        <span class="portfolio-hashrate-value">${stats ? formatHashrate(stats.currentHashrate) : "--"}</span>
       </span>
       ${spark}
       <span class="portfolio-square-chev">›</span>
@@ -1356,7 +1356,7 @@ function insightCardsHtml(portfolio) {
 
   const fee = computeFeeSummary(portfolio.id);
   const feeBody = fee.count === 0
-    ? `<span class="portfolio-hashrate-value">—</span>
+    ? `<span class="portfolio-hashrate-value">--</span>
        <span class="portfolio-insight-note">Add your chatting address with + to count the network fees it has paid.</span>`
     : `<span class="portfolio-hashrate-value">${amountsHidden ? MASKED_AMOUNT : fmtFeeKas(fee.totalKas)}</span>
        <span class="portfolio-insight-sub">${fmtFiat(fee.totalFiat)}</span>
@@ -1405,7 +1405,7 @@ function hashrateViewHtml() {
       </div>
       <div class="portfolio-detail-date" data-portfolio-hashrate-date hidden></div>
       <div class="portfolio-detail-price-row">
-        <span class="portfolio-detail-price" data-portfolio-hashrate-value>${stats ? formatHashrate(stats.currentHashrate) : "—"}</span>
+        <span class="portfolio-detail-price" data-portfolio-hashrate-value>${stats ? formatHashrate(stats.currentHashrate) : "--"}</span>
       </div>
       ${(() => {
         const ranged = hashrateVisiblePoints(stats);
@@ -1460,7 +1460,7 @@ function priceViewHtml() {
   const pPos = (change ?? 0) >= 0;
   const bigNumber = inPair
     ? fmtPairAmount(pairSeries.latest ?? series[series.length - 1][1], { perKas: true })
-    : (price ? fmtPrice(price.price) : "—");
+    : (price ? fmtPrice(price.price) : "--");
   return `
     <div class="portfolio-screen-header">
       <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
@@ -1556,7 +1556,7 @@ function valueViewHtml(summary) {
         </div>` : ""}
       ${valuePoints.length >= 2
         ? bigChartSvg(valuePoints, { height: 220, stroke: "var(--kaspa-ink)", chart: "value", lineWidth: 3 })
-        : `<div class="portfolio-chart-empty">Not enough history yet — check back after a few days of activity.</div>`}
+        : `<div class="portfolio-chart-empty">Not enough history yet. Check back after a few days of activity.</div>`}
       <div class="portfolio-ranges portfolio-ranges-wide">
         ${rangeButtonsHtml()}
       </div>
@@ -1661,7 +1661,7 @@ function wireScrubbing() {
       const value = rootEl.querySelector("[data-portfolio-price-value]");
       const change = rootEl.querySelector("[data-portfolio-price-24h]");
       if (date) date.hidden = true;
-      if (value) value.textContent = inPair ? fmtPairAmount(pairSeries.latest ?? inPair[inPair.length - 1][1], { perKas: true }) : (price ? fmtPrice(price.price) : "—");
+      if (value) value.textContent = inPair ? fmtPairAmount(pairSeries.latest ?? inPair[inPair.length - 1][1], { perKas: true }) : (price ? fmtPrice(price.price) : "--");
       if (change) change.style.visibility = "";
     }, (a, b) => {
       const reading = spanReadout(a, b, (delta) => fmtPoint(Math.abs(delta)));
@@ -1688,7 +1688,7 @@ function wireScrubbing() {
       const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
       const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
       if (date) date.hidden = true;
-      if (value) value.textContent = stats ? formatHashrate(stats.currentHashrate) : "—";
+      if (value) value.textContent = stats ? formatHashrate(stats.currentHashrate) : "--";
     }, (a, b) => {
       const reading = spanReadout(a, b, (delta) => formatHashrate(Math.abs(delta)));
       const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
@@ -2914,7 +2914,7 @@ async function refreshData({ force = false } = {}) {
 // Init
 // ---------------------------------------------------------------------------
 
-/** For the swap screen's "Add to Portfolio": the available portfolios (id + name). */
+/** For a chooser's "Add to Portfolio" (Cold Storage): the available portfolios (id + name). */
 export function listPortfolios() {
   ensureDefaultPortfolio();
   return state.portfolios.map((p) => ({ id: p.id, name: p.name, isActive: p.id === state.activeId }));
@@ -2942,7 +2942,7 @@ export async function historicalKasPrice(timestamp) {
   catch { return null; }
 }
 
-/** Appends a transaction to a specific portfolio (used by completed swaps). */
+/** Appends a transaction to a specific portfolio (used by Cold Storage's Add to Portfolio). */
 export function addTransactionToPortfolio(portfolioId, {
   type, amountKas, fiatValue = null, notes = null,
   timestamp = null, sourceTxId = null, sourceAddress = null,
