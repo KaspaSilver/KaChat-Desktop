@@ -52,7 +52,44 @@ export const SEND_ICONS = {
   chevronRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   arrows: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 20V5m0 0L3.5 8.5M7 5l3.5 3.5M17 4v15m0 0-3.5-3.5M17 19l3.5-3.5"/></svg>',
   slide: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 6 6-6 6M13 6l6 6-6 6"/></svg>',
+  book: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg>',
+  bookFill: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z" style="fill:currentColor"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg>',
 };
+
+// The Address Book on every recipient card (iOS 00767a4 SendRecipientCard): a button beside Scan
+// QR (only while the book has entries) that picks a saved address, and the saved name under the
+// address card. The host app supplies the book: { hasEntries() -> bool, nameFor(address) ->
+// string|null }. Unset, the card has neither.
+let addressBookHooks = null;
+export function configureSendAddressBook(hooks) {
+  addressBookHooks = hooks && typeof hooks === "object" ? hooks : null;
+}
+function addressBookHasEntries() {
+  try { return Boolean(addressBookHooks?.hasEntries?.()); } catch { return false; }
+}
+function addressBookNameFor(address) {
+  const trimmed = String(address || "").trim();
+  if (!trimmed) return null;
+  try { return addressBookHooks?.nameFor?.(trimmed) || null; } catch { return null; }
+}
+function savedNameInnerHtml(name) {
+  return name ? `${SEND_ICONS.bookFill}<span>${esc(name)}</span>` : "";
+}
+
+/** Re-reads the Address Book for a mounted card: the button's visibility and the saved name for
+ *  `address` (the resolved address, else what is typed). */
+export function refreshRecipientAddressBook(root, prefix, address) {
+  if (!root) return;
+  const p = attrName(prefix);
+  const button = root.querySelector(`[data-${p}-address-book]`);
+  if (button) button.hidden = !addressBookHasEntries();
+  const line = root.querySelector(`[data-${p}-saved-name]`);
+  if (line) {
+    const name = addressBookNameFor(address);
+    line.innerHTML = savedNameInnerHtml(name);
+    line.hidden = !name;
+  }
+}
 
 /** "kaspa:qyp4abcdef...123456" - the iOS shortAddress (14 + 6). */
 export function shortSendAddress(address) {
@@ -95,14 +132,16 @@ export function recipientStatusHtml({ input = "", resolving = false, error = nul
  * P-scan, P-check (the green tick in the field), P-resolution (the address card's host, inside
  * P-resolution-wrap),
  * P-status (the status line), P-locked / P-locked-address / P-locked-note (Compound UTXOs) and
- * P-recipient-row (the editable row, hidden while locked).
+ * P-recipient-row (the editable row, hidden while locked), P-address-book (the Address Book
+ * button) and P-saved-name (the saved name under the card, for `savedNameAddress` or the value).
  */
 export function recipientCardHtml({
   prefix, value = "", lockedAddress = null, placeholder = "kaspa:qr... or domain",
-  statusHtml = "", cardHtml = "", valid = false, label = "To",
+  statusHtml = "", cardHtml = "", valid = false, label = "To", savedNameAddress = null,
 } = {}) {
   const p = attrName(prefix);
   const locked = Boolean(lockedAddress);
+  const savedName = addressBookNameFor(savedNameAddress ?? value);
   return `
     <div class="sk-card sk-recipient" data-${p}-recipient-card>
       <span class="sk-card-label">${esc(label)}</span>
@@ -118,8 +157,10 @@ export function recipientCardHtml({
         </span>
         <button type="button" class="sk-icon-button" data-${p}-paste aria-label="Paste" title="Paste">${SEND_ICONS.paste}</button>
         <button type="button" class="sk-icon-button" data-${p}-scan aria-label="Scan QR" title="Scan QR">${SEND_ICONS.scan}</button>
+        <button type="button" class="sk-icon-button" data-${p}-address-book aria-label="Address Book" title="Address Book" ${addressBookHasEntries() ? "" : "hidden"}>${SEND_ICONS.book}</button>
       </div>
       <div class="sk-recipient-resolution" data-${p}-resolution-wrap ${locked ? "hidden" : ""}><div data-${p}-resolution>${cardHtml}</div></div>
+      <p class="sk-saved-name" data-${p}-saved-name ${!locked && savedName ? "" : "hidden"}>${savedNameInnerHtml(locked ? null : savedName)}</p>
       <div class="sk-recipient-status" data-${p}-status role="status" aria-live="polite" ${locked ? "hidden" : ""}>${statusHtml}</div>
     </div>`;
 }
@@ -136,6 +177,7 @@ export function setRecipientLocked(root, prefix, lockedAddress) {
   show(q("recipient-row"), !locked);
   show(q("resolution-wrap"), !locked);
   show(q("status"), !locked);
+  if (locked) show(q("saved-name"), false);
   const code = q("locked-address");
   if (code) code.textContent = lockedAddress || "";
   const input = q("recipient");

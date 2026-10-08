@@ -17,6 +17,14 @@ import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedId
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
+import {
+  configureAddressBook, addressBookName, addressBookEntry, addressBookIsEmpty, archiveAddressBook,
+  importAddressBookArchive, mergeAddressBookArchives, removeAddressBookForWallet,
+} from "./address-book-store.js";
+import {
+  initAddressBook, showAddressBook, hideAddressBook, resetAddressBookForAccount, openAddressBookEditor,
+  pickFromAddressBook, pickManyFromAddressBook, refreshAddressBookStorageRow, ADDRESS_BOOK_ICONS,
+} from "./address-book.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
@@ -25,9 +33,9 @@ import {
   mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
   sanitizeAmountText, availablePillInnerHtml, infoPillHtml, feeControlsHtml, feeControls, sendActionButtonHtml,
   createSendActionButton, openSendFromPicker, closeSendFromPicker, shortSendAddress,
-  coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
+  configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
 } from "./send-kaspa-components.js";
-import { initNextcloud, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
+import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
@@ -256,6 +264,17 @@ function accountScopedKey(baseKey, address = engine.address) {
   const clean = String(address || "").trim();
   return clean ? `${ACCOUNT_DATA_PREFIX}:${clean}:${baseKey}` : baseKey;
 }
+
+// The Address Book (iOS 00767a4): one per wallet. Entries and tombstones are small and live in
+// localStorage; the photos you assign are larger and live in the IndexedDB-backed chat storage.
+// Configured up here because display names read it from the very first render.
+configureAddressBook({
+  storage: localStorage,
+  photoStorage: { get: (key) => chatStorageGetSync(key), set: (key, value) => chatStorageSetSync(key, value), remove: (key) => chatStorageRemoveSync(key) },
+  scopedKey: (base, wallet) => accountScopedKey(base, wallet),
+  wallet: () => engine.address || "",
+  isValidAddress: (address) => isValidKaspaAddressString(address),
+});
 
 // ---------------------------------------------------------------------------
 // Chat state persists in IndexedDB (ui/storage.js): localStorage's ~5MB quota
@@ -1045,6 +1064,11 @@ function closeSavedAccountDelete() {
 function removeAccountScopedLocalData(address) {
   const cleanAddress = String(address || "").trim();
   if (!cleanAddress) return;
+  // That wallet's Address Book, first: its photos live in the chat storage and are found through
+  // its entries, which the localStorage sweep below removes.
+  for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")].filter(Boolean))) {
+    try { removeAddressBookForWallet(encoded); } catch { /* not stored */ }
+  }
   // Removing an account clears its data on BOTH networks (iOS 741c005): one key, two addresses.
   for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")])) {
     // The pre-DSK-011 faucet lock lived outside the account prefix under a global key.
@@ -2640,8 +2664,7 @@ const contactAddressInput = contactForm?.elements?.address;
 const contactNameInput = contactForm?.elements?.name;
 const createChatAddButton = document.querySelector("[data-create-chat-add]");
 const createChatError = document.querySelector("[data-create-chat-error]");
-const contactImportButton = document.querySelector("[data-contact-import]");
-const contactImportFile = document.querySelector("[data-contact-import-file]");
+const contactAddressBookButton = document.querySelector("[data-contact-address-book]");
 const contactPasteButton = document.querySelector("[data-contact-paste]");
 const contactScanButton = document.querySelector("[data-contact-scan]");
 const searchInput = document.querySelector(".search-input");
@@ -2802,6 +2825,10 @@ function shortAddress(address) {
 function displayNameForAddress(contact) {
   if (!contact) return "";
   if (contact.nameIsCustom) return contact.name || shortAddress(contact.address);
+  // A name you gave the chat wins; then the address's Address Book name (iOS 00767a4); then who
+  // it is on chain.
+  const savedName = addressBookName(contact.address);
+  if (savedName) return savedName;
   // Testnet (iOS e52357d, ContactsManager.displayName): your name for them, else their .kachat
   // name, else the stored default (their short address) - KNS is never consulted there.
   // Every network since iOS 7227d69 (mainnet has no registry yet, so its .kachat label is null there).
@@ -2813,6 +2840,9 @@ function displayNameForAddress(contact) {
 /// testnet its .kachat name, elsewhere its KNS domain (when .kas names are identity), else the
 /// short address. For an address with no contact record; with one, use displayNameForAddress.
 function identityNameForAddress(address) {
+  // With no contact record, the Address Book name comes first (iOS displayName(for: address)).
+  const savedName = addressBookName(address);
+  if (savedName) return savedName;
   if (kachatNamesUiEnabled()) return kachatCachedLabel(address) || shortAddress(address);
   return knsDomainForAddress(address) || shortAddress(address);
 }
@@ -3986,6 +4016,9 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
   try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
   try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
+  // The Address Book is per wallet: its screens go back to the list (the store reads the new
+  // wallet's book on its next read).
+  try { resetAddressBookForAccount(); } catch { /* not yet initialized */ }
   try { loadNotifCenter(); } catch { /* not yet initialized */ }
   // .kachat registrations in flight (testnet) pick up again for this wallet (iOS resume()).
   try { refreshKachatIdentity.at = 0; window.setTimeout(() => { try { kachatNames()?.actions.resume(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
@@ -9242,6 +9275,7 @@ function setActiveAppTab(tab) {
   if (screenTab === "chess") showChessTournaments(); else hideChessTournaments();
   try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
   try { if (screenTab === "kachat-stats") showKachatStats(); else hideKachatStats(); } catch { /* not started */ }
+  try { if (screenTab === "address-book") showAddressBook(); else hideAddressBook(); } catch { /* not started */ }
 }
 
 sidebarTabButtons.forEach((button) => {
@@ -9277,10 +9311,11 @@ const DOCK_PINNED = ["hub", "profile"];
 /** Tabs the user can place. Excludes the pinned two. */
 // .kachat and KaChat Stats (iOS 5.2) are Hub sections like the rest: first in the Hub on a fresh
 // install, appended for an existing arrangement (normalizeDockPrefs), assignable to the dock.
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess", "kachat-names", "kachat-stats"]; // Public Chats live under Chats now (iOS a566da7)
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
+// Address Book (iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
+const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book"]; // Public Chats live under Chats now (iOS a566da7)
+const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
 const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
+const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kaposts", "swaps", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
 const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats" };
 
@@ -10098,7 +10133,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 112;
+const APP_BUILD = 113;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10261,6 +10296,10 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
   // the screen has one: "Looking up domain…", "Resolved: …", "Valid address", "Invalid…".
   function setRecipientStatus(status) {
     if (els.statusEl) els.statusEl.innerHTML = recipientStatusHtml(status || {});
+    // The card's Address Book button and the saved name for what it resolved to (iOS 00767a4).
+    if (els.addressBook) {
+      try { refreshRecipientAddressBook(els.addressBook.root, els.addressBook.prefix, status?.resolvedAddress || status?.input || ""); } catch { /* cosmetic */ }
+    }
   }
 
   // iOS WithdrawalSuccessCard parity: after a successful send the modal STAYS OPEN and flips
@@ -10840,6 +10879,15 @@ sendKaspaScanButton?.addEventListener("click", async () => {
   recipient.dispatchEvent(new Event("input"));
 });
 
+// The recipient card's Address Book button (iOS 00767a4): a full-screen picker of saved addresses.
+sendKaspaModal?.querySelector("[data-send-kaspa-address-book]")?.addEventListener("click", async () => {
+  const entry = await pickFromAddressBook();
+  const recipient = document.querySelector("[data-send-kaspa-recipient]");
+  if (!entry?.address || !recipient || sendKaspaCompound) return;
+  recipient.value = entry.address;
+  recipient.dispatchEvent(new Event("input"));
+});
+
 // Reset the extra controls and (re)load price + balance/UTXOs each time the modal opens.
 function resetSendKaspaExtras() {
   sendKaspaUnit = "kas";
@@ -10939,6 +10987,7 @@ const sendKaspaController = makeSendController({
   // The shared recipient card: its status line and the address card's spot.
   statusEl: sendKaspaModal?.querySelector("[data-send-kaspa-status]") || null,
   cardHost: sendKaspaModal?.querySelector("[data-send-kaspa-resolution]") || null,
+  addressBook: sendKaspaModal ? { root: sendKaspaModal, prefix: "send-kaspa" } : null,
   amount: sendKaspaAmountInput,
   error: document.querySelector("[data-send-kaspa-error]"),
   progress: document.querySelector("[data-send-kaspa-progress]"),
@@ -11002,7 +11051,16 @@ function openSendKaspaModal(options = {}) {
   sendKaspaSlider.setBusy(false);
   applySendKaspaCompoundUi();
   resetSendKaspaExtras();
-  return sendKaspaController.open();
+  const opened = sendKaspaController.open();
+  // Address Book > Send KAS (iOS WithdrawKaspaView prefillAddress): open() clears the recipient
+  // synchronously, so the prefill goes in right after and runs the usual address check.
+  const prefill = String(options?.prefillAddress || "").trim();
+  const recipient = document.querySelector("[data-send-kaspa-recipient]");
+  if (prefill && !sendKaspaCompound && recipient && engine.address) {
+    recipient.value = prefill;
+    recipient.dispatchEvent(new Event("input"));
+  }
+  return opened;
 }
 
 // Slide to Send / Slide to Consolidate (iOS SendActionButton, afaad34): the send goes once the
@@ -14084,7 +14142,7 @@ function showContactModal() {
   setCreateChatError("");
   resetCreateChatPicker();
   updateCreateChatAddState();
-  loadCreateChatPicker();
+  // No Contacts list to load any more: the Address Book button picks someone (iOS 1be4f6e).
   window.setTimeout(() => contactAddressInput?.focus(), 0);
 }
 
@@ -15062,6 +15120,9 @@ function openChatInfoFor(contact, conversationEntry) {
   }
   const openChatRow = document.querySelector("[data-chat-info-open-chat]");
   if (openChatRow) openChatRow.hidden = isSelf;
+  const addressBookRow = document.querySelector("[data-chat-info-address-book]");
+  if (addressBookRow) addressBookRow.hidden = isSelf;
+  refreshChatInfoAddressBookRow();
   const cancelButton = document.querySelector("[data-chat-info-cancel]");
   if (cancelButton) cancelButton.textContent = isSelf ? "Done" : "Cancel";
   const saveButton = document.querySelector("[data-chat-info-save]");
@@ -15458,6 +15519,26 @@ document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", 
   if (viewed?.viewedOnly) { delete viewed.viewedOnly; schedulePersistState(); }
   closeChatInfo();
   openOrCreateOneToOne(address);
+});
+// User Info's Address Book row (iOS 00767a4): "Add to Address Book", or "Address Book" once saved.
+function refreshChatInfoAddressBookRow() {
+  const saved = Boolean(chatInfoContactAddress && addressBookEntry(chatInfoContactAddress));
+  const title = document.querySelector("[data-chat-info-address-book-title]");
+  if (title) title.textContent = saved ? "Address Book" : "Add to Address Book";
+  const icon = document.querySelector("[data-chat-info-address-book-icon]");
+  if (icon) icon.innerHTML = (saved ? ADDRESS_BOOK_ICONS.bookFill : ADDRESS_BOOK_ICONS.book).replace("<svg ", '<svg class="chat-info-row-icon" ');
+}
+document.querySelector("[data-chat-info-address-book]")?.addEventListener("click", async () => {
+  const address = chatInfoContactAddress;
+  if (!address || address === engine.address) return;
+  const contact = state.contacts.find((entry) => entry.address === address);
+  const result = await openAddressBookEditor({
+    address,
+    suggestedName: contact?.nameIsCustom ? contact.name : (contact ? displayNameForAddress(contact) : identityNameForAddress(address)),
+  });
+  if (result === "saved") showCopyToast("Saved to Address Book.");
+  else if (result === "removed") showCopyToast("Removed from Address Book.");
+  refreshChatInfoAddressBookRow();
 });
 // Clicking the dimmed area outside the sheet dismisses it, the way a detent sheet does.
 chatInfoSheetOverlay?.addEventListener("click", (event) => {
@@ -16767,6 +16848,8 @@ function refreshSettingsCaptions() {
   try { if (photo) photo.textContent = PHOTO_QUALITY_PRESETS.find((p) => p.id === getPhotoQualityPresetId())?.name || ""; } catch {}
   const cacheCaption = document.querySelector("[data-cache-total-caption]");
   try { if (cacheCaption) cacheCaption.textContent = formatCacheBytes(cacheCategories().reduce((sum, c) => sum + c.bytes, 0)); } catch {}
+  // Storage > Address Book Photos: the space they take on this device (iOS cda0d99).
+  try { refreshAddressBookStorageRow(); } catch {}
 }
 
 function showSettingsCategory(index) {
@@ -17036,43 +17119,12 @@ contactPasteButton?.addEventListener("click", async () => {
   }
 });
 
-contactImportButton?.addEventListener("click", async () => {
+// The Address Book fills the address (iOS 00767a4 / 1be4f6e; it replaced Import from Contacts and
+// the Contacts list under the field). A full-screen picker over this sheet.
+contactAddressBookButton?.addEventListener("click", async () => {
   setCreateChatError("");
-  try {
-    if (navigator.contacts?.select) {
-      const selected = await navigator.contacts.select(["name", "address", "email", "tel"], { multiple: false });
-      const entry = selected?.[0];
-      if (!entry) return;
-      const serialized = JSON.stringify(entry);
-      const addressMatch = serialized.match(/kaspa:[a-z0-9]+/i);
-      if (!addressMatch) throw new Error("The selected contact does not contain a Kaspa address.");
-      setContactAddressValue(addressMatch[0]);
-      const selectedName = Array.isArray(entry.name) ? entry.name[0] : entry.name;
-      if (selectedName && contactNameInput && !contactNameInput.value.trim()) contactNameInput.value = selectedName;
-      return;
-    }
-    contactImportFile?.click();
-  } catch (error) {
-    setCreateChatError(error?.message || "Contact import was not available.");
-  }
-});
-
-contactImportFile?.addEventListener("change", async () => {
-  const file = contactImportFile.files?.[0];
-  contactImportFile.value = "";
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const addressMatch = text.match(/kaspa:[a-z0-9]+/i);
-    if (!addressMatch) throw new Error("That contact file does not contain a Kaspa address.");
-    setContactAddressValue(addressMatch[0]);
-    const nameMatch = text.match(/^FN(?:;[^:]*)?:(.+)$/im);
-    if (nameMatch?.[1] && contactNameInput && !contactNameInput.value.trim()) {
-      contactNameInput.value = nameMatch[1].trim();
-    }
-  } catch (error) {
-    setCreateChatError(error?.message || "The contact file could not be imported.");
-  }
+  const entry = await pickFromAddressBook();
+  if (entry?.address) setContactAddressValue(entry.address);
 });
 
 contactScanButton?.addEventListener("click", async () => {
@@ -17677,11 +17729,20 @@ onContextGesture(chatList, async (event) => {
         subtitle: isSilent ? "Notifications from this chat resume." : "No notification from this chat, whatever your app-wide setting says.",
         icon: isSilent ? ACTION_TILE_ICONS.bell : ACTION_TILE_ICONS.bellSlash,
       },
+      // Save this person's address, or edit their saved entry, without leaving the list (iOS
+      // 98f3728). Not on your own chat.
+      ...(isSelfConversation(conversationEntry) ? [] : [addressBookEntry(contact.address)
+        ? { id: "address-book", title: "Address Book", subtitle: "Edit or remove this saved address.", icon: ADDRESS_BOOK_ICONS.bookFill }
+        : { id: "address-book", title: "Add to Address Book", subtitle: "Save this address with a name you'll recognize.", icon: ADDRESS_BOOK_ICONS.book }]),
       // Your own chat has no Delete (iOS ef4f183).
       ...(isSelfConversation(conversationEntry) ? [] : [{ id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash }]),
     ],
   });
   if (!choice) return;
+  if (choice === "address-book") {
+    openAddressBookEditor({ address: contact.address, suggestedName: contact.nameIsCustom ? contact.name : displayNameForAddress(contact) });
+    return;
+  }
   if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }
   if (choice === "unread") { conversationEntry.unreadCount = Math.max(1, Number(conversationEntry.unreadCount || 0)); persistState(); renderChats(); return; }
   if (choice === "silence") {
@@ -20613,6 +20674,13 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
   // have just replaced storage).
   if (reloadState) reloadStateFromBrowserStorage();
 
+  // The Address Book is per wallet: only this wallet's archive (or an unstamped one - a foreign
+  // one was refused above) fills it; per address the newest edit or deletion wins (iOS 00767a4).
+  if (Array.isArray(archive.addressBook) || Array.isArray(archive.addressBookDeleted)) {
+    try { importAddressBookArchive(archive.addressBook || [], archive.addressBookDeleted || []); }
+    catch (error) { appendEngineLog(`Address Book restore skipped: ${error?.message || error}`); }
+  }
+
   const addedMessageIds = new Set();
   const touchedConversationIds = new Set();
 
@@ -21136,7 +21204,20 @@ function buildLocalChatArchive() {
     // always comes back. Keys still travel too (belt-and-suspenders recovery).
     groups: buildArchiveGroups(),
     ...(tombstones.size ? { deletedContactAddresses: [...tombstones].sort() } : {}),
+    // This wallet's Address Book (NEXTCLOUD_SYNC.md §5, iOS 00767a4): optional keys, each entry
+    // with its assigned photo as base64 JPEG. Left out when the book is empty.
+    ...buildArchiveAddressBook(),
   };
+}
+
+function buildArchiveAddressBook() {
+  try {
+    const { addressBook, addressBookDeleted } = archiveAddressBook();
+    return {
+      ...(addressBook.length ? { addressBook } : {}),
+      ...(addressBookDeleted.length ? { addressBookDeleted } : {}),
+    };
+  } catch { return {}; }
 }
 
 // Full group key material PLUS decrypted message history for the shared backup archive, so a
@@ -21225,6 +21306,16 @@ function parseRemoteChatArchive(json) {
  *     one; conversationId keeps the already-published value for stability.
  * A desktop backup can therefore never delete a phone's history, or vice versa.
  */
+/** The top-level archive keys mergeChatArchives rebuilds itself (desktopState is re-attached by
+ *  buildSharedBackupPayload); everything else rides through. A function, not a module constant,
+ *  so it can never be read before its line has run. */
+function archiveModeledKeys() {
+  return new Set([
+    "schemaVersion", "exportedAt", "walletAddress", "conversations", "groups", "deletedContactAddresses",
+    "addressBook", "addressBookDeleted", "desktopState",
+  ]);
+}
+
 function mergeChatArchives(remote, local) {
   const remoteIsNewer = archiveExportedAtMs(remote) > archiveExportedAtMs(local);
   const merged = new Map();
@@ -21319,13 +21410,32 @@ function mergeChatArchives(remote, local) {
     return { ...rest, messages: [...__msgMap.values()] };
   });
 
+  // Address Book: per address the newest edit or deletion wins, the winner's photo with it
+  // (NEXTCLOUD_SYNC.md §5, iOS mergeArchiveAddressBooks). Local first, so a tie keeps ours.
+  let book = { addressBook: [], addressBookDeleted: [] };
+  try { book = mergeAddressBookArchives(local, remote); } catch { /* unreadable: both sides dropped below */ }
+
+  // Keys this client doesn't model are carried through untouched (NEXTCLOUD_SYNC.md §5), so a
+  // newer client's fields survive this write. Ours are rebuilt below and win.
+  const carried = {};
+  const modeled = archiveModeledKeys();
+  for (const side of [remote, local]) {
+    if (!side || typeof side !== "object") continue;
+    for (const [key, value] of Object.entries(side)) {
+      if (!modeled.has(key)) carried[key] = value;
+    }
+  }
+
   return {
+    ...carried,
     schemaVersion: CHAT_ARCHIVE_SCHEMA_VERSION,
     exportedAt: local.exportedAt,
     walletAddress: local.walletAddress || String(remote?.walletAddress || "") || null,
     conversations,
     ...(mergedGroups.length ? { groups: mergedGroups } : {}),
     ...(tombstones.size ? { deletedContactAddresses: [...tombstones].sort() } : {}),
+    ...(book.addressBook.length ? { addressBook: book.addressBook } : {}),
+    ...(book.addressBookDeleted.length ? { addressBookDeleted: book.addressBookDeleted } : {}),
   };
 }
 
@@ -24758,6 +24868,8 @@ queueMicrotask(async () => {
   try {
     initColdStorage({
       engine, escapeHtml, shortAddress, accountScopedKey,
+      // KasSigner's Send: the recipient card's Address Book button (iOS 00767a4).
+      pickAddressBookEntry: () => pickFromAddressBook(),
       addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
       showToast: showCopyToast, appendEngineLog,
       explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
@@ -24935,6 +25047,45 @@ queueMicrotask(async () => {
       indexerUrls: () => ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"].map((key) => getEndpoint(key)).filter(Boolean),
     });
   } catch (error) { appendEngineLog(`KaChat Stats did not start: ${error?.message || error}`); }
+  try {
+    // Address Book (iOS 00767a4 / cda0d99 / 98f3728 / 1be4f6e): Kaspa Hub > Address Book, the
+    // add / edit sheet and the picker. A change repaints names (chat list, open thread, User Info)
+    // and owes the backup an upload.
+    initAddressBook({
+      escapeHtml, shortAddress, personGlyphSvg,
+      // Exactly the avatar the address set on its own profile - never a chat contact's photo.
+      profileAvatarHtml: (address, className) => {
+        if (address === engine.address) return selfAvatarHtml(className);
+        if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, className);
+        const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
+        if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
+        return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
+      },
+      ownAddress: () => engine.address || "",
+      canSend: () => Boolean(engine.address),
+      openSend: (address) => openSendKaspaModal({ prefillAddress: address }),
+      openChat: (address) => openChatWithAddress({ address }),
+      copyText: (text) => copyTextToClipboard(text),
+      showToast: showCopyToast,
+      confirmDialog,
+      formatBytes: (bytes) => formatCacheBytes(bytes),
+      onChange: (kind) => {
+        try { renderChats(); } catch { /* not ready */ }
+        try {
+          const open = activeConversationId ? state.conversations.find((entry) => entry.id === activeConversationId) : null;
+          const openContact = open ? contactForConversation(open) : null;
+          if (openContact && conversationName) conversationName.textContent = displayNameForAddress(openContact);
+        } catch { /* not ready */ }
+        try { refreshChatInfoAddressBookRow(); } catch { /* not ready */ }
+        // A user edit owes the backup an upload; a restore came FROM the backup (iOS didChange).
+        if (kind !== "restore") { try { noteNextcloudActivity(); } catch { /* not connected */ } }
+      },
+    });
+    configureSendAddressBook({
+      hasEntries: () => !addressBookIsEmpty(),
+      nameFor: (address) => addressBookEntry(address)?.name || null,
+    });
+  } catch (error) { appendEngineLog(`Address Book did not start: ${error?.message || error}`); }
   function initChessTournamentsSafe() { initChessTournaments({
     engine,
     escapeHtml,
@@ -25726,8 +25877,7 @@ const groupContactsBody = document.querySelector("[data-group-contacts-body]");
 const groupAddressInput = document.querySelector("[data-group-address-input]");
 const groupAddressStatus = document.querySelector("[data-group-address-status]");
 const groupAddressAddButton = document.querySelector("[data-group-address-add]");
-const groupAddressImportButton = document.querySelector("[data-group-address-import]");
-const groupAddressImportFile = document.querySelector("[data-group-address-import-file]");
+const groupAddressBookButton = document.querySelector("[data-group-address-book]");
 const groupAddressPasteButton = document.querySelector("[data-group-address-paste]");
 const groupAddressScanButton = document.querySelector("[data-group-address-scan]");
 const groupCreateError = document.querySelector("[data-group-create-error]");
@@ -26895,7 +27045,9 @@ function renderGroupSelectedMembers() {
   if (!groupMembersList) return;
   const addrs = [...groupCreateSelected];
   if (!addrs.length) {
-    groupMembersList.innerHTML = `<p class="group-picker-empty">No members added yet. Open Contacts below to add people.</p>`;
+    groupMembersList.innerHTML = `<p class="group-picker-empty">${groupModalMode === "add"
+      ? "No members added yet. Open Contacts below to add people."
+      : "No members added yet. Add people from your Address Book or by address below."}</p>`;
     return;
   }
   groupMembersList.innerHTML = addrs.map((addr) => {
@@ -26919,6 +27071,18 @@ function renderGroupSelectedMembers() {
       </div>`;
   }).join("");
 }
+/// New Group (true) shows "Add Members" with the Address Book and no Contacts drawer (iOS
+/// 1be4f6e); Add Members to an existing group (false) keeps the Contacts drawer as it was.
+function setGroupCreateAddressBookMode(on) {
+  const contactsSection = document.querySelector("[data-group-contacts-section]");
+  if (contactsSection) contactsSection.hidden = on;
+  const title = document.querySelector("[data-group-add-members-title]");
+  if (title) title.hidden = !on;
+  const hint = document.querySelector("[data-group-add-by-address-hint]");
+  if (hint) hint.textContent = on
+    ? "Pick people from your Address Book, or add anyone by Kaspa address or domain."
+    : "Not in your contacts? Add anyone by Kaspa address or KNS domain:";
+}
 function openGroupCreate() {
   // Opened from the Chats New sheet, the caller marks it again right after this (see newChatSheet).
   if (groupCreateModal) delete groupCreateModal.dataset.fromNewSheet;
@@ -26931,22 +27095,17 @@ function openGroupCreate() {
   if (groupNameInput) { groupNameInput.value = ""; groupNameInput.hidden = false; }
   const identityRow = document.querySelector("[data-group-identity-row]");
   if (identityRow) identityRow.hidden = false;
-  if (groupPickerHint) groupPickerHint.textContent = "Add contacts to the group. You control the membership as the group admin.";
+  if (groupPickerHint) groupPickerHint.textContent = "Add people to the group. You control the membership as the group admin.";
   if (groupCreateError) groupCreateError.hidden = true;
   if (groupMemberSearch) groupMemberSearch.value = "";
   groupPickerExclude = [];
   clearGroupCreatePhoto();
   resetGroupAddressSection();
-  renderGroupMemberPicker();
+  // New Group (iOS 1be4f6e): the Contacts drawer and its follow-graph loader are gone. People
+  // come from the Address Book (several at once) or by address, under "Add Members".
+  setGroupCreateAddressBookMode(true);
   updateGroupCreateSubmit();
-  // The picker offers the follow graph as well as contacts; this fills it and repaints when the
-  // indexer answers. Guarded internally, so sharing it with Create Chat costs nothing.
-  loadCreateChatPicker().then(() => {
-    if (!groupCreateModal || groupCreateModal.hidden) return;
-    renderGroupMemberPicker(groupPickerExclude);
-  });
-  // Both sections start collapsed: Members opens to review who's added; Contacts opens to
-  // search and pick people.
+  // Members starts collapsed: it opens to review who's added.
   setGroupSection(groupMembersToggle, groupMembersBody, false);
   setGroupSection(groupContactsToggle, groupContactsBody, false);
   if (groupCreateModal) groupCreateModal.hidden = false;
@@ -26971,6 +27130,8 @@ function openGroupAddMember(groupId) {
   groupPickerExclude = g.members.map((m) => m.address);
   clearGroupCreatePhoto();
   resetGroupAddressSection();
+  // Adding to an existing group keeps its Contacts list (iOS AddGroupMembersView, unchanged).
+  setGroupCreateAddressBookMode(false);
   renderGroupMemberPicker(groupPickerExclude);
   updateGroupCreateSubmit();
   loadCreateChatPicker().then(() => {
@@ -27378,33 +27539,27 @@ groupAddressPasteButton?.addEventListener("click", async () => {
     groupAddressInput.focus();
   } catch { /* clipboard denied/empty: leave the field unchanged */ }
 });
-groupAddressImportButton?.addEventListener("click", async () => {
-  try {
-    if (navigator.contacts?.select) {
-      const selected = await navigator.contacts.select(["name", "address", "email", "tel"], { multiple: false });
-      const entry = selected?.[0];
-      if (!entry) return;
-      const addressMatch = JSON.stringify(entry).match(/kaspa:[a-z0-9]+/i);
-      if (!addressMatch) { setGroupAddressStatus('<span class="create-chat-status-bad">✕ No Kaspa address in that contact</span>'); return; }
-      if (groupAddressInput) { groupAddressInput.value = addressMatch[0]; updateGroupAddressState(); }
-      return;
-    }
-    groupAddressImportFile?.click();
-  } catch (error) {
-    setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(error?.message || "Import unavailable")}</span>`);
+// The Address Book's full-screen multi-select (iOS 1be4f6e; it replaced Import from Contacts):
+// ticks start on who is already in, and the result replaces the Address Book part of the roster,
+// so unticking someone takes them out again. You (and, adding to a group, its members) are never
+// offered.
+groupAddressBookButton?.addEventListener("click", async () => {
+  const picked = await pickManyFromAddressBook({
+    preselected: [...groupCreateSelected],
+    excluding: [engine.address, ...groupPickerExclude].filter(Boolean),
+  });
+  if (!picked || !groupCreateModal || groupCreateModal.hidden) return;
+  const bookAddresses = new Set([...groupCreateSelected].filter((address) => addressBookEntry(address)));
+  const members = [...groupCreateSelected].filter((address) => !bookAddresses.has(address));
+  for (const entry of picked) {
+    if (members.length >= MAX_GROUP_MEMBERS) break;
+    if (!members.includes(entry.address)) members.push(entry.address);
   }
-});
-groupAddressImportFile?.addEventListener("change", async () => {
-  const file = groupAddressImportFile.files?.[0];
-  groupAddressImportFile.value = "";
-  if (!file) return;
-  try {
-    const addressMatch = (await file.text()).match(/kaspa:[a-z0-9]+/i);
-    if (!addressMatch) { setGroupAddressStatus('<span class="create-chat-status-bad">✕ No Kaspa address in that file</span>'); return; }
-    if (groupAddressInput) { groupAddressInput.value = addressMatch[0]; updateGroupAddressState(); }
-  } catch (error) {
-    setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(error?.message || "Could not read that file")}</span>`);
-  }
+  groupCreateSelected.clear();
+  for (const address of members) groupCreateSelected.add(address);
+  updateGroupCreateSubmit();
+  renderGroupMemberPicker(groupPickerExclude);
+  if (members.length) setGroupSection(groupMembersToggle, groupMembersBody, true);
 });
 groupAddressScanButton?.addEventListener("click", async () => {
   const scanned = await scanKaspaAddress({

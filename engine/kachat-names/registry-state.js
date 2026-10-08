@@ -366,7 +366,6 @@ const PLATFORM_INFO = Object.freeze({
   instagram: { name: "Instagram", prefix: "instagram.com/" },
   tiktok: { name: "TikTok", prefix: "tiktok.com/@" },
   twitch: { name: "Twitch", prefix: "twitch.tv/" },
-  kick: { name: "Kick", prefix: "kick.com/" },
   github: { name: "GitHub", prefix: "github.com/" },
   telegram: { name: "Telegram", prefix: "t.me/" },
   linkedin: { name: "LinkedIn", prefix: "linkedin.com/in/" },
@@ -374,15 +373,15 @@ const PLATFORM_INFO = Object.freeze({
 });
 
 const PLATFORM_CHOICES = Object.freeze({
-  avatar: Object.freeze(["x", "youtube", "instagram", "tiktok", "facebook", "twitch", "kick", "github", "telegram", "linkedin", "discord"]),
+  avatar: Object.freeze(["x", "youtube", "instagram", "tiktok", "facebook", "twitch", "github", "telegram", "linkedin", "discord"]),
   banner: Object.freeze(["x", "youtube", "discord"]),
-  bio: Object.freeze(["x", "youtube", "telegram", "twitch", "kick", "github", "discord"]),
+  bio: Object.freeze(["x", "youtube", "telegram", "twitch", "github", "discord"]),
 });
 
 /** The platforms a profile can point at (Swift `SocialSource.Platform`), by raw value. */
 export const SocialPlatform = Object.freeze({
   x: "x", youtube: "youtube", facebook: "facebook", instagram: "instagram", tiktok: "tiktok", twitch: "twitch",
-  kick: "kick", github: "github", telegram: "telegram", linkedin: "linkedin", discord: "discord",
+  github: "github", telegram: "telegram", linkedin: "linkedin", discord: "discord",
   /** Every platform (Swift `allCases`). */
   all: Object.freeze(Object.keys(PLATFORM_INFO)),
   isPlatform(p) { return typeof p === "string" && Object.hasOwn(PLATFORM_INFO, p); },
@@ -511,9 +510,8 @@ export class SocialSource {
       case "twitch.tv":
         if (parts.length === 1 && okHandle(p0)) { platform = "twitch"; handle = p0; link = `https://www.twitch.tv/${handle}`; }
         break;
-      case "kick.com":
-        if (parts.length === 1 && okHandle(p0)) { platform = "kick"; handle = p0; link = `https://kick.com/${handle}`; }
-        break;
+      // kick.com is not a source any more (iOS 14e3c52): such a link no longer parses, so a profile
+      // that points there shows no Kick avatar or bio.
       case "github.com":
         if (parts.length === 1 && okHandle(p0)) { platform = "github"; handle = p0; link = `https://github.com/${handle}`; }
         break;
@@ -607,14 +605,14 @@ export class SocialSource {
   }
 
   /** The bio a platform shows in its preview, where that text really is the person's own (X,
-   *  YouTube, Telegram, Kick, and Twitch without its boilerplate). Instagram, TikTok, Facebook and
+   *  YouTube, Telegram, and Twitch without its boilerplate). Instagram, TikTok, Facebook and
    *  LinkedIn only put follower counts or site text there: no bio from them. GitHub and Discord
    *  come from their APIs instead. */
   static bio(platform, description) {
     if (typeof description !== "string" || !description) return null;
     let text;
     switch (platform) {
-      case "x": case "youtube": case "telegram": case "kick":
+      case "x": case "youtube": case "telegram":
         text = description;
         break;
       case "twitch":

@@ -527,6 +527,8 @@
         <!-- Kaspa Hub, 5.2: the .kachat name marketplace (UI only until names launch) and KaChat Stats. -->
         <div class="profile-screen" data-app-tab-screen="kachat-names" data-kachat-market hidden></div>
         <div class="profile-screen" data-app-tab-screen="kachat-stats" data-kachat-stats hidden></div>
+        <!-- Kaspa Hub > Address Book (iOS 00767a4): saved addresses, per wallet (ui/address-book.js). -->
+        <div class="profile-screen" data-app-tab-screen="address-book" data-address-book hidden></div>
         <div class="profile-screen apps-tab-screen" data-app-tab-screen="apps" hidden>
           <div class="kaposts-header">
             <h1 class="kaposts-title">Kaspa Websites</h1>
@@ -882,6 +884,11 @@
       <button class="sidebar-tab" type="button" data-app-tab="kachat-stats" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 20.5h18"/><path d="M6 17V11M10 17V6M14 17v-8M18 17v-4"/></svg></span>
         <span>Stats</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="address-book" hidden>
+        <!-- book.closed (iOS AppTab.addressBook). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg></span>
+        <span>Address Book</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
         <!-- A rook and a knight (iOS ChessTabIcon: SF Symbols has no chess pieces). -->
@@ -1299,6 +1306,13 @@
               <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Local storage used</strong><small data-local-storage-used>Calculating…</small></span></div>
             </div>
             <p class="settings-group-footer">How long messages are kept on this device, and how much space they use. Applies before any cloud storage.</p>
+            <!-- Your own data, not cache (iOS cda0d99): photos you assigned in the Address Book. Kept
+                 apart from Cache, whose "clear" must never delete anything you'd miss. -->
+            <div class="settings-list-card">
+              <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Address Book Photos</strong></span><span class="settings-dropdown-caption" data-address-book-photos-size>…</span></div>
+              <button class="settings-list-row danger-row" type="button" data-address-book-photos-remove hidden><span class="settings-row-copy"><strong>Remove Address Book Photos</strong></span></button>
+            </div>
+            <p class="settings-group-footer">Photos you assigned to saved addresses, for every wallet on this device. They're kept until you remove them, and they're included in your chat backup.</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="cache">
                 <span class="settings-row-copy"><strong>Cache</strong></span>
@@ -1596,14 +1610,10 @@
           <label class="create-chat-address-label" for="create-chat-address">Kaspa Address or Domain</label>
           <input id="create-chat-address" class="create-chat-address-input" name="address" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" required />
           <div class="create-chat-tools" aria-label="Address actions">
-            <button type="button" class="create-chat-tool" data-contact-import>
-              <span class="create-chat-tool-icon" aria-hidden="true"><svg class="person-plus-icon" viewBox="0 0 32 32" focusable="false" aria-hidden="true">
-            <circle cx="12" cy="8.5" r="5.25"/>
-            <path d="M3.5 24.5c.7-5.4 4-8.7 8.5-8.7 2.3 0 4.3.8 5.8 2.3"/>
-            <circle cx="24.2" cy="21.8" r="5.3"/>
-            <path d="M24.2 18.9v5.8M21.3 21.8h5.8"/>
-          </svg></span>
-              <span>Import</span>
+            <!-- The Address Book fills the address (iOS 00767a4 / 1be4f6e: it replaced Import from Contacts). -->
+            <button type="button" class="create-chat-tool" data-contact-address-book>
+              <span class="create-chat-tool-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 6.5A2 2 0 0 1 9 4.5h16v20.5H9a2 2 0 0 0-2 2Z"/><path d="M7 27a2 2 0 0 0 2 2h16v-4"/></svg></span>
+              <span>Address Book</span>
             </button>
             <button type="button" class="create-chat-tool" data-contact-paste>
               <span class="create-chat-tool-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="9" y="8" width="15" height="19" rx="2.5"/><path d="M13 8V5.5h10V20"/><path d="M18.5 4.5h5v5"/></svg></span>
@@ -1634,26 +1644,12 @@
         <p class="create-chat-help" data-create-chat-private-footer>They'll get your first message as a Message Request. Turn on Private Chat if you'd rather leave no link between you on chain.</p>
       </section>
 
-      <section class="create-chat-section create-chat-picker" data-create-chat-picker-section hidden>
-        <div class="create-chat-picker-head">
-          <p class="create-chat-section-title">CONTACTS</p>
-          <button type="button" class="create-chat-picker-search-toggle" data-create-chat-picker-search-toggle aria-label="Search contacts">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
-          </button>
-        </div>
-        <div class="create-chat-picker-search" data-create-chat-picker-search hidden>
-          <input type="search" class="create-chat-picker-query" data-create-chat-picker-query placeholder="Search contacts" autocomplete="off" spellcheck="false" />
-        </div>
-        <div class="create-chat-picker-list" data-create-chat-picker-list></div>
-        <p class="create-chat-help">Your chats and the people you follow on KaPosts. Click one to fill in their address.</p>
-      </section>
-
+      <!-- The searchable Contacts list (your chats + KaPosts follows) is gone: the Address Book
+           button above fills the address (iOS 1be4f6e). -->
       <section class="create-chat-section create-chat-name-section">
         <label class="create-chat-section-title" for="create-chat-name">NAME (OPTIONAL)</label>
         <input id="create-chat-name" class="create-chat-name-input" name="name" type="text" placeholder="Contact name" autocomplete="off" />
       </section>
-
-      <input type="file" data-contact-import-file accept=".vcf,text/vcard,text/x-vcard" hidden />
     </form>
   </div>
 
@@ -2162,12 +2158,15 @@
       </div>
 
       <div class="group-add-by-address">
-        <p class="field-hint">Not in your contacts? Add anyone by Kaspa address or KNS domain:</p>
+        <!-- New Group (iOS 1be4f6e): "Add Members" - the Address Book's multi-select, or anyone by
+             address. Add Members to an existing group keeps the Contacts list above. -->
+        <p class="group-section-title group-add-members-title" data-group-add-members-title hidden>Add Members</p>
+        <p class="field-hint" data-group-add-by-address-hint>Not in your contacts? Add anyone by Kaspa address or KNS domain:</p>
         <input class="group-address-input" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" data-group-address-input />
         <div class="group-address-tools" aria-label="Address actions">
-          <button type="button" class="group-address-tool" data-group-address-import>
-            <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="12" cy="8.5" r="5.25"/><path d="M3.5 24.5c.7-5.4 4-8.7 8.5-8.7 2.3 0 4.3.8 5.8 2.3"/><path d="M24.2 18.9v5.8M21.3 21.8h5.8"/></svg>
-            <span>Import</span>
+          <button type="button" class="group-address-tool" data-group-address-book>
+            <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 6.5A2 2 0 0 1 9 4.5h16v20.5H9a2 2 0 0 0-2 2Z"/><path d="M7 27a2 2 0 0 0 2 2h16v-4"/></svg>
+            <span>Address Book</span>
           </button>
           <button type="button" class="group-address-tool" data-group-address-paste>
             <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="9" y="8" width="15" height="19" rx="2.5"/><path d="M13 8V5.5h10V20"/><path d="M18.5 4.5h5v5"/></svg>
@@ -2178,7 +2177,6 @@
             <span>Scan QR</span>
           </button>
         </div>
-        <input type="file" accept=".vcf,text/vcard,text/plain" hidden data-group-address-import-file />
         <p class="group-address-status" data-group-address-status hidden></p>
         <div class="create-chat-preview" data-group-address-preview hidden></div>
         <button type="button" class="secondary-button group-address-add" data-group-address-add disabled>Add to Group</button>
@@ -3008,6 +3006,12 @@
           <button class="chat-info-row" type="button" data-chat-info-sheet="aliases">
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h14M5 15h14M10 4 8 20M16 4l-2 16"/></svg>
             <span class="chat-info-row-title">Aliases</span>
+            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+          <!-- "Add to Address Book" / "Address Book" (iOS 00767a4): save, rename, note, remove. -->
+          <button class="chat-info-row" type="button" data-chat-info-address-book>
+            <span class="chat-info-row-icon-slot" data-chat-info-address-book-icon aria-hidden="true"></span>
+            <span class="chat-info-row-title" data-chat-info-address-book-title>Add to Address Book</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="notifications">

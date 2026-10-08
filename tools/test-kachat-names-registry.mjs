@@ -502,14 +502,15 @@ function runRules(r) {
   // desktop extras: the rest of the link rules, per-field platforms, the page readers
   const P = R.SocialPlatform;
   r.eq([...P.choices("banner")], ["x", "youtube", "discord"], "banner platforms");
-  r.eq([...P.choices("bio")], ["x", "youtube", "telegram", "twitch", "kick", "github", "discord"], "bio platforms");
-  r.eq(P.choices("avatar").length, 11, "every platform can fill the avatar");
+  r.eq([...P.choices("bio")], ["x", "youtube", "telegram", "twitch", "github", "discord"], "bio platforms (no Kick, iOS 14e3c52)");
+  r.eq(P.choices("avatar").length, 10, "every platform can fill the avatar");
+  r.eq(SS.fromLink("kick.com/xqc", "avatar"), null, "a kick.com link no longer parses (iOS 14e3c52)");
   r.check(P.all.every((x) => P.prefix(x) && P.displayName(x)), "every platform has a prefix and a name");
   const links = {
     "twitter.com/jack": "https://x.com/jack", "https://mobile.twitter.com/jack?s=20": "https://x.com/jack",
     "m.youtube.com/channel/UC123": "https://www.youtube.com/channel/UC123", "fb.com/zuck": "https://www.facebook.com/zuck",
     "instagram.com/nasa/": "https://www.instagram.com/nasa/", "twitch.tv/twitch": "https://www.twitch.tv/twitch",
-    "kick.com/xqc": "https://kick.com/xqc", "github.com/torvalds": "https://github.com/torvalds",
+    "github.com/torvalds": "https://github.com/torvalds",
     "telegram.me/durov": "https://t.me/durov", "linkedin.com/in/someone": "https://www.linkedin.com/in/someone",
     "https://discord.com/invite/abc": "https://discord.gg/abc",
   };
@@ -1581,10 +1582,10 @@ async function runSocialResolver(r) {
   routes.set("https://x.com/KaspaCurrency", null);
   const away = await res.resolve("x.com/KaspaCurrency", { maxAgeMs: 0 });
   r.eq([away.kind, away.profile?.bio], ["unreachable", "Kaspa"], "resolver: unreachable keeps the last answer");
-  routes.set("https://kick.com/never", () => { throw new Error("boom"); });
-  r.eq(await res.resolve("kick.com/never"), { kind: "unreachable", profile: null }, "resolver: a throwing fetch is unreachable");
-  routes.set("https://kick.com/cut", () => ({ status: 200, contentType: "text/html", text: `${"x".repeat(3_000_000)}<meta property="og:description" content="late">` }));
-  r.eq((await res.resolve("kick.com/cut")).kind, "unreachable", "resolver: nothing past the read cap is read (a page without profile tags is unreachable)");
+  routes.set("https://www.twitch.tv/never", () => { throw new Error("boom"); });
+  r.eq(await res.resolve("twitch.tv/never"), { kind: "unreachable", profile: null }, "resolver: a throwing fetch is unreachable");
+  routes.set("https://www.twitch.tv/cut", () => ({ status: 200, contentType: "text/html", text: `${"x".repeat(3_000_000)}<meta property="og:description" content="late">` }));
+  r.eq((await res.resolve("twitch.tv/cut")).kind, "unreachable", "resolver: nothing past the read cap is read (a page without profile tags is unreachable)");
   r.eq(await res.resolve("example.com/whoever"), { kind: "answered", profile: { avatar: null, banner: null, bio: null } }, "resolver: no lookup for an unsupported link");
 
   // profile(link): the cached answer now, a background lookup when stale

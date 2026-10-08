@@ -22,7 +22,7 @@
 //   YouTube  the channel page: og:image, og:description, the banner from its embedded data
 //   Discord  the invite API (server icon, banner, description)
 //   GitHub   the public user API (avatar, bio)
-//   Telegram, Kick, Twitch   the page's og:image and og:description (Twitch's boilerplate cut)
+//   Telegram, Twitch         the page's og:image and og:description (Twitch's boilerplate cut)
 //   Instagram, TikTok, Facebook, LinkedIn   the page's og:image only (their descriptions are
 //            follower counts or site text, never the person's bio)
 //

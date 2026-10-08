@@ -1265,6 +1265,9 @@ function splitArchiveForProgress(plainJson) {
   if (Array.isArray(parsed.groups) && parsed.groups.length) {
     batches[batches.length - 1].groups = parsed.groups;
   }
+  // The Address Book (NEXTCLOUD_SYNC.md §5) rides with the last batch too, so it is applied once.
+  if (Array.isArray(parsed.addressBook)) batches[batches.length - 1].addressBook = parsed.addressBook;
+  if (Array.isArray(parsed.addressBookDeleted)) batches[batches.length - 1].addressBookDeleted = parsed.addressBookDeleted;
   return { total: conversations.length, batches };
 }
 

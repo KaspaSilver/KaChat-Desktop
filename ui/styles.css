@@ -13125,3 +13125,115 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* "What is a seed phrase?" is a page in the Create Account flow now (iOS 712bb4d): the
    passphrase explainer's headline-and-text sections, a little taller since it is the whole step. */
 .create-account-flow .seed-explainer-page { max-height: min(60vh, 560px); margin: 4px 0 8px; }
+
+/* ==== Address Book (iOS AddressBookView, 00767a4 / cda0d99 / 1be4f6e) ====
+   Kaspa Hub > Address Book (ui/address-book.js), its add / edit sheet and the full-screen picker,
+   the recipient card's saved name, and User Info's row. Built on the theme's tokens. */
+.ab-screen { display: flex; flex-direction: column; min-height: 0; }
+.ab-header { width: 100%; gap: 10px; flex-shrink: 0; }
+.ab-header .kaposts-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ab-header .kaposts-icon-button { flex: 0 0 auto; }
+.ab-header .ab-detail-title { font-size: 22px; text-align: center; }
+.ab-header-spacer { flex: 0 0 36px; }
+.ab-body { display: flex; flex-direction: column; gap: 12px; padding-bottom: 28px; }
+.ab-search {
+  width: 100%; min-height: 38px; padding: 0 12px; border: 0; border-radius: 10px;
+  background: var(--surface-2); color: var(--text); font: inherit; font-size: 16px;
+}
+.ab-search:focus { outline: 2px solid color-mix(in srgb, var(--kaspa) 45%, transparent); outline-offset: 0; }
+.ab-list { display: flex; flex-direction: column; border-radius: 10px; overflow: hidden; background: var(--panel); }
+.ab-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 14px; border: 0;
+  border-bottom: .5px solid var(--line); background: transparent; color: var(--text); text-align: left; cursor: pointer;
+}
+.ab-row:last-child { border-bottom: 0; }
+.ab-row:hover { background: var(--row-hover); }
+.ab-row-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.ab-row-copy strong { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ab-row-copy small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ab-avatar { border-radius: 50%; }
+.ab-avatar-38 { width: 38px; height: 38px; }
+.ab-avatar-76 { width: 76px; height: 76px; }
+.ab-avatar-84 { width: 84px; height: 84px; }
+.ab-empty-line { margin: 12px 4px; color: var(--muted); font-size: 14px; text-align: center; }
+.ab-gone { margin-top: 40px; }
+.ab-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 40px 28px; text-align: center;
+}
+.ab-empty strong { font-size: 17px; }
+.ab-empty p { margin: 0; max-width: 420px; color: var(--muted); font-size: 15px; line-height: 1.4; }
+.ab-empty-icon { display: inline-grid; place-items: center; color: var(--kaspa-ink); }
+.ab-empty-icon.muted { color: var(--muted); }
+.ab-empty-icon svg { width: 46px; height: 46px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.ab-empty-add { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 18px; border: 0; border-radius: 999px; font-weight: 650; }
+.ab-empty-add svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+.ab-card { display: flex; flex-direction: column; border-radius: 10px; overflow: hidden; background: var(--panel); }
+.ab-hero { align-items: center; gap: 10px; padding: 18px 16px; text-align: center; }
+.ab-hero-name { font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.ab-hero-note { margin: 0; color: var(--muted); font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ab-section-title { color: var(--muted); font-size: 13px; font-weight: 500; text-transform: uppercase; letter-spacing: .02em; }
+.ab-body > .ab-section-title { margin: 6px 4px -6px; }
+.ab-sheet .ab-section-title { margin: 0 2px 8px; }
+.ab-address-mono {
+  margin: 0; padding: 12px 14px; border-bottom: .5px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; user-select: text;
+}
+.ab-action {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 0 14px; border: 0;
+  border-bottom: .5px solid var(--line); background: transparent; color: var(--kaspa-ink); font: inherit; font-size: 16px; text-align: left; cursor: pointer;
+}
+.ab-action:last-child { border-bottom: 0; }
+.ab-action:hover:not(:disabled) { background: var(--row-hover); }
+.ab-action:disabled { color: var(--muted); cursor: default; }
+.ab-action.danger { color: var(--ios-red); }
+.ab-action-icon { display: inline-grid; place-items: center; width: 22px; height: 22px; }
+.ab-action-icon svg, .ab-link-button svg, .ab-remove-button svg, .ab-editor-error svg {
+  width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* The sheets sit over New Chat (2100) and the Send screens; the scanner (2600) and the app's
+   dialogs (3000) still come above them. */
+.ab-picker-backdrop { z-index: 2300; }
+.ab-editor-backdrop { z-index: 2350; }
+.ab-sheet { max-height: min(92vh, 900px); }
+.ab-picker { width: min(100%, 520px); height: min(92vh, 900px); display: flex; flex-direction: column; }
+.ab-picker [data-ab-picker-body] { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; padding-top: 14px; }
+.ab-picker-list { flex: 1; min-height: 0; overflow-y: auto; border-radius: 10px; }
+.ab-picker-row { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.ab-picker-empty { flex: 1; justify-content: center; }
+.ab-tick { flex: 0 0 auto; display: inline-grid; place-items: center; color: var(--muted); }
+.ab-tick.on { color: var(--kaspa-ink); }
+.ab-tick svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ab-photo-section { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.ab-photo-avatar { display: grid; place-items: center; }
+.ab-photo-buttons { display: flex; gap: 20px; justify-content: center; }
+.ab-link-button {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 2px; border: 0; background: transparent;
+  color: var(--kaspa-ink); font: inherit; font-size: 15px; cursor: pointer;
+}
+.ab-link-button.danger { color: var(--ios-red); }
+.ab-photo-section .create-chat-help { text-align: center; }
+.ab-address-fixed { border: 0; border-radius: 15px; background: var(--surface-2); color: var(--muted); }
+.ab-address-input { display: block; resize: none; font-size: 15px; line-height: 1.35; padding-top: 14px; }
+.ab-address-tools { grid-template-columns: repeat(2, 1fr); }
+.ab-address-tools .create-chat-tool { min-height: 52px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.ab-address-tools .create-chat-tool-icon, .ab-address-tools .create-chat-tool-icon svg { width: 22px; height: 22px; }
+.ab-address-tools .create-chat-tool-icon svg { stroke-width: 1.9; }
+.ab-note-input { display: block; width: 100%; min-height: 52px; padding: 14px 16px; resize: vertical; line-height: 1.35; }
+.ab-editor-error { display: flex; align-items: center; gap: 8px; color: var(--ios-red); }
+.ab-remove-button {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 50px; border: 0;
+  border-radius: 15px; background: var(--surface-2); color: var(--ios-red); font: inherit; font-size: 16px; cursor: pointer;
+}
+
+/* Send screens: the saved name under the address card (iOS Label(saved.name, "book.closed.fill")). */
+.sk-saved-name { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; color: var(--kaspa-ink); font-size: 12px; font-weight: 600; }
+.sk-saved-name[hidden] { display: none; }
+.sk-saved-name svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+/* User Info's row: its glyph is swapped between book.closed and book.closed.fill. */
+.chat-info-row-icon-slot { display: contents; }
+
+/* New Group's "Add Members" heading over the Address Book / by-address tools. */
+.group-add-members-title { margin: 0 0 6px; color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; }
+.group-add-members-title[hidden] { display: none; }

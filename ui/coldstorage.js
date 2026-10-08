@@ -27,7 +27,7 @@ import { closeActiveScanner, scanKaspaAddress, scanQrCode } from "./qr-scan.js";
 import {
   recipientCardHtml, recipientStatusHtml, amountEntryHtml, layoutAmountEntry, sanitizeAmountText,
   availablePillInnerHtml, infoPillHtml, feeControlsHtml, coinControlSummaryText, sendActionButtonHtml,
-  shortSendAddress,
+  shortSendAddress, refreshRecipientAddressBook,
 } from "./send-kaspa-components.js";
 import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx, historicalKasPrice } from "./portfolio.js";
 
@@ -1593,6 +1593,8 @@ function renderSendStatusOnly() {
   if (cardHost) cardHost.innerHTML = sendRecipientCardHtml();
   const check = modalsEl?.querySelector("[data-cold-send-check]");
   if (check) check.hidden = !(send.toInput.trim() && sendHasValidRecipient());
+  // The saved Address Book name for what the recipient resolved to (iOS 00767a4).
+  if (!send.isCompound) refreshRecipientAddressBook(modalsEl, "cold-send", send.resolvedAddress || send.toInput.trim());
   const buildBtn = modalsEl?.querySelector("[data-cold-send-build]");
   if (buildBtn && send.step === "form") buildBtn.disabled = !(sendHasValidRecipient() && sendAmountSompi() !== null);
   const maxBtn = modalsEl?.querySelector("[data-cold-send-max]");
@@ -1641,6 +1643,7 @@ function renderSendFlow() {
           valid: Boolean(send.toInput.trim()) && sendHasValidRecipient(),
           statusHtml: send.isCompound ? "" : sendRecipientStatusHtml(),
           cardHtml: send.isCompound ? "" : sendRecipientCardHtml(),
+          savedNameAddress: send.resolvedAddress || send.toInput.trim(),
         })}
         ${send.isCompound ? `<p class="sk-caption">${send.compoundHasMore
           ? `This address has more than ${KSPT_MAX_INPUTS} UTXOs. KasSigner can sign at most ${KSPT_MAX_INPUTS} inputs per transaction, so this merges the largest ${KSPT_MAX_INPUTS} into one. Run Compound again afterward to keep combining the rest.`
@@ -2044,6 +2047,15 @@ function buildModals() {
       const input = sendBody.querySelector("[data-cold-send-recipient]");
       if (input) input.value = scanned;
       handleSendRecipientInput(scanned);
+      return;
+    }
+    // The recipient card's Address Book button (iOS 00767a4): pick a saved address.
+    if (event.target.closest("[data-cold-send-address-book]")) {
+      const entry = await deps.pickAddressBookEntry?.();
+      if (!entry?.address || !send || send.step !== "form" || send.isCompound) return;
+      const input = sendBody.querySelector("[data-cold-send-recipient]");
+      if (input) input.value = entry.address;
+      handleSendRecipientInput(entry.address);
       return;
     }
     if (event.target.closest("[data-cold-send-max]")) { sendSetMax(); return; }
