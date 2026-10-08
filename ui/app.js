@@ -35,7 +35,7 @@ import {
   createSendActionButton, openSendFromPicker, closeSendFromPicker, shortSendAddress,
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
 } from "./send-kaspa-components.js";
-import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, syncNextcloudContacts, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
+import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
@@ -10133,7 +10133,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 113;
+const APP_BUILD = 114;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12252,36 +12252,6 @@ languageOptionButtons.forEach((button) => {
 });
 applyLanguage();
 refreshLanguageUi();
-
-// Contacts > "Sync Contacts from Nextcloud": pull the connected account's address book over
-// CardDAV and import any card carrying a Kaspa address. Read-only against the server.
-const contactsNextcloudSyncButton = document.querySelector("[data-contacts-nextcloud-sync]");
-contactsNextcloudSyncButton?.addEventListener("click", async () => {
-  const status = document.querySelector("[data-contacts-nextcloud-status]");
-  const setStatusText = (text) => { if (status) status.textContent = text; };
-  if (!isNextcloudConnected()) {
-    showCopyToast("Connect Nextcloud in Settings → Storage first.");
-    setStatusText("Not connected. Connect a server in Settings → Storage → Nextcloud, then sync.");
-    return;
-  }
-  if (contactsNextcloudSyncButton.disabled) return;
-  contactsNextcloudSyncButton.disabled = true;
-  setStatusText("Syncing…");
-  try {
-    const result = await syncNextcloudContacts();
-    const parts = [];
-    if (result.added) parts.push(`${result.added} added`);
-    if (result.updated) parts.push(`${result.updated} updated`);
-    const detail = parts.length ? parts.join(", ") : "no new contacts";
-    setStatusText(`Synced ${result.found} card${result.found === 1 ? "" : "s"} with a Kaspa address — ${detail}.`);
-    showCopyToast(`Nextcloud contacts synced — ${detail}.`);
-  } catch (error) {
-    setStatusText("Sync failed. Check your Nextcloud connection and try again.");
-    showCopyToast(error?.message || "Nextcloud contacts sync failed.");
-  } finally {
-    contactsNextcloudSyncButton.disabled = false;
-  }
-});
 
 // Connectivity endpoint fields (Kaspa REST API, KNS API, Push Indexer, Trusted
 // Node) persist through the endpoint registry. Blank = default; Trusted Node
@@ -15738,57 +15708,6 @@ function addContact({ name, address, relationshipState = "legacy-manual" }) {
   persistState();
   renderChats();
   openConversation(conversationEntry.id);
-}
-
-// Batch import of {address, name} pairs pulled from a Nextcloud address book (see
-// nextcloud.js syncContactsFromNextcloud). Adds a contact + conversation for each new,
-// valid Kaspa address without opening any of them; fills in a name for an existing contact
-// that has none. One persist/render at the end. Returns a per-outcome tally.
-function importNextcloudContacts(entries) {
-  const list = Array.isArray(entries) ? entries : [];
-  let added = 0;
-  let updated = 0;
-  let skipped = 0;
-  for (const raw of list) {
-    const address = String(raw?.address || "").trim();
-    const name = String(raw?.name || "").trim();
-    if (!isValidKaspaAddressString(address)) { skipped += 1; continue; }
-    const existing = state.contacts.find((entry) => entry.address === address);
-    if (existing) {
-      if (name && !existing.nameIsCustom) {
-        existing.name = name;
-        existing.nameIsCustom = true;
-        existing.avatar = initialsFor(name);
-        existing.updatedAt = Date.now();
-        updated += 1;
-      } else {
-        skipped += 1;
-      }
-      continue;
-    }
-    const createdAt = Date.now();
-    const contact = {
-      id: nowId(),
-      name,
-      nameIsCustom: Boolean(name),
-      address,
-      avatar: initialsFor(name),
-      createdAt,
-      updatedAt: createdAt,
-      relationshipState: "legacy-manual",
-      handshakeTxid: "",
-    };
-    const conversationEntry = createConversation({ contactId: contact.id, createdAt });
-    state.contacts.push(contact);
-    state.conversations.push(conversationEntry);
-    added += 1;
-  }
-  if (added || updated) {
-    refreshSubscriptionAddresses({ restart: true });
-    persistState();
-    renderChats();
-  }
-  return { added, updated, skipped };
 }
 
 // Open (or create) the 1:1 chat with an arbitrary Kaspa address and open the Send KAS sheet
@@ -24966,9 +24885,6 @@ queueMicrotask(async () => {
       // The shared archive itself (whoever wrote it): merged into the desktop
       // conversations, never a state replace.
       importPhoneArchive: importPhoneChatArchive,
-      // CardDAV contacts sync: import {address, name} pairs read from the account's Nextcloud
-      // address book into the desktop's contact list (Settings → Contacts).
-      importNextcloudContacts,
     });
   } catch (error) { appendEngineLog(`initNextcloud did not start: ${error?.message || error}`); }
 
