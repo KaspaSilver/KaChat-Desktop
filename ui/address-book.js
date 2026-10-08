@@ -10,10 +10,13 @@ import {
   addressBookEntries, addressBookEntry, addressBookIsEmpty, searchAddressBook, addressBookPhoto,
   saveAddressBookEntry, removeAddressBookEntry, normalizeAddressBookAddress,
   addressBookPhotoBytes, removeAllAddressBookPhotos, onAddressBookChange,
+  addressBookExportJson, addressBookExportFileName, importAddressBookExport,
   ADDRESS_BOOK_PHOTO_MAX_SIDE, ADDRESS_BOOK_PHOTO_QUALITY,
 } from "./address-book-store.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 import { onContextGesture } from "./touch.js";
+import { saveFile } from "./save-file.js";
+import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
 
 const svg = (body, extra = "") => `<svg viewBox="0 0 24 24" aria-hidden="true"${extra}>${body}</svg>`;
 const BOOK_PATH = '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/>';
@@ -24,6 +27,12 @@ export const ADDRESS_BOOK_ICONS = {
 };
 const ICONS = {
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
+  // square.and.arrow.up.on.square
+  importExport: svg('<path d="M13 13V3"/><path d="m9.5 6.5 3.5-3.5 3.5 3.5"/><path d="M16.5 9.5H18A1.5 1.5 0 0 1 19.5 11v6.5A1.5 1.5 0 0 1 18 19H8a1.5 1.5 0 0 1-1.5-1.5V11A1.5 1.5 0 0 1 8 9.5h1.5"/><path d="M4 12.5V20a1.5 1.5 0 0 0 1.5 1.5H15"/>'),
+  fileIn: svg('<path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 15v3.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V15"/>'),
+  fileOut: svg('<path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/>'),
+  cloudIn: svg('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.8 8.6 4.2 4.2 0 0 1 17.5 17"/><path d="M12 11v9"/><path d="m9 17 3 3 3-3"/>'),
+  cloudOut: svg('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.8 8.6 4.2 4.2 0 0 1 17.5 17"/><path d="M12 20v-9"/><path d="m9 14 3-3 3 3"/>'),
   back: svg('<path d="m15 5-7 7 7 7"/>'),
   copy: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/>'),
   check: svg('<path d="M20 6 9 17l-5-5"/>'),
@@ -108,6 +117,7 @@ function listHtml() {
     <div class="kaposts-header ab-header">
       <h1 class="kaposts-title">Address Book</h1>
       <div class="kaposts-header-actions">
+        <button class="kaposts-icon-button" type="button" data-ab-import-export aria-label="Import or export" title="Import or export">${ICONS.importExport}</button>
         <button class="kaposts-icon-button" type="button" data-ab-add aria-label="Add Address" title="Add Address">${ICONS.plus}</button>
       </div>
     </div>
@@ -200,6 +210,7 @@ async function onScreenClick(event) {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
   if (target.closest("[data-ab-add]")) { openAddressBookEditor({ address: null }); return; }
+  if (target.closest("[data-ab-import-export]")) { openImportExportSheet(); return; }
   const open = target.closest("[data-ab-open]");
   if (open) { detailAddress = open.getAttribute("data-ab-open"); render(); screenEl.scrollTop = 0; return; }
   if (target.closest("[data-ab-back]")) { detailAddress = null; render(); return; }
@@ -291,7 +302,164 @@ export function resetAddressBookForAccount() {
   searchText = "";
   closePicker(null);
   closeEditor(null);
+  closeImportExportSheet();
   if (active) window.setTimeout(render, 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Import or Export sheet (iOS AddressBookView importExportSheet, 87b2a0b)
+// ---------------------------------------------------------------------------------------------
+//
+// Import File / Export File, and with Nextcloud connected Import from Nextcloud / Export to
+// Nextcloud (else a line saying where to connect it). The file is the store's export JSON; Export
+// to Nextcloud puts it in the KaChat folder with its spaces kept, one new file per tap
+// (NEXTCLOUD_SYNC.md §1), and Import from Nextcloud picks a .json starting in that folder.
+
+let ioSheetEl = null;
+let ioFileInput = null;
+
+function ensureImportExportSheet() {
+  if (ioSheetEl) return ioSheetEl;
+  ioSheetEl = document.createElement("div");
+  ioSheetEl.className = "modal-backdrop ab-backdrop ab-io-backdrop";
+  ioSheetEl.hidden = true;
+  ioSheetEl.innerHTML = `<div class="contact-modal portfolio-editor-modal ab-io-sheet" role="dialog" aria-modal="true" aria-label="Import or Export" data-ab-io-body></div>`;
+  document.body.appendChild(ioSheetEl);
+  ioSheetEl.addEventListener("mousedown", (event) => { if (event.target === ioSheetEl) closeImportExportSheet(); });
+  ioSheetEl.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeImportExportSheet(); } });
+  ioSheetEl.addEventListener("click", onImportExportClick);
+  ioFileInput = document.createElement("input");
+  ioFileInput.type = "file";
+  ioFileInput.accept = ".json,application/json";
+  ioFileInput.hidden = true;
+  ioFileInput.setAttribute("data-ab-io-file", "");
+  document.body.appendChild(ioFileInput);
+  ioFileInput.addEventListener("change", onImportFileChosen);
+  return ioSheetEl;
+}
+
+function ioRowHtml({ action, icon, title, subtitle }) {
+  return `
+    <button type="button" class="cold-action-row" data-ab-io="${esc(action)}">
+      <span class="cold-action-icon" aria-hidden="true">${icon}</span>
+      <span class="cold-action-copy"><strong>${esc(title)}</strong><small>${esc(subtitle)}</small></span>
+    </button>`;
+}
+
+function renderImportExportSheet() {
+  const body = ioSheetEl?.querySelector("[data-ab-io-body]");
+  if (!body) return;
+  const connected = isNextcloudConnected();
+  const rows = [
+    { action: "import", icon: ICONS.fileIn, title: "Import File", subtitle: "Add addresses from an Address Book export." },
+    { action: "export", icon: ICONS.fileOut, title: "Export File", subtitle: "Save this Address Book, with its photos, to a file." },
+    ...(connected ? [
+      { action: "nc-import", icon: ICONS.cloudIn, title: "Import from Nextcloud", subtitle: "Pick an Address Book export from your Nextcloud." },
+      { action: "nc-export", icon: ICONS.cloudOut, title: "Export to Nextcloud", subtitle: "Save it to the KaChat folder in your Nextcloud, to import on any device." },
+    ] : []),
+  ];
+  body.innerHTML = `
+    <div class="modal-header">
+      <div><p class="modal-kicker">Address Book</p><h2>Import or Export</h2></div>
+      <button class="modal-close" type="button" data-ab-io-close aria-label="Close">×</button>
+    </div>
+    <div class="cold-action-rows">${rows.map(ioRowHtml).join("")}</div>
+    ${connected ? "" : `<p class="create-chat-help ab-io-note">${esc("Connect Nextcloud in Settings > Storage to also save it there and import it on another device.")}</p>`}`;
+}
+
+function openImportExportSheet() {
+  ensureImportExportSheet();
+  renderImportExportSheet();
+  ioSheetEl.hidden = false;
+  window.setTimeout(() => ioSheetEl?.querySelector("[data-ab-io]")?.focus(), 0);
+}
+
+function closeImportExportSheet() {
+  if (ioSheetEl) ioSheetEl.hidden = true;
+}
+
+function onImportExportClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  if (target.closest("[data-ab-io-close]")) { closeImportExportSheet(); return; }
+  const row = target.closest("[data-ab-io]");
+  if (!row) return;
+  closeImportExportSheet();
+  const action = row.getAttribute("data-ab-io");
+  if (action === "import") { ioFileInput.value = ""; ioFileInput.click(); }
+  else if (action === "export") exportToFile();
+  else if (action === "nc-import") importFromNextcloud();
+  else if (action === "nc-export") exportToNextcloud();
+}
+
+const toast = (message) => { try { deps?.showToast?.(message); } catch { /* no toast */ } };
+const errorText = (error) => String(error?.message || error || "unknown error");
+
+/** The export as { filename, json }, or null (with the toast said) when there is nothing to write. */
+function buildExport() {
+  if (addressBookIsEmpty()) { toast("Nothing to export yet. Add an address first."); return null; }
+  try {
+    return { filename: addressBookExportFileName(), json: addressBookExportJson() };
+  } catch {
+    toast("Export failed. Couldn't write the file.");
+    return null;
+  }
+}
+
+async function exportToFile() {
+  const built = buildExport();
+  if (!built) return;
+  try { await saveFile(built.filename, "application/json", built.json); }
+  catch { toast("Export failed. Couldn't write the file."); }
+}
+
+async function exportToNextcloud() {
+  const built = buildExport();
+  if (!built) return;
+  try {
+    const path = await uploadToKaChatFolder(new Blob([built.json], { type: "application/json" }), built.filename, "application/json", { keepSpaces: true });
+    toast(`Saved to ${path} in Nextcloud.`);
+  } catch (error) {
+    toast(`Export to Nextcloud failed: ${errorText(error)}`);
+  }
+}
+
+function importFromNextcloud() {
+  openNextcloudFilePicker({
+    allowedExtensions: ["json"],
+    onPicked: async (file) => {
+      let text;
+      try { text = await downloadNextcloudText(file.path, { maxBytes: 50_000_000 }); }
+      catch (error) { toast(`Import from Nextcloud failed: ${errorText(error)}`); return; }
+      runImport(text);
+    },
+  });
+}
+
+async function onImportFileChosen() {
+  const file = ioFileInput?.files?.[0];
+  if (ioFileInput) ioFileInput.value = "";
+  if (!file) return;
+  let text;
+  try {
+    if (file.size > 50_000_000) throw new Error("too large");
+    text = await file.text();
+  } catch {
+    toast("Couldn't read that file.");
+    return;
+  }
+  runImport(text);
+}
+
+function runImport(text) {
+  try {
+    const { added, updated } = importAddressBookExport(text);
+    toast(added + updated === 0
+      ? "Already up to date. Every address in the file is saved."
+      : `Imported: ${added} added, ${updated} updated.`);
+  } catch (error) {
+    toast(errorText(error));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

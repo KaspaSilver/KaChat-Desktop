@@ -386,15 +386,17 @@ async function ensureFolder(davRoot, parts) {
 
 /** Uploads `body` as `filename` into the KaChat folder (backupFolderPath - beside the chat
  *  backup), creating the folder chain if needed, and returns the stored path. A file of the same
- *  name is replaced; exports carry a timestamp in their name, so each one is a new file. */
-export async function uploadToKaChatFolder(body, filename, contentType) {
+ *  name is replaced; exports carry a timestamp in their name, so each one is a new file.
+ *  `keepSpaces` keeps a name the user gave (a portfolio's, "KaChat Address Book") readable in
+ *  Nextcloud instead of turning its spaces into underscores (iOS 87b2a0b). */
+export async function uploadToKaChatFolder(body, filename, contentType, { keepSpaces = false } = {}) {
   if (!nc) throw new Error("Nextcloud is not connected.");
   await ensureDavUser();
   const folder = backupFolderPath();
   const parts = folder.split("/").filter(Boolean);
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = await ensureFolder(davRoot, parts);
-  const storedName = String(filename || "file").replace(/[^\w.\-]+/g, "_");
+  const storedName = kaChatFolderFileName(filename, { keepSpaces });
   const put = await fetch(`${folderURL}/${encodeURIComponent(storedName)}`, {
     method: "PUT",
     headers: { Authorization: authHeader(), "Content-Type": contentType || "application/octet-stream" },
@@ -403,6 +405,17 @@ export async function uploadToKaChatFolder(body, filename, contentType) {
   if (put.status === 401) throw new Error("Nextcloud refused the upload (HTTP 401).");
   if (!put.ok) throw new Error(`Upload failed (HTTP ${put.status}).`);
   return parts.length ? `${parts.join("/")}/${storedName}` : storedName;
+}
+
+/** The name a KaChat-folder upload is stored under: letters, digits, dot, dash and underscore
+ *  survive (and spaces, with `keepSpaces` - each other character becomes "_", as iOS's
+ *  sanitizedMediaFilename does); the extension always survives. */
+export function kaChatFolderFileName(filename, { keepSpaces = false } = {}) {
+  const name = String(filename || "file");
+  const cleaned = keepSpaces
+    ? name.replace(/[^\p{L}\p{N}\p{M}._\- ]/gu, "_")
+    : name.replace(/[^\w.\-]+/g, "_");
+  return cleaned || "file";
 }
 
 /** A file's text, for importing it. Every failure throws so the caller can say what went wrong. */

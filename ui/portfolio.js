@@ -1918,7 +1918,18 @@ function buildCsvExport() {
     const notes = String(tx.notes || "").replace(/"/g, '""');
     csv += `"${date}","KAS","${txKind(tx)}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
   }
-  return { filename: `kachat-portfolio-${new Date().toISOString().replace(/:/g, "-").slice(0, 19)}.csv`, csv };
+  // iOS's file-name time: ISO 8601 in UTC, whole seconds, "Z", with ":" made "-".
+  const stamp = `${new Date().toISOString().slice(0, 19)}Z`.replace(/:/g, "-");
+  return { filename: `${portfolioExportBaseName(portfolio)} ${stamp}.csv`, csv };
+}
+
+/** The export's file name: the name the portfolio has in the app ("Long Term 2026-10-08T...Z.csv"),
+ *  so it is recognizable in Downloads and Nextcloud; "KaChat Portfolio" when it has none.
+ *  Characters a file name can't hold are dropped, and it stops at 60 characters (iOS 87b2a0b). */
+function portfolioExportBaseName(portfolio) {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = String(portfolio?.name ?? "").replace(/[/\\:?*"<>|\u0000-\u001f\u007f-\u009f]/g, "").trim();
+  return cleaned ? Array.from(cleaned).slice(0, 60).join("") : "KaChat Portfolio";
 }
 
 async function exportCsv() {
@@ -1936,7 +1947,7 @@ async function exportToNextcloud() {
   const built = buildCsvExport();
   if (!built) return;
   try {
-    const path = await uploadToKaChatFolder(new Blob([built.csv], { type: "text/csv" }), built.filename, "text/csv");
+    const path = await uploadToKaChatFolder(new Blob([built.csv], { type: "text/csv" }), built.filename, "text/csv", { keepSpaces: true });
     deps.showToast?.(`Saved to ${path} in Nextcloud.`);
   } catch (error) {
     deps.showToast?.(`Export to Nextcloud failed: ${error?.message || "unknown error"}`);

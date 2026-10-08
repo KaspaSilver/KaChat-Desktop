@@ -13213,6 +13213,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 }
 .ab-link-button.danger { color: var(--ios-red); }
 .ab-photo-section .create-chat-help { text-align: center; }
+/* Import or Export sheet (iOS 87b2a0b): the "Connect Nextcloud" line under the rows. */
+.ab-io-sheet .ab-io-note { margin-top: 14px; text-align: center; }
 .ab-address-fixed { border: 0; border-radius: 15px; background: var(--surface-2); color: var(--muted); }
 .ab-address-input { display: block; resize: none; font-size: 15px; line-height: 1.35; padding-top: 14px; }
 .ab-address-tools { grid-template-columns: repeat(2, 1fr); }

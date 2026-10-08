@@ -384,6 +384,108 @@ export function removeAddressBookForWallet(wallet) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Export / import (Address Book > Import or Export; iOS AddressBookManager 87b2a0b)
+// ---------------------------------------------------------------------------------------------
+//
+// The file is plain JSON any KaChat (iOS, Android, Desktop) and any wallet can read
+// (NEXTCLOUD_SYNC.md §1): { type: "kachat-address-book", version: 1, exportedAt, walletAddress,
+// entries }, keys sorted like iOS's JSONEncoder .sortedKeys, every entry in the backup's shape
+// (§5) with its assigned photo as raw base64 JPEG. walletAddress is informational - any wallet may
+// import the file - and left out when there is no wallet, as iOS leaves out a nil.
+
+export const ADDRESS_BOOK_EXPORT_TYPE = "kachat-address-book";
+export const ADDRESS_BOOK_EXPORT_VERSION = 1;
+export const ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT = "That file isn't a KaChat Address Book export.";
+export const ADDRESS_BOOK_IMPORT_EMPTY = "That Address Book export has no addresses.";
+
+/** iOS's file-name time: ISO8601DateFormatter (UTC, whole seconds, "Z") with ":" made "-",
+ *  e.g. "2026-10-08T18-37-50Z". */
+export function addressBookFileStamp(ms) {
+  return addressBookIso(ms).replace(/:/g, "-");
+}
+
+/** "KaChat Address Book 2026-10-08T18-37-50Z.json" - the time keeps exports from overwriting
+ *  each other. */
+export function addressBookExportFileName(ms = config.now()) {
+  return `KaChat Address Book ${addressBookFileStamp(ms)}.json`;
+}
+
+/** This wallet's book as the export object (keys in sorted order). */
+export function addressBookExport() {
+  const c = load();
+  const entries = addressBookEntries().map((entry) => {
+    const archived = toArchiveEntry(entry, readPhoto(c.wallet, entry.address));
+    const sorted = {};
+    for (const key of Object.keys(archived).sort()) sorted[key] = archived[key];
+    return sorted;
+  });
+  const out = { entries, exportedAt: addressBookIso(config.now()), type: ADDRESS_BOOK_EXPORT_TYPE, version: ADDRESS_BOOK_EXPORT_VERSION };
+  const wallet = normalizeAddressBookAddress(c.wallet);
+  if (wallet) out.walletAddress = wallet;
+  return out;
+}
+
+/** The export file's text (pretty-printed, like iOS's .prettyPrinted). */
+export function addressBookExportJson() {
+  return JSON.stringify(addressBookExport(), null, 2);
+}
+
+/**
+ * Imports an export file (its text, or the parsed object) into this wallet's book: an address not
+ * saved here is added - even one deleted since, since importing is asking for it back, so its
+ * tombstone is lifted; one already saved takes the file's name, note and photo only when the
+ * file's `updatedAt` is newer. Photos come with their entry. Returns { added, updated }.
+ * Throws an Error whose message is the text to show: "Open a wallet first.", a file whose type
+ * isn't kachat-address-book or whose version isn't supported (ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT),
+ * or one with no usable address (ADDRESS_BOOK_IMPORT_EMPTY).
+ */
+export function importAddressBookExport(input) {
+  const c = load();
+  if (!c.wallet) throw new Error("Open a wallet first.");
+  let file = input;
+  if (typeof input === "string") {
+    try { file = JSON.parse(input.replace(/^﻿/, "")); } catch { file = null; }
+  }
+  if (!file || typeof file !== "object" || Array.isArray(file)
+    || file.type !== ADDRESS_BOOK_EXPORT_TYPE
+    || file.version !== ADDRESS_BOOK_EXPORT_VERSION
+    || !Array.isArray(file.entries)) {
+    throw new Error(ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT);
+  }
+  const valid = [];
+  for (const raw of file.entries) {
+    const entry = cleanEntry(raw);
+    if (!entry) continue;
+    let ok = false;
+    try { ok = config.isValidAddress(entry.address) !== false; } catch { ok = false; }
+    if (ok) valid.push({ entry, photo: addressBookPhotoFromBase64(raw.photo) });
+  }
+  if (!valid.length) throw new Error(ADDRESS_BOOK_IMPORT_EMPTY);
+  let added = 0;
+  let updated = 0;
+  for (const { entry: incoming, photo } of valid) {
+    const address = incoming.address;
+    const existing = c.entries.get(address);
+    if (existing) {
+      if (!(incoming.updatedAt > existing.updatedAt)) continue;
+      c.entries.set(address, { ...existing, name: incoming.name, note: incoming.note, updatedAt: incoming.updatedAt });
+      if (photo) { try { writePhoto(c.wallet, address, photo); } catch { /* storage full: keeps the entry */ } }
+      else deletePhoto(c.wallet, address);
+      updated += 1;
+    } else {
+      const idTaken = [...c.entries.values()].some((e) => e.id === incoming.id);
+      c.entries.set(address, idTaken ? { ...incoming, id: newUuid() } : incoming);
+      if (photo) { try { writePhoto(c.wallet, address, photo); } catch { /* storage full: keeps the entry */ } }
+      added += 1;
+    }
+    c.deleted.delete(address);
+  }
+  persist();
+  if (added + updated > 0) emit("import");
+  return { added, updated };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Backup
 // ---------------------------------------------------------------------------------------------
 

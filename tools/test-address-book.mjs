@@ -7,8 +7,10 @@ import {
   addressBookPhotoBytes, removeAllAddressBookPhotos, removeAddressBookForWallet,
   archiveAddressBook, importAddressBookArchive, mergeAddressBooks, mergeAddressBookArchives,
   normalizeAddressBookAddress, onAddressBookChange,
+  addressBookExportJson, addressBookExportFileName, importAddressBookExport,
   ADDRESS_BOOK_ENTRIES_KEY, ADDRESS_BOOK_DELETED_KEY,
 } from "../ui/address-book-store.js";
+import { kaChatFolderFileName } from "../ui/nextcloud.js";
 
 class MemoryStorage {
   constructor() { this.map = new Map(); }
@@ -268,6 +270,119 @@ test("Remove Address Book Photos: every wallet, entries marked edited", () => {
   const remote = { addressBook: [{ address: CAROL, name: "Carol", note: "", createdAt: iso(clock - 5000), updatedAt: iso(clock - 5000), photo: PHOTO_B64 }] };
   const merged = mergeAddressBookArchives(archiveAddressBook(), remote);
   assert.equal(merged.addressBook[0].photo, undefined);
+});
+
+test("export file: name, format, photo attached", () => {
+  fresh({ start: Date.parse("2026-10-08T18:37:50.123Z") });
+  assert.equal(addressBookExportFileName(), "KaChat Address Book 2026-10-08T18-37-50Z.json", "iOS's ISO8601DateFormatter time, \":\" made \"-\"");
+  assert.equal(addressBookExportFileName(Date.parse("2026-01-02T03:04:05Z")), "KaChat Address Book 2026-01-02T03-04-05Z.json");
+  saveAddressBookEntry({ address: BOB, name: "Bob", note: "work" });
+  saveAddressBookEntry({ address: ALICE, name: "Alice", photo: PHOTO });
+  const text = addressBookExportJson();
+  const file = JSON.parse(text);
+  assert.deepEqual(Object.keys(file), ["entries", "exportedAt", "type", "version", "walletAddress"], "sorted keys, like iOS");
+  assert.equal(file.type, "kachat-address-book");
+  assert.equal(file.version, 1);
+  assert.equal(file.exportedAt, "2026-10-08T18:37:50Z", "whole-second ISO 8601");
+  assert.equal(file.walletAddress, WALLET_A);
+  assert.deepEqual(file.entries.map((e) => e.address), [ALICE, BOB], "sorted by name");
+  assert.deepEqual(Object.keys(file.entries[0]), ["address", "createdAt", "id", "name", "note", "photo", "updatedAt"]);
+  assert.equal(file.entries[0].photo, PHOTO_B64, "the photo rides with its entry as raw base64");
+  assert.equal(file.entries[1].photo, undefined, "no photo key without one");
+  assert.equal(file.entries[1].note, "work");
+  assert.match(text, /\n {2}"entries"/, "pretty-printed");
+  wallet = "";
+  assert.equal(JSON.parse(addressBookExportJson()).walletAddress, undefined, "no wallet: left out, like iOS's nil");
+});
+
+test("import: adds, updates only from a newer edit, lifts a tombstone, brings the photo", () => {
+  fresh();
+  saveAddressBookEntry({ address: ALICE, name: "Alice here", photo: PHOTO });
+  saveAddressBookEntry({ address: BOB, name: "Bob here", note: "keep" });
+  saveAddressBookEntry({ address: CAROL, name: "Carol" });
+  const t0 = clock;
+  tick(10_000);
+  removeAddressBookEntry(CAROL);
+  const deletedAt = clock;
+  tick(10_000);
+  const DAVE = "kaspa:qpdave0000000000000000000000000000000000000000000000000000";
+  const file = {
+    type: "kachat-address-book", version: 1, exportedAt: iso(clock), walletAddress: WALLET_B,
+    entries: [
+      // Newer than ours: name, note and photo (none - removed there) taken.
+      { id: "6f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", address: ALICE, name: "Alice there", note: "n", createdAt: iso(t0), updatedAt: iso(t0 + 5000) },
+      // Older than ours: ignored.
+      { id: "7f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", address: BOB.toUpperCase(), name: "Bob old", note: "", createdAt: iso(t0 - 9000), updatedAt: iso(t0 - 9000), photo: PHOTO_B64 },
+      // Deleted here after this edit: imported anyway (asking for it back), tombstone lifted.
+      { id: "8f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", address: CAROL, name: "Carol back", note: "", createdAt: iso(t0), updatedAt: iso(t0), photo: PHOTO_B64 },
+      // New: added with its own id, times and photo.
+      { id: "9f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", address: DAVE, name: "Dave", note: "x", createdAt: iso(t0 - 1000), updatedAt: iso(t0 - 1000), photo: PHOTO_B64 },
+      // Unusable rows are skipped, not fatal.
+      { address: "kaspa:nope", name: "Bad" },
+      { address: DAVE, name: "  " },
+    ],
+  };
+  let events = 0;
+  const off = onAddressBookChange((kind) => { events += 1; assert.equal(kind, "import"); });
+  assert.deepEqual(importAddressBookExport(JSON.stringify(file)), { added: 2, updated: 1 });
+  off();
+  assert.equal(events, 1);
+  assert.equal(addressBookEntry(ALICE).name, "Alice there");
+  assert.equal(addressBookEntry(ALICE).note, "n");
+  assert.equal(addressBookEntry(ALICE).updatedAt, t0 + 5000);
+  assert.equal(hasAddressBookPhoto(ALICE), false, "a newer edit without a photo removes ours");
+  assert.equal(addressBookEntry(BOB).name, "Bob here", "an older edit never overwrites");
+  assert.equal(hasAddressBookPhoto(BOB), false, "nor brings its photo");
+  assert.equal(addressBookEntry(CAROL).name, "Carol back", "a deleted address comes back");
+  assert.ok(deletedAt > t0, "even though it was deleted after the file's edit");
+  assert.deepEqual(archiveAddressBook().addressBookDeleted, [], "its tombstone is lifted");
+  assert.equal(addressBookPhoto(CAROL), PHOTO);
+  const dave = addressBookEntry(DAVE);
+  assert.deepEqual([dave.id, dave.name, dave.note, dave.createdAt], ["9f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", "Dave", "x", t0 - 1000]);
+  assert.equal(addressBookPhoto(DAVE), PHOTO, "the photo comes with its entry");
+  // Persisted, and a second import of the same file changes nothing.
+  configureAddressBook({});
+  assert.equal(addressBookEntry(DAVE).name, "Dave");
+  assert.deepEqual(importAddressBookExport(file), { added: 0, updated: 0 });
+  // An id already used by another entry gets a fresh one.
+  const EVE = "kaspa:qpeve00000000000000000000000000000000000000000000000000000";
+  importAddressBookExport({ ...file, entries: [{ id: dave.id, address: EVE, name: "Eve", note: "", createdAt: iso(clock), updatedAt: iso(clock) }] });
+  assert.notEqual(addressBookEntry(EVE).id, dave.id);
+  // Round trip: our own export imports into another wallet.
+  const exported = addressBookExportJson();
+  wallet = WALLET_B;
+  assert.deepEqual(importAddressBookExport(exported), { added: 5, updated: 0 });
+  assert.equal(addressBookPhoto(DAVE), PHOTO);
+});
+
+test("import refuses: not an export, wrong type or version, no addresses, no wallet", () => {
+  fresh();
+  const NOT = /: That file isn't a KaChat Address Book export\.$/;
+  const ok = { type: "kachat-address-book", version: 1, exportedAt: iso(clock), entries: [{ address: ALICE, name: "Alice", createdAt: iso(clock), updatedAt: iso(clock) }] };
+  assert.throws(() => importAddressBookExport("not json"), NOT);
+  assert.throws(() => importAddressBookExport("[]"), NOT);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, type: "kachat-backup" })), NOT);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, type: undefined })), NOT);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: 2 })), NOT, "an unsupported version");
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: "1" })), NOT);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: undefined })), NOT);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: {} })), NOT);
+  // A chat backup carries addressBook, not an Address Book export.
+  assert.throws(() => importAddressBookExport(JSON.stringify(archiveAddressBook())), NOT);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: [] })), /: That Address Book export has no addresses\.$/);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: [{ address: "kaspa:nope", name: "X" }] })), /no addresses/);
+  assert.equal(addressBookEntries().length, 0, "nothing imported by a refused file");
+  wallet = "";
+  assert.throws(() => importAddressBookExport(JSON.stringify(ok)), /: Open a wallet first\.$/);
+  wallet = WALLET_A;
+  assert.deepEqual(importAddressBookExport(`﻿${JSON.stringify(ok)}`), { added: 1, updated: 0 }, "a byte-order mark is fine");
+});
+
+test("Nextcloud: manual exports keep their spaces in the KaChat folder", () => {
+  assert.equal(kaChatFolderFileName("KaChat Address Book 2026-10-08T18-37-50Z.json", { keepSpaces: true }), "KaChat Address Book 2026-10-08T18-37-50Z.json");
+  assert.equal(kaChatFolderFileName("Long Term 2026-10-08T18-37-50Z.csv", { keepSpaces: true }), "Long Term 2026-10-08T18-37-50Z.csv");
+  assert.equal(kaChatFolderFileName("Größe: 1/2.csv", { keepSpaces: true }), "Größe_ 1_2.csv", "letters survive; each other character becomes _");
+  assert.equal(kaChatFolderFileName("Long Term.csv"), "Long_Term.csv", "other uploads unchanged");
 });
 
 test("normalise", () => {
