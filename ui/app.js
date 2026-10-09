@@ -3474,7 +3474,7 @@ async function syncInbox({ catchUp = false } = {}) {
       // inbox re-serves a sender's old first message on every catch-up, and that brought the chat
       // straight back. A first message mined AFTER the deletion is new: it lifts the tombstone.
       if (isContactDeletedAsOf(sender, row.txid, row.blockTime)) continue;
-      if (loadDeletedContactAddresses().has(sender)) clearDeletedContactAddress(sender);
+      if (loadDeletedContactAddresses().has(sender)) reopenDeletedContactAddress(sender);
       senders.push(sender);
     }
     let added = 0;
@@ -3936,7 +3936,11 @@ function loadDeletedContactMap() {
         if (!address) continue;
         // Older shape: a bare number. Newer: { at, txIds }.
         if (value && typeof value === "object") {
-          map[String(address)] = { at: Number(value.at) || 0, txIds: Array.isArray(value.txIds) ? value.txIds.map(String) : null };
+          map[String(address)] = {
+            at: Number(value.at) || 0,
+            txIds: Array.isArray(value.txIds) ? value.txIds.map(String) : null,
+            ...(value.reopened ? { reopened: true } : {}),
+          };
         } else {
           map[String(address)] = { at: Number(value) || 0, txIds: null };
         }
@@ -3951,8 +3955,11 @@ function saveDeletedContactMap(map) {
   try { localStorage.setItem(accountScopedKey(DELETED_CONTACTS_KEY), JSON.stringify(map)); } catch {}
 }
 
+/// The addresses whose chats are deleted now. A chat reopened after its deletion (`reopened`) is
+/// live again and not listed; its entry only keeps the deletion instant as a history floor.
 function loadDeletedContactAddresses() {
-  return new Set(Object.keys(loadDeletedContactMap()));
+  const map = loadDeletedContactMap();
+  return new Set(Object.keys(map).filter((address) => !map[address].reopened));
 }
 
 /// Tombstone these addresses, stamped so later traffic can still get through.
@@ -3987,10 +3994,24 @@ function recordDeletedContactAddresses(addresses) {
   saveDeletedContactMap(map);
 }
 
+/// A deliberate add (writing to them, adding them, tipping): the tombstone AND its floor go, so the
+/// whole history may come back.
 function clearDeletedContactAddress(address) {
   const map = loadDeletedContactMap();
   if (!(String(address || "") in map)) return;
   delete map[String(address || "")];
+  saveDeletedContactMap(map);
+}
+
+/// Activity from after the deletion reopened the chat (iOS 4b00a5f clearDeletionTombstone): the
+/// tombstone lifts, but the deletion instant stays as a history floor. Re-fetching what came
+/// before brought back the old chat, our own old messages included, and those made the new
+/// request read as a chat already accepted, so it skipped Message Requests.
+function reopenDeletedContactAddress(address) {
+  const map = loadDeletedContactMap();
+  const key = String(address || "");
+  if (!(key in map) || map[key].reopened) return;
+  map[key] = { ...map[key], reopened: true };
   saveDeletedContactMap(map);
 }
 
@@ -4008,10 +4029,12 @@ function isContactDeletedAsOf(address, txId, blockTime) {
   const map = loadDeletedContactMap();
   const key = String(address || "");
   if (!(key in map)) return false;
-  const { at, txIds } = map[key];
-  if (!at) return true;
+  const { at, txIds, reopened } = map[key];
+  // A reopened chat: only what came before the deletion stays out (its floor); no time in hand
+  // is new traffic there, not a re-serve.
+  if (!at) return !reopened;
   const time = Number(blockTime || 0);
-  if (!time) return true;
+  if (!time) return !reopened;
   if (time < at) return true;
   if (time === at) {
     // Same instant as the deletion: suppress only what was already ours then. A tombstone written
@@ -5038,8 +5061,12 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     : { messages: [], nextCursor: conversationEntry.sync?.cursor || 0, note: "No KaChat indexer on this network yet." };
   let added = 0;
   let liveAdded = 0;
+  // A chat reopened after a deletion keeps what came before it deleted: its deletion instant is a
+  // floor every fetched message is held to (iOS 4b00a5f, isDeletedAsOf on every insert).
+  const belowDeletionFloor = (incoming) => isContactDeletedAsOf(contact.address, incoming?.txid, incoming?.blockTime || incoming?.createdAt);
   for (const incoming of result.messages || []) {
     if (olderThanRetention(incoming)) continue;
+    if (belowDeletionFloor(incoming)) continue;
     const hiddenKeys = new Set((conversationEntry.hiddenMessageKeys || []).map(String));
     if ((incoming.txid && hiddenKeys.has(String(incoming.txid))) || (incoming.id && hiddenKeys.has(String(incoming.id)))) continue;
     if ((conversationEntry.messages || []).some((m) => m.txid && m.txid === incoming.txid)) continue;
@@ -5072,6 +5099,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
       registerSuppressedPaymentTxIds(paymentResult.contractTxids || [], "kachat-contract");
       for (const incoming of paymentResult.messages || []) {
         if (olderThanRetention(incoming)) continue;
+        if (belowDeletionFloor(incoming)) continue;
         if (isSuppressedPaymentTxId(incoming.txid)) continue;
         if ((conversationEntry.messages || []).some((message) => message.txid && message.txid === incoming.txid)) continue;
         const message = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
@@ -5187,6 +5215,9 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
     if (isContactDeletedAsOf(request.sender, request.txid, request.blockTime)) continue;
     // A rejected (blocked) address stays blocked: its handshake is not a way back in.
     if (isChatBlocked(request.sender)) continue;
+    // Past the gate, a handshake from a deleted contact is new: the chat reopens, keeping the
+    // deletion instant as its floor (iOS 4b00a5f).
+    if (loadDeletedContactAddresses().has(request.sender)) reopenDeletedContactAddress(request.sender);
     let contact = state.contacts.find((entry) => entry.address === request.sender);
     let conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
     let wasOutgoingRequest = false;
@@ -5289,7 +5320,7 @@ async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
     // Our own old handshake to someone whose chat was deleted must not recreate it (iOS
     // isDeletedAsOf gate on every message): only one sent after the deletion reopens the chat.
     if (isContactDeletedAsOf(hs.receiver, hs.txid, hs.createdAt)) continue;
-    if (!state.contacts.some((c) => c.address === hs.receiver) && loadDeletedContactAddresses().has(hs.receiver)) clearDeletedContactAddress(hs.receiver);
+    if (!state.contacts.some((c) => c.address === hs.receiver) && loadDeletedContactAddresses().has(hs.receiver)) reopenDeletedContactAddress(hs.receiver);
     let contact = state.contacts.find((c) => c.address === hs.receiver);
     let conversationEntry = contact ? state.conversations.find((c) => c.contactId === contact.id) : null;
     if (!contact) {
@@ -10433,7 +10464,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 127;
+const APP_BUILD = 128;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -18207,6 +18238,18 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
   recordDeletedContactAddresses(
     state.contacts.filter((contact) => contactIdsToDelete.has(contact.id)).map((contact) => contact.address),
   );
+  // A deleted chat is no longer one you accepted (or made Private): if they start a new one, it is
+  // a Message Request like any stranger's. A block stays (iOS 4b00a5f forgetChatAcceptance).
+  {
+    const s = chatRequestState();
+    let changed = false;
+    for (const contact of state.contacts.filter((entry) => contactIdsToDelete.has(entry.id))) {
+      const key = String(contact.address || "").toLowerCase();
+      if (s.accepted.delete(key)) changed = true;
+      if (s.privateChats.delete(key)) changed = true;
+    }
+    if (changed) saveChatRequestState(s);
+  }
   state.conversations = state.conversations.filter((entry) => !idsToDelete.has(entry.id));
   state.contacts = state.contacts.filter((contact) => !contactIdsToDelete.has(contact.id));
   if (activeConversationId && idsToDelete.has(activeConversationId)) setActiveConversationId(null);
@@ -21427,6 +21470,9 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       // an eternal "waiting" message that no delivery can ever resolve.
       if (isPhantomArchiveMessage(archiveMessage)) continue;
       const txid = String(archiveMessage?.txId || "").trim();
+      // A chat reopened after a deletion keeps what came before it deleted, from a backup too
+      // (iOS 4b00a5f).
+      if (isContactDeletedAsOf(contactAddress, txid, phoneArchiveTimestampMs(archiveMessage))) continue;
       const id = String(archiveMessage?.id || "").trim() || nowId();
       if (txid && (knownTxids.has(txid) || hidden.has(txid))) continue;
       if (knownIds.has(id) || hidden.has(id)) continue;
