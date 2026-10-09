@@ -10467,7 +10467,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 130;
+const APP_BUILD = 131;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -12958,7 +12958,7 @@ function updateLocalStorageUsedLabel() {
     bytes += key.length + (localStorage.getItem(key) || "").length;
   }
   const kb = bytes / 1024;
-  label.textContent = kb < 1024 ? `${kb.toFixed(1)} KB` : `${(kb / 1024).toFixed(2)} MB`;
+  label.textContent = kb < 1000 ? `${kb.toFixed(1)} KB` : `${(kb / 1024).toFixed(2)} MB`;
 }
 
 // Single source of truth for every green/orange/red connection dot in the

@@ -967,7 +967,7 @@ export function pickManyFromAddressBook({ preselected = [], excluding = [] } = {
 function formatBytes(bytes) {
   try { if (deps?.formatBytes) return deps.formatBytes(bytes); } catch { /* fall through */ }
   const kb = bytes / 1024;
-  return kb < 1024 ? `${kb.toFixed(1)} KB` : `${(kb / 1024).toFixed(1)} MB`;
+  return kb < 1000 ? `${kb.toFixed(1)} KB` : `${(kb / 1024).toFixed(1)} MB`;
 }
 
 /** The row's size and whether Remove shows (every wallet on this device). */

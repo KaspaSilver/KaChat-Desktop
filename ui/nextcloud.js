@@ -1579,7 +1579,7 @@ async function refreshBackupStatusLine() {
   if (restoreBtn) restoreBtn.disabled = !info || restore.phase === "running";
   if (!info) { current.textContent = "No backup on this server yet."; return; }
   const when = info.modified ? info.modified.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "unknown time";
-  const size = info.size ? ` · ${(info.size / 1024).toFixed(1)} KB` : "";
+  const size = info.size ? ` · ${formatFileSize(info.size)}` : "";
   current.textContent = `Last backup: ${when}${size}`;
 }
 
@@ -1707,10 +1707,14 @@ function renderPicker() {
     ${pickerLoading ? '<p class="nc-empty">Loading…</p>' : ""}`;
 }
 
+/** A size people read at a glance: KB up to 1000 KB, then MB (never "42566.1 KB"). */
 function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} bytes`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} bytes`;
+  const kb = n / 1024;
+  if (kb < 1000) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return mb < 1000 ? `${mb.toFixed(1)} MB` : `${(mb / 1024).toFixed(2)} GB`;
 }
 
 function fileRowIcon(file) {
