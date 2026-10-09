@@ -197,7 +197,11 @@ function listedChannels() {
  *  the room was last opened), latest activity (for the row's order), and the half sheet's state. */
 export function chatCircleRooms() {
   if (!deps) return [];
-  return listedChannels().map((name) => ({
+  // Every curated language room whose toggle (Settings > Public Chats) is on shows as a circle,
+  // joined or not: the old "Other Languages" list is gone, so this is where they are opened (opening
+  // one joins it). Unopened ones have no bell, so the closed-room sweep never polls them.
+  const languages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => curatedShown(name) && !isServiceBroadcastChannel(name));
+  return [...new Set([...listedChannels(), ...languages])].map((name) => ({
     name,
     unread: unreadFor(name),
     lastAt: Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0),
