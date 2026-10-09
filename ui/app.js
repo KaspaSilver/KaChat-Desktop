@@ -4280,13 +4280,18 @@ function syncLabel(conversationEntry) {
 }
 
 function lastMessageFor(conversationEntry) {
-  const messages = conversationEntry.messages || [];
+  const messages = conversationEntry?.messages || [];
   // The chat list previews the newest REAL message — cross-device placeholders are
   // hidden everywhere (see renderMessages), so they must not claim the preview either.
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.text !== "📤 Sent via another device") return messages[i];
+  // Newest by time, not by position (iOS newestRealMessage: the maximum timestamp, first among
+  // equals): a message merged in late can sit out of order until the next sort.
+  let newest = null;
+  for (const message of messages) {
+    if (!message || message.text === "📤 Sent via another device") continue;
+    if (newest && Number(message.createdAt || 0) <= Number(newest.createdAt || 0)) continue;
+    newest = message;
   }
-  return null;
+  return newest;
 }
 
 function statusLabel(status) {
@@ -4652,14 +4657,13 @@ function conversationPreview(conversationEntry) {
 // Effective recency for chat-list ordering: the newest of the stored lastActivityAt and the
 // actual last message's timestamp, so a chat always sorts by its most recent activity even if
 // lastActivityAt drifted (e.g. a synced message that never bumped it).
+// The chat list's order, as iOS sorts it (ChatListView, Conversation.lastMessage): the time of the
+// newest real message, newest first. Nothing else moves a chat. The bookkeeping times
+// (updatedAt, lastActivityAt) were in here too and get set to "now" by things that aren't
+// messages - deleting messages, the retention sweep, a contact turning established, a rename - so
+// a quiet chat could jump above one with a newer message.
 function conversationRecency(conversationEntry) {
-  const last = lastMessageFor(conversationEntry);
-  return Math.max(
-    Number(conversationEntry?.lastActivityAt || 0),
-    Number(last?.createdAt || 0),
-    Number(conversationEntry?.updatedAt || 0),
-    Number(conversationEntry?.createdAt || 0),
-  );
+  return Number(lastMessageFor(conversationEntry)?.createdAt || 0);
 }
 
 /** The chat with your own address: notes to yourself, synced across your devices. */
@@ -4668,12 +4672,14 @@ function isSelfConversation(conversationEntry) {
   return Boolean(address) && Boolean(engine.address) && address === engine.address;
 }
 function sortedConversations() {
-  // Your own chat sits at the very top at all times; pinned chats follow, then by recency.
+  // Your own chat sits at the very top at all times (iOS pinningSelfChat); every other chat by its
+  // newest message. iOS has no pinned 1:1 chats, so an old `pinned` flag no longer outranks a
+  // newer message. Chats with no messages yet go last, newest-created first.
   return [...state.conversations]
     .filter((conversationEntry) => !conversationEntry.archived)
     .sort((a, b) => Number(isSelfConversation(b)) - Number(isSelfConversation(a))
-      || Number(b.pinned) - Number(a.pinned)
-      || conversationRecency(b) - conversationRecency(a));
+      || conversationRecency(b) - conversationRecency(a)
+      || Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
 // While Node Connection is scanning, the latest log line is mirrored under its button.
@@ -10286,7 +10292,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 121;
+const APP_BUILD = 122;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
