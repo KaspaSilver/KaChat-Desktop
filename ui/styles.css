@@ -11255,6 +11255,12 @@ button.chess-t-row { cursor: pointer; }
 .account-overlay-card { background: var(--sheet-bg); border: .5px solid var(--line); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
 :root[data-theme="light"] .account-overlay-card { background: var(--bg-grouped); }
 .account-overlay-header { border-bottom: .5px solid var(--line); padding: 12px 16px; }
+/* On a phone these overlays are full screen: keep their bar below the status bar. This rule comes
+   after the 620px block, so without it Close / Cancel sat under the clock, where an iPhone
+   home-screen app can't be tapped. */
+@media (max-width: 620px) {
+  .account-overlay:not(.over-logged-out) .account-overlay-header { padding-top: calc(12px + var(--safe-top)); }
+}
 .account-overlay-body { padding: 8px 16px 32px; }
 .manage-address-card { background: var(--bg-plain); border: .5px solid var(--line); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
 

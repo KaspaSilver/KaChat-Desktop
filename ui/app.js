@@ -10286,7 +10286,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 120;
+const APP_BUILD = 121;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14526,7 +14526,11 @@ function renderChats() {
   // Keep one stable in-memory state object during the session. Browser storage is
   // for startup/recovery only; reloading it here used to replace live conversation
   // references and make message history disappear until another mutation rerendered it.
-  if (!isWideLayout) setActiveConversationId(null);
+  // Drawing the list never navigates. It used to close the open chat on a phone, so every refresh
+  // behind an open thread (a reaction or edit arriving, the first-open history rescan, a sent
+  // reaction) dropped you back to the list. Back closes a chat; one that no longer exists
+  // (deleted, cleared, another account's state) closes here.
+  if (activeConversationId && !state.conversations.some((entry) => entry.id === activeConversationId)) setActiveConversationId(null);
   // One list (iOS a062577): the group chats and public rooms are the circles above the chats.
   renderChatCircles();
   setChatToolRowsForGroupsTab(false);
@@ -15231,7 +15235,9 @@ function openConversation(conversationId) {
     composer.elements.message.value = conversationEntry.draft;
     autoGrowComposer();
   }
-  window.setTimeout(() => composer.elements.message?.focus(), 0);
+  // Ready to type on a computer. On a phone the keyboard waits for a tap on the field, as in the
+  // iOS app: focusing here raised it over the thread on every open.
+  if (!isTouchDevice()) window.setTimeout(() => composer.elements.message?.focus(), 0);
 
   // Fresh-address payment pools: the lazy once-per-contact offer, the pool-of-2
   // replenish re-check (retries a top-up whose send failed when a reservation got
@@ -18068,8 +18074,8 @@ onContextGesture(chatList, async (event) => {
 });
 
 document.querySelector("[data-back-to-chats]").addEventListener("click", () => {
-  if (isWideLayout) setActiveConversationId(null);
-  else renderChats();
+  setActiveConversationId(null);
+  if (!isWideLayout) renderChats();
 });
 
 copyContactAddressButtons.forEach((button) => {
@@ -26585,7 +26591,8 @@ function openGroupChat(groupId) {
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
     if (groupComposerInput) { groupComposerInput.value = readDraft(`group:${groupId}`); autoGrowGroupComposer(); }
   } catch { /* composer wiring not ready during boot */ }
-  window.setTimeout(() => groupComposerInput?.focus(), 0);
+  // As in a 1:1: no keyboard on open on a phone, only a tap on the field raises it.
+  if (!isTouchDevice()) window.setTimeout(() => groupComposerInput?.focus(), 0);
   renderGroupList();
 }
 function closeGroupChat() {
