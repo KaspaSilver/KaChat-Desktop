@@ -673,11 +673,19 @@ function publicRoomCardHtml() {
   else if (busyElsewhere) cta = `<button class="secondary-button chess-t-cta" type="button" data-chess-t-resume="${esc(mine.id)}">${T.tournamentStatus(mine) === "open" ? "You're waiting in" : "You're playing in"} ${esc(mine.name)}</button>`;
   else cta = `<button class="${historyReady ? "primary-button" : "secondary-button"} chess-t-cta" type="button" data-chess-t-join-public ${busy || !historyReady ? "disabled" : ""}>${busy ? "Joining…" : historyReady ? joinLabel() : "Loading rooms…"}</button>`;
   const seats = Array.from({ length: capacity }, (_, i) => `<span class="chess-t-seat${i < count ? " taken" : ""}"></span>`).join("");
+  // Before the arena's history has loaded (a first visit on this device has no cache), every room
+  // looks empty and the lowest open one is #1 - a number that is wrong the moment history lands.
+  // Say it is still being found instead of showing it.
+  const kind = duel ? "Public 1v1" : "Public tournament";
+  const findingRoom = !historyReady && !room;
+  const roomTitleHtml = findingRoom
+    ? `<strong>${kind}</strong><small>Finding the current room…</small>`
+    : `<strong>${kind} #${number}</strong><small>${count} of ${capacity} players waiting</small>`;
   return `
     <div class="chess-t-card">
       <div class="chess-t-card-top">
         <span class="chess-t-row-icon">${duel ? ICON_TWO : ICON_PEOPLE}</span>
-        <span class="chess-t-row-main"><strong>${duel ? `Public 1v1 #${number}` : `Public tournament #${number}`}</strong><small>${count} of ${capacity} players waiting</small></span>
+        <span class="chess-t-row-main">${roomTitleHtml}</span>
       </div>
       <div class="chess-t-seats">${seats}</div>
       ${cta}

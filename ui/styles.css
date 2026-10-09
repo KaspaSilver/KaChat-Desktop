@@ -10282,6 +10282,10 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-header .kaposts-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chess-t-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 var(--dock-inset, 124px); }
 .chess-t-body .screen-kicker { margin: 12px 0 2px; }
+/* The body scrolls; its sections never shrink. A grouped list has overflow: hidden (for its
+   rounded corners), which lets a flex column squash it to a sliver on a short screen: the Private
+   list showed as a thin bar with its rows cut off. */
+.chess-t-body > * { flex-shrink: 0; }
 .chess-t-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border-radius: 16px; background: var(--surface-1, rgba(255,255,255,.04)); border: 1px solid var(--card-border, rgba(255,255,255,.08)); }
 .chess-t-card-top { display: flex; align-items: center; gap: 12px; }
 .chess-t-seats { display: flex; gap: 6px; }
