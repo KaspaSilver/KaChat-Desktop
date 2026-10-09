@@ -40,7 +40,7 @@ import {
   SEND_ICONS, feeControlsHtml, feeControls, sendActionButtonHtml, createSendActionButton, infoPillHtml,
   otherDomainsHtml, pickOtherDomain,
 } from "./send-kaspa-components.js";
-import { looksLikeName } from "../engine/name-services.js";
+import { looksLikeName, notFoundMessage } from "../engine/name-services.js";
 import { pickFromAddressBook } from "./address-book.js";
 import { sompiFromUserText, sanitizeAmountInput } from "../engine/amounts.js";
 import { addressBookEntry } from "./address-book-store.js";
@@ -2108,7 +2108,7 @@ function openTransferSheet(info, owner) {
       if (resolution) {
         if (!use({ address: resolution.ownerAddress, name: resolution.domain, tld: resolution.tld })) resolveError = "That name's address can't own a .kachat name.";
       } else {
-        resolveError = "No domain found by that name.";
+        resolveError = notFoundMessage(t, nameResolutions);
       }
     } catch {
       if (mySeq !== seq) return;

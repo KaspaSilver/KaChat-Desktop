@@ -32,7 +32,7 @@ import {
 import { validateMainnetAddress } from "../engine/utils.js";
 import { ADDRESS_PREFIX, ADDRESS_HRP, KAS_UNIT } from "../engine/network.js";
 import { resolveDomain } from "../engine/kns.js";
-import { looksLikeName, resolveEverywhere, primary as primaryName } from "../engine/name-services.js";
+import { looksLikeName, resolveEverywhere, primary as primaryName, notFoundMessage } from "../engine/name-services.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { otherDomainsHtml, pickOtherDomain } from "./send-kaspa-components.js";
 import { saveFile } from "./save-file.js";
@@ -2153,7 +2153,7 @@ function syncImportModal() {
     showCard(addressImport.resolvedAddress, addressImport.resolvedDomain);
     return;
   }
-  if (addressImport.notFound) { status.textContent = "No domain found"; return; }
+  if (addressImport.notFound) { status.textContent = notFoundMessage(input, addressImport.nameResolutions || []); return; }
   if (looksLikeRawAddress(input)) {
     const valid = isValidRawAddress(input);
     status.textContent = valid ? "Valid address" : "Invalid address format";

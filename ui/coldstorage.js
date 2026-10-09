@@ -1320,7 +1320,7 @@ function handleSendRecipientInput(raw) {
           send.resolvedDomain = resolution.domain;
           send.selectedTld = resolution.tld || null;
         } else {
-          send.knsError = nameNotFoundText(trimmed);
+          send.knsError = nameNotFoundText(trimmed, results);
         }
       } catch {
         if (!send || token !== sendResolveToken) return;

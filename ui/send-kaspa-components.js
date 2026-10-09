@@ -23,7 +23,7 @@
 import { otherNetworkReason } from "../engine/network.js";
 
 import { sanitizeAmountInput } from "../engine/amounts.js";
-import { splitTypedName } from "../engine/name-services.js";
+import { splitTypedName, notFoundMessage } from "../engine/name-services.js";
 
 const KNOB_INSET = 4;
 
@@ -128,11 +128,12 @@ export function otherDomainMissingText(resolution) {
   return resolution?.state === "failed" ? "Couldn't check" : "Not registered";
 }
 
-/** The error for a typed name nothing answered: "No .kas domain found" when an ending was typed,
- *  else "No domain found" (iOS 6ac48a7). */
-export function nameNotFoundText(typed) {
-  const tld = splitTypedName(String(typed || "")).tld;
-  return tld ? `No .${tld} domain found` : "No domain found";
+/** The one not-found message every address field shows (iOS 5a5122d notFoundMessage): "No .kas
+ *  domain found" for a typed ending, else the .kachat one - "No .kachat domain found", or
+ *  ".kachat names aren't live on this network yet" where its registry isn't. `results` are the
+ *  lookup's answers when the caller has them. */
+export function nameNotFoundText(typed, results = []) {
+  return notFoundMessage(String(typed || ""), results);
 }
 
 /** The dropdown's markup: every answer but the one in use (`selectedTld`), or "" when there is

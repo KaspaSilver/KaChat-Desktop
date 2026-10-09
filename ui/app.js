@@ -8664,7 +8664,7 @@ function updateKnsTransferRecipient() {
       if (resolution?.ownerAddress) {
         useKnsTransferResolution(resolution.ownerAddress, resolution.domain || raw, resolution.tld);
       } else {
-        renderKnsTransferResolution(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`
+        renderKnsTransferResolution(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw, knsTransferName.results))}</span>`
           + otherDomainsHtml({ resolutions: knsTransferName.results }));
       }
     } catch {
@@ -10424,7 +10424,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 125;
+const APP_BUILD = 126;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10743,7 +10743,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
         if (resolution) {
           useResolution(resolution);
         } else {
-          setRecipientStatus({ input: raw, error: nameNotFoundText(raw), nameResolutions: nameResults });
+          setRecipientStatus({ input: raw, error: nameNotFoundText(raw, nameResults), nameResolutions: nameResults });
           renderOtherDomains(true);
         }
       } catch {
@@ -14265,7 +14265,7 @@ function updateCreateChatAddState() {
           renderCreateChatPicker();
         } else {
           // Nothing for the ending typed, but another service may have it (Other domains opens).
-          renderCreateChatStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`
+          renderCreateChatStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw, createChatNameResults))}</span>`
             + otherDomainsHtml({ resolutions: createChatNameResults }));
         }
       } catch {
@@ -27974,7 +27974,7 @@ function updateGroupAddressState() {
           useGroupAddressResolution(resolution.ownerAddress, resolution.domain || raw, resolution.tld);
           return;
         }
-        setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`
+        setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw, groupAddressNameResults))}</span>`
           + otherDomainsHtml({ resolutions: groupAddressNameResults }));
         renderGroupAddressPreview();
       } catch {

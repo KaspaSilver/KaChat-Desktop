@@ -543,7 +543,7 @@ function resolveEditorName(input) {
     s.nameResolutions = results || [];
     s.resolving = false;
     if (resolution?.ownerAddress) selectEditorResolution({ address: resolution.ownerAddress, name: resolution.domain, tld: resolution.tld });
-    else s.lookupError = nameNotFoundText(typed);
+    else s.lookupError = nameNotFoundText(typed, results);
     renderEditorResolution();
     refreshEditorChrome();
   }, 300);

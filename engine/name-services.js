@@ -524,17 +524,33 @@ export async function resolveEverywhere(input, { resolveKas, resolveKachat, netw
 }
 
 /**
- * The answer a typed name gets: the service the person named if they typed an ending (and only
- * if that one resolved), else the first in RESOLUTION_ORDER that resolves.
+ * The answer a typed name gets: the service the person named if they typed an ending, else
+ * .kachat - and only .kachat (iOS 5a5122d). A bare name never falls through to another service on
+ * its own (on mainnet "testing" became testing.kas while .kachat isn't live there): what it is on
+ * .kas, .k or .kaspa waits under "Other domains" for the person to pick.
  * @param {NameResolution[]} results From resolveEverywhere.
  * @param {string} typedInput The same typed input.
  * @returns {NameResolution|null}
  */
 export function primary(results, typedInput) {
   const list = Array.isArray(results) ? results : [];
-  const explicit = splitTypedName(typedInput).tld;
-  if (explicit) return list.find((r) => r.tld === explicit && r.address != null) ?? null;
-  return list.find((r) => r.address != null) ?? null;
+  const wanted = splitTypedName(typedInput).tld || "kachat";
+  return list.find((r) => r.tld === wanted && r.address != null) ?? null;
+}
+
+/**
+ * Why a typed name has no answer (iOS NameServicesClient.notFoundMessage, 5a5122d): the ending
+ * typed found nothing, or - a bare name - there is no such .kachat name, or no .kachat registry on
+ * this network yet.
+ * @param {string} typedInput What was typed.
+ * @param {NameResolution[]} [results] resolveEverywhere's answers, when there are any.
+ */
+export function notFoundMessage(typedInput, results = []) {
+  const wanted = splitTypedName(typedInput).tld || "kachat";
+  const kachatNotLive = (Array.isArray(results) && results.some((r) => r?.tld === "kachat" && r.state === "notLive"))
+    || !SERVICE_TABLE.kachat.isLive;
+  if (wanted === "kachat" && kachatNotLive) return ".kachat names aren't live on this network yet";
+  return `No .${wanted} domain found`;
 }
 
 function entry(tld, canonical, address, failed) {

@@ -389,6 +389,17 @@ function loadState({ caches = true } = {}) {
     try {
       messageCache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") || {};
     } catch { messageCache = {}; }
+    // One row per message id (iOS d0b819f): a cache written while a send's own row and the
+    // chain's copy raced could hold the same txid twice. The first copy stays.
+    for (const channel of Object.keys(messageCache)) {
+      const ids = new Set();
+      messageCache[channel] = (Array.isArray(messageCache[channel]) ? messageCache[channel] : []).filter((m) => {
+        if (!m?.txId) return false;
+        if (ids.has(m.txId)) return false;
+        ids.add(m.txId);
+        return true;
+      });
+    }
     try {
       reactionsCache = JSON.parse(localStorage.getItem(REACTIONS_KEY) || "{}") || {};
     } catch { reactionsCache = {}; }
@@ -920,8 +931,13 @@ async function sendBroadcastText(channel, text, { showBubble = true, feeKas = nu
   try {
     const txid = await enqueueBroadcastSend(() => sendBroadcastMessage({ engine: deps.engine, channel, content: text, feeKas: feeKas || "0" }));
     if (showBubble) {
-      messageCache[channel] = (messageCache[channel] || []).map((m) =>
-        m.txId === pendingId ? { ...m, txId: txid, status: undefined } : m);
+      const list = messageCache[channel] || [];
+      // The chain's copy can already be in the room (a block scan faster than this answer, with
+      // the pending bubble not matched): then the bubble goes, so the id is never listed twice
+      // (iOS d0b819f, one row per message id).
+      messageCache[channel] = list.some((m) => m.txId === txid)
+        ? list.filter((m) => m.txId !== pendingId)
+        : list.map((m) => (m.txId === pendingId ? { ...m, txId: txid, status: undefined } : m));
       saveCache();
     }
     return txid;
