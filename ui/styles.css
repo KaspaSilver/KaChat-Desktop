@@ -9677,6 +9677,8 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .kns-domain-card.static { cursor: default; }
 .kns-domain-card .kns-domain-primary { position: absolute; top: 10px; right: 10px; padding: 3px 8px; border-radius: 999px; background: rgba(0,0,0,.35); color: #fff; font-size: 11px; font-weight: 700; }
+/* Your Domains > .kachat: when the name expires, bottom right (iOS 72b7dc7). */
+.kns-domain-card .kns-domain-footnote { position: absolute; right: 14px; bottom: 10px; font-size: 11px; font-weight: 600; color: rgba(0,0,0,.65); white-space: nowrap; }
 .profile-domain-detail { display: grid; gap: 14px; }
 .profile-domain-detail-rows { display: grid; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-1); overflow: hidden; }
 .profile-domain-detail-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); font-size: 14px; }

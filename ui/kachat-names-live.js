@@ -3144,11 +3144,23 @@ function domainBadge(n) {
   }
 }
 
-function domainCardsHtml(names) {
+/** The card's bottom-right corner in Your Domains (iOS 72b7dc7 KachatLiveDomainsTab.expiryLine):
+ *  when the name expires - or, once it has, when its grace period ends (renew before then). */
+function domainExpiryLine(n) {
+  const grace = graceMs();
+  switch (n.status(grace)) {
+    case Status.active: return `Expires ${dayText(n.expiresAt)}`;
+    case Status.grace: return `Grace ends ${dayText(BigInt(n.expiresAt) + BigInt(grace))}`;
+    default: return "";
+  }
+}
+
+function domainCardsHtml(names, { footnote = false } = {}) {
   return names.map((n) => {
     rememberName(n);
     const b = domainBadge(n);
-    return `<button type="button" class="kns-domain-card" data-kl-domain-open="${esc(n.name)}">${esc(n.display)}${b ? `<span class="kns-domain-primary">${esc(b)}</span>` : ""}</button>`;
+    const foot = footnote ? domainExpiryLine(n) : "";
+    return `<button type="button" class="kns-domain-card" data-kl-domain-open="${esc(n.name)}">${esc(n.display)}${b ? `<span class="kns-domain-primary">${esc(b)}</span>` : ""}${foot ? `<span class="kns-domain-footnote">${esc(foot)}</span>` : ""}</button>`;
   }).join("");
 }
 
@@ -3265,7 +3277,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   }
   const shown = domainsShown.get(address);
   containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}">${shown?.length
-    ? domainCardsHtml(shown)
+    ? domainCardsHtml(shown, { footnote: variant === "domains" })
     : `<div class="kl-domains-loading">${spinner()}</div>`}</div>`;
   if (!containerEl.dataset.klDomainsBound) {
     containerEl.dataset.klDomainsBound = "1";
@@ -3291,7 +3303,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   let shownNames = shown ?? [];
   let shownOffers = [];
   const paint = (root) => {
-    const cards = shownNames.length ? domainCardsHtml(shownNames) : domainsEmptyHtml(variant);
+    const cards = shownNames.length ? domainCardsHtml(shownNames, { footnote: variant === "domains" }) : domainsEmptyHtml(variant);
     // The offers this wallet made, under its names (iOS 0765ce0: moved here from the
     // marketplace's former My Names tab), as square tiles with the name (iOS 7f50e84); each opens
     // its half sheet - Withdraw, and Refund once expired.
