@@ -18,6 +18,7 @@ import { otherNetworkReason } from "../engine/network.js";
 import { onContextGesture } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
+import { otherDomainsHtml, pickOtherDomain, nameNotFoundText } from "./send-kaspa-components.js";
 
 const svg = (body, extra = "") => `<svg viewBox="0 0 24 24" aria-hidden="true"${extra}>${body}</svg>`;
 const BOOK_PATH = '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/>';
@@ -475,8 +476,10 @@ function runImport(text) {
 
 let editorEl = null;
 /** { address: fixed address or null, addressInput, name, note, pendingPhoto (undefined keep |
- *  string new | null removed), error, resolve } */
+ *  string new | null removed), error, resolve, and for a typed domain (iOS 6ac48a7):
+ *  resolvedAddress, resolvedName, nameResolutions, selectedTld, resolving, lookupError } */
 let editorState = null;
+let editorResolveToken = 0;
 
 function ensureEditor() {
   if (editorEl) return editorEl;
@@ -494,9 +497,70 @@ function ensureEditor() {
   return editorEl;
 }
 
+/** The address being saved: the one this editor was opened for, else what the typed domain
+ *  resolved to, else what was typed (iOS 6ac48a7 enteredAddress). */
 function editorEffectiveAddress() {
   if (!editorState) return "";
-  return normalizeAddressBookAddress(editorState.address ?? editorState.addressInput);
+  return normalizeAddressBookAddress(editorState.address ?? editorState.resolvedAddress ?? editorState.addressInput);
+}
+
+// The Address Book editor takes a domain too (iOS 6ac48a7): a typed name resolves on every
+// service, .kachat first, with Other domains under the resolved name; the entry saves the address.
+function editorResolutionHtml() {
+  const s = editorState;
+  if (!s || s.address) return "";
+  if (s.resolving) return '<span class="create-chat-status-muted">Looking up domain…</span>';
+  const others = otherDomainsHtml({ resolutions: s.nameResolutions || [], selectedTld: s.selectedTld ?? null });
+  if (s.resolvedAddress) {
+    return `<span class="create-chat-status-good">✓ Resolved: ${esc(s.resolvedName || "")}</span>`
+      + `<span class="create-chat-status-mono">${esc(s.resolvedAddress)}</span>${others}`;
+  }
+  if (s.lookupError) return `<span class="create-chat-status-bad">✕ ${esc(s.lookupError)}</span>${others}`;
+  return "";
+}
+function renderEditorResolution() {
+  const host = editorEl?.querySelector("[data-ab-editor-resolution]");
+  if (!host) return;
+  const html = editorResolutionHtml();
+  host.innerHTML = html;
+  host.hidden = !html;
+}
+function resolveEditorName(input) {
+  const s = editorState;
+  if (!s || s.address) return;
+  const typed = String(input || "").trim();
+  const token = ++editorResolveToken;
+  Object.assign(s, { resolvedAddress: null, resolvedName: null, nameResolutions: [], selectedTld: null, lookupError: null, resolving: false });
+  if (!typed || !deps?.looksLikeName?.(typed) || typeof deps?.lookUpName !== "function") { renderEditorResolution(); return; }
+  s.resolving = true;
+  renderEditorResolution();
+  window.setTimeout(async () => {
+    if (token !== editorResolveToken || editorState !== s) return;
+    let results = [];
+    let resolution = null;
+    try { ({ results, resolution } = await deps.lookUpName(typed)); } catch { results = []; resolution = null; }
+    if (token !== editorResolveToken || editorState !== s) return;
+    s.nameResolutions = results || [];
+    s.resolving = false;
+    if (resolution?.ownerAddress) selectEditorResolution({ address: resolution.ownerAddress, name: resolution.domain, tld: resolution.tld });
+    else s.lookupError = nameNotFoundText(typed);
+    renderEditorResolution();
+    refreshEditorChrome();
+  }, 300);
+}
+function selectEditorResolution({ address, name, tld }) {
+  const s = editorState;
+  if (!s || !address) return;
+  s.resolvedAddress = address;
+  s.resolvedName = name || null;
+  s.selectedTld = tld || null;
+  s.lookupError = null;
+  // the name they're known by, unless one was typed already
+  if (!String(s.name || "").trim() && name) {
+    s.name = name;
+    const field = editorEl?.querySelector("[data-ab-editor-name]");
+    if (field) field.value = name;
+  }
 }
 
 function editorShowsAssignedPhoto() {
@@ -546,12 +610,13 @@ function renderEditor() {
       ${s.address
         ? `<p class="ab-address-mono ab-address-fixed">${esc(s.address)}</p>`
         : `<div class="create-chat-address-card">
-            <textarea class="create-chat-address-input ab-address-input" rows="2" data-ab-editor-address placeholder="kaspa:qr..." autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Address">${esc(s.addressInput)}</textarea>
+            <textarea class="create-chat-address-input ab-address-input" rows="2" data-ab-editor-address placeholder="kaspa:qr... or domain" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Address or domain">${esc(s.addressInput)}</textarea>
             <div class="create-chat-tools ab-address-tools">
               <button type="button" class="create-chat-tool" data-ab-editor-paste><span class="create-chat-tool-icon" aria-hidden="true">${ICONS.paste}</span><span>Paste</span></button>
               <button type="button" class="create-chat-tool" data-ab-editor-scan><span class="create-chat-tool-icon" aria-hidden="true">${ICONS.scan}</span><span>Scan QR</span></button>
             </div>
-          </div>`}
+          </div>
+          <div class="create-chat-status" data-ab-editor-resolution ${editorResolutionHtml() ? "" : "hidden"}>${editorResolutionHtml()}</div>`}
     </section>
     <section class="create-chat-section">
       <textarea class="create-chat-name-input ab-note-input" rows="2" data-ab-editor-note placeholder="Note (optional)" aria-label="Note (optional)">${esc(s.note)}</textarea>
@@ -576,7 +641,7 @@ function onEditorInput(event) {
   const t = event.target;
   if (t.matches("[data-ab-editor-name]")) editorState.name = t.value;
   else if (t.matches("[data-ab-editor-note]")) editorState.note = t.value;
-  else if (t.matches("[data-ab-editor-address]")) editorState.addressInput = t.value;
+  else if (t.matches("[data-ab-editor-address]")) { editorState.addressInput = t.value; resolveEditorName(t.value); }
   else return;
   refreshEditorChrome();
 }
@@ -586,6 +651,7 @@ function setEditorAddressInput(value) {
   editorState.addressInput = String(value || "").trim();
   const field = editorEl?.querySelector("[data-ab-editor-address]");
   if (field) field.value = editorState.addressInput;
+  resolveEditorName(editorState.addressInput);
   // The title, Remove and photo buttons follow whether that address is already saved.
   const existing = addressBookEntry(editorEffectiveAddress());
   if (existing && !String(editorState.name || "").trim()) { editorState.name = existing.name; editorState.note = existing.note; }
@@ -596,6 +662,14 @@ async function onEditorClick(event) {
   const target = event.target instanceof Element ? event.target : null;
   if (!target || !editorState) return;
   if (target.closest("[data-ab-editor-cancel]")) { closeEditor(null); return; }
+  // A pick under Other domains saves that service's address instead (iOS 6ac48a7).
+  const otherDomain = pickOtherDomain(event, editorState.nameResolutions);
+  if (otherDomain) {
+    selectEditorResolution({ address: otherDomain.address, name: otherDomain.name, tld: otherDomain.tld });
+    renderEditorResolution();
+    refreshEditorChrome();
+    return;
+  }
   if (target.closest("[data-ab-photo-choose]")) { editorEl.querySelector("[data-ab-photo-input]")?.click(); return; }
   if (target.closest("[data-ab-photo-remove]")) { editorState.pendingPhoto = null; renderEditor(); return; }
   if (target.closest("[data-ab-editor-paste]")) {
@@ -717,7 +791,14 @@ export function openAddressBookEditor({ address = null, suggestedName = "" } = {
       pendingPhoto: undefined,
       error: null,
       resolve,
+      resolvedAddress: null,
+      resolvedName: null,
+      nameResolutions: [],
+      selectedTld: null,
+      resolving: false,
+      lookupError: null,
     };
+    editorResolveToken += 1;
     renderEditor();
     editorEl.hidden = false;
     window.setTimeout(() => {

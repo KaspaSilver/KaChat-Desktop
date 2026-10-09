@@ -85,6 +85,13 @@ export function initKachatNamesRuntime(engine, { wallet = null, onSubmitted = nu
       await registry.refreshIfStale();
       return (await registry.namesOf(key, { includeInactive: true })).length > 0;
     },
+    // The names an address holds (active or in grace), for the chatting-address scan (iOS 6ac48a7).
+    held: async (address) => {
+      const key = KachatNamesRegistry.keyOf(address);
+      if (!key) return [];
+      await registry.refreshIfStale();
+      return (await registry.heldNames(key)).map((n) => n.name);
+    },
   });
   runtime = { engine, service, registry, actions };
   return runtime;

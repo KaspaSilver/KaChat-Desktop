@@ -1310,7 +1310,7 @@ function openBroadcastSenderMenu(address, x, y) {
   const mine = address === deps.engine.address;
   // iOS BroadcastChannelView's sender sheet: a header naming the sender and their address, then
   // one row per option saying what it does.
-  const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and shared media." }];
+  const options = [{ id: "profile", title: "View Profile", subtitle: "Their profile, .kachat name and address." }];
   if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this sender." });
   options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {

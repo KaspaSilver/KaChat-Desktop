@@ -712,6 +712,9 @@
             </button>
           </div>
 
+          <!-- One of your .kachat names expired and is in its grace period: renew it in time (iOS 6ac48a7). -->
+          <div class="kachat-expired-banner" data-kachat-expired-banner hidden></div>
+
           <!-- The account name right under the title, renamed in place with the pencil (iOS accountNameRow). -->
           <div class="profile-account-row">
             <strong class="profile-account-name" data-profile-account-name-text>Current Account</strong>
@@ -836,7 +839,7 @@
             <div class="profile-about-row"><strong>Version</strong><span data-profile-version>--</span></div>
             <a class="profile-about-row profile-about-link" href="https://linktr.ee/Kachat_" target="_blank" rel="noopener"><strong>Website</strong><span>linktr.ee/Kachat_</span></a>
             <a class="profile-about-row profile-about-link" href="mailto:kaspasilver@gmail.com"><strong>Support Email</strong><span>kaspasilver@gmail.com</span></a>
-            <button class="profile-about-row profile-about-link" type="button" data-profile-donate><strong>Donate</strong><span data-profile-donate-label>kachat.kas</span></button>
+            <button class="profile-about-row profile-about-link" type="button" data-profile-donate><strong>Donate</strong><span data-profile-donate-label>kachat.kachat</span></button>
             <button class="profile-about-row profile-about-link" type="button" data-profile-licenses><strong>Open Source Licenses</strong><span class="profile-row-trailing"><svg viewBox="0 0 8 13" aria-hidden="true"><path d="M1.5 1.5l5 5-5 5"/></svg></span></button>
           </div>
         </div>
@@ -1166,25 +1169,28 @@
             <p class="settings-group-footer">Translates KaPosts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one (see TRANSLATION_SERVICE.md).</p>
             </div>
             <div class="connection-panel" data-connection-panel="domains" hidden>
-            <p class="settings-group-label">Kaspa Name Service</p>
+            <!-- .kachat first: it is what every address field resolves before anything else (iOS 6ac48a7). -->
+            <p class="settings-group-label">.kachat Names</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form connection-readonly-list">
+                <div class="connection-readonly"><span>KaChat Names (.kachat)</span><em>Coming soon</em></div>
+              </div>
+            </div>
+            <p class="settings-group-footer">Resolved first, everywhere you can type an address.</p>
+            <p class="settings-group-label">Other Domains</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
-                  <label class="field-label compact">KNS API URL
+                  <label class="field-label compact">.kas
                     <input class="field-input" type="url" data-endpoint="knsApi" autocomplete="off" spellcheck="false" readonly />
                   </label>
                   <p class="field-hint danger" data-endpoint-error="knsApi" hidden></p>
               </div>
-            </div>
-            <p class="settings-group-footer">KNS domain resolution service</p>
-            <p class="settings-group-label">Other Name Services</p>
-            <div class="settings-list-card">
               <div class="settings-page-form connection-readonly-list">
-                <div class="connection-readonly"><span>dotk (.k)</span><code>https://api.dotk.name/v1</code></div>
-                <div class="connection-readonly"><span>Kaspa Names (.kaspa)</span><code>https://kaspaname.com/v1</code></div>
-                <div class="connection-readonly"><span>KaChat Names (.kachat)</span><em>Coming soon</em></div>
+                <div class="connection-readonly"><span>.k</span><code>https://api.dotk.name/v1</code></div>
+                <div class="connection-readonly"><span>.kaspa</span><code>https://kaspaname.com/v1</code></div>
               </div>
             </div>
-            <p class="settings-group-footer">Used to show the .k and .kaspa names an address owns. KaChat's own .kachat names will be set here once they launch.</p>
+            <p class="settings-group-footer">Looked up after .kachat, and listed under Other domains when a typed name also exists there.</p>
             </div>
             <div class="connection-panel" data-connection-panel="explorer" hidden>
             <p class="settings-group-label">Kaspa Explorer API</p>
@@ -1604,7 +1610,7 @@
           </div>
         </div>
         <p class="create-chat-error" data-create-chat-error hidden></p>
-        <p class="create-chat-help">Enter a Kaspa address (kaspa:...) or KNS domain name (e.g., alice.kas)</p>
+        <p class="create-chat-help">Enter a Kaspa address (kaspa:...) or a domain (e.g. alice.kachat). .kachat names are looked up first.</p>
         <div class="create-chat-status" data-create-chat-status hidden></div>
         <div class="create-chat-preview" data-create-chat-preview hidden></div>
       </section>
@@ -2139,7 +2145,7 @@
         <!-- New Group (iOS 1be4f6e): "Add Members" - the Address Book's multi-select, or anyone by
              address. Add Members to an existing group keeps the Contacts list above. -->
         <p class="group-section-title group-add-members-title" data-group-add-members-title hidden>Add Members</p>
-        <p class="field-hint" data-group-add-by-address-hint>Not in your contacts? Add anyone by Kaspa address or KNS domain:</p>
+        <p class="field-hint" data-group-add-by-address-hint>Not in your contacts? Add anyone by Kaspa address or domain:</p>
         <input class="group-address-input" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" data-group-address-input />
         <div class="group-address-tools" aria-label="Address actions">
           <button type="button" class="group-address-tool" data-group-address-book>
@@ -2155,7 +2161,7 @@
             <span>Scan QR</span>
           </button>
         </div>
-        <p class="group-address-status" data-group-address-status hidden></p>
+        <div class="group-address-status" data-group-address-status hidden></div>
         <div class="create-chat-preview" data-group-address-preview hidden></div>
         <button type="button" class="secondary-button group-address-add" data-group-address-add disabled>Add to Group</button>
       </div>
@@ -2668,7 +2674,7 @@
         <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
       <h3 class="chatting-picker-title">Choose Your Chatting Address</h3>
-      <p class="spending-manage-subtitle">If this seed already holds your identity at a different address, a domain (.kas, .k or .kaspa) or a funded chatting balance, pick it here. Only addresses with a balance or domains are shown.</p>
+      <p class="spending-manage-subtitle">If this seed already holds your identity at a different address, a domain (.kachat, .kas, .k or .kaspa) or a funded chatting balance, pick it here. Only addresses with a balance or domains are shown.</p>
       <div class="manage-address-body">
         <div class="manage-address-list chatting-picker-list" data-chatting-picker-list></div>
         <p class="field-error chatting-picker-error" data-chatting-picker-error hidden></p>
@@ -2721,6 +2727,9 @@
       <label class="field-label">Recipient
         <input class="field-input" type="text" data-kns-transfer-recipient placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" />
       </label>
+      <!-- What a typed domain resolved to, .kachat first, and Other domains (iOS 6ac48a7). -->
+      <div class="create-chat-status" data-kns-transfer-resolution hidden></div>
+      <p class="field-hint">Enter a Kaspa address (kaspa:...) or a domain. .kachat names are looked up first.</p>
       <p class="field-error" data-kns-transfer-error hidden></p>
       <p class="field-hint" data-kns-transfer-status hidden></p>
       <div class="modal-actions">

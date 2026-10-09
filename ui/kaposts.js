@@ -1202,28 +1202,39 @@ function escapeWithMentions(rawText) {
   return out;
 }
 
+// The owner address of an @mention token, on every name service with .kachat first (iOS d0c5b09
+// KaPostsView.mentionAddress): the ending typed ("@bob.kas" is the .kas name), else .kachat, .kas,
+// .k, .kaspa.
+async function mentionAddress(token) {
+  const resolution = await deps.engine.resolveName?.(token);
+  return resolution?.ownerAddress || null;
+}
+
 // Resolve the @mentions in a post's text to the compressed pubkeys the indexer needs in
-// mentioned_pubkeys. Chatted contacts resolve from the local candidate list; ANYONE else with
-// a KNS domain resolves live (owner address -> pubkey). Unresolvable tokens stay plain text.
+// mentioned_pubkeys. Each token keeps the ending it was typed with (iOS d0c5b09): a contact's .kas
+// name resolves from the local candidate list - only for a token typed as .kas - and everyone else
+// resolves live on every service, .kachat first (owner address -> pubkey). Unresolvable tokens
+// stay plain text.
 async function mentionedPubkeysFor(text) {
   if (!MENTIONS_ENABLED) return [];
-  const domains = [];
-  const seenDomains = new Set();
+  const tokens = [];
+  const seenTokens = new Set();
   // Scanned on the RENDERED text, as iOS does, so `**@alice**` still notifies alice: the mention
   // regex wants whitespace or line start before the "@", and the bold markers would hide that.
   for (const m of renderKaPostsMarkdown(text).text.matchAll(MENTION_PATTERN)) {
-    const domain = m[2].toLowerCase().replace(/\.kas$/, "");
-    if (domain && !seenDomains.has(domain)) { seenDomains.add(domain); domains.push(domain); }
+    const token = m[2].toLowerCase();
+    if (token && !seenTokens.has(token)) { seenTokens.add(token); tokens.push(token); }
   }
-  if (!domains.length) return [];
-  const byDomain = new Map((deps.getMentionCandidates?.() || []).map((c) => [c.domain.toLowerCase(), c.pubkey]));
+  if (!tokens.length) return [];
+  const byKasName = new Map((deps.getMentionCandidates?.() || []).map((c) => [c.domain.toLowerCase(), c.pubkey]));
   const found = new Set();
-  for (const domain of domains) {
-    let pubkey = byDomain.get(domain) || null;
+  for (const token of tokens) {
+    let pubkey = token.endsWith(".kas") ? (byKasName.get(token.slice(0, -4)) || null) : null;
     if (!pubkey) {
+      // everyone else on every service, .kachat first
       try {
-        const resolution = await deps.engine.resolveKnsDomain?.(domain);
-        if (resolution?.ownerAddress) pubkey = deps.engine.kapostPubkeyForAddress?.(resolution.ownerAddress) || null;
+        const address = await mentionAddress(token);
+        if (address) pubkey = deps.engine.kapostPubkeyForAddress?.(address) || null;
       } catch { /* unresolvable: plain text */ }
     }
     if (pubkey) found.add(pubkey);
@@ -1231,14 +1242,15 @@ async function mentionedPubkeysFor(text) {
   return [...found];
 }
 
-// Tapped @mention anywhere in KaPosts: resolve the KNS domain and open that user's profile
-// (any KNS holder, contact or not - never-posted owners get an honest empty profile).
+// Tapped @mention anywhere in KaPosts: resolve the token .kachat first ("@bob.kas" stays the .kas
+// name, iOS d0c5b09) and open that user's profile at the resolved address (iOS 5316269) - anyone
+// with a name, contact or not; never-posted owners get an honest empty profile.
 async function openMentionProfile(domain) {
   try {
-    const resolution = await deps.engine.resolveKnsDomain?.(domain);
-    if (!resolution?.ownerAddress) { deps.showToast?.(`Couldn't resolve @${domain}.`); return; }
-    const pubkey = deps.engine.kapostPubkeyForAddress?.(resolution.ownerAddress) || null;
-    openPosterProfile(resolution.ownerAddress, pubkey);
+    const address = await mentionAddress(domain);
+    if (!address) { deps.showToast?.(`Couldn't resolve @${domain}.`); return; }
+    const pubkey = deps.engine.kapostPubkeyForAddress?.(address) || null;
+    openPosterProfile(address, pubkey);
   } catch (error) {
     deps.showToast?.(error?.message || `Couldn't resolve @${domain}.`);
   }
@@ -4651,9 +4663,10 @@ export function resetKaPostsForAccount() {
 }
 
 // --- @mention autocomplete --------------------------------------------------
-// Attach to a composer textarea: typing "@" opens a menu of your 1:1 contacts that have a KNS
-// domain (deps.getMentionCandidates). Picking one inserts "@domain ". Only KNS-domain contacts
-// are mentionable — the same set the indexer will turn into mention notifications.
+// Attach to a composer textarea: typing "@" opens a menu of your 1:1 contacts' names - their
+// .kachat names first (deps.getKachatMentionNames), then their .kas domains
+// (deps.getMentionCandidates) - and a live-resolved name for the query on any service, .kachat
+// first (iOS d0c5b09). Picking one inserts "@name.ending ", so it resolves on the service shown.
 const MENTION_QUERY_RE = /(?:^|[\s([{<"'])@([a-z0-9-]*)$/i;
 
 function attachMentionAutocomplete(textarea) {
@@ -4664,10 +4677,10 @@ function attachMentionAutocomplete(textarea) {
   let items = [];
   let activeIndex = 0;
   let anchorStart = -1; // index of the '@' currently being completed
-  // Live any-KNS resolution of the current query (contacts come from the local list; this
-  // row lets you mention anyone with a KNS domain).
+  // Live resolution of the current query on every service, .kachat first (contacts come from the
+  // local list; this row lets you mention anyone with a name anywhere).
   let resolveToken = 0;
-  let resolvedExtra = null; // { query, domain }
+  let resolvedExtra = null; // { query, domain } - domain with its ending, e.g. "bob.kachat"
 
   function close() {
     if (menu) { menu.remove(); menu = null; }
@@ -4686,9 +4699,10 @@ function attachMentionAutocomplete(textarea) {
     window.setTimeout(async () => {
       if (token !== resolveToken) return;
       try {
-        const resolution = await deps.engine.resolveKnsDomain?.(clean);
+        // anyone with a name on any service, .kachat first
+        const resolution = await deps.engine.resolveName?.(clean);
         if (token !== resolveToken || !resolution?.domain) return;
-        resolvedExtra = { query: clean, domain: String(resolution.domain).toLowerCase().replace(/\.kas$/, "") };
+        resolvedExtra = { query: clean, domain: String(resolution.domain).toLowerCase() };
         const ctx = currentQuery();
         if (ctx && ctx.query.toLowerCase() === clean) render(ctx.query);
       } catch { /* no match: contacts-only list stands */ }
@@ -4707,11 +4721,18 @@ function attachMentionAutocomplete(textarea) {
   function render(query) {
     const q = String(query || "").toLowerCase();
     const candidates = deps.getMentionCandidates?.() || [];
-    items = candidates
+    // contacts' .kachat names come first, then their .kas domains (as "name.kas": the ending
+    // typed is the service it resolves on, iOS d0c5b09)
+    const kachat = [...new Set((deps.getKachatMentionNames?.() || []).map((n) => String(n).toLowerCase()))]
+      .filter((full) => !q || full.startsWith(q))
+      .sort()
+      .map((full) => ({ domain: full, name: "" }));
+    const kas = candidates
       .filter((c) => !q || c.domain.toLowerCase().startsWith(q) || c.name.toLowerCase().includes(q))
-      .slice(0, 6);
-    // Live-resolved any-KNS match for the current query rides along at the end.
-    if (resolvedExtra && resolvedExtra.query === q
+      .map((c) => ({ domain: `${c.domain.toLowerCase()}.kas`, name: c.name }));
+    items = [...kachat, ...kas].slice(0, 6);
+    // a live-resolved name matching the query (any service, .kachat first) rides along
+    if (resolvedExtra && resolvedExtra.query === q && resolvedExtra.domain.startsWith(q)
         && !items.some((c) => c.domain.toLowerCase() === resolvedExtra.domain)) {
       items = [...items, { domain: resolvedExtra.domain, name: "" }];
     }

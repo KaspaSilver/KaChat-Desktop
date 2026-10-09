@@ -38,7 +38,9 @@ import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } f
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
 import {
   SEND_ICONS, feeControlsHtml, feeControls, sendActionButtonHtml, createSendActionButton, infoPillHtml,
+  otherDomainsHtml, pickOtherDomain,
 } from "./send-kaspa-components.js";
+import { looksLikeName } from "../engine/name-services.js";
 import { pickFromAddressBook } from "./address-book.js";
 import { sompiFromUserText, sanitizeAmountInput } from "../engine/amounts.js";
 import { addressBookEntry } from "./address-book-store.js";
@@ -2017,7 +2019,8 @@ function openDelistSheet(info, owner) {
   });
 }
 
-/** KachatTransferSheet: to an address or a .kachat name, the resolved address shown. The "New owner"
+/** KachatTransferSheet: to an address or a domain on any service, .kachat first (iOS 6ac48a7), the
+ *  resolved address shown with Other domains under it. The "New owner"
  *  field has the Send screens' recipient buttons beside it - Paste, Scan QR (a ?query is dropped)
  *  and the full-screen Address Book picker - and the saved name under it when the address is in the
  *  Address Book (iOS bfe7ef9). */
@@ -2028,11 +2031,31 @@ function openTransferSheet(info, owner) {
   let resolving = false;
   let timer = null;
   let seq = 0;
+  // A typed name: what it resolved as and every service's answer (iOS 6ac48a7).
+  let resolvedName = null;
+  let nameResolutions = [];
+  let selectedTld = null;
   const statusHtml = () => {
     if (resolving) return spinner();
-    if (resolved) return `<span class="kl-mono">${esc(resolved.address)}</span>`;
-    if (resolveError) return `<small class="kl-red">${esc(resolveError)}</small>`;
-    return "";
+    const others = otherDomainsHtml({ resolutions: nameResolutions, selectedTld });
+    if (resolved) {
+      return `${resolvedName ? `<small class="kl-green">✓ Resolved: ${esc(resolvedName)}</small><br>` : ""}<span class="kl-mono">${esc(resolved.address)}</span>${others}`;
+    }
+    if (resolveError) return `<small class="kl-red">${esc(resolveError)}</small>${others}`;
+    return others;
+  };
+  /** Takes one service's answer as the new owner: its address must be a Schnorr key, the only kind
+   *  a name can be locked to. False when it isn't. */
+  const use = (resolution) => {
+    const address = String(resolution?.address || "").toLowerCase();
+    const key = address ? keyOf(address) : null;
+    if (!key) return false;
+    try { validateKey(key, ""); } catch { return false; }
+    resolved = { address, key };
+    resolvedName = resolution.name || null;
+    selectedTld = resolution.tld || null;
+    resolveError = null;
+    return true;
   };
   /** The saved name of the resolved address (else of what is typed), from the Address Book. */
   const savedName = () => {
@@ -2052,6 +2075,9 @@ function openTransferSheet(info, owner) {
     const mySeq = ++seq;
     resolved = null;
     resolveError = null;
+    resolvedName = null;
+    nameResolutions = [];
+    selectedTld = null;
     const t = input.trim().toLowerCase();
     if (!t) { showStatus(sheet); sheet.update(); return; }
     if (t.startsWith("kaspatest:") || t.startsWith("kaspa:")) {
@@ -2064,9 +2090,10 @@ function openTransferSheet(info, owner) {
       sheet.update();
       return;
     }
-    const name = normalize(t);
-    if (invalidReason(name)) {
-      resolveError = "Enter an address or a .kachat name.";
+    // a name on any service, .kachat first (the ending typed, else .kachat, .kas, .k, .kaspa) - a
+    // .kachat name in grace still points to its owner, like everywhere else it resolves (f7c371a)
+    if (!looksLikeName(t)) {
+      resolveError = "Enter an address or a domain.";
       showStatus(sheet);
       sheet.update();
       return;
@@ -2075,15 +2102,13 @@ function openTransferSheet(info, owner) {
     showStatus(sheet);
     sheet.update();
     try {
-      const rt = kachatNames();
-      const r = await rt.registry.lookup(name);
+      const { results, resolution } = await kachatNames().engine.lookUpName(t);
       if (mySeq !== seq) return;
-      // a name in grace still points to its owner, like everywhere else it resolves (iOS f7c371a)
-      if (r.kind === "registered" && r.info.status(graceMs()) !== Status.lapsed) {
-        const a = addressOf(r.info.owner);
-        if (a) resolved = { address: a, key: r.info.owner };
+      nameResolutions = results || [];
+      if (resolution) {
+        if (!use({ address: resolution.ownerAddress, name: resolution.domain, tld: resolution.tld })) resolveError = "That name's address can't own a .kachat name.";
       } else {
-        resolveError = "No .kachat name by that name.";
+        resolveError = "No domain found by that name.";
       }
     } catch {
       if (mySeq !== seq) return;
@@ -2114,7 +2139,7 @@ function openTransferSheet(info, owner) {
     inputsHtml: cardHtml(`
       <div class="sk-recipient-row">
         <span class="sk-recipient-field">
-          <input class="sk-recipient-input" type="text" placeholder="kaspatest:... or name.kachat" autocomplete="off" autocapitalize="none"
+          <input class="sk-recipient-input" type="text" placeholder="kaspatest:... or domain" autocomplete="off" autocapitalize="none"
             autocorrect="off" spellcheck="false" data-kl-transfer-input aria-label="New owner" />
         </span>
         ${iconButton("data-kl-transfer-paste", "Paste", SEND_ICONS.paste)}
@@ -2124,7 +2149,7 @@ function openTransferSheet(info, owner) {
       <p class="sk-saved-name" data-kl-transfer-saved hidden></p>
       <div class="kl-transfer-status" data-kl-transfer-status hidden></div>`, {
       title: "New owner",
-      footerHtml: cardNote("A testnet address, or a .kachat name - it's resolved to the address shown."),
+      footerHtml: cardNote("An address or a domain - .kachat names are looked up first, and it's resolved to the address shown."),
     }),
     rows: () => [{ title: "Name", value: info.display }, ...(resolved ? [{ title: "To", value: resolved.address }] : [])],
     operation: () => (resolved ? Operation.transfer(info, resolved.key) : null),
@@ -2139,6 +2164,14 @@ function openTransferSheet(info, owner) {
       timer = setTimeout(() => resolve(sheet), 400);
     },
     async onClick(event, sheet) {
+      // A pick under Other domains: that service's answer becomes the new owner (iOS 6ac48a7).
+      const otherDomain = pickOtherDomain(event, nameResolutions);
+      if (otherDomain) {
+        if (!use(otherDomain)) resolveError = "That name's address can't own a .kachat name.";
+        showStatus(sheet);
+        sheet.update();
+        return;
+      }
       if (event.target.closest("[data-kl-transfer-paste]")) {
         let text = null;
         try { text = await navigator.clipboard?.readText?.(); } catch { text = null; }
@@ -2151,8 +2184,8 @@ function openTransferSheet(info, owner) {
           scanned = await scanKaspaAddress({
             title: "Scan QR",
             hint: "Point the camera at the new owner's address QR code.",
-            manualLabel: "Address or .kachat name",
-            manualPlaceholder: "kaspatest:... or name.kachat",
+            manualLabel: "Address or domain",
+            manualPlaceholder: "kaspatest:... or domain",
           });
         } catch { scanned = null; }
         // normalizeScannedKaspaAddress already dropped a ?amount=... query
@@ -3186,6 +3219,23 @@ export async function kachatOwnedNameCount(walletAddress, { onLapse = null } = {
   const held = await rt.registry.heldNames(key);
   scheduleLapse(`count:${address}`, held, onLapse);
   return held.length;
+}
+
+/** This wallet's .kachat names that have expired and sit in their grace period, soonest first, for
+ *  Profile's banner (iOS 6ac48a7 KachatExpiredNamesModel): renew before grace ends, or anyone can
+ *  claim them. Each is { name, display, expiresAt, graceEndsText }. [] where the registry isn't
+ *  launched (mainnet); throws when the registry can't be read. */
+export async function kachatExpiredNames(walletAddress) {
+  const rt = kachatNames();
+  const key = rt ? keyOf(String(walletAddress || "").toLowerCase()) : null;
+  if (!key) return [];
+  await rt.registry.refreshIfStale();
+  const grace = graceMs();
+  const owned = await rt.registry.namesOf(key, { includeInactive: true });
+  return owned
+    .filter((n) => n.status(grace) === Status.grace)
+    .sort((a, b) => (a.expiresAt < b.expiresAt ? -1 : a.expiresAt > b.expiresAt ? 1 : 0))
+    .map((n) => ({ name: n.name, display: n.display, expiresAt: String(n.expiresAt), graceEndsText: dayText(BigInt(n.expiresAt) + BigInt(grace)) }));
 }
 
 /** `listener()` whenever the .kachat registry moves (a registration, sale or transfer lands);

@@ -27,7 +27,7 @@ import { closeActiveScanner, scanKaspaAddress, scanQrCode } from "./qr-scan.js";
 import {
   recipientCardHtml, recipientStatusHtml, amountEntryHtml, layoutAmountEntry, sanitizeAmountText,
   availablePillInnerHtml, infoPillHtml, feeControlsHtml, coinControlSummaryText, sendActionButtonHtml,
-  shortSendAddress, refreshRecipientAddressBook,
+  shortSendAddress, refreshRecipientAddressBook, pickOtherDomain, nameNotFoundText,
 } from "./send-kaspa-components.js";
 import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx, historicalKasPrice } from "./portfolio.js";
 
@@ -733,7 +733,7 @@ function renderColdActionsSheet() {
       : `<div class="cold-action-rows">
            ${row("generate", "Generate More Addresses", "Reveals the next unused address in this account.",
                  '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>')}
-           ${row("discover", "Discover Addresses", "Finds addresses holding a balance or a KNS domain.",
+           ${row("discover", "Discover Addresses", "Finds addresses holding a balance or a domain.",
                  '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>')}
            ${row("open-visibility", "Address Visibility", "Check off every address you want on the list, in one sitting.",
                  CHECKLIST_ICON)}
@@ -1286,6 +1286,10 @@ function handleSendRecipientInput(raw) {
   send.resolvedDomain = null;
   send.knsError = null;
   send.resolvingKns = false;
+  // Every service's answer for a typed name and the one in use: the rest go under Other domains
+  // (iOS 6ac48a7 ColdSendFlowView).
+  send.nameResolutions = [];
+  send.selectedTld = null;
   const trimmed = raw.trim();
   const token = ++sendResolveToken;
 
@@ -1306,17 +1310,21 @@ function handleSendRecipientInput(raw) {
     window.setTimeout(async () => {
       if (!send || token !== sendResolveToken) return;
       try {
-        const resolution = await deps.engine.resolveName(trimmed);
+        // Every name service, in priority: the ending typed, else .kachat, .kas, .k, .kaspa. The
+        // resolved line names which one answered; the others are offered under Other domains.
+        const { results, resolution } = await deps.engine.lookUpName(trimmed);
         if (!send || token !== sendResolveToken) return;
+        send.nameResolutions = results || [];
         if (resolution) {
           send.resolvedAddress = resolution.ownerAddress;
           send.resolvedDomain = resolution.domain;
+          send.selectedTld = resolution.tld || null;
         } else {
-          send.knsError = "No domain found";
+          send.knsError = nameNotFoundText(trimmed);
         }
       } catch {
         if (!send || token !== sendResolveToken) return;
-        send.knsError = "No domain found";
+        send.knsError = nameNotFoundText(trimmed);
       }
       send.resolvingKns = false;
       renderSendStatusOnly();
@@ -1558,6 +1566,8 @@ function sendRecipientStatusHtml() {
     resolvedAddress: send.resolvedAddress,
     resolvedName: send.resolvedDomain,
     valid: send.validAddress,
+    nameResolutions: send.nameResolutions || [],
+    selectedTld: send.selectedTld ?? null,
   });
 }
 
@@ -2021,6 +2031,16 @@ function buildModals() {
   sendBody.addEventListener("click", async (event) => {
     if (!send) return;
     if (event.target.closest("[data-cold-send-close]")) { closeSendFlow(); return; }
+    // A pick under Other domains switches the recipient to that service's answer (iOS 6ac48a7).
+    const otherDomain = pickOtherDomain(event, send.nameResolutions);
+    if (otherDomain) {
+      send.resolvedAddress = otherDomain.address;
+      send.resolvedDomain = otherDomain.name;
+      send.selectedTld = otherDomain.tld;
+      send.knsError = null;
+      renderSendStatusOnly();
+      return;
+    }
     if (event.target.closest("[data-cold-send-paste]")) {
       try {
         const text = (await navigator.clipboard.readText())?.trim();

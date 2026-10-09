@@ -23,6 +23,7 @@
 import { otherNetworkReason } from "../engine/network.js";
 
 import { sanitizeAmountInput } from "../engine/amounts.js";
+import { splitTypedName } from "../engine/name-services.js";
 
 const KNOB_INSET = 4;
 
@@ -110,16 +111,66 @@ export function formatSompiPlain(sompi) {
 
 // --- Recipient ----------------------------------------------------------------------------------
 
+// --- Other domains -------------------------------------------------------------------------------
+
+// "Other domains" (iOS 6ac48a7 OtherDomainsDropdown): what the same typed name points to on the
+// other services, under the name it resolved to, each selectable. Every field that takes an
+// address shows it (Create chat, the group address field, the Send screens, KasSigner's send, Send
+// Domain, Portfolio, the Address Book editor, .kachat Transfer); the order is always .kachat first,
+// and where .kachat's registry isn't live yet (mainnet) it is listed as "Coming soon". Opens by
+// itself when nothing was picked but another service has the name. A pick is a click on
+// [data-other-domain="<tld>"]; `pickOtherDomain` turns it back into the answer.
+
+/** What a service with no address for the name says: "Coming soon", "Couldn't check" or
+ *  "Not registered" (iOS OtherDomainsDropdown.missingText). */
+export function otherDomainMissingText(resolution) {
+  if (resolution?.state === "notLive") return "Coming soon";
+  return resolution?.state === "failed" ? "Couldn't check" : "Not registered";
+}
+
+/** The error for a typed name nothing answered: "No .kas domain found" when an ending was typed,
+ *  else "No domain found" (iOS 6ac48a7). */
+export function nameNotFoundText(typed) {
+  const tld = splitTypedName(String(typed || "")).tld;
+  return tld ? `No .${tld} domain found` : "No domain found";
+}
+
+/** The dropdown's markup: every answer but the one in use (`selectedTld`), or "" when there is
+ *  none. `resolutions` are engine NameResolution rows ({ tld, name, address, state }). */
+export function otherDomainsHtml({ resolutions = [], selectedTld = null } = {}) {
+  const list = Array.isArray(resolutions) ? resolutions : [];
+  const others = list.filter((entry) => entry && entry.tld !== selectedTld);
+  if (!others.length) return "";
+  const open = selectedTld == null && list.some((entry) => entry?.address);
+  return `
+    <details class="create-chat-other-domains other-domains" data-other-domains ${open ? "open" : ""}>
+      <summary>Other domains</summary>
+      ${others.map((entry) => entry.address
+        ? `<button type="button" class="create-chat-other-domain" data-other-domain="${esc(entry.tld)}"><strong>${esc(entry.name)}</strong><span>${esc(shortSendAddress(entry.address))}</span></button>`
+        : `<div class="create-chat-other-domain muted"><strong>${esc(entry.name)}</strong><span>${esc(otherDomainMissingText(entry))}</span></div>`).join("")}
+    </details>`;
+}
+
+/** The answer a click under Other domains picked, or null (not a pick, or nothing to pick). */
+export function pickOtherDomain(event, resolutions) {
+  const button = event?.target?.closest?.("[data-other-domain]");
+  if (!button) return null;
+  return (Array.isArray(resolutions) ? resolutions : [])
+    .find((entry) => entry?.tld === button.dataset.otherDomain && entry.address) || null;
+}
+
 /** The line under the recipient saying what the input resolved to (iOS SendRecipientCard
- *  statusLine). Empty while nothing is typed. */
-export function recipientStatusHtml({ input = "", resolving = false, error = null, resolvedAddress = null, resolvedName = null, valid = false } = {}) {
+ *  statusLine), with Other domains under it once the lookup is done (`nameResolutions` /
+ *  `selectedTld`, iOS 6ac48a7). Empty while nothing is typed. */
+export function recipientStatusHtml({ input = "", resolving = false, error = null, resolvedAddress = null, resolvedName = null, valid = false, nameResolutions = [], selectedTld = null } = {}) {
   const trimmed = String(input || "").trim();
   if (!trimmed) return "";
   if (resolving) return '<p class="sk-status muted"><span class="sk-spinner" aria-hidden="true"></span>Looking up domain…</p>';
-  if (error) return `<p class="sk-status bad">✕ ${esc(error)}</p>`;
+  const others = otherDomainsHtml({ resolutions: nameResolutions, selectedTld });
+  if (error) return `<p class="sk-status bad">✕ ${esc(error)}</p>${others}`;
   if (resolvedAddress) {
     return `<p class="sk-status good">✓ Resolved: ${esc(resolvedName || "")}</p>
-      <p class="sk-status mono">${esc(resolvedAddress)}</p>`;
+      <p class="sk-status mono">${esc(resolvedAddress)}</p>${others}`;
   }
   if (valid) return '<p class="sk-status good">✓ Valid address</p>';
   // The other network's address is the same key on another chain (IOS-003): say which.

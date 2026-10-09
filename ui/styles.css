@@ -11600,6 +11600,8 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .sidebar-tab svg { width: 25px; height: 25px; stroke-width: 1.8; }
 .sidebar-tab-logo { width: 24px; height: 24px; }
 .sidebar-tab-badge { background: var(--ios-red); min-width: 18px; height: 18px; font-size: 11px; font-weight: 600; top: 2px; }
+/* Profile's dock badge: a plain red dot, no number (iOS 28d9d68). */
+.sidebar-tab-badge.dot { min-width: 10px; width: 10px; height: 10px; padding: 0; top: 6px; }
 
 .new-chat-fab {
   width: 56px; height: 56px;
@@ -12175,6 +12177,25 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .create-chat-other-domain span { color: var(--muted); font-size: 12.5px; }
 .create-chat-other-domain.muted { cursor: default; }
 .create-chat-other-domain.muted strong { color: var(--muted); font-weight: 500; }
+
+/* Profile: one of your .kachat names expired and is in its grace period (iOS 6ac48a7
+   KachatExpiredNamesBanner) - orange tint, click opens the name, the X hides it. */
+.kachat-expired-banner:not([hidden]) {
+  display: flex; align-items: flex-start; gap: 12px; margin: 0 0 16px; padding: 12px;
+  border-radius: 14px; background: rgba(255, 149, 0, .14); border: 1px solid rgba(255, 149, 0, .35);
+}
+.kachat-expired-banner-icon svg { width: 20px; height: 20px; margin-top: 2px; fill: none; stroke: var(--ios-orange, #ff9500); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kachat-expired-banner-copy {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 0; border: 0;
+  background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.kachat-expired-banner-copy strong { font-size: 15px; font-weight: 600; }
+.kachat-expired-banner-copy span { font-size: 12.5px; color: var(--muted); }
+.kachat-expired-banner-close {
+  width: 28px; height: 28px; flex: none; display: grid; place-items: center; padding: 0; border: 0;
+  background: none; color: var(--muted); cursor: pointer;
+}
+.kachat-expired-banner-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
 
 /* The .kachat wordmark is wider than tall: sized by height in the dock and the Hub grid. */
 .kachat-wordmark-icon svg, .hub-tile-icon .kmkt-wordmark, .dock-preview-icon .kmkt-wordmark { width: auto !important; max-width: 44px; height: 18px !important; fill: currentColor; stroke: none; }

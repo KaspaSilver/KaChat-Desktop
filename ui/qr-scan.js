@@ -110,7 +110,7 @@ export function scanQrCode(options = {}) {
 }
 
 /**
- * Convenience wrapper for the common case: scan a Kaspa address (or a KNS domain),
+ * Convenience wrapper for the common case: scan a Kaspa address (or a domain),
  * with `kaspa:addr?amount=...` query strings stripped exactly like the paste paths do.
  * @param {object} [options] Same options as `scanQrCode`; `normalize` is preset.
  * @returns {Promise<string|null>}
@@ -120,7 +120,7 @@ export function scanKaspaAddress(options = {}) {
     title: "Scan a Kaspa Address",
     hint: "Line the QR code up inside the square",
     manualTitle: "Enter it manually",
-    manualLabel: "Kaspa address or KNS domain",
+    manualLabel: "Kaspa address or domain",
     manualPlaceholder: "kaspa:qr... or domain",
     mono: true,
     ...options,

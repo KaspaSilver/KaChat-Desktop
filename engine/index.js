@@ -1636,8 +1636,9 @@ export class KaspaEngine {
     return nsLooksLikeName(raw);
   }
 
-  /** Every service's answer for a typed name, in resolution order. Services not live yet are left
-   *  out, as iOS leaves them out. */
+  /** Every service's answer for a typed name, in resolution order. .kachat is always listed first;
+   *  where its registry isn't live yet (mainnet) it comes back as state "notLive", shown as
+   *  "Coming soon" under Other domains (iOS 6ac48a7). */
   async resolveNameEverywhere(input) {
     const results = await nsResolveEverywhere(String(input || "").trim(), {
       network: NETWORK,
@@ -1647,16 +1648,25 @@ export class KaspaEngine {
         try { return (await this.resolveKnsDomain(name))?.ownerAddress || null; } catch { return null; }
       },
     });
-    return results.filter((entry) => entry.state !== "notLive");
+    return results;
   }
 
   /** The address a typed name points to, in the shape resolveKnsDomain returned:
    *  { ownerAddress, domain, tld, results } (results = every service's answer), or null. */
   async resolveName(input) {
+    return (await this.lookUpName(input)).resolution;
+  }
+
+  /** Every service's answer and the winner, also when nothing won (iOS 6ac48a7: a field shows
+   *  "No .x domain found" with the other services' answers under Other domains):
+   *  { results, resolution } where resolution is resolveName's shape or null. */
+  async lookUpName(input) {
     const results = await this.resolveNameEverywhere(input);
     const winner = nsPrimary(results, String(input || "").trim());
-    if (!winner?.address) return null;
-    return { ownerAddress: winner.address, domain: winner.name, tld: winner.tld, results };
+    const resolution = winner?.address
+      ? { ownerAddress: winner.address, domain: winner.name, tld: winner.tld, results }
+      : null;
+    return { results, resolution };
   }
 
   /** Names this address owns on .k and .kaspa (read-only), for Your Domains. */
@@ -1695,8 +1705,24 @@ export class KaspaEngine {
     return owners;
   }
 
+  /** The .kachat names each address holds (active or in grace) where the registry is live; an
+   *  empty Map elsewhere (iOS 6ac48a7 NameServicesClient.kachatNames(of:)). Kept apart from
+   *  otherServiceNamesFor because .kachat comes first wherever names are listed. Map of address ->
+   *  [{ name, display, tld: "kachat" }]; only addresses holding one. Failures count as none. */
+  async kachatNamesFor(addresses) {
+    const result = new Map();
+    if (!this.kachatHooks?.held) return result;
+    for (const address of [...new Set((addresses || []).filter(Boolean))]) {
+      try {
+        const held = await this.kachatHooks.held(address);
+        if (held?.length) result.set(address, held.map((name) => ({ name, display: `${name}.kachat`, tld: "kachat" })));
+      } catch { /* unreadable: not counted */ }
+    }
+    return result;
+  }
+
   /** The .kachat registry hooks the app registers on testnet: { resolve(canonical) -> address|null,
-   *  ownsAny(address) -> bool }. The engine never builds the registry itself. */
+   *  ownsAny(address) -> bool, held(address) -> [name] }. The engine never builds the registry itself. */
   setKachatNameHooks(hooks) { this.kachatHooks = hooks || null; }
 
   /** Whether one address owns a name on any service (iOS ownsAnyName). */

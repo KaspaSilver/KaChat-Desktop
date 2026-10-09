@@ -490,8 +490,9 @@ export async function ownedNamesForAddresses(addresses, { xOnlyPubKeyFor = null,
  *                   iOS shows "Not registered".
  *   failed        - the service could not be asked (network, timeout, non-2xx/404, bad body),
  *                   so "not registered" is unknown. iOS shows "Couldn't check".
- *   notLive       - `.kachat`, which is not live yet. NOT in the iOS list (iOS leaves `.kachat`
- *                   out entirely); filter these out of an "Other domains" list for parity.
+ *   notLive       - `.kachat` where its registry isn't live yet (mainnet until launch): listed,
+ *                   first as always, but nothing resolves there. iOS shows "Coming soon" under
+ *                   Other domains (6ac48a7 NameResolution.notLive).
  */
 
 /**
@@ -541,16 +542,18 @@ function entry(tld, canonical, address, failed) {
   return { tld, name: `${canonical}.${tld}`, address: failed ? null : (address ?? null), state };
 }
 
-// `.kachat`: not live on mainnet (reported as notLive). On testnet the registry's owner of a name
-// that is active or in its grace period - only a lapsed name does not resolve (KACHAT_NAMES.md
+// `.kachat`: always listed first; where its registry isn't live (mainnet until launch) it is
+// reported as notLive under its canonical name (iOS 6ac48a7). On testnet the registry's owner of a
+// name that is active or in its grace period - only a lapsed name does not resolve (KACHAT_NAMES.md
 // section 4, iOS f7c371a). The app
 // supplies the lookup (`resolveKachat(canonical) -> address|null`, throws when unreadable).
 async function resolveKachatEntry(label, resolveKachat) {
-  if (!NAME_SERVICES.kachat.isLive) {
-    return { tld: "kachat", name: `${label.toLowerCase()}.kachat`, address: null, state: "notLive" };
-  }
   const canonical = kachatNormalize(label);
-  if (!kachatIsValid(canonical) || typeof resolveKachat !== "function") return null;
+  if (!kachatIsValid(canonical)) return null;
+  if (!NAME_SERVICES.kachat.isLive) {
+    return { tld: "kachat", name: `${canonical}.kachat`, address: null, state: "notLive" };
+  }
+  if (typeof resolveKachat !== "function") return null;
   try {
     const address = await resolveKachat(canonical);
     return entry("kachat", canonical, typeof address === "string" ? address : null, false);

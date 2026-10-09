@@ -14,8 +14,8 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
-import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache } from "./kachat-names-live.js";
+import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -35,6 +35,7 @@ import {
   mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
   sanitizeAmountText, availablePillInnerHtml, infoPillHtml, feeControlsHtml, feeControls, sendActionButtonHtml,
   createSendActionButton, openSendFromPicker, closeSendFromPicker, shortSendAddress,
+  otherDomainsHtml, pickOtherDomain, nameNotFoundText,
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
 } from "./send-kaspa-components.js";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
@@ -8631,6 +8632,53 @@ const knsTransferStatusEl = document.querySelector("[data-kns-transfer-status]")
 const knsTransferSendBtn = document.querySelector("[data-kns-transfer-send]");
 let knsTransferContext = null;
 let knsTransferInFlight = false;
+// The recipient field takes a domain on any service, .kachat first, with Other domains under the
+// resolved name (iOS 6ac48a7 KNSDomainSendView): the address it resolved to and every answer.
+const knsTransferResolutionEl = document.querySelector("[data-kns-transfer-resolution]");
+const knsTransferName = { token: 0, typed: "", address: null, name: null, tld: null, results: [], resolving: false };
+function renderKnsTransferResolution(html) {
+  if (!knsTransferResolutionEl) return;
+  knsTransferResolutionEl.innerHTML = html || "";
+  knsTransferResolutionEl.hidden = !html;
+}
+function useKnsTransferResolution(address, name, tld) {
+  Object.assign(knsTransferName, { address, name, tld: tld || null });
+  renderKnsTransferResolution(`<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(name)}</span>`
+    + `<span class="create-chat-status-mono">${escapeHtml(address)}</span>`
+    + otherDomainsHtml({ resolutions: knsTransferName.results, selectedTld: knsTransferName.tld }));
+}
+function updateKnsTransferRecipient() {
+  const raw = String(knsTransferRecipientInput?.value || "").trim();
+  const token = ++knsTransferName.token;
+  Object.assign(knsTransferName, { typed: raw, address: null, name: null, tld: null, results: [], resolving: false });
+  if (!raw || knsTransferRecipientInput?.readOnly || !engine.looksLikeName(raw)) { renderKnsTransferResolution(""); return; }
+  knsTransferName.resolving = true;
+  renderKnsTransferResolution('<span class="create-chat-status-muted">Looking up domain…</span>');
+  window.setTimeout(async () => {
+    if (token !== knsTransferName.token) return;
+    try {
+      const { results, resolution } = await engine.lookUpName(raw);
+      if (token !== knsTransferName.token) return;
+      knsTransferName.resolving = false;
+      knsTransferName.results = results || [];
+      if (resolution?.ownerAddress) {
+        useKnsTransferResolution(resolution.ownerAddress, resolution.domain || raw, resolution.tld);
+      } else {
+        renderKnsTransferResolution(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`
+          + otherDomainsHtml({ resolutions: knsTransferName.results }));
+      }
+    } catch {
+      if (token !== knsTransferName.token) return;
+      knsTransferName.resolving = false;
+      renderKnsTransferResolution(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`);
+    }
+  }, 300);
+}
+knsTransferRecipientInput?.addEventListener("input", updateKnsTransferRecipient);
+knsTransferResolutionEl?.addEventListener("click", (event) => {
+  const entry = pickOtherDomain(event, knsTransferName.results);
+  if (entry) useKnsTransferResolution(entry.address, entry.name, entry.tld);
+});
 
 // Opens Send Domain. A domain with an unfinished transfer (EXT-005) opens in resume mode instead:
 // the recipient is fixed to the recorded one and the button finishes that transfer (no new
@@ -8640,6 +8688,7 @@ function openKnsTransferModal({ domain, assetId, spendingIndex = null, pending =
   knsTransferContext = { domain, assetId, spendingIndex, resume: null };
   if (knsTransferDomainEl) knsTransferDomainEl.textContent = domain;
   if (knsTransferRecipientInput) { knsTransferRecipientInput.value = ""; knsTransferRecipientInput.readOnly = false; }
+  updateKnsTransferRecipient();
   if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
   if (knsTransferStatusEl) knsTransferStatusEl.hidden = true;
   if (knsTransferSendBtn) { knsTransferSendBtn.disabled = false; knsTransferSendBtn.textContent = "Send Domain"; }
@@ -8660,6 +8709,7 @@ function setKnsTransferResumeMode(record) {
   if (!knsTransferContext || !record) return;
   knsTransferContext.resume = record;
   if (knsTransferRecipientInput) { knsTransferRecipientInput.value = record.recipient || ""; knsTransferRecipientInput.readOnly = true; }
+  updateKnsTransferRecipient();
   if (knsTransferSendBtn) knsTransferSendBtn.textContent = record.status === "reveal-failed" ? "Retry reveal" : "Finish transfer";
   if (knsTransferStatusEl) {
     knsTransferStatusEl.textContent = `A transfer of ${record.domain || "this domain"} to ${shortAddress(record.recipient || "")} was started but not finished. Finishing it reveals the commit already sent; no new 2 KAS commit is made.`;
@@ -8790,10 +8840,22 @@ async function finishKnsTransfer() {
 async function submitKnsTransfer() {
   if (!knsTransferContext || knsTransferInFlight) return;
   if (knsTransferContext.resume) { finishKnsTransfer(); return; }
-  const recipient = String(knsTransferRecipientInput?.value || "").trim();
-  if (!recipient) {
-    if (knsTransferErrorEl) { knsTransferErrorEl.textContent = "Enter a recipient address or .kas domain."; knsTransferErrorEl.hidden = false; }
+  const typed = String(knsTransferRecipientInput?.value || "").trim();
+  if (!typed) {
+    if (knsTransferErrorEl) { knsTransferErrorEl.textContent = "Enter an address or a domain."; knsTransferErrorEl.hidden = false; }
     return;
+  }
+  // A typed domain goes out as the address it resolved to (.kachat first, or the Other domains pick).
+  let recipient = typed;
+  if (engine.looksLikeName(typed)) {
+    if (knsTransferName.typed !== typed || !knsTransferName.address) {
+      if (knsTransferErrorEl) {
+        knsTransferErrorEl.textContent = knsTransferName.typed === typed && knsTransferName.resolving ? "Looking up domain…" : nameNotFoundText(typed);
+        knsTransferErrorEl.hidden = false;
+      }
+      return;
+    }
+    recipient = knsTransferName.address;
   }
   knsTransferInFlight = true;
   if (knsTransferSendBtn) knsTransferSendBtn.disabled = true;
@@ -8993,7 +9055,7 @@ spendingActionsToggle?.addEventListener("click", async (event) => {
     title: "Address Actions",
     options: [
       { id: "generate", title: "Generate New Spending Address", subtitle: "Reveals the next unused address in this wallet." },
-      { id: "discover", title: "Discover Addresses", subtitle: "Finds addresses holding a balance or a KNS domain." },
+      { id: "discover", title: "Discover Addresses", subtitle: "Finds addresses holding a balance or a domain." },
       { id: "visibility", title: "Address Visibility", subtitle: "Check off every address you want on the list, in one sitting." },
       { id: "sweep", title: "Send All Kaspa To Primary", subtitle: "Sweeps every other address into your primary spending address." },
     ],
@@ -9657,7 +9719,13 @@ function refreshTabBadges() {
       let badge = button.querySelector(".sidebar-tab-badge");
       if (count > 0) {
         if (!badge) { badge = document.createElement("span"); badge.className = "sidebar-tab-badge"; button.appendChild(badge); }
-        badge.textContent = tabBadgeLabel(count);
+        // Profile's dock badge is a red dot while the bell holds anything unread, the way the bell
+        // itself is a dot (iOS 28d9d68 AppTabBadge.dockLabel); the other tabs keep their counts.
+        const dot = tab === "profile";
+        badge.classList.toggle("dot", dot);
+        badge.textContent = dot ? "" : tabBadgeLabel(count);
+        if (dot) badge.setAttribute("aria-label", "Unread notifications");
+        else badge.removeAttribute("aria-label");
       } else if (badge) badge.remove();
     }
     const tile = hubGrid?.querySelector(`[data-hub-tile="${tab}"]`);
@@ -10067,6 +10135,8 @@ async function refreshKachatOwnedCount() {
     // right then (iOS aa36d2a)
     const count = await kachatOwnedNameCount(address, { onLapse: () => refreshKachatOwnedCount() });
     if (engine.address !== address) return; // account switched meanwhile
+    // the expired-name banner reloads with the same registry moves (iOS 6ac48a7)
+    refreshKachatExpiredBanner();
     if (kachatOwnedCountFor === address && kachatOwnedCount === count) return;
     kachatOwnedCount = count;
     kachatOwnedCountFor = address;
@@ -10075,6 +10145,67 @@ async function refreshKachatOwnedCount() {
     // Registry unreadable right now: keep the last count.
   }
 }
+// Profile's banner while one of this wallet's .kachat names has expired and sits in its grace
+// period (iOS 6ac48a7 KachatExpiredNamesBanner): clicking it opens the name (renew is there), the X
+// hides it. A dismissal is per name and expiry, so a name that expires again brings it back. Where
+// the registry isn't launched (mainnet) there is never one. State lives on the function objects
+// (this can run before later declarations init).
+function kachatExpiredDismissStoreKey(address) { return `kachatExpiredBannerDismissed.${String(address || "").toLowerCase()}`; }
+function kachatExpiredKey(n) { return `${n.name}@${n.expiresAt}`; }
+function kachatExpiredDismissed(address) {
+  try { return new Set(JSON.parse(localStorage.getItem(kachatExpiredDismissStoreKey(address)) || "[]")); } catch { return new Set(); }
+}
+async function refreshKachatExpiredBanner() {
+  const address = engine.address;
+  if (!address || !kachatNamesLaunched()) { renderKachatExpiredBanner.state = null; renderKachatExpiredBanner(); return; }
+  let expired;
+  try { expired = await kachatExpiredNames(address); } catch { return; /* unreadable: keep what is shown */ }
+  if (engine.address !== address) return;
+  renderKachatExpiredBanner.state = { address, expired };
+  renderKachatExpiredBanner();
+}
+function kachatExpiredVisible() {
+  const st = renderKachatExpiredBanner.state;
+  if (!st || st.address !== engine.address) return [];
+  const dismissed = kachatExpiredDismissed(st.address);
+  return st.expired.filter((n) => !dismissed.has(kachatExpiredKey(n)));
+}
+function renderKachatExpiredBanner() {
+  const el = document.querySelector("[data-kachat-expired-banner]");
+  if (!el) return;
+  const visible = kachatExpiredVisible();
+  const n = visible[0];
+  if (!n) { el.hidden = true; el.innerHTML = ""; return; }
+  const title = visible.length === 1 ? "One of your .kachat domains expired" : `${visible.length} of your .kachat domains expired`;
+  const body = visible.length === 1
+    ? `Renew ${n.display} before its grace period ends on ${n.graceEndsText} to keep it.`
+    : "Renew them before their grace periods end to keep them.";
+  el.innerHTML = `
+    <span class="kachat-expired-banner-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3zM12 9v5M12 17.5v.5"/></svg></span>
+    <button type="button" class="kachat-expired-banner-copy" data-kachat-expired-open="${escapeHtml(n.name)}">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(body)}</span>
+    </button>
+    <button type="button" class="kachat-expired-banner-close" data-kachat-expired-dismiss aria-label="Dismiss" title="Dismiss"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`;
+  el.hidden = false;
+}
+document.querySelector("[data-kachat-expired-banner]")?.addEventListener("click", (event) => {
+  const open = event.target.closest("[data-kachat-expired-open]");
+  if (open) {
+    openKachatNameFromBell(open.dataset.kachatExpiredOpen, { showTab: () => setActiveAppTab("kachat-names") });
+    return;
+  }
+  if (!event.target.closest("[data-kachat-expired-dismiss]")) return;
+  const st = renderKachatExpiredBanner.state;
+  if (!st) return;
+  const dismissed = kachatExpiredDismissed(st.address);
+  for (const n of kachatExpiredVisible()) dismissed.add(kachatExpiredKey(n));
+  // only names still in grace are worth remembering
+  const live = new Set(st.expired.map(kachatExpiredKey));
+  try { localStorage.setItem(kachatExpiredDismissStoreKey(st.address), JSON.stringify([...dismissed].filter((key) => live.has(key)))); } catch { /* storage full: shows again next time */ }
+  renderKachatExpiredBanner();
+});
+
 function renderProfileDomains() {
   const countEl = document.querySelector("[data-profile-domains-count]");
   // Blank rather than "0" until a lookup has actually answered. The count includes .k and .kaspa,
@@ -10289,17 +10420,17 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // The Profile hero's button edits your .kachat profile (iOS 09e0403).
 document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", () => openKachatProfileEditor());
 
-// --- Profile > About: Version and Donate (iOS aboutSection). Donate resolves
-// kachat.kas and jumps straight into that chat in payment mode.
+// --- Profile > About: Version and Donate (iOS aboutSection). Donate opens Profile's Send screen
+// with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 123;
+const APP_BUILD = 124;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 
-const DONATE_DOMAIN = "kachat.kas";
-let donateResolving = false;
+// Donate (iOS e7cc0d5): the Send screen, addressed to KaChat's .kachat name.
+const DONATE_DOMAIN = "kachat.kachat";
 
 // The notices the libraries the desktop ships ask to travel with it (iOS f656d9d has its own list).
 const OPEN_SOURCE_LICENSE_TEXTS = {
@@ -10353,42 +10484,15 @@ document.querySelector("[data-profile-licenses]")?.addEventListener("click", () 
   });
 });
 
+// Donate goes straight to Send with KaChat's name filled in (iOS e7cc0d5): it resolves like any
+// typed name (.kachat first, the others under Other domains), no chat opened.
 document.querySelector("[data-profile-donate]")?.addEventListener("click", async () => {
-  if (donateResolving) return;
-  donateResolving = true;
-  const labelEl = document.querySelector("[data-profile-donate-label]");
-  if (labelEl) labelEl.textContent = "Resolving…";
   try {
     await ensureRuntimes({ quiet: true });
     if (!engine.address) throw new Error("Generate or import a wallet first.");
-    const resolution = await engine.resolveKnsDomain(DONATE_DOMAIN);
-    if (!resolution) throw new Error(`Couldn't resolve ${DONATE_DOMAIN}. Please try again later.`);
-    const address = validateContactAddress(resolution.ownerAddress);
-    let contact = state.contacts.find((entry) => entry.address === address);
-    if (!contact) {
-      const createdAt = Date.now();
-      contact = {
-        id: nowId(), name: resolution.domain || DONATE_DOMAIN, nameIsCustom: false, address,
-        avatar: initialsFor(resolution.domain || DONATE_DOMAIN), createdAt, updatedAt: createdAt,
-        relationshipState: "legacy-manual", handshakeTxid: "",
-      };
-      state.contacts.push(contact);
-    }
-    let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
-    if (!conversationEntry) {
-      conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
-      state.conversations.push(conversationEntry);
-      refreshSubscriptionAddresses({ restart: true });
-      persistState();
-    }
-    setActiveAppTab("chats");
-    openConversation(conversationEntry.id);
-    openPaymentSheet();
+    openSendKaspaModal({ prefillAddress: DONATE_DOMAIN });
   } catch (error) {
-    showCopyToast(error?.message || `Couldn't resolve ${DONATE_DOMAIN}.`);
-  } finally {
-    donateResolving = false;
-    if (labelEl) labelEl.textContent = DONATE_DOMAIN;
+    showCopyToast(error?.message || "Couldn't open Send.");
   }
 });
 
@@ -10452,6 +10556,51 @@ function recordOutgoingPaymentChat({ destination, amountKas, txid }) {
 function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent, slideToSend = false, onBusyChange = null } = {}) {
   let resolvedAddress = null;
   let resolveToken = 0;
+  // Every service's answer for a typed name and the one in use (iOS 6ac48a7): the rest go under
+  // "Other domains", where picking one switches the recipient.
+  let nameResults = [];
+  let selectedTld = null;
+  let typedName = "";
+  // The screens without the shared status line (the older resolvedHint ones) get the dropdown in
+  // its own spot under the hint.
+  function otherDomainsHost() {
+    if (els.statusEl || !els.resolvedHint) return null;
+    let host = els.resolvedHint.parentElement?.querySelector("[data-send-other-domains]");
+    if (!host) {
+      host = document.createElement("div");
+      host.dataset.sendOtherDomains = "";
+      els.resolvedHint.insertAdjacentElement("afterend", host);
+    }
+    return host;
+  }
+  function renderOtherDomains(show) {
+    const host = otherDomainsHost();
+    if (host) host.innerHTML = show ? otherDomainsHtml({ resolutions: nameResults, selectedTld }) : "";
+  }
+  function onOtherDomainClick(event) {
+    const entry = pickOtherDomain(event, nameResults);
+    if (!entry) return;
+    useResolution({ ownerAddress: entry.address, domain: entry.name, tld: entry.tld });
+  }
+  els.statusEl?.addEventListener("click", onOtherDomainClick);
+  els.resolvedHint?.parentElement?.addEventListener("click", (event) => { if (!els.statusEl) onOtherDomainClick(event); });
+  // Use one service's answer (the priority one, or a pick from Other domains).
+  function useResolution(resolution) {
+    const raw = String(els.recipient?.value || "").trim();
+    const amountValid = (sompiFromUserText(String(els.amount?.value || "")) ?? 0n) > 0n;
+    resolvedAddress = resolution.ownerAddress;
+    selectedTld = resolution.tld || null;
+    setRecipientStatus({ input: raw, resolvedAddress: resolution.ownerAddress, resolvedName: resolution.domain || raw, nameResolutions: nameResults, selectedTld });
+    if (els.resolvedHint) {
+      // Show the domain AND the full resolved address below it, matching iOS's WithdrawKaspaView.
+      els.resolvedHint.innerHTML = `Resolved: ${escapeHtml(resolution.domain)}<br><span class="send-resolved-address">${escapeHtml(resolution.ownerAddress || "")}</span>`;
+      els.resolvedHint.hidden = false;
+    }
+    renderOtherDomains(true);
+    if (els.checkEl) els.checkEl.hidden = false; // resolved -> green check
+    if (els.submit) els.submit.disabled = !amountValid;
+    showResolutionCard(resolution.ownerAddress, resolution.domain || raw);
+  }
   // The shared recipient card's status line (send-kaspa-components recipientStatusHtml), when
   // the screen has one: "Looking up domain…", "Resolved: …", "Valid address", "Invalid…".
   function setRecipientStatus(status) {
@@ -10506,6 +10655,10 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     if (els.recipient) els.recipient.value = "";
     if (els.amount) els.amount.value = "";
     resolvedAddress = null;
+    typedName = "";
+    nameResults = [];
+    selectedTld = null;
+    renderOtherDomains(false);
     setRecipientStatus(null);
     showResolutionCard(null);
     if (els.checkEl) els.checkEl.hidden = true;
@@ -10550,7 +10703,16 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     const token = ++resolveToken;
     const raw = String(els.recipient?.value || "").trim();
     const amountValid = (sompiFromUserText(String(els.amount?.value || "")) ?? 0n) > 0n;
+    // An amount keystroke keeps the name already resolved (and its Other domains pick).
+    if (raw && raw === typedName && engine.looksLikeName(raw) && (resolvedAddress || nameResults.length)) {
+      if (els.submit) els.submit.disabled = !resolvedAddress || !amountValid;
+      return;
+    }
+    typedName = raw;
     resolvedAddress = null;
+    nameResults = [];
+    selectedTld = null;
+    renderOtherDomains(false);
     if (els.resolvedHint) els.resolvedHint.hidden = true;
     if (els.checkEl) els.checkEl.hidden = true;
     if (els.error) els.error.hidden = true;
@@ -10573,25 +10735,20 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       if (els.submit) els.submit.disabled = true;
       setRecipientStatus({ input: raw, resolving: true });
       try {
-        const resolution = await engine.resolveName(raw);
+        // Every name service, in priority: the ending typed, else .kachat, .kas, .k, .kaspa. The
+        // resolved line names which one answered; the others are offered under Other domains.
+        const { results, resolution } = await engine.lookUpName(raw);
         if (token !== resolveToken) return; // a newer keystroke superseded this lookup
-        setRecipientStatus(resolution
-          ? { input: raw, resolvedAddress: resolution.ownerAddress, resolvedName: resolution.domain || raw }
-          : { input: raw, error: "No domain found" });
+        nameResults = results || [];
         if (resolution) {
-          resolvedAddress = resolution.ownerAddress;
-          if (els.resolvedHint) {
-            // Show the domain AND the full resolved address below it, matching iOS's WithdrawKaspaView.
-            els.resolvedHint.innerHTML = `Resolved: ${escapeHtml(resolution.domain)}<br><span class="send-resolved-address">${escapeHtml(resolution.ownerAddress || "")}</span>`;
-            els.resolvedHint.hidden = false;
-          }
-          if (els.checkEl) els.checkEl.hidden = false; // resolved -> green check
-          if (els.submit) els.submit.disabled = !amountValid;
-          showResolutionCard(resolution.ownerAddress, resolution.domain || raw);
+          useResolution(resolution);
+        } else {
+          setRecipientStatus({ input: raw, error: nameNotFoundText(raw), nameResolutions: nameResults });
+          renderOtherDomains(true);
         }
       } catch {
         // leave disabled; submit surfaces a clearer error if attempted anyway
-        if (token === resolveToken) setRecipientStatus({ input: raw, error: "No domain found" });
+        if (token === resolveToken) setRecipientStatus({ input: raw, error: nameNotFoundText(raw) });
       }
       return;
     }
@@ -14022,31 +14179,24 @@ function setCreateChatError(message = "") {
 // "Valid address" / "Resolved: name.kas" / "Invalid address format" states.
 let createChatResolveToken = 0;
 
-// "Other domains" (iOS a0dbc15): what the same name points to on the other services, and the
-// one the new chat will use. Picking another switches the chat to it.
+// "Other domains" (iOS a0dbc15, the shared dropdown since 6ac48a7): what the same name points to
+// on the other services, and the one the new chat will use. Picking another switches the chat to it.
 let createChatNameResults = [];
 let createChatPickedName = "";
-const OTHER_DOMAIN_STATE_LABEL = { notRegistered: "Not registered", failed: "Couldn't check" };
+let createChatPickedTld = null;
 function createChatResolvedStatusHtml(picked) {
-  const others = createChatNameResults.filter((entry) => entry.name !== picked.name);
   return `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(picked.name)}</span>`
     + `<span class="create-chat-status-mono">${escapeHtml(picked.address)}</span>`
-    + (others.length ? `
-      <details class="create-chat-other-domains">
-        <summary>Other domains</summary>
-        ${others.map((entry) => entry.state === "resolved"
-          ? `<button type="button" class="create-chat-other-domain" data-create-chat-other="${escapeHtml(entry.name)}"><strong>${escapeHtml(entry.name)}</strong><span>${escapeHtml(shortAddress(entry.address))}</span></button>`
-          : `<div class="create-chat-other-domain muted"><strong>${escapeHtml(entry.name)}</strong><span>${escapeHtml(OTHER_DOMAIN_STATE_LABEL[entry.state] || "Couldn't check")}</span></div>`).join("")}
-      </details>` : "");
+    + otherDomainsHtml({ resolutions: createChatNameResults, selectedTld: picked.tld ?? null });
 }
 document.querySelector("[data-create-chat-status]")?.addEventListener("click", (event) => {
-  const pick = event.target.closest("[data-create-chat-other]");
-  if (!pick) return;
-  const entry = createChatNameResults.find((candidate) => candidate.name === pick.dataset.createChatOther && candidate.state === "resolved");
+  const entry = pickOtherDomain(event, createChatNameResults);
   if (!entry) return;
   createChatPickedName = entry.name;
+  createChatPickedTld = entry.tld;
   createChatResolvedAddress = entry.address;
   renderCreateChatStatus(createChatResolvedStatusHtml(entry));
+  if (createChatAddButton) createChatAddButton.disabled = false;
   renderCreateChatPreview();
   renderCreateChatPicker();
 });
@@ -14063,6 +14213,7 @@ function updateCreateChatAddState() {
   const token = ++createChatResolveToken;
   createChatNameResults = [];
   createChatPickedName = "";
+  createChatPickedTld = null;
 
   if (!raw) {
     renderCreateChatStatus("");
@@ -14091,9 +14242,8 @@ function updateCreateChatAddState() {
   }
 
   if (engine.looksLikeName(raw)) {
-    // Matches both "name.kas" and a bare "name" — resolution normalizes either
-    // form by appending .kas if it's missing (see resolveKnsDomain). Debounced
-    // live resolution so Add only enables for a domain that actually exists.
+    // A name on any service, .kachat first: the ending typed, else .kachat, .kas, .k, .kaspa
+    // (iOS 6ac48a7). Debounced live resolution so Add only enables for a name that exists.
     renderCreateChatStatus('<span class="create-chat-status-muted">Looking up domain…</span>');
     createChatAddButton.disabled = true;
     createChatResolvedAddress = "";
@@ -14102,22 +14252,25 @@ function updateCreateChatAddState() {
     window.setTimeout(async () => {
       if (token !== createChatResolveToken) return;
       try {
-        const resolution = await engine.resolveName(raw);
+        const { results, resolution } = await engine.lookUpName(raw);
         if (token !== createChatResolveToken) return;
+        createChatNameResults = results || [];
         if (resolution?.ownerAddress) {
-          createChatNameResults = resolution.results || [];
           createChatPickedName = resolution.domain || raw;
-          renderCreateChatStatus(createChatResolvedStatusHtml({ name: createChatPickedName, address: resolution.ownerAddress }));
+          createChatPickedTld = resolution.tld || null;
+          renderCreateChatStatus(createChatResolvedStatusHtml({ name: createChatPickedName, address: resolution.ownerAddress, tld: createChatPickedTld }));
           createChatAddButton.disabled = false;
           createChatResolvedAddress = resolution.ownerAddress;
           renderCreateChatPreview();
           renderCreateChatPicker();
         } else {
-          renderCreateChatStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
+          // Nothing for the ending typed, but another service may have it (Other domains opens).
+          renderCreateChatStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`
+            + otherDomainsHtml({ resolutions: createChatNameResults }));
         }
       } catch {
         if (token !== createChatResolveToken) return;
-        renderCreateChatStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
+        renderCreateChatStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`);
       }
     }, 300);
     return;
@@ -14154,15 +14307,44 @@ function createChatEffectiveAddress() {
 /// A raw address tells you nothing about whether you typed the right one; a face and a domain do.
 /// Only ever shown for an address the app is confident about - a card flickering through wrong
 /// faces while you type would be worse than no card at all.
-/// The create-chat card, for every other place an address or a .kas domain goes in (iOS
-/// ac0ef19): withdrawals, sends from an address, the portfolio, a group invite. The SCREEN does
-/// the resolving; this takes the outcome and shows the face, the domain and the address. Nil
-/// address, no card. Fetches the profile once and calls `onLoaded` so the caller repaints.
+/// The name a resolution card shows (iOS 6ac48a7 AddressResolutionCard.displayName): the domain
+/// that was typed, else the address's own .kachat name, else what KNS knows of it. When the .kachat
+/// answer is still on its way, `onLabel(address)` repaints once one lands (latest card per
+/// address; state lives on the function object, this can run before later declarations init).
+function resolutionCardName(address, domain = null, onLabel = null) {
+  if (domain) return domain;
+  if (kachatNamesUiEnabled()) {
+    const label = kachatCachedLabel(address);
+    if (label) return label;
+    if (typeof onLabel === "function") {
+      const pending = resolutionCardName.pending || (resolutionCardName.pending = new Map());
+      pending.set(address, onLabel);
+      if (!resolutionCardName.listening) {
+        resolutionCardName.listening = true;
+        onKachatIdentityChange(() => {
+          const due = [...pending.entries()].filter(([a]) => kachatCachedLabel(a));
+          for (const [a, repaint] of due) {
+            pending.delete(a);
+            try { repaint(a); } catch { /* cosmetic */ }
+          }
+        });
+      }
+    }
+  }
+  const info = engine.peekKnsAddressInfo?.(address);
+  return info?.explicitPrimaryDomain || engine.peekKnsAddressProfile?.(address)?.domainName || null;
+}
+
+/// The create-chat card, for every other place an address or a domain goes in (iOS ac0ef19):
+/// withdrawals, sends from an address, the portfolio, a group invite. The SCREEN does the
+/// resolving (.kachat first); this takes the outcome and shows the face, the name (the domain
+/// typed, else the address's own .kachat name, iOS 6ac48a7) and the address. Nil address, no
+/// card. Fetches the profile once and calls `onLoaded` so the caller repaints.
 function addressResolutionCardHtml(address, { domain = null, onLoaded = null } = {}) {
   if (!address) return "";
   const profile = engine.peekKnsAddressProfile?.(address);
   const info = engine.peekKnsAddressInfo?.(address);
-  const knownDomain = info?.explicitPrimaryDomain || profile?.domainName || domain || null;
+  const knownDomain = resolutionCardName(address, domain, onLoaded);
   const avatarUrl = profile?.profile?.avatarUrl || "";
   const looking = !profile && !info;
   if (looking && typeof onLoaded === "function") {
@@ -14172,7 +14354,7 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
     <div class="create-chat-preview address-resolution-card">
       <span class="create-chat-preview-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : personGlyphSvg()}</span>
       <span class="create-chat-preview-copy">
-        <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No KNS domain"))}</span>
+        <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No domain"))}</span>
         <span class="create-chat-preview-address">${escapeHtml(address)}</span>
       </span>
     </div>`;
@@ -14190,7 +14372,9 @@ function renderCreateChatPreview() {
 
   const profile = engine.peekKnsAddressProfile?.(address);
   const info = engine.peekKnsAddressInfo?.(address);
-  const domain = info?.explicitPrimaryDomain || profile?.domainName || null;
+  // The domain typed (or picked under Other domains), else the address's own .kachat name (iOS
+  // 6ac48a7 AddressResolutionCard).
+  const domain = resolutionCardName(address, createChatPickedName || null, (a) => { if (createChatEffectiveAddress() === a) renderCreateChatPreview(); });
   const avatarUrl = profile?.profile?.avatarUrl || "";
   const known = (state.contacts || []).find((contact) => contact.address === address);
   // The domain the resolver already found beats waiting on a profile fetch: if you typed one,
@@ -14204,7 +14388,7 @@ function renderCreateChatPreview() {
       ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
       : personGlyphSvg()}</span>
     <span class="create-chat-preview-copy">
-      <span class="create-chat-preview-name${name ? "" : " muted"}">${escapeHtml(name || (looking ? "Looking up…" : "No KNS domain"))}</span>
+      <span class="create-chat-preview-name${name ? "" : " muted"}">${escapeHtml(name || (looking ? "Looking up…" : "No domain"))}</span>
       <span class="create-chat-preview-address">${escapeHtml(address)}</span>
     </span>
     ${known ? `<span class="create-chat-preview-tag">Already a chat</span>` : ""}`;
@@ -23489,13 +23673,14 @@ function visibleChattingPickerCandidates() {
     entry.balanceSompi > 0n || chattingPickerNameCount(entry) > 0 || entry.index === 0 || entry.index === current);
 }
 
-// Names on every service: KNS .kas domains plus .k / .kaspa names (iOS nameCount / onlyName).
+// Names on every service: .kachat names (listed first, iOS 6ac48a7), KNS .kas domains plus .k /
+// .kaspa names (iOS nameCount / onlyName).
 function chattingPickerNameCount(entry) {
-  return (entry.domains?.length || 0) + (entry.otherNames?.length || 0);
+  return (entry.kachatNames?.length || 0) + (entry.domains?.length || 0) + (entry.otherNames?.length || 0);
 }
 function chattingPickerOnlyName(entry) {
   if (chattingPickerNameCount(entry) !== 1) return null;
-  return entry.domains?.[0]?.fullName || entry.otherNames?.[0]?.display || null;
+  return entry.kachatNames?.[0]?.display || entry.domains?.[0]?.fullName || entry.otherNames?.[0]?.display || null;
 }
 
 function renderChattingPickerFooter() {
@@ -23592,6 +23777,10 @@ async function scanChattingAddressBatch() {
     let otherNamesByAddress = new Map();
     try { otherNamesByAddress = await engine.otherServiceNamesFor(addresses); } catch { /* none counted */ }
     if (token !== chattingPickerToken) return;
+    // .kachat names (active or in grace) where the registry is live, listed first (iOS 6ac48a7).
+    let kachatNamesByAddress = new Map();
+    try { kachatNamesByAddress = await engine.kachatNamesFor(addresses); } catch { /* none counted */ }
+    if (token !== chattingPickerToken) return;
 
     for (const entry of derived) {
       const info = engine.peekKnsAddressInfo?.(entry.address) || null;
@@ -23602,6 +23791,7 @@ async function scanChattingAddressBatch() {
         domains: Array.isArray(info?.allDomains) ? info.allDomains : [],
         primaryDomain: info?.primaryDomain || null,
         otherNames: otherNamesByAddress.get(entry.address) || [],
+        kachatNames: kachatNamesByAddress.get(entry.address) || [],
       });
     }
     chattingPickerScanned = start + CHATTING_PICKER_BATCH;
@@ -23650,6 +23840,12 @@ function renderChattingPickerDetail() {
   const isCurrent = candidate.index === activeChattingIndex();
   const domains = candidate.domains;
   const otherNames = candidate.otherNames || [];
+  const kachatNames = candidate.kachatNames || [];
+  const kachatNamesHtml = kachatNames.length
+    ? `<div class="chatting-picker-detail-domains"><strong>.kachat Names (${escapeHtml(String(kachatNames.length))})</strong>`
+      + kachatNames.map((name) => `<div class="chatting-picker-detail-domain"><span>${escapeHtml(name.display)}</span></div>`).join("")
+      + `</div>`
+    : "";
   const otherNamesHtml = otherNames.length
     ? `<div class="chatting-picker-detail-domains"><strong>.k and .kaspa Names (${escapeHtml(String(otherNames.length))})</strong>`
       + otherNames.map((name) =>
@@ -23657,7 +23853,7 @@ function renderChattingPickerDetail() {
       + `</div>`
     : "";
   const domainsHtml = domains.length
-    ? `<div class="chatting-picker-detail-domains"><strong>KNS Domains (${escapeHtml(String(domains.length))})</strong>`
+    ? `<div class="chatting-picker-detail-domains"><strong>.kas Names (${escapeHtml(String(domains.length))})</strong>`
       + domains.map((domain) => {
         const isPrimary = candidate.primaryDomain
           && String(domain.fullName).toLowerCase() === String(candidate.primaryDomain).toLowerCase();
@@ -23670,6 +23866,7 @@ function renderChattingPickerDetail() {
     <button type="button" class="chatting-picker-detail-address" data-chatting-picker-copy>${escapeHtml(candidate.address)}</button>
     <p class="chatting-picker-detail-hint">Click the address to copy it.</p>
     <div class="chatting-picker-detail-stat"><span>Balance</span><span>${escapeHtml(formatSompiForNotification(candidate.balanceSompi))} ${KAS_UNIT}</span></div>
+    ${kachatNamesHtml}
     ${otherNamesHtml}
     ${domainsHtml}`;
   if (chattingPickerSetBtn) {
@@ -25250,6 +25447,16 @@ queueMicrotask(async () => {
         }
         return out;
       },
+      // Contacts' .kachat names ("alice.kachat"), listed first in the @suggestions (iOS d0c5b09).
+      getKachatMentionNames: () => {
+        if (!kachatNamesUiEnabled()) return [];
+        const out = [];
+        for (const contact of state.contacts || []) {
+          const label = kachatCachedLabel(contact.address);
+          if (label && !out.includes(label)) out.push(label);
+        }
+        return out;
+      },
     });
   } catch (error) { appendEngineLog(`initKaPosts did not start: ${error?.message || error}`); }
 
@@ -25531,6 +25738,9 @@ queueMicrotask(async () => {
         return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
       },
       ownAddress: () => engine.address || "",
+      // The editor's address field takes a domain, .kachat first (iOS 6ac48a7).
+      looksLikeName: (input) => engine.looksLikeName(input),
+      lookUpName: (input) => engine.lookUpName(input),
       canSend: () => Boolean(engine.address),
       openSend: (address) => openSendKaspaModal({ prefillAddress: address }),
       openChat: (address) => openChatWithAddress({ address }),
@@ -26276,7 +26486,7 @@ function openGroupMemberMenu(address, x, y) {
   const hidden = Boolean(activeGroupId && !mine && isGroupMemberHidden(activeGroupId, address));
   // iOS GroupChatDetailView's sender sheet: a header naming the sender and their address, then
   // one row per option saying what it does.
-  const options = [{ id: "profile", title: "View Profile", subtitle: "Their KNS profile, domains and address." }];
+  const options = [{ id: "profile", title: "View Profile", subtitle: "Their profile, .kachat name and address." }];
   if (!mine) {
     options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
     options.push({ id: "pay", title: "Pay in Kaspa", subtitle: `Send ${KAS_UNIT} to this member from your chatting address.` });
@@ -26351,6 +26561,10 @@ const groupCreateError = document.querySelector("[data-group-create-error]");
 const groupCreateSubmit = document.querySelector("[data-group-create-submit]");
 let groupAddressResolved = null;
 let groupAddressResolveToken = 0;
+// A typed name (iOS 6ac48a7): every service's answer, and the one in use - its name and ending.
+let groupAddressNameResults = [];
+let groupAddressPickedName = null;
+let groupAddressPickedTld = null;
 const groupChatScreen = document.querySelector("[data-group-chat-screen]");
 const groupChatName = document.querySelector("[data-group-chat-name]");
 const groupChatSub = document.querySelector("[data-group-chat-sub]");
@@ -27446,7 +27660,7 @@ function renderGroupMemberPicker(excludeAddresses = []) {
     const anyone = eligibleGroupContacts([]).length > 0;
     groupMemberPicker.innerHTML = `<p class="group-picker-empty">${groupModalMode === "add" && anyone
       ? "Everyone in your contacts is already in this group."
-      : "You have no contacts yet. Paste an address or a .kas domain to invite someone."}</p>`;
+      : "You have no contacts yet. Paste an address or a domain to invite someone."}</p>`;
     return;
   }
   // Filter by the search box (name, nickname, or address). Selection persists across
@@ -27549,7 +27763,7 @@ function setGroupCreateAddressBookMode(on) {
   const hint = document.querySelector("[data-group-add-by-address-hint]");
   if (hint) hint.textContent = on
     ? "Pick people from your Address Book, or add anyone by Kaspa address or domain."
-    : "Not in your contacts? Add anyone by Kaspa address or KNS domain:";
+    : "Not in your contacts? Add anyone by Kaspa address or domain:";
 }
 function openGroupCreate() {
   // Opened from the Chats New sheet, the caller marks it again right after this (see newChatSheet).
@@ -27642,7 +27856,8 @@ function renderGroupAddressPreview() {
 
   const profile = engine.peekKnsAddressProfile?.(address);
   const info = engine.peekKnsAddressInfo?.(address);
-  const domain = info?.explicitPrimaryDomain || profile?.domainName || null;
+  // The domain typed, else the address's own .kachat name (iOS 6ac48a7 AddressResolutionCard).
+  const domain = resolutionCardName(address, groupAddressPickedName, (a) => { if (groupAddressResolved === a) renderGroupAddressPreview(); });
   const avatarUrl = profile?.profile?.avatarUrl || "";
   const looking = !profile && !info;
 
@@ -27652,7 +27867,7 @@ function renderGroupAddressPreview() {
       ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
       : personGlyphSvg()}</span>
     <span class="create-chat-preview-copy">
-      <span class="create-chat-preview-name${domain ? "" : " muted"}">${escapeHtml(domain || (looking ? "Looking up…" : "No KNS domain"))}</span>
+      <span class="create-chat-preview-name${domain ? "" : " muted"}">${escapeHtml(domain || (looking ? "Looking up…" : "No domain"))}</span>
       <span class="create-chat-preview-address">${escapeHtml(address)}</span>
     </span>`;
 
@@ -27671,6 +27886,9 @@ function renderGroupAddressPreview() {
 
 function resetGroupAddressSection() {
   groupAddressResolved = null;
+  groupAddressNameResults = [];
+  groupAddressPickedName = null;
+  groupAddressPickedTld = null;
   groupAddressResolveToken++;
   if (groupAddressInput) groupAddressInput.value = "";
   setGroupAddressStatus("");
@@ -27688,14 +27906,41 @@ function groupAddressDuplicateWarning(address) {
   return null;
 }
 
-// Live validity feedback for the group address field (raw address or KNS domain),
-// mirroring the 1:1 create-chat resolver. Sets groupAddressResolved to the address
+/// The group field's line for a resolved name (iOS 6ac48a7 AddGroupMembersView): "Resolved: name"
+/// (or why it can't be added) with the address, then Other domains.
+function groupAddressResolvedStatusHtml(address, name) {
+  const dupe = groupAddressDuplicateWarning(address);
+  return (dupe
+    ? `<span class="create-chat-status-bad">✕ ${escapeHtml(dupe)}</span>`
+    : `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(name)}</span>`)
+    + `<span class="create-chat-status-mono">${escapeHtml(address)}</span>`
+    + otherDomainsHtml({ resolutions: groupAddressNameResults, selectedTld: groupAddressPickedTld });
+}
+/// Use one service's answer (the priority one, or a pick from Other domains).
+function useGroupAddressResolution(address, name, tld) {
+  groupAddressResolved = address;
+  groupAddressPickedName = name;
+  groupAddressPickedTld = tld || null;
+  setGroupAddressStatus(groupAddressResolvedStatusHtml(address, name));
+  if (groupAddressAddButton) groupAddressAddButton.disabled = Boolean(groupAddressDuplicateWarning(address));
+  renderGroupAddressPreview();
+}
+groupAddressStatus?.addEventListener("click", (event) => {
+  const entry = pickOtherDomain(event, groupAddressNameResults);
+  if (entry) useGroupAddressResolution(entry.address, entry.name, entry.tld);
+});
+
+// Live validity feedback for the group address field (raw address or a domain, .kachat first -
+// iOS 6ac48a7), mirroring the 1:1 create-chat resolver. Sets groupAddressResolved to the address
 // that "Add to Group" will use.
 function updateGroupAddressState() {
   if (!groupAddressInput) return;
   const raw = String(groupAddressInput.value || "").trim();
   const token = ++groupAddressResolveToken;
   groupAddressResolved = null;
+  groupAddressNameResults = [];
+  groupAddressPickedName = null;
+  groupAddressPickedTld = null;
   if (groupAddressAddButton) groupAddressAddButton.disabled = true;
 
   if (!raw) { setGroupAddressStatus(""); renderGroupAddressPreview(); return; }
@@ -27722,22 +27967,19 @@ function updateGroupAddressState() {
     window.setTimeout(async () => {
       if (token !== groupAddressResolveToken) return;
       try {
-        const resolution = await engine.resolveName(raw);
+        const { results, resolution } = await engine.lookUpName(raw);
         if (token !== groupAddressResolveToken) return;
+        groupAddressNameResults = results || [];
         if (resolution?.ownerAddress) {
-          groupAddressResolved = resolution.ownerAddress;
-          const dupe = groupAddressDuplicateWarning(resolution.ownerAddress);
-          setGroupAddressStatus(dupe
-            ? `<span class="create-chat-status-bad">✕ ${escapeHtml(dupe)}</span><span class="create-chat-status-mono">${escapeHtml(resolution.ownerAddress)}</span>`
-            : `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(resolution.domain || raw)}</span><span class="create-chat-status-mono">${escapeHtml(resolution.ownerAddress)}</span>`);
-          if (groupAddressAddButton) groupAddressAddButton.disabled = Boolean(dupe);
-        } else {
-          setGroupAddressStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
+          useGroupAddressResolution(resolution.ownerAddress, resolution.domain || raw, resolution.tld);
+          return;
         }
+        setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`
+          + otherDomainsHtml({ resolutions: groupAddressNameResults }));
         renderGroupAddressPreview();
       } catch {
         if (token !== groupAddressResolveToken) return;
-        setGroupAddressStatus('<span class="create-chat-status-bad">✕ No domain found</span>');
+        setGroupAddressStatus(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`);
       }
     }, 300);
     return;

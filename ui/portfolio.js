@@ -34,6 +34,7 @@ import { ADDRESS_PREFIX, ADDRESS_HRP, KAS_UNIT } from "../engine/network.js";
 import { resolveDomain } from "../engine/kns.js";
 import { looksLikeName, resolveEverywhere, primary as primaryName } from "../engine/name-services.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
+import { otherDomainsHtml, pickOtherDomain } from "./send-kaspa-components.js";
 import { saveFile } from "./save-file.js";
 import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
@@ -2091,7 +2092,7 @@ function setImportProgress(text) {
   if (el) el.textContent = text || "";
 }
 
-// --- address field: raw address or KNS domain (iOS PortfolioAddAddressView) ---
+// --- address field: raw address or a domain, .kachat first (iOS PortfolioAddAddressView, 6ac48a7) ---
 
 function looksLikeRawAddress(input) {
   const lower = String(input || "").toLowerCase();
@@ -2106,7 +2107,7 @@ function shortenAddress(address) {
   return address.length > 26 ? `${address.slice(0, 16)}...${address.slice(-8)}` : address;
 }
 
-/** What Import actually runs against: the resolved owner of a KNS domain, else the raw input. */
+/** What Import actually runs against: the resolved owner of a typed domain, else the raw input. */
 function importEffectiveAddress() {
   return addressImport?.resolvedAddress || addressImport?.input || "";
 }
@@ -2138,10 +2139,16 @@ function syncImportModal() {
   if (!cardHost) { cardHost = document.createElement("div"); cardHost.dataset.portfolioImportCard = ""; status.insertAdjacentElement("afterend", cardHost); }
   const showCard = (address, domain) => { cardHost.innerHTML = address ? (deps.addressCardHtml?.(address, { domain, onLoaded: () => syncImportModal() }) || "") : ""; };
   showCard(null);
+  // Other domains under the resolved name (iOS 6ac48a7): the same name on the other services.
+  let othersHost = modalsEl.querySelector("[data-portfolio-import-other-domains]");
+  if (!othersHost) { othersHost = document.createElement("div"); othersHost.dataset.portfolioImportOtherDomains = ""; cardHost.insertAdjacentElement("afterend", othersHost); }
+  othersHost.innerHTML = addressImport && !addressImport.resolving && input
+    ? otherDomainsHtml({ resolutions: addressImport.nameResolutions || [], selectedTld: addressImport.selectedTld ?? null })
+    : "";
   if (addressImport?.resolving) { status.textContent = "Looking up domain…"; return; }
   if (!input) { status.textContent = ""; return; }
   if (addressImport.resolvedAddress) {
-    status.textContent = `Resolves to ${shortenAddress(addressImport.resolvedAddress)}`;
+    status.textContent = `Resolved: ${addressImport.resolvedDomain || ""} ${shortenAddress(addressImport.resolvedAddress)}`;
     status.style.color = "var(--ios-green)";
     showCard(addressImport.resolvedAddress, addressImport.resolvedDomain);
     return;
@@ -2168,6 +2175,8 @@ function handleImportInputChange(raw) {
   addressImport.resolvedDomain = null;
   addressImport.notFound = false;
   addressImport.resolving = false;
+  addressImport.nameResolutions = [];
+  addressImport.selectedTld = null;
   const seq = (knsResolveSeq += 1);
 
   if (trimmed && !looksLikeRawAddress(trimmed) && looksLikeName(trimmed)) {
@@ -2230,21 +2239,29 @@ async function resolveImportDomain(domain, seq) {
   if (seq !== knsResolveSeq || addressImport?.input !== domain) return;
 
   // Every name service in priority order (iOS 79b6ac8): the typed ending's, else .kachat, .kas,
-  // .k, .kaspa - the same resolution as sends and new chats.
+  // .k, .kaspa - the same resolution as sends and new chats (the engine's, so .kachat resolves
+  // where its registry is live). Every answer is kept for Other domains (iOS 6ac48a7).
   let resolution = null;
+  let results = [];
   try {
-    const results = (await resolveEverywhere(domain, {
-      resolveKas: async (name) => {
-        try { return (await resolveDomain(name, { baseUrl: getEndpoint("knsApi") }))?.ownerAddress || null; } catch { return null; }
-      },
-    })).filter((entry) => entry.state !== "notLive");
-    const winner = primaryName(results, domain);
-    resolution = winner?.address ? { ownerAddress: winner.address, domain: winner.name } : null;
+    if (deps.engine?.lookUpName) {
+      ({ results, resolution } = await deps.engine.lookUpName(domain));
+    } else {
+      results = await resolveEverywhere(domain, {
+        resolveKas: async (name) => {
+          try { return (await resolveDomain(name, { baseUrl: getEndpoint("knsApi") }))?.ownerAddress || null; } catch { return null; }
+        },
+      });
+      const winner = primaryName(results, domain);
+      resolution = winner?.address ? { ownerAddress: winner.address, domain: winner.name, tld: winner.tld } : null;
+    }
   } catch { resolution = null; }
 
   // Input may have moved on while the lookup was in flight — a stale answer must not overwrite
   // the state for what's in the field now.
   if (seq !== knsResolveSeq || addressImport?.input !== domain) return;
+  addressImport.nameResolutions = results || [];
+  addressImport.selectedTld = resolution?.tld || null;
   addressImport.resolvedAddress = resolution?.ownerAddress || null;
   addressImport.resolvedDomain = resolution?.domain || null;
   addressImport.notFound = !resolution;
@@ -2599,7 +2616,7 @@ function buildModals() {
           <button class="modal-close" type="button" data-portfolio-import-close aria-label="Close">×</button>
         </div>
         <div class="portfolio-editor-body">
-          <p class="portfolio-import-note" data-portfolio-import-manual>Enter a Kaspa address or a KNS domain like name.kas. Imports that address's on-chain history: every received transaction becomes a buy and every sent one a sell, priced at that day's KAS price. Re-running later only adds new activity.</p>
+          <p class="portfolio-import-note" data-portfolio-import-manual>Enter a Kaspa address or a domain like name.kachat (.kachat names are looked up first). Imports that address's on-chain history: every received transaction becomes a buy and every sent one a sell, priced at that day's KAS price. Re-running later only adds new activity.</p>
           <label class="portfolio-editor-field" data-portfolio-import-manual>
             <span>Kaspa Address or KNS Domain</span>
             <input type="text" placeholder="kaspa:qr… or domain" data-portfolio-import-address spellcheck="false" autocomplete="off" autocapitalize="off" />
@@ -2755,6 +2772,18 @@ function buildModals() {
         modalsEl.querySelector("[data-portfolio-import-modal]").hidden = true;
       }
       return;
+    }
+    // A pick under Other domains imports that service's address instead (iOS 6ac48a7).
+    if (event.target.closest("[data-portfolio-import-other-domains]") && addressImport && !addressImport.busy) {
+      const entry = pickOtherDomain(event, addressImport.nameResolutions);
+      if (entry) {
+        addressImport.resolvedAddress = entry.address;
+        addressImport.resolvedDomain = entry.name;
+        addressImport.selectedTld = entry.tld;
+        addressImport.notFound = false;
+        syncImportModal();
+        return;
+      }
     }
     if (event.target.closest("[data-portfolio-import-paste]")) {
       pasteIntoImportField();
