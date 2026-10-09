@@ -330,10 +330,11 @@ function runBundled(r) {
     "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
   ].find((x) => existsSync(x));
   if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
-  // the bundled manifest: the live testnet-10 registry v5, the migration drill of 2026-10-09 that
-  // imported the day-clock v4 registry e6b72448..7f0d (iOS fbfa5a6), verified from the bundle and
-  // as an indexer would serve it (every template pinned for its registry id)
-  const BUNDLED_REGISTRY = "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d";
+  // the bundled manifest: the live testnet-10 registry v5 on the audited contracts (iOS 427efd7),
+  // which imported the 2026-10-09 migration-drill registry fdc403f5..571d, verified from the bundle
+  // and as an indexer would serve it (every template pinned for its registry id)
+  const BUNDLED_REGISTRY = "1283f749506c454488a6b7264197658ed1c12051f1887905c4396243a89fbfa2";
+  const MIGRATED_FROM = "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d";
   const PREDECESSOR = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
   const bundledJson = JSON.parse(bundled.toString("utf8"));
   r.eq(bundledJson.registryVersion, 5, "bundled manifest registryVersion");
@@ -345,10 +346,10 @@ function runBundled(r) {
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
     r.eq(bm.network, "testnet-10", "bundled manifest network");
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled registry covenant id");
-    r.eq(C.hex(bm.genesisTxid), "408682e6d46f483ef0bb2564f96a78ead5f2af6401fbb2fdbdb8ecd8f61dfda5", "bundled registry genesis txid");
+    r.eq(C.hex(bm.genesisTxid), "b6223f0f7fa589a27bf8c0cf5698bfb6ce9421de31a9e635049afa8b2107e24f", "bundled registry genesis txid");
     r.eq(bm.registryVersion, 5, "bundled manifest: registry v5");
-    r.eq(bm.params.migration ? C.hex(bm.params.migration.predecessorRegistryId) : null, PREDECESSOR, "bundled manifest: imports the day-clock v4 registry");
-    r.eq(bm.params.migration?.deadlineMs, 1_791_541_849_055n, "bundled manifest: register opens 2026-10-09 10:30:49 UTC");
+    r.eq(bm.params.migration ? C.hex(bm.params.migration.predecessorRegistryId) : null, MIGRATED_FROM, "bundled manifest: imports the drill registry");
+    r.eq(bm.params.migration?.deadlineMs, 1_791_582_129_000n, "bundled manifest: register opens at the migration deadline");
     r.check(bm.price === undefined && bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
     r.eq(bm.params.periodMs, 86_400_000n, "bundled manifest: 24-hour testnet clock");
     r.eq(bm.params.graceMs, 21_600_000n, "bundled manifest: 6-hour grace");
@@ -361,9 +362,11 @@ function runBundled(r) {
     r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer", "every template pinned for the bundled registry");
     r.eq(M.templatePinsFor(BUNDLED_REGISTRY.toUpperCase(), 5).KachatOffer, pins.KachatOffer, "templatePinsFor takes hex in any case");
     for (const t of [bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled ${t.contract} is the pinned build`);
-    r.eq(pins.KachatGap, "afce97e05a6341ea7768252a264c65882b92105f8d7158a3ac63f68fbe1615cb", "pinned v5 gap hash (iOS, per deployment)");
-    r.eq(pins.KachatName, "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b", "pinned name hash (iOS)");
-    r.eq(pins.KachatOffer, "9d6e666481ea80e27565e68c01e6de51b32660d2f91368d9b80e4ee00b981d6d", "pinned offer hash (iOS)");
+    r.eq(pins.KachatGap, "9fe90632a60e8771f2b8ac5e4368d5f4a2990fb9e5ad0fa6f3771b6287ee4242", "pinned v5 gap hash (iOS, per deployment)");
+    r.eq(pins.KachatName, "9d4f91bfd7aea47f8529104d260dc7b80c673fe04e2595b21abe47209c39e0e8", "pinned v5 name hash (iOS, audited contracts)");
+    r.eq(pins.KachatOffer, "7cb988f2b608aa5575bed8455b006f4ce11b8c2ac09aae377d41b1f94c935100", "pinned offer hash (iOS)");
+    // the retired drill registry lost its pins (iOS 427efd7)
+    r.eq(M.templatePinsFor(MIGRATED_FROM, 5).KachatOffer, undefined, "the retired drill registry has no offer pin");
     // the v4 predecessor keeps its pins (an indexer may still serve its manifest until it moves)
     const prev = M.templatePinsFor(PREDECESSOR, 4);
     r.eq(prev.KachatGap, "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5", "pinned v4 gap hash (iOS)");

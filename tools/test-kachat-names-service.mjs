@@ -175,7 +175,7 @@ async function main() {
   // the bundled testnet manifest is the live testnet-10 registry v5, the migration drill that
   // imported the day-clock v4 registry (iOS fbfa5a6): it verifies, so testnet leaves "Setting up"
   // (registryUpgrading stays false)
-  const BUNDLED_REGISTRY = "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d";
+  const BUNDLED_REGISTRY = "1283f749506c454488a6b7264197658ed1c12051f1887905c4396243a89fbfa2";
   const bundled = new S.KachatNamesService(fakeEngine());
   let bundledEvents = 0;
   bundled.onChange((x) => { if (x === bundled) bundledEvents += 1; });
