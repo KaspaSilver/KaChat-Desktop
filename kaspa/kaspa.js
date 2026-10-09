@@ -15039,7 +15039,12 @@ function __wbg_get_imports() {
         return addHeapObject(ret);
     };
     imports.wbg.__wbg_newnoargs_105ed471475aaf50 = function(arg0, arg1) {
-        const ret = new Function(getStringFromWasm0(arg0, arg1));
+        // KaChat patch (2026-10-09, see kaspa/VERSION): the page's CSP has no 'unsafe-eval', and
+        // js-sys / workflow-rs only ever build "return this" here to reach the global object (the
+        // SDK's websocket reconnect timer did, and threw an EvalError). Answer that one without
+        // eval; anything else still goes to Function and the CSP still refuses it.
+        const src = getStringFromWasm0(arg0, arg1);
+        const ret = src === "return this" ? function () { return globalThis; } : new Function(src);
         return addHeapObject(ret);
     };
     imports.wbg.__wbg_newwithbyteoffsetandlength_d97e637ebe145a9a = function(arg0, arg1, arg2) {

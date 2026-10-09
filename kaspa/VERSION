@@ -30,3 +30,12 @@ TO CLOSE THE GAP
 Kasia cipher (cipher/) for comparison: built from vendor/kasia-cipher (in this repo; Cargo.lock pins
 rusty-kaspa v1.0.0 = eb71df4d284593fccd1342094c37edc8c000da85 for kaspa-addresses / kaspa-wallet-keys)
 with the same Linux toolchain (rustc 59807616...). Checksums: cipher/SHA256SUMS.
+
+LOCAL PATCH (2026-10-09, KaChat-Desktop Build 134)
+  kaspa/kaspa.js and cipher/cipher.js: __wbg_newnoargs answers "return this" with a function that
+  returns globalThis instead of `new Function(...)`. The page's CSP (tools/security-headers.mjs)
+  has no 'unsafe-eval', and js-sys / workflow-rs build exactly that string to reach the global
+  object; the SDK's websocket reconnect timer threw "EvalError ... 'unsafe-eval' is not an allowed
+  source of script" after a failed node connection. Any other string still goes to Function and is
+  refused by the CSP. The .wasm binaries are unchanged; the .js checksums in SHA256SUMS were
+  updated for this patch (bash tools/check-wasm.sh --update).
