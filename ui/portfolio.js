@@ -36,7 +36,12 @@ import { looksLikeName, resolveEverywhere, primary as primaryName, notFoundMessa
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { otherDomainsHtml, pickOtherDomain } from "./send-kaspa-components.js";
 import { saveFile } from "./save-file.js";
-import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
+import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker, noteMessageActivity } from "./nextcloud.js";
+import {
+  PORTFOLIO_SEED_NAME, isPortfolioUuid, newPortfolioUuid, stampPortfolioChanges, mergePortfolioTombstones,
+  mergePortfolioSync, portfolioSyncFromDesktop, portfolioSyncToDesktop, portfolioSyncFromArchive,
+  portfolioSyncToArchive, portfolioSyncForArchive, isPortfolioSyncEmpty,
+} from "./portfolio-sync.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
@@ -46,6 +51,9 @@ const PORTFOLIO_KEY = "kachat-portfolios-v1"; // account-scoped: { activeId, por
 // account BESIDE the ledger: [{ txId, portfolioId, sourceAddress, amountSompi, timestamp,
 // fiatValue }] - fiatValue null until that day's price is known (the backfill fills it in).
 const FEES_KEY = "kachat-portfolio-fees-v1";
+// Portfolios and rows deleted on this account, [{ kind: "portfolio" | "transaction", id, deletedAt }]
+// (ms), carried in the Nextcloud backup so a merge or restore never brings them back (iOS 11f1548).
+const TOMBSTONES_KEY = "kachat-portfolio-tombstones-v1";
 const MAX_PORTFOLIOS = 5;
 // Mirrors iOS PortfolioAddressImporter.priceUnavailableNote — rows the import couldn't price
 // synchronously carry this note, show a warning icon, and are filled in by the background price
@@ -86,6 +94,10 @@ let rootEl = null;
 let modalsEl = null;
 let state = { activeId: null, portfolios: [] };
 let fees = [];             // every portfolio's PortfolioFeeRecords for this account (FEES_KEY)
+let tombstones = [];       // this account's deleted portfolios and rows (TOMBSTONES_KEY)
+// The list as last saved (a deep copy: rows are edited in place), so a save can tell what changed
+// (stamped) and what went (a tombstone) - iOS savedPortfolios / savedTransactions (11f1548).
+let savedPortfolios = [];
 let price = null;         // { price, change24h, currency, fetchedAt }
 let history = [];          // [[ts, fiat]] for the selected range — resolved every render
 let sevenDayHistory = [];  // fixed 7d window for per-card "today's change" (independent of range)
@@ -237,8 +249,10 @@ function currencySymbol() {
 // full-screen KAS price chart below the range selector.
 const KASPA_ABOUT = "Kaspa is a decentralized, open-source, proof-of-work cryptocurrency. It is built on the GHOSTDAG protocol - a generalization of Nakamoto consensus that, instead of discarding blocks created in parallel, orders them together in a blockDAG. This lets Kaspa reach very high block rates and near-instant transaction confirmation while keeping the security guarantees of proof of work. Kaspa launched in November 2021 with a fair release: no pre-mine, no pre-sale, and no coin allocations. Its native coin is KAS.";
 
+/** A new portfolio or row id: an uppercase UUID, as iOS writes them (the backup matches portfolio
+ *  deletions by that string). */
 function nowId() {
-  return typeof crypto?.randomUUID === "function" ? crypto.randomUUID() : `p-${Date.now()}-${Math.random()}`;
+  return newPortfolioUuid();
 }
 
 // ---------------------------------------------------------------------------
@@ -247,15 +261,79 @@ function nowId() {
 
 function loadState() {
   loadFees();
+  loadTombstones();
+  state = { activeId: null, portfolios: [] };
   try {
     const parsed = JSON.parse(localStorage.getItem(deps.accountScopedKey(PORTFOLIO_KEY)) || "null");
-    if (parsed?.portfolios?.length) { state = parsed; return; }
+    if (parsed?.portfolios?.length) state = parsed;
   } catch { /* fall through */ }
-  state = { activeId: null, portfolios: [] };
+  if (migrateForSync()) writeState();
+  savedPortfolios = snapshotPortfolios();
 }
 
-function saveState() {
+/** Once per stored list, before sync reads it (iOS 11f1548): every portfolio gets a createdAt and
+ *  an uppercase UUID id (fees and the active id follow it), every row a UUID id. Not an edit, so
+ *  nothing is stamped. True when anything changed. */
+function migrateForSync() {
+  let changed = false;
+  const renamed = new Map();
+  const now = Date.now();
+  for (const portfolio of state.portfolios) {
+    const raw = String(portfolio.id ?? "");
+    const id = isPortfolioUuid(raw) ? raw.toUpperCase() : nowId();
+    if (id !== raw) { renamed.set(raw, id); portfolio.id = id; changed = true; }
+    if (!Number.isFinite(Number(portfolio.createdAt)) || Number(portfolio.createdAt) <= 0) { portfolio.createdAt = now; changed = true; }
+    for (const tx of portfolio.transactions || []) {
+      if (!isPortfolioUuid(tx.id)) { tx.id = nowId(); changed = true; }
+    }
+  }
+  if (renamed.has(String(state.activeId ?? ""))) state.activeId = renamed.get(String(state.activeId));
+  let feesChanged = false;
+  for (const fee of fees) {
+    const raw = String(fee.portfolioId ?? "");
+    const id = renamed.get(raw) || (isPortfolioUuid(raw) ? raw.toUpperCase() : raw);
+    if (id !== raw) { fee.portfolioId = id; feesChanged = true; }
+  }
+  if (feesChanged) { try { localStorage.setItem(deps.accountScopedKey(FEES_KEY), JSON.stringify(fees)); } catch { /* quota */ } }
+  return changed;
+}
+
+function snapshotPortfolios() {
+  return JSON.parse(JSON.stringify(state.portfolios));
+}
+
+function writeState() {
   localStorage.setItem(deps.accountScopedKey(PORTFOLIO_KEY), JSON.stringify(state));
+}
+
+/// Saves the list: anything added, renamed, moved or edited is stamped, anything gone is recorded
+/// as deleted, and the Nextcloud backup is marked to upload (NEXTCLOUD_SYNC.md §5, iOS 11f1548
+/// PortfolioManager/PortfolioViewModel.persist). Picking the active portfolio changes nothing here.
+function saveState() {
+  const now = Date.now();
+  const result = stampPortfolioChanges(savedPortfolios, state.portfolios, now);
+  if (result.tombstones.length) {
+    tombstones = mergePortfolioTombstones([tombstones, result.tombstones]);
+    saveTombstones();
+  }
+  writeState();
+  savedPortfolios = snapshotPortfolios();
+  if (result.changed) noteBackupActivity();
+}
+
+function noteBackupActivity() {
+  try { noteMessageActivity(); } catch { /* Nextcloud not set up */ }
+}
+
+function loadTombstones() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(deps.accountScopedKey(TOMBSTONES_KEY)) || "null");
+    tombstones = Array.isArray(parsed) ? parsed : [];
+  } catch { tombstones = []; }
+}
+
+function saveTombstones() {
+  try { localStorage.setItem(deps.accountScopedKey(TOMBSTONES_KEY), JSON.stringify(tombstones)); } catch { /* quota */ }
 }
 
 function loadFees() {
@@ -267,6 +345,7 @@ function loadFees() {
 
 function saveFees() {
   try { localStorage.setItem(deps.accountScopedKey(FEES_KEY), JSON.stringify(fees)); } catch { /* quota */ }
+  noteBackupActivity(); // fees ride in the backup too (iOS persistFees)
 }
 
 /// A deleted portfolio's fees go with it (iOS forgetPortfolio). Its rows already do: they live
@@ -279,10 +358,13 @@ function forgetPortfolioFees(portfolioId) {
 
 function ensureDefaultPortfolio() {
   if (state.portfolios.length === 0) {
-    const p = { id: nowId(), name: "Portfolio 1", transactions: [] };
+    // The seed is written as is, never stamped: untouched, it stays out of the backup and gives
+    // way to the real list when one arrives (iOS 11f1548).
+    const p = { id: nowId(), name: PORTFOLIO_SEED_NAME, createdAt: Date.now(), transactions: [] };
     state.portfolios.push(p);
     state.activeId = p.id;
-    saveState();
+    writeState();
+    savedPortfolios = snapshotPortfolios();
   }
   if (!state.portfolios.some((p) => p.id === state.activeId)) {
     state.activeId = state.portfolios[0].id;
@@ -2943,6 +3025,49 @@ async function refreshData({ force = false } = {}) {
 // Init
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Nextcloud backup (NEXTCLOUD_SYNC.md §5 "Portfolios", iOS 11f1548)
+// ---------------------------------------------------------------------------
+
+/** This account's portfolios as the sync model sees them. */
+function currentPortfolioSync() {
+  return portfolioSyncFromDesktop(state.portfolios, fees, tombstones);
+}
+
+/** What the backup carries for this account: the archive's optional `portfolios`,
+ *  `portfolioTransactions`, `portfolioFees` and `portfolioDeleted` keys, empty ones left out.
+ *  An untouched "Portfolio 1" seed is never uploaded. */
+export function portfolioArchive() {
+  if (!deps) return {};
+  return portfolioSyncToArchive(portfolioSyncForArchive(currentPortfolioSync()));
+}
+
+/** A restore: merges the archive's portfolios into this account's (per item the newest edit or
+ *  deletion wins) and reloads. The caller has already refused a foreign wallet's archive. The
+ *  active portfolio is this device's own and stays put when it survives. True when applied. */
+export function importPortfolioArchive(archive) {
+  if (!deps) return false;
+  const incoming = portfolioSyncFromArchive(archive);
+  if (isPortfolioSyncEmpty(incoming)) return false;
+  const local = currentPortfolioSync();
+  const merged = mergePortfolioSync([local, incoming]);
+  // Compared in the merge's own order, so an archive that adds nothing writes nothing.
+  if (!merged.portfolios.length || JSON.stringify(merged) === JSON.stringify(mergePortfolioSync([local]))) return false;
+  const next = portfolioSyncToDesktop(merged);
+  state.portfolios = next.portfolios;
+  if (!state.portfolios.some((p) => p.id === state.activeId)) state.activeId = state.portfolios[0].id;
+  fees = next.fees;
+  tombstones = next.tombstones;
+  // Written as is: a restore came FROM the backup, so nothing is stamped or marked to upload.
+  writeState();
+  try { localStorage.setItem(deps.accountScopedKey(FEES_KEY), JSON.stringify(fees)); } catch { /* quota */ }
+  saveTombstones();
+  savedPortfolios = snapshotPortfolios();
+  render();
+  startPriceBackfillIfNeeded();
+  return true;
+}
+
 /** For a chooser's "Add to Portfolio" (Cold Storage): the available portfolios (id + name). */
 export function listPortfolios() {
   ensureDefaultPortfolio();
@@ -3114,7 +3239,7 @@ export function initPortfolio(dependencies) {
         initial: `Portfolio ${state.portfolios.length + 1}`,
       });
       if (name?.trim()) {
-        const p = { id: nowId(), name: name.trim(), transactions: [] };
+        const p = { id: nowId(), name: name.trim(), createdAt: Date.now(), transactions: [] };
         state.portfolios.push(p);
         state.activeId = p.id;
         saveState(); render();

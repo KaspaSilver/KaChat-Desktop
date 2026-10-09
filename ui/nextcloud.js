@@ -1339,6 +1339,10 @@ function splitArchiveForProgress(plainJson) {
   // The Address Book (NEXTCLOUD_SYNC.md §5) rides with the last batch too, so it is applied once.
   if (Array.isArray(parsed.addressBook)) batches[batches.length - 1].addressBook = parsed.addressBook;
   if (Array.isArray(parsed.addressBookDeleted)) batches[batches.length - 1].addressBookDeleted = parsed.addressBookDeleted;
+  // So do the portfolios (iOS 11f1548).
+  for (const key of ["portfolios", "portfolioTransactions", "portfolioFees", "portfolioDeleted"]) {
+    if (Array.isArray(parsed[key])) batches[batches.length - 1][key] = parsed[key];
+  }
   return { total: conversations.length, batches };
 }
 
@@ -1560,6 +1564,7 @@ function renderSettings() {
       <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small data-nc-backup-status>Checking last backup…</small></span></div>
     </div>
     <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history.</p>
+    <p class="settings-group-footer">Your Address Book and portfolios are in the same backup and sync between your devices the same way.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
     </div>

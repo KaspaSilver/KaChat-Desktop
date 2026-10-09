@@ -28,7 +28,8 @@ import {
   pickFromAddressBook, pickManyFromAddressBook, refreshAddressBookStorageRow, ADDRESS_BOOK_ICONS,
 } from "./address-book.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
-import { initPortfolio, refreshPortfolio, resetPortfolioForAccount } from "./portfolio.js";
+import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioArchive, importPortfolioArchive } from "./portfolio.js";
+import { mergePortfolioArchives } from "./portfolio-sync.js";
 import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 import {
@@ -10467,7 +10468,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 131;
+const APP_BUILD = 132;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -21410,6 +21411,11 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     try { importAddressBookArchive(archive.addressBook || [], archive.addressBookDeleted || []); }
     catch (error) { appendEngineLog(`Address Book restore skipped: ${error?.message || error}`); }
   }
+  // So are the portfolios: per item the newest edit or deletion wins (iOS 11f1548).
+  if (["portfolios", "portfolioTransactions", "portfolioFees", "portfolioDeleted"].some((key) => Array.isArray(archive[key]))) {
+    try { importPortfolioArchive(archive); }
+    catch (error) { appendEngineLog(`Portfolio restore skipped: ${error?.message || error}`); }
+  }
 
   const addedMessageIds = new Set();
   const touchedConversationIds = new Set();
@@ -21940,7 +21946,14 @@ function buildLocalChatArchive() {
     // This wallet's Address Book (NEXTCLOUD_SYNC.md §5, iOS 00767a4): optional keys, each entry
     // with its assigned photo as base64 JPEG. Left out when the book is empty.
     ...buildArchiveAddressBook(),
+    // This wallet's portfolios, ledger rows, recorded fees and deletions (NEXTCLOUD_SYNC.md §5,
+    // iOS 11f1548): optional keys, each left out when empty; an untouched seed is never uploaded.
+    ...buildArchivePortfolios(),
   };
+}
+
+function buildArchivePortfolios() {
+  try { return portfolioArchive(); } catch { return {}; }
 }
 
 function buildArchiveAddressBook() {
@@ -22046,6 +22059,7 @@ function archiveModeledKeys() {
   return new Set([
     "schemaVersion", "exportedAt", "walletAddress", "conversations", "groups", "deletedContactAddresses",
     "addressBook", "addressBookDeleted", "desktopState",
+    "portfolios", "portfolioTransactions", "portfolioFees", "portfolioDeleted",
   ]);
 }
 
@@ -22148,6 +22162,11 @@ function mergeChatArchives(remote, local) {
   let book = { addressBook: [], addressBookDeleted: [] };
   try { book = mergeAddressBookArchives(local, remote); } catch { /* unreadable: both sides dropped below */ }
 
+  // Portfolios: per item the newest edit or deletion wins, a deleted portfolio takes its rows and
+  // fees, the list is renumbered (iOS 11f1548 PortfolioSync.merge). Empty keys are left out.
+  let portfolioKeys = {};
+  try { portfolioKeys = mergePortfolioArchives(local, remote); } catch { /* unreadable: both sides dropped below */ }
+
   // Keys this client doesn't model are carried through untouched (NEXTCLOUD_SYNC.md §5), so a
   // newer client's fields survive this write. Ours are rebuilt below and win.
   const carried = {};
@@ -22169,6 +22188,7 @@ function mergeChatArchives(remote, local) {
     ...(tombstones.size ? { deletedContactAddresses: [...tombstones].sort() } : {}),
     ...(book.addressBook.length ? { addressBook: book.addressBook } : {}),
     ...(book.addressBookDeleted.length ? { addressBookDeleted: book.addressBookDeleted } : {}),
+    ...portfolioKeys,
   };
 }
 
