@@ -171,6 +171,30 @@ function isExtensionPage() {
   return protocol === "chrome-extension:" || protocol === "moz-extension:" || protocol === "safari-web-extension:";
 }
 
+// The relay allows each client 600 requests a minute (tools/relay-guard.mjs) for EVERYTHING it
+// carries: indexer and Kaspa API reads, but also Nextcloud, Talk and link previews. A catch-up sync
+// alone ran at 500-570 a minute through it (desktop.kachat.app, 2026-10-09), so anything on top -
+// connecting Nextcloud, a second tab - hit the limit and every request answered 429 for a minute
+// ("Nextcloud returned HTTP 429"). The indexer/API traffic is paced here to stay well under it, and
+// a 429 that still comes back is waited out once instead of failing the sync.
+const RELAY_PACE_MAX = 420;
+const RELAY_PACE_WINDOW_MS = 60_000;
+const relayPaceStamps = [];
+async function relayPaceSlot() {
+  for (;;) {
+    const now = Date.now();
+    while (relayPaceStamps.length && now - relayPaceStamps[0] >= RELAY_PACE_WINDOW_MS) relayPaceStamps.shift();
+    if (relayPaceStamps.length < RELAY_PACE_MAX) { relayPaceStamps.push(now); return; }
+    await new Promise((resolve) => setTimeout(resolve, Math.max(50, RELAY_PACE_WINDOW_MS - (now - relayPaceStamps[0]) + 10)));
+  }
+}
+/** Whether a 429 is the relay's own limit ("Too many requests", text/plain) rather than the
+ *  target's. Reads a clone, so the caller's response is untouched. */
+export async function isRelayRateLimit(response) {
+  if (response?.status !== 429) return false;
+  try { return (await response.clone().text()).trim() === "Too many requests"; } catch { return false; }
+}
+
 function installIndexerProxy() {
   if (typeof window === "undefined" || typeof window.fetch !== "function" || window.__kasiaProxyInstalled) return;
   if (isExtensionPage()) return;
@@ -219,7 +243,16 @@ function installIndexerProxy() {
             // the CDN in front - a GET is tried directly, which is exactly what would have
             // happened without a relay. Bodies cannot be replayed, so a POST is not retried.
             try {
-              const response = await relayed();
+              await relayPaceSlot();
+              let response = await relayed();
+              // Over the relay's limit anyway (another tab, Nextcloud traffic): a GET waits out
+              // the window it names, once, rather than failing the read.
+              if (response.status === 429 && (method === "GET" || method === "HEAD") && await isRelayRateLimit(response)) {
+                const wait = Math.min(60, Math.max(1, Number(response.headers.get("retry-after")) || 60)) * 1000;
+                await new Promise((resolve) => setTimeout(resolve, wait));
+                await relayPaceSlot();
+                response = await relayed();
+              }
               if (response.status >= 500 && (method === "GET" || method === "HEAD")) {
                 try { return await direct(); } catch { return response; }
               }

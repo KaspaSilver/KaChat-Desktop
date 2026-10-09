@@ -205,6 +205,16 @@ function corsHint(error) {
 // API
 // ---------------------------------------------------------------------------
 
+/** What a 429 means: KaChat's relay limiting this connection for a minute, or Nextcloud's own
+ *  brute-force protection slowing sign-ins after failed attempts. */
+async function tooManyRequestsText(response) {
+  let relay = false;
+  try { relay = (await response.clone().text()).trim() === "Too many requests"; } catch { relay = false; }
+  return relay
+    ? "Too many requests through KaChat's relay right now. Wait a minute and try again."
+    : "Nextcloud is slowing down sign-ins from this connection after too many attempts. Wait a few minutes, check the app password, and try again.";
+}
+
 async function verifyCredentials(server, username, appPassword) {
   const response = await ncFetch(`${apiBase(server)}/ocs/v2.php/cloud/user?format=json`, {
     headers: {
@@ -215,6 +225,7 @@ async function verifyCredentials(server, username, appPassword) {
     cache: "no-store",
   });
   if (response.status === 401) throw new Error("Nextcloud rejected the username or app password.");
+  if (response.status === 429) throw new Error(await tooManyRequestsText(response));
   if (!response.ok) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
   const decoded = await response.json();
   if (!decoded?.ocs?.data) throw new Error("Unexpected response from the Nextcloud server.");
@@ -274,7 +285,7 @@ async function listFolder(relativePath = "") {
   });
   if (response.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (response.status !== 207) {
-    const error = new Error(`Nextcloud returned HTTP ${response.status}.`);
+    const error = new Error(response.status === 429 ? await tooManyRequestsText(response) : `Nextcloud returned HTTP ${response.status}.`);
     error.status = response.status;
     throw error;
   }
@@ -766,7 +777,7 @@ async function fetchBackupETag() {
   });
   if (response.status === 404) return null;
   if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
-  if (response.status !== 207) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
+  if (response.status !== 207) throw new Error(response.status === 429 ? await tooManyRequestsText(response) : `Nextcloud returned HTTP ${response.status}.`);
   const etag = parseETagFromMultistatus(await response.text());
   if (!etag) throw transientError("The server's file listing did not include an ETag.");
   return etag;
