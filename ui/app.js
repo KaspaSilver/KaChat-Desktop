@@ -5635,7 +5635,10 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
         title: `Received ${amountKas} ${KAS_UNIT}`,
         body: "Your chatting address",
         timestamp: Date.now(),
-        targetKind: "wallet",
+        // Opens the chatting address's history, as a tapped banner does (iOS 95e2cba); it used
+        // to open Portfolio.
+        targetKind: "address",
+        targetId: myAddress,
       });
     }
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -10464,7 +10467,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 128;
+const APP_BUILD = 129;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
