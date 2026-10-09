@@ -13131,3 +13131,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* New Group's "Add Members" heading over the Address Book / by-address tools. */
 .group-add-members-title { margin: 0 0 6px; color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; }
 .group-add-members-title[hidden] { display: none; }
+
+/* Install card: the same KaChat logo tile as the sign-in header (kachat-logo.png is 432px with the
+   tile at 123..309, so scale it to fill the box, exactly like .logged-out-logo). */
+.ios-install-hint-icon { display: grid; place-items: center; overflow: hidden; background: transparent; }
+.ios-install-hint-icon img { width: 100%; height: 100%; object-fit: cover; transform: scale(2.33); }

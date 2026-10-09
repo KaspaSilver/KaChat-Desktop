@@ -10,6 +10,8 @@
        must keep talking plain http/ws to a local node. A file, not inline, so the CSP needs no
        'unsafe-inline' for scripts (DSK-014); see public/upgrade-insecure.js. -->
   <script src="/upgrade-insecure.js"></script>
+  <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
+  <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
   <link rel="stylesheet" href="./ui/styles.css?v=385" />
   <meta name="theme-color" content="#000000" />

@@ -1,6 +1,8 @@
 // Web-app plumbing: the service worker, the phone viewport, and the "installed" state.
 // Loaded from index.html as its own module so it runs before the app has to care.
 import { shouldRegisterServiceWorker } from "./origin-migration.js";
+// The KaChat logo the sign-in screen shows (the install card matches it).
+import kachatLogoUrl from "./assets/kachat-logo.png";
 
 // The app is not always served from the root: the published site lives under /desktop/, so every
 // path the web-app plumbing uses is built on Vite's base rather than written as root-absolute.
@@ -107,7 +109,7 @@ function showIosInstallHint() {
   hint.className = "ios-install-hint";
   hint.setAttribute("role", "status");
   hint.innerHTML = `
-    <img class="ios-install-hint-icon" src="${appBase()}icons/icon-192.png" alt="" />
+    <span class="ios-install-hint-icon" aria-hidden="true"><img src="${kachatLogoUrl}" alt="" /></span>
     <div class="ios-install-hint-copy">
       <strong>Get KaChat as an app</strong>
       <span>Tap <svg viewBox="0 0 24 24" aria-label="Share"><path d="M12 3v13"/><path d="m7 8 5-5 5 5"/><path d="M5 12v8h14v-8"/></svg> then <b>Add to Home Screen</b>. It opens full screen and can notify you.</span>
