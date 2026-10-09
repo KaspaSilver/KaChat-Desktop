@@ -11,9 +11,12 @@
 // registry data (iOS d36fc42, `kachatProfiles()`): Edit KaChat Profile saves on every network
 // (the primary name shows "Coming soon" on mainnet), and the identity cache and the profile hero
 // read profile-only identities there (no label; avatar, banner, bio and Linktree from the record).
-// Every spending or destructive action shows its cost first (built against
-// live UTXOs, nothing sent), asks to confirm, then passes the device lock (deps.deviceLock) before
-// anything is signed.
+// Every spending or destructive action shows its cost first (built against live UTXOs, nothing
+// sent) in a Send-style sheet (iOS e426432: glass cards, the Send screens' fee card - Normal / Fast
+// / Priority or a custom total, Fast first on a busy network - info pills and slide to confirm; the
+// slide is the confirmation, no second prompt, iOS e67074c), then passes the device lock
+// (deps.deviceLock) before anything is signed. Every transaction ends on a receipt that follows it
+// on the node (actions.follow): Sent to the network / In a block / Updated in KaChat.
 //
 // The sheets and layers come from kachat-market.js through `initKachatLive(kit)` (no import cycle).
 // Nothing runs at import.
@@ -23,7 +26,7 @@ import { KAS_UNIT, kasLabel, isNetworkAddress, NETWORK } from "../engine/network
 import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
 import { userFacingError, chooseDialog } from "./dialogs.js";
-import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays } from "../engine/kachat-names/actions.js";
+import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays, FeeTier, FeeChoice, TxStage } from "../engine/kachat-names/actions.js";
 import { paramsExpiresSoonMs } from "../engine/kachat-names/manifest.js";
 import {
   Status, Profile, SocialSource, SocialPlatform, SocialKind, addressOf, keyOf, shortAddress as registryShortAddress, compactAddress,
@@ -33,6 +36,12 @@ import { ProfileIdentityStore } from "../engine/kachat-names/profile-cache.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
+import {
+  SEND_ICONS, feeControlsHtml, feeControls, sendActionButtonHtml, createSendActionButton, infoPillHtml,
+} from "./send-kaspa-components.js";
+import { pickFromAddressBook } from "./address-book.js";
+import { addressBookEntry } from "./address-book-store.js";
+import { scanKaspaAddress } from "./qr-scan.js";
 
 /** { getDeps, esc, ICON, wordmark, openLayer, closeLayer, navBar, sectionHeader, hubChanged(kind), openNameDetail(info) } */
 let kit = null;
@@ -348,6 +357,8 @@ const LI = {
   copy: svg(`<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.4a1.9 1.9 0 0 0-1.9-1.9H6.4a1.9 1.9 0 0 0-1.9 1.9v7.2a1.9 1.9 0 0 0 1.9 1.9h2.1"/>`),
   check: svg(`<path d="m5 12.5 4.3 4.3L19 7.2"/>`),
   hourglass: svg(`<path d="M6.5 3.5h11M6.5 20.5h11"/><path d="M7.5 3.5c0 4.2 4.5 5.6 4.5 8.5s-4.5 4.3-4.5 8.5M16.5 3.5c0 4.2-4.5 5.6-4.5 8.5s4.5 4.3 4.5 8.5"/>`),
+  circle: svg(`<circle cx="12" cy="12" r="9.2"/>`),
+  xCircle: svg(`<circle cx="12" cy="12" r="9.2"/><path d="m9 9 6 6M15 9l-6 6"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
 };
 
@@ -428,9 +439,9 @@ function eventRowHtml(event, { showName = false } = {}) {
     </div>`;
 }
 
-/** "Expires in 2d 4h": the time until an offer becomes refundable (its refundAfter DAA score,
- *  10 per second), or null once it is. */
-function offerExpiresIn(offer, daa) {
+/** "2d 4h": the time until an offer becomes refundable (its refundAfter DAA score, 10 per second;
+ *  at least a minute), or null once it is (iOS KachatOfferState.timeLeft). */
+function offerTimeLeft(offer, daa) {
   if (daa == null || offer.refundable(daa)) return null;
   const left = offer.refundAfter > 0n ? offer.refundAfter : 0n;
   const seconds = Math.max(60, Number(left - BigInt(daa)) / Number(DAA_PER_SECOND));
@@ -438,65 +449,10 @@ function offerExpiresIn(offer, daa) {
   if (seconds >= 86_400) text = `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3_600)}h`;
   else if (seconds >= 3_600) text = `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
   else text = `${Math.floor(seconds / 60)}m`;
-  return `Expires in ${text.replace(/ 0[hm]$/, "")}`;
+  return text.replace(/ 0[hm]$/, "");
 }
 
-/** KachatOfferRow: withdraw / refund for the buyer; for the owner (indexer only) a tap on the row
- *  or Accept accepts it, Decline sends it back. Expired offers go back to their buyers on their own
- *  (actions.returnExpiredOffers); `declined` (made to an earlier owner of the name, registry v3)
- *  can never be accepted and goes back too. */
-function offerRowHtml(offer, { isBuyer, isOwner, nameInfo = null, declined = false }) {
-  rememberOffer(offer);
-  if (nameInfo) rememberName(nameInfo);
-  const actions = kachatNames()?.actions;
-  const daa = actions?.virtualDaa ?? null;
-  const refundable = daa != null && offer.refundable(daa);
-  const returning = Boolean(actions?.returningOffers?.has(offer.id));
-  const withdrawing = Boolean(actions?.withdrawingOffers?.has(offer.id));
-  // ...and the name itself still active: an expired name would reach the buyer only to be
-  // reclaimed (iOS 71128c4, IOS-055)
-  const nameActive = Boolean(nameInfo && nameInfo.status(graceMs()) === Status.active);
-  const acceptable = isOwner && !refundable && !declined && nameActive;
-  let who = "";
-  if (isBuyer) who = "Your offer";
-  else { const a = addressOf(offer.buyer); if (a) who = shortAddr(a); }
-  const id = esc(offer.id);
-  const nameAttr = nameInfo ? ` data-kl-offer-name="${esc(nameInfo.name)}"` : "";
-  let state = "";
-  if (declined || withdrawing) {
-    state = `<small class="kl-orange">${esc(isBuyer ? "Declined - the name changed hands, returning to you" : "Declined - made to an earlier owner")}</small>`;
-  } else if (refundable) {
-    const text = returning || isOwner ? (isBuyer ? "Expired - returning to you" : "Expired - returning to the buyer") : "Expired - refundable now";
-    state = `<small class="kl-orange">${esc(text)}</small>`;
-  } else {
-    const left = offerExpiresIn(offer, daa);
-    if (left) state = `<small class="kmkt-muted">${esc(left)}</small>`;
-  }
-  let buttons = "";
-  if (isBuyer) {
-    buttons = `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="withdraw" data-kl-offer-id="${id}">Withdraw</button>`
-      + (refundable && !returning ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="refund" data-kl-offer-id="${id}">Refund</button>` : "");
-  } else if (acceptable) {
-    buttons = `<button class="secondary-button kl-danger kmkt-small-button" type="button" data-kl-offer-act="decline" data-kl-offer-id="${id}">Decline</button>`
-      + `<button class="primary-button kmkt-small-button" type="button" data-kl-offer-act="accept" data-kl-offer-id="${id}"${nameAttr}>Accept</button>`;
-  } else if (refundable && !returning) {
-    buttons = `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-offer-act="refund" data-kl-offer-id="${id}">Refund</button>`;
-  }
-  // A click anywhere on the row opens the accept flow for the owner (the buttons keep their own).
-  const rowAttrs = acceptable ? ` data-kl-offer-act="accept" data-kl-offer-id="${id}"${nameAttr} title="Accept this offer"` : "";
-  const dim = refundable || declined || withdrawing;
-  return `
-    <div class="kmkt-row static compact kl-offer-row${acceptable ? " kl-offer-tappable" : ""}${dim ? " kl-offer-dim" : ""}"${rowAttrs}>
-      <span class="kmkt-row-icon w24">${kit.ICON.hand}</span>
-      <span class="kl-row-text">
-        ${offer.name ? `<strong>${esc(`${offer.name}.kachat`)}</strong>` : ""}
-        ${who ? `<small>${esc(who)}</small>` : ""}
-        ${state}
-      </span>
-      <span class="kl-row-price">${esc(amountText(offer.amount))}</span>
-      ${buttons ? `<span class="kl-row-buttons">${buttons}</span>` : ""}
-    </div>`;
-}
+// (the offer rows became square tiles with a half sheet - offerTileHtml / openOfferDetailSheet, iOS 7f50e84)
 
 /** KachatLiveEmpty: a text, or a spinner while loading (text null). */
 function emptyCard(text) {
@@ -555,12 +511,6 @@ const footer = (text, cls = "") => (text ? `<p class="kmkt-form-footer ${cls}">$
 
 function navHtml(title, { leading = null, trailing = null } = {}) {
   return `<div class="kl-nav" data-kl-nav>${kit.navBar(title, { leading, trailing })}</div>`;
-}
-
-function explorerLink(txId) {
-  const fn = deps().explorerTxUrl;
-  if (typeof fn !== "function") return "";
-  return `<a class="kl-link" href="${esc(fn(txId))}" target="_blank" rel="noopener noreferrer">${LI.external}<span>View in Explorer</span></a>`;
 }
 
 /** What the transaction does to the wallet: its outputs to the wallet minus its inputs from it. */
@@ -869,16 +819,23 @@ function watchRegistrations() {
   // My Offers follows what this app is sending back (expired, or made to an earlier owner)
   const offersSig = () => `${rt.actions.returningOffers?.size ?? 0}|${rt.actions.withdrawingOffers?.size ?? 0}`;
   let lastOffersSig = offersSig();
-  registrationsUnsubscribe = rt.actions.subscribe(({ pending }) => {
+  // the registrations as last drawn: a follower's stage or a new fee estimate (iOS e426432) also
+  // reach subscribers, and need no repaint here
+  let lastDrawn = null;
+  registrationsUnsubscribe = rt.actions.subscribe(({ pending, virtualDaa, autoPresentedRegistration }) => {
     const sig = offersSig();
     if (sig !== lastOffersSig) { lastOffersSig = sig; if (hub.myOffers.length) hubChanged("data"); }
+    const drawn = JSON.stringify([pending, String(virtualDaa), autoPresentedRegistration ?? null]);
+    if (drawn === lastDrawn) return;
+    lastDrawn = drawn;
     let completed = false;
     for (const p of pending) {
       const before = registrationStages.get(p.id);
       if (before && before !== Stage.registered && p.stage === Stage.registered) {
         completed = true;
-        // Pops up the moment the registration lands (iOS 0870fcc).
-        if (p.registerTxId) openTxDoneSheet({ txId: p.registerTxId, title: "Name registered" });
+        // Pops up the moment the registration lands (iOS 0870fcc) - already known to be in a
+        // block, so nothing to follow (iOS e426432 `accepted`).
+        if (p.registerTxId) openTxDoneSheet({ txId: p.registerTxId, title: "Name registered", accepted: true });
       }
       registrationStages.set(p.id, p.stage);
     }
@@ -990,7 +947,7 @@ function progressBodyHtml(p) {
 /** The registration buttons inside the progress sheet and the claims list. */
 function registrationActionClick(target) {
   const view = target.closest("[data-kl-reg-view]");
-  if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered", owner: "kachat-registration" }); return; }
+  if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered", owner: "kachat-registration", accepted: true }); return; }
   const done = target.closest("[data-kl-reg-done]");
   if (done) { kachatNames()?.actions.dismiss(done.dataset.klRegDone); return; }
   const dismiss = target.closest("[data-kl-reg-dismiss]");
@@ -1320,13 +1277,6 @@ export function liveHubClick(event) {
     return true;
   }
   // (a claim in flight shows in its own progress sheet and the claims list, not on the hub: iOS b219bb0)
-  const offerAct = target.closest("[data-kl-offer-act]");
-  if (offerAct) {
-    const offer = offerIndex.get(offerAct.dataset.klOfferId);
-    const name = offerAct.dataset.klOfferName ? nameIndex.get(offerAct.dataset.klOfferName) : null;
-    if (offer) openOfferActionSheet(offerAct.dataset.klOfferAct, offer, name, "market");
-    return true;
-  }
   return false;
 }
 
@@ -1459,50 +1409,132 @@ const TX_DONE_TITLES = Object.freeze({
   "Decline Offer": "Offer declined",
 });
 
-/** The half sheet every finished name transaction shows (iOS KachatTxDoneSheet): what happened,
- *  the transaction id (click to copy) and View in Explorer - the explorer picked in Settings,
- *  testnet-10's on testnet. */
-function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", onClose = null }) {
+/** What the receipt says under its title for each stage (iOS KachatTxDoneSheet.stageText). */
+function txStageText(stage) {
+  switch (stage) {
+    case TxStage.accepted: return "It's in a block. Updating KaChat...";
+    case TxStage.shown: return "Done. It shows in KaChat now.";
+    case TxStage.dropped: return "The network hasn't taken it. Nothing was spent if it never lands - try again with a faster fee.";
+    default: return "Waiting for the network to put it in a block. Usually a few seconds; longer when it's busy.";
+  }
+}
+
+/** One step of the receipt: done (a green check), active (a spinner) or still to come (a circle). */
+function txStepHtml(title, { done = false, active = false } = {}) {
+  const icon = done ? `<span class="kl-green">${LI.checkCircle}</span>` : active ? spinner("kl-step-spinner") : `<span class="kmkt-muted">${LI.circle}</span>`;
+  return `<div class="kl-receipt-step${done || active ? " on" : ""}"><span class="kl-receipt-step-icon">${icon}</span><span>${esc(title)}</span></div>`;
+}
+
+/**
+ * The receipt every name transaction ends on (iOS KachatTxDoneSheet, e426432), in the Send
+ * receipt's style: what it does, its progress followed on a node (actions.follow) - a spinner
+ * until it lands, then a check; steps Sent to the network / In a block / Updated in KaChat; dropped
+ * says so and suggests a faster fee - and the transaction id as a link to the block explorer picked
+ * in Settings (testnet-10's on testnet). Closing it early is fine: the change still lands.
+ * `accepted`: already known to be in a block (a registration the driver saw land) - no progress to
+ * follow. A transaction this sheet wasn't handed by `perform` (a profile save) is followed here.
+ */
+function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", onClose = null, accepted = false }) {
   if (!kit || !txId) return null;
   const explorer = typeof deps().explorerTxUrl === "function" ? deps().explorerTxUrl(txId) : "";
-  let copied = false;
-  const body = () => `
-    <div class="kmkt-sheet-body kl-done">
-      <span class="kl-done-check kl-green">${LI.checkCircle}</span>
-      <strong class="kl-done-title">${esc(title)}</strong>
-      <p class="kmkt-muted kl-done-note">It shows here once the network accepts it, usually within seconds.</p>
-      <button class="kl-done-txid" type="button" data-kl-done-copy title="Copy transaction id">
-        <span class="kl-mono">${esc(txId)}</span>
-        <span>${copied ? "Copied" : "Copy"}</span>
-      </button>
-      ${explorer ? `<a class="kmkt-form-button kl-done-explorer" href="${esc(explorer)}" target="_blank" rel="noopener noreferrer">${LI.external}<span>View in Explorer</span></a>` : ""}
-      <button class="kl-done-close" type="button" data-kmkt-close>Done</button>
-    </div>`;
+  // profiles save on every network (kachatProfiles), names only where the registry runs
+  const actions = kachatNames()?.actions ?? kachatProfiles()?.actions ?? null;
+  const stage = () => actions?.txStage?.(txId) ?? (accepted ? TxStage.shown : TxStage.sent);
+  const body = () => {
+    const st = stage();
+    const inBlock = st === TxStage.accepted || st === TxStage.shown;
+    const icon = st === TxStage.shown ? `<span class="kl-receipt-icon kl-green">${LI.checkCircle}</span>`
+      : st === TxStage.dropped ? `<span class="kl-receipt-icon kl-orange">${LI.exclamation}</span>`
+        : `<span class="kl-receipt-icon">${spinner("kl-receipt-spinner")}</span>`;
+    const txid = `<span class="kl-mono">${esc(txId)}</span>${explorer ? LI.external : ""}`;
+    return `
+      <div class="kmkt-sheet-body kl-receipt">
+        ${icon}
+        <strong class="kl-receipt-title">${esc(title)}</strong>
+        <p class="kmkt-muted kl-receipt-note">${esc(txStageText(st))}</p>
+        <div class="sk-card kl-receipt-steps">
+          ${txStepHtml("Sent to the network", { done: true })}
+          ${txStepHtml("In a block", { done: inBlock, active: !inBlock && st !== TxStage.dropped })}
+          ${txStepHtml("Updated in KaChat", { done: st === TxStage.shown, active: st === TxStage.accepted })}
+        </div>
+        ${explorer
+          ? `<a class="sk-card kl-receipt-txid" href="${esc(explorer)}" target="_blank" rel="noopener noreferrer" title="Open in the explorer">${txid}</a>`
+          : `<span class="sk-card kl-receipt-txid">${txid}</span>`}
+        ${explorer ? `<p class="sk-caption kl-receipt-caption">Click the transaction to open it in the explorer.</p>` : ""}
+        <button class="kl-receipt-done" type="button" data-kmkt-close>Done</button>
+      </div>`;
+  };
+  let last = stage();
+  let unsubscribe = null;
   const layer = kit.openLayer({
     owner,
     kind: "sheet",
     label: title,
     html: body(),
-    onClick(event, l) {
-      if (event.target.closest("[data-kl-done-copy]")) {
-        try { navigator.clipboard?.writeText(txId); } catch { /* clipboard blocked */ }
-        copied = true;
-        const sheetEl = l.el.querySelector(".kmkt-sheet");
-        if (sheetEl) sheetEl.innerHTML = body();
-      }
+    onClose: () => {
+      try { unsubscribe?.(); } catch { /* gone */ }
+      try { onClose?.(); } catch { /* fine */ }
     },
-    onClose: () => { try { onClose?.(); } catch { /* fine */ } },
   });
+  const repaint = () => {
+    const sheetEl = layer.el.querySelector(".kmkt-sheet");
+    if (sheetEl) sheetEl.innerHTML = body();
+  };
+  if (actions?.subscribe) {
+    unsubscribe = actions.subscribe(() => {
+      const st = stage();
+      if (st !== last) { last = st; repaint(); }
+    });
+  }
+  // a transaction this sheet wasn't handed by `perform` (a profile save): follow it here
+  if (actions && !accepted && actions.txStage?.(txId) == null) {
+    try { actions.follow?.(txId, null); } catch { /* shows as sent */ }
+  }
   return layer;
 }
 
+/** A glass card in the Send screens' style (iOS KachatCard / KachatInputCard, e426432): an optional
+ *  small caption title, the content (trusted markup), an optional note under it (trusted markup). */
+function cardHtml(contentHtml, { title = "", footerHtml = "", cls = "" } = {}) {
+  return `
+    <div class="sk-card kl-card ${cls}">
+      ${title ? `<span class="sk-card-label">${esc(title)}</span>` : ""}
+      ${contentHtml}
+      ${footerHtml}
+    </div>`;
+}
+
+/** A card's note (iOS KachatInputCard footer). */
+const cardNote = (text, cls = "") => (text ? `<p class="sk-caption ${cls}">${esc(text)}</p>` : "");
+
+/** Shown when the network is busy (iOS KachatBusyNetworkNotice): Normal may wait, a faster fee gets
+ *  in sooner. */
+function busyNoticeHtml() {
+  return `
+    <div class="kl-busy-notice" role="status">
+      <span class="kl-orange">${LI.warning}</span>
+      <span class="kl-busy-copy">
+        <strong>The network is busy</strong>
+        <small>At Normal this may wait a while. Fast or Priority pays a little more to get into a block sooner.</small>
+      </span>
+    </div>`;
+}
+
+/** A destructive action's warning, in red above the slider (iOS e426432 / e67074c). */
+function warningCardHtml(text) {
+  return `<div class="kl-warning-card" role="note">${LI.warning}<span>${esc(text)}</span></div>`;
+}
+
 /**
- * Every action's sheet: its inputs, what it costs (built against live UTXOs, nothing sent), one
- * Confirm - an extra warning for the destructive ones - then the device lock, then the
- * transaction. Shows the txid when it is sent.
+ * Every action's sheet, in the Send screens' style (iOS KachatTxSheet, e426432): what it does (a
+ * card), its inputs (cards), the network fee with Normal / Fast / Priority or a custom amount (and a
+ * notice when the network is busy - it then starts on Fast unless the person chose), the cost, and
+ * slide to confirm - the destructive ones show their warning in red above it; the slide itself is
+ * the confirmation (iOS e67074c) - then the device lock, then the transaction, sent at the fee shown.
+ * Ends on a receipt that follows it into a block.
  *
  * cfg: { owner, title, confirmTitle, warning?, footer?: () => string|null, rows?: () => [{title, value}],
- *        inputsHtml?: string, operation: () => op|null, operationKey: () => string, back?: () => void,
+ *        inputsHtml?: string (cards), operation: () => op|null, operationKey: () => string, back?: () => void,
  *        onInput?(event, sheet), onClick?(event, sheet), onOpen?(sheet), onDone?(txId), onClose?(txId|null) }
  */
 function openTxSheet(cfg) {
@@ -1513,10 +1545,16 @@ function openTxSheet(cfg) {
     key: undefined, seq: 0, timer: null, layer: null, closed: false,
     /** the spending address that signs and pays for the plan (iOS 881ada6), else null: the chatting address */
     payer: null,
+    /** the fee (iOS e426432): a speed, or a typed total (sompi); `touched` once the person chose -
+     *  a busy network no longer moves it for them */
+    fee: { tier: FeeTier.normal, custom: null, touched: false },
+    feeCtl: null,
+    slide: null,
   };
+  const feeChoice = () => (sheet.fee.custom != null ? FeeChoice.customTotal(sheet.fee.custom) : FeeChoice.tier(sheet.fee.tier));
 
-  // a step of a flow (`cfg.back`, Renew after "How long?"; iOS 26bd5dc): Back, not Cancel, leads
-  // back until it's sent
+  // a step of a flow (`cfg.back`, Renew after "How long?"; iOS 26bd5dc; an offer's action inside
+  // its half sheet, iOS 7f50e84): Back, not Cancel, leads back until it's sent
   const navFor = () => {
     if (sheet.txId) return navHtml(cfg.title, { trailing: { label: "Done", bold: true } });
     if (cfg.back) {
@@ -1531,70 +1569,75 @@ function openTxSheet(cfg) {
     return navHtml(cfg.title, { leading: { label: "Cancel" } });
   };
 
-  const summaryHtml = () => {
-    let rows = (cfg.rows?.() ?? []).map((r) => formRow(r.title, r.value)).join("");
-    if (sheet.plan) {
-      if (sheet.plan.priceFee > 0n) rows += formRow("Price (to miners)", amountText(sheet.plan.priceFee));
-      rows += formRow("Network fee", amountText(sheet.plan.networkFee));
-      // An owner action on a name one of your spending addresses holds is signed and paid by that
-      // address (iOS 881ada6): what it changes there.
-      const payerKey = sheet.payer ? keyOf(sheet.payer.address) : null;
-      // Otherwise names spend from, and pay back to, the chatting address: its real balance and
-      // what it will be once this is sent (iOS 8ecc38c).
-      const me = payerKey ? null : myKey();
-      if (payerKey) {
-        rows += formRow("Paid from", `Spending address #${sheet.payer.index}`);
-        rows += formRow("Balance change", signedAmount(balanceChange(sheet.plan, payerKey)), { bold: true });
-      } else if (me) {
-        const change = balanceChange(sheet.plan, me);
-        const balance = walletBalanceSompi();
-        if (balance != null) {
-          rows += formRow("Chatting address balance", amountText(balance));
-          const after = balance + change;
-          rows += formRow("Balance after", amountText(after > 0n ? after : 0n), { bold: true });
-        } else {
-          rows += formRow("Balance change", signedAmount(change), { bold: true });
-        }
-      }
-    } else if (sheet.building) {
-      rows += formRow("Network fee", "", { valueHtml: spinner() });
+  /** What it does: the rows, and the price when there is one (to miners). */
+  const rowsHtml = () => {
+    const rows = (cfg.rows?.() ?? []).map((r) => formRow(r.title, r.value)).join("");
+    const price = sheet.plan && sheet.plan.priceFee > 0n ? formRow("Price (to miners)", amountText(sheet.plan.priceFee)) : "";
+    if (!rows && !price) return "";
+    return cardHtml(`${rows}${rows && price ? `<div class="sk-divider" aria-hidden="true"></div>` : ""}${price}`, { cls: "kl-rows-card" });
+  };
+
+  /** Names spend from, and pay back to, the chatting address (iOS 8ecc38c): its balance after; an
+   *  owner action on a name a spending address holds is signed and paid by that address (iOS
+   *  881ada6): which one, and what it changes there. */
+  const pillsHtml = () => {
+    if (!sheet.plan) return "";
+    const pill = (text) => infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(text)}</span>` });
+    const payerKey = sheet.payer ? keyOf(sheet.payer.address) : null;
+    if (payerKey) {
+      return pill(`Paid from: Spending address #${sheet.payer.index}`)
+        + pill(`Balance change: ${signedAmount(balanceChange(sheet.plan, payerKey))}`);
     }
-    const foot = sheet.planError ? footer(sheet.planError, "kl-red") : footer(cfg.footer?.() ?? null);
-    const warning = cfg.warning ? `
-      <section class="kmkt-form-section">
-        <div class="kmkt-form-card"><div class="kmkt-form-row kl-warning">${LI.warning}<span>${esc(cfg.warning)}</span></div></div>
-      </section>` : "";
-    const action = sheet.txId
-      ? `<div class="kmkt-form-row kl-sent">
-          <span class="kl-sent-title kl-green">${LI.checkCircle}<span>Sent</span></span>
-          <span class="kl-mono">${esc(sheet.txId)}</span>
-          ${explorerLink(sheet.txId)}
-          <small class="kmkt-muted">It shows here once the network accepts it, usually within seconds.</small>
-        </div>`
-      : `<button class="kmkt-form-button ${cfg.warning ? "kl-destructive" : ""}" type="button" data-kl-tx-confirm ${!sheet.plan || sheet.sending ? "disabled" : ""}>
-          ${sheet.sending ? spinner() : esc(cfg.confirmTitle)}
-        </button>`;
-    return `
-      ${section(rows, { footerHtml: foot })}
-      ${warning}
-      ${section(action, { footerHtml: sheet.sendError ? footer(sheet.sendError, "kl-red") : "" })}`;
+    const me = myKey();
+    if (!me) return "";
+    const change = balanceChange(sheet.plan, me);
+    const balance = walletBalanceSompi();
+    if (balance != null) {
+      const after = balance + change;
+      return pill(`Balance after: ${amountText(after > 0n ? after : 0n)}`);
+    }
+    return pill(`Balance change: ${signedAmount(change)}`);
+  };
+
+  const notesHtml = () => {
+    if (sheet.planError) return `<p class="kl-tx-note kl-red">${esc(sheet.planError)}</p>`;
+    const text = cfg.footer?.() ?? null;
+    return text ? `<p class="kl-tx-note kmkt-muted">${esc(text)}</p>` : "";
   };
 
   sheet.render = () => {
     if (sheet.closed || !sheet.layer) return;
     const el = sheet.layer.el;
-    const nav = el.querySelector("[data-kl-nav]");
+    const q = (sel) => el.querySelector(sel);
+    const nav = q("[data-kl-nav]");
     if (nav) nav.outerHTML = navFor();
-    const summary = el.querySelector("[data-kl-summary]");
-    if (summary) summary.innerHTML = summaryHtml();
-    const inputs = el.querySelector("[data-kl-inputs]");
+    const rows = q("[data-kl-rows]");
+    if (rows) rows.innerHTML = rowsHtml();
+    const busy = q("[data-kl-busy]");
+    if (busy) busy.innerHTML = rt.actions.feeEstimate?.isBusy && !sheet.txId ? busyNoticeHtml() : "";
+    const pills = q("[data-kl-pills]");
+    if (pills) pills.innerHTML = pillsHtml();
+    const notes = q("[data-kl-notes]");
+    if (notes) notes.innerHTML = notesHtml();
+    const sendError = q("[data-kl-send-error]");
+    if (sendError) sendError.innerHTML = sheet.sendError ? `<p class="kl-tx-note kl-red">${esc(sheet.sendError)}</p>` : "";
+    const inputs = q("[data-kl-inputs]");
     if (inputs) inputs.disabled = Boolean(sheet.txId || sheet.sending);
+    if (sheet.feeCtl && !sheet.feeCtl.editing) {
+      sheet.feeCtl.setEstimating(sheet.building);
+      sheet.feeCtl.setText(sheet.plan ? amountText(sheet.plan.networkFee) : "--");
+    }
+    const fee = q("[data-kl-fee-host]");
+    if (fee) fee.inert = Boolean(sheet.txId || sheet.sending);
+    const action = q("[data-kl-action]");
+    if (action) action.hidden = Boolean(sheet.txId);
+    sheet.slide?.setEnabled(Boolean(sheet.plan && !sheet.building && !sheet.txId));
   };
 
-  /** Rebuilds the plan when the operation changed (inputs), 300 ms after the last change. */
+  /** Rebuilds the plan when the operation or the fee changed, 300 ms after the last change. */
   sheet.update = () => {
     if (sheet.txId) { sheet.render(); return; }
-    const key = cfg.operationKey();
+    const key = `${cfg.operationKey()}|${sheet.fee.tier}|${sheet.fee.custom ?? ""}`;
     if (key === sheet.key) { sheet.render(); return; }
     sheet.key = key;
     sheet.plan = null;
@@ -1607,9 +1650,11 @@ function openTxSheet(cfg) {
     if (!op) { sheet.building = false; sheet.render(); return; }
     sheet.building = true;
     sheet.render();
+    const fee = feeChoice();
     sheet.timer = setTimeout(async () => {
       try {
-        const plan = await rt.actions.plan(op);
+        // built at the fee shown (iOS e426432), as it will be sent
+        const plan = await rt.actions.plan(op, { fee });
         if (seq !== sheet.seq || sheet.closed) return;
         sheet.plan = plan;
         sheet.op = op;
@@ -1623,26 +1668,45 @@ function openTxSheet(cfg) {
     }, 300);
   };
 
+  /** A speed replaces a typed fee. */
+  const chooseTier = (tier) => {
+    if (sheet.sending || sheet.txId || !Object.values(FeeTier).includes(tier)) return;
+    sheet.fee = { tier, custom: null, touched: true };
+    sheet.feeCtl?.setTier(tier);
+    sheet.update();
+  };
+
+  /** A typed total (the fee card's custom field) - more than zero, else the speed stays. */
+  const commitCustomFee = () => {
+    const input = sheet.layer?.el.querySelector("[data-kltx-fee-custom]");
+    const value = parseSompi(input?.value ?? "");
+    sheet.feeCtl?.setEditing(false);
+    sheet.fee.touched = true;
+    if (value != null && value > 0n) sheet.fee.custom = value;
+    sheet.update();
+  };
+
   const confirm = async () => {
     if (!sheet.plan || !sheet.op || sheet.sending || sheet.txId) return;
     const op = sheet.op;
-    if (cfg.warning) {
-      const ok = await confirmAsk({ title: cfg.title, message: cfg.warning, confirmLabel: cfg.confirmTitle, destructive: true });
-      if (!ok) return;
-    }
+    const key = sheet.key;
+    const fee = feeChoice();
+    // The slide is the confirmation: no second prompt, even for the destructive ones - their
+    // warning is the red card above (iOS e67074c).
     if (!(await deviceLock())) return;
-    if (sheet.closed || op !== sheet.op) return;
+    if (sheet.closed || op !== sheet.op || key !== sheet.key) return;
     sheet.sending = true;
     sheet.sendError = null;
+    sheet.slide?.setBusy(true);
     sheet.render();
     try {
-      // never pays more than the price shown (iOS 4f5d95e; with v4's fixed prices a safeguard)
+      // never pays more than the price shown (iOS 4f5d95e; with v4's fixed prices a safeguard), at
+      // the fee shown (iOS e426432)
       const maxPrice = typeof sheet.plan?.priceFee === "bigint" ? sheet.plan.priceFee : null;
-      const txId = await rt.actions.perform(op, { maxPrice });
+      const txId = await rt.actions.perform(op, { maxPrice, fee });
       sheet.txId = txId;
       try { cfg.onDone?.(txId); } catch { /* the sheet still shows it */ }
-      // Every finished name transaction opens the done half sheet; closing it closes the action
-      // (iOS 0870fcc).
+      // Every name transaction ends on the receipt; closing it closes the action (iOS 0870fcc).
       openTxDoneSheet({
         txId,
         title: cfg.doneTitle || TX_DONE_TITLES[cfg.title] || "Transaction sent",
@@ -1654,12 +1718,14 @@ function openTxSheet(cfg) {
       // the price moved: build the plan again so the person sees the new price and confirms it
       if (error?.code === "priceChanged" && !sheet.closed) {
         sheet.sending = false;
+        sheet.slide?.setBusy(false);
         sheet.key = undefined;
         sheet.update();
         return;
       }
     }
     sheet.sending = false;
+    sheet.slide?.setBusy(false);
     sheet.render();
   };
 
@@ -1669,12 +1735,26 @@ function openTxSheet(cfg) {
     label: cfg.title,
     html: `
       ${navFor()}
-      <div class="kmkt-sheet-body kmkt-form kl-tx-body">
-        ${cfg.inputsHtml ? `<fieldset class="kl-fieldset" data-kl-inputs>${cfg.inputsHtml}</fieldset>` : ""}
-        <div class="kl-summary" data-kl-summary></div>
+      <div class="kmkt-sheet-body kl-tx-body kl-send-sheet">
+        <div data-kl-rows></div>
+        ${cfg.inputsHtml ? `<fieldset class="kl-fieldset kl-cards" data-kl-inputs>${cfg.inputsHtml}</fieldset>` : ""}
+        <div data-kl-busy></div>
+        <div data-kl-fee-host>${feeControlsHtml({ prefix: "kltx", estimating: true, tier: sheet.fee.tier, showCoinControl: false })}</div>
+        <div class="sk-pills kl-pills" data-kl-pills></div>
+        ${cfg.warning ? warningCardHtml(cfg.warning) : ""}
+        <div data-kl-notes></div>
+        <div class="kl-tx-action" data-kl-action>${sendActionButtonHtml({ attr: "kl-tx-slide", title: cfg.confirmTitle, disabled: true })}</div>
+        <div data-kl-send-error></div>
       </div>`,
     onClick(event) {
-      if (event.target.closest("[data-kl-tx-confirm]")) { confirm(); return; }
+      const tier = event.target.closest("[data-kltx-fee]");
+      if (tier) { chooseTier(tier.getAttribute("data-kltx-fee")); return; }
+      if (event.target.closest("[data-kltx-fee-edit]")) {
+        if (!sheet.sending && !sheet.txId) sheet.feeCtl?.setEditing(true, sheet.plan ? plainAmount(sheet.plan.networkFee) : "");
+        return;
+      }
+      if (event.target.closest("[data-kltx-fee-commit]")) { commitCustomFee(); return; }
+      if (event.target.closest("[data-kl-tx-slide]")) return;
       if (event.target.closest("[data-kl-tx-back]")) {
         if (!sheet.sending && !sheet.txId) {
           kit.closeLayer(sheet.layer);
@@ -1684,7 +1764,11 @@ function openTxSheet(cfg) {
       }
       cfg.onClick?.(event, sheet);
     },
-    onInput: (event) => cfg.onInput?.(event, sheet),
+    onInput: (event) => {
+      const custom = event.target.closest("[data-kltx-fee-custom]");
+      if (custom) { sanitizeAmountInput(custom); return; }
+      cfg.onInput?.(event, sheet);
+    },
     onClose() {
       sheet.closed = true;
       clearTimeout(sheet.timer);
@@ -1692,15 +1776,32 @@ function openTxSheet(cfg) {
       try { cfg.onClose?.(sheet.txId); } catch { /* optional */ }
     },
   });
+  sheet.feeCtl = feeControls(sheet.layer.el, "kltx");
+  sheet.slide = createSendActionButton(sheet.layer.el.querySelector("[data-kl-tx-slide]"), { onAction: () => { confirm(); }, busyLabel: "Sending…" });
+  sheet.layer.el.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.closest?.("[data-kltx-fee-custom]")) { event.preventDefault(); commitCustomFee(); }
+  });
   sheet.update();
+  // A busy network starts on Fast unless the person already chose (iOS e426432).
+  rt.actions.refreshFeeEstimate?.().then((estimate) => {
+    if (sheet.closed || sheet.txId) return;
+    if (estimate?.isBusy && !sheet.fee.touched && sheet.fee.custom == null && sheet.fee.tier === FeeTier.normal) {
+      sheet.fee.tier = FeeTier.fast;
+      sheet.feeCtl?.setTier(FeeTier.fast);
+      sheet.update();
+    } else {
+      sheet.render();
+    }
+  }).catch(() => { /* the fee card still prices Normal */ });
   try { cfg.onOpen?.(sheet); } catch { /* optional */ }
   return sheet;
 }
 
+/** An amount field in a card (iOS: title2, semibold, the unit beside it). */
 function amountInputHtml(attr, label) {
   return `
-    <label class="kmkt-form-row kmkt-amount-row">
-      <input class="kmkt-amount-input" type="text" inputmode="decimal" placeholder="0" autocomplete="off" ${attr} aria-label="${esc(label)}" />
+    <label class="kl-amount-field">
+      <input class="kl-amount-input" type="text" inputmode="decimal" placeholder="0" autocomplete="off" ${attr} aria-label="${esc(label)}" />
       <span class="kmkt-muted">${esc(KAS_UNIT)}</span>
     </label>`;
 }
@@ -1758,11 +1859,11 @@ function openOfferSheet(info, owner) {
     title: "Make an Offer",
     confirmTitle: "Send Offer",
     inputsHtml: `
-      ${section(amountInputHtml("data-kl-offer-amount", `Your offer in ${KAS_UNIT}`), {
-        header: "Your offer",
-        footerHtml: footer(kasLabel("Your KAS stays locked on chain until the owner accepts or declines, you withdraw the offer, or it expires - then anyone can send it back to you.")),
+      ${cardHtml(amountInputHtml("data-kl-offer-amount", `Your offer in ${KAS_UNIT}`), {
+        title: "Your offer",
+        footerHtml: cardNote(kasLabel("Your KAS stays locked on chain until the owner accepts or declines, you withdraw the offer, or it expires - then anyone can send it back to you.")),
       })}
-      ${section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("days", OFFER_DAYS, days, "Refundable after")}</div>`, { header: "Refundable after" })}`,
+      ${cardHtml(segmentedHtml("days", OFFER_DAYS, days, "Refundable after"), { title: "Refundable after" })}`,
     footer: () => {
       const a = amount();
       return info.isListed && a != null && info.price < a
@@ -1822,8 +1923,7 @@ function openExtendSheet(info, owner) {
     confirmTitle: "Extend",
     doneTitle: "Extended",
     inputsHtml: available > 1
-      ? section(`<div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years",
-        Array.from({ length: available }, (_, i) => ({ id: i + 1, title: yearsLabel(i + 1) })), years, "Years")}</div>`)
+      ? cardHtml(segmentedHtml("years", Array.from({ length: available }, (_, i) => ({ id: i + 1, title: yearsLabel(i + 1) })), years, "Years"))
       : "",
     footer: () => (yearlyPeriods()
       ? "Extending adds years to the current paid period, which holds at most 2 years. The price goes to the miners."
@@ -1898,7 +1998,7 @@ function openListSheet(info, owner) {
     owner,
     title: info.isListed ? "Change Price" : "List for Sale",
     confirmTitle: info.isListed ? "Change Price" : "List",
-    inputsHtml: section(amountInputHtml("data-kl-list-price", `Price in ${KAS_UNIT}`), { header: "Price" }),
+    inputsHtml: cardHtml(amountInputHtml("data-kl-list-price", `Price in ${KAS_UNIT}`), { title: "Price" }),
     footer: () => "Anyone can buy it at this price: the payment reaches you and the name reaches them in one transaction. Delist any time.",
     rows: () => (info.isListed ? [{ title: "Listed at", value: amountText(info.price) }] : []),
     operation: () => { const v = price(); return v != null ? Operation.list(info, v) : null; },
@@ -1923,7 +2023,10 @@ function openDelistSheet(info, owner) {
   });
 }
 
-/** KachatTransferSheet: to an address or a .kachat name, the resolved address shown. */
+/** KachatTransferSheet: to an address or a .kachat name, the resolved address shown. The "New owner"
+ *  field has the Send screens' recipient buttons beside it - Paste, Scan QR (a ?query is dropped)
+ *  and the full-screen Address Book picker - and the saved name under it when the address is in the
+ *  Address Book (iOS bfe7ef9). */
 function openTransferSheet(info, owner) {
   let input = "";
   let resolved = null; // { address, key }
@@ -1937,9 +2040,19 @@ function openTransferSheet(info, owner) {
     if (resolveError) return `<small class="kl-red">${esc(resolveError)}</small>`;
     return "";
   };
+  /** The saved name of the resolved address (else of what is typed), from the Address Book. */
+  const savedName = () => {
+    try { return addressBookEntry(resolved?.address ?? input.trim())?.name || null; } catch { return null; }
+  };
   const showStatus = (sheet) => {
     const el = sheet.layer?.el.querySelector("[data-kl-transfer-status]");
     if (el) { el.innerHTML = statusHtml(); el.hidden = !el.innerHTML.trim(); }
+    const saved = sheet.layer?.el.querySelector("[data-kl-transfer-saved]");
+    if (saved) {
+      const name = savedName();
+      saved.innerHTML = name ? `${SEND_ICONS.bookFill}<span>${esc(name)}</span>` : "";
+      saved.hidden = !name;
+    }
   };
   const resolve = async (sheet) => {
     const mySeq = ++seq;
@@ -1986,19 +2099,38 @@ function openTransferSheet(info, owner) {
     showStatus(sheet);
     sheet.update();
   };
+  /** What Paste, Scan QR or the Address Book put in the field: resolved at once. */
+  const setInput = (sheet, value) => {
+    const text = String(value ?? "").trim();
+    if (!text || sheet.closed || sheet.sending || sheet.txId) return;
+    const el = sheet.layer?.el.querySelector("[data-kl-transfer-input]");
+    if (el) el.value = text;
+    input = text;
+    clearTimeout(timer);
+    resolving = false;
+    resolve(sheet);
+  };
+  const iconButton = (attr, label, icon) =>
+    `<button type="button" class="sk-icon-button" ${attr} aria-label="${esc(label)}" title="${esc(label)}">${icon}</button>`;
   openTxSheet({
     owner,
     title: "Transfer",
     confirmTitle: "Transfer",
     warning: "A transfer can't be undone. The new owner gets the name with its current expiry; your profile stays with your address.",
-    inputsHtml: section(`
-      <label class="kmkt-form-row">
-        <input class="kl-input" type="text" placeholder="kaspatest:... or name.kachat" autocomplete="off" autocapitalize="none"
-          autocorrect="off" spellcheck="false" data-kl-transfer-input aria-label="New owner" />
-      </label>
-      <div class="kmkt-form-row kl-status-row" data-kl-transfer-status hidden></div>`, {
-      header: "New owner",
-      footerHtml: footer("A testnet address, or a .kachat name - it's resolved to the address shown."),
+    inputsHtml: cardHtml(`
+      <div class="sk-recipient-row">
+        <span class="sk-recipient-field">
+          <input class="sk-recipient-input" type="text" placeholder="kaspatest:... or name.kachat" autocomplete="off" autocapitalize="none"
+            autocorrect="off" spellcheck="false" data-kl-transfer-input aria-label="New owner" />
+        </span>
+        ${iconButton("data-kl-transfer-paste", "Paste", SEND_ICONS.paste)}
+        ${iconButton("data-kl-transfer-scan", "Scan QR", SEND_ICONS.scan)}
+        ${iconButton("data-kl-transfer-book", "Address Book", SEND_ICONS.book)}
+      </div>
+      <p class="sk-saved-name" data-kl-transfer-saved hidden></p>
+      <div class="kl-transfer-status" data-kl-transfer-status hidden></div>`, {
+      title: "New owner",
+      footerHtml: cardNote("A testnet address, or a .kachat name - it's resolved to the address shown."),
     }),
     rows: () => [{ title: "Name", value: info.display }, ...(resolved ? [{ title: "To", value: resolved.address }] : [])],
     operation: () => (resolved ? Operation.transfer(info, resolved.key) : null),
@@ -2011,6 +2143,33 @@ function openTransferSheet(info, owner) {
       seq += 1;
       resolving = false;
       timer = setTimeout(() => resolve(sheet), 400);
+    },
+    async onClick(event, sheet) {
+      if (event.target.closest("[data-kl-transfer-paste]")) {
+        let text = null;
+        try { text = await navigator.clipboard?.readText?.(); } catch { text = null; }
+        setInput(sheet, text);
+        return;
+      }
+      if (event.target.closest("[data-kl-transfer-scan]")) {
+        let scanned = null;
+        try {
+          scanned = await scanKaspaAddress({
+            title: "Scan QR",
+            hint: "Point the camera at the new owner's address QR code.",
+            manualLabel: "Address or .kachat name",
+            manualPlaceholder: "kaspatest:... or name.kachat",
+          });
+        } catch { scanned = null; }
+        // normalizeScannedKaspaAddress already dropped a ?amount=... query
+        if (scanned) setInput(sheet, String(scanned).split("?")[0]);
+        return;
+      }
+      if (event.target.closest("[data-kl-transfer-book]")) {
+        let entry = null;
+        try { entry = await pickFromAddressBook(); } catch { entry = null; }
+        if (entry?.address) setInput(sheet, entry.address);
+      }
     },
   });
 }
@@ -2027,11 +2186,18 @@ function openReleaseSheet(info, owner) {
   });
 }
 
-/** KachatOfferAction: withdraw, refund, accept or decline an offer. */
-function openOfferActionSheet(kind, offer, nameInfo, owner) {
+/** KachatOfferAction: withdraw, refund, accept or decline an offer. `embedded` (iOS 7f50e84
+ *  form(embedded:)): opened from the offer's half sheet - Back, not Cancel, leads back to it;
+ *  `onSent(txId)` once it was sent and its sheet (and receipt) closed. */
+function openOfferActionSheet(kind, offer, nameInfo, owner, { embedded = false, onSent = null } = {}) {
+  const flow = {
+    ...(embedded ? { back: () => {} } : {}),
+    onClose: (txId) => { if (txId) { try { onSent?.(txId); } catch { /* fine */ } } },
+  };
   if (kind === "decline") {
     const buyer = addressOf(offer.buyer);
     openTxSheet({
+      ...flow,
       owner, title: "Decline Offer", confirmTitle: "Decline", doneTitle: "Offer declined",
       footer: () => "The offer goes back to the buyer. Its network fee comes out of the offer, so declining costs you nothing.",
       rows: () => [{ title: "Offer", value: amountText(offer.amount) }, { title: "Buyer", value: buyer ? shortAddr(buyer) : "" }],
@@ -2041,12 +2207,14 @@ function openOfferActionSheet(kind, offer, nameInfo, owner) {
   }
   if (kind === "withdraw") {
     openTxSheet({
+      ...flow,
       owner, title: "Withdraw Offer", confirmTitle: "Withdraw",
       rows: () => [{ title: "Offer", value: amountText(offer.amount) }],
       operation: () => Operation.withdraw(offer), operationKey: () => offer.id,
     });
   } else if (kind === "refund") {
     openTxSheet({
+      ...flow,
       owner, title: "Refund Offer", confirmTitle: "Refund",
       rows: () => [{ title: "Offer", value: amountText(offer.amount) }],
       operation: () => Operation.refund(offer), operationKey: () => offer.id,
@@ -2054,6 +2222,7 @@ function openOfferActionSheet(kind, offer, nameInfo, owner) {
   } else if (kind === "accept" && nameInfo) {
     const buyer = addressOf(offer.buyer);
     openTxSheet({
+      ...flow,
       owner, title: "Accept Offer", confirmTitle: "Accept and Transfer",
       warning: "The name goes to the buyer and the offer's amount comes to you, in one transaction. This can't be undone.",
       rows: () => [
@@ -2067,19 +2236,189 @@ function openOfferActionSheet(kind, offer, nameInfo, owner) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Offers: square tiles and their accept / decline half sheet (iOS 7f50e84)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What an offer is and what this wallet can do with it - shared by its tile and its half sheet
+ * (iOS KachatOfferState). `args`: `{ offer, isBuyer, isOwner, nameInfo, declined }` - `declined`:
+ * made before the name changed hands (registry v3), never acceptable, on its way back to the buyer.
+ */
+function offerState({ offer, isBuyer = false, isOwner = false, nameInfo = null, declined = false }) {
+  const actions = kachatNames()?.actions;
+  const daa = actions?.virtualDaa ?? null;
+  const refundable = daa != null && offer.refundable(daa);
+  const returning = Boolean(actions?.returningOffers?.has(offer.id));
+  /** declined and being pulled back by this app (the buyer's) */
+  const withdrawing = Boolean(actions?.withdrawingOffers?.has(offer.id));
+  // ...and the name itself still active: an expired name would reach the buyer only to be
+  // reclaimed (iOS 71128c4, IOS-055)
+  const nameActive = Boolean(nameInfo && nameInfo.status(graceMs()) === Status.active);
+  let statusText = null;
+  if (declined || withdrawing) {
+    statusText = isBuyer ? "Declined - the name changed hands, returning to you" : "Declined - made to an earlier owner";
+  } else if (refundable) {
+    statusText = returning || isOwner ? (isBuyer ? "Expired - returning to you" : "Expired - returning to the buyer") : "Expired - refundable now";
+  }
+  return {
+    offer, isBuyer, isOwner, nameInfo, declined, refundable, returning, withdrawing,
+    /** the owner can take it: still inside its time (an expired one is on its way back), and the name still active */
+    acceptable: isOwner && !refundable && !declined && nameActive,
+    dimmed: refundable || declined || withdrawing,
+    /** anyone may send an expired offer back; this app does it on its own for its own offers */
+    canRefund: refundable && !returning,
+    buyerAddress: addressOf(offer.buyer),
+    /** "2d 21h" until it can be refunded, null once it can */
+    timeLeft: offerTimeLeft(offer, daa),
+    statusText,
+  };
+}
+
+/** One offer as a square tile (iOS KachatOfferTile): the amount, who made it ("Your offer" or the
+ *  buyer), the name on tiles shown away from its page (My Offers), and "Expires in ..." or its
+ *  expired / declined state in orange. A click opens its half sheet. */
+function offerTileHtml(state, { showsName = false } = {}) {
+  const { offer } = state;
+  rememberOffer(offer);
+  if (state.nameInfo) rememberName(state.nameInfo);
+  const who = state.isBuyer ? "Your offer" : state.buyerAddress ? shortAddr(state.buyerAddress) : "";
+  const line = state.statusText
+    ? `<small class="kl-offer-tile-status kl-orange">${esc(state.statusText)}</small>`
+    : state.timeLeft ? `<small class="kl-offer-tile-left kmkt-muted">${esc(`Expires in ${state.timeLeft}`)}</small>` : "";
+  return `
+    <button class="kmkt-card kl-tile kl-offer-tile${state.dimmed ? " kl-offer-dim" : ""}" type="button" data-kl-offer-open="${esc(offer.id)}"
+      aria-label="${esc(`${amountText(offer.amount)}${who ? `, ${who}` : ""}`)}">
+      <span class="kl-offer-tile-icon">${kit.ICON.hand}</span>
+      <strong class="kl-offer-tile-amount">${esc(amountText(offer.amount))}</strong>
+      ${showsName && offer.name ? `<span class="kl-offer-tile-name">${esc(`${offer.name}.kachat`)}</span>` : ""}
+      ${who ? `<small class="kl-offer-tile-who">${esc(who)}</small>` : ""}
+      ${line}
+    </button>`;
+}
+
+/**
+ * An offer's half sheet (iOS KachatOfferDetailSheet): the amount, who made it (click to copy), the
+ * time left, and what this wallet can do - Accept or Decline (the name's owner), Withdraw or Refund
+ * (the buyer), Refund (anyone, once expired). Each opens its transaction over this sheet (Back
+ * returns here); once it is sent and its receipt closes, this sheet closes too. `args` as
+ * `offerState`; the state is read again on every repaint (the DAA score, offers going back).
+ */
+function openOfferDetailSheet(args, owner = "market") {
+  if (!kit) return null;
+  let copied = false;
+  let copiedTimer = null;
+  let unsubscribe = null;
+  const actionButton = (kind, title, icon, { prominent = false, danger = false } = {}) => `
+    <button class="kl-offer-action${prominent ? " prominent" : ""}${danger ? " danger" : ""}" type="button" data-kl-offer-do="${esc(kind)}">
+      ${icon}<span>${esc(title)}</span>
+    </button>`;
+  const actionsHtml = (st) => {
+    if (st.acceptable) {
+      return actionButton("accept", "Accept", LI.checkCircle, { prominent: true })
+        + actionButton("decline", "Decline", LI.xCircle, { danger: true });
+    }
+    if (st.isBuyer) {
+      return actionButton("withdraw", "Withdraw", LI.uturn, { prominent: !st.canRefund })
+        + (st.canRefund ? actionButton("refund", "Refund", LI.reclaim, { prominent: true }) : "");
+    }
+    if (st.canRefund) return actionButton("refund", "Refund", LI.reclaim, { prominent: true });
+    return `<p class="kl-tx-note kmkt-muted">${esc(st.isOwner ? "This offer can't be accepted any more." : "Only the name's owner can accept or decline this offer.")}</p>`;
+  };
+  const body = () => {
+    const st = offerState(args);
+    const name = st.offer.name ?? st.nameInfo?.name ?? null;
+    let from = "";
+    if (st.isBuyer) from = `<strong>You</strong>`;
+    else if (st.buyerAddress) {
+      from = `<button class="kl-offer-from" type="button" data-kl-offer-copy title="${esc(st.buyerAddress)}" aria-label="${esc(st.buyerAddress)}"
+          aria-description="Copies the address">
+          <span class="kl-mono">${esc(shortAddr(st.buyerAddress))}</span><span class="kl-owner-copy-icon">${copied ? LI.check : LI.copy}</span>
+        </button>`;
+    }
+    return `
+      ${navHtml("Offer", { leading: { label: "Close" } })}
+      <div class="kmkt-sheet-body kl-offer-sheet">
+        <div class="kl-offer-head">
+          <span class="kl-offer-head-icon">${kit.ICON.hand}</span>
+          <strong class="kl-offer-head-amount">${esc(amountText(st.offer.amount))}</strong>
+          ${name ? `<span class="kl-offer-head-name">${esc(`${name}.kachat`)}</span>` : ""}
+        </div>
+        ${cardHtml(`
+          ${formRow("From", "", { valueHtml: `<span class="kl-form-value">${from}</span>` })}
+          ${st.timeLeft ? formRow("Expires in", st.timeLeft) : ""}
+          ${st.statusText ? `<p class="kl-tx-note kl-orange">${esc(st.statusText)}</p>` : ""}`)}
+        <div class="kl-offer-actions">${actionsHtml(st)}</div>
+      </div>`;
+  };
+  const layer = kit.openLayer({
+    owner,
+    kind: "sheet",
+    label: "Offer",
+    html: body(),
+    onClick(event, l) {
+      if (event.target.closest("[data-kl-offer-copy]")) {
+        const address = addressOf(args.offer.buyer);
+        if (address) {
+          try { navigator.clipboard?.writeText(address); } catch { /* clipboard blocked */ }
+          copied = true;
+          repaint();
+          clearTimeout(copiedTimer);
+          copiedTimer = setTimeout(() => { copied = false; repaint(); }, 1500);
+        }
+        return;
+      }
+      const act = event.target.closest("[data-kl-offer-do]");
+      if (act) {
+        // the transaction over this sheet; once sent (and its receipt closed) the offer is settled
+        openOfferActionSheet(act.dataset.klOfferDo, args.offer, args.nameInfo, owner, {
+          embedded: true,
+          onSent: () => { if (layer.el.isConnected) kit.closeLayer(l); },
+        });
+      }
+    },
+    onClose() {
+      clearTimeout(copiedTimer);
+      try { unsubscribe?.(); } catch { /* gone */ }
+    },
+  });
+  function repaint() {
+    const sheetEl = layer.el.querySelector(".kmkt-sheet");
+    if (sheetEl && layer.el.isConnected) sheetEl.innerHTML = body();
+  }
+  // the time left and what this app is sending back move on their own
+  const a = kachatNames()?.actions;
+  if (a?.subscribe) {
+    const sig = () => `${a.virtualDaa}|${a.returningOffers?.size ?? 0}|${a.withdrawingOffers?.size ?? 0}`;
+    let last = sig();
+    unsubscribe = a.subscribe(() => { const now = sig(); if (now !== last) { last = now; repaint(); } });
+  }
+  return layer;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Claim (KachatClaimSheet)
 // ---------------------------------------------------------------------------------------------
 
+/** The claim sheet, in the Send screens' style (iOS KachatClaimSheet, e426432): the name and its
+ *  years, the cost, a fee speed for both transactions (the commit now, the register about a minute
+ *  later; a busy network starts on Fast unless the person chose), what's available, how claiming
+ *  works, and slide to claim - then the device lock. */
 function openClaimSheet({ name, gap, owner = "market" }) {
   const rt = kachatNames();
   if (!rt || !kit) return;
   let years = 1;
+  let feeTier = FeeTier.normal;
+  /** the person picked a speed: a busy network no longer moves it for them */
+  let feeTouched = false;
   let quote = null;
+  /** the speed `quote` was priced at */
+  let quoteTier = null;
   let quoteError = null;
   let starting = false;
   let startError = null;
   let seq = 0;
   let closed = false;
+  let slide = null;
 
   const costHtml = () => {
     let rows;
@@ -2090,28 +2429,22 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         + formRow("Registry deposit (returned on release)", amountText(quote.gapDeposit))
         + formRow("Commit (returned at registration)", amountText(quote.commit))
         + formRow("Network fees", amountText(quote.networkFee))
-        + formRow("Total", amountText(quote.total), { bold: true })
-        + formRow("Available", amountText(quote.spendable));
+        + `<div class="sk-divider" aria-hidden="true"></div>`
+        + formRow("Total", amountText(quote.total), { bold: true });
     } else if (quoteError) {
-      rows = `<div class="kmkt-form-row"><span class="kl-red">${esc(quoteError)}</span></div>`;
+      rows = `<p class="kl-tx-note kl-red">${esc(quoteError)}</p>`;
     } else {
       rows = formRow("Total", "", { valueHtml: spinner() });
     }
-    const foot = quote && !quote.affordable
-      ? footer(kasLabel("Not enough KAS on your chatting address for this name."), "kl-red")
-      : footer("The price goes to the miners - KaChat takes nothing. The bond and the deposit come back when you release the name.");
-    return section(rows, { header: "Cost", footerHtml: foot });
+    return cardHtml(rows, { cls: "kl-rows-card" });
   };
 
-  const actionHtml = () => section(
-    `<button class="kmkt-form-button" type="button" data-kl-claim-start ${quote?.affordable !== true || starting ? "disabled" : ""}>
-      ${starting ? spinner() : esc(`Claim ${name}.kachat`)}
-    </button>`,
-    { footerHtml: startError ? footer(startError, "kl-red") : "" },
-  );
+  const footHtml = () => (quote && !quote.affordable
+    ? `<p class="kl-tx-note kl-red">${esc(kasLabel("Not enough KAS on your chatting address for this name."))}</p>`
+    : `<p class="kl-tx-note kmkt-muted">The price goes to the miners - KaChat takes nothing. The bond and the deposit come back when you release the name.</p>`);
 
   const step = (n, text) => `
-    <div class="kmkt-form-row kl-step-row">
+    <div class="kl-step-row kl-card-step">
       <span class="kl-step-num">${n}</span>
       <span class="kl-label-text">${esc(text)}</span>
     </div>`;
@@ -2119,21 +2452,34 @@ function openClaimSheet({ name, gap, owner = "market" }) {
   let layer = null;
   const render = () => {
     if (closed || !layer) return;
-    const cost = layer.el.querySelector("[data-kl-claim-cost]");
+    const q = (sel) => layer.el.querySelector(sel);
+    const cost = q("[data-kl-claim-cost]");
     if (cost) cost.innerHTML = costHtml();
-    const action = layer.el.querySelector("[data-kl-claim-action]");
-    if (action) action.innerHTML = actionHtml();
+    const busy = q("[data-kl-claim-busy]");
+    if (busy) busy.innerHTML = rt.actions.feeEstimate?.isBusy ? busyNoticeHtml() : "";
+    const pills = q("[data-kl-claim-pills]");
+    if (pills) pills.innerHTML = quote ? infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(`Available: ${amountText(quote.spendable)}`)}</span>` }) : "";
+    const foot = q("[data-kl-claim-foot]");
+    if (foot) foot.innerHTML = footHtml();
+    const error = q("[data-kl-claim-error]");
+    if (error) error.innerHTML = startError ? `<p class="kl-tx-note kl-red">${esc(startError)}</p>` : "";
+    const inputs = q("[data-kl-claim-inputs]");
+    if (inputs) inputs.disabled = starting;
+    slide?.setEnabled(quote?.affordable === true && quoteTier === feeTier && !starting);
   };
 
   const loadQuote = async () => {
     const mySeq = ++seq;
     quote = null;
+    quoteTier = null;
     quoteError = null;
     render();
+    const tier = feeTier;
     try {
-      const q = await rt.actions.quote({ name, years: BigInt(years), gap });
+      const q = await rt.actions.quote({ name, years: BigInt(years), gap, feeTier: tier });
       if (mySeq !== seq || closed) return;
       quote = q;
+      quoteTier = tier;
     } catch (error) {
       if (mySeq !== seq || closed) return;
       quoteError = errorText(error);
@@ -2143,17 +2489,21 @@ function openClaimSheet({ name, gap, owner = "market" }) {
 
   const start = async () => {
     if (starting || quote?.affordable !== true) return;
-    // the price shown is the most the registration will ever pay (iOS 4f5d95e, IOS-054)
+    // the price shown is the most the registration will ever pay (iOS 4f5d95e, IOS-054), at the
+    // speed it was quoted at
     const q = quote;
-    if (q.years !== BigInt(years)) return;
+    const tier = quoteTier;
+    if (q.years !== BigInt(years) || tier !== feeTier) return;
     if (!(await deviceLock())) return;
     if (closed || quote !== q) return;
     starting = true;
     startError = null;
+    slide?.setBusy(true);
     render();
     try {
-      const commitTxId = await rt.actions.startRegistration({ name, years: q.years, maxPrice: q.price });
+      const commitTxId = await rt.actions.startRegistration({ name, years: q.years, maxPrice: q.price, feeTier: tier });
       starting = false;
+      slide?.setBusy(false);
       // the claim becomes its progress half sheet; closing that leaves the claim running (iOS b219bb0)
       const started = rt.actions.pending.find((x) => x.commitTxId === commitTxId)
         ?? [...rt.actions.pending].reverse().find((x) => x.name === name && isOpen(x));
@@ -2164,8 +2514,15 @@ function openClaimSheet({ name, gap, owner = "market" }) {
       startError = errorText(error);
     }
     starting = false;
+    slide?.setBusy(false);
     render();
   };
+
+  const tierOptions = [
+    { id: FeeTier.normal, title: "Normal" },
+    { id: FeeTier.fast, title: "Fast" },
+    { id: FeeTier.priority, title: "Priority" },
+  ];
 
   layer = kit.openLayer({
     owner,
@@ -2173,30 +2530,61 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     label: "Claim Name",
     html: `
       ${navHtml("Claim Name", { leading: { label: "Cancel" } })}
-      <div class="kmkt-sheet-body kmkt-form">
-        ${section(`
-          ${formRow("Name", `${name}.kachat`, { bold: false })}
-          <div class="kmkt-form-row kmkt-segment-row">${segmentedHtml("years", yearsOptions(), years, "Years")}</div>`)}
+      <div class="kmkt-sheet-body kl-tx-body kl-send-sheet">
+        <fieldset class="kl-fieldset kl-cards" data-kl-claim-inputs>
+          ${cardHtml(`
+            ${formRow("Name", `${name}.kachat`, { bold: true })}
+            ${segmentedHtml("years", yearsOptions(), years, "Years")}`)}
+        </fieldset>
         <div data-kl-claim-cost></div>
-        ${section(
+        <div data-kl-claim-busy></div>
+        ${cardHtml(`
+          <span class="sk-fee-title">Network Fee</span>
+          ${segmentedHtml("fee", tierOptions, feeTier, "Network fee speed")}
+          ${cardNote("Claiming sends two transactions: the commit now, the registration about a minute later. Both use this speed.")}`)}
+        <div class="sk-pills kl-pills" data-kl-claim-pills></div>
+        ${cardHtml(
           step(1, "A hidden commit goes on chain first. Nobody can see which name it is for.")
           + step(2, "About a minute later KaChat registers the name by itself. Keep the app open; if you leave, it continues next time.")
           + step(3, yearlyPeriods()
             ? "The name is yours for the years you paid, at most 2 ahead. A 1-year name can be extended to 2 years; from 10 days before it expires you can renew it."
             : `The name is yours for the time you paid, at most ${periodsText(maxYears())} ahead. From ${durationText(Number(params()?.renewWindowMs ?? 0n))} before it expires you can renew it.`),
-          { header: "How claiming works" },
+          { title: "How claiming works" },
         )}
-        <div data-kl-claim-action></div>
+        <div data-kl-claim-foot></div>
+        <div class="kl-tx-action">${sendActionButtonHtml({ attr: "kl-claim-slide", title: `Claim ${name}.kachat`, disabled: true })}</div>
+        <div data-kl-claim-error></div>
       </div>`,
     onClick(event, l) {
-      if (event.target.closest("[data-kl-claim-start]")) { start(); return; }
+      if (event.target.closest("[data-kl-claim-slide]")) return;
       const chosen = segmentedClick(event, l.el);
-      if (chosen?.group === "years" && Number(chosen.id) !== years) { years = Number(chosen.id); loadQuote(); }
+      if (!chosen || starting) return;
+      if (chosen.group === "years" && Number(chosen.id) !== years) { years = Number(chosen.id); loadQuote(); }
+      if (chosen.group === "fee") {
+        feeTouched = true;
+        if (chosen.id !== feeTier) { feeTier = chosen.id; loadQuote(); }
+      }
     },
     onClose() { closed = true; },
   });
+  slide = createSendActionButton(layer.el.querySelector("[data-kl-claim-slide]"), { onAction: () => { start(); }, busyLabel: "Claiming…" });
   render();
   loadQuote();
+  // A busy network starts on Fast unless the person already chose (iOS e426432).
+  rt.actions.refreshFeeEstimate?.().then((estimate) => {
+    if (closed) return;
+    if (estimate?.isBusy && !feeTouched && feeTier === FeeTier.normal) {
+      feeTier = FeeTier.fast;
+      layer.el.querySelectorAll('[data-kl-seg-group="fee"] [data-kl-seg]').forEach((b) => {
+        const on = b.dataset.klSeg === feeTier;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-checked", String(on));
+      });
+      loadQuote();
+    } else {
+      render();
+    }
+  }).catch(() => { /* priced at Normal */ });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2425,23 +2813,29 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
                 <span class="kl-owner-copy-icon">${d.ownerCopied ? LI.check : LI.copy}</span>
               </button>` : ""}
           </div>
-          ${!ownedByWallet() && address ? `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-message>${kit.ICON.bubbles}<span>Message</span></button>` : ""}
+          ${!ownedByWallet() && address
+            // a fixed round button: as a bordered "Message" label it was squeezed by the address
+            // beside it into a tall, empty capsule (iOS 395863e)
+            ? `<button class="kl-owner-message" type="button" data-kl-message aria-label="Message" title="Message">${kit.ICON.bubbles}</button>` : ""}
         </div>
       </section>`;
   };
 
+  /** One offer on this name, as this wallet sees it (iOS offerState): the owner acts on it only
+   *  with an indexer; one made to an earlier owner (registry v3) is never acceptable. */
+  const offerArgs = (o) => ({
+    offer: o, isBuyer: isMine(o.buyer), isOwner: canActAsOwner() && !!rt()?.registry.isIndexer, nameInfo: d.info,
+    declined: o.isDeclined(d.info.owner),
+  });
+
   const offersSection = () => {
-    const isOwnerIndexer = canActAsOwner() && !!rt()?.registry.isIndexer;
+    // square tiles, two a row; a click opens the offer's half sheet (iOS 7f50e84)
     const list = d.offers.length
-      ? listCard(d.offers.map((o) => offerRowHtml(o, {
-        isBuyer: isMine(o.buyer), isOwner: isOwnerIndexer, nameInfo: d.info,
-        // made to an earlier owner (registry v3): never acceptable, on its way back to the buyer
-        declined: o.isDeclined(d.info.owner),
-      })).join(""), 50)
+      ? kachatNameGridHtml(d.offers.map((o) => offerTileHtml(offerState(offerArgs(o)))).join(""))
       : `<div class="kmkt-card kmkt-empty-card">No open offers.</div>`;
     return `
       <section class="kmkt-block">
-        ${kit.sectionHeader("Offers", canActAsOwner() ? "Tap an offer to accept it. Expired offers go back to their buyers." : "")}
+        ${kit.sectionHeader("Offers", canActAsOwner() ? "Click an offer to accept or decline it. Expired offers go back to their buyers." : "")}
         ${list}
         ${chainNote()}
       </section>`;
@@ -2654,10 +3048,10 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
       }
       return true;
     }
-    const offerAct = target.closest("[data-kl-offer-act]");
-    if (offerAct) {
-      const offer = offerIndex.get(offerAct.dataset.klOfferId);
-      if (offer) openOfferActionSheet(offerAct.dataset.klOfferAct, offer, d.info, owner);
+    const offerOpen = target.closest("[data-kl-offer-open]");
+    if (offerOpen) {
+      const offer = d.offers.find((o) => o.id === offerOpen.dataset.klOfferOpen) ?? offerIndex.get(offerOpen.dataset.klOfferOpen);
+      if (offer) openOfferDetailSheet(offerArgs(offer), owner);
       return true;
     }
     return false;
@@ -2817,11 +3211,12 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   if (!containerEl.dataset.klDomainsBound) {
     containerEl.dataset.klDomainsBound = "1";
     containerEl.addEventListener("click", (event) => {
-      // My Offers (Your Domains only): Withdraw / Refund
-      const offerAct = event.target.closest("[data-kl-offer-act]");
-      if (offerAct && containerEl.contains(offerAct)) {
-        const offer = offerIndex.get(offerAct.dataset.klOfferId);
-        if (offer) openOfferActionSheet(offerAct.dataset.klOfferAct, offer, null, "domains");
+      // My Offers (Your Domains only): a tile opens the offer's half sheet - Withdraw, or Refund
+      // once expired (iOS 7f50e84)
+      const offerOpen = event.target.closest("[data-kl-offer-open]");
+      if (offerOpen && containerEl.contains(offerOpen)) {
+        const offer = offerIndex.get(offerOpen.dataset.klOfferOpen);
+        if (offer) openOfferDetailSheet({ offer, isBuyer: true, isOwner: false }, "domains");
         return;
       }
       const open = event.target.closest("[data-kl-domain-open]");
@@ -2839,11 +3234,12 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   const paint = (root) => {
     const cards = shownNames.length ? domainCardsHtml(shownNames) : domainsEmptyHtml(variant);
     // The offers this wallet made, under its names (iOS 0765ce0: moved here from the
-    // marketplace's former My Names tab), with Withdraw, and Refund once expired.
+    // marketplace's former My Names tab), as square tiles with the name (iOS 7f50e84); each opens
+    // its half sheet - Withdraw, and Refund once expired.
     const offers = variant === "domains" && shownOffers.length ? `
       <div class="kl-domains-offers">
         ${kit.sectionHeader("My Offers", "Offers you made. Withdraw one any time; once it expires it comes back to you on its own.")}
-        ${listCard(shownOffers.map((o) => offerRowHtml(o, { isBuyer: true, isOwner: false })).join(""), 50)}
+        ${kachatNameGridHtml(shownOffers.map((o) => offerTileHtml(offerState({ offer: o, isBuyer: true, isOwner: false }), { showsName: true })).join(""))}
       </div>` : "";
     root.innerHTML = cards + offers;
   };

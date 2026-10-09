@@ -345,6 +345,37 @@ export class KachatNamesRegistry {
     return this._refreshing;
   }
 
+  /** Read-your-writes after this app's own transaction (iOS 32260ae): refreshes - bumping
+   *  `revision`, which every .kachat screen reloads on - until the registry shows `txId`: an
+   *  indexer whose `indexedDaa` has reached `daa` (the DAA score of the block it landed in; null =
+   *  any indexed state counts), or a chain walk that has applied it. Gives up after `timeoutMs`
+   *  (45 s). Resolves true once it shows, false when it gave up (or there is no registry here). */
+  async refreshUntilIncludes(txId, daa = null, { timeoutMs = 45_000, pauseMs = 1_500 } = {}) {
+    if (!this.deps.isEnabled()) return false;
+    const id = String(txId ?? "").trim().toLowerCase();
+    const deadline = Number(this._nowMs()) + timeoutMs;
+    do {
+      await this.refresh();
+      if (await this._includes(id, daa)) return true;
+      await this.deps.sleep(pauseMs);
+    } while (Number(this._nowMs()) < deadline);
+    return false;
+  }
+
+  /** Whether the registry, as it stands, includes `txId` (see `refreshUntilIncludes`). */
+  async _includes(txId, daa) {
+    if (this.source?.kind === "indexer") {
+      if (daa == null) return true;
+      try {
+        const status = IndexerAPI.status(await this._get(this.source.base, "/names/status"));
+        return status.indexedDaa != null && BigInt(status.indexedDaa) >= BigInt(daa);
+      } catch {
+        return false;
+      }
+    }
+    return (this.chainState?.applied ?? []).some((a) => String(a).toLowerCase() === txId);
+  }
+
   /** `refresh()` unless the last one is younger than `maxAge` seconds (lookups from typed names). */
   async refreshIfStale({ maxAge = 60 } = {}) {
     const at = this.refreshedAt;

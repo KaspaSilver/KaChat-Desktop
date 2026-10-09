@@ -1051,6 +1051,46 @@ async function runRegistryIndexer(v, r) {
     r.eq(dagFails.source?.kind, "indexer", "registry (indexer lag): a failed DAG read trusts the indexer's synced");
   }
 
+  // iOS 32260ae: read-your-writes - refresh until the registry includes this app's own transaction
+  {
+    let clock = 1_800_000_000_000;
+    let indexed = 100;
+    let statusReads = 0;
+    const ryFetch = async (url) => {
+      if (new URL(url).pathname !== "/names/status") return response(404, { error: "not_found" });
+      statusReads += 1;
+      const body = { registryCovenantId: C.hex(m.registryCovenantId), synced: true, indexedDaa: indexed };
+      indexed += 50; // the indexer moves on between reads
+      return response(200, body);
+    };
+    const mk = (extra = {}) => new KachatNamesRegistry({
+      fetch: ryFetch, restBase: () => "https://rest.test", indexerBase: () => "https://idx.test", getUtxosByAddresses: async () => [],
+      storage: memoryStorage(), manifest: async () => m, now: () => clock, sleep: async (ms) => { clock += ms; }, log: () => {}, ...extra,
+    });
+    const ry = mk();
+    const revisions = [];
+    ry.onChange(() => revisions.push(ry.revision));
+    const shown = await ry.refreshUntilIncludes("AB".repeat(32), 400n);
+    r.eq(shown, true, "refreshUntilIncludes (indexer): true once indexedDaa reached the landed block's DAA score");
+    r.check(revisions.length >= 2, `refreshUntilIncludes: every round refreshes (revision bumped ${revisions.length}x, screens reload)`);
+    r.check(clock - 1_800_000_000_000 < 45_000, "refreshUntilIncludes: done well inside 45 s");
+    indexed = 0;
+    const startedAt = clock;
+    r.eq(await ry.refreshUntilIncludes("ab".repeat(32), 1_000_000n), false, "refreshUntilIncludes (indexer): gives up when the indexer never gets there");
+    r.check(clock - startedAt >= 45_000 && clock - startedAt < 48_000, `refreshUntilIncludes: gives up after 45 s (${clock - startedAt} ms)`);
+    statusReads = 0;
+    r.eq(await ry.refreshUntilIncludes("ab".repeat(32), null), true, "refreshUntilIncludes (indexer): no DAA score -> the first refresh counts");
+    // the chain walker: true once the walk applied it
+    const walk = mk({ indexerBase: () => "" });
+    let applied = [];
+    walk.refresh = async () => { walk.source = { kind: "chain" }; walk.chainState = { applied }; };
+    let rounds = 0;
+    walk.deps.sleep = async (ms) => { clock += ms; rounds += 1; if (rounds === 2) applied = ["CD".repeat(32)]; };
+    r.eq(await walk.refreshUntilIncludes("cd".repeat(32), 5n), true, "refreshUntilIncludes (walk): true once the chain walk applied the txid (any case)");
+    r.eq(rounds, 2, "refreshUntilIncludes (walk): kept refreshing until then");
+    r.eq(await mk({ isEnabled: () => false }).refreshUntilIncludes("cd".repeat(32), 5n), false, "refreshUntilIncludes: no registry here (mainnet) -> false, nothing read");
+  }
+
   // an indexer for another registry is not used
   const reg2 = new KachatNamesRegistry({
     fetch: async () => response(200, { registryCovenantId: "00".repeat(32) }), restBase: () => "https://rest.test", indexerBase: () => "https://idx.test",

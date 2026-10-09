@@ -1023,6 +1023,30 @@ export class KaspaEngine {
     }
   }
 
+  /** The node's own fee estimate (GetFeeEstimate; iOS NodePoolService.feeEstimate, e426432):
+   *  `{ priority: { feerate, seconds }, normal: { feerate, seconds } }` - sompi per gram, and how
+   *  long a transaction paying that is expected to wait - the priority bucket and the first normal
+   *  bucket (the priority one when the node lists none). Throws when no node answers or the answer
+   *  has no estimate; the .kachat actions then fall back to the REST API. */
+  async getFeeEstimate() {
+    this.requireSdk();
+    const response = await this.withRpc(async (rpc) => {
+      if (typeof rpc?.getFeeEstimate !== "function") throw new Error("This node client has no GetFeeEstimate.");
+      return rpc.getFeeEstimate({});
+    }, { retries: 1, label: "Fee estimate" });
+    const estimate = response?.estimate ?? response;
+    const bucket = (b) => {
+      const feerate = Number(b?.feerate);
+      const seconds = Number(b?.estimatedSeconds ?? b?.estimated_seconds ?? 0);
+      return Number.isFinite(feerate) && feerate > 0 ? { feerate, seconds: Number.isFinite(seconds) ? seconds : 0 } : null;
+    };
+    const priority = bucket(estimate?.priorityBucket ?? estimate?.priority_bucket);
+    if (!priority) throw new Error("The node sent no fee estimate.");
+    const normalList = estimate?.normalBuckets ?? estimate?.normal_buckets;
+    const normal = (Array.isArray(normalList) ? bucket(normalList[0]) : null) ?? priority;
+    return { priority, normal };
+  }
+
   /** UTXOs of `addresses` WITH their covenant ids, as plain objects:
    *  `{ outpoint: { transactionId, index }, amount: bigint, scriptPublicKey: hex (script only),
    *  scriptVersion, blockDaaScore: bigint, isCoinbase, covenantId: hex | null }`. 50 addresses

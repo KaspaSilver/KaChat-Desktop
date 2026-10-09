@@ -483,6 +483,8 @@ async function main() {
       engine, service: svc, registry: { ...registryStub, ...registry }, storage: { get: () => null, set: () => {} },
     });
     act.feerate = async () => 100;
+    // a fee speed (iOS e426432) is priced from the network's estimate: fixed here, nothing fetched
+    act.feerateForTier = async () => 100;
     return act;
   };
   const extStep = v.steps.find((x) => x.op === "extend");
@@ -728,15 +730,90 @@ async function main() {
       r.check(started?.stage === A.Stage.waiting && started.reclaimTxId === null, "startRegistration: a failed early reclaim leaves the claim waiting, reclaim to the driver");
     } catch (e) { r.check(false, `startRegistration with a failing reclaim threw ${e.stack || e}`); }
 
-    // MARK: the claim receipt shows as soon as the registration is accepted (iOS d65fd1a)
-    const acc = regAt(async (name) => ({ kind: "free", name, gap: gapInfo })); // the registry hasn't caught up
-    let accRefreshes = 0;
-    acc.registry = { ...acc.registry, isAccepted: async () => true, refresh: async () => { accRefreshes += 1; } };
-    acc._upsert(recordFor("accepted", price, { stage: A.Stage.registering, registerTxId: "ab".repeat(32) }));
-    await acc._advance(acc._find("accepted"));
-    r.eq(acc.pending.find((x) => x.id === "accepted").stage, A.Stage.registered, "registering: accepted is registered, without waiting for the registry");
-    await new Promise((res) => setTimeout(res, 0));
-    r.eq(accRefreshes, 1, "registering: the registry refreshes in the background");
+    // MARK: the claim receipt shows as soon as the registration is in a block (iOS d65fd1a), node
+    // only (iOS e426432): no node holds the register in its mempool and the commit is gone from the
+    // UTXO set; a node error is never read as "spent". The registry then catches up (iOS 32260ae).
+    {
+      const landAt = ({ commitLive = false, inPool = false, nodeDown = false } = {}) => {
+        const act = actionsAt({ ...regStep, records: {} }, undefined, { extra: [nodeUtxo(g0.utxo), ...(commitLive ? [nodeUtxo(c0.utxo)] : [])] });
+        act._startDriver = () => {};
+        act._loadPending(s(v.deployer.address));
+        const catchUps = [];
+        act.registry = {
+          ...act.registry,
+          // the REST API would say "accepted": never asked any more for a registration
+          isAccepted: async () => true,
+          refreshUntilIncludes: async (txId, daa) => { catchUps.push([txId, daa]); return true; },
+        };
+        act.engine.getMempoolEntry = async () => (inPool ? { transaction: {} } : null);
+        if (nodeDown) act.engine.getUtxosWithCovenants = async () => { throw new Error("node unreachable"); };
+        act._upsert(recordFor("land", price, { stage: A.Stage.registering, registerTxId: "ab".repeat(32) }));
+        return { act, catchUps };
+      };
+      const pooled = landAt({ inPool: true });
+      await pooled.act._advance(pooled.act._find("land"));
+      r.eq(pooled.act._find("land").stage, A.Stage.registering, "registering (node only): still in a mempool -> not registered yet (REST's yes is not asked)");
+      const live = landAt({ commitLive: true });
+      await live.act._advance(live.act._find("land"));
+      r.eq(live.act._find("land").stage, A.Stage.registering, "registering (node only): the commit still in the UTXO set -> not registered yet");
+      const down = landAt({ nodeDown: true });
+      r.eq(await down.act._commitSpent(down.act._find("land")), null, "commitSpent: a node error is unknown (null), never spent");
+      await down.act._advance(down.act._find("land"));
+      r.eq(down.act._find("land").stage, A.Stage.registering, "registering (node only): a node error is never read as spent");
+      const landed = landAt();
+      r.eq(await landed.act._commitSpent(landed.act._find("land")), true, "commitSpent: gone from the node's UTXO set -> true");
+      r.eq(await live.act._commitSpent(live.act._find("land")), false, "commitSpent: still in the UTXO set -> false");
+      await landed.act._advance(landed.act._find("land"));
+      r.eq(landed.act._find("land").stage, A.Stage.registered, "registering (node only): out of every mempool and the commit spent -> registered, without waiting for the registry");
+      await new Promise((res) => setTimeout(res, 0));
+      r.eq(JSON.stringify(landed.catchUps.map(([t, d]) => [t, String(d)])), JSON.stringify([["ab".repeat(32), String(u64(regStep.env.blockDaa))]]),
+        "registering: the registry refreshes in the background until it includes the register (at the virtual DAA score)");
+    }
+    // MARK: a claim's fee speed (iOS e426432): quoted and committed at it, kept on the record, and
+    // the register, a resent commit and the reclaim pay it too; claims from before keep the priority rate
+    {
+      const tiered = regAt();
+      const tierCalls = [];
+      let priorityCalls = 0;
+      tiered.feerateForTier = async (t) => { tierCalls.push(t); return { normal: 100, fast: 200, priority: 500 }[t]; };
+      tiered.feerate = async () => { priorityCalls += 1; return 300; };
+      const commits = [];
+      tiered.service.signAndSubmit = async (plan, { env }) => { commits.push({ plan, rate: env.feerate }); return T.txIdHex(plan.unsignedTx); };
+      try {
+        const q = await tiered.quote({ name: "fastname", years: 1, gap: gapInfo, feeTier: A.FeeTier.fast });
+        r.eq(tierCalls.join(","), "fast", "quote: priced at the chosen speed");
+        const slowQ = await tiered.quote({ name: "fastname", years: 1, gap: gapInfo, feeTier: "normal" });
+        r.check(q.networkFee > slowQ.networkFee, `quote: Fast costs more network fee than Normal (${q.networkFee} > ${slowQ.networkFee})`);
+        tierCalls.length = 0;
+        await tiered.startRegistration({ name: "fastname", years: 1, maxPrice: price, feeTier: "Fast" });
+        const started = tiered.pending.find((x) => x.name === "fastname");
+        r.eq(started?.feeTier, "fast", "startRegistration: the record keeps feeTier (any case read, stored lowercase)");
+        r.eq(commits[0]?.rate, 200, "startRegistration: the commit is sent at the chosen speed's rate");
+        r.eq(tierCalls.join(","), "fast", "startRegistration: priced through feerateForTier");
+        r.eq(await tiered._registrationFeerate({ feeTier: "priority" }), 500, "registrationFeerate: a claim's speed, at the network's rate now");
+        r.eq(await tiered._registrationFeerate({ feeTier: null }), 300, "registrationFeerate: a claim from before (no feeTier) keeps the priority rate");
+        r.eq(await tiered._registrationFeerate({}), 300, "registrationFeerate: no field at all -> the priority rate");
+        // the register is sent at the claim's speed
+        const regSent = regAt();
+        regSent.feerateForTier = async (t) => ({ normal: 100, fast: 200, priority: 500 }[t]);
+        regSent.feerate = async () => 300;
+        const regRates = [];
+        regSent.service.signAndSubmit = async (plan, { env }) => { regRates.push(env.feerate); return T.txIdHex(plan.unsignedTx); };
+        regSent._upsert(recordFor("tier-reg", price, { feeTier: "priority" }));
+        await regSent._register(regSent._find("tier-reg"), c0.utxo);
+        regSent._upsert(recordFor("old-reg", price));
+        await regSent._register(regSent._find("old-reg"), c0.utxo);
+        r.eq(regRates.join(","), "500,300", "register: at the claim's speed (Priority 5x), a claim from before at the priority rate");
+        // the reclaim of an expired name goes out at the claim's speed
+        const rc = claimAt(false);
+        const reclaimOpts = [];
+        rc.perform = async (op, opts) => { reclaimOpts.push(opts ?? null); return reclaimTx; };
+        await rc._sendReclaim(lapsedInfo, { ...recordFor("rc", price), feeTier: "fast" });
+        await rc._sendReclaim(lapsedInfo, recordFor("rc2", price));
+        r.eq(JSON.stringify(reclaimOpts.map((o) => o?.fee ?? null)), JSON.stringify([{ kind: "tier", tier: "fast" }, null]), "reclaim: at the claim's speed; a claim from before keeps the default");
+      } catch (e) { r.check(false, `claim fee speed threw ${e.stack || e}`); }
+    }
+
     const activeStarter = regAt(async (name) => ({ kind: "registered", name, info: new RS.NameInfo({ ...lapsedInfo, outpoint: lapsedInfo.outpoint, expiresAt: BigInt(Date.now()) - 1_000n }) }));
     await r.throws(() => activeStarter.startRegistration({ name: c0.name, years: 1, maxPrice: price }),
       (e) => e.code === "notRegisterable" && e.message === `${c0.name}.kachat is already registered.`, "startRegistration: a name in grace is still its owner's");
@@ -1068,6 +1145,175 @@ async function main() {
       r.eq(res.saved, "cd".repeat(32), "mainnet: saveProfile returns the txid");
       r.eq(JSON.stringify(res.calls), JSON.stringify([`submit:${res.address}`, `note:${res.address}`]), "mainnet: saveProfile submits and notes, no registry refresh");
     }
+  }
+
+  // MARK: fees (iOS e426432): the node's estimate first, REST only as a fallback; speeds; busy
+  {
+    const realFetch = globalThis.fetch;
+    try {
+      let restCalls = 0;
+      globalThis.fetch = async () => {
+        restCalls += 1;
+        return { status: 200, json: async () => ({ priorityBucket: { feerate: 900, estimatedSeconds: 1 }, normalBuckets: [{ feerate: 400, estimatedSeconds: 30 }] }) };
+      };
+      let nodeAnswer = { priority: { feerate: 250, seconds: 1 }, normal: { feerate: 120, seconds: 2 } };
+      const feeEngine = { ...actEngine, getFeeEstimate: async () => { if (!nodeAnswer) throw new Error("no node"); return nodeAnswer; } };
+      const fa = new A.KachatNamesActions({ engine: feeEngine, service: dry, registry: registryStub, storage });
+      const seen = [];
+      fa.subscribe((x) => seen.push(x.feeEstimate));
+      const e1 = await fa.refreshFeeEstimate();
+      r.check(e1.normal === 120 && e1.normalSeconds === 2 && e1.priority === 250 && e1.prioritySeconds === 1, "refreshFeeEstimate: from the node (GetFeeEstimate)");
+      r.eq(restCalls, 0, "refreshFeeEstimate: the REST API isn't asked while a node answers");
+      r.check(seen.some((x) => x?.normal === 120), "refreshFeeEstimate: subscribers see the new estimate");
+      r.eq(e1.isBusy, false, "busy: 1.2x the floor, 2 s -> not busy");
+      r.eq(await fa.feerate(), 250, "feerate: max(100, the priority rate) from the node");
+      r.eq(await fa.feerateForTier(A.FeeTier.normal), 120, "feerateForTier: Normal = 1x the network's Normal rate");
+      r.eq(await fa.feerateForTier("fast"), 240, "feerateForTier: Fast = 2x");
+      r.eq(await fa.feerateForTier("Priority"), 600, "feerateForTier: Priority = 5x");
+      nodeAnswer = { priority: { feerate: 60, seconds: 1 }, normal: { feerate: 40, seconds: 1 } };
+      r.eq(await fa.feerateForTier("normal"), 100, "feerateForTier: never under the relay floor");
+      r.eq(await fa.feerateForTier("fast"), 200, "feerateForTier: the floor times the multiplier");
+      r.eq(await fa.feerate(), 100, "feerate: never under the floor");
+      nodeAnswer = null;
+      const e2 = await fa.refreshFeeEstimate();
+      r.check(e2.normal === 400 && e2.normalSeconds === 30 && e2.priority === 900 && restCalls === 1, "refreshFeeEstimate: no node -> the REST API (normalBuckets[0], priorityBucket)");
+      r.eq(e2.isBusy, true, "busy: Normal expected to wait 30 s");
+      globalThis.fetch = async () => { throw new Error("offline"); };
+      r.eq((await fa.refreshFeeEstimate())?.normal, 400, "refreshFeeEstimate: nothing answers -> the last estimate stays");
+      const none = new A.KachatNamesActions({ engine: feeEngine, service: dry, registry: registryStub, storage });
+      r.eq(await none.refreshFeeEstimate(), null, "refreshFeeEstimate: nothing ever answered -> null");
+      r.eq(await none.feerateForTier("fast"), 2 * A.unknownFeerate, "feerateForTier: no estimate -> unknownFeerate times the multiplier");
+      r.eq(A.isBusyEstimate({ normal: 150, normalSeconds: 10 }), false, "busy: exactly 1.5x the floor and 10 s is not busy");
+      r.eq(A.isBusyEstimate({ normal: 151, normalSeconds: 1 }), true, "busy: Normal above 1.5x the floor");
+      r.eq(A.isBusyEstimate({ normal: 100, normalSeconds: 11 }), true, "busy: Normal expected over 10 s");
+      r.eq(A.isBusyEstimate(null), false, "busy: no estimate is not busy");
+      r.eq(A.makeFeeEstimate({ normal: 200, priority: 300 }).isBusy, true, "makeFeeEstimate carries isBusy");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // fee choices
+    r.eq(JSON.stringify(A.normalizeFeeChoice("fast")), JSON.stringify({ kind: "tier", tier: "fast" }), "normalizeFeeChoice: a speed id");
+    r.eq(JSON.stringify(A.normalizeFeeChoice({ tier: "Priority" })), JSON.stringify({ kind: "tier", tier: "priority" }), "normalizeFeeChoice: { tier }");
+    r.eq(A.normalizeFeeChoice({ customTotal: "5000" })?.total, 5000n, "normalizeFeeChoice: { customTotal }");
+    r.eq(A.normalizeFeeChoice(A.FeeChoice.customTotal(7n))?.total, 7n, "normalizeFeeChoice: FeeChoice.customTotal");
+    r.eq(A.normalizeFeeChoice({ customTotal: 0n }), null, "normalizeFeeChoice: a zero total is no choice");
+    r.eq(A.normalizeFeeChoice("turbo"), null, "normalizeFeeChoice: an unknown speed is no choice");
+    r.eq(A.normalizeFeeChoice(null), null, "normalizeFeeChoice: none");
+    r.eq(A.parseFeeTier("NORMAL"), "normal", "parseFeeTier: any case");
+    // the plan is rebuilt at the chosen fee, and sent at it
+    if (extStep) {
+      const ext = nameInfoOf(extStep.records.name);
+      const fp = actionsAt(extStep);
+      fp.feerateForTier = async (t) => ({ normal: 100, fast: 200, priority: 500 }[t]);
+      fp.feerate = async () => 300;
+      fp.registry = { ...fp.registry, refreshAfter: () => {} };
+      try {
+        const op = A.Operation.extend(ext, 1n);
+        const normal = await fp.plan(op, { fee: A.FeeChoice.tier("normal") });
+        const fast = await fp.plan(op, { fee: "fast" });
+        const pri = await fp.plan(op, { fee: { tier: "priority" } });
+        const dflt = await fp.plan(op);
+        r.check(normal.networkFee < fast.networkFee && fast.networkFee < pri.networkFee, `plan: Normal < Fast < Priority (${normal.networkFee}, ${fast.networkFee}, ${pri.networkFee})`);
+        r.check(dflt.networkFee > fast.networkFee && dflt.networkFee < pri.networkFee, "plan: no choice keeps the old priority rate");
+        r.eq(normal.priceFee, pri.priceFee, "plan: the fee choice never changes the price");
+        const target = normal.networkFee * 3n;
+        const custom = await fp.plan(op, { fee: A.FeeChoice.customTotal(target) });
+        const off = custom.networkFee > target ? custom.networkFee - target : target - custom.networkFee;
+        r.check(off * 100n <= target, `plan: a custom total becomes a rate from the transaction's mass (${custom.networkFee} for ${target})`);
+        const tiny = await fp.plan(op, { fee: A.FeeChoice.customTotal(1n) });
+        r.eq(tiny.networkFee, normal.networkFee, "plan: a custom total under the floor pays the floor (Normal here is the floor)");
+        const sent = [];
+        fp.service.signAndSubmit = async (plan, { env }) => { sent.push({ fee: plan.networkFee, rate: env.feerate }); return T.txIdHex(plan.unsignedTx); };
+        const txId = await fp.perform(op, { maxPrice: pri.priceFee, fee: "priority" });
+        r.check(sent.length === 1 && sent[0].rate === 500 && sent[0].fee === pri.networkFee, "perform: sent at the chosen fee (the plan shown)");
+        r.eq(fp.txStage(txId), A.TxStage.sent, "perform: the transaction is followed (receipt stage 'sent')");
+      } catch (e) { r.check(false, `fee choice threw ${e.stack || e}`); }
+    }
+  }
+
+  // MARK: the follower (iOS e426432, 32260ae): mempool, then the transaction's own output in the
+  // UTXO set (in a block), then the registry until it includes it; dropped; REST last
+  {
+    const regOut = C.concat([0xaa, 0x20], new Uint8Array(32).fill(0x4e), [0x87]);
+    const regAddress = S.p2shAddress(regOut);
+    const planWith = (outputs) => ({ unsignedTx: { outputs } });
+    const followPlan = planWith([{ script: C.p2pkScript(me), value: 1n }, { script: regOut, value: 2n }]);
+    r.eq(JSON.stringify(A.followTarget(followPlan)), JSON.stringify({ index: 1, address: regAddress }), "followTarget: the registry / offer (P2SH) output");
+    r.eq(JSON.stringify(A.followTarget(planWith([{ script: C.p2pkScript(me), value: 1n }]))), JSON.stringify({ index: 0, address: RS.addressOf(me) }), "followTarget: else output 0 (its P2PK address)");
+    r.eq(JSON.stringify(A.followTarget(null)), JSON.stringify({ index: 0, address: null }), "followTarget: no plan -> no output to look for");
+    r.eq(A.p2pkAddress(new Uint8Array(33)), null, "p2pkAddress: not a P2PK script");
+    const txid = "7e".repeat(32);
+    /** Actions over a scripted node: `script(tick)` -> { pool, utxo } per poll; a fake clock. */
+    const followRig = ({ script, accepted = () => false, catchUp = true } = {}) => {
+      let t = 0;
+      let tick = 0;
+      const calls = { utxo: 0, pool: 0, rest: 0, catchUps: [] };
+      const engine = {
+        ...actEngine,
+        currentVirtualDaaScore: async () => 9_999n,
+        getUtxosWithCovenants: async (addresses) => {
+          calls.utxo += 1;
+          const st = script(tick, t);
+          return st.utxo && addresses.includes(regAddress) ? [{ outpoint: { transactionId: txid.toUpperCase(), index: 1 }, blockDaaScore: 4_242n }] : [];
+        },
+        getMempoolEntry: async () => { calls.pool += 1; const st = script(tick, t); tick += 1; return st.pool ? { transaction: {} } : null; },
+      };
+      const registry = {
+        ...registryStub,
+        isAccepted: async () => { calls.rest += 1; return accepted(t); },
+        ...(catchUp ? { refreshUntilIncludes: async (id, daa) => { calls.catchUps.push([id, daa]); return true; } } : {}),
+      };
+      const act = new A.KachatNamesActions({ engine, service: dry, registry, storage, clock: { now: () => t, sleep: async (ms) => { t += ms; } } });
+      const stages = [];
+      act.subscribe(({ txStages }) => { const st = txStages[txid]; if (st && stages[stages.length - 1] !== st) stages.push(st); });
+      return { act, calls, stages, time: () => t };
+    };
+    // lands: in the mempool for a while, then its registry output is in the UTXO set
+    {
+      const rig = followRig({ script: (tick) => ({ pool: tick < 3, utxo: tick >= 3 }) });
+      const p1 = rig.act.follow(txid, followPlan);
+      r.check(rig.act.follow(txid.toUpperCase(), followPlan) === p1, "follow: a transaction already followed isn't followed twice");
+      const last = await p1;
+      r.eq(last, A.TxStage.shown, "follow: lands -> shown");
+      r.eq(rig.stages.join(">"), "sent>inMempool>accepted>shown", "follow: stages Sent to the network > (mempool) > In a block > Updated in KaChat");
+      r.eq(JSON.stringify(rig.calls.catchUps.map(([i, d]) => [i, String(d)])), JSON.stringify([[txid, "4242"]]), "follow: the registry refreshes until it includes the tx, at the landed output's block DAA score");
+      r.eq(rig.calls.rest, 0, "follow: the REST API is never asked when the node shows the output");
+      r.eq(rig.act.txStage(txid.toUpperCase()), A.TxStage.shown, "txStage: by txid, any case");
+      r.eq(rig.act.txStages[txid], A.TxStage.shown, "txStages: a copy by txid");
+    }
+    // dropped: never in a mempool, never in the UTXO set, REST doesn't know it -> dropped after a minute
+    {
+      const rig = followRig({ script: () => ({ pool: false, utxo: false }) });
+      const last = await rig.act.follow(txid, followPlan);
+      r.eq(last, A.TxStage.dropped, "follow: no node has it -> dropped");
+      r.check(rig.time() > 60_000 && rig.time() <= 62_000, `follow: dropped after a minute (${rig.time()} ms)`);
+      r.eq(rig.stages.join(">"), "sent>dropped", "follow: stages sent > dropped");
+      r.check(rig.calls.rest > 0 && rig.calls.rest <= 42, `follow: the REST API asked only after 20 s, as a last resort (${rig.calls.rest}x)`);
+    }
+    // in a block, its output spent again right away: out of the mempool, not in the UTXO set -> REST says accepted
+    {
+      const rig = followRig({ script: (tick) => ({ pool: tick < 2, utxo: false }), accepted: () => true });
+      const last = await rig.act.follow(txid, followPlan);
+      r.eq(last, A.TxStage.shown, "follow: output already spent -> the REST API settles it -> shown");
+      r.eq(rig.stages.join(">"), "sent>inMempool>accepted>shown", "follow: (REST) stages");
+      r.eq(JSON.stringify(rig.calls.catchUps.map(([i, d]) => [i, String(d)])), JSON.stringify([[txid, "9999"]]), "follow: (REST) the registry catches up to the virtual DAA score");
+    }
+    // a transaction built elsewhere (a profile save): no plan -> mempool, then REST
+    {
+      const rig = followRig({ script: (tick) => ({ pool: tick < 2, utxo: true }), accepted: (t) => t >= 3_000 });
+      const last = await rig.act.follow(txid, null);
+      r.eq(last, A.TxStage.shown, "follow (no plan): mempool, then the REST API -> shown");
+      r.eq(rig.calls.utxo, 0, "follow (no plan): no output to look for in the UTXO set");
+    }
+    // a registry without refreshUntilIncludes (an older copy) refreshes once
+    {
+      let refreshes = 0;
+      const rig = followRig({ script: () => ({ pool: false, utxo: true }), catchUp: false });
+      rig.act.registry.refresh = async () => { refreshes += 1; };
+      r.eq(await rig.act.follow(txid, followPlan), A.TxStage.shown, "follow: lands at once");
+      r.eq(refreshes, 1, "follow: a registry without refreshUntilIncludes refreshes once");
+    }
+    r.eq(await new A.KachatNamesActions({ engine: actEngine, service: dry, registry: registryStub, storage }).follow("nope"), null, "follow: a malformed txid isn't followed");
   }
 
   // MARK: report

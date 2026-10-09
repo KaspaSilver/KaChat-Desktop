@@ -299,3 +299,134 @@
 .kl-grace-line .kmkt-ico { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 1px; }
 .kl-grace-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .kl-grace-copy .kl-countdown { font-weight: 600; }
+
+/* ---- Send-style sheets (iOS e426432): glass cards, the Send screens' fee card, info pills and
+   slide to confirm, for every name transaction and the claim ------------------------------- */
+.kl-send-sheet { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; }
+.kl-send-sheet > div:empty { display: none; }
+.kl-send-sheet .kl-cards { display: flex; flex-direction: column; gap: 16px; }
+.kl-card .kmkt-form-row {
+  min-height: 0; padding: 0; background-image: none; font-size: 15px; line-height: 20px;
+}
+.kl-card .kmkt-form-row > span:first-child { color: var(--text); }
+.kl-card .kl-form-value { color: var(--muted); }
+.kl-card .kl-form-row.bold .kl-form-value, .kl-card .kl-form-row.bold > span:first-child { color: var(--text); }
+.kl-card .settings-segmented { margin: 0; }
+.kl-card .sk-divider { margin: 0; }
+.kl-card .kl-card-step { display: flex; }
+.kl-pills { justify-content: flex-start; }
+.kl-tx-note { margin: 0; font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.kl-tx-action { padding-top: 4px; }
+.kl-tx-action[hidden] { display: none; }
+.kl-amount-field { display: flex; align-items: baseline; gap: 8px; cursor: text; }
+.kl-amount-input {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 0;
+  color: var(--text); font: inherit; font-size: 22px; font-weight: 600; line-height: 28px;
+}
+.kl-amount-input::placeholder { color: var(--placeholder); }
+.kl-amount-field > span { font-size: 15px; font-weight: 600; }
+.kl-fieldset:disabled .sk-icon-button, .kl-fieldset:disabled .kl-amount-input, .kl-fieldset:disabled .sk-recipient-input { opacity: .6; }
+.kl-transfer-status:not([hidden]) { display: block; font-size: 12px; }
+.kl-transfer-status .kl-spinner { width: 16px; height: 16px; }
+
+/* a busy network: Normal may wait (iOS KachatBusyNetworkNotice) */
+.kl-busy-notice {
+  display: flex; align-items: flex-start; gap: 10px; padding: 14px; border-radius: 20px;
+  background: color-mix(in srgb, var(--ios-orange) 12%, transparent);
+}
+.kl-busy-notice .kmkt-ico { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; }
+.kl-busy-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.kl-busy-copy strong { font-size: 15px; font-weight: 600; line-height: 20px; color: var(--text); }
+.kl-busy-copy small { font-size: 12px; line-height: 16px; color: var(--muted); }
+
+/* a destructive action's warning, red above the slider (iOS e426432 / e67074c) */
+.kl-warning-card {
+  display: flex; align-items: flex-start; gap: 10px; padding: 14px; border-radius: 20px;
+  background: color-mix(in srgb, var(--ios-red) 10%, transparent); color: var(--ios-red);
+  font-size: 15px; line-height: 20px;
+}
+.kl-warning-card .kmkt-ico { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; }
+
+/* ---- The receipt (iOS KachatTxDoneSheet, e426432): followed on a node into a block --------- */
+.kl-receipt { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 28px 20px 20px; text-align: center; }
+.kl-receipt-icon { display: flex; justify-content: center; align-items: center; height: 52px; }
+.kl-receipt-icon .kmkt-ico { width: 52px; height: 52px; }
+.kl-receipt-spinner { width: 40px; height: 40px; border-width: 3px; }
+.kl-receipt-title { margin-top: 12px; font-size: 20px; font-weight: 700; line-height: 25px; color: var(--text); overflow-wrap: anywhere; }
+.kl-receipt-note { margin: 4px 8px 0; font-size: 15px; line-height: 20px; }
+.kl-receipt-steps { margin-top: 18px; gap: 10px; text-align: left; border-radius: 16px; }
+.kl-receipt-step { display: flex; align-items: center; gap: 10px; font-size: 15px; line-height: 20px; color: var(--muted); }
+.kl-receipt-step.on { color: var(--text); }
+.kl-receipt-step-icon { display: inline-flex; justify-content: center; width: 20px; flex: 0 0 auto; }
+.kl-receipt-step-icon .kmkt-ico { width: 20px; height: 20px; }
+.kl-step-spinner { width: 16px; height: 16px; }
+.kl-receipt-txid {
+  margin-top: 12px; flex-direction: row; align-items: center; justify-content: center; gap: 6px; border-radius: 14px;
+  color: var(--kaspa-ink); text-decoration: none;
+}
+a.kl-receipt-txid:hover { background: var(--primary-08, var(--row-hover)); }
+.kl-receipt-txid .kl-mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; font-size: 13px; }
+.kl-receipt-txid .kmkt-ico { width: 15px; height: 15px; flex: 0 0 auto; }
+.kl-receipt-caption { margin-top: 6px; }
+.kl-receipt-done {
+  margin-top: 18px; padding: 14px; border: 0; border-radius: 999px; background: var(--kaspa); color: #000;
+  font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
+}
+.kl-receipt-done:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+
+/* ---- Name page: the owner's Message button, a fixed round button (iOS 395863e) ---------------- */
+.kl-owner-message {
+  flex: 0 0 44px; width: 44px; height: 44px; padding: 0; display: inline-grid; place-items: center;
+  border: 0; border-radius: 50%; cursor: pointer;
+  background: color-mix(in srgb, var(--kaspa) 18%, transparent); color: var(--kaspa-ink);
+}
+.kl-owner-message .kmkt-ico { width: 20px; height: 20px; stroke-width: 2; }
+.kl-owner-message:hover { background: color-mix(in srgb, var(--kaspa) 26%, transparent); }
+.kl-owner-message:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+
+/* ---- Offers: square tiles and their half sheet (iOS 7f50e84) ------------------------------- */
+.kl-offer-tile { gap: 6px; padding: 12px; }
+.kl-offer-tile.kl-offer-dim { opacity: .6; }
+.kl-offer-tile-icon { display: inline-flex; color: var(--kaspa-ink); }
+.kl-offer-tile-icon .kmkt-ico { width: 22px; height: 22px; }
+.kl-offer-tile-amount {
+  max-width: 100%; font-size: 17px; font-weight: 700; line-height: 22px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-offer-tile-name {
+  max-width: 100%; font-size: 12px; font-weight: 600; line-height: 16px; color: var(--kaspa-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-offer-tile-who {
+  max-width: 100%; font-size: 12px; line-height: 16px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-offer-tile-status, .kl-offer-tile-left {
+  max-width: 100%; font-size: 11px; line-height: 14px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.kl-offer-sheet { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; }
+.kl-offer-head { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 4px; text-align: center; }
+.kl-offer-head-icon { display: inline-flex; color: var(--kaspa-ink); }
+.kl-offer-head-icon .kmkt-ico { width: 28px; height: 28px; }
+.kl-offer-head-amount {
+  max-width: 100%; font-size: 34px; font-weight: 700; line-height: 41px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kl-offer-head-name { font-size: 15px; font-weight: 600; line-height: 20px; color: var(--kaspa-ink); overflow-wrap: anywhere; }
+.kl-offer-from {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--muted); font: inherit;
+}
+.kl-offer-from .kl-mono { font-size: 14px; }
+.kl-offer-from .kmkt-ico { width: 14px; height: 14px; }
+.kl-offer-actions { display: flex; flex-direction: column; gap: 10px; }
+.kl-offer-action {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 14px;
+  border: 0; border-radius: 999px; cursor: pointer; font: inherit; font-size: 17px; font-weight: 600;
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent); color: var(--kaspa-ink);
+}
+.kl-offer-action.prominent { background: var(--kaspa); color: #000; }
+.kl-offer-action.danger { color: var(--ios-red); }
+.kl-offer-action .kmkt-ico { width: 20px; height: 20px; }
+.kl-offer-action:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }

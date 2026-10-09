@@ -2,9 +2,14 @@
 //
 // Port of iOS KaChat/Services/KachatNames/KachatNamesActions.swift. Each operation is built with
 // the pure builders (builder.js) over UTXOs re-read from a node (registry ones with the registry
-// covenant id), at max(100, the REST API's priority fee rate), signed with the wallet key and
-// submitted (service.js); it returns the txid and refreshes the registry once the REST API reports
-// the transaction accepted. `plan(op)` builds the same transaction without sending it (the sheets).
+// covenant id), at the fee the person chose - Normal / Fast / Priority (1x / 2x / 5x the network's
+// Normal rate, never under the 100 sompi/gram floor) or a custom total turned into a rate from the
+// transaction's mass; without a choice, max(100, the priority rate) - read from the node's
+// GetFeeEstimate (the REST API only when no node answers; iOS e426432). It is signed with the
+// wallet key and submitted (service.js); it returns the txid and `follow`s it on the node: its
+// mempool, then its own output in the UTXO set (in a block), then the registry refreshes until it
+// includes it (read-your-writes, iOS 32260ae). The stages (`txStage`, TxStage) drive the receipt.
+// `plan(op, { fee })` builds the same transaction without sending it (the sheets).
 // The registration is commit -> wait tCommit (+20) DAA -> register, driven automatically and
 // resumable (records in localStorage, per wallet). Testnet-10 only (KachatNamesService.isLaunched),
 // except the address profile record (`profileSigner`, `profileFee`, `saveProfile`), which works on
@@ -63,7 +68,7 @@ import { makeOutpoint, makeUtxo, makeUtxoEntry, outpointKey } from "./transactio
 import { templateScript, paramsRegisterCost } from "./manifest.js";
 import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
-import { GapInfo, OfferInfo, Profile, Status } from "./registry-state.js";
+import { GapInfo, OfferInfo, Profile, Status, addressOf, p2shAddress } from "./registry-state.js";
 import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
 
 // MARK: - Registration records
@@ -96,7 +101,10 @@ export const Stage = Object.freeze({
  *    b219bb0), cancelTxId: hex|null, stage: Stage, createdAt: Number (unix ms), updatedAt: Number,
  *    lastError: string|null (an error, or while it still runs what the driver is doing),
  *    maxPrice: decimal sompi string|null (the price the person confirmed for the whole
- *    registration - it never pays more) }`. `recordPrice(p.maxPrice)` reads it as BigInt.
+ *    registration - it never pays more), feeTier: "normal" | "fast" | "priority" | null (the fee
+ *    speed chosen when claiming, for the commit and - at the network's rate then - the register;
+ *    null on claims from before iOS e426432: they keep the priority rate) }`.
+ *    `recordPrice(p.maxPrice)` reads the price as BigInt.
  * The stored copy also carries `salt` (hex) - iOS keeps it in the Keychain; `pending` never
  * exposes it.
  */
@@ -141,6 +149,85 @@ export const daaPerSecond = 10n;
  *  floor is exactly what a busy network drops (testnet-10 asked 115-894 sompi/gram on 2026-10-07).
  *  Still a tiny fee on these small transactions. Swift `unknownFeerate` (iOS b219bb0). */
 export const unknownFeerate = minFeerate * 10;
+
+// MARK: - Fees (iOS e426432)
+
+/** The Send screens' fee speeds (iOS WithdrawFeeTier; the ids of send-kaspa-components'
+ *  SEND_FEE_TIERS). */
+export const FeeTier = Object.freeze({ normal: "normal", fast: "fast", priority: "priority" });
+/** What each speed pays, as a multiple of the network's Normal rate (the Send screens' 1x/2x/5x). */
+export const feeTierMultipliers = Object.freeze({ normal: 1, fast: 2, priority: 5 });
+
+/** A fee speed from its id (any case: iOS stores "Normal" / "Fast" / "Priority"), else null. */
+export function parseFeeTier(value) {
+  const t = String(value ?? "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(feeTierMultipliers, t) ? t : null;
+}
+
+/** The fee a name transaction pays (iOS `FeeChoice`): a speed, or the whole network fee the
+ *  person typed (sompi). `perform` / `plan` take one as `{ fee }`; a bare speed id ("fast") or
+ *  `{ customTotal }` is read the same way, and null keeps the old default (the priority rate). */
+export const FeeChoice = Object.freeze({
+  tier: (tier) => ({ kind: "tier", tier: parseFeeTier(tier) ?? FeeTier.normal }),
+  customTotal: (sompi) => ({ kind: "customTotal", total: BigInt(sompi) }),
+});
+
+/** `fee` as a FeeChoice, or null (none / unreadable). */
+export function normalizeFeeChoice(fee) {
+  if (fee == null) return null;
+  if (typeof fee === "string") return parseFeeTier(fee) ? FeeChoice.tier(fee) : null;
+  if (typeof fee !== "object") return null;
+  if (fee.kind === "tier" || (fee.kind == null && fee.tier != null)) return parseFeeTier(fee.tier) ? FeeChoice.tier(fee.tier) : null;
+  const total = fee.kind === "customTotal" ? fee.total : fee.customTotal;
+  try {
+    const t = BigInt(total);
+    return t > 0n ? FeeChoice.customTotal(t) : null;
+  } catch { return null; }
+}
+
+/** Busy (iOS FeeEstimate.isBusy): Normal costs above 1.5x the relay floor, or isn't expected in
+ *  the next few blocks (over 10 s). A busy network starts the sheets on Fast. */
+export function isBusyEstimate(e) {
+  return !!e && (Number(e.normal) > minFeerate * 1.5 || Number(e.normalSeconds) > 10);
+}
+
+/** The network's fee picture (iOS `FeeEstimate`): `{ normal, normalSeconds, priority,
+ *  prioritySeconds, isBusy }` - sompi per gram and the seconds each is expected to wait. */
+export function makeFeeEstimate({ normal, normalSeconds = 0, priority, prioritySeconds = 0 }) {
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const e = { normal: n(normal), normalSeconds: n(normalSeconds), priority: n(priority), prioritySeconds: n(prioritySeconds) };
+  return Object.freeze({ ...e, isBusy: isBusyEstimate(e) });
+}
+
+// MARK: - Following a sent transaction (node only; iOS e426432, 32260ae)
+
+/** Where a sent name transaction is (iOS `TxStage`): sent, waiting in a node's mempool, in a block
+ *  (its output is in the UTXO set), shown (the registry has it), or dropped (no node has it). */
+export const TxStage = Object.freeze({
+  sent: "sent", inMempool: "inMempool", accepted: "accepted", shown: "shown", dropped: "dropped",
+});
+/** The follower gives up (dropped) after this long. */
+export const followGiveUpMs = 300_000;
+
+/** The `kaspatest:` address of a Schnorr P2PK output script (`<32-byte key> OP_CHECKSIG`), or null. */
+export function p2pkAddress(script) {
+  const b = script;
+  if (!(b instanceof Uint8Array) || b.length !== 34 || b[0] !== 0x20 || b[33] !== 0xac) return null;
+  return addressOf(b.slice(1, 33));
+}
+
+/** Which output of `plan` tells that the transaction is in a block: the registry or offer output
+ *  (P2SH) if there is one, else output 0 -> `{ index, address }` (address null without a plan: a
+ *  transaction built elsewhere, like a profile save, which only the mempool and the REST API can
+ *  tell about). */
+export function followTarget(plan) {
+  const outputs = plan?.unsignedTx?.outputs ?? [];
+  let index = outputs.findIndex((o) => o?.script && p2shAddress(o.script) != null);
+  if (index < 0) index = 0;
+  const o = outputs[index];
+  const address = o ? (p2shAddress(o.script) ?? p2pkAddress(o.script)) : null;
+  return { index, address };
+}
 
 /** Swift `KachatNamesActions.ActionError`; `code` is the case name. Extra fields per case:
  *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }` (unix ms, BigInt), priceChanged
@@ -271,10 +358,18 @@ export class KachatNamesActions {
    *  `wallet` (optional, the wallet's other addresses - iOS 881ada6):
    *    `spendingAddresses()` -> [{ index, address }] (the revealed spending addresses),
    *    `spendingPrivateKey(index)` -> hex | null (that address's derived key),
-   *    `kasSignerAddresses()` -> [{ account, index, address }] (watch-only, never signed for). */
-  constructor({ engine, service = null, registry, storage = null, wallet = null } = {}) {
+   *    `kasSignerAddresses()` -> [{ account, index, address }] (watch-only, never signed for).
+   *  `clock` (optional, tests): `{ now() -> unix ms, sleep(ms) -> Promise }` for the follower. */
+  constructor({ engine, service = null, registry, storage = null, wallet = null, clock = null } = {}) {
     if (!registry) throw new Failure("KachatNamesActions needs the app's registry");
     this.engine = engine;
+    this.clock = { now: clock?.now ?? nowMs, sleep: clock?.sleep ?? sleep };
+    /** The last fee estimate read (`refreshFeeEstimate`, makeFeeEstimate shape), or null. */
+    this.feeEstimate = null;
+    /** txid -> TxStage of every transaction followed this session (`follow`) */
+    this._txStages = new Map();
+    /** txid -> the running follower's promise */
+    this._follows = new Map();
     this.wallet = wallet ?? {};
     this.service = service ?? new KachatNamesService(engine);
     this.registry = registry;
@@ -317,15 +412,34 @@ export class KachatNamesActions {
     this._emit();
   }
 
-  /** `listener({ pending, virtualDaa, autoPresentedRegistration })` after every change; returns an
-   *  unsubscribe function. */
+  /** `listener({ pending, virtualDaa, autoPresentedRegistration, txStages, feeEstimate })` after
+   *  every change (a follower's stage and a new fee estimate included); returns an unsubscribe
+   *  function. */
   subscribe(listener) {
     this._listeners.add(listener);
     return () => this._listeners.delete(listener);
   }
 
+  /** The stage of every transaction followed this session: `{ [txid]: TxStage }` (a copy). */
+  get txStages() { return Object.fromEntries(this._txStages); }
+
+  /** The stage of `txId` (TxStage), or null when it isn't followed. */
+  txStage(txId) { return this._txStages.get(String(txId ?? "").trim().toLowerCase()) ?? null; }
+
+  _setTxStage(id, stage) {
+    if (this._txStages.get(id) === stage) return;
+    this._txStages.delete(id);
+    this._txStages.set(id, stage);
+    // a session's worth; the oldest go first
+    while (this._txStages.size > 500) this._txStages.delete(this._txStages.keys().next().value);
+    this._emit();
+  }
+
   _emit() {
-    const snapshot = { pending: this.pending, virtualDaa: this.virtualDaa, autoPresentedRegistration: this.autoPresentedRegistration };
+    const snapshot = {
+      pending: this.pending, virtualDaa: this.virtualDaa, autoPresentedRegistration: this.autoPresentedRegistration,
+      txStages: this.txStages, feeEstimate: this.feeEstimate,
+    };
     for (const l of [...this._listeners]) {
       try { l(snapshot); } catch (e) { this.engine?.log?.("[KachatNames] listener failed:", errorMessage(e)); }
     }
@@ -449,22 +563,75 @@ export class KachatNamesActions {
 
   static validateKey(xonly, what) { return validateKey(xonly, what); }
 
-  /** `max(100, the REST API's priority fee rate)` in sompi per gram (a Number). The estimate is
-   *  read twice; when it can't be read, `unknownFeerate` (iOS b219bb0). */
-  async feerate() {
-    let base;
-    try { base = trimSlash(getEndpoint("kaspaApi")); } catch { return unknownFeerate; }
-    if (!base) return unknownFeerate;
+  // MARK: Fees (iOS e426432)
+
+  /** Reads the network's fee picture and keeps it in `feeEstimate` (subscribers hear of it): the
+   *  node's GetFeeEstimate (`engine.getFeeEstimate()`), else the REST API's `/info/fee-estimate`
+   *  (read twice). -> makeFeeEstimate shape, or the last one read (null when nothing ever answered). */
+  async refreshFeeEstimate() {
+    const keep = (e) => {
+      const changed = JSON.stringify(e) !== JSON.stringify(this.feeEstimate);
+      this.feeEstimate = e;
+      if (changed) this._emit();
+      return e;
+    };
+    if (typeof this.engine?.getFeeEstimate === "function") {
+      try {
+        const e = await this.engine.getFeeEstimate();
+        if (Number(e?.priority?.feerate) > 0) {
+          return keep(makeFeeEstimate({
+            normal: e.normal?.feerate ?? e.priority.feerate, normalSeconds: e.normal?.seconds ?? e.priority.seconds,
+            priority: e.priority.feerate, prioritySeconds: e.priority.seconds,
+          }));
+        }
+      } catch { /* no node answered: the REST API */ }
+    }
+    let base = "";
+    try { base = trimSlash(getEndpoint("kaspaApi")); } catch { base = ""; }
+    if (!base) return this.feeEstimate;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await fetch(`${base}/info/fee-estimate`, { headers: { Accept: "application/json" }, cache: "no-store" });
         if (res.status !== 200) continue;
         const j = await res.json();
-        const rate = Number(j?.priorityBucket?.feerate);
-        if (Number.isFinite(rate)) return Math.max(minFeerate, rate);
-      } catch { /* try again, then the fallback */ }
+        const priority = j?.priorityBucket;
+        if (!priority || !Number.isFinite(Number(priority.feerate))) continue;
+        const normal = (Array.isArray(j?.normalBuckets) ? j.normalBuckets[0] : null) ?? priority;
+        return keep(makeFeeEstimate({
+          normal: normal.feerate, normalSeconds: normal.estimatedSeconds, priority: priority.feerate, prioritySeconds: priority.estimatedSeconds,
+        }));
+      } catch { /* try again, then the last estimate */ }
     }
-    return unknownFeerate;
+    return this.feeEstimate;
+  }
+
+  /** `max(100, the priority fee rate)` in sompi per gram (a Number) - the rate when no fee was
+   *  chosen; `unknownFeerate` when no estimate can be read (iOS b219bb0). */
+  async feerate() {
+    const e = await this.refreshFeeEstimate();
+    if (!e || !(e.priority > 0)) return unknownFeerate;
+    return Math.max(minFeerate, e.priority);
+  }
+
+  /** The rate a speed pays (FeeTier): the network's Normal rate, never under the floor, times the
+   *  speed's multiplier - the Send screens' 1x / 2x / 5x. `unknownFeerate` times it when no
+   *  estimate can be read. */
+  async feerateForTier(tier) {
+    const e = await this.refreshFeeEstimate();
+    const base = e ? Math.max(minFeerate, e.normal) : unknownFeerate;
+    return base * feeTierMultipliers[parseFeeTier(tier) ?? FeeTier.normal];
+  }
+
+  /** The rate for a fee choice (`normalizeFeeChoice`); none keeps the old default (the priority
+   *  rate). A typed total is turned into a rate by building the transaction once at the floor to
+   *  learn its mass. */
+  async _feerateFor(fee, op, s) {
+    const choice = normalizeFeeChoice(fee);
+    if (!choice) return this.feerate();
+    if (choice.kind === "tier") return this.feerateForTier(choice.tier);
+    const probe = (await this._build(op, s, minFeerate)).plan;
+    const mass = Math.max(1, Number(probe.costs.minFee) / minFeerate);
+    return Math.max(minFeerate, Number(choice.total) / mass);
   }
 
   /** The wallet's node UTXOs (with covenant ids), less coins a scheduled KaPost reserved. */
@@ -472,10 +639,11 @@ export class KachatNamesActions {
     return excludeReservedUtxos(await this.engine.getUtxosWithCovenants([address]));
   }
 
-  /** Builder, environment and the wallet's funding UTXOs for one transaction. */
-  async _context(s) {
+  /** Builder, environment and the wallet's funding UTXOs for one transaction, at `rate` (sompi per
+   *  gram; default: the priority rate, `feerate()`). */
+  async _context(s, rate = null) {
     const builder = await this.service.builder();
-    const env = await this.service.environment({ privateKey: s.privateKey, feerate: await this.feerate() });
+    const env = await this.service.environment({ privateKey: s.privateKey, feerate: rate ?? await this.feerate() });
     this._setVirtualDaa(env.blockDaa);
     const utxos = await this._walletUtxos(s.address);
     const funding = fundingUtxos(utxos, { me: s.me, virtualDaaScore: env.blockDaa });
@@ -520,15 +688,17 @@ export class KachatNamesActions {
 
   /** Builds `op` against live UTXOs without submitting anything: the fee and outputs a sheet shows
    *  before the person confirms. Returns the builder's Plan (plan.fee, plan.priceFee,
-   *  plan.networkFee, plan.outputs, plan.notes, plan.txid...). */
-  async plan(op) {
+   *  plan.networkFee, plan.outputs, plan.notes, plan.txid...). `fee` (optional): the fee choice
+   *  (FeeChoice, a speed id, or `{ customTotal }`) - the plan is built at it, as `perform` sends it;
+   *  none keeps the priority rate. */
+  async plan(op, { fee = null } = {}) {
     const s = this.signerFor(op);
-    return (await this._build(op, s)).plan;
+    return (await this._build(op, s, await this._feerateFor(fee, op, s))).plan;
   }
 
-  async _build(op, s) {
+  async _build(op, s, rate = null) {
     const m = await this.registry.prepare();
-    const { builder: b, env, wallet } = await this._context(s);
+    const { builder: b, env, wallet } = await this._context(s, rate);
     let plan;
     switch (op.kind) {
       case "extend": {
@@ -609,17 +779,20 @@ export class KachatNamesActions {
     return { plan, env };
   }
 
-  /** Builds, signs and submits `op`; returns the txid. The registry refreshes once the
-   *  transaction is accepted. Runs in the engine's per-address send queue, so a chat message sent
-   *  meanwhile cannot pick the same coin. A transfer, release or accepted offer then declines the
-   *  name's other open offers made to this owner (`declineOpenOffers`).
+  /** Builds, signs and submits `op`; returns the txid, then `follow`s it on the node (the receipt's
+   *  stages, and the registry refreshed until it shows it). Runs in the engine's per-address send
+   *  queue, so a chat message sent meanwhile cannot pick the same coin. A transfer, release or
+   *  accepted offer then declines the name's other open offers made to this owner
+   *  (`declineOpenOffers`).
    *  `maxPrice` (sompi, BigInt) is the price the person saw and confirmed (the shown plan's
    *  `priceFee`): an extend or renew never pays more - a higher price throws
-   *  `ActionError.priceChanged(newPrice)` before anything is signed (iOS 4f5d95e, IOS-054). */
-  async perform(op, { maxPrice = null } = {}) {
+   *  `ActionError.priceChanged(newPrice)` before anything is signed (iOS 4f5d95e, IOS-054).
+   *  `fee` (optional): the fee choice the sheet showed (see `plan`); it is sent at that fee. */
+  async perform(op, { maxPrice = null, fee = null } = {}) {
     const s = this.signerFor(op);
     const cap = maxPrice == null ? null : BigInt(maxPrice);
-    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap));
+    const rate = await this._feerateFor(fee, op, s);
+    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap, rate));
     // An offer you withdrew or refunded yourself isn't news; the ones this app returns on its own
     // (expired, made to an earlier owner) are (iOS 86471dd).
     if ((op.kind === "withdraw" && !this.withdrawingOffers.has(op.offer?.id))
@@ -637,16 +810,111 @@ export class KachatNamesActions {
     // be accepted any more, so they go straight back to their buyers.
     if (op.kind === "transfer" || op.kind === "release") this.declineOpenOffers(op.name, null);
     else if (op.kind === "accept") this.declineOpenOffers(op.name, op.offer);
-    this.registry.refreshAfter(txId);
+    this.follow(txId, plan);
     return txId;
   }
 
-  /** Builds, signs and submits `op` -> `{ plan, txId }`, rebuilt against live UTXOs. It never
-   *  pays more than `maxPrice`, the price the person confirmed. */
-  async _submit(op, s, maxPrice = null) {
-    const { plan, env } = await this._build(op, s);
+  /** Builds, signs and submits `op` -> `{ plan, txId }`, rebuilt against live UTXOs at `rate`. It
+   *  never pays more than `maxPrice`, the price the person confirmed. */
+  async _submit(op, s, maxPrice = null, rate = null) {
+    const { plan, env } = await this._build(op, s, rate);
     if (maxPrice != null && BigInt(plan.priceFee ?? 0n) > maxPrice) throw ActionError.priceChanged(plan.priceFee);
     return { plan, txId: await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env }) };
+  }
+
+  // MARK: Following a sent transaction (node only; iOS e426432, 32260ae)
+
+  /** Follows `txId` on a node until it is in a block, then refreshes the registry until it shows
+   *  it, publishing each stage (`txStage`, subscribers): sent -> inMempool -> accepted ("in a
+   *  block": the node's UTXO set holds the transaction's own output, `followTarget(plan)`) ->
+   *  shown; dropped when no node has it after a minute (or after 5 minutes in all). The REST API is
+   *  asked only when the output isn't found - spent again right away, or a transaction without a
+   *  plan (`plan` null: a profile save), which only the mempool and the REST API can tell about.
+   *  A transaction already being followed isn't followed twice. Returns the follower's promise,
+   *  resolving to its last stage (callers need not await it). */
+  follow(txId, plan = null) {
+    const id = String(txId ?? "").trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) return Promise.resolve(null);
+    const running = this._follows.get(id);
+    if (running) return running;
+    this._setTxStage(id, TxStage.sent);
+    const run = this._follow(id, followTarget(plan))
+      .catch((e) => {
+        this.engine?.log?.(`[KachatNames] following ${id} failed: ${errorMessage(e)}`);
+        this._setTxStage(id, TxStage.dropped);
+        return TxStage.dropped;
+      })
+      .finally(() => { if (this._follows.get(id) === run) this._follows.delete(id); });
+    this._follows.set(id, run);
+    return run;
+  }
+
+  async _follow(id, { index, address }) {
+    const { now, sleep: wait } = this.clock;
+    const started = now();
+    let sawMempool = false;
+    const landed = async (daa) => {
+      this._setTxStage(id, TxStage.accepted);
+      // until the registry (indexer or walk) has caught up with the block it landed in
+      try { await this._catchUp(id, daa); } catch { /* it shows on the next refresh */ }
+      this._setTxStage(id, TxStage.shown);
+      return TxStage.shown;
+    };
+    while (now() - started < followGiveUpMs) {
+      if (address) {
+        let utxos = null;
+        try { utxos = await this.engine.getUtxosWithCovenants([address]); } catch { utxos = null; }
+        const hit = Array.isArray(utxos)
+          ? utxos.find((u) => String(u?.outpoint?.transactionId ?? "").toLowerCase() === id && Number(u.outpoint.index) === index)
+          : null;
+        if (hit) return landed(hit.blockDaaScore != null ? BigInt(hit.blockDaaScore) : null);
+      }
+      if (await this._inMempool(id)) {
+        sawMempool = true;
+        if (this._txStages.get(id) === TxStage.sent) this._setTxStage(id, TxStage.inMempool);
+      } else if (sawMempool || !address || now() - started > 20_000) {
+        // Out of the mempool and not found by its output: in a block whose output was spent right
+        // away, or dropped. The REST API settles the rare case.
+        if (await this._restAccepted(id)) {
+          let daa = null;
+          try { daa = (await this.engine?.currentVirtualDaaScore?.()) ?? null; } catch { daa = null; }
+          return landed(daa);
+        }
+        if (now() - started > 60_000) {
+          this._setTxStage(id, TxStage.dropped);
+          return TxStage.dropped;
+        }
+      }
+      await wait(1_000);
+    }
+    this._setTxStage(id, TxStage.dropped);
+    return TxStage.dropped;
+  }
+
+  /** Read-your-writes (iOS 32260ae): the registry refreshes until it includes `txId` (an indexer
+   *  that has indexed up to `daa`, or a chain walk that applied it); a registry without
+   *  `refreshUntilIncludes` just refreshes once. */
+  async _catchUp(txId, daa) {
+    const r = this.registry;
+    if (typeof r?.refreshUntilIncludes === "function") return r.refreshUntilIncludes(txId, daa);
+    return r?.refresh?.();
+  }
+
+  /** Whether the REST API has `txId` accepted: the registry's own check, or - where there is no
+   *  registry (mainnet, an inert registry with no REST base) - the app's REST API directly. */
+  async _restAccepted(txId) {
+    try { if (await this.registry?.isAccepted?.(txId)) return true; } catch { /* not known */ }
+    if (KachatNamesService.isLaunched) return false;
+    let base = "";
+    try { base = trimSlash(getEndpoint("kaspaApi")); } catch { base = ""; }
+    if (!base) return false;
+    try {
+      const res = await fetch(`${base}/transactions/${txId}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (res.status !== 200) return false;
+      return (await res.json())?.is_accepted === true;
+    } catch {
+      return false;
+    }
   }
 
   // MARK: Offers that go back to their buyers
@@ -769,12 +1037,13 @@ export class KachatNamesActions {
    *  each further one, left to miners), bond (returned on release),
    *  gapDeposit (the extra gap the registration creates, returned on release), commit (the
    *  commit's value, returned into the registration), networkFee, total (what leaves the wallet in
-   *  the end: price + bond + gap deposit + network fees), spendable, affordable }`. */
-  async quote({ name, years, gap }) {
+   *  the end: price + bond + gap deposit + network fees), spendable, affordable }`.
+   *  `feeTier` (FeeTier, default normal): the fee speed both transactions will use (iOS e426432). */
+  async quote({ name, years, gap, feeTier = FeeTier.normal }) {
     const s = this.signer();
     years = BigInt(years);
     const m = await this.registry.prepare();
-    const { builder: b, env, wallet } = await this._context(s);
+    const { builder: b, env, wallet } = await this._context(s, await this.feerateForTier(feeTier));
     const salt = newSalt();
     const spendable = wallet.reduce((a, u) => a + u.entry.amount, 0n);
     const price = paramsRegisterCost(m.params, utf8(name).length, years);
@@ -818,12 +1087,15 @@ export class KachatNamesActions {
    *  txid. Progress arrives through `subscribe` (the record's `stage`). `maxPrice` (sompi, required)
    *  is the price the person confirmed (the quote's `price`): the registration never pays more
    *  (iOS 4f5d95e, IOS-054). Several claims can run side by side (iOS b219bb0). A name past its
-   *  grace can be claimed: the driver frees the old record first (iOS eea52b2). */
-  async startRegistration({ name: raw, years, maxPrice }) {
+   *  grace can be claimed: the driver frees the old record first (iOS eea52b2). `feeTier`
+   *  (FeeTier, default normal): the fee speed of the commit now and - at the network's rate then -
+   *  of the register (and a reclaim); kept on the record (iOS e426432). */
+  async startRegistration({ name: raw, years, maxPrice, feeTier = FeeTier.normal }) {
     const s = this.signer();
     years = BigInt(years);
     if (maxPrice == null) throw new Failure("startRegistration needs the price the person confirmed (maxPrice)");
     const cap = BigInt(maxPrice);
+    const tier = parseFeeTier(feeTier) ?? FeeTier.normal;
     const name = normalize(raw);
     validate(name);
     this._loadPending(s.address);
@@ -840,8 +1112,9 @@ export class KachatNamesActions {
     }
     let record = null;
     try {
+      const rate = await this.feerateForTier(tier);
       await enqueueSend(s.address, async () => {
-        const { builder: b, env, wallet } = await this._context(s);
+        const { builder: b, env, wallet } = await this._context(s, rate);
         const salt = newSalt();
         const plan = b.commit({ env, wallet, name, salt });
         const commit = plan.newCommit;
@@ -853,7 +1126,7 @@ export class KachatNamesActions {
           commitScript: hex(script), commitDaa: null, registerTxId: null, reclaimTxId: null, reclaimLo: null, reclaimHi: null,
           commitSentAt: null, commitResends: null,
           cancelTxId: null, stage: Stage.committing, createdAt: now, updatedAt: now, lastError: null, salt: hex(salt),
-          maxPrice: cap.toString(),
+          maxPrice: cap.toString(), feeTier: tier,
         };
         this._upsert(record);
         const txId = await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
@@ -1018,12 +1291,21 @@ export class KachatNamesActions {
         return;
       }
       case Stage.registering: {
-        if (p.registerTxId && await this.registry.isAccepted(p.registerTxId)) {
+        // In a block: no node holds the register in its mempool any more, and the commit it spends
+        // is gone from the node's UTXO set (only this owner's register or cancel can spend it).
+        // Node only (iOS e426432); a node that can't be asked never reads as "spent".
+        const tx = p.registerTxId;
+        if (tx && !(await this._inMempool(tx)) && (await this._commitSpent(p)) === true) {
           // Accepted is registered: the gap only accepts a register that mints this owner's name.
           // The receipt shows now; the registry catches up in the background instead of first (a
-          // chain walk while the indexer follows another registry; iOS d65fd1a).
+          // chain walk while the indexer follows another registry; iOS d65fd1a), until it includes
+          // the register (iOS 32260ae).
           this._finishRegistered(p);
-          Promise.resolve().then(() => this.registry.refresh()).catch(() => {});
+          (async () => {
+            let daa = null;
+            try { daa = (await this.engine?.currentVirtualDaaScore?.()) ?? null; } catch { daa = null; }
+            await this._catchUp(tx, daa);
+          })().catch(() => {});
           return;
         }
         // not accepted after two minutes and the commit is still there: register again
@@ -1043,6 +1325,27 @@ export class KachatNamesActions {
       default:
         return;
     }
+  }
+
+  /** true: the node says the commit is no longer in the UTXO set; false: it still is; null: the
+   *  node couldn't be asked - never read as "spent" (iOS e426432 commitSpent). */
+  async _commitSpent(p) {
+    let script;
+    let outpoint;
+    try { script = unhex(p.commitScript); outpoint = commitOutpoint(p); } catch { return null; }
+    try {
+      await this.service.liveUtxo({ script, outpoint });
+      return false;
+    } catch (e) {
+      return e instanceof ServiceError && e.code === "notOnChain" ? true : null;
+    }
+  }
+
+  /** The rate the registration's chosen speed pays now (its claim-time choice); a claim from
+   *  before iOS e426432 (no feeTier) keeps the priority rate. */
+  async _registrationFeerate(p) {
+    const tier = parseFeeTier(p?.feeTier);
+    return tier ? this.feerateForTier(tier) : this.feerate();
   }
 
   /** A commit not on chain yet: still waiting in a node's mempool (true), sent again because a
@@ -1090,8 +1393,9 @@ export class KachatNamesActions {
       const stored = this._find(p.id) ?? p;
       if (!stored.salt) throw ActionError.noSalt();
       const salt = unhex32(stored.salt);
+      const rate = await this._registrationFeerate(stored);
       const txId = await enqueueSend(s.address, async () => {
-        const { builder: b, env, wallet } = await this._context(s);
+        const { builder: b, env, wallet } = await this._context(s, rate);
         const plan = b.commit({ env, wallet, name: p.name, salt });
         const script = plan.newCommit?.utxo?.entry?.script;
         if (!script || hex(script) !== p.commitScript) throw new Failure("commit: a different script");
@@ -1171,8 +1475,9 @@ export class KachatNamesActions {
         gap = found.gap;
       }
       const cap = recordPrice(p.maxPrice);
+      const rate = await this._registrationFeerate(p);
       const txId = await enqueueSend(s.address, async () => {
-        const { builder: b, env, wallet } = await this._context(s);
+        const { builder: b, env, wallet } = await this._context(s, rate);
         const plan = b.register({
           env, wallet, gap: await this._liveGap(gap, m),
           commit: { name: p.name, owner: s.me, salt, value: commit.entry.amount, utxo: commit },
@@ -1201,7 +1506,9 @@ export class KachatNamesActions {
    *  gaps around the name, merged, which is the reclaim's output 0 (iOS beb9c45). */
   async _sendReclaim(n, p) {
     const gaps = await this.registry.exitGaps(n);
-    const txId = await this.perform(Operation.reclaim(n));
+    // at the claim's fee speed (iOS e426432); a claim from before keeps the priority rate
+    const tier = parseFeeTier(p?.feeTier);
+    const txId = await this.perform(Operation.reclaim(n), { fee: tier ? FeeChoice.tier(tier) : null });
     this._set(p, (q) => {
       q.reclaimTxId = txId;
       q.reclaimLo = hex(gaps.below.lo);
