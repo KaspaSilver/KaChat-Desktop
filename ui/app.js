@@ -6,7 +6,7 @@ import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwo
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi } from "../engine/amounts.js";
+import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
@@ -321,6 +321,7 @@ configureAddressBook({
   scopedKey: (base, wallet) => accountScopedKey(base, wallet),
   wallet: () => engine.address || "",
   isValidAddress: (address) => isValidKaspaAddressString(address),
+  otherNetworkReason: (address) => otherNetworkReason(address),
 });
 
 // ---------------------------------------------------------------------------
@@ -6743,7 +6744,7 @@ async function runAddressActivityCheck() {
     // so nothing is silently marked as seen.
     await engine.connect();
     const response = await engine.withRpc(
-      (rpc) => rpc.getUtxosByAddresses(addresses),
+      async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses(addresses)),
       { retries: 1, label: "Address activity balances" },
     );
     if (engine.address !== walletAtStart) return; // account switched mid-flight
@@ -9018,7 +9019,7 @@ document.addEventListener("click", (event) => {
 async function spendingBalancesBatchSompi(addresses) {
   await engine.connect();
   const response = await engine.withRpc(
-    (rpc) => rpc.getUtxosByAddresses(addresses),
+    async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses(addresses)),
     { retries: 1, label: "Spending balances" }
   );
   const byAddress = new Map(addresses.map((a) => [a, 0]));
@@ -10292,7 +10293,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // kachat.kas and jumps straight into that chat in payment mode.
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 122;
+const APP_BUILD = 123;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -23574,7 +23575,7 @@ async function scanChattingAddressBatch() {
     try {
       await engine.connect();
       const response = await engine.withRpc(
-        (rpc) => rpc.getUtxosByAddresses(addresses),
+        async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses(addresses)),
         { retries: 1, label: "Chatting address scan" },
       );
       for (const entry of response?.entries || []) {

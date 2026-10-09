@@ -27,14 +27,14 @@ import bundledManifestJson from "./kachat-names-testnet-10.json" with { type: "j
 
 import { IS_TESTNET, isNetworkAddress } from "../network.js";
 import { getEndpoint } from "../endpoints.js";
-import { sendKaspa } from "../transactions.js";
+import { sendKaspa, excludeReservedUtxos } from "../transactions.js";
 import {
   Failure, minFeerate, maxProfileJSONBytes, hex, unhex, unhex32, bytesEqual, concat, utf8, fromUtf8,
   p2pkScript, profilePayload,
 } from "./codec.js";
 import { makeOutpoint, makeUtxo, makeUtxoEntry, txIdHex } from "./transaction.js";
 import { decodeManifest, verifyManifest, ManifestSource } from "./manifest.js";
-import { Builder, makeEnv, planSignedBy } from "./builder.js";
+import { Builder, makeEnv, planSignedBy, recommendedBudgetsFor } from "./builder.js";
 import { addressPrefix, addressOf, keyOf, p2shAddress } from "./registry-state.js";
 
 // MARK: - Errors
@@ -60,8 +60,9 @@ export class ServiceError extends Error {
   static submitMismatch(expected, got) {
     return new ServiceError("submitMismatch", `The node accepted ${got}, expected ${expected}`, { expected, got });
   }
-  /** The manifest is an earlier registry's (v1 - v3); this app builds for v4 and waits for its
-   *  genesis. Not a failure to show as one: the screens say the registry is being set up. */
+  /** The manifest is a registry version this app doesn't build for (v1 - v3, or later than v5);
+   *  this app builds for v4 and v5. Not a failure to show as one: the screens say the registry is
+   *  being set up. */
   static registryUpgrading() { return new ServiceError("registryUpgrading", registryUpgradingMessage); }
 }
 
@@ -153,11 +154,12 @@ export function spendableForBuild(utxos, virtualDaaScore) {
 
 /** The wallet's spendable funding UTXOs for the builders: the signer's own Schnorr P2PK outputs
  *  only, mature, and never one carrying a covenant id (spending that would drag a covenant into
- *  the transaction and change its storage mass). */
+ *  the transaction and change its storage mass), nor one a scheduled KaPost will spend (iOS
+ *  58a0b22, IOS-064: quotes, plans and submits all fund from here, so they see the same coins). */
 export function fundingUtxos(utxos, { me, virtualDaaScore }) {
   const mine = hex(p2pkScript(me));
   const out = [];
-  for (const u of spendableForBuild(utxos, virtualDaaScore)) {
+  for (const u of spendableForBuild(excludeReservedUtxos(utxos), virtualDaaScore)) {
     if (u.covenantId != null || String(u.scriptPublicKey).toLowerCase() !== mine) continue;
     try { out.push(convert(u)); } catch { /* malformed: skip, as Swift's try? */ }
   }
@@ -262,7 +264,7 @@ export class KachatNamesService {
     this.manifest = null;
     /** Where the manifest came from: "bundle" or the indexer URL. */
     this.manifestSource = null;
-    /** The manifest describes an earlier registry (v1 - v3): names wait for the v4 genesis manifest.
+    /** The manifest describes a registry this app doesn't build for (not v4 or v5): names wait.
      *  The screens show "Setting up" instead of an error. Changes are announced to `onChange`. */
     this.registryUpgrading = false;
     /** Why the bundled manifest was refused. The bundle can't change while the app runs, so it is
@@ -338,7 +340,7 @@ export class KachatNamesService {
   /** The verified registry manifest: kachat-names-testnet-10.json bundled with the app, else the
    *  indexer's `GET /names/manifest`. Cached once verified. An indexer-served manifest is trusted
    *  only when every template is pinned in the app (`verifyManifest(m, { source: "indexer" })`).
-   *  An earlier registry's manifest (not registry v4) throws `ServiceError.registryUpgrading()`
+   *  A registry version this app doesn't build for (not v4 or v5) throws `ServiceError.registryUpgrading()`
    *  (code "registryUpgrading") and sets `registryUpgrading`; a refused bundled manifest is
    *  remembered and thrown again without re-reading it. */
   async loadManifest({ allowDryRun = false } = {}) {
@@ -352,12 +354,12 @@ export class KachatNamesService {
       // an indexer-served manifest is trusted only when every template is pinned in the app
       verifyManifest(m, { source: source === "bundle" ? ManifestSource.bundle : ManifestSource.indexer });
     } catch (error) {
-      // An earlier registry's manifest (an old indexer copy; the bundle is v4 since 2026-10-07) is
-      // expected, not an error: say "being upgraded", once, and stop re-reading the bundle.
+      // A registry version this app doesn't build for (an earlier or a later one) is expected, not
+      // an error: say "being upgraded", once, and stop re-reading the bundle.
       const upgrading = isRegistryUpgrading(error);
       const refused = upgrading ? ServiceError.registryUpgrading() : error;
       if (upgrading) {
-        if (!this.registryUpgrading) this._log(`[KachatNames] the ${source} manifest is an earlier registry; .kachat waits for the v4 genesis manifest`);
+        if (!this.registryUpgrading) this._log(`[KachatNames] the ${source} manifest is an earlier registry; .kachat waits for a registry v4 or v5 manifest`);
         this._setRegistryUpgrading(true);
       }
       if (source === "bundle") this._bundleFailure = refused;
@@ -416,6 +418,8 @@ export class KachatNamesService {
       blockTimeMs: dag.pastMedianTime,
       wallMs: BigInt(Date.now()),
       feerate: Math.max(Number(feerate), minFeerate),
+      // the v5 gap is bigger and costs more script units per spend (iOS 6f18475)
+      budgets: { ...recommendedBudgetsFor(await this.loadManifest().then((m) => m.registryVersion, () => 4)) },
     });
   }
 
@@ -469,7 +473,9 @@ export class KachatNamesService {
     // the transaction leaves the app
     const sdkId = String(wasmTx.id ?? "").toLowerCase();
     if (sdkId && sdkId !== expected) throw ServiceError.submitMismatch(expected, `${sdkId} (SDK conversion)`);
-    const txId = String(await this.engine.submitRpcTransaction(wasmTx) ?? "").toLowerCase();
+    // a node can accept it while its answer is lost and a raced node rejects it: looked up by its
+    // locally computed id before failing, so a retry never pays a price twice (iOS 9139e88, IOS-014)
+    const txId = String(await this.engine.submitRpcTransaction(wasmTx, { expectedTxId: expected }) ?? "").toLowerCase();
     this.engine.log?.(`[KachatNames] submitted ${txId}`);
     if (txId !== expected) throw ServiceError.submitMismatch(expected, txId);
     for (const l of [...this._submitListeners]) {
@@ -505,7 +511,8 @@ export class KachatNamesService {
     await engine.connect();
     // plain coins only: a coin carrying a covenant id is never spent by the v0 path
     const utxos = await engine.getUtxosWithCovenants([engine.address]);
-    const plain = utxos.filter((u) => u.covenantId == null);
+    // never a coin a scheduled KaPost will spend (iOS 58a0b22, IOS-064)
+    const plain = excludeReservedUtxos(utxos).filter((u) => u.covenantId == null);
     if (!plain.length) throw new Failure("No spendable coins without a covenant.");
     const selectedOutpoints = plain.length === utxos.length
       ? null

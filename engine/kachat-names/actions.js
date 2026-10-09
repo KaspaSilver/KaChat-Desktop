@@ -61,7 +61,7 @@ import { getEndpoint } from "../endpoints.js";
 import { ADDRESS_HRP, KAS_UNIT, isNetworkAddress } from "../network.js";
 import { enqueueSend, excludeReservedUtxos } from "../transactions.js";
 import {
-  Failure, minFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
+  Failure, minFeerate, maxFeerate, safeFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
   gapState, nameState, offerState,
 } from "./codec.js";
 import { makeOutpoint, makeUtxo, makeUtxoEntry, outpointKey } from "./transaction.js";
@@ -149,6 +149,11 @@ export const daaPerSecond = 10n;
  *  floor is exactly what a busy network drops (testnet-10 asked 115-894 sompi/gram on 2026-10-07).
  *  Still a tiny fee on these small transactions. Swift `unknownFeerate` (iOS b219bb0). */
 export const unknownFeerate = minFeerate * 10;
+/** The most a transaction sent without a sheet pays per gram (the claim driver, returning expired
+ *  offers, declining, withdrawing, freeing an expired name): 20x the floor, above the busiest rate
+ *  seen, and a few hundredths of a KAS on these transactions. Swift `backgroundMaxFeerate`
+ *  (iOS 7e2b6cd, IOS-061). */
+export const backgroundMaxFeerate = minFeerate * 20;
 
 // MARK: - Fees (iOS e426432)
 
@@ -191,6 +196,19 @@ export function isBusyEstimate(e) {
   return !!e && (Number(e.normal) > minFeerate * 1.5 || Number(e.normalSeconds) > 10);
 }
 
+/** An estimate only if every rate is a real, non-negative number at most `maxFeerate`: one node
+ *  (any pool node, or the REST API) answering NaN, infinity or 1e300 is ignored rather than paid
+ *  (Swift `KachatNamesActions.sane`, iOS 7e2b6cd, IOS-061). Takes the raw rates and seconds ->
+ *  makeFeeEstimate shape, or null. */
+export function saneFeeEstimate({ normal, normalSeconds = 0, priority, prioritySeconds = 0 }) {
+  for (const rate of [normal, priority]) {
+    const r = typeof rate === "number" ? rate : Number(rate ?? NaN);
+    if (!(Number.isFinite(r) && r >= 0 && r <= maxFeerate)) return null;
+  }
+  const secs = (v) => { const x = Number(v); return Number.isFinite(x) ? Math.max(0, x) : 0; };
+  return makeFeeEstimate({ normal: Number(normal), normalSeconds: secs(normalSeconds), priority: Number(priority), prioritySeconds: secs(prioritySeconds) });
+}
+
 /** The network's fee picture (iOS `FeeEstimate`): `{ normal, normalSeconds, priority,
  *  prioritySeconds, isBusy }` - sompi per gram and the seconds each is expected to wait. */
 export function makeFeeEstimate({ normal, normalSeconds = 0, priority, prioritySeconds = 0 }) {
@@ -230,8 +248,8 @@ export function followTarget(plan) {
 }
 
 /** Swift `KachatNamesActions.ActionError`; `code` is the case name. Extra fields per case:
- *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }` (unix ms, BigInt), priceChanged
- *  `{ price }` (sompi, BigInt). */
+ *  renewalNotOpen `{ opensMs }`, periodFull `{ renewalOpensMs }`, registrationNotOpen `{ opensMs }`
+ *  (unix ms, BigInt), priceChanged `{ price }`, feeChanged `{ fee }` (sompi, BigInt). */
 export class ActionError extends Error {
   constructor(code, message, extra = {}) {
     super(message);
@@ -263,6 +281,15 @@ export class ActionError extends Error {
   static periodUnknown() {
     return new ActionError("periodUnknown", "The names indexer didn't send this name's paid period. Pull to refresh and try again.");
   }
+  /** the rebuilt transaction's network fee is above the one the person saw (iOS 7e2b6cd, IOS-061) */
+  static feeChanged(fee) {
+    const f = BigInt(fee);
+    return new ActionError(
+      "feeChanged",
+      `The network fee went up to ${kasText(f)} since you confirmed. Nothing was sent. Check the new fee and confirm again.`,
+      { fee: f },
+    );
+  }
   /** accept on an offer past its refund time */
   static offerExpired() { return new ActionError("offerExpired", "This offer has expired. It's going back to the buyer."); }
   /** accept on an offer made to an earlier owner of the name */
@@ -290,6 +317,24 @@ export class ActionError extends Error {
     return new ActionError("expiredTooLong", "This name has been expired too long to renew. It can only be reclaimed and registered again.");
   }
   static offerTooLong() { return new ActionError("offerTooLong", "An offer can run for up to 7 days."); }
+  /** registry v5: registering opens at the migration deadline, once the old registry's names are
+   *  imported (iOS dd836cb) */
+  static registrationNotOpen(opensMs) {
+    return new ActionError(
+      "registrationNotOpen",
+      `Names are moving to the new registry. New names can be claimed from ${dayString(opensMs)}.`,
+      { opensMs: BigInt(opensMs) },
+    );
+  }
+}
+
+/** Registry v5 refuses `register` until the migration deadline; checked against the wall clock
+ *  with the 3-minute margin `registerNow` takes off it (Swift
+ *  `KachatNamesActions.requireRegistrationOpen`, iOS dd836cb). */
+export function requireRegistrationOpen(m) {
+  const deadline = m?.params?.migration?.deadlineMs;
+  if (deadline == null || !(BigInt(nowMs()) - 180_000n < deadline)) return;
+  throw ActionError.registrationNotOpen(deadline + 180_000n);
 }
 
 // MARK: - Operations
@@ -562,6 +607,8 @@ export class KachatNamesActions {
   }
 
   static validateKey(xonly, what) { return validateKey(xonly, what); }
+  /** See the module-level `requireRegistrationOpen`. */
+  static requireRegistrationOpen(m) { return requireRegistrationOpen(m); }
 
   // MARK: Fees (iOS e426432)
 
@@ -578,12 +625,12 @@ export class KachatNamesActions {
     if (typeof this.engine?.getFeeEstimate === "function") {
       try {
         const e = await this.engine.getFeeEstimate();
-        if (Number(e?.priority?.feerate) > 0) {
-          return keep(makeFeeEstimate({
-            normal: e.normal?.feerate ?? e.priority.feerate, normalSeconds: e.normal?.seconds ?? e.priority.seconds,
-            priority: e.priority.feerate, prioritySeconds: e.priority.seconds,
-          }));
-        }
+        // a node's NaN, infinity or 1e300 is ignored, not paid: the REST API instead (IOS-061)
+        const estimate = Number(e?.priority?.feerate) > 0 ? saneFeeEstimate({
+          normal: e.normal?.feerate ?? e.priority.feerate, normalSeconds: e.normal?.seconds ?? e.priority.seconds,
+          priority: e.priority.feerate, prioritySeconds: e.priority.seconds,
+        }) : null;
+        if (estimate) return keep(estimate);
       } catch { /* no node answered: the REST API */ }
     }
     let base = "";
@@ -597,20 +644,24 @@ export class KachatNamesActions {
         const priority = j?.priorityBucket;
         if (!priority || !Number.isFinite(Number(priority.feerate))) continue;
         const normal = (Array.isArray(j?.normalBuckets) ? j.normalBuckets[0] : null) ?? priority;
-        return keep(makeFeeEstimate({
+        const estimate = saneFeeEstimate({
           normal: normal.feerate, normalSeconds: normal.estimatedSeconds, priority: priority.feerate, prioritySeconds: priority.estimatedSeconds,
-        }));
+        });
+        // an estimate out of bounds keeps the last good one (IOS-061)
+        if (!estimate) return this.feeEstimate;
+        return keep(estimate);
       } catch { /* try again, then the last estimate */ }
     }
     return this.feeEstimate;
   }
 
-  /** `max(100, the priority fee rate)` in sompi per gram (a Number) - the rate when no fee was
-   *  chosen; `unknownFeerate` when no estimate can be read (iOS b219bb0). */
+  /** The rate for a transaction sent without a sheet (nobody saw its fee): the priority rate in
+   *  sompi per gram (a Number), at least the floor and capped at `backgroundMaxFeerate` (iOS
+   *  7e2b6cd, IOS-061); `unknownFeerate` when no estimate can be read (iOS b219bb0). */
   async feerate() {
     const e = await this.refreshFeeEstimate();
     if (!e || !(e.priority > 0)) return unknownFeerate;
-    return Math.max(minFeerate, e.priority);
+    return Math.min(safeFeerate(e.priority), backgroundMaxFeerate);
   }
 
   /** The rate a speed pays (FeeTier): the network's Normal rate, never under the floor, times the
@@ -619,7 +670,7 @@ export class KachatNamesActions {
   async feerateForTier(tier) {
     const e = await this.refreshFeeEstimate();
     const base = e ? Math.max(minFeerate, e.normal) : unknownFeerate;
-    return base * feeTierMultipliers[parseFeeTier(tier) ?? FeeTier.normal];
+    return safeFeerate(base * feeTierMultipliers[parseFeeTier(tier) ?? FeeTier.normal]);
   }
 
   /** The rate for a fee choice (`normalizeFeeChoice`); none keeps the old default (the priority
@@ -631,7 +682,7 @@ export class KachatNamesActions {
     if (choice.kind === "tier") return this.feerateForTier(choice.tier);
     const probe = (await this._build(op, s, minFeerate)).plan;
     const mass = Math.max(1, Number(probe.costs.minFee) / minFeerate);
-    return Math.max(minFeerate, Number(choice.total) / mass);
+    return safeFeerate(Number(choice.total) / mass);
   }
 
   /** The wallet's node UTXOs (with covenant ids), less coins a scheduled KaPost reserved. */
@@ -692,8 +743,16 @@ export class KachatNamesActions {
    *  (FeeChoice, a speed id, or `{ customTotal }`) - the plan is built at it, as `perform` sends it;
    *  none keeps the priority rate. */
   async plan(op, { fee = null } = {}) {
+    return (await this.planWithRate(op, { fee })).plan;
+  }
+
+  /** `{ plan, feerate }`: the plan and the fee rate it was built at - the rate
+   *  `perform(op, { exactFeerate })` then sends at, so the fee sent is the fee shown (Swift
+   *  `planWithRate`, iOS 7e2b6cd, IOS-061). */
+  async planWithRate(op, { fee = null } = {}) {
     const s = this.signerFor(op);
-    return (await this._build(op, s, await this._feerateFor(fee, op, s))).plan;
+    const rate = await this._feerateFor(fee, op, s);
+    return { plan: (await this._build(op, s, rate)).plan, feerate: rate };
   }
 
   async _build(op, s, rate = null) {
@@ -787,12 +846,17 @@ export class KachatNamesActions {
    *  `maxPrice` (sompi, BigInt) is the price the person saw and confirmed (the shown plan's
    *  `priceFee`): an extend or renew never pays more - a higher price throws
    *  `ActionError.priceChanged(newPrice)` before anything is signed (iOS 4f5d95e, IOS-054).
-   *  `fee` (optional): the fee choice the sheet showed (see `plan`); it is sent at that fee. */
-  async perform(op, { maxPrice = null, fee = null } = {}) {
+   *  `fee` (optional): the fee choice the sheet showed (see `plan`); it is sent at that fee.
+   *  `exactFeerate` (from `planWithRate`) sends at the rate the person saw instead of reading it
+   *  again; `maxNetworkFee` (sompi) refuses a rebuild whose network fee is above the one shown
+   *  (the inputs can change between the two builds) with `ActionError.feeChanged`, like
+   *  `maxPrice` does for the price (iOS 7e2b6cd, IOS-061). */
+  async perform(op, { maxPrice = null, fee = null, exactFeerate = null, maxNetworkFee = null } = {}) {
     const s = this.signerFor(op);
     const cap = maxPrice == null ? null : BigInt(maxPrice);
-    const rate = await this._feerateFor(fee, op, s);
-    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap, rate));
+    const feeCap = maxNetworkFee == null ? null : BigInt(maxNetworkFee);
+    const rate = exactFeerate != null ? safeFeerate(exactFeerate) : await this._feerateFor(fee, op, s);
+    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap, rate, feeCap));
     // An offer you withdrew or refunded yourself isn't news; the ones this app returns on its own
     // (expired, made to an earlier owner) are (iOS 86471dd).
     if ((op.kind === "withdraw" && !this.withdrawingOffers.has(op.offer?.id))
@@ -815,10 +879,15 @@ export class KachatNamesActions {
   }
 
   /** Builds, signs and submits `op` -> `{ plan, txId }`, rebuilt against live UTXOs at `rate`. It
-   *  never pays more than `maxPrice`, the price the person confirmed. */
-  async _submit(op, s, maxPrice = null, rate = null) {
+   *  never pays more than `maxPrice`, the price the person confirmed, nor a network fee above
+   *  `maxNetworkFee` (plus a few percent), the one they saw. */
+  async _submit(op, s, maxPrice = null, rate = null, maxNetworkFee = null) {
     const { plan, env } = await this._build(op, s, rate);
     if (maxPrice != null && BigInt(plan.priceFee ?? 0n) > maxPrice) throw ActionError.priceChanged(plan.priceFee);
+    // A few percent of slack: the same rate on a rebuild with other inputs can weigh a little more.
+    if (maxNetworkFee != null && BigInt(plan.networkFee ?? 0n) > maxNetworkFee + maxNetworkFee / 20n + 1_000n) {
+      throw ActionError.feeChanged(plan.networkFee);
+    }
     return { plan, txId: await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env }) };
   }
 
@@ -1043,6 +1112,7 @@ export class KachatNamesActions {
     const s = this.signer();
     years = BigInt(years);
     const m = await this.registry.prepare();
+    requireRegistrationOpen(m);
     const { builder: b, env, wallet } = await this._context(s, await this.feerateForTier(feeTier));
     const salt = newSalt();
     const spendable = wallet.reduce((a, u) => a + u.entry.amount, 0n);
@@ -1098,6 +1168,8 @@ export class KachatNamesActions {
     const tier = parseFeeTier(feeTier) ?? FeeTier.normal;
     const name = normalize(raw);
     validate(name);
+    // never a commit that couldn't be registered: v5 opens register at its migration deadline
+    requireRegistrationOpen(await this.registry.prepare());
     this._loadPending(s.address);
     await this.registry.refresh();
     const found = await this.registry.lookup(name);
@@ -1345,7 +1417,9 @@ export class KachatNamesActions {
    *  before iOS e426432 (no feeTier) keeps the priority rate. */
   async _registrationFeerate(p) {
     const tier = parseFeeTier(p?.feeTier);
-    return tier ? this.feerateForTier(tier) : this.feerate();
+    // The register goes out by itself a minute after the claim: the chosen speed, but never above
+    // the background cap - its fee is not shown again (iOS 7e2b6cd, IOS-061).
+    return tier ? Math.min(await this.feerateForTier(tier), backgroundMaxFeerate) : this.feerate();
   }
 
   /** A commit not on chain yet: still waiting in a node's mempool (true), sent again because a
@@ -1440,6 +1514,12 @@ export class KachatNamesActions {
       const salt = unhex32(p.salt);
       await this.registry.refresh();
       const m = await this.registry.prepare();
+      // A commit isn't bound to a registry: one sent before a migration registers on the new
+      // registry once its deadline passes. Until then it waits, saying why (iOS dd836cb).
+      try { requireRegistrationOpen(m); } catch (error) {
+        this._set(p, (q) => { q.lastError = errorMessage(error); });
+        return;
+      }
       const found = await this.registry.lookup(p.name);
       let gap = null;
       if (found.kind === "registered" && found.info.status(this.registry.graceMs, BigInt(nowMs())) === Status.lapsed) {

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import {
   sompiFromUserText, sanitizeAmountInput, kasTextFromSompi, kasToSompi, utxoAmountSompi,
-  MAX_TYPED_SOMPI, MAX_U64,
+  MAX_TYPED_SOMPI, MAX_U64, MAX_SUPPLY_SOMPI, checkedUtxoAnswer,
 } from "../engine/amounts.js";
 
 globalThis.fetch = async () => new Response("", { status: 404 });
@@ -223,6 +223,20 @@ test("sendKaspa: 'already in the mempool' for our own transaction is a sent paym
   assert.equal(result.txids.length, 1);
   assert.ok(rpc.mempool.has(result.txids[0]));
   assert.equal(rpc.submitted.length, 0); // never re-submitted as a second payment
+});
+
+// MARK: checkedUtxoAnswer (iOS 283cd28, IOS-020)
+test("UTXO answers above the Kaspa supply are refused, per coin and in total", () => {
+  const ok = { entries: [{ amount: 5n * 100_000_000n }, { entry: { amount: "7" } }] };
+  assert.equal(checkedUtxoAnswer(ok), ok);
+  assert.equal(checkedUtxoAnswer({ entries: [] }).entries.length, 0);
+  assert.equal(checkedUtxoAnswer(null), null);
+  assert.throws(() => checkedUtxoAnswer({ entries: [{ amount: MAX_SUPPLY_SOMPI + 1n }] }), /above the Kaspa supply/);
+  assert.throws(() => checkedUtxoAnswer({ entries: [{ amount: MAX_U64 }] }), /above the Kaspa supply/);
+  const half = MAX_SUPPLY_SOMPI / 2n + 1n;
+  assert.throws(() => checkedUtxoAnswer({ entries: [{ amount: half }, { utxoEntry: { amount: half } }] }), /above the Kaspa supply/);
+  // a non-integer is left for sanitizeUtxoEntries to drop, not refused here
+  assert.doesNotThrow(() => checkedUtxoAnswer({ entries: [{ amount: 1.5 }] }));
 });
 
 for (const [name, fn] of tests) {

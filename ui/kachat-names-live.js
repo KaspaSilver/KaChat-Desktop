@@ -40,6 +40,7 @@ import {
   SEND_ICONS, feeControlsHtml, feeControls, sendActionButtonHtml, createSendActionButton, infoPillHtml,
 } from "./send-kaspa-components.js";
 import { pickFromAddressBook } from "./address-book.js";
+import { sompiFromUserText, sanitizeAmountInput } from "../engine/amounts.js";
 import { addressBookEntry } from "./address-book-store.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 
@@ -61,7 +62,6 @@ const AUTH_REASON = "Confirm this .kachat transaction";
 /** testnet-10 runs at 10 blocks per second */
 const DAA_PER_SECOND = 10n;
 const SOMPI_PER_KAS = 100_000_000n;
-const U64_MAX = (1n << 64n) - 1n;
 const PRIVACY_SEEN_KEY = "kachat_profile_privacy_seen";
 
 /** Whether the registry is live here (testnet-10 with the runtime built): reads and actions run.
@@ -90,29 +90,11 @@ export function amountText(sompi) { return `${plainAmount(sompi)} ${KAS_UNIT}`; 
 /** "+1.99 TKAS" / "-36.002 TKAS". */
 function signedAmount(delta) { return delta >= 0n ? `+${amountText(delta)}` : `-${amountText(-delta)}`; }
 
-/** "12.5" or "12,5" -> sompi (BigInt); null for anything else or more than 8 decimals. */
-export function parseSompi(text) {
-  const t = String(text ?? "").trim().replace(/,/g, ".");
-  if (!t) return null;
-  const parts = t.split(".");
-  if (parts.length > 2) return null;
-  const whole = parts[0] === "" ? "0" : parts[0];
-  if (!/^[0-9]+$/.test(whole)) return null;
-  let frac = 0n;
-  if (parts.length === 2) {
-    const f = parts[1];
-    if (f.length > 8 || !/^[0-9]*$/.test(f)) return null;
-    frac = BigInt(f.padEnd(8, "0"));
-  }
-  const value = BigInt(whole) * SOMPI_PER_KAS + frac;
-  return value > U64_MAX ? null : value;
-}
-
-/** A decimal amount field: digits and one point (a comma reads as the point), 8 decimals at most. */
-function sanitizeAmountInput(input) {
-  let value = input.value.replace(/,/g, ".").replace(/[^0-9.]/g, "");
-  const dot = value.indexOf(".");
-  if (dot !== -1) value = value.slice(0, dot + 1) + value.slice(dot + 1).replace(/\./g, "").slice(0, 8);
+/** Cleans a decimal amount field as it's typed, with the shared `sanitizeAmountInput` (digits and
+ *  one point, a comma or the Arabic separator as the point, 8 decimals at most); the offer, price
+ *  and custom fee fields are then read with the shared `sompiFromUserText` (iOS cee1966, IOS-062). */
+function sanitizeAmountField(input) {
+  const value = sanitizeAmountInput(input.value);
   if (value !== input.value) input.value = value;
   return value;
 }
@@ -360,6 +342,8 @@ const LI = {
   circle: svg(`<circle cx="12" cy="12" r="9.2"/>`),
   xCircle: svg(`<circle cx="12" cy="12" r="9.2"/><path d="m9 9 6 6M15 9l-6 6"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
+  clock: svg(`<circle cx="12" cy="12" r="9.2"/><path d="M12 7v5.2l3.4 2"/>`),
+  arrowDownDoc: svg(`<path d="M14 3.5H7.4A1.9 1.9 0 0 0 5.5 5.4v13.2a1.9 1.9 0 0 0 1.9 1.9h9.2a1.9 1.9 0 0 0 1.9-1.9V8Z"/><path d="M14 3.5V8h4.5"/><path d="M12 10.5v6.5M9.2 14.2 12 17l2.8-2.8"/>`),
 };
 
 const spinner = (cls = "") => `<span class="kl-spinner ${cls}" role="status" aria-label="Loading"></span>`;
@@ -376,6 +360,7 @@ function eventIcon(op) {
     case "renew": return LI.refresh;
     case "release": return LI.uturn;
     case "reclaim": return LI.reclaim;
+    case "import": return LI.arrowDownDoc;
     default: return I.hand;
   }
 }
@@ -392,6 +377,8 @@ function eventTitle(op) {
     case "renew": return "Renewed";
     case "release": return "Released";
     case "reclaim": return "Reclaimed";
+    // registry v5: a name brought over from the old registry's snapshot (iOS dd836cb)
+    case "import": return "Moved to the new registry";
     case "offer": return "Offer made";
     case "offer_withdraw": return "Offer withdrawn";
     case "offer_refund": return "Offer refunded";
@@ -531,7 +518,7 @@ const hub = {
   /** null until the manifest is checked; false when it fails (the hub then stays a mockup) */
   ready: null,
   setupError: null,
-  /** The manifest is an earlier registry's (not v4): the hub says "Setting up", calmly. */
+  /** The manifest is a registry version this app doesn't build for (not v4 or v5): the hub says "Setting up", calmly. */
   upgrading: false,
   search: { kind: "idle" },
   listings: [],
@@ -1543,6 +1530,8 @@ function openTxSheet(cfg) {
   const sheet = {
     plan: null, op: null, planError: null, building: false, sending: false, txId: null, sendError: null,
     key: undefined, seq: 0, timer: null, layer: null, closed: false,
+    /** the fee rate `plan` was built at: the send uses exactly this (iOS 7e2b6cd, IOS-061) */
+    planFeerate: null,
     /** the spending address that signs and pays for the plan (iOS 881ada6), else null: the chatting address */
     payer: null,
     /** the fee (iOS e426432): a speed, or a typed total (sompi); `touched` once the person chose -
@@ -1641,6 +1630,7 @@ function openTxSheet(cfg) {
     if (key === sheet.key) { sheet.render(); return; }
     sheet.key = key;
     sheet.plan = null;
+    sheet.planFeerate = null;
     sheet.op = null;
     sheet.payer = null;
     sheet.planError = null;
@@ -1653,10 +1643,12 @@ function openTxSheet(cfg) {
     const fee = feeChoice();
     sheet.timer = setTimeout(async () => {
       try {
-        // built at the fee shown (iOS e426432), as it will be sent
-        const plan = await rt.actions.plan(op, { fee });
+        // built at the fee shown (iOS e426432), and sent at exactly the rate it was built at
+        // (iOS 7e2b6cd, IOS-061)
+        const built = await rt.actions.planWithRate(op, { fee });
         if (seq !== sheet.seq || sheet.closed) return;
-        sheet.plan = plan;
+        sheet.plan = built.plan;
+        sheet.planFeerate = built.feerate;
         sheet.op = op;
         try { sheet.payer = rt.actions.payerFor?.(op) ?? null; } catch { sheet.payer = null; }
       } catch (error) {
@@ -1679,7 +1671,8 @@ function openTxSheet(cfg) {
   /** A typed total (the fee card's custom field) - more than zero, else the speed stays. */
   const commitCustomFee = () => {
     const input = sheet.layer?.el.querySelector("[data-kltx-fee-custom]");
-    const value = parseSompi(input?.value ?? "");
+    // the shared exact parser the Send screens use (iOS cee1966, IOS-062)
+    const value = sompiFromUserText(input?.value ?? "");
     sheet.feeCtl?.setEditing(false);
     sheet.fee.touched = true;
     if (value != null && value > 0n) sheet.fee.custom = value;
@@ -1700,10 +1693,11 @@ function openTxSheet(cfg) {
     sheet.slide?.setBusy(true);
     sheet.render();
     try {
-      // never pays more than the price shown (iOS 4f5d95e; with v4's fixed prices a safeguard), at
-      // the fee shown (iOS e426432)
+      // never pays more than the price shown (iOS 4f5d95e; with v4's fixed prices a safeguard), and
+      // sends at the fee rate shown - refused if the rebuilt fee is higher (iOS 7e2b6cd, IOS-061)
       const maxPrice = typeof sheet.plan?.priceFee === "bigint" ? sheet.plan.priceFee : null;
-      const txId = await rt.actions.perform(op, { maxPrice, fee });
+      const maxNetworkFee = typeof sheet.plan?.networkFee === "bigint" ? sheet.plan.networkFee : null;
+      const txId = await rt.actions.perform(op, { maxPrice, fee, exactFeerate: sheet.planFeerate ?? null, maxNetworkFee });
       sheet.txId = txId;
       try { cfg.onDone?.(txId); } catch { /* the sheet still shows it */ }
       // Every name transaction ends on the receipt; closing it closes the action (iOS 0870fcc).
@@ -1715,8 +1709,8 @@ function openTxSheet(cfg) {
       });
     } catch (error) {
       sheet.sendError = errorText(error);
-      // the price moved: build the plan again so the person sees the new price and confirms it
-      if (error?.code === "priceChanged" && !sheet.closed) {
+      // the price or the fee moved: build the plan again so the person sees it and confirms it
+      if ((error?.code === "priceChanged" || error?.code === "feeChanged") && !sheet.closed) {
         sheet.sending = false;
         sheet.slide?.setBusy(false);
         sheet.key = undefined;
@@ -1766,7 +1760,7 @@ function openTxSheet(cfg) {
     },
     onInput: (event) => {
       const custom = event.target.closest("[data-kltx-fee-custom]");
-      if (custom) { sanitizeAmountInput(custom); return; }
+      if (custom) { sanitizeAmountField(custom); return; }
       cfg.onInput?.(event, sheet);
     },
     onClose() {
@@ -1852,7 +1846,7 @@ function openOfferSheet(info, owner) {
   let amountRaw = "";
   let days = 3;
   let virtualDaa = null;
-  const amount = () => { const a = parseSompi(amountRaw); return a != null && a > 0n ? a : null; };
+  const amount = () => { const a = sompiFromUserText(amountRaw); return a != null && a > 0n ? a : null; };
   const refundAfter = () => (virtualDaa == null ? null : virtualDaa + BigInt(Math.min(days, Number(maxOfferDays))) * 86_400n * DAA_PER_SECOND);
   openTxSheet({
     owner,
@@ -1887,7 +1881,7 @@ function openOfferSheet(info, owner) {
     onInput(event, sheet) {
       const input = event.target.closest("[data-kl-offer-amount]");
       if (!input) return;
-      amountRaw = sanitizeAmountInput(input);
+      amountRaw = sanitizeAmountField(input);
       sheet.update();
     },
     onClick(event, sheet) {
@@ -1993,7 +1987,7 @@ function openRenewReview(info, owner, years) {
 /** KachatListSheet: List for Sale / Change Price. */
 function openListSheet(info, owner) {
   let priceRaw = "";
-  const price = () => { const v = parseSompi(priceRaw); return v != null && v > 0n ? v : null; };
+  const price = () => { const v = sompiFromUserText(priceRaw); return v != null && v > 0n ? v : null; };
   openTxSheet({
     owner,
     title: info.isListed ? "Change Price" : "List for Sale",
@@ -2006,7 +2000,7 @@ function openListSheet(info, owner) {
     onInput(event, sheet) {
       const input = event.target.closest("[data-kl-list-price]");
       if (!input) return;
-      priceRaw = sanitizeAmountInput(input);
+      priceRaw = sanitizeAmountField(input);
       sheet.update();
     },
   });
@@ -2414,6 +2408,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
   /** the speed `quote` was priced at */
   let quoteTier = null;
   let quoteError = null;
+  /** registry v5 before its migration deadline: why claiming waits, and until when (iOS dd836cb) */
+  let notOpen = null;
   let starting = false;
   let startError = null;
   let seq = 0;
@@ -2433,11 +2429,19 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         + formRow("Total", amountText(quote.total), { bold: true });
     } else if (quoteError) {
       rows = `<p class="kl-tx-note kl-red">${esc(quoteError)}</p>`;
+    } else if (notOpen) {
+      rows = formRow("Total", "", { valueHtml: `<span class="kl-form-value kmkt-muted">-</span>` });
     } else {
       rows = formRow("Total", "", { valueHtml: spinner() });
     }
     return cardHtml(rows, { cls: "kl-rows-card" });
   };
+
+  const notOpenHtml = () => (notOpen
+    ? cardHtml(`
+        <div class="kl-notopen-row"><span class="kl-orange">${LI.clock}</span><span>${esc(notOpen)}</span></div>
+        ${cardNote("Every name from the old registry comes over with the same owner and expiry first.")}`)
+    : "");
 
   const footHtml = () => (quote && !quote.affordable
     ? `<p class="kl-tx-note kl-red">${esc(kasLabel("Not enough KAS on your chatting address for this name."))}</p>`
@@ -2453,6 +2457,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
   const render = () => {
     if (closed || !layer) return;
     const q = (sel) => layer.el.querySelector(sel);
+    const waiting = q("[data-kl-claim-notopen]");
+    if (waiting) waiting.innerHTML = notOpenHtml();
     const cost = q("[data-kl-claim-cost]");
     if (cost) cost.innerHTML = costHtml();
     const busy = q("[data-kl-claim-busy]");
@@ -2473,6 +2479,7 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     quote = null;
     quoteTier = null;
     quoteError = null;
+    notOpen = null;
     render();
     const tier = feeTier;
     try {
@@ -2482,7 +2489,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
       quoteTier = tier;
     } catch (error) {
       if (mySeq !== seq || closed) return;
-      quoteError = errorText(error);
+      if (error?.code === "registrationNotOpen") notOpen = errorText(error);
+      else quoteError = errorText(error);
     }
     render();
   };
@@ -2536,6 +2544,7 @@ function openClaimSheet({ name, gap, owner = "market" }) {
             ${formRow("Name", `${name}.kachat`, { bold: true })}
             ${segmentedHtml("years", yearsOptions(), years, "Years")}`)}
         </fieldset>
+        <div data-kl-claim-notopen></div>
         <div data-kl-claim-cost></div>
         <div data-kl-claim-busy></div>
         ${cardHtml(`

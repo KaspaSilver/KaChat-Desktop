@@ -14,6 +14,7 @@ import {
   ADDRESS_BOOK_PHOTO_MAX_SIDE, ADDRESS_BOOK_PHOTO_QUALITY,
 } from "./address-book-store.js";
 import { scanKaspaAddress } from "./qr-scan.js";
+import { otherNetworkReason } from "../engine/network.js";
 import { onContextGesture } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
@@ -146,6 +147,9 @@ function detailHtml(address) {
     return `${header}<p class="ab-empty-line ab-gone">Not in your Address Book</p>`;
   }
   const canSend = Boolean(deps?.canSend?.());
+  // The other network's address (saved before IOS-063, or restored from a backup) can't be paid or
+  // messaged here; iOS turns both off and says why.
+  const otherNetwork = entry ? otherNetworkReason(entry.address) : null;
   return `${header}
     <div class="ab-body">
       <div class="ab-card ab-hero">
@@ -160,9 +164,10 @@ function detailHtml(address) {
         ${actionRow({ attr: "data-ab-share", icon: ICONS.share, label: "Share Address" })}
       </div>
       <div class="ab-card">
-        ${actionRow({ attr: "data-ab-send", icon: ICONS.plane, label: "Send KAS", disabled: !canSend })}
-        ${isOwnAddress(entry.address) ? "" : actionRow({ attr: "data-ab-message", icon: ICONS.bubble, label: "Message" })}
+        ${actionRow({ attr: "data-ab-send", icon: ICONS.plane, label: "Send KAS", disabled: !canSend || Boolean(otherNetwork) })}
+        ${isOwnAddress(entry.address) ? "" : actionRow({ attr: "data-ab-message", icon: ICONS.bubble, label: "Message", disabled: Boolean(otherNetwork) })}
       </div>
+      ${otherNetwork ? `<p class="ab-section-foot">${esc(otherNetwork)}</p>` : ""}
       <div class="ab-card">
         ${actionRow({ attr: "data-ab-edit", icon: ICONS.pencil, label: "Edit" })}
         ${actionRow({ attr: "data-ab-delete", icon: ICONS.trash, label: "Delete from Address Book", danger: true })}
@@ -232,8 +237,8 @@ async function onScreenClick(event) {
     return;
   }
   if (target.closest("[data-ab-share]")) { shareAddress(entry.address); return; }
-  if (target.closest("[data-ab-send]")) { if (deps?.canSend?.()) deps?.openSend?.(entry.address); return; }
-  if (target.closest("[data-ab-message]")) { deps?.openChat?.(entry.address); return; }
+  if (target.closest("[data-ab-send]")) { if (deps?.canSend?.() && !otherNetworkReason(entry.address)) deps?.openSend?.(entry.address); return; }
+  if (target.closest("[data-ab-message]")) { if (!otherNetworkReason(entry.address)) deps?.openChat?.(entry.address); return; }
   if (target.closest("[data-ab-edit]")) {
     const result = await openAddressBookEditor({ address: entry.address });
     if (result === "removed") { detailAddress = null; render(); }
@@ -453,10 +458,12 @@ async function onImportFileChosen() {
 
 function runImport(text) {
   try {
-    const { added, updated } = importAddressBookExport(text);
-    toast(added + updated === 0
+    const { added, updated, skipped } = importAddressBookExport(text);
+    let message = added + updated === 0
       ? "Already up to date. Every address in the file is saved."
-      : `Imported: ${added} added, ${updated} updated.`);
+      : `Imported: ${added} added, ${updated} updated.`;
+    if (skipped > 0) message += ` Skipped ${skipped} from the other network.`;
+    toast(message);
   } catch (error) {
     toast(errorText(error));
   }
@@ -762,12 +769,15 @@ function pickerRowsHtml() {
   if (!shown.length) return `<p class="ab-empty-line">No matches</p>`;
   return shown.map((entry) => {
     const ticked = pickerState.ticked.has(entry.address);
+    // The other network's address can't be chatted with or added to a group (iOS IOS-063).
+    const otherNetwork = otherNetworkReason(entry.address);
     return `
-      <button type="button" class="create-chat-picker-row ab-picker-row${ticked ? " picked" : ""}" data-ab-pick="${esc(entry.address)}"${pickerState.multiple ? ` aria-pressed="${ticked}"` : ""}>
+      <button type="button" class="create-chat-picker-row ab-picker-row${ticked ? " picked" : ""}${otherNetwork ? " ab-other-network" : ""}" data-ab-pick="${esc(entry.address)}"${pickerState.multiple ? ` aria-pressed="${ticked}"` : ""}${otherNetwork ? " disabled" : ""}>
         ${addressBookAvatarHtml(entry.address, "create-chat-picker-avatar")}
         <span class="create-chat-picker-copy">
           <span class="create-chat-picker-name">${esc(entry.name)}</span>
           <span class="create-chat-picker-sub">${esc(short(entry.address))}</span>
+          ${otherNetwork ? `<span class="ab-other-network-note">${esc(otherNetwork)}</span>` : ""}
         </span>
         ${pickerState.multiple ? `<span class="ab-tick${ticked ? " on" : ""}" aria-hidden="true">${ticked ? ICONS.circleCheck : ICONS.circle}</span>` : ""}
       </button>`;
@@ -813,12 +823,13 @@ function onPickerClick(event) {
   if (target.closest("[data-ab-picker-cancel]")) { closePicker(null); return; }
   if (target.closest("[data-ab-picker-done]")) {
     const ticked = pickerState.ticked;
-    closePicker(addressBookEntries().filter((e) => ticked.has(e.address)));
+    closePicker(addressBookEntries().filter((e) => ticked.has(e.address) && !otherNetworkReason(e.address)));
     return;
   }
   const row = target.closest("[data-ab-pick]");
   if (!row) return;
   const address = row.getAttribute("data-ab-pick");
+  if (otherNetworkReason(address)) return;
   if (!pickerState.multiple) {
     closePicker(addressBookEntry(address));
     return;

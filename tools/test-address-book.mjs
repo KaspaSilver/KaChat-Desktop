@@ -324,7 +324,7 @@ test("import: adds, updates only from a newer edit, lifts a tombstone, brings th
   };
   let events = 0;
   const off = onAddressBookChange((kind) => { events += 1; assert.equal(kind, "import"); });
-  assert.deepEqual(importAddressBookExport(JSON.stringify(file)), { added: 2, updated: 1 });
+  assert.deepEqual(importAddressBookExport(JSON.stringify(file)), { added: 2, updated: 1, skipped: 0 });
   off();
   assert.equal(events, 1);
   assert.equal(addressBookEntry(ALICE).name, "Alice there");
@@ -343,7 +343,7 @@ test("import: adds, updates only from a newer edit, lifts a tombstone, brings th
   // Persisted, and a second import of the same file changes nothing.
   configureAddressBook({});
   assert.equal(addressBookEntry(DAVE).name, "Dave");
-  assert.deepEqual(importAddressBookExport(file), { added: 0, updated: 0 });
+  assert.deepEqual(importAddressBookExport(file), { added: 0, updated: 0, skipped: 0 });
   // An id already used by another entry gets a fresh one.
   const EVE = "kaspa:qpeve00000000000000000000000000000000000000000000000000000";
   importAddressBookExport({ ...file, entries: [{ id: dave.id, address: EVE, name: "Eve", note: "", createdAt: iso(clock), updatedAt: iso(clock) }] });
@@ -351,7 +351,7 @@ test("import: adds, updates only from a newer edit, lifts a tombstone, brings th
   // Round trip: our own export imports into another wallet.
   const exported = addressBookExportJson();
   wallet = WALLET_B;
-  assert.deepEqual(importAddressBookExport(exported), { added: 5, updated: 0 });
+  assert.deepEqual(importAddressBookExport(exported), { added: 5, updated: 0, skipped: 0 });
   assert.equal(addressBookPhoto(DAVE), PHOTO);
 });
 
@@ -375,7 +375,7 @@ test("import refuses: not an export, wrong type or version, no addresses, no wal
   wallet = "";
   assert.throws(() => importAddressBookExport(JSON.stringify(ok)), /: Open a wallet first\.$/);
   wallet = WALLET_A;
-  assert.deepEqual(importAddressBookExport(`﻿${JSON.stringify(ok)}`), { added: 1, updated: 0 }, "a byte-order mark is fine");
+  assert.deepEqual(importAddressBookExport(`﻿${JSON.stringify(ok)}`), { added: 1, updated: 0, skipped: 0 }, "a byte-order mark is fine");
 });
 
 test("Nextcloud: manual exports keep their spaces in the KaChat folder", () => {
@@ -383,6 +383,21 @@ test("Nextcloud: manual exports keep their spaces in the KaChat folder", () => {
   assert.equal(kaChatFolderFileName("Long Term 2026-10-08T18-37-50Z.csv", { keepSpaces: true }), "Long Term 2026-10-08T18-37-50Z.csv");
   assert.equal(kaChatFolderFileName("Größe: 1/2.csv", { keepSpaces: true }), "Größe_ 1_2.csv", "letters survive; each other character becomes _");
   assert.equal(kaChatFolderFileName("Long Term.csv"), "Long_Term.csv", "other uploads unchanged");
+});
+
+test("other network (IOS-063): save refuses it, import skips and counts it, all-other-network is refused", () => {
+  fresh();
+  const reason = (a) => (a.startsWith("kaspatest:") ? "This is a Testnet address. KaChat is on Mainnet." : null);
+  configureAddressBook({ otherNetworkReason: reason });
+  const TN = "kaspatest:qptestnet0000000000000000000000000000000000000000000000000";
+  assert.throws(() => saveAddressBookEntry({ address: TN, name: "Testy" }), /This is a Testnet address\. KaChat is on Mainnet\./);
+  assert.equal(addressBookEntry(TN), null);
+  const file = (entries) => ({ type: "kachat-address-book", version: 1, exportedAt: iso(clock), walletAddress: WALLET_A, entries });
+  const row = (address, name) => ({ id: crypto.randomUUID(), address, name, note: "", createdAt: iso(clock), updatedAt: iso(clock) });
+  assert.deepEqual(importAddressBookExport(file([row(ALICE, "Alice"), row(TN, "Testy")])), { added: 1, updated: 0, skipped: 1 });
+  assert.equal(addressBookEntry(TN), null);
+  assert.throws(() => importAddressBookExport(file([row(TN, "Testy")])), /Every address in that file is a Testnet address\. KaChat is on Mainnet\./);
+  configureAddressBook({ otherNetworkReason: () => null });
 });
 
 test("normalise", () => {

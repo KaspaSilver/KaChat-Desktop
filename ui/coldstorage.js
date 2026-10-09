@@ -10,7 +10,7 @@
 
 import { getEndpoint } from "../engine/endpoints.js";
 import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
-import { sompiFromUserText, kasToSompi, fiatTextFloorFromSompi } from "../engine/amounts.js";
+import { sompiFromUserText, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
 import { renderKachatLiveDomainsTab, kachatOwnersOfNames } from "./kachat-names-live.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
@@ -244,7 +244,7 @@ async function fetchBalance(address) {
 async function fetchBalancesBatch(addresses) {
   await deps.engine.connect();
   const response = await deps.engine.withRpc(
-    (rpc) => rpc.getUtxosByAddresses(addresses),
+    async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses(addresses)),
     { retries: 1, label: "Cold storage balances" }
   );
   const byAddress = new Map(addresses.map((a) => [a, 0]));

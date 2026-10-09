@@ -150,7 +150,7 @@ export class OfferInfo {
 }
 
 /** One registry event (history, activity). Parties are x-only keys (hex, walker) or addresses
- *  (indexer). `op`: register, transfer, list, delist, sale, extend, renew, release, reclaim,
+ *  (indexer). `op`: register, import (registry v5), transfer, list, delist, sale, extend, renew, release, reclaim,
  *  offer_accepted, offer, offer_accept, offer_withdraw, offer_refund. */
 export class Event {
   constructor({ txId, op, name = null, at = null, from = null, to = null, price = null, years = null }) {
@@ -1254,6 +1254,27 @@ export class RegistryState {
           events.push(new Event({ txId: id, op: "register", name, at: tx.at, to: hex(owner), years }));
           break;
         }
+        case "import": {
+          // registry v5: a name from the predecessor's snapshot, with its owner and paid period,
+          // unlisted. The same outputs as register; the contract checked the Merkle proof and the
+          // owner's or sponsor's signature (REGISTRY_V5.md section 2; iOS 6f18475).
+          if (!(Number(m.registryVersion) >= 5)) throw new Failure(`${short}: import on a registry v${m.registryVersion} gap`);
+          const nameBytes = sp.args[0];
+          if (nameBytes === undefined) throw new Failure(`${short}: import without a name`);
+          const owner = RegistryState._arg32(sp.args, 1);
+          const periodStart = RegistryState._argInt(sp.args, 2);
+          const expiresAt = RegistryState._argInt(sp.args, 3);
+          const name = fromUtf8(nameBytes);
+          const k = blake3(nameBytes);
+          const pad = new Uint8Array(32);
+          pad.set(nameBytes.subarray(0, 32));
+          const f = makeNameFields({ key: k, paddedName: pad, owner, price: 0n, periodStart, expiresAt });
+          predicted.push({ auth: i, p: { kind: "gap", lo: g.lo, hi: hex(k) } });
+          predicted.push({ auth: i, p: { kind: "gap", lo: hex(k), hi: g.hi } });
+          predicted.push({ auth: i, p: { kind: "name", f, name } });
+          events.push(new Event({ txId: id, op: "import", name, at: tx.at, to: hex(owner) }));
+          break;
+        }
         case "merge": {
           const succ = gapIns.find(([j, x]) => j === 2 && x.lo === g.hi);
           if (!succ) throw new Failure(`${short}: merge without the tracked successor gap at input 2`);
@@ -1403,7 +1424,9 @@ export class RegistryState {
    *  - `address(script) -> string|null`: the P2SH address of a tracked script;
    *  - `live(addresses: string[]) -> Promise<Set<"txid:index">>`: which outpoints at those
    *    addresses are unspent (a node);
-   *  - `transactions(address) -> Promise<TxView[]>`: accepted transactions touching an address.
+   *  - `transactions(address, wanted: Set<"txid:index">) -> Promise<TxView[]>`: accepted
+   *    transactions touching an address (the REST API), at least those spending the `wanted`
+   *    outpoints when it has them (iOS 8de95c9, IOS-065).
    *
    *  Returns a WalkReport `{ rounds, applied: txid[], events: Event[], unresolved: "txid:index"[] }`
    *  (unresolved: tracked UTXOs the node no longer has but whose spending transaction was not
@@ -1431,7 +1454,7 @@ export class RegistryState {
       const found = new Set();
       for (const a of [...new Set(spent.map((x) => x[0]))].sort()) {
         const wanted = new Set(spent.filter((x) => x[0] === a).map((x) => x[1]));
-        for (const tx of await transactions(a)) {
+        for (const tx of await transactions(a, wanted)) {
           const spends = tx.inputs.map((i) => opKey(hex(i.outpoint.txid), i.outpoint.index)).filter((op) => wanted.has(op));
           if (spends.length) {
             candidates.set(tx.idHex, tx);

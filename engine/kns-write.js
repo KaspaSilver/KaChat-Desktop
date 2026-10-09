@@ -32,6 +32,7 @@ import {
   clearKnsCache,
 } from "./kns.js";
 import { sendKaspa } from "./transactions.js";
+import { checkedUtxoAnswer } from "./amounts.js";
 
 const KNS_TITLE_BYTES = new TextEncoder().encode("kns");
 const MAX_PAYLOAD_BYTES = 520;
@@ -829,7 +830,7 @@ export async function resumeKnsTransfer({ engine, assetId, signer = null, onStat
 
   await engine.connect();
   onStatus({ status: "locating-commit" });
-  const lookup = (rpc) => rpc.getUtxosByAddresses([commitAddressString]);
+  const lookup = async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses([commitAddressString]));
   const found = await engine.withRpc(lookup, { retries: 1, label: "KNS commit lookup" }).catch(() => null);
   const entries = Array.isArray(found?.entries) ? found.entries : [];
   const wantAmount = record.commitAmountSompi != null ? BigInt(record.commitAmountSompi) : null;

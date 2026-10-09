@@ -132,7 +132,7 @@ function fakeEngine({ kaspa = null, utxos = [], dag = { networkId: "testnet-10",
     async currentDagPoint() { return dag; },
     async currentVirtualDaaScore() { return dag.virtualDaaScore; },
     async getUtxosWithCovenants(addresses) { return utxos.filter((u) => addresses.includes(u.address)); },
-    async submitRpcTransaction(tx) { this.submitted.push(tx); return tx.id; },
+    async submitRpcTransaction(tx, opts) { this.submitted.push(tx); this.submitOpts = opts; return tx.id; },
   };
 }
 
@@ -172,10 +172,10 @@ async function main() {
 
   // MARK: manifest and gate
   r.check(S.KachatNamesService.isEnabled, "testnet gate open under kachat-network-v1=testnet");
-  // the bundled testnet manifest is the live testnet-10 registry v4 on the day clock (iOS 08107e1;
-  // the 10-minute registry bff18554..0e2f is retired): it verifies, so testnet leaves "Setting up"
+  // the bundled testnet manifest is the live testnet-10 registry v5, the migration drill that
+  // imported the day-clock v4 registry (iOS fbfa5a6): it verifies, so testnet leaves "Setting up"
   // (registryUpgrading stays false)
-  const BUNDLED_REGISTRY = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
+  const BUNDLED_REGISTRY = "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d";
   const bundled = new S.KachatNamesService(fakeEngine());
   let bundledEvents = 0;
   bundled.onChange((x) => { if (x === bundled) bundledEvents += 1; });
@@ -187,13 +187,14 @@ async function main() {
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled manifest: registry covenant id");
     r.check(bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
     r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "bundled manifest: the pinned register table");
-    r.eq(bundled.registryUpgrading, false, "bundled v4 manifest: registryUpgrading stays false (no Setting up)");
-    r.eq(bundledEvents, 0, "bundled v4 manifest: no registryUpgrading change announced");
+    r.eq(bundled.registryUpgrading, false, "bundled v5 manifest: registryUpgrading stays false (no Setting up)");
+    r.eq(bundledEvents, 0, "bundled v5 manifest: no registryUpgrading change announced");
     r.check((await bundled.loadManifest()) === bm, "the verified bundled manifest is cached");
     r.check((await bundled.builder()) instanceof B.Builder, "builder() over the bundled manifest");
-    console.log("bundled manifest: registry v4, verified");
+    r.eq(bm.registryVersion, 5, "bundled manifest: registry v5");
+    console.log("bundled manifest: registry v5, verified");
   } catch (e) {
-    r.check(false, `the bundled v4 manifest is refused: ${e.code ?? ""} ${e.message}`);
+    r.check(false, `the bundled v5 manifest is refused: ${e.code ?? ""} ${e.message}`);
   }
   // the same manifest served by an indexer verifies too: every template is pinned for its registry
   const bundledBytes = readFileSync(join(repo, "engine/kachat-names/kachat-names-testnet-10.json"));
@@ -263,6 +264,11 @@ async function main() {
   r.eq(C.hex(env0.me), s(v.deployer.xonly), "environment: me");
   r.eq(env0.feerate, 100, "environment: feerate floor 100");
   r.eq(env0.blockDaa, 590_000_100n, "environment: virtual DAA");
+  // the budgets follow the registry version (iOS 6f18475): v4 without a usable manifest (a dry run),
+  // the v5 table over the bundled v5 manifest
+  r.eq(env0.budgets["gap.register"], B.recommendedBudgets["gap.register"], "environment: v4 budgets without a usable manifest");
+  const envV5 = await bundled.environment({ privateKey: sk });
+  r.eq(JSON.stringify(envV5.budgets), JSON.stringify(B.recommendedBudgetsV5), "environment: the v5 budgets over the bundled v5 manifest");
   const wrongNet = new S.KachatNamesService(fakeEngine({ dag: { networkId: "mainnet", virtualDaaScore: 1n, pastMedianTime: 1n } }), { bundledManifest: v.manifest });
   await r.throws(() => wrongNet.environment({ privateKey: sk }), (e) => e.code === "wrongNodeNetwork", "environment refuses a mainnet node");
 
@@ -362,6 +368,8 @@ async function main() {
     const txId = await svc.submit(first.signed);
     r.eq(txId, T.txIdHex(first.signed), "submit returns the plan's txid");
     r.eq(engine.submitted.length, 1, "submit hands one WASM Transaction to the engine");
+    // IOS-014: a failed submit is looked up by the core's own id before it fails (iOS 9139e88)
+    r.eq(engine.submitOpts?.expectedTxId, T.txIdHex(first.signed), "submit passes the locally computed txid for the acceptance lookup");
     const lying = fakeEngine({ kaspa });
     lying.submitRpcTransaction = async () => "00".repeat(32);
     await r.throws(() => new S.KachatNamesService(lying, { bundledManifest: v.manifest }).submit(first.signed), (e) => e.code === "submitMismatch", "submit refuses another txid");
@@ -404,6 +412,19 @@ async function main() {
   const funding = S.fundingUtxos(withExtras, { me, virtualDaaScore: daa });
   r.eq(funding.length, plain.length, "fundingUtxos: only own mature P2PK coins without a covenant");
   r.check(funding.every((u, i) => T.utxoEntryEqual(u.entry, wallet[i].entry) && T.outpointEqual(u.outpoint, wallet[i].outpoint)), "fundingUtxos converts to the core shape");
+  // IOS-064: a coin a scheduled KaPost will spend never funds a name transaction (iOS 58a0b22)
+  {
+    const Tx = await import("../engine/transactions.js");
+    const held = plain[0].outpoint;
+    Tx.setReservedOutpoints([`${held.transactionId}:${held.index}`]);
+    try {
+      const free = S.fundingUtxos(withExtras, { me, virtualDaaScore: daa });
+      r.eq(free.length, plain.length - 1, "fundingUtxos: a scheduled KaPost's coin is left out");
+      r.check(!free.some((u) => C.hex(u.outpoint.txid) === held.transactionId && u.outpoint.index === Number(held.index)), "fundingUtxos: never the reserved outpoint");
+    } finally {
+      Tx.setReservedOutpoints([]);
+    }
+  }
 
   // MARK: profile record payload
   const okJson = new RS.Profile({ bio: "hi", links: { x: "@me" } }).recordJSON();

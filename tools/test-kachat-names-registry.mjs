@@ -9,6 +9,11 @@
 //
 //   node tools/test-kachat-names-registry.mjs [--live] [path/to/KachatNamesVectors.json]
 //
+// Without a path it runs the v4 vectors (tools/fixtures/kachat-names-vectors.json), then the
+// walker, the walk and the walk-in-any-order over the registry v5 vectors
+// (tools/fixtures/kachat-names-vectors-v5.json, a copy of iOS KaChatTests/KachatNamesVectors-v5.json,
+// kachat-domains 6eddc7a), which open with two imports from a migration snapshot (iOS 6f18475).
+//
 // `--live` also walks the LIVE testnet-10 registry from the bundled manifest, read-only, through
 // api-tn10.kaspa.org (UTXO liveness from GET /addresses/{a}/utxos instead of a node, spends from
 // GET /addresses/{a}/full-transactions) and prints what it found, then compares it with the
@@ -72,8 +77,15 @@ const outpointKey = (u) => `${s(u.txid)}:${Number(u.index)}`;
 /** The vectors' end-to-end plan (README "The end-to-end run", registry v4), after the genesis:
  *  commits, three registrations, extend, renew, transfer, list, buy, four offers (accept,
  *  decline, refund, withdraw), release, reclaim. The steps after it are edge cases on their own
- *  synthetic records. */
-const e2eCount = 21;
+ *  synthetic records. Registry v5 vectors open with `lead` imports from the migration snapshot
+ *  (set by `useVectors`), then the same plan. */
+let lead = 0;
+let e2eCount = 21;
+function useVectors(v) {
+  lead = 0;
+  while (lead < v.steps.length && v.steps[lead].op === "import") lead += 1;
+  e2eCount = 21 + lead;
+}
 
 /** Every record a step was built from must be in the walked state, exactly. */
 function checkRecords(st, state, r) {
@@ -164,14 +176,39 @@ function runWalker(v, r) {
     }
     try { state.checkInvariants(); } catch (e) { r.check(false, `${s(st.label)}: invariants: ${e.message}`); }
   });
+  const imported = e2e.slice(0, lead).map((st) => s(st.label).slice("import ".length));
   r.eq(ops, [
+    ...imported.map((n) => `import ${n}`),
     "register alpha-tn", "register bravo-tn", "register lapse-tn", "extend alpha-tn", "renew lapse-tn",
     "transfer alpha-tn", "list alpha-tn", "sale alpha-tn", "offer bravo-tn", "offer_accepted bravo-tn", "offer_accept bravo-tn",
     "offer alpha-tn", "offer_decline alpha-tn", "offer alpha-tn", "offer_refund alpha-tn",
     "offer alpha-tn", "offer_withdraw alpha-tn", "release bravo-tn", "reclaim lapse-tn",
   ], "e2e events");
-  r.eq(state.names.map((n) => n.name), ["alpha-tn"], "names left after the e2e plan");
-  r.eq(state.gaps.length, 2, "gaps left after the e2e plan");
+  r.eq(sortStr(state.names.map((n) => n.name)), sortStr([...imported, "alpha-tn"]), "names left after the e2e plan");
+  r.eq(state.gaps.length, 2 + lead, "gaps left after the e2e plan");
+  const entries = v.migrationRules?.snapshot?.entries;
+  if (lead > 0 && Array.isArray(entries)) {
+    // registry v5: each import is the snapshot entry exactly - owner, paid period - and unlisted
+    r.eq(entries.length, lead, "v5: one import per snapshot entry");
+    for (const e of entries) {
+      const n = state.name(s(e.name));
+      r.eq(n?.owner, s(e.owner), `v5 import ${e.name}: owner`);
+      r.eq(n?.periodStart, u64(e.periodStart), `v5 import ${e.name}: periodStart`);
+      r.eq(n?.expiresAt, u64(e.expiresAt), `v5 import ${e.name}: expiresAt`);
+      r.eq(n?.price, 0n, `v5 import ${e.name}: unlisted`);
+      r.eq(n?.key, s(e.key), `v5 import ${e.name}: key`);
+    }
+    r.check(state.events.filter((e) => e.op === "import").every((e) => e.years == null && e.price == null), "v5: import events carry no price or years");
+    // the same import on a v4 manifest is refused
+    const v4 = structuredClone(v.manifest);
+    v4.registryVersion = 4;
+    delete v4.params.migration;
+    let m4 = null;
+    try { m4 = M.decodeManifest(v4); } catch { m4 = null; }
+    r.check(m4 != null && tryApply(R.RegistryState.atGenesis(m4), view(e2e[0], 1_000), m4) === null, "v5: an import is refused on a v4 manifest");
+  } else if (lead > 0) {
+    r.check(false, "v5: the vectors have no migrationRules.snapshot.entries");
+  }
   r.eq(state.offers.length, 0, "offers left after the e2e plan");
   // registry v4: no price record to follow, no price events
   r.check(state.shards === undefined && state.priceCovenantId === undefined, "registry v4: the state has no price shards");
@@ -180,9 +217,9 @@ function runWalker(v, r) {
   const payout = accepted?.price ?? 0n;
   r.check(payout > 9n * 100_000_000n && payout < 10n * 100_000_000n, `accepted offer payout is the offer less the fee (${payout})`);
   const alpha = state.name("alpha-tn");
-  r.check(alpha?.registeredTxId === C.hex(hx(e2e[3].expected.txid)), "registration tx carried through every transition");
-  r.eq(alpha?.registeredAt, 1_003n, "registration time carried through every transition");
-  const alphaRegister = e2e[3].args;
+  r.check(alpha?.registeredTxId === C.hex(hx(e2e[lead + 3].expected.txid)), "registration tx carried through every transition");
+  r.eq(alpha?.registeredAt, BigInt(1_003 + lead), "registration time carried through every transition");
+  const alphaRegister = e2e[lead + 3].args;
   r.eq(alpha?.periodStart, u64(alphaRegister.now), "alpha-tn: periodStart = register's now, kept by extend, transfer, list and buy");
   r.eq(alpha?.expiresAt, u64(alphaRegister.now) + 2n * m.params.periodMs, "alpha-tn: registered for 1 period, extended by 1");
   r.eq(m.params.periodMs, 86_400_000n, "testnet vectors run the 24-hour clock");
@@ -230,8 +267,9 @@ function runWalker(v, r) {
     }
   }
 
-  // refusals leave the state alone
-  const reg = steps[3];
+  // refusals leave the state alone (on the first spend of the genesis gap: the first
+  // registration, or on v5 the first import)
+  const reg = steps[lead > 0 ? 0 : 3];
   const genesis = R.RegistryState.atGenesis(m);
   const st0 = R.RegistryState.atGenesis(m);
   const tampered = view(reg, 1);
@@ -252,7 +290,7 @@ function runWalker(v, r) {
   r.check(tryApply(st0, badRedeem, m) === null, "a spend revealing another redeem script was accepted");
   r.check(st0.equals(genesis), "refusals left the state alone");
   // an unrelated transaction is ignored
-  r.eq(tryApply(st0, view(steps[0], 1), m)?.length, 0, "a commit is not a registry transaction");
+  r.eq(tryApply(st0, view(steps[lead], 1), m)?.length, 0, "a commit is not a registry transaction");
 }
 
 /** The simulated chain of the e2e transactions: scripts by outpoint and spends. `opts` (the
@@ -296,7 +334,7 @@ function simulatedChain(v, { at = (i) => 1_000 + i, blueScore = () => null, orde
  *  simulated UTXO set, spends found through addresses, transactions handed back newest first. */
 async function runWalk(v, r) {
   const { m, addr, visibleUpTo } = simulatedChain(v);
-  for (const upTo of [3, 6, 7, 8, 10, 11, 17, e2eCount]) {
+  for (const upTo of [...(lead > 0 ? [lead] : []), ...[3, 6, 7, 8, 10, 11, 17].map((x) => x + lead), e2eCount]) {
     const { visible, live, transactions } = visibleUpTo(upTo);
     const walked = R.RegistryState.atGenesis(m);
     try {
@@ -381,7 +419,7 @@ async function runWalkOrder(v, r) {
       r.check(false, `walk ${label} threw ${e.message}`);
     }
     // incremental: a cache walked partway (in order), then the rest in this variant's order
-    for (const upTo of [7, 13, 19]) {
+    for (const upTo of [7, 13, 19].map((x) => x + lead)) {
       const partial = R.RegistryState.atGenesis(m);
       const first = ref.visibleUpTo(upTo);
       const rest = visibleUpTo(N);
@@ -398,8 +436,8 @@ async function runWalkOrder(v, r) {
 
   // apply: a reclaim whose name is not caught up (its renewal not applied) waits, changing nothing
   const steps = v.steps.slice(0, N);
-  const renewLapse = 7, reclaimLapse = 20;
-  r.eq([s(steps[renewLapse].op), s(steps[reclaimLapse].op)], ["renew", "reclaim"], "order fixture: steps 7 and 20 renew and reclaim lapse-tn");
+  const renewLapse = 7 + lead, reclaimLapse = 20 + lead;
+  r.eq([s(steps[renewLapse].op), s(steps[reclaimLapse].op)], ["renew", "reclaim"], "order fixture: steps 7 and 20 (after the imports) renew and reclaim lapse-tn");
   const behind = R.RegistryState.atGenesis(m);
   for (let pass = 0; pass < N; pass++) ref.txs.forEach((t, i) => { if (i !== renewLapse && i !== reclaimLapse) tryApply(behind, t, m); });
   r.check(behind.name("lapse-tn") != null && behind.name("bravo-tn") == null, "order fixture: bravo-tn released, lapse-tn at its first period");
@@ -412,10 +450,10 @@ async function runWalkOrder(v, r) {
   r.check(behind.name("lapse-tn") == null, "the reclaim applies once the renewal has");
   sameAs(behind, applyAll, "applied until stable in another order");
   // chain order: spends first, then blue score, then time
-  const [a, b2, c] = [ref.txs[3], ref.txs[4], ref.txs[5]].map((t) => Object.assign(Object.create(Object.getPrototypeOf(t)), t));
+  const [a, b2, c] = [ref.txs[lead + 3], ref.txs[lead + 4], ref.txs[lead + 5]].map((t) => Object.assign(Object.create(Object.getPrototypeOf(t)), t));
   a.blueScore = 30n; b2.blueScore = 20n; c.blueScore = 10n; // c spends b2's outputs, b2 a's
   r.eq(R.RegistryState._chainOrder([c, b2, a]).map((t) => t.idHex), [a, b2, c].map((t) => t.idHex), "chain order: spends before blue score");
-  const [x, y] = [ref.txs[0], ref.txs[13]].map((t) => Object.assign(Object.create(Object.getPrototypeOf(t)), t));
+  const [x, y] = [ref.txs[lead], ref.txs[lead + 13]].map((t) => Object.assign(Object.create(Object.getPrototypeOf(t)), t));
   x.blueScore = 50n; y.blueScore = 40n; x.at = 1n; y.at = 2n;
   r.eq(R.RegistryState._chainOrder([x, y]).map((t) => t.idHex), [y.idHex, x.idHex], "chain order: unrelated ones by blue score");
 }
@@ -843,6 +881,55 @@ async function runRegistryChain(v, r) {
 /** A refused manifest (registry v1: "being upgraded") and other refresh failures: a failed refresh
  *  counts as an attempt and bumps `revision` only when the error changed (iOS d2e0673, the refresh
  *  loop fix); a cache of the previous format is walked again. */
+/** IOS-065 (iOS 8de95c9): the REST history is paged until a spent registry coin's spender is
+ *  found. 60 dust payments to the genesis gap's (public) address, newer than the spend that moved
+ *  it on, no longer hide that spend: the walk reads the next page and every name resolves. */
+async function runRestPaging(v, r) {
+  const { m, addr, visibleUpTo } = simulatedChain(v);
+  const { visible, live, transactions } = visibleUpTo(e2eCount);
+  const genesisAddress = addr(m.genesisOutput.script);
+  const dust = Array.from({ length: 60 }, (_, i) => ({
+    transaction_id: (i + 1).toString(16).padStart(64, "d"), is_accepted: true, accepting_block_time: 9_000 + i, payload: null,
+    inputs: [{ index: 0, previous_outpoint_hash: "11".repeat(32), previous_outpoint_index: String(i), signature_script: "" }],
+    outputs: [{ index: 0, amount: 20_000_000, script_public_key: C.hex(m.genesisOutput.script), covenant_id: null, covenant_authorizing_input: null }],
+  }));
+  const pages = [];
+  const fetch = async (url) => {
+    const u = new URL(url);
+    const mm = u.pathname.match(/^\/addresses\/([^/]+)\/full-transactions$/);
+    if (!mm) return response(404, {});
+    const a = decodeURIComponent(mm[1]);
+    const limit = Number(u.searchParams.get("limit")), offset = Number(u.searchParams.get("offset"));
+    pages.push(`${a === genesisAddress ? "genesis" : "other"}:${offset}`);
+    const list = [...(a === genesisAddress ? dust : []), ...transactions(a).map(toREST)];
+    return response(200, list.slice(offset, offset + limit));
+  };
+  const getUtxosByAddresses = async (addresses) => [...live(addresses)].map((op) => {
+    const [transactionId, index] = op.split(":");
+    return { outpoint: { transactionId, index: Number(index) }, covenantId: null };
+  });
+  const reference = R.RegistryState.atGenesis(m);
+  for (const t of visible) tryApply(reference, t, m);
+  const reg = new KachatNamesRegistry({ fetch, restBase: () => "https://rest.test", indexerBase: () => "", getUtxosByAddresses, storage: memoryStorage(), manifest: m, log: () => {} });
+  r.eq(KachatNamesRegistry.restPageSize, 50, "IOS-065: 50 transactions a page");
+  r.eq(KachatNamesRegistry.restMaxPages, 20, "IOS-065: at most 20 pages (1,000 transactions) per address");
+  await reg.refresh();
+  r.eq(reg.lastError, null, "IOS-065: refresh behind 60 dust payments without error");
+  r.eq(sortStr(reg.chainState?.names.map((n) => n.name) ?? []), sortStr(reference.names.map((n) => n.name)), "IOS-065: every name resolves behind the dust");
+  r.eq(reg.lastWalk?.unresolved, [], "IOS-065: no spend left unresolved");
+  r.check(pages.includes("genesis:0") && pages.includes("genesis:50"), `IOS-065: the genesis address was read past its first page (${pages.filter((x) => x.startsWith("genesis")).join(",")})`);
+  r.check(!pages.includes("genesis:100"), "IOS-065: paging stopped once the spender was found");
+  r.check(pages.filter((x) => x.startsWith("other")).every((x) => x.endsWith(":0")), "IOS-065: a short history is one page");
+  // nothing wanted: one page, as before
+  pages.length = 0;
+  const one = await reg.restTransactions(genesisAddress);
+  r.eq([one.length, pages.join(",")], [50, "genesis:0"], "IOS-065: restTransactions without wanted outpoints reads one page");
+  // a spender never found stops at the last page, not after restMaxPages
+  pages.length = 0;
+  const all = await reg.restTransactions(genesisAddress, new Set(["22".repeat(32) + ":0"]));
+  r.eq([all.length, pages.join(",")], [dust.length + transactions(genesisAddress).length, "genesis:0,genesis:50"], "IOS-065: paging ends with the history");
+}
+
 /** A cached state the chain disagrees with (walked out of order by an earlier version) is walked
  *  again from the genesis: one whose names and gaps no longer tile (dropped at load), and one
  *  still tracking a UTXO a transaction it already applied spends (`stale` from the walk). */
@@ -1416,7 +1503,7 @@ async function runLive() {
   // incremental: a cache walked two rounds, then walked on, ends where the full walk did
   try {
     const ids = [C.hex(m.registryCovenantId)];
-    const io = { manifest: m, address: (sc) => R.p2shAddress(sc), live: (a) => reg._liveOutpoints(a, ids), transactions: (a) => reg.restTransactions(a) };
+    const io = { manifest: m, address: (sc) => R.p2shAddress(sc), live: (a) => reg._liveOutpoints(a, ids), transactions: (a, wanted) => reg.restTransactions(a, wanted) };
     const partial = R.RegistryState.atGenesis(m);
     await partial.walk({ ...io, maxRounds: 2 });
     const resumed = R.RegistryState.fromJSON(JSON.stringify(partial.toJSON()));
@@ -1430,7 +1517,7 @@ async function runLive() {
   } catch (e) {
     console.log(`  incremental walk failed: ${e.message} (not counted)`);
   }
-  console.log(`live TN10 registry ${C.hex(m.registryCovenantId).slice(0, 16)}...: ${Date.now() - t0} ms, ${st.applied.length - 1} transaction(s) walked, ${st.gaps.length} gap(s), ${st.names.length} name(s), ${st.events.length} event(s), cache ${storage.map.get("kachat-names-registry-testnet-v1")?.length ?? 0} bytes; walk ${reg.lastWalk.rounds} round(s), unresolved ${reg.lastWalk.unresolved.length}`);
+  console.log(`live TN10 registry v${m.registryVersion} ${C.hex(m.registryCovenantId).slice(0, 16)}... (genesis ${C.hex(m.genesisTxid).slice(0, 8)}..${C.hex(m.genesisTxid).slice(-5)}): ${Date.now() - t0} ms, ${st.applied.length - 1} transaction(s) walked, ${st.gaps.length} gap(s), ${st.names.length} name(s), ${st.events.length} event(s), cache ${storage.map.get("kachat-names-registry-testnet-v1")?.length ?? 0} bytes; walk ${reg.lastWalk.rounds} round(s), unresolved ${reg.lastWalk.unresolved.length}`);
   for (const g of st.gaps) console.log(`  gap ${g.lo.slice(0, 8)}..-${g.hi.slice(0, 8)}.. at ${g.txid.slice(0, 16)}:${g.index}`);
   for (const n of st.names) {
     const status = R.Status.of(n.expiresAt, m.params.graceMs, BigInt(Date.now()));
@@ -1470,7 +1557,7 @@ async function compareWithIndexer(m, st) {
   }
   const want = C.hex(m.registryCovenantId);
   const follows = status.registryCovenantId?.toLowerCase() === want;
-  console.log(`  indexer ${base}: /names/status registry ${status.registryCovenantId ?? "-"} (${follows ? "matches the bundled v4 registry" : `MISMATCH: the bundled registry is ${want}`}), synced ${status.synced}, indexedDaa ${status.indexedDaa ?? "-"}, genesis ${status.genesisTxId ?? "-"}`);
+  console.log(`  indexer ${base}: /names/status registry ${status.registryCovenantId ?? "-"} (${follows ? `matches the bundled v${m.registryVersion} registry` : `MISMATCH: the bundled registry is ${want}`}), synced ${status.synced}, indexedDaa ${status.indexedDaa ?? "-"}, genesis ${status.genesisTxId ?? "-"}`);
   if (!follows) {
     console.log("  indexer: the app would ignore it and walk the chain itself (as this run did)");
     return;
@@ -1784,8 +1871,10 @@ async function runProfileCache(r) {
 async function main() {
   const args = process.argv.slice(2);
   const live = args.includes("--live");
-  const path = args.find((a) => !a.startsWith("--")) ?? join(repo, "tools/fixtures/kachat-names-vectors.json");
+  const given = args.find((a) => !a.startsWith("--"));
+  const path = given ?? join(repo, "tools/fixtures/kachat-names-vectors.json");
   const v = JSON.parse(readFileSync(path, "utf8"));
+  useVectors(v);
   const r = new Report();
   runRules(r);
   console.log(`rules: ${r.pass} pass, ${r.fail} fail`);
@@ -1797,14 +1886,32 @@ async function main() {
   console.log(`+ walk over a simulated chain: ${r.pass} pass, ${r.fail} fail`);
   await runWalkOrder(v, r);
   console.log(`+ walk in any order (shuffled, reversed, from a cache): ${r.pass} pass, ${r.fail} fail`);
-  await runRegistryChain(v, r);
-  console.log(`+ KachatNamesRegistry over the simulated chain: ${r.pass} pass, ${r.fail} fail`);
-  await runRegistryStaleCache(v, r);
-  console.log(`+ KachatNamesRegistry over an out-of-date cache: ${r.pass} pass, ${r.fail} fail`);
-  await runRegistryFailures(v, r);
-  console.log(`+ KachatNamesRegistry refusals and failed refreshes: ${r.pass} pass, ${r.fail} fail`);
-  await runRegistryIndexer(v, r);
-  console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
+  if (lead === 0) {
+    await runRegistryChain(v, r);
+    console.log(`+ KachatNamesRegistry over the simulated chain: ${r.pass} pass, ${r.fail} fail`);
+    await runRegistryStaleCache(v, r);
+    console.log(`+ KachatNamesRegistry over an out-of-date cache: ${r.pass} pass, ${r.fail} fail`);
+    await runRegistryFailures(v, r);
+    console.log(`+ KachatNamesRegistry refusals and failed refreshes: ${r.pass} pass, ${r.fail} fail`);
+    await runRegistryIndexer(v, r);
+    console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
+    await runRestPaging(v, r);
+    console.log(`+ REST history paged past dust (IOS-065): ${r.pass} pass, ${r.fail} fail`);
+  }
+  if (given === undefined) {
+    // registry v5 (iOS 6f18475): the walker decodes the snapshot imports, the walk follows them in
+    // any order
+    const v5 = JSON.parse(readFileSync(join(repo, "tools/fixtures/kachat-names-vectors-v5.json"), "utf8"));
+    useVectors(v5);
+    r.check(lead === 2, `v5 vectors open with 2 imports (got ${lead})`);
+    runWalker(v5, r);
+    console.log(`+ walker over the v5 vectors (imports): ${r.pass} pass, ${r.fail} fail`);
+    await runWalk(v5, r);
+    console.log(`+ walk over a simulated v5 chain: ${r.pass} pass, ${r.fail} fail`);
+    await runWalkOrder(v5, r);
+    console.log(`+ v5 walk in any order (shuffled, reversed, from a cache): ${r.pass} pass, ${r.fail} fail`);
+    useVectors(v);
+  }
   await runProfilesOnly(r);
   console.log(`+ profile-only identities (no registry): ${r.pass} pass, ${r.fail} fail`);
   await runOwnProfileSync(r);

@@ -29,6 +29,10 @@ let config = {
   scopedKey: (base, wallet) => `${wallet}:${base}`,
   wallet: () => "",
   isValidAddress: () => true,
+  // Why `address` can't be used here: a valid address of the network the app isn't on (iOS
+  // KaspaAddress.otherNetworkReason), else null. Saving and importing keep to the active network
+  // (IOS-063): a chat with the other network's address is never read.
+  otherNetworkReason: () => null,
   now: () => Date.now(),
 };
 
@@ -273,6 +277,9 @@ export function saveAddressBookEntry({ address, name, note = "", photo } = {}) {
   const key = normalizeAddressBookAddress(address);
   const cleanName = String(name ?? "").trim();
   if (!cleanName) throw new Error("Enter a name.");
+  let otherNetwork = null;
+  try { otherNetwork = key ? config.otherNetworkReason(key) : null; } catch { otherNetwork = null; }
+  if (otherNetwork) throw new Error(otherNetwork);
   let valid = false;
   try { valid = Boolean(key) && config.isValidAddress(key) !== false; } catch { valid = false; }
   if (!valid) throw new Error("Enter a valid Kaspa address.");
@@ -453,14 +460,24 @@ export function importAddressBookExport(input) {
     throw new Error(ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT);
   }
   const valid = [];
+  let named = 0;
+  let otherNetworkMessage = null;
   for (const raw of file.entries) {
     const entry = cleanEntry(raw);
     if (!entry) continue;
     let ok = false;
     try { ok = config.isValidAddress(entry.address) !== false; } catch { ok = false; }
-    if (ok) valid.push({ entry, photo: addressBookPhotoFromBase64(raw.photo) });
+    if (!ok) continue;
+    named += 1;
+    // The other network's entries are skipped and counted (iOS IOS-063).
+    let reason = null;
+    try { reason = config.otherNetworkReason(entry.address); } catch { reason = null; }
+    if (reason) { otherNetworkMessage = reason; continue; }
+    valid.push({ entry, photo: addressBookPhotoFromBase64(raw.photo) });
   }
-  if (!valid.length) throw new Error(ADDRESS_BOOK_IMPORT_EMPTY);
+  if (!named) throw new Error(ADDRESS_BOOK_IMPORT_EMPTY);
+  if (!valid.length) throw new Error(addressBookImportOtherNetworkText(otherNetworkMessage));
+  const skipped = named - valid.length;
   let added = 0;
   let updated = 0;
   for (const { entry: incoming, photo } of valid) {
@@ -482,7 +499,14 @@ export function importAddressBookExport(input) {
   }
   persist();
   if (added + updated > 0) emit("import");
-  return { added, updated };
+  return { added, updated, skipped };
+}
+
+/** iOS ImportError.otherNetwork: every address in the file is the other network's. */
+function addressBookImportOtherNetworkText(reason) {
+  return /Mainnet address/.test(String(reason || ""))
+    ? "Every address in that file is a Mainnet address. KaChat is on Testnet."
+    : "Every address in that file is a Testnet address. KaChat is on Mainnet.";
 }
 
 // ---------------------------------------------------------------------------------------------

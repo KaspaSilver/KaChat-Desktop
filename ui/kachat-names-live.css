@@ -339,6 +339,10 @@
 .kl-busy-copy strong { font-size: 15px; font-weight: 600; line-height: 20px; color: var(--text); }
 .kl-busy-copy small { font-size: 12px; line-height: 16px; color: var(--muted); }
 
+/* the claim sheet before a v5 migration deadline: when registering opens (iOS dd836cb) */
+.kl-notopen-row { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; line-height: 20px; color: var(--text); }
+.kl-notopen-row .kmkt-ico { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 0; }
+
 /* a destructive action's warning, red above the slider (iOS e426432 / e67074c) */
 .kl-warning-card {
   display: flex; align-items: flex-start; gap: 10px; padding: 14px; border-radius: 20px;

@@ -4,13 +4,16 @@
 // `kachat-names-<network>.json` is written by the kachat-domains CLI's `genesis` and served by
 // the indexer at `GET /names/manifest`; the testnet-10 one is bundled next to this file
 // (kachat-names-testnet-10.json, byte-identical to the iOS resource). `verifyManifest` must pass
-// before anything trusts it. Registry v4 only (`registryVersion: 4`): an earlier manifest throws
-// `Failure.outdatedRegistry()` (the screens say the registry is being set up).
+// before anything trusts it. Registry v4 and v5 (`registryVersion: 4 | 5`; v5 adds `import` from a
+// migration snapshot, iOS 6f18475): an earlier manifest throws `Failure.outdatedRegistry()`, a later
+// one `Failure.newerRegistry()` (the screens say the registry is being set up).
 //
 //   Template { contract, prefix, suffix, stateLength, templateHash, dispatchTags: { entry: Uint8Array(4) } }
 //   Params   { bond, gapValue, tCommit, maxYears, periodMs, graceMs, renewWindowMs: bigint,
-//              registerPrices[5]: bigint, renewPrices[5]: bigint, offerMaxFee: bigint }
-//   Manifest { network, status, params, gap, name, offer: Template, registryCovenantId, genesisTxid,
+//              registerPrices[5]: bigint, renewPrices[5]: bigint, offerMaxFee: bigint,
+//              migration: Migration | null }
+//   Migration { predecessorRegistryId, root, sponsor: Uint8Array(32), deadlineMs: bigint }   (v5)
+//   Manifest { network, status, registryVersion: 4 | 5, params, gap, name, offer: Template, registryCovenantId, genesisTxid,
 //              genesisOutpoint: Outpoint, genesisOutput: TxOutput, genesisState: { lo, hi }, isDryRun }
 //
 // The prices are fixed (registry v4): baked into the gap and name templates, whose hashes are
@@ -27,28 +30,44 @@ export const supportedNetwork = "testnet-10";
 /** The bundled manifest's base name (engine/kachat-names/kachat-names-testnet-10.json). */
 export const bundleResource = "kachat-names-testnet-10";
 
-/** Template hashes of the pinned build - registry v4 (silverc v1.0.0 @ 3ed9733), testnet-10
+/** Registry versions this app builds for: v4, and v5 (v4 plus `import` from a migration snapshot,
+ *  kachat-domains docs/REGISTRY_V5.md). Swift `Manifest.supportedVersions`. */
+export const supportedVersions = Object.freeze([4, 5]);
+
+/** Template hashes of the pinned build by registry version (silverc v1.0.0 @ 3ed9733), testnet-10
  *  params on the day clock: 24-hour periods, 6-hour grace, 2-hour renewal window (kachat-domains
- *  artifacts/testnet10/build-info.json; iOS 08107e1). The gap and the name bake only the
- *  params - their fixed prices included - so they are pinned before any genesis. The offer bakes
- *  the registry id, so its hash exists once the registry genesis does: the deployment adds it in
- *  `deployedTemplateHashes`. A manifest with any template unpinned is trusted only from the
- *  bundle (`verifyManifest(m, { source })`), never from an indexer - an unpinned offer template
- *  could hold buyers' funds in a script the indexer controls (iOS 1d81a1a, IOS-059). */
+ *  artifacts/testnet10/build-info.json; iOS 08107e1, 6f18475). The v4 gap and the name bake only
+ *  the params - their fixed prices included - so they are pinned before any genesis. The v5 gap
+ *  also bakes its migration (snapshot root, deadline, sponsor) and the offer the registry id, so
+ *  their hashes exist per deployment: `deployedTemplateHashes`. A manifest with any template
+ *  unpinned is trusted only from the bundle (`verifyManifest(m, { source })`), never from an
+ *  indexer - an unpinned offer template could hold buyers' funds in a script the indexer controls
+ *  (iOS 1d81a1a, IOS-059). */
 export const pinnedTemplateHashes = {
-  KachatGap: "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5",
-  KachatName: "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b",
+  4: {
+    KachatGap: "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5",
+    KachatName: "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b",
+  },
+  5: {
+    KachatName: "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b",
+  },
 };
 /** The price tables the pinned gap and name bake (kachat-domains params/testnet10.json), sompi by
  *  name length 1, 2, 3, 4, 5+ bytes: a manifest whose params say otherwise would show and charge
  *  prices the contracts don't (Swift `Manifest.pinnedRegisterPrices` / `pinnedRenewPrices`). */
 export const pinnedRegisterPrices = Object.freeze([4_000_000_000n, 2_000_000_000n, 1_000_000_000n, 250_000_000n, 35_000_000n]);
 export const pinnedRenewPrices = Object.freeze([1_000_000_000n, 500_000_000n, 250_000_000n, 62_500_000n, 8_750_000n]);
-/** The offer build each deployed registry was launched with, by registry covenant id (Swift
- *  `Manifest.deployedTemplateHashes`). A manifest for one of these registries must carry exactly
- *  this; any other registry (a dry run, the test vectors) has no offer pin, so only a bundled
- *  manifest of it is trusted. */
+/** The per-deployment builds (the offer; on v5 also the gap) each deployed registry was launched
+ *  with, by registry covenant id (Swift `Manifest.deployedTemplateHashes`). A manifest for one of
+ *  these registries must carry exactly this; any other registry (a dry run, the test vectors) has
+ *  no such pin, so only a bundled manifest of it is trusted. */
 export const deployedTemplateHashes = {
+  // testnet-10 registry v5, the migration drill of 2026-10-09: genesis 408682e6..dfda5,
+  // imports the day-clock v4 registry e6b72448..7f0d (snapshot of 6 names)
+  "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d": {
+    KachatGap: "afce97e05a6341ea7768252a264c65882b92105f8d7158a3ac63f68fbe1615cb",
+    KachatOffer: "9d6e666481ea80e27565e68c01e6de51b32660d2f91368d9b80e4ee00b981d6d",
+  },
   // testnet-10 registry v4 on the day clock, 2026-10-07: genesis 5ffdd006..a777 (the
   // 10-minute deployment bff18554..0e2f before it is retired: its gap and name aren't pinned)
   "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d": {
@@ -56,17 +75,26 @@ export const deployedTemplateHashes = {
   },
 };
 
-/** Every pinned template hash for the registry `registryCovenantId` (Uint8Array or hex):
- *  `pinnedTemplateHashes` merged with that deployment's `deployedTemplateHashes` (the global pin
- *  wins on a clash, as Swift's `merging { pinned, _ in pinned }`). */
-export function templatePinsFor(registryCovenantId) {
+/** Every pinned template hash for the registry `registryCovenantId` (Uint8Array or hex) of
+ *  `registryVersion` (default 4): that version's `pinnedTemplateHashes` merged with the
+ *  deployment's `deployedTemplateHashes` (the version pin wins on a clash, as Swift's
+ *  `merging { pinned, _ in pinned }`). */
+export function templatePinsFor(registryCovenantId, registryVersion = 4) {
   const id = typeof registryCovenantId === "string" ? registryCovenantId.toLowerCase() : hex(registryCovenantId);
   const deployed = Object.prototype.hasOwnProperty.call(deployedTemplateHashes, id) ? deployedTemplateHashes[id] : {};
-  return { ...deployed, ...pinnedTemplateHashes };
+  const v = Number(registryVersion);
+  const pinned = Object.prototype.hasOwnProperty.call(pinnedTemplateHashes, v) ? pinnedTemplateHashes[v] : {};
+  return { ...deployed, ...pinned };
 }
 /** State lengths per contract (registry v4: gap 66, name 126, offer 108). */
 export const stateLengths = { KachatGap: 66, KachatName: 126, KachatOffer: 108 };
-/** The dispatch entries every contract must have. */
+/** The dispatch entries a contract must have on `registryVersion` (the v5 gap adds `import`).
+ *  Swift `Manifest.entries(_:version:)`. */
+export function entriesFor(contract, registryVersion) {
+  if (contract === "KachatGap" && Number(registryVersion) >= 5) return ["register", "merge", "absorbed", "import"];
+  return entries[contract] ?? [];
+}
+/** The dispatch entries every contract must have (registry v4). */
 export const entries = {
   KachatGap: ["register", "merge", "absorbed"],
   KachatName: ["transfer", "list", "buy", "extend", "renew", "release", "reclaim"],
@@ -104,6 +132,10 @@ export function templateStateOfRedeem(t, redeem) {
 // MARK: - Params (kachat-domains params/<network>.json, registry v4)
 
 // MARK: Prices (registry v4: KachatGap.priceFor, KachatName.renewPrice)
+
+/** `register` is refused while `now < migration.deadlineMs` (registry v5): the sponsor imports
+ *  every snapshot name first. Swift `Params.registerOpen(atMs:)`. */
+export function paramsRegisterOpen(p, now) { return BigInt(now) >= (p.migration?.deadlineMs ?? 0n); }
 
 /** What a name of `n` bytes costs for its first period (sompi, BigInt).
  *  Swift `Params.registerPrice(forLength:)`. */
@@ -218,17 +250,34 @@ function outpointOf(v, what) {
 function isObject(v) { return v != null && typeof v === "object" && !Array.isArray(v); }
 
 /** A Manifest from its parsed JSON object (no verification; call `verifyManifest`). Throws
- *  `Failure.outdatedRegistry()` for anything but `registryVersion: 4`. */
+ *  `Failure.outdatedRegistry()` for a registry before v4, `Failure.newerRegistry()` after v5. */
 export function manifestFromJSON(root) {
   if (!isObject(root)) throw new Failure("manifest: not a JSON object");
   const network = str(root.network, "network");
   const status = typeof root.status === "string" ? root.status : "";
-  // registry v1 - v3 manifests describe contracts this app no longer builds for: it waits for the
-  // v4 genesis (Swift `(root["registryVersion"] as? NSNumber)?.intValue == 4`)
+  // registry v1 - v3 manifests describe contracts this app no longer builds for; a later version
+  // needs a newer app (Swift `(root["registryVersion"] as? NSNumber)?.intValue ?? 0`)
   const rv = root.registryVersion;
-  if (!((typeof rv === "number" && Math.trunc(rv) === 4) || rv === 4n)) throw Failure.outdatedRegistry();
+  const version = typeof rv === "bigint" ? Number(rv) : (typeof rv === "number" && Number.isFinite(rv) ? Math.trunc(rv) : 0);
+  if (!supportedVersions.includes(version)) {
+    throw version > Math.max(...supportedVersions) ? Failure.newerRegistry() : Failure.outdatedRegistry();
+  }
   const p = root.params;
   if (!isObject(p)) throw new Failure("manifest: params missing");
+  let migration = null;
+  if (version >= 5) {
+    const mj = p.migration;
+    if (!isObject(mj)) throw new Failure("manifest: params.migration missing (registry v5)");
+    const mig = {
+      predecessorRegistryId: unhex32(str(mj.predecessorRegistryId, "migration.predecessorRegistryId")),
+      root: unhex32(str(mj.root, "migration.root")),
+      deadlineMs: u64(mj.deadlineMs, "migration.deadlineMs"),
+      /** x-only key that may import for the snapshot owners (zero: owners only) */
+      sponsor: unhex32(str(mj.sponsor, "migration.sponsor")),
+    };
+    // root 0 and deadline 0: a v5 registry with no predecessor (register works as on v4)
+    migration = (bytesEqual(mig.root, zero32()) && mig.deadlineMs === 0n) ? null : mig;
+  }
   const params = {
     bond: u64(p.bond, "bond"),
     gapValue: u64(p.gapValue, "gapValue"),
@@ -245,6 +294,10 @@ export function manifestFromJSON(root) {
     /** sompi for every further period (extend, renew, registering past one period) */
     renewPrices: tiers(isObject(p.prices) ? p.prices.renew : undefined, "prices.renew"),
     offerMaxFee: u64(p.offerMaxFee, "offerMaxFee"),
+    /** registry v5: the predecessor snapshot this registry imports (kachat-domains
+     *  docs/REGISTRY_V5.md section 4), baked into the v5 gap; null on v4 and on a v5 registry with
+     *  no predecessor */
+    migration,
   };
   const artifacts = root.artifacts;
   if (!isObject(artifacts)) throw new Failure("manifest: artifacts missing");
@@ -274,7 +327,7 @@ export function manifestFromJSON(root) {
   if (st == null || typeof st !== "object" || Array.isArray(st)) throw new Failure("manifest: genesis state missing");
   const genesisState = { lo: unhex32(str(st.lo, "genesis lo")), hi: unhex32(str(st.hi, "genesis hi")) };
   return {
-    network, status, params, gap, name, offer,
+    network, status, registryVersion: version, params, gap, name, offer,
     registryCovenantId, genesisTxid, genesisOutpoint, genesisOutput, genesisState,
     /** A manifest from a dry run describes a registry that does not exist. */
     isDryRun: status.startsWith("dry run"),
@@ -305,7 +358,7 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
   if (m.network !== supportedNetwork) {
     throw new Failure(`manifest is for ${m.network}; only ${supportedNetwork} is enabled (mainnet waits for an audit)`);
   }
-  const pins = templatePinsFor(m.registryCovenantId);
+  const pins = templatePinsFor(m.registryCovenantId, m.registryVersion);
   for (const t of [m.gap, m.name, m.offer]) {
     if (!bytesEqual(computeTemplateHash(t.prefix, t.suffix), t.templateHash)) {
       throw new Failure(`manifest: ${t.contract} template hash does not match its prefix and suffix`);
@@ -316,13 +369,21 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
     } else if (source === ManifestSource.indexer) {
       throw new Failure(`manifest: ${t.contract} is not pinned in this app; only a bundled manifest is trusted`);
     }
-    for (const e of entries[t.contract] ?? []) {
+    for (const e of entriesFor(t.contract, m.registryVersion)) {
       if (!Object.prototype.hasOwnProperty.call(t.dispatchTags, e)) {
         throw new Failure(`manifest: ${t.contract} dispatch tag for ${e} missing`);
       }
     }
   }
   if (indexOfBytes(m.gap.suffix, m.name.templateHash) < 0) throw new Failure("manifest: the gap is not built for this name template");
+  const mig = m.params.migration;
+  if (mig) {
+    // the v5 gap bakes its snapshot root and sponsor (the deadline is a number)
+    if (indexOfBytes(m.gap.suffix, mig.root) < 0 || !(bytesEqual(mig.sponsor, zero32()) || indexOfBytes(m.gap.suffix, mig.sponsor) >= 0)) {
+      throw new Failure("manifest: the gap is not built for this migration snapshot");
+    }
+    if (bytesEqual(mig.predecessorRegistryId, m.registryCovenantId)) throw new Failure("manifest: a registry can't import itself");
+  }
   if (indexOfBytes(m.offer.suffix, m.registryCovenantId) < 0 || indexOfBytes(m.offer.suffix, m.name.templateHash) < 0) {
     throw new Failure("manifest: the offer is not built for this registry id and name template");
   }

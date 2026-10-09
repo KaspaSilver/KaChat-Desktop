@@ -8,6 +8,11 @@
 // With a second path it also writes every step rebuilt with the app's fixed budgets (placeholder
 // signatures), for `kachat-names-vectors check <out.json>` in kachat-domains (Swift
 // `writeFixedBudget`).
+//
+// Without a path it runs the v4 vectors, then the registry v5 vectors
+// (tools/fixtures/kachat-names-vectors-v5.json, a copy of iOS KaChatTests/KachatNamesVectors-v5.json,
+// kachat-domains 6eddc7a: the v5 gap's budgets, the register deadline; imports are skipped, the
+// walker test decodes them - iOS 6f18475).
 
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -212,12 +217,20 @@ function runManifest(v, r) {
   // genesis exists: the vectors' registry is not a deployed one, so an indexer-served copy is refused
   r.check(M.deployedTemplateHashes[C.hex(m.registryCovenantId)] === undefined, "the vectors' registry has deployment pins");
   r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with an unpinned offer verified");
-  r.eq(C.hex(m.gap.templateHash), M.pinnedTemplateHashes.KachatGap, "the vectors' gap is the pinned v4 build");
-  r.eq(C.hex(m.name.templateHash), M.pinnedTemplateHashes.KachatName, "the vectors' name is the pinned v4 build");
+  const versionPins = M.pinnedTemplateHashes[m.registryVersion];
+  r.eq(m.registryVersion, Number(v.registryVersion ?? 4), "registryVersion");
+  if (m.registryVersion >= 5) {
+    // the v5 gap bakes its migration snapshot: pinned per deployment, never by version
+    r.eq(versionPins.KachatGap, undefined, "v5: the gap is not pinned by version");
+    r.eq(M.templatePinsFor(m.registryCovenantId, 5).KachatGap, undefined, "v5: the vectors' gap has no pin");
+  } else {
+    r.eq(C.hex(m.gap.templateHash), versionPins.KachatGap, "the vectors' gap is the pinned v4 build");
+  }
+  r.eq(C.hex(m.name.templateHash), versionPins.KachatName, `the vectors' name is the pinned v${m.registryVersion} build`);
   // IOS-059: the offer template must be pinned too - an unpinned one could hold buyers' funds in a
   // script the indexer controls
   {
-    const pins = M.pinnedTemplateHashes;
+    const pins = versionPins;
     const saved = { ...pins };
     try {
       pins.KachatGap = C.hex(m.gap.templateHash);
@@ -273,6 +286,42 @@ function runManifest(v, r) {
   const j3 = structuredClone(v.manifest);
   j3.network = "mainnet";
   r.check(!verifies(M.decodeManifest(j3)), "mainnet manifest verified");
+  if (m.registryVersion >= 5) {
+    // registry v5 (iOS 6f18475): params.migration decoded, baked into the gap, never the registry itself
+    const mig = m.params.migration;
+    const mj = v.manifest.params.migration;
+    r.check(mig != null, "v5: params.migration decoded");
+    if (mig) {
+      r.eq(C.hex(mig.root), s(mj.root), "v5: migration root");
+      r.eq(C.hex(mig.sponsor), s(mj.sponsor), "v5: migration sponsor");
+      r.eq(C.hex(mig.predecessorRegistryId), s(mj.predecessorRegistryId), "v5: migration predecessor");
+      r.eq(mig.deadlineMs, u64(mj.deadlineMs), "v5: migration deadline");
+    }
+    r.eq(M.entriesFor("KachatGap", 5).join(","), "register,merge,absorbed,import", "v5: the gap has an import entry");
+    const jt = structuredClone(v.manifest);
+    jt.params.migration.root = "ab".repeat(32);
+    r.check((() => { try { M.verifyManifest(M.decodeManifest(jt)); return false; } catch (e) { return /migration snapshot/.test(e.message); } })(), "v5: a migration root the gap does not bake verified");
+    const js = structuredClone(v.manifest);
+    js.params.migration.sponsor = "cd".repeat(32);
+    r.check(!verifies(M.decodeManifest(js)), "v5: a sponsor the gap does not bake verified");
+    const jself = structuredClone(v.manifest);
+    jself.params.migration.predecessorRegistryId = jself.registryCovenantId;
+    r.check((() => { try { M.verifyManifest(M.decodeManifest(jself)); return false; } catch (e) { return /import itself/.test(e.message); } })(), "v5: a registry importing itself verified");
+    const jnone = structuredClone(v.manifest);
+    jnone.params.migration.root = "00".repeat(32);
+    jnone.params.migration.deadlineMs = 0;
+    r.eq(M.decodeManifest(jnone).params.migration, null, "v5: root 0 and deadline 0 is no migration");
+    const jtag = structuredClone(v.manifest);
+    delete jtag.artifacts.KachatGap.dispatchTags.import;
+    r.check((() => { try { M.verifyManifest(M.decodeManifest(jtag)); return false; } catch (e) { return /dispatch tag for import/.test(e.message); } })(), "v5: a gap without an import entry verified");
+  } else {
+    r.eq(m.params.migration, null, "v4: no migration");
+  }
+  return m;
+}
+
+/** The bundled testnet-10 manifest (once, whatever vectors run). */
+function runBundled(r) {
   // the bundled testnet-10 manifest: byte-identical to iOS (when the iOS repo is here) and verified
   const bundledPath = join(repo, "engine/kachat-names/kachat-names-testnet-10.json");
   const bundled = readFileSync(bundledPath);
@@ -281,12 +330,13 @@ function runManifest(v, r) {
     "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-testnet-10.json",
   ].find((x) => existsSync(x));
   if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled manifest differs from the iOS resource");
-  // the bundled manifest: the live testnet-10 registry v4 on the day clock (iOS 08107e1; the
-  // 10-minute registry bff18554..0e2f is retired), verified from the bundle and as an indexer would
-  // serve it (every template pinned for its registry id)
-  const BUNDLED_REGISTRY = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
+  // the bundled manifest: the live testnet-10 registry v5, the migration drill of 2026-10-09 that
+  // imported the day-clock v4 registry e6b72448..7f0d (iOS fbfa5a6), verified from the bundle and
+  // as an indexer would serve it (every template pinned for its registry id)
+  const BUNDLED_REGISTRY = "fdc403f5ef76ea7c71dcb5305d09daf7ab7fd68dc1d274a314fc8ca9111e571d";
+  const PREDECESSOR = "e6b7244831004e1db928458bce570347317b50ff124c010d342d73a6c2017f0d";
   const bundledJson = JSON.parse(bundled.toString("utf8"));
-  r.eq(bundledJson.registryVersion, 4, "bundled manifest registryVersion");
+  r.eq(bundledJson.registryVersion, 5, "bundled manifest registryVersion");
   let bm = null;
   try { bm = M.decodeManifest(new Uint8Array(bundled)); } catch (e) { r.check(false, `bundled manifest decode: ${e.message}`); }
   if (bm) {
@@ -295,7 +345,10 @@ function runManifest(v, r) {
     r.check(!bm.isDryRun, "the bundled manifest is a dry run");
     r.eq(bm.network, "testnet-10", "bundled manifest network");
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled registry covenant id");
-    r.eq(C.hex(bm.genesisTxid), "5ffdd006230bcba0ee52c3ce7b69fba2b9a4d489b57fee93e2b103eb1622a777", "bundled registry genesis txid");
+    r.eq(C.hex(bm.genesisTxid), "408682e6d46f483ef0bb2564f96a78ead5f2af6401fbb2fdbdb8ecd8f61dfda5", "bundled registry genesis txid");
+    r.eq(bm.registryVersion, 5, "bundled manifest: registry v5");
+    r.eq(bm.params.migration ? C.hex(bm.params.migration.predecessorRegistryId) : null, PREDECESSOR, "bundled manifest: imports the day-clock v4 registry");
+    r.eq(bm.params.migration?.deadlineMs, 1_791_541_849_055n, "bundled manifest: register opens 2026-10-09 10:30:49 UTC");
     r.check(bm.price === undefined && bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
     r.eq(bm.params.periodMs, 86_400_000n, "bundled manifest: 24-hour testnet clock");
     r.eq(bm.params.graceMs, 21_600_000n, "bundled manifest: 6-hour grace");
@@ -304,15 +357,22 @@ function runManifest(v, r) {
     r.eq(bm.params.renewPrices.join(","), M.pinnedRenewPrices.join(","), "bundled manifest: the pinned renew table");
     // the pins: the gap and name everywhere, the offer for this registry id - and they are exactly
     // the bundled templates (iOS Manifest.pinnedTemplateHashes / deployedTemplateHashes)
-    const pins = M.templatePinsFor(bm.registryCovenantId);
+    const pins = M.templatePinsFor(bm.registryCovenantId, bm.registryVersion);
     r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer", "every template pinned for the bundled registry");
-    r.eq(M.templatePinsFor(BUNDLED_REGISTRY.toUpperCase()).KachatOffer, pins.KachatOffer, "templatePinsFor takes hex in any case");
+    r.eq(M.templatePinsFor(BUNDLED_REGISTRY.toUpperCase(), 5).KachatOffer, pins.KachatOffer, "templatePinsFor takes hex in any case");
     for (const t of [bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled ${t.contract} is the pinned build`);
-    r.eq(pins.KachatGap, "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5", "pinned gap hash (iOS)");
+    r.eq(pins.KachatGap, "afce97e05a6341ea7768252a264c65882b92105f8d7158a3ac63f68fbe1615cb", "pinned v5 gap hash (iOS, per deployment)");
     r.eq(pins.KachatName, "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b", "pinned name hash (iOS)");
-    r.eq(pins.KachatOffer, "5a7e22af319bac406769563b6b4b39b05c3aac145375ccaaada4095960372a7a", "pinned offer hash (iOS)");
+    r.eq(pins.KachatOffer, "9d6e666481ea80e27565e68c01e6de51b32660d2f91368d9b80e4ee00b981d6d", "pinned offer hash (iOS)");
+    // the v4 predecessor keeps its pins (an indexer may still serve its manifest until it moves)
+    const prev = M.templatePinsFor(PREDECESSOR, 4);
+    r.eq(prev.KachatGap, "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5", "pinned v4 gap hash (iOS)");
+    r.eq(prev.KachatOffer, "5a7e22af319bac406769563b6b4b39b05c3aac145375ccaaada4095960372a7a", "pinned v4 offer hash (iOS)");
     r.eq(M.templatePinsFor("bff185546af1940ec70d74143e23b5f018fdb864bd02e15ca9b4c8d8ede40e2f").KachatOffer, undefined, "the retired 10-minute registry has no offer pin");
-    r.eq(Object.keys(M.templatePinsFor("ab".repeat(32))).sort().join(","), "KachatGap,KachatName", "another registry: only the gap and name pinned");
+    r.eq(Object.keys(M.templatePinsFor("ab".repeat(32))).sort().join(","), "KachatGap,KachatName", "another v4 registry: only the gap and name pinned");
+    r.eq(Object.keys(M.templatePinsFor("ab".repeat(32), 5)).sort().join(","), "KachatName", "another v5 registry: only the name pinned");
+    // the v4 gap's pin does not carry over to v5: the bundled v5 gap under another id is unpinned
+    r.check(M.templatePinsFor(BUNDLED_REGISTRY, 4).KachatGap !== pins.KachatGap, "the v5 gap is not the v4 pin");
     // a tampered offer build (its hash recomputed so only the pin can catch it) is refused, from
     // the bundle too: this registry's offer is pinned
     const tampered = M.decodeManifest(new Uint8Array(bundled));
@@ -324,7 +384,7 @@ function runManifest(v, r) {
       try { M.verifyManifest(tampered, { source }); } catch (e) { msg = e.message; }
       r.check(/KachatOffer is not the pinned build/.test(msg), `a tampered offer template (${source}) is refused as not pinned: ${msg || "verified"}`);
     }
-    // the same for the gap (pinned everywhere in v4)
+    // the same for the gap (pinned per deployment in v5)
     const tamperedGap = M.decodeManifest(new Uint8Array(bundled));
     const gsuffix = tamperedGap.gap.suffix.slice();
     gsuffix[gsuffix.length - 1] ^= 1;
@@ -345,9 +405,14 @@ function runManifest(v, r) {
     let v3Err = null;
     try { M.decodeManifest(v3); } catch (e) { v3Err = e; }
     r.check(v3Err instanceof C.Failure && v3Err.isOutdatedRegistry, "a registryVersion 3 copy of the bundled manifest is outdated");
-    console.log(`bundled manifest: registry v4, verified (registry ${BUNDLED_REGISTRY.slice(0, 8)}..${BUNDLED_REGISTRY.slice(-4)}, every template pinned)`);
+    // registryVersion 6 of the same manifest is a newer registry (also "setting up")
+    const v6 = structuredClone(bundledJson);
+    v6.registryVersion = 6;
+    let v6Err = null;
+    try { M.decodeManifest(v6); } catch (e) { v6Err = e; }
+    r.check(v6Err instanceof C.Failure && v6Err.isNewerRegistry && v6Err.isOutdatedRegistry, "a registryVersion 6 copy of the bundled manifest is newer");
+    console.log(`bundled manifest: registry v${bm.registryVersion}, verified (registry ${BUNDLED_REGISTRY.slice(0, 8)}..${BUNDLED_REGISTRY.slice(-4)}, every template pinned)`);
   }
-  return m;
 }
 
 /** The period rules on their own (KACHAT_NAMES.md 4.1, ops.rs) on the testnet-10 day clock
@@ -355,6 +420,20 @@ function runManifest(v, r) {
  *  opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
 function runPeriodRules(v, m, r) {
   const p = m.params;
+  // IOS-061: a fee rate from a node can be anything; the maths never throws and never exceeds the cap
+  r.eq(C.safeFeerate(NaN), C.minFeerate, "NaN fee rate -> the floor");
+  r.eq(C.safeFeerate(Infinity), C.minFeerate, "infinite fee rate -> the floor");
+  r.eq(C.safeFeerate(-5), C.minFeerate, "negative fee rate -> the floor");
+  r.eq(C.safeFeerate(1e300), C.maxFeerate, "1e300 fee rate -> the ceiling");
+  r.eq(C.safeFeerate(500), 500, "a normal fee rate is kept");
+  // desktop extra: networkFee itself takes any rate (BigInt() would throw on NaN / Infinity)
+  {
+    const st0 = v.steps.find((x) => x.op === "commit");
+    const plan0 = build(new B.Builder(m), "commit", B.makeEnv({ me: hx(st0.env.me), blockDaa: u64(st0.env.blockDaa), blockTimeMs: u64(st0.env.blockTimeMs), wallMs: u64(st0.env.wallMs) }), st0.wallet.map(utxo), st0.args, st0.records);
+    const tx0 = plan0.unsignedTx;
+    r.eq(T.networkFee(tx0, NaN), T.networkFee(tx0, C.minFeerate), "networkFee at NaN pays the floor");
+    r.eq(T.networkFee(tx0, 1e300), T.networkFee(tx0, C.maxFeerate), "networkFee at 1e300 pays the ceiling");
+  }
   const y = p.periodMs;
   r.eq(y, 86_400_000n, "periodMs from the manifest (24 hours)");
   r.eq(p.renewWindowMs, 7_200_000n, "renewWindowMs from the manifest (2 hours)");
@@ -421,12 +500,46 @@ function runPeriodRules(v, m, r) {
   } else {
     r.check(false, "no extend step in the vectors");
   }
-  // the fixed budgets are the vectors' table, entry for entry
+  // the fixed budgets are the vectors' table, entry for entry (a v4 table has no gap.import)
   const recommended = v.recommendedBudgets;
-  const roles = Object.values(B.BudgetRole);
+  const table = B.recommendedBudgetsFor(m.registryVersion);
+  const roles = Object.values(B.BudgetRole).filter((x) => m.registryVersion >= 5 || x !== B.BudgetRole.gapImport);
   r.eq(Object.keys(recommended).sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
   for (const role of roles) {
-    r.eq(BigInt(B.recommendedBudgets[role]), u64(recommended[role]), `recommended budget ${role}`);
+    r.eq(BigInt(table[role]), u64(recommended[role]), `recommended budget ${role}`);
+  }
+  if (m.registryVersion >= 5 && v.migrationRules) {
+    // registry v5: register is refused before the migration deadline, built at and after it
+    const opens = u64(v.migrationRules.registerOpensAt);
+    r.eq(m.params.migration?.deadlineMs ?? 0n, opens, "v5: registerOpensAt = migration.deadlineMs");
+    r.check(!M.paramsRegisterOpen(m.params, opens - 1n) && M.paramsRegisterOpen(m.params, opens), "v5: registerOpen flips at the deadline");
+    const st = v.steps.find((x) => s(x.op) === "register");
+    if (st) {
+      const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs), budgets: { ...table } });
+      const rec = st.records;
+      try {
+        b.register({ env, wallet: st.wallet.map(utxo), gap: gapRec(rec.gap), commit: commitRec(rec.commit), years: u64(st.args.years), now: opens - 1n });
+        r.check(false, "v5: register a millisecond before the deadline was built");
+      } catch (e) {
+        r.check(/migration deadline/.test(e.message), `v5: register before the deadline refused for the deadline: ${e.message}`);
+      }
+    } else {
+      r.check(false, "v5: no register step to try before the deadline");
+    }
+    // a v5 manifest without its migration block is refused
+    const noMig = structuredClone(v.manifest);
+    delete noMig.params.migration;
+    r.check((() => { try { M.decodeManifest(noMig); return false; } catch { return true; } })(), "v5: a manifest without params.migration decoded");
+    r.eq(B.recommendedBudgetsFor(5), B.recommendedBudgetsV5, "recommendedBudgetsFor(5) is the v5 table");
+  }
+  // a later registry version is "newer", never trusted (the screens say it is being set up)
+  const later = structuredClone(v.manifest);
+  later.registryVersion = 6;
+  try {
+    M.decodeManifest(later);
+    r.check(false, "a registryVersion 6 manifest decoded");
+  } catch (e) {
+    r.check(e instanceof C.Failure && e.isNewerRegistry && e.isOutdatedRegistry, `registryVersion 6 is a newer registry: ${e.message}`);
   }
   // an earlier registry's manifest (no registryVersion 4) is recognised as outdated, never trusted
   const old = structuredClone(v.manifest);
@@ -449,6 +562,7 @@ function runPeriodRules(v, m, r) {
     }
   }
   r.check(C.Failure.outdatedRegistry().isOutdatedRegistry && !new C.Failure("x").isOutdatedRegistry, "Failure.outdatedRegistry / isOutdatedRegistry");
+  r.check(C.Failure.newerRegistry().isOutdatedRegistry && !C.Failure.outdatedRegistry().isNewerRegistry, "Failure.newerRegistry counts as isOutdatedRegistry");
 }
 
 function build(b, op, env, wallet, args, rec) {
@@ -472,15 +586,20 @@ function build(b, op, env, wallet, args, rec) {
   }
 }
 
-/** The steps the app builds: every one (registry v4 has no price changes). */
-const appSteps = (v) => v.steps;
+/** The steps the app builds: every one but the v5 imports (registry v4 has no price changes; the
+ *  sponsor's or an owner's import is built by the kachat-domains CLI, the walker decodes it). */
+const appSteps = (v) => v.steps.filter((st) => st.op !== "import");
 
 function runSteps(v, m, r) {
   const b = new B.Builder(m);
   const results = [];
   const recommended = v.recommendedBudgets;
-  r.eq(Object.keys(B.recommendedBudgets).length, Object.keys(recommended).length, "recommended table size");
+  // the fixed table for this registry version (v5's gap is bigger)
+  const table = B.recommendedBudgetsFor(m.registryVersion);
+  const tableSize = Object.keys(table).filter((k) => m.registryVersion >= 5 || k !== B.BudgetRole.gapImport).length;
+  r.eq(tableSize, Object.keys(recommended).length, "recommended table size");
   r.check(v.steps.every((st) => st.op !== "setPrices"), "registry v4 vectors have no price changes");
+  for (const st of v.steps.filter((x) => x.op === "import")) console.log(`SKIP   ${st.label}   (import: built by the CLI, decoded by the walker)`);
   for (const st of appSteps(v)) {
     const failBefore = r.fail;
     const failuresBefore = r.failures.length;
@@ -488,13 +607,13 @@ function runSteps(v, m, r) {
     const env0 = st.env;
     const exp = st.expected;
     const expInputs = exp.inputs;
-    const budgets = { ...B.recommendedBudgets };
+    const budgets = { ...table };
     for (const i of expInputs) {
       const role = s(i.role);
       const measured = num(i.computeBudget);
-      r.check(role in B.recommendedBudgets, `${label}: unknown role ${role}`);
-      r.check(measured <= B.budgetFor(B.recommendedBudgets, role), `${label}: measured budget ${measured} > recommended for ${role}`);
-      r.eq(B.recommendedBudgets[role], num(recommended[role]), `recommended table ${role}`);
+      r.check(role in table, `${label}: unknown role ${role}`);
+      r.check(measured <= B.budgetFor(table, role), `${label}: measured budget ${measured} > recommended for ${role}`);
+      r.eq(table[role], num(recommended[role]), `recommended table ${role}`);
       budgets[role] = measured;
     }
     const env = B.makeEnv({ me: hx(env0.me), blockDaa: u64(env0.blockDaa), blockTimeMs: u64(env0.blockTimeMs), wallMs: u64(env0.wallMs), feerate: Number(env0.feerate), budgets });
@@ -624,11 +743,12 @@ function runFixedBudgets(v, m, r) {
   // every step also builds with the app's fixed (recommended) budgets, as the app will run them
   // (Swift: writeFixedBudget, which kachat-names-vectors check validates 35/35)
   const b = new B.Builder(m);
+  const table = B.recommendedBudgetsFor(m.registryVersion);
   for (const st of appSteps(v)) {
-    const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs) });
+    const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs), budgets: { ...table } });
     try {
       const plan = build(b, st.op, env, st.wallet.map(utxo), st.args, st.records);
-      r.check(plan.unsignedTx.inputs.every((i, k) => i.computeBudget === B.recommendedBudgets[plan.inputs[k].role]), `${st.label}: fixed budgets`);
+      r.check(plan.unsignedTx.inputs.every((i, k) => i.computeBudget === table[plan.inputs[k].role]), `${st.label}: fixed budgets`);
     } catch (e) {
       r.check(false, `${st.label}: fixed-budget build threw ${e.message}`);
     }
@@ -656,7 +776,8 @@ function writeFixedBudget(v, m, out) {
     isCoinbase: e.isCoinbase, covenantId: e.covenantId ? C.hex(e.covenantId) : null,
   });
   const txs = appSteps(v).map((st) => {
-    const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs) });
+    const env = B.makeEnv({ me: hx(st.env.me), blockDaa: u64(st.env.blockDaa), blockTimeMs: u64(st.env.blockTimeMs), wallMs: u64(st.env.wallMs),
+      budgets: { ...B.recommendedBudgetsFor(m.registryVersion) } });
     const plan = build(b, st.op, env, st.wallet.map(utxo), st.args, st.records);
     const tx = plan.unsignedTx;
     return {
@@ -692,24 +813,44 @@ async function runAsyncSigner(v, m, r) {
   r.eqHex(T.txFullPreimage(c), C.hex(T.txFullPreimage(a)), "async signer matches the sync signer");
 }
 
-const vectorsPath = process.argv[2] || join(repo, "tools/fixtures/kachat-names-vectors.json");
-const v = JSON.parse(readFileSync(vectorsPath, "utf8"));
-const r = new Report();
-runBlake3Official(r);
-console.log(`blake3 official vectors: ${r.pass} checks pass, ${r.fail} fail`);
-runCodecs(v, r);
-console.log(`blake3 + codecs: ${r.pass} checks pass, ${r.fail} fail`);
-const m = runManifest(v, r);
-runPeriodRules(v, m, r);
-console.log(`+ manifest and period rules: ${r.pass} checks pass, ${r.fail} fail`);
-const results = runSteps(v, m, r);
-runFixedBudgets(v, m, r);
-await runAsyncSigner(v, m, r);
-for (const res of results) {
-  console.log((res.ok ? "MATCH  " : "DIFFER ") + res.label + (res.firstFailure ? "   <- " + res.firstFailure : ""));
+/** One vectors file through every check; true when it all passed. */
+async function runVectors(vectorsPath, { fixedOut = null } = {}) {
+  const v = JSON.parse(readFileSync(vectorsPath, "utf8"));
+  const r = new Report();
+  console.log(`== ${vectorsPath.split("/").pop()} (registry v${v.manifest?.registryVersion})`);
+  runBlake3Official(r);
+  console.log(`blake3 official vectors: ${r.pass} checks pass, ${r.fail} fail`);
+  runCodecs(v, r);
+  console.log(`blake3 + codecs: ${r.pass} checks pass, ${r.fail} fail`);
+  const m = runManifest(v, r);
+  runPeriodRules(v, m, r);
+  console.log(`+ manifest and period rules: ${r.pass} checks pass, ${r.fail} fail`);
+  const results = runSteps(v, m, r);
+  runFixedBudgets(v, m, r);
+  await runAsyncSigner(v, m, r);
+  for (const res of results) {
+    console.log((res.ok ? "MATCH  " : "DIFFER ") + res.label + (res.firstFailure ? "   <- " + res.firstFailure : ""));
+  }
+  console.log(`vectors: ${r.pass} checks pass, ${r.fail} fail; ${results.filter((x) => x.ok).length}/${results.length} transactions byte-identical`);
+  for (const f of r.failures.slice(0, 40)) console.log("  FAIL " + f);
+  if (fixedOut) writeFixedBudget(v, m, fixedOut);
+  return r.fail === 0;
 }
-console.log(`vectors: ${r.pass} checks pass, ${r.fail} fail; ${results.filter((x) => x.ok).length}/${results.length} transactions byte-identical`);
-for (const f of r.failures.slice(0, 40)) console.log("  FAIL " + f);
-if (process.argv[3]) writeFixedBudget(v, m, process.argv[3]);
-if (r.fail !== 0) process.exit(1);
+
+const given = process.argv[2];
+let ok = true;
+if (given) {
+  ok = await runVectors(given, { fixedOut: process.argv[3] || null });
+} else {
+  ok = (await runVectors(join(repo, "tools/fixtures/kachat-names-vectors.json"))) && ok;
+  ok = (await runVectors(join(repo, "tools/fixtures/kachat-names-vectors-v5.json"))) && ok;
+}
+{
+  const r = new Report();
+  runBundled(r);
+  console.log(`bundled manifest: ${r.pass} checks pass, ${r.fail} fail`);
+  for (const f of r.failures.slice(0, 40)) console.log("  FAIL " + f);
+  ok = ok && r.fail === 0;
+}
+if (!ok) process.exit(1);
 console.log("OK");

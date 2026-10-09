@@ -3,7 +3,7 @@ import { loadKaspaModule } from "./wasm-loader.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
 import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
-import { kasToSompi } from "./amounts.js";
+import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
 import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
@@ -1057,7 +1057,7 @@ export class KaspaEngine {
     const out = [];
     for (let start = 0; start < list.length; start += 50) {
       const chunk = list.slice(start, start + 50);
-      const response = await this.withRpc((rpc) => rpc.getUtxosByAddresses(chunk), { retries: 1, label: "UTXO read" });
+      const response = await this.withRpc(async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses(chunk)), { retries: 1, label: "UTXO read" });
       for (const e of response?.entries || []) out.push(plainUtxo(e));
     }
     return out;
@@ -1068,13 +1068,17 @@ export class KaspaEngine {
     return this.getUtxosWithCovenants(addresses);
   }
 
-  /** Submits a Kaspa WASM SDK Transaction as is; returns the node's transaction id. */
-  async submitRpcTransaction(transaction) {
+  /** Submits a Kaspa WASM SDK Transaction as is; returns the node's transaction id.
+   *  `expectedTxId`: the id computed locally (the .kachat core's), looked up when the submit fails;
+   *  else the SDK transaction's own id (iOS 9139e88 `submitRpcTransaction(_:expectedTxId:)`). */
+  async submitRpcTransaction(transaction, { expectedTxId = null } = {}) {
     this.requireSdk();
     // A submit whose answer was lost but whose transaction the network has is a send that went
     // out (iOS IOS-014), not a failure to retry.
-    let localId = null;
-    try { localId = transaction?.id ? String(transaction.id) : null; } catch { localId = null; }
+    let localId = expectedTxId ? String(expectedTxId) : null;
+    if (!localId) {
+      try { localId = transaction?.id ? String(transaction.id) : null; } catch { localId = null; }
+    }
     return submitConfirmingAcceptance({
       withRpc: this.withRpc.bind(this),
       submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction, allowOrphan }),

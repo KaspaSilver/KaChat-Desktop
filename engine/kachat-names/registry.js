@@ -88,6 +88,11 @@ export const profileMissPauseMs = 300_000;
 const profileMissesMax = 2000;
 /** Grace when no manifest is loaded yet (10 days). */
 const defaultGraceMs = 864_000_000n;
+/** The REST history is read this many transactions a page (`restTransactions`) ... */
+export const restPageSize = 50;
+/** ... for at most 1,000 transactions per address: past the newest dust anyone would pay to send
+ *  (iOS 8de95c9, IOS-065). */
+export const restMaxPages = 20;
 
 /** `JSON.parse` that keeps integers past 2^53 exact (as BigInt), like Swift's JSONSerialization.
  *  Uses the reviver's source text where the engine has it (ES2025 JSON.parse source text access). */
@@ -391,7 +396,7 @@ export class KachatNamesRegistry {
         manifest: m,
         address: (script) => p2shAddress(script),
         live: (addresses) => this._liveOutpoints(addresses, ids),
-        transactions: (address) => this.restTransactions(address),
+        transactions: (address, wanted) => this.restTransactions(address, wanted),
       });
       try { state.checkInvariants(); } catch (e) { e.stale = true; throw e; }
       return report;
@@ -445,17 +450,32 @@ export class KachatNamesRegistry {
     return out;
   }
 
-  /** Accepted transactions touching `address`, newest first (kaspa-rest-server), as TxViews. */
-  async restTransactions(address) {
+  /** Accepted transactions touching `address`, newest first (kaspa-rest-server), as TxViews -
+   *  paged until every outpoint ("txid:index") in `wanted` has its spender, the history ends, or
+   *  `restMaxPages` pages. One page is not enough: 50 dust payments to a registry address would
+   *  hide the spend that moved it on, and the names behind it would never resolve (iOS 8de95c9,
+   *  IOS-065). */
+  async restTransactions(address, wanted = null) {
     const base = this._restBase();
     if (!base) throw new Failure("bad Kaspa REST API URL");
-    const url = `${base}/addresses/${address}/full-transactions?limit=50&offset=0&resolve_previous_outpoints=no`;
-    const res = await this._fetch(url, 20_000);
-    if (res.status !== 200) throw new Failure(`the Kaspa REST API answered ${res.status} for ${address}`);
-    const list = parseJSONExact(await res.text());
-    if (!Array.isArray(list)) return [];
-    return list.map((j) => TxView.fromREST(j)).filter(Boolean);
+    const out = [];
+    const missing = new Set(wanted ?? []);
+    for (let page = 0; page < restMaxPages; page++) {
+      const url = `${base}/addresses/${address}/full-transactions?limit=${restPageSize}&offset=${page * restPageSize}&resolve_previous_outpoints=no`;
+      const res = await this._fetch(url, 20_000);
+      if (res.status !== 200) throw new Failure(`the Kaspa REST API answered ${res.status} for ${address}`);
+      const list = parseJSONExact(await res.text());
+      if (!Array.isArray(list)) break;
+      const txs = list.map((j) => TxView.fromREST(j)).filter(Boolean);
+      out.push(...txs);
+      for (const tx of txs) for (const i of tx.inputs) missing.delete(`${hex(i.outpoint.txid)}:${i.outpoint.index}`);
+      if (missing.size === 0 || list.length < restPageSize) break;
+    }
+    return out;
   }
+
+  static get restPageSize() { return restPageSize; }
+  static get restMaxPages() { return restMaxPages; }
 
   /** Whether the REST API has seen `txId` accepted. */
   async isAccepted(txId) {

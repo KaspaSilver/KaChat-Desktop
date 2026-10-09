@@ -10,7 +10,7 @@
 
 import { getEndpoint } from "./endpoints.js";
 import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance } from "./transactions.js";
-import { utxoAmountSompi } from "./amounts.js";
+import { utxoAmountSompi, checkedUtxoAnswer } from "./amounts.js";
 import { NETWORK_ID } from "./utils.js";
 
 // U+2060 WORD JOINER — the KaChat exclusivity marker. Invisible everywhere, survives base64
@@ -577,7 +577,7 @@ async function buildScheduledPostNow({ engine, text, mentionedPubkeys = [], rese
   const payload = new TextEncoder().encode(payloadString);
   await engine.connect();
   const kaspa = engine.kaspa;
-  const { entries } = await engine.withRpc((rpc) => rpc.getUtxosByAddresses([engine.address]), { retries: 1, label: "Scheduled post UTXO fetch" });
+  const { entries } = await engine.withRpc(async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses([engine.address])), { retries: 1, label: "Scheduled post UTXO fetch" });
   // A getter is read here, inside the send queue, so a post scheduled a moment earlier has
   // already reserved its coin.
   const reservedList = typeof reservedOutpoints === "function" ? reservedOutpoints() : reservedOutpoints;

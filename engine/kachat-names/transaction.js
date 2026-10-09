@@ -15,7 +15,7 @@
 //                   subnetworkId: Uint8Array(20), gas: bigint, payload: Uint8Array, storageMass: bigint }
 
 import {
-  Failure, le16, le32, le64, concat, hex, bytesEqual, blake2bKeyed, blake3Keyed, sighashAll, minFeerate,
+  Failure, le16, le32, le64, concat, hex, bytesEqual, blake2bKeyed, blake3Keyed, sighashAll, safeFeerate,
 } from "./codec.js";
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
@@ -273,12 +273,15 @@ export function storageMass(tx, entries) {
   return harmonicOuts > arithmeticIns ? harmonicOuts - arithmeticIns : 0n;
 }
 
-/** The relay fee the CLI pays: ceil(max(compute, normalized transient) * feerate), feerate at
- *  least `minFeerate` (100 sompi/gram). `feerate` is a Number (sompi per gram). */
+/** The relay fee the CLI pays: ceil(max(compute, normalized transient) * feerate). `feerate` is a
+ *  Number (sompi per gram), made safe first (`safeFeerate`: within [minFeerate, maxFeerate], never
+ *  NaN or infinite), so the product is always a small finite number - `BigInt()` never sees NaN or
+ *  infinity (iOS 7e2b6cd, IOS-061). */
 export function networkFee(tx, feerate) {
   const c = computeMass(tx);
   const n = normalizedTransient(tx);
   const feeMass = c > n ? c : n;
-  const rate = Math.max(Number(feerate), minFeerate);
-  return BigInt(Math.ceil(Number(feeMass) * rate));
+  const fee = Math.ceil(Number(feeMass) * safeFeerate(feerate));
+  if (!Number.isFinite(fee) || fee < 0 || fee >= 9.0e18) return 9_000_000_000_000_000_000n;
+  return BigInt(fee);
 }

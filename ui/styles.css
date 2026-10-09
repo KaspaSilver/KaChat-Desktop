@@ -13098,6 +13098,10 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .ab-picker [data-ab-picker-body] { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; padding-top: 14px; }
 .ab-picker-list { flex: 1; min-height: 0; overflow-y: auto; border-radius: 10px; }
 .ab-picker-row { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+/* The other network's address (iOS IOS-063): greyed out with the reason, never pickable. */
+.ab-picker-row.ab-other-network { opacity: .5; cursor: default; }
+.ab-other-network-note { display: block; font-size: 12px; color: var(--ios-orange, #ff9f0a); }
+.ab-section-foot { margin: -6px 16px 0; color: var(--muted); font-size: 13px; }
 .ab-picker-empty { flex: 1; justify-content: center; }
 .ab-tick { flex: 0 0 auto; display: inline-grid; place-items: center; color: var(--muted); }
 .ab-tick.on { color: var(--kaspa-ink); }

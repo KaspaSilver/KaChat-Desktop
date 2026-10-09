@@ -46,7 +46,7 @@ import {
 } from "./transaction.js";
 import {
   verifyManifest, templateRedeem, templateScript, templateTag, paramsExtendableYearsOf, paramsRenewOpens, paramsExpiresSoonMs,
-  paramsRegisterCost, paramsRenewPrice,
+  paramsRegisterCost, paramsRenewPrice, paramsRegisterOpen,
 } from "./manifest.js";
 
 // MARK: - Compute budgets
@@ -58,6 +58,8 @@ export const BudgetRole = {
   gapRegister: "gap.register",
   gapMerge: "gap.merge",
   gapAbsorbed: "gap.absorbed",
+  /** registry v5 only: the CLI's sponsor imports; listed so the table matches the vectors */
+  gapImport: "gap.import",
   nameTransfer: "name.transfer",
   nameList: "name.list",
   nameBuy: "name.buy",
@@ -78,10 +80,25 @@ export const BudgetRole = {
  *  on the side of a slightly higher fee (100 grams per unit). Registry v4. */
 export const recommendedBudgets = {
   "p2pk": 10, "commit": 10,
-  "gap.register": 8, "gap.merge": 4, "gap.absorbed": 0,
+  "gap.register": 8, "gap.merge": 4, "gap.absorbed": 0, "gap.import": 0,
   "name.transfer": 12, "name.list": 12, "name.buy": 2, "name.extend": 2, "name.renew": 2, "name.release": 10, "name.reclaim": 0,
   "offer.accept": 17, "offer.decline": 10, "offer.withdraw": 10, "offer.refund": 0,
 };
+
+/** Registry v5: the gap is the v5 gap (7.7 kB: the 20-level import proof loop and a second name
+ *  check), and every gap spend reveals and runs it. kachat-domains 6eddc7a measured the worst
+ *  cases: register 122,889 script units (12), merge 69,090 (6), absorbed 15,782 (1), import
+ *  ~234,700 (23); the vectors' `recommendedBudgets`. Name and offer as v4 (Swift
+ *  `Budgets.recommendedV5`, iOS 6f18475). */
+export const recommendedBudgetsV5 = {
+  ...recommendedBudgets,
+  "gap.register": 13, "gap.merge": 7, "gap.absorbed": 1, "gap.import": 24,
+};
+
+/** The fixed table for a registry version (Swift `Budgets.recommended(forRegistryVersion:)`). */
+export function recommendedBudgetsFor(registryVersion) {
+  return Number(registryVersion) >= 5 ? recommendedBudgetsV5 : recommendedBudgets;
+}
 
 /** The budget `budgets` commits for `role`, falling back to the recommended table, then 0. */
 export function budgetFor(budgets, role) {
@@ -522,6 +539,10 @@ export class Builder {
     const redeem = commitRedeem(commitment(name, env.me, commit.salt), env.me);
     if (!bytesEqual(commitUtxo.entry.script, p2shScript(redeem))) throw new Failure("commit UTXO script does not match the salt");
     if (!(now > 0n && now >= lockTimeThreshold)) throw new Failure("now must be a unix-ms timestamp");
+    // registry v5: closed until the migration deadline (the contract refuses it)
+    if (!paramsRegisterOpen(this.params, now)) {
+      throw Failure.registrationNotOpen(this.params.migration?.deadlineMs ?? 0n);
+    }
 
     const nameLength = utf8(name).length;
     const price = paramsRegisterCost(this.params, nameLength, years);

@@ -1,5 +1,5 @@
 import { NETWORK_ID, validateMainnetAddress, sompiToKaspaDisplay } from "./utils.js";
-import { kasToSompi, utxoAmountSompi, MAX_U64 } from "./amounts.js";
+import { kasToSompi, utxoAmountSompi, MAX_U64, checkedUtxoAnswer } from "./amounts.js";
 import { getEndpoint } from "./endpoints.js";
 
 // Every real send (messages, handshakes, self-stash, KAS payments, KNS
@@ -23,7 +23,7 @@ export function enqueueSend(sourceAddress, task) {
 }
 
 export async function getBalance(kaspa, rpc, address) {
-  const response = await rpc.getUtxosByAddresses([address]);
+  const response = checkedUtxoAnswer(await rpc.getUtxosByAddresses([address]));
   const entries = sanitizeUtxoEntries(response.entries);
   const totalSompi = totalUtxoSompi(entries);
   return {
@@ -54,7 +54,7 @@ const bySompiAsc = (a, b) => { const x = utxoAmountSompi(a) ?? 0n; const y = utx
 const bySompiDesc = (a, b) => bySompiAsc(b, a);
 /** The address's UTXOs, sanitized, through `withRpc` when given (a node failover) else `rpc`. */
 async function fetchUtxoEntries({ rpc, withRpc, sourceAddress, label }) {
-  const fetchUtxos = (activeRpc) => activeRpc.getUtxosByAddresses([sourceAddress]);
+  const fetchUtxos = async (activeRpc) => checkedUtxoAnswer(await activeRpc.getUtxosByAddresses([sourceAddress]));
   const response = withRpc ? await withRpc(fetchUtxos, { retries: 1, label }) : await fetchUtxos(rpc);
   const entries = sanitizeUtxoEntries(response?.entries);
   totalUtxoSompi(entries);

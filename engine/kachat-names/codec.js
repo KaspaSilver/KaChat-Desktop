@@ -21,18 +21,29 @@ export class Failure extends Error {
   }
 
   /**
-   * The manifest describes an earlier registry (v1 - v3): this app builds for registry v4 (fixed
-   * register and renew tables, no price record) and waits for its genesis manifest. Not an error
-   * to show as one: the screens say the registry is being set up. (Swift `Failure.outdatedRegistry`.)
+   * The manifest describes a registry this app doesn't build for: an earlier one (v1 - v3) or a
+   * later one than v5 (`newerRegistry`). Not an error to show as one: the screens say the
+   * registry is being set up. (Swift `Failure.outdatedRegistry` / `newerRegistry`, iOS 6f18475.)
    */
   static outdatedRegistry() { return new Failure(outdatedRegistryMessage); }
+  static newerRegistry() { return new Failure(newerRegistryMessage); }
+  /** Registry v5: `register` is refused until the migration deadline (unix ms).
+   *  Swift `Failure.registrationNotOpen`. */
+  static registrationNotOpen(deadlineMs) {
+    return new Failure(`registration opens after the migration deadline (${BigInt(deadlineMs)})`);
+  }
 
-  /** Whether this is `Failure.outdatedRegistry()` (Swift `isOutdatedRegistry`). */
-  get isOutdatedRegistry() { return this.message === outdatedRegistryMessage; }
+  /** Whether this is `Failure.outdatedRegistry()` or `Failure.newerRegistry()` (Swift
+   *  `isOutdatedRegistry`). */
+  get isOutdatedRegistry() { return this.message === outdatedRegistryMessage || this.message === newerRegistryMessage; }
+  /** Whether this is `Failure.newerRegistry()`. */
+  get isNewerRegistry() { return this.message === newerRegistryMessage; }
 }
 
 /** The message of `Failure.outdatedRegistry()`. */
-export const outdatedRegistryMessage = "manifest: an earlier registry; this app needs the registry v4 manifest (new genesis pending)";
+export const outdatedRegistryMessage = "manifest: an earlier registry; this app needs a registry v4 or v5 manifest";
+/** The message of `Failure.newerRegistry()`. */
+export const newerRegistryMessage = "manifest: a later registry version than this app builds for; update KaChat";
 
 // MARK: - Constants (rusty-kaspa a41a333, kachat-domains params)
 
@@ -50,6 +61,18 @@ export const minChange = 20_000_000n;
 export const targetChange = 100_000_000n;
 /** Relay floor after Toccata: 100 sompi per gram of max(compute, normalized transient). */
 export const minFeerate = 100.0;
+/** The most any name transaction pays per gram: 1000x the floor (the busiest testnet-10 seen,
+ *  2026-10-07, asked 894). A fee estimate above it is treated as unknown (iOS 7e2b6cd, IOS-061). */
+export const maxFeerate = minFeerate * 1000;
+
+/** A fee rate that is always safe to multiply: never NaN, infinite or negative, and within
+ *  [minFeerate, maxFeerate] - so a bad value from a node can neither crash nor drain (Swift
+ *  `KachatNames.safeFeerate`, IOS-061). */
+export function safeFeerate(rate) {
+  const r = Number(rate);
+  if (!Number.isFinite(r) || !(r > 0)) return minFeerate;
+  return Math.min(Math.max(r, minFeerate), maxFeerate);
+}
 /** register, extend and renew sum at most 8 inputs and 8 outputs (the contracts' bounded loops). */
 export const maxInputsFeeEntry = 8;
 /** Every other operation: keep transactions small anyway. */
