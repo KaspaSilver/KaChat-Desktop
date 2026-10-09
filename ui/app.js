@@ -3470,6 +3470,11 @@ async function syncInbox({ catchUp = false } = {}) {
     for (const row of found) {
       const sender = String(row.sender || "");
       if (!sender.startsWith(ADDRESS_PREFIX) || sender === wallet || isChatBlocked(sender) || senders.includes(sender)) continue;
+      // A deleted chat stays deleted (iOS addMessageToConversation's isDeletedAsOf gate): the
+      // inbox re-serves a sender's old first message on every catch-up, and that brought the chat
+      // straight back. A first message mined AFTER the deletion is new: it lifts the tombstone.
+      if (isContactDeletedAsOf(sender, row.txid, row.blockTime)) continue;
+      if (loadDeletedContactAddresses().has(sender)) clearDeletedContactAddress(sender);
       senders.push(sender);
     }
     let added = 0;
@@ -5281,6 +5286,10 @@ async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
   let added = 0;
   for (const hs of result.handshakes || []) {
     if (hs.receiver === engine.address) continue; // self-stash copies aren't a peer conversation
+    // Our own old handshake to someone whose chat was deleted must not recreate it (iOS
+    // isDeletedAsOf gate on every message): only one sent after the deletion reopens the chat.
+    if (isContactDeletedAsOf(hs.receiver, hs.txid, hs.createdAt)) continue;
+    if (!state.contacts.some((c) => c.address === hs.receiver) && loadDeletedContactAddresses().has(hs.receiver)) clearDeletedContactAddress(hs.receiver);
     let contact = state.contacts.find((c) => c.address === hs.receiver);
     let conversationEntry = contact ? state.conversations.find((c) => c.contactId === contact.id) : null;
     if (!contact) {
@@ -10424,7 +10433,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with kachat.kachat filled in (iOS e7cc0d5).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 126;
+const APP_BUILD = 127;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -13920,6 +13929,8 @@ async function recoverConversationsFromBlockchain() {
   for (const stash of result.stashes || []) {
     if (!stash.partnerAddress || stash.partnerAddress === engine.address) continue;
     if (state.contacts.some((entry) => entry.address === stash.partnerAddress)) continue;
+    // A chat deleted here stays deleted: recovery brings back what was lost, not what was removed.
+    if (loadDeletedContactAddresses().has(stash.partnerAddress)) continue;
     const createdAt = Number(stash.timestamp || stash.blockTime || Date.now());
     const displayName = shortAddress(stash.partnerAddress);
     const contact = {
