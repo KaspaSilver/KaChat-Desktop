@@ -6,7 +6,8 @@
 // profile link shows, read out of a platform's answer), the REST transaction parser, the
 // indexer response shapes (Part D), and the chain walker's state with its transition decoder (a
 // port of the kachat-domains CLI's `Registry::apply`, B3) and walk loop. Pure: no DOM, no
-// network, no keys. Checked by tools/test-kachat-names-registry.mjs.
+// network I/O, no keys (only the address prefix of the network the page runs on, engine/network.js).
+// Checked by tools/test-kachat-names-registry.mjs.
 //
 // Conventions as in the rest of engine/kachat-names: bytes are Uint8Array, Swift UInt64/Int64
 // (amounts, prices, unix ms, DAA, years) are BigInt, small ints (output indexes) are Number,
@@ -20,6 +21,7 @@ import {
 } from "./codec.js";
 import { makeOutpoint, makeTxOutput, makeCovenantBinding } from "./transaction.js";
 import { templateRedeem, templateScript, templateStateOfRedeem, paramsExtendableYears, paramsRenewOpens } from "./manifest.js";
+import { ADDRESS_HRP } from "../network.js";
 
 const I64_MAX = 0x7fff_ffff_ffff_ffffn;
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
@@ -741,8 +743,10 @@ export function makeIdentity({ address, label: l = null, names = [], profile = n
 
 // MARK: - Addresses (Kaspa cashaddr, iOS Bech32.swift / KaspaAddress)
 
-/** The network prefix of the only network .kachat runs on. */
-export const addressPrefix = "kaspatest";
+/** The address prefix of the network the app runs on (engine/network.js, read once per page load):
+ *  names, owners and registry outputs are shown and parsed with it - `kaspa` on mainnet since its
+ *  launch, `kaspatest` on testnet-10 (Swift `KachatNamesService.addressPrefix`, iOS ef6b21e). */
+export const addressPrefix = ADDRESS_HRP;
 /** Address versions: Schnorr P2PK 0, ECDSA P2PK 1, P2SH 8. */
 export const AddressVersion = Object.freeze({ pubKey: 0, pubKeyECDSA: 1, scriptHash: 8 });
 
@@ -809,13 +813,13 @@ export function decodeAddress(address) {
   return { hrp, version: data[0], payload: Uint8Array.from(data.slice(1)) };
 }
 
-/** The `kaspatest:` Schnorr P2PK address of an x-only key (iOS `KachatNamesRegistry.address(of:)`). */
+/** The Schnorr P2PK address (this network's prefix) of an x-only key (iOS `KachatNamesRegistry.address(of:)`). */
 export function addressOf(xonly, hrp = addressPrefix) {
   if (!(xonly instanceof Uint8Array) || xonly.length !== 32) return null;
   return encodeAddress(hrp, AddressVersion.pubKey, xonly);
 }
 
-/** The x-only key of a `kaspatest:` Schnorr address, or null (iOS `keyOf`). */
+/** The x-only key of a Schnorr address on this network (`hrp`), or null (iOS `keyOf`). */
 export function keyOf(address, hrp = addressPrefix) {
   const a = decodeAddress(String(address ?? "").toLowerCase());
   if (!a || a.hrp !== hrp || a.version !== AddressVersion.pubKey || a.payload.length !== 32) return null;

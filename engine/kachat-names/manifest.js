@@ -2,8 +2,9 @@
 //
 // Port of iOS KaChat/Services/KachatNames/KachatNamesManifest.swift. The manifest
 // `kachat-names-<network>.json` is written by the kachat-domains CLI's `genesis` and served by
-// the indexer at `GET /names/manifest`; the testnet-10 one is bundled next to this file
-// (kachat-names-testnet-10.json, byte-identical to the iOS resource). `verifyManifest` must pass
+// the indexer at `GET /names/manifest`; one per network is bundled next to this file
+// (kachat-names-testnet-10.json and, since the mainnet v1 launch on 2026-10-09, kachat-names-mainnet.json;
+// byte-identical to the iOS resources, iOS ef6b21e). `verifyManifest` must pass
 // before anything trusts it. Registry v4 and v5 (`registryVersion: 4 | 5`; v5 adds `import` from a
 // migration snapshot, iOS 6f18475): an earlier manifest throws `Failure.outdatedRegistry()`, a later
 // one `Failure.newerRegistry()` (the screens say the registry is being set up).
@@ -25,45 +26,69 @@ import {
 } from "./codec.js";
 import { makeOutpoint, makeTxOutput } from "./transaction.js";
 
-/** Only testnet-10 is enabled (mainnet waits for an audit). */
-export const supportedNetwork = "testnet-10";
-/** The bundled manifest's base name (engine/kachat-names/kachat-names-testnet-10.json). */
-export const bundleResource = "kachat-names-testnet-10";
+/** The networks with a live registry: testnet-10, and mainnet since its launch on 2026-10-09
+ *  ("mainnet v1", kachat-domains docs/MAINNET.md). Swift `Manifest.supportedNetworks` (iOS ef6b21e). */
+export const supportedNetworks = Object.freeze(["testnet-10", "mainnet"]);
+/** The manifest the app ships for a network (engine/kachat-names/<this>.json). Swift
+ *  `Manifest.bundleResource(network:)`. */
+export function bundleResource(network) { return `kachat-names-${network}`; }
 
 /** Registry versions this app builds for: v4, and v5 (v4 plus `import` from a migration snapshot,
  *  kachat-domains docs/REGISTRY_V5.md). Swift `Manifest.supportedVersions`. */
 export const supportedVersions = Object.freeze([4, 5]);
 
-/** Template hashes of the pinned build by registry version (silverc v1.0.0 @ 3ed9733), testnet-10
- *  params on the day clock: 24-hour periods, 6-hour grace, 2-hour renewal window (kachat-domains
- *  artifacts/testnet10/build-info.json; iOS 08107e1, 6f18475). The v4 gap and the name bake only
+/** Template hashes of the pinned build by network, then registry version (silverc v1.0.0 @
+ *  3ed9733). Testnet-10 params on the day clock: 24-hour periods, 6-hour grace, 2-hour renewal
+ *  window (kachat-domains artifacts/testnet10/build-info.json; iOS 08107e1, 6f18475); mainnet v1 the
+ *  v4 contracts under params/mainnet.json (iOS ef6b21e). The v4 gap and the name bake only
  *  the params - their fixed prices included - so they are pinned before any genesis. The v5 gap
  *  also bakes its migration (snapshot root, deadline, sponsor) and the offer the registry id, so
  *  their hashes exist per deployment: `deployedTemplateHashes`. A manifest with any template
  *  unpinned is trusted only from the bundle (`verifyManifest(m, { source })`), never from an
  *  indexer - an unpinned offer template could hold buyers' funds in a script the indexer controls
- *  (iOS 1d81a1a, IOS-059). */
+ *  (iOS 1d81a1a, IOS-059). A version not pinned on the manifest's network is refused. */
 export const pinnedTemplateHashes = {
-  4: {
-    KachatGap: "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5",
-    KachatName: "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b",
+  "testnet-10": {
+    4: {
+      KachatGap: "9f057f406361583eb2b94956825f86a2d8cc47d3c8800f05855a3e75b39d8bf5",
+      KachatName: "c263a8c2cb4bdfac3234675114fc3ce4ba5a1d26c12e887c3d3b2ca89460b56b",
+    },
+    // the audited contracts (kachat-domains fbd9cf2, audit C2: no other covenant's input shares the
+    // fee) - the name changed with them (iOS 427efd7)
+    5: {
+      KachatName: "9d4f91bfd7aea47f8529104d260dc7b80c673fe04e2595b21abe47209c39e0e8",
+    },
   },
-  // the audited contracts (kachat-domains fbd9cf2, audit C2: no other covenant's input shares the
-  // fee) - the name changed with them (iOS 427efd7)
-  5: {
-    KachatName: "9d4f91bfd7aea47f8529104d260dc7b80c673fe04e2595b21abe47209c39e0e8",
+  // mainnet v1 (2026-10-09): the v4 contracts under params/mainnet.json - yearly periods, 90-day
+  // grace, 30-day renewal window (kachat-domains artifacts/mainnet)
+  "mainnet": {
+    4: {
+      KachatGap: "d70afe60686842b92ec8b4f6da34eb20462f0a98c26922de62b82ae65cfc1d4f",
+      KachatName: "259e0250a2bba8587a74b2ad366c45916565593db6eb44c3751dacba943f19d6",
+    },
   },
 };
-/** The price tables the pinned gap and name bake (kachat-domains params/testnet10.json), sompi by
- *  name length 1, 2, 3, 4, 5+ bytes: a manifest whose params say otherwise would show and charge
- *  prices the contracts don't (Swift `Manifest.pinnedRegisterPrices` / `pinnedRenewPrices`). */
-export const pinnedRegisterPrices = Object.freeze([4_000_000_000n, 2_000_000_000n, 1_000_000_000n, 250_000_000n, 35_000_000n]);
-export const pinnedRenewPrices = Object.freeze([1_000_000_000n, 500_000_000n, 250_000_000n, 62_500_000n, 8_750_000n]);
+/** The price tables the pinned gap and name bake, per network (kachat-domains
+ *  params/<network>.json), sompi by name length 1, 2, 3, 4, 5+ bytes: a manifest whose params say
+ *  otherwise would show and charge prices the contracts don't (Swift `Manifest.pinnedRegisterPrices`
+ *  / `pinnedRenewPrices`, iOS ef6b21e). Testnet is mainnet / 100. */
+export const pinnedRegisterPrices = Object.freeze({
+  "testnet-10": Object.freeze([4_000_000_000n, 2_000_000_000n, 1_000_000_000n, 250_000_000n, 35_000_000n]),
+  "mainnet": Object.freeze([400_000_000_000n, 200_000_000_000n, 100_000_000_000n, 25_000_000_000n, 3_500_000_000n]),
+});
+export const pinnedRenewPrices = Object.freeze({
+  "testnet-10": Object.freeze([1_000_000_000n, 500_000_000n, 250_000_000n, 62_500_000n, 8_750_000n]),
+  "mainnet": Object.freeze([100_000_000_000n, 50_000_000_000n, 25_000_000_000n, 6_250_000_000n, 875_000_000n]),
+});
 /** The per-deployment builds (the offer; on v5 also the gap) each deployed registry was launched
  *  with, by registry covenant id (Swift `Manifest.deployedTemplateHashes`). A manifest for one of
  *  these registries must carry exactly this; any other registry (a dry run, the test vectors) has
  *  no such pin, so only a bundled manifest of it is trusted. */
 export const deployedTemplateHashes = {
+  // mainnet v1, 2026-10-09 20:39 UTC: genesis a0281841..90ff (iOS ef6b21e)
+  "348bd2c81170f267a2a7039cbf3a6f275e80b189d6c956183ea73ff3ffde75a4": {
+    KachatOffer: "7e7f2461f475f7196eabd9fca2f945fbf660c27d40b7f65e2c6a9dc2c0ae63e4",
+  },
   // testnet-10 registry v5 on the audited contracts, 2026-10-09: genesis b6223f0f..e24f, imports
   // the drill registry fdc403f5..571d (snapshot of 6 names); offerMaxFee 0.1 KAS (iOS 427efd7).
   // The retired drill registry's pins are dropped.
@@ -79,15 +104,21 @@ export const deployedTemplateHashes = {
 };
 
 /** Every pinned template hash for the registry `registryCovenantId` (Uint8Array or hex) of
- *  `registryVersion` (default 4): that version's `pinnedTemplateHashes` merged with the
- *  deployment's `deployedTemplateHashes` (the version pin wins on a clash, as Swift's
- *  `merging { pinned, _ in pinned }`). */
-export function templatePinsFor(registryCovenantId, registryVersion = 4) {
+ *  `registryVersion` (default 4) on `network` (default testnet-10): that network's version pins
+ *  (`pinnedTemplateHashes`) merged with the deployment's `deployedTemplateHashes` (the version pin
+ *  wins on a clash, as Swift's `merging { pinned, _ in pinned }`). */
+export function templatePinsFor(registryCovenantId, registryVersion = 4, network = "testnet-10") {
   const id = typeof registryCovenantId === "string" ? registryCovenantId.toLowerCase() : hex(registryCovenantId);
   const deployed = Object.prototype.hasOwnProperty.call(deployedTemplateHashes, id) ? deployedTemplateHashes[id] : {};
-  const v = Number(registryVersion);
-  const pinned = Object.prototype.hasOwnProperty.call(pinnedTemplateHashes, v) ? pinnedTemplateHashes[v] : {};
+  const pinned = versionPinsFor(network, registryVersion) ?? {};
   return { ...deployed, ...pinned };
+}
+/** The version pins of `registryVersion` on `network`, or null when the app has none there
+ *  (Swift `pinnedTemplateHashes[network]?[registryVersion]`). */
+export function versionPinsFor(network, registryVersion) {
+  const byNetwork = Object.prototype.hasOwnProperty.call(pinnedTemplateHashes, network) ? pinnedTemplateHashes[network] : null;
+  const v = Number(registryVersion);
+  return byNetwork && Object.prototype.hasOwnProperty.call(byNetwork, v) ? byNetwork[v] : null;
 }
 /** State lengths per contract (registry v4: gap 66, name 126, offer 108). */
 export const stateLengths = { KachatGap: 66, KachatName: 126, KachatOffer: 108 };
@@ -348,7 +379,8 @@ export function decodeManifest(data) {
 // MARK: - Verification
 
 /** Checks everything the app relies on (KACHAT_NAMES_INDEXER.md B2, kachat-domains
- *  `manifest::load`): testnet-10 only; every template's hash recomputed from its prefix and
+ *  `manifest::load`): a network with a live registry (`supportedNetworks`) and a version this app
+ *  has pins for there; every template's hash recomputed from its prefix and
  *  suffix and equal to the pinned build where pinned (`templatePinsFor`: the gap and name
  *  everywhere, the offer per deployed registry id; an indexer-served manifest needs every hash
  *  pinned, the offer's too - IOS-059); every dispatch tag present; the gap baked for this name
@@ -358,10 +390,13 @@ export function decodeManifest(data) {
  *  `registryCovenantId == covenant_id(genesis outpoint, [(0, genesis gap)])`. Throws a Failure.
  *  `source` is `ManifestSource.bundle` (default) or `ManifestSource.indexer`. */
 export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
-  if (m.network !== supportedNetwork) {
-    throw new Failure(`manifest is for ${m.network}; only ${supportedNetwork} is enabled (mainnet waits for an audit)`);
+  if (!supportedNetworks.includes(m.network)) {
+    throw new Failure(`manifest is for ${m.network}, which has no .kachat registry in this app`);
   }
-  const pins = templatePinsFor(m.registryCovenantId, m.registryVersion);
+  if (versionPinsFor(m.network, m.registryVersion) == null) {
+    throw new Failure(`manifest: registry v${m.registryVersion} isn't pinned for ${m.network} in this app`);
+  }
+  const pins = templatePinsFor(m.registryCovenantId, m.registryVersion, m.network);
   for (const t of [m.gap, m.name, m.offer]) {
     if (!bytesEqual(computeTemplateHash(t.prefix, t.suffix), t.templateHash)) {
       throw new Failure(`manifest: ${t.contract} template hash does not match its prefix and suffix`);
@@ -400,7 +435,8 @@ export function verifyManifest(m, { source = ManifestSource.bundle } = {}) {
     throw new Failure("manifest: params out of range");
   }
   const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-  if (!same(p.registerPrices, pinnedRegisterPrices) || !same(p.renewPrices, pinnedRenewPrices)) {
+  // per network (iOS ef6b21e): a manifest relabelled to the other network fails here too
+  if (!same(p.registerPrices, pinnedRegisterPrices[m.network]) || !same(p.renewPrices, pinnedRenewPrices[m.network])) {
     throw new Failure("manifest: the price tables are not the ones the pinned gap and name bake");
   }
   if (!bytesEqual(m.genesisState.lo, zero32()) || !bytesEqual(m.genesisState.hi, ff32())) {

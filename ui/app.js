@@ -10465,16 +10465,19 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", () => openKachatProfileEditor());
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate opens Profile's Send screen
-// with kachat.kachat filled in (iOS e7cc0d5).
+// with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 135;
+const APP_BUILD = 136;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 
-// Donate (iOS e7cc0d5): the Send screen, addressed to KaChat's .kachat name.
-const DONATE_DOMAIN = "kachat.kachat";
+// Donate (iOS e7cc0d5): the Send screen, addressed to KaChat's donation address, pinned (iOS
+// 8bc86f8, IOS-067): a name is first-come, so resolving kachat.kachat would pay whoever registered
+// it. This is the address kachat.kas has always paid; on testnet the same key's kaspatest: form.
+// The row still reads kachat.kachat; Send shows the address's own .kachat name once registered.
+var DONATE_ADDRESS_MAINNET = "kaspa:qzy7da4589avjwmmnqfvkhp5p8p268gc7rvr9lg2xxpuhj75sy8kgdqmpd2fu";
 
 // The notices the libraries the desktop ships ask to travel with it (iOS f656d9d has its own list).
 const OPEN_SOURCE_LICENSE_TEXTS = {
@@ -10528,13 +10531,13 @@ document.querySelector("[data-profile-licenses]")?.addEventListener("click", () 
   });
 });
 
-// Donate goes straight to Send with KaChat's name filled in (iOS e7cc0d5): it resolves like any
-// typed name (.kachat first, the others under Other domains), no chat opened.
+// Donate goes straight to Send with KaChat's pinned donation address filled in (iOS e7cc0d5,
+// 8bc86f8): an address, not a name anyone could register, so no Other domains; no chat opened.
 document.querySelector("[data-profile-donate]")?.addEventListener("click", async () => {
   try {
     await ensureRuntimes({ quiet: true });
     if (!engine.address) throw new Error("Generate or import a wallet first.");
-    openSendKaspaModal({ prefillAddress: DONATE_DOMAIN });
+    openSendKaspaModal({ prefillAddress: toActiveNetworkAddress(DONATE_ADDRESS_MAINNET) });
   } catch (error) {
     showCopyToast(error?.message || "Couldn't open Send.");
   }
@@ -14381,6 +14384,26 @@ function resolutionCardName(address, domain = null, onLabel = null) {
   return info?.explicitPrimaryDomain || engine.peekKnsAddressProfile?.(address)?.domainName || null;
 }
 
+/// Whether a resolution card still waits on its lookup (iOS 6c8e75a, IOS-074): never for an
+/// invalid address or one already answered, and not once its lookup ended - a failed one too,
+/// which caches nothing, so "Looking up…" used to stay and every repaint fetched again. Ended
+/// lookups count for a minute (state on the function object, as resolutionCardName's).
+function resolutionCardLooking(address) {
+  if (!address || !isValidKaspaAddressString(address)) return false;
+  if (engine.peekKnsAddressProfile?.(address) || engine.peekKnsAddressInfo?.(address)) return false;
+  const endedAt = resolutionCardLooking.ended?.get(address);
+  return !(endedAt && Date.now() - endedAt < 60_000);
+}
+
+/// A resolution card's lookup; settles once it ended, whatever the answer (iOS 6c8e75a).
+function resolutionCardLookUp(address) {
+  return Promise.allSettled([engine.getKnsAddressProfile?.(address), engine.getKnsAddressInfo?.(address)]).then(() => {
+    const ended = resolutionCardLooking.ended || (resolutionCardLooking.ended = new Map());
+    if (ended.size > 500) ended.clear();
+    ended.set(address, Date.now());
+  });
+}
+
 /// The create-chat card, for every other place an address or a domain goes in (iOS ac0ef19):
 /// withdrawals, sends from an address, the portfolio, a group invite. The SCREEN does the
 /// resolving (.kachat first); this takes the outcome and shows the face, the name (the domain
@@ -14389,15 +14412,19 @@ function resolutionCardName(address, domain = null, onLabel = null) {
 function addressResolutionCardHtml(address, { domain = null, onLoaded = null } = {}) {
   if (!address) return "";
   const profile = engine.peekKnsAddressProfile?.(address);
-  const info = engine.peekKnsAddressInfo?.(address);
   const knownDomain = resolutionCardName(address, domain, onLoaded);
   const avatarUrl = profile?.profile?.avatarUrl || "";
-  const looking = !profile && !info;
+  // the spinner always stops, and a late answer for an address no longer shown is dropped
+  // (iOS 6c8e75a, IOS-074)
+  const looking = resolutionCardLooking(address);
   if (looking && typeof onLoaded === "function") {
-    Promise.allSettled([engine.getKnsAddressProfile?.(address), engine.getKnsAddressInfo?.(address)]).then(() => onLoaded(address));
+    resolutionCardLookUp(address).then(() => {
+      const shown = [...document.querySelectorAll("[data-resolution-card-address]")].some((el) => el.dataset.resolutionCardAddress === address);
+      if (shown) onLoaded(address);
+    });
   }
   return `
-    <div class="create-chat-preview address-resolution-card">
+    <div class="create-chat-preview address-resolution-card" data-resolution-card-address="${escapeHtml(address)}">
       <span class="create-chat-preview-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : personGlyphSvg()}</span>
       <span class="create-chat-preview-copy">
         <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No domain"))}</span>
@@ -14417,7 +14444,6 @@ function renderCreateChatPreview() {
   }
 
   const profile = engine.peekKnsAddressProfile?.(address);
-  const info = engine.peekKnsAddressInfo?.(address);
   // The domain typed (or picked under Other domains), else the address's own .kachat name (iOS
   // 6ac48a7 AddressResolutionCard).
   const domain = resolutionCardName(address, createChatPickedName || null, (a) => { if (createChatEffectiveAddress() === a) renderCreateChatPreview(); });
@@ -14426,7 +14452,7 @@ function renderCreateChatPreview() {
   // The domain the resolver already found beats waiting on a profile fetch: if you typed one,
   // that IS the name.
   const name = (known && known.nameIsCustom ? known.name : null) || domain;
-  const looking = !profile && !info;
+  const looking = resolutionCardLooking(address); // the spinner always stops (iOS 6c8e75a)
 
   card.hidden = false;
   card.innerHTML = `
@@ -14441,10 +14467,7 @@ function renderCreateChatPreview() {
 
   if (looking) {
     const token = ++createChatPreviewToken;
-    Promise.allSettled([
-      engine.getKnsAddressProfile?.(address),
-      engine.getKnsAddressInfo?.(address),
-    ]).then(() => {
+    resolutionCardLookUp(address).then(() => {
       if (token !== createChatPreviewToken) return;
       if (createChatEffectiveAddress() !== address) return;
       renderCreateChatPreview();
@@ -17453,10 +17476,10 @@ if (IS_TESTNET) {
   const readonly = document.querySelectorAll(".connection-readonly code");
   if (readonly[0]) readonly[0].textContent = "https://api-tn10.dotk.name/v1";
   if (readonly[1]) { const em = document.createElement("em"); em.textContent = "Not available on this network"; readonly[1].replaceWith(em); }
-  // .kachat is live on testnet: read through the chat indexer when it serves names, else straight
-  // from the chain (iOS 5df42b4).
+  // .kachat is live on both networks (iOS ef6b21e; index.html says Live on Mainnet): read through
+  // the chat indexer when it serves names, else straight from the chain (iOS 5df42b4).
   document.querySelectorAll(".connection-readonly em").forEach((em) => {
-    if (em.textContent.trim() === "Coming soon") em.textContent = "Live on Testnet (testnet-10 registry)";
+    if (em.textContent.trim() === "Live on Mainnet") em.textContent = "Live on Testnet (testnet-10 registry)";
   });
   document.querySelectorAll('[data-node-mode="official"]').forEach((card) => { card.hidden = true; });
 }
@@ -27935,11 +27958,10 @@ function renderGroupAddressPreview() {
   if (!address) { card.hidden = true; card.innerHTML = ""; return; }
 
   const profile = engine.peekKnsAddressProfile?.(address);
-  const info = engine.peekKnsAddressInfo?.(address);
   // The domain typed, else the address's own .kachat name (iOS 6ac48a7 AddressResolutionCard).
   const domain = resolutionCardName(address, groupAddressPickedName, (a) => { if (groupAddressResolved === a) renderGroupAddressPreview(); });
   const avatarUrl = profile?.profile?.avatarUrl || "";
-  const looking = !profile && !info;
+  const looking = resolutionCardLooking(address); // the spinner always stops (iOS 6c8e75a)
 
   card.hidden = false;
   card.innerHTML = `
@@ -27953,10 +27975,7 @@ function renderGroupAddressPreview() {
 
   if (looking) {
     const token = ++groupAddressPreviewToken;
-    Promise.allSettled([
-      engine.getKnsAddressProfile?.(address),
-      engine.getKnsAddressInfo?.(address),
-    ]).then(() => {
+    resolutionCardLookUp(address).then(() => {
       if (token !== groupAddressPreviewToken) return;
       if (groupAddressResolved !== address) return;
       renderGroupAddressPreview();

@@ -107,6 +107,10 @@ export class KaspaEngine {
     this.rpcConnectPromise = null;
     this.standbyConnectPromise = null;
     this.failoverPromise = null;
+    // The wallet subscription start running now, and which processor's events count (iOS
+    // 410ee4b, IOS-071): starts run one at a time, and a replaced processor is never heard again.
+    this.walletSubscriptionInFlight = null;
+    this.walletSubscriptionGeneration = 0;
     this.rpcHeartbeatTimer = null;
     // Backstop poll that catches a silently-wedged node. The primary "node dropped"
     // signal is now the subscription disconnect event (see scheduleImmediateFailover),
@@ -462,6 +466,8 @@ export class KaspaEngine {
   }
 
   async stopWalletSubscription({ preserveState = false } = {}) {
+    // whatever the stopped processor still says is dropped (iOS 410ee4b)
+    this.walletSubscriptionGeneration += 1;
     const context = this.utxoContext;
     const processor = this.utxoProcessor;
     this.utxoContext = null;
@@ -472,7 +478,20 @@ export class KaspaEngine {
     if (!preserveState) this.setSubscriptionState({ status: "idle", endpoint: "", lastError: "" });
   }
 
-  async startWalletSubscription({ force = false } = {}) {
+  /** Starts run one at a time (iOS 410ee4b, IOS-071): two interleaving at the stop `await` each
+   *  started a processor and only the last was kept, so the other kept delivering every change
+   *  (and its disconnects) from then on. A later caller finds the first one's subscription. */
+  async startWalletSubscription(options = {}) {
+    while (this.walletSubscriptionInFlight) {
+      try { await this.walletSubscriptionInFlight; } catch { /* its own caller sees the error */ }
+    }
+    const run = this.performStartWalletSubscription(options);
+    this.walletSubscriptionInFlight = run;
+    try { return await run; }
+    finally { if (this.walletSubscriptionInFlight === run) this.walletSubscriptionInFlight = null; }
+  }
+
+  async performStartWalletSubscription({ force = false } = {}) {
     this.requireWallet();
     const rpc = await this.connect();
     const endpoint = rpc?.url || "";
@@ -486,10 +505,14 @@ export class KaspaEngine {
     }
 
     await this.stopWalletSubscription({ preserveState: true });
+    // one handler per subscription (iOS 410ee4b): only this processor's events count until the
+    // next stop
+    const generation = this.walletSubscriptionGeneration;
     this.setSubscriptionState({ status: "connecting", address: this.address, endpoint, lastError: "" });
     try {
       const processor = new this.kaspa.UtxoProcessor({ rpc, networkId: NETWORK_ID });
       processor.addEventListener((event) => {
+        if (generation !== this.walletSubscriptionGeneration) return;
         const type = String(event?.type || "");
         if (["balance", "pending", "reorg", "stasis", "maturity", "discovery"].includes(type)) {
           this.emitWalletActivity(event);
@@ -507,6 +530,12 @@ export class KaspaEngine {
       const context = new this.kaspa.UtxoContext({ processor });
       const trackedAddresses = this.trackedSubscriptionAddresses();
       await context.trackAddresses(trackedAddresses);
+      if (generation !== this.walletSubscriptionGeneration) {
+        // stopped while it started (sign-out, account switch): the stop wins
+        try { await context.clear?.(); } catch {}
+        try { await processor.stop?.(); } catch {}
+        return this.subscriptionSnapshot();
+      }
       this.utxoProcessor = processor;
       this.utxoContext = context;
       this.utxoSubscriptionRpc = rpc;

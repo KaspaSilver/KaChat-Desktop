@@ -7,12 +7,17 @@
 // fake fetch and node (lookups, owners, history, exit gaps, resolveActive / resolveHeld, the cache round trip)
 // and over a fake names indexer. Run from the repo root:
 //
-//   node tools/test-kachat-names-registry.mjs [--live] [path/to/KachatNamesVectors.json]
+//   node tools/test-kachat-names-registry.mjs [--live] [--live-mainnet] [path/to/KachatNamesVectors.json]
 //
 // Without a path it runs the v4 vectors (tools/fixtures/kachat-names-vectors.json), then the
 // walker, the walk and the walk-in-any-order over the registry v5 vectors
 // (tools/fixtures/kachat-names-vectors-v5.json, a copy of iOS KaChatTests/KachatNamesVectors-v5.json,
-// kachat-domains 6eddc7a), which open with two imports from a migration snapshot (iOS 6f18475).
+// kachat-domains 6eddc7a), which open with two imports from a migration snapshot (iOS 6f18475),
+// and over the mainnet v1 vectors (tools/fixtures/kachat-names-vectors-mainnet.json, a copy of iOS
+// KaChatTests/KachatNamesVectors-mainnet.json: the audited v4 under the mainnet params, iOS ef6b21e).
+//
+// The registry runs on the network the page runs on (engine/network.js, read once at import): this
+// test runs as testnet-10 (kaspatest: addresses), as the app does under Settings > Testnet.
 //
 // `--live` also walks the LIVE testnet-10 registry from the bundled manifest, read-only, through
 // api-tn10.kaspa.org (UTXO liveness from GET /addresses/{a}/utxos instead of a node, spends from
@@ -21,20 +26,35 @@
 // /names/activity at KACHAT_NAMES_INDEXER or https://tnkachat.duckdns.org:7443). An unreachable
 // network is reported, not failed; an indexer that answers with another registry or other records
 // is reported as a mismatch (the app would walk the chain itself then).
+//
+// `--live-mainnet` walks the LIVE mainnet registry (348bd2c8, iOS ef6b21e) from the bundled mainnet
+// manifest the same way through api.kaspa.org, in a child process that runs as mainnet (kaspa:
+// addresses, the mainnet cache key); the testnet-10 names indexer is not compared there.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
 
-import * as C from "../engine/kachat-names/codec.js";
-import * as T from "../engine/kachat-names/transaction.js";
-import * as M from "../engine/kachat-names/manifest.js";
-import * as R from "../engine/kachat-names/registry-state.js";
-import {
+// engine/network.js reads the network once, at import (registry-state.js takes its address prefix
+// from it): testnet-10 unless this is the mainnet live walk's child process
+const MAINNET_CHILD = process.argv.includes("--mainnet-child");
+globalThis.localStorage = {
+  getItem: (k) => (k === "kachat-network-v1" && !MAINNET_CHILD ? "testnet" : null),
+  setItem: () => {},
+  removeItem: () => {},
+};
+
+const C = await import("../engine/kachat-names/codec.js");
+const T = await import("../engine/kachat-names/transaction.js");
+const M = await import("../engine/kachat-names/manifest.js");
+const R = await import("../engine/kachat-names/registry-state.js");
+const {
   KachatNamesRegistry, parseJSONExact, KachatSocialImageResolver, socialImageCachePrefix, socialImageLegacyCachePrefix,
   ownProfileStorageKey, ownProfileKeyPrefixFor, profilesUnavailablePauseMs, profileMissPauseMs, ownProfileSyncDecision,
-} from "../engine/kachat-names/registry.js";
-import * as PC from "../engine/kachat-names/profile-cache.js";
+  registryCacheKeyFor,
+} = await import("../engine/kachat-names/registry.js");
+const PC = await import("../engine/kachat-names/profile-cache.js");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -222,7 +242,7 @@ function runWalker(v, r) {
   const alphaRegister = e2e[lead + 3].args;
   r.eq(alpha?.periodStart, u64(alphaRegister.now), "alpha-tn: periodStart = register's now, kept by extend, transfer, list and buy");
   r.eq(alpha?.expiresAt, u64(alphaRegister.now) + 2n * m.params.periodMs, "alpha-tn: registered for 1 period, extended by 1");
-  r.eq(m.params.periodMs, 86_400_000n, "testnet vectors run the 24-hour clock");
+  r.eq(m.params.periodMs, m.network === "mainnet" ? C.yearMs : 86_400_000n, "the vectors run their network's clock");
   // applying again changes nothing
   const snapshot = state.clone();
   e2e.forEach((st, i) => tryApply(state, view(st, 1_000 + i), m));
@@ -647,6 +667,15 @@ function runREST(r) {
   r.eq(R.keyOf("KASPATEST:QZ5XDN6E0CLXSYEY4K7PZHKRFJNHG6QNEAC0D0LYL8PK7TYA6VYYSF8PT3R8M") && C.hex(R.keyOf("kaspatest:qz5xdn6e0clxsyey4k7pzhkrfjnhg6qneac0d0lyl8pk7tya6vyysf8pt3r8m")), C.hex(xonly), "keyOf(address)");
   r.eq(R.keyOf("kaspatest:qz5xdn6e0clxsyey4k7pzhkrfjnhg6qneac0d0lyl8pk7tya6vyysf8pt3r8n"), null, "keyOf refuses a bad checksum");
   r.eq(R.keyOf("kaspatest:pzg7r3p9wthvxxjtm74k7nlznrl9rjcfxjkx7txmslss2gyzw3xvj686vxecj"), null, "keyOf refuses a P2SH address");
+  // the network's prefix drives the defaults (iOS ef6b21e: KachatNamesService.addressPrefix)
+  r.eq(R.addressPrefix, "kaspatest", "addressPrefix under kachat-network-v1=testnet");
+  const mainnetOwner = R.addressOf(xonly, "kaspa");
+  r.check(mainnetOwner?.startsWith("kaspa:q") === true, "addressOf(x-only key, kaspa) is a kaspa: address");
+  r.eq(R.keyOf(mainnetOwner), null, "keyOf refuses the other network's address");
+  r.eq(C.hex(R.keyOf(mainnetOwner, "kaspa")), C.hex(xonly), "keyOf(kaspa: address, kaspa)");
+  // the walker's cache is per network
+  r.eq(registryCacheKeyFor("testnet-10"), "kachat-names-registry-testnet-v1", "registryCacheKeyFor(testnet-10)");
+  r.eq(registryCacheKeyFor("mainnet"), "kachat-names-registry-mainnet-v1", "registryCacheKeyFor(mainnet)");
   r.eq(R.keyOf(R.encodeAddress("kaspa", 0, xonly)), null, "keyOf refuses a mainnet address");
   const rejected = { ...j, is_accepted: false };
   r.eq(R.TxView.fromREST(rejected), null, "REST: a transaction not accepted is skipped");
@@ -1462,11 +1491,16 @@ async function runOwnProfileSync(r) {
   r.eq((await regS.ownProfile(tn))?.at, 1234, "own sync: a savedAt record is read as at");
 }
 
-// MARK: - Live (read-only TN10 walk)
+// MARK: - Live (read-only TN10 / mainnet walk)
 
-async function runLive() {
-  const base = "https://api-tn10.kaspa.org";
-  const m = M.decodeManifest(readFileSync(join(repo, "engine/kachat-names/kachat-names-testnet-10.json"), "utf8"));
+async function runLive({ mainnet = false } = {}) {
+  const base = mainnet ? "https://api.kaspa.org" : "https://api-tn10.kaspa.org";
+  const label = mainnet ? "mainnet" : "TN10";
+  const m = M.decodeManifest(readFileSync(join(repo, `engine/kachat-names/kachat-names-${mainnet ? "mainnet" : "testnet-10"}.json`), "utf8"));
+  if (R.addressPrefix !== (mainnet ? "kaspa" : "kaspatest")) {
+    console.log(`live: the ${label} walk runs with the ${R.addressPrefix}: prefix`);
+    return false;
+  }
   try { M.verifyManifest(m); } catch (e) { console.log(`live: manifest does not verify: ${e.message}`); return false; }
   const getJSON = async (path) => {
     const res = await fetch(base + path, { signal: AbortSignal.timeout(20_000) });
@@ -1517,7 +1551,7 @@ async function runLive() {
   } catch (e) {
     console.log(`  incremental walk failed: ${e.message} (not counted)`);
   }
-  console.log(`live TN10 registry v${m.registryVersion} ${C.hex(m.registryCovenantId).slice(0, 16)}... (genesis ${C.hex(m.genesisTxid).slice(0, 8)}..${C.hex(m.genesisTxid).slice(-5)}): ${Date.now() - t0} ms, ${st.applied.length - 1} transaction(s) walked, ${st.gaps.length} gap(s), ${st.names.length} name(s), ${st.events.length} event(s), cache ${storage.map.get("kachat-names-registry-testnet-v1")?.length ?? 0} bytes; walk ${reg.lastWalk.rounds} round(s), unresolved ${reg.lastWalk.unresolved.length}`);
+  console.log(`live ${label} registry v${m.registryVersion} ${C.hex(m.registryCovenantId).slice(0, 16)}... (genesis ${C.hex(m.genesisTxid).slice(0, 8)}..${C.hex(m.genesisTxid).slice(-5)}): ${Date.now() - t0} ms, ${st.applied.length - 1} transaction(s) walked, ${st.gaps.length} gap(s), ${st.names.length} name(s), ${st.events.length} event(s), cache ${storage.map.get(registryCacheKeyFor(m.network))?.length ?? 0} bytes (${registryCacheKeyFor(m.network)}); walk ${reg.lastWalk.rounds} round(s), unresolved ${reg.lastWalk.unresolved.length}`);
   for (const g of st.gaps) console.log(`  gap ${g.lo.slice(0, 8)}..-${g.hi.slice(0, 8)}.. at ${g.txid.slice(0, 16)}:${g.index}`);
   for (const n of st.names) {
     const status = R.Status.of(n.expiresAt, m.params.graceMs, BigInt(Date.now()));
@@ -1535,7 +1569,8 @@ async function runLive() {
   const g = txs.find((t) => t.idHex === C.hex(m.genesisTxid));
   const ok = !!g && g.outputs[0].covenant != null && C.bytesEqual(g.outputs[0].covenant.covenantId, m.registryCovenantId) && C.bytesEqual(g.outputs[0].script, m.genesisOutput.script);
   console.log(`  REST full-transactions of ${genesisAddress}: ${txs.length} tx(s); genesis parsed with its covenant binding: ${ok}`);
-  await compareWithIndexer(m, st);
+  // the testnet-10 names indexer follows the testnet registry only
+  if (!mainnet) await compareWithIndexer(m, st);
   return ok;
 }
 
@@ -1870,7 +1905,10 @@ async function runProfileCache(r) {
 
 async function main() {
   const args = process.argv.slice(2);
+  // the mainnet live walk's child process: only that walk, as mainnet
+  if (MAINNET_CHILD) process.exit((await runLive({ mainnet: true })) ? 0 : 1);
   const live = args.includes("--live");
+  const liveMainnet = args.includes("--live-mainnet");
   const given = args.find((a) => !a.startsWith("--"));
   const path = given ?? join(repo, "tools/fixtures/kachat-names-vectors.json");
   const v = JSON.parse(readFileSync(path, "utf8"));
@@ -1910,6 +1948,16 @@ async function main() {
     console.log(`+ walk over a simulated v5 chain: ${r.pass} pass, ${r.fail} fail`);
     await runWalkOrder(v5, r);
     console.log(`+ v5 walk in any order (shuffled, reversed, from a cache): ${r.pass} pass, ${r.fail} fail`);
+    // mainnet v1 (iOS ef6b21e): the walker over the audited v4 under the mainnet params
+    const vm = JSON.parse(readFileSync(join(repo, "tools/fixtures/kachat-names-vectors-mainnet.json"), "utf8"));
+    useVectors(vm);
+    r.check(vm.manifest.network === "mainnet" && lead === 0, "mainnet vectors: a mainnet manifest, no imports");
+    runWalker(vm, r);
+    console.log(`+ walker over the mainnet vectors: ${r.pass} pass, ${r.fail} fail`);
+    await runWalk(vm, r);
+    console.log(`+ walk over a simulated mainnet chain: ${r.pass} pass, ${r.fail} fail`);
+    await runWalkOrder(vm, r);
+    console.log(`+ mainnet walk in any order (shuffled, reversed, from a cache): ${r.pass} pass, ${r.fail} fail`);
     useVectors(v);
   }
   await runProfilesOnly(r);
@@ -1923,6 +1971,16 @@ async function main() {
   for (const f of r.failures.slice(0, 40)) console.log(`  FAIL ${f}`);
   let ok = r.fail === 0;
   if (live) ok = (await runLive()) && ok;
+  if (liveMainnet) {
+    // a child process: engine/network.js is read once per process, and this one runs as testnet
+    let childOk = true;
+    try {
+      execFileSync(process.execPath, [fileURLToPath(import.meta.url), "--mainnet-child"], { stdio: "inherit", cwd: repo });
+    } catch {
+      childOk = false;
+    }
+    ok = childOk && ok;
+  }
   if (!ok) process.exit(1);
   console.log("OK");
 }

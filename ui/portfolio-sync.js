@@ -299,13 +299,59 @@ export function mergePortfolioTombstones(sides) {
 }
 
 /**
- * iOS PortfolioSync.merge: per item the newest `updatedAt` wins (a portfolio without one counts
+ * Folds what two devices each made on their own before sync existed (iOS 54788da
+ * PortfolioSync.foldEquivalents, IOS-073): portfolios with the same name and no `updatedAt`
+ * become one (the oldest stays; a createdAt tie keeps the smaller id, so either order folds the
+ * same way), their rows and fees move with them, and a row whose (portfolio, sourceTxId) is
+ * already there - the same imported transaction - is kept once (the newest edit, ties by the
+ * smaller id: the same choice on every device, so the copies don't trade places).
+ */
+export function foldPortfolioEquivalents(sides) {
+  const keep = new Map();
+  for (const p of sides.flatMap((s) => s.portfolios)) {
+    if (p.updatedAt !== null && p.updatedAt !== undefined) continue;
+    const have = keep.get(p.name);
+    if (have && (have.createdAt < p.createdAt || (have.createdAt === p.createdAt && compareStrings(have.id, p.id) <= 0))) continue;
+    keep.set(p.name, p);
+  }
+  const remap = new Map();
+  for (const p of sides.flatMap((s) => s.portfolios)) {
+    if (p.updatedAt !== null && p.updatedAt !== undefined) continue;
+    const canonical = keep.get(p.name);
+    if (canonical && canonical.id !== p.id) remap.set(p.id, canonical.id);
+  }
+  const target = (id) => remap.get(id) ?? id;
+  const winner = new Map();
+  for (const t of sides.flatMap((s) => s.transactions)) {
+    if (!t.sourceTxId) continue;
+    const key = `${target(t.portfolioId)}:${t.sourceTxId}`;
+    const have = winner.get(key);
+    const a = have ? (have.updatedAt ?? -Infinity) : 0;
+    const b = t.updatedAt ?? -Infinity;
+    if (!have || b > a || (b === a && compareStrings(t.id, have.id) < 0)) winner.set(key, t);
+  }
+  return sides.map((side) => ({
+    ...side,
+    portfolios: side.portfolios.filter((p) => !remap.has(p.id)),
+    transactions: side.transactions.flatMap((t) => {
+      const moved = remap.has(t.portfolioId) ? { ...t, portfolioId: target(t.portfolioId) } : t;
+      if (!moved.sourceTxId) return [moved];
+      return winner.get(`${moved.portfolioId}:${moved.sourceTxId}`) === t ? [moved] : [];
+    }),
+    fees: side.fees.map((f) => (remap.has(f.portfolioId) ? { ...f, portfolioId: target(f.portfolioId) } : f)),
+  }));
+}
+
+/**
+ * iOS PortfolioSync.merge: what two devices made before sync is folded first
+ * (foldPortfolioEquivalents, iOS 54788da); then per item the newest `updatedAt` wins (a portfolio without one counts
  * as its createdAt, a row without one as the oldest possible; a tie keeps the earlier side),
  * unless a tombstone at or after it deletes it. A row or fee lives only while its portfolio does;
  * a priced fee beats an unpriced one. A pristine seed stays only while nothing else is there.
  * The list is ordered by sortOrder (ties by createdAt) and renumbered 0..n-1.
  */
 export function mergePortfolioSync(sides) {
+  sides = foldPortfolioEquivalents(sides);
   const tombstones = mergePortfolioTombstones(sides.map((s) => s.tombstones));
   const gone = new Map(tombstones.map((t) => [`${t.kind}:${t.id}`, t.deletedAt]));
 

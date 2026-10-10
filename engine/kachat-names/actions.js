@@ -11,11 +11,12 @@
 // includes it (read-your-writes, iOS 32260ae). The stages (`txStage`, TxStage) drive the receipt.
 // `plan(op, { fee })` builds the same transaction without sending it (the sheets).
 // The registration is commit -> wait tCommit (+20) DAA -> register, driven automatically and
-// resumable (records in localStorage, per wallet). Testnet-10 only (KachatNamesService.isLaunched),
-// except the address profile record (`profileSigner`, `profileFee`, `saveProfile`), which works on
-// every network (KachatNamesService.profilesEnabled, iOS d36fc42): it is a self-send, not registry
-// data, so on mainnet the app builds these actions over an inert registry (isEnabled false) and
-// only the profile methods are used.
+// resumable (records in localStorage, per wallet). Where the network has a live registry: testnet-10,
+// and mainnet since 2026-10-09 (KachatNamesService.isLaunched, iOS ef6b21e). The address profile
+// record (`profileSigner`, `profileFee`, `saveProfile`) works on every network
+// (KachatNamesService.profilesEnabled, iOS d36fc42): it is a self-send, not registry data, so where
+// a network has no registry the app builds these actions over an inert registry (isEnabled false)
+// and only the profile methods are used.
 //
 // Owner actions on a name one of the wallet's SPENDING addresses holds (iOS 881ada6) sign - and pay
 // their fee - with that address's derived key: the app passes `wallet` hooks (see the constructor)
@@ -59,7 +60,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 
 import { getEndpoint } from "../endpoints.js";
 import { ADDRESS_HRP, KAS_UNIT, isNetworkAddress } from "../network.js";
-import { enqueueSend, excludeReservedUtxos } from "../transactions.js";
+import { enqueueSend, excludeReservedUtxos, sendKaspa } from "../transactions.js";
 import {
   Failure, minFeerate, maxFeerate, safeFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
   gapState, nameState, offerState,
@@ -122,7 +123,9 @@ export function needsDriving(p) {
   return [Stage.committing, Stage.waiting, Stage.registering, Stage.cancelling].includes(p.stage);
 }
 
-/** The localStorage key of the registrations: `{ [wallet address]: PendingRegistration[] }` (with salts). */
+/** The localStorage key of the registrations: `{ [wallet address]: PendingRegistration[] }` (with salts).
+ *  One key for both networks (the name predates mainnet): records are kept per wallet address, whose
+ *  prefix (`kaspa:` / `kaspatest:`) names the network, so they never mix. */
 export const registrationsStorageKey = "kachat-names-registrations-testnet-v1";
 
 // MARK: - Errors
@@ -154,6 +157,21 @@ export const unknownFeerate = minFeerate * 10;
  *  seen, and a few hundredths of a KAS on these transactions. Swift `backgroundMaxFeerate`
  *  (iOS 7e2b6cd, IOS-061). */
 export const backgroundMaxFeerate = minFeerate * 20;
+
+// MARK: - Many small coins (mainnet, 2026-10-09; iOS f1c16ec)
+
+/** The most coins one combine spends (iOS KasiaTransactionBuilder.maxInputsPerTransaction). */
+export const combineMaxCoins = 80;
+/** What a combine keeps back from the coins it spends (sompi): the fee, with what's left coming
+ *  back as change (0.05 KAS, iOS f1c16ec). */
+export const combineFeeRoom = 5_000_000n;
+
+/** A name transaction takes at most a few funding inputs (the builder's slots), so a wallet holding
+ *  enough KAS in many small coins couldn't pay: "insufficient funds ... at most N funding inputs
+ *  fit". Swift `KachatNamesActions.isTooManyCoins` (iOS f1c16ec). */
+export function isTooManyCoins(error) {
+  return error instanceof Failure && String(error.message ?? "").includes("funding inputs fit");
+}
 
 // MARK: - Fees (iOS e426432)
 
@@ -227,7 +245,7 @@ export const TxStage = Object.freeze({
 /** The follower gives up (dropped) after this long. */
 export const followGiveUpMs = 300_000;
 
-/** The `kaspatest:` address of a Schnorr P2PK output script (`<32-byte key> OP_CHECKSIG`), or null. */
+/** The address (this network's prefix) of a Schnorr P2PK output script (`<32-byte key> OP_CHECKSIG`), or null. */
 export function p2pkAddress(script) {
   const b = script;
   if (!(b instanceof Uint8Array) || b.length !== 34 || b[0] !== 0x20 || b[33] !== 0xac) return null;
@@ -258,7 +276,7 @@ export class ActionError extends Error {
     Object.assign(this, extra);
   }
 
-  static noWallet() { return new ActionError("noWallet", "No testnet wallet is open."); }
+  static noWallet() { return new ActionError("noWallet", "No wallet is open."); }
   /** No wallet (address and key) is open at all - the profile signer, on any network. */
   static noOpenWallet() { return new ActionError("noWallet", "No wallet is open."); }
   static keyMismatch() { return new ActionError("keyMismatch", "This wallet's key does not match its address."); }
@@ -317,6 +335,8 @@ export class ActionError extends Error {
     return new ActionError("expiredTooLong", "This name has been expired too long to renew. It can only be reclaimed and registered again.");
   }
   static offerTooLong() { return new ActionError("offerTooLong", "An offer can run for up to 7 days."); }
+  /** MAINNET.md C1: an offer's refund time must come before the name expires (iOS 0312a3f). */
+  static offerPastExpiry() { return new ActionError("offerPastExpiry", "An offer must be refundable before the name expires."); }
   /** registry v5: registering opens at the migration deadline, once the old registry's names are
    *  imported (iOS dd836cb) */
   static registrationNotOpen(opensMs) {
@@ -439,6 +459,8 @@ export class KachatNamesActions {
     /** offer ids this person closed themselves (Withdraw, Refund) - not news when they disappear
      *  (the app's .kachat notifier, iOS 86471dd KachatNamesNotifier.selfClosedOffers) */
     this.selfClosedOffers = new Set();
+    /** registration ids this session already combined coins for (`combineCoins`, iOS f1c16ec) */
+    this._combinedFor = new Set();
   }
 
   // MARK: Observing (Swift @Published pending / virtualDaa)
@@ -500,21 +522,22 @@ export class KachatNamesActions {
 
   // MARK: Wallet
 
-  /** The current wallet's testnet address, key and x-only key (they must agree):
+  /** The current wallet's address on this network, its key and x-only key (they must agree):
    *  `{ address, privateKey: hex, me: Uint8Array(32) }`. */
   signer() {
     this.service.requireLaunched();
     const address = String(this.engine?.address ?? "").toLowerCase();
     const key = this.engine?.privateKeyHex;
-    if (!address.startsWith("kaspatest:") || !key) throw ActionError.noWallet();
+    // this network's prefix (iOS ef6b21e: KachatNamesService.addressPrefix)
+    if (!address.startsWith(`${KachatNamesService.addressPrefix}:`) || !key) throw ActionError.noWallet();
     const me = xonlyKey(key);
     if (!bytesEqual(keyOf(address), me)) throw ActionError.keyMismatch();
     return { address, privateKey: key, me };
   }
 
   /** The current wallet's chatting address and key on the network the app runs on - the profile
-   *  record's signer (iOS d36fc42 profileSigner). Unlike `signer()` it isn't testnet-only: profiles
-   *  work on mainnet before its registry launches (KachatNamesService.profilesEnabled).
+   *  record's signer (iOS d36fc42 profileSigner). Unlike `signer()` it doesn't need a live registry
+   *  (KachatNamesService.profilesEnabled).
    *  `{ address, privateKey: hex, me: Uint8Array(32) }`. */
   profileSigner() {
     if (!KachatNamesService.profilesEnabled) throw ServiceError.testnetOnly();
@@ -585,8 +608,8 @@ export class KachatNamesActions {
     const payer = this.payerFor(op);
     if (!payer) return this.signer();
     this.service.requireLaunched();
-    // a testnet address on the network the app runs on (iOS d657ee3, IOS-058)
-    if (!payer.address.startsWith("kaspatest:") || !isNetworkAddress(payer.address)) throw ServiceError.wrongAddressNetwork();
+    // an address on the network the app runs on (iOS d657ee3, IOS-058; its prefix, iOS ef6b21e)
+    if (!payer.address.startsWith(`${KachatNamesService.addressPrefix}:`) || !isNetworkAddress(payer.address)) throw ServiceError.wrongAddressNetwork();
     let key = null;
     try { key = this.wallet.spendingPrivateKey?.(payer.index) ?? null; } catch { key = null; }
     if (!key) throw ActionError.noWallet();
@@ -752,7 +775,61 @@ export class KachatNamesActions {
   async planWithRate(op, { fee = null } = {}) {
     const s = this.signerFor(op);
     const rate = await this._feerateFor(fee, op, s);
-    return { plan: (await this._build(op, s, rate)).plan, feerate: rate };
+    let built;
+    try {
+      built = await this._build(op, s, rate);
+    } catch (error) {
+      if (!isTooManyCoins(error)) throw error;
+      // the KAS is there, in too many small coins: combined into one first (iOS f1c16ec)
+      await this.combineCoins(s);
+      built = await this._build(op, s, rate);
+    }
+    return { plan: built.plan, feerate: rate };
+  }
+
+  /** Combines the wallet's coins into one: a plain send of up to `combineMaxCoins` largest coins to
+   *  the same address (a tiny network fee), then waits until a node has the combined coin, so the
+   *  name transaction can be built from it. Never a coin a scheduled KaPost holds or one carrying a
+   *  covenant. It is a move between your own coins, not a payment: the service's submit listeners
+   *  hear it, so the app keeps it out of the chats. Returns the txid. Runs in the per-address send
+   *  queue itself, so it must not be called from inside it. Swift `combineCoins` (iOS f1c16ec). */
+  async combineCoins(s) {
+    const engine = this.engine;
+    const plain = (await this._walletUtxos(s.address))
+      .filter((u) => u.covenantId == null)
+      .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : BigInt(b.amount) < BigInt(a.amount) ? -1 : 0))
+      .slice(0, combineMaxCoins);
+    const total = plain.reduce((a, u) => a + BigInt(u.amount), 0n);
+    if (plain.length <= 1 || !(total > combineFeeRoom * 2n)) {
+      throw new Failure("Not enough KAS on your chatting address for this.");
+    }
+    if (!engine?.kaspa) throw new Failure("Load Rusty Kaspa WASM first.");
+    const amount = total - combineFeeRoom;
+    const result = await sendKaspa({
+      kaspa: engine.kaspa,
+      rpc: engine.rpc,
+      withRpc: typeof engine.withRpc === "function" ? engine.withRpc.bind(engine) : null,
+      privateKey: s.privateKey,
+      sourceAddress: s.address,
+      destinationAddress: s.address,
+      amountKas: `${amount / 100_000_000n}.${String(amount % 100_000_000n).padStart(8, "0")}`,
+      feeKas: "0",
+      selectedOutpoints: plain.map((u) => `${u.outpoint.transactionId}:${u.outpoint.index}`),
+      log: (...a) => engine.log?.(a.join(" ")),
+    });
+    const txIds = (result?.txids ?? []).map((t) => String(t).toLowerCase());
+    const txId = txIds[txIds.length - 1];
+    if (!txId) throw new Failure("The coins were not combined.");
+    // a move between your own coins, not a payment to show in the chats
+    for (const t of txIds) this.service.noteSubmitted?.(t);
+    engine.log?.(`[KachatNames] combined ${plain.length} coins into one: ${txId}`);
+    for (let i = 0; i < 30; i += 1) {
+      await this.clock.sleep(2_000);
+      let now = [];
+      try { now = await engine.getUtxosWithCovenants([s.address]); } catch { now = []; }
+      if (now.some((u) => String(u.outpoint?.transactionId ?? "").toLowerCase() === txId)) break;
+    }
+    return txId;
   }
 
   async _build(op, s, rate = null) {
@@ -802,6 +879,10 @@ export class KachatNamesActions {
         const refundAfter = BigInt(op.refundAfterDaa);
         const cap = env.blockDaa + maxOfferDays * 86_400n * daaPerSecond;
         if (!(refundAfter > env.blockDaa && refundAfter <= cap)) throw ActionError.offerTooLong();
+        // MAINNET.md C1: refundable before the name expires - past that the seller could accept it
+        // and then reclaim the name, leaving the buyer only the bond (iOS 0312a3f)
+        const refundAtMs = env.wallMs + ((refundAfter - env.blockDaa) * 1000n) / daaPerSecond;
+        if (refundAtMs > BigInt(op.target.expiresAt)) throw ActionError.offerPastExpiry();
         plan = b.offer({ env, wallet, target: await this._liveName(op.target, m), amount: BigInt(op.amount), refundAfter });
         break;
       }
@@ -856,7 +937,17 @@ export class KachatNamesActions {
     const cap = maxPrice == null ? null : BigInt(maxPrice);
     const feeCap = maxNetworkFee == null ? null : BigInt(maxNetworkFee);
     const rate = exactFeerate != null ? safeFeerate(exactFeerate) : await this._feerateFor(fee, op, s);
-    const { plan, txId } = await enqueueSend(s.address, () => this._submit(op, s, cap, rate, feeCap));
+    let sent;
+    try {
+      sent = await enqueueSend(s.address, () => this._submit(op, s, cap, rate, feeCap));
+    } catch (error) {
+      if (!isTooManyCoins(error)) throw error;
+      // the KAS is there, in too many small coins: combined into one (outside the send queue,
+      // which the combine uses itself), then built again (iOS f1c16ec)
+      await this.combineCoins(s);
+      sent = await enqueueSend(s.address, () => this._submit(op, s, cap, rate, feeCap));
+    }
+    const { plan, txId } = sent;
     // An offer you withdrew or refunded yourself isn't news; the ones this app returns on its own
     // (expired, made to an earlier owner) are (iOS 86471dd).
     if ((op.kind === "withdraw" && !this.withdrawingOffers.has(op.offer?.id))
@@ -1034,7 +1125,8 @@ export class KachatNamesActions {
   }
 
   /** Pulls this wallet's declined offers (OfferInfo[]) back: those made to an earlier owner of the
-   *  name (the contract refuses them now) or on a name since released. A withdraw, signed by the
+   *  name (the contract refuses them now), on a name since released, or on a name that has expired
+   *  (MAINNET.md C1, iOS 0312a3f: its seller could accept and then reclaim it). A withdraw, signed by the
    *  buyer - this wallet's chatting address - and paid back to it. Before its refund time only the
    *  buyer or the seller can return an offer, so the buyer's app does it as soon as it sees the name
    *  changed hands; after that, `returnExpiredOffers` covers it from any app. Each offer is tried
@@ -1051,10 +1143,13 @@ export class KachatNamesActions {
       if (!ownerByName.has(o.name)) {
         let r;
         try { r = await this.registry.lookup(o.name); } catch { continue; }
-        ownerByName.set(o.name, r.kind === "registered" ? r.info.owner : null);
+        // MAINNET.md C1: once the name has expired the seller could accept the offer and then
+        // reclaim the name, so it counts as declined - it comes back (iOS 0312a3f)
+        const active = r.kind === "registered" && r.info.status(this.registry.graceMs, BigInt(nowMs())) === Status.active;
+        ownerByName.set(o.name, active ? r.info.owner : null);
       }
       const current = ownerByName.get(o.name);
-      // still made to the name's current owner: it stands
+      // still made to the name's current owner, who still holds it: it stands
       if (current != null && !o.isDeclined(current)) continue;
       this.withdrawingOffers.add(o.id);
       this._emit();
@@ -1119,6 +1214,8 @@ export class KachatNamesActions {
     const price = paramsRegisterCost(m.params, utf8(name).length, years);
     let commitFee = 0n;
     let registerFee = 0n;
+    /** the KAS is there but in too many small coins for one transaction (iOS f1c16ec) */
+    let combinesCoins = false;
     try {
       const commitPlan = b.commit({ env, wallet, name, salt });
       commitFee = commitPlan.networkFee;
@@ -1139,7 +1236,10 @@ export class KachatNamesActions {
             commit, years, now: registerNow(env),
           });
           registerFee = reg.networkFee;
-        } catch { /* estimated below */ }
+        } catch (error) {
+          // estimated below; KaChat combines many small coins into one before registering
+          combinesCoins = isTooManyCoins(error);
+        }
       }
     } catch { /* estimated below */ }
     if (registerFee === 0n) registerFee = 400_000n;
@@ -1149,6 +1249,8 @@ export class KachatNamesActions {
     return {
       name, years, price, bond: m.params.bond, gapDeposit: m.params.gapValue, commit: commitValue,
       networkFee: fee, total, spendable, affordable: spendable >= total + minChange,
+      // the claim sheet says up front that the coins get combined (`combineCoins`, iOS f1c16ec)
+      combinesCoins,
     };
   }
 
@@ -1249,6 +1351,7 @@ export class KachatNamesActions {
   retry(p) {
     const stored = this._find(typeof p === "string" ? p : p.id);
     if (!stored) return;
+    this._combinedFor.delete(stored.id); // Try Again may combine coins again (iOS f1c16ec)
     this._set(stored, (q) => { q.stage = Stage.waiting; q.lastError = null; });
     this._startDriver();
   }
@@ -1556,17 +1659,29 @@ export class KachatNamesActions {
       }
       const cap = recordPrice(p.maxPrice);
       const rate = await this._registrationFeerate(p);
-      const txId = await enqueueSend(s.address, async () => {
-        const { builder: b, env, wallet } = await this._context(s, rate);
-        const plan = b.register({
-          env, wallet, gap: await this._liveGap(gap, m),
-          commit: { name: p.name, owner: s.me, salt, value: commit.entry.amount, utxo: commit },
-          years: BigInt(p.years), now: registerNow(env),
+      let txId;
+      try {
+        txId = await enqueueSend(s.address, async () => {
+          const { builder: b, env, wallet } = await this._context(s, rate);
+          const plan = b.register({
+            env, wallet, gap: await this._liveGap(gap, m),
+            commit: { name: p.name, owner: s.me, salt, value: commit.entry.amount, utxo: commit },
+            years: BigInt(p.years), now: registerNow(env),
+          });
+          // Never pay more than the person confirmed (the fixed prices make this a safeguard).
+          if (cap != null && BigInt(plan.priceFee ?? 0n) > cap) throw ActionError.priceChanged(plan.priceFee);
+          return this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
         });
-        // Never pay more than the person confirmed (the fixed prices make this a safeguard).
-        if (cap != null && BigInt(plan.priceFee ?? 0n) > cap) throw ActionError.priceChanged(plan.priceFee);
-        return this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
-      });
+      } catch (error) {
+        if (!isTooManyCoins(error) || this._combinedFor.has(p.id)) throw error;
+        // the KAS is there in many small coins: combine them, then register on the next tick with
+        // the same commit (once per registration; a second time it's real) (iOS f1c16ec)
+        this._combinedFor.add(p.id);
+        this._set(p, (q) => { q.lastError = "Your KAS is in many small coins. Combining them into one first..."; });
+        await this.combineCoins(s);
+        this._set(p, (q) => { q.lastError = null; });
+        return;
+      }
       this._set(p, (q) => { q.stage = Stage.registering; q.registerTxId = txId; q.lastError = null; });
       this.registry.refreshAfter(txId);
     } catch (error) {
@@ -1586,9 +1701,9 @@ export class KachatNamesActions {
    *  gaps around the name, merged, which is the reclaim's output 0 (iOS beb9c45). */
   async _sendReclaim(n, p) {
     const gaps = await this.registry.exitGaps(n);
-    // at the claim's fee speed (iOS e426432); a claim from before keeps the priority rate
-    const tier = parseFeeTier(p?.feeTier);
-    const txId = await this.perform(Operation.reclaim(n), { fee: tier ? FeeChoice.tier(tier) : null });
+    // sent with no fee shown, like the register: the chosen speed under the background cap
+    // (iOS 25c9193, IOS-061)
+    const txId = await this.perform(Operation.reclaim(n), { exactFeerate: await this._registrationFeerate(p) });
     this._set(p, (q) => {
       q.reclaimTxId = txId;
       q.reclaimLo = hex(gaps.below.lo);

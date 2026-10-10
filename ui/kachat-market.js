@@ -11,20 +11,20 @@
 // Also here: "Edit .kachat Profile" (the profile editor's layout with nothing in it yet) and the
 // .kachat Setup Guide it opens (claim, avatar, banner, details, done - each step Coming soon).
 //
-// On TESTNET (testnet-10, iOS 5df42b4) it is live instead (ui/kachat-names-live.js): a Testnet
-// badge, search with real availability and price, Claim (its progress as a half sheet, and every
+// Where the registry is launched (testnet-10, iOS 5df42b4; mainnet since 2026-10-09, iOS ef6b21e)
+// it is live instead (ui/kachat-names-live.js): a Testnet badge on testnet, search with real availability and price, Claim (its progress as a half sheet, and every
 // open claim behind the claims button), the registry's listings / expired names Available to anyone /
 // activity, the live name detail with its transaction sheets, and the
 // live address profile editor. This file keeps the layers and the mockups, and hands the live
 // screens what they need through initKachatLive.
 //
-// On MAINNET (iOS 7227d69: the .kachat UI is on everywhere, the registry only where launched) the
-// pages are the live ones, empty, under "Coming soon"; search says registration isn't open; the
-// profile editor is the live one with Save off. The placeholder pages remain only for a testnet
-// registry that is setting up.
+// On a network without a registry (iOS 7227d69: the .kachat UI is on everywhere, the registry only
+// where launched) the pages are the live ones, empty, under "Coming soon"; search says registration
+// isn't open; the profile editor is the live one with Save off. The placeholder pages remain only
+// for a registry that is setting up.
 
 import "./kachat-market.css";
-import { KAS_UNIT } from "../engine/network.js";
+import { KAS_UNIT, IS_TESTNET } from "../engine/network.js";
 import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
@@ -529,9 +529,12 @@ function openHowItWorksSheet() {
       ${navBar("How .kachat works", { trailing: { label: "Done", bold: true } })}
       <div class="kmkt-sheet-body kmkt-form">
         ${formSection(rows, {
-          footer: liveHubIsLive()
-            ? "Live on Testnet: names, prices and payments here use TKAS on testnet-10. Mainnet names come after an audit."
-            : "Nothing here is live yet.",
+          // per network since the mainnet launch (iOS ef6b21e)
+          footer: liveHubIsLive() && !IS_TESTNET
+            ? "Live on Mainnet: names, prices and payments here are real KAS."
+            : liveHubIsLive()
+              ? "Live on Testnet: names, prices and payments here use TKAS on testnet-10. Mainnet names are live on Mainnet."
+              : "Nothing here is live yet.",
         })}
       </div>`,
   });

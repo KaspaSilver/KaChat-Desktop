@@ -2,17 +2,19 @@
 //
 // Port of iOS KaChat/Services/KachatNames/KachatNamesService.swift. The core (codec, transaction,
 // manifest, builder) is pure and checked against the kachat-domains vectors; this service adds
-// what needs the app: the testnet gate, loading and verifying the manifest, the node's DAG point,
+// what needs the app: the network gate, loading and verifying the manifest, the node's DAG point,
 // the wallet's and the registry's live UTXOs, BIP-340 Schnorr signing with the wallet key
 // (SIGHASH_ALL over the version-1 sighash, @noble/curves), the conversion to the Kaspa WASM SDK's
 // Transaction with the Toccata fields, and submission through the engine's RPC client.
 //
-// Registry transactions are testnet-10 only: every registry entry point refuses unless
-// engine/network.js IS_TESTNET (`isLaunched`), and the manifest itself must be for testnet-10
-// (verifyManifest). The mainnet registry stays off until the contracts are audited - but the
-// .kachat UI and identity are on for every network (`isEnabled`, iOS 7227d69), and the address
-// profile record is not registry data (`profilesEnabled`, iOS d36fc42): a `kchat:1:profile:`
-// self-send from the wallet's address on the network the app runs on, so it saves on mainnet too.
+// Names run on testnet-10 and, since the mainnet v1 launch on 2026-10-09, on mainnet (iOS ef6b21e):
+// each network has its own bundled manifest (kachat-names-<network>.json), its own pinned templates
+// and price tables (manifest.js), and its own address prefix (`addressPrefix`). The manifest in use
+// always matches the network the app runs on (`networkName`, engine/network.js NETWORK_ID); every
+// registry entry point refuses where the network has no registry (`isLaunched`). The .kachat UI
+// and identity are on for every network (`isEnabled`, iOS 7227d69), and the address profile record
+// is not registry data (`profilesEnabled`, iOS d36fc42): a `kchat:1:profile:` self-send from the
+// wallet's address on the network the app runs on.
 //
 // Nothing runs at import. `new KachatNamesService(engine)` takes the KaspaEngine (engine/index.js);
 // it uses engine.kaspa, engine.currentDagPoint(), engine.getUtxosWithCovenants(addresses),
@@ -23,9 +25,10 @@
 // `signAndSubmit`. KachatNamesActions (actions.js) does all of that per operation.
 
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
-import bundledManifestJson from "./kachat-names-testnet-10.json" with { type: "json" };
+import testnetManifestJson from "./kachat-names-testnet-10.json" with { type: "json" };
+import mainnetManifestJson from "./kachat-names-mainnet.json" with { type: "json" };
 
-import { IS_TESTNET, isNetworkAddress } from "../network.js";
+import { NETWORK_ID, ADDRESS_HRP, isNetworkAddress } from "../network.js";
 import { getEndpoint } from "../endpoints.js";
 import { sendKaspa, excludeReservedUtxos } from "../transactions.js";
 import {
@@ -33,7 +36,7 @@ import {
   p2pkScript, profilePayload,
 } from "./codec.js";
 import { makeOutpoint, makeUtxo, makeUtxoEntry, txIdHex } from "./transaction.js";
-import { decodeManifest, verifyManifest, ManifestSource } from "./manifest.js";
+import { decodeManifest, verifyManifest, ManifestSource, supportedNetworks } from "./manifest.js";
 import { Builder, makeEnv, planSignedBy, recommendedBudgetsFor } from "./builder.js";
 import { addressPrefix, addressOf, keyOf, p2shAddress } from "./registry-state.js";
 
@@ -48,12 +51,12 @@ export class ServiceError extends Error {
     Object.assign(this, extra);
   }
 
-  static testnetOnly() { return new ServiceError("testnetOnly", ".kachat names run on Testnet only for now"); }
+  static testnetOnly() { return new ServiceError("testnetOnly", ".kachat names aren't live on this network yet"); }
   /** The address is not on the network the app runs on (iOS d36fc42). */
   static wrongAddressNetwork() { return new ServiceError("wrongAddressNetwork", "This address is on a different network than the app."); }
   static noManifest(why) { return new ServiceError("noManifest", `No .kachat registry manifest: ${why}`); }
   static dryRunManifest() { return new ServiceError("dryRunManifest", "The .kachat manifest is from a dry run; that registry does not exist"); }
-  static wrongNodeNetwork(n) { return new ServiceError("wrongNodeNetwork", `The node is on ${n}, not testnet-10`); }
+  static wrongNodeNetwork(n) { return new ServiceError("wrongNodeNetwork", `The node is on ${n}, not ${KachatNamesService.networkName}`); }
   static keyMismatch() { return new ServiceError("keyMismatch", "The signing key is not the key the transaction was built for"); }
   static notOnChain(what) { return new ServiceError("notOnChain", `${what} is not on chain (or not with the registry covenant id)`); }
   static badProfile(why) { return new ServiceError("badProfile", `Profile: ${why}`); }
@@ -68,7 +71,7 @@ export class ServiceError extends Error {
 
 /** The (English) message of `ServiceError.registryUpgrading()`. */
 export const registryUpgradingMessage =
-  "The .kachat registry on Testnet is being upgraded. Names open here again once the new registry is live.";
+  "The .kachat registry is being upgraded. Names open here again once the new registry is live.";
 
 /** Whether `error` means the registry is being upgraded (an earlier registry's manifest), not a failure (Swift
  *  `KachatNamesService.isRegistryUpgrading`): a `ServiceError` with code "registryUpgrading" or
@@ -81,9 +84,18 @@ export function isRegistryUpgrading(error) {
 
 // MARK: - Addresses (the registry's pure Kaspa cashaddr codec)
 
-/** The testnet address prefix (names run on testnet-10 only). */
+/** The address prefix of the network the app runs on (registry-state.js `addressPrefix`). */
+export { addressPrefix };
+/** The old name of `addressPrefix` (kept for callers of the earlier API). */
 export const testnetPrefix = addressPrefix;
-/** `p2shAddress(script)`: the `kaspatest:` P2SH address of a P2SH script, or null (Swift
+/** The bundled manifest JSON of a manifest network ("testnet-10" | "mainnet"), or null for none
+ *  (Swift `Manifest.bundleResource(network:)`, iOS ef6b21e). */
+export function bundledManifestFor(network) {
+  if (network === "mainnet") return mainnetManifestJson;
+  if (network === "testnet-10") return testnetManifestJson;
+  return null;
+}
+/** `p2shAddress(script)`: the P2SH address (this network's prefix) of a P2SH script, or null (Swift
  *  `KachatNamesService.p2shAddress`). `addressOf(xonly)` / `keyOf(address)`: Swift
  *  `KachatNamesRegistry.address(of:)` / `keyOf`. */
 export { p2shAddress, addressOf, keyOf };
@@ -256,10 +268,10 @@ function trimSlash(s) {
 
 export class KachatNamesService {
   /** `engine`: the KaspaEngine. `options.bundledManifest`: the manifest JSON to use instead of the
-   *  bundled one (tests; null forces the indexer path). */
-  constructor(engine, { bundledManifest = bundledManifestJson } = {}) {
+   *  one bundled for the network the app runs on (tests; null forces the indexer path). */
+  constructor(engine, { bundledManifest = undefined } = {}) {
     this.engine = engine;
-    this.bundledManifest = bundledManifest;
+    this.bundledManifest = bundledManifest === undefined ? bundledManifestFor(KachatNamesService.networkName) : bundledManifest;
     /** The verified manifest, once loaded. */
     this.manifest = null;
     /** Where the manifest came from: "bundle" or the indexer URL. */
@@ -283,7 +295,8 @@ export class KachatNamesService {
   }
 
   /** Optional: `listener(txId)` after every transaction `submit` sends and the node accepts (each
-   *  registry operation and a registration's commit; not the profile record, a plain self-send).
+   *  registry operation and a registration's commit; not the profile record, a plain self-send),
+   *  and after a coin combine (`noteSubmitted`).
    *  The app uses it to keep name transactions out of its payment chats (iOS 32fdaa4); nothing
    *  here depends on anyone listening. Returns an unsubscribe function. */
   onSubmitted(listener) {
@@ -311,14 +324,19 @@ export class KachatNamesService {
   // MARK: Gate
 
   /** The .kachat UI and identity: on every network since iOS 7227d69 - mainnet shows the same
-   *  screens as testnet (and people by their .kachat name, not KNS), in a "Coming soon" state until
-   *  its registry launches. */
+   *  screens as testnet (and people by their .kachat name, not KNS). */
   static get isEnabled() { return true; }
   get isEnabled() { return KachatNamesService.isEnabled; }
   /** Whether this network has a live registry the app reads and transacts with (lookups, listings,
-   *  registrations, resolving typed names): testnet-10 only until an audit. */
-  static get isLaunched() { return IS_TESTNET; }
+   *  registrations, resolving typed names): testnet-10, and mainnet since 2026-10-09 (iOS ef6b21e). */
+  static get isLaunched() { return supportedNetworks.includes(KachatNamesService.networkName); }
   get isLaunched() { return KachatNamesService.isLaunched; }
+  /** The manifest network name of the network the app runs on: "mainnet" | "testnet-10" (Swift
+   *  `KachatNamesService.networkName`). It drives the node check, the bundled manifest and the cache. */
+  static get networkName() { return NETWORK_ID; }
+  /** The address prefix of the network the app runs on ("kaspa" | "kaspatest"): names, owners and
+   *  registry outputs are shown and parsed with it (Swift `KachatNamesService.addressPrefix`). */
+  static get addressPrefix() { return ADDRESS_HRP; }
   /** Address profiles (`kchat:1:profile:`) work on every network (iOS d36fc42): a profile is a
    *  plain self-send from the chatting address with no registry behind it, so mainnet saves and
    *  reads them before its registry launches. Only the primary name needs the registry. */
@@ -326,7 +344,7 @@ export class KachatNamesService {
   get profilesEnabled() { return KachatNamesService.profilesEnabled; }
 
   /** The gate on every registry read and write: the network the app runs on has a live registry
-   *  (`isLaunched`, testnet-10 for now). `isEnabled` only turns the UI on. Swift `requireLaunched()`
+   *  (`isLaunched`). `isEnabled` only turns the UI on. Swift `requireLaunched()`
    *  (iOS d657ee3, IOS-058). */
   requireLaunched() {
     if (!KachatNamesService.isLaunched) throw ServiceError.testnetOnly();
@@ -337,14 +355,17 @@ export class KachatNamesService {
 
   // MARK: Manifest
 
-  /** The verified registry manifest: kachat-names-testnet-10.json bundled with the app, else the
-   *  indexer's `GET /names/manifest`. Cached once verified. An indexer-served manifest is trusted
+  /** The verified registry manifest: kachat-names-<network>.json bundled with the app for the
+   *  network it runs on, else the indexer's `GET /names/manifest`. Cached once verified. An indexer-served manifest is trusted
    *  only when every template is pinned in the app (`verifyManifest(m, { source: "indexer" })`).
    *  A registry version this app doesn't build for (not v4 or v5) throws `ServiceError.registryUpgrading()`
    *  (code "registryUpgrading") and sets `registryUpgrading`; a refused bundled manifest is
    *  remembered and thrown again without re-reading it. */
   async loadManifest({ allowDryRun = false } = {}) {
     this.requireLaunched();
+    // the other network's manifest never serves this one (iOS ef6b21e; the network is fixed per page
+    // load here, so this only guards a manifest an indexer served for the wrong network)
+    if (this.manifest && this.manifest.network !== KachatNamesService.networkName) this.resetManifest();
     if (this.manifest && (allowDryRun || !this.manifest.isDryRun)) return this.manifest;
     if (this._bundleFailure) throw this._bundleFailure;
     const [data, source] = await this._manifestData();
@@ -366,6 +387,10 @@ export class KachatNamesService {
       throw refused;
     }
     if (m.isDryRun && !allowDryRun) throw ServiceError.dryRunManifest();
+    // a manifest for the other network (one an indexer of that network served) is never this one's
+    if (!m.isDryRun && m.network !== KachatNamesService.networkName) {
+      throw ServiceError.noManifest(`the ${source} manifest is for ${m.network}, not ${KachatNamesService.networkName}`);
+    }
     this._setRegistryUpgrading(false);
     this.manifest = m;
     this.manifestSource = source;
@@ -383,7 +408,7 @@ export class KachatNamesService {
   async _manifestData() {
     if (this.bundledManifest != null) return [this.bundledManifest, "bundle"];
     const base = trimSlash(getEndpoint("kasiaIndexer"));
-    if (!base) throw ServiceError.noManifest("none in the app and no indexer is configured for Testnet");
+    if (!base) throw ServiceError.noManifest("none in the app and no indexer is configured");
     const url = `${base}/names/manifest`;
     let response;
     try {
@@ -406,12 +431,13 @@ export class KachatNamesService {
   static xonlyKey(privateKey) { return xonlyKey(privateKey); }
 
   /** Where the next transaction is judged: the virtual's DAA score and past median time from a
-   *  testnet-10 node, the wall clock, the signer's key. `feerate` in sompi/gram (min 100). */
+   *  node on the app's network (`networkName`), the wall clock, the signer's key. `feerate` in
+   *  sompi/gram (min 100). */
   async environment({ privateKey, feerate = minFeerate }) {
     this.requireLaunched();
     const dag = await this.engine.currentDagPoint();
     const network = String(dag.networkId ?? "");
-    if (!network.endsWith("testnet-10")) throw ServiceError.wrongNodeNetwork(network || "an unknown network");
+    if (!network.endsWith(KachatNamesService.networkName)) throw ServiceError.wrongNodeNetwork(network || "an unknown network");
     return makeEnv({
       me: xonlyKey(privateKey),
       blockDaa: dag.virtualDaaScore,
@@ -478,10 +504,19 @@ export class KachatNamesService {
     const txId = String(await this.engine.submitRpcTransaction(wasmTx, { expectedTxId: expected }) ?? "").toLowerCase();
     this.engine.log?.(`[KachatNames] submitted ${txId}`);
     if (txId !== expected) throw ServiceError.submitMismatch(expected, txId);
-    for (const l of [...this._submitListeners]) {
-      try { l(txId); } catch (e) { this._log("[KachatNames] submit listener failed:", e?.message ?? e); }
-    }
+    this.noteSubmitted(txId);
     return txId;
+  }
+
+  /** Tells the `onSubmitted` listeners about `txId`: every transaction `submit` sends, and the
+   *  self-send that combines many small coins before a name transaction (actions.js `combineCoins`,
+   *  iOS f1c16ec: a move between your own coins, kept out of the chats like the rest). */
+  noteSubmitted(txId) {
+    const id = String(txId ?? "").toLowerCase();
+    if (!id) return;
+    for (const l of [...this._submitListeners]) {
+      try { l(id); } catch (e) { this._log("[KachatNames] submit listener failed:", e?.message ?? e); }
+    }
   }
 
   /** Sign with the wallet key and submit; returns the txid. */

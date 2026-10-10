@@ -1,4 +1,5 @@
-import { IS_TESTNET } from "./network.js";
+import { NETWORK_ID } from "./network.js";
+import { supportedNetworks as kachatNetworks } from "./kachat-names/manifest.js";
 import { normalize as kachatNormalize, isValid as kachatIsValid } from "./kachat-names/codec.js";
 // The Kaspa name services besides KNS (which engine/kns.js covers for `.kas`), plus the
 // priority resolution that asks every service at once. A port of iOS
@@ -58,13 +59,13 @@ const REQUEST_TIMEOUT_MS = 15000; // iOS: timeoutIntervalForRequest = 15
  * @property {string|null} websiteName   The site as people know it ("knsdomains.org"); null for .kachat.
  * @property {string|null} getDomainLabel "Get a .kas domain at knsdomains.org"; null for .kachat.
  * @property {boolean} isLive            Whether the app can read this service yet (.kachat: only where
- *                                       its registry is launched - testnet-10 for now).
+ *                                       its registry is launched - testnet-10 and mainnet).
  */
 
 const SERVICE_TABLE = {
-  // Readable on testnet only (the testnet-10 registry, iOS 25cc2c9): resolving typed names waits for
-  // the mainnet registry to launch after an audit (iOS 7227d69 isLaunched). Its UI is on everywhere.
-  kachat: { serviceName: "KaChat Names", websiteURL: null, websiteName: null, isLive: IS_TESTNET },
+  // Readable where its registry is launched (iOS 25cc2c9, 7227d69 isLaunched): testnet-10, and
+  // mainnet since 2026-10-09 (iOS ef6b21e). Its UI is on everywhere.
+  kachat: { serviceName: "KaChat Names", websiteURL: null, websiteName: null, isLive: kachatNetworks.includes(NETWORK_ID) },
   kas: { serviceName: "KNS", websiteURL: "https://app.knsdomains.org", websiteName: "knsdomains.org", isLive: true },
   k: { serviceName: "dotk", websiteURL: "https://dotk.name", websiteName: "dotk.name", isLive: true },
   kaspa: { serviceName: "Kaspa Names", websiteURL: "https://kaspaname.com", websiteName: "kaspaname.com", isLive: true },
@@ -490,7 +491,7 @@ export async function ownedNamesForAddresses(addresses, { xOnlyPubKeyFor = null,
  *                   iOS shows "Not registered".
  *   failed        - the service could not be asked (network, timeout, non-2xx/404, bad body),
  *                   so "not registered" is unknown. iOS shows "Couldn't check".
- *   notLive       - `.kachat` where its registry isn't live yet (mainnet until launch): listed,
+ *   notLive       - `.kachat` where its registry isn't live (a network without one): listed,
  *                   first as always, but nothing resolves there. iOS shows "Coming soon" under
  *                   Other domains (6ac48a7 NameResolution.notLive).
  */
@@ -558,8 +559,8 @@ function entry(tld, canonical, address, failed) {
   return { tld, name: `${canonical}.${tld}`, address: failed ? null : (address ?? null), state };
 }
 
-// `.kachat`: always listed first; where its registry isn't live (mainnet until launch) it is
-// reported as notLive under its canonical name (iOS 6ac48a7). On testnet the registry's owner of a
+// `.kachat`: always listed first; where its registry isn't live it is reported as notLive under
+// its canonical name (iOS 6ac48a7). Where it is live, the registry's owner of a
 // name that is active or in its grace period - only a lapsed name does not resolve (KACHAT_NAMES.md
 // section 4, iOS f7c371a). The app
 // supplies the lookup (`resolveKachat(canonical) -> address|null`, throws when unreadable).

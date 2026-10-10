@@ -186,7 +186,7 @@ async function main() {
     r.check(!bm.isDryRun, "bundled manifest is not a dry run");
     r.eq(C.hex(bm.registryCovenantId), BUNDLED_REGISTRY, "bundled manifest: registry covenant id");
     r.check(bm.priceCovenantId === undefined && bm.genesisShards === undefined, "bundled manifest: no price record (registry v4)");
-    r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "bundled manifest: the pinned register table");
+    r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices["testnet-10"].join(","), "bundled manifest: the pinned register table");
     r.eq(bundled.registryUpgrading, false, "bundled v5 manifest: registryUpgrading stays false (no Setting up)");
     r.eq(bundledEvents, 0, "bundled v5 manifest: no registryUpgrading change announced");
     r.check((await bundled.loadManifest()) === bm, "the verified bundled manifest is cached");
@@ -635,6 +635,79 @@ async function main() {
     r.eq(typeof A.Stage.priceChanged, "undefined", "registry v4: Stage.priceChanged is gone");
     r.eq(typeof ok.acceptNewPrice, "undefined", "registry v4: acceptNewPrice is gone");
 
+    // MARK: many small coins (iOS f1c16ec): combined into one, then built again
+    const J = (x) => JSON.stringify(x, (_k, val) => (typeof val === "bigint" ? `${val}n` : val));
+    const tooMany = new C.Failure(`register ${c0.name}: insufficient funds: need 1.00000000 TKAS more (outputs 2.00000000 TKAS + price 0.35000000 TKAS + network fee ~0.00010000 TKAS), 9.00000000 TKAS spendable (at most 6 funding inputs fit)`);
+    r.check(A.isTooManyCoins(tooMany), "isTooManyCoins: the builder's funding-slots message");
+    r.check(!A.isTooManyCoins(new C.Failure("register x: insufficient funds: need 1.00000000 TKAS more, 0.50000000 TKAS spendable")), "isTooManyCoins: plain insufficient funds is not");
+    r.check(!A.isTooManyCoins(new Error("at most 6 funding inputs fit")), "isTooManyCoins: only the builder's Failure");
+    {
+      // the driver combines once and registers on the next tick with the same commit
+      const many = regAt();
+      const realContext = many._context.bind(many);
+      many._context = async (sg, rate) => ({ ...(await realContext(sg, rate)), builder: { register: () => { throw tooMany; } } });
+      let combines = 0;
+      many.combineCoins = async () => { combines += 1; return "cc".repeat(32); };
+      let submits = 0;
+      many.service.signAndSubmit = async () => { submits += 1; return "ee".repeat(32); };
+      many._upsert(recordFor("reg-many", price));
+      await many._register(many._find("reg-many"), c0.utxo);
+      const first = many.pending.find((x) => x.id === "reg-many");
+      r.eq(J([combines, submits, first.stage, first.lastError, first.commitTxId]), J([1, 0, A.Stage.waiting, null, C.hex(c0.utxo.outpoint.txid)]),
+        "combine: the driver combines once, then waits for the next tick with the same commit");
+      await many._register(many._find("reg-many"), c0.utxo);
+      const second = many.pending.find((x) => x.id === "reg-many");
+      r.eq(J([combines, second.stage]), J([1, A.Stage.failed]), "combine: once per registration - a second time the shortfall is real");
+      r.check(/funding inputs fit/.test(second.lastError ?? ""), `combine: and says why (${second.lastError})`);
+      many.retry(second);
+      await many._register(many._find("reg-many"), c0.utxo);
+      r.eq(combines, 2, "combine: Try Again may combine again");
+      // the claim sheet says up front that the coins get combined
+      const quoting = regAt();
+      const realQuoteContext = quoting._context.bind(quoting);
+      let registerError = tooMany;
+      quoting._context = async (sg, rate) => ({
+        ...(await realQuoteContext(sg, rate)),
+        builder: {
+          commit: () => ({ networkFee: 2_000n, inputs: [], newCommit: { ...c0, utxo: c0.utxo } }),
+          register: () => { throw registerError; },
+        },
+      });
+      const q1 = await quoting.quote({ name: c0.name, years: 1n, gap: gapInfo });
+      registerError = new C.Failure("register: insufficient funds: need 1.00000000 TKAS more, 0.10000000 TKAS spendable");
+      const q2 = await quoting.quote({ name: c0.name, years: 1n, gap: gapInfo });
+      r.eq(J([q1.combinesCoins, q2.combinesCoins]), J([true, false]), "quote: combinesCoins only when the coins, not the KAS, are short");
+      // sheets (plan) and submits (perform) combine and build again; other failures don't
+      const pa = regAt();
+      let paCombines = 0;
+      pa.combineCoins = async () => { paCombines += 1; return "cc".repeat(32); };
+      let builds = 0;
+      pa._build = async () => { builds += 1; if (builds === 1) throw tooMany; return { plan: { tag: "built" }, env: {} }; };
+      const extendOp = A.Operation.extend(new RS.NameInfo({ name: "x", key: C.key("x"), owner: me, expiresAt: 1n, outpoint: T.makeOutpoint(C.zero32(), 0) }), 1n);
+      const planned = await pa.planWithRate(extendOp);
+      r.eq(J([planned.plan.tag, builds, paCombines]), J(["built", 2, 1]), "planWithRate: many small coins are combined, then the plan is built again");
+      let submitsTried = 0;
+      pa._submit = async () => { submitsTried += 1; if (submitsTried === 1) throw tooMany; return { plan: { tag: "sent" }, txId: "ab".repeat(32) }; };
+      pa.follow = () => Promise.resolve(null);
+      r.eq(await pa.perform(extendOp), "ab".repeat(32), "perform: sent after the combine");
+      r.eq(J([submitsTried, paCombines]), J([2, 2]), "perform: combined once (outside the send queue), then built and sent again");
+      pa._submit = async () => { throw new C.Failure("register: insufficient funds: need 1 more"); };
+      await r.throws(() => pa.perform(extendOp), (e) => /insufficient funds/.test(e.message), "perform: a real shortfall is not combined");
+      r.eq(paCombines, 2, "perform: no combine for a real shortfall");
+      // combineCoins never spends a covenant coin (nor a reserved one) and needs more than one coin
+      const cEngine = {
+        ...pa.engine,
+        getUtxosWithCovenants: async () => [
+          { outpoint: { transactionId: "a1".repeat(32), index: 0 }, amount: 100_000_000n, covenantId: null },
+          { outpoint: { transactionId: "a2".repeat(32), index: 0 }, amount: 9_000_000_000n, covenantId: "77".repeat(32) },
+        ],
+      };
+      const ca = new A.KachatNamesActions({ engine: cEngine, service: pa.service, registry: registryStub, storage: { get: () => null, set: () => {} } });
+      await r.throws(() => ca.combineCoins(ca.signer()), (e) => e.message === "Not enough KAS on your chatting address for this.",
+        "combineCoins: one plain coin (the covenant coin never counts) is nothing to combine");
+      r.eq(J([A.combineMaxCoins, A.combineFeeRoom]), J([80, 5_000_000n]), "combineCoins: up to 80 coins, 0.05 KAS kept back for the fee");
+    }
+
     // MARK: claiming an expired name frees it first (iOS eea52b2, 4f0bd33)
     const lapsedInfo = new RS.NameInfo({
       name: c0.name, key: C.key(c0.name), owner: S.xonlyKey(other), price: 0n,
@@ -825,13 +898,18 @@ async function main() {
         regSent._upsert(recordFor("old-reg", price));
         await regSent._register(regSent._find("old-reg"), c0.utxo);
         r.eq(regRates.join(","), "500,300", "register: at the claim's speed (Priority 5x), a claim from before at the priority rate");
-        // the reclaim of an expired name goes out at the claim's speed
+        // the reclaim of an expired name goes out like the register (iOS 25c9193, IOS-061): sent
+        // with no fee shown, so at the claim's speed under the background cap
         const rc = claimAt(false);
+        rc.feerateForTier = async (t) => ({ normal: 100, fast: 200, priority: 5_000 }[t]);
+        rc.feerate = async () => 300;
         const reclaimOpts = [];
         rc.perform = async (op, opts) => { reclaimOpts.push(opts ?? null); return reclaimTx; };
         await rc._sendReclaim(lapsedInfo, { ...recordFor("rc", price), feeTier: "fast" });
         await rc._sendReclaim(lapsedInfo, recordFor("rc2", price));
-        r.eq(JSON.stringify(reclaimOpts.map((o) => o?.fee ?? null)), JSON.stringify([{ kind: "tier", tier: "fast" }, null]), "reclaim: at the claim's speed; a claim from before keeps the default");
+        await rc._sendReclaim(lapsedInfo, { ...recordFor("rc3", price), feeTier: "priority" });
+        r.eq(JSON.stringify(reclaimOpts.map((o) => [o?.exactFeerate ?? null, o?.fee ?? null])), JSON.stringify([[200, null], [300, null], [A.backgroundMaxFeerate, null]]),
+          "reclaim: the claim's speed, a claim from before the priority rate, never above backgroundMaxFeerate");
       } catch (e) { r.check(false, `claim fee speed threw ${e.stack || e}`); }
     }
 
@@ -992,6 +1070,12 @@ async function main() {
     } catch (e) { r.check(false, `actions: offer threw ${e.stack || e}`); }
     await r.throws(() => act2.plan(A.Operation.offer(theirs, u64(offerStep.args.amount), daa + week + 1n)), (e) => e.code === "offerTooLong", "actions: an offer past 7 days is refused");
     await r.throws(() => act2.plan(A.Operation.offer(theirs, u64(offerStep.args.amount), daa)), (e) => e.code === "offerTooLong", "actions: an offer that is refundable at once is refused");
+    // MAINNET.md C1 (iOS 0312a3f): refundable before the name expires
+    const endsTomorrow = new RS.NameInfo({ ...theirs, outpoint: theirs.outpoint, expiresAt: BigInt(Date.now()) + 86_400_000n });
+    await r.throws(() => act2.plan(A.Operation.offer(endsTomorrow, u64(offerStep.args.amount), daa + 3n * 86_400n * A.daaPerSecond)),
+      (e) => e.code === "offerPastExpiry" && e.message === "An offer must be refundable before the name expires.", "C1: an offer refundable after the name expires is refused");
+    await r.throws(() => act2.plan(A.Operation.offer(endsTomorrow, u64(offerStep.args.amount), daa + 12n * 3_600n * A.daaPerSecond)),
+      (e) => e.code !== "offerPastExpiry", "C1: one refundable before the expiry passes that check");
   }
   const acceptStep = v.steps.find((x) => x.op === "acceptOffer" && x.label.includes("wanted"));
   if (acceptStep) {
@@ -1066,7 +1150,7 @@ async function main() {
     const toEarlier = mk("03", { refundAfter: 590_000_200n, seller: stranger });
     const freeName = mk("04", { refundAfter: 590_000_200n, name: "gone" });
     const notMine = mk("05", { refundAfter: 590_000_200n, buyer: stranger, seller: stranger });
-    const aliceInfo = new RS.NameInfo({ name: "alice", key: C.key("alice"), owner: me, expiresAt: 1n, outpoint: T.makeOutpoint(C.zero32(), 0) });
+    const aliceInfo = new RS.NameInfo({ name: "alice", key: C.key("alice"), owner: me, expiresAt: BigInt(Date.now()) + 86_400_000n, outpoint: T.makeOutpoint(C.zero32(), 0) });
     const reg2 = {
       ...registryStub,
       lookup: async (name) => (name === "alice" ? { kind: "registered", name, info: aliceInfo } : { kind: "free", name, gap: null }),
@@ -1081,6 +1165,19 @@ async function main() {
     await act.withdrawDeclinedOffers([fresh, toEarlier, freeName, notMine]);
     await act.withdrawDeclinedOffers([toEarlier]);
     r.eq(performed.sort().join(","), "withdraw:03,withdraw:04", "withdrawDeclinedOffers: mine, made to an earlier owner or on a free name, once");
+    // MAINNET.md C1 (iOS 0312a3f): on a name that has expired, even an offer to its current owner
+    // comes back (the seller could accept it and then reclaim the name)
+    {
+      const expiredAlice = new RS.NameInfo({ ...aliceInfo, outpoint: aliceInfo.outpoint, expiresAt: 1n });
+      const done = [];
+      const actC1 = new A.KachatNamesActions({
+        engine: actEngine, service: dry, storage,
+        registry: { ...reg2, lookup: async (name) => ({ kind: "registered", name, info: expiredAlice }) },
+      });
+      actC1.perform = async (op) => { done.push(`${op.kind}:${op.offer.id.slice(0, 2)}`); return "ff".repeat(32); };
+      await actC1.withdrawDeclinedOffers([fresh, notMine]);
+      r.eq(done.join(","), "withdraw:02", "withdrawDeclinedOffers (C1): mine on an expired name come back, even to its owner");
+    }
     performed.length = 0;
     await act.declineOpenOffers(aliceInfo, fresh);
     r.eq(performed.sort().join(","), "decline:06", "declineOpenOffers: the rest made to this owner, not the accepted one");
@@ -1142,10 +1239,19 @@ async function main() {
       const actions = new A.KachatNamesActions({ engine, service, registry, storage: { get: () => null, set: () => {} } });
       const err = (f) => { try { f(); return null; } catch (e) { return e.code ?? e.message; } };
       out.profileSigner = (() => { try { const s = actions.profileSigner(); return s.address === address && C.hex(s.me) === C.hex(me); } catch (e) { return e.code ?? e.message; } })();
-      out.signer = err(() => new A.KachatNamesActions({ engine, registry, storage: { get: () => null, set: () => {} } }).signer());
-      out.testnetAddress = err(() => new A.KachatNamesActions({ engine: { ...engine, address: RS.addressOf(me) }, service, registry, storage: { get: () => null, set: () => {} } }).profileSigner());
-      out.manifest = await new S.KachatNamesService({}).loadManifest().then(() => null, (e) => e.code);
-      out.submitTestnet = await new S.KachatNamesService({}).submitProfileRecord({ json: '{"v":1}', address: RS.addressOf(me) }).then(() => null, (e) => e.code);
+      out.networkName = S.KachatNamesService.networkName;
+      out.addressPrefix = S.KachatNamesService.addressPrefix + "/" + RS.addressPrefix;
+      out.signer = (() => { try { const s = new A.KachatNamesActions({ engine, registry, storage: { get: () => null, set: () => {} } }).signer(); return s.address === address; } catch (e) { return e.code ?? e.message; } })();
+      out.signerTestnet = err(() => new A.KachatNamesActions({ engine: { ...engine, address: RS.addressOf(me, "kaspatest") }, registry, storage: { get: () => null, set: () => {} } }).signer());
+      out.noWalletMessage = A.ActionError.noWallet().message;
+      out.testnetAddress = err(() => new A.KachatNamesActions({ engine: { ...engine, address: RS.addressOf(me, "kaspatest") }, service, registry, storage: { get: () => null, set: () => {} } }).profileSigner());
+      out.manifest = await new S.KachatNamesService({}).loadManifest().then((m) => m.network + ":" + C.hex(m.registryCovenantId) + ":v" + m.registryVersion, (e) => e.code ?? e.message);
+      out.testnetManifest = await new S.KachatNamesService({}, { bundledManifest: S.bundledManifestFor("testnet-10") }).loadManifest().then(() => null, (e) => e.code + ": " + e.message);
+      const dagOf = (networkId) => ({ currentDagPoint: async () => ({ networkId, virtualDaaScore: 1n, pastMedianTime: 1n }) });
+      out.envTestnetNode = await new S.KachatNamesService(dagOf("testnet-10")).environment({ privateKey: sk }).then(() => null, (e) => e.code);
+      out.envBudgets = await new S.KachatNamesService(dagOf("mainnet")).environment({ privateKey: sk }).then((env) => env.budgets["gap.register"] + "/" + env.budgets["gap.merge"], (e) => e.code ?? e.message);
+      out.p2sh = S.p2shAddress(Uint8Array.from([0xaa, 0x20, ...new Uint8Array(32).fill(7), 0x87]));
+      out.submitTestnet = await new S.KachatNamesService({}).submitProfileRecord({ json: '{"v":1}', address: RS.addressOf(me, "kaspatest") }).then(() => null, (e) => e.code);
       out.submitNoWallet = await new S.KachatNamesService({}).submitProfileRecord({ json: '{"v":1}', address }).then(() => null, (e) => e.message);
       out.saved = await actions.saveProfile({ bio: "x.com/me" });
       out.calls = calls;
@@ -1156,15 +1262,24 @@ async function main() {
       res = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", child], { cwd: repo, encoding: "utf8" }).trim().split("\n").pop());
     } catch (e) { r.check(false, `mainnet child process failed: ${e.stderr || e.message}`); }
     if (res) {
-      r.check(res.isLaunched === false && res.profilesEnabled === true, "mainnet: registry not launched, profiles enabled");
+      // mainnet v1 (iOS ef6b21e): the registry is launched on mainnet too
+      r.check(res.isLaunched === true && res.profilesEnabled === true, "mainnet: registry launched, profiles enabled");
+      r.eq(res.networkName, "mainnet", "mainnet: networkName");
+      r.eq(res.addressPrefix, "kaspa/kaspa", "mainnet: the address prefix (service and registry-state)");
       r.eq(res.profileSigner, true, "mainnet: profileSigner signs for the kaspa: address");
-      r.eq(res.signer, "testnetOnly", "mainnet: the registry signer stays testnet-only");
+      r.eq(res.signer, true, "mainnet: the registry signer signs for the kaspa: address");
+      r.eq(res.signerTestnet, "noWallet", "mainnet: the registry signer refuses a kaspatest: wallet");
+      r.eq(res.noWalletMessage, "No wallet is open.", "noWallet: no network in the message");
       r.eq(res.testnetAddress, "wrongAddressNetwork", "mainnet: profileSigner refuses a kaspatest: address");
-      r.eq(res.manifest, "testnetOnly", "mainnet: no manifest");
+      r.eq(res.manifest, "mainnet:348bd2c81170f267a2a7039cbf3a6f275e80b189d6c956183ea73ff3ffde75a4:v4", "mainnet: the bundled mainnet manifest (registry 348bd2c8, v4)");
+      r.check(typeof res.testnetManifest === "string" && /^noManifest: .*is for testnet-10, not mainnet/.test(res.testnetManifest), `mainnet: the testnet manifest is refused there: ${res.testnetManifest}`);
+      r.eq(res.envTestnetNode, "wrongNodeNetwork", "mainnet: a testnet-10 node is refused");
+      r.eq(res.envBudgets, "9/5", "mainnet: the audited v4 budgets (register 9, merge 5)");
+      r.check(typeof res.p2sh === "string" && res.p2sh.startsWith("kaspa:p"), "mainnet: P2SH addresses carry the kaspa: prefix");
       r.eq(res.submitTestnet, "wrongAddressNetwork", "mainnet: submitProfileRecord refuses a kaspatest: address");
       r.eq(res.submitNoWallet, "Load the wallet first.", "mainnet: submitProfileRecord passes the network gate for a kaspa: address");
       r.eq(res.saved, "cd".repeat(32), "mainnet: saveProfile returns the txid");
-      r.eq(JSON.stringify(res.calls), JSON.stringify([`submit:${res.address}`, `note:${res.address}`]), "mainnet: saveProfile submits and notes, no registry refresh");
+      r.eq(JSON.stringify(res.calls), JSON.stringify([`submit:${res.address}`, `note:${res.address}`, "refresh"]), "mainnet: saveProfile submits, notes and refreshes the registry");
     }
   }
 

@@ -340,6 +340,8 @@
 .kl-busy-copy small { font-size: 12px; line-height: 16px; color: var(--muted); }
 
 /* the claim sheet before a v5 migration deadline: when registering opens (iOS dd836cb) */
+.kl-combine-note { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+.kl-combine-note .kmkt-ico { width: 16px; height: 16px; flex: 0 0 auto; }
 .kl-notopen-row { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; line-height: 20px; color: var(--text); }
 .kl-notopen-row .kmkt-ico { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 0; }
 

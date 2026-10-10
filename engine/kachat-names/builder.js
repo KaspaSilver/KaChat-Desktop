@@ -77,10 +77,13 @@ export const BudgetRole = {
  *  has no engine, so it commits a fixed budget per entry that covers every case (README "Cost per
  *  operation"; the vector generator checks every measured budget fits this table, the vectors'
  *  `recommendedBudgets`). An input that needs more than it committed fails, so these only ever err
- *  on the side of a slightly higher fee (100 grams per unit). Registry v4. */
+ *  on the side of a slightly higher fee (100 grams per unit). Registry v4 on the audited contracts. */
 export const recommendedBudgets = {
   "p2pk": 10, "commit": 10,
-  "gap.register": 8, "gap.merge": 4, "gap.absorbed": 0, "gap.import": 0,
+  // the audited v4 contracts (mainnet v1, kachat-domains a99afeb): audit C2's fee loop reads every
+  // input's covenant id - register up to 92,048 script units (9), merge 50,084 (5); the pre-audit
+  // v4 needed 8 / 4 (iOS ef6b21e)
+  "gap.register": 9, "gap.merge": 5, "gap.absorbed": 0, "gap.import": 0,
   "name.transfer": 12, "name.list": 12, "name.buy": 2, "name.extend": 2, "name.renew": 2, "name.release": 10, "name.reclaim": 0,
   "offer.accept": 17, "offer.decline": 10, "offer.withdraw": 10, "offer.refund": 0,
 };
@@ -240,10 +243,11 @@ function placeholderSignature() {
   return s;
 }
 
-/** `"%llu.%08llu TKAS"`. */
-function kas(sompi) {
+/** `"%llu.%08llu KAS"` on mainnet, `"... TKAS"` on testnet: an amount in a plan's description, in
+ *  the registry's unit - the CLI's wording, which the vectors compare (iOS ef6b21e). */
+function kas(sompi, network = "testnet-10") {
   const v = BigInt(sompi);
-  return `${v / sompiPerKas}.${String(v % sompiPerKas).padStart(8, "0")} TKAS`;
+  return `${v / sompiPerKas}.${String(v % sompiPerKas).padStart(8, "0")} ${network === "mainnet" ? "KAS" : "TKAS"}`;
 }
 
 function sum(xs, f) { return xs.reduce((a, x) => a + f(x), 0n); }
@@ -309,14 +313,16 @@ function select(wallet, used, target, slots) {
 /** The .kachat transaction builders over a verified manifest. Every builder takes one object
  *  argument (the Swift labels) and returns a Plan, or throws a Failure. */
 export class Builder {
-  /** Only over a verified testnet-10 manifest (`verifyManifest`): the builders never run against
-   *  an unverified registry or another network. */
+  /** Only over a verified manifest of a network with a live registry (`verifyManifest`): the
+   *  builders never run against an unverified registry. */
   constructor(manifest) {
     verifyManifest(manifest);
     this.manifest = manifest;
   }
 
   get params() { return this.manifest.params; }
+  /** An amount in this registry's unit (see the module-level `kas`). */
+  _kas(sompi) { return kas(sompi, this.manifest.network); }
   get registryId() { return this.manifest.registryCovenantId; }
 
   /** See the module-level `registerNow`. */
@@ -384,8 +390,8 @@ export class Builder {
           const all = sum(wallet.filter((u) => !used.has(outpointKey(u.outpoint))), (u) => u.entry.amount);
           const bound = slots < wallet.length ? ` (at most ${slots} funding inputs fit)` : "";
           throw new Failure(
-            `${d.op}: insufficient funds: need ${kas(required - fixedIn)} more (outputs ${kas(fixedOut)} + price `
-              + `${kas(d.priceFee)} + network fee ~${kas(est)}), ${kas(all)} spendable${bound}`,
+            `${d.op}: insufficient funds: need ${this._kas(required - fixedIn)} more (outputs ${this._kas(fixedOut)} + price `
+              + `${this._kas(d.priceFee)} + network fee ~${this._kas(est)}), ${this._kas(all)} spendable${bound}`,
           );
         }
         const inputs = [...d.inputs];
@@ -402,7 +408,7 @@ export class Builder {
         const feeNow = massNetworkFee(tx, env.feerate);
         if (feeNow <= est) {
           if (!withChange && change > 0n) {
-            d.notes.push(`no change output: the ${kas(change)} left over goes to the miner`);
+            d.notes.push(`no change output: the ${this._kas(change)} left over goes to the miner`);
           }
           last = { inputs, outputs, change, withChange };
           break;
@@ -425,11 +431,11 @@ export class Builder {
       const { tx } = this._assemble(d.inputs, d.outputs.map((o) => ({ ...o, output: { ...o.output } })), d.lockTime, d.payload, env);
       const f = massNetworkFee(tx, env.feerate);
       if (cap != null && f > cap) {
-        throw new Failure(`${d.op}: network fee ${kas(f)} exceeds the contract's maxFee ${kas(cap)}`);
+        throw new Failure(`${d.op}: network fee ${this._kas(f)} exceeds the contract's maxFee ${this._kas(cap)}`);
       }
       if (!(totalIn >= taken + f)) throw new Failure(`${d.op}: inputs do not cover the outputs and the fee`);
       const v = totalIn - taken - f;
-      if (!(v >= floor)) throw new Failure(`${d.op}: output ${index} would be only ${kas(v)}`);
+      if (!(v >= floor)) throw new Failure(`${d.op}: output ${index} would be only ${this._kas(v)}`);
       d.outputs[index].output.value = v;
       networkFee = f;
     } else {
@@ -453,7 +459,7 @@ export class Builder {
 
   _checkLive(label, utxo, value, covenant) {
     if (utxo.entry.amount !== value) {
-      throw new Failure(`${label}: live UTXO holds ${kas(utxo.entry.amount)}, not ${kas(value)}`);
+      throw new Failure(`${label}: live UTXO holds ${this._kas(utxo.entry.amount)}, not ${this._kas(value)}`);
     }
     if (!bytesEqual(utxo.entry.covenantId ?? null, covenant ?? null)) throw new Failure(`${label}: live UTXO has the wrong covenant id`);
   }
@@ -629,7 +635,7 @@ export class Builder {
       outputs: [{ output: this._nameOutput(nf), label: `name ${nm}` }],
       priceFee: price,
       notes: [
-        `extension price ${kas(price)} left as miner fee`,
+        `extension price ${this._kas(price)} left as miner fee`,
         `expiresAt ${f.expiresAt} -> ${nf.expiresAt}; periodStart ${f.periodStart} kept (at most ${this.params.maxYears} periods past it)`,
       ],
       payload: namePayload("extend", nm),
@@ -660,7 +666,7 @@ export class Builder {
       lockTime: lock,
       priceFee: price,
       notes: [
-        `renewal price ${kas(price)} left as miner fee`,
+        `renewal price ${this._kas(price)} left as miner fee`,
         `new period: periodStart ${f.periodStart} -> ${nf.periodStart} (the old expiry), expiresAt -> ${nf.expiresAt}`,
         `lock time ${lock} >= window opening expiresAt - renewWindowMs = ${opens}`,
       ],
@@ -695,7 +701,7 @@ export class Builder {
     this._checkLive(nm, n.utxo, this.params.bond, this.registryId);
     if (price < 0n || price > maxListPrice) throw new Failure("price above the supply");
     const d = {
-      op: price === 0n ? `delist ${nm}` : `list ${nm} at ${kas(price)}`,
+      op: price === 0n ? `delist ${nm}` : `list ${nm} at ${this._kas(price)}`,
       inputs: [this._nameInput(n, "list", [argInt(price), argSignature()], BudgetRole.nameList, "name list (owner sig)")],
       outputs: [{ output: this._nameOutput(nameFieldsWithPrice(n.fields, price)), label: `name ${nm}` }],
       notes: [],
@@ -714,7 +720,7 @@ export class Builder {
     this._checkLive(nm, n.utxo, this.params.bond, this.registryId);
     if (!(n.fields.price > 0n)) throw new Failure(`${nm} is not listed`);
     const d = {
-      op: `buy ${nm} for ${kas(n.fields.price)}`,
+      op: `buy ${nm} for ${this._kas(n.fields.price)}`,
       inputs: [this._nameInput(n, "buy", [argBytes(env.me)], BudgetRole.nameBuy, "name buy(me)")],
       outputs: [
         { output: this._nameOutput(nameFieldsWithOwner(n.fields, env.me)), label: `name ${nm}` },
@@ -746,7 +752,7 @@ export class Builder {
     if (!(refundAfter < lockTimeThreshold)) throw new Failure("refundAfter is a DAA score");
     const fields = makeOfferFields({ key: nameKey(name), buyer: env.me, seller: target.fields.owner, refundAfter });
     const out = makeTxOutput({ value: amount, script: templateScript(this.manifest.offer, offerState(fields)) });
-    const d = { op: `offer ${kas(amount)} on ${name}`, inputs: [], outputs: [{ output: out, label: "offer P2SH" }], notes: [] };
+    const d = { op: `offer ${this._kas(amount)} on ${name}`, inputs: [], outputs: [{ output: out, label: "offer P2SH" }], notes: [] };
     if (target.fields.price > 0n && target.fields.price <= amount) {
       d.notes.push(`${name} is listed at or below this offer: buying it may be cheaper`);
     }
@@ -768,7 +774,7 @@ export class Builder {
     this._checkLive("offer", o.utxo, o.value, null);
     if (!bytesEqual(o.fields.key, n.fields.key)) throw new Failure("that offer is for another name");
     const d = {
-      op: `accept offer ${kas(o.value)} on ${nm}`,
+      op: `accept offer ${this._kas(o.value)} on ${nm}`,
       inputs: [
         this._nameInput(n, "transfer", [argBytes(o.fields.buyer), argSignature()], BudgetRole.nameTransfer, "name transfer(buyer) (owner sig)"),
         this._offerInput(o, "accept", [argInt(0n), argSignature()], BudgetRole.offerAccept, "offer accept(0) (seller sig)"),
@@ -788,7 +794,7 @@ export class Builder {
     if (!bytesEqual(o.fields.seller, env.me)) throw new Failure("only the seller can decline this offer");
     this._checkLive("offer", o.utxo, o.value, null);
     const d = {
-      op: `decline offer ${kas(o.value)}`,
+      op: `decline offer ${this._kas(o.value)}`,
       inputs: [this._offerInput(o, "decline", [argSignature()], BudgetRole.offerDecline, "offer decline (seller sig)")],
       outputs: [{ output: makeTxOutput({ value: 0n, script: p2pkScript(o.fields.buyer) }), label: "back to the buyer" }],
     };
@@ -800,7 +806,7 @@ export class Builder {
     if (!bytesEqual(o.fields.buyer, env.me)) throw new Failure("only the buyer can withdraw this offer");
     this._checkLive("offer", o.utxo, o.value, null);
     const d = {
-      op: `withdraw offer ${kas(o.value)}`,
+      op: `withdraw offer ${this._kas(o.value)}`,
       inputs: [this._offerInput(o, "withdraw", [argSignature()], BudgetRole.offerWithdraw, "offer withdraw (buyer sig)")],
       outputs: [{ output: makeTxOutput({ value: 0n, script: p2pkScript(o.fields.buyer) }), label: "back to the buyer" }],
     };
@@ -811,7 +817,7 @@ export class Builder {
   refundOffer({ env, offer: o }) {
     this._checkLive("offer", o.utxo, o.value, null);
     const d = {
-      op: `refund offer ${kas(o.value)}`,
+      op: `refund offer ${this._kas(o.value)}`,
       inputs: [this._offerInput(o, "refund", [], BudgetRole.offerRefund, "offer refund()")],
       outputs: [{ output: makeTxOutput({ value: 0n, script: p2pkScript(o.fields.buyer) }), label: "refund to the buyer" }],
       lockTime: o.fields.refundAfter,

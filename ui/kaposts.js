@@ -8,6 +8,7 @@
 import { fitBackgroundBanner } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { userFacingError } from "./dialogs.js";
+import { splitTypedName, primary as primaryName } from "../engine/name-services.js";
 import {
   KAPOSTS_POST_CHARACTER_LIMIT,
   fetchFollowingFeed,
@@ -549,6 +550,8 @@ function mapRemotePost(post) {
     remoteId: post.id,
     posterPubkey: post.userPublicKey,
     posterAddress: address,
+    // who each @token meant when the author wrote it; a tap opens one of these (iOS e493c97)
+    mentionedPubkeys: Array.isArray(post.mentionedPubkeys) ? post.mentionedPubkeys.filter((k) => typeof k === "string") : [],
     text: stripKaChatMarker(content),
     timestamp: Number(post.timestamp) || Date.now(),
     likes: post.upVotesCount || 0,
@@ -1202,12 +1205,34 @@ function escapeWithMentions(rawText) {
   return out;
 }
 
-// The owner address of an @mention token, on every name service with .kachat first (iOS d0c5b09
-// KaPostsView.mentionAddress): the ending typed ("@bob.kas" is the .kas name), else .kachat, .kas,
-// .k, .kaspa.
-async function mentionAddress(token) {
-  const resolution = await deps.engine.resolveName?.(token);
-  return resolution?.ownerAddress || null;
+// The owner address of an @mention token (iOS KaPostsView.mentionAddress, e493c97 IOS-068/069).
+// Mentions have their own rule, not the address fields' .kachat-only one:
+// - with the post's signed mentions (`signed`), the answer whose owner the author signed: who the
+//   token meant when it was written, whoever holds the name today;
+// - otherwise the ending typed ("@bob.kas" is the .kas name), else .kachat, else .kas: the meaning
+//   every post from before .kachat was written with.
+async function mentionAddress(token, signed = []) {
+  const results = (await deps.engine.resolveNameEverywhere?.(token)) || [];
+  if (signed.length) {
+    const keys = new Set(signed.map((k) => String(k).toLowerCase()));
+    const typed = splitTypedName(token).tld;
+    const ordered = [...results.filter((r) => r.tld === typed), ...results.filter((r) => r.tld !== typed)];
+    const match = ordered.find((r) => {
+      const pk = r.address ? deps.engine.kapostPubkeyForAddress?.(r.address) : null;
+      return pk && keys.has(String(pk).toLowerCase());
+    });
+    if (match) return match.address;
+  }
+  return mentionResolution(token, results)?.address || null;
+}
+
+// The mention rule's answer among every service's results (iOS e493c97): the ending typed, else
+// .kachat, else - a bare token with no .kachat answer - the .kas name it meant before .kachat.
+function mentionResolution(token, results) {
+  const winner = primaryName(results, token);
+  if (winner) return winner;
+  if (splitTypedName(token).tld) return null;
+  return results.find((r) => r.tld === "kas" && r.address) || null;
 }
 
 // Resolve the @mentions in a post's text to the compressed pubkeys the indexer needs in
@@ -1231,7 +1256,7 @@ async function mentionedPubkeysFor(text) {
   for (const token of tokens) {
     let pubkey = token.endsWith(".kas") ? (byKasName.get(token.slice(0, -4)) || null) : null;
     if (!pubkey) {
-      // everyone else on every service, .kachat first
+      // everyone else: the mention rule (ending typed, else .kachat, else .kas; iOS e493c97)
       try {
         const address = await mentionAddress(token);
         if (address) pubkey = deps.engine.kapostPubkeyForAddress?.(address) || null;
@@ -1242,12 +1267,13 @@ async function mentionedPubkeysFor(text) {
   return [...found];
 }
 
-// Tapped @mention anywhere in KaPosts: resolve the token .kachat first ("@bob.kas" stays the .kas
-// name, iOS d0c5b09) and open that user's profile at the resolved address (iOS 5316269) - anyone
+// Tapped @mention anywhere in KaPosts: open the profile of whoever the author signed for the
+// token (the post's mentionedPubkeys, iOS e493c97 IOS-068), else the mention rule's answer
+// ("@bob.kas" stays the .kas name, iOS d0c5b09), at the resolved address (iOS 5316269) - anyone
 // with a name, contact or not; never-posted owners get an honest empty profile.
-async function openMentionProfile(domain) {
+async function openMentionProfile(domain, signed = []) {
   try {
-    const address = await mentionAddress(domain);
+    const address = await mentionAddress(domain, signed);
     if (!address) { deps.showToast?.(`Couldn't resolve @${domain}.`); return; }
     const pubkey = deps.engine.kapostPubkeyForAddress?.(address) || null;
     openPosterProfile(address, pubkey);
@@ -4665,8 +4691,8 @@ export function resetKaPostsForAccount() {
 // --- @mention autocomplete --------------------------------------------------
 // Attach to a composer textarea: typing "@" opens a menu of your 1:1 contacts' names - their
 // .kachat names first (deps.getKachatMentionNames), then their .kas domains
-// (deps.getMentionCandidates) - and a live-resolved name for the query on any service, .kachat
-// first (iOS d0c5b09). Picking one inserts "@name.ending ", so it resolves on the service shown.
+// (deps.getMentionCandidates) - and a live-resolved name for the query by the mention rule:
+// .kachat first, else .kas (iOS d0c5b09, e493c97). Picking one inserts "@name.ending ", so it resolves on the service shown.
 const MENTION_QUERY_RE = /(?:^|[\s([{<"'])@([a-z0-9-]*)$/i;
 
 function attachMentionAutocomplete(textarea) {
@@ -4677,7 +4703,7 @@ function attachMentionAutocomplete(textarea) {
   let items = [];
   let activeIndex = 0;
   let anchorStart = -1; // index of the '@' currently being completed
-  // Live resolution of the current query on every service, .kachat first (contacts come from the
+  // Live resolution of the current query, .kachat first, else .kas (contacts come from the
   // local list; this row lets you mention anyone with a name anywhere).
   let resolveToken = 0;
   let resolvedExtra = null; // { query, domain } - domain with its ending, e.g. "bob.kachat"
@@ -4699,10 +4725,11 @@ function attachMentionAutocomplete(textarea) {
     window.setTimeout(async () => {
       if (token !== resolveToken) return;
       try {
-        // anyone with a name on any service, .kachat first
-        const resolution = await deps.engine.resolveName?.(clean);
-        if (token !== resolveToken || !resolution?.domain) return;
-        resolvedExtra = { query: clean, domain: String(resolution.domain).toLowerCase() };
+        // anyone with a name: .kachat first, else the .kas name (the mention rule, iOS e493c97)
+        const results = (await deps.engine.resolveNameEverywhere?.(clean)) || [];
+        const resolution = mentionResolution(clean, results);
+        if (token !== resolveToken || !resolution?.name) return;
+        resolvedExtra = { query: clean, domain: String(resolution.name).toLowerCase() };
         const ctx = currentQuery();
         if (ctx && ctx.query.toLowerCase() === clean) render(ctx.query);
       } catch { /* no match: contacts-only list stands */ }
@@ -5261,7 +5288,10 @@ export function initKaPosts(dependencies) {
 
     const mentionTap = event.target.closest("[data-kaposts-mention]");
     if (mentionTap) {
-      openMentionProfile(mentionTap.dataset.kapostsMention);
+      // the post's signed mentions ride along, so the tap opens who the author meant (iOS e493c97)
+      const cellId = mentionTap.closest("[data-kaposts-post]")?.dataset.kapostsPost;
+      const signed = (cellId && findPost(cellId)?.mentionedPubkeys) || [];
+      openMentionProfile(mentionTap.dataset.kapostsMention, signed);
       return;
     }
 

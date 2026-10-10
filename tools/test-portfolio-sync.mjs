@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   mergePortfolioSync, mergePortfolioArchives, mergePortfolioTombstones, stampPortfolioChanges,
   portfolioSyncFromArchive, portfolioSyncToArchive, portfolioSyncFromDesktop, portfolioSyncToDesktop,
-  portfolioSyncForArchive, isPristinePortfolioSeed, newPortfolioUuid, PORTFOLIO_SEED_NAME,
+  portfolioSyncForArchive, isPristinePortfolioSeed, newPortfolioUuid, PORTFOLIO_SEED_NAME, foldPortfolioEquivalents,
 } from "../ui/portfolio-sync.js";
 
 const P1 = "11111111-1111-4111-8111-111111111111";
@@ -219,6 +219,74 @@ test("Desktop store round trip keeps order, KAS amounts and stamps", () => {
   assert.ok(!("updatedAt" in back.portfolios[1]));
   assert.equal(back.fees[0].fiatValue, null);
   assert.deepEqual(back.tombstones, [tomb("transaction", "x", at(2))]);
+});
+
+// iOS 54788da (IOS-073): what two devices made before sync is folded.
+const imported = (id, portfolioId, sourceTxId, opts = {}) => ({ ...row(id, portfolioId, opts), type: "transfer", sourceTxId });
+const deviceA = () => side({
+  portfolios: [portfolio(P1, "Portfolio 1", { createdAt: at(0) })],
+  transactions: [imported("a-1", P1, "txid-1"), imported("a-2", P1, "txid-2"), row("a-manual", P1)],
+  fees: [fee("txid-1", P1, 3)],
+});
+const deviceB = () => side({
+  portfolios: [portfolio(P2, "Portfolio 1", { createdAt: at(5) })],
+  transactions: [imported("b-1", P2, "txid-1", { updatedAt: at(9), notes: "edited on B" }), imported("b-3", P2, "txid-3"), row("b-manual", P2)],
+  fees: [fee("txid-1", P2, 3), fee("txid-3", P2, null)],
+});
+
+test("fold: same-named portfolios without updatedAt become one, rows and fees move, an import kept once", () => {
+  const merged = mergePortfolioSync([deviceA(), deviceB()]);
+  assert.deepEqual(merged.portfolios.map((p) => p.id), [P1], "the oldest id stays");
+  assert.ok(merged.transactions.every((t) => t.portfolioId === P1));
+  assert.deepEqual(merged.transactions.map((t) => t.id).sort(), ["a-2", "a-manual", "b-1", "b-3", "b-manual"]);
+  assert.equal(merged.transactions.find((t) => t.sourceTxId === "txid-1").notes, "edited on B", "the newest edit stays");
+  assert.deepEqual(merged.fees.map((f) => `${f.portfolioId}:${f.txId}`), [`${P1}:txid-1`, `${P1}:txid-3`]);
+  // no updatedAt anywhere on the duplicate: ties keep the smaller id
+  const tie = mergePortfolioSync([
+    side({ portfolios: [portfolio(P1, "Main")], transactions: [imported("z-copy", P1, "t")] }),
+    side({ portfolios: [portfolio(P2, "Main", { createdAt: at(1) })], transactions: [imported("m-copy", P2, "t")] }),
+  ]);
+  assert.deepEqual(tie.transactions.map((t) => [t.id, t.portfolioId]), [["m-copy", P1]]);
+});
+
+test("fold: either order gives the same result", () => {
+  const ab = mergePortfolioSync([deviceA(), deviceB()]);
+  const ba = mergePortfolioSync([deviceB(), deviceA()]);
+  assert.deepEqual(ab.portfolios, ba.portfolios);
+  assert.deepEqual(ab.transactions, ba.transactions);
+  assert.deepEqual(ab.fees, ba.fees);
+  // a createdAt tie folds into the smaller id whichever side comes first
+  const x = side({ portfolios: [portfolio(P2, "Same")] });
+  const y = side({ portfolios: [portfolio(P1, "Same")] });
+  assert.deepEqual(mergePortfolioSync([x, y]).portfolios.map((p) => p.id), [P1]);
+  assert.deepEqual(mergePortfolioSync([y, x]).portfolios.map((p) => p.id), [P1]);
+});
+
+test("fold: stable on the next sync", () => {
+  const first = mergePortfolioSync([deviceA(), deviceB()]);
+  // each device saves the merge; the next sync meets it again next to the device's old copy
+  const again = mergePortfolioSync([first, deviceB()]);
+  assert.deepEqual(again.portfolios, first.portfolios);
+  assert.deepEqual(again.transactions, first.transactions);
+  assert.deepEqual(again.fees, first.fees);
+  assert.deepEqual(mergePortfolioSync([first, first]), first);
+  const viaArchive = portfolioSyncFromArchive(mergePortfolioArchives(portfolioSyncToArchive(first), portfolioSyncToArchive(deviceA())));
+  assert.deepEqual(viaArchive.transactions.map((t) => t.id), first.transactions.map((t) => t.id));
+});
+
+test("fold: different names, or an edited portfolio, stay apart", () => {
+  const merged = mergePortfolioSync([
+    side({ portfolios: [portfolio(P1, "Savings")], transactions: [imported("s", P1, "t")] }),
+    side({ portfolios: [portfolio(P2, "Trading", { sortOrder: 1 })], transactions: [imported("t", P2, "t")] }),
+  ]);
+  assert.deepEqual(merged.portfolios.map((p) => p.id), [P1, P2]);
+  assert.equal(merged.transactions.length, 2);
+  const edited = mergePortfolioSync([
+    side({ portfolios: [portfolio(P1, "Same")] }),
+    side({ portfolios: [portfolio(P3, "Same", { sortOrder: 1, updatedAt: at(4) })] }),
+  ]);
+  assert.deepEqual(edited.portfolios.map((p) => p.id), [P1, P3]);
+  assert.equal(foldPortfolioEquivalents([side()]).length, 1);
 });
 
 let failed = 0;

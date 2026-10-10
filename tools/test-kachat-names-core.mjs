@@ -11,8 +11,12 @@
 //
 // Without a path it runs the v4 vectors, then the registry v5 vectors
 // (tools/fixtures/kachat-names-vectors-v5.json, a copy of iOS KaChatTests/KachatNamesVectors-v5.json,
-// kachat-domains 6eddc7a: the v5 gap's budgets, the register deadline; imports are skipped, the
-// walker test decodes them - iOS 6f18475).
+// kachat-domains 6eddc7a, regenerated with the C3 case in iOS ef6b21e: the v5 gap's budgets, the
+// register deadline; imports are skipped, the walker test decodes them - iOS 6f18475), then the
+// mainnet v1 vectors (tools/fixtures/kachat-names-vectors-mainnet.json, a copy of iOS
+// KaChatTests/KachatNamesVectors-mainnet.json, kachat-domains a99afeb: the audited v4 contracts
+// under the mainnet params - iOS ef6b21e). Both bundled manifests (testnet-10 and mainnet) are
+// checked last.
 
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -217,12 +221,13 @@ function runManifest(v, r) {
   // genesis exists: the vectors' registry is not a deployed one, so an indexer-served copy is refused
   r.check(M.deployedTemplateHashes[C.hex(m.registryCovenantId)] === undefined, "the vectors' registry has deployment pins");
   r.check(!verifies(m, { source: M.ManifestSource.indexer }), "an indexer-served manifest with an unpinned offer verified");
-  const versionPins = M.pinnedTemplateHashes[m.registryVersion];
+  // pins and prices are per network (iOS ef6b21e)
+  const versionPins = M.versionPinsFor(m.network, m.registryVersion);
   r.eq(m.registryVersion, Number(v.registryVersion ?? 4), "registryVersion");
   if (m.registryVersion >= 5) {
     // the v5 gap bakes its migration snapshot: pinned per deployment, never by version
     r.eq(versionPins.KachatGap, undefined, "v5: the gap is not pinned by version");
-    r.eq(M.templatePinsFor(m.registryCovenantId, 5).KachatGap, undefined, "v5: the vectors' gap has no pin");
+    r.eq(M.templatePinsFor(m.registryCovenantId, 5, m.network).KachatGap, undefined, "v5: the vectors' gap has no pin");
   } else {
     r.eq(C.hex(m.gap.templateHash), versionPins.KachatGap, "the vectors' gap is the pinned v4 build");
   }
@@ -254,8 +259,8 @@ function runManifest(v, r) {
   // the fixed tables (registry v4) and the rule the contracts charge by
   r.eq(m.params.registerPrices.join(","), v.registerPrices.map(u64).join(","), "register prices");
   r.eq(m.params.renewPrices.join(","), v.renewPrices.map(u64).join(","), "renew prices");
-  r.eq(m.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "register prices = the pinned table");
-  r.eq(m.params.renewPrices.join(","), M.pinnedRenewPrices.join(","), "renew prices = the pinned table");
+  r.eq(m.params.registerPrices.join(","), M.pinnedRegisterPrices[m.network].join(","), "register prices = the pinned table");
+  r.eq(m.params.renewPrices.join(","), M.pinnedRenewPrices[m.network].join(","), "renew prices = the pinned table");
   for (let len = 1; len <= 6; len++) {
     for (const years of [1n, 2n]) {
       const t = C.tier(len);
@@ -271,7 +276,7 @@ function runManifest(v, r) {
   r.check(!verifies(M.decodeManifest(jp)), "manifest with other prices than the templates bake verified");
   // desktop extra: the renew table too, and a missing table
   const jr = structuredClone(v.manifest);
-  jr.params.prices.renew.len5plus = 8_750_001;
+  jr.params.prices.renew.len5plus = Number(m.params.renewPrices[4]) + 1;
   r.check(!verifies(M.decodeManifest(jr)), "manifest with another renew table verified");
   const jm = structuredClone(v.manifest);
   delete jm.params.prices.renew;
@@ -283,9 +288,23 @@ function runManifest(v, r) {
   const j2 = structuredClone(v.manifest);
   j2.artifacts.KachatGap.suffixHex = j2.artifacts.KachatGap.suffixHex.slice(0, -2) + "00";
   r.check(!verifies(M.decodeManifest(j2)), "manifest with a tampered gap suffix verified");
+  // relabelled to the OTHER network, a manifest is refused (pins and prices are per network, iOS ef6b21e)
   const j3 = structuredClone(v.manifest);
-  j3.network = "mainnet";
-  r.check(!verifies(M.decodeManifest(j3)), "mainnet manifest verified");
+  j3.network = m.network === "mainnet" ? "testnet-10" : "mainnet";
+  r.check(!verifies(M.decodeManifest(j3)), "a manifest relabelled to the other network verified");
+  const j4 = structuredClone(v.manifest);
+  j4.network = "testnet-11";
+  r.check(!verifies(M.decodeManifest(j4)), "a manifest for an unsupported network verified");
+  // a registry version not pinned on the manifest's network is refused (mainnet pins only v4)
+  if (m.network === "mainnet") {
+    r.eq(M.versionPinsFor("mainnet", 5), null, "mainnet: no v5 pins");
+    let msg = "";
+    const j5 = structuredClone(v.manifest);
+    j5.registryVersion = 5;
+    j5.params.migration = { predecessorRegistryId: "00".repeat(32), root: "00".repeat(32), deadlineMs: 0, sponsor: "00".repeat(32) };
+    try { M.verifyManifest(M.decodeManifest(j5)); } catch (e) { msg = e.message; }
+    r.check(/isn't pinned for mainnet/.test(msg), `mainnet: a v5 manifest is refused as not pinned: ${msg || "verified"}`);
+  }
   if (m.registryVersion >= 5) {
     // registry v5 (iOS 6f18475): params.migration decoded, baked into the gap, never the registry itself
     const mig = m.params.migration;
@@ -354,8 +373,8 @@ function runBundled(r) {
     r.eq(bm.params.periodMs, 86_400_000n, "bundled manifest: 24-hour testnet clock");
     r.eq(bm.params.graceMs, 21_600_000n, "bundled manifest: 6-hour grace");
     r.eq(bm.params.renewWindowMs, 7_200_000n, "bundled manifest: 2-hour renewal window");
-    r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.join(","), "bundled manifest: the pinned register table");
-    r.eq(bm.params.renewPrices.join(","), M.pinnedRenewPrices.join(","), "bundled manifest: the pinned renew table");
+    r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices["testnet-10"].join(","), "bundled manifest: the pinned register table");
+    r.eq(bm.params.renewPrices.join(","), M.pinnedRenewPrices["testnet-10"].join(","), "bundled manifest: the pinned renew table");
     // the pins: the gap and name everywhere, the offer for this registry id - and they are exactly
     // the bundled templates (iOS Manifest.pinnedTemplateHashes / deployedTemplateHashes)
     const pins = M.templatePinsFor(bm.registryCovenantId, bm.registryVersion);
@@ -418,6 +437,70 @@ function runBundled(r) {
   }
 }
 
+/** The bundled mainnet manifest (iOS ef6b21e: mainnet v1, registry 348bd2c8, launched 2026-10-09):
+ *  byte-identical to iOS, verified from the bundle and as an indexer would serve it, the mainnet
+ *  pins and prices, and never accepted under the other network's label. */
+function runBundledMainnet(r) {
+  const path = join(repo, "engine/kachat-names/kachat-names-mainnet.json");
+  if (!existsSync(path)) { r.check(false, "no bundled mainnet manifest"); return; }
+  const bundled = readFileSync(path);
+  const iosPath = [
+    "/Users/restosaved/Everything KaChat/KaChat/KaChat/Resources/kachat-names-mainnet.json",
+    "/Users/restosaved/KaChat/KaChat/Resources/kachat-names-mainnet.json",
+  ].find((x) => existsSync(x));
+  if (iosPath) r.check(Buffer.compare(bundled, readFileSync(iosPath)) === 0, "bundled mainnet manifest differs from the iOS resource");
+  const REGISTRY = "348bd2c81170f267a2a7039cbf3a6f275e80b189d6c956183ea73ff3ffde75a4";
+  const json = JSON.parse(bundled.toString("utf8"));
+  let bm = null;
+  try { bm = M.decodeManifest(new Uint8Array(bundled)); } catch (e) { r.check(false, `bundled mainnet manifest decode: ${e.message}`); return; }
+  try { M.verifyManifest(bm); r.pass += 1; } catch (e) { r.check(false, `bundled mainnet manifest verify (bundle): ${e.message}`); }
+  try { M.verifyManifest(bm, { source: M.ManifestSource.indexer }); r.pass += 1; } catch (e) { r.check(false, `bundled mainnet manifest verify (indexer): ${e.message}`); }
+  r.check(!bm.isDryRun, "the bundled mainnet manifest is a dry run");
+  r.eq(bm.network, "mainnet", "bundled mainnet manifest network");
+  r.eq(bm.registryVersion, 4, "bundled mainnet manifest: registry v4");
+  r.eq(C.hex(bm.registryCovenantId), REGISTRY, "bundled mainnet registry covenant id");
+  r.eq(C.hex(bm.genesisTxid), "a0281841bf77807a7780f13cc84c0a3e4cd8df3d076b7f052ffc9c898cca90ff", "bundled mainnet genesis txid");
+  r.eq(bm.params.migration, null, "bundled mainnet manifest: no migration (v4)");
+  r.eq(bm.params.periodMs, C.yearMs, "bundled mainnet manifest: yearly periods");
+  r.eq(bm.params.graceMs, 7_776_000_000n, "bundled mainnet manifest: 90-day grace");
+  r.eq(bm.params.renewWindowMs, 2_592_000_000n, "bundled mainnet manifest: 30-day renewal window");
+  r.eq(bm.params.registerPrices.join(","), "400000000000,200000000000,100000000000,25000000000,3500000000", "bundled mainnet manifest: register 4000/2000/1000/250/35 KAS");
+  r.eq(bm.params.renewPrices.join(","), "100000000000,50000000000,25000000000,6250000000,875000000", "bundled mainnet manifest: renew 1000/500/250/62.5/8.75 KAS");
+  r.eq(bm.params.registerPrices.join(","), M.pinnedRegisterPrices.mainnet.join(","), "bundled mainnet manifest: the pinned register table");
+  r.eq(bm.params.renewPrices.join(","), M.pinnedRenewPrices.mainnet.join(","), "bundled mainnet manifest: the pinned renew table");
+  // testnet is mainnet / 100
+  r.eq(M.pinnedRegisterPrices.mainnet.map((x) => x / 100n).join(","), M.pinnedRegisterPrices["testnet-10"].join(","), "testnet register table = mainnet / 100");
+  r.eq(M.pinnedRenewPrices.mainnet.map((x) => x / 100n).join(","), M.pinnedRenewPrices["testnet-10"].join(","), "testnet renew table = mainnet / 100");
+  const pins = M.templatePinsFor(bm.registryCovenantId, 4, "mainnet");
+  r.eq(Object.keys(pins).sort().join(","), "KachatGap,KachatName,KachatOffer", "every template pinned for the mainnet registry");
+  for (const t of [bm.gap, bm.name, bm.offer]) r.eq(C.hex(t.templateHash), pins[t.contract], `bundled mainnet ${t.contract} is the pinned build`);
+  r.eq(pins.KachatGap, "d70afe60686842b92ec8b4f6da34eb20462f0a98c26922de62b82ae65cfc1d4f", "pinned mainnet gap hash (iOS)");
+  r.eq(pins.KachatName, "259e0250a2bba8587a74b2ad366c45916565593db6eb44c3751dacba943f19d6", "pinned mainnet name hash (iOS)");
+  r.eq(pins.KachatOffer, "7e7f2461f475f7196eabd9fca2f945fbf660c27d40b7f65e2c6a9dc2c0ae63e4", "pinned mainnet offer hash (iOS)");
+  // the mainnet gap and name are not testnet's, and testnet's v4 pins don't verify a mainnet build
+  r.check(M.templatePinsFor(REGISTRY, 4, "testnet-10").KachatGap !== pins.KachatGap, "the mainnet gap is not the testnet v4 pin");
+  // relabelled to the other network, either bundled manifest is refused (iOS ef6b21e)
+  const asTestnet = structuredClone(json);
+  asTestnet.network = "testnet-10";
+  r.check(!verifies(M.decodeManifest(asTestnet)), "the mainnet manifest relabelled testnet-10 verified");
+  const tn = JSON.parse(readFileSync(join(repo, "engine/kachat-names/kachat-names-testnet-10.json"), "utf8"));
+  tn.network = "mainnet";
+  let tnMsg = "";
+  try { M.verifyManifest(M.decodeManifest(tn)); } catch (e) { tnMsg = e.message; }
+  r.check(tnMsg !== "", "the testnet manifest relabelled mainnet verified");
+  // a tampered mainnet offer build (its hash recomputed so only the pin can catch it) is refused
+  const tampered = M.decodeManifest(new Uint8Array(bundled));
+  const suffix = tampered.offer.suffix.slice();
+  suffix[suffix.length - 1] ^= 1;
+  tampered.offer = { ...tampered.offer, suffix, templateHash: C.templateHash(tampered.offer.prefix, suffix) };
+  let msg = "";
+  try { M.verifyManifest(tampered); } catch (e) { msg = e.message; }
+  r.check(/KachatOffer is not the pinned build/.test(msg), `a tampered mainnet offer template is refused as not pinned: ${msg || "verified"}`);
+  r.eq(M.bundleResource("mainnet"), "kachat-names-mainnet", "bundleResource(mainnet)");
+  r.eq(M.bundleResource("testnet-10"), "kachat-names-testnet-10", "bundleResource(testnet-10)");
+  console.log(`bundled manifest mainnet: registry v${bm.registryVersion}, verified (registry ${REGISTRY.slice(0, 8)}..${REGISTRY.slice(-4)}, every template pinned)`);
+}
+
 /** The period rules on their own (KACHAT_NAMES.md 4.1, ops.rs) on the testnet-10 day clock
  *  (registry v4: periodMs 24 hours, renewWindowMs 2 hours, graceMs 6 hours): what extend may add, when renew
  *  opens, its lock time, the refusals. Port of Swift `runPeriodRules`. */
@@ -438,9 +521,11 @@ function runPeriodRules(v, m, r) {
     r.eq(T.networkFee(tx0, 1e300), T.networkFee(tx0, C.maxFeerate), "networkFee at 1e300 pays the ceiling");
   }
   const y = p.periodMs;
-  r.eq(y, 86_400_000n, "periodMs from the manifest (24 hours)");
-  r.eq(p.renewWindowMs, 7_200_000n, "renewWindowMs from the manifest (2 hours)");
-  r.eq(p.graceMs, 21_600_000n, "graceMs from the manifest (6 hours)");
+  // testnet-10: the day clock; mainnet: the year clock (90-day grace, 30-day window; iOS ef6b21e)
+  const mainnet = m.network === "mainnet";
+  r.eq(y, mainnet ? 31_536_000_000n : 86_400_000n, "periodMs from the manifest");
+  r.eq(p.renewWindowMs, mainnet ? 2_592_000_000n : 7_200_000n, "renewWindowMs from the manifest");
+  r.eq(p.graceMs, mainnet ? 7_776_000_000n : 21_600_000n, "graceMs from the manifest");
   r.eq(u64(v.renewWindowMs), p.renewWindowMs, "renewWindowMs matches the vectors");
   const start = 2_000_000_000_000n;
   r.eq(M.paramsExtendableYears(p, start, start + y), 1n, "1-period registration: extend by 1");
@@ -458,10 +543,10 @@ function runPeriodRules(v, m, r) {
   r.eq(C.nameFieldsWithPrice(f, 5n).periodStart, start, "list keeps periodStart");
   r.check((() => { try { return C.nameFieldsEqual(C.decodeNameState(C.nameState(f)), f); } catch { return false; } })(), "126-byte state round trip");
   r.check((() => { try { C.decodeNameState(C.nameState(f).subarray(0, 117)); return false; } catch { return true; } })(), "a 117-byte (v1) state is refused");
-  // a 2-period name: the window opens 2 hours before its expiry
+  // a 2-period name: the window opens renewWindowMs before its expiry
   const f2 = C.nameFieldsFor("alice", new Uint8Array(32).fill(7), 0n, start, start + 2n * y);
   const opens = M.paramsRenewOpens(p, f2.expiresAt);
-  r.eq(opens, f2.expiresAt - 7_200_000n, "renew opens 2 hours before expiry");
+  r.eq(opens, f2.expiresAt - p.renewWindowMs, "renew opens renewWindowMs before expiry");
   const before = B.makeEnv({ me: f.owner, blockDaa: 1n, blockTimeMs: opens - 60_000n, wallMs: opens + 60_000n });
   r.check(!B.renewWindowOpen(before, p, f2.expiresAt), "window closed while the median time is before the opening");
   r.eq(B.renewLockTime(before, p, f2.expiresAt), opens, "lock time never before the opening");
@@ -509,7 +594,8 @@ function runPeriodRules(v, m, r) {
   const roles = Object.values(B.BudgetRole).filter((x) => m.registryVersion >= 5 || x !== B.BudgetRole.gapImport);
   r.eq(Object.keys(recommended).sort().join(","), [...roles].sort().join(","), "budget roles = recommendedBudgets keys");
   for (const role of roles) {
-    r.eq(BigInt(table[role]), u64(recommended[role]), `recommended budget ${role}`);
+    // never below the vectors' table (a pre-audit v4 set asks less than the audited code, iOS ef6b21e)
+    r.check(BigInt(table[role]) >= u64(recommended[role]), `recommended budget ${role}: ${table[role]} < ${recommended[role]}`);
   }
   if (m.registryVersion >= 5 && v.migrationRules) {
     // registry v5: register is refused before the migration deadline, built at and after it
@@ -616,7 +702,8 @@ function runSteps(v, m, r) {
       const measured = num(i.computeBudget);
       r.check(role in table, `${label}: unknown role ${role}`);
       r.check(measured <= B.budgetFor(table, role), `${label}: measured budget ${measured} > recommended for ${role}`);
-      r.eq(table[role], num(recommended[role]), `recommended table ${role}`);
+      // never below the vectors' table (a pre-audit v4 set asks less than the audited code)
+      r.check(table[role] >= num(recommended[role]), `recommended table ${role}: ${table[role]} < ${num(recommended[role])}`);
       budgets[role] = measured;
     }
     const env = B.makeEnv({ me: hx(env0.me), blockDaa: u64(env0.blockDaa), blockTimeMs: u64(env0.blockTimeMs), wallMs: u64(env0.wallMs), feerate: Number(env0.feerate), budgets });
@@ -627,7 +714,8 @@ function runSteps(v, m, r) {
     try {
       plan = build(b, s(st.op), env, wallet, args, rec);
       if (st.op === "register") {
-        r.eq(B.registerNow(env), u64(args.now) + (label.includes("lapse") ? 55n * 3_600_000n : 0n), `${label}: registerNow`);
+        // the lapse step is backdated on purpose (by a network's clock), so only the others (iOS ef6b21e)
+        if (!label.includes("lapse")) r.eq(B.registerNow(env), u64(args.now), `${label}: registerNow`);
         // registry v4: the registration price for the first period, the renewal price after
         r.eq(plan.priceFee, M.paramsRegisterCost(m.params, C.utf8(s(rec.commit.name)).length, u64(args.years)), `${label}: registerCost`);
         r.check(plan.inputs.every((i) => i.role !== "price.use"), `${label}: no price shard input`);
@@ -847,11 +935,14 @@ if (given) {
 } else {
   ok = (await runVectors(join(repo, "tools/fixtures/kachat-names-vectors.json"))) && ok;
   ok = (await runVectors(join(repo, "tools/fixtures/kachat-names-vectors-v5.json"))) && ok;
+  // mainnet v1 (iOS ef6b21e): the vectors of the audited v4 under the mainnet params (kachat-domains a99afeb)
+  ok = (await runVectors(join(repo, "tools/fixtures/kachat-names-vectors-mainnet.json"))) && ok;
 }
 {
   const r = new Report();
   runBundled(r);
-  console.log(`bundled manifest: ${r.pass} checks pass, ${r.fail} fail`);
+  runBundledMainnet(r);
+  console.log(`bundled manifests: ${r.pass} checks pass, ${r.fail} fail`);
   for (const f of r.failures.slice(0, 40)) console.log("  FAIL " + f);
   ok = ok && r.fail === 0;
 }

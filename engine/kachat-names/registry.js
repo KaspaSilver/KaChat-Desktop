@@ -15,7 +15,9 @@
 //   Cached per network in `storage`.
 //
 // Records from either source are only read here; every action must re-read its UTXOs from a node
-// before it builds anything. The registry is testnet-10 only. Every I/O dependency is injected (no
+// before it builds anything. The registry runs on testnet-10 and, since 2026-10-09, mainnet (iOS
+// ef6b21e): the manifest names the network, and addresses use its prefix (registry-state.js
+// `addressPrefix`). Every I/O dependency is injected (no
 // app imports), and nothing runs at import.
 //
 // Where the network has no registry (`isEnabled()` false: mainnet, iOS d36fc42) the registry is
@@ -44,8 +46,13 @@ export {
   KachatSocialImageResolver, socialImageCachePrefix, socialImageLegacyCachePrefix, socialFreshForMs, socialLookupDeadlineMs, socialRequestTimeoutMs, socialRecentMs,
 } from "./social-image-resolver.js";
 
-/** The storage key of the walker's cache (testnet-10). */
+/** The storage key of the walker's cache on testnet-10. */
 export const registryCacheKey = "kachat-names-registry-testnet-v1";
+/** The storage key of the walker's cache on a manifest network ("testnet-10" | "mainnet"): each
+ *  network keeps its own (iOS ef6b21e: cache folders per network); testnet's is `registryCacheKey`. */
+export function registryCacheKeyFor(network) {
+  return network === "mainnet" ? "kachat-names-registry-mainnet-v1" : registryCacheKey;
+}
 /** The storage key prefix of this device's own profile records on testnet (`<prefix>:<address>`). */
 export const ownProfileKeyPrefix = "kachat-names-profile-testnet-v1";
 /** The own-profile storage key prefix of a network ("mainnet" | "testnet"): "kachat-names-profile-<network>-v1"
@@ -155,7 +162,7 @@ function isUpgradingError(error) {
  *      behind the network isn't used (iOS 7aa6c6d); without it, the indexer's own `synced` is trusted.
  *  - optional: `isEnabled()` (default true; false makes refresh a no-op, as iOS
  *      KachatNamesService.isLaunched - the app passes that gate), `log(...args)` (default console.log), `cacheKey`
- *      (default "kachat-names-registry-testnet-v1"), `sleep(ms)`.
+ *      (default `registryCacheKeyFor(manifest.network)`), `sleep(ms)`.
  */
 export class KachatNamesRegistry {
   constructor(deps = {}) {
@@ -170,7 +177,7 @@ export class KachatNamesRegistry {
       isEnabled: deps.isEnabled ?? (() => true),
       virtualDaaScore: deps.virtualDaaScore ?? null,
       log: deps.log ?? ((...a) => console.log(...a)),
-      cacheKey: deps.cacheKey ?? registryCacheKey,
+      cacheKey: deps.cacheKey ?? null,
       sleep: deps.sleep ?? sleep,
     };
     /** `{ kind: "indexer", base }` | `{ kind: "chain" }` | null (not chosen yet) */
@@ -193,6 +200,8 @@ export class KachatNamesRegistry {
     /** the verified manifest once loaded */
     this.manifest = null;
     this._cacheNetwork = null;
+    /** the network `prepare` last ran for */
+    this._preparedNetwork = null;
     this._ownProfiles = new Map();
     this._listeners = new Set();
     this._refreshing = null;
@@ -238,6 +247,15 @@ export class KachatNamesRegistry {
   async prepare({ forceSourceCheck = false } = {}) {
     if (!this.deps.isEnabled()) throw new Failure("there is no .kachat registry on this network yet");
     const m = await this._loadManifest();
+    // a source picked on the other network (its indexer) is never this one's (iOS ef6b21e)
+    if (this._preparedNetwork !== m.network) {
+      if (this._preparedNetwork != null) {
+        this.source = null;
+        this.chainState = null;
+        this._cacheNetwork = null;
+      }
+      this._preparedNetwork = m.network;
+    }
     if (this.source == null || forceSourceCheck) {
       const chosen = await this._chooseSource(m);
       if (this.source && this.source.kind !== chosen.kind) {
@@ -258,6 +276,7 @@ export class KachatNamesRegistry {
     this.source = null;
     this.chainState = null;
     this._cacheNetwork = null;
+    this._preparedNetwork = null;
     this._ownProfiles = new Map();
     this._profilesUnavailableUntil = 0;
     this._profileMisses = new Map();
@@ -977,7 +996,7 @@ export class KachatNamesRegistry {
   }
 
   async _loadCache(m) {
-    const text = await this._storageGet(this.deps.cacheKey);
+    const text = await this._storageGet(this._cacheKey(m.network));
     if (!text) return null;
     try {
       const st = RegistryState.fromJSON(text);
@@ -990,8 +1009,11 @@ export class KachatNamesRegistry {
   }
 
   async _saveCache(st) {
-    await this._storageSet(this.deps.cacheKey, JSON.stringify(st.toJSON()));
+    await this._storageSet(this._cacheKey(this.manifest?.network), JSON.stringify(st.toJSON()));
   }
+
+  /** The walker cache's storage key: the `cacheKey` dep, else the manifest network's. */
+  _cacheKey(network) { return this.deps.cacheKey ?? registryCacheKeyFor(network); }
 }
 
 export { addressOf, keyOf, shortAddress, compactAddress, p2shAddress };

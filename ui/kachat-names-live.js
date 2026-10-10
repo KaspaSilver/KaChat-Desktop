@@ -5,12 +5,13 @@
 // the profile hero's .kachat pictures, bio and Linktree link (kachatHeroProfile), looked up from the
 // profile's social links on this device (engine/kachat-names/social-image-resolver.js).
 // The screens are on for EVERY network (iOS 7227d69, kachatNamesUiEnabled); the registry behind them
-// is live only where it is launched (testnet-10, kachatNamesLaunched - the runtime `kachatNames()`
-// exists only there). On mainnet the hub pages, Your Domains and each address's .kachat tab render
-// empty under "Coming soon", and nothing reads or writes a registry. Address profiles are not
-// registry data (iOS d36fc42, `kachatProfiles()`): Edit KaChat Profile saves on every network
-// (the primary name shows "Coming soon" on mainnet), and the identity cache and the profile hero
-// read profile-only identities there (no label; avatar, banner, bio and Linktree from the record).
+// is live only where it is launched (testnet-10, and mainnet since 2026-10-09, iOS ef6b21e;
+// kachatNamesLaunched - the runtime `kachatNames()` exists only there). On a network without a
+// registry the hub pages, Your Domains and each address's .kachat tab render empty under "Coming
+// soon", and nothing reads or writes a registry. Address profiles are not registry data (iOS
+// d36fc42, `kachatProfiles()`): Edit KaChat Profile saves on every network (the primary name shows
+// "Coming soon" where there is no registry), and the identity cache and the profile hero read
+// profile-only identities there (no label; avatar, banner, bio and Linktree from the record).
 // Every spending or destructive action shows its cost first (built against live UTXOs, nothing
 // sent) in a Send-style sheet (iOS e426432: glass cards, the Send screens' fee card - Normal / Fast
 // / Priority or a custom total, Fast first on a busy network - info pills and slide to confirm; the
@@ -345,6 +346,8 @@ const LI = {
   xCircle: svg(`<circle cx="12" cy="12" r="9.2"/><path d="m9 9 6 6M15 9l-6 6"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
   clock: svg(`<circle cx="12" cy="12" r="9.2"/><path d="M12 7v5.2l3.4 2"/>`),
+  // arrow.triangle.merge: two paths joining into one (the coin combine, iOS f1c16ec)
+  merge: svg(`<path d="M6 3.5v4.2a4.3 4.3 0 0 0 1.3 3.1L12 15.5M18 3.5v4.2a4.3 4.3 0 0 1-1.3 3.1L12 15.5v5"/><path d="m3.8 5.7 2.2-2.2 2.2 2.2M15.8 5.7 18 3.5l2.2 2.2"/>`),
   arrowDownDoc: svg(`<path d="M14 3.5H7.4A1.9 1.9 0 0 0 5.5 5.4v13.2a1.9 1.9 0 0 0 1.9 1.9h9.2a1.9 1.9 0 0 0 1.9-1.9V8Z"/><path d="M14 3.5V8h4.5"/><path d="M12 10.5v6.5M9.2 14.2 12 17l2.8-2.8"/>`),
 };
 
@@ -405,7 +408,11 @@ function statusPill(status) {
   return `<span class="kl-status kl-status-${esc(status)}">${esc(label)}</span>`;
 }
 
-function testnetBadge() { return `<span class="kl-testnet-badge">Testnet</span>`; }
+/** "Testnet", on testnet only: mainnet's names are the real ones and need no label (iOS ef6b21e). */
+function testnetBadge() { return NETWORK === "testnet" ? `<span class="kl-testnet-badge">Testnet</span>` : ""; }
+
+/** The transfer sheet's recipient placeholder for this network (iOS ef6b21e). */
+function transferPlaceholder() { return NETWORK === "mainnet" ? "kaspa:qr... or domain" : "kaspatest:... or domain"; }
 
 // (the marketplace's name rows became tiles - kachatNameTileHtml, iOS 27a4f39)
 
@@ -1849,7 +1856,29 @@ function openOfferSheet(info, owner) {
   let days = 3;
   let virtualDaa = null;
   const amount = () => { const a = sompiFromUserText(amountRaw); return a != null && a > 0n ? a : null; };
-  const refundAfter = () => (virtualDaa == null ? null : virtualDaa + BigInt(Math.min(days, Number(maxOfferDays))) * 86_400n * DAA_PER_SECOND);
+  const wantedAfter = () => virtualDaa + BigInt(Math.min(days, Number(maxOfferDays))) * 86_400n * DAA_PER_SECOND;
+  /** `days` from now, but never past the name's expiry (MAINNET.md C1, iOS 0312a3f): with yearly
+   *  names that rarely matters, near the end of a period it does. */
+  const refundAfter = () => {
+    if (virtualDaa == null) return null;
+    const msLeft = BigInt(info.expiresAt) - BigInt(Date.now()) - 600_000n; // 10 minutes of margin
+    if (msLeft <= 0n) return null;
+    const atExpiry = virtualDaa + (msLeft * DAA_PER_SECOND) / 1000n;
+    const wanted = wantedAfter();
+    return wanted < atExpiry ? wanted : atExpiry;
+  };
+  const cappedByExpiry = () => {
+    const after = refundAfter();
+    return virtualDaa != null && after != null && after < wantedAfter();
+  };
+  /** The "Refundable after" card says so when the name's expiry caps the refund time. */
+  const paintCapped = (sheet) => {
+    const el = sheet?.layer?.el?.querySelector("[data-kl-offer-capped]");
+    if (!el) return;
+    el.innerHTML = cappedByExpiry()
+      ? cardNote(`This name expires sooner, so your offer is refundable from ${dayText(BigInt(info.expiresAt) - 600_000n)}.`)
+      : "";
+  };
   openTxSheet({
     owner,
     title: "Make an Offer",
@@ -1859,7 +1888,7 @@ function openOfferSheet(info, owner) {
         title: "Your offer",
         footerHtml: cardNote(kasLabel("Your KAS stays locked on chain until the owner accepts or declines, you withdraw the offer, or it expires - then anyone can send it back to you.")),
       })}
-      ${cardHtml(segmentedHtml("days", OFFER_DAYS, days, "Refundable after"), { title: "Refundable after" })}`,
+      ${cardHtml(segmentedHtml("days", OFFER_DAYS, days, "Refundable after"), { title: "Refundable after", footerHtml: `<div data-kl-offer-capped></div>` })}`,
     footer: () => {
       const a = amount();
       return info.isListed && a != null && info.price < a
@@ -1888,11 +1917,11 @@ function openOfferSheet(info, owner) {
     },
     onClick(event, sheet) {
       const chosen = segmentedClick(event, sheet.layer.el);
-      if (chosen?.group === "days") { days = Number(chosen.id); sheet.update(); }
+      if (chosen?.group === "days") { days = Number(chosen.id); paintCapped(sheet); sheet.update(); }
     },
     onOpen(sheet) {
       kachatNames()?.actions.refreshVirtualDaa()
-        .then((daa) => { if (daa != null) { virtualDaa = BigInt(daa); sheet.update(); } })
+        .then((daa) => { if (daa != null) { virtualDaa = BigInt(daa); paintCapped(sheet); sheet.update(); } })
         .catch(() => { /* the offer stays unbuildable */ });
     },
   });
@@ -2082,7 +2111,7 @@ function openTransferSheet(info, owner) {
     if (!t) { showStatus(sheet); sheet.update(); return; }
     if (t.startsWith("kaspatest:") || t.startsWith("kaspa:")) {
       const key = keyOf(t);
-      if (!key) resolveError = "Not a testnet Schnorr address.";
+      if (!key) resolveError = "Not a Schnorr address on this network.";
       else {
         try { validateKey(key, ""); resolved = { address: t, key }; } catch { resolveError = "That address's key is not valid."; }
       }
@@ -2139,7 +2168,7 @@ function openTransferSheet(info, owner) {
     inputsHtml: cardHtml(`
       <div class="sk-recipient-row">
         <span class="sk-recipient-field">
-          <input class="sk-recipient-input" type="text" placeholder="kaspatest:... or domain" autocomplete="off" autocapitalize="none"
+          <input class="sk-recipient-input" type="text" placeholder="${esc(transferPlaceholder())}" autocomplete="off" autocapitalize="none"
             autocorrect="off" spellcheck="false" data-kl-transfer-input aria-label="New owner" />
         </span>
         ${iconButton("data-kl-transfer-paste", "Paste", SEND_ICONS.paste)}
@@ -2185,7 +2214,7 @@ function openTransferSheet(info, owner) {
             title: "Scan QR",
             hint: "Point the camera at the new owner's address QR code.",
             manualLabel: "Address or domain",
-            manualPlaceholder: "kaspatest:... or domain",
+            manualPlaceholder: transferPlaceholder(),
           });
         } catch { scanned = null; }
         // normalizeScannedKaspaAddress already dropped a ?amount=... query
@@ -2498,6 +2527,13 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     if (busy) busy.innerHTML = rt.actions.feeEstimate?.isBusy ? busyNoticeHtml() : "";
     const pills = q("[data-kl-claim-pills]");
     if (pills) pills.innerHTML = quote ? infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(`Available: ${amountText(quote.spendable)}`)}</span>` }) : "";
+    // many small coins: combined into one before registering, said up front (iOS f1c16ec)
+    const combine = q("[data-kl-claim-combine]");
+    if (combine) {
+      combine.innerHTML = quote?.combinesCoins && quote.affordable
+        ? `<div class="kl-combine-note">${LI.merge}<span>${esc(kasLabel("Your KAS is in many small coins. KaChat combines them into one before registering, for a tiny extra network fee."))}</span></div>`
+        : "";
+    }
     const foot = q("[data-kl-claim-foot]");
     if (foot) foot.innerHTML = footHtml();
     const error = q("[data-kl-claim-error]");
@@ -2585,6 +2621,7 @@ function openClaimSheet({ name, gap, owner = "market" }) {
           ${segmentedHtml("fee", tierOptions, feeTier, "Network fee speed")}
           ${cardNote("Claiming sends two transactions: the commit now, the registration about a minute later. Both use this speed.")}`)}
         <div class="sk-pills kl-pills" data-kl-claim-pills></div>
+        <div data-kl-claim-combine></div>
         ${cardHtml(
           step(1, "A hidden commit goes on chain first. Nobody can see which name it is for.")
           + step(2, "About a minute later KaChat registers the name by itself. Keep the app open; if you leave, it continues next time.")
@@ -2632,6 +2669,27 @@ function openClaimSheet({ name, gap, owner = "market" }) {
 // ---------------------------------------------------------------------------------------------
 // Name detail (KachatLiveNameDetail)
 // ---------------------------------------------------------------------------------------------
+
+/** The registry events that hand a name to a (new) owner. */
+const OWNERSHIP_OPS = new Set(["register", "import", "transfer", "sale", "offer_accepted", "offer_accept"]);
+
+/** MAINNET.md C6 (iOS 0312a3f, KachatLiveNameDetail.currentOffers): an offer is bound to a seller
+ *  key, so one made to this owner before the name last left them - and came back - could be
+ *  accepted again. Only offers made since the current owner got the name are shown for them;
+ *  others to other sellers (declined, on their way back to the buyer) stay. */
+export function currentOffers(offers, owner, history) {
+  let since = null;
+  for (const e of history ?? []) {
+    if (!OWNERSHIP_OPS.has(e?.op) || e.at == null) continue;
+    const at = BigInt(e.at);
+    if (since == null || at > since) since = at;
+  }
+  if (since == null) return offers;
+  return (offers ?? []).filter((o) => {
+    if (!bytesEqual(o.seller, owner) || o.createdAt == null) return true;
+    return BigInt(o.createdAt) >= since;
+  });
+}
 
 /**
  * A registered name, live: who owns it, its status and expiry, its price, and what the person can
@@ -2967,8 +3025,11 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     if (!ownedByWallet() && address) {
       try { d.ownerLabel = (await registry.identity(address))?.label ?? null; } catch { /* no label */ }
     }
-    try { d.offers = await registry.offersFor(d.info.name); } catch { d.offers = []; }
     try { d.history = await registry.history(d.info.name); } catch { d.history = []; }
+    // only offers made since the owner got the name (MAINNET.md C6, iOS 0312a3f)
+    let offers = [];
+    try { offers = await registry.offersFor(d.info.name); } catch { offers = []; }
+    d.offers = currentOffers(offers, d.info.owner, d.history);
     if (d.offers.length) {
       await actions.refreshVirtualDaa().catch(() => null);
       // Expired offers don't stay on your name: the owner's app (and the buyer's) send them back.
