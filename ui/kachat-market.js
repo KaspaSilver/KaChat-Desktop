@@ -26,6 +26,7 @@
 import "./kachat-market.css";
 import { KAS_UNIT, IS_TESTNET } from "../engine/network.js";
 import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
+import { publicLaunchMs, isPubliclyOpen, launchString } from "../engine/kachat-names/launch.js";
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
   liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml,
@@ -342,7 +343,49 @@ function headerActionsHtml() {
   return `${liveRefreshButtonHtml()}${liveClaimsButtonHtml()}<button class="kaposts-icon-button" type="button" data-kmkt-how aria-label="How it works" title="How it works">${ICON.question}</button>`;
 }
 
+/** Mainnet's countdown to the public opening (iOS c6ebf74 KachatLaunchCountdown): days, hours,
+ *  minutes and seconds, and the moment in the person's own time zone. */
+function countdownUnitsHtml(opensMs) {
+  const left = Math.max(0, Math.floor((opensMs - Date.now()) / 1000));
+  const unit = (value, label) => `<span class="kmkt-countdown-unit"><strong>${String(value).padStart(2, "0")}</strong><small>${label}</small></span>`;
+  return unit(Math.floor(left / 86_400), "Days") + unit(Math.floor((left % 86_400) / 3_600), "Hours")
+    + unit(Math.floor((left % 3_600) / 60), "Minutes") + unit(left % 60, "Seconds");
+}
+function countdownHtml(opensMs) {
+  return `
+    <section class="kmkt-countdown" aria-label="Names open in">
+      <p class="kmkt-countdown-title">Names open in</p>
+      <div class="kmkt-countdown-units" data-kmkt-countdown-units>${countdownUnitsHtml(opensMs)}</div>
+      <p class="kmkt-countdown-when">${esc(launchString(opensMs))}</p>
+      <p class="kmkt-countdown-note">Then anyone can search and claim a .kachat name here.</p>
+    </section>`;
+}
+
+/** Ticks the countdown once a second while the screen is up; at the moment, the marketplace opens
+ *  by itself (no reload). */
+let countdownTimer = null;
+function syncCountdownTimer() {
+  const opens = publicLaunchMs();
+  const counting = opens != null && !isPubliclyOpen() && state.view === "home" && Boolean(screen());
+  if (!counting) { if (countdownTimer) { window.clearInterval(countdownTimer); countdownTimer = null; } return; }
+  if (countdownTimer) return;
+  countdownTimer = window.setInterval(() => {
+    const el = screen();
+    if (!el) return;
+    if (isPubliclyOpen()) {
+      window.clearInterval(countdownTimer); countdownTimer = null;
+      const scroll = el.scrollTop; render(); el.scrollTop = scroll;
+      return;
+    }
+    const units = el.querySelector("[data-kmkt-countdown-units]");
+    if (units) units.innerHTML = countdownUnitsHtml(opens);
+  }, 1000);
+}
+
 function homeHtml() {
+  // Mainnet before its public opening: the countdown instead of search and the pages (iOS c6ebf74).
+  const opens = publicLaunchMs();
+  const counting = opens != null && !isPubliclyOpen();
   return `
     <div class="kmkt-root">
       <div class="kaposts-header kmkt-header">
@@ -350,9 +393,10 @@ function homeHtml() {
         <div class="kaposts-header-actions" data-kmkt-header-actions>${headerActionsHtml()}</div>
       </div>
       ${heroHtml()}
+      ${counting ? countdownHtml(opens) : `
       ${searchCardHtml()}
       ${tabsHtml()}
-      <div data-kmkt-page-body>${pageHtml()}</div>
+      <div data-kmkt-page-body>${pageHtml()}</div>`}
     </div>`;
 }
 
@@ -561,6 +605,7 @@ function render() {
   if (!el) return;
   if (state.view === "name" && state.detail) el.innerHTML = state.detail.html();
   else el.innerHTML = state.view === "listing" ? listingHtml() : homeHtml();
+  syncCountdownTimer();
 }
 
 /** The live hub changed (kachat-names-live.js): re-render the parts that show it. */
@@ -828,6 +873,7 @@ export function showKachatMarket() {
 /** The .kachat screen went off: its own sheets close with it (the profile editor and the setup
  *  guide are not the market's and stay). Where you were - tab, listing, search - is kept. */
 export function hideKachatMarket() {
+  if (countdownTimer) { window.clearInterval(countdownTimer); countdownTimer = null; }
   closeLayersOwnedBy("market");
   liveHubHide();
   state.detail?.detach();

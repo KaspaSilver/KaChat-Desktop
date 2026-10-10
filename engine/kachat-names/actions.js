@@ -70,6 +70,7 @@ import { templateScript, paramsRegisterCost } from "./manifest.js";
 import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { GapInfo, OfferInfo, Profile, Status, addressOf, p2shAddress } from "./registry-state.js";
+import { publicLaunchMs, launchString } from "./launch.js";
 import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
 
 // MARK: - Registration records
@@ -346,12 +347,24 @@ export class ActionError extends Error {
       { opensMs: BigInt(opensMs) },
     );
   }
+  /** mainnet before its public opening (launch.js, iOS c6ebf74 notPublicYet) */
+  static notPublicYet(opensMs) {
+    return new ActionError("notPublicYet", `.kachat names open to everyone on ${launchString(opensMs)}.`, { opensMs: BigInt(opensMs) });
+  }
+}
+
+/** Either reason registering can't start yet: shown as a notice, not an error (iOS isNotOpenYet). */
+export function isNotOpenYet(error) {
+  return error?.code === "registrationNotOpen" || error?.code === "notPublicYet";
 }
 
 /** Registry v5 refuses `register` until the migration deadline; checked against the wall clock
  *  with the 3-minute margin `registerNow` takes off it (Swift
  *  `KachatNamesActions.requireRegistrationOpen`, iOS dd836cb). */
 export function requireRegistrationOpen(m) {
+  // mainnet's countdown: nobody claims a name in the app before the public opening (iOS c6ebf74)
+  const opens = publicLaunchMs();
+  if (opens != null && nowMs() < opens) throw ActionError.notPublicYet(opens);
   const deadline = m?.params?.migration?.deadlineMs;
   if (deadline == null || !(BigInt(nowMs()) - 180_000n < deadline)) return;
   throw ActionError.registrationNotOpen(deadline + 180_000n);

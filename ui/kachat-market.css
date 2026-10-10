@@ -331,3 +331,13 @@ button.kmkt-row:active { background-color: var(--row-pressed); }
   .kmkt-sheet-tall { height: 100%; }
   .kmkt-backdrop > .kmkt-sheet { overflow: hidden; }
 }
+
+/* Mainnet's countdown to the public opening (iOS c6ebf74 KachatLaunchCountdown). */
+.kmkt-countdown { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 20px; border-radius: 20px; background: var(--grouped-row, var(--surface-1)); text-align: center; }
+.kmkt-countdown-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--muted); }
+.kmkt-countdown-units { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; }
+.kmkt-countdown-unit { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 4px; border-radius: 14px; background: rgba(112, 199, 186, .12); }
+.kmkt-countdown-unit strong { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.kmkt-countdown-unit small { font-size: 11px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.kmkt-countdown-when { margin: 0; font-size: 15px; font-weight: 600; }
+.kmkt-countdown-note { margin: 0; font-size: 12.5px; color: var(--muted); }

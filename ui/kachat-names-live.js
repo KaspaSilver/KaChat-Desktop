@@ -2558,7 +2558,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
       quoteTier = tier;
     } catch (error) {
       if (mySeq !== seq || closed) return;
-      if (error?.code === "registrationNotOpen") notOpen = errorText(error);
+      // the v5 migration deadline or mainnet's public opening: a notice, not an error (iOS c6ebf74)
+      if (error?.code === "registrationNotOpen" || error?.code === "notPublicYet") notOpen = errorText(error);
       else quoteError = errorText(error);
     }
     render();
