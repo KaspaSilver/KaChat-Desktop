@@ -6462,8 +6462,14 @@ body.session-logged-out [data-account-rename-modal] {
   max-width: 640px;
   margin: 0 auto;
   padding: 8px 16px 24px;
-  overflow-y: auto;
+  /* The grid never shrinks or scrolls on its own: the Hub screen scrolls as a whole. As a flex
+     child with its own overflow it was squeezed to the space left, which clipped the third row
+     once a seventh tile (KaChat Bots) arrived. */
+  flex: 0 0 auto;
+  overflow: visible;
 }
+/* Room under the last row for the floating dock on a phone-width window. */
+.hub-screen { overflow-y: auto; padding-bottom: calc(24px + var(--dock-inset, 0px)); }
 .hub-tile {
   position: relative;
   aspect-ratio: 1;
