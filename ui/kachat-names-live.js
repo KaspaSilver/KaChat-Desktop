@@ -1617,6 +1617,12 @@ function openTxSheet(cfg) {
 
   const notesHtml = () => {
     if (sheet.planError) return `<p class="kl-tx-note kl-red">${esc(sheet.planError)}</p>`;
+    // Many small coins: nothing is sent until the slide, which combines them first; the fee of the
+    // name transaction itself then shows for its own slide (DSK-047).
+    if (sheet.combinesCoins) {
+      return `<div class="kl-combine-note">${LI.merge}<span>${esc(kasLabel(
+        "Your KAS is in many small coins. Slide to combine them into one first, for a tiny network fee; then this transaction's fee shows here to confirm."))}</span></div>`;
+    }
     const text = cfg.footer?.() ?? null;
     return text ? `<p class="kl-tx-note kmkt-muted">${esc(text)}</p>` : "";
   };
@@ -1647,7 +1653,7 @@ function openTxSheet(cfg) {
     if (fee) fee.inert = Boolean(sheet.txId || sheet.sending);
     const action = q("[data-kl-action]");
     if (action) action.hidden = Boolean(sheet.txId);
-    sheet.slide?.setEnabled(Boolean(sheet.plan && !sheet.building && !sheet.txId));
+    sheet.slide?.setEnabled(Boolean((sheet.plan || sheet.combinesCoins) && !sheet.building && !sheet.txId));
   };
 
   /** Rebuilds the plan when the operation or the fee changed, 300 ms after the last change. */
@@ -1661,6 +1667,7 @@ function openTxSheet(cfg) {
     sheet.op = null;
     sheet.payer = null;
     sheet.planError = null;
+    sheet.combinesCoins = false;
     clearTimeout(sheet.timer);
     const op = cfg.operation();
     const seq = ++sheet.seq;
@@ -1676,6 +1683,7 @@ function openTxSheet(cfg) {
         if (seq !== sheet.seq || sheet.closed) return;
         sheet.plan = built.plan;
         sheet.planFeerate = built.feerate;
+        sheet.combinesCoins = Boolean(built.combinesCoins);
         sheet.op = op;
         try { sheet.payer = rt.actions.payerFor?.(op) ?? null; } catch { sheet.payer = null; }
       } catch (error) {
@@ -1706,7 +1714,32 @@ function openTxSheet(cfg) {
     sheet.update();
   };
 
+  /** The slide on a sheet whose coins must be combined first: only the combine is sent, then the
+   *  plan is built again so the name transaction's own fee is shown and confirmed (DSK-047). */
+  const combineFirst = async () => {
+    const op = sheet.op;
+    const key = sheet.key;
+    if (!(await deviceLock())) return;
+    if (sheet.closed || op !== sheet.op || key !== sheet.key) return;
+    sheet.sending = true;
+    sheet.sendError = null;
+    sheet.slide?.setBusy(true);
+    sheet.render();
+    try {
+      await rt.actions.combineCoinsFor(op);
+    } catch (error) {
+      sheet.sendError = errorText(error);
+    }
+    sheet.sending = false;
+    sheet.slide?.setBusy(false);
+    if (sheet.closed) return;
+    if (sheet.sendError) { sheet.render(); return; }
+    sheet.key = undefined;
+    sheet.update();
+  };
+
   const confirm = async () => {
+    if (sheet.combinesCoins && !sheet.plan && sheet.op && !sheet.sending && !sheet.txId) { await combineFirst(); return; }
     if (!sheet.plan || !sheet.op || sheet.sending || sheet.txId) return;
     const op = sheet.op;
     const key = sheet.key;

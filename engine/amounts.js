@@ -132,21 +132,32 @@ export function kasToSompi(value) {
  *  or all of an answer's coins together, can hold. */
 export const MAX_SUPPLY_SOMPI = 29_000_000_000n * 100_000_000n;
 
+/** A node's answer the app refuses as impossible: the node is at fault, not the connection, so
+ *  withRpc forgets that node and asks another one (DSK-046). */
+export class BadNodeAnswerError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BadNodeAnswerError";
+    this.badNode = true;
+  }
+}
+
 /** A node's getUtxosByAddresses answer as the app may use it (iOS checkedFromNetwork, IOS-020): a
  *  coin or a total above the Kaspa supply is a broken or hostile peer's, refused where it's read so
  *  no balance, contact sum or Max further on works with it. Non-integer amounts are left for
- *  sanitizeUtxoEntries to drop. Returns the response; throws otherwise (withRpc then tries another
- *  node). */
+ *  sanitizeUtxoEntries to drop. Returns the response; throws a BadNodeAnswerError otherwise, which
+ *  withRpc answers by dropping that node and retrying on another (iOS: another node's hedged answer
+ *  wins). */
 export function checkedUtxoAnswer(response) {
   let total = 0n;
   for (const entry of response?.entries || []) {
     const raw = entry?.amount ?? entry?.entry?.amount ?? entry?.utxoEntry?.amount ?? 0;
     let value;
     try { value = BigInt(raw); } catch { continue; }
-    if (value > MAX_SUPPLY_SOMPI) throw new Error("Invalid UTXO data: amount above the Kaspa supply");
+    if (value > MAX_SUPPLY_SOMPI) throw new BadNodeAnswerError("Invalid UTXO data: amount above the Kaspa supply");
     if (value > 0n) total += value;
   }
-  if (total > MAX_SUPPLY_SOMPI) throw new Error("Invalid UTXO data: amount above the Kaspa supply");
+  if (total > MAX_SUPPLY_SOMPI) throw new BadNodeAnswerError("Invalid UTXO data: amount above the Kaspa supply");
   return response;
 }
 

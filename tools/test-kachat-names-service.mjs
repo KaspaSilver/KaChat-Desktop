@@ -684,8 +684,12 @@ async function main() {
       let builds = 0;
       pa._build = async () => { builds += 1; if (builds === 1) throw tooMany; return { plan: { tag: "built" }, env: {} }; };
       const extendOp = A.Operation.extend(new RS.NameInfo({ name: "x", key: C.key("x"), owner: me, expiresAt: 1n, outpoint: T.makeOutpoint(C.zero32(), 0) }), 1n);
+      // a preview never sends anything: it says the coins need combining (DSK-047)
       const planned = await pa.planWithRate(extendOp);
-      r.eq(J([planned.plan.tag, builds, paCombines]), J(["built", 2, 1]), "planWithRate: many small coins are combined, then the plan is built again");
+      r.eq(J([planned.plan, planned.combinesCoins, builds, paCombines]), J([null, true, 1, 0]), "planWithRate: many small coins are flagged, not combined (DSK-047)");
+      r.eq(await pa.combineCoinsFor(extendOp), "cc".repeat(32), "combineCoinsFor: combines once the person slid");
+      const replanned = await pa.planWithRate(extendOp);
+      r.eq(J([replanned.plan.tag, replanned.combinesCoins ?? false, builds, paCombines]), J(["built", false, 2, 1]), "planWithRate: built after the combine");
       let submitsTried = 0;
       pa._submit = async () => { submitsTried += 1; if (submitsTried === 1) throw tooMany; return { plan: { tag: "sent" }, txId: "ab".repeat(32) }; };
       pa.follow = () => Promise.resolve(null);

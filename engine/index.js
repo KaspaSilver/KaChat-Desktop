@@ -920,8 +920,16 @@ export class KaspaEngine {
         return await operation(rpc);
       } catch (error) {
         lastError = error;
-        if (attempt >= retries || !isRpcConnectionError(error)) throw error;
-        this.log(`${label} lost RPC connection; attempting standby failover...`);
+        const badNode = error?.badNode === true;
+        if (attempt >= retries || !(badNode || isRpcConnectionError(error))) throw error;
+        if (badNode) {
+          // Up but answering the impossible (DSK-046): Automatic mode must not pick it again.
+          const endpoint = this.rpc?.url || this.connectionState.primaryEndpoint || "";
+          this.log(`${label}: ${error.message} from ${endpoint || "the node"}; switching nodes...`);
+          if (endpoint) forgetEndpoint(endpoint);
+        } else {
+          this.log(`${label} lost RPC connection; attempting standby failover...`);
+        }
         await this.handlePrimaryFailure(error?.message || `${label} connection failed`);
       }
     }

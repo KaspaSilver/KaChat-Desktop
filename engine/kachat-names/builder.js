@@ -388,7 +388,9 @@ export class Builder {
         have = sum(picked, (u) => u.entry.amount);
         if (fixedIn + have < required) {
           const all = sum(wallet.filter((u) => !used.has(outpointKey(u.outpoint))), (u) => u.entry.amount);
-          const bound = slots < wallet.length ? ` (at most ${slots} funding inputs fit)` : "";
+          // Only when the coins would cover it if more fitted: a wallet that is simply short is
+          // "insufficient funds", never a reason to combine coins (DSK-047).
+          const bound = slots < wallet.length && all >= required - fixedIn ? ` (at most ${slots} funding inputs fit)` : "";
           throw new Failure(
             `${d.op}: insufficient funds: need ${this._kas(required - fixedIn)} more (outputs ${this._kas(fixedOut)} + price `
               + `${this._kas(d.priceFee)} + network fee ~${this._kas(est)}), ${this._kas(all)} spendable${bound}`,

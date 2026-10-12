@@ -784,7 +784,9 @@ export class KachatNamesActions {
 
   /** `{ plan, feerate }`: the plan and the fee rate it was built at - the rate
    *  `perform(op, { exactFeerate })` then sends at, so the fee sent is the fee shown (Swift
-   *  `planWithRate`, iOS 7e2b6cd, IOS-061). */
+   *  `planWithRate`, iOS 7e2b6cd, IOS-061). When the KAS is there but in too many small coins it
+   *  is `{ plan: null, feerate, combinesCoins: true }`: a preview never sends anything, the sheet
+   *  asks first and then calls `combineCoinsFor` (DSK-047). */
   async planWithRate(op, { fee = null } = {}) {
     const s = this.signerFor(op);
     const rate = await this._feerateFor(fee, op, s);
@@ -793,11 +795,15 @@ export class KachatNamesActions {
       built = await this._build(op, s, rate);
     } catch (error) {
       if (!isTooManyCoins(error)) throw error;
-      // the KAS is there, in too many small coins: combined into one first (iOS f1c16ec)
-      await this.combineCoins(s);
-      built = await this._build(op, s, rate);
+      return { plan: null, feerate: rate, combinesCoins: true };
     }
     return { plan: built.plan, feerate: rate };
+  }
+
+  /** Combines the coins of the address that pays for `op`, after the person confirmed it on a
+   *  sheet whose preview said `combinesCoins` (DSK-047). Returns the txid. */
+  async combineCoinsFor(op) {
+    return this.combineCoins(this.signerFor(op));
   }
 
   /** Combines the wallet's coins into one: a plain send of up to `combineMaxCoins` largest coins to

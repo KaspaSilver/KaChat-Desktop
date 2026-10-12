@@ -585,6 +585,19 @@ function runPeriodRules(v, m, r) {
       r.check(false, "early renew plan not built");
     }
     r.check(refused(() => b.renew({ env, wallet, name: n, years: 3n })), "renew by 3 refused");
+    // DSK-047: "funding inputs fit" (which makes the app combine coins) only when the coins would
+    // cover it if more fitted; a wallet that is simply short says plain insufficient funds
+    const n2 = nameRec(ext.records.name);
+    const w0 = ext.wallet[0];
+    const coins = (amount) => Array.from({ length: 30 }, (_x, i) => utxo({ ...w0, txid: (i + 1).toString(16).padStart(64, "0"), index: 0, amount: String(amount), covenantId: null }));
+    const failure = (wallet2) => { try { b.extend({ env, wallet: wallet2, name: n2, years: 1n }); return ""; } catch (e) { return String(e?.message ?? e); } };
+    const short = failure(coins(1_000n));
+    r.check(/insufficient funds/.test(short) && !/funding inputs fit/.test(short), `a short wallet of many coins is not "too many coins" (${short})`);
+    // each coin a twentieth of what the extend needs: 30 cover it, the few that fit don't
+    const needKas = /need ([0-9.]+)/.exec(short)?.[1] ?? "1";
+    const needSompi = BigInt(needKas.split(".")[0]) * 100_000_000n + BigInt((needKas.split(".")[1] ?? "").padEnd(8, "0").slice(0, 8));
+    const many = failure(coins(needSompi / 20n + 1n));
+    r.check(/funding inputs fit/.test(many), `enough KAS in too many coins says so (${many})`);
   } else {
     r.check(false, "no extend step in the vectors");
   }

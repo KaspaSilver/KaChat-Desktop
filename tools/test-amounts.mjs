@@ -237,6 +237,9 @@ test("UTXO answers above the Kaspa supply are refused, per coin and in total", (
   assert.throws(() => checkedUtxoAnswer({ entries: [{ amount: half }, { utxoEntry: { amount: half } }] }), /above the Kaspa supply/);
   // a non-integer is left for sanitizeUtxoEntries to drop, not refused here
   assert.doesNotThrow(() => checkedUtxoAnswer({ entries: [{ amount: 1.5 }] }));
+  // DSK-046: the refusal marks the node at fault, so withRpc switches nodes instead of rethrowing.
+  try { checkedUtxoAnswer({ entries: [{ amount: MAX_SUPPLY_SOMPI + 1n }] }); assert.fail("no throw"); }
+  catch (error) { assert.equal(error.badNode, true); }
 });
 
 for (const [name, fn] of tests) {
