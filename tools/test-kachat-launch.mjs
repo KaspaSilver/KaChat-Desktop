@@ -1,9 +1,11 @@
 // The mainnet .kachat countdown runs on the network's clock, not the device's (XP-020).
 import assert from "node:assert/strict";
 import {
-  MAINNET_PUBLIC_LAUNCH_MS, publicLaunchMs, isPubliclyOpen, noteChainTimeMs, networkNowMs, refreshChainTime, countdownNowMs,
+  MAINNET_PUBLIC_LAUNCH_MS, publicLaunchMs, isPubliclyOpen, noteChainTimeMs, networkNowMs, refreshChainTime,
 } from "../engine/kachat-names/launch.js";
 
+const store = new Map();
+globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)) };
 const opens = MAINNET_PUBLIC_LAUNCH_MS;
 assert.equal(publicLaunchMs("mainnet"), opens);
 assert.equal(publicLaunchMs("testnet-10"), null);
@@ -17,22 +19,16 @@ assert.equal(isPubliclyOpen(null, "mainnet"), false);
 noteChainTimeMs(opens - 86_400_000);
 assert.ok(Math.abs(networkNowMs() - (opens - 86_400_000)) < 1_000);
 assert.equal(isPubliclyOpen(undefined, "mainnet"), false);
-// once the network reaches the opening it is open, whatever the device says
+// an explicit time (a device's) is judged but never remembered
+assert.equal(isPubliclyOpen(opens + 5, "mainnet"), true);
+assert.equal(store.size, 0, "a passed-in time is not remembered");
+// once the network reaches the opening it is open, whatever the device says, and remembered
 noteChainTimeMs(opens + 1_000);
 assert.equal(isPubliclyOpen(undefined, "mainnet"), true);
+assert.equal(store.get("kachat_names_public_opened.mainnet"), "1", "the opening is remembered");
 // nonsense from a node is ignored
 noteChainTimeMs(0); noteChainTimeMs("x");
 assert.ok(networkNowMs() >= opens);
-
-// the device's clock while it agrees with the network's (past median time trails by ~2 min)
-noteChainTimeMs(opens - 120_000);
-assert.equal(countdownNowMs(opens + 1), opens + 1, "a correct clock: opens on time");
-assert.equal(isPubliclyOpen(countdownNowMs(opens + 1), "mainnet"), true);
-const net = networkNowMs();
-assert.ok(Math.abs(countdownNowMs(opens + 6 * 60_000) - net) < 1_000, "6 min ahead: the network's time");
-assert.ok(Math.abs(countdownNowMs(opens + 5 * 86_400_000) - net) < 1_000, "days ahead: the network's time");
-assert.equal(isPubliclyOpen(countdownNowMs(opens + 5 * 86_400_000), "mainnet"), false, "a date set ahead does not open it");
-assert.ok(Math.abs(countdownNowMs(opens - 86_400_000) - net) < 1_000, "a day behind: the network's time");
 
 // refreshChainTime: a fresh reading is kept for a minute; a stale one is read again from the source
 let reads = 0;
@@ -41,7 +37,10 @@ await refreshChainTime({ read });
 assert.equal(reads, 0, "fresh: not read again");
 await refreshChainTime({ read, maxAgeMs: 0 });
 assert.equal(reads, 1, "stale: read from the node");
-assert.equal(isPubliclyOpen(undefined, "mainnet"), false, "the node's time wins over the earlier note");
+assert.ok(networkNowMs() < opens, "the node's time wins over the earlier note");
+assert.equal(isPubliclyOpen(undefined, "mainnet"), true, "but once opened it stays open (its clock only moves forward)");
+store.clear();
+assert.equal(isPubliclyOpen(undefined, "mainnet"), false, "without the memory: the node's time decides");
 // a failing node never throws, and is asked again at most every 5 s
 const failing = async () => { reads += 1; throw new Error("no node"); };
 await refreshChainTime({ read: failing, maxAgeMs: 0 });

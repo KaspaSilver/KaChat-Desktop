@@ -684,20 +684,33 @@ async function main() {
       let builds = 0;
       pa._build = async () => { builds += 1; if (builds === 1) throw tooMany; return { plan: { tag: "built" }, env: {} }; };
       const extendOp = A.Operation.extend(new RS.NameInfo({ name: "x", key: C.key("x"), owner: me, expiresAt: 1n, outpoint: T.makeOutpoint(C.zero32(), 0) }), 1n);
-      // a preview never sends anything: it says the coins need combining (DSK-047)
+      // a preview never sends anything (iOS 778a8fc, IOS-075/DSK-047): planned as if the coins
+      // were combined, and it says so; perform combines after the slide
+      let previewFlags = [];
+      pa._build = async (_op, _s, _rate, opts = {}) => {
+        builds += 1; previewFlags.push(Boolean(opts.previewCombined));
+        if (!opts.previewCombined) throw tooMany;
+        return { plan: { tag: "built" }, env: {} };
+      };
       const planned = await pa.planWithRate(extendOp);
-      r.eq(J([planned.plan, planned.combinesCoins, builds, paCombines]), J([null, true, 1, 0]), "planWithRate: many small coins are flagged, not combined (DSK-047)");
-      r.eq(await pa.combineCoinsFor(extendOp), "cc".repeat(32), "combineCoinsFor: combines once the person slid");
-      const replanned = await pa.planWithRate(extendOp);
-      r.eq(J([replanned.plan.tag, replanned.combinesCoins ?? false, builds, paCombines]), J(["built", false, 2, 1]), "planWithRate: built after the combine");
+      r.eq(J([planned.plan.tag, planned.combinesCoins, builds, paCombines, previewFlags]), J(["built", true, 2, 0, [false, true]]),
+        "planWithRate: many small coins are planned as combined and flagged, never combined (IOS-075/DSK-047)");
+      // combinedPreviewWallet: the largest coins (up to combineMaxCoins) as one, less the fee room
+      const coin = (n, amount) => ({ outpoint: T.makeOutpoint(new Uint8Array(32).fill(n), 0), entry: { amount, scriptVersion: 0, script: new Uint8Array(34), blockDaaScore: 0n, isCoinbase: false, covenantId: null } });
+      const preview = A.combinedPreviewWallet([coin(1, 3_000_000n), coin(2, 10_000_000n), coin(3, 7_000_000n)]);
+      r.eq(J([preview.length, preview[0].entry.amount, preview[0].outpoint.txid[0]]), J([1, 15_000_000n, 0xcc]), "combinedPreviewWallet: one stand-in coin, total less 0.05 KAS");
+      const big = Array.from({ length: A.combineMaxCoins + 5 }, (_x, i) => coin(i % 250, 1_000_000n));
+      r.eq(A.combinedPreviewWallet(big).length, 6, "combinedPreviewWallet: coins past the combine limit stay as they are");
+      r.eq(A.combinedPreviewWallet([coin(1, 9n)]).length, 1, "combinedPreviewWallet: one coin is left alone");
+      pa._build = async () => { builds += 1; if (builds === 1) throw tooMany; return { plan: { tag: "built" }, env: {} }; };
       let submitsTried = 0;
       pa._submit = async () => { submitsTried += 1; if (submitsTried === 1) throw tooMany; return { plan: { tag: "sent" }, txId: "ab".repeat(32) }; };
       pa.follow = () => Promise.resolve(null);
       r.eq(await pa.perform(extendOp), "ab".repeat(32), "perform: sent after the combine");
-      r.eq(J([submitsTried, paCombines]), J([2, 2]), "perform: combined once (outside the send queue), then built and sent again");
+      r.eq(J([submitsTried, paCombines]), J([2, 1]), "perform: combined once (outside the send queue), then built and sent again");
       pa._submit = async () => { throw new C.Failure("register: insufficient funds: need 1 more"); };
       await r.throws(() => pa.perform(extendOp), (e) => /insufficient funds/.test(e.message), "perform: a real shortfall is not combined");
-      r.eq(paCombines, 2, "perform: no combine for a real shortfall");
+      r.eq(paCombines, 1, "perform: no combine for a real shortfall");
       // combineCoins never spends a covenant coin (nor a reserved one) and needs more than one coin
       const cEngine = {
         ...pa.engine,

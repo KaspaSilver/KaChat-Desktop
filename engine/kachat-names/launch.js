@@ -35,17 +35,6 @@ export function networkNowMs() {
   return chainClock ? chainClock.chainMs + (monotonicMs() - chainClock.at) : null;
 }
 
-/** The node's past median time trails the real time by a minute or two, so the device's clock is
- *  used while it agrees with the network's (up to 5 minutes ahead of it, or behind it by any small
- *  amount up to 5 minutes): the opening lands on time on a correct clock, and a clock set days ahead
- *  gains nothing. Null before any node has answered. */
-export function countdownNowMs(deviceMs = Date.now()) {
-  const network = networkNowMs();
-  if (network == null) return null;
-  const ahead = deviceMs - network;
-  return ahead <= 5 * 60_000 && ahead >= -5 * 60_000 ? deviceMs : network;
-}
-
 /** What reads the DAG when the countdown needs the network's time (the app's engine). */
 export function setChainTimeSource(read) {
   chainTimeSource = typeof read === "function" ? read : null;
@@ -71,11 +60,27 @@ export async function refreshChainTime({ read = chainTimeSource, maxAgeMs = 60_0
   return networkNowMs();
 }
 
-/** Open once the network's time reaches the opening; closed while that time is unknown. */
-export function isPubliclyOpen(nowMs = countdownNowMs(), network = NETWORK_ID) {
+// Once the network has passed the opening it stays open - its clock only moves forward - so that
+// is remembered and later visits don't flash the countdown (iOS 6975e3e).
+const openedKey = (network) => `kachat_names_public_opened.${network}`;
+function rememberedOpen(network) {
+  try { return globalThis.localStorage?.getItem(openedKey(network)) === "1"; } catch { return false; }
+}
+function rememberOpen(network) {
+  try { globalThis.localStorage?.setItem(openedKey(network), "1"); } catch { /* fine */ }
+}
+
+/** Open once the network's time reaches the opening (iOS 6975e3e, XP-020); closed while that time
+ *  is unknown. `nowMs` defaults to the network's time - never the device's. */
+export function isPubliclyOpen(nowMs = undefined, network = NETWORK_ID) {
   const opens = publicLaunchMs(network);
   if (opens == null) return true;
-  return nowMs != null && nowMs >= opens;
+  if (rememberedOpen(network)) return true;
+  const fromNetwork = nowMs === undefined;
+  const now = fromNetwork ? networkNowMs() : nowMs;
+  if (now == null || now < opens) return false;
+  if (fromNetwork) rememberOpen(network); // only the network's own time is remembered
+  return true;
 }
 
 /** "Friday, October 16 at 8:00 AM" in the person's own time zone and language (iOS launchString). */

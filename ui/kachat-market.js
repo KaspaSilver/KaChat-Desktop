@@ -26,7 +26,7 @@
 import "./kachat-market.css";
 import { KAS_UNIT, IS_TESTNET } from "../engine/network.js";
 import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
-import { publicLaunchMs, isPubliclyOpen, launchString, countdownNowMs, refreshChainTime } from "../engine/kachat-names/launch.js";
+import { publicLaunchMs, isPubliclyOpen, launchString, networkNowMs, refreshChainTime } from "../engine/kachat-names/launch.js";
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
   liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml,
@@ -347,7 +347,7 @@ function headerActionsHtml() {
  *  minutes and seconds, and the moment in the person's own time zone. */
 function countdownUnitsHtml(opensMs) {
   // the network's time (XP-020); the device's only to draw it before a node has answered
-  const left = Math.max(0, Math.floor((opensMs - (countdownNowMs() ?? Date.now())) / 1000));
+  const left = Math.max(0, Math.floor((opensMs - (networkNowMs() ?? Date.now())) / 1000));
   const unit = (value, label) => `<span class="kmkt-countdown-unit"><strong>${String(value).padStart(2, "0")}</strong><small>${label}</small></span>`;
   return unit(Math.floor(left / 86_400), "Days") + unit(Math.floor((left % 86_400) / 3_600), "Hours")
     + unit(Math.floor((left % 3_600) / 60), "Minutes") + unit(left % 60, "Seconds");

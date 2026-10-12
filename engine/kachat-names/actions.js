@@ -174,6 +174,19 @@ export function isTooManyCoins(error) {
   return error instanceof Failure && String(error.message ?? "").includes("funding inputs fit");
 }
 
+/** The wallet as it will be once `combineCoins` ran: its largest coins (as many as a combine
+ *  takes) as one coin, less room for that send's fee. Only ever planned against, for a preview -
+ *  never signed or sent (Swift `combinedPreviewWallet`, iOS 778a8fc). */
+export function combinedPreviewWallet(wallet) {
+  const sorted = [...wallet].sort((a, b) => (b.entry.amount > a.entry.amount ? 1 : b.entry.amount < a.entry.amount ? -1 : 0));
+  const merged = sorted.slice(0, combineMaxCoins);
+  if (merged.length <= 1) return wallet;
+  const total = merged.reduce((sum, u) => sum + u.entry.amount, 0n);
+  if (!(total > combineFeeRoom)) return wallet;
+  const standIn = makeUtxo(makeOutpoint(new Uint8Array(32).fill(0xcc), 0), { ...merged[0].entry, amount: total - combineFeeRoom });
+  return [standIn, ...sorted.slice(merged.length)];
+}
+
 // MARK: - Fees (iOS e426432)
 
 /** The Send screens' fee speeds (iOS WithdrawFeeTier; the ids of send-kaspa-components'
@@ -791,26 +804,19 @@ export class KachatNamesActions {
 
   /** `{ plan, feerate }`: the plan and the fee rate it was built at - the rate
    *  `perform(op, { exactFeerate })` then sends at, so the fee sent is the fee shown (Swift
-   *  `planWithRate`, iOS 7e2b6cd, IOS-061). When the KAS is there but in too many small coins it
-   *  is `{ plan: null, feerate, combinesCoins: true }`: a preview never sends anything, the sheet
-   *  asks first and then calls `combineCoinsFor` (DSK-047). */
+   *  `planWithRate`, iOS 7e2b6cd, IOS-061). A preview never sends anything (iOS 778a8fc,
+   *  IOS-075/DSK-047): when the KAS is there but in more small coins than the transaction can take,
+   *  it is planned as if they were already combined and `combinesCoins` says so; the combine itself
+   *  is sent by `perform`, after the slide and the device lock. */
   async planWithRate(op, { fee = null } = {}) {
     const s = this.signerFor(op);
     const rate = await this._feerateFor(fee, op, s);
-    let built;
     try {
-      built = await this._build(op, s, rate);
+      return { plan: (await this._build(op, s, rate)).plan, feerate: rate, combinesCoins: false };
     } catch (error) {
       if (!isTooManyCoins(error)) throw error;
-      return { plan: null, feerate: rate, combinesCoins: true };
+      return { plan: (await this._build(op, s, rate, { previewCombined: true })).plan, feerate: rate, combinesCoins: true };
     }
-    return { plan: built.plan, feerate: rate };
-  }
-
-  /** Combines the coins of the address that pays for `op`, after the person confirmed it on a
-   *  sheet whose preview said `combinesCoins` (DSK-047). Returns the txid. */
-  async combineCoinsFor(op) {
-    return this.combineCoins(this.signerFor(op));
   }
 
   /** Combines the wallet's coins into one: a plain send of up to `combineMaxCoins` largest coins to
@@ -858,9 +864,10 @@ export class KachatNamesActions {
     return txId;
   }
 
-  async _build(op, s, rate = null) {
+  async _build(op, s, rate = null, { previewCombined = false } = {}) {
     const m = await this.registry.prepare();
-    const { builder: b, env, wallet } = await this._context(s, rate);
+    const { builder: b, env, wallet: live } = await this._context(s, rate);
+    const wallet = previewCombined ? combinedPreviewWallet(live) : live;
     let plan;
     switch (op.kind) {
       case "extend": {
