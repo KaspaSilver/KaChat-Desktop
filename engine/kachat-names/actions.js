@@ -70,7 +70,7 @@ import { templateScript, paramsRegisterCost } from "./manifest.js";
 import { registerNow, renewWindowOpen } from "./builder.js";
 import { keyOf } from "./registry.js";
 import { GapInfo, OfferInfo, Profile, Status, addressOf, p2shAddress } from "./registry-state.js";
-import { publicLaunchMs, launchString } from "./launch.js";
+import { publicLaunchMs, launchString, isPubliclyOpen, refreshChainTime } from "./launch.js";
 import { KachatNamesService, ServiceError, xonlyKey, fundingUtxos, newSalt, profileRecordPayload } from "./service.js";
 
 // MARK: - Registration records
@@ -362,9 +362,10 @@ export function isNotOpenYet(error) {
  *  with the 3-minute margin `registerNow` takes off it (Swift
  *  `KachatNamesActions.requireRegistrationOpen`, iOS dd836cb). */
 export function requireRegistrationOpen(m) {
-  // mainnet's countdown: nobody claims a name in the app before the public opening (iOS c6ebf74)
+  // mainnet's countdown: nobody claims a name in the app before the public opening (iOS c6ebf74),
+  // judged on the network's time, not the device's (XP-020)
   const opens = publicLaunchMs();
-  if (opens != null && nowMs() < opens) throw ActionError.notPublicYet(opens);
+  if (opens != null && !isPubliclyOpen()) throw ActionError.notPublicYet(opens);
   const deadline = m?.params?.migration?.deadlineMs;
   if (deadline == null || !(BigInt(nowMs()) - 180_000n < deadline)) return;
   throw ActionError.registrationNotOpen(deadline + 180_000n);
@@ -645,6 +646,12 @@ export class KachatNamesActions {
   static validateKey(xonly, what) { return validateKey(xonly, what); }
   /** See the module-level `requireRegistrationOpen`. */
   static requireRegistrationOpen(m) { return requireRegistrationOpen(m); }
+
+  /** The network's time for the mainnet countdown (XP-020), read from the node when stale. */
+  async _refreshChainTime() {
+    if (publicLaunchMs() == null || typeof this.engine?.currentDagPoint !== "function") return;
+    await refreshChainTime({ read: () => this.engine.currentDagPoint() });
+  }
 
   // MARK: Fees (iOS e426432)
 
@@ -1226,6 +1233,7 @@ export class KachatNamesActions {
     const s = this.signer();
     years = BigInt(years);
     const m = await this.registry.prepare();
+    await this._refreshChainTime();
     requireRegistrationOpen(m);
     const { builder: b, env, wallet } = await this._context(s, await this.feerateForTier(feeTier));
     const salt = newSalt();
@@ -1290,7 +1298,9 @@ export class KachatNamesActions {
     const name = normalize(raw);
     validate(name);
     // never a commit that couldn't be registered: v5 opens register at its migration deadline
-    requireRegistrationOpen(await this.registry.prepare());
+    const manifest = await this.registry.prepare();
+    await this._refreshChainTime();
+    requireRegistrationOpen(manifest);
     this._loadPending(s.address);
     await this.registry.refresh();
     const found = await this.registry.lookup(name);
@@ -1638,6 +1648,7 @@ export class KachatNamesActions {
       const m = await this.registry.prepare();
       // A commit isn't bound to a registry: one sent before a migration registers on the new
       // registry once its deadline passes. Until then it waits, saying why (iOS dd836cb).
+      await this._refreshChainTime();
       try { requireRegistrationOpen(m); } catch (error) {
         this._set(p, (q) => { q.lastError = errorMessage(error); });
         return;

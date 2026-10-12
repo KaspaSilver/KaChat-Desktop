@@ -3,6 +3,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
+import { setChainTimeSource } from "../engine/kachat-names/launch.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
@@ -10953,7 +10954,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 141;
+const APP_BUILD = 142;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -26433,6 +26434,8 @@ queueMicrotask(async () => {
     // until names launch (no-op without the registry runtime).
     try { startKachatNamesNotifier({ record: (row) => recordGlobalNotification(row), log: appendEngineLog }); }
     catch (error) { appendEngineLog(`.kachat news did not start: ${error?.message || error}`); }
+    // The .kachat countdown runs on the network's clock (XP-020).
+    setChainTimeSource(() => engine.currentDagPoint());
     initKachatMarket({
       escapeHtml, showToast: showCopyToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
       openChat: (address) => openChatWithAddress({ address }),

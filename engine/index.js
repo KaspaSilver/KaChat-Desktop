@@ -1,5 +1,6 @@
 import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
+import { noteChainTimeMs } from "./kachat-names/launch.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
 import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
@@ -1084,11 +1085,14 @@ export class KaspaEngine {
       const dag = await rpc.getBlockDagInfo();
       let networkId = String(dag?.network ?? dag?.networkId ?? "");
       if (!networkId) networkId = String((await rpc.getServerInfo())?.networkId ?? "");
-      return {
+      const point = {
         networkId,
         virtualDaaScore: BigInt(dag?.virtualDaaScore ?? 0),
         pastMedianTime: BigInt(dag?.pastMedianTime ?? 0),
       };
+      // the .kachat countdown runs on this clock, not the device's (XP-020)
+      if (point.pastMedianTime > 0n) noteChainTimeMs(point.pastMedianTime);
+      return point;
     }, { retries: 1, label: "DAG info" });
   }
 
