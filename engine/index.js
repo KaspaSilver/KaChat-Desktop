@@ -123,6 +123,8 @@ export class KaspaEngine {
     this.utxoProcessor = null;
     this.utxoContext = null;
     this.utxoSubscriptionRpc = null;
+    /** the addresses the running UtxoContext tracks (widened in place, iOS 2a99afc) */
+    this.utxoTrackedAddresses = [];
     this.subscriptionAddresses = [];
     this.subscriptionState = {
       status: "idle",
@@ -457,8 +459,55 @@ export class KaspaEngine {
       addresses: this.address ? [this.address, ...normalized] : [...normalized],
       contactCount: normalized.length,
     });
-    if (changed && restart && this.rpc && this.address) queueMicrotask(() => this.rebuildWalletSubscription());
+    if (changed && restart && this.rpc && this.address) queueMicrotask(() => this.updateWalletSubscriptionAddresses());
     return this.subscriptionSnapshot();
+  }
+
+  /** A changed address list (a new chat, a watched address). Only adding goes on the live
+   *  subscription: the new addresses are tracked on the running UtxoContext. The full rebuild
+   *  stopped the processor and started another, so utxosChanged went unheard for the gap (iOS
+   *  2a99afc). Removing addresses, a subscription that isn't up or one on another node go the
+   *  full way. In line with subscription starts (walletSubscriptionInFlight). */
+  async updateWalletSubscriptionAddresses() {
+    if (!this.address || !this.rpc) return null;
+    while (this.walletSubscriptionInFlight) {
+      try { await this.walletSubscriptionInFlight; } catch { /* its own caller sees the error */ }
+    }
+    const run = (async () => {
+      if (await this.widenWalletSubscription()) return this.subscriptionSnapshot();
+      return this.performStartWalletSubscription({ force: true });
+    })();
+    this.walletSubscriptionInFlight = run;
+    try { return await run; }
+    catch (error) { this.log("Wallet subscription rebuild failed:", error?.message || error); return null; }
+    finally { if (this.walletSubscriptionInFlight === run) this.walletSubscriptionInFlight = null; }
+  }
+
+  /** True when the wanted list only adds to the live subscription and the new addresses are now
+   *  tracked on it; false when it didn't apply or tracking failed (the caller rebuilds). */
+  async widenWalletSubscription() {
+    const context = this.utxoContext;
+    const tracked = this.utxoTrackedAddresses || [];
+    if (!context || !this.utxoProcessor || this.subscriptionState.status !== "ready" || !this.rpc
+      || this.utxoSubscriptionRpc !== this.rpc || this.subscriptionState.address !== this.address) return false;
+    const wanted = this.trackedSubscriptionAddresses();
+    const wantedSet = new Set(wanted);
+    if (!tracked.every((address) => wantedSet.has(address))) return false; // removing: full way
+    const trackedSet = new Set(tracked);
+    const added = wanted.filter((address) => !trackedSet.has(address));
+    if (!added.length) return true;
+    const generation = this.walletSubscriptionGeneration;
+    try {
+      await context.trackAddresses(added);
+    } catch (error) {
+      this.log("Widening the UTXO subscription failed; resubscribing:", error?.message || error);
+      return false;
+    }
+    if (generation !== this.walletSubscriptionGeneration) return true; // stopped meanwhile: the stop wins
+    this.utxoTrackedAddresses = [...tracked, ...added];
+    this.setSubscriptionState({ status: "ready", address: this.address, addresses: wanted, contactCount: Math.max(0, wanted.length - 1), lastError: "" });
+    this.log(`Live UTXO subscription widened to ${wanted.length} address(es)`);
+    return true;
   }
 
   trackedSubscriptionAddresses() {
@@ -473,6 +522,7 @@ export class KaspaEngine {
     this.utxoContext = null;
     this.utxoProcessor = null;
     this.utxoSubscriptionRpc = null;
+    this.utxoTrackedAddresses = [];
     try { await context?.clear?.(); } catch {}
     try { await processor?.stop?.(); } catch {}
     if (!preserveState) this.setSubscriptionState({ status: "idle", endpoint: "", lastError: "" });
@@ -539,6 +589,7 @@ export class KaspaEngine {
       this.utxoProcessor = processor;
       this.utxoContext = context;
       this.utxoSubscriptionRpc = rpc;
+      this.utxoTrackedAddresses = trackedAddresses;
       this.setSubscriptionState({ status: "ready", address: this.address, addresses: trackedAddresses, contactCount: Math.max(0, trackedAddresses.length - 1), endpoint, lastEventType: "subscription-ready", lastEventAt: Date.now(), lastError: "" });
       this.log(`Live UTXO subscription ready for ${trackedAddresses.length} address(es) via ${endpoint}`);
       return this.subscriptionSnapshot();
@@ -735,13 +786,17 @@ export class KaspaEngine {
 
   async connect({ force = false } = {}) {
     this.requireSdk();
-    if (!force && this.rpc && await probeRpc(this.rpc)) {
-      this.setConnectionState({ primary: "ready", primaryEndpoint: this.rpc.url || "", lastError: "" });
+    const probed = this.rpc;
+    if (!force && probed && await probeRpc(probed)) {
+      this.setConnectionState({ primary: "ready", primaryEndpoint: this.rpc?.url || probed.url || "", lastError: "" });
       this.startRpcHeartbeat();
       queueMicrotask(() => this.ensureStandby());
-      return this.rpc;
+      return this.rpc || probed;
     }
+    // A second connect joins the one under way (iOS 54aaa87), and one that finished while this
+    // probe ran counts too: connecting again would replace the fresh connection.
     if (this.rpcConnectPromise) return this.rpcConnectPromise;
+    if (!force && this.rpc && this.rpc !== probed) return this.rpc;
 
     this.rpcConnectPromise = (async () => {
       if (force) {

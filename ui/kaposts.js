@@ -122,6 +122,9 @@ let composerReplyTarget = null; // post being replied to, when the composer is a
 let composerEditTarget = null;  // one of our own posts being edited (iOS 2d483a7): Save replaces its text
 let countdownTicker = null;
 let savedFeedScroll = 0;
+// The KaPosts scroller's last position while it was on screen: a hidden tab can come back at the
+// top, and returning to the tab puts the reader back where they were (iOS c18fb77).
+let contentScrollTop = 0;
 
 // Endless-scroll state (see the "Endless scrolling" section below)
 let feedPager = null;
@@ -347,7 +350,9 @@ const PAGER_THREAD_PAGE_SIZE = 100;
 const PAGER_TARGET_ROWS = 18;
 const PAGER_MAX_REQUESTS = 5;
 const PAGER_MAX_UNPRODUCTIVE = 1; // one all-filtered trigger (five requests) and we ask for a tap (iOS KaPostsPaginator)
-const FEED_FRESH_MS = 90_000;
+// Page one loaded within this window is current enough to keep: coming back to the tab keeps the
+// pages scrolled in and only looks for newer posts (iOS c18fb77, FeedLoadGates.staleAfter).
+const FEED_STALE_AFTER_MS = 5 * 60_000;
 
 function makePager({ pageSize = PAGER_PAGE_SIZE, target = PAGER_TARGET_ROWS } = {}) {
   return {
@@ -4636,8 +4641,15 @@ export function refreshKaPostsFeed() {
   // .kachat answers that landed while the tab was away (the feed itself repaints below).
   if (posterRepaintPending && (activePanel || currentThreadPost())) repaintPosterIdentities();
   posterRepaintPending = false;
-  if (remotePosts.length > 0 && Date.now() - lastFeedLoadAt < FEED_FRESH_MS) {
+  // Coming back to the tab keeps the pages already scrolled in and the reader's place: page one
+  // is re-pulled only when nothing is loaded or it is over 5 minutes old, otherwise just the
+  // newer posts are looked for (iOS c18fb77).
+  if (remotePosts.length > 0 && Date.now() - lastFeedLoadAt < FEED_STALE_AFTER_MS) {
+    const keepTop = contentScrollTop;
     renderFeed();
+    const scroller = kapostsScrollEl();
+    if (scroller && keepTop && scroller.scrollTop !== keepTop) scroller.scrollTop = keepTop;
+    checkForNewPosts();
     return;
   }
   loadFeed();
@@ -4831,6 +4843,13 @@ export function initKaPosts(dependencies) {
   }
 
   feedEl = document.querySelector("[data-kaposts-feed]");
+  const contentScroller = kapostsScrollEl();
+  if (contentScroller && !contentScroller.dataset.scrollTracked) {
+    contentScroller.dataset.scrollTracked = "1";
+    contentScroller.addEventListener("scroll", () => {
+      if (contentScroller.clientHeight > 0) contentScrollTop = contentScroller.scrollTop;
+    }, { passive: true });
+  }
   statusEl = document.querySelector("[data-kaposts-status]");
   tabsEl = document.querySelector("[data-kaposts-feed-tabs]");
   threadEl = document.querySelector("[data-kaposts-thread]");

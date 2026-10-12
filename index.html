@@ -304,6 +304,11 @@
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></span>
                   <span class="composer-plus-copy"><strong>File</strong><small>Send any file from your Nextcloud. It shows as a preview.</small></span>
                 </button>
+                <!-- iOS 6594936: a payment request made for this contact, sent into this chat. -->
+                <button type="button" data-composer-request-payment title="Ask this contact for an exact amount, with what it's for." aria-description="Ask this contact for an exact amount, with what it's for.">
+                  <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg></span>
+                  <span class="composer-plus-copy"><strong>Request Payment</strong><small>Ask this contact for an exact amount, with what it's for.</small></span>
+                </button>
                 <button type="button" data-chess-open title="Invite this contact to a game on chain." aria-description="Invite this contact to a game on chain.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg></span>
                   <span class="composer-plus-copy"><strong>Play Chess</strong><small>Invite this contact to a game on chain.</small></span>
@@ -522,6 +527,8 @@
         <div class="profile-screen" data-app-tab-screen="kachat-stats" data-kachat-stats hidden></div>
         <!-- Kaspa Hub > Address Book (iOS 00767a4): saved addresses, per wallet (ui/address-book.js). -->
         <div class="profile-screen" data-app-tab-screen="address-book" data-address-book hidden></div>
+        <!-- Kaspa Hub > KaChat Bots (iOS 82ab31d): the four bots as cards (ui/kachat-bots.js). -->
+        <div class="profile-screen" data-app-tab-screen="kachat-bots" data-kachat-bots hidden></div>
         <div class="profile-screen apps-tab-screen" data-app-tab-screen="apps" hidden>
           <div class="kaposts-header">
             <h1 class="kaposts-title">Kaspa Websites</h1>
@@ -837,7 +844,7 @@
           <div class="profile-card profile-about-card">
             <div class="profile-about-row"><strong>Created</strong><span data-profile-created>--</span></div>
             <div class="profile-about-row"><strong>Version</strong><span data-profile-version>--</span></div>
-            <a class="profile-about-row profile-about-link" href="https://linktr.ee/Kachat_" target="_blank" rel="noopener"><strong>Website</strong><span>linktr.ee/Kachat_</span></a>
+            <a class="profile-about-row profile-about-link" href="https://home.kachat.app" target="_blank" rel="noopener"><strong>Website</strong><span>home.kachat.app</span></a>
             <a class="profile-about-row profile-about-link" href="mailto:kaspasilver@gmail.com"><strong>Support Email</strong><span>kaspasilver@gmail.com</span></a>
             <button class="profile-about-row profile-about-link" type="button" data-profile-donate><strong>Donate</strong><span data-profile-donate-label>kachat.kachat</span></button>
             <button class="profile-about-row profile-about-link" type="button" data-profile-licenses><strong>Open Source Licenses</strong><span class="profile-row-trailing"><svg viewBox="0 0 8 13" aria-hidden="true"><path d="M1.5 1.5l5 5-5 5"/></svg></span></button>
@@ -881,6 +888,11 @@
         <!-- book.closed (iOS AppTab.addressBook). -->
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg></span>
         <span>Address Book</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="kachat-bots" hidden>
+        <!-- cpu (iOS AppTab.kachatBots, 82ab31d). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/><rect x="9.6" y="9.6" width="4.8" height="4.8" rx=".8"/><path d="M9.5 3.5v3M14.5 3.5v3M9.5 17.5v3M14.5 17.5v3M3.5 9.5h3M3.5 14.5h3M17.5 9.5h3M17.5 14.5h3"/></svg></span>
+        <span>Bots</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
         <!-- A rook and a knight (iOS ChessTabIcon: SF Symbols has no chess pieces). -->
@@ -1062,7 +1074,7 @@
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="explorer">
                 <span class="settings-row-copy"><strong>Kaspa Explorer</strong><small>Which explorer transaction and address links open in.</small></span>
-                <span class="settings-dropdown-value" data-explorer-current>explorer.kaspa.org</span>
+                <span class="settings-dropdown-value" data-explorer-current>kaspa.stream</span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
             </div>
@@ -2753,6 +2765,8 @@
       <div class="sk-screen">
         <div data-sk-mount="recipient"></div>
         <p class="sk-caption send-compound-note" data-send-kaspa-compound-note hidden>Combines all UTXOs at this address into a single one by sending the balance back to itself, to reduce the number of inputs a future send needs.</p>
+        <!-- A payment request being paid (iOS PaymentRequestSummary): what it asks for and who made it. -->
+        <div class="sk-card payment-request-summary" data-send-kaspa-request-summary hidden></div>
         <div data-sk-mount="amount"></div>
         <div data-sk-mount="pills"></div>
         <div data-sk-mount="fee"></div>

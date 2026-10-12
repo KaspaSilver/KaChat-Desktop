@@ -7,6 +7,7 @@ import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
+import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
@@ -19,6 +20,7 @@ import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedId
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
+import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
 import {
   configureAddressBook, addressBookName, addressBookEntry, addressBookIsEmpty, archiveAddressBook,
   importAddressBookArchive, mergeAddressBookArchives, removeAddressBookForWallet,
@@ -518,6 +520,16 @@ const ACCOUNT_SHELL_META_KEY = "kachat-account-shell-metadata-v1";
 const SAVED_ACCOUNTS_KEY = "kachat-saved-accounts-v1";
 const ACTIVE_ACCOUNT_KEY = "kachat-active-account-v1";
 let accountShellPrefs = loadAccountShellPreferences();
+// One-time: an existing user (any saved account) without a picked explorer was on the old default,
+// explorer.kaspa.org; pin it so the new kaspa.stream default only reaches fresh installs (iOS e69fe13).
+if (!accountShellPrefs.explorerDefaultMigrated) {
+  try {
+    const existingUser = !!localStorage.getItem(SAVED_ACCOUNTS_KEY) || !!localStorage.getItem(STORAGE_KEY);
+    if (existingUser && !accountShellPrefs.explorer) accountShellPrefs.explorer = "kaspaOrg";
+    accountShellPrefs.explorerDefaultMigrated = true;
+    persistAccountShellPreferences();
+  } catch { /* storage unavailable: the default applies */ }
+}
 const loggedOutScreen = document.querySelector("[data-logged-out-screen]");
 const mainAppShell = document.querySelector("#app");
 const savedAccountList = document.querySelector("[data-saved-account-list]");
@@ -787,7 +799,10 @@ const KASPA_EXPLORERS = {
   kaspaStream: { displayName: "kaspa.stream", tx: "https://kaspa.stream/transactions/", address: "https://kaspa.stream/addresses/" },
   kaspaOrg: { displayName: "explorer.kaspa.org", tx: "https://explorer.kaspa.org/txs/", address: "https://explorer.kaspa.org/addresses/" },
 };
-const DEFAULT_KASPA_EXPLORER = "kaspaOrg";
+// kaspa.stream is the default for a fresh install (iOS e69fe13). iOS keeps an existing user's
+// saved choice, and the old default was saved with it, so here an existing user who never picked
+// one stays on explorer.kaspa.org (pinned once, below).
+const DEFAULT_KASPA_EXPLORER = "kaspaStream";
 
 function currentExplorer() {
   return KASPA_EXPLORERS[accountShellPrefs.explorer] || KASPA_EXPLORERS[DEFAULT_KASPA_EXPLORER];
@@ -1441,9 +1456,20 @@ const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 //   kachat://kapost/<txid>        https://kachat.app/post/<txid>       (kachat.duckdns.org still opens)
 //   kachat://broadcast/<channel>  https://kachat.app/broadcast/<channel>
 //   kachat://profile/<address>    https://kachat.app/u/<address>       (iOS 863b0e9; a missing kaspa: prefix means mainnet)
+//   kachat://pay/<address>?...    https://kachat.app/pay/<address>?... (iOS c6851d6 / 7c71a98, engine/payment-request.js)
 // Everything a pasted link carries is untrusted, so the payload is re-validated here rather
 // than trusted from the URL's text.
-const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile)\/[^\s<>"']+|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(?:post|broadcast|u)\/[^\s<>"']+)/i;
+const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
+// A payment request's link checked once (iOS matchCache, 427f19b): its signature check runs on
+// every message render otherwise. Keyed by the link text; the network is fixed for the page.
+var paymentRequestLinkCache = new Map();
+function parsePaymentRequestLinkCached(text) {
+  if (paymentRequestLinkCache.has(text)) return paymentRequestLinkCache.get(text);
+  const request = parsePaymentRequestLink(text);
+  if (paymentRequestLinkCache.size >= 2048) paymentRequestLinkCache.clear();
+  paymentRequestLinkCache.set(text, request);
+  return request;
+}
 const KACHAT_UNIVERSAL_LINK_HOST = "kachat.app";
 /** The kachat.app link to a person: reads cleanly without the kaspa: prefix. */
 function profileUniversalLink(address) {
@@ -1455,6 +1481,10 @@ function profileUniversalLink(address) {
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
   let target = null, payload = null;
+  if (/^(?:kachat:\/\/pay\/|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/pay\/)/i.test(text)) {
+    const request = parsePaymentRequestLinkCached(text);
+    return request ? { kind: "pay", request } : null;
+  }
   const custom = text.match(/^kachat:\/\/(kapost|broadcast|profile)\/([^/?#]+)\/?$/i);
   if (custom) { target = custom[1].toLowerCase(); payload = custom[2]; }
   else {
@@ -1491,17 +1521,22 @@ function parseKaChatInternalLink(raw) {
 function firstInternalLinkIn(text) {
   const match = String(text || "").match(INTERNAL_LINK_IN_TEXT_RE);
   if (!match) return null;
-  const link = parseKaChatInternalLink(match[0]);
-  return link ? { ...link, raw: match[0] } : null;
+  let candidate = match[0];
+  // Trailing prose punctuation is not part of a payment request ("... pay kachat.app/pay/...?amount=1.").
+  if (/\/pay\//i.test(candidate)) candidate = candidate.replace(/[.,;:!?)\]}'"]+$/, "");
+  const link = parseKaChatInternalLink(candidate);
+  return link ? { ...link, raw: candidate } : null;
 }
 // Opens the target screen (iOS KaChatLinkRouter) - never the browser for an in-app target.
 function openKaChatInternalLink(link) {
   if (!link) return;
-  // Simple Mode hides KaPosts and Public Chats; a profile opens User Info, which Chats keeps.
-  if (isChildModeEnabled() && link.kind !== "profile") { showCopyToast("Not available in Simple Mode."); return; }
+  // Simple Mode hides KaPosts and Public Chats; a profile opens User Info, which Chats keeps, and a
+  // payment request opens Send Kaspa, which it keeps too.
+  if (isChildModeEnabled() && link.kind !== "profile" && link.kind !== "pay") { showCopyToast("Not available in Simple Mode."); return; }
   if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
   else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
   else if (link.kind === "profile") openProfileLink(link.address);
+  else if (link.kind === "pay") openPaymentRequest(link.request);
 }
 /** Someone's profile link shows their User Info, contact or not (iOS 81df734); Open Chat is one
  *  click from there. Your own link lands on Chats. */
@@ -1516,6 +1551,7 @@ function openProfileLink(address) {
 }
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
+  if (link?.kind === "pay") return buildPaymentRequestCard(link.request);
   const card = document.createElement("button");
   card.type = "button";
   card.className = "message-link-card internal-link-card";
@@ -1555,6 +1591,432 @@ function buildInternalLinkCard(link) {
   card.addEventListener("click", (event) => { event.stopPropagation(); openKaChatInternalLink(link); });
   return card;
 }
+// --- Payment requests (iOS c6851d6, 7c71a98, 427f19b, 1fe8388, 6594936) -------------------------
+// A link asking to be paid an exact amount, with what it's for (engine/payment-request.js). Made in
+// Chats > + > Request Payment (Copy / Share) or a 1:1 chat's + sheet (sent into the chat); tapped
+// or pasted anywhere in KaChat, someone else's opens Send Kaspa with the address locked and the
+// amount and memo filled in, and your own shows it again to copy or share. Nothing here runs at
+// load except the paste listener's registration.
+
+var PAYMENT_REQUEST_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16.5v-9M8 11.5l4-4 4 4"/></svg>';
+// The request Send Kaspa is paying right now (iOS WithdrawKaspaView activeRequest), or null.
+var sendKaspaPaymentRequest = null;
+// Set by the chat-payment path of Send Kaspa so its onSent doesn't add a second "Sent" bubble.
+var sendKaspaPaidAsChatPayment = false;
+// The wallet's own addresses, worked out once per account and spending-address count (iOS
+// 427f19b): listing them derives every spending address, and the request card asks on every render.
+var ownPaymentAddressCache = null;
+
+function ownPaymentAddresses() {
+  const wallet = String(engine.address || "").toLowerCase();
+  if (!wallet) return new Set();
+  const maxIndex = activeAccountMnemonic() ? getSpendingState().maxIndex : -1;
+  const key = `${wallet}|${maxIndex}`;
+  if (ownPaymentAddressCache?.key === key) return ownPaymentAddressCache.addresses;
+  const addresses = new Set([wallet]);
+  let complete = true;
+  for (let index = 0; index <= maxIndex; index += 1) {
+    const address = deriveSpendingAddressAt(index);
+    if (address) addresses.add(String(address).toLowerCase()); else complete = false;
+  }
+  // Kept only once every address derived: before the SDK loads, the next render asks again.
+  if (complete) ownPaymentAddressCache = { key, addresses };
+  return addresses;
+}
+/** True when the request is yours: one you signed, or one paying into this wallet (iOS isOwn). */
+function isOwnPaymentRequest(request) {
+  const wallet = String(engine.address || "").toLowerCase();
+  if (!wallet || !request) return false;
+  if (request.creator && request.creator.toLowerCase() === wallet) return true;
+  return ownPaymentAddresses().has(String(request.address || "").toLowerCase());
+}
+/** The name a request's maker goes by here (iOS ContactsManager.displayName(for:)). */
+function paymentRequestPersonName(address) {
+  const contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === String(address || "").toLowerCase());
+  return knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (kachatNamesUiEnabled() ? identityNameForAddress(address) : shortAddress(address)));
+}
+
+// The request's card in a message (iOS KaChatInternalLinkCardView .paymentRequest): the amount,
+// the memo, who it's from once the signature checked out, and what a click does.
+function buildPaymentRequestCard(request) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "message-link-card internal-link-card payment-request-card";
+  const own = isOwnPaymentRequest(request);
+  const lines = [];
+  if (request.memo) lines.push(request.memo);
+  // the maker, as the signature in the link proves - their name, not the payment address (7c71a98)
+  if (request.creator && !own) lines.push(`From ${paymentRequestPersonName(request.creator)}`);
+  lines.push(own ? "Your payment request. Tap to view." : "Tap to pay.");
+  card.innerHTML = `<span class="internal-link-icon">${PAYMENT_REQUEST_ICON}</span>
+    <span class="message-link-card-meta">
+      <span class="message-link-card-site">Payment Request</span>
+      <strong>${escapeHtml(`${paymentRequestAmountText(request)} ${KAS_UNIT}`)}</strong>
+      <small class="payment-request-card-lines">${lines.map((line) => escapeHtml(line)).join("<br>")}</small>
+    </span>`;
+  card.addEventListener("click", (event) => { event.stopPropagation(); openPaymentRequest(request); });
+  return card;
+}
+
+/** Someone else's request opens Send Kaspa filled in; your own shows it to copy or share (1fe8388). */
+function openPaymentRequest(request) {
+  if (!request || !engine.address) return;
+  if (isOwnPaymentRequest(request)) { openOwnPaymentRequestSheet(request); return; }
+  openSendKaspaModal({ paymentRequest: request });
+}
+
+/** Pasting someone's request opens Send Kaspa instead of landing in the text (iOS
+ *  PaymentRequestPaste): only text that is the link and nothing else, and never your own, which
+ *  pastes as text so you can send it to whoever should pay. */
+function openPaymentRequestIfPasted(text) {
+  const link = firstInternalLinkIn(text);
+  if (!link || link.kind !== "pay" || String(text || "").trim() !== link.raw) return false;
+  if (isOwnPaymentRequest(link.request)) return false;
+  openPaymentRequest(link.request);
+  return true;
+}
+// The chat composers (1:1, group, public) and the KaPosts composer and reply box (iOS
+// ComposerUITextView / PaymentRequestAwareTextView). Capture phase, so it runs before any field's
+// own paste handling.
+var PAYMENT_REQUEST_PASTE_FIELDS = '[data-composer] textarea[name="message"], [data-group-composer-input], [data-broadcast-input], [data-kaposts-composer-input], [data-kaposts-reply-input]';
+document.addEventListener("paste", (event) => {
+  const field = event.target?.closest?.(PAYMENT_REQUEST_PASTE_FIELDS);
+  if (!field) return;
+  const text = event.clipboardData?.getData("text/plain");
+  if (!text || !openPaymentRequestIfPasted(text)) return;
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+
+// What a request asks for, above the amount on Send Kaspa (iOS PaymentRequestSummary), and who
+// made it: "Requested by" only when the signature checked out, else "Not signed" (7c71a98).
+function paymentRequestSummaryHtml(request) {
+  const creator = request.creator;
+  const maker = creator
+    ? `<p class="payment-request-signed"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.8"/></svg>Requested by</p>
+       <div data-payment-request-maker>${addressResolutionCardHtml(creator, { onLoaded: (address) => { if (sendKaspaPaymentRequest?.creator === address) renderSendKaspaPaymentRequest(); } })}</div>
+       ${creator.toLowerCase() !== request.address.toLowerCase() ? '<p class="sk-caption">Signed by their chatting address. The payment goes to the address above.</p>' : ""}`
+    : '<p class="payment-request-unsigned"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5M12 17.2v.3"/></svg>Not signed: who made this request can\'t be confirmed.</p>';
+  return `
+    <span class="payment-request-eyebrow">Requested</span>
+    <strong class="payment-request-amount">${escapeHtml(`${paymentRequestAmountText(request)} ${KAS_UNIT}`)}</strong>
+    ${request.memo ? `<p class="payment-request-memo">${escapeHtml(request.memo)}</p>` : ""}
+    <p class="sk-caption">${request.toChattingAddress ? "Paid as a chat payment: it shows in your chat with them." : "Paid to their spending address."}</p>
+    <hr class="payment-request-divider" />
+    ${maker}`;
+}
+function renderSendKaspaPaymentRequest() {
+  const host = sendKaspaModal?.querySelector("[data-send-kaspa-request-summary]");
+  if (!host) return;
+  host.hidden = !sendKaspaPaymentRequest;
+  host.innerHTML = sendKaspaPaymentRequest ? paymentRequestSummaryHtml(sendKaspaPaymentRequest) : "";
+}
+/** Fills Send Kaspa in from a request (iOS WithdrawKaspaView.apply): the address (locked), the
+ *  exact amount in KAS and the request above it. */
+function applyPaymentRequestToSendKaspa(request) {
+  if (!request || sendKaspaCompound || sendKaspaSourceIndex != null) return;
+  sendKaspaPaymentRequest = request;
+  applySendKaspaCompoundUi();
+  const recipient = document.querySelector("[data-send-kaspa-recipient]");
+  if (recipient) { recipient.value = request.address; recipient.dispatchEvent(new Event("input")); }
+  // the exact amount is what's sent: the field goes back to KAS for it
+  sendKaspaUnit = "kas";
+  sendKaspaMaxMode = false;
+  sendKaspaMaxPin = null;
+  applySendKaspaUnit();
+  if (sendKaspaAmountInput) { sendKaspaAmountInput.value = paymentRequestAmountText(request); sendKaspaAmountInput.dispatchEvent(new Event("input")); }
+  renderSendKaspaPaymentRequest();
+}
+/** A chatting-address request is paid as a chat payment, the memo encrypted to them inside it
+ *  (iOS c6851d6 sendPayment(to:note:)): it lands in your chat with them like any chat payment. */
+async function payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints }) {
+  const address = request.address;
+  let contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === address.toLowerCase());
+  if (!contact) {
+    const createdAt = Date.now();
+    contact = { id: nowId(), name: "", nameIsCustom: false, address, avatar: initialsFor(shortAddress(address)), createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "" };
+    clearDeletedContactAddress(address);
+    state.contacts.push(contact);
+  }
+  let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
+  if (!conversationEntry) {
+    conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
+    state.conversations.push(conversationEntry);
+    refreshSubscriptionAddresses({ restart: true });
+    persistState();
+    renderChats();
+  }
+  const sent = await sendKasPayment(conversationEntry.id, amountKas, {
+    note: request.memo,
+    extraFeeSompi: kasToSompi(feeKas) ?? 0n,
+    manualUtxos: selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null,
+  });
+  if (!sent) throw new Error("A payment is already being sent. Try again in a moment.");
+  sendKaspaPaidAsChatPayment = true;
+  return { txids: [] };
+}
+
+// The request's link, copied or shared (iOS Copy Payment Request / ShareLink). The browser's share
+// sheet when there is one, else the clipboard.
+async function sharePaymentRequestLink(url) {
+  if (typeof navigator.share === "function") {
+    try { await navigator.share({ title: "Payment Request", url }); return; }
+    catch (error) { if (error?.name === "AbortError") return; }
+  }
+  try { await copyTextToClipboard(url); showCopyToast("Payment request copied"); }
+  catch { showCopyToast(url); }
+}
+
+function closePaymentRequestSheets() {
+  document.querySelectorAll("[data-payment-request-sheet]").forEach((el) => el.closeSheet?.());
+}
+/** A modal built per open (like the New sheet): no state outside the DOM. */
+function openPaymentRequestBackdrop(label, innerHtml) {
+  closePaymentRequestSheets();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop payment-request-backdrop";
+  backdrop.setAttribute("data-payment-request-sheet", "");
+  backdrop.innerHTML = `<section class="contact-modal payment-request-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)}">${innerHtml}</section>`;
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
+  function close() {
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey, true);
+  }
+  backdrop.closeSheet = close;
+  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+  backdrop.addEventListener("click", (event) => { if (event.target.closest("[data-payment-request-close]")) close(); });
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(backdrop);
+  return { backdrop, sheet: backdrop.querySelector(".payment-request-modal"), close };
+}
+function paymentRequestHeaderHtml(title, closeLabel) {
+  return `<div class="modal-header">
+      <div><h2>${escapeHtml(title)}</h2></div>
+      <button class="modal-close" type="button" data-payment-request-close aria-label="${escapeHtml(closeLabel)}">×</button>
+    </div>`;
+}
+var PAYMENT_REQUEST_CHATTING_NOTE = "The payment lands in your chat with whoever pays, with the memo.";
+var PAYMENT_REQUEST_SPENDING_NOTE = "Paid to a fresh address of yours. The memo shows to whoever pays, but doesn't travel with the payment.";
+
+/**
+ * Request Payment (iOS CreatePaymentRequestView): paid to your chatting address or a fresh
+ * spending (receive) address, an exact amount in KAS or your currency, and an optional memo up to
+ * 140 characters. Signed by your chatting address when its key is here (7c71a98). From Chats > +
+ * it gives Copy Payment Request / Share; from a 1:1 chat (`conversationId`, 6594936) the button is
+ * Send Payment Request, which sends it into that chat.
+ */
+function openCreatePaymentRequest({ conversationId = null } = {}) {
+  if (!engine.address) return;
+  const conversationEntry = conversationId ? state.conversations.find((entry) => entry.id === conversationId) : null;
+  const recipient = conversationEntry ? contactForConversation(conversationEntry) : null;
+  const { sheet, close } = openPaymentRequestBackdrop("Request Payment", `
+    ${paymentRequestHeaderHtml("Request Payment", "Cancel")}
+    <div class="sk-screen">
+      <div class="settings-segmented full" role="group" aria-label="Paid to">
+        <button type="button" class="settings-segmented-option active" data-payreq-dest="chatting" aria-pressed="true">Chatting Address</button>
+        <button type="button" class="settings-segmented-option" data-payreq-dest="spending" aria-pressed="false">Spending Address</button>
+      </div>
+      <div data-payreq-address></div>
+      <p class="sk-caption" data-payreq-dest-note></p>
+      ${amountEntryHtml({ prefix: "payreq", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, attrs: { conversion: "payreq-fiat" } })}
+      <div class="payment-request-memo-field">
+        <textarea class="field-input" rows="2" data-payreq-memo placeholder="What it's for (optional)" aria-label="What it's for (optional)"></textarea>
+        <span class="payment-request-memo-count" data-payreq-memo-count>0/${PAYMENT_REQUEST_MEMO_LIMIT}</span>
+      </div>
+      <p class="field-error" data-payreq-error role="alert" hidden></p>
+      <button class="primary-button full" type="button" data-payreq-action disabled>${recipient ? "Send Payment Request" : "Copy Payment Request"}</button>
+      ${recipient ? "" : '<button class="secondary-button full" type="button" data-payreq-share hidden>Share</button>'}
+      <p class="sk-caption payment-request-footnote">Anyone who opens or pastes it in KaChat gets Send Kaspa with this filled in, and sees it was made by your chatting address (signed with its key).</p>
+    </div>`);
+  // Asking for an amount, not sending one: no Max (iOS KaspaAmountEntry showsMax: false).
+  sheet.querySelector("[data-payreq-max]")?.remove();
+  const amountInput = sheet.querySelector("[data-payreq-amount]");
+  const unitCode = sheet.querySelector("[data-payreq-unit-code]");
+  const unitToggle = sheet.querySelector("[data-payreq-unit]");
+  const conversion = sheet.querySelector("[data-payreq-fiat]");
+  const memoInput = sheet.querySelector("[data-payreq-memo]");
+  const memoCount = sheet.querySelector("[data-payreq-memo-count]");
+  const actionButton = sheet.querySelector("[data-payreq-action]");
+  const shareButton = sheet.querySelector("[data-payreq-share]");
+  const errorEl = sheet.querySelector("[data-payreq-error]");
+  let destination = "chatting";
+  let spendingAddress = null;
+  let unit = "kas";
+  let price = null;
+  let copied = false;
+  let sending = false;
+  let lastLink = null;
+
+  const address = () => (destination === "chatting" ? engine.address : spendingAddress);
+  const amountKasText = () => {
+    const raw = String(amountInput?.value || "");
+    if (unit !== "fiat") return raw;
+    const value = Number(raw);
+    return price && isFinite(value) && value > 0 ? trimKas8(value / price) : "";
+  };
+  // Signed by your chatting address: whoever pays sees it is from you, even when it pays into a
+  // spending address, which has no identity. An account whose key isn't here still asks, unsigned.
+  const currentRequest = () => {
+    const payTo = address();
+    const sompi = sompiFromUserText(amountKasText());
+    if (!payTo || sompi == null || sompi <= 0n) return null;
+    const unsigned = makePaymentRequest({ address: payTo, amountSompi: sompi, memo: memoInput?.value || "", toChattingAddress: destination === "chatting" });
+    const key = engine.privateKeyHex;
+    return (key && signPaymentRequest(unsigned, engine.address, key)) || unsigned;
+  };
+  const renderAddress = () => {
+    const host = sheet.querySelector("[data-payreq-address]");
+    const payTo = address();
+    if (host) host.innerHTML = payTo
+      ? addressResolutionCardHtml(payTo, { onLoaded: (loaded) => { if (address() === loaded) renderAddress(); } })
+      : '<div class="payment-request-loading"><span class="sk-spinner" aria-hidden="true"></span></div>';
+    const note = sheet.querySelector("[data-payreq-dest-note]");
+    if (note) note.textContent = destination === "chatting" ? PAYMENT_REQUEST_CHATTING_NOTE : PAYMENT_REQUEST_SPENDING_NOTE;
+  };
+  const renderAmount = () => {
+    layoutAmountEntry(amountInput, unitCode);
+    if (unitCode) unitCode.textContent = unit === "kas" ? KAS_UNIT : selectedCurrency.toUpperCase();
+    if (unitToggle) unitToggle.hidden = !price;
+    if (!conversion) return;
+    const value = Number(amountInput?.value);
+    let text = "";
+    if (isFinite(value) && value > 0 && price) {
+      text = unit === "kas"
+        ? `≈ ${formatFiatValue(value, price)}`
+        : `≈ ${(value / price).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
+    }
+    conversion.textContent = text || (unit === "kas" ? selectedCurrency.toUpperCase() : KAS_UNIT);
+  };
+  const refresh = () => {
+    const request = currentRequest();
+    const link = request ? paymentRequestUniversalLink(request) : null;
+    if (link !== lastLink) { copied = false; lastLink = link; }
+    if (actionButton) {
+      actionButton.disabled = !request || sending;
+      if (!recipient) actionButton.textContent = copied ? "Copied" : "Copy Payment Request";
+    }
+    if (shareButton) shareButton.hidden = !request;
+    if (memoCount) memoCount.textContent = `${memoCharacters(memoInput?.value || "").length}/${PAYMENT_REQUEST_MEMO_LIMIT}`;
+  };
+
+  sheet.addEventListener("click", (event) => {
+    const dest = event.target.closest("[data-payreq-dest]")?.dataset.payreqDest;
+    if (dest && dest !== destination) {
+      destination = dest;
+      sheet.querySelectorAll("[data-payreq-dest]").forEach((button) => {
+        const on = button.dataset.payreqDest === destination;
+        button.classList.toggle("active", on);
+        button.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      renderAddress();
+      refresh();
+    }
+  });
+  unitToggle?.addEventListener("click", () => {
+    if (!price) return;
+    const value = Number(amountInput?.value);
+    if (isFinite(value) && value > 0) {
+      amountInput.value = unit === "kas" ? (value * price).toFixed(selectedCurrency === "btc" ? 8 : 2) : trimKas8(value / price);
+    }
+    unit = unit === "kas" ? "fiat" : "kas";
+    renderAmount();
+    refresh();
+  });
+  amountInput?.addEventListener("input", () => {
+    const sanitized = sanitizeAmountText(amountInput.value, unit === "fiat" && selectedCurrency !== "btc" ? 2 : 8);
+    if (sanitized !== amountInput.value) amountInput.value = sanitized;
+    renderAmount();
+    refresh();
+  });
+  memoInput?.addEventListener("input", () => {
+    const clamped = clampMemoText(memoInput.value);
+    if (clamped !== memoInput.value) memoInput.value = clamped;
+    refresh();
+  });
+  shareButton?.addEventListener("click", () => {
+    const request = currentRequest();
+    if (request) sharePaymentRequestLink(paymentRequestUniversalLink(request));
+  });
+  actionButton?.addEventListener("click", async () => {
+    const request = currentRequest();
+    if (!request) return;
+    const link = paymentRequestUniversalLink(request);
+    if (!recipient) {
+      try { await copyTextToClipboard(link); copied = true; lastLink = link; refresh(); }
+      catch { showCopyToast(link); }
+      return;
+    }
+    // Into the chat as a message: it shows there as a Payment Request card they tap to pay.
+    const blocked = ["outgoing-request", "declined", "request-failed"].includes(recipient.relationshipState);
+    if (blocked || !state.conversations.some((entry) => entry.id === conversationId)) {
+      if (errorEl) {
+        errorEl.textContent = recipient.relationshipState === "declined" ? "Communication request declined" : recipient.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "This chat can't send messages right now.";
+        errorEl.hidden = false;
+      }
+      return;
+    }
+    sending = true;
+    refresh();
+    // Sent as its own message, never as a reply to whatever the composer was replying to.
+    const savedReply = replyingToMessageId;
+    replyingToMessageId = null;
+    try { queueConversationMessage(conversationId, link); }
+    finally { replyingToMessageId = savedReply; }
+    close();
+  });
+
+  renderAddress();
+  renderAmount();
+  refresh();
+  amountInput?.focus();
+  fetchKasPrice(selectedCurrency).then((value) => { price = value || null; renderAmount(); }).catch(() => {});
+  // A fresh receive address of the spending chain, as Receive Kaspa shows.
+  if (activeAccountMnemonic()) {
+    (async () => {
+      try { await ensureRuntimes({ quiet: true }); } catch { /* the address stays loading */ }
+      const fresh = await freshReceiveAddress().catch(() => null);
+      if (!fresh || !sheet.isConnected) return;
+      spendingAddress = fresh;
+      if (destination === "spending") { renderAddress(); refresh(); }
+    })();
+  }
+}
+
+/** One of your own requests, clicked in a chat (iOS OwnPaymentRequestView, 1fe8388): what it asks
+ *  for and where it pays into, with its link to copy or share again. Nothing to pay - it's yours. */
+function openOwnPaymentRequestSheet(request) {
+  const link = paymentRequestUniversalLink(request);
+  const { sheet } = openPaymentRequestBackdrop("Your Payment Request", `
+    ${paymentRequestHeaderHtml("Your Payment Request", "Done")}
+    <div class="sk-screen">
+      <div class="payment-request-own-head">
+        <strong class="payment-request-own-amount">${escapeHtml(`${paymentRequestAmountText(request)} ${KAS_UNIT}`)}</strong>
+        ${request.memo ? `<p class="payment-request-memo">${escapeHtml(request.memo)}</p>` : ""}
+      </div>
+      <span class="payment-request-eyebrow">${request.toChattingAddress ? "Paid to your chatting address" : "Paid to your spending address"}</span>
+      <div data-payreq-own-address></div>
+      <p class="sk-caption">${request.toChattingAddress ? PAYMENT_REQUEST_CHATTING_NOTE : PAYMENT_REQUEST_SPENDING_NOTE}</p>
+      <button class="primary-button full" type="button" data-payreq-own-copy>Copy Payment Request</button>
+      <button class="secondary-button full" type="button" data-payreq-own-share>Share</button>
+    </div>`);
+  const renderAddress = () => {
+    const host = sheet.querySelector("[data-payreq-own-address]");
+    if (host) host.innerHTML = addressResolutionCardHtml(request.address, { onLoaded: renderAddress });
+  };
+  renderAddress();
+  const copyButton = sheet.querySelector("[data-payreq-own-copy]");
+  copyButton?.addEventListener("click", async () => {
+    try { await copyTextToClipboard(link); copyButton.textContent = "Copied"; }
+    catch { showCopyToast(link); }
+  });
+  sheet.querySelector("[data-payreq-own-share]")?.addEventListener("click", () => sharePaymentRequestLink(link));
+}
+
 // An https universal link rendered as an anchor still opens inside the app.
 document.addEventListener("click", (event) => {
   const anchor = event.target.closest(".message-text a[href], .group-message-text a[href]");
@@ -4636,6 +5098,7 @@ function webLinkPreviewLabel(text) {
   if (internal?.kind === "kapost") return "Shared a KaPosts post";
   if (internal?.kind === "profile") return "Shared a KaChat profile";
   if (internal?.kind === "broadcast") return `Public chat room #${internal.channel}`;
+  if (internal?.kind === "pay") return kasLabel(`Payment request: ${paymentRequestAmountText(internal.request)} KAS`);
   return WEB_LINK_RE.test(String(text || "")) ? "📎 Sent a link" : null;
 }
 function chatListPreviewText(message) {
@@ -8065,6 +8528,19 @@ async function refreshSpendingTotal() {
   }
 }
 
+// Showing Profile re-reads the spending balance at most every 30 s for the same address: switching
+// tabs back and forth started the requests each time. Sends, arriving funds and the address's own
+// screens still refresh at once (iOS 9de981a). State on the function object (load-order safe).
+function refreshSpendingSummaryOnShow() {
+  const st = refreshSpendingSummaryOnShow;
+  const key = `${engine.address || ""}|${getActiveSpendingIndex()}`;
+  if (st.key === key && Date.now() - (st.at || 0) < 30_000) return;
+  refreshSpendingSummary();
+  // only a resolved address counts; a keychain still unlocking is asked again on the next show
+  st.key = key;
+  st.at = activeSpendingAddress ? Date.now() : 0;
+}
+
 async function refreshSpendingSummary() {
   const mnemonic = activeAccountMnemonic();
   if (!mnemonic || !engine.kaspa) {
@@ -9528,7 +10004,7 @@ function setActiveAppTab(tab) {
     if (detailEmptyState) detailEmptyState.hidden = groupOpen || Boolean(activeConversationId);
   }
   updateDetailActiveClass();
-  if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummary(); }
+  if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummaryOnShow(); }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
   // The room circles sit above the Chats list, so the rooms stay live while Chats is up (and an
@@ -9542,6 +10018,7 @@ function setActiveAppTab(tab) {
   try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
   try { if (screenTab === "kachat-stats") showKachatStats(); else hideKachatStats(); } catch { /* not started */ }
   try { if (screenTab === "address-book") showAddressBook(); else hideAddressBook(); } catch { /* not started */ }
+  try { if (screenTab === "kachat-bots") showKachatBots(); else hideKachatBots(); } catch { /* not started */ }
 }
 
 sidebarTabButtons.forEach((button) => {
@@ -9578,12 +10055,13 @@ const DOCK_PINNED = ["hub", "profile"];
 // .kachat and KaChat Stats (iOS 5.2) are Hub sections like the rest: first in the Hub on a fresh
 // install, appended for an existing arrangement (normalizeDockPrefs), assignable to the dock.
 // Address Book (iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book"]; // Public Chats live under Chats now (iOS a566da7)
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kaposts", "apps", "chess"];
+// KaChat Bots (iOS 82ab31d AppTab.kachatBots) follows KaChat Stats in the Hub; Simple Mode keeps it.
+const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book", "kachat-bots"]; // Public Chats live under Chats now (iOS a566da7)
+const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "kaposts", "apps", "chess"];
 const DOCK_DEFAULT =["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kaposts", "apps", "chess"];
+const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kachat-bots", "kaposts", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -10205,6 +10683,10 @@ async function refreshKachatExpiredBanner() {
   let expired;
   try { expired = await kachatExpiredNames(address); } catch { return; /* unreadable: keep what is shown */ }
   if (engine.address !== address) return;
+  // re-rendered only on a change (iOS 9de981a)
+  const prev = renderKachatExpiredBanner.state;
+  const sig = (list) => (list || []).map(kachatExpiredKey).join(",");
+  if (prev && prev.address === address && sig(prev.expired) === sig(expired)) return;
   renderKachatExpiredBanner.state = { address, expired };
   renderKachatExpiredBanner();
 }
@@ -10468,7 +10950,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 137;
+const APP_BUILD = 138;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11446,14 +11928,16 @@ function applySendKaspaCompoundUi() {
   const note = document.querySelector("[data-send-kaspa-compound-note]");
   const spending = sendKaspaSourceIndex != null;
   // iOS: "Send Kaspa from Address #N" on a spending address's Send; it follows a picked source.
+  // Paying a payment request is "Payment Request" (iOS c6851d6).
   if (titleEl) titleEl.textContent = sendKaspaCompound
     ? "Compound UTXOs"
-    : (spending ? `Send Kaspa from Address #${sendKaspaSourceIndex}` : "Send Kaspa");
+    : (spending ? `Send Kaspa from Address #${sendKaspaSourceIndex}` : (sendKaspaPaymentRequest ? "Payment Request" : "Send Kaspa"));
   if (kickerEl) kickerEl.textContent = sendKaspaCompound
     ? "Consolidating this address"
     : (spending ? `Spending address · ${shortAddress(sendKaspaSourceAddress())}` : "Real Kaspa transaction");
-  // The shared recipient card, locked to this address for Compound UTXOs.
-  setRecipientLocked(sendKaspaModal, "send-kaspa", sendKaspaCompound ? sendKaspaSourceAddress() : null);
+  // The shared recipient card, locked to this address for Compound UTXOs, and to a payment
+  // request's address while paying one (iOS c6851d6 lockedAddress: activeRequest?.address).
+  setRecipientLocked(sendKaspaModal, "send-kaspa", sendKaspaCompound ? sendKaspaSourceAddress() : (sendKaspaPaymentRequest?.address || null));
   if (note) note.hidden = !sendKaspaCompound;
   sendKaspaSlider.setTitle(sendKaspaCompound ? "Slide to Consolidate" : "Slide to Send");
 }
@@ -11496,6 +11980,11 @@ const sendKaspaController = makeSendController({
         : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(), totalFeeKas });
     }
     if (sendKaspaMaxMode) return sendKaspaPinnedMax(destination, selectedOutpoints);
+    // A payment request to someone's chatting address goes as a chat payment, its memo inside.
+    const request = sendKaspaPaymentRequest;
+    if (request?.toChattingAddress && sendKaspaSourceIndex == null && request.address.toLowerCase() === String(destination || "").toLowerCase()) {
+      return payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints });
+    }
     if (sendKaspaSourceIndex != null) {
       const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex);
       return engine.sendFromSpending({
@@ -11511,6 +12000,8 @@ const sendKaspaController = makeSendController({
   // compound) surfaces as a chat with the destination holding the payment bubble.
   onSent: ({ txid, destination, amountKas }) => {
     if (sendKaspaCompound || sendKaspaSourceIndex != null) return;
+    // A request paid as a chat payment already has its bubble in that chat.
+    if (sendKaspaPaidAsChatPayment) { sendKaspaPaidAsChatPayment = false; return; }
     recordOutgoingPaymentChat({ destination, amountKas, txid });
   },
 });
@@ -11522,6 +12013,9 @@ function openSendKaspaModal(options = {}) {
   }
   sendKaspaCompound = Boolean(options?.compound);
   sendKaspaSourceIndex = spendingIndex;
+  sendKaspaPaymentRequest = null;
+  sendKaspaPaidAsChatPayment = false;
+  renderSendKaspaPaymentRequest();
   closeSendFromPicker();
   sendKaspaSlider.setBusy(false);
   applySendKaspaCompoundUi();
@@ -11531,12 +12025,24 @@ function openSendKaspaModal(options = {}) {
   // synchronously, so the prefill goes in right after and runs the usual address check.
   const prefill = String(options?.prefillAddress || "").trim();
   const recipient = document.querySelector("[data-send-kaspa-recipient]");
-  if (prefill && !sendKaspaCompound && recipient && engine.address) {
+  if (options?.paymentRequest && !sendKaspaCompound && spendingIndex == null && engine.address) {
+    // Someone's payment request (iOS c6851d6): paid from the chatting address, as on iOS.
+    applyPaymentRequestToSendKaspa(options.paymentRequest);
+  } else if (prefill && !sendKaspaCompound && recipient && engine.address) {
     recipient.value = prefill;
     recipient.dispatchEvent(new Event("input"));
   }
   return opened;
 }
+// A payment request pasted (or scanned) into the recipient fills in everything it carries (iOS
+// c6851d6 WithdrawKaspaView): the address locked, the amount and the request above it.
+document.querySelector("[data-send-kaspa-recipient]")?.addEventListener("input", (event) => {
+  if (sendKaspaCompound || sendKaspaSourceIndex != null || event.target.readOnly) return;
+  const value = String(event.target.value || "");
+  if (!/\/pay\//i.test(value)) return;
+  const link = firstInternalLinkIn(value.trim());
+  if (link?.kind === "pay") applyPaymentRequestToSendKaspa(link.request);
+});
 
 // Slide to Send / Slide to Consolidate (iOS SendActionButton, afaad34): the send goes once the
 // knob reaches the right end; Return / Space or a screen reader's activation is the plain action.
@@ -14768,6 +15274,9 @@ function visibleChatConversations() {
     if (!contact) return false;
     // Requests sit behind the Message Requests row; blocked chats nowhere.
     if (isMessageRequest(conversationEntry) || isChatBlocked(contact.address)) return false;
+    // Bot chats never sit in the list or its search: Kaspa Hub > KaChat Bots, and their circle
+    // once you have written to the bot (iOS d576941 / 5fcf755).
+    if (isKachatBot(contact.address)) return false;
     if (!query) return true;
     if (displayNameForAddress(contact).toLowerCase().includes(query)) return true;
     if (contact.name.toLowerCase().includes(query)) return true;
@@ -14793,11 +15302,14 @@ function renderChats() {
   if (activeConversationId && !state.conversations.some((entry) => entry.id === activeConversationId)) setActiveConversationId(null);
   // One list (iOS a062577): the group chats and public rooms are the circles above the chats.
   renderChatCircles();
+  // The bots' cards carry their chats' unread counts (iOS d576941).
+  try { refreshKachatBots(); } catch { /* not started */ }
   setChatToolRowsForGroupsTab(false);
 
   const visibleConversations = visibleChatConversations();
 
-  if (state.conversations.length === 0) {
+  // Bot chats alone are no chats: the empty state shows below the circles (iOS displayed.isEmpty).
+  if (!state.conversations.some((entry) => !isKachatBot(contactForConversation(entry)?.address))) {
     emptyState.hidden = false;
     chatList.hidden = true;
     chatList.innerHTML = "";
@@ -17810,7 +18322,7 @@ function isEverythingSelected() {
   const circles = visibleChatCircles();
   if (!chats.length && !circles.length) return false;
   return chats.every((entry) => selectedChatConversationIds.has(entry.id))
-    && circles.every((item) => (item.kind === "group" ? selectedGroupIds.has(item.key) : selectedRoomNames.has(item.key)));
+    && circles.every((item) => (item.kind === "group" ? selectedGroupIds.has(item.key) : item.kind === "bot" || selectedRoomNames.has(item.key)));
 }
 
 function updateChatSelectionBar() {
@@ -17858,7 +18370,7 @@ chatSelectAll?.addEventListener("click", () => {
     for (const entry of visibleChatConversations()) selectedChatConversationIds.add(entry.id);
     for (const item of visibleChatCircles()) {
       if (item.kind === "group") selectedGroupIds.add(item.key);
-      else selectedRoomNames.add(item.key);
+      else if (item.kind === "room") selectedRoomNames.add(item.key);
     }
   }
   renderChats();
@@ -17975,11 +18487,77 @@ function visibleChatCircles() {
       items.push({ id: `r:${room.name}`, kind: "room", key: room.name, title, unread: room.unread, at: room.lastAt, room });
     }
   }
+  for (const entry of botCircleConversations()) {
+    const contact = contactForConversation(entry);
+    const title = kachatBotFor(contact.address)?.name || displayNameForAddress(contact);
+    if (query && !title.toLowerCase().includes(query)) continue;
+    const at = Number(lastMessageFor(entry)?.createdAt || 0);
+    items.push({ id: `b:${contact.address.toLowerCase()}`, kind: "bot", key: entry.id, title, unread: Number(entry.unreadCount || 0), at, conversation: entry, contact });
+  }
   const byId = new Map(items.map((item) => [item.id, item]));
   const pinned = chatCirclePins().map((id) => byId.get(id)).filter(Boolean);
   const pinnedIds = new Set(pinned.map((item) => item.id));
   const rest = items.filter((item) => !pinnedIds.has(item.id)).sort((a, b) => b.at - a.at);
   return [...pinned, ...rest];
+}
+
+// --- KaChat Bots in the circles row (iOS 5fcf755) -------------------------------------------------
+// A bot chat is a circle (the bot's icon and name, its unread count) once you have written to the
+// bot; just opening it from Kaspa Hub leaves no circle, and deleting the chat takes it away until
+// you open the bot from Kaspa Hub and write to it again. Pins are "b:<address>".
+
+/** Bot chats you have written to, not deleted. */
+function botCircleConversations() {
+  const deleted = loadDeletedContactAddresses();
+  return (state.conversations || []).filter((entry) => {
+    const contact = contactForConversation(entry);
+    if (!contact?.address || !isKachatBot(contact.address) || deleted.has(contact.address)) return false;
+    return (entry.messages || []).some((message) => message?.direction === "outgoing");
+  });
+}
+
+/** The 1:1 conversation with a bot, or null. */
+function kachatBotConversation(address) {
+  const key = String(address || "").toLowerCase();
+  if (!key) return null;
+  const contact = (state.contacts || []).find((entry) => String(entry.address || "").toLowerCase() === key);
+  return contact ? state.conversations.find((entry) => entry.contactId === contact.id) || null : null;
+}
+
+/** Kaspa Hub > KaChat Bots: opens (or starts) the 1:1 chat, the way the Address Book does (iOS
+ *  KaChatBotCard.open). Starting it accepts it, so the bot's replies land in the chat, not in
+ *  Message Requests; the bot's name is the contact's name until the person renames it. A chat
+ *  deleted before starts again: the deletion's block is lifted, but what came before it stays
+ *  deleted (the floor reopenDeletedContactAddress keeps, iOS clearDeletionTombstone). */
+function openKachatBotChat(bot) {
+  if (!bot?.address || !engine.address) return;
+  const address = bot.address;
+  reopenDeletedContactAddress(address);
+  let contact = state.contacts.find((entry) => entry.address === address);
+  if (!contact) {
+    const createdAt = Date.now();
+    contact = {
+      id: nowId(), name: bot.name, nameIsCustom: true, address, avatar: initialsFor(bot.name),
+      createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "",
+    };
+    state.contacts.push(contact);
+  } else if (!contact.nameIsCustom || !String(contact.name || "").trim()) {
+    contact.name = bot.name;
+    contact.nameIsCustom = true;
+    contact.updatedAt = Date.now();
+  }
+  acceptChat(address);
+  let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
+  if (!conversationEntry) {
+    conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
+    state.conversations.push(conversationEntry);
+    refreshSubscriptionAddresses({ restart: true });
+  }
+  persistState();
+  renderChats();
+  // Chats wherever it lives - its dock tab or Kaspa Hub (setActiveAppTab routes a Hub tab there).
+  setActiveAppTab("chats");
+  openConversation(conversationEntry.id);
 }
 
 function chatCircleGroupPhotoUrl(g) {
@@ -18017,8 +18595,9 @@ function renderChatCircles() {
 
 function chatCirclesHtml(items, pins, selecting) {
   return items.map((item) => {
-    const selected = item.kind === "group" ? selectedGroupIds.has(item.key) : selectedRoomNames.has(item.key);
-    const active = item.kind === "group" ? item.key === activeGroupId : Boolean(item.room?.open);
+    // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755).
+    const selected = item.kind === "group" ? selectedGroupIds.has(item.key) : item.kind === "bot" ? false : selectedRoomNames.has(item.key);
+    const active = item.kind === "group" ? item.key === activeGroupId : item.kind === "bot" ? item.key === activeConversationId : Boolean(item.room?.open);
     const pinned = pins.has(item.id);
     let avatar;
     if (item.kind === "group") {
@@ -18026,6 +18605,8 @@ function chatCirclesHtml(items, pins, selecting) {
       avatar = url
         ? `<img class="chat-circle-photo" src="${escapeHtml(url)}" alt="" />`
         : `<span class="chat-circle-glyph">${GROUP_AVATAR_SVG || ""}</span>`;
+    } else if (item.kind === "bot") {
+      avatar = `<span class="chat-circle-glyph chat-circle-bot">${kachatBotIconHtml(kachatBotFor(item.contact?.address))}</span>`;
     } else {
       avatar = `<span class="chat-circle-hash">#</span>`;
     }
@@ -18035,7 +18616,8 @@ function chatCirclesHtml(items, pins, selecting) {
     const pin = pinned && !selecting ? `<span class="chat-circle-pin" aria-hidden="true">${CHAT_CIRCLE_PIN_SVG || ""}</span>` : "";
     const label = `${item.title}${item.unread > 0 ? `, ${item.unread} unread` : ""}${pinned ? ", pinned" : ""}`;
     const classes = `chat-circle${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active && !selecting ? " active" : ""}`;
-    return `<button type="button" class="${classes}" data-circle-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(`${item.title} - right-click for options`)}"${selecting ? ` aria-pressed="${selected ? "true" : "false"}"` : ""}>
+    const conversationAttr = item.kind === "bot" ? ` data-conversation-id="${escapeHtml(item.key)}"` : "";
+    return `<button type="button" class="${classes}" data-circle-id="${escapeHtml(item.id)}"${conversationAttr} aria-label="${escapeHtml(label)}" title="${escapeHtml(`${item.title} - right-click for options`)}"${selecting ? ` aria-pressed="${selected ? "true" : "false"}"` : ""}>
       <span class="chat-circle-avatar">${avatar}${corner}${pin}</span>
       <span class="chat-circle-title">${escapeHtml(item.title)}</span>
     </button>`;
@@ -18118,6 +18700,7 @@ async function openChatCircleSheet(id) {
     }
     return;
   }
+  if (id.startsWith("b:")) { await openBotCircleSheet(id, pinOption); return; }
   if (!id.startsWith("r:") || isChildModeEnabled()) return;
   const name = id.slice(2);
   let room = null;
@@ -18159,6 +18742,48 @@ async function openChatCircleSheet(id) {
   }
 }
 
+// Hold a bot's circle (iOS 5fcf755): Mark as Read / Unread, Pin to Front / Unpin, Silence /
+// Unsilence, Delete (confirmed). Delete removes the chat; the bot's messages stay blocked and the
+// circle gone until you open the bot from Kaspa Hub and write to it again.
+async function openBotCircleSheet(id, pinOption) {
+  const conversationEntry = botCircleConversations().find((entry) => `b:${String(contactForConversation(entry)?.address || "").toLowerCase()}` === id);
+  const contact = contactForConversation(conversationEntry);
+  if (!conversationEntry || !contact) return;
+  const isSilent = getContactNotifyOverride(contact.address) === "off";
+  const choice = await chooseDialog({
+    title: kachatBotFor(contact.address)?.name || displayNameForAddress(contact),
+    layout: "tiles",
+    options: [
+      conversationEntry.unreadCount > 0
+        ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this chat.", icon: ACTION_TILE_ICONS.envelopeOpen }
+        : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
+      pinOption,
+      {
+        id: "silence",
+        title: isSilent ? "Unsilence" : "Silence",
+        subtitle: isSilent ? "Notifications from this bot resume." : "No notification from this bot.",
+        icon: isSilent ? ACTION_TILE_ICONS.bell : ACTION_TILE_ICONS.bellSlash,
+      },
+      { id: "delete", title: "Delete", subtitle: "Removes this chat until you write to the bot again.", destructive: true, icon: ACTION_TILE_ICONS.trash },
+    ],
+  });
+  if (!choice) return;
+  if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }
+  if (choice === "unread") { conversationEntry.unreadCount = Math.max(1, Number(conversationEntry.unreadCount || 0)); persistState(); renderChats(); return; }
+  if (choice === "pin") { toggleChatCirclePin(id); return; }
+  if (choice === "silence") { setContactPref(contact.address, "notify", isSilent ? undefined : "off"); renderChats(); return; }
+  if (choice === "delete") {
+    // The chat row's own delete: tombstoned, acceptance forgotten (iOS deleteConversations).
+    const confirmed = await confirmDialog({
+      title: "Delete Chat?",
+      message: "This permanently deletes every message in this chat from this device. This cannot be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (confirmed) deleteConversationsByIds([conversationEntry.id]);
+  }
+}
+
 {
   const circlesEl = document.querySelector("[data-chat-circles]");
   circlesEl?.addEventListener("click", (event) => {
@@ -18167,6 +18792,8 @@ async function openChatCircleSheet(id) {
     const id = circle.dataset.circleId || "";
     const key = id.slice(2);
     if (chatSelectionModeActive) {
+      // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755).
+      if (id.startsWith("b:")) return;
       const set = id.startsWith("g:") ? selectedGroupIds : selectedRoomNames;
       if (set.has(key)) set.delete(key);
       else set.add(key);
@@ -18180,6 +18807,11 @@ async function openChatCircleSheet(id) {
       openGroupChat(key);
     } else if (id.startsWith("r:")) {
       openRoomFromCircle(key);
+    } else if (id.startsWith("b:")) {
+      // A bot chat from its circle, like a chat row: clicking the open one again closes it.
+      const conversationId = circle.dataset.conversationId || "";
+      if (conversationId && conversationId === activeConversationId) { setActiveConversationId(null); renderChats(); return; }
+      if (conversationId) openConversation(conversationId);
     }
   });
   onContextGesture(circlesEl, (event) => {
@@ -19952,6 +20584,11 @@ if (composerPlusButton && composerPlusMenu) {
 composerPlusMenu?.querySelector("[data-composer-pay]")?.addEventListener("click", () => {
   closeComposerMenu();
   openPaymentSheet();
+});
+// Request Payment (iOS 6594936): a request for this contact, sent into this chat.
+composerPlusMenu?.querySelector("[data-composer-request-payment]")?.addEventListener("click", () => {
+  closeComposerMenu();
+  if (activeConversationId) openCreatePaymentRequest({ conversationId: activeConversationId });
 });
 composerPlusMenu?.querySelectorAll("[data-composer-media]").forEach((row) => {
   row.addEventListener("click", () => chooseComposerMedia(row.dataset.composerMedia));
@@ -25868,6 +26505,13 @@ queueMicrotask(async () => {
       nameFor: (address) => addressBookEntry(address)?.name || null,
     });
   } catch (error) { appendEngineLog(`Address Book did not start: ${error?.message || error}`); }
+  try {
+    initKachatBots({
+      escapeHtml,
+      unreadFor: (address) => kachatBotConversation(address)?.unreadCount || 0,
+      openBot: (bot) => openKachatBotChat(bot),
+    });
+  } catch (error) { appendEngineLog(`KaChat Bots did not start: ${error?.message || error}`); }
   function initChessTournamentsSafe() { initChessTournaments({
     engine,
     escapeHtml,
@@ -28419,12 +29063,14 @@ function newChatSheetIcon(kind) {
     // iOS f81e8d6: arrow.up.circle / arrow.down.circle.
     send: '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-9M8 11.5l4-4 4 4"/>',
     receive: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v9M8 12.5l4 4 4-4"/>',
+    // iOS c6851d6: doc.text.
+    request: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[kind] || ""}</svg>`;
 }
 
 // Square glass tiles, three to a row (iOS f81e8d6): New Chat, New Group Chat, New Public Chat /
-// Send Kaspa, Receive Kaspa, Fund Chatting Address. Each one's old line is its tooltip and
+// Send Kaspa, Receive Kaspa, Request Payment (iOS c6851d6), Fund Chatting Address. Each one's old line is its tooltip and
 // accessible description.
 function newChatSheetMenuHtml() {
   const rows = [
@@ -28434,6 +29080,7 @@ function newChatSheetMenuHtml() {
     ...(isChildModeEnabled() ? [] : [{ id: "public", title: "New Public Chat", subtitle: "Join a public room, or create one." }]),
     { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from your spending address." },
     { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
+    { id: "request", title: "Request Payment", subtitle: "A link asking for an exact amount, with what it's for." },
     { id: "fund", title: "Fund Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
   ];
   return `
@@ -28547,6 +29194,8 @@ function openNewChatSheet() {
       if (openGroupCreate() && groupCreateModal) groupCreateModal.dataset.fromNewSheet = "1";
     } else if (choice === "fund") {
       openChattingAddressScreen();
+    } else if (choice === "request") {
+      openCreatePaymentRequest();
     } else if (choice === "receive") {
       openReceiveKaspaScreen();
     } else if (choice === "send") {

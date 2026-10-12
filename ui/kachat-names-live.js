@@ -616,8 +616,18 @@ function hubStart() {
     }
     if (before !== true) hubChanged("ready");
     try { rt.actions.resume(); } catch { /* no wallet yet */ }
+    // Coming back to the screen with its pages loaded (same revision, same wallet): only a stale
+    // registry is refreshed, and a refresh that moves the revision reloads through the onChange
+    // above. A full refresh and reload ran on every show (iOS 9de981a).
+    if (hub.loaded && !hub.loadError && hub.loadedRevision === rt.registry.revision && hub.loadedFor === hubWalletKey()) {
+      await rt.registry.refreshIfStale();
+      return;
+    }
+    // A refresh that bumped the revision already reloads through the onChange above; reloading
+    // here as well ran every request twice (iOS 9de981a).
+    const revisionBefore = rt.registry.revision;
     await rt.registry.refresh();
-    await hubReload();
+    if (rt.registry.revision === revisionBefore) await hubReload();
   })().finally(() => { hubStarting = null; });
   return hubStarting;
 }
@@ -648,10 +658,16 @@ function hubReload() {
   return hubReloading;
 }
 
+/** The wallet the hub's pages were loaded for (see hubStart). */
+function hubWalletKey() { return String(kachatNames()?.actions?.myAddress || ""); }
+
 async function hubReloadOnce() {
   const rt = kachatNames();
   if (!rt || !liveHubIsLive()) return;
   const { registry, actions } = rt;
+  // what these pages show: a later show reloads only when either moved (iOS 9de981a)
+  const loadingRevision = registry.revision;
+  const loadingFor = hubWalletKey();
   try {
     hub.listings = await registry.listings();
     hub.lapsed = await registry.lapsed();
@@ -677,6 +693,8 @@ async function hubReloadOnce() {
     hub.loadError = errorText(error);
   }
   hub.loaded = true;
+  hub.loadedRevision = loadingRevision;
+  hub.loadedFor = loadingFor;
   hubChanged("data");
 }
 
@@ -3303,7 +3321,8 @@ export async function kachatExpiredNames(walletAddress) {
   const rt = kachatNames();
   const key = rt ? keyOf(String(walletAddress || "").toLowerCase()) : null;
   if (!key) return [];
-  await rt.registry.refreshIfStale();
+  // Profile's own five-minute window: a shorter one refreshed in between (iOS 9de981a)
+  await rt.registry.refreshIfStale({ maxAge: 300 });
   const grace = graceMs();
   const owned = await rt.registry.namesOf(key, { includeInactive: true });
   return owned
@@ -3677,6 +3696,8 @@ const IDENTITY_MAX_AGE_MS = 300_000;
  *  identities are profile-only (mainnet) a failed address waits `profileMissPauseMs` (5 minutes),
  *  as the engine does (registry.profileOnlyIdentity). */
 const IDENTITY_RETRY_MS = 60_000;
+/** A registry change re-asks only for identities at least this old (iOS 05c9615). */
+const IDENTITY_RECHECK_MIN_AGE_MS = 60_000;
 /** Listeners hear about a batch of answers at most this often. */
 const IDENTITY_NOTIFY_MS = 200;
 const IDENTITY_CACHE_MAX = 2000;
@@ -3839,7 +3860,13 @@ export function kachatCachedIdentity(address) {
   watchIdentitySources(registry);
   profileIdentityStore();
   const entry = cachedIdentities.get(key);
-  const stale = !entry || entry.revision !== registry.revision || Date.now() - entry.at > IDENTITY_MAX_AGE_MS;
+  // Five minutes old, or older than a minute once the registry changed: re-asking for every
+  // address on screen after each refresh cost a request per avatar (iOS 05c9615). This wallet's
+  // own address still follows every change (its profile save bumps the revision).
+  const age = entry ? Date.now() - entry.at : Infinity;
+  const own = key === String(rt.engine?.address || "").toLowerCase();
+  const stale = !entry || age > IDENTITY_MAX_AGE_MS
+    || (entry.revision !== registry.revision && (own || age > IDENTITY_RECHECK_MIN_AGE_MS));
   if (stale && !identityLookups.has(key)) lookUpIdentity(registry, key);
   return entry?.identity ?? null;
 }

@@ -836,6 +836,21 @@ async function runRegistryChain(v, r) {
   const callsBefore = restCalls.length;
   await reg.refreshIfStale();
   r.eq(restCalls.length, callsBefore, "registry (chain): a fresh registry is not refreshed again");
+  // iOS 0c305b5: an automatic refresh that found nothing new stays quiet (no revision bump) until
+  // the last bump is 5 minutes old; pull to refresh (refresh()) always announces
+  {
+    const clockBefore = clock;
+    const rev = reg.revision;
+    clock += 61_000;
+    await reg.refreshIfStale();
+    r.check(reg.refreshedAt === clock && reg.revision === rev, `registry (chain): an automatic refresh with nothing new does not bump (${reg.revision})`);
+    await reg.refresh();
+    r.eq(reg.revision, rev + 1, "registry (chain): pull to refresh always bumps");
+    clock += 301_000;
+    await reg.refreshIfStale();
+    r.eq(reg.revision, rev + 2, "registry (chain): an automatic refresh bumps once the last bump is 5 minutes old");
+    clock = clockBefore;
+  }
   clock = Number(alpha.expiresAt) + 1_000; // in grace
   r.eq(await reg.resolveActive("alpha-tn"), null, "registry (chain): resolveActive: a name in grace is not active");
   // iOS f7c371a: a name in grace still resolves to its owner, and still labels them

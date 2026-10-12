@@ -12615,10 +12615,17 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .chat-circle-photo { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
 .chat-circle-glyph { display: grid; place-items: center; }
 .chat-circle-glyph svg { width: 26px; height: 26px; display: block; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.chat-circle-glyph.chat-circle-bot svg { width: 24px; height: 24px; stroke-width: 1.8; } /* a bot's icon (iOS 5fcf755) */
 .chat-circle-hash { font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-size: 26px; font-weight: 700; line-height: 1; }
+/* The whole name: a long one carries on underneath (up to three lines, centered) rather than being
+   cut off, and every name reserves the three lines so the row has one height and the chat list
+   below never covers a second or third line; the row is top-aligned, so the circles stay level
+   (iOS 7a8ef1f / 55cb8e6). */
 .chat-circle-title {
   width: 68px; font-size: 11px; line-height: 1.25; text-align: center; color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: normal; overflow-wrap: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
+  overflow: hidden; min-height: calc(3 * 1.25em); max-height: calc(3 * 1.25em);
 }
 .chat-circle-badge {
   position: absolute; top: -4px; right: -6px;
@@ -13173,3 +13180,54 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
    tile at 123..309, so scale it to fill the box, exactly like .logged-out-logo). */
 .ios-install-hint-icon { display: grid; place-items: center; overflow: hidden; background: transparent; }
 .ios-install-hint-icon img { width: 100%; height: 100%; object-fit: cover; transform: scale(2.33); }
+
+/* Kaspa Hub > KaChat Bots (iOS KaChatBotsView, 82ab31d / d576941): one card per bot - its icon in a
+   tinted circle, name and description, the chat's unread count and a chevron; a bot that can't be
+   messaged here (testnet) is dimmed and says why. */
+.kb-screen { display: flex; flex-direction: column; min-height: 0; }
+.kb-header { width: 100%; flex-shrink: 0; }
+.kb-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 0 28px; }
+.kb-card {
+  display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px; border: 0; border-radius: 16px;
+  background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.kb-card:disabled { opacity: .6; cursor: default; }
+@media (hover: hover) { .kb-card:not(:disabled):hover { background: var(--row-hover); } }
+.kb-card:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.kb-card-icon {
+  flex: 0 0 52px; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--kaspa) 15%, transparent); color: var(--kaspa-ink);
+}
+.kb-card-icon svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.kb-card-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.kb-card-copy strong { font-size: 17px; font-weight: 600; }
+.kb-card-copy small { color: var(--muted); font-size: 15px; line-height: 1.35; }
+.kb-card-badge {
+  flex: 0 0 auto; min-width: 22px; padding: 3px 7px; border-radius: 999px;
+  background: var(--ios-red, #ff3b30); color: #fff; font-size: 12px; font-weight: 700; line-height: 16px; text-align: center;
+}
+.kb-card-chevron { flex: 0 0 auto; display: grid; place-items: center; color: var(--muted); }
+.kb-card-chevron svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.kb-footnote { margin: 4px 8px 0; color: var(--muted); font-size: 13px; line-height: 1.4; text-align: center; }
+
+/* Payment requests (iOS c6851d6 / 7c71a98 / 1fe8388): the Request Payment and Your Payment Request
+   sheets, the request above the amount on Send Kaspa, and the card in a message. */
+.payment-request-modal { max-width: 440px; }
+.payment-request-modal .sk-screen { margin-top: 4px; }
+.payment-request-loading { display: grid; place-items: center; padding: 18px 0; }
+.payment-request-memo-field { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.payment-request-memo-field textarea { width: 100%; resize: vertical; min-height: 52px; }
+.payment-request-memo-count { font-size: 11px; color: var(--muted); }
+.payment-request-footnote { text-align: center; }
+.payment-request-summary { display: flex; flex-direction: column; gap: 6px; }
+.payment-request-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--kaspa); }
+.payment-request-amount { font-size: 17px; }
+.payment-request-memo { margin: 0; font-size: 14px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.payment-request-divider { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+.payment-request-signed, .payment-request-unsigned { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; font-weight: 600; }
+.payment-request-signed { color: var(--ios-green); }
+.payment-request-unsigned { color: var(--ios-orange); font-weight: 500; }
+.payment-request-signed svg, .payment-request-unsigned svg { width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.payment-request-own-head { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; text-align: center; }
+.payment-request-own-amount { font-size: 40px; font-weight: 700; line-height: 1.1; overflow-wrap: anywhere; }
+.payment-request-card-lines { white-space: normal; overflow-wrap: anywhere; }

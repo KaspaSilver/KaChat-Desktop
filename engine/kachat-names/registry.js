@@ -195,6 +195,10 @@ export class KachatNamesRegistry {
     this.refreshedAt = null;
     /** bumped whenever registry data may have changed, so screens reload */
     this.revision = 0;
+    /** unix ms when `refresh` last bumped `revision` (see `refresh({ announce })`) */
+    this._revisionBumpedAt = -Infinity;
+    /** a caller that joined a running quiet refresh asked for an announcing one */
+    this._announceJoined = false;
     /** the last chain walk's report `{ rounds, applied, events, unresolved }`, or null */
     this.lastWalk = null;
     /** the verified manifest once loaded */
@@ -338,20 +342,40 @@ export class KachatNamesRegistry {
    *  and bumps `revision` only when the error changed, so screens that reload on `revision` (and
    *  refresh from there) can't turn a refusal into a refresh loop. */
   /** Every refresh re-checks the source (iOS 7aa6c6d), so an indexer that fell behind is dropped and
-   *  one that caught up is used again (an old `{ forceSourceCheck }` argument is ignored). */
-  refresh() {
+   *  one that caught up is used again (an old `{ forceSourceCheck }` argument is ignored).
+   *  `announce: false` (the automatic `refreshIfStale`) bumps `revision` on success only when
+   *  something may have changed: the walk applied a transaction, the source changed, the last
+   *  refresh had failed, or the last bump is 5 minutes old (an indexer can't say). Pull to refresh
+   *  and read-your-writes always announce (iOS 0c305b5). */
+  refresh({ announce = true } = {}) {
     if (!this.deps.isEnabled()) return Promise.resolve();
-    if (this._refreshing) return this._refreshing;
+    if (this._refreshing) {
+      if (announce) this._announceJoined = true;
+      return this._refreshing;
+    }
     this.isRefreshing = true;
+    this._announceJoined = false;
     this._refreshing = (async () => {
       const previousError = this.lastError;
+      const sourceKey = (s) => (s ? `${s.kind}:${s.base ?? ""}` : "");
+      const previousSource = sourceKey(this.source);
       let changed = true;
       try {
         const m = await this.prepare({ forceSourceCheck: true });
-        if (this.source.kind === "chain") await this._walk(m);
+        let walkedChanges = false;
+        if (this.source.kind === "chain") {
+          const report = await this._walk(m);
+          walkedChanges = (report?.applied?.length ?? 0) > 0 || !!report?.fromGenesis;
+        }
         this.lastError = null;
         this.registryUpgrading = false;
-        this.refreshedAt = Number(this._nowMs());
+        const now = Number(this._nowMs());
+        this.refreshedAt = now;
+        const quiet = !announce && !this._announceJoined && !walkedChanges
+          && sourceKey(this.source) === previousSource && previousError == null
+          && now - this._revisionBumpedAt < 300_000;
+        changed = !quiet;
+        if (changed) this._revisionBumpedAt = now;
       } catch (e) {
         const message = e?.message ?? String(e);
         const upgrading = isUpgradingError(e);
@@ -363,6 +387,7 @@ export class KachatNamesRegistry {
       } finally {
         this.isRefreshing = false;
         this._refreshing = null;
+        this._announceJoined = false;
       }
       if (changed) this._bump();
     })();
@@ -404,7 +429,7 @@ export class KachatNamesRegistry {
   async refreshIfStale({ maxAge = 60 } = {}) {
     const at = this.refreshedAt;
     if (at != null && Number(this._nowMs()) - at < maxAge * 1000) return;
-    await this.refresh();
+    await this.refresh({ announce: false });
   }
 
   async _walk(m) {
@@ -433,6 +458,7 @@ export class KachatNamesRegistry {
       state = RegistryState.atGenesis(m);
       state.offers = offers;
       report = await walkFrom(state);
+      report.fromGenesis = true; // started over: an automatic refresh announces it (iOS 0c305b5)
     }
     state.verifiedAt = this._nowMs();
     if (report.applied.length) {
