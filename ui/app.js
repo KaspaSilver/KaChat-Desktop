@@ -2,6 +2,7 @@ import { originMigrationGate } from "./origin-migration.js";
 import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
+import { installGroupedAmountInputs } from "./grouped-amount.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
@@ -128,6 +129,8 @@ function labelStaticAmountUnits() {
 labelStaticAmountUnits();
 // Banners show whole at their own proportions (iOS c66bfc7).
 installBannerImageFit();
+// Amount fields show thousands commas as you type; the value read stays plain (iOS 40c5258).
+installGroupedAmountInputs();
 // .kas profiles saved before they stopped loading are dropped (iOS d6ded9d).
 engine.dropKnsProfileCache?.();
 engine.onConnectionState?.(() => {
@@ -10950,7 +10953,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 139;
+const APP_BUILD = 140;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;

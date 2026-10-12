@@ -22,7 +22,7 @@
 
 import { otherNetworkReason } from "../engine/network.js";
 
-import { sanitizeAmountInput } from "../engine/amounts.js";
+import { sanitizeAmountInput, groupedAmountText } from "../engine/amounts.js";
 import { splitTypedName, notFoundMessage } from "../engine/name-services.js";
 
 const KNOB_INSET = 4;
@@ -255,13 +255,14 @@ export function amountEntryHtml({
     conversion: attrName(attrs.conversion || `${p}-conversion`),
     max: attrName(attrs.max || `${p}-max`),
   };
-  const size = amountFontSize(value);
+  const shown = groupedAmountText(value);
+  const size = amountFontSize(shown);
   return `
     <div class="sk-amount" data-${p}-amount-entry>
       <label class="sk-amount-entry">
         <input class="sk-amount-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0"
-          data-${a.input} aria-label="${esc(ariaLabel)}" value="${esc(value)}"
-          style="font-size:${size}px;width:${Math.max(1, String(value).length || 1) + 0.6}ch" />
+          data-${a.input} aria-label="${esc(ariaLabel)}" value="${esc(shown)}"
+          style="font-size:${size}px;width:${Math.max(1, shown.length || 1) + 0.6}ch" />
         <span class="sk-amount-unit" data-${a.unit} style="font-size:${Math.round(size * 0.55)}px">${esc(unitText)}</span>
       </label>
       <div class="sk-amount-actions">
@@ -279,10 +280,10 @@ export function amountFontSize(text) {
   return length <= 7 ? 52 : (length <= 10 ? 40 : 30);
 }
 
-/** Re-sizes a mounted amount entry to what's typed (runs on every keystroke). */
+/** Re-sizes a mounted amount entry to what's typed (runs on every keystroke), commas included. */
 export function layoutAmountEntry(input, unitEl) {
   if (!input) return;
-  const display = String(input.value || "");
+  const display = groupedAmountText(String(input.value || ""));
   const size = amountFontSize(display);
   input.style.fontSize = `${size}px`;
   input.style.width = `${Math.max(1, display.length || 1) + 0.6}ch`;

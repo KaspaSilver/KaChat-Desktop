@@ -67,6 +67,37 @@ export function sanitizeAmountInput(value, maxDecimals = 8) {
   return result;
 }
 
+/** "12345.5" -> "12,345.5": commas every three digits of the whole part, the rest as typed
+ *  (iOS KaspaAmountEntry.grouped). Anything that isn't a plain amount comes back unchanged. */
+export function groupedAmountText(plain) {
+  const text = String(plain ?? "");
+  const dot = text.indexOf(".");
+  const whole = dot < 0 ? text : text.slice(0, dot);
+  if (whole.length <= 3 || !/^[0-9]+$/.test(whole)) return text;
+  let out = "";
+  for (let i = 0; i < whole.length; i += 1) {
+    if (i > 0 && (whole.length - i) % 3 === 0) out += ",";
+    out += whole[i];
+  }
+  return dot < 0 ? out : out + text.slice(dot);
+}
+
+/** The edited field back to plain digits (iOS KaspaAmountEntry.ungrouped). The commas shown are
+ *  ours and go; a comma TYPED as the decimal point (comma-decimal keyboards) stays one: typed at
+ *  the end, or a single comma not three digits from the end in a number that had no grouping
+ *  ("0,5" pasted is 0.5, never 5). */
+export function ungroupedAmountText(edited, previous) {
+  const text = String(edited ?? "");
+  const before = String(previous ?? "");
+  if (text === before + ",") return before.replaceAll(",", "") + ".";
+  const comma = text.indexOf(",");
+  if (!before.includes(",") && !text.includes(".") && comma >= 0 && comma === text.lastIndexOf(",")
+      && text.length - comma - 1 !== 3) {
+    return text.replace(",", ".");
+  }
+  return text.replaceAll(",", "");
+}
+
 /** Sompi as plain KAS text: up to 8 decimals, trailing zeros dropped ("1.5", "0", "-2"). Exact. */
 export function kasTextFromSompi(sompi) {
   let value;
