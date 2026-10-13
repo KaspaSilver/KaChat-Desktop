@@ -965,7 +965,8 @@ function senderName(address) {
   // Testnet (iOS e52357d): their .kachat name when you haven't named them (null elsewhere).
   const identityName = deps.identityNameFor?.(address);
   if (identityName) return identityName;
-  return deps.shortAddress(address);
+  // No name: the app's one short form, kaspa:xxxx....xxxx (iOS a80d271).
+  return deps.defaultAlias ? deps.defaultAlias(address) : deps.shortAddress(address);
 }
 
 /** Last-activity preview for the channel list. Reaction payloads are humanized as

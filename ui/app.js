@@ -1635,7 +1635,7 @@ function isOwnPaymentRequest(request) {
 /** The name a request's maker goes by here (iOS ContactsManager.displayName(for:)). */
 function paymentRequestPersonName(address) {
   const contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === String(address || "").toLowerCase());
-  return knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (kachatNamesUiEnabled() ? identityNameForAddress(address) : shortAddress(address)));
+  return knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (kachatNamesUiEnabled() ? identityNameForAddress(address) : defaultAliasFor(address)));
 }
 
 // The request's card in a message (iOS KaChatInternalLinkCardView .paymentRequest): the amount,
@@ -2381,7 +2381,7 @@ function mentionDisplayLabel(address) {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return displayNameForAddress(contact);
   if (kachatNamesUiEnabled()) return identityNameForAddress(address);
-  return shortAddress(address);
+  return defaultAliasFor(address);
 }
 
 // Render message text that may contain @mention tokens AND URLs into `container`. Each mention
@@ -3462,6 +3462,26 @@ function shortAddress(address) {
   return `${address.slice(0, 14)}…${address.slice(-8)}`;
 }
 
+/** The one short form an address with no name shows as - "kaspa:xxxx....xxxx", the same as the
+ *  chat list (iOS Contact.generateDefaultAlias, a80d271). For names; shortAddress stays the form
+ *  for showing an address as an address. */
+function defaultAliasFor(address) {
+  const text = String(address || "");
+  const colon = text.indexOf(":");
+  if (colon < 0) return text;
+  const prefix = text.slice(0, colon);
+  const body = text.slice(colon + 1);
+  return body.length > 12 ? `${prefix}:${body.slice(0, 4)}....${body.slice(-4)}` : text;
+}
+
+/** A stored name that was never anyone's name: a Kasia handshake's random 12-hex chat alias, or
+ *  an old placeholder (the long short-address form). Shown as defaultAliasFor instead. */
+function isPlaceholderContactName(contact) {
+  if (!contact || contact.nameIsCustom) return false;
+  const name = String(contact.name || "").trim();
+  return !name || /^[0-9a-f]{12}$/i.test(name) || name === shortAddress(contact.address) || name === "Unnamed";
+}
+
 // Matches iOS/Android's KNS alias behavior: shows the address's resolved KNS
 // primary domain when one is cached, falling back to the shortened address —
 // unlike an arbitrary hand-typed name, a verified on-chain domain is treated
@@ -3480,7 +3500,7 @@ function shortAddress(address) {
 // custom name has been set, so this just reads contact.name normally.
 function displayNameForAddress(contact) {
   if (!contact) return "";
-  if (contact.nameIsCustom) return contact.name || shortAddress(contact.address);
+  if (contact.nameIsCustom) return contact.name || defaultAliasFor(contact.address);
   // A name you gave the chat wins; then the address's Address Book name (iOS 00767a4); then who
   // it is on chain.
   const savedName = addressBookName(contact.address);
@@ -3488,8 +3508,9 @@ function displayNameForAddress(contact) {
   // Testnet (iOS e52357d, ContactsManager.displayName): your name for them, else their .kachat
   // name, else the stored default (their short address) - KNS is never consulted there.
   // Every network since iOS 7227d69 (mainnet has no registry yet, so its .kachat label is null there).
-  if (kachatNamesUiEnabled()) return kachatCachedLabel(contact.address) || contact.name || shortAddress(contact.address);
-  return knsDomainForAddress(contact.address) || contact.name || shortAddress(contact.address);
+  const storedName = isPlaceholderContactName(contact) ? "" : contact.name;
+  if (kachatNamesUiEnabled()) return kachatCachedLabel(contact.address) || storedName || defaultAliasFor(contact.address);
+  return knsDomainForAddress(contact.address) || storedName || defaultAliasFor(contact.address);
 }
 
 /// Who an address is when you haven't named it (iOS ContactsManager.identityName, e52357d): on
@@ -3499,8 +3520,8 @@ function identityNameForAddress(address) {
   // With no contact record, the Address Book name comes first (iOS displayName(for: address)).
   const savedName = addressBookName(address);
   if (savedName) return savedName;
-  if (kachatNamesUiEnabled()) return kachatCachedLabel(address) || shortAddress(address);
-  return knsDomainForAddress(address) || shortAddress(address);
+  if (kachatNamesUiEnabled()) return kachatCachedLabel(address) || defaultAliasFor(address);
+  return knsDomainForAddress(address) || defaultAliasFor(address);
 }
 
 /// The KNS name to show for an address, matching iOS's ContactsManager.displayName.
@@ -3547,8 +3568,16 @@ function revertDomainContactNames() {
   if (!engine.address || engine.knsNamesAsIdentity) return;
   let changed = 0;
   for (const contact of state.contacts || []) {
+    // A random 12-hex chat alias stored as a name by older builds goes too (iOS a80d271).
+    if (contact && !contact.nameIsCustom && /^[0-9a-f]{12}$/i.test(String(contact.name || "").trim())) {
+      contact.name = defaultAliasFor(contact.address);
+      contact.avatar = initialsFor(contact.name);
+      contact.updatedAt = Date.now();
+      changed += 1;
+      continue;
+    }
     if (!contact || !isKasDomainName(contact.name)) continue;
-    contact.name = shortAddress(contact.address);
+    contact.name = defaultAliasFor(contact.address);
     contact.nameIsCustom = false;
     contact.avatar = initialsFor(contact.name);
     contact.updatedAt = Date.now();
@@ -5790,7 +5819,8 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
           m?.direction === "outgoing" && m?.messageType !== "handshake" && String(m?.text || "").trim().length > 0);
         contact.relationshipState = alreadyTalking ? "established" : "incoming-request";
       }
-      if (request.alias && (!contact.name || /^kaspa(test)?:/.test(contact.name))) contact.name = request.alias;
+      // A handshake's alias is the sender's random chat alias, never their name: a person is the
+      // name you gave them, their .kachat name or their address (iOS a80d271).
       if (!conversationEntry) {
         conversationEntry = createConversation({ contactId: contact.id, createdAt: Number(request.createdAt || Date.now()) });
         state.conversations.push(conversationEntry);
@@ -5931,7 +5961,7 @@ function normalizeSelfContact(contact) {
   if (!contact || contact.address !== engine.address) return;
   if (contact.nameIsCustom && contact.name === "My Address") {
     contact.nameIsCustom = false;
-    contact.name = shortAddress(contact.address);
+    contact.name = defaultAliasFor(contact.address);
     contact.avatar = initialsFor(contact.name);
     contact.updatedAt = Date.now();
   }
@@ -9797,7 +9827,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 149;
+const APP_BUILD = 150;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14959,7 +14989,7 @@ function openChatInfoForAddress(address) {
   // Your own User Info (iOS 95f50ca): who you are - name, avatar, KNS profile, address, domains,
   // share - and none of the per-contact rows. You are never added as your own contact.
   if (!contact && engine.address && address === engine.address) {
-    const name = knsDomainForAddress(address) || shortAddress(address);
+    const name = knsDomainForAddress(address) || defaultAliasFor(address);
     const createdAt = Date.now();
     contact = { id: "self-transient", name, nameIsCustom: false, address, avatar: initialsFor(name), createdAt, updatedAt: createdAt, relationshipState: "self", handshakeTxid: "" };
     openChatInfoFor(contact, null);
@@ -14968,7 +14998,7 @@ function openChatInfoForAddress(address) {
   if (!contact) {
     const createdAt = Date.now();
     // Testnet: the stored default is the short address; their .kachat name is read live on top.
-    const name = (kachatNamesUiEnabled() ? shortAddress(address) : groupSenderLabel(address)) || shortAddress(address);
+    const name = (kachatNamesUiEnabled() ? defaultAliasFor(address) : groupSenderLabel(address)) || defaultAliasFor(address);
     contact = {
       id: nowId(),
       name,
@@ -15334,7 +15364,7 @@ function saveChatInfo() {
     // Testnet: an empty field on a contact you never named keeps its stored default as it was.
     const keepsDefaultName = kachatNamesUiEnabled() && !trimmed && !contact.nameIsCustom && Boolean(contact.name);
     contact.nameIsCustom = Boolean(trimmed);
-    contact.name = trimmed || (keepsDefaultName ? contact.name : shortAddress(contact.address));
+    contact.name = trimmed || (keepsDefaultName ? contact.name : defaultAliasFor(contact.address));
     if (!contact.nameIsCustom) applyKnsPrimaryDomainToContact(contact);
     contact.updatedAt = Date.now();
     persistState();
@@ -15404,7 +15434,7 @@ document.querySelector("[data-chat-info-share]")?.addEventListener("click", asyn
   if (!address) return;
   const url = profileUniversalLink(address);
   const contact = state.contacts.find((entry) => entry.address === address);
-  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (kachatNamesUiEnabled() ? identityNameForAddress(address) : shortAddress(address)));
+  const name = knsDomainForAddress(address) || (contact ? displayNameForAddress(contact) : (kachatNamesUiEnabled() ? identityNameForAddress(address) : defaultAliasFor(address)));
   if (typeof navigator.share === "function") {
     try { await navigator.share({ title: name, url }); return; }
     catch (error) { if (error?.name === "AbortError") return; }
@@ -20928,13 +20958,14 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     // A .kas domain is nobody's name since 5.2: a backup still carrying one (an older build or
     // another platform wrote it) never puts it back - a name removed here stays removed (iOS ce0b636).
     const archivedAlias = String(archived?.contactAlias || "").trim();
-    const alias = isKasDomainName(archivedAlias) ? "" : archivedAlias;
+    // Nor is a random 12-hex chat alias (a Kasia handshake's) anyone's name.
+    const alias = isKasDomainName(archivedAlias) || /^[0-9a-f]{12}$/i.test(archivedAlias) ? "" : archivedAlias;
     const archivePhoto = archivePhotoToDataUrl(archived?.contactPhoto);
     let contact = state.contacts.find((entry) => entry.address === contactAddress);
     let conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
     if (!contact) {
       const createdAt = phoneArchiveTimestampMs(archivedMessages[0]);
-      const displayName = alias || shortAddress(contactAddress);
+      const displayName = alias || defaultAliasFor(contactAddress);
       contact = {
         id: nowId(), name: displayName, nameIsCustom: false, address: contactAddress,
         avatar: initialsFor(displayName), photo: archivePhoto || "", createdAt, updatedAt: createdAt,
@@ -24912,6 +24943,7 @@ queueMicrotask(async () => {
       engine,
       escapeHtml,
       shortAddress,
+      defaultAlias: defaultAliasFor,
       accountScopedKey,
       isChattingBalanceZero,
       showFundingGate: showFundingGateModal,
@@ -24996,6 +25028,7 @@ queueMicrotask(async () => {
     initBroadcasts({
       engine,
       escapeHtml,
+      defaultAlias: defaultAliasFor,
       voiceFileName,
       // The room owns the detail pane while open, beside the one Chats list (iOS a062577).
       onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
@@ -26177,7 +26210,7 @@ function groupSenderLabel(address) {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return displayNameForAddress(contact);
   if (kachatNamesUiEnabled()) return identityNameForAddress(address);
-  return shortAddress(address);
+  return defaultAliasFor(address);
 }
 function memberAvatarHtml(address, className = "chat-avatar") {
   const contact = (state.contacts || []).find((c) => c.address === address);
