@@ -156,6 +156,8 @@ async function connectCandidate(kaspa, {
   role = "primary",
   excludedEndpoints = [],
   singleShot = false,
+  // A race connects several at once: only the winner becomes the registry's last good node.
+  setLastGood = role === "primary",
 } = {}) {
   const rpc = makeRpc(kaspa, { endpoint });
   const source = endpoint ? `${role} endpoint` : `Rusty Kaspa resolver for ${role}`;
@@ -176,7 +178,7 @@ async function connectCandidate(kaspa, {
       throw new Error(`${role} resolved to an endpoint already in use.`);
     }
     const latencyMs = (globalThis.performance?.now?.() ?? now()) - startedAt;
-    recordSuccess(activeEndpoint, latencyMs, { setLastGood: role === "primary" });
+    recordSuccess(activeEndpoint, latencyMs, { setLastGood });
     log(`${role === "primary" ? "Primary" : "Standby"} connected:`, activeEndpoint);
     return rpc;
   } catch (error) {
@@ -247,8 +249,9 @@ const RESOLVER_TIMEOUT_MS = 20000;
 // cannot be reached from where the reader is (its seed servers blocked or unreachable) even
 // though the nodes can. Same public pool, no house node; refreshed from the resolver's own
 // answers whenever it works.
+// Kasia's wss://wrpc.kasia.fyi was dropped (owner, 2026-10-13: it never answered).
+const RETIRED_NODES = ["wss://wrpc.kasia.fyi"];
 const MAINNET_NODE_SEEDS = [
-  "wss://wrpc.kasia.fyi",
   "wss://isla.kaspa.red/kaspa/mainnet/wrpc/borsh",
   "wss://kate.kaspa.red/kaspa/mainnet/wrpc/borsh",
   "wss://emma.kaspa.stream/kaspa/mainnet/wrpc/borsh",
@@ -271,15 +274,49 @@ function rememberPublicNode(url) {
 /** The most recent node that answered, or "". */
 function lastPublicNode() {
   if (typeof localStorage === "undefined") return "";
-  try { return String(JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]")[0] || ""); } catch { return ""; }
+  try {
+    const url = String(JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]")[0] || "");
+    return isRetiredNode(url) ? "" : url;
+  } catch { return ""; }
 }
-const LAST_NODE_TIMEOUT_MS = 3500;
+
+/// Several nodes at once, the first to connect (and say it is synced) wins; the others are
+/// closed as they come in. One slow or dead node no longer costs its whole timeout before the
+/// next is even tried (iOS asks up to three nodes at once, KaspaRPCRouter maxHedgedRequests).
+const RACE_WIDTH = 4;
+function raceCandidates(kaspa, urls, { log = () => {}, timeoutMs = DIRECT_CONNECT_TIMEOUT_MS } = {}) {
+  return new Promise((resolve, reject) => {
+    let pending = urls.length;
+    let won = false;
+    let lastError = null;
+    if (!pending) { reject(new Error("No node to try.")); return; }
+    log(`Trying ${urls.length} nodes at once: ${urls.join(", ")}`);
+    for (const url of urls) {
+      connectCandidate(kaspa, { endpoint: url, timeoutMs, log, role: "primary", singleShot: true, setLastGood: false })
+        .then((rpc) => {
+          if (won) { disconnectRpc(rpc); return; }
+          won = true;
+          recordSuccess(rpc.url || url, 0, { setLastGood: true });
+          rememberPublicNode(url);
+          resolve(rpc);
+        }, (error) => {
+          lastError = error;
+          log(`Node ${url} failed: ${error?.message || error}`);
+        })
+        .finally(() => {
+          pending -= 1;
+          if (!pending && !won) reject(lastError || new Error("None of these nodes answered."));
+        });
+    }
+  });
+}
+const isRetiredNode = (url) => RETIRED_NODES.some((r) => String(url || "").toLowerCase().startsWith(r));
 function knownPublicNodes() {
   let remembered = [];
   if (typeof localStorage !== "undefined") {
     try { remembered = JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]"); } catch { remembered = []; }
   }
-  const all = [...remembered, ...PUBLIC_NODE_SEEDS].filter((u, i, arr) => u && arr.indexOf(u) === i);
+  const all = [...remembered, ...PUBLIC_NODE_SEEDS].filter((u, i, arr) => u && !isRetiredNode(u) && arr.indexOf(u) === i);
   // Shuffled, so a pool of readers does not all pile onto the first name in the list.
   for (let i = all.length - 1; i > 0; i -= 1) { const j = Math.floor(Math.random() * (i + 1)); [all[i], all[j]] = [all[j], all[i]]; }
   return all;
@@ -294,18 +331,19 @@ async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [
   const tried = new Set(excludedEndpoints.map((u) => String(u || "").toLowerCase()));
   let lastError = null;
   let resolverAnswered = false;
-  // The node that answered last time, tried first and briefly: a reload that finds it still
-  // healthy connects straight away instead of waiting on the resolver round trip. If it has
-  // gone, the resolver runs exactly as before.
+  // First, a race: the node that answered last time and a few other known public nodes, all at
+  // once, so a reload connects in about a second when any of them is healthy. If none answers,
+  // the resolver runs exactly as before, then the rest of the known nodes (raced too).
+  const usable = (u) => u && !tried.has(u.toLowerCase()) && (!secure || /^wss:\/\//i.test(u));
   const lastNode = lastPublicNode();
-  if (lastNode && !tried.has(lastNode.toLowerCase()) && (!secure || /^wss:\/\//i.test(lastNode))) {
-    tried.add(lastNode.toLowerCase());
+  const firstWave = [...(usable(lastNode) ? [lastNode] : []), ...knownPublicNodes().filter((u) => usable(u) && u !== lastNode)].slice(0, RACE_WIDTH);
+  if (firstWave.length) {
+    for (const u of firstWave) tried.add(u.toLowerCase());
     try {
-      const rpc = await connectCandidate(kaspa, { endpoint: lastNode, timeoutMs: LAST_NODE_TIMEOUT_MS, log, role: "primary", singleShot: true });
-      rememberPublicNode(lastNode);
-      return rpc;
+      return await raceCandidates(kaspa, firstWave, { log, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS });
     } catch (error) {
-      log(`Last node ${lastNode} did not answer quickly; asking the resolver.`);
+      lastError = error;
+      log("None of the known nodes answered; asking the public node resolver.");
     }
   }
   for (let attempt = 1; attempt <= RESOLVER_ATTEMPTS; attempt += 1) {
@@ -323,7 +361,7 @@ async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [
     if (!url) { lastError = new Error("The public node resolver returned no node."); continue; }
     resolverAnswered = true;
     if (secure && !/^wss:\/\//i.test(url)) { log(`Resolver offered ${url}, unusable from an https page; asking again.`); continue; }
-    if (tried.has(url.toLowerCase())) continue;
+    if (tried.has(url.toLowerCase()) || isRetiredNode(url)) continue;
     tried.add(url.toLowerCase());
     try {
       const rpc = await connectCandidate(kaspa, { endpoint: url, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS, log, role: "primary", singleShot: true });
@@ -336,17 +374,15 @@ async function connectViaResolver(kaspa, { log = () => {}, excludedEndpoints = [
   }
   // The resolver could not be reached, or nothing it offered answered: try the public nodes
   // the app already knows about, directly. Still the public pool - never a house node.
-  const direct = knownPublicNodes().filter((u) => !tried.has(u.toLowerCase()) && (!secure || /^wss:\/\//i.test(u)));
+  const direct = knownPublicNodes().filter(usable);
   if (direct.length) log(`${resolverAnswered ? "No resolver node answered" : "The public node resolver is unreachable from here"}; trying ${direct.length} known public nodes directly...`);
-  for (const url of direct) {
-    tried.add(url.toLowerCase());
+  for (let i = 0; i < direct.length; i += RACE_WIDTH) {
+    const wave = direct.slice(i, i + RACE_WIDTH);
+    for (const u of wave) tried.add(u.toLowerCase());
     try {
-      const rpc = await connectCandidate(kaspa, { endpoint: url, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS, log, role: "primary", singleShot: true });
-      rememberPublicNode(url);
-      return rpc;
+      return await raceCandidates(kaspa, wave, { log, timeoutMs: DIRECT_CONNECT_TIMEOUT_MS });
     } catch (error) {
       lastError = error;
-      log(`Known public node ${url} failed: ${error?.message || error}`);
     }
   }
   throw lastError || new Error("No public node could be reached.");

@@ -10967,7 +10967,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 146;
+const APP_BUILD = 147;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -24139,11 +24139,12 @@ function renderSetupExtra(kind) {
     // sees what they ask it.
     const opts = [
       { key: "scan", title: "Automatic Node Scan", badge: "Recommended", sub: "The Kaspa public node resolver picks a healthy public node for you, the way kaspa-ng does. Nothing to set up." },
-      { key: "official", title: "Kasia Public Node", badge: "Better", sub: "Kasia's public node at wrpc.kasia.fyi, the one the Kasia web app uses. One known operator, nothing to set up, and no scanning." },
       { key: "own", title: "Connect Your Own Node", badge: "Best", sub: "Your own Kaspa wRPC endpoint. Nobody else sees what you ask it, and nothing depends on anyone else's node staying up.", input: true },
     ];
     let current = accountShellPrefs.nodeChoice;
-    if (current !== "own" && current !== "official") current = "scan"; // "auto" from older builds means the hosted mode, which is the scan now
+    // "auto" from older builds means the hosted mode, which is the scan now; so does "official",
+    // Kasia's node, retired on 2026-10-13
+    if (current !== "own") current = "scan";
     const list = document.createElement("div");
     list.className = "setup-choice-list";
     for (const o of opts) {
@@ -24210,10 +24211,7 @@ function renderSetupExtra(kind) {
 function applySetupNodeChoice() {
   const choice = accountShellPrefs.nodeChoice;
   setEndpoint("nodeScan", "");
-  if (choice === "official") {
-    setEndpoint("trustedNode", DEFAULT_TRUSTED_NODE);
-    return;
-  }
+  // "official" was Kasia's node, retired: it reads as the scan now
   if (choice !== "own") {
     if (getEndpointOverride("trustedNode").trim()) setEndpoint("trustedNode", "");
     return;

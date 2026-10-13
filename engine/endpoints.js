@@ -61,7 +61,10 @@ export const MAINNET_DEFAULTS = MAINNET_ENDPOINT_DEFAULTS;
 // Borsh encoding like everything this client speaks. Replaces KaChat's own node here, which
 // readers abroad could not always reach.
 // A mainnet node: there is no default node on testnet (iOS hides it from the pickers there).
-export const DEFAULT_TRUSTED_NODE = IS_TESTNET ? "" : "wss://wrpc.kasia.fyi";
+// None on mainnet either since 2026-10-13: the owner dropped Kasia's node (it never answered), so
+// the "Better" choice is gone and Automatic Node Scan is the hosted mode.
+export const DEFAULT_TRUSTED_NODE = "";
+const RETIRED_NODE_URLS = ["wss://wrpc.kasia.fyi"];
 
 // Retired / superseded chat-indexer defaults. Drop any stored override still pointing at one of
 // these so it falls back to the current default (kachat.duckdns.org): indexer.kasia.fyi is offline,
@@ -81,6 +84,15 @@ let overrides = loadStored();
   const current = overrides.kasiaIndexer;
   if (current != null && RETIRED_INDEXER_URLS.includes(String(current).trim().replace(/\/+$/, ""))) {
     delete overrides.kasiaIndexer;
+    try { localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(overrides)); } catch {}
+  }
+})();
+
+// Someone who picked "Kasia Public Node" goes back to Automatic Node Scan: that node is retired.
+(function migrateRetiredNode() {
+  const current = String(overrides.trustedNode || "").trim().replace(/\/+$/, "").toLowerCase();
+  if (current && RETIRED_NODE_URLS.includes(current)) {
+    delete overrides.trustedNode;
     try { localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(overrides)); } catch {}
   }
 })();
