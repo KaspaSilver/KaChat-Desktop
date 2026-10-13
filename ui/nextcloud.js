@@ -378,9 +378,8 @@ function backupFolderPath() {
 
 /** Looks for a folder on the server that already holds a KaChat backup - the default path
  *  first, then any top-level folder with "kachat" in its name (any case), then one level down
- *  inside those - and adopts the first one found as the backup folder. With a backup in hand,
- *  Automatic Sync is switched on and the one-time restore runs, so a device that connects to an
- *  existing backup starts from the phone's history instead of an empty folder. */
+ *  inside those - and adopts the first one found as the backup folder. Automatic Sync stays as
+ *  it is (off after connecting): switching it on is what restores from that backup, once. */
 async function adoptExistingBackupFolder() {
   if (!nc || nc.backupFolderScanned) return;
   const hasBackup = async (path) => {
@@ -413,12 +412,11 @@ async function adoptExistingBackupFolder() {
   if (found) {
     const changed = (nc.backupFolder || DEFAULT_BACKUP_FOLDER) !== found;
     if (changed) nc.backupFolder = found;
-    if (!nc.autoBackup) nc.autoBackup = true;
     saveState();
     renderSettings();
-    armAutoBackup();
-    deps.showToast?.(changed ? `Found your KaChat backup in "${found}" - syncing with it.` : "Found your KaChat backup - syncing with it.");
-    scheduleAutoRestoreIfNeeded();
+    if (!nc.autoBackup) {
+      deps.showToast?.(changed ? `Found your KaChat backup in "${found}". Turn on Automatic Sync to restore from it.` : "Found your KaChat backup. Turn on Automatic Sync to restore from it.");
+    }
   } else {
     saveState();
   }
@@ -1115,16 +1113,20 @@ function scheduleAutoRestoreIfNeeded() {
   autoRestoreTimer = window.setTimeout(() => { autoRestoreTimer = null; runAutoRestore(); }, 3_000);
 }
 
-async function runAutoRestore() {
+async function runAutoRestore({ announce = false } = {}) {
   if (!nc?.autoBackup || nc.autoRestoreDone) return;
   if (isBusy()) return;   // the done flag stays unset, so a later trigger retries
+  if (announce) deps.showToast?.("Restoring from your Nextcloud backup…");
   syncInFlight = true;
   try {
     // ETag before the download (best effort): recorded after a successful import so the change
     // watcher's first poll does not immediately re-download what the bootstrap just imported.
     const etagAtDownload = await fetchBackupETag().catch(() => null);
     const raw = await downloadBackupFile(BACKUP_FILENAME);
-    if (!raw) return;     // no backup yet: NOT an error, and NOT done
+    if (!raw) {           // no backup yet: NOT an error, and NOT done
+      if (announce) deps.showToast?.("No backup in this folder yet - this device's history will be backed up there.");
+      return;
+    }
     const plain = await deps.openBackupPayload(raw);
     const summary = deps.importPhoneArchive?.(plain) || null;
     if (!nc) return;
@@ -1137,13 +1139,15 @@ async function runAutoRestore() {
     noteLocalActivity();
     // Fully silent by design — sync is invisible plumbing, like iCloud. The log line is the
     // only trace.
-    deps.appendEngineLog?.(
-      `Nextcloud automatic restore finished: ${summary?.messages ?? 0} message${summary?.messages === 1 ? "" : "s"} in ${summary?.conversations ?? 0} chat${summary?.conversations === 1 ? "" : "s"}.`,
-    );
+    const restoredText = `${summary?.messages ?? 0} message${summary?.messages === 1 ? "" : "s"} in ${summary?.conversations ?? 0} chat${summary?.conversations === 1 ? "" : "s"}`;
+    deps.appendEngineLog?.(`Nextcloud automatic restore finished: ${restoredText}.`);
+    // Switching Automatic Sync on says what it brought in; the background bootstrap stays silent.
+    if (announce) deps.showToast?.(`Restored from your backup: ${restoredText}.`);
   } catch (error) {
     // Includes an unreadable archive and transient network failures: stay silent, leave the
     // done flag unset so a later trigger retries, and never surface a modal.
     deps.appendEngineLog?.(`Nextcloud automatic restore skipped (a later attempt retries): ${error.message}`);
+    if (announce) deps.showToast?.(`Couldn't restore from the backup yet (${error.message}). It tries again shortly.`);
   } finally {
     syncInFlight = false;
     lastActivityFingerprint = activityFingerprint();
@@ -1901,10 +1905,10 @@ function wireSettings() {
       button.textContent = "Connecting…";
       try {
         const userId = await verifyCredentials(server, username, appPassword);
-        // Automatic Sync is on from the moment a server is connected (iOS bde94b0): the archive
-        // on the reader's own server is the one cross-device channel, and a connection that
-        // then sat idle until a toggle was found is a connection that did nothing.
-        nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: true, lastAutoBackup: 0 };
+        // Automatic Sync starts off (the owner's call, 2026-10-13; iOS bde94b0 switched it on at
+        // connect): the person picks the folder first, and switching it on restores from that
+        // backup once before anything is uploaded.
+        nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
         try { saveState({ strict: true }); }
         catch (error) { nc = null; throw error; } // locked meanwhile: not connected, nothing stored
         ncLocked = null;
@@ -1973,8 +1977,12 @@ function wireSettings() {
     if (event.target.matches("[data-nc-auto]")) {
       if (!nc) return;
       nc.autoBackup = event.target.checked;
+      if (!nc.autoBackup) { saveState(); armAutoBackup(); return; }
+      // Switched on: one full restore from the chosen backup first, so every chat is complete
+      // at once (not caught up chat by chat as each one opens); the uploads start after it.
+      nc.autoRestoreDone = false;
       saveState();
-      armAutoBackup();
+      void runAutoRestore({ announce: true }).finally(() => armAutoBackup());
     }
   });
 }

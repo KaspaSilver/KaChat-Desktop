@@ -13253,7 +13253,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 .addr-domains-icon svg { width: 24px; height: 24px; }
-.addr-domains-icon.kachat svg { width: 42px; height: auto; }
 .addr-domains-text { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
 .addr-domains-text strong { font-size: 17px; font-weight: 600; }
 .addr-domains-text small { font-size: 15px; color: var(--muted); }

@@ -9156,7 +9156,6 @@ initAddressDomainsTab({
   engine,
   renderKachat: (el, address) => renderKachatLiveDomainsTab(el, address, { variant: "address" }),
   kachatNames: (address) => kachatHeldNamesOf(address),
-  wordmark: KACHAT_WORDMARK_SVG,
   escapeHtml,
 });
 
@@ -10968,7 +10967,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 145;
+const APP_BUILD = 146;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -28950,28 +28949,36 @@ async function syncGroupsNow({ catchUp = false } = {}) {
   // iMessage-style membership lines for members who received a key rotation: the engine reports
   // which addresses were added/removed on each root update (see _applyRoot). The acting admin
   // emits its own lines directly in the add/remove handlers, so those dedupe via the stable key.
+  // These lines are news only while recent (iOS systemMessageLifetime): the group's history
+  // replayed by the first sync after an import or restore, or any change older than that, adds
+  // no lines - the thread opens on its messages, as on iOS.
   for (const ev of result.controls || []) {
     if (!ev || !ev.groupId) continue;
+    const evRaw = Number(ev.blockTime || 0);
+    const evMs = evRaw > 1e12 ? evRaw : evRaw > 0 ? evRaw * 1000 : 0;
+    const isNews = !catchUp && (!evMs || Date.now() - evMs <= GROUP_SYSTEM_MESSAGE_LIFETIME_MS);
+    const lineAt = evMs || Date.now();
     // A group photo the admin changed — system line + refresh the open header/list.
     if (ev.kind === "photo-updated") {
-      if (ev.changed) {
+      if (ev.changed && isNews) {
         const who = groupSenderLabel(ev.adminAddress);
-        appendGroupSystemMessage(ev.groupId, ev.cleared ? `${who} removed the group photo` : `${who} changed the group photo`, Date.now(), `sys:${ev.groupId}:photo:${ev.photoKey || (ev.cleared ? "cleared" : "set")}`);
+        appendGroupSystemMessage(ev.groupId, ev.cleared ? `${who} removed the group photo` : `${who} changed the group photo`, lineAt, `sys:${ev.groupId}:photo:${ev.photoKey || (ev.cleared ? "cleared" : "set")}`);
       }
       if (ev.groupId === activeGroupId) { try { openGroupChat(activeGroupId); } catch {} }
       if (groupManageScreen && !groupManageScreen.hidden && activeGroupId === ev.groupId) { try { openGroupManage(activeGroupId); } catch {} }
       continue;
     }
+    if (!isNews) continue;
     // A rename (admin changed the group name) — system line for members.
     if (ev.renamedTo) {
-      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(ev.adminAddress)} changed the group name to "${ev.renamedTo}"`, Date.now(), `sys:${ev.groupId}:name:${ev.epoch}:${ev.renamedTo}`);
+      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(ev.adminAddress)} changed the group name to "${ev.renamedTo}"`, lineAt, `sys:${ev.groupId}:name:${ev.epoch}:${ev.renamedTo}`);
     }
     for (const addr of ev.added || []) {
       if (addr === engine.address) continue;
-      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was added to the group chat`, Date.now(), `sys:${ev.groupId}:${ev.epoch}:add:${addr}`);
+      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was added to the group chat`, lineAt, `sys:${ev.groupId}:${ev.epoch}:add:${addr}`);
     }
     for (const addr of ev.removed || []) {
-      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was removed from the group chat`, Date.now(), `sys:${ev.groupId}:${ev.epoch}:rem:${addr}`);
+      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was removed from the group chat`, lineAt, `sys:${ev.groupId}:${ev.epoch}:rem:${addr}`);
     }
   }
   // Only events that changed something repaint: an unchanged photo or an epoch notice is not news.

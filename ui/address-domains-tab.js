@@ -14,7 +14,7 @@ let seq = 0;
 
 /** `engine` (name lookups), `renderKachat(el, address)` (the .kachat cards and their detail
  *  screens), `kachatNames(address)` (-> display names, or null when the lookup failed),
- *  `wordmark` (the .kachat icon), `escapeHtml`. */
+ *  `escapeHtml`. Every card has the globe, .kachat too (iOS 0b68567). */
 export function initAddressDomainsTab(deps) {
   ctx = deps;
 }
@@ -41,7 +41,7 @@ function countHtml(state, tld) {
 function cardsHtml(state) {
   return `<div class="addr-domains-cards">${ADDRESS_DOMAIN_ORDER.map((tld) => `
     <button type="button" class="addr-domains-card" data-addr-domains-open="${tld}">
-      <span class="addr-domains-icon${tld === "kachat" ? " kachat" : ""}" aria-hidden="true">${tld === "kachat" ? (ctx?.wordmark || "") : GLOBE}</span>
+      <span class="addr-domains-icon" aria-hidden="true">${GLOBE}</span>
       <span class="addr-domains-text"><strong>${esc(suffixOf(tld))}</strong><small>${esc(serviceOf(tld))}</small></span>
       <span data-addr-domains-count="${tld}">${countHtml(state, tld)}</span>
       <span class="addr-domains-chevron" aria-hidden="true">${CHEVRON}</span>

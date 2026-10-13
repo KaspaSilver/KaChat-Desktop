@@ -192,7 +192,8 @@ export class GroupManager {
         // One row that throws must not pin the cursor in front of it forever.
         try {
           const ev = await this.applyControl(row.payloadString, row.sender, row.blockTime);
-          if (ev) events.push(ev);
+          // when it happened, so the UI can tell news from history replayed on an import
+          if (ev) events.push({ ...ev, blockTime: row.blockTime ?? null });
         } catch (error) {
           this.engine.log?.(`Group control row skipped: ${error?.message || error}`);
         }
