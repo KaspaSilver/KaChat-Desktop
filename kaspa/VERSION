@@ -39,3 +39,11 @@ LOCAL PATCH (2026-10-09, KaChat-Desktop Build 134)
   source of script" after a failed node connection. Any other string still goes to Function and is
   refused by the CSP. The .wasm binaries are unchanged; the .js checksums in SHA256SUMS were
   updated for this patch (bash tools/check-wasm.sh --update).
+
+LOCAL PATCH (2026-10-13, KaChat-Desktop Build 145)
+  The same __wbg_newnoargs in kaspa/kaspa.js and cipher/cipher.js also answers workflow-core's
+  promise-with-resolvers helper ("let resolve, reject; const p = new Promise(...); p.resolve =
+  resolve; p.reject = reject; return p;", compared with whitespace collapsed) with a plain function
+  instead of `new Function(...)`: a timer callback built it and threw the same CSP EvalError. Both
+  .wasm binaries hold exactly that snippet and "return this"; nothing else reaches Function. The
+  .wasm binaries are unchanged; the .js checksums were updated (bash tools/check-wasm.sh --update).

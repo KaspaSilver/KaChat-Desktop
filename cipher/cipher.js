@@ -2889,8 +2889,22 @@ function __wbg_get_imports() {
         // js-sys / workflow-rs only ever build "return this" here to reach the global object (the
         // SDK's websocket reconnect timer did, and threw an EvalError). Answer that one without
         // eval; anything else still goes to Function and the CSP still refuses it.
+        // Build 145: workflow-core also builds its promise-with-resolvers helper this way (a
+        // timer callback threw the same EvalError); it is answered without eval too. Compared with
+        // whitespace collapsed, so only that exact snippet matches.
         const src = getStringFromWasm0(arg0, arg1);
-        const ret = src === "return this" ? function () { return globalThis; } : new Function(src);
+        const flat = src.replace(/\s+/g, " ").trim();
+        const ret = flat === "return this"
+            ? function () { return globalThis; }
+            : flat === "let resolve, reject; const p = new Promise((resolve_, reject_) => { resolve = resolve_; reject = reject_; }); p.resolve = resolve; p.reject = reject; return p;"
+                ? function () {
+                    let resolve, reject;
+                    const p = new Promise((resolve_, reject_) => { resolve = resolve_; reject = reject_; });
+                    p.resolve = resolve;
+                    p.reject = reject;
+                    return p;
+                }
+                : new Function(src);
         return ret;
     };
     imports.wbg.__wbg_newwithbyteoffsetandlength_d97e637ebe145a9a = function(arg0, arg1, arg2) {
