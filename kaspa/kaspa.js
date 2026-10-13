@@ -15058,6 +15058,16 @@ function __wbg_get_imports() {
                     p.reject = reject;
                     return p;
                 }
+            // Build 148: workflow-core's requestAnimationFrame fallback (a scheduler sets it up from a
+            // timer callback; refused by the CSP, the task waiting on it never finished). Same
+            // effect as the snippet: called with no receiver, `this` is the global object.
+            : flat === "if (!this.requestAnimationFrame){ if (this.setImmediate) this.requestAnimationFrame = (callback)=>setImmediate(callback) else this.requestAnimationFrame = (callback)=>setTimeout(callback, 0) }"
+                ? function () {
+                    const g = this || globalThis;
+                    if (!g.requestAnimationFrame) {
+                        g.requestAnimationFrame = g.setImmediate ? (callback) => g.setImmediate(callback) : (callback) => setTimeout(callback, 0);
+                    }
+                }
                 : new Function(src);
         return addHeapObject(ret);
     };

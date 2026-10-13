@@ -47,3 +47,11 @@ LOCAL PATCH (2026-10-13, KaChat-Desktop Build 145)
   instead of `new Function(...)`: a timer callback built it and threw the same CSP EvalError. Both
   .wasm binaries hold exactly that snippet and "return this"; nothing else reaches Function. The
   .wasm binaries are unchanged; the .js checksums were updated (bash tools/check-wasm.sh --update).
+
+LOCAL PATCH (2026-10-13, KaChat-Desktop Build 148)
+  kaspa/kaspa.js only: __wbg_newnoargs also answers workflow-core's requestAnimationFrame fallback
+  ("if (!this.requestAnimationFrame){ ... setImmediate ... setTimeout(callback, 0) }", whitespace
+  collapsed) without eval. It was the third and last JS snippet kaspa_bg.wasm passes to Function
+  (the full list: "return this", the promise-with-resolvers helper, this one; the timer worker
+  source is loaded as a Blob, not through Function). A user's console showed the EvalError from
+  it under the CSP while chat sends stayed at "Sending". cipher_bg.wasm does not contain it.

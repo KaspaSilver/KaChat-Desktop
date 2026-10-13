@@ -529,27 +529,62 @@ async function uploadBackup(payloadJson) {
   if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the backup folder (HTTP ${mkcol.status}).`);
 
-  // Nextcloud holds a write lock on the file while another PUT (this device's automatic sync,
-  // or another device) is in flight and answers 423. Waited out on a short backoff - half a
-  // minute in all - and only a lock that never clears surfaces, with what to do about it.
+  // The archive is written to a temporary file first and then renamed over the backup (WebDAV
+  // MOVE), the way sync clients do it. Nextcloud write-locks a file for as long as a PUT into it
+  // runs, and an upload cut off halfway (a tab closed during its final flush, a dropped
+  // connection) left that lock on the backup itself until the server expired it - every later
+  // read and write answered 423 Locked meanwhile. Now only the temporary file is ever mid-upload;
+  // the backup is locked just for the instant of the rename.
+  const tempName = `.${BACKUP_FILENAME}.upload-${Math.random().toString(36).slice(2, 10)}`;
+  const tempURL = `${folderURL}/${encodeURIComponent(tempName)}`;
+  const put = await ncFetch(tempURL, {
+    method: "PUT",
+    headers: { Authorization: authHeader(), "Content-Type": "application/json" },
+    body: payloadJson,
+  });
+  if (put.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
+  if (!put.ok) throw new Error(`Backup upload failed (HTTP ${put.status}).`);
+  // MOVE names its target by absolute URL, and Nextcloud only accepts its own: the real server
+  // address, not the relay's.
+  const realFolder = `${String(nc?.server || "").replace(/\/+$/, "")}/remote.php/dav/files/${davUser()}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}`;
+  const dropTemp = () => ncFetch(tempURL, { method: "DELETE", headers: { Authorization: authHeader() } }).catch(() => {});
+  // A rename onto a file another device is writing right now still meets its lock: waited out
+  // on a short backoff, half a minute in all, and only a lock that never clears surfaces.
   for (let attempt = 0; ; attempt += 1) {
-    const put = await ncFetch(`${folderURL}/${BACKUP_FILENAME}`, {
-      method: "PUT",
-      headers: { Authorization: authHeader(), "Content-Type": "application/json" },
-      body: payloadJson,
+    const move = await ncFetch(tempURL, {
+      method: "MOVE",
+      headers: { Authorization: authHeader(), Destination: `${realFolder}/${encodeURIComponent(BACKUP_FILENAME)}`, Overwrite: "T" },
     });
-    if (put.status === 423) {
+    if (move.status === 423) {
       if (attempt >= LOCK_RETRY_DELAYS_S.length) {
-        throw new Error("Nextcloud has the backup file locked (HTTP 423): another device or sync is reading or writing it right now. Try again in a minute. If it keeps happening, the lock is stale on the server - clear it with occ (maintenance mode on, empty the file locks, off).");
+        await dropTemp();
+        throw new Error("Nextcloud has the backup file locked (HTTP 423): another device or sync is writing it right now, or an earlier upload was cut off and the server still holds its lock (it lets go on its own, usually within the hour). Try again later.");
       }
       deps.appendEngineLog?.(`Nextcloud backup file locked (HTTP 423), retrying in ${LOCK_RETRY_DELAYS_S[attempt]}s`);
       await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_DELAYS_S[attempt] * 1000));
       continue;
     }
-    if (!put.ok) throw new Error(`Backup upload failed (HTTP ${put.status}).`);
-    const raw = put.headers.get("OC-ETag") || put.headers.get("ETag");
+    if (!move.ok) {
+      // A server (or something in front of it) that will not rename: write the backup directly,
+      // as before, rather than not at all.
+      await dropTemp();
+      deps.appendEngineLog?.(`Nextcloud refused the rename (HTTP ${move.status}); uploading the backup directly.`);
+      const direct = await ncFetch(`${folderURL}/${BACKUP_FILENAME}`, {
+        method: "PUT",
+        headers: { Authorization: authHeader(), "Content-Type": "application/json" },
+        body: payloadJson,
+      });
+      if (direct.status === 423) throw new Error("Nextcloud has the backup file locked (HTTP 423): another device or sync is writing it right now. Try again later.");
+      if (!direct.ok) throw new Error(`Backup upload failed (HTTP ${direct.status}).`);
+      const directTag = direct.headers.get("OC-ETag") || direct.headers.get("ETag");
+      return directTag ? normalizeETag(directTag) || null : null;
+    }
+    const raw = move.headers.get("OC-ETag") || move.headers.get("ETag");
     const normalized = raw ? normalizeETag(raw) : "";
-    return normalized || null;
+    if (normalized) return normalized;
+    // Not every server sends the ETag on a MOVE: ask for it, so the change watcher knows this
+    // upload is ours.
+    try { return await fetchBackupETag(); } catch { return null; }
   }
 }
 const LOCK_RETRY_DELAYS_S = [1, 2, 4, 8, 15];
@@ -701,6 +736,8 @@ async function downloadBackupFile(filename, { onProgress = null } = {}) {
   const response = await ncFetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
   if (response.status === 404) return null;
   if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
+  // Locked while another device writes it: not a failure, the next attempt reads it.
+  if (response.status === 423) throw transientError("Nextcloud has the backup file locked right now (HTTP 423): another device is writing it. Trying again shortly.");
   if (!response.ok) throw new Error(`Backup download failed (HTTP ${response.status}).`);
   const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
   const text = await readBodyWithProgress(response, onProgress);

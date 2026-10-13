@@ -13,8 +13,19 @@ const sendQueues = new Map();
 
 /** Runs a task in the per-address send queue: anything that picks and spends coins from one
  *  address goes through here so two builds never choose the same coin. */
+// How long a send waits for the one ahead of it. A send that never settles (a node that stops
+// answering mid-submit, an SDK task that died) used to hold every later send from that address at
+// "Sending" for good. After this the queue moves on; if the stuck one does land later, the node
+// refuses whichever spends the same coins second, so nothing is paid twice.
+const SEND_QUEUE_WAIT_MS = 90_000;
+
 export function enqueueSend(sourceAddress, task) {
-  const previous = sendQueues.get(sourceAddress) || Promise.resolve();
+  const ahead = sendQueues.get(sourceAddress) || Promise.resolve();
+  let timer = null;
+  const previous = Promise.race([
+    ahead,
+    new Promise((resolve) => { timer = setTimeout(resolve, SEND_QUEUE_WAIT_MS); }),
+  ]).finally(() => clearTimeout(timer));
   const next = previous.then(task, task).finally(() => {
     if (sendQueues.get(sourceAddress) === next) sendQueues.delete(sourceAddress);
   });
