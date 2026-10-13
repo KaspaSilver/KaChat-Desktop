@@ -3,6 +3,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
+import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { setChainTimeSource } from "../engine/kachat-names/launch.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
@@ -18,7 +19,7 @@ import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames } from "./kachat-names-live.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -3470,23 +3471,29 @@ function knsDomainForAddress(address) {
 // name and its address has an explicit on-chain primary domain, adopt it as
 // contact.name so it becomes the single source of truth everywhere (sidebar,
 // header, Chat Info) instead of being recomputed separately in each place.
-/// Once per account (iOS 509c0fe): a contact whose name was only ever its .kas domain - every
-/// auto-named contact - goes back to unnamed, so it reads as its address. A name you typed
-/// yourself is kept.
-const DOMAIN_NAMES_REVERTED_KEY = "kachat-domain-names-reverted-v1";
-function revertDomainContactNamesOnce() {
+/** A bare .kas domain ("bob.kas"): since 5.2 never anyone's name in the app - a person is the name
+ *  you gave them, their .kachat name or their address. Names like that came from KNS, set by old
+ *  builds or other platforms (iOS Contact.isKasDomainName, ce0b636). */
+function isKasDomainName(name) {
+  const trimmed = String(name || "").trim().toLowerCase();
+  return trimmed.length > 4 && trimmed.endsWith(".kas") && !/\s/.test(trimmed);
+}
+
+/// Every load, not once (iOS ce0b636; was once per account, iOS 509c0fe): a contact named with a
+/// bare .kas domain goes back to unnamed, so it reads as its .kachat name or address. A .kas name
+/// can come back later - restored from a Nextcloud backup another platform wrote, or by an older
+/// build - and it must not stay.
+function revertDomainContactNames() {
   if (!engine.address || engine.knsNamesAsIdentity) return;
-  const key = accountScopedKey(DOMAIN_NAMES_REVERTED_KEY);
-  try { if (localStorage.getItem(key) === "1") return; } catch { return; }
   let changed = 0;
   for (const contact of state.contacts || []) {
-    if (!contact || contact.nameIsCustom || !/\.kas$/i.test(String(contact.name || "").trim())) continue;
+    if (!contact || !isKasDomainName(contact.name)) continue;
     contact.name = shortAddress(contact.address);
+    contact.nameIsCustom = false;
     contact.avatar = initialsFor(contact.name);
     contact.updatedAt = Date.now();
     changed += 1;
   }
-  try { localStorage.setItem(key, "1"); } catch { /* fine */ }
   if (changed) { schedulePersistState(); try { renderChats(); } catch { /* not ready */ } }
 }
 function applyKnsPrimaryDomainToContact(contact) {
@@ -4695,7 +4702,7 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // Your own chat is there from the moment the account is created, imported or opened (iOS
   // ensureSelfConversation), already first in the list.
   if (engine.address === clean) { try { ensureSelfChatForSync(); } catch { /* fine */ } }
-  if (engine.address === clean) { try { revertDomainContactNamesOnce(); } catch { /* fine */ } }
+  if (engine.address === clean) { try { revertDomainContactNames(); } catch { /* fine */ } }
   // Payment chats older builds made from .kachat contract transactions go (iOS 32fdaa4).
   if (engine.address === clean) { try { purgeContractAddressPaymentChats(); } catch (error) { appendEngineLog(`Contract chat purge failed: ${error?.message || error}`); } }
   refreshSubscriptionAddresses({ restart: false });
@@ -9142,10 +9149,16 @@ const spendingDetailUtxoList = document.querySelector("[data-spending-detail-utx
 let spendingDetailIndex = 0;
 let spendingDetailAddress = null;
 
-// Plain tab names - History, UTXOs, .kachat - with no counts (iOS 718b88c). The .kachat tab
-// (iOS KachatAddressDomainsList) is a placeholder until .kachat names launch; the KNS Domains
-// tab and its per-domain Send are gone, .kas names being managed from Your Domains.
+// Plain tab names - History, UTXOs, Domains - with no counts (iOS 718b88c, fe52376). The Domains
+// tab is a card per name service; until an address is known it holds the .kachat note.
 document.querySelectorAll("[data-kachat-address-domains]").forEach((el) => { el.innerHTML = kachatAddressDomainsHtml(); });
+initAddressDomainsTab({
+  engine,
+  renderKachat: (el, address) => renderKachatLiveDomainsTab(el, address, { variant: "address" }),
+  kachatNames: (address) => kachatHeldNamesOf(address),
+  wordmark: KACHAT_WORDMARK_SVG,
+  escapeHtml,
+});
 
 // --- Send KNS Domain modal (spending-address transfers) ---
 const knsTransferModal = document.querySelector("[data-kns-transfer-modal]");
@@ -9522,12 +9535,13 @@ function setSpendingDetailTab(tab) {
   if (tab === "kachat") paintKachatAddressDomains("[data-spending-detail-panel=\"kachat\"]", spendingDetailAddress);
 }
 
-/// An address screen's .kachat tab: that address's own names (iOS KachatAddressLiveNamesList,
-/// 881ada6), the same cards and name detail as Your Domains - live where the registry is launched,
-/// empty on mainnet (7227d69). A spending address's names get owner actions signed by its own key.
+/// An address screen's Domains tab (iOS fe52376): a card per name service with this address's
+/// count; .kachat opens that address's own names (iOS KachatAddressLiveNamesList, 881ada6), the
+/// same cards and name detail as Your Domains. A spending address's names get owner actions signed
+/// by its own key.
 function paintKachatAddressDomains(panelSelector, address) {
   const el = document.querySelector(`${panelSelector} [data-kachat-address-domains]`);
-  if (el && address) renderKachatLiveDomainsTab(el, address, { variant: "address" });
+  if (el && address) renderAddressDomainsTab(el, address);
 }
 
 async function openSpendingDetailScreen(index) {
@@ -10954,7 +10968,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 143;
+const APP_BUILD = 144;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -22099,7 +22113,10 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     const archivedMessages = Array.isArray(archived?.messages) ? archived.messages : [];
     if (!archivedMessages.length) continue;
 
-    const alias = String(archived?.contactAlias || "").trim();
+    // A .kas domain is nobody's name since 5.2: a backup still carrying one (an older build or
+    // another platform wrote it) never puts it back - a name removed here stays removed (iOS ce0b636).
+    const archivedAlias = String(archived?.contactAlias || "").trim();
+    const alias = isKasDomainName(archivedAlias) ? "" : archivedAlias;
     const archivePhoto = archivePhotoToDataUrl(archived?.contactPhoto);
     let contact = state.contacts.find((entry) => entry.address === contactAddress);
     let conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
@@ -29853,6 +29870,44 @@ groupVoicePanel?.addEventListener("click", (event) => {
     else clearVoicePreview(groupVoicePanel);
   }
 });
+
+/** Keeps a chat pinned to its bottom while the content under it grows - a link preview, a photo or
+ *  a video arriving a moment after its row - so an arrival's jump to the bottom doesn't land short
+ *  and then get shoved up in steps (iOS aa26c35). Only when the reader was at the end just before
+ *  the growth and isn't touching the list; anyone reading history above is never moved. */
+function keepChatPinnedWhileGrowing(area) {
+  if (!area) return;
+  let lastHeight = area.scrollHeight;
+  let touching = false;
+  let releaseTimer = null;
+  const check = () => {
+    const height = area.scrollHeight;
+    if (height > lastHeight && !touching) {
+      // measured against the size BEFORE the growth: was the reader at the end then?
+      const visibleBottom = area.scrollTop + area.clientHeight;
+      if (lastHeight - visibleBottom <= 24) area.scrollTop = height;
+    }
+    lastHeight = area.scrollHeight;
+  };
+  let queued = false;
+  const queueCheck = () => {
+    if (queued) return;
+    queued = true;
+    window.requestAnimationFrame(() => { queued = false; check(); });
+  };
+  area.addEventListener("scroll", () => { if (area.scrollHeight <= lastHeight) lastHeight = area.scrollHeight; }, { passive: true });
+  new MutationObserver(queueCheck).observe(area, { childList: true, subtree: true });
+  // media finishing loading grows its row without a DOM change; load doesn't bubble, so capture it
+  area.addEventListener("load", queueCheck, true);
+  area.addEventListener("loadedmetadata", queueCheck, true);
+  const hold = () => { touching = true; window.clearTimeout(releaseTimer); };
+  const release = () => { window.clearTimeout(releaseTimer); releaseTimer = window.setTimeout(() => { touching = false; lastHeight = area.scrollHeight; }, 150); };
+  area.addEventListener("pointerdown", hold, { passive: true });
+  area.addEventListener("touchstart", hold, { passive: true });
+  for (const type of ["pointerup", "pointercancel", "touchend", "touchcancel"]) area.addEventListener(type, release, { passive: true });
+}
+keepChatPinnedWhileGrowing(messageArea);
+keepChatPinnedWhileGrowing(groupMessageArea);
 
 // Scroll-to-latest for the 1:1 thread (iOS scrollToBottomButton): appears when scrolled up,
 // and counts the incoming messages that landed since you last sat at the bottom.

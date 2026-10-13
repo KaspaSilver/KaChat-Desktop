@@ -11,7 +11,8 @@
 import { getEndpoint } from "../engine/endpoints.js";
 import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
 import { sompiFromUserText, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
-import { renderKachatLiveDomainsTab, kachatOwnersOfNames } from "./kachat-names-live.js";
+import { kachatOwnersOfNames } from "./kachat-names-live.js";
+import { renderAddressDomainsTab } from "./address-domains-tab.js";
 import { userFacingError } from "./dialogs.js";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
@@ -1001,11 +1002,11 @@ function renderAddressScreen() {
       <span class="spending-detail-balance-value">${fmtKasExact(balanceSompi)} ${KAS_UNIT}</span>
       <span class="spending-detail-balance-address">${deps.escapeHtml(shortColdAddress(entry.address))}</span>
     </div>
-    <!-- History / UTXOs / .kachat on the app's underline tab bar (iOS b96d727, 718b88c). -->
+    <!-- History / UTXOs / Domains on the app's underline tab bar (iOS b96d727, 718b88c, fe52376). -->
     <nav class="domains-tabs address-tabs" aria-label="Cold address view">
       <button type="button" class="domains-tab ${addressTab === "transactions" ? "active" : ""}" data-cold-tab="transactions">History</button>
       <button type="button" class="domains-tab ${addressTab === "utxos" ? "active" : ""}" data-cold-tab="utxos">UTXOs</button>
-      <button type="button" class="domains-tab ${addressTab === "kachat" ? "active" : ""}" data-cold-tab="kachat">.kachat</button>
+      <button type="button" class="domains-tab ${addressTab === "kachat" ? "active" : ""}" data-cold-tab="kachat">Domains</button>
     </nav>
     <div class="manage-address-list cold-address-panel">
       ${addressTab === "transactions" ? addressTxRowsHtml(entry) : addressTab === "utxos" ? addressUtxoRowsHtml(entry) : "<div data-cold-kachat-names></div>"}
@@ -1020,11 +1021,12 @@ function renderAddressScreen() {
         Send
       </button>
     </div>`;
-  // The .kachat tab: this address's own names, live where the registry is launched (iOS 881ada6),
-  // empty on mainnet. A name opens read-only here - a KasSigner address signs on its device.
+  // The Domains tab: a card per name service (iOS fe52376); .kachat opens this address's own names,
+  // live where the registry is launched (iOS 881ada6). A name opens read-only here - a KasSigner
+  // address signs on its device.
   if (addressTab === "kachat") {
     const namesEl = rootEl.querySelector("[data-cold-kachat-names]");
-    if (namesEl) renderKachatLiveDomainsTab(namesEl, entry.address, { variant: "address" });
+    if (namesEl) renderAddressDomainsTab(namesEl, entry.address);
   }
 }
 

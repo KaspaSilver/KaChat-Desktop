@@ -3484,6 +3484,18 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   return true;
 }
 
+/** The .kachat names `address` holds (active or in grace), as display names, for an address's
+ *  Domains tab (iOS fe52376); [] where the registry isn't launched, null when the lookup failed. */
+export async function kachatHeldNamesOf(address) {
+  const rt = kachatNames();
+  const key = address ? keyOf(address) : null;
+  if (!rt || !key) return [];
+  try {
+    if (rt.registry.refreshedAt == null) await rt.registry.refresh();
+    return (await rt.registry.heldNames(key)).map((n) => n.display || `${n.name}.kachat`);
+  } catch { return null; }
+}
+
 /** Which of `addresses` own a .kachat name (iOS KachatNamesRegistry.ownersOfNames, 881ada6): the
  *  "Contains domain" tag and funded-first sort on Manage Addresses and KasSigner. An empty Set where
  *  the registry isn't launched (mainnet) - nothing is read there. -> Promise<Set<string>> */

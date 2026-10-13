@@ -13237,3 +13237,48 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .payment-request-own-head { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; text-align: center; }
 .payment-request-own-amount { font-size: 40px; font-weight: 700; line-height: 1.1; overflow-wrap: anywhere; }
 .payment-request-card-lines { white-space: normal; overflow-wrap: anywhere; }
+
+/* An address screen's Domains tab (iOS fe52376 AddressDomainsTab): a card per name service. */
+.addr-domains { padding: 12px 0 16px; }
+.addr-domains-cards { display: flex; flex-direction: column; gap: 12px; }
+.addr-domains-card {
+  display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px;
+  border: 0; border-radius: 16px; background: var(--surface-2); color: var(--text);
+  text-align: left; cursor: pointer; font: inherit;
+}
+.addr-domains-card:hover { background: var(--surface-3); }
+.addr-domains-icon {
+  flex: 0 0 48px; width: 48px; height: 48px; border-radius: 50%;
+  display: grid; place-items: center; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.addr-domains-icon svg { width: 24px; height: 24px; }
+.addr-domains-icon.kachat svg { width: 42px; height: auto; }
+.addr-domains-text { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
+.addr-domains-text strong { font-size: 17px; font-weight: 600; }
+.addr-domains-text small { font-size: 15px; color: var(--muted); }
+.addr-domains-count {
+  display: inline-block; min-width: 28px; padding: 4px 10px; border-radius: 999px; text-align: center;
+  font-size: 15px; font-weight: 700; color: var(--muted); background: color-mix(in srgb, var(--muted) 15%, transparent);
+}
+.addr-domains-count.has { color: #000; background: var(--accent); }
+.addr-domains-warn { display: inline-flex; color: #f5a623; }
+.addr-domains-warn svg { width: 20px; height: 20px; }
+.addr-domains-spinner {
+  display: inline-block; width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--muted) 35%, transparent); border-top-color: var(--muted);
+  animation: addr-domains-spin .8s linear infinite;
+}
+@keyframes addr-domains-spin { to { transform: rotate(360deg); } }
+.addr-domains-chevron { display: inline-flex; color: var(--muted); }
+.addr-domains-chevron svg { width: 14px; height: 14px; }
+.addr-domains-subhead { position: relative; display: flex; align-items: center; justify-content: center; min-height: 36px; margin-bottom: 12px; }
+.addr-domains-subhead strong { font-size: 17px; font-weight: 600; }
+.addr-domains-back {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 2px; padding: 6px 4px;
+  border: 0; background: none; color: var(--accent); font: inherit; font-size: 16px; cursor: pointer;
+}
+.addr-domains-back svg { width: 18px; height: 18px; }
+.addr-domains-names { display: flex; flex-direction: column; }
+.addr-domains-empty { margin: 0; padding: 24px 8px; text-align: center; color: var(--muted); }
