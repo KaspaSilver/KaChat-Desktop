@@ -1,18 +1,19 @@
 // The pieces every Send Kaspa screen is built from, so they look and behave the same (iOS
-// Views/Shared/SendKaspaComponents.swift, 4d0324f / afaad34 / e994235 / dae8a01): the 1:1 chat's
-// Send KAS sheet, Profile's Send Kaspa (the chatting address), a spending address's Send (and its
-// Compound UTXOs), and KasSigner's send.
+// Views/Shared/SendKaspaComponents.swift, 4d0324f / afaad34 / e994235 / dae8a01 / 6333dd3): the
+// 1:1 chat's Send KAS sheet, Send Kaspa (Chats > +, Donate, the Address Book, an address's Send,
+// paying a payment request, and Compound UTXOs), KaPosts tips, and KasSigner's send.
 //
+//   From            - Chatting Address (the default) or Choose an Address, the chosen address and
+//                     its balance; every send but KasSigner's and Compound UTXOs starts with it
 //   recipient card  - "To": address or name, Paste and Scan QR beside the field, the lookup status
 //                     and the address card; locked to one address for Compound UTXOs
 //   amount entry    - the big centred amount, the KAS / currency switch (showing the converted
 //                     value) and Max
-//   info pills      - "Available: X KAS" (with "· Address #N ⌄" where the source can be picked)
-//                     and "From ..."
+//   info pills      - "Available: X KAS" (Compound UTXOs and KasSigner, which have no From)
 //   fee controls    - Network Fee (click it for a custom one), Normal / Fast / Priority, Coin Control
 //   action button   - slide the knob to the right end to send ("Slide to Send" / "Slide to
 //                     Consolidate"); a plain button for KasSigner's Build Unsigned Transaction
-//   Send From       - the spending-address picker behind the Available pill
+//   own addresses   - Choose an Address: every address of the account, each Used / Unused
 //
 // Every screen keeps its own logic (name lookup, fee estimates, coin control, compound, KasSigner
 // signing, the sent confirmation); these only draw it and handle the gestures. Markup comes out
@@ -307,7 +308,7 @@ export function availablePillInnerHtml({ text, sourceLabel = null, chooser = fal
     : ""}${chooser ? `<span class="sk-pill-chevron" aria-hidden="true">${SEND_ICONS.chevronDown}</span>` : ""}`;
 }
 
-/** One glass capsule of context. A `button` when it opens something (the Send From picker). */
+/** One glass capsule of context. A `button` when it opens something. */
 export function infoPillHtml({ attr = "", innerHtml = "", button = false, disabled = false, title = "" } = {}) {
   const a = attr ? `data-${attrName(attr)}` : "";
   return button
@@ -568,40 +569,118 @@ export function mountSendPieces(root, html = {}) {
   });
 }
 
-// --- Send From (which spending address pays) ----------------------------------------------------
+// --- From (which of your addresses a send comes out of) ------------------------------------------
+// iOS 6333dd3 SendFromSection / OwnAddressPicker / SelectablePill: every send starts with From -
+// Chatting Address (the default) or Choose an Address (any address of the account, chatting first,
+// each Used / Unused, with its balance) - so it is always plain which address the Kaspa leaves.
+// Request Payment's Fresh Address / Choose an Address uses the same pills and picker.
 
-/** The rows Send From lists (iOS SpendingSourcePicker): every visible spending address plus
- *  hidden ones holding Kaspa (and the current one), funded first, then by index. */
-export function sendFromRows(entries, currentIndex) {
-  return (entries || [])
-    .filter((e) => !e.hidden || BigInt(e.balanceSompi || 0) > 0n || e.index === currentIndex)
-    .sort((a, b) => {
-      const fa = BigInt(a.balanceSompi || 0) > 0n ? 0 : 1;
-      const fb = BigInt(b.balanceSompi || 0) > 0n ? 0 : 1;
-      return fa - fb || a.index - b.index;
-    });
+/** A pill to pick one of a few choices, like the amount's currency switch: the chosen one filled
+ *  in (iOS SelectablePill). `attr` names its data attribute, `value` is what it carries. */
+export function selectablePillHtml({ attr, value = "", title, selected = false } = {}) {
+  return `<button type="button" class="sk-select-pill${selected ? " selected" : ""}" data-${attrName(attr)}="${esc(value)}" aria-pressed="${selected ? "true" : "false"}">${esc(title)}</button>`;
 }
 
-let activeSourcePicker = null;
+/** Fills in the pill of `attr` whose value is `value` (null fills none). */
+export function setSelectedPill(root, attr, value) {
+  root?.querySelectorAll(`[data-${attrName(attr)}]`).forEach((pill) => {
+    const on = value != null && pill.getAttribute(`data-${attrName(attr)}`) === String(value);
+    pill.classList.toggle("selected", on);
+    pill.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+/** The From section (iOS SendFromSection): "FROM", the Chatting Address / Choose an Address pills,
+ *  and the chosen address with its balance. Wired by `sendFromControls`. */
+export function sendFromSectionHtml({ prefix }) {
+  const p = attrName(prefix);
+  return `
+    <div class="sk-from" data-${p}-from>
+      <span class="sk-from-label">From</span>
+      <div class="sk-select-pills">
+        ${selectablePillHtml({ attr: `${p}-from-choice`, value: "chatting", title: "Chatting Address", selected: true })}
+        ${selectablePillHtml({ attr: `${p}-from-choice`, value: "choose", title: "Choose an Address" })}
+      </div>
+      <div class="sk-from-card">
+        <span class="sk-from-copy">
+          <span class="sk-from-title" data-${p}-from-title>Chatting Address</span>
+          <code class="sk-from-address" data-${p}-from-address></code>
+        </span>
+        <span class="sk-from-balance" data-${p}-from-balance><span class="sk-spinner" aria-hidden="true"></span></span>
+      </div>
+    </div>`;
+}
 
 /**
- * Opens Send From over the current screen. `loadEntries()` resolves to
- * [{ index, address, label, balanceSompi, isPrimary, hidden }]; picking a row calls
- * `onPick(entry)` and closes. Picking changes that one send only - the screen decides what that
- * means; this never touches which address is primary.
+ * Wires a From section. `onChatting()` runs for the Chatting Address pill, `onChoose()` for Choose
+ * an Address (the screen opens `openOwnAddressPicker`). `render({ chatting, title, address,
+ * balanceText })` shows the source (balanceText null = still loading); `setDisabled` locks the
+ * pills while a send is on its way.
  */
-export function openSendFromPicker({ loadEntries, currentIndex, kasUnit = "KAS", onPick } = {}) {
-  closeSendFromPicker();
+export function sendFromControls(root, prefix, { onChatting, onChoose } = {}) {
+  const p = attrName(prefix);
+  const section = root?.querySelector(`[data-${p}-from]`);
+  let disabled = false;
+  section?.addEventListener("click", (event) => {
+    const pill = event.target.closest(`[data-${p}-from-choice]`);
+    if (!pill || disabled) return;
+    if (pill.getAttribute(`data-${p}-from-choice`) === "chatting") onChatting?.();
+    else onChoose?.();
+  });
+  return {
+    render({ chatting = true, title = "Chatting Address", address = "", balanceText = null } = {}) {
+      if (!section) return;
+      setSelectedPill(section, `${p}-from-choice`, chatting ? "chatting" : "choose");
+      const titleEl = section.querySelector(`[data-${p}-from-title]`);
+      if (titleEl) titleEl.textContent = title;
+      const addressEl = section.querySelector(`[data-${p}-from-address]`);
+      if (addressEl) { addressEl.textContent = shortSendAddress(address); addressEl.title = address || ""; }
+      const balanceEl = section.querySelector(`[data-${p}-from-balance]`);
+      if (balanceEl) {
+        balanceEl.innerHTML = balanceText == null ? '<span class="sk-spinner" aria-hidden="true"></span>' : esc(balanceText);
+      }
+    },
+    setDisabled(value) {
+      disabled = Boolean(value);
+      section?.querySelectorAll(`[data-${p}-from-choice]`).forEach((pill) => { pill.disabled = disabled; });
+    },
+  };
+}
+
+/** The Used / Unused / Checking tag (iOS OwnAddressPicker.usedTag): "Checking" until a lookup has
+ *  answered, never a possibly-wrong "Unused". */
+export function usedTagHtml(used) {
+  if (used === true) return '<span class="sk-used-tag used">Used</span>';
+  if (used === false) return '<span class="sk-used-tag unused">Unused</span>';
+  return '<span class="sk-used-tag checking">Checking</span>';
+}
+
+let activeOwnAddressPicker = null;
+
+/**
+ * Your addresses to pick from (iOS OwnAddressPicker): the chatting address, then the spending
+ * addresses (the ones Manage Addresses shows, plus hidden ones holding Kaspa, in number order),
+ * each with its name, balance and whether it was ever used - a balance means used, else
+ * `cachedUsed(address)` (true / false / null), else `probeUsed(address)` (a history lookup, eight
+ * at a time). A send's Choose an Address ("Send From") and Request Payment's.
+ *
+ * `loadEntries()` resolves to { chatting: { address, balanceSompi }, spending: [{ index, address,
+ * label, balanceSompi, hidden }] }. Picking a row calls `onPick({ kind: "chatting", address })` or
+ * `onPick({ kind: "spending", index, address, label })` and closes; Cancel, Escape or the backdrop
+ * leave things as they were.
+ */
+export function openOwnAddressPicker({ title = "Choose an Address", selectedAddress = null, loadEntries, cachedUsed, probeUsed, kasUnit = "KAS", onPick } = {}) {
+  closeOwnAddressPicker();
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop sk-source-backdrop";
   backdrop.dataset.skSourcePicker = "";
   backdrop.innerHTML = `
     <section class="contact-modal sk-source-sheet" role="dialog" aria-modal="true" aria-labelledby="sk-source-title">
       <div class="modal-header">
-        <div><h2 id="sk-source-title">Send From</h2></div>
+        <div><h2 id="sk-source-title">${esc(title)}</h2></div>
         <button class="modal-close" type="button" data-sk-source-cancel aria-label="Cancel">×</button>
       </div>
-      <div class="sk-source-list" data-sk-source-list role="listbox" aria-label="Spending addresses">
+      <div class="sk-source-list" data-sk-source-list role="listbox" aria-label="Your addresses">
         <p class="sk-source-empty"><span class="sk-spinner" aria-hidden="true"></span>Loading addresses…</p>
       </div>
       <div class="modal-actions">
@@ -609,65 +688,105 @@ export function openSendFromPicker({ loadEntries, currentIndex, kasUnit = "KAS",
       </div>
     </section>`;
   const list = backdrop.querySelector("[data-sk-source-list]");
-  let entries = [];
+  let rows = [];
+  const used = new Map();
 
   const onKey = (event) => {
     if (event.key !== "Escape") return;
-    // Only the picker closes, not the send screen under it.
+    // Only the picker closes, not the screen under it.
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation?.();
-    closeSendFromPicker();
+    close();
   };
   const close = () => {
     window.removeEventListener("keydown", onKey, true);
     backdrop.remove();
-    if (activeSourcePicker === close) activeSourcePicker = null;
+    if (activeOwnAddressPicker === close) activeOwnAddressPicker = null;
   };
-  activeSourcePicker = close;
+  activeOwnAddressPicker = close;
   window.addEventListener("keydown", onKey, true);
 
   backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
   backdrop.addEventListener("click", (event) => {
     if (event.target.closest("[data-sk-source-cancel]")) { close(); return; }
-    const row = event.target.closest("[data-sk-source-index]");
+    const row = event.target.closest("[data-sk-source-key]");
     if (!row) return;
-    const picked = entries.find((e) => String(e.index) === row.getAttribute("data-sk-source-index"));
+    const picked = rows.find((r) => r.key === row.getAttribute("data-sk-source-key"));
     close();
-    if (picked) { try { onPick?.(picked); } catch { /* the screen reports its own errors */ } }
+    if (picked) { try { onPick?.(picked.source); } catch { /* the screen reports its own errors */ } }
   });
   document.body.appendChild(backdrop);
 
+  const rowHtml = (r) => {
+    const funded = BigInt(r.balanceSompi || 0) > 0n;
+    const current = selectedAddress != null && r.address === selectedAddress;
+    return `
+      <button type="button" class="sk-source-row${current ? " current" : ""}" role="option" aria-selected="${current ? "true" : "false"}" data-sk-source-key="${esc(r.key)}">
+        <span class="sk-source-copy">
+          <span class="sk-source-name">${esc(r.title)}<span data-sk-used="${esc(r.key)}">${usedTagHtml(used.get(r.address))}</span></span>
+          <code class="sk-source-address">${esc(shortSendAddress(r.address))}</code>
+        </span>
+        <span class="sk-source-balance${funded ? "" : " empty"}">${esc(formatSompiPlain(r.balanceSompi || 0))} ${esc(kasUnit)}</span>
+        <span class="sk-source-check" aria-hidden="true">${current ? SEND_ICONS.check : ""}</span>
+      </button>`;
+  };
+  const paintUsed = (r) => {
+    const slot = list.querySelector(`[data-sk-used="${CSS.escape(r.key)}"]`);
+    if (slot) slot.innerHTML = usedTagHtml(used.get(r.address));
+  };
+
   Promise.resolve()
     .then(() => loadEntries?.())
-    .then((loaded) => {
+    .then(async (loaded) => {
       if (!backdrop.isConnected) return;
-      entries = sendFromRows(loaded, currentIndex);
-      if (!entries.length) { list.innerHTML = '<p class="sk-source-empty">No spending addresses yet.</p>'; return; }
-      list.innerHTML = entries.map((e) => {
-        const funded = BigInt(e.balanceSompi || 0) > 0n;
-        const current = e.index === currentIndex;
-        return `
-          <button type="button" class="sk-source-row${current ? " current" : ""}" role="option" aria-selected="${current ? "true" : "false"}" data-sk-source-index="${esc(e.index)}">
-            <span class="sk-source-copy">
-              <span class="sk-source-name">${esc(e.label || `Address #${e.index}`)}${e.isPrimary ? '<span class="sk-source-primary">Primary</span>' : ""}</span>
-              <code class="sk-source-address">${esc(shortSendAddress(e.address))}</code>
-            </span>
-            <span class="sk-source-balance${funded ? "" : " empty"}">${esc(formatSompiPlain(e.balanceSompi || 0))} ${esc(kasUnit)}</span>
-            <span class="sk-source-check" aria-hidden="true">${current ? SEND_ICONS.check : ""}</span>
-          </button>`;
-      }).join("");
+      const chatting = loaded?.chatting?.address ? [{
+        key: "chatting", title: "Chatting Address", address: loaded.chatting.address,
+        balanceSompi: loaded.chatting.balanceSompi || 0, source: { kind: "chatting", address: loaded.chatting.address },
+      }] : [];
+      const spending = (loaded?.spending || [])
+        .filter((e) => !e.hidden || BigInt(e.balanceSompi || 0) > 0n)
+        .sort((a, b) => a.index - b.index)
+        .map((e) => ({
+          key: `spending-${e.index}`, title: e.label || `Address #${e.index}`, address: e.address,
+          balanceSompi: e.balanceSompi || 0, source: { kind: "spending", index: e.index, address: e.address, label: e.label || `Address #${e.index}` },
+        }));
+      rows = [...chatting, ...spending];
+      // Used: a balance means used, else the cached answer; the rest are looked up below.
+      const toProbe = [];
+      for (const r of rows) {
+        if (BigInt(r.balanceSompi || 0) > 0n) { used.set(r.address, true); continue; }
+        const cached = cachedUsed?.(r.address);
+        if (cached === true || cached === false) used.set(r.address, cached);
+        else toProbe.push(r);
+      }
+      list.innerHTML = `
+        ${chatting.length ? `<p class="sk-source-section">Chatting Address</p>${chatting.map(rowHtml).join("")}` : ""}
+        <p class="sk-source-section">Spending Addresses</p>
+        ${spending.length ? spending.map(rowHtml).join("") : '<p class="sk-source-empty">No spending addresses yet.</p>'}`;
       list.querySelector(".sk-source-row.current")?.focus?.();
+      // A few at a time, like Manage Addresses (a burst gets rate-limited).
+      let next = 0;
+      const worker = async () => {
+        while (next < toProbe.length && backdrop.isConnected) {
+          const r = toProbe[next++];
+          let answer = null;
+          try { answer = await probeUsed?.(r.address); } catch { answer = null; }
+          if (!backdrop.isConnected) return;
+          if (answer === true || answer === false) { used.set(r.address, answer); paintUsed(r); }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(8, toProbe.length) }, worker));
     })
     .catch((error) => {
       if (!backdrop.isConnected) return;
-      list.innerHTML = `<p class="sk-source-empty bad">${esc(error?.message || "Couldn't load your spending addresses.")}</p>`;
+      list.innerHTML = `<p class="sk-source-empty bad">${esc(error?.message || "Couldn't load your addresses.")}</p>`;
     });
   return close;
 }
 
-export function closeSendFromPicker() {
-  if (activeSourcePicker) activeSourcePicker();
+export function closeOwnAddressPicker() {
+  if (activeOwnAddressPicker) activeOwnAddressPicker();
 }
 
 // --- Coin Control (which coins pay) -------------------------------------------------------------

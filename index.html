@@ -278,7 +278,7 @@
                 <button type="button" data-handshake-warning-send>Send Handshake</button>
               </div>
               <!-- The "+" sheet (iOS composerPlusSheet, 8b13460): the input bubble is the text field
-                   only, everything else is here - Pay in Kaspa, Camera, Photo, Voice Message, File
+                   only, everything else is here - Send Kaspa (iOS c8b93a6), Camera, Photo, Voice Message, File
                    (Nextcloud only), Play Chess, and Send Handshake where it is still needed.
                    Square tiles, three to a row (iOS d645d78): each line under a title is the
                    tooltip / accessible description, its <small> hidden by .composer-plus-tiles. -->
@@ -286,7 +286,7 @@
                 <p class="composer-plus-title">Send</p>
                 <button type="button" data-composer-pay title="Send Kaspa to this contact." aria-description="Send Kaspa to this contact.">
                   <span class="mode-icon mode-icon-kaspa" aria-hidden="true"><img src="./ui/assets/kaspa-logo.png" alt="" /></span>
-                  <span class="composer-plus-copy"><strong>Pay in Kaspa</strong><small>Send Kaspa to this contact.</small></span>
+                  <span class="composer-plus-copy"><strong>Send Kaspa</strong><small>Send Kaspa to this contact.</small></span>
                 </button>
                 <button type="button" data-composer-media="camera" title="Take a photo and send it." aria-description="Take a photo and send it.">
                   <span class="mode-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.1-1.6A1 1 0 0 1 9.6 4h4.8a1 1 0 0 1 .8.4L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.2"/></svg></span>
@@ -766,9 +766,6 @@
             </button>
           </div>
 
-          <!-- One row per address role. The title and balance ARE the copy affordance, and the two
-               circles are Send and Manage - iOS replaced the expanding dropdowns that hid those
-               same three actions behind a chevron tap (ProfileView.addressActionRow). -->
           <!-- Testnet only (iOS 182ae68, 2a81767): free TN10 coins for the chatting address from the
                official faucet. It sits behind a Cloudflare check, so it opens in a new tab with the
                kaspatest: address copied; a balance rise after you come back locks it for 24 h. -->
@@ -781,37 +778,18 @@
             <svg class="testnet-faucet-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
           </button>
 
-          <div class="profile-card profile-address-row">
-            <button class="profile-address-main" type="button" data-copy-engine-address>
-              <span class="profile-address-title">Chatting</span>
-              <span class="profile-address-balance" data-profile-balance>-- KAS</span>
-            </button>
-            <div class="profile-address-actions">
-              <button class="profile-address-icon" type="button" data-open-send-kaspa aria-label="Send Kaspa from your chatting address" title="Send">
-                <svg class="send-glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 17V7.5M7.8 11.5 12 7.3l4.2 4.2"/></svg>
-              </button>
-              <button class="profile-address-icon" type="button" data-open-manage-address aria-label="Manage chatting address" title="Manage">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.369-.491l1.217.456c.355.133.75.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z"/><path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>
-              </button>
-            </div>
-          </div>
-
-          <div class="profile-card profile-address-row">
-            <button class="profile-address-main" type="button" data-copy-spending-address>
-              <span class="profile-address-title">Spending</span>
-              <span class="profile-address-note" data-spending-unlocking hidden>Address unlocking...</span>
-              <span class="profile-address-balance" data-spending-balance>-- KAS</span>
-              <span class="profile-address-total" data-spending-total hidden></span>
-            </button>
-            <div class="profile-address-actions">
-              <button class="profile-address-icon" type="button" data-open-spending-send aria-label="Send Kaspa from your spending address" title="Send">
-                <svg class="send-glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 17V7.5M7.8 11.5 12 7.3l4.2 4.2"/></svg>
-              </button>
-              <button class="profile-address-icon" type="button" data-open-spending-manage aria-label="Manage spending addresses" title="Manage">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.369-.491l1.217.456c.355.133.75.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z"/><path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>
-              </button>
-            </div>
-          </div>
+          <!-- One Manage Addresses card (iOS 6333dd3): every address of this account, with the
+               account total (the chatting address and every spending address, hidden ones too,
+               245a5d2). Which address a send comes from is picked on the send screen (From), so
+               Profile no longer splits Chatting from Spending or has a "primary". -->
+          <button class="profile-card profile-manage-addresses" type="button" data-open-spending-manage>
+            <span class="profile-manage-addresses-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7 9h.01M7 12h.01M7 15h.01M10 9h7M10 12h7M10 15h7"/></svg></span>
+            <span class="profile-manage-addresses-copy">
+              <strong>Manage Addresses</strong>
+              <span class="profile-manage-addresses-total" data-manage-addresses-total><span class="sk-spinner" aria-hidden="true"></span></span>
+            </span>
+            <svg class="profile-manage-addresses-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
 
           <!-- Your Domains: a top-level row rather than a page inside the KNS editor - domains are
                something you own, not a setting of the profile that happens to use one (iOS
@@ -1036,10 +1014,6 @@
               <div class="settings-toggle-row"><span><strong>Save account on this device</strong><small data-save-account-note>Without a password, keys are stored unencrypted in this browser. Set a password to encrypt them.</small></span><label class="switch-control"><input type="checkbox" data-pref-save-account checked><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Keep me signed in</strong><small data-keep-signed-in-note>Restore the active account when KaChat opens.</small></span><label class="switch-control"><input type="checkbox" data-pref-keep-signed-in checked><span></span></label></div>
             </div>
-            <div class="settings-list-card" data-chats-privacy-card>
-              <div class="settings-toggle-row"><span><strong>Chats Payment Privacy</strong></span><label class="switch-control"><input type="checkbox" data-chats-privacy-toggle checked><span></span></label></div>
-            </div>
-            <p class="settings-group-footer" data-chats-privacy-footer>On: Anytime you receive Kaspa KaChat will do its best make sure the Kaspa goes to a fresh address not tied to your chatting identity. Sending Kaspa KaChat will always make sure it comes out of your primary spend address which is never associated with your chatting identity.<br><br>Off: All Kaspa will flow in and out of your chatting address<br><br>This setting belongs to this account alone - your other accounts keep their own.</p>
           </section>
 
           <!-- Security sub-screen: Simple Mode (ui/childmode.js renders the stateful page). -->
@@ -2062,14 +2036,13 @@
         <p data-pay-recipient></p>
       </header>
       <!-- The shared amount entry and slide-to-send button (ui/send-kaspa-components.js). -->
+      <!-- From (iOS 6333dd3): the chatting address by default, or Choose an Address. -->
+      <div data-sk-mount="from"></div>
       <div data-sk-mount="amount"></div>
       <label class="pay-memo">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>
         <textarea rows="1" placeholder="Add a memo (encrypted)" data-pay-memo aria-label="Add a memo (encrypted)"></textarea>
       </label>
-      <div class="pay-pills">
-        <div class="available-balance-banner" data-available-balance-banner hidden role="status" aria-live="polite"></div>
-      </div>
       <!-- The shared fee card (iOS SendFeeControls, 62c2773): Network Fee, Normal / Fast / Priority, Coin Control. -->
       <div data-sk-mount="fee"></div>
       <p class="pay-sheet-note" data-pay-note hidden></p>
@@ -2088,11 +2061,9 @@
         <h2 id="tip-sheet-title" data-tip-title>Tip</h2>
         <p data-tip-recipient></p>
       </header>
+      <!-- From (iOS 6333dd3): the chatting address by default, or Choose an Address. -->
+      <div data-sk-mount="from"></div>
       <div data-sk-mount="amount"></div>
-      <p class="tip-destination" data-tip-destination></p>
-      <div class="pay-pills">
-        <span class="sk-pill" data-tip-available role="status" aria-live="polite"></span>
-      </div>
       <div data-sk-mount="fee"></div>
       <p class="pay-sheet-note" data-tip-note hidden></p>
       <div data-sk-mount="action"></div>
@@ -2551,7 +2522,8 @@
     </div>
   </div>
 
-  <div class="chatting-address-screen spending-manage-screen" data-spending-manage-screen hidden role="dialog" aria-modal="true" aria-label="Spending Addresses">
+  <!-- Manage Addresses (iOS 6333dd3): every address of this account, the chatting address first. -->
+  <div class="chatting-address-screen spending-manage-screen" data-spending-manage-screen hidden role="dialog" aria-modal="true" aria-label="Manage Addresses">
     <div class="manage-address-card">
       <header class="chatting-address-header">
         <button class="chatting-address-back" type="button" data-close-spending-manage aria-label="Back">
@@ -2563,10 +2535,6 @@
       </header>
       <!-- The spending addresses' own receive switch (iOS ba352a2); Settings > Address Activity stays the master. -->
       <div class="settings-toggle-row manage-address-notify"><span><strong>Notify on receive</strong><small>When a spending address receives Kaspa from someone else.</small></span><label class="switch-control"><input type="checkbox" data-pref-spending-receive checked><span></span></label></div>
-      <div class="settings-segmented full manage-address-tabs" role="group" aria-label="Manage addresses view" data-spending-tabs hidden>
-        <button type="button" class="settings-segmented-option active" data-spending-tab="addresses">Addresses</button>
-        <button type="button" class="settings-segmented-option" data-spending-tab="privacy">Chat Privacy</button>
-      </div>
       <!-- Total, then the actions button directly under it (iOS accountSummary): the actions
            are about this account, so they sit with the account rather than pinned over the list. -->
       <div class="spending-total" data-spending-total-block>
@@ -2576,12 +2544,10 @@
       </div>
       <div class="manage-address-body">
         <div class="manage-address-list spending-address-list" data-spending-address-list></div>
-        <div class="manage-address-list spending-privacy-list" data-spending-privacy-list hidden></div>
       </div>
       <div class="spending-actions-menu" data-spending-actions-menu role="menu" hidden aria-hidden="true">
         <button type="button" data-spending-generate hidden></button>
         <button type="button" data-spending-scan hidden></button>
-        <button type="button" data-spending-consolidate hidden></button>
       </div>
     </div>
   </div>
@@ -2592,9 +2558,9 @@
   <div class="chatting-address-screen spending-visibility-screen" data-spending-visibility-screen hidden role="dialog" aria-modal="true" aria-label="Address Visibility">
     <div class="manage-address-card">
       <header class="chatting-address-header">
-        <button class="chatting-address-back" type="button" data-close-spending-visibility aria-label="Done">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
-        </button>
+        <!-- Hide All (iOS 245a5d2): confirmed, then Manage Addresses starts over with only the
+             chatting address. Done closes. -->
+        <button class="chatting-address-back spending-visibility-done spending-visibility-hide-all" type="button" data-spending-hide-all>Hide All</button>
         <span class="chatting-address-balance">Address Visibility</span>
         <button class="chatting-address-back spending-visibility-done" type="button" data-done-spending-visibility>Done</button>
       </header>
@@ -2754,8 +2720,10 @@
         <button class="modal-close" type="button" data-close-send-kaspa aria-label="Close">×</button>
       </div>
       <!-- Built from ui/send-kaspa-components.js (mounted by app.js), the same pieces as the chat's
-           Send KAS sheet and KasSigner's send: recipient, amount, pills, fee controls, slide to send. -->
+           Send KAS sheet and KasSigner's send: From (iOS 6333dd3; not on Compound UTXOs), recipient,
+           amount, pills, fee controls, slide to send. -->
       <div class="sk-screen">
+        <div data-sk-mount="from"></div>
         <div data-sk-mount="recipient"></div>
         <p class="sk-caption send-compound-note" data-send-kaspa-compound-note hidden>Combines all UTXOs at this address into a single one by sending the balance back to itself, to reduce the number of inputs a future send needs.</p>
         <!-- A payment request being paid (iOS PaymentRequestSummary): what it asks for and who made it. -->

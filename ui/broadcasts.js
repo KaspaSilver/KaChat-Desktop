@@ -1330,7 +1330,8 @@ function openBroadcastSenderMenu(address, x, y) {
   if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this sender." });
   options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
-    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: `Send ${KAS_UNIT} to this sender from your chatting address.` });
+    // "Send Kaspa", was "Pay in Kaspa" (iOS aaa45ae).
+    options.push({ id: "pay", title: "Send Kaspa", subtitle: `Send ${KAS_UNIT} to this sender from your chatting address.` });
     options.push({ id: "hide", title: "Hide User", subtitle: "Their messages disappear from this room on this device.", destructive: true });
   }
   chooseDialog({ title: senderName(address), message: address, options }).then((choice) => {

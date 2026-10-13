@@ -40,7 +40,8 @@ import { scanKaspaAddress } from "./qr-scan.js";
 import {
   mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
   sanitizeAmountText, availablePillInnerHtml, infoPillHtml, feeControlsHtml, feeControls, sendActionButtonHtml,
-  createSendActionButton, openSendFromPicker, closeSendFromPicker, shortSendAddress,
+  createSendActionButton, openOwnAddressPicker, closeOwnAddressPicker,
+  sendFromSectionHtml, sendFromControls, selectablePillHtml, setSelectedPill,
   otherDomainsHtml, pickOtherDomain, nameNotFoundText,
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
 } from "./send-kaspa-components.js";
@@ -378,15 +379,13 @@ function subscriptionContactAddresses() {
 }
 
 // Own non-chatting addresses the wallet wants live UTXO events for: revealed
-// spending-chain addresses, cold-storage watch addresses (Address Activity
-// notifications), and reserved-and-offered payment-pool addresses (so incoming
-// pool payments are noticed promptly). All helpers are defensive — during early
-// module init none of the backing state exists yet.
+// spending-chain addresses and cold-storage watch addresses (Address Activity
+// notifications). All helpers are defensive — during early module init none of
+// the backing state exists yet.
 function ownWatchedActivityAddresses() {
   try {
     const set = new Set(spendingWatchedAddressList());
     for (const entry of listColdWatchedAddresses()) set.add(entry.address);
-    for (const address of paymentPoolOfferedAddresses()) set.add(address);
     set.delete(engine.address || "");
     return [...set];
   } catch { return []; }
@@ -472,7 +471,6 @@ let groupVoiceViaNextcloud = false;
 // The chat the Send KAS sheet is open for (null while it is closed). Up here because
 // openConversation reads it.
 let paySheetConversationId = null;
-let availableBalanceHideTimer = null;
 let paymentSendInFlight = false;
 let handshakeSendInFlight = false;
 // All messages are now real on-chain Kaspa transactions, unconditionally —
@@ -1430,7 +1428,6 @@ let latestServiceStatusText = "Starting services";
 const toolbarBalance = document.querySelector("[data-toolbar-balance]");
 const toolbarBalanceValue = document.querySelector("[data-toolbar-balance-value]");
 const profileAddress = document.querySelector("[data-profile-address]");
-const profileBalance = document.querySelector("[data-profile-balance]");
 const profileInitial = document.querySelector("[data-profile-initial]");
 const profileKnsEmptyCta = document.querySelector("[data-profile-kns-empty-cta]");
 const profileKnsOwned = document.querySelector("[data-profile-kns-owned]");
@@ -1719,7 +1716,7 @@ function renderSendKaspaPaymentRequest() {
 /** Fills Send Kaspa in from a request (iOS WithdrawKaspaView.apply): the address (locked), the
  *  exact amount in KAS and the request above it. */
 function applyPaymentRequestToSendKaspa(request) {
-  if (!request || sendKaspaCompound || sendKaspaSourceIndex != null) return;
+  if (!request || sendKaspaCompound) return;
   sendKaspaPaymentRequest = request;
   applySendKaspaCompoundUi();
   const recipient = document.querySelector("[data-send-kaspa-recipient]");
@@ -1733,8 +1730,9 @@ function applyPaymentRequestToSendKaspa(request) {
   renderSendKaspaPaymentRequest();
 }
 /** A chatting-address request is paid as a chat payment, the memo encrypted to them inside it
- *  (iOS c6851d6 sendPayment(to:note:)): it lands in your chat with them like any chat payment. */
-async function payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints }) {
+ *  (iOS c6851d6 sendPayment(to:note:)): it lands in your chat with them like any chat payment.
+ *  From the address Send Kaspa's From names (iOS 6333dd3; null = the chatting address). */
+async function payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints, sourceSpendingIndex = null }) {
   const address = request.address;
   let contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === address.toLowerCase());
   if (!contact) {
@@ -1753,6 +1751,7 @@ async function payPaymentRequestAsChatPayment(request, { amountKas, feeKas, sele
   }
   const sent = await sendKasPayment(conversationEntry.id, amountKas, {
     note: request.memo,
+    sourceSpendingIndex,
     extraFeeSompi: kasToSompi(feeKas) ?? 0n,
     manualUtxos: selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null,
   });
@@ -1806,13 +1805,20 @@ function paymentRequestHeaderHtml(title, closeLabel) {
     </div>`;
 }
 var PAYMENT_REQUEST_CHATTING_NOTE = "The payment lands in your chat with whoever pays, with the memo.";
-var PAYMENT_REQUEST_SPENDING_NOTE = "Paid to a fresh address of yours. The memo shows to whoever pays, but doesn't travel with the payment.";
+// A request you made to a spending address (iOS 86dfd2d: each gets a brand-new one).
+var PAYMENT_REQUEST_SPENDING_NOTE = "Paid to a brand-new address of yours, used for this request only. The memo shows to whoever pays, but doesn't travel with the payment.";
+// Choose an Address picked a spending address (iOS 6dee531).
+var PAYMENT_REQUEST_CHOSEN_NOTE = "The memo shows to whoever pays, but doesn't travel with the payment.";
 
 /**
- * Request Payment (iOS CreatePaymentRequestView): paid to your chatting address or a fresh
- * spending (receive) address, an exact amount in KAS or your currency, and an optional memo up to
- * 140 characters. Signed by your chatting address when its key is here (7c71a98). From Chats > +
- * it gives Copy Payment Request / Share; from a 1:1 chat (`conversationId`, 6594936) the button is
+ * Request Payment (iOS CreatePaymentRequestView): paid to a Fresh Address (the default, iOS
+ * 6dee531: a brand-new spending address, never revealed, used or handed out - shown when the screen
+ * opens, derived not reserved, 3f5f79c, and reserved only when the request is copied, shared or
+ * sent, so opening the screen and cancelling uses none up) or Choose an Address (any of your
+ * addresses, each Used / Unused, 338d9f5). A request to the chatting address is a chat payment with
+ * the memo; any other is a plain send. An exact amount in KAS or your currency, and an optional memo
+ * up to 140 characters. Signed by your chatting address when its key is here (7c71a98). From Chats >
+ * + it gives Copy Payment Request / Share; from a 1:1 chat (`conversationId`, 6594936) the button is
  * Send Payment Request, which sends it into that chat.
  */
 function openCreatePaymentRequest({ conversationId = null } = {}) {
@@ -1822,12 +1828,12 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   const { sheet, close } = openPaymentRequestBackdrop("Request Payment", `
     ${paymentRequestHeaderHtml("Request Payment", "Cancel")}
     <div class="sk-screen">
-      <div class="settings-segmented full" role="group" aria-label="Paid to">
-        <button type="button" class="settings-segmented-option active" data-payreq-dest="chatting" aria-pressed="true">Chatting Address</button>
-        <button type="button" class="settings-segmented-option" data-payreq-dest="spending" aria-pressed="false">Spending Address</button>
+      <div class="sk-select-pills" role="group" aria-label="Paid to">
+        ${selectablePillHtml({ attr: "payreq-dest", value: "fresh", title: "Fresh Address", selected: true })}
+        ${selectablePillHtml({ attr: "payreq-dest", value: "chosen", title: "Choose an Address" })}
       </div>
       <div data-payreq-address></div>
-      <p class="sk-caption" data-payreq-dest-note></p>
+      <p class="sk-caption" data-payreq-dest-note hidden></p>
       ${amountEntryHtml({ prefix: "payreq", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, attrs: { conversion: "payreq-fiat" } })}
       <div class="payment-request-memo-field">
         <textarea class="field-input" rows="2" data-payreq-memo placeholder="What it's for (optional)" aria-label="What it's for (optional)"></textarea>
@@ -1835,7 +1841,7 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
       </div>
       <p class="field-error" data-payreq-error role="alert" hidden></p>
       <button class="primary-button full" type="button" data-payreq-action disabled>${recipient ? "Send Payment Request" : "Copy Payment Request"}</button>
-      ${recipient ? "" : '<button class="secondary-button full" type="button" data-payreq-share hidden>Share</button>'}
+      ${recipient ? "" : '<button class="secondary-button full" type="button" data-payreq-share disabled>Share</button>'}
       <p class="sk-caption payment-request-footnote">Anyone who opens or pastes it in KaChat gets Send Kaspa with this filled in, and sees it was made by your chatting address (signed with its key).</p>
     </div>`);
   // Asking for an amount, not sending one: no Max (iOS KaspaAmountEntry showsMax: false).
@@ -1849,39 +1855,52 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   const actionButton = sheet.querySelector("[data-payreq-action]");
   const shareButton = sheet.querySelector("[data-payreq-share]");
   const errorEl = sheet.querySelector("[data-payreq-error]");
-  let destination = "chatting";
-  let spendingAddress = null;
+  let destination = "fresh";
+  // The brand-new address reserved for this request (reserveFreshSpendingAddresses) - only when it's
+  // copied, shared or sent. Once per screen: Copy, Share and Send all reuse it, so no two requests
+  // share an address.
+  let freshAddress = null;
+  // The next brand-new address, shown before it's reserved: the slot after the last revealed one.
+  let nextFreshAddress = null;
+  let chosenAddress = null;
   let unit = "kas";
   let price = null;
   let copied = false;
-  let sending = false;
-  let lastLink = null;
+  let working = false;
 
-  const address = () => (destination === "chatting" ? engine.address : spendingAddress);
   const amountKasText = () => {
     const raw = String(amountInput?.value || "");
     if (unit !== "fiat") return raw;
     const value = Number(raw);
     return price && isFinite(value) && value > 0 ? trimKas8(value / price) : "";
   };
-  // Signed by your chatting address: whoever pays sees it is from you, even when it pays into a
-  // spending address, which has no identity. An account whose key isn't here still asks, unsigned.
-  const currentRequest = () => {
-    const payTo = address();
+  const amountSompi = () => {
     const sompi = sompiFromUserText(amountKasText());
-    if (!payTo || sompi == null || sompi <= 0n) return null;
-    const unsigned = makePaymentRequest({ address: payTo, amountSompi: sompi, memo: memoInput?.value || "", toChattingAddress: destination === "chatting" });
-    const key = engine.privateKeyHex;
-    return (key && signPaymentRequest(unsigned, engine.address, key)) || unsigned;
+    return sompi != null && sompi > 0n ? sompi : null;
+  };
+  // Ready to hand out: an amount, and an address (or a fresh one to be made).
+  const canMake = () => amountSompi() != null && (destination === "fresh" || Boolean(chosenAddress));
+  const setError = (message) => {
+    if (!errorEl) return;
+    errorEl.textContent = message || "";
+    errorEl.hidden = !message;
   };
   const renderAddress = () => {
     const host = sheet.querySelector("[data-payreq-address]");
-    const payTo = address();
-    if (host) host.innerHTML = payTo
-      ? addressResolutionCardHtml(payTo, { onLoaded: (loaded) => { if (address() === loaded) renderAddress(); } })
-      : '<div class="payment-request-loading"><span class="sk-spinner" aria-hidden="true"></span></div>';
     const note = sheet.querySelector("[data-payreq-dest-note]");
-    if (note) note.textContent = destination === "chatting" ? PAYMENT_REQUEST_CHATTING_NOTE : PAYMENT_REQUEST_SPENDING_NOTE;
+    const shown = destination === "fresh" ? (freshAddress || nextFreshAddress) : chosenAddress;
+    if (host) {
+      host.innerHTML = shown
+        ? addressResolutionCardHtml(shown, { onLoaded: (loaded) => { if (loaded === shown && sheet.isConnected) renderAddress(); } })
+        : destination === "fresh" ? '<div class="payment-request-loading"><span class="sk-spinner" aria-hidden="true"></span></div>' : "";
+    }
+    // Fresh Address just shows the address it will be paid to (iOS 3f5f79c).
+    let text = "";
+    if (destination === "chosen") {
+      text = !chosenAddress ? "Pick which of your addresses gets paid."
+        : chosenAddress === engine.address ? PAYMENT_REQUEST_CHATTING_NOTE : PAYMENT_REQUEST_CHOSEN_NOTE;
+    }
+    if (note) { note.textContent = text; note.hidden = !text; }
   };
   const renderAmount = () => {
     layoutAmountEntry(amountInput, unitCode);
@@ -1898,28 +1917,72 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
     conversion.textContent = text || (unit === "kas" ? selectedCurrency.toUpperCase() : KAS_UNIT);
   };
   const refresh = () => {
-    const request = currentRequest();
-    const link = request ? paymentRequestUniversalLink(request) : null;
-    if (link !== lastLink) { copied = false; lastLink = link; }
+    const ready = canMake() && !working;
     if (actionButton) {
-      actionButton.disabled = !request || sending;
+      actionButton.disabled = !ready;
       if (!recipient) actionButton.textContent = copied ? "Copied" : "Copy Payment Request";
     }
-    if (shareButton) shareButton.hidden = !request;
+    if (shareButton) shareButton.disabled = !ready;
     if (memoCount) memoCount.textContent = `${memoCharacters(memoInput?.value || "").length}/${PAYMENT_REQUEST_MEMO_LIMIT}`;
+  };
+  // Any change to what the request says un-does "Copied".
+  const edited = () => { copied = false; refresh(); };
+
+  // The request to hand out, signed by your chatting address (whoever pays sees it's from you, even
+  // when it's paid to a spending address, which has no identity). A fresh address is reserved here,
+  // the first time it's needed, and watched from then on so its payment shows the moment it lands.
+  const makeRequest = async () => {
+    const sompi = amountSompi();
+    if (sompi == null) return null;
+    let payTo;
+    if (destination === "fresh") {
+      if (!freshAddress) {
+        try { await ensureRuntimes({ quiet: true }); } catch { /* checked just below */ }
+        const reserved = reserveFreshSpendingAddresses(1)[0]?.address || null;
+        if (!reserved) { setError("Couldn't make a new address. Please try again."); return null; }
+        freshAddress = reserved;
+        renderAddress();
+        refreshSubscriptionAddresses({ restart: true });
+      }
+      payTo = freshAddress;
+    } else {
+      if (!chosenAddress) return null;
+      payTo = chosenAddress;
+    }
+    const unsigned = makePaymentRequest({ address: payTo, amountSompi: sompi, memo: memoInput?.value || "", toChattingAddress: payTo === engine.address });
+    // an account whose key isn't here can still ask; the payer is told it's unsigned
+    const key = engine.privateKeyHex;
+    return (key && signPaymentRequest(unsigned, engine.address, key)) || unsigned;
+  };
+  const run = async (task) => {
+    if (working || !canMake()) return;
+    working = true;
+    setError("");
+    refresh();
+    try { await task(); }
+    finally { working = false; if (sheet.isConnected) refresh(); }
   };
 
   sheet.addEventListener("click", (event) => {
     const dest = event.target.closest("[data-payreq-dest]")?.dataset.payreqDest;
-    if (dest && dest !== destination) {
+    if (!dest || working) return;
+    if (dest !== destination) {
       destination = dest;
-      sheet.querySelectorAll("[data-payreq-dest]").forEach((button) => {
-        const on = button.dataset.payreqDest === destination;
-        button.classList.toggle("active", on);
-        button.setAttribute("aria-pressed", on ? "true" : "false");
-      });
+      setSelectedPill(sheet, "payreq-dest", destination);
       renderAddress();
-      refresh();
+      edited();
+    }
+    if (dest === "chosen") {
+      openOwnAddressPickerFor({
+        title: "Choose an Address",
+        selectedAddress: chosenAddress,
+        onPick: (picked) => {
+          if (!sheet.isConnected) return;
+          chosenAddress = picked.address;
+          renderAddress();
+          edited();
+        },
+      });
     }
   });
   unitToggle?.addEventListener("click", () => {
@@ -1930,64 +1993,62 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
     }
     unit = unit === "kas" ? "fiat" : "kas";
     renderAmount();
-    refresh();
+    edited();
   });
   amountInput?.addEventListener("input", () => {
     const sanitized = sanitizeAmountText(amountInput.value, unit === "fiat" && selectedCurrency !== "btc" ? 2 : 8);
     if (sanitized !== amountInput.value) amountInput.value = sanitized;
     renderAmount();
-    refresh();
+    edited();
   });
   memoInput?.addEventListener("input", () => {
     const clamped = clampMemoText(memoInput.value);
     if (clamped !== memoInput.value) memoInput.value = clamped;
-    refresh();
+    edited();
   });
-  shareButton?.addEventListener("click", () => {
-    const request = currentRequest();
-    if (request) sharePaymentRequestLink(paymentRequestUniversalLink(request));
-  });
-  actionButton?.addEventListener("click", async () => {
-    const request = currentRequest();
-    if (!request) return;
-    const link = paymentRequestUniversalLink(request);
+  // Share waits for the fresh address before opening the share sheet (iOS 6dee531).
+  shareButton?.addEventListener("click", () => run(async () => {
+    const request = await makeRequest();
+    if (request) await sharePaymentRequestLink(paymentRequestUniversalLink(request));
+  }));
+  actionButton?.addEventListener("click", () => run(async () => {
     if (!recipient) {
-      try { await copyTextToClipboard(link); copied = true; lastLink = link; refresh(); }
+      const request = await makeRequest();
+      if (!request) return;
+      const link = paymentRequestUniversalLink(request);
+      try { await copyTextToClipboard(link); copied = true; }
       catch { showCopyToast(link); }
       return;
     }
     // Into the chat as a message: it shows there as a Payment Request card they tap to pay.
     const blocked = ["outgoing-request", "declined", "request-failed"].includes(recipient.relationshipState);
     if (blocked || !state.conversations.some((entry) => entry.id === conversationId)) {
-      if (errorEl) {
-        errorEl.textContent = recipient.relationshipState === "declined" ? "Communication request declined" : recipient.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "This chat can't send messages right now.";
-        errorEl.hidden = false;
-      }
+      setError(recipient.relationshipState === "declined" ? "Communication request declined" : recipient.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "This chat can't send messages right now.");
       return;
     }
-    sending = true;
-    refresh();
+    const request = await makeRequest();
+    if (!request) return;
     // Sent as its own message, never as a reply to whatever the composer was replying to.
     const savedReply = replyingToMessageId;
     replyingToMessageId = null;
-    try { queueConversationMessage(conversationId, link); }
+    try { queueConversationMessage(conversationId, paymentRequestUniversalLink(request)); }
     finally { replyingToMessageId = savedReply; }
     close();
-  });
+  }));
 
   renderAddress();
   renderAmount();
   refresh();
   amountInput?.focus();
   fetchKasPrice(selectedCurrency).then((value) => { price = value || null; renderAmount(); }).catch(() => {});
-  // A fresh receive address of the spending chain, as Receive Kaspa shows.
+  // Derived, not reserved: opening the screen and cancelling uses no address up (iOS 3f5f79c).
   if (activeAccountMnemonic()) {
     (async () => {
       try { await ensureRuntimes({ quiet: true }); } catch { /* the address stays loading */ }
-      const fresh = await freshReceiveAddress().catch(() => null);
-      if (!fresh || !sheet.isConnected) return;
-      spendingAddress = fresh;
-      if (destination === "spending") { renderAddress(); refresh(); }
+      const next = deriveSpendingAddressAt(getSpendingState().maxIndex + 1);
+      if (!next || !sheet.isConnected) return;
+      nextFreshAddress = next;
+      if (destination === "fresh" && !freshAddress) renderAddress();
     })();
   }
 }
@@ -3113,7 +3174,7 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   if (mode === "off") return;
   if (parseReactionEnvelope(message.text)) return; // reactions aren't standalone messages
   if (Calls.parseCallEnvelope(message.text)) return; // a call rings on its own screen, not as a banner
-  if (parsePaymentPoolEnvelope(message.text)) return; // fresh-address pool control envelopes are silent (matches iOS)
+  if (isRetiredPaymentPoolEnvelope(message.text)) return; // retired payment-pool envelopes are silent (iOS 6333dd3)
   // Nothing at all from a blocked address; one "New message request" per requester, then
   // silence until accepted (NO_HANDSHAKE_MESSAGING.md §4).
   if (isChatBlocked(contact?.address)) return;
@@ -3244,7 +3305,6 @@ const pendingPhotoMeta = document.querySelector("[data-pending-photo-meta]");
 const pendingPhotoRemove = document.querySelector("[data-pending-photo-remove]");
 let pendingPhotoAttachment = null;
 const composerModeButtons = Array.from(document.querySelectorAll("[data-composer-mode]"));
-const availableBalanceBanner = document.querySelector("[data-available-balance-banner]");
 const feeEstimateBanner = document.querySelector("[data-fee-estimate-banner]");
 const handshakeWarningBanner = document.querySelector("[data-handshake-warning-banner]");
 let feeEstimateDebounceTimer = null;
@@ -4706,9 +4766,6 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // Payment chats older builds made from .kachat contract transactions go (iOS 32fdaa4).
   if (engine.address === clean) { try { purgeContractAddressPaymentChats(); } catch (error) { appendEngineLog(`Contract chat purge failed: ${error?.message || error}`); } }
   refreshSubscriptionAddresses({ restart: false });
-  // Per-account Chats Payment Privacy: switching accounts applies that
-  // account's stored value immediately (Settings toggle included).
-  try { refreshChatsPrivacyToggle(); } catch { /* not yet wired during early init */ }
   // Per-account message retention: show this account's window and clean up its stored history
   // (a no-op on the default "Keep forever").
   try { refreshRetentionSelectionUi(); } catch { /* not yet wired during early init */ }
@@ -5548,7 +5605,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     const message = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
     applyMessagePatch(message, incoming);
     // Only a real, visible bubble notifies and counts as unread. Reactions and the
-    // fresh-address payment-pool control envelopes are swallowed (return null).
+    // retired payment-pool envelopes are swallowed (return null).
     const visible = appendIncomingOrReactionMessage(conversationEntry, message);
     if (visible) {
       // Backfill (restore / first sweep / anything older than this session) arrives silently;
@@ -6895,12 +6952,10 @@ async function refreshOwnKnsProfileUntilResolved({ attempts = 6, delayMs = 5000 
 // bounds, hidden set, and labels are persisted (per wallet address), mirroring
 // iOS's WalletManager+SpendingAddresses UserDefaults model. ---
 const SPENDING_STATE_KEY = "kachat-spending-state-v1";
-const spendingBalanceEl = document.querySelector("[data-spending-balance]");
 const spendingManageScreen = document.querySelector("[data-spending-manage-screen]");
 const spendingListEl = document.querySelector("[data-spending-address-list]");
 const spendingGenerateBtn = document.querySelector("[data-spending-generate]");
 const spendingScanBtn = document.querySelector("[data-spending-scan]");
-const spendingConsolidateBtn = document.querySelector("[data-spending-consolidate]");
 const spendingActionsToggle = document.querySelector("[data-spending-actions-toggle]");
 const spendingActionsMenu = document.querySelector("[data-spending-actions-menu]");
 // Address Visibility screen (iOS parity: SpendingAddressVisibilityView) — compact paged
@@ -6908,13 +6963,10 @@ const spendingActionsMenu = document.querySelector("[data-spending-actions-menu]
 const spendingVisibilityScreen = document.querySelector("[data-spending-visibility-screen]");
 const spendingVisibilityList = document.querySelector("[data-spending-visibility-list]");
 const spendingVisibilityOpenBtn = document.querySelector("[data-open-spending-visibility]");
-const spendingVisibilityCloseBtn = document.querySelector("[data-close-spending-visibility]");
 const spendingVisibilityDoneBtn = document.querySelector("[data-done-spending-visibility]");
 const spendingVisPrevBtn = document.querySelector("[data-spending-vis-prev]");
 const spendingVisNextBtn = document.querySelector("[data-spending-vis-next]");
 const spendingVisRangeEl = document.querySelector("[data-spending-vis-range]");
-let activeSpendingAddress = null;
-let spendingConsolidating = false;
 let spendingListToken = 0;
 const SPENDING_GAP_LIMIT = 20;
 
@@ -7039,7 +7091,9 @@ function spendingLabelFor(state, index) {
   const custom = state.labels?.[index] ?? state.labels?.[String(index)];
   const trimmed = custom != null ? String(custom).trim() : "";
   if (trimmed) return trimmed;
-  return index === 0 ? "Primary spending" : `Spending #${index}`;
+  // "Address #N", as iOS names it (SpendingAddressEntry.displayLabel): no "primary" in the UI any
+  // more (iOS 6333dd3).
+  return `Address #${index}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -7098,51 +7152,6 @@ function saveAddrActivityHandled(list) {
   } catch {}
 }
 
-// Claims a txId for a path that already told the user about it (a chat payment
-// bubble from a payment_notice), so the balance sweep doesn't announce the same
-// money a second time as a wallet notification.
-// A pool receipt is announced twice by two independent paths: this wallet-activity
-// watcher (which exists so funds are never silent, even if the payer's notice never
-// arrives) and the payer's `payment_notice`, which raises the real chat bubble and claims
-// the txId. In the common ordering the funds land seconds BEFORE the notice, so notifying
-// immediately would double-announce every private payment. Hold the wallet notification
-// for a grace window instead: if the notice claims the txId in the meantime the chat
-// bubble has already told the user, and if it never comes they still get told.
-const POOL_RECEIPT_NOTIFY_GRACE_MS = 90_000;
-const pendingPoolReceiptNotifications = new Set();
-
-function schedulePoolReceiptNotification({ txid, address, amountSompi, kind }) {
-  if (pendingPoolReceiptNotifications.has(txid)) return;
-  pendingPoolReceiptNotifications.add(txid);
-  window.setTimeout(() => {
-    pendingPoolReceiptNotifications.delete(txid);
-    // Claimed by the payment_notice while we waited: the chat bubble covered it.
-    if (loadAddrActivityHandled().includes(txid)) return;
-    markAddressActivityTxHandled(txid);
-    const title = `Received ${formatSompiForNotification(amountSompi)} ${KAS_UNIT}`;
-    const body = describeActivityAddress(kind, address);
-    postDesktopNotification({ title, body, tag: `kachat-addr-activity-${txid}`, onClick: () => {} });
-    recordGlobalNotification({
-      id: `wallet-${txid}`,
-      source: "wallet",
-      title,
-      body,
-      timestamp: Date.now(),
-      targetKind: "wallet",
-    });
-    appendEngineLog(`Address activity: pool receive ${txid.slice(0, 12)}… had no payment notice`);
-  }, POOL_RECEIPT_NOTIFY_GRACE_MS);
-}
-
-function markAddressActivityTxHandled(txid) {
-  const clean = String(txid || "").trim();
-  if (!clean) return;
-  const handled = loadAddrActivityHandled();
-  if (handled.includes(clean)) return;
-  handled.push(clean);
-  saveAddrActivityHandled(handled);
-}
-
 // Every revealed spending-chain address (0...maxIndex) for the active account.
 function spendingWatchedAddressList() {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
@@ -7157,11 +7166,7 @@ function spendingWatchedAddressList() {
 
 // Addresses whose receives should NOTIFY, mapped to a wording kind: watched
 // spending + cold addresses, minus the chatting address (its receives are chat
-// classified). Payment-pool reservation addresses STAY in the map, re-tagged so
-// the notification names them for what they are: a payment into one of them is
-// only ever announced by the payer's payment_notice, and that envelope can fail
-// to arrive (payer's send failed, older client, raced a revoke) — dropping these
-// from the watch too would leave funds nobody ever hears about.
+// classified).
 function addressActivityWatchedMap() {
   const map = new Map();
   // The spending addresses have their own switch (Manage Addresses); each cold-storage account
@@ -7175,9 +7180,6 @@ function addressActivityWatchedMap() {
     if (!map.has(entry.address)) map.set(entry.address, `cold:${entry.label}`);
   }
   map.delete(engine.address || "");
-  for (const offered of paymentPoolOfferedAddresses()) {
-    if (offered && offered !== engine.address) map.set(offered, "pool");
-  }
   return map;
 }
 
@@ -7196,8 +7198,7 @@ function addressActivityMutedList() {
 }
 
 // Addresses that count as "ours" when they appear among a tx's INPUTS —
-// superset of the notifiable set: chatting + all spending (reserved pool
-// addresses are spending-chain indices, so covered) + all cold storage.
+// superset of the notifiable set: chatting + all spending + all cold storage.
 function ownInputAddressSet() {
   const set = new Set(spendingWatchedAddressList());
   for (const entry of listColdWatchedAddresses()) set.add(entry.address);
@@ -7208,7 +7209,6 @@ function ownInputAddressSet() {
 function describeActivityAddress(kind, address) {
   const shortA = shortAddress(address);
   if (String(kind || "").startsWith("cold:")) return `Cold storage (${String(kind).slice(5)}) ${shortA}`;
-  if (kind === "pool") return `Chat privacy address ${shortA}`;
   return `Spending address ${shortA}`;
 }
 
@@ -7278,18 +7278,8 @@ async function runAddressActivityCheck() {
     const isFirstRun = Object.keys(baselines).length === 0;
     let changed = false;
     const increases = [];
-    // Funded-reservation detection (iOS handlePoolReservationUtxoAdditions, which
-    // rides the utxosChanged stream — this batched balance read is the desktop
-    // equivalent). Deliberately absolute (balance > 0) rather than baseline-diffed
-    // and deliberately outside the notification feature flag: a reservation holding
-    // money is funded whether or not a diff caught the moment it arrived, whether or
-    // not the payer's payment_notice ever lands, and whether or not Address Activity
-    // notifications are switched on.
-    const offeredPoolAddresses = new Set(paymentPoolOfferedAddresses());
-    const fundedPoolAddresses = [];
     for (const [address, balance] of balances) {
       const balanceText = balance.toString();
-      if (balance > 0n && offeredPoolAddresses.has(address)) fundedPoolAddresses.push(address);
       const previous = baselines[address];
       if (previous === undefined) {
         // Never-tracked address (feature install, newly revealed slot, fresh
@@ -7307,7 +7297,6 @@ async function runAddressActivityCheck() {
       baselines[address] = balanceText;
     }
     if (changed) saveAddrActivityBaselines(baselines);
-    for (const address of fundedPoolAddresses) notePoolReservationFundedOnChain(address);
     if (increases.length) await attributeAndNotifyAddressActivity(increases);
   } finally {
     addressActivityRunning = false;
@@ -7336,16 +7325,7 @@ async function attributeAndNotifyAddressActivity(increases) {
       handled.push(txid);
       const inputAddresses = txInputAddresses(tx);
       const isSelfSend = inputAddresses.length > 0 && inputAddresses.some((input) => own.has(input));
-      if (!isSelfSend && kind === "pool") {
-        // Deferred so the payer's notice can claim it first - see
-        // schedulePoolReceiptNotification. Deliberately NOT added to the handled list here;
-        // the grace timer decides who announces this txId.
-        handledSet.delete(txid);
-        const pendingIdx = handled.lastIndexOf(txid);
-        if (pendingIdx !== -1) handled.splice(pendingIdx, 1);
-        schedulePoolReceiptNotification({ txid, address, amountSompi: toAddress, kind });
-        appendEngineLog(`Address activity: pool receive ${txid.slice(0, 12)}… awaiting payment notice`);
-      } else if (!isSelfSend) {
+      if (!isSelfSend) {
         postDesktopNotification({
           title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
           body: describeActivityAddress(kind, address),
@@ -7395,17 +7375,16 @@ async function attributeAndNotifyAddressActivity(increases) {
 }
 
 // Where a tapped address-activity notification goes (iOS 13046ad). Each one is for one address,
-// so it carries that address and opens it on its History tab. A chat privacy (pool) address has
-// no screen of its own, so its receipts keep landing where they always did.
+// so it carries that address and opens it on its History tab.
 function addressActivityRoute(kind, address) {
-  return kind === "pool" || !address ? { kind: "tab", tab: "profile" } : { kind: "address", address };
+  return !address ? { kind: "tab", tab: "profile" } : { kind: "address", address };
 }
 function addressActivityCenterTarget(kind, address) {
-  return kind === "pool" || !address ? { targetKind: "wallet" } : { targetKind: "address", targetId: address };
+  return !address ? { targetKind: "wallet" } : { targetKind: "address", targetId: address };
 }
 function openAddressActivityTarget(kind, address) {
   try {
-    if (kind === "pool" || !address) setActiveAppTab("profile");
+    if (!address) setActiveAppTab("profile");
     else routeToOwnAddress(address);
   } catch { /* the focus alone is still better than nothing */ }
 }
@@ -7466,225 +7445,35 @@ function routeToOwnAddress(address, attempt = 0) {
 window.setInterval(() => { if (!document.hidden) scheduleAddressActivityCheck(0); }, 180_000);
 
 // ---------------------------------------------------------------------------
-// Fresh-address payment pools (MESSAGING.md "Fresh-Address Payment Pools";
-// iOS PaymentPoolStore + ChatService+PaymentPools port).
+// What is left of Chats Payment Privacy (iOS 6333dd3, ChatService+PaymentPools).
 //
-// Contacts exchange batches of fresh, never-used spending-chain receive
-// addresses through the normal encrypted contextual channel (`addr_pool`,
-// plain JSON in the plaintext exactly like reactions), Send KAS pays one of
-// those instead of the contact's chatting address, and a `payment_notice`
-// envelope keeps the recipient's chat showing a payment bubble. All three
-// envelope types are invisible — intercepted in appendIncomingOrReactionMessage
-// before they could ever render. State is device-local, per account
-// (accountScopedKey), NOT backed up — a restore simply re-exchanges pools.
+// The fresh-address payment pools (fresh spending addresses offered to contacts
+// through invisible `addr_pool` envelopes, payments sent to them, `payment_notice`
+// bubbles) were removed on 2026-10-13: the person now picks where a payment
+// comes FROM on every send screen (Chatting Address or Choose an Address), and
+// payments go to the contact's chatting address. Other clients may still send
+// the envelopes; they are swallowed so they never show as text. The old
+// per-account pool state and toggle in localStorage are simply no longer read.
 // ---------------------------------------------------------------------------
 
-const PAYMENT_POOL_STATE_KEY = "kachat-payment-pool-state-v1";
-const CHATS_PRIVACY_KEY = "kachat-chats-privacy-v1"; // per-account: "1"/"0", default ON
-// How many fresh addresses each addr_pool offer carries — also the target the
-// auto-replenish keeps live per contact (iOS PaymentPoolStore.offerBatchSize).
-// Deliberately small: every reservation burns an index against the 50-per-contact
-// lifetime cap.
-const POOL_OFFER_BATCH_SIZE = 2;
-// Ask for more once the unused remainder of a contact's pool drops to this or
-// lower. With a pool of 2 the request is a backstop for a lost replenish top-up,
-// so it fires only after a consumption actually leaves a single unused address.
-const POOL_LOW_WATER_MARK = 1;
-const POOL_MAX_STORED = 20;
-const POOL_MAX_HANDLED_TXIDS = 500;
-const POOL_REQUEST_THROTTLE_MS = 10 * 60 * 1000;
-// Inbound abuse limits — part of the protocol contract (MESSAGING.md).
-const POOL_SERVE_THROTTLE_MS = 10 * 60 * 1000;
-const POOL_TOGGLE_TRANSITION_GAP_MS = 60 * 1000;
-const POOL_MAX_LIFETIME_RESERVATIONS = 50;
-const POOL_MAX_OUTSTANDING_UNFUNDED = 15;
-
-function loadPoolState() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(accountScopedKey(PAYMENT_POOL_STATE_KEY)) || "{}") || {};
-    return {
-      // contactAddress -> [{ address, index, offered, funded, activeOffer }] — MY reserved
-      // spending addresses offered to that contact. CRITICAL INVARIANT: an
-      // address reserved for contact X is never offered to any other contact
-      // and never re-offered; reserveFreshSpendingAddresses only hands out
-      // indices past the all-time max.
-      myReservations: raw.myReservations && typeof raw.myReservations === "object" ? raw.myReservations : {},
-      // contactAddress -> [{ address, used }] — THAT contact's fresh addresses I can pay them at.
-      theirPools: raw.theirPools && typeof raw.theirPools === "object" ? raw.theirPools : {},
-      offeredContacts: Array.isArray(raw.offeredContacts) ? raw.offeredContacts.map(String) : [],
-      handledEnvelopeTxIds: Array.isArray(raw.handledEnvelopeTxIds) ? raw.handledEnvelopeTxIds.map(String) : [],
-      lastPoolRequestAt: raw.lastPoolRequestAt && typeof raw.lastPoolRequestAt === "object" ? raw.lastPoolRequestAt : {},
-      lastPoolServeAt: raw.lastPoolServeAt && typeof raw.lastPoolServeAt === "object" ? raw.lastPoolServeAt : {},
-      revokedContacts: Array.isArray(raw.revokedContacts) ? raw.revokedContacts.map(String) : [],
-      // Contacts who revoked OUR pool at THEM (incoming empty replace:true — their
-      // Chats Privacy went off). While set we never proactively offer or replenish:
-      // their active count is 0 by revocation, not by consumption. Cleared when they
-      // show renewed interest (addr_pool_request, a non-empty pool of theirs, or any
-      // successful offer of ours).
-      contactsRevokedAtUs: Array.isArray(raw.contactsRevokedAtUs) ? raw.contactsRevokedAtUs.map(String) : [],
-    };
-  } catch {
-    return { myReservations: {}, theirPools: {}, offeredContacts: [], handledEnvelopeTxIds: [], lastPoolRequestAt: {}, lastPoolServeAt: {}, revokedContacts: [], contactsRevokedAtUs: [] };
-  }
-}
-
-function savePoolState(poolState) {
-  try { localStorage.setItem(accountScopedKey(PAYMENT_POOL_STATE_KEY), JSON.stringify(poolState)); } catch {}
-}
-
-// Per-ACCOUNT "Chats Payment Privacy" toggle (Settings > Chats), default ON.
-// Gates the send side only: OFF pays/funds via the chatting address, offers
-// nothing and requests nothing; inbound notices/pools stay handled regardless.
-function chatsPrivacyEnabled() {
-  try { return localStorage.getItem(accountScopedKey(CHATS_PRIVACY_KEY)) !== "0"; } catch { return true; }
-}
-
-function setChatsPrivacyEnabled(enabled) {
-  try { localStorage.setItem(accountScopedKey(CHATS_PRIVACY_KEY), enabled ? "1" : "0"); } catch {}
-}
-
-// Every reserved-and-offered address across all contacts — these belong in the
-// UTXO subscription watched set, and are excluded from Address Activity
-// notifications (their receives render as chat payment bubbles instead).
-function paymentPoolOfferedAddresses() {
-  try {
-    const poolState = loadPoolState();
-    const list = [];
-    for (const entries of Object.values(poolState.myReservations || {})) {
-      for (const entry of entries || []) if (entry.offered) list.push(entry.address);
-    }
-    return list;
-  } catch { return []; }
-}
-
-function isReservedPoolAddress(poolState, address) {
-  for (const entries of Object.values(poolState.myReservations || {})) {
-    if ((entries || []).some((entry) => entry.address === address)) return true;
-  }
-  return false;
-}
-
-// ACTIVE (as opposed to the HISTORICAL `offered` flag above): the reservation is
-// part of a contact's CURRENT live pool. That narrower set drives the Address
-// Visibility lock and the row-menu Hide refusal — an address a contact may pay
-// into at any moment must stay visible to its owner. An entry leaves the set when
-// we revoke (Chats Privacy off), the contact revokes at us, a replace:true
-// re-offer supersedes it, or it gets funded; the row is an ordinary address again
-// from then on. `activeOffer` is optional for state written before this split:
-// nil means offered && never funded && contact not revoked by us, which is exactly
-// what "active" meant then (iOS PaymentPoolStore.activeOfferedReservationAddresses).
-function isActivePoolReservation(entry, contactAddress, poolState) {
-  if (entry?.activeOffer === true) return true;
-  if (entry?.activeOffer === false) return false;
-  return entry?.offered === true
-    && entry?.funded !== true
-    && !(poolState.revokedContacts || []).includes(contactAddress);
-}
-
-// [{ address, index, contactAddress }] for every reservation currently in a live pool.
-function activePoolReservationEntries() {
-  try {
-    const poolState = loadPoolState();
-    const list = [];
-    for (const [contactAddress, entries] of Object.entries(poolState.myReservations || {})) {
-      for (const entry of entries || []) {
-        if (isActivePoolReservation(entry, contactAddress, poolState)) {
-          list.push({ address: entry.address, index: entry.index, contactAddress });
-        }
-      }
-    }
-    return list;
-  } catch { return []; }
-}
-
-function activePoolReservationAddressSet() {
-  return new Set(activePoolReservationEntries().map((entry) => entry.address));
-}
-
-function activePoolReservationIndexSet() {
-  return new Set(activePoolReservationEntries()
-    .map((entry) => entry.index)
-    .filter((index) => Number.isInteger(index)));
-}
-
-// The contact a reservation belongs to, by address — routes a reservation funded
-// through the UTXO/balance watch back to the contact whose pool it came from.
-function poolReservationOwnerContact(address) {
-  const poolState = loadPoolState();
-  for (const [contactAddress, entries] of Object.entries(poolState.myReservations || {})) {
-    if ((entries || []).some((entry) => entry.address === address)) return contactAddress;
-  }
-  return null;
-}
-
-// Repair for reservations recorded under the old born-hidden design (and for any
-// index a user hid before it was offered): an address in an ACTIVE live pool can
-// never be hidden, so it leaves the hidden set. Scoped to the active set on
-// purpose — a reverted reservation (revoked, superseded, funded) is a normal
-// address again and stays however the user left it. Cheap; safe to call on every
-// address-screen render and after every offer.
-function unhideActivePoolReservations() {
-  try {
-    const active = activePoolReservationIndexSet();
-    if (!active.size) return false;
-    const spendingState = getSpendingState();
-    const hiddenSet = new Set(spendingState.hidden);
-    let unhidden = 0;
-    for (const index of active) if (hiddenSet.delete(index)) unhidden += 1;
-    if (!unhidden) return false;
-    saveSpendingState({ hidden: [...hiddenSet] });
-    appendEngineLog(`Un-hid ${unhidden} actively offered payment-pool address(es).`);
-    return true;
-  } catch { return false; }
-}
-
-// A payment_notice memo as sent and shown (iOS PaymentNoticeContent.maxMemoLength): one line,
-// trimmed, at most 500 characters (code points, so an emoji is one).
-// The incoming bubble a payment_notice raises: "Received X KAS", or "Received X KAS — <memo>".
-function paymentNoticeBubbleText(amountKas, memo) {
-  const note = clampPaymentNoticeMemo(memo);
-  return note ? `Received ${amountKas} ${KAS_UNIT} — ${note}` : `Received ${amountKas} ${KAS_UNIT}`;
-}
-// (A literal, not a top-level const: this can run while the module is still evaluating.)
-function clampPaymentNoticeMemo(value) {
-  const max = 500;
-  const oneLine = String(value ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
-  const chars = Array.from(oneLine);
-  return chars.length > max ? chars.slice(0, max).join("").trim() : oneLine;
-}
-
-// Wire parser for the three pool envelope types (PaymentPoolCodec.parse).
-// Unknown `type` values fall through to the normal message pipeline; unknown
-// extra fields inside these envelopes are ignored.
-function parsePaymentPoolEnvelope(text) {
+// True for a retired payment-pool envelope (`addr_pool`, `addr_pool_request`,
+// `payment_notice`) from another client: it is dropped, never a bubble (iOS
+// isRetiredPaymentPoolEnvelope / PaymentPoolCodec.parse). Unknown `type` values
+// fall through to the normal message pipeline.
+function isRetiredPaymentPoolEnvelope(text) {
   const trimmed = String(text || "").trim();
-  if (!trimmed.startsWith("{") || trimmed.length > 100_000) return null;
+  if (!trimmed.startsWith("{") || trimmed.length > 100_000) return false;
   try {
     const parsed = JSON.parse(trimmed);
-    if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.type === "addr_pool") {
-      if (!Array.isArray(parsed.addresses)) return null;
-      return { kind: "pool", addresses: parsed.addresses.map((a) => String(a || "")), replace: parsed.replace === true };
-    }
-    if (parsed.type === "addr_pool_request") return { kind: "request" };
+    if (!parsed || typeof parsed !== "object") return false;
+    if (parsed.type === "addr_pool") return Array.isArray(parsed.addresses);
+    if (parsed.type === "addr_pool_request") return true;
     if (parsed.type === "payment_notice") {
-      const txId = String(parsed.txId || "").trim().toLowerCase();
       const amountSompi = Number(parsed.amountSompi);
-      const address = String(parsed.address || "").trim();
-      if (!txId || !Number.isFinite(amountSompi) || amountSompi <= 0 || !address) return null;
-      // Optional payer's note (XP-004); absent or not a string reads as none, as before.
-      const memo = typeof parsed.memo === "string" ? clampPaymentNoticeMemo(parsed.memo) : "";
-      return { kind: "notice", txId, amountSompi: Math.floor(amountSompi), address, memo };
+      return Boolean(String(parsed.txId || "").trim()) && Number.isFinite(amountSompi) && amountSompi > 0 && Boolean(String(parsed.address || "").trim());
     }
-    return null;
-  } catch { return null; }
-}
-
-// Established = both directions have spoken (>=1 incoming AND >=1 outgoing) —
-// the bar both for offering our pool and for accepting a contact's.
-function isPoolEstablishedConversation(conversationEntry) {
-  const messages = conversationEntry?.messages || [];
-  return messages.some((m) => m.direction === "incoming") && messages.some((m) => m.direction === "outgoing");
+    return false;
+  } catch { return false; }
 }
 
 function isValidKaspaAddressString(address) {
@@ -7692,30 +7481,18 @@ function isValidKaspaAddressString(address) {
   catch { return false; }
 }
 
-function isWithinPoolServeGap(poolState, contactAddress, toggleTransition) {
-  const last = Number(poolState.lastPoolServeAt?.[contactAddress] || 0);
-  if (!last) return false;
-  const gap = toggleTransition ? POOL_TOGGLE_TRANSITION_GAP_MS : POOL_SERVE_THROTTLE_MS;
-  return Date.now() - last < gap;
-}
-
-// Gate for EVERY addr_pool send (initial offer, reciprocity, request-driven
-// top-ups): one send per contact per 10 minutes (60s transition gap for
-// genuine toggle flips), nothing once the lifetime reservation cap or the
-// outstanding-unfunded-offers cap is hit. Suppressions are silent (log only).
-function canServePoolOffer(contactAddress, { toggleTransition = false } = {}) {
-  const poolState = loadPoolState();
-  if (isWithinPoolServeGap(poolState, contactAddress, toggleTransition)) return false;
-  const reservations = poolState.myReservations[contactAddress] || [];
-  if (reservations.length >= POOL_MAX_LIFETIME_RESERVATIONS) return false;
-  const outstandingUnfunded = reservations.filter((r) => r.offered && r.funded !== true).length;
-  if (outstandingUnfunded >= POOL_MAX_OUTSTANDING_UNFUNDED) return false;
-  return true;
+// Where a 1:1 payment goes: the contact's chatting address (the memo is encrypted
+// to its key). Every 1:1 payment passes here: paying someone is reaching out to
+// them, like writing (iOS 5.2).
+function chatPaymentDestination(contact) {
+  if (contact?.address && contact.address !== engine.address) acceptChat(contact.address);
+  return contact.address;
 }
 
 // Reveals `count` fresh spending-chain slots strictly past the all-time max
 // index (bumping the persisted maxIndex, so they show in Manage Addresses like
-// any revealed address and future generates/reservations can never collide).
+// any revealed address and no later payment-change address or reservation can
+// land on the same index). Request Payment's Fresh Address (iOS 6dee531).
 function reserveFreshSpendingAddresses(count) {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
   const spendingState = getSpendingState();
@@ -7731,753 +7508,8 @@ function reserveFreshSpendingAddresses(count) {
   return results;
 }
 
-// Sends an invisible pool envelope through the normal encrypted
-// contextual-message pipeline (identical to sendReaction's construction) —
-// never a bubble, no pending bookkeeping. Returns the submitted txid ("" if
-// unknown), which is remembered in the replay guard so the indexer re-fetch of
-// our own envelope is dropped without re-entering handler logic.
-async function sendInvisiblePoolEnvelope(contact, payload) {
-  if (!engine.address) throw new Error("No wallet loaded.");
-  const conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
-  const envelope = await engine.createEncryptedMessageEnvelope({
-    conversationId: conversationEntry?.id || nowId(),
-    contactId: contact.id,
-    toAddress: contact.address,
-    fromAddress: engine.address,
-    text: payload,
-    localNonce: nowId(),
-    createdAt: Date.now(),
-  });
-  const result = await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
-  const txid = String(result?.txid || "").trim();
-  if (txid) {
-    const poolState = loadPoolState();
-    if (!poolState.handledEnvelopeTxIds.includes(txid)) {
-      poolState.handledEnvelopeTxIds.push(txid);
-      if (poolState.handledEnvelopeTxIds.length > POOL_MAX_HANDLED_TXIDS) {
-        poolState.handledEnvelopeTxIds.splice(0, poolState.handledEnvelopeTxIds.length - POOL_MAX_HANDLED_TXIDS);
-      }
-      savePoolState(poolState);
-    }
-  }
-  return txid;
-}
-
-// Serializes pool-envelope sends: the engine already queues per source
-// address, but the marker/throttle re-checks inside reserveAndSendAddressPool
-// must run after any queued predecessor finished (several envelope handlers
-// can queue offers for the same contact before the first flips the marker).
-let poolSendChain = Promise.resolve();
-function enqueuePoolOperation(operation) {
-  const next = poolSendChain.then(operation, operation);
-  poolSendChain = next.catch(() => {});
-  return next;
-}
-
-// Reserves fresh spending-chain addresses for `contact` and sends them as an
-// addr_pool envelope. Re-uses reservations whose send previously failed
-// (offered=false) before revealing new indices; replace:true offers may re-send
-// previously offered but never-funded reservations (post-revoke re-offer —
-// the recipient discarded them, re-sending creates no reuse and doesn't burn
-// a fresh batch of indices per toggle cycle). All gates re-checked here, inside
-// the serialized operation, not just at call sites.
-//
-// `replenish: true` marks an automatic top-up triggered by a reservation getting
-// funded: it shares the toggle broadcasts' throttle exemption (60s gap instead of
-// the 10-minute throttle, reservation caps in full) and sends only the SHORTFALL
-// back up to POOL_OFFER_BATCH_SIZE fresh active addresses, recomputed here inside
-// the serialized operation so stacked triggers for the same funding collapse into
-// one send (or none).
-async function reserveAndSendAddressPool(contact, { replace, toggleTransition = false, replenish = false } = {}) {
-  if (!engine.address || !contact?.address) return;
-  if (!chatsPrivacyEnabled()) return;
-  const contactAddress = contact.address;
-  let poolState = loadPoolState();
-  // No offer of any kind to a contact who revoked our pool at them until they
-  // re-engage. The re-engagement lanes (their addr_pool_request, a non-empty pool
-  // of theirs) clear the marker before enqueueing, so they pass; everything else —
-  // lazy offers, toggle-on re-offers, replenishes — is blocked, including a revoke
-  // of theirs that lands between enqueue and execution.
-  if ((poolState.contactsRevokedAtUs || []).includes(contactAddress)) return;
-  if (replace && poolState.offeredContacts.includes(contactAddress)) return;
-  if (!canServePoolOffer(contactAddress, { toggleTransition: toggleTransition || replenish })) {
-    appendEngineLog(`Pool offer to ${shortAddress(contactAddress)} suppressed by serve throttle/caps.`);
-    return;
-  }
-
-  // Replenish sends only the shortfall; everything else sends a full batch.
-  let batchLimit = POOL_OFFER_BATCH_SIZE;
-  if (replenish) {
-    batchLimit = POOL_OFFER_BATCH_SIZE - activeFreshReservationCount(contactAddress);
-    if (batchLimit <= 0) return;
-  }
-
-  const reservations = poolState.myReservations[contactAddress] || [];
-  let pending = replace
-    ? reservations.filter((r) => r.funded !== true)
-    : reservations.filter((r) => !r.offered);
-  if (pending.length > batchLimit) pending = pending.slice(0, batchLimit);
-
-  const lifetimeHeadroom = POOL_MAX_LIFETIME_RESERVATIONS - reservations.length;
-  const missing = Math.min(batchLimit - pending.length, lifetimeHeadroom);
-  if (missing > 0) {
-    const fresh = reserveFreshSpendingAddresses(missing);
-    if (!fresh.length && !pending.length) {
-      appendEngineLog("Pool offer aborted — could not reserve fresh spending addresses.");
-      return;
-    }
-    if (fresh.length) {
-      // Pool reservations are born VISIBLE: they appear in Manage Addresses right
-      // away so the user can see exactly which of their addresses are held ready for
-      // a contact to pay into. Hiding them (the old design) meant a payment whose
-      // payment_notice never arrived landed on an address the user could not see
-      // anywhere. Fresh indices are past the revealed bound, so they are never in
-      // the hidden set to begin with; reservations recorded under the old design
-      // are repaired by unhideActivePoolReservations() once the send succeeds.
-      const entries = fresh.map(({ address, index }) => ({ address, index, offered: false, funded: false, activeOffer: false }));
-      poolState = loadPoolState();
-      const list = poolState.myReservations[contactAddress] || [];
-      const known = new Set(list.map((r) => r.address));
-      for (const entry of entries) if (!known.has(entry.address)) list.push(entry);
-      poolState.myReservations[contactAddress] = list;
-      savePoolState(poolState);
-      pending = pending.concat(entries);
-    }
-  }
-  if (!pending.length) return;
-
-  // Wire format (MESSAGING.md): {"type":"addr_pool","addresses":[...],"replace":bool}
-  const payload = JSON.stringify({ type: "addr_pool", addresses: pending.map((r) => r.address), replace: replace === true });
-  await sendInvisiblePoolEnvelope(contact, payload);
-
-  poolState = loadPoolState();
-  const list = poolState.myReservations[contactAddress] || [];
-  const offeredNow = new Set(pending.map((r) => r.address));
-  for (const entry of list) {
-    if (offeredNow.has(entry.address)) {
-      entry.offered = true;   // HISTORICAL, never cleared: stays watched and notice-renderable.
-      entry.activeOffer = true;
-    } else if (replace) {
-      // A replace batch IS the contact's whole live pool now — any other reservation
-      // still flagged active is superseded and reverts to an ordinary address row.
-      entry.activeOffer = false;
-    }
-  }
-  poolState.myReservations[contactAddress] = list;
-  if (!poolState.offeredContacts.includes(contactAddress)) poolState.offeredContacts.push(contactAddress);
-  poolState.lastPoolServeAt[contactAddress] = Date.now();
-  poolState.revokedContacts = poolState.revokedContacts.filter((a) => a !== contactAddress);
-  // A successful offer supersedes a standing revoked-at-us marker: the contact holds
-  // live addresses of ours again, so replenishes are meaningful again.
-  poolState.contactsRevokedAtUs = (poolState.contactsRevokedAtUs || []).filter((a) => a !== contactAddress);
-  savePoolState(poolState);
-  // Actively offered addresses are always visible in Manage Addresses.
-  unhideActivePoolReservations();
-  appendEngineLog(`Offered ${pending.length} fresh pool addresses to ${shortAddress(contactAddress)} (replace=${replace === true}, replenish=${replenish === true}).`);
-
-  // The just-offered reserved addresses join the UTXO watched set.
-  refreshSubscriptionAddresses({ restart: true });
-}
-
-// Lazily offers this wallet's fresh receive addresses once per contact
-// (persisted marker) — called on conversation open and reciprocally from an
-// incoming addr_pool. Established conversations only.
-function offerAddressPoolIfNeeded(contact, conversationEntry) {
-  if (!engine.address || !contact?.address) return;
-  if (!chatsPrivacyEnabled()) return;
-  const poolState = loadPoolState();
-  if (poolState.offeredContacts.includes(contact.address)) return;
-  // A contact who revoked our pool at them gets no unsolicited offers until they
-  // re-engage (the re-engagement lanes clear the marker before routing here).
-  if ((poolState.contactsRevokedAtUs || []).includes(contact.address)) return;
-  if (!canServePoolOffer(contact.address)) return;
-  if (!isPoolEstablishedConversation(conversationEntry)) return;
-  enqueuePoolOperation(() => reserveAndSendAddressPool(contact, { replace: true }))
-    .catch((error) => appendEngineLog(`Pool offer failed: ${error.message}`));
-}
-
-// How many of our reservations for `contactAddress` are currently live-and-fresh:
-// part of the contact's ACTIVE pool and never funded. This is the count the
-// auto-replenish compares against POOL_OFFER_BATCH_SIZE — the contact should
-// always hold that many fresh addresses to pay us at.
-function activeFreshReservationCount(contactAddress) {
-  const poolState = loadPoolState();
-  return (poolState.myReservations[contactAddress] || [])
-    .filter((entry) => entry.funded !== true && isActivePoolReservation(entry, contactAddress, poolState))
-    .length;
-}
-
-// Keeps a contact who holds a live pool of ours topped up to POOL_OFFER_BATCH_SIZE
-// fresh addresses (iOS replenishPoolIfNeeded). Fired whenever one of their
-// reservations is detected funded — a payment_notice naming it, or the balance
-// watch seeing funds arrive on it — and re-checked on every conversation open, so
-// a top-up whose send failed earlier gets retried. Sends an ADDITIVE addr_pool
-// (replace:false) carrying only the shortfall.
-function replenishPoolIfNeeded(contactAddress) {
-  if (!engine.address || !contactAddress) return;
-  if (!chatsPrivacyEnabled()) return;
-  const poolState = loadPoolState();
-  // Only contacts currently holding a live pool of ours get proactive top-ups — a
-  // never-offered contact goes through the normal initial offer, a revoked one
-  // through the toggle-on re-offer.
-  if (!poolState.offeredContacts.includes(contactAddress)) return;
-  if ((poolState.revokedContacts || []).includes(contactAddress)) return;
-  // A contact who revoked at us zeroed their active count deliberately — that's
-  // disinterest, not consumption; never replenish until they re-engage.
-  if ((poolState.contactsRevokedAtUs || []).includes(contactAddress)) return;
-  if (activeFreshReservationCount(contactAddress) >= POOL_OFFER_BATCH_SIZE) return;
-  const conversationEntry = (state.conversations || [])
-    .find((entry) => contactForConversation(entry)?.address === contactAddress);
-  if (!isPoolEstablishedConversation(conversationEntry)) return;
-  const contact = contactForConversation(conversationEntry);
-  if (!contact) return;
-  enqueuePoolOperation(() => reserveAndSendAddressPool(contact, { replace: false, replenish: true }))
-    .catch((error) => appendEngineLog(`Pool replenish failed: ${error.message}`));
-}
-
-// Sends addr_pool_request when the stored pool for `contact` has run low
-// (<= POOL_LOW_WATER_MARK unused), throttled per contact. Never when Chats
-// Payment Privacy is OFF (we aren't consuming pool addresses then).
-function maybeRequestMorePoolAddresses(contact) {
-  if (!engine.address || !contact?.address) return;
-  if (!chatsPrivacyEnabled()) return;
-  const poolState = loadPoolState();
-  const pool = poolState.theirPools[contact.address] || [];
-  if (!pool.length) return;
-  if (pool.filter((entry) => !entry.used).length > POOL_LOW_WATER_MARK) return;
-  const last = Number(poolState.lastPoolRequestAt[contact.address] || 0);
-  if (last && Date.now() - last < POOL_REQUEST_THROTTLE_MS) return;
-  enqueuePoolOperation(async () => {
-    await sendInvisiblePoolEnvelope(contact, JSON.stringify({ type: "addr_pool_request" }));
-    const current = loadPoolState();
-    current.lastPoolRequestAt[contact.address] = Date.now();
-    savePoolState(current);
-    appendEngineLog(`Requested fresh pool addresses from ${shortAddress(contact.address)}.`);
-  }).catch((error) => appendEngineLog(`addr_pool_request send failed: ${error.message}`));
-}
-
-// Front door for the three envelope types, called from the interception in
-// appendIncomingOrReactionMessage — these never become bubbles (except the
-// payment bubble a payment_notice deliberately creates). Replay-guarded by
-// envelope txid: history re-fetch replays the same envelopes and must not
-// re-trigger reservation sends or pool merges.
-function handlePaymentPoolEnvelope(envelope, conversationEntry, message) {
-  if (!engine.address) return;
-  const contact = contactForConversation(conversationEntry);
-  const contactAddress = contact?.address || "";
-  if (!contactAddress) return;
-
-  const txid = String(message.txid || "").trim();
-  if (txid) {
-    const poolState = loadPoolState();
-    if (poolState.handledEnvelopeTxIds.includes(txid)) return;
-    poolState.handledEnvelopeTxIds.push(txid);
-    if (poolState.handledEnvelopeTxIds.length > POOL_MAX_HANDLED_TXIDS) {
-      poolState.handledEnvelopeTxIds.splice(0, poolState.handledEnvelopeTxIds.length - POOL_MAX_HANDLED_TXIDS);
-    }
-    savePoolState(poolState);
-  }
-
-  const outgoing = message.direction === "outgoing";
-  if (envelope.kind === "pool") {
-    // Our own outgoing addr_pool re-fetched: nothing to do.
-    if (outgoing) return;
-    if (!isPoolEstablishedConversation(conversationEntry)) {
-      appendEngineLog(`Ignoring addr_pool from non-established conversation ${shortAddress(contactAddress)}.`);
-      return;
-    }
-    acceptIncomingAddressPool(envelope, contact, conversationEntry);
-  } else if (envelope.kind === "request") {
-    if (outgoing) return;
-    // Chats Privacy OFF: silently ignore (same no-error semantics as the rate limits).
-    if (!chatsPrivacyEnabled()) return;
-    if (!isPoolEstablishedConversation(conversationEntry)) return;
-    // An explicit request is renewed interest — a standing revoked-at-us marker
-    // (they once revoked our pool) no longer applies, so offers/replenishes resume.
-    clearContactRevokedAtUs(contactAddress);
-    if (!canServePoolOffer(contactAddress)) {
-      appendEngineLog(`Ignoring addr_pool_request from ${shortAddress(contactAddress)} — serve throttle/caps.`);
-      return;
-    }
-    enqueuePoolOperation(() => reserveAndSendAddressPool(contact, { replace: false }))
-      .catch((error) => appendEngineLog(`Pool top-up failed: ${error.message}`));
-  } else if (envelope.kind === "notice") {
-    // The payer's own notice re-fetched: swallow — the payer's bubble was
-    // created by the send flow.
-    if (outgoing) return;
-    createPaymentBubbleFromNotice(envelope, conversationEntry, contact, message);
-  }
-}
-
-// Validates and stores a received addr_pool as "addresses I can pay this
-// contact at". Per-address validation: bech32-valid, kaspa: prefix, not our
-// chatting address, not one we reserved, not our own spending-chain address.
-// Honors the revocation primitive: replace:true + empty-after-validation
-// clears the stored pool entirely. Reciprocity offers our pool if the contact
-// hasn't gotten it yet.
-function acceptIncomingAddressPool(envelope, contact, conversationEntry) {
-  const contactAddress = contact.address;
-  const poolState = loadPoolState();
-  const ownSpending = new Set(spendingWatchedAddressList());
-  const accepted = [];
-  for (const raw of envelope.addresses.slice(0, POOL_MAX_STORED)) {
-    const address = String(raw || "").trim();
-    if (!address.startsWith(ADDRESS_PREFIX) ||
-        !isValidKaspaAddressString(address) ||
-        address === engine.address ||
-        isReservedPoolAddress(poolState, address) ||
-        ownSpending.has(address)) {
-      appendEngineLog(`Rejected pool address from ${shortAddress(contactAddress)}: …${address.slice(-14)}`);
-      continue;
-    }
-    accepted.push(address);
-  }
-
-  // REVOCATION PRIMITIVE: a replace:true pool that is empty after validation
-  // clears this contact's stored pool entirely — our next payment falls back
-  // to their chatting address, and the fresh-address indicator goes false
-  // immediately. No reciprocity on a revoke.
-  if (envelope.replace && accepted.length === 0) {
-    poolState.theirPools[contactAddress] = [];
-    // The contact signalled pool disinterest (Chats Privacy off on their side): our
-    // offers to them leave the ACTIVE set too — their Manage Addresses rows revert to
-    // normal, hideable addresses. Protocol state (offered marker, watch set,
-    // payment_notice rendering) is untouched: a payment racing this revoke, or a
-    // straggler send into the old pool, still lands and renders. The marker also keeps
-    // the auto-replenish from reading the zeroed active count as a shortfall and
-    // pushing fresh addresses at someone who just signalled disinterest.
-    if (!(poolState.contactsRevokedAtUs || []).includes(contactAddress)) {
-      poolState.contactsRevokedAtUs = [...(poolState.contactsRevokedAtUs || []), contactAddress];
-    }
-    for (const entry of poolState.myReservations[contactAddress] || []) entry.activeOffer = false;
-    savePoolState(poolState);
-    appendEngineLog(`Pool REVOKED by ${shortAddress(contactAddress)} — cleared stored pool.`);
-    refreshComposerAvailableBalance();
-    return;
-  }
-  if (!accepted.length) return;
-
-  const existing = poolState.theirPools[contactAddress] || [];
-  const usedByAddress = new Map(existing.map((entry) => [entry.address, entry.used === true]));
-  let merged = envelope.replace ? [] : existing.slice();
-  const seen = new Set(merged.map((entry) => entry.address));
-  for (const address of accepted) {
-    if (seen.has(address)) continue;
-    seen.add(address);
-    // used flags carry over on replace — a replayed/overlapping replace can
-    // never resurrect an already-spent address.
-    merged.push({ address, used: usedByAddress.get(address) === true });
-  }
-  if (merged.length > POOL_MAX_STORED) merged = merged.slice(0, POOL_MAX_STORED);
-  poolState.theirPools[contactAddress] = merged;
-  // A non-empty pool offer means the contact participates in the feature again —
-  // any standing revoked-at-us marker from an earlier revoke of theirs is stale.
-  poolState.contactsRevokedAtUs = (poolState.contactsRevokedAtUs || []).filter((a) => a !== contactAddress);
-  savePoolState(poolState);
-  appendEngineLog(`Stored ${accepted.length} pool addresses for ${shortAddress(contactAddress)} (replace=${envelope.replace}).`);
-  refreshComposerAvailableBalance();
-
-  // Reciprocity: they shared theirs — if they've never gotten ours, offer now.
-  if (!loadPoolState().offeredContacts.includes(contactAddress)) {
-    offerAddressPoolIfNeeded(contact, conversationEntry);
-  }
-}
-
-// Marks one of our reservations funded — a payment_notice from the contact named
-// it as the payment destination, or the balance watch saw funds land on it.
-// Feeds the outstanding-unfunded cap. Returns true ONLY when this call actually
-// transitioned the reservation, so repeated notifications for the same funding
-// never queue duplicate replenishes.
-function markReservationFunded(address, contactAddress) {
-  const poolState = loadPoolState();
-  const entries = poolState.myReservations[contactAddress];
-  if (!entries) return false;
-  const entry = entries.find((r) => r.address === address);
-  if (!entry || entry.funded === true) return false;
-  entry.funded = true;
-  // Consumed: the address leaves the ACTIVE offered set — from here its row is
-  // governed by the funded rule (kept visible by its balance, no longer locked as
-  // a live offer).
-  entry.activeOffer = false;
-  savePoolState(poolState);
-  // The reserved address now holds money — funded addresses are always visible.
-  // Reservations are born visible now, so this normally no-ops; it still repairs
-  // state left hidden by the old born-hidden design.
-  if (Number.isInteger(entry.index)) {
-    const spendingState = getSpendingState();
-    const hiddenSet = new Set(spendingState.hidden);
-    if (hiddenSet.delete(entry.index)) saveSpendingState({ hidden: [...hiddenSet] });
-  }
-  return true;
-}
-
-// Funded detection that does NOT depend on the payer's payment_notice: the offered
-// reservation addresses are in the UTXO watched set and in the Address Activity
-// balance sweep, so money landing on one is observed directly (iOS does the same
-// from its utxosChanged stream in handlePoolReservationUtxoAdditions). Marks the
-// reservation funded, keeps its row visible, and tops the contact's pool back up.
-function notePoolReservationFundedOnChain(address) {
-  try {
-    const contactAddress = poolReservationOwnerContact(address);
-    if (!contactAddress) return;
-    if (!markReservationFunded(address, contactAddress)) return;
-    appendEngineLog(`Pool reservation ${shortAddress(address)} funded (observed on chain) for ${shortAddress(contactAddress)} — replenishing.`);
-    replenishPoolIfNeeded(contactAddress);
-  } catch (error) {
-    appendEngineLog(`Pool reservation funding check failed: ${error.message}`);
-  }
-}
-
-function clearContactRevokedAtUs(contactAddress) {
-  const poolState = loadPoolState();
-  if (!(poolState.contactsRevokedAtUs || []).includes(contactAddress)) return;
-  poolState.contactsRevokedAtUs = poolState.contactsRevokedAtUs.filter((a) => a !== contactAddress);
-  savePoolState(poolState);
-}
-
-// Renders a received payment_notice as a normal incoming payment bubble,
-// deduped by the payment's txId. Rendering is NOT blocked on chain
-// verification (the notice arrived over the sender-authenticated encrypted
-// channel); a background REST check corrects the amount if the chain
-// disagrees and downgrades the bubble if the tx pays nothing to the claimed
-// address.
-function createPaymentBubbleFromNotice(envelope, conversationEntry, contact, sourceMessage) {
-  // An actual funded transition tops the contact back up to a full fresh pool.
-  if (markReservationFunded(envelope.address, contact.address)) {
-    replenishPoolIfNeeded(contact.address);
-  }
-
-  const txId = envelope.txId;
-  // The chat bubble below is this payment's notification — claim the txId so the
-  // Address Activity balance sweep (pool addresses are watched there now) doesn't
-  // announce the same receive again as a wallet notification.
-  markAddressActivityTxHandled(txId);
-  const exists = (conversationEntry.messages || []).some((m) => String(m.txid || "").toLowerCase() === txId);
-  if (exists) return;
-
-  const amountKas = formatSompiForNotification(envelope.amountSompi);
-  const createdAt = Number(sourceMessage.createdAt || Date.now());
-  // "Received X KAS — <memo>" when the notice carries the payer's note (XP-004): the same stored
-  // shape as a chatting-address payment with a note. Older notices have none.
-  const bubble = createMessage({
-    conversationId: conversationEntry.id,
-    contactId: contact.id,
-    direction: "incoming",
-    text: paymentNoticeBubbleText(amountKas, envelope.memo),
-    sender: contact.address,
-    receiver: envelope.address,
-    status: MESSAGE_STATUSES.CONFIRMED,
-    transport: "kaspa-payment",
-    createdAt,
-  });
-  bubble.txid = txId;
-  bubble.messageType = "payment";
-  bubble.paymentAmountKas = amountKas;
-  bubble.confirmations = 1;
-  addMessageToConversation(conversationEntry, bubble);
-  conversationEntry.messages.sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
-  conversationEntry.lastActivityAt = Math.max(Number(conversationEntry.lastActivityAt || 0), createdAt);
-  conversationEntry.updatedAt = Date.now();
-  persistState();
-  if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
-  renderChats();
-  maybeNotifyIncoming(conversationEntry, contact, bubble);
-  appendEngineLog(`Created payment bubble from payment_notice ${txId.slice(0, 12)}…`);
-  verifyPaymentNoticeAgainstChain(conversationEntry, bubble, envelope);
-}
-
-// Best-effort background verification of a payment_notice against the
-// on-chain tx. Silent on network failure; the chain is authoritative for the
-// amount; a tx with no output to the claimed address flags the bubble.
-async function verifyPaymentNoticeAgainstChain(conversationEntry, bubble, envelope) {
-  let tx = null;
-  try {
-    const base = String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
-    const response = await fetch(`${base}/transactions/${encodeURIComponent(envelope.txId)}?resolve_previous_outpoints=no`, {
-      headers: { Accept: "application/json" }, cache: "no-store",
-    });
-    if (!response.ok) return;
-    tx = await response.json();
-  } catch { return; }
-  let paidToClaimed = 0n;
-  for (const output of (Array.isArray(tx?.outputs) ? tx.outputs : [])) {
-    if (kaspaOutputAddress(output) === envelope.address) paidToClaimed += kaspaOutputAmount(output);
-  }
-  const live = (conversationEntry.messages || []).find((m) => m.id === bubble.id) || bubble;
-  if (paidToClaimed === 0n) {
-    appendEngineLog(`payment_notice ${envelope.txId.slice(0, 12)}… FAILED verification — no output to claimed address.`);
-    applyMessagePatch(live, { status: MESSAGE_STATUSES.BROADCAST, note: "Unverified: the referenced transaction pays nothing to the claimed address." });
-  } else if (paidToClaimed !== BigInt(envelope.amountSompi)) {
-    const corrected = formatSompiForNotification(paidToClaimed);
-    applyMessagePatch(live, { text: paymentNoticeBubbleText(corrected, envelope.memo), paymentAmountKas: corrected, note: "Amount corrected from chain data." });
-  } else {
-    return;
-  }
-  persistState();
-  if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
-}
-
-// Consumes a pool address immediately and persistently — burning an address is
-// safe, reusing one is not, so this is written before the payment is even built.
-function markPoolAddressUsed(address, contactAddress) {
-  const poolState = loadPoolState();
-  const pool = poolState.theirPools[contactAddress] || [];
-  const entry = pool.find((item) => item.address === address);
-  if (!entry || entry.used === true) return false;
-  entry.used = true;
-  savePoolState(poolState);
-  return true;
-}
-
-// The destination for a Send KAS to `contact`: an unused address from their
-// stored pool, else the chatting address — exact pre-pool behavior.
-// Deliberately NOT gated on the sender's privacy toggle: the RECIPIENT'S
-// privacy governs the destination — if they shared fresh addresses, money
-// arrives on one no matter the sender's setting. The sender's toggle only
-// governs the funding side.
-//
-// CROSS-DEVICE DOUBLE-PAY PROTECTION: the `used` flags are device-local, so with
-// the same seed on two clients a payment sent from one never marks the address
-// used on the other — the second payment would land on the very address the pool
-// exists to keep fresh, linking both payments on chain. Before consuming a
-// candidate this probes its on-chain history (uncached, deliberately bypassing
-// spendingUsageCache / the batched balance reader — both can be stale or absent
-// exactly when it matters); an address with ANY history is marked used locally
-// (the skip persists) and the walk moves on. A probe that cannot answer (network
-// error) consumes the candidate anyway: a rare reuse beats failing the payment or
-// silently leaking it to the chatting address. The walk is bounded by the stored
-// pool (at most POOL_MAX_STORED entries), each probe a one-row body with a
-// timeout. If every pool address turns out used, the payment falls back to the
-// chatting address and the low-water addr_pool_request asks for more.
-async function consumePoolPaymentDestination(contact) {
-  // Every 1:1 payment passes here: paying someone is reaching out to them, like writing (iOS 5.2).
-  if (contact?.address && contact.address !== engine.address) acceptChat(contact.address);
-  let skippedUsedElsewhere = 0;
-  try {
-    // Each iteration either consumes the head unused address (returns) or marks it
-    // used (persisted) and re-reads, so the loop is bounded by the stored pool size.
-    for (;;) {
-      const pool = loadPoolState().theirPools[contact.address] || [];
-      const next = pool.find((entry) => !entry.used);
-      if (!next) return contact.address;
-      if (!isValidKaspaAddressString(next.address)) return contact.address;
-      if (await spendingAddressHasHistory(next.address, { timeoutMs: 8000 })) {
-        // Another device (or a straggler payment) already used this one — burn it
-        // locally so no future send here picks it either, and walk on. A consume
-        // that somehow didn't stick would loop forever, so bail to the chatting
-        // address instead.
-        if (!markPoolAddressUsed(next.address, contact.address)) return contact.address;
-        skippedUsedElsewhere += 1;
-        appendEngineLog(`Pool address …${next.address.slice(-10)} for ${shortAddress(contact.address)} already has chain history (used by another device?) — skipping.`);
-        continue;
-      }
-      markPoolAddressUsed(next.address, contact.address);
-      appendEngineLog(`Payment to ${shortAddress(contact.address)} will use fresh pool address …${next.address.slice(-10)}.`);
-      return next.address;
-    }
-  } finally {
-    // Addresses another device already paid: the pool may have silently run low, and
-    // the normal post-send request never fires for a chatting-address fallback.
-    if (skippedUsedElsewhere > 0) maybeRequestMorePoolAddresses(contact);
-  }
-}
-
-// True when the NEXT payment to this contact would go to a fresh pool address —
-// drives the subtle fresh-address indicator in the payment composer. Matches
-// consumePoolPaymentDestination: recipient-governed, independent of the
-// sender's privacy toggle.
-function willPayViaFreshPoolAddress(contactAddress) {
-  if (!engine.address) return false;
-  const pool = loadPoolState().theirPools[contactAddress] || [];
-  return pool.some((entry) => !entry.used);
-}
-
-// Sends the payment_notice envelope after a pool-address payment was accepted
-// (fire-and-forget), then checks the low-water mark. No-op for
-// chatting-address payments — existing detection covers those.
-// `memo` (MESSAGING.md, since 2026-10-06, iOS 6b20d77 / XP-004): the payer's note travels in the
-// notice, the only part of a pool payment the recipient's chat reads. At most 500 characters,
-// omitted when empty, so older readers see the exact notice they always did.
-function handlePoolPaymentSubmitted(contact, txid, amountSompi, destinationAddress, memo = "") {
-  if (!contact || destinationAddress === contact.address) return;
-  const note = clampPaymentNoticeMemo(memo);
-  const payload = JSON.stringify({ type: "payment_notice", txId: String(txid).toLowerCase(), amountSompi, address: destinationAddress, ...(note ? { memo: note } : {}) });
-  enqueuePoolOperation(async () => {
-    await sendInvisiblePoolEnvelope(contact, payload);
-    appendEngineLog(`Sent payment_notice for ${String(txid).slice(0, 12)}…`);
-  }).catch((error) => {
-    // The payment itself succeeded; a lost notice only means the recipient's
-    // bubble waits for their own discovery. Not retried automatically.
-    appendEngineLog(`payment_notice send failed for ${String(txid).slice(0, 12)}…: ${error.message}`);
-  }).finally(() => {
-    maybeRequestMorePoolAddresses(contact);
-  });
-}
-
-// Chats Payment Privacy toggle propagation — both directions are PROACTIVE
-// (the toggle is the switch, not conversation-opening): OFF revokes our pool
-// at every contact holding one (empty replace:true), ON clears revocation
-// markers and immediately re-offers to every established contact not holding
-// a live pool. Toggle broadcasts honor the 60s per-contact transition gap.
-function handleChatsPrivacyToggleChanged(enabled) {
-  if (!engine.address) return;
-  if (enabled) {
-    const poolState = loadPoolState();
-    poolState.revokedContacts = [];
-    savePoolState(poolState);
-    reofferPoolsForChatsPrivacyOn();
-  } else {
-    revokeOfferedPoolsForChatsPrivacyOff();
-  }
-  refreshComposerAvailableBalance();
-}
-
-// Toggle-ON targets are the union of two lanes:
-//
-// - POOL HISTORY (persisted state): every contact who previously HELD a live pool
-//   of ours — at least one reservation historically flagged offered — and doesn't
-//   hold one now (offered marker unset: our revoke landed). This lane reaches
-//   contacts whose CONVERSATION was deleted since the offer, which the
-//   conversation-derived lane below cannot see. They proved establishment when
-//   first offered, so no conversation re-check.
-// - NEVER-OFFERED ESTABLISHED CONVERSATIONS: the toggle is the switch, so contacts
-//   the lazy offer hasn't reached yet get theirs now instead of on next open.
-//
-// Both lanes skip contacts currently holding a live pool (nothing to resend) and
-// contacts who revoked our pool at them (nothing until they re-engage). A contact
-// whose row no longer exists in the address book is skipped — an offer needs a
-// contact to route to, unlike a revoke.
-function reofferPoolCandidateContacts(poolState) {
-  const revokedAtUs = poolState.contactsRevokedAtUs || [];
-  return Object.entries(poolState.myReservations || {})
-    .filter(([contactAddress, entries]) => !poolState.offeredContacts.includes(contactAddress)
-      && !revokedAtUs.includes(contactAddress)
-      && (entries || []).some((r) => r.offered))
-    .map(([contactAddress]) => contactAddress)
-    .sort();
-}
-
-function reofferPoolsForChatsPrivacyOn() {
-  const poolState = loadPoolState();
-  const revokedAtUs = poolState.contactsRevokedAtUs || [];
-  const conversationTargets = (state.conversations || [])
-    .map((entry) => ({ entry, contact: contactForConversation(entry) }))
-    .filter(({ entry, contact }) => contact?.address
-      && isPoolEstablishedConversation(entry)
-      && !poolState.offeredContacts.includes(contact.address)
-      && !revokedAtUs.includes(contact.address))
-    .map(({ contact }) => contact.address);
-  const seen = new Set();
-  const targets = [...reofferPoolCandidateContacts(poolState), ...conversationTargets]
-    .filter((address) => !seen.has(address) && seen.add(address));
-  if (!targets.length) return;
-  appendEngineLog(`Chats Payment Privacy on — re-offering pools to ${targets.length} contact(s).`);
-  enqueuePoolOperation(async () => {
-    for (const contactAddress of targets) {
-      if (!chatsPrivacyEnabled()) return; // flipped back OFF mid-broadcast
-      const contact = state.contacts.find((entry) => entry.address === contactAddress);
-      if (!contact) continue; // deleted contact: nothing to offer to
-      try {
-        await reserveAndSendAddressPool(contact, { replace: true, toggleTransition: true });
-      } catch (error) {
-        appendEngineLog(`Toggle-on pool offer to ${shortAddress(contactAddress)} failed (lazy offer remains): ${error.message}`);
-      }
-    }
-  });
-}
-
-// Contacts currently holding a live pool of OUR addresses — the target list for
-// the toggle-off revoke broadcast. Derived from PERSISTED state two ways and
-// unioned, so a contact can never dodge a revoke through marker drift: the
-// offered-marker set AND every contact with at least one reservation actually
-// flagged offered. Minus already-revoked contacts.
-function contactsHoldingOurPool(poolState = loadPoolState()) {
-  const holders = new Set(poolState.offeredContacts);
-  for (const [contactAddress, entries] of Object.entries(poolState.myReservations || {})) {
-    if ((entries || []).some((r) => r.offered)) holders.add(contactAddress);
-  }
-  return [...holders].filter((address) => !(poolState.revokedContacts || []).includes(address)).sort();
-}
-
-// How many follow-up sweeps a single toggle-off runs to reach gap-deferred or
-// send-failed contacts before giving up until the next toggle-off.
-const POOL_MAX_REVOKE_RETRY_PASSES = 3;
-
-// One revoke per contact currently holding our pool, per PERSISTED state.
-// Revokes bypass the reservation caps (a revoke must always be allowed out) but
-// honor the 60s transition gap. A contact DELETED from the address book still
-// gets its revoke — it may well still believe our pool is live, and the envelope
-// only needs the address, so a placeholder contact stands in. A pass that leaves
-// stragglers (gap-deferred, or whose send failed) schedules itself again once the
-// gap has certainly expired, up to POOL_MAX_REVOKE_RETRY_PASSES passes, so a
-// single toggle-off converges to "no contact holds a live pool" without the user
-// flipping again. Contacts still unreached after the last pass keep their markers,
-// stay eligible on the next toggle-off, and drain their residual pool meanwhile.
-function revokeOfferedPoolsForChatsPrivacyOff(retryPass = 0) {
-  const walletAtStart = engine.address;
-  const targets = contactsHoldingOurPool();
-  if (!targets.length) return;
-  appendEngineLog(`Chats Payment Privacy off — revoking offered pools at ${targets.length} contact(s) (pass ${retryPass}).`);
-  enqueuePoolOperation(async () => {
-    for (const contactAddress of targets) {
-      if (chatsPrivacyEnabled()) return; // flipped back ON mid-broadcast
-      if (engine.address !== walletAtStart) return; // account switched mid-broadcast
-      const current = loadPoolState();
-      if (current.revokedContacts.includes(contactAddress)) continue;
-      if (isWithinPoolServeGap(current, contactAddress, true)) {
-        appendEngineLog(`Revoke to ${shortAddress(contactAddress)} deferred by transition gap.`);
-        continue;
-      }
-      // A deleted contact still holds our pool — the revoke must reach them too.
-      const contact = state.contacts.find((entry) => entry.address === contactAddress)
-        || { id: `pool-revoke-${contactAddress}`, address: contactAddress };
-      try {
-        await sendInvisiblePoolEnvelope(contact, JSON.stringify({ type: "addr_pool", addresses: [], replace: true }));
-        const after = loadPoolState();
-        if (!after.revokedContacts.includes(contactAddress)) after.revokedContacts.push(contactAddress);
-        after.offeredContacts = after.offeredContacts.filter((a) => a !== contactAddress);
-        after.lastPoolServeAt[contactAddress] = Date.now();
-        // The reservations stay recorded and historically offered (still reserved for
-        // this contact alone, still watched — a payment racing the revoke must land and
-        // render), but they leave the ACTIVE set: their rows revert to normal,
-        // hideable addresses until a re-offer reactivates them.
-        for (const entry of after.myReservations[contactAddress] || []) entry.activeOffer = false;
-        savePoolState(after);
-        appendEngineLog(`Revoked pool at ${shortAddress(contactAddress)}.`);
-      } catch (error) {
-        appendEngineLog(`Pool revoke to ${shortAddress(contactAddress)} failed (non-fatal, residual drain applies): ${error.message}`);
-      }
-    }
-
-    // Convergence pass: anyone still holding (gap-deferred or send-failed) gets
-    // another sweep once the transition gap has certainly expired. Bounded so a
-    // permanently unreachable contact can't keep the chain alive forever.
-    if (retryPass >= POOL_MAX_REVOKE_RETRY_PASSES) return;
-    if (!contactsHoldingOurPool().length) return;
-    if (chatsPrivacyEnabled() || engine.address !== walletAtStart) return;
-    window.setTimeout(() => {
-      // Still the same account, still off? (An account switch invalidates the pass —
-      // the next toggle-off for that account starts its own chain.)
-      if (engine.address !== walletAtStart || chatsPrivacyEnabled()) return;
-      revokeOfferedPoolsForChatsPrivacyOff(retryPass + 1);
-    }, POOL_TOGGLE_TRANSITION_GAP_MS + 5000);
-  });
-}
-
-// Settings > Chats toggle wiring (per-account, applied on account switches too).
-const chatsPrivacyToggleEl = document.querySelector("[data-chats-privacy-toggle]");
-function refreshChatsPrivacyToggle() {
-  if (chatsPrivacyToggleEl) chatsPrivacyToggleEl.checked = chatsPrivacyEnabled();
-}
-chatsPrivacyToggleEl?.addEventListener("change", () => {
-  setChatsPrivacyEnabled(chatsPrivacyToggleEl.checked);
-  handleChatsPrivacyToggleChanged(chatsPrivacyToggleEl.checked);
-});
-refreshChatsPrivacyToggle();
-
-// --- Profile card summary (active spending address + live balance) ---
 // Last-known spending balances/used-state, persisted per account — stale-while-revalidate:
-// the dropdown and Manage Addresses paint the cached numbers instantly while the live batched
+// Manage Addresses and Choose an Address paint the cached numbers instantly while the live batched
 // refresh runs behind them (the same pattern cold storage uses for its account cache).
 const SPENDING_BAL_CACHE_KEY = "kachat-spending-balcache-v1"; // { [address]: { kas, used } }
 function loadSpendingBalCache() {
@@ -8492,112 +7524,80 @@ function saveSpendingBalCacheEntries(updates) {
   } catch { /* cache is best-effort */ }
 }
 
-function setSpendingUnlocking(active) {
-  const el = document.querySelector("[data-spending-unlocking]");
-  if (el) el.hidden = !active;
-}
-
-/// The whole-account spending total, under the active address's own balance.
-///
-/// Shown whenever it is known, INCLUDING when it equals the balance above it: on an account whose
-/// funds all sit on the current address the two are the same number, and hiding the line exactly
-/// then reads as the feature being missing rather than as "nothing else to add" (iOS
-/// spendingTotalText).
-function setSpendingTotal(kas) {
-  const el = document.querySelector("[data-spending-total]");
+// --- Profile's Manage Addresses card (iOS 6333dd3) ---
+// One card for every address of this account, opening Manage Addresses, with the account total:
+// the chatting address and every spending address, hidden ones too (iOS 245a5d2), so nothing
+// disappears from the balance.
+// Every revealed spending address together (BigInt sompi), null until first known. A failed lookup
+// leaves the previous total in place rather than clearing it: a total a few seconds stale reads
+// better than a line that vanishes because one request timed out.
+let spendingTotalSompi = null;
+function renderProfileAccountTotal() {
+  const el = document.querySelector("[data-manage-addresses-total]");
   if (!el) return;
-  el.hidden = kas == null;
-  el.textContent = kas == null ? "" : `Total: ${kas} ${KAS_UNIT}`;
+  const chatting = sompiFromUserText(String(currentBalanceKas ?? ""));
+  const needsSpending = Boolean(activeAccountMnemonic());
+  if (chatting == null || (needsSpending && spendingTotalSompi == null)) {
+    el.innerHTML = '<span class="sk-spinner" aria-hidden="true"></span>';
+    return;
+  }
+  el.textContent = `${kasTextFromSompi(chatting + (needsSpending ? spendingTotalSompi : 0n))} ${KAS_UNIT}`;
 }
 
 let spendingTotalToken = 0;
 async function refreshSpendingTotal() {
   const token = ++spendingTotalToken;
-  if (!activeAccountMnemonic() || !engine.kaspa) { setSpendingTotal(null); return; }
   const state = getSpendingState();
-  const hidden = new Set(state.hidden);
   const addresses = [];
   for (let i = 0; i <= state.maxIndex; i += 1) {
-    // Same membership rule as the Manage Addresses list: hidden addresses are out, except the
-    // primary, which can never be hidden.
-    if (hidden.has(i) && i !== state.activeIndex) continue;
     const addr = deriveSpendingAddressAt(i);
     if (addr) addresses.push(addr);
   }
-  if (!addresses.length) { setSpendingTotal(null); return; }
+  if (!addresses.length) { renderProfileAccountTotal(); return; }
   try {
     // ONE batched UTXO call for every address - the same call the Manage Addresses list makes,
     // rather than a round trip per address.
     const byAddress = await spendingBalancesBatchSompi(addresses);
     if (token !== spendingTotalToken) return;
-    let sompi = 0;
-    for (const value of byAddress.values()) sompi += Number(value) || 0;
-    setSpendingTotal(trimKas8(sompi / 1e8));
-  } catch {
-    // An unreachable node costs the total line, not the balance above it.
-    if (token === spendingTotalToken) setSpendingTotal(null);
-  }
+    let sompi = 0n;
+    for (const value of byAddress.values()) sompi += BigInt(Math.round(Number(value) || 0));
+    spendingTotalSompi = sompi;
+  } catch { /* the previous total stays */ }
+  if (token === spendingTotalToken) renderProfileAccountTotal();
 }
 
-// Showing Profile re-reads the spending balance at most every 30 s for the same address: switching
-// tabs back and forth started the requests each time. Sends, arriving funds and the address's own
-// screens still refresh at once (iOS 9de981a). State on the function object (load-order safe).
+// Showing Profile re-reads the total at most every 30 s for the same account: switching tabs back
+// and forth started the requests each time. Sends, arriving funds and the address screens still
+// refresh at once (iOS 9de981a). State on the function object (load-order safe).
 function refreshSpendingSummaryOnShow() {
   const st = refreshSpendingSummaryOnShow;
-  const key = `${engine.address || ""}|${getActiveSpendingIndex()}`;
+  const key = engine.address || "";
   if (st.key === key && Date.now() - (st.at || 0) < 30_000) return;
   refreshSpendingSummary();
-  // only a resolved address counts; a keychain still unlocking is asked again on the next show
+  // only a known total counts; a keychain still unlocking is asked again on the next show
   st.key = key;
-  st.at = activeSpendingAddress ? Date.now() : 0;
+  st.at = spendingTotalSompi != null ? Date.now() : 0;
 }
 
 async function refreshSpendingSummary() {
-  const mnemonic = activeAccountMnemonic();
-  if (!mnemonic || !engine.kaspa) {
-    activeSpendingAddress = null;
-    if (spendingBalanceEl) spendingBalanceEl.textContent = `-- ${KAS_UNIT}`;
-    setSpendingUnlocking(false);
-    setSpendingTotal(null);
-    return;
+  if (refreshSpendingSummary.wallet !== engine.address) {
+    // another account: its total starts unknown, never the previous account's number
+    refreshSpendingSummary.wallet = engine.address;
+    spendingTotalSompi = null;
   }
-  const address = deriveSpendingAddressAt(getActiveSpendingIndex());
-  if (!address) {
-    activeSpendingAddress = null;
-    if (spendingBalanceEl) spendingBalanceEl.textContent = `-- ${KAS_UNIT}`;
-    // Said in the row rather than left as a bare "-- KAS": the keychain is still unlocking, and
-    // the alternative iOS rejected was showing some other address in this one's place.
-    setSpendingUnlocking(true);
-    setSpendingTotal(null);
-    return;
-  }
-  activeSpendingAddress = address;
-  setSpendingUnlocking(false);
-  refreshSpendingTotal();
-  // Paint the last-known balance immediately; the live number replaces it when it lands.
-  const cached = loadSpendingBalCache()[address];
-  if (spendingBalanceEl) spendingBalanceEl.textContent = cached?.kas != null ? `${cached.kas} ${KAS_UNIT}` : "…";
-  try {
-    const bal = await engine.balanceForAddress(address);
-    saveSpendingBalCacheEntries({ [address]: { ...(cached || {}), kas: String(bal.totalKas) } });
-    // Guard against a stale response if the active address changed meanwhile.
-    if (activeSpendingAddress === address && spendingBalanceEl) {
-      spendingBalanceEl.textContent = `${bal.totalKas} ${KAS_UNIT}`;
-    }
-  } catch (error) {
-    if (activeSpendingAddress === address && spendingBalanceEl && cached?.kas == null) {
-      spendingBalanceEl.textContent = `-- ${KAS_UNIT}`;
-    }
-  }
+  renderProfileAccountTotal();
+  if (!activeAccountMnemonic() || !engine.kaspa) return;
+  await refreshSpendingTotal();
 }
 
-// --- Manage Spending Addresses screen ---
-const STAR_PATH = "m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 18l-5.8 3 1.1-6.5L2.6 9.8l6.5-.9Z";
-// Each row: tap the body to open the address's detail (transactions + send/
-// receive); the ⋯ button opens a menu (Rename / Copy / Show QR / Set as Primary),
-// matching iOS's ManageAddressesView.
-function spendingRowHtml(index, address, state, balanceText, used, hasDomain = false, reserved = false) {
-  const isActive = index === state.activeIndex;
+// --- Manage Addresses screen ---
+// Every address of this account (iOS 6333dd3 ManageAddressesView): the chatting address first,
+// then the spending addresses in number order (245a5d2), each with its balance and whether it was
+// used. Which address a send comes from is picked on the send screen itself (From), so there is no
+// "primary" here: no star, no Set as Primary, no Send All To Primary.
+// Each spending row: click the body to open the address's detail (transactions + send/receive);
+// the ⋯ button opens Rename / Copy / Show QR / Hide.
+function spendingRowHtml(index, address, state, balanceText, used, hasDomain = false) {
   const label = spendingLabelFor(state, index);
   // Three states (iOS): Used, Unused, and Checking while the history probe has not answered -
   // claiming "Unused" before it has could invite address reuse.
@@ -8607,17 +7607,17 @@ function spendingRowHtml(index, address, state, balanceText, used, hasDomain = f
       ? '<span class="spending-address-usage unused">Unused</span>'
       : '<span class="spending-address-usage checking">Checking</span>';
   const domainTag = hasDomain ? '<span class="spending-address-domain-tag">Contains domain</span>' : "";
+  // Any address can be hidden, funded ones too (iOS 245a5d2): it comes back from Address Visibility.
   const menuItems = [
     `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="rename" data-index="${index}">Rename Address</button>`,
     `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="copy" data-index="${index}">Copy Address</button>`,
     `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="receive" data-index="${index}">Show QR Code</button>`,
-    isActive ? "" : `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="activate" data-index="${index}">Set as Primary Address</button>`,
-    isActive || reserved ? "" : `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="hide" data-index="${index}">Hide Address</button>`,
-  ].filter(Boolean).join("");
+    `<button type="button" role="menuitem" class="spending-row-menu-item" data-spending-action="hide" data-index="${index}">Hide Address</button>`,
+  ].join("");
   return `
-    <div class="spending-address-row${isActive ? " active" : ""}" data-spending-row="${index}">
+    <div class="spending-address-row" data-spending-row="${index}">
       <button type="button" class="spending-address-row-main" data-spending-open="${index}" aria-label="Open ${escapeHtml(label)}">
-        <span class="spending-address-label">${escapeHtml(label)}${isActive ? `<svg class="spending-address-star" viewBox="0 0 24 24" aria-label="Primary"><path d="${STAR_PATH}"/></svg>` : ""}</span>
+        <span class="spending-address-label">${escapeHtml(label)}</span>
         <span class="spending-address-value">${escapeHtml(shortAddress(address))}</span>
         <span class="spending-address-balance" data-spending-balance-cell="${index}">${escapeHtml(balanceText)}</span>
         <span class="spending-address-row-tags">${usage}${domainTag}</span>
@@ -8631,12 +7631,28 @@ function spendingRowHtml(index, address, state, balanceText, used, hasDomain = f
     </div>`;
 }
 
+// The chatting address, first in the list (iOS 6333dd3 chattingAddressRow): it opens its own
+// screen (history, UTXOs, Domains, Send / Receive), the one Profile's Chatting row used to.
+function chattingAddressRowHtml() {
+  const address = engine.address || "";
+  const balanceText = currentBalanceKas != null && currentBalanceKas !== "" ? `${currentBalanceKas} ${KAS_UNIT}` : `-- ${KAS_UNIT}`;
+  return `
+    <div class="spending-address-row chatting-address-row">
+      <button type="button" class="spending-address-row-main" data-spending-open-chatting aria-label="Open Chatting Address">
+        <span class="spending-address-label">Chatting Address<svg class="chatting-address-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg></span>
+        <span class="spending-address-value">${escapeHtml(shortAddress(address))}</span>
+        <span class="spending-address-balance" data-chatting-row-balance>${escapeHtml(balanceText)}</span>
+        <span class="spending-address-row-tags"><span class="spending-address-usage chatting-used">Used</span></span>
+      </button>
+      <svg class="chatting-address-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+    </div>`;
+}
+
 // An address counts as "used" if it holds a balance now or has any on-chain
 // transaction history — mirrors iOS's everUsed || balance>0. Deliberately
-// uncached (`cache: "no-store"`, no memo): the pool-payment probe needs the live
-// answer, and a stale "unused" there means a double-pay. `timeoutMs` bounds that
-// probe so a hung REST endpoint can't stall a send; other callers keep the
-// previous unbounded behavior.
+// uncached (`cache: "no-store"`, no memo): Receive Kaspa and Generate need the
+// live answer. `timeoutMs` bounds a probe so a hung REST endpoint can't stall a
+// caller; others keep the previous unbounded behavior.
 async function spendingAddressHasHistory(address, { timeoutMs = 0 } = {}) {
   if (!String(address || "").trim()) return false; // empty address would 404 as /addresses//…
   try {
@@ -8649,63 +7665,55 @@ async function spendingAddressHasHistory(address, { timeoutMs = 0 } = {}) {
   } catch { return null; }
 }
 
-// Everything the visible spending addresses hold, together (iOS "Total Balance"). The chatting
-// address is deliberately not folded in.
+// Everything this account holds (iOS "Total Balance", 6333dd3 / 245a5d2): the chatting address and
+// every spending address, hidden ones too - the same total as Profile's Manage Addresses card.
 function updateSpendingTotalBalance(entries) {
   const totalEl = document.querySelector("[data-spending-total-balance]");
   if (!totalEl) return;
   const known = entries.filter((e) => e.kas != null && Number.isFinite(Number(e.kas)));
-  if (!known.length) { totalEl.textContent = `-- ${KAS_UNIT}`; return; }
-  totalEl.textContent = `${trimKas8(known.reduce((sum, e) => sum + (Number(e.kas) || 0), 0))} ${KAS_UNIT}`;
+  const chattingKas = Number(currentBalanceKas);
+  const hasChatting = currentBalanceKas != null && currentBalanceKas !== "" && Number.isFinite(chattingKas);
+  if (!known.length && !hasChatting) { totalEl.textContent = `-- ${KAS_UNIT}`; return; }
+  const sum = known.reduce((total, e) => total + (Number(e.kas) || 0), 0) + (hasChatting ? chattingKas : 0);
+  totalEl.textContent = `${trimKas8(sum)} ${KAS_UNIT}`;
 }
 
 async function renderSpendingList() {
   if (!spendingListEl) return;
+  const chattingRow = engine.address ? chattingAddressRowHtml() : "";
   if (!activeAccountMnemonic()) {
-    spendingListEl.innerHTML = '<p class="spending-address-empty">This account has no recovery phrase, so spending addresses aren\'t available.</p>';
+    spendingListEl.innerHTML = `${chattingRow}<p class="spending-address-empty">This account has no recovery phrase, so spending addresses aren't available.</p>`;
+    updateSpendingTotalBalance([]);
     return;
   }
-  // Repair first: an actively offered pool address can never be hidden, so a row
-  // left hidden by the old born-hidden design comes back into the list here.
-  unhideActivePoolReservations();
   const state = getSpendingState();
-  const primaryIndex = state.activeIndex;
   const token = ++spendingListToken;
   const hiddenSet = new Set(state.hidden);
-  const reservedAddresses = activePoolReservationAddressSet();
-  const items = [];
-  const privacyOn = chatsPrivacyEnabled();
+  // Every revealed address counts in the total; only the visible ones are listed (Address
+  // Visibility hides any of them, the old primary included).
+  const all = [];
   for (let i = 0; i <= state.maxIndex; i++) {
-    // Hidden addresses (Address Visibility screen) stay off the main list; the
-    // primary can never be hidden.
-    if (hiddenSet.has(i) && i !== primaryIndex) continue;
     const address = deriveSpendingAddressAt(i);
-    if (!address) continue;
-    // Actively offered pool addresses are the Chat Privacy tab's rows, not this list's - while
-    // privacy is off the tab does not exist, so they stay here as ordinary rows (iOS).
-    if (privacyOn && i !== primaryIndex && reservedAddresses.has(address)) continue;
-    items.push({ index: i, address });
+    if (address) all.push({ index: i, address, hidden: hiddenSet.has(i) });
   }
-  if (!items.length) {
-    spendingListEl.innerHTML = '<div class="no-results-card"><strong>No Spending Addresses</strong><span>Generate one below to start sending payments from a separate address than the one you chat from.</span></div>';
-    return;
-  }
-  // Provisional render with LAST-KNOWN balances/used-state (index order) so the list appears
+  const items = all.filter((it) => !it.hidden);
+  const emptyHtml = '<div class="no-results-card"><strong>No Spending Addresses</strong><span>Generate one below to start sending payments from a separate address than the one you chat from.</span></div>';
+  // Provisional render with LAST-KNOWN balances/used-state (number order) so the list appears
   // instantly with real numbers instead of a wall of "…" — the live refresh replaces it below.
   const balCache = loadSpendingBalCache();
-  spendingListEl.innerHTML = items
-    .map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${balCache[it.address].kas} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null, false, reservedAddresses.has(it.address)))
-    .join("");
-  updateSpendingTotalBalance(items.map((it) => ({ kas: balCache[it.address]?.kas != null ? Number(balCache[it.address].kas) : null })));
-  // Enrich with live balance + used-state, then order: primary first → funded → rest.
-  // Balances arrive in ONE batched node call (the per-address loop this replaces fired one
-  // round trip per row); history checks run only for zero-balance rows, 4 at a time, so a
-  // long list can't burst the REST rate limiter into 429s.
+  spendingListEl.innerHTML = chattingRow + (items.length
+    ? items.map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${balCache[it.address].kas} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null)).join("")
+    : emptyHtml);
+  updateSpendingTotalBalance(all.map((it) => ({ kas: balCache[it.address]?.kas != null ? Number(balCache[it.address].kas) : null })));
+  if (!all.length) return;
+  // Enrich with live balance + used-state. Balances arrive in ONE batched node call (hidden
+  // addresses too, for the total); history checks run only for listed zero-balance rows, 4 at a
+  // time, so a long list can't burst the REST rate limiter into 429s.
   let batched = null;
-  try { batched = await spendingBalancesBatchSompi(items.map((it) => it.address)); }
+  try { batched = await spendingBalancesBatchSompi(all.map((it) => it.address)); }
   catch { batched = null; /* node pool unreachable — fall back below */ }
   if (token !== spendingListToken) return;
-  const enriched = items.map((it) => {
+  const enrich = (it) => {
     let kas = 0, totalKas = null;
     if (batched) {
       const sompi = batched.get(it.address) || 0;
@@ -8716,8 +7724,10 @@ async function renderSpendingList() {
       kas = Number(totalKas) || 0;
     }
     return { ...it, kas, totalKas, used: kas > 0 ? true : (balCache[it.address]?.used ?? null) };
-  });
-  updateSpendingTotalBalance(enriched);
+  };
+  const enrichedAll = all.map(enrich);
+  updateSpendingTotalBalance(enrichedAll);
+  const enriched = enrichedAll.filter((e) => !e.hidden);
   const pendingUsed = enriched.filter((e) => e.kas === 0 && e.used == null);
   for (let base = 0; base < pendingUsed.length; base += 4) {
     await Promise.all(pendingUsed.slice(base, base + 4).map(async (e) => {
@@ -8726,15 +7736,14 @@ async function renderSpendingList() {
     if (token !== spendingListToken) return;
   }
   const cacheUpdates = {};
-  for (const e of enriched) {
+  for (const e of enrichedAll) {
     if (e.totalKas != null) cacheUpdates[e.address] = { kas: e.totalKas, used: e.used === true ? true : (balCache[e.address]?.used ?? e.used) };
   }
   saveSpendingBalCacheEntries(cacheUpdates);
   if (token !== spendingListToken) return;
-  // Batched, cached KNS assets-by-owner lookups drive the "Contains domain"
-  // tag and promote those rows into the funded group (iOS parity). The
-  // refresh is debounced/backed-off inside engine/kns.js, so reopening the
-  // screen is normally cache-only.
+  // Batched, cached KNS assets-by-owner lookups drive the "Contains domain" tag (iOS parity). The
+  // refresh is debounced/backed-off inside engine/kns.js, so reopening the screen is normally
+  // cache-only.
   let domainOwning = new Set();
   try {
     await engine.refreshKnsIfNeeded?.(enriched.map((e) => e.address));
@@ -8746,121 +7755,33 @@ async function renderSpendingList() {
   // .kachat names count too (iOS 881ada6 ownersOfNames; empty where the registry isn't launched).
   for (const address of await kachatOwnersOfNames(enriched.map((e) => e.address))) domainOwning.add(address);
   if (token !== spendingListToken) return;
-  // Primary first → addresses with a balance OR a KNS domain (stable within
-  // the group) → fresh/unused last.
-  const rank = (e) => (e.index === primaryIndex ? 0 : (e.kas > 0 || domainOwning.has(e.address)) ? 1 : 2);
-  enriched.sort((a, b) => rank(a) - rank(b) || b.index - a.index);
-  updateSpendingTotalBalance(enriched);
-  spendingListEl.innerHTML = enriched
-    .map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address), reservedAddresses.has(e.address)))
-    .join("");
+  // In number order, #0 first (iOS 245a5d2).
+  enriched.sort((a, b) => a.index - b.index);
+  spendingListEl.innerHTML = (engine.address ? chattingAddressRowHtml() : "") + (enriched.length
+    ? enriched.map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address))).join("")
+    : emptyHtml);
 }
 
 function openSpendingManageScreen() {
   if (!spendingManageScreen) return;
-  if (!activeAccountMnemonic()) {
-    showCopyToast("This account has no recovery phrase, so spending addresses aren't available.");
-    return;
-  }
   spendingManageScreen.hidden = false;
-  // The tab switch only exists while Chats Payment Privacy is on for this account - off means
-  // no live pools, so the screen is just the plain Addresses list.
-  const tabs = document.querySelector("[data-spending-tabs]");
-  if (tabs) tabs.hidden = !chatsPrivacyEnabled();
-  showSpendingTab("addresses");
   renderSpendingList();
 }
 
-let spendingTab = "addresses";
-function showSpendingTab(tab) {
-  spendingTab = tab;
-  document.querySelectorAll("[data-spending-tab]").forEach((b) => b.classList.toggle("active", b.dataset.spendingTab === tab));
-  const addressesList = document.querySelector("[data-spending-address-list]");
-  const privacyList = document.querySelector("[data-spending-privacy-list]");
-  const total = document.querySelector("[data-spending-total-block]");
-  if (addressesList) addressesList.hidden = tab !== "addresses";
-  if (privacyList) privacyList.hidden = tab !== "privacy";
-  if (total) total.hidden = tab !== "addresses";
-  if (tab === "privacy") renderSpendingPrivacyList();
-}
-document.querySelectorAll("[data-spending-tab]").forEach((button) => button.addEventListener("click", () => showSpendingTab(button.dataset.spendingTab)));
-
-// Chat Privacy (iOS chatPrivacyTabContent): the addresses actively offered to contacts as
-// payment-pool reservations. The pool manages these rows; the one manual override is moving a
-// row out, for a payment that landed while this device was not running to notice it.
-async function renderSpendingPrivacyList() {
-  const listEl = document.querySelector("[data-spending-privacy-list]");
-  if (!listEl) return;
-  const entries = activePoolReservationEntries();
-  const explainer = `<p class="spending-privacy-explainer">These are fresh addresses offered to your contacts for private payments. Each contact gets their own, so your payment history stays unlinkable. KaChat keeps at least 2 fresh addresses per chat and replaces them as they are used.</p>`;
-  if (!entries.length) {
-    listEl.innerHTML = `${explainer}<div class="no-results-card"><strong>No Chat Privacy Addresses</strong><span>When you chat with someone while Chats Payment Privacy is on, the fresh addresses offered to them appear here.</span></div>`;
-    return;
-  }
+// A new chatting balance, on Manage Addresses' first row and its total, without a full reload.
+function refreshChattingRowBalance() {
+  if (!spendingManageScreen || spendingManageScreen.hidden) return;
+  const cell = spendingListEl?.querySelector("[data-chatting-row-balance]");
+  if (cell) cell.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  const kasEntries = [];
+  const cache = loadSpendingBalCache();
   const state = getSpendingState();
-  let balances = null;
-  try { balances = await spendingBalancesBatchSompi(entries.map((e) => e.address)); } catch { balances = null; }
-  listEl.innerHTML = explainer + entries.map((entry) => {
-    const sompi = balances?.get(entry.address) || 0;
-    const kas = Number(sompi) / 1e8;
-    const label = String(state.labels?.[entry.index] || "").trim();
-    return `
-      <button type="button" class="spending-privacy-row" data-privacy-row="${escapeHtml(entry.address)}" data-privacy-index="${entry.index}" data-privacy-kas="${kas}">
-        <span class="meta">
-          <small>Address #${entry.index}${label ? ` · ${escapeHtml(label)}` : ""}</small>
-          <code>${escapeHtml(shortAddress(entry.address))}</code>
-          ${kas > 0 ? `<span class="funded">${trimKas8(kas)} ${KAS_UNIT} <b>Funded</b></span>` : ""}
-        </span>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
-      </button>`;
-  }).join("");
-}
-
-function releasePoolReservation(address, index) {
-  const poolState = loadPoolState();
-  let changed = false;
-  for (const [contactAddress, list] of Object.entries(poolState.myReservations || {})) {
-    const kept = (list || []).filter((entry) => entry.address !== address);
-    if (kept.length !== (list || []).length) { poolState.myReservations[contactAddress] = kept; changed = true; }
+  for (let i = 0; i <= state.maxIndex; i += 1) {
+    const address = deriveSpendingAddressAt(i);
+    if (address && cache[address]?.kas != null) kasEntries.push({ kas: Number(cache[address].kas) });
   }
-  if (!changed) return false;
-  savePoolState(poolState);
-  // It was locked visible while it was an offer; nothing holds it hidden now.
-  const state = getSpendingState();
-  saveSpendingState({ hidden: (state.hidden || []).filter((i) => Number(i) !== Number(index)) });
-  return true;
+  updateSpendingTotalBalance(kasEntries);
 }
-
-document.querySelector("[data-spending-privacy-list]")?.addEventListener("click", async (event) => {
-  const row = event.target.closest("[data-privacy-row]");
-  if (!row) return;
-  const address = row.dataset.privacyRow;
-  const index = Number(row.dataset.privacyIndex) || 0;
-  const kas = Number(row.dataset.privacyKas) || 0;
-  const choice = await chooseDialog({
-    title: `Address ${index}`,
-    message: `${shortAddress(address)}${kas > 0 ? `\nHolding ${trimKas8(kas)} ${KAS_UNIT}` : ""}`,
-    options: [
-      { id: "move", title: "Move out of Chat Payment Privacy", subtitle: kas > 0
-        ? "It has been paid into, so it is no longer a fresh address. Moves it to your normal spending list where you can send from it."
-        : "Stops offering this address to your contact and moves it to your normal spending list." },
-      { id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." },
-      { id: "qr", title: "Show QR Code", subtitle: "Full screen, for scanning with another device." },
-      { id: "cancel", title: "Cancel", subtitle: "Leave it in the pool." },
-    ],
-  });
-  if (choice === "move") {
-    if (releasePoolReservation(address, index)) {
-      showCopyToast("Moved out of Chat Payment Privacy.");
-      renderSpendingPrivacyList();
-      renderSpendingList();
-    }
-  } else if (choice === "copy") {
-    try { await copyTextToClipboard(address); showCopyToast(addressCopiedToastText(address)); } catch {}
-  } else if (choice === "qr") {
-    openChattingAddressScreen({ address, balanceText: `${trimKas8(kas)} ${KAS_UNIT}`, subtitle: null });
-  }
-});
 
 function closeSpendingManageScreen() {
   closeAllSpendingMenus();
@@ -8902,26 +7823,20 @@ async function spendingUsageFor(address) {
   return result;
 }
 
-// `reserved` = the address is actively offered to a contact as a Chats Payment
-// Privacy pool address (iOS SpendingAddressVisibilityView): the row shows CHECKED
-// and inert, labeled so the user knows why. A contact may pay into it at any
-// moment, so its owner must always be able to see it; once the offer is no longer
-// active the row becomes an ordinary, hideable row again.
-function spendingVisibilityRowHtml(index, address, state, visible, reserved = false) {
-  const isPrimary = index === state.activeIndex;
-  const locked = isPrimary || reserved;
+// One row of Address Visibility (iOS SpendingAddressVisibilityView). Every row toggles both ways,
+// funded ones too (iOS 245a5d2): Hide All starts the list over, and nothing is lost - hidden
+// addresses still count in the totals.
+function spendingVisibilityRowHtml(index, address, state, visible) {
   const customLabel = (state.labels?.[index] ?? state.labels?.[String(index)] ?? "").toString().trim();
   const checkSvg = visible
     ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path class="spending-vis-check" d="m7.5 12.5 3 3 6-6.5"/></svg>'
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.2"/></svg>';
   return `
     <div class="spending-visibility-row${visible ? "" : " off"}" data-vis-row="${index}">
-      <button type="button" class="spending-visibility-toggle${visible ? " on" : ""}" data-spending-vis-toggle="${index}" aria-pressed="${visible}"${locked ? ' aria-disabled="true" style="opacity:.45"' : ""} aria-label="Toggle visibility of spending address #${index}">${checkSvg}</button>
+      <button type="button" class="spending-visibility-toggle${visible ? " on" : ""}" data-spending-vis-toggle="${index}" aria-pressed="${visible}" aria-label="Toggle visibility of spending address #${index}">${checkSvg}</button>
       <div class="spending-visibility-info">
         <div class="spending-visibility-head">
           <span class="spending-address-index">#${index}</span>
-          ${isPrimary ? `<span class="spending-address-active-badge"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${STAR_PATH}"/></svg>Primary</span>` : ""}
-          ${reserved ? '<span class="spending-visibility-label">Chat privacy address</span>' : ""}
           ${customLabel ? `<span class="spending-visibility-label">${escapeHtml(customLabel)}</span>` : ""}
           <span class="spending-address-usage spending-visibility-usage" data-vis-usage="${index}">…</span>
         </div>
@@ -8932,11 +7847,8 @@ function spendingVisibilityRowHtml(index, address, state, visible, reserved = fa
 
 async function renderSpendingVisibilityPage() {
   if (!spendingVisibilityList) return;
-  // Repair first: an actively offered pool address can never be hidden.
-  unhideActivePoolReservations();
   const state = getSpendingState();
   const hiddenSet = new Set(state.hidden);
-  const reservedAddresses = activePoolReservationAddressSet();
   const start = spendingVisibilityPage * SPENDING_VIS_PAGE_SIZE;
   const end = start + SPENDING_VIS_PAGE_SIZE - 1;
   if (spendingVisRangeEl) spendingVisRangeEl.textContent = `#${start} - #${end}`;
@@ -8945,12 +7857,11 @@ async function renderSpendingVisibilityPage() {
   const rows = [];
   for (let i = start; i <= end; i++) {
     const address = deriveSpendingAddressAt(i);
-    const reserved = Boolean(address) && reservedAddresses.has(address);
-    const visible = (i <= state.maxIndex && !hiddenSet.has(i)) || reserved;
-    rows.push({ index: i, address, visible, reserved });
+    const visible = i <= state.maxIndex && !hiddenSet.has(i);
+    rows.push({ index: i, address, visible });
   }
   spendingVisibilityList.innerHTML = rows
-    .map((r) => spendingVisibilityRowHtml(r.index, r.address, state, r.visible, r.reserved))
+    .map((r) => spendingVisibilityRowHtml(r.index, r.address, state, r.visible))
     .join("");
   // Usage fill: funded rows show their balance, the rest Used/Unused. Chunked
   // like the discovery scan so a page can't burst the REST rate limiter.
@@ -8994,7 +7905,21 @@ function closeSpendingVisibilityScreen() {
 }
 
 spendingVisibilityOpenBtn?.addEventListener("click", openSpendingVisibilityScreen);
-spendingVisibilityCloseBtn?.addEventListener("click", closeSpendingVisibilityScreen);
+// Hide All (iOS 245a5d2): every revealed address hidden, so Manage Addresses starts over with only
+// the chatting address. Nothing is lost: Address Visibility brings any back, and the totals still
+// count them.
+document.querySelector("[data-spending-hide-all]")?.addEventListener("click", async () => {
+  const ok = await confirmDialog({
+    title: "Hide All Addresses?",
+    message: "Manage Addresses starts over with only your chatting address. Nothing is lost: bring any address back here, and its Kaspa still counts in your total.",
+    confirmLabel: "Hide All",
+    destructive: true,
+  });
+  if (!ok) return;
+  const state = getSpendingState();
+  saveSpendingState({ hidden: Array.from({ length: Math.max(0, state.maxIndex) + 1 }, (_, i) => i) });
+  renderSpendingVisibilityPage();
+});
 spendingVisibilityDoneBtn?.addEventListener("click", closeSpendingVisibilityScreen);
 spendingVisPrevBtn?.addEventListener("click", () => {
   if (spendingVisibilityPage === 0) return;
@@ -9013,26 +7938,10 @@ spendingVisibilityList?.addEventListener("click", async (event) => {
   const index = Number(row.dataset.visRow);
   if (!Number.isInteger(index) || index < 0) return;
   const state = getSpendingState();
-  if (index === state.activeIndex) {
-    showCopyToast("The primary address is always visible.");
-    return;
-  }
   const hiddenSet = new Set(state.hidden);
-  const address = deriveSpendingAddressAt(index);
-  // Actively offered payment-pool addresses are inert here: a contact may pay into
-  // one at any moment, so it stays visible until the offer is no longer active.
-  if (address && activePoolReservationAddressSet().has(address)) {
-    showCopyToast("This address is offered to a contact for chat payment privacy, so it stays visible.");
-    return;
-  }
+  // Every row toggles both ways, funded ones and the old primary too (iOS 245a5d2).
   const visible = index <= state.maxIndex && !hiddenSet.has(index);
   if (visible) {
-    // Funded addresses stay visible — same rule iOS enforces store-side.
-    const usage = address ? await spendingUsageFor(address) : { kas: 0 };
-    if (usage.kas > 0) {
-      showCopyToast("Addresses holding a balance stay visible.");
-      return;
-    }
     hiddenSet.add(index);
     saveSpendingState({ hidden: Array.from(hiddenSet) });
   } else if (index <= state.maxIndex) {
@@ -9056,12 +7965,7 @@ spendingListEl?.addEventListener("click", async (event) => {
     const index = Math.max(0, Math.floor(Number(btn.dataset.index) || 0));
     const action = btn.dataset.spendingAction;
     const state = getSpendingState();
-    if (action === "activate") {
-      saveSpendingState({ activeIndex: index });
-      renderSpendingList();
-      refreshSpendingSummary();
-      showCopyToast(`Spending address #${index} is now the primary address.`);
-    } else if (action === "copy") {
+    if (action === "copy") {
       const addr = deriveSpendingAddressAt(index);
       if (!addr) { showCopyToast("Address is not ready yet."); return; }
       try { await copyTextToClipboard(addr); showCopyToast("Spending address copied to clipboard."); }
@@ -9081,18 +7985,8 @@ spendingListEl?.addEventListener("click", async (event) => {
       saveSpendingState({ labels });
       renderSpendingList();
     } else if (action === "hide") {
-      // Same guards as the Address Visibility checklist toggle: never the primary (the menu
-      // already omits it there), never an address holding a balance — checked live.
-      if (index === state.activeIndex) { showCopyToast("The primary address is always visible."); return; }
-      const addr = deriveSpendingAddressAt(index);
-      if (!addr) { showCopyToast("Address is not ready yet."); return; }
-      if (activePoolReservationAddressSet().has(addr)) {
-        showCopyToast("This address is offered to a contact for chat payment privacy, so it stays visible.");
-        return;
-      }
-      let balanceSompi = 0;
-      try { balanceSompi = (await spendingBalancesBatchSompi([addr])).get(addr) || 0; } catch { balanceSompi = 0; }
-      if (balanceSompi > 0) { showCopyToast("Addresses holding a balance stay visible."); return; }
+      // Same effect as unchecking it in Address Visibility. Any address, funded too (iOS 245a5d2):
+      // it comes back from there, and its Kaspa still counts in the total.
       const hiddenSet = new Set(state.hidden || []);
       hiddenSet.add(index);
       saveSpendingState({ hidden: Array.from(hiddenSet) });
@@ -9107,19 +8001,24 @@ spendingListEl?.addEventListener("click", async (event) => {
     event.stopPropagation();
     const index = Number(menuToggle.dataset.spendingMenuToggle) || 0;
     const state = getSpendingState();
-    const isPrimary = index === state.activeIndex;
     const address = deriveSpendingAddressAt(index);
-    const reserved = address ? activePoolReservationAddressSet().has(address) : false;
+    // No Set as Primary any more (iOS 6333dd3); Hide for every address (245a5d2).
     const options = [
       { id: "rename", title: "Rename Address", subtitle: "Gives this address a label of your own." },
       { id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." },
       { id: "receive", title: "Show QR Code", subtitle: "Full screen, for scanning with another device." },
+      { id: "hide", title: "Hide Address", subtitle: "Removes it from this list. Re-enable it in Address Visibility." },
     ];
-    if (!isPrimary) options.push({ id: "activate", title: "Set as Primary Address", subtitle: "New payments send from here by default." });
-    if (!isPrimary && !reserved) options.push({ id: "hide", title: "Hide Address", subtitle: "Removes it from this list. Re-enable it in Address Visibility." });
     const label = spendingLabelFor(state, index);
     const choice = await chooseDialog({ title: label || `Address ${index}`, message: address ? shortAddress(address) : "", options });
     if (choice) spendingListEl.querySelector(`[data-spending-action="${choice}"][data-index="${index}"]`)?.click();
+    return;
+  }
+
+  // The chatting address's row opens its own screen (iOS 6333dd3 ChattingAddressManageView).
+  if (event.target.closest("[data-spending-open-chatting]")) {
+    closeAllSpendingMenus();
+    openManageAddressScreen();
     return;
   }
 
@@ -9578,10 +8477,12 @@ document.querySelector("[data-spending-detail-receive]")?.addEventListener("clic
   if (!spendingDetailAddress) return;
   openChattingAddressScreen({ address: spendingDetailAddress, balanceText: spendingDetailBalanceEl?.textContent || "", subtitle: null });
 });
-document.querySelector("[data-spending-detail-send]")?.addEventListener("click", () => openSendKaspaModal({ spendingIndex: spendingDetailIndex }));
+// Every send has the From section: Chatting Address by default, this address under Choose an
+// Address (iOS 6333dd3).
+document.querySelector("[data-spending-detail-send]")?.addEventListener("click", () => openSendKaspaModal());
 
-// "Address Actions" footer menu (Generate / Discover / Send All to Primary),
-// matching iOS's toolbar Menu. Opens upward above the button.
+// "Address Actions" menu (Generate / Discover / Address Visibility), matching iOS's sheet. Send All
+// Kaspa To Primary is gone with the primary (iOS 6333dd3).
 function closeSpendingActionsMenu() {
   if (spendingActionsMenu) spendingActionsMenu.hidden = true;
   spendingActionsToggle?.setAttribute("aria-expanded", "false");
@@ -9594,23 +8495,20 @@ spendingActionsToggle?.addEventListener("click", async (event) => {
       { id: "generate", title: "Generate New Spending Address", subtitle: "Reveals the next unused address in this wallet." },
       { id: "discover", title: "Discover Addresses", subtitle: "Finds addresses holding a balance or a domain." },
       { id: "visibility", title: "Address Visibility", subtitle: "Check off every address you want on the list, in one sitting." },
-      { id: "sweep", title: "Send All Kaspa To Primary", subtitle: "Sweeps every other address into your primary spending address." },
     ],
   });
   if (choice === "generate") spendingGenerateBtn?.click();
   else if (choice === "discover") spendingScanBtn?.click();
   else if (choice === "visibility") spendingVisibilityOpenBtn?.click();
-  else if (choice === "sweep") spendingConsolidateBtn?.click();
 });
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".spending-actions-wrap")) closeSpendingActionsMenu();
 });
 
 // Generate recycles the LOWEST truly-unused index (iOS parity:
-// lowestUnusedSpendingAddress): skips the primary, anything holding a balance
-// or with on-chain history, and any payment-pool reservation (those are
-// promised to a contact and must never be re-offered). Falls back to
-// revealing maxIndex+1 when every revealed index is spoken for.
+// lowestUnusedSpendingAddress): skips the current receive index, anything holding
+// a balance or with on-chain history. Falls back to revealing maxIndex+1 when
+// every revealed index is spoken for.
 
 // Every revealed address's balance in ONE gRPC round trip — the per-address loop this
 // replaces could fail a low index's lookup mid-scan and skip it "to be safe", which on a
@@ -9643,7 +8541,6 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
   spendingGenerateBusy = true;
   try {
     const state = getSpendingState();
-    const poolState = loadPoolState();
     const addressByIndex = new Map();
     for (let i = 0; i <= state.maxIndex; i++) {
       const address = deriveSpendingAddressAt(i);
@@ -9662,7 +8559,6 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
       // port had dropped it.
       if (!alreadyHidden.has(i)) continue;
       if (i === state.activeIndex) continue;
-      if (isReservedPoolAddress(poolState, address)) continue;
       if (balances) {
         if ((balances.get(address) || 0) > 0) continue;
       } else {
@@ -9693,70 +8589,6 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
     spendingGenerateBusy = false;
   }
 }
-
-// Send All Kaspa to the primary spending address: sweep every non-primary
-// spending address that holds a balance into the primary one (matches iOS's
-// consolidateToPrimary). Money-moving — confirmed first, fires one tx per source.
-spendingConsolidateBtn?.addEventListener("click", async () => {
-  closeSpendingActionsMenu();
-  if (spendingConsolidating) return;
-  if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return; }
-  const state = getSpendingState();
-  const primaryIndex = state.activeIndex;
-  const primaryAddress = deriveSpendingAddressAt(primaryIndex);
-  if (!primaryAddress) { showCopyToast("Primary spending address is not ready yet."); return; }
-
-  spendingConsolidating = true;
-  const label = spendingConsolidateBtn.querySelector("span");
-  const original = label?.textContent;
-  try {
-    // Find every non-primary funded address.
-    const sources = [];
-    for (let i = 0; i <= state.maxIndex; i++) {
-      if (i === primaryIndex) continue;
-      const addr = deriveSpendingAddressAt(i);
-      if (!addr) continue;
-      try {
-        const bal = await engine.balanceForAddress(addr);
-        const sompi = BigInt(bal?.totalSompi ?? 0);
-        if (sompi > 0n) sources.push({ index: i, sompi });
-      } catch { /* skip on lookup failure */ }
-    }
-    if (!sources.length) { showCopyToast("No non-primary spending addresses hold a balance."); return; }
-
-    // BigInt sompi throughout (audit DSK-019): float KAS sums could carry more than 8 decimals.
-    const total = sources.reduce((sum, s) => sum + s.sompi, 0n);
-    const ok = await confirmText(
-      `Send all Kaspa from ${sources.length} spending address${sources.length > 1 ? "es" : ""} (~${sompiToKasDisplay(total)} ${KAS_UNIT}) to your primary spending address #${primaryIndex}?\n\nThis broadcasts ${sources.length} transaction${sources.length > 1 ? "s" : ""}.`
-    );
-    if (!ok) return;
-
-    if (label) label.textContent = "Sending…";
-    let sent = 0;
-    for (const src of sources) {
-      try {
-        // Exact single-output Max send (total - fee, no change): a fixed fee headroom left a
-        // tiny change output that KIP-9 storage mass rejects (audit DSK-019).
-        await engine.sendMaxFromSpending({
-          mnemonic: activeAccountMnemonic(),
-          index: src.index,
-          passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
-          destinationAddress: primaryAddress,
-        });
-        sent += 1;
-      } catch (error) {
-        appendEngineLog(`Consolidate #${src.index} failed: ${error.message}`);
-      }
-    }
-    showCopyToast(sent ? `Swept ${sent} address${sent > 1 ? "es" : ""} to your primary address.` : "Nothing could be swept.");
-    renderSpendingList();
-    refreshSpendingSummary();
-    refreshSpendingDetailIfOpen();
-  } finally {
-    spendingConsolidating = false;
-    if (label && original != null) label.textContent = original;
-  }
-});
 
 // Discovery scan: reveal any derived address that already holds a BALANCE or owns a KNS
 // DOMAIN. The old gap-only loop started at maxIndex+1 and quit after 20 consecutive empties,
@@ -9839,16 +8671,7 @@ spendingScanBtn?.addEventListener("click", async () => {
   }
 });
 
-document.querySelector("[data-copy-spending-address]")?.addEventListener("click", async () => {
-  if (!activeSpendingAddress) { showCopyToast("Spending address is not ready yet."); return; }
-  try { await copyTextToClipboard(activeSpendingAddress); showCopyToast("Spending address copied to clipboard."); }
-  catch (error) { appendEngineLog(error.message); }
-});
-document.querySelector("[data-open-spending-receive]")?.addEventListener("click", () => {
-  if (!activeSpendingAddress) { showCopyToast("Spending address is not ready yet."); return; }
-  openChattingAddressScreen({ address: activeSpendingAddress, balanceText: spendingBalanceEl?.textContent || "", subtitle: null });
-});
-document.querySelector("[data-open-spending-send]")?.addEventListener("click", () => openSendKaspaModal({ spendingIndex: getActiveSpendingIndex() }));
+// Profile's Manage Addresses card (iOS 6333dd3).
 document.querySelector("[data-open-spending-manage]")?.addEventListener("click", openSpendingManageScreen);
 document.querySelector("[data-close-spending-manage]")?.addEventListener("click", closeSpendingManageScreen);
 
@@ -10483,22 +9306,29 @@ const CHATTING_ADDRESS_SUBTITLE = kasLabel("This address should be for chatting 
 async function freshReceiveAddress() {
   if (!activeAccountMnemonic()) return null;
   const state = getSpendingState();
-  const reserved = activePoolReservationAddressSet();
   const untouched = async (address) => {
-    if (!address || reserved.has(address)) return false;
+    if (!address) return false;
     spendingUsageCache.delete(address); // live answer: a QR is scanned the instant it appears
     const usage = await spendingUsageFor(address);
     return usage.used !== true;
+  };
+  // The address handed out is back on the Manage Addresses list, even when the person had hidden
+  // it (Hide All): money is about to land there (iOS 245a5d2 showIfHidden).
+  const showIfHidden = (index) => {
+    const current = getSpendingState();
+    if (!current.hidden.includes(index)) return;
+    saveSpendingState({ hidden: current.hidden.filter((i) => i !== index) });
   };
   let remembered = null;
   try { remembered = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY)) || "null"); } catch { remembered = null; }
   if (Number.isInteger(remembered) && remembered >= 0) {
     const address = deriveSpendingAddressAt(remembered);
-    if (await untouched(address)) return address;
+    if (await untouched(address)) { showIfHidden(remembered); return address; }
   }
   const primary = deriveSpendingAddressAt(state.activeIndex);
   if (await untouched(primary)) {
     try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(state.activeIndex)); } catch {}
+    showIfHidden(state.activeIndex);
     return primary;
   }
   const index = state.maxIndex + 1;
@@ -10967,7 +9797,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 148;
+const APP_BUILD = 149;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -11357,17 +10187,20 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
   return { open, submit };
 }
 
-// Standalone Send Kaspa modal (opened from profile > Chatting Address > Send Kaspa).
-// Matches iOS WithdrawKaspaView: KNS resolution + Paste, fiat/KAS toggle + conversion,
-// Max, Network Fee tiers (Normal/Priority/Custom), and Coin Control (UTXO selection).
+// Send Kaspa (Chats > + > Send Kaspa, Donate, the Address Book, an address's Send, paying a payment
+// request, and Compound UTXOs). Matches iOS WithdrawKaspaView: From (iOS 6333dd3), KNS resolution +
+// Paste, fiat/KAS toggle + conversion, Max, Network Fee tiers (Normal/Priority/Custom), and Coin
+// Control (UTXO selection).
 const sendKaspaModal = document.querySelector("[data-send-kaspa-modal]");
-function closeSendKaspaModal() { closeSendFromPicker(); if (sendKaspaModal) sendKaspaModal.hidden = true; }
+function closeSendKaspaModal() { closeOwnAddressPicker(); if (sendKaspaModal) sendKaspaModal.hidden = true; }
 // The screen is built from the shared Send Kaspa pieces (send-kaspa-components.js, iOS 4d0324f),
 // mounted before the element lookups below.
 mountSendPieces(sendKaspaModal, {
+  from: sendFromSectionHtml({ prefix: "send-kaspa" }),
   recipient: recipientCardHtml({ prefix: "send-kaspa" }),
   amount: amountEntryHtml({ prefix: "send-kaspa", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, attrs: { conversion: "send-kaspa-fiat" } }),
-  pills: `<div class="sk-pills">${infoPillHtml({ attr: "send-kaspa-source-pill", button: true, disabled: true })}${infoPillHtml({ attr: "send-kaspa-from-pill" })}</div>`,
+  // Compound UTXOs has no From (it merges this one address): its balance shows here (iOS 6333dd3).
+  pills: `<div class="sk-pills" data-send-kaspa-pills hidden>${infoPillHtml({ attr: "send-kaspa-source-pill" })}</div>`,
   fee: feeControlsHtml({ prefix: "send-kaspa", coinList: true }),
   action: sendActionButtonHtml({ attr: "send-kaspa-submit", title: "Slide to Send" }),
 });
@@ -11402,10 +10235,12 @@ let sendKaspaMaxToken = 0;
 let sendKaspaFeeTier = "normal";
 let sendKaspaUtxos = [];           // UTXO entries at the source address, for coin control
 const sendKaspaSelected = new Set();
-// Which address the modal sends FROM: null = the chatting/identity address (engine.address);
-// a number = that spending-address index. Lets one rich modal serve both (spending send/compound
-// looks identical to the chatting one).
+// Which address the modal sends FROM (the From section, iOS 6333dd3): null = the chatting/identity
+// address (engine.address, every send's default); a number = that spending-address index, picked
+// under Choose an Address (or the address Compound UTXOs merges). One rich modal serves both.
 let sendKaspaSourceIndex = null;
+// The picked spending address's name, as Choose an Address listed it.
+let sendKaspaSourceLabel = null;
 
 function sendKaspaSourceAddress() {
   return sendKaspaSourceIndex == null ? engine.address : deriveSpendingAddressAt(sendKaspaSourceIndex);
@@ -11904,35 +10739,36 @@ function resetSendKaspaExtras() {
   }).catch(() => { if (source === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
 }
 
-// The Available pill (iOS SendInfoPill): "Available: X KAS", and on a spending address's Send
-// "· Address #N ⌄" - click it to send from another spending address (iOS e994235). Compound UTXOs
-// is about its one address, so there it's shown but fixed. The From pill names the address paying.
+// The From section (iOS 6333dd3 SendFromSection): Chatting Address or Choose an Address, the chosen
+// address and its balance ("…" while it loads). Compound UTXOs is about its one address, so it has
+// no From: its "Available: X KAS" pill shows instead.
 function spendingSourceLabel(index) {
   const st = getSpendingState();
   const custom = st.labels?.[index] ?? st.labels?.[String(index)];
   const trimmed = custom != null ? String(custom).trim() : "";
   return trimmed || `Address #${index}`;
 }
-function renderSendKaspaSourcePill(balanceText) {
-  const pill = sendKaspaModal?.querySelector("[data-send-kaspa-source-pill]");
-  const spending = sendKaspaSourceIndex != null;
-  const chooser = spending && !sendKaspaCompound;
-  if (pill) {
-    pill.innerHTML = availablePillInnerHtml({
-      text: `Available: ${balanceText} ${KAS_UNIT}`,
-      sourceLabel: spending ? spendingSourceLabel(sendKaspaSourceIndex) : null,
-      chooser,
+const sendKaspaFrom = sendFromControls(sendKaspaModal, "send-kaspa", {
+  onChatting: () => { if (!sendKaspaSlider.busy) switchSendKaspaSource(null); },
+  onChoose: () => {
+    if (sendKaspaCompound || sendKaspaSlider.busy) return;
+    openOwnAddressPickerFor({
+      title: "Send From",
+      selectedAddress: sendKaspaSourceAddress(),
+      onPick: (picked) => switchSendKaspaSource(picked.kind === "spending" ? picked.index : null, picked.label),
     });
-    pill.disabled = !chooser;
-    pill.classList.toggle("clickable", chooser);
-    if (chooser) pill.title = "Choose which spending address to send from"; else pill.removeAttribute("title");
-  }
-  const fromPill = sendKaspaModal?.querySelector("[data-send-kaspa-from-pill]");
-  if (fromPill) {
-    const from = sendKaspaSourceAddress();
-    fromPill.textContent = from ? `From ${shortSendAddress(from)}` : "";
-    fromPill.hidden = !from;
-  }
+  },
+});
+function renderSendKaspaSourcePill(balanceText) {
+  const loading = balanceText == null || balanceText === "…";
+  sendKaspaFrom.render({
+    chatting: sendKaspaSourceIndex == null,
+    title: sendKaspaSourceIndex == null ? "Chatting Address" : (sendKaspaSourceLabel || spendingSourceLabel(sendKaspaSourceIndex)),
+    address: sendKaspaSourceAddress() || "",
+    balanceText: loading ? null : `${balanceText} ${KAS_UNIT}`,
+  });
+  const pill = sendKaspaModal?.querySelector("[data-send-kaspa-source-pill]");
+  if (pill) pill.innerHTML = availablePillInnerHtml({ text: `Available: ${balanceText ?? "…"} ${KAS_UNIT}` });
 }
 
 // Compound UTXOs mode (matches iOS's WithdrawKaspaView isCompoundMode): the Send Kaspa screen with
@@ -11943,15 +10779,17 @@ function applySendKaspaCompoundUi() {
   const titleEl = document.querySelector("[data-send-kaspa-title]");
   const kickerEl = document.querySelector("[data-send-kaspa-kicker]");
   const note = document.querySelector("[data-send-kaspa-compound-note]");
-  const spending = sendKaspaSourceIndex != null;
-  // iOS: "Send Kaspa from Address #N" on a spending address's Send; it follows a picked source.
-  // Paying a payment request is "Payment Request" (iOS c6851d6).
+  // iOS WithdrawKaspaView: "Compound UTXOs", "Payment Request" while paying one (iOS c6851d6), else
+  // "Send Kaspa" - which address pays is the From section's to say (iOS 6333dd3).
   if (titleEl) titleEl.textContent = sendKaspaCompound
     ? "Compound UTXOs"
-    : (spending ? `Send Kaspa from Address #${sendKaspaSourceIndex}` : (sendKaspaPaymentRequest ? "Payment Request" : "Send Kaspa"));
-  if (kickerEl) kickerEl.textContent = sendKaspaCompound
-    ? "Consolidating this address"
-    : (spending ? `Spending address · ${shortAddress(sendKaspaSourceAddress())}` : "Real Kaspa transaction");
+    : (sendKaspaPaymentRequest ? "Payment Request" : "Send Kaspa");
+  if (kickerEl) kickerEl.textContent = sendKaspaCompound ? "Consolidating this address" : "Real Kaspa transaction";
+  // From on every send but Compound UTXOs, whose balance shows in the Available pill instead.
+  const from = sendKaspaModal?.querySelector("[data-send-kaspa-from]");
+  if (from) from.hidden = sendKaspaCompound;
+  const pills = sendKaspaModal?.querySelector("[data-send-kaspa-pills]");
+  if (pills) pills.hidden = !sendKaspaCompound;
   // The shared recipient card, locked to this address for Compound UTXOs, and to a payment
   // request's address while paying one (iOS c6851d6 lockedAddress: activeRequest?.address).
   setRecipientLocked(sendKaspaModal, "send-kaspa", sendKaspaCompound ? sendKaspaSourceAddress() : (sendKaspaPaymentRequest?.address || null));
@@ -11997,10 +10835,11 @@ const sendKaspaController = makeSendController({
         : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(), totalFeeKas });
     }
     if (sendKaspaMaxMode) return sendKaspaPinnedMax(destination, selectedOutpoints);
-    // A payment request to someone's chatting address goes as a chat payment, its memo inside.
+    // A payment request to someone's chatting address goes as a chat payment, its memo inside,
+    // from whichever address From names (iOS 6333dd3 sendPayment(sourceSpendingIndex:)).
     const request = sendKaspaPaymentRequest;
-    if (request?.toChattingAddress && sendKaspaSourceIndex == null && request.address.toLowerCase() === String(destination || "").toLowerCase()) {
-      return payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints });
+    if (request?.toChattingAddress && request.address.toLowerCase() === String(destination || "").toLowerCase()) {
+      return payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints, sourceSpendingIndex: sendKaspaSourceIndex });
     }
     if (sendKaspaSourceIndex != null) {
       const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex);
@@ -12016,12 +10855,14 @@ const sendKaspaController = makeSendController({
   // iOS parity: a send from the CHATTING address (not a spending index, not a
   // compound) surfaces as a chat with the destination holding the payment bubble.
   onSent: ({ txid, destination, amountKas }) => {
-    if (sendKaspaCompound || sendKaspaSourceIndex != null) return;
     // A request paid as a chat payment already has its bubble in that chat.
     if (sendKaspaPaidAsChatPayment) { sendKaspaPaidAsChatPayment = false; return; }
+    if (sendKaspaCompound || sendKaspaSourceIndex != null) return;
     recordOutgoingPaymentChat({ destination, amountKas, txid });
   },
 });
+// Every send starts From the chatting address (iOS 6333dd3); `spendingIndex` is the address
+// Compound UTXOs merges (or one to start From).
 function openSendKaspaModal(options = {}) {
   const spendingIndex = Number.isInteger(options?.spendingIndex) ? options.spendingIndex : null;
   if (spendingIndex != null && !activeAccountMnemonic()) {
@@ -12030,10 +10871,11 @@ function openSendKaspaModal(options = {}) {
   }
   sendKaspaCompound = Boolean(options?.compound);
   sendKaspaSourceIndex = spendingIndex;
+  sendKaspaSourceLabel = null;
   sendKaspaPaymentRequest = null;
   sendKaspaPaidAsChatPayment = false;
   renderSendKaspaPaymentRequest();
-  closeSendFromPicker();
+  closeOwnAddressPicker();
   sendKaspaSlider.setBusy(false);
   applySendKaspaCompoundUi();
   resetSendKaspaExtras();
@@ -12042,8 +10884,8 @@ function openSendKaspaModal(options = {}) {
   // synchronously, so the prefill goes in right after and runs the usual address check.
   const prefill = String(options?.prefillAddress || "").trim();
   const recipient = document.querySelector("[data-send-kaspa-recipient]");
-  if (options?.paymentRequest && !sendKaspaCompound && spendingIndex == null && engine.address) {
-    // Someone's payment request (iOS c6851d6): paid from the chatting address, as on iOS.
+  if (options?.paymentRequest && !sendKaspaCompound && engine.address) {
+    // Someone's payment request (iOS c6851d6): From the chatting address unless another is chosen.
     applyPaymentRequestToSendKaspa(options.paymentRequest);
   } else if (prefill && !sendKaspaCompound && recipient && engine.address) {
     recipient.value = prefill;
@@ -12054,7 +10896,7 @@ function openSendKaspaModal(options = {}) {
 // A payment request pasted (or scanned) into the recipient fills in everything it carries (iOS
 // c6851d6 WithdrawKaspaView): the address locked, the amount and the request above it.
 document.querySelector("[data-send-kaspa-recipient]")?.addEventListener("input", (event) => {
-  if (sendKaspaCompound || sendKaspaSourceIndex != null || event.target.readOnly) return;
+  if (sendKaspaCompound || event.target.readOnly) return;
   const value = String(event.target.value || "");
   if (!/\/pay\//i.test(value)) return;
   const link = firstInternalLinkIn(value.trim());
@@ -12067,8 +10909,8 @@ const sendKaspaSlider = createSendActionButton(sendKaspaModal?.querySelector("[d
   onAction: () => sendKaspaController.submit(),
 });
 
-// Every spending address Send From can list (iOS getSpendingAddressList): the revealed range with
-// each one's label, balance (one batched lookup), hidden flag and whether it is the primary.
+// Every spending address Choose an Address can list (iOS getSpendingAddressList): the revealed range
+// with each one's label, balance (one batched lookup) and hidden flag.
 async function loadSpendingSourceEntries() {
   if (!activeAccountMnemonic()) return [];
   await ensureRuntimes({ quiet: true });
@@ -12085,18 +10927,59 @@ async function loadSpendingSourceEntries() {
     ...r,
     label: spendingSourceLabel(r.index),
     balanceSompi: BigInt(Math.round(Number(balances.get(r.address) || 0))),
-    isPrimary: r.index === st.activeIndex,
     hidden: hidden.has(r.index),
   }));
 }
 
-// Send From on a spending address's Send (iOS e994235): this send only - the fee estimate, Max,
-// the title and the send itself follow the picked address, coin control and a custom fee reset
-// (they belong to the address they were set for), and the primary stays where it is.
-function switchSendKaspaSource(index) {
-  if (!Number.isInteger(index) || index === sendKaspaSourceIndex || sendKaspaCompound) return;
-  if (!deriveSpendingAddressAt(index)) { showCopyToast("That spending address isn't ready yet."); return; }
-  sendKaspaSourceIndex = index;
+// Your addresses for Choose an Address (iOS OwnAddressPicker): the chatting address, then every
+// spending address, with balances.
+async function loadOwnAddressEntries() {
+  let chattingSompi = 0n;
+  try { chattingSompi = BigInt((await engine.balance())?.totalSompi ?? 0); }
+  catch { chattingSompi = sompiFromUserText(String(currentBalanceKas ?? "")) ?? 0n; }
+  return {
+    chatting: engine.address ? { address: engine.address, balanceSompi: chattingSompi } : null,
+    spending: await loadSpendingSourceEntries(),
+  };
+}
+// Used / Unused the way Manage Addresses checks it: the cached answer, else a history lookup
+// (remembered once it says used, which never changes back).
+function ownAddressCachedUsed(address) {
+  const session = spendingUsageCache.get(address);
+  if (session?.used === true || session?.used === false) return session.used;
+  const cached = loadSpendingBalCache()[address]?.used;
+  return cached === true || cached === false ? cached : null;
+}
+async function ownAddressProbeUsed(address) {
+  const used = await spendingAddressHasHistory(address);
+  if (used === true) saveSpendingBalCacheEntries({ [address]: { ...(loadSpendingBalCache()[address] || {}), used: true } });
+  return used;
+}
+/** Choose an Address over the current screen (a send's "Send From", Request Payment's "Choose an
+ *  Address"): every address of the account, chatting first, each Used / Unused (iOS 6333dd3). */
+function openOwnAddressPickerFor({ title, selectedAddress, onPick }) {
+  openOwnAddressPicker({
+    title,
+    selectedAddress,
+    loadEntries: async () => { await ensureRuntimes({ quiet: true }); return loadOwnAddressEntries(); },
+    cachedUsed: ownAddressCachedUsed,
+    probeUsed: ownAddressProbeUsed,
+    kasUnit: KAS_UNIT,
+    onPick,
+  });
+}
+
+// From on Send Kaspa (iOS 6333dd3): the chatting address (null) or a spending address. The fee
+// estimate, Max and the send itself follow it; coin control and a custom fee reset (they belong to
+// the address they were set for), and the primary stays where it is.
+function switchSendKaspaSource(pickedIndex, label = null) {
+  const next = Number.isInteger(pickedIndex) ? pickedIndex : null;
+  if (sendKaspaCompound) return;
+  if (next === sendKaspaSourceIndex) return;
+  if (next != null && !deriveSpendingAddressAt(next)) { showCopyToast("That spending address isn't ready yet."); return; }
+  sendKaspaSourceIndex = next;
+  sendKaspaSourceLabel = next == null ? null : (label || spendingSourceLabel(next));
+  const index = next;
   sendKaspaMaxMode = false;
   sendKaspaFeeCustomOverride = false;
   selectSendKaspaFeeTier(sendKaspaFeeTier);
@@ -12117,15 +11000,6 @@ function switchSendKaspaSource(index) {
   }).catch(() => { if (index === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
   scheduleSendKaspaFeeEstimate();
 }
-sendKaspaModal?.querySelector("[data-send-kaspa-source-pill]")?.addEventListener("click", () => {
-  if (sendKaspaSourceIndex == null || sendKaspaCompound || sendKaspaSlider.busy) return;
-  openSendFromPicker({
-    loadEntries: loadSpendingSourceEntries,
-    currentIndex: sendKaspaSourceIndex,
-    kasUnit: KAS_UNIT,
-    onPick: (entry) => switchSendKaspaSource(entry.index),
-  });
-});
 
 document.querySelectorAll("[data-close-send-kaspa]").forEach((button) => button.addEventListener("click", closeSendKaspaModal));
 document.querySelector("[data-open-send-kaspa]")?.addEventListener("click", openSendKaspaModal);
@@ -14708,7 +13582,9 @@ function updateWalletUi() {
   const accountName = meta?.name || (address ? "Current Account" : "No Active Account");
   if (toolbarBalanceValue) toolbarBalanceValue.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   else toolbarBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
-  if (profileBalance) profileBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  // The chatting balance is part of Profile's Manage Addresses total and Manage Addresses' first
+  // row (iOS 6333dd3).
+  try { renderProfileAccountTotal(); refreshChattingRowBalance(); } catch { /* not yet wired during early init */ }
   installTestnetFaucetButton.render?.(); // Claim Testnet Kaspa follows the loaded account
   if (chattingAddressBalance) chattingAddressBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
@@ -15562,10 +14438,11 @@ function renderMessages(conversationEntry) {
   // from another device whose text never synced into an archive this device has seen).
   const messages = (conversationEntry.messages || [])
     .filter((m) => m?.text !== "📤 Sent via another device")
-    // Invisible control envelopes (reactions, fresh-address pool markers) are applied at ingest,
-    // never shown as bubbles. Filter them at render too, so any that slipped into storage before
-    // interception existed — or via a history restore that didn't intercept — don't leak as raw JSON.
-    .filter((m) => !parseReactionEnvelope(m?.text) && !parsePaymentPoolEnvelope(m?.text) && !parseEditEnvelope(m?.text));
+    // Invisible control envelopes (reactions, retired payment-pool markers) are applied or dropped
+    // at ingest, never shown as bubbles. Filter them at render too, so any that slipped into storage
+    // before interception existed — or via a history restore that didn't intercept — don't leak as
+    // raw JSON.
+    .filter((m) => !parseReactionEnvelope(m?.text) && !isRetiredPaymentPoolEnvelope(m?.text) && !parseEditEnvelope(m?.text));
   // The thread re-renders constantly (sync polls, link previews resolving,
   // reactions). Capture the scroll state BEFORE the rebuild so a user reading
   // older history isn't yanked back to the bottom by every background render:
@@ -15732,7 +14609,7 @@ function renderMessages(conversationEntry) {
     // Kaspa logo in a circle — solid white on the sent/teal side for contrast —
     // bold amount, a Sent/Received line, optional note. Unparseable/legacy payment
     // content falls through to the classic text rendering below. Covers both
-    // detected payments and pool payment_notice bubbles (same text template).
+    // detected payments and the pool payment_notice bubbles stored before 6333dd3 (same text template).
     const paymentParts = parsePaymentCardParts(message);
     if (paymentParts) {
       bubble.classList.add("has-payment-card");
@@ -16027,13 +14904,6 @@ function openConversation(conversationId) {
   // Ready to type on a computer. On a phone the keyboard waits for a tap on the field, as in the
   // iOS app: focusing here raised it over the thread on every open.
   if (!isTouchDevice()) window.setTimeout(() => composer.elements.message?.focus(), 0);
-
-  // Fresh-address payment pools: the lazy once-per-contact offer, the pool-of-2
-  // replenish re-check (retries a top-up whose send failed when a reservation got
-  // funded), and the low-water top-up request. All no-ops unless due.
-  offerAddressPoolIfNeeded(contact, conversationEntry);
-  replenishPoolIfNeeded(contact.address);
-  maybeRequestMorePoolAddresses(contact);
 
   // The header name above is a synchronous cache-peek and may render before
   // KNS data has ever been fetched for this address — refresh in the
@@ -16810,23 +15680,22 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
   // Chats wherever it lives - its dock tab or Kaspa Hub (setActiveAppTab routes a Hub tab there).
   setActiveAppTab("chats");
   openConversation(conversationEntry.id);
-  // Pay in Kaspa from a group or public chat sender sheet, a KaPosts poster: the Send KAS sheet.
+  // Send Kaspa from a group or public chat sender sheet, a KaPosts poster: the Send KAS sheet.
   if (paymentMode) openPaymentSheet();
 }
 
 // --- KaPosts tip sheet -------------------------------------------------------
 // The same Send Kaspa sheet as a payment in a chat (iOS 0e08006, KaPostTipSheet), built from the
-// shared pieces (send-kaspa-components.js): "Tip / to <name>", the big amount with the KAS /
-// currency switch and Max, where it goes (a fresh private address they shared, or their public
-// chatting address), the FUNDING SOURCE's available balance (primary spending address when
-// Payment Privacy is on, chatting address when off), the fee card (speed, custom fee, Coin
-// Control), the small-amount question, and slide-to-send. The send itself is unchanged: a plain
-// payment with no payload, through the exact chat-payment rules (consumePoolPaymentDestination +
-// privacy-gated funding), with the payment bubble in the 1:1 conversation. The contact is created
-// only when a tip is actually sent.
+// shared pieces (send-kaspa-components.js): "Tip / to <name>", From (iOS 6333dd3: the chatting
+// address by default, or Choose an Address, with that address's balance), the big amount with the
+// KAS / currency switch and Max, the fee card (speed, custom fee, Coin Control), the small-amount
+// question, and slide-to-send. The send itself: a plain payment with no payload to their chatting
+// address, from the From address, with the payment bubble in the 1:1 conversation. The contact is
+// created only when a tip is actually sent.
 const TIP_FEE_MULTIPLIERS = { normal: 1n, fast: 2n, priority: 5n };
 const tipModal = document.querySelector("[data-tip-modal]");
 mountSendPieces(tipModal, {
+  from: sendFromSectionHtml({ prefix: "tip" }),
   amount: amountEntryHtml({ prefix: "tip", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})` }),
   // Prefix "tip-kas" so its data-tip-kas-fee="tier" buttons never collide with the other data-tip-*.
   fee: feeControlsHtml({ prefix: "tip-kas" }),
@@ -16842,6 +15711,18 @@ let tipMaxTimer = null;
 
 function tipQ(selector) { return tipModal ? tipModal.querySelector(selector) : null; }
 const tipSlider = createSendActionButton(tipQ("[data-tip-send]"), { onAction: () => submitTipSheet() });
+const tipFromCtl = sendFromControls(tipModal, "tip", {
+  onChatting: () => tipSetSource(null),
+  onChoose: () => {
+    const tip = tipState;
+    if (!tip || tip.sending) return;
+    openOwnAddressPickerFor({
+      title: "Send From",
+      selectedAddress: tip.fundingAddress || engine.address,
+      onPick: (picked) => tipSetSource(picked.kind === "spending" ? picked.index : null, picked.label),
+    });
+  },
+});
 
 // --- KaPosts Settings (iOS a566da7) ------------------------------------------
 // The gear in KaPosts' icon row: a default tip (tapping Tip sends it at once, no amount screen)
@@ -16945,10 +15826,9 @@ async function sendInstantTip(address, name, amountKasNumber) {
   }
   persistState();
   renderChats();
-  const privacyOn = chatsPrivacyEnabled();
-  const fundingIndex = getActiveSpendingIndex();
-  const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
-  const destinationAddress = await consumePoolPaymentDestination(contact);
+  // From the chatting address to theirs, like a chat payment with no From picked (iOS 6333dd3
+  // sendPayment without sourceSpendingIndex).
+  const destinationAddress = chatPaymentDestination(contact);
   const message = createMessage({
     conversationId: conversationEntry.id, contactId: contact.id, direction: "outgoing",
     text: `Sent ${amountKas} ${KAS_UNIT}`, sender: engine.address || null, receiver: destinationAddress,
@@ -16961,17 +15841,12 @@ async function sendInstantTip(address, name, amountKasNumber) {
   const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
   showCopyToast(`Sending ${amountKas} ${KAS_UNIT} tip…`);
   try {
-    const fresh = fundingAddress ? freshChangeForSpendingIndex(fundingIndex) : null;
-    const result = fundingAddress
-      ? await engine.sendFromSpending({ mnemonic: activeAccountMnemonic(), index: fundingIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(), destinationAddress, amountKas, feeKas: "0", changeAddress: fresh?.address || null })
-      : await engine.send(destinationAddress, amountKas, "0");
-    if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh));
+    const result = await engine.send(destinationAddress, amountKas, "0");
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: NETWORK, note: "Kaspa node accepted and broadcast the payment transaction." });
-    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(kasTextToSompi(amountKas)), destinationAddress);
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
     conversationEntry.updatedAt = Date.now();
     persistState();
@@ -17013,6 +15888,7 @@ function tipRefreshState() {
   const sending = Boolean(tip?.sending);
   if (tipSlider.busy !== sending) tipSlider.setBusy(sending);
   tipSlider.setEnabled(Boolean(tip) && sompi > 0n && !sending);
+  tipFromCtl.setDisabled(sending);
 }
 
 function tipSetError(message) {
@@ -17083,17 +15959,54 @@ function tipRefreshUnitUi() {
   tipRefreshState();
 }
 
-// "Available: X KAS · Primary spending address" (or the chatting address): what the send will see.
+// From (iOS 6333dd3 SendFromSection): the address the tip leaves from and its balance - what the
+// send will see.
 function tipRenderAvailable() {
-  const el = tipQ("[data-tip-available]");
   const tip = tipState;
-  if (!el || !tip) return;
-  const manual = tip.manualUtxos ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n) : null;
-  let text;
-  if (manual != null) text = `Selected: ${formatSompiPlain(manual)} ${KAS_UNIT}`;
-  else if (tip.availableSompi != null) text = `Available: ${formatSompiPlain(tip.availableSompi)} ${KAS_UNIT}`;
-  else text = tip.availableFailed ? "Available: unavailable" : "Available: …";
-  el.innerHTML = availablePillInnerHtml({ text, sourceLabel: tip.fundingAddress ? "Primary spending address" : "Chatting address" });
+  if (!tip) return;
+  tipFromCtl.render({
+    chatting: tip.fundingIndex == null,
+    title: tip.fundingIndex == null ? "Chatting Address" : (tip.sourceLabel || spendingSourceLabel(tip.fundingIndex)),
+    address: tip.fundingAddress || engine.address || "",
+    balanceText: tip.availableSompi != null ? `${formatSompiPlain(tip.availableSompi)} ${KAS_UNIT}` : (tip.availableFailed ? `-- ${KAS_UNIT}` : null),
+  });
+  tipFromCtl.setDisabled(Boolean(tip.sending));
+}
+// The From address's balance (the tip's Available), loaded for the source picked now.
+async function tipLoadAvailable(tip) {
+  tip.availableSompi = null;
+  tip.availableFailed = false;
+  tipRenderAvailable();
+  const source = tip.fundingIndex;
+  try {
+    await ensureRuntimes({ quiet: true });
+    const balance = tip.fundingAddress ? await engine.balanceForAddress(tip.fundingAddress) : await engine.balance();
+    if (tipState !== tip || tip.fundingIndex !== source) return; // the sheet closed or the From changed meanwhile
+    tip.availableSompi = BigInt(balance?.totalSompi ?? (sompiFromUserText(String(balance?.totalKas ?? "")) ?? 0n));
+  } catch {
+    if (tipState !== tip || tip.fundingIndex !== source) return;
+    tip.availableFailed = true;
+  }
+  tipRenderAvailable();
+}
+// From: the chatting address (null) or a spending address. Coins picked on one address can't pay
+// from another (iOS 6333dd3).
+function tipSetSource(index, label = null) {
+  const tip = tipState;
+  if (!tip || tip.sending) return;
+  const next = Number.isInteger(index) ? index : null;
+  if (next === tip.fundingIndex) return;
+  const address = next == null ? null : deriveSpendingAddressAt(next);
+  if (next != null && !address) { showCopyToast("That spending address isn't ready yet."); return; }
+  tip.fundingIndex = next;
+  tip.fundingAddress = address;
+  tip.sourceLabel = next == null ? null : label;
+  tip.manualUtxos = null;
+  tip.error = "";
+  tipRenderFee();
+  tipRefreshState();
+  tipScheduleFee();
+  tipLoadAvailable(tip);
 }
 
 // The fee from the address the tip will spend from (and the chosen coins), debounced like the
@@ -17247,10 +16160,8 @@ async function openTipModal({ address, name } = {}) {
     ? (state.conversations.find((entry) => entry.contactId === contact.id) || null)
     : null;
 
-  const privacyOn = chatsPrivacyEnabled();
-  const fundingIndex = getActiveSpendingIndex();
-  const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
   closeCoinControlPicker();
+  closeOwnAddressPicker();
   if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
   tipFeeTimer = null;
   tipFeeEstimateToken += 1;
@@ -17259,8 +16170,8 @@ async function openTipModal({ address, name } = {}) {
   tipMaxTimer = null;
   tipState = {
     max: null, // an exact Max, pinned (tipSetMax)
-    contact, conversationEntry, address: clean, displayName, fundingIndex, fundingAddress,
-    spendingFunded: Boolean(fundingAddress),
+    // From (iOS 6333dd3): null = the chatting address, the default; else a spending address.
+    contact, conversationEntry, address: clean, displayName, fundingIndex: null, fundingAddress: null, sourceLabel: null,
     availableSompi: null, availableFailed: false,
     // the fee card: base (Normal) fee in sompi, speed, custom extra; coin control (null = automatic)
     baseFeeSompi: null, estimating: false, tier: "normal", customExtraFeeSompi: null, manualUtxos: null,
@@ -17274,15 +16185,6 @@ async function openTipModal({ address, name } = {}) {
   if (titleEl) titleEl.textContent = "Tip";
   const recipientEl = tipQ("[data-tip-recipient]");
   if (recipientEl) { recipientEl.textContent = `to ${shownName}`; recipientEl.title = clean; }
-  // Which privacy scenario this tip will hit (same signal as the chat composer).
-  const destEl = tipQ("[data-tip-destination]");
-  if (destEl) {
-    const viaPool = willPayViaFreshPoolAddress(clean);
-    destEl.textContent = viaPool
-      ? "Goes to a fresh private address they shared"
-      : "Goes to their public chatting address";
-    destEl.classList.toggle("tip-dest-private", viaPool);
-  }
   const amountEl = tipQ("[data-tip-amount]");
   if (amountEl) amountEl.value = "";
   const customFeeEl = tipQ("[data-tip-kas-fee-custom]");
@@ -17300,23 +16202,14 @@ async function openTipModal({ address, name } = {}) {
     sheet.price = price;
     tipRefreshUnitUi();
   }).catch(() => {});
-
-  try {
-    await ensureRuntimes({ quiet: true });
-    const balance = fundingAddress ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
-    if (tipState !== sheet) return; // the sheet closed or switched targets meanwhile
-    sheet.availableSompi = BigInt(balance?.totalSompi ?? (sompiFromUserText(String(balance?.totalKas ?? "")) ?? 0n));
-  } catch {
-    if (tipState !== sheet) return;
-    sheet.availableFailed = true;
-  }
-  tipRenderAvailable();
+  await tipLoadAvailable(sheet);
 }
 
 // A tip on its way can't be walked away from mid-send (iOS interactiveDismissDisabled(isSending)).
 function closeTipModal({ force = false } = {}) {
   if (tipState?.sending && !force) return;
   closeCoinControlPicker();
+  closeOwnAddressPicker();
   tipSlider.reset();
   if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
   tipFeeTimer = null;
@@ -17367,8 +16260,8 @@ async function sendTipNow(tipSompi) {
     ? tip.manualUtxos.reduce((sum, coin) => sum + BigInt(coin.amountSompi || 0), 0n)
     : tip.availableSompi;
   if (max) {
-    // The coins must still be the ones Max was computed from - checked before a pool address is
-    // used or a bubble is written, and again by the engine at the send.
+    // The coins must still be the ones Max was computed from - checked before a bubble is
+    // written, and again by the engine at the send.
     let live = null;
     try {
       await ensureRuntimes({ quiet: true });
@@ -17413,8 +16306,8 @@ async function sendTipNow(tipSompi) {
   persistState();
   renderChats();
 
-  // Recipient-governed destination: their fresh pool address when they shared one.
-  const destinationAddress = await consumePoolPaymentDestination(contact);
+  // Paid to their chatting address (iOS 6333dd3: no pool destinations any more).
+  const destinationAddress = chatPaymentDestination(contact);
   const createdAt = Date.now();
   const message = createMessage({
     conversationId: conversationEntry.id,
@@ -17436,8 +16329,9 @@ async function sendTipNow(tipSompi) {
 
   try {
     await ensureRuntimes({ quiet: true });
-    // A Max tip leaves no change, so no fresh change address is used.
-    const tipFresh = tip.fundingAddress && !max ? freshChangeForSpendingIndex(tip.fundingIndex) : null;
+    // From a spending address the change goes to a never-used address, revealed rather than made
+    // primary (iOS 6333dd3). A Max tip leaves no change, so no fresh change address is used.
+    const tipFresh = tip.fundingAddress && !max ? freshSpendingChangeAddress() : null;
     // A plain payment, no payload: the tip's on-chain shape is unchanged. The fee card's extra goes
     // as the priority fee and coin control limits the coins, exactly as in the chat's sheet.
     // Max: one output of exactly the shown amount from exactly its coins (DSK-042), or nothing if
@@ -17466,7 +16360,7 @@ async function sendTipNow(tipSompi) {
           changeAddress: tipFresh?.address || null,
         })
       : await engine.send(destinationAddress, amountKas, "0", { extraFeeSompi, manualUtxos: manualKeys });
-    if (tipFresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(tipFresh));
+    if (tipFresh) runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(tipFresh));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -17480,7 +16374,6 @@ async function sendTipNow(tipSompi) {
         ? "Kaspa payment verified at recipient output."
         : "Kaspa node accepted and broadcast the payment transaction.",
     });
-    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress);
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
     showCopyToast(`Tip sent · ${(verifiedTxid || txid).slice(0, 10)}…`);
     conversationEntry.updatedAt = Date.now();
@@ -19462,74 +18355,30 @@ function setComposerHint(message) {
   input.focus();
 }
 
-function hideAvailableBalanceBanner() {
-  if (availableBalanceHideTimer) window.clearTimeout(availableBalanceHideTimer);
-  availableBalanceHideTimer = null;
-  if (availableBalanceBanner) availableBalanceBanner.hidden = true;
-}
-
-// The Send KAS sheet's "Available" pill (iOS availableBalanceBubble). Privacy ON: the PRIMARY
-// SPENDING address balance - the actual funding source - underlined and clickable, opening Manage
-// Spending Addresses; refreshed when that balance changes (wallet-activity bridge) and after sends.
-// Privacy OFF: the plain chatting balance, not clickable. A small accent arrow marks that the next
-// send pays a fresh pool address.
+// The Send KAS sheet's From (iOS 6333dd3 SendFromSection, replacing the Available pill): the
+// chatting address by default, or one picked under Choose an Address, with that address's balance -
+// refreshed when funds move (wallet-activity bridge) and after sends. `reset` shows the spinner
+// while a newly picked address loads.
 let composerBalanceToken = 0;
 
-// Privacy ON (iOS dae8a01): "available: X KAS · Address #N ⌄" - the address paying (the primary
-// unless another was picked) - and clicking it opens Send From, not Manage Addresses.
-function renderAvailableBalanceBanner(balanceText, clickable, contact) {
-  if (!availableBalanceBanner) return;
-  availableBalanceBanner.replaceChildren();
-  const value = document.createElement("span");
-  value.className = `available-balance-value${clickable ? " clickable" : ""}`;
-  value.textContent = `available: ${balanceText} ${KAS_UNIT}`;
-  availableBalanceBanner.append(value);
-  if (clickable) {
-    const sep = document.createElement("span");
-    sep.className = "sk-pill-sep";
-    sep.setAttribute("aria-hidden", "true");
-    sep.textContent = "·";
-    const source = document.createElement("span");
-    source.className = "sk-pill-source";
-    source.textContent = spendingSourceLabel(paymentSourceIndex ?? getActiveSpendingIndex());
-    const chevron = document.createElement("span");
-    chevron.className = "sk-pill-chevron";
-    chevron.setAttribute("aria-hidden", "true");
-    chevron.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>';
-    availableBalanceBanner.append(sep, source, chevron);
-  }
-  // A real control when it opens Send From (keyboard + screen readers), a status line otherwise.
-  if (clickable) {
-    availableBalanceBanner.setAttribute("role", "button");
-    availableBalanceBanner.tabIndex = 0;
-    availableBalanceBanner.title = "Choose which spending address to send from";
-  } else {
-    availableBalanceBanner.setAttribute("role", "status");
-    availableBalanceBanner.removeAttribute("tabindex");
-    availableBalanceBanner.removeAttribute("title");
-  }
-  if (contact && willPayViaFreshPoolAddress(contact.address)) {
-    const arrow = document.createElement("span");
-    arrow.className = "available-balance-fresh";
-    arrow.textContent = "→";
-    arrow.title = "Payment goes to a fresh address this contact shared, so it cannot be linked to their chat address on-chain";
-    availableBalanceBanner.append(arrow);
-  }
-  availableBalanceBanner.classList.toggle("clickable", clickable);
-  availableBalanceBanner.hidden = false;
+function renderPaymentFrom(balanceText = null) {
+  payFromCtl.render({
+    chatting: paymentSourceIndex == null,
+    title: paymentSourceIndex == null ? "Chatting Address" : (paymentSourceLabel || spendingSourceLabel(paymentSourceIndex)),
+    address: paymentFundingAddress() || "",
+    balanceText: balanceText == null ? null : `${balanceText} ${KAS_UNIT}`,
+  });
 }
 
-async function refreshComposerAvailableBalance() {
-  if (!availableBalanceBanner || !isPaySheetOpen()) return;
-  const conversationEntry = state.conversations.find((entry) => entry.id === (paySheetConversationId || activeConversationId));
-  const contact = contactForConversation(conversationEntry);
-  const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
+async function refreshComposerAvailableBalance({ reset = false } = {}) {
+  if (!isPaySheetOpen()) return;
   const token = ++composerBalanceToken;
-  renderAvailableBalanceBanner("…", spendingFunded, contact);
+  const source = paymentSourceIndex;
+  if (reset) renderPaymentFrom(null);
   try {
     let balanceKas;
-    if (spendingFunded) {
-      const address = deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex());
+    if (source != null) {
+      const address = deriveSpendingAddressAt(source);
       if (!address) throw new Error("No spending address");
       balanceKas = (await engine.balanceForAddress(address)).totalKas;
     } else {
@@ -19537,64 +18386,45 @@ async function refreshComposerAvailableBalance() {
       currentBalanceKas = balance.totalKas; rememberLastBalance();
       balanceKas = balance.totalKas;
     }
-    if (token !== composerBalanceToken || !isPaySheetOpen()) return;
-    composerAvailableKas = Number(balanceKas);
-    renderAvailableBalanceBanner(balanceKas, spendingFunded, contact);
+    if (token !== composerBalanceToken || !isPaySheetOpen() || source !== paymentSourceIndex) return;
+    renderPaymentFrom(balanceKas);
   } catch {
-    if (token !== composerBalanceToken || !isPaySheetOpen()) return;
-    renderAvailableBalanceBanner("--", spendingFunded, contact);
+    if (token !== composerBalanceToken || !isPaySheetOpen() || source !== paymentSourceIndex) return;
+    renderPaymentFrom("--");
   }
 }
 
-// Privacy ON: pay this one payment from another spending address (iOS dae8a01, the same Send From
-// list as a spending address's Send). Privacy OFF pays from the chatting address: nothing to pick.
-function openPaymentSourcePicker() {
+// From: this one payment comes out of the chatting address (null) or a spending address. Coin
+// control and a custom fee belong to the address they were set for (iOS 62c2773 / 6333dd3).
+function setPaymentSource(index, label = null) {
   if (!isPaySheetOpen() || paymentSendInFlight) return;
-  if (!chatsPrivacyEnabled() || !activeAccountMnemonic()) return; // OFF: not tappable
-  const primaryIndex = getActiveSpendingIndex();
-  openSendFromPicker({
-    loadEntries: loadSpendingSourceEntries,
-    currentIndex: paymentSourceIndex ?? primaryIndex,
-    kasUnit: KAS_UNIT,
-    onPick: (entry) => {
-      if (!isPaySheetOpen() || paymentSendInFlight) return;
-      const previousSource = paymentSourceIndex;
-      paymentSourceIndex = entry.index === getActiveSpendingIndex() ? null : entry.index;
-      // Coin control and a custom fee belong to the address they were set for (iOS 62c2773).
-      if (paymentSourceIndex !== previousSource) {
-        paymentManualUtxos = null;
-        paymentCustomExtraFeeSompi = null;
-        payFeeCtl.setEditing(false);
-        renderPaymentFeeCard();
-      }
-      composerAvailableKas = null;
-      paySheetError = "";
-      refreshComposerAvailableBalance();
-      refreshPaymentSheetState();
-      schedulePaymentFee();
-    },
-  });
+  const next = Number.isInteger(index) ? index : null;
+  if (next === paymentSourceIndex) return;
+  paymentSourceIndex = next;
+  paymentSourceLabel = next == null ? null : label;
+  paymentManualUtxos = null;
+  paymentCustomExtraFeeSompi = null;
+  payFeeCtl.setEditing(false);
+  renderPaymentFeeCard();
+  paySheetError = "";
+  refreshComposerAvailableBalance({ reset: true });
+  refreshPaymentSheetState();
+  schedulePaymentFee();
 }
-availableBalanceBanner?.addEventListener("click", openPaymentSourcePicker);
-availableBalanceBanner?.addEventListener("keydown", (event) => {
-  if ((event.key === "Enter" || event.key === " ") && availableBalanceBanner.getAttribute("role") === "button") {
-    event.preventDefault();
-    openPaymentSourcePicker();
-  }
-});
 
 // --- Send KAS sheet (iOS 8d208b2 paymentSheet) ------------------------------------------------
 // "Send KAS / to <name>", a big centred amount (KAS or fiat - iOS KaspaFiatAmountState - with the
 // converted value and Max under it), an encrypted memo of up to 140 characters (the payment
 // payload's note, shown in the payment bubble), the fee and Available pills, and a slide-to-send
-// button (iOS afaad34). Every way into a chat payment opens it: the "+" sheet's Pay in
-// Kaspa, the payment-mode chat route (Pay in Kaspa from group and public chat sender sheets, the
+// button (iOS afaad34). Every way into a chat payment opens it: the "+" sheet's Send
+// Kaspa, the payment-mode chat route (Send Kaspa from group and public chat sender sheets, the
 // donate row). No confirmation sheet afterwards (iOS 80a6aae): the bubble is the confirmation.
 const PAYMENT_MEMO_MAX_LENGTH = 140;
 const paySheet = document.querySelector("[data-pay-sheet]");
 // The shared Send Kaspa pieces (send-kaspa-components.js): the amount entry and the slide-to-send
 // button, mounted before the element lookups below.
 mountSendPieces(paySheet, {
+  from: sendFromSectionHtml({ prefix: "pay" }),
   amount: amountEntryHtml({
     prefix: "pay", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`,
     attrs: { unit: "pay-unit", toggle: "pay-unit-toggle", conversion: "pay-conversion", max: "pay-max" },
@@ -19617,13 +18447,24 @@ const payFeeCustomInput = paySheet?.querySelector("[data-pay-kas-fee-custom]");
 const payNoteEl = paySheet?.querySelector("[data-pay-note]");
 const payHoldButton = paySheet?.querySelector("[data-pay-hold]");
 const paySlider = createSendActionButton(payHoldButton, { onAction: () => submitPaymentSheet() });
-// The spending address this payment comes from when not the primary (Chats Payment Privacy on),
-// picked from the Available pill (iOS dae8a01). null = the primary. Reset each time the sheet
-// opens; the primary itself never changes.
+// Where this payment comes from (the sheet's From, iOS 6333dd3): null = the chatting address, else
+// the spending address picked under Choose an Address. Back to the chatting address each time the
+// sheet opens; nothing about it changes which address is "primary".
 let paymentSourceIndex = null;
+let paymentSourceLabel = null;
+const payFromCtl = sendFromControls(paySheet, "pay", {
+  onChatting: () => setPaymentSource(null),
+  onChoose: () => {
+    if (!isPaySheetOpen() || paymentSendInFlight) return;
+    openOwnAddressPickerFor({
+      title: "Send From",
+      selectedAddress: paymentFundingAddress(),
+      onPick: (picked) => setPaymentSource(picked.kind === "spending" ? picked.index : null, picked.label),
+    });
+  },
+});
 let paymentUnit = "kas";
 let paymentPrice = null;
-let composerAvailableKas = null;
 let paySheetError = "";
 let payFeeTimer = null;
 let payFeeToken = 0;
@@ -19726,6 +18567,7 @@ function refreshPaymentSheetState() {
   }
   if (paySlider.busy !== Boolean(paymentSendInFlight)) paySlider.setBusy(paymentSendInFlight);
   paySlider.setEnabled(sompi > 0 && !paymentSendInFlight);
+  payFromCtl.setDisabled(Boolean(paymentSendInFlight));
 }
 
 // The fee card (iOS SendFeeControls in the Send KAS sheet, 62c2773). The extra over the base fee:
@@ -19739,11 +18581,10 @@ function paymentExtraFeeSompi() {
 function paymentTotalFeeSompi() {
   return paymentBaseFeeSompi == null ? null : paymentBaseFeeSompi + paymentExtraFeeSompi();
 }
-// The address this payment spends from - what sendKasPayment will use: the picked spending address
-// (Send From), else the primary, with Chats Payment Privacy on; the chatting address with it off.
+// The address this payment spends from - what sendKasPayment will use: the From (iOS 6333dd3), the
+// chatting address unless a spending address was picked.
 function paymentFundingAddress() {
-  const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
-  return spendingFunded ? deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex()) : engine.address;
+  return paymentSourceIndex == null ? engine.address : deriveSpendingAddressAt(paymentSourceIndex);
 }
 function renderPaymentFeeCard() {
   const total = paymentTotalFeeSompi();
@@ -19924,9 +18765,8 @@ function schedulePaymentFee() {
     try {
       const amountKas = kasTextFromSompi(amountSompi);
       const payloadBytes = estimatePaymentPayloadBytes(currentPaymentMemo(), Number(amountSompi));
-      const spendingFunded = chatsPrivacyEnabled() && Boolean(activeAccountMnemonic());
-      // The picked source (Send From), else the primary - what sendKasPayment will spend from.
-      const fundingAddress = spendingFunded ? deriveSpendingAddressAt(paymentSourceIndex ?? getActiveSpendingIndex()) : null;
+      // The From address - what sendKasPayment will spend from (null = the chatting address).
+      const fundingAddress = paymentSourceIndex == null ? null : deriveSpendingAddressAt(paymentSourceIndex);
       // Coin control: estimate against exactly the chosen coins (iOS passes manualUtxos).
       const selection = paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null;
       // Chat payments pay the SDK's own fee at Normal (no priority tip), so that is the base shown;
@@ -19973,6 +18813,7 @@ function openPaymentSheet() {
   closeComposerMenu();
   paySheetConversationId = conversationEntry.id;
   paymentSourceIndex = null;
+  paymentSourceLabel = null;
   resetPaymentSheetFields();
   if (payTitleEl) payTitleEl.textContent = `Send ${KAS_UNIT}`;
   if (payRecipientEl) payRecipientEl.textContent = `to ${displayNameForAddress(contact) || shortAddress(contact.address)}`;
@@ -19982,7 +18823,7 @@ function openPaymentSheet() {
     paymentPrice = price;
     if (isPaySheetOpen()) refreshPaymentUnitUi();
   }).catch(() => {});
-  refreshComposerAvailableBalance();
+  refreshComposerAvailableBalance({ reset: true });
   // The amount is the first thing to type - after anything that was about to take focus back.
   window.setTimeout(() => { if (isPaySheetOpen()) payAmountInput?.focus(); }, 60);
 }
@@ -19992,7 +18833,7 @@ function closePaymentSheet({ force = false } = {}) {
   // A payment on its way can't be walked away from mid-send (iOS interactiveDismissDisabled).
   if (paymentSendInFlight && !force) return;
   cancelPaymentHold();
-  closeSendFromPicker();
+  closeOwnAddressPicker();
   closeCoinControlPicker();
   paySheet.hidden = true;
   paySheetConversationId = null;
@@ -20002,7 +18843,7 @@ function closePaymentSheet({ force = false } = {}) {
   paymentMaxToken += 1; // a Max still computing has no sheet to fill
   if (paymentMaxTimer) window.clearTimeout(paymentMaxTimer);
   paymentMaxTimer = null;
-  hideAvailableBalanceBanner();
+  composerBalanceToken += 1; // a balance still loading has no sheet to show it
 }
 
 payAmountInput?.addEventListener("input", (event) => {
@@ -20097,7 +18938,7 @@ async function submitPaymentSheet() {
   try {
     await sendKasPayment(conversationId, amountKas, {
       note: memo,
-      // Send From (privacy on): the picked spending address, null = the primary.
+      // From (iOS 6333dd3): the picked spending address, null = the chatting address.
       sourceSpendingIndex: paymentSourceIndex,
       // The fee card (iOS 62c2773): the speed / custom extra over the base fee, and coin control.
       extraFeeSompi: max ? max.extraFeeSompi : paymentExtraFeeSompi(),
@@ -20405,18 +19246,13 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
   paymentSendInFlight = true;
   refreshPaymentSheetState();
   try {
-    // Funding source follows the per-account Chats Payment Privacy toggle
-    // (iOS paymentFundingSourceAddress): ON funds from the PRIMARY SPENDING
-    // address (falling back to the chatting address only if this account has
-    // no stored mnemonic to derive from), OFF is chatting-to-chatting end to
-    // end. The balance guard checks the same source the send will use.
-    // A source picked on the sheet's Available pill (iOS dae8a01) pays instead of the primary;
-    // privacy OFF ignores it (always the chatting address).
-    const privacyOn = chatsPrivacyEnabled();
-    const primaryIndex = getActiveSpendingIndex();
-    const fundingIndex = Number.isInteger(sourceSpendingIndex) ? sourceSpendingIndex : primaryIndex;
-    const keepsPrimary = fundingIndex !== primaryIndex;
-    const fundingAddress = privacyOn && activeAccountMnemonic() ? deriveSpendingAddressAt(fundingIndex) : null;
+    // The From the person chose (iOS 6333dd3 paymentFundingSourceAddress): the chatting address
+    // (null, the default) - change back to it - or one of their spending addresses, whose change
+    // goes to a never-used address. The balance guard checks the same source the send will use.
+    const fundingIndex = Number.isInteger(sourceSpendingIndex) ? sourceSpendingIndex : null;
+    if (fundingIndex != null && !activeAccountMnemonic()) throw new Error("This account has no recovery phrase, so spending sends aren't available.");
+    const fundingAddress = fundingIndex != null ? deriveSpendingAddressAt(fundingIndex) : null;
+    if (fundingIndex != null && !fundingAddress) throw new Error("That spending address isn't ready yet.");
     const spendingFunded = Boolean(fundingAddress);
     const balance = spendingFunded ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
     if (!spendingFunded) currentBalanceKas = balance.totalKas; rememberLastBalance();
@@ -20436,8 +19272,8 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     }
     if (max) {
       // Max carries its own exact fee; what must hold is that the coins are still the ones it was
-      // computed from - checked here before a pool address is used or a bubble is written, and
-      // again by the engine at the send.
+      // computed from - checked here before a bubble is written, and again by the engine at the
+      // send.
       if (requestedSompi !== max.amountSompi || !sameCoinKeys(maxCoinKeys(balance.entries, manualKeys), max.outpoints)) {
         const changed = new Error(MAX_AMOUNT_CHANGED_MESSAGE);
         changed.code = MAX_AMOUNT_CHANGED;
@@ -20449,7 +19285,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
         : `Not enough ${KAS_UNIT}: planned spend ${amountKas} ${KAS_UNIT}, but the available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`);
     }
     // The payment payload, as iOS writes it: kchat:1:pay: + the payment JSON (the memo is its
-    // "message") encrypted to the contact's chat address. Built before a pool address is consumed.
+    // "message") encrypted to the contact's chat address.
     let payload = null;
     try {
       const built = await engine.buildPaymentPayload({ receiver: contact.address, note: memo, amountSompi: Number(requestedSompi) });
@@ -20458,12 +19294,8 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       if (memo) throw new Error(`Couldn't encrypt the memo. (${userFacingError(error)})`);
       appendEngineLog(`Payment payload unavailable, sending without one: ${error.message}`);
     }
-    // Fresh-address payment pools: consume the contact's next unused pool
-    // address (persisted immediately — a consumed address is never offered to
-    // a payment again, even if this payment ultimately fails), chatting
-    // address fallback. Recipient-governed: their shared fresh addresses are
-    // used no matter the sender's privacy toggle.
-    const destinationAddress = await consumePoolPaymentDestination(contact);
+    // Paid to the contact's chatting address (iOS 6333dd3: no pool destinations any more).
+    const destinationAddress = chatPaymentDestination(contact);
     const createdAt = Date.now();
     // The memo goes into your own bubble now (iOS 2be75ed): it is encrypted to the recipient, so
     // this device can never read it back from the chain.
@@ -20490,12 +19322,10 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
 
     let submittedTxids = [];
     try {
-      // The primary's change goes to a fresh address that becomes the primary (as before); a
-      // picked address's change still goes to a fresh address, revealed but not made primary.
-      // A Max payment leaves no change, so no fresh change address is used.
-      const payFresh = spendingFunded && !max
-        ? (keepsPrimary ? freshSpendingChangeAddress() : freshChangeForSpendingIndex(fundingIndex))
-        : null;
+      // A spending address's change goes to a never-used address, revealed in Manage Addresses;
+      // nothing rotates a "primary" (iOS 6333dd3). A Max payment leaves no change, so no fresh
+      // change address is used.
+      const payFresh = spendingFunded && !max ? freshSpendingChangeAddress() : null;
       // Max: one output of exactly the shown amount from exactly its coins, the payment payload on
       // it, nothing left for change (DSK-042); the engine refuses if the coins changed (DSK-043).
       const maxPin = max ? { extraFeeSompi: extraSompi, manualUtxos: manualKeys, payload, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
@@ -20526,10 +19356,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
         : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys });
       if (payFresh) {
         // The node has the payment by now: a bookkeeping slip here must not mark it failed.
-        runPostSubmitStep("Change-address rotation", () => {
-          if (keepsPrimary) revealSpendingChangeAddress(payFresh);
-          else rotatePrimarySpendingTo(payFresh);
-        });
+        runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(payFresh));
       }
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -20562,11 +19389,6 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
         : "Kaspa node accepted and broadcast the payment transaction.",
     });
     setStatus(`Payment sent · ${(verifiedTxid || txid).slice(0, 12)}…`);
-    // Pool payments never touch the recipient's chatting address — send the
-    // payment_notice so their chat still shows the bubble, then top up our
-    // stored pool if it ran low. No-op for chatting-address payments. The memo rides in the
-    // notice (XP-004); the payment's own payload above is sealed to the contact's chat key.
-    handlePoolPaymentSubmitted(contact, verifiedTxid || txid, Number(requestedSompi), destinationAddress, memo);
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -21975,20 +20797,11 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
     renderChats();
     return null;
   }
-  // Fresh-address payment pool envelopes ride the same encrypted pipeline and
-  // are intercepted the same way reactions are — they never render as bubbles
-  // (a payment_notice *produces* a payment bubble, but the envelope itself is
-  // swallowed here). Unknown {type:...} values fall through to the normal
+  // The retired payment-pool envelopes another client may still send (addr_pool,
+  // addr_pool_request, payment_notice): never bubbles, and nothing acts on them any
+  // more (iOS 6333dd3). Unknown {type:...} values fall through to the normal
   // pipeline per the wire contract.
-  const poolEnvelope = parsePaymentPoolEnvelope(message.text);
-  if (poolEnvelope) {
-    try { handlePaymentPoolEnvelope(poolEnvelope, conversationEntry, message); }
-    catch (error) { appendEngineLog(`Pool envelope handling failed: ${error.message}`); }
-    // Swallowed control message: no bubble, so the caller must not notify or count it.
-    // (A payment_notice produces its own payment bubble + notification inside
-    // handlePaymentPoolEnvelope, so it is handled there, not here.)
-    return null;
-  }
+  if (isRetiredPaymentPoolEnvelope(message.text)) return null;
   // Calls ride the chat: an invite rings, a request asks this device to host, an end hangs up.
   // The message still lands, as the call-history line every client renders.
   const callEnvelope = Calls.parseCallEnvelope(message.text);
@@ -22170,9 +20983,9 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       if (isScriptAddress(archiveMessage?.senderAddress) || isScriptAddress(archiveMessage?.receiverAddress)) continue;
 
       const rawContent = String(archiveMessage?.content || "");
-      // Pool envelopes in a phone archive are historical bookkeeping — never
-      // rendered, and their side effects must not replay from a backup.
-      if (parsePaymentPoolEnvelope(rawContent)) {
+      // Retired pool envelopes in a phone archive are historical bookkeeping —
+      // never rendered.
+      if (isRetiredPaymentPoolEnvelope(rawContent)) {
         if (txid) knownTxids.add(txid);
         continue;
       }
@@ -23994,7 +22807,6 @@ const SETUP_ICONS = {
   server: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>',
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path fill="var(--accent, #70c7ba)" stroke="none" d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg>',
   shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg>',
-  privacy: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M7.2 12.6s2-3.1 4.8-3.1 4.8 3.1 4.8 3.1-2 3.1-4.8 3.1a4.4 4.4 0 0 1-1.7-.34"/><path d="M7 7l10 10"/></svg>',
 };
 
 const SETUP_STEPS = [
@@ -24008,12 +22820,11 @@ const SETUP_STEPS = [
   { icon: SETUP_ICONS.network, title: "How KaChat Uses Kaspa", body: "KaChat lets you send and receive messages on the Kaspa network itself. Kaspa is required to pay fees when sending your messages. The fee you pay goes to miners which secure the network." },
   { icon: SETUP_ICONS.qrcode, qr: true, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started - enough to claim a .kachat name and chat for a while. 5 Kaspa is enough for about 2500 messages.", extra: "funding" },
   { icon: SETUP_ICONS.server, title: "Connect to a Node", body: "KaChat needs to connect to a node. How would you like to connect?", extra: "node" },
-  { icon: null, title: "Chatting vs. Spending Address", body: "", extra: "addresses" },
+  // Your Addresses, without the old "never send money here" privacy framing (iOS 245a5d2).
+  { icon: null, title: "Your Addresses", body: "", extra: "addresses" },
+  // The guide's final step: the Chat Payment Privacy step after it is gone with the feature (iOS
+  // 6333dd3).
   { icon: SETUP_ICONS.chat, title: "Starting a Conversation", body: "To chat with someone, press Create Chat and enter their Kaspa address or .kachat name. Your first message reaches them as a Message Request they can accept. For the most privacy, turn on Private Chat: nothing links you on chain, and they see your messages once they start a private chat with you too." },
-  // Per-account Chats Payment Privacy (fresh-address payment pools) — placed
-  // directly after the starting-a-conversation step, the guide's final step.
-  // Copy matches iOS's WelcomeGuideView paymentPrivacyStep exactly.
-  { icon: SETUP_ICONS.privacy, title: "Chat Payment Privacy", body: "How would you like to send and receive payments in chats?", extra: "privacy" },
 ];
 let setupStepIndex = 0;
 const SETUP_USER_TYPE_STEP = SETUP_STEPS.findIndex((step) => step.extra === "usertype");
@@ -24096,43 +22907,6 @@ function renderSetupExtra(kind) {
       wrap.append(pickerBtn);
     }
     setupExtraEl.appendChild(wrap);
-  } else if (kind === "privacy") {
-    // Chats Payment Privacy chooser (iOS paymentPrivacyRow port): On
-    // preselected + Recommended; the selection writes straight through to the
-    // per-account store, so a replay shows and edits the real setting.
-    const options = [
-      {
-        value: true,
-        title: "On",
-        badge: "Recommended",
-        sub: "Anytime you receive Kaspa KaChat will do its best make sure the Kaspa goes to a fresh address not tied to your chatting identity. Sending Kaspa KaChat will always make sure it comes out of your primary spend address which is never associated with your chatting identity.",
-      },
-      {
-        value: false,
-        title: "Off",
-        badge: null,
-        sub: "All Kaspa will flow in and out of your chatting address",
-      },
-    ];
-    const current = chatsPrivacyEnabled();
-    const list = document.createElement("div");
-    list.className = "setup-choice-list";
-    for (const o of options) {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "setup-node-row" + (current === o.value ? " selected" : "");
-      row.innerHTML = `<span class="setup-node-dot"></span><span class="setup-node-copy"><strong></strong><small></small></span>${o.badge ? `<span class="setup-node-badge"></span>` : ""}`;
-      row.querySelector("strong").textContent = o.title;
-      row.querySelector("small").textContent = o.sub;
-      if (o.badge) row.querySelector(".setup-node-badge").textContent = o.badge;
-      row.addEventListener("click", () => {
-        setChatsPrivacyEnabled(o.value);
-        refreshChatsPrivacyToggle();
-        renderSetupStep();
-      });
-      list.appendChild(row);
-    }
-    setupExtraEl.appendChild(list);
   } else if (kind === "node") {
     // The same two the Node Connection dialog offers, worded for someone who has not met either
     // yet. Recommended is ours because it needs nothing; Best is their own because nobody else
@@ -24184,8 +22958,8 @@ function renderSetupExtra(kind) {
   } else if (kind === "addresses") {
     const spendingAddr = deriveSpendingAddressAt(getActiveSpendingIndex());
     const rows = [
-      { title: "Chatting Address", value: engine.address || "--", caption: "Your public messaging identity. Fund it with a small amount to pay message fees and for your .kachat name - never send money here that you intend to spend." },
-      { title: "Spending Address", value: spendingAddr || "Import a recovery phrase to use spending addresses", caption: "Where you send and receive Kaspa you intend to use for everything else." },
+      { title: "Chatting Address", value: engine.address || "--", caption: "Your messaging identity. Messages and your .kachat name are paid from it, and every send starts from it unless you choose another address." },
+      { title: "Spending Address", value: spendingAddr || "Import a recovery phrase to use spending addresses", caption: "More addresses of yours for sending and receiving Kaspa. Pick one under From on any send, or make a new one in Manage Addresses." },
     ];
     for (const r of rows) {
       const box = document.createElement("div");
@@ -25720,7 +24494,7 @@ function exportDiagnosticsFile() {
     const archive = {
       exportedAt: new Date().toISOString(),
       app: { name: "KaChat Desktop", version: APP_VERSION_LABEL, userAgent: navigator.userAgent, language: navigator.language, online: navigator.onLine },
-      account: { chattingAddress: engine.address ? `${engine.address.slice(0, 16)}…${engine.address.slice(-6)}` : null, chatsPrivacy: chatsPrivacyEnabled() },
+      account: { chattingAddress: engine.address ? `${engine.address.slice(0, 16)}…${engine.address.slice(-6)}` : null },
       connection: { endpoints: getEndpoints(), explorer: currentExplorer().displayName, runtime: window.__kaspaEngineStep || null },
       counts: { contacts: (state.contacts || []).length, conversations: conversations.length, incomingMessages: incoming, outgoingMessages: outgoing },
       logs: logLines,
@@ -27256,7 +26030,8 @@ function openGroupMemberMenu(address, x, y) {
   const options = [{ id: "profile", title: "View Profile", subtitle: "Their profile, .kachat name and address." }];
   if (!mine) {
     options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
-    options.push({ id: "pay", title: "Pay in Kaspa", subtitle: `Send ${KAS_UNIT} to this member from your chatting address.` });
+    // "Send Kaspa", was "Pay in Kaspa" (iOS aaa45ae).
+    options.push({ id: "pay", title: "Send Kaspa", subtitle: `Send ${KAS_UNIT} to this member from your chatting address.` });
   }
   options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
@@ -29079,7 +27854,7 @@ groupMembersList?.addEventListener("click", (event) => {
 // - New Public Chat swaps the sheet's content for the room-name field. Errors show in place;
 //   joining switches to Public Chats and opens the room there.
 // - Fund Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page; Send
-//   Kaspa closes it and opens Profile's Send from the current spending address.
+//   Kaspa closes it and opens Send Kaspa, From the chatting address or any other (iOS 6333dd3).
 // No state lives outside the DOM: the sheet is built per open (like the payment detail sheet), and
 // "came from the sheet" is a data attribute on the create modal, so nothing here is read at load.
 function newChatSheetIcon(kind) {
@@ -29106,7 +27881,7 @@ function newChatSheetMenuHtml() {
     { id: "group", title: "New Group Chat", subtitle: "Start an encrypted group with several people." },
     // Simple Mode hides Public Chats, so it has no tile here either.
     ...(isChildModeEnabled() ? [] : [{ id: "public", title: "New Public Chat", subtitle: "Join a public room, or create one." }]),
-    { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from your spending address." },
+    { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from any of your addresses." },
     { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
     { id: "request", title: "Request Payment", subtitle: "A link asking for an exact amount, with what it's for." },
     { id: "fund", title: "Fund Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
@@ -29123,23 +27898,6 @@ function newChatSheetMenuHtml() {
     </div>`;
 }
 
-// The New sheet's Send Kaspa (iOS f81e8d6 SpendingSendLauncher): Profile's Send from the current
-// spending address - the same openSendKaspaModal({ spendingIndex }) its spending row's Send opens,
-// which loads that address's balance into its Available pill. Says so while the spending key is
-// still unlocking, rather than opening a send with nothing behind it.
-async function openSpendingSendFromNewSheet() {
-  if (!activeAccountMnemonic()) {
-    showCopyToast("This account has no recovery phrase, so spending sends aren't available.");
-    return;
-  }
-  try { await ensureRuntimes({ quiet: true }); } catch { /* checked just below */ }
-  const index = getActiveSpendingIndex();
-  if (!deriveSpendingAddressAt(index)) {
-    showCopyToast("Spending address is unlocking. Go back and try again.");
-    return;
-  }
-  openSendKaspaModal({ spendingIndex: index });
-}
 
 function newChatSheetJoinHtml() {
   return `
@@ -29227,7 +27985,8 @@ function openNewChatSheet() {
     } else if (choice === "receive") {
       openReceiveKaspaScreen();
     } else if (choice === "send") {
-      openSpendingSendFromNewSheet();
+      // Send Kaspa From the chatting address, or any address under Choose an Address (iOS 6333dd3).
+      openSendKaspaModal();
     }
   });
   sheet.addEventListener("input", (event) => {
@@ -29706,7 +28465,7 @@ function startGroupMedia(kind, viaNextcloud) {
   }
 }
 // The "+" (iOS plusSheet): a sheet titled Send - Camera, Photo, Voice Message, and File once a
-// Nextcloud server is connected. No Pay in Kaspa or chess: a group has no single recipient. With
+// Nextcloud server is connected. No Send Kaspa or chess: a group has no single recipient. With
 // Nextcloud connected, Camera / Photo / Voice Message ask on chain or via Nextcloud (Back returns
 // to this sheet); without it they go straight on chain.
 groupPlusButton?.addEventListener("click", async (event) => {

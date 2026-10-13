@@ -744,63 +744,12 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   stroke-linejoin: round;
 }
 
-/* Address rows (Chatting / Spending). The text block is a button because tapping the title and
-   balance is what copies the address - iOS folded the old Copy row into it, leaving two circles. */
-.profile-address-row {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 14px 16px;
-}
 
-.profile-address-main {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  /* Fixed width so Send and Manage land in the same column on both rows regardless of how long
-     the title or the balance text is (iOS pins this block to 140pt for the same reason). */
-  width: 148px;
-  flex: 0 0 auto;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
 
-.profile-address-title { font-weight: 650; font-size: 14px; }
-.profile-address-balance { color: var(--kaspa-ink); font-weight: 700; font-size: 13px; }
-.profile-address-note,
-.profile-address-total { color: var(--muted); font-size: 11.5px; }
 
-.profile-address-actions { display: flex; align-items: center; gap: 14px; margin-left: auto; }
 
-.profile-address-icon {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  border: 1px solid var(--card-border);
-  background: var(--surface-2);
-  color: var(--kaspa-ink);
-  cursor: pointer;
-  flex: 0 0 auto;
-}
 
-.profile-address-icon:hover { border-color: rgba(112,199,186,.3); }
 
-.profile-address-icon svg {
-  width: 22px;
-  height: 22px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
 
 /* Trailing cluster on a row that carries a value beside its chevron (Your Domains). */
 .profile-row-trailing { display: inline-flex; align-items: center; gap: 8px; }
@@ -3675,7 +3624,6 @@ body.session-logged-out [data-account-rename-modal] {
 
 
 /* Step 101: Send KAS mode. Scoped to the existing thread composer only. */
-.available-balance-banner,
 .fee-estimate-banner { cursor: pointer; font-variant-numeric: tabular-nums; }
 .fee-estimate-banner:not(.estimating) { text-decoration: underline; text-underline-offset: 2px; }
 .fee-estimate-banner.estimating {
@@ -3698,16 +3646,6 @@ body.session-logged-out [data-account-rename-modal] {
   box-shadow: 0 8px 20px rgba(0,0,0,.22);
 }
 
-.available-balance-banner { right: 18px; display: inline-flex; align-items: center; gap: 6px; }
-.available-balance-banner.clickable { cursor: pointer; }
-.available-balance-banner .available-balance-value.clickable { text-decoration: underline; text-underline-offset: 2px; }
-/* Fresh-address indicator: the next send pays a pool address the contact shared. */
-.available-balance-banner .available-balance-fresh {
-  color: var(--kaspa);
-  font-weight: 700;
-  font-size: 12px;
-  line-height: 1;
-}
 .fee-estimate-banner { left: 18px; }
 
 /* Sits in the composer shell's normal flow, directly above the composer, so the
@@ -7408,10 +7346,6 @@ body.session-logged-out [data-account-rename-modal] {
 
 /* KaPosts tip: the chat's Send KAS sheet (.pay-sheet) plus where the tip goes (iOS 0e08006) */
 [data-tip-modal] { z-index: 1600; }
-.tip-destination { margin: 0; text-align: center; font-size: 12.5px; color: var(--muted); }
-.tip-destination.tip-dest-private { color: var(--ios-green); }
-.tip-destination::before { content: "🌐 "; }
-.tip-destination.tip-dest-private::before { content: "🔒 "; }
 
 /* Broadcasts list, iOS parity: Popular + Your Channels sections of rounded cards */
 .broadcast-section-header {
@@ -9715,20 +9649,11 @@ body.session-logged-out [data-account-rename-modal] {
 .kns-save-banner.failed { color: var(--ios-red); }
 .kns-save-banner button { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 800; cursor: pointer; text-decoration: underline; }
 .kns-save-banner .dismiss { color: var(--muted); text-decoration: none; font-size: 16px; }
-/* Manage Addresses: total balance, the Chat Privacy tab, Checking badge. */
+/* Manage Addresses: total balance, Checking badge. */
 .spending-total { display: grid; gap: 2px; padding: 8px 16px 4px; }
 .spending-total span { font-size: 12px; color: var(--muted); }
 .spending-total strong { font-size: 22px; }
 .spending-address-usage.checking { color: var(--muted); }
-.spending-privacy-list { display: flex; flex-direction: column; gap: 10px; }
-.spending-privacy-explainer { margin: 0; padding: 0 4px; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
-.spending-privacy-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px 16px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-1); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
-.spending-privacy-row .meta { flex: 1; min-width: 0; display: grid; gap: 4px; }
-.spending-privacy-row .meta small { font-size: 12px; color: var(--muted); }
-.spending-privacy-row .meta code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.spending-privacy-row .funded { display: inline-flex; align-items: center; gap: 6px; color: var(--kaspa-ink); font-weight: 700; font-size: 13px; }
-.spending-privacy-row .funded b { padding: 2px 8px; border-radius: 999px; background: rgba(112,199,186,.15); font-size: 11px; }
-.spending-privacy-row svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* iOS "Address Actions": one labelled capsule under the tabs on the chatting and spending address
    screens, the same button Manage Addresses has at its foot. */
@@ -10119,7 +10044,6 @@ html.standalone .ios-install-hint { display: none; }
   .settings-toggle-row.settings-segmented-row { flex-direction: column; align-items: stretch; gap: 8px; }
   .settings-segmented-row .settings-segmented { display: flex; width: 100%; }
   .settings-segmented-row .settings-segmented-option { flex: 1; }
-  .manage-address-tabs .settings-segmented-option { padding: 7px 6px; font-size: 12px; }
 
   /* Portfolio summary stats stack; a P&L line never wraps under itself. */
   .portfolio-summary-grid { flex-direction: column; gap: 8px; }
@@ -11333,15 +11257,6 @@ button.chess-t-row { cursor: pointer; }
 .profile-qr-circle { width: 80px; height: 80px; color: var(--on-accent-strong); }
 .profile-qr-circle svg { width: 30px; height: 30px; stroke-width: 1.8; }
 .profile-qr-button { font-size: 15px; font-weight: 400; gap: 8px; }
-.profile-address-row { justify-content: center; gap: 24px; }
-.profile-address-main { width: 140px; }
-.profile-address-title { font-size: 15px; font-weight: 600; }
-.profile-address-balance { font-size: 12px; font-weight: 600; color: var(--kaspa-ink); }
-.profile-address-note, .profile-address-total { font-size: 11px; }
-.profile-address-actions { margin-left: 0; gap: 24px; }
-.profile-address-icon { width: 54px; height: 54px; border: .8px solid var(--glass-stroke); background: var(--glass-fill); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
-.profile-address-icon:hover { border-color: var(--glass-stroke); background-color: var(--row-hover); }
-.profile-address-icon svg { width: 24px; height: 24px; stroke-width: 2; }
 .profile-recovery-row { font-size: 17px; font-weight: 400; justify-content: flex-start; gap: 12px; }
 .profile-recovery-row > span:first-of-type { flex: 1; }
 .profile-recovery-row > svg { order: -1; color: var(--text); width: 20px; height: 20px; }
@@ -11947,7 +11862,7 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .kachat-composer .composer-send:disabled { background: var(--muted); opacity: .5; }
 .composer.payment-mode .composer-field-wrap { box-shadow: inset 0 0 0 1px rgba(112,199,186,.35), var(--glass-shadow); }
 
-.fee-estimate-banner, .available-balance-banner, .fee-pill {
+.fee-estimate-banner, .fee-pill {
   padding: 6px 10px; border-radius: 14px; font-size: 11px; color: var(--muted);
   background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
   border: 1px solid var(--glass-stroke); box-shadow: var(--glass-shadow);
@@ -12301,18 +12216,6 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .profile-qr-circle svg.qr-glyph { width: 28px; height: 28px; fill: currentColor; stroke: none; }
 .profile-qr-button:hover .profile-qr-circle { filter: brightness(1.06); }
 
-/* Address rows: a centred cluster - 140pt title/balance block, then two 54pt material circles
-   with accent glyphs (arrow.up.circle.fill, gearshape). */
-.profile-address-row { justify-content: center; gap: 24px; padding: 14px 16px; }
-.profile-address-main { width: 140px; flex: 0 0 140px; gap: 3px; padding: 0; }
-.profile-address-title { font-size: 15px; font-weight: 600; color: var(--text); }
-.profile-address-balance { font-size: 12px; font-weight: 600; color: var(--kaspa-ink); }
-.profile-address-note, .profile-address-total { font-size: 11px; color: var(--muted); }
-.profile-address-actions { margin-left: 0; gap: 24px; }
-.profile-address-icon { width: 54px; height: 54px; color: var(--kaspa-ink); background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); border: .8px solid var(--glass-stroke); }
-.profile-address-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; }
-.profile-address-icon svg.send-glyph circle { fill: currentColor; stroke: none; }
-.profile-address-icon svg.send-glyph path { stroke: var(--panel); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Your Domains / Settings / Help: Label(icon + title) in primary, trailing count and a small
    secondary chevron. Log Out: red title, red icon on the right. */
@@ -12530,9 +12433,6 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .pay-memo svg { flex: 0 0 16px; width: 16px; height: 16px; margin-top: 2px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .pay-memo textarea { flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent; color: var(--text); font: inherit; font-size: 15px; line-height: 1.35; padding: 0; max-height: 84px; }
 .pay-memo textarea::placeholder { color: var(--placeholder, var(--muted)); }
-.pay-pills { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; }
-.pay-pills .pay-fee-pill { cursor: default; text-decoration: none; border-radius: 14px; }
-.pay-pills .available-balance-banner { position: static; right: auto; }
 .pay-sheet-note { margin: 0; text-align: center; font-size: 13px; color: var(--ios-orange, #ff9500); }
 .pay-sheet-note.error { color: var(--ios-red, #ff3b30); }
 .pay-hold-button {
@@ -12751,11 +12651,10 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .sk-pill-button.clickable, .sk-pill-button:not(:disabled) { cursor: pointer; }
 .sk-pill-button:not(:disabled) .sk-pill-value { text-decoration: underline; text-underline-offset: 2px; }
 .sk-pill-button:not(:disabled):hover { background: var(--primary-08); }
-.sk-pill-button:focus-visible, .available-balance-banner[role="button"]:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.sk-pill-button:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
 .sk-pill-source { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
 .sk-pill-chevron { display: inline-flex; }
 .sk-pill-chevron svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-.available-balance-banner .sk-pill-source { color: inherit; }
 
 /* Fee and coin control */
 .sk-fee-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
@@ -12821,7 +12720,37 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
   .sk-slide-animating .sk-slide-knob, .sk-slide-animating .sk-slide-fill { transition: none; }
 }
 
-/* Send From (which spending address pays) */
+/* From (iOS 6333dd3 SendFromSection / SelectablePill): which of your addresses a send leaves from. */
+.sk-from { display: flex; flex-direction: column; gap: 10px; }
+.sk-from-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+.sk-select-pills { display: flex; gap: 10px; }
+.sk-select-pill {
+  flex: 1 1 0; min-width: 0; padding: 10px 6px; border-radius: 999px; cursor: pointer;
+  border: 1px solid rgba(112,199,186,.35); background: var(--material, var(--surface-1)); color: var(--text);
+  font: inherit; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sk-select-pill.selected { background: var(--kaspa); border-color: transparent; color: #000; }
+.sk-select-pill:not(.selected):hover:not(:disabled) { background: var(--primary-08); }
+.sk-select-pill:disabled { opacity: .55; cursor: default; }
+.sk-select-pill:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.sk-from-card {
+  display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 14px;
+  background: var(--material, var(--surface-1)); border: 1px solid var(--glass-stroke, var(--line));
+}
+.sk-from-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sk-from-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-from-address { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-from-address:empty { display: none; }
+.sk-from-balance { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sk-from-balance .sk-spinner { margin: 0; color: var(--muted); }
+.sk-used-tag { padding: 2px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; }
+.sk-used-tag.used { background: rgba(142,142,147,.15); color: var(--muted); }
+.sk-used-tag.unused { background: rgba(52,199,89,.15); color: var(--ios-green); }
+.sk-used-tag.checking { padding: 0; font-weight: 600; color: var(--muted); }
+.sk-source-section { margin: 10px 12px 2px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+.sk-source-section:first-child { margin-top: 0; }
+
+/* Choose an Address (iOS OwnAddressPicker): your addresses, chatting first */
 .sk-source-backdrop { z-index: 2600; }
 .sk-source-sheet { width: min(100%, 440px); max-height: min(80vh, 640px); display: flex; flex-direction: column; gap: 12px; }
 .sk-source-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 60px; }
@@ -12835,7 +12764,6 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .sk-source-row.current { background: rgba(112,199,186,.10); }
 .sk-source-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .sk-source-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sk-source-primary { padding: 2px 6px; border-radius: 999px; background: rgba(112,199,186,.15); color: var(--kaspa-ink); font-size: 10px; font-weight: 700; }
 .sk-source-address { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--muted); }
 .sk-source-balance { font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sk-source-balance.empty { color: var(--muted); }
@@ -13281,3 +13209,33 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .addr-domains-back svg { width: 18px; height: 18px; }
 .addr-domains-names { display: flex; flex-direction: column; }
 .addr-domains-empty { margin: 0; padding: 24px 8px; text-align: center; color: var(--muted); }
+
+/* Profile's Manage Addresses card (iOS 6333dd3): one card for every address of the account, with
+   the account total, in place of the Chatting and Spending rows. */
+.profile-manage-addresses {
+  display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px 16px;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.profile-manage-addresses:hover { background-color: var(--row-hover); }
+.profile-manage-addresses-icon {
+  flex: 0 0 48px; width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%;
+  background: var(--material); border: .8px solid var(--glass-stroke); color: var(--kaspa-ink);
+}
+.profile-manage-addresses-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.profile-manage-addresses-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.profile-manage-addresses-copy strong { font-size: 15px; font-weight: 600; }
+.profile-manage-addresses-total { font-size: 12px; font-weight: 600; color: var(--kaspa-ink); font-variant-numeric: tabular-nums; }
+.profile-manage-addresses-total .sk-spinner { width: 11px; height: 11px; margin: 0; color: var(--muted); }
+.profile-manage-addresses-chevron { flex: 0 0 auto; width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Manage Addresses' first row: the chatting address (iOS 6333dd3), opening its own screen - which
+   therefore stacks above Manage Addresses (both are 1500 full-screens; this one comes first in the
+   DOM). Always "Used". */
+.spending-address-row.chatting-address-row { align-items: center; }
+.chatting-address-row-icon { width: 13px; height: 13px; fill: var(--kaspa); stroke: none; }
+.chatting-address-row-chevron { flex: 0 0 auto; width: 12px; height: 12px; margin: 0 14px 0 4px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.spending-address-row .spending-address-usage.chatting-used { color: var(--ios-orange); }
+[data-manage-address-screen] { z-index: 1510; }
+
+/* Address Visibility's Hide All (iOS 245a5d2), where the back arrow was. */
+.spending-visibility-hide-all { color: var(--ios-red); }
