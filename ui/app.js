@@ -9834,7 +9834,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 153;
+const APP_BUILD = 154;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -13847,9 +13847,8 @@ function resolutionCardLookUp(address) {
 /// card. Fetches the profile once and calls `onLoaded` so the caller repaints.
 function addressResolutionCardHtml(address, { domain = null, onLoaded = null } = {}) {
   if (!address) return "";
-  const profile = engine.peekKnsAddressProfile?.(address);
+  watchResolutionAvatars();
   const knownDomain = resolutionCardName(address, domain, onLoaded);
-  const avatarUrl = profile?.profile?.avatarUrl || "";
   // the spinner always stops, and a late answer for an address no longer shown is dropped
   // (iOS 6c8e75a, IOS-074)
   const looking = resolutionCardLooking(address);
@@ -13861,7 +13860,7 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
   }
   return `
     <div class="create-chat-preview address-resolution-card" data-resolution-card-address="${escapeHtml(address)}">
-      <span class="create-chat-preview-avatar">${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : personGlyphSvg()}</span>
+      ${resolutionAvatarHtml(address)}
       <span class="create-chat-preview-copy">
         <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No domain"))}</span>
         <span class="create-chat-preview-address">${escapeHtml(address)}</span>
@@ -13869,7 +13868,36 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
     </div>`;
 }
 
+/// The face on a resolution card (Create Chat, a group invite, and every send/withdraw field):
+/// the address's .kachat avatar - the picture its profile shows, through the same cache and relay
+/// retry as everywhere else - and the old KNS picture only where .kachat isn't the identity.
+function resolutionAvatarInnerHtml(address) {
+  if (kachatNamesUiEnabled()) return kachatAvatarImgHtml(address) || personGlyphSvg();
+  const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl || "";
+  return avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : personGlyphSvg();
+}
+function resolutionAvatarHtml(address) {
+  return `<span class="create-chat-preview-avatar" data-resolution-avatar="${escapeHtml(address)}">${resolutionAvatarInnerHtml(address)}</span>`;
+}
+// The avatar lands after the name (the profile's picture link is looked up, then the picture): a
+// card still showing the glyph gets its face as soon as it is known.
+let resolutionAvatarWatching = false;
+function watchResolutionAvatars() {
+  if (resolutionAvatarWatching) return;
+  resolutionAvatarWatching = true;
+  const fill = () => {
+    for (const slot of document.querySelectorAll("[data-resolution-avatar]")) {
+      if (slot.querySelector("img")) continue;
+      const html = resolutionAvatarInnerHtml(slot.dataset.resolutionAvatar);
+      if (html.startsWith("<img")) slot.innerHTML = html;
+    }
+  };
+  try { onKachatIdentityChange(fill); } catch { /* names not started */ }
+  try { onKachatSocialChange(fill); } catch { /* names not started */ }
+}
+
 function renderCreateChatPreview() {
+  watchResolutionAvatars();
   const card = document.querySelector("[data-create-chat-preview]");
   if (!card) return;
   const address = createChatEffectiveAddress();
@@ -13879,11 +13907,9 @@ function renderCreateChatPreview() {
     return;
   }
 
-  const profile = engine.peekKnsAddressProfile?.(address);
   // The domain typed (or picked under Other domains), else the address's own .kachat name (iOS
   // 6ac48a7 AddressResolutionCard).
   const domain = resolutionCardName(address, createChatPickedName || null, (a) => { if (createChatEffectiveAddress() === a) renderCreateChatPreview(); });
-  const avatarUrl = profile?.profile?.avatarUrl || "";
   const known = (state.contacts || []).find((contact) => contact.address === address);
   // The domain the resolver already found beats waiting on a profile fetch: if you typed one,
   // that IS the name.
@@ -13892,9 +13918,7 @@ function renderCreateChatPreview() {
 
   card.hidden = false;
   card.innerHTML = `
-    <span class="create-chat-preview-avatar">${avatarUrl
-      ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
-      : personGlyphSvg()}</span>
+    ${resolutionAvatarHtml(address)}
     <span class="create-chat-preview-copy">
       <span class="create-chat-preview-name${name ? "" : " muted"}">${escapeHtml(name || (looking ? "Looking up…" : "No domain"))}</span>
       <span class="create-chat-preview-address">${escapeHtml(address)}</span>
@@ -27473,17 +27497,14 @@ function renderGroupAddressPreview() {
   const address = groupAddressResolved || "";
   if (!address) { card.hidden = true; card.innerHTML = ""; return; }
 
-  const profile = engine.peekKnsAddressProfile?.(address);
+  watchResolutionAvatars();
   // The domain typed, else the address's own .kachat name (iOS 6ac48a7 AddressResolutionCard).
   const domain = resolutionCardName(address, groupAddressPickedName, (a) => { if (groupAddressResolved === a) renderGroupAddressPreview(); });
-  const avatarUrl = profile?.profile?.avatarUrl || "";
   const looking = resolutionCardLooking(address); // the spinner always stops (iOS 6c8e75a)
 
   card.hidden = false;
   card.innerHTML = `
-    <span class="create-chat-preview-avatar">${avatarUrl
-      ? `<img src="${escapeHtml(avatarUrl)}" alt="" />`
-      : personGlyphSvg()}</span>
+    ${resolutionAvatarHtml(address)}
     <span class="create-chat-preview-copy">
       <span class="create-chat-preview-name${domain ? "" : " muted"}">${escapeHtml(domain || (looking ? "Looking up…" : "No domain"))}</span>
       <span class="create-chat-preview-address">${escapeHtml(address)}</span>
