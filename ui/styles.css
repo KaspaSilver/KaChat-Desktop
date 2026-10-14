@@ -13251,3 +13251,37 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 
 /* Setup guide, Your Chatting Address: the Profile screenshot (iOS 8852cdb). */
 .setup-address-explainer { display: block; width: 100%; max-width: 340px; margin: 0 auto 16px; border-radius: 16px; }
+
+/* Smooth scrolling: no live blur on cards inside a scrolling list. Each one was redrawn on every
+   scroll frame (the costliest effect on a phone), and over the lists' plain backgrounds a blur
+   shows nothing - the same semi-transparent material looks identical without it. Bars, sheets
+   and menus that content scrolls under keep theirs. */
+.message-area .message-link-card,
+.message-area .message-payment-card.incoming,
+.message-area .message-reaction-pill,
+.message-area .link-tap-to-load,
+[data-group-message-area] .message-link-card,
+[data-group-message-area] .message-payment-card.incoming,
+[data-group-message-area] .message-reaction-pill,
+[data-group-message-area] .link-tap-to-load,
+.spending-address-row,
+.hub-tile,
+.portfolio-card,
+.portfolio-square,
+.kaposts-rail-post,
+.cold-action-row,
+.import-source-row {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Long lists skip laying out rows that are off screen (a browser-native virtual list). */
+.chat-list > .chat-row { content-visibility: auto; contain-intrinsic-size: auto 74px; }
+
+/* Every button answers the touch the moment it lands, not when the finger lifts (Telegram-style
+   press feedback). Zero specificity: a control's own pressed look wins; rows that already darken
+   on press are left as they are. */
+:where(button, [role="button"]):not(:disabled):not(.chat-row):not(.settings-list-row):not(.broadcast-room-row):active {
+  opacity: 0.72;
+  transition-duration: 0s;
+}

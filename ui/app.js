@@ -2774,7 +2774,7 @@ function jumpToMessageByTxid(txid) {
   const index = conversationEntry.messages.indexOf(target);
   const key = `c:${conversationEntry.id}`;
   const needed = conversationEntry.messages.length - Math.max(0, index - 20);
-  if ((messageWindowByThread.get(key) || MESSAGE_WINDOW_STEP) < needed) messageWindowByThread.set(key, needed);
+  if ((messageWindowByThread.get(key) || MESSAGE_WINDOW_FIRST) < needed) messageWindowByThread.set(key, needed);
   renderMessages(conversationEntry);
   window.requestAnimationFrame(() => {
     const el = messageArea.querySelector(`[data-message-id="${CSS.escape(target.id)}"]`);
@@ -4803,6 +4803,20 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   return state;
 }
 
+// Date formatters are costly to build and these run for every bubble and chat row on every
+// render: one per format, rebuilt only when the page's language changes.
+const dateFormatters = new Map();
+function dateFormatter(key, options) {
+  const lang = document.documentElement.lang || "";
+  const id = `${lang}|${key}`;
+  let formatter = dateFormatters.get(id);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(lang || undefined, options);
+    dateFormatters.set(id, formatter);
+  }
+  return formatter;
+}
+
 // The chat list's row timestamp (iOS ChatListView.formatDate): a clock time only for today, so
 // a three-day-old chat does not read as if it happened at 3:03 this afternoon.
 function formatChatListDate(timestamp) {
@@ -4813,16 +4827,13 @@ function formatChatListDate(timestamp) {
   const days = Math.round((midnight(now) - midnight(date)) / 86400000);
   if (days === 0) return formatTime(timestamp);
   if (days === 1) return "Yesterday";
-  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  return dateFormatter("monthDay", { month: "short", day: "numeric" }).format(date);
 }
 
 function formatTime(timestamp) {
   if (!timestamp) return "";
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true, // 12-hour clock (e.g. 3:03 PM), not 24-hour
-  }).format(new Date(timestamp));
+  // 12-hour clock (e.g. 3:03 PM), not 24-hour
+  return dateFormatter("time12", { hour: "numeric", minute: "2-digit", hour12: true }).format(new Date(timestamp));
 }
 
 
@@ -4837,8 +4848,8 @@ function daySeparatorLabel(ts) {
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
   return d.getFullYear() === now.getFullYear()
-    ? d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })
-    : d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+    ? dateFormatter("weekdayMonthDay", { weekday: "long", month: "short", day: "numeric" }).format(d)
+    : dateFormatter("monthDayYear", { month: "short", day: "numeric", year: "numeric" }).format(d);
 }
 
 // Builds one centered "Today"/"Yesterday"/date pill for a message timeline.
@@ -4854,12 +4865,7 @@ function buildDaySeparatorElement(ts) {
 
 function formatDateTime(timestamp) {
   if (!timestamp) return "Never synced";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
+  return dateFormatter("monthDayTime", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(timestamp));
 }
 
 function syncLabel(conversationEntry) {
@@ -9828,7 +9834,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 152;
+const APP_BUILD = 153;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14382,6 +14388,16 @@ function createDeliveryStatusIcon(message, { onRetry = null } = {}) {
 }
 
 const LONG_MESSAGE_BYTES = 2000;
+const longMessageEncoder = new TextEncoder();
+/** Over LONG_MESSAGE_BYTES of UTF-8. A character is 1-3 bytes here (4 for a surrogate pair, which
+ *  is 2 string units), so most texts are decided by their length alone; only the in-between ones
+ *  are encoded - this runs for every bubble on every render. */
+function isLongMessageText(value) {
+  const text = String(value || "");
+  if (text.length > LONG_MESSAGE_BYTES) return true;
+  if (text.length * 3 <= LONG_MESSAGE_BYTES) return false;
+  return longMessageEncoder.encode(text).length > LONG_MESSAGE_BYTES;
+}
 const LONG_MESSAGE_PREVIEW_CHARS = 500;
 function isSingleEmojiOnlyMessage(text) {
   const value = String(text || "");
@@ -14431,14 +14447,17 @@ function messageTypeCapsule(message, { hasPaymentCard = false } = {}) {
   return capsule;
 }
 
-// Long threads render their newest window only (150 rows, growing by 150 as you scroll up or
-// press "Show earlier messages"): building thousands of bubbles on every sync tick was what
-// made a busy chat stutter. The window resets when the thread changes.
+// Long threads render their newest window only, growing by 150 as you scroll up or press "Show
+// earlier messages": building thousands of bubbles on every sync tick was what made a busy chat
+// stutter. A chat opens on its last 40 - a screenful and then some - so the click paints at
+// once; the rest arrives as you scroll up, before you reach the top. The window resets when the
+// thread changes.
+const MESSAGE_WINDOW_FIRST = 40;
 const MESSAGE_WINDOW_STEP = 150;
 const messageWindowByThread = new Map();
 function messageWindowFor(key, isThreadSwitch) {
   if (isThreadSwitch) messageWindowByThread.delete(key);
-  return messageWindowByThread.get(key) || MESSAGE_WINDOW_STEP;
+  return messageWindowByThread.get(key) || MESSAGE_WINDOW_FIRST;
 }
 function buildLoadEarlierButton(hiddenCount, onLoad) {
   const button = document.createElement("button");
@@ -14452,7 +14471,7 @@ function buildLoadEarlierButton(hiddenCount, onLoad) {
 // what stays constant when rows are added above.
 function extendMessageWindow(area, key, rerender) {
   const distanceFromBottom = area.scrollHeight - area.scrollTop;
-  messageWindowByThread.set(key, (messageWindowByThread.get(key) || MESSAGE_WINDOW_STEP) + MESSAGE_WINDOW_STEP);
+  messageWindowByThread.set(key, (messageWindowByThread.get(key) || MESSAGE_WINDOW_FIRST) + MESSAGE_WINDOW_STEP);
   rerender();
   area.scrollTop = area.scrollHeight - distanceFromBottom;
 }
@@ -14523,6 +14542,11 @@ function renderMessages(conversationEntry) {
     messageArea.appendChild(buildLoadEarlierButton(hiddenCount, () => extendMessageWindow(messageArea, windowKey, () => renderMessages(conversationEntry))));
   }
 
+  // Looked up once per render, not once per message: the same two faces and one name repeat on
+  // every row.
+  const peerAvatarHtml = requestContact ? avatarHtmlFor(requestContact, "message-avatar") : "";
+  const ownAvatarHtml = selfAvatarHtml("message-avatar");
+  const peerName = displayNameForAddress(requestContact) || shortAddress(requestContact?.address || "");
   let lastDayKey = "";
   windowed.forEach((message, index) => {
     // "Today"/"Yesterday"/date pill whenever the calendar day changes (iOS parity).
@@ -14548,9 +14572,9 @@ function renderMessages(conversationEntry) {
     if (message.direction === "incoming") {
       const nextMessage = windowed[index + 1];
       const isLastInGroup = !nextMessage || nextMessage.direction !== message.direction;
-      if (isLastInGroup && requestContact) avatarSlot.innerHTML = avatarHtmlFor(requestContact, "message-avatar");
+      if (isLastInGroup && requestContact) avatarSlot.innerHTML = peerAvatarHtml;
     } else {
-      avatarSlot.innerHTML = selfAvatarHtml("message-avatar");
+      avatarSlot.innerHTML = ownAvatarHtml;
     }
 
     const bubble = document.createElement("div");
@@ -14567,9 +14591,7 @@ function renderMessages(conversationEntry) {
       const cardHead = document.createElement("div");
       cardHead.className = "message-card-head";
       const cardSender = document.createElement("strong");
-      cardSender.textContent = message.direction === "incoming"
-        ? (displayNameForAddress(requestContact) || shortAddress(requestContact?.address || ""))
-        : "You";
+      cardSender.textContent = message.direction === "incoming" ? peerName : "You";
       cardHead.append(cardSender);
       if (message.createdAt) {
         const cardTime = document.createElement("span");
@@ -14677,7 +14699,7 @@ function renderMessages(conversationEntry) {
       // whose words these were.
       const label = document.createElement("strong");
       const quotedIsMine = replyEnvelope.replyToSender && replyEnvelope.replyToSender === engine.address;
-      label.textContent = quotedIsMine ? "You" : (displayNameForAddress(requestContact) || shortAddress(requestContact?.address || ""));
+      label.textContent = quotedIsMine ? "You" : peerName;
       const preview = document.createElement("span");
       preview.textContent = replyEnvelope.replyToPreview || "Message";
       quote.append(label, preview);
@@ -14722,7 +14744,7 @@ function renderMessages(conversationEntry) {
       // A giant string (a media payload that failed to parse, or someone's essay) makes the whole
       // thread's layout janky; past 2000 bytes it shows a 500-character preview and opens in
       // full on demand. A lone emoji loses its bubble and grows, as iMessage does.
-      const isLongMessage = new TextEncoder().encode(String(fullBodyText || "")).length > LONG_MESSAGE_BYTES;
+      const isLongMessage = isLongMessageText(fullBodyText);
       const bodyText = isLongMessage ? `${String(fullBodyText).slice(0, LONG_MESSAGE_PREVIEW_CHARS)}…` : fullBodyText;
       if (!isLongMessage && isSingleEmojiOnlyMessage(bodyText)) bubble.classList.add("emoji-only");
       const linkUrls = renderTextWithMentions(text, bodyText);
@@ -14879,11 +14901,26 @@ function renderMessages(conversationEntry) {
 }
 
 messageArea?.addEventListener("scroll", () => {
-  if (messageArea.scrollTop > 60 || Number(messageArea.dataset.hiddenCount || 0) === 0) return;
+  // Well before the top, so the older rows are there by the time you scroll to them.
+  if (messageArea.scrollTop > 400 || Number(messageArea.dataset.hiddenCount || 0) === 0) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   if (!conversationEntry) return;
   extendMessageWindow(messageArea, `c:${conversationEntry.id}`, () => renderMessages(conversationEntry));
 }, { passive: true });
+
+/** The chat list without a rebuild when a chat opens: the active highlight moves to its row and
+ *  the row's unread badge goes. False when the row isn't drawn (the caller renders the list). */
+function markChatRowOpened(conversationId) {
+  if (chatSelectionModeActive) return false;
+  const row = chatList?.querySelector(`[data-conversation-id="${CSS.escape(conversationId)}"]`);
+  if (!row) return false;
+  chatList.querySelectorAll(".chat-row.active").forEach((el) => { if (el !== row) el.classList.remove("active"); });
+  row.classList.add("active");
+  row.classList.remove("unread");
+  row.querySelectorAll(".chat-row-unread, .unread-badge, [data-unread-badge]").forEach((el) => el.remove());
+  try { updateChatsListTabBadges(); } catch { /* not ready */ }
+  return true;
+}
 
 function openConversation(conversationId) {
   messageSelectionMode = false;
@@ -14914,9 +14951,10 @@ function openConversation(conversationId) {
   promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { persist: false });
   schedulePersistState(); // only the unread count changed; do not hold up the chat opening
 
-  // Keep the sidebar list in sync (new/updated conversation row, unread badge)
-  // now that it stays visible alongside the open conversation at wide widths.
-  renderChats();
+  // Keep the sidebar list in sync (the active row, its cleared unread badge) now that it stays
+  // visible beside the open conversation at wide widths. The row is already drawn, so only
+  // those two change; rebuilding the whole list on every open was a good part of its cost.
+  if (!markChatRowOpened(conversationId)) renderChats();
   setActiveConversationId(conversationId);
   if (applyKnsPrimaryDomainToContact(contact)) { persistState(); renderChats(); }
   conversationName.textContent = displayNameForAddress(contact);
@@ -26155,7 +26193,7 @@ const groupMessageArea = document.querySelector("[data-group-message-area]");
 // element is looked up: the build lowers top-level const to var, so attaching it earlier in the
 // module read undefined and the group thread never loaded older messages on scroll.
 groupMessageArea?.addEventListener("scroll", () => {
-  if (groupMessageArea.scrollTop > 60 || Number(groupMessageArea.dataset.hiddenCount || 0) === 0 || !activeGroupId) return;
+  if (groupMessageArea.scrollTop > 400 || Number(groupMessageArea.dataset.hiddenCount || 0) === 0 || !activeGroupId) return;
   extendMessageWindow(groupMessageArea, `g:${activeGroupId}`, renderGroupMessages);
 }, { passive: true });
 const groupMessageEmpty = document.querySelector("[data-group-message-empty]");
