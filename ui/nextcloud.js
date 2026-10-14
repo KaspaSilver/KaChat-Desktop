@@ -522,6 +522,33 @@ export async function uploadNextcloudMedia(blob, filename, contentType) {
  *  PUT response (`OC-ETag` first — Nextcloud's canonical header — then `ETag`), normalized;
  *  null when the header is missing (some proxies strip it; runBackup then recovers it with a
  *  follow-up PROPFIND). */
+// The temp copy an upload writes before it is renamed over the backup (DSK-049).
+const UPLOAD_TEMP_PREFIX = `.${BACKUP_FILENAME}.upload-`;
+const UPLOAD_DEVICE_KEY = "kachat-nextcloud-upload-id";
+const STALE_UPLOAD_MS = 60 * 60 * 1000;
+function uploadDeviceId() {
+  try {
+    let id = localStorage.getItem(UPLOAD_DEVICE_KEY) || "";
+    if (!/^[a-z0-9]{8,16}$/.test(id)) {
+      id = Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+      localStorage.setItem(UPLOAD_DEVICE_KEY, id);
+    }
+    return id;
+  } catch { return "device"; }
+}
+/** Removes upload copies older than an hour from the backup folder - never this upload's own. */
+async function clearStaleUploadCopies(ownTempName) {
+  const listing = await listFolder(backupFolderPath());
+  const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
+  const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
+  for (const entry of listing) {
+    if (entry.isDirectory || !String(entry.name || "").startsWith(UPLOAD_TEMP_PREFIX) || entry.name === ownTempName) continue;
+    const modified = entry.modified instanceof Date ? entry.modified.getTime() : 0;
+    if (modified && Date.now() - modified < STALE_UPLOAD_MS) continue; // maybe another device's upload in flight
+    await ncFetch(`${davRoot}/${folder}/${encodeURIComponent(entry.name)}`, { method: "DELETE", headers: { Authorization: authHeader() } }).catch(() => {});
+  }
+}
+
 async function uploadBackup(payloadJson) {
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}`;
@@ -535,19 +562,27 @@ async function uploadBackup(payloadJson) {
   // connection) left that lock on the backup itself until the server expired it - every later
   // read and write answered 423 Locked meanwhile. Now only the temporary file is ever mid-upload;
   // the backup is locked just for the instant of the rename.
-  const tempName = `.${BACKUP_FILENAME}.upload-${Math.random().toString(36).slice(2, 10)}`;
+  // One temp name per device (DSK-049): an upload cut off before its rename is overwritten by the
+  // next one instead of leaving another full-size hidden copy, and old ones are cleared below.
+  const tempName = `${UPLOAD_TEMP_PREFIX}${uploadDeviceId()}`;
   const tempURL = `${folderURL}/${encodeURIComponent(tempName)}`;
-  const put = await ncFetch(tempURL, {
-    method: "PUT",
-    headers: { Authorization: authHeader(), "Content-Type": "application/json" },
-    body: payloadJson,
-  });
+  const dropTemp = () => ncFetch(tempURL, { method: "DELETE", headers: { Authorization: authHeader() } }).catch(() => {});
+  let put;
+  try {
+    put = await ncFetch(tempURL, {
+      method: "PUT",
+      headers: { Authorization: authHeader(), "Content-Type": "application/json" },
+      body: payloadJson,
+    });
+  } catch (error) {
+    await dropTemp();
+    throw error;
+  }
   if (put.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
-  if (!put.ok) throw new Error(`Backup upload failed (HTTP ${put.status}).`);
+  if (!put.ok) { await dropTemp(); throw new Error(`Backup upload failed (HTTP ${put.status}).`); }
   // MOVE names its target by absolute URL, and Nextcloud only accepts its own: the real server
   // address, not the relay's.
   const realFolder = `${String(nc?.server || "").replace(/\/+$/, "")}/remote.php/dav/files/${davUser()}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}`;
-  const dropTemp = () => ncFetch(tempURL, { method: "DELETE", headers: { Authorization: authHeader() } }).catch(() => {});
   // A rename onto a file another device is writing right now still meets its lock: waited out
   // on a short backoff, half a minute in all, and only a lock that never clears surfaces.
   for (let attempt = 0; ; attempt += 1) {
@@ -579,6 +614,9 @@ async function uploadBackup(payloadJson) {
       const directTag = direct.headers.get("OC-ETag") || direct.headers.get("ETag");
       return directTag ? normalizeETag(directTag) || null : null;
     }
+    // In place: clear upload copies another device (or an older build's random names) left
+    // behind when an upload was cut off (DSK-049). Best effort, never in the way of the backup.
+    clearStaleUploadCopies(tempName).catch(() => {});
     const raw = move.headers.get("OC-ETag") || move.headers.get("ETag");
     const normalized = raw ? normalizeETag(raw) : "";
     if (normalized) return normalized;
@@ -630,9 +668,10 @@ async function repairableTruncation(error) {
   return received >= serverSize;
 }
 
-// One sync = read, merge, write, verify (NEXTCLOUD_SYNC.md §4, §7). The file is only ever PUT in
-// place: no copy of any kind is made during sync - Nextcloud's own version history keeps earlier
-// contents. What happens to the server copy:
+// One sync = read, merge, write, verify (NEXTCLOUD_SYNC.md §4, §7). The file is written to one
+// hidden temp copy per device and renamed over the backup (uploadBackup), so a cut-off upload never
+// locks or damages it; leftover copies older than an hour are cleared after a sync. Nextcloud's own
+// version history keeps earlier contents. What happens to the server copy:
 // - a download that failed or stopped early (a transfer problem) throws before any PUT;
 // - another wallet's file, a hint-less envelope that won't open, or a newer schema throws - never
 //   touched;

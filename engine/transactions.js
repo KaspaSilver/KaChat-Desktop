@@ -13,24 +13,29 @@ const sendQueues = new Map();
 
 /** Runs a task in the per-address send queue: anything that picks and spends coins from one
  *  address goes through here so two builds never choose the same coin. */
-// How long a send waits for the one ahead of it. A send that never settles (a node that stops
+// How long a RUNNING send may hold the queue. A send that never settles (a node that stops
 // answering mid-submit, an SDK task that died) used to hold every later send from that address at
-// "Sending" for good. After this the queue moves on; if the stuck one does land later, the node
-// refuses whichever spends the same coins second, so nothing is paid twice.
+// "Sending" for good. After this the next send may start - one, not every send queued meanwhile:
+// the clock starts when a send reaches the head of the queue, never when it is queued (DSK-048).
+// If the stuck one does land later, the node refuses whichever spends the same coins second, so
+// nothing is paid twice.
 const SEND_QUEUE_WAIT_MS = 90_000;
 
 export function enqueueSend(sourceAddress, task) {
+  // The queue is a chain of "slots": each resolves (never rejects) once its send settled or its
+  // 90 s of running time ran out, and the next send starts only then.
   const ahead = sendQueues.get(sourceAddress) || Promise.resolve();
-  let timer = null;
-  const previous = Promise.race([
-    ahead,
-    new Promise((resolve) => { timer = setTimeout(resolve, SEND_QUEUE_WAIT_MS); }),
-  ]).finally(() => clearTimeout(timer));
-  const next = previous.then(task, task).finally(() => {
-    if (sendQueues.get(sourceAddress) === next) sendQueues.delete(sourceAddress);
+  let release = () => {};
+  const slot = new Promise((resolve) => { release = resolve; });
+  const result = ahead.then(() => {
+    const timer = setTimeout(release, SEND_QUEUE_WAIT_MS);
+    const run = Promise.resolve().then(task);
+    run.then(() => { clearTimeout(timer); release(); }, () => { clearTimeout(timer); release(); });
+    return run;
   });
-  sendQueues.set(sourceAddress, next);
-  return next;
+  sendQueues.set(sourceAddress, slot);
+  slot.then(() => { if (sendQueues.get(sourceAddress) === slot) sendQueues.delete(sourceAddress); });
+  return result;
 }
 
 export async function getBalance(kaspa, rpc, address) {

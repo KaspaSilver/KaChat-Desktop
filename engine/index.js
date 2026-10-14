@@ -1,7 +1,7 @@
 import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
 import { noteChainTimeMs } from "./kachat-names/launch.js";
-import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, probeRpc, recordFailover } from "./rpc.js";
+import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, markBadNode, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
 import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
@@ -927,7 +927,9 @@ export class KaspaEngine {
           // Up but answering the impossible (DSK-046): Automatic mode must not pick it again.
           const endpoint = this.rpc?.url || this.connectionState.primaryEndpoint || "";
           this.log(`${label}: ${error.message} from ${endpoint || "the node"}; switching nodes...`);
-          if (endpoint) forgetEndpoint(endpoint);
+          // Out of the registry AND of Automatic's races for this session (DSK-046 run 7): the
+          // registry alone is not what Automatic picks from, so the retry could land on it again.
+          if (endpoint) { forgetEndpoint(endpoint); markBadNode(endpoint); }
         } else {
           this.log(`${label} lost RPC connection; attempting standby failover...`);
         }

@@ -249,6 +249,22 @@ const RESOLVER_TIMEOUT_MS = 20000;
 // cannot be reached from where the reader is (its seed servers blocked or unreachable) even
 // though the nodes can. Same public pool, no house node; refreshed from the resolver's own
 // answers whenever it works.
+// Nodes that answered something impossible this session (DSK-046): kept out of every race, the
+// remembered list and the resolver's answers until the app is reloaded, so the retry after a bad
+// answer always reaches another node.
+const badNodesThisSession = new Set();
+export function markBadNode(url) {
+  const key = String(url || "").trim().toLowerCase();
+  if (!key) return;
+  badNodesThisSession.add(key);
+  if (typeof localStorage === "undefined") return;
+  try {
+    const list = JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]");
+    const next = list.filter((u) => String(u || "").trim().toLowerCase() !== key);
+    if (next.length !== list.length) localStorage.setItem(SEEN_NODES_KEY, JSON.stringify(next));
+  } catch { /* storage is a nicety */ }
+}
+
 // Kasia's wss://wrpc.kasia.fyi was dropped (owner, 2026-10-13: it never answered).
 const RETIRED_NODES = ["wss://wrpc.kasia.fyi"];
 const MAINNET_NODE_SEEDS = [
@@ -264,7 +280,7 @@ export const PUBLIC_NODE_SEEDS = IS_TESTNET
   : MAINNET_NODE_SEEDS;
 const SEEN_NODES_KEY = IS_TESTNET ? "kachat-public-nodes-seen-testnet" : "kachat-public-nodes-seen";
 function rememberPublicNode(url) {
-  if (typeof localStorage === "undefined") return;
+  if (typeof localStorage === "undefined" || isRetiredNode(url)) return;
   try {
     const list = JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]");
     const next = [url, ...list.filter((u) => u !== url)].slice(0, 12);
@@ -310,8 +326,9 @@ function raceCandidates(kaspa, urls, { log = () => {}, timeoutMs = DIRECT_CONNEC
     }
   });
 }
-const isRetiredNode = (url) => RETIRED_NODES.some((r) => String(url || "").toLowerCase().startsWith(r));
-function knownPublicNodes() {
+const isRetiredNode = (url) => RETIRED_NODES.some((r) => String(url || "").toLowerCase().startsWith(r))
+  || badNodesThisSession.has(String(url || "").trim().toLowerCase());
+export function knownPublicNodes() {
   let remembered = [];
   if (typeof localStorage !== "undefined") {
     try { remembered = JSON.parse(localStorage.getItem(SEEN_NODES_KEY) || "[]"); } catch { remembered = []; }
