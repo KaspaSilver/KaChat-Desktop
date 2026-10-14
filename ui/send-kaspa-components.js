@@ -644,6 +644,12 @@ export function sendFromControls(root, prefix, { onChatting, onChoose } = {}) {
       disabled = Boolean(value);
       section?.querySelectorAll(`[data-${p}-from-choice]`).forEach((pill) => { pill.disabled = disabled; });
     },
+    /** Opened from one address's own page (its history's Send): that address only, so the pills
+     *  are not offered (iOS 7a8102b SendFromSection isLocked). */
+    setLocked(value) {
+      const pills = section?.querySelector(".sk-select-pills");
+      if (pills) pills.hidden = Boolean(value);
+    },
   };
 }
 

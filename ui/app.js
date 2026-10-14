@@ -8558,7 +8558,8 @@ document.querySelector("[data-spending-detail-receive]")?.addEventListener("clic
 });
 // Every send has the From section: Chatting Address by default, this address under Choose an
 // Address (iOS 6333dd3).
-document.querySelector("[data-spending-detail-send]")?.addEventListener("click", () => openSendKaspaModal());
+// Send from this address's own page: it is the From, with no other to pick (iOS 7a8102b).
+document.querySelector("[data-spending-detail-send]")?.addEventListener("click", () => openSendKaspaModal({ spendingIndex: spendingDetailIndex, lockSource: true }));
 
 // "Address Actions" menu (Generate / Discover / Address Visibility), matching iOS's sheet. Send All
 // Kaspa To Primary is gone with the primary (iOS 6333dd3).
@@ -9876,7 +9877,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 156;
+const APP_BUILD = 157;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -10828,9 +10829,9 @@ function spendingSourceLabel(index) {
   return trimmed || `Address #${index}`;
 }
 const sendKaspaFrom = sendFromControls(sendKaspaModal, "send-kaspa", {
-  onChatting: () => { if (!sendKaspaSlider.busy) switchSendKaspaSource(null); },
+  onChatting: () => { if (!sendKaspaSlider.busy && !sendKaspaSourceLocked) switchSendKaspaSource(null); },
   onChoose: () => {
-    if (sendKaspaCompound || sendKaspaSlider.busy) return;
+    if (sendKaspaCompound || sendKaspaSlider.busy || sendKaspaSourceLocked) return;
     openOwnAddressPickerFor({
       title: "Send From",
       selectedAddress: sendKaspaSourceAddress(),
@@ -10942,6 +10943,7 @@ const sendKaspaController = makeSendController({
 });
 // Every send starts From the chatting address (iOS 6333dd3); `spendingIndex` is the address
 // Compound UTXOs merges (or one to start From).
+let sendKaspaSourceLocked = false;
 function openSendKaspaModal(options = {}) {
   const spendingIndex = Number.isInteger(options?.spendingIndex) ? options.spendingIndex : null;
   if (spendingIndex != null && !activeAccountMnemonic()) {
@@ -10951,6 +10953,10 @@ function openSendKaspaModal(options = {}) {
   sendKaspaCompound = Boolean(options?.compound);
   sendKaspaSourceIndex = spendingIndex;
   sendKaspaSourceLabel = null;
+  // From an address's own page the Kaspa leaves from that address, with no other to pick (iOS
+  // 7a8102b); every other send keeps the choice.
+  sendKaspaSourceLocked = Boolean(options?.lockSource);
+  sendKaspaFrom.setLocked(sendKaspaSourceLocked);
   sendKaspaPaymentRequest = null;
   sendKaspaPaidAsChatPayment = false;
   renderSendKaspaPaymentRequest();
@@ -11635,7 +11641,8 @@ const manageSendController = makeSendController({
 });
 // Use the same rich Send Kaspa modal the profile dropdown opens (chatting address), so the two
 // entry points are identical instead of the older in-card send screen.
-document.querySelector("[data-manage-address-send]")?.addEventListener("click", () => openSendKaspaModal());
+// The chatting address's own page: Send leaves from the chatting address, nothing to pick (iOS 7a8102b).
+document.querySelector("[data-manage-address-send]")?.addEventListener("click", () => openSendKaspaModal({ lockSource: true }));
 document.querySelector("[data-manage-send-back]")?.addEventListener("click", () => showManageView("list"));
 
 document.querySelectorAll("[data-manage-address-tab]").forEach((tabButton) => {
