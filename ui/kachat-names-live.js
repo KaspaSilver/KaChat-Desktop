@@ -3665,7 +3665,7 @@ export function onKachatSocialChange(listener) {
 
 /**
  * The KaChat profile of `address` for the profile hero (iOS ContactsView, every network): the
- * avatar, banner and bio its social links show right now, looked up on this device (cached 24 h;
+ * avatar, banner and bio its social links show right now, looked up on this device (cached 5 days;
  * a stale answer is returned at once and refreshed in the background - see onKachatSocialChange),
  * and its Linktree link. The address's own record on this device comes first (the one it wrote,
  * or the newer one registry.syncOwnProfile adopted from the chain - the app syncs before this), then the
@@ -3898,7 +3898,7 @@ export function kachatCachedLabel(address) {
 }
 
 /** The social profile a link shows, as far as this device knows it right now (sync); asks the
- *  resolver behind it (cached 24 h there) when there is no answer here or it is old. */
+ *  resolver behind it (cached 5 days there) when there is no answer here or it is old. */
 function cachedSocialProfile(link) {
   if (!link) return null;
   let key = null;

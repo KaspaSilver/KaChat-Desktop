@@ -49,7 +49,7 @@
 //     As fetchText, for a JSON API; `json` null when the body isn't JSON. Derived from fetchText
 //     when not given.
 //   storage: { get(key) -> string|null, set(key, string), remove?(key) }               (optional)
-//     sync or async. The 24 h cache, part of the profile cache (profile-cache.js, iOS
+//     sync or async. The 5-day cache, part of the profile cache (profile-cache.js, iOS
 //     KachatProfileCache): one entry per profile link under
 //     "kachat-profile-cache-v1:social:<link>" (`{"profile":{"avatar","banner","bio"},"checkedAt":ms}`)
 //     and an index under "kachat-profile-cache-v1:social:index"; at most 500 entries, the oldest
@@ -90,8 +90,10 @@ export const socialImageCachePrefix = "kachat-profile-cache-v1:social:";
 /** Where the cache lived before 2026-10-07 (moved once to `socialImageCachePrefix`). */
 export const socialImageLegacyCachePrefix = "kachat-social-image-v1:";
 
-/** An answer is fresh this long (24 h). */
-export const socialFreshForMs = 24 * 3600 * 1000;
+/** An answer is fresh this long (5 days). */
+// Avatars, banners and bios are looked up afresh once their answer is 5 days old, so an updated
+// profile reaches everyone eventually; the last answer shows meanwhile (iOS 46b26d9, was 24 h).
+export const socialFreshForMs = 5 * 24 * 3600 * 1000;
 /** Hard limit for one lookup, every request and fallback included. Each step has its own shorter
  *  timeout, so a slow first source can't use up the time the next one needs. */
 export const socialLookupDeadlineMs = 20_000;

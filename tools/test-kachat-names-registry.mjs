@@ -1767,7 +1767,7 @@ async function runSocialResolver(r) {
 
   // profile(link): the cached answer now, a background lookup when stale
   const res2 = make();
-  clock += 25 * 3600 * 1000;
+  clock += (5 * 24 + 1) * 3600 * 1000; // past the 5-day freshness (iOS 46b26d9)
   routes.set("https://api.fxtwitter.com/KaspaCurrency", { body: { code: 200, user: { avatar_url: "https://pbs.twimg.com/profile_images/3/c_normal.jpg", description: "new" } } });
   const landed = new Promise((resolve) => res2.onChange((_l, p) => resolve(p)));
   const stale = await res2.profile("x.com/KaspaCurrency");
