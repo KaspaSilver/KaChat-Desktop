@@ -525,6 +525,11 @@ const ACCOUNT_SHELL_META_KEY = "kachat-account-shell-metadata-v1";
 const SAVED_ACCOUNTS_KEY = "kachat-saved-accounts-v1";
 const ACTIVE_ACCOUNT_KEY = "kachat-active-account-v1";
 let accountShellPrefs = loadAccountShellPreferences();
+// The local password guards everything, always (owner, 2026-10-14): revealing a seed phrase or a
+// private key, opening KaChat and switching accounts all ask for it, accounts are always saved on
+// this device (encrypted with it), and the active one is restored after it is entered. These were
+// switches; they are fixed on now.
+for (const key of ["passwordForSeed", "passwordForLogin", "passwordForSpendingKey", "saveAccount", "keepSignedIn"]) accountShellPrefs[key] = true;
 // One-time: an existing user (any saved account) without a picked explorer was on the old default,
 // explorer.kaspa.org; pin it so the new kaspa.stream default only reaches fresh installs (iOS e69fe13).
 if (!accountShellPrefs.explorerDefaultMigrated) {
@@ -633,11 +638,17 @@ function closePasswordModal(result) {
   passwordResolver = null;
   if (resolve) resolve(result);
 }
-function requestPassword({ mode = "verify", title, message, allowForgot = false } = {}) {
+// `required`: no way out but to set it (no Cancel, no close button, no click-away) - the local
+// password every account must have (owner, 2026-10-14).
+let passwordRequired = false;
+function requestPassword({ mode = "verify", title, message, allowForgot = false, required = false } = {}) {
   return new Promise((resolve) => {
     if (passwordResolver) { const prev = passwordResolver; passwordResolver = null; prev(false); }
     passwordMode = mode;
     passwordResolver = resolve;
+    passwordRequired = Boolean(required);
+    passwordModal?.querySelectorAll("[data-password-cancel]").forEach((b) => { b.hidden = passwordRequired; });
+    setPasswordVisible(false);
     // "Forgot password?" only on the lock (signed out, vault locked): offered inside an unlocked
     // session it would be a way around the seed-reveal password.
     { const forgot = document.querySelector("[data-password-forgot]"); if (forgot) forgot.hidden = !(allowForgot && mode === "verify" && isAppLocked()); }
@@ -693,21 +704,46 @@ document.querySelector("[data-password-forgot]")?.addEventListener("click", asyn
   });
   if (!confirmed) return;
   const removed = resetForgottenAppPassword();
-  for (const key of ["passwordForSeed", "passwordForLogin", "passwordForSpendingKey"]) accountShellPrefs[key] = false;
-  persistAccountShellPreferences();
   refreshPasswordStatus();
   renderSavedAccountsScreen();
   showCopyToast(removed ? "Password reset. Import your account with its recovery phrase." : "Password reset.");
 });
 document.querySelectorAll("[data-password-cancel]").forEach((b) => b.addEventListener("click", () => closePasswordModal(false)));
-passwordModal?.addEventListener("click", (event) => { if (event.target === passwordModal) closePasswordModal(false); });
-
-// Ensures a password exists (prompting to create one if not). Returns true if a
-// password is available afterward.
-async function ensureAppPassword(message) {
-  if (hasAppPassword()) return true;
-  return requestPassword({ mode: "set", title: "Set Password", message: message || "Create a password to protect this." });
+passwordModal?.addEventListener("click", (event) => { if (event.target === passwordModal && !passwordRequired) closePasswordModal(false); });
+// Show / hide what is typed, both fields at once (owner, 2026-10-14).
+function setPasswordVisible(visible) {
+  for (const input of [passwordInput, passwordConfirmInput]) if (input) input.type = visible ? "text" : "password";
+  passwordModal?.querySelectorAll("[data-password-reveal]").forEach((button) => {
+    button.setAttribute("aria-pressed", visible ? "true" : "false");
+    button.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+    button.classList.toggle("revealed", visible);
+  });
 }
+passwordModal?.querySelectorAll("[data-password-reveal]").forEach((button) => {
+  button.addEventListener("click", () => setPasswordVisible(passwordInput?.type === "password"));
+});
+
+/** Every account has a local password: one that has none (an older one, or a fresh create /
+ *  import) is asked to set it before anything else, with no way to skip it. */
+let requiredPasswordPrompting = false;
+async function requireAppPasswordIfMissing() {
+  if (requiredPasswordPrompting || hasAppPassword() || !engine.address) return;
+  requiredPasswordPrompting = true;
+  try {
+    while (!hasAppPassword()) {
+      const ok = await requestPassword({
+        mode: "set",
+        required: true,
+        title: "Set a Password",
+        message: `Create a password for this device, at least ${MIN_APP_PASSWORD_LENGTH} characters. Your keys are encrypted with it, and KaChat asks for it to open, to switch accounts and to show a seed phrase or private key. If you forget it, you'll need your recovery phrase.`,
+      });
+      if (ok) { refreshPasswordStatus(); showCopyToast("Password set. Your keys are now encrypted."); }
+    }
+  } finally {
+    requiredPasswordPrompting = false;
+  }
+}
+
 
 const passwordStatusEl = document.querySelector("[data-password-status]");
 function refreshPasswordStatus() {
@@ -726,33 +762,7 @@ function refreshPasswordStatus() {
       ? "Restore the active account when KaChat opens, after you enter your password. Closing the tab locks KaChat, and a manual refresh asks for the password again."
       : "Restore the active account when KaChat opens.";
   }
-  for (const [selector, key] of [["[data-pref-password-seed]", "passwordForSeed"], ["[data-pref-password-login]", "passwordForLogin"], ["[data-pref-password-spending-key]", "passwordForSpendingKey"]]) {
-    const toggle = document.querySelector(selector);
-    if (toggle) toggle.checked = !!accountShellPrefs[key] && hasPassword;
-  }
 }
-function initSecurityToggle(toggle, key) {
-  if (!toggle) return;
-  toggle.checked = !!accountShellPrefs[key];
-  toggle.addEventListener("change", async () => {
-    if (toggle.checked) {
-      if (!(await ensureAppPassword())) { toggle.checked = false; return; }
-      accountShellPrefs[key] = true;
-    } else {
-      // Require the password to turn a protection off, so it can't be trivially bypassed.
-      if (hasAppPassword() && !(await requestPassword({ mode: "verify", title: "Confirm Password", message: "Enter your password to turn this off." }))) {
-        toggle.checked = true;
-        return;
-      }
-      accountShellPrefs[key] = false;
-    }
-    persistAccountShellPreferences();
-    refreshPasswordStatus();
-  });
-}
-initSecurityToggle(document.querySelector("[data-pref-password-seed]"), "passwordForSeed");
-initSecurityToggle(document.querySelector("[data-pref-password-login]"), "passwordForLogin");
-initSecurityToggle(document.querySelector("[data-pref-password-spending-key]"), "passwordForSpendingKey");
 refreshPasswordStatus();
 document.querySelector("[data-change-password]")?.addEventListener("click", async () => {
   if (!hasAppPassword()) {
@@ -762,38 +772,11 @@ document.querySelector("[data-change-password]")?.addEventListener("click", asyn
     }
     return;
   }
-  const choice = await chooseDialog({
-    title: "App Password",
-    options: [
-      { id: "change", title: "Change Password", subtitle: "Re-encrypts your saved accounts' keys with the new password." },
-      { id: "remove", title: "Remove Password", subtitle: "Stores your keys unencrypted in this browser.", destructive: true },
-      { id: "cancel", title: "Cancel" },
-    ],
-  });
-  if (choice === "change") {
-    if (!(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
-    if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. If you forget it, you'll need your recovery phrase.` })) {
-      showCopyToast("Password updated");
-      refreshPasswordStatus();
-    }
-  } else if (choice === "remove") {
-    if (!(await requestPassword({ mode: "verify", title: "Remove Password", message: "Enter your current password." }))) return;
-    const confirmed = await confirmDialog({
-      title: "Remove password?",
-      message: "Your recovery phrases, passphrases and private keys, and your Nextcloud app password, will be stored UNENCRYPTED in this browser. Anyone who can read this browser's data, or a malicious script or extension, could take them and your funds. KaChat will no longer ask for a password.",
-      confirmLabel: "Remove Password",
-      destructive: true,
-    });
-    if (!confirmed) return;
-    try {
-      vaultRemoveAppPassword(); // decrypts back to plaintext and checks it before deleting the record
-      for (const key of ["passwordForSeed", "passwordForLogin", "passwordForSpendingKey"]) accountShellPrefs[key] = false;
-      persistAccountShellPreferences();
-      refreshPasswordStatus();
-      showCopyToast("Password removed. Keys on this device are no longer encrypted.");
-    } catch (error) {
-      showCopyToast(userFacingError(error));
-    }
+  // Change only: the password can't be removed - it is what keeps the keys encrypted.
+  if (!(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
+  if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. If you forget it, you'll need your recovery phrase.` })) {
+    showCopyToast("Password updated");
+    refreshPasswordStatus();
   }
 });
 
@@ -4802,6 +4785,8 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // ensureSelfConversation), already first in the list.
   if (engine.address === clean) { try { ensureSelfChatForSync(); } catch { /* fine */ } }
   if (engine.address === clean) { try { revertDomainContactNames(); } catch { /* fine */ } }
+  // An account with no local password sets one before anything else (owner, 2026-10-14).
+  if (engine.address === clean && !hasAppPassword()) window.setTimeout(() => { requireAppPasswordIfMissing(); }, 300);
   // Payment chats older builds made from .kachat contract transactions go (iOS 32fdaa4).
   if (engine.address === clean) { try { purgeContractAddressPaymentChats(); } catch (error) { appendEngineLog(`Contract chat purge failed: ${error?.message || error}`); } }
   refreshSubscriptionAddresses({ restart: false });
@@ -10039,7 +10024,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 161;
+const APP_BUILD = 162;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -24957,8 +24942,6 @@ function refreshSetupGuideRow() {
 }
 
 const prefBindings = [
-  ["[data-pref-save-account]", "saveAccount", true],
-  ["[data-pref-keep-signed-in]", "keepSignedIn", true],
   ["[data-pref-estimate-fees]", "estimateFees", false],
   ["[data-pref-hide-payment-chats]", "hidePaymentChats", false],
   ["[data-pref-show-contact-balance]", "showContactBalance", true],
@@ -25002,8 +24985,6 @@ prefBindings.forEach(([selector, key, fallback]) => {
         if (!granted) showCopyToast(notificationsUnavailableMessage());
       });
     }
-    if (key === "saveAccount") showCopyToast(input.checked ? "New accounts will be saved on this device." : "New accounts will stay in memory only (not saved).");
-    if (key === "keepSignedIn") showCopyToast(input.checked ? "You'll stay signed in on next launch." : "You'll be asked to sign in on next launch.");
   });
 });
 refreshSetupGuideRow();

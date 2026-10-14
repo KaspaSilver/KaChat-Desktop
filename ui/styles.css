@@ -13402,3 +13402,17 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 
 /* User Info's Rescan Profile row: a spinner while it looks everything up again (iOS bc95d17). */
 .chat-info-rescan-spinner { margin-left: auto; width: 16px; height: 16px; }
+
+/* The password fields' show / hide button (owner, 2026-10-14). */
+.password-field { position: relative; display: block; }
+.password-field .field-input { padding-right: 44px; width: 100%; box-sizing: border-box; }
+.password-reveal {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.password-reveal:hover { color: var(--text); }
+.password-reveal svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.password-reveal .eye-closed { display: none; }
+.password-reveal.revealed .eye-open { display: none; }
+.password-reveal.revealed .eye-closed { display: block; }

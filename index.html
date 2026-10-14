@@ -1006,13 +1006,8 @@
           <section class="settings-group">
             <p class="settings-group-label">Security</p>
             <div class="settings-list-card">
-              <div class="settings-toggle-row"><span><strong>Password for Seed Phrase</strong><small>Require your password to reveal the seed phrase or private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-seed><span></span></label></div>
-              <div class="settings-toggle-row"><span><strong>Password for Account Login</strong><small>Also ask for your password when switching to a saved account. With a password set, KaChat always asks for it when it opens, because your keys are encrypted with it: closing the tab locks KaChat, and a manual refresh asks again.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-login><span></span></label></div>
-              <div class="settings-toggle-row"><span><strong>Password for Address Private Keys</strong><small>Require your password to reveal a spending address's private key.</small></span><label class="switch-control"><input type="checkbox" data-pref-password-spending-key><span></span></label></div>
               <button class="settings-list-row" type="button" data-change-password><span class="settings-row-copy"><strong>Change Password</strong><small data-password-status>No password set</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Simple Mode</strong><small>Limit KaChat to Chats, Portfolio and Cold Storage.</small></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <div class="settings-toggle-row"><span><strong>Save account on this device</strong><small data-save-account-note>Without a password, keys are stored unencrypted in this browser. Set a password to encrypt them.</small></span><label class="switch-control"><input type="checkbox" data-pref-save-account checked><span></span></label></div>
-              <div class="settings-toggle-row"><span><strong>Keep me signed in</strong><small data-keep-signed-in-note>Restore the active account when KaChat opens.</small></span><label class="switch-control"><input type="checkbox" data-pref-keep-signed-in checked><span></span></label></div>
             </div>
           </section>
 
@@ -2807,10 +2802,10 @@
       </div>
       <p class="field-hint" data-password-message hidden></p>
       <label class="field-label">Password
-        <input class="field-input" type="password" data-password-input autocomplete="off" />
+        <span class="password-field"><input class="field-input" type="password" data-password-input autocomplete="off" /><button class="password-reveal" type="button" data-password-reveal aria-label="Show password" aria-pressed="false"><svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.6A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2.5 12s3.5 6.5 9.5 6.5c1.6 0 3-.4 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button></span>
       </label>
       <label class="field-label" data-password-confirm-label hidden>Confirm Password
-        <input class="field-input" type="password" data-password-confirm autocomplete="off" />
+        <span class="password-field"><input class="field-input" type="password" data-password-confirm autocomplete="off" /><button class="password-reveal" type="button" data-password-reveal aria-label="Show password" aria-pressed="false"><svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.6A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2.5 12s3.5 6.5 9.5 6.5c1.6 0 3-.4 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button></span>
       </label>
       <p class="field-error" data-password-error hidden></p>
       <button class="linklike-button" type="button" data-password-forgot hidden>Forgot password? You'll need your recovery phrase.</button>
