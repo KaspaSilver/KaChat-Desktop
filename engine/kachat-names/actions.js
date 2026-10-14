@@ -511,8 +511,6 @@ export class KachatNamesActions {
      *  `chattingMarketSource`, or `{ kind: "spending", index, address, label }`. Set with
      *  `setMarketSource`; back to the chatting address when the marketplace closes. */
     this._marketSource = chattingMarketSource;
-    /** `marketSource` was made with Buy From's Fresh Address (which pill shows as chosen) */
-    this.marketSourceIsFresh = false;
   }
 
   // MARK: Buy From (iOS eb9b027)
@@ -522,18 +520,16 @@ export class KachatNamesActions {
 
   /** Picks the marketplace's address: null / `{ kind: "chatting" }` for the chatting address, or a
    *  spending address `{ index, address, label }`. A spending address is remembered for this wallet
-   *  (`marketAddresses`). `fresh`: picked with Buy From's Fresh Address. Subscribers hear of it. */
-  setMarketSource(source, { fresh = false } = {}) {
+   *  (`marketAddresses`). Subscribers hear of it. */
+  setMarketSource(source) {
     let next = chattingMarketSource;
     if (source && source.kind !== "chatting" && Number.isInteger(source.index) && typeof source.address === "string" && source.address) {
       const label = String(source.label ?? "").trim() || `Address #${source.index}`;
       next = Object.freeze({ kind: "spending", index: source.index, address: source.address.toLowerCase(), label });
     }
-    const isFresh = next.kind === "spending" && Boolean(fresh);
     const same = next.kind === this._marketSource.kind && next.address === this._marketSource.address
-      && next.index === this._marketSource.index && isFresh === this.marketSourceIsFresh;
+      && next.index === this._marketSource.index;
     this._marketSource = next;
-    this.marketSourceIsFresh = isFresh;
     if (next.kind === "spending") this._rememberMarketAddress(next.address);
     if (!same) this._emit();
   }

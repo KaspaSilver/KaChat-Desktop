@@ -357,7 +357,6 @@ button.kmkt-row:active { background-color: var(--row-pressed); }
 .kmkt-source-pill .kmkt-ico-chevron-down { width: 12px; height: 12px; stroke-width: 2.6; }
 
 .kmkt-buyfrom { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
-.kmkt-buyfrom-note { margin: 0; font-size: 15px; line-height: 20px; color: var(--muted); }
 /* iOS: a horizontal row of pills, scrolled when they don't fit - never cut short */
 /* The three choices wrap onto a second line in a narrow sheet rather than scrolling sideways,
    where "Choose an Address" was cut off with nothing to say there was more. */

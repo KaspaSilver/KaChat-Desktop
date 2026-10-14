@@ -726,14 +726,12 @@ function hideSourcePill() {
 
 /** Buy From (iOS KachatMarketSourceSheet): which address the marketplace pays with - claims,
  *  purchases and offers - and so which address a new name lands on. Chatting Address (the
- *  default), Fresh Address (a never-used spending address, revealed in Manage Addresses) or Choose
- *  an Address (any of yours, each Used / Unused), with that address's balance, a copy button and,
- *  when it is empty, Fund: its QR code and a copy button, to send KAS to it from anywhere. */
+ *  default) or Choose an Address (any of yours, each Used / Unused; iOS ca39de7), with that
+ *  address's balance, a copy button and, when it is empty, Fund: its QR code and a copy button. */
 function openBuyFromSheet() {
   const rt = kachatNames();
   if (!rt || layers.some((l) => l.owner === "market" && l.buyFrom)) return;
   const actions = rt.actions;
-  let makingFresh = false;
   let copied = false;
   let copiedTimer = null;
   let timer = null;
@@ -744,15 +742,14 @@ function openBuyFromSheet() {
   const pillsHtml = () => {
     const spending = isSpending();
     return selectablePillHtml({ attr: "kmkt-source", value: "chatting", title: "Chatting Address", selected: !spending })
-      + selectablePillHtml({ attr: "kmkt-source", value: "fresh", title: "Fresh Address", selected: spending && actions.marketSourceIsFresh })
-      + selectablePillHtml({ attr: "kmkt-source", value: "choose", title: "Choose an Address", selected: spending && !actions.marketSourceIsFresh });
+      + selectablePillHtml({ attr: "kmkt-source", value: "choose", title: "Choose an Address", selected: spending });
   };
   const cardHtml = () => {
     const source = marketSource();
     const address = sourceAddress(source);
     const balance = shownSourceBalance(source);
     const spinnerHtml = `<span class="sk-spinner" aria-hidden="true"></span>`;
-    const balanceHtml = makingFresh || balance == null ? spinnerHtml : esc(`${plainAmount(balance)} ${KAS_UNIT}`);
+    const balanceHtml = balance == null ? spinnerHtml : esc(`${plainAmount(balance)} ${KAS_UNIT}`);
     return `
       <div class="sk-from-card kmkt-source-card">
         <span class="sk-from-copy">
@@ -779,19 +776,6 @@ function openBuyFromSheet() {
     if (fund) fund.innerHTML = fundHtml();
   };
 
-  /** A never-used spending address (revealed in Manage Addresses), the same one Receive offers. */
-  const makeFresh = async () => {
-    if (makingFresh) return;
-    makingFresh = true;
-    render();
-    try {
-      const entry = await deps?.freshSpendingAddress?.();
-      if (entry && Number.isInteger(entry.index) && entry.address) actions.setMarketSource(entry, { fresh: true });
-    } catch { /* stays where it was */ }
-    makingFresh = false;
-    render();
-  };
-
   const copy = async () => {
     const address = sourceAddress(marketSource());
     if (!address) return;
@@ -809,7 +793,6 @@ function openBuyFromSheet() {
     html: `
       ${navBar("Buy From", { trailing: { label: "Done", bold: true } })}
       <div class="kmkt-sheet-body kmkt-buyfrom">
-        <p class="kmkt-buyfrom-note">Claims, purchases and offers here are paid from this address, and the names you claim or buy belong to it. Use a fresh address to keep a name apart from your chatting address.</p>
         <div class="sk-select-pills kmkt-source-pills" data-kmkt-source-pills>${pillsHtml()}</div>
         <div data-kmkt-source-card>${cardHtml()}</div>
         <div data-kmkt-source-fund-host>${fundHtml()}</div>
@@ -819,7 +802,6 @@ function openBuyFromSheet() {
       if (pill) {
         const choice = pill.getAttribute("data-kmkt-source");
         if (choice === "chatting") actions.setMarketSource(null);
-        else if (choice === "fresh") makeFresh();
         else {
           deps?.openOwnAddressPicker?.({
             title: "Buy From",
@@ -1141,7 +1123,6 @@ export function openKachatSetupGuide() {
  *  contactNameFor(address), explorerTxUrl(txid), explorerAddressUrl(address), shortAddress(address),
  *  onIdentityChanged(),
  *  Buy From (iOS eb9b027): addressBalanceSompi(address) -> Promise<bigint>, drawQr(canvas, text),
- *  freshSpendingAddress() -> Promise<{ index, address, label } | null>,
  *  openOwnAddressPicker({ title, selectedAddress, onPick({ kind, index?, address, label? })) } */
 export function initKachatMarket(dependencies) {
   deps = dependencies || {};

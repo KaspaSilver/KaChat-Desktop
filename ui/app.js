@@ -10024,7 +10024,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 163;
+const APP_BUILD = 164;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -25620,18 +25620,10 @@ queueMicrotask(async () => {
       },
       explorerTxUrl, explorerAddressUrl, shortAddress,
       onIdentityChanged: () => { try { refreshKachatIdentity(); } catch { /* not ready yet */ } },
-      // Buy From (iOS eb9b027): the address the marketplace buys with - its balance, Fresh Address
-      // (the one Receive offers), Choose an Address, and Fund's QR code (the funding card's).
+      // Buy From (iOS eb9b027): the address the marketplace buys with - its balance, Choose an
+      // Address, and Fund's QR code (the funding card's).
       addressBalanceSompi: async (address) => BigInt((await engine.balanceForAddress(address))?.totalSompi ?? 0),
       drawQr: (canvas, text) => engine.drawQrFor(canvas, text, { dark: "#06110f", light: "#ffffff" }),
-      freshSpendingAddress: async () => {
-        const address = await freshReceiveAddress();
-        if (!address) return null;
-        for (let index = 0; index <= getSpendingState().maxIndex; index += 1) {
-          if (deriveSpendingAddressAt(index) === address) return { index, address, label: spendingSourceLabel(index) };
-        }
-        return null;
-      },
       openOwnAddressPicker: ({ title, selectedAddress, onPick }) => openOwnAddressPickerFor({ title, selectedAddress, onPick }),
     });
   } catch (error) { appendEngineLog(`.kachat did not start: ${error?.message || error}`); }

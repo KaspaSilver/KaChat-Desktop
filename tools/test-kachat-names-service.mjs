@@ -1173,12 +1173,11 @@ async function main() {
     r.eq(ba.ownMarketKeys.length, 1, "ownMarketKeys: just the chatting key before any pick");
     let sourceEvents = 0;
     const unsubSource = ba.subscribe(() => { sourceEvents += 1; });
-    ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "" }, { fresh: true });
+    ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "" });
     unsubSource();
     r.check(sourceEvents > 0, "setMarketSource: subscribers hear of it");
     r.eq(ba.marketSource.kind, "spending", "setMarketSource: a spending address");
     r.eq(ba.marketSource.label, "Address #3", "setMarketSource: an unnamed address is Address #N");
-    r.eq(ba.marketSourceIsFresh, true, "setMarketSource: picked as a fresh address");
     r.check(C.bytesEqual(ba.buyerSigner().me, hx(o0.seller)), "buyerSigner: the marketplace's spending address");
     r.eq(ba.buyerSigner().address, spendAddr.toLowerCase(), "buyerSigner: its address");
     for (const op of buyOps) {
@@ -1193,7 +1192,6 @@ async function main() {
     r.check(C.bytesEqual(ba.ownMarketKeys[0], chatKey) && C.bytesEqual(ba.ownMarketKeys[1], hx(o0.seller)), "ownMarketKeys: chatting first");
     ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "Names" });
     r.eq(ba.marketAddresses.length, 1, "marketAddresses: an address is remembered once");
-    r.eq(ba.marketSourceIsFresh, false, "setMarketSource: Choose an Address is not fresh");
     // leaving the marketplace: back to the chatting address, the remembered address stays
     ba.setMarketSource(null);
     r.eq(ba.marketSource.kind, "chatting", "setMarketSource(null): the chatting address");
