@@ -436,3 +436,8 @@ a.kl-receipt-txid:hover { background: var(--primary-08, var(--row-hover)); }
 .kl-offer-action.danger { color: var(--ios-red); }
 .kl-offer-action .kmkt-ico { width: 20px; height: 20px; }
 .kl-offer-action:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+
+/* Fund (iOS eb9b027 KachatAddressFundSheet, 2b45d6e profile save): the zero-balance funding card
+   (QR, address, copy) in a sheet. */
+.kl-fund-body { padding: 4px 16px 20px; }
+.kl-fund-card { margin-top: 0; }

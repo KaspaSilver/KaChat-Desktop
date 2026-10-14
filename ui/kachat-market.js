@@ -22,16 +22,23 @@
 // where launched) the pages are the live ones, empty, under "Coming soon"; search says registration
 // isn't open; the profile editor is the live one with Save off. The placeholder pages remain only
 // for a registry that is setting up.
+//
+// Buy From (iOS eb9b027): while the market is up, the top bar's balance is the marketplace's own
+// pill - the balance and the address it buys with (actions.marketSource) - and clicking it opens Buy
+// From. Leaving the market switches back to the chatting address.
 
 import "./kachat-market.css";
 import { KAS_UNIT, IS_TESTNET } from "../engine/network.js";
-import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
+import { kachatNames, kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtime.js";
+import { compactAddress } from "../engine/kachat-names/registry-state.js";
+import { selectablePillHtml } from "./send-kaspa-components.js";
 import { publicLaunchMs, isPubliclyOpen, launchString, networkNowMs, refreshChainTime } from "../engine/kachat-names/launch.js";
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
   liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml,
   livePageHtml, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
   kachatNameTileHtml, kachatNameGridHtml, liveClaimsButtonHtml, openClaimsList,
+  addressBalanceSompi, openAddressFundSheet, plainAmount,
 } from "./kachat-names-live.js";
 
 /** Your Domains > .kachat and each address's .kachat tab (iOS KachatLiveDomainsTab, KachatAddressLiveNamesList); see kachat-names-live.js. */
@@ -91,6 +98,10 @@ const ICON = {
   lock: svg(`<rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M8 10.5V7.6a4 4 0 0 1 8 0v2.9"/>`),
   bubbles: svg(`<path d="M3.9 4h9.7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H8.7L5.2 16v-3H3.9a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M15.6 8.5h4.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-1.3v3l-3.5-3h-4.6a2 2 0 0 1-2-1.6"/>`),
   chevron: svg(`<path d="m9.5 6 6 6-6 6"/>`),
+  chevronDown: svg(`<path d="m6 9.5 6 6 6-6"/>`, "kmkt-ico kmkt-ico-chevron-down"),
+  copy: svg(`<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6.4a1.9 1.9 0 0 0-1.9-1.9H6.4a1.9 1.9 0 0 0-1.9 1.9v7.2a1.9 1.9 0 0 0 1.9 1.9h2.1"/>`),
+  check: svg(`<path d="m5 12.5 4.3 4.3L19 7.2"/>`),
+  qrcode: svg(`<rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1"/><path d="M14 14h2.5v2.5H14zM18 18h2.5v2.5H18zM14 18.5v2M18.5 14h2"/>`),
   back: svg(`<path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/>`),
   personCircle: svg(`<circle cx="12" cy="12" r="9.4"/><circle cx="12" cy="10" r="3.2"/><path d="M5.9 18.5a7.3 7.3 0 0 1 12.2 0"/>`),
   personFill: svg(`<circle cx="12" cy="7.8" r="4.3"/><path d="M3.6 21c.5-4.6 4-7.3 8.4-7.3s7.9 2.7 8.4 7.3Z"/>`, "kmkt-ico kmkt-ico-fill"),
@@ -163,7 +174,8 @@ function bindEscape() {
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !layers.length) return;
     // An app dialog or the password prompt over a sheet takes its own Escape first.
-    if (document.querySelector(".app-dialog-backdrop:not([hidden]), [data-password-modal]:not([hidden])")) return;
+    // So does Choose an Address over Buy From (send-kaspa-components openOwnAddressPicker).
+    if (document.querySelector(".app-dialog-backdrop:not([hidden]), [data-password-modal]:not([hidden]), [data-sk-source-picker]")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     const top = layers[layers.length - 1];
@@ -587,6 +599,270 @@ function openHowItWorksSheet() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Buy From: the address the marketplace buys with (iOS eb9b027 KachatMarketSourcePill /
+// KachatMarketSourceSheet / KachatAddressFundSheet)
+// ---------------------------------------------------------------------------------------------
+
+/** The marketplace's address (actions.marketSource) - `{ kind: "chatting" }` or a spending one -
+ *  or null where the registry isn't launched (no pill there: the app's own balance shows). */
+function marketSource() {
+  try { return kachatNames()?.actions?.marketSource ?? null; } catch { return null; }
+}
+
+/** "Chatting Address", or the spending address's name ("Address #3"). */
+function sourceTitle(source) {
+  return source?.kind === "spending" ? source.label : "Chatting Address";
+}
+
+/** The source's address: the spending address, or the chatting address. */
+function sourceAddress(source) {
+  if (source?.kind === "spending") return source.address;
+  return String(kachatNames()?.actions?.myAddress || deps?.walletAddress?.() || "").toLowerCase();
+}
+
+/** The chatting address's balance (sompi, BigInt) as the app knows it, or null. */
+function chattingBalanceSompi() {
+  try {
+    const v = deps?.walletBalanceSompi?.();
+    return typeof v === "bigint" ? v : null;
+  } catch { return null; }
+}
+
+/** The last balance read for each spending address the pill or the sheet showed: address -> sompi. */
+const sourceBalances = new Map();
+
+/** What the pill and the sheet show for `source`: the app's chatting balance, else the address's last
+ *  read balance (null while it loads). */
+function shownSourceBalance(source) {
+  if (source?.kind !== "spending") return chattingBalanceSompi();
+  return sourceBalances.has(source.address) ? sourceBalances.get(source.address) : null;
+}
+
+/** Reads a spending source's balance; `then` runs when it changed. */
+async function readSourceBalance(source, then) {
+  if (source?.kind !== "spending") return;
+  const sompi = await addressBalanceSompi(source.address);
+  if (sompi == null) return;
+  const before = sourceBalances.get(source.address);
+  sourceBalances.set(source.address, sompi);
+  if (before !== sompi) then?.();
+}
+
+/** "12.34567890 KAS" (iOS %.8f in the pill). */
+function eightDecimals(sompi) {
+  const v = BigInt(sompi ?? 0n);
+  return `${v / 100_000_000n}.${(v % 100_000_000n).toString().padStart(8, "0")} ${KAS_UNIT}`;
+}
+
+let sourcePillEl = null;
+let sourcePillTimer = null;
+let sourcePillUnsubscribe = null;
+let sourcePillShownFor = null;
+
+/** The marketplace's balance pill (iOS KachatMarketSourcePill), in place of the chatting balance
+ *  every other screen shows at the top: the balance of the address it buys with and which address
+ *  that is. Clicking it opens Buy From. */
+function sourcePillInnerHtml() {
+  const source = marketSource();
+  const balance = shownSourceBalance(source);
+  return `
+    ${sourcePillEl?.dataset.kmktLogo || ""}
+    <span class="kmkt-source-pill-copy">
+      <span class="kmkt-source-pill-amount">${esc(eightDecimals(balance ?? 0n))}</span>
+      <small class="kmkt-source-pill-address">${esc(`${sourceTitle(source)} · ${compactAddress(sourceAddress(source))}`)}</small>
+    </span>
+    ${ICON.chevronDown}`;
+}
+
+function paintSourcePill() {
+  if (sourcePillEl) sourcePillEl.innerHTML = sourcePillInnerHtml();
+}
+
+function showSourcePill() {
+  const rt = kachatNames();
+  const original = document.querySelector("[data-toolbar-balance]");
+  if (!rt || !original) return;
+  if (!sourcePillEl) {
+    sourcePillEl = document.createElement("button");
+    sourcePillEl.type = "button";
+    sourcePillEl.className = "toolbar-balance kmkt-source-pill";
+    sourcePillEl.dataset.kmktSourcePill = "";
+    sourcePillEl.title = "Choose the address the marketplace buys with";
+    sourcePillEl.setAttribute("aria-label", "Choose the address the marketplace buys with");
+    // the app's own Kaspa logo (its built URL), as the balance it stands in for
+    const logo = original.querySelector("img");
+    sourcePillEl.dataset.kmktLogo = logo ? logo.outerHTML : "";
+    sourcePillEl.addEventListener("click", () => openBuyFromSheet());
+  }
+  if (!sourcePillEl.isConnected) original.after(sourcePillEl);
+  original.hidden = true;
+  paintSourcePill();
+  sourcePillUnsubscribe ??= rt.actions.subscribe(() => {
+    const source = marketSource();
+    const key = `${source?.kind}|${source?.address ?? ""}`;
+    if (key !== sourcePillShownFor) {
+      sourcePillShownFor = key;
+      readSourceBalance(source, paintSourcePill);
+    }
+    paintSourcePill();
+  });
+  // every 15 seconds while the marketplace is up (iOS KachatMarketSourcePill's task)
+  if (!sourcePillTimer) {
+    const tick = () => { readSourceBalance(marketSource(), paintSourcePill); paintSourcePill(); };
+    tick();
+    sourcePillTimer = window.setInterval(tick, 15_000);
+  }
+}
+
+function hideSourcePill() {
+  if (sourcePillTimer) { window.clearInterval(sourcePillTimer); sourcePillTimer = null; }
+  sourcePillUnsubscribe?.();
+  sourcePillUnsubscribe = null;
+  sourcePillShownFor = null;
+  sourcePillEl?.remove();
+  const original = document.querySelector("[data-toolbar-balance]");
+  if (original) original.hidden = false;
+}
+
+/** Buy From (iOS KachatMarketSourceSheet): which address the marketplace pays with - claims,
+ *  purchases and offers - and so which address a new name lands on. Chatting Address (the
+ *  default), Fresh Address (a never-used spending address, revealed in Manage Addresses) or Choose
+ *  an Address (any of yours, each Used / Unused), with that address's balance, a copy button and,
+ *  when it is empty, Fund: its QR code and a copy button, to send KAS to it from anywhere. */
+function openBuyFromSheet() {
+  const rt = kachatNames();
+  if (!rt || layers.some((l) => l.owner === "market" && l.buyFrom)) return;
+  const actions = rt.actions;
+  let makingFresh = false;
+  let copied = false;
+  let copiedTimer = null;
+  let timer = null;
+  let unsubscribe = null;
+  let shownFor = null;
+
+  const isSpending = () => marketSource()?.kind === "spending";
+  const pillsHtml = () => {
+    const spending = isSpending();
+    return selectablePillHtml({ attr: "kmkt-source", value: "chatting", title: "Chatting Address", selected: !spending })
+      + selectablePillHtml({ attr: "kmkt-source", value: "fresh", title: "Fresh Address", selected: spending && actions.marketSourceIsFresh })
+      + selectablePillHtml({ attr: "kmkt-source", value: "choose", title: "Choose an Address", selected: spending && !actions.marketSourceIsFresh });
+  };
+  const cardHtml = () => {
+    const source = marketSource();
+    const address = sourceAddress(source);
+    const balance = shownSourceBalance(source);
+    const spinnerHtml = `<span class="sk-spinner" aria-hidden="true"></span>`;
+    const balanceHtml = makingFresh || balance == null ? spinnerHtml : esc(`${plainAmount(balance)} ${KAS_UNIT}`);
+    return `
+      <div class="sk-from-card kmkt-source-card">
+        <span class="sk-from-copy">
+          <span class="sk-from-title">${esc(sourceTitle(source))}</span>
+          ${address ? `<code class="sk-from-address" title="${esc(address)}">${esc(compactAddress(address))}</code>` : ""}
+        </span>
+        <span class="sk-from-balance">${balanceHtml}</span>
+        ${address ? `<button class="kmkt-source-copy" type="button" data-kmkt-source-copy aria-label="Copy address" title="Copy address">${copied ? ICON.check : ICON.copy}</button>` : ""}
+      </div>`;
+  };
+  const fundHtml = () => {
+    const balance = shownSourceBalance(marketSource());
+    return balance === 0n
+      ? `<button class="kmkt-source-fund" type="button" data-kmkt-source-fund>${ICON.qrcode}<span>Fund</span></button>`
+      : "";
+  };
+  const render = () => {
+    const q = (sel) => layer.el.querySelector(sel);
+    const pills = q("[data-kmkt-source-pills]");
+    if (pills) pills.innerHTML = pillsHtml();
+    const card = q("[data-kmkt-source-card]");
+    if (card) card.innerHTML = cardHtml();
+    const fund = q("[data-kmkt-source-fund-host]");
+    if (fund) fund.innerHTML = fundHtml();
+  };
+
+  /** A never-used spending address (revealed in Manage Addresses), the same one Receive offers. */
+  const makeFresh = async () => {
+    if (makingFresh) return;
+    makingFresh = true;
+    render();
+    try {
+      const entry = await deps?.freshSpendingAddress?.();
+      if (entry && Number.isInteger(entry.index) && entry.address) actions.setMarketSource(entry, { fresh: true });
+    } catch { /* stays where it was */ }
+    makingFresh = false;
+    render();
+  };
+
+  const copy = async () => {
+    const address = sourceAddress(marketSource());
+    if (!address) return;
+    try { await navigator.clipboard?.writeText(address); } catch { return; }
+    copied = true;
+    render();
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { copied = false; if (layer.el.isConnected) render(); }, 1500);
+  };
+
+  const layer = openLayer({
+    owner: "market",
+    kind: "sheet",
+    label: "Buy From",
+    html: `
+      ${navBar("Buy From", { trailing: { label: "Done", bold: true } })}
+      <div class="kmkt-sheet-body kmkt-buyfrom">
+        <p class="kmkt-buyfrom-note">Claims, purchases and offers here are paid from this address, and the names you claim or buy belong to it. Use a fresh address to keep a name apart from your chatting address.</p>
+        <div class="sk-select-pills kmkt-source-pills" data-kmkt-source-pills>${pillsHtml()}</div>
+        <div data-kmkt-source-card>${cardHtml()}</div>
+        <div data-kmkt-source-fund-host>${fundHtml()}</div>
+      </div>`,
+    onClick(event) {
+      const pill = event.target.closest("[data-kmkt-source]");
+      if (pill) {
+        const choice = pill.getAttribute("data-kmkt-source");
+        if (choice === "chatting") actions.setMarketSource(null);
+        else if (choice === "fresh") makeFresh();
+        else {
+          deps?.openOwnAddressPicker?.({
+            title: "Buy From",
+            selectedAddress: sourceAddress(marketSource()),
+            onPick: (picked) => actions.setMarketSource(picked?.kind === "spending" ? picked : null),
+          });
+        }
+        return;
+      }
+      if (event.target.closest("[data-kmkt-source-copy]")) { copy(); return; }
+      if (event.target.closest("[data-kmkt-source-fund]")) {
+        const address = sourceAddress(marketSource());
+        if (!address) return;
+        openAddressFundSheet({
+          address, title: "Send KAS to this address to buy with it.", owner: "market",
+          onClose: () => { readSourceBalance(marketSource(), () => { render(); paintSourcePill(); }); },
+        });
+      }
+    },
+    onClose() {
+      clearInterval(timer);
+      clearTimeout(copiedTimer);
+      unsubscribe?.();
+    },
+  });
+  layer.buyFrom = true;
+  unsubscribe = actions.subscribe(() => {
+    const source = marketSource();
+    const key = `${source?.kind}|${source?.address ?? ""}`;
+    if (key !== shownFor) {
+      shownFor = key;
+      readSourceBalance(source, render);
+    }
+    render();
+  });
+  shownFor = `${marketSource()?.kind}|${marketSource()?.address ?? ""}`;
+  // every 10 seconds while it is up (iOS KachatMarketSourceSheet's task)
+  const tick = () => { readSourceBalance(marketSource(), render); render(); };
+  tick();
+  timer = setInterval(tick, 10_000);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Market: rendering and events
 // ---------------------------------------------------------------------------------------------
 
@@ -861,8 +1137,12 @@ export function openKachatSetupGuide() {
 // ---------------------------------------------------------------------------------------------
 
 /** deps: { escapeHtml, showToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
- *  openChat(address), deviceLock(reason) -> Promise<bool>, walletAddress(), contactNameFor(address),
- *  explorerTxUrl(txid), explorerAddressUrl(address), shortAddress(address), onIdentityChanged() } */
+ *  openChat(address), deviceLock(reason) -> Promise<bool>, walletAddress(), walletBalanceSompi(),
+ *  contactNameFor(address), explorerTxUrl(txid), explorerAddressUrl(address), shortAddress(address),
+ *  onIdentityChanged(),
+ *  Buy From (iOS eb9b027): addressBalanceSompi(address) -> Promise<bigint>, drawQr(canvas, text),
+ *  freshSpendingAddress() -> Promise<{ index, address, label } | null>,
+ *  openOwnAddressPicker({ title, selectedAddress, onPick({ kind, index?, address, label? })) } */
 export function initKachatMarket(dependencies) {
   deps = dependencies || {};
   initKachatLive({
@@ -888,6 +1168,8 @@ export function showKachatMarket() {
   render();
   el.scrollTop = scroll;
   liveHubShow();
+  // the address the marketplace buys with, and its balance, at the top (iOS eb9b027)
+  showSourcePill();
   // A name typed before the screen went off is looked up again (the registry may have moved).
   if (liveEnabled() && state.search.trim()) liveSearchInput(state.search);
   if (state.view === "name") state.detail?.attach();
@@ -900,6 +1182,10 @@ export function hideKachatMarket() {
   closeLayersOwnedBy("market");
   liveHubHide();
   state.detail?.detach();
+  // Only the marketplace buys from another address: leaving it, everything else (Your Domains'
+  // renew and extend, the profile) pays from the chatting address again (iOS eb9b027).
+  hideSourcePill();
+  try { kachatNames()?.actions?.setMarketSource?.(null); } catch { /* no runtime */ }
 }
 
 /** The ".kachat" tab's static note (iOS KachatAddressDomainsList's "coming" note): what the tab

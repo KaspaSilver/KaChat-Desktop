@@ -341,3 +341,38 @@ button.kmkt-row:active { background-color: var(--row-pressed); }
 .kmkt-countdown-unit small { font-size: 11px; font-weight: 600; color: var(--muted); white-space: nowrap; }
 .kmkt-countdown-when { margin: 0; font-size: 15px; font-weight: 600; }
 .kmkt-countdown-note { margin: 0; font-size: 12.5px; color: var(--muted); }
+
+/* Buy From (iOS eb9b027): the marketplace's balance pill at the top, in place of the chatting
+   balance (KachatMarketSourcePill) - the balance and, under it, which address the marketplace buys
+   with - and its sheet (KachatMarketSourceSheet). */
+.toolbar-balance.kmkt-source-pill {
+  border: 0; background: transparent; cursor: pointer; font: inherit; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.kmkt-source-pill:hover { color: var(--text); }
+.kmkt-source-pill:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; border-radius: 10px; }
+.kmkt-source-pill-copy { display: flex; flex-direction: column; align-items: center; min-width: 0; line-height: 1.15; }
+.kmkt-source-pill-amount { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.kmkt-source-pill-address { font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.kmkt-source-pill .kmkt-ico-chevron-down { width: 12px; height: 12px; stroke-width: 2.6; }
+
+.kmkt-buyfrom { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
+.kmkt-buyfrom-note { margin: 0; font-size: 15px; line-height: 20px; color: var(--muted); }
+/* iOS: a horizontal row of pills, scrolled when they don't fit - never cut short */
+/* The three choices wrap onto a second line in a narrow sheet rather than scrolling sideways,
+   where "Choose an Address" was cut off with nothing to say there was more. */
+.kmkt-source-pills { flex-wrap: wrap; overflow: visible; }
+.kmkt-source-pills .sk-select-pill { flex: 0 0 auto; padding: 10px 14px; overflow: visible; }
+.kmkt-source-card { gap: 12px; }
+.kmkt-source-copy {
+  flex: 0 0 auto; display: inline-flex; padding: 4px; border: 0; background: transparent;
+  color: var(--kaspa-ink); cursor: pointer;
+}
+.kmkt-source-copy .kmkt-ico { width: 18px; height: 18px; stroke-width: 1.9; }
+.kmkt-source-fund {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+  padding: 14px; border: 0; border-radius: 999px; background: var(--kaspa); color: #000;
+  font: inherit; font-size: 15px; font-weight: 700; cursor: pointer;
+}
+.kmkt-source-fund:hover { filter: brightness(1.05); }
+.kmkt-source-fund .kmkt-ico { width: 18px; height: 18px; stroke-width: 1.9; }

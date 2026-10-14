@@ -10039,7 +10039,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 159;
+const APP_BUILD = 160;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -14051,6 +14051,32 @@ function resolutionCardLookUp(address) {
   });
 }
 
+/// Which of this wallet's own addresses `address` is: "Chatting Address", or a spending address's
+/// name ("Address #3", or the name the person gave it); null for anyone else's (iOS 56f004f
+/// WalletManager.ownAddressLabel). The address-to-index map is built once per account and address
+/// count, hidden addresses included.
+let ownAddressIndexCache = { key: "", map: new Map() };
+function ownAddressLabelFor(address) {
+  const target = String(address || "").trim().toLowerCase();
+  const wallet = String(engine.address || "").toLowerCase();
+  if (!target || !wallet) return null;
+  if (target === wallet) return "Chatting Address";
+  if (!activeAccountMnemonic()) return null;
+  const maxIndex = Math.max(0, Number(getSpendingState().maxIndex) || 0);
+  const key = `${wallet}|${maxIndex}`;
+  if (ownAddressIndexCache.key !== key) {
+    const map = new Map();
+    for (let index = 0; index <= maxIndex; index += 1) {
+      const spending = deriveSpendingAddressAt(index);
+      if (spending) map.set(String(spending).toLowerCase(), index);
+    }
+    ownAddressIndexCache = { key, map };
+  }
+  const index = ownAddressIndexCache.map.get(target);
+  return index == null ? null : spendingSourceLabel(index);
+}
+const OWN_ADDRESS_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.4"/><path d="M3.8 19c.9-3.3 3.3-5 6.2-5 1.4 0 2.6.4 3.6 1"/><path d="m15 17.5 2 2 4-4.5"/></svg>';
+
 /// The create-chat card, for every other place an address or a domain goes in (iOS ac0ef19):
 /// withdrawals, sends from an address, the portfolio, a group invite. The SCREEN does the
 /// resolving (.kachat first); this takes the outcome and shows the face, the name (the domain
@@ -14060,6 +14086,8 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
   if (!address) return "";
   watchResolutionAvatars();
   const knownDomain = resolutionCardName(address, domain, onLoaded);
+  // one of this wallet's own addresses: you are sending to yourself (iOS 56f004f)
+  const own = ownAddressLabelFor(address);
   // the spinner always stops, and a late answer for an address no longer shown is dropped
   // (iOS 6c8e75a, IOS-074)
   const looking = resolutionCardLooking(address);
@@ -14075,6 +14103,7 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
       <span class="create-chat-preview-copy">
         <span class="create-chat-preview-name${knownDomain ? "" : " muted"}">${escapeHtml(knownDomain || (looking ? "Looking up…" : "No domain"))}</span>
         <span class="create-chat-preview-address">${escapeHtml(address)}</span>
+        ${own ? `<span class="create-chat-preview-own">${OWN_ADDRESS_ICON}<span>${escapeHtml(`Your own address: ${own}`)}</span></span>` : ""}
       </span>
     </div>`;
 }
@@ -17937,7 +17966,7 @@ async function openChatCircleSheet(id) {
     pinOption,
     room.notify
       ? { id: "notify", title: "Turn Off Notifications", subtitle: "No notification for new messages in this room.", icon: ACTION_TILE_ICONS.bellSlash }
-      : { id: "notify", title: "Turn On Notifications", subtitle: room.indexed ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open.", icon: ACTION_TILE_ICONS.bell },
+      : { id: "notify", title: "Turn On Notifications", subtitle: room.tracked ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open.", icon: ACTION_TILE_ICONS.bell },
     { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room.", icon: ACTION_TILE_ICONS.link },
   ];
   if (room.indexed) {
@@ -25586,6 +25615,19 @@ queueMicrotask(async () => {
       },
       explorerTxUrl, explorerAddressUrl, shortAddress,
       onIdentityChanged: () => { try { refreshKachatIdentity(); } catch { /* not ready yet */ } },
+      // Buy From (iOS eb9b027): the address the marketplace buys with - its balance, Fresh Address
+      // (the one Receive offers), Choose an Address, and Fund's QR code (the funding card's).
+      addressBalanceSompi: async (address) => BigInt((await engine.balanceForAddress(address))?.totalSompi ?? 0),
+      drawQr: (canvas, text) => engine.drawQrFor(canvas, text, { dark: "#06110f", light: "#ffffff" }),
+      freshSpendingAddress: async () => {
+        const address = await freshReceiveAddress();
+        if (!address) return null;
+        for (let index = 0; index <= getSpendingState().maxIndex; index += 1) {
+          if (deriveSpendingAddressAt(index) === address) return { index, address, label: spendingSourceLabel(index) };
+        }
+        return null;
+      },
+      openOwnAddressPicker: ({ title, selectedAddress, onPick }) => openOwnAddressPickerFor({ title, selectedAddress, onPick }),
     });
   } catch (error) { appendEngineLog(`.kachat did not start: ${error?.message || error}`); }
   try {

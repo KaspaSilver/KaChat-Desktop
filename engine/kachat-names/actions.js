@@ -23,6 +23,16 @@
 // and `signer(op)` / `ownAddress(owner)` pick the address. A KasSigner (watch-only) address is
 // recognised but never signed for.
 //
+// Buy From (iOS eb9b027): the marketplace buys with `marketSource` - the chatting address unless the
+// person picked a spending address with the marketplace's balance pill. Inscribing a name (quote,
+// commit, register, and a claim resumed later), buy, offer, and extend / renew opened from the
+// marketplace are paid from it (`buyerSigner`), and a name claimed or bought this way belongs to
+// it. A claim in progress keeps signing with the address it started from (`ownerSigner`, by the
+// record's owner key); its record and salt stay with the wallet (the chatting address). Withdrawing
+// an offer signs with the address it was made from. Addresses picked are remembered per wallet
+// (`marketAddresses`, `ownMarketKeys`), so Your Domains and the marketplace list their names and
+// offers with the chatting address's.
+//
 // Nothing runs at import. The app wires ONE shared registry (registry.js) and one service:
 //
 //   const service = new KachatNamesService(engine);
@@ -128,6 +138,15 @@ export function needsDriving(p) {
  *  One key for both networks (the name predates mainnet): records are kept per wallet address, whose
  *  prefix (`kaspa:` / `kaspatest:`) names the network, so they never mix. */
 export const registrationsStorageKey = "kachat-names-registrations-testnet-v1";
+
+/** The storage key of the spending addresses the marketplace bought with, per wallet (a JSON array
+ *  of lowercased addresses). Swift `kachat_market_addresses.<wallet address>` (iOS eb9b027). */
+export function marketAddressesStorageKey(walletAddress) {
+  return `kachat_market_addresses.${String(walletAddress ?? "").toLowerCase()}`;
+}
+
+/** The marketplace's default address (iOS SendSource.chatting). */
+export const chattingMarketSource = Object.freeze({ kind: "chatting" });
 
 // MARK: - Errors
 
@@ -488,6 +507,83 @@ export class KachatNamesActions {
     this.selfClosedOffers = new Set();
     /** registration ids this session already combined coins for (`combineCoins`, iOS f1c16ec) */
     this._combinedFor = new Set();
+    /** The address the marketplace pays and buys with (iOS eb9b027 `marketSource`):
+     *  `chattingMarketSource`, or `{ kind: "spending", index, address, label }`. Set with
+     *  `setMarketSource`; back to the chatting address when the marketplace closes. */
+    this._marketSource = chattingMarketSource;
+    /** `marketSource` was made with Buy From's Fresh Address (which pill shows as chosen) */
+    this.marketSourceIsFresh = false;
+  }
+
+  // MARK: Buy From (iOS eb9b027)
+
+  /** The address the marketplace buys with (see the constructor). */
+  get marketSource() { return this._marketSource; }
+
+  /** Picks the marketplace's address: null / `{ kind: "chatting" }` for the chatting address, or a
+   *  spending address `{ index, address, label }`. A spending address is remembered for this wallet
+   *  (`marketAddresses`). `fresh`: picked with Buy From's Fresh Address. Subscribers hear of it. */
+  setMarketSource(source, { fresh = false } = {}) {
+    let next = chattingMarketSource;
+    if (source && source.kind !== "chatting" && Number.isInteger(source.index) && typeof source.address === "string" && source.address) {
+      const label = String(source.label ?? "").trim() || `Address #${source.index}`;
+      next = Object.freeze({ kind: "spending", index: source.index, address: source.address.toLowerCase(), label });
+    }
+    const isFresh = next.kind === "spending" && Boolean(fresh);
+    const same = next.kind === this._marketSource.kind && next.address === this._marketSource.address
+      && next.index === this._marketSource.index && isFresh === this.marketSourceIsFresh;
+    this._marketSource = next;
+    this.marketSourceIsFresh = isFresh;
+    if (next.kind === "spending") this._rememberMarketAddress(next.address);
+    if (!same) this._emit();
+  }
+
+  /** The storage key of this wallet's bought-with addresses, or null without a wallet. */
+  get _marketAddressesKey() {
+    const wallet = this.myAddress;
+    return wallet ? marketAddressesStorageKey(wallet) : null;
+  }
+
+  /** Spending addresses picked to buy with in the marketplace, for this wallet (lowercased): Your
+   *  Domains and the marketplace list the names and offers they hold next to the chatting
+   *  address's (iOS eb9b027 `marketAddresses`). */
+  get marketAddresses() {
+    const key = this._marketAddressesKey;
+    if (!key) return [];
+    let text = null;
+    try { text = this.storage.get(key); } catch { text = null; }
+    if (!text) return [];
+    try {
+      const list = JSON.parse(text);
+      return Array.isArray(list) ? list.filter((a) => typeof a === "string" && a).map((a) => a.toLowerCase()) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  _rememberMarketAddress(address) {
+    const key = this._marketAddressesKey;
+    const a = String(address ?? "").toLowerCase();
+    if (!key || !a) return;
+    const list = this.marketAddresses;
+    if (list.includes(a)) return;
+    list.push(a);
+    try { this.storage.set(key, JSON.stringify(list)); } catch (e) {
+      this.engine?.log?.("[KachatNames] could not save the marketplace's addresses:", errorMessage(e));
+    }
+  }
+
+  /** The keys whose names and offers count as this wallet's in the marketplace and Your Domains:
+   *  the chatting address's, then each address bought with (iOS eb9b027 `ownMarketKeys`). */
+  get ownMarketKeys() {
+    const keys = [];
+    const me = this.myKey;
+    if (me) keys.push(me);
+    for (const address of this.marketAddresses) {
+      const key = keyOf(address);
+      if (key && !keys.some((k) => bytesEqual(k, key))) keys.push(key);
+    }
+    return keys;
   }
 
   // MARK: Observing (Swift @Published pending / virtualDaa)
@@ -532,7 +628,7 @@ export class KachatNamesActions {
   _emit() {
     const snapshot = {
       pending: this.pending, virtualDaa: this.virtualDaa, autoPresentedRegistration: this.autoPresentedRegistration,
-      txStages: this.txStages, feeEstimate: this.feeEstimate,
+      txStages: this.txStages, feeEstimate: this.feeEstimate, marketSource: this._marketSource,
     };
     for (const l of [...this._listeners]) {
       try { l(snapshot); } catch (e) { this.engine?.log?.("[KachatNames] listener failed:", errorMessage(e)); }
@@ -618,31 +714,86 @@ export class KachatNamesActions {
     return null;
   }
 
-  /** The spending address that signs and pays for `op` (iOS signer(for:)): owner-only actions
-   *  (transfer, list/delist, accept, release, decline) on a name or offer one of the wallet's
-   *  spending addresses holds. null = the chatting address (everything else, extend and renew
-   *  included - anyone may pay those). */
+  /** The spending address that signs and pays for `op`, without touching a private key - the same
+   *  choice `signerFor(op)` makes (iOS `payer(for:)`, eb9b027): owner-only actions (transfer,
+   *  list/delist, accept, release, decline) on a name or offer one of the wallet's spending
+   *  addresses holds; a withdraw or refund of an offer one of them made; and buy, offer, extend and
+   *  renew while the marketplace buys with a spending address (`marketSource`).
+   *  `{ kind: "spending", index, address, label? }`, or null = the chatting address. */
   payerFor(op) {
-    const held = KachatNamesActions.heldBy(op);
-    if (!held) return null;
-    const own = this.ownAddress(held);
-    return own?.kind === "spending" ? own : null;
+    const held = KachatNamesActions.heldBy(op)
+      ?? ((op?.kind === "withdraw" || op?.kind === "refund") ? op.offer?.buyer ?? null : null);
+    if (held) {
+      const own = this.ownAddress(held);
+      if (own?.kind === "spending") return own;
+    }
+    if (["buy", "offer", "extend", "renew"].includes(op?.kind) && this._marketSource.kind === "spending") {
+      const { index, address, label } = this._marketSource;
+      return { kind: "spending", index, address, label };
+    }
+    return null;
   }
 
-  /** The signer for `op`: that spending address's derived key when `payerFor(op)` names one, else
-   *  the chatting address (`signer()`). */
+  /** The signer for `op` (iOS `signer(for:)`, eb9b027): owner-only actions on a name or offer one of
+   *  the wallet's spending addresses holds sign - and pay - with that address's derived key; an
+   *  offer is withdrawn (or refunded) with the key it was made from; buy, offer, extend and renew
+   *  are paid by, and (buy, offer) belong to, the marketplace's address (`buyerSigner`); everything
+   *  else uses the chatting address (`signer()`). */
   signerFor(op) {
-    const payer = this.payerFor(op);
-    if (!payer) return this.signer();
+    const held = KachatNamesActions.heldBy(op);
+    if (held) {
+      const own = this.ownAddress(held);
+      if (own?.kind === "spending") return this._spendingSigner(own.index, own.address, held);
+    }
+    switch (op?.kind) {
+      // an offer is withdrawn with the key it was made from (a refund is anyone's, but the buyer's
+      // own address pays its fee the same way)
+      case "withdraw":
+      case "refund":
+        try { return this.ownerSigner(op.offer?.buyer); } catch { return this.signer(); }
+      // paid by, and (buy, offer) belonging to, the marketplace's address
+      case "buy":
+      case "offer":
+      case "extend":
+      case "renew":
+        return this.buyerSigner();
+      default:
+        return this.signer();
+    }
+  }
+
+  /** A spending address's signer, checked against the key it must have (`expected`, else the
+   *  address's own key). Swift `spendingSigner(index:address:expected:)` (iOS eb9b027). */
+  _spendingSigner(index, address, expected = null) {
     this.service.requireLaunched();
+    const a = String(address ?? "").toLowerCase();
     // an address on the network the app runs on (iOS d657ee3, IOS-058; its prefix, iOS ef6b21e)
-    if (!payer.address.startsWith(`${KachatNamesService.addressPrefix}:`) || !isNetworkAddress(payer.address)) throw ServiceError.wrongAddressNetwork();
+    if (!a.startsWith(`${KachatNamesService.addressPrefix}:`) || !isNetworkAddress(a)) throw ServiceError.wrongAddressNetwork();
     let key = null;
-    try { key = this.wallet.spendingPrivateKey?.(payer.index) ?? null; } catch { key = null; }
+    try { key = this.wallet.spendingPrivateKey?.(index) ?? null; } catch { key = null; }
     if (!key) throw ActionError.noWallet();
     const me = xonlyKey(key);
-    if (!bytesEqual(me, KachatNamesActions.heldBy(op)) || !bytesEqual(keyOf(payer.address), me)) throw ActionError.keyMismatch();
-    return { address: payer.address, privateKey: key, me };
+    const want = expected ?? keyOf(a);
+    if (!want || !bytesEqual(me, want) || !bytesEqual(keyOf(a), me)) throw ActionError.keyMismatch();
+    return { address: a, privateKey: key, me };
+  }
+
+  /** The signer for whichever of this wallet's addresses holds `owner` (an x-only key): the
+   *  chatting address or a spending address - a claim in progress keeps the address it was started
+   *  from (iOS eb9b027 `ownerSigner`). Anyone else's key (or a KasSigner's) throws keyMismatch. */
+  ownerSigner(owner) {
+    const own = this.ownAddress(owner);
+    if (own?.kind === "chatting") return this.signer();
+    if (own?.kind === "spending") return this._spendingSigner(own.index, own.address, owner);
+    throw ActionError.keyMismatch();
+  }
+
+  /** The marketplace's address (`marketSource`): a spending address's signer, else the chatting
+   *  address's (iOS eb9b027 `buyerSigner`). */
+  buyerSigner() {
+    const source = this._marketSource;
+    if (source.kind !== "spending") return this.signer();
+    return this._spendingSigner(source.index, source.address, null);
   }
 
   /** The current wallet's x-only key, without touching the private key (null when none). */
@@ -764,9 +915,10 @@ export class KachatNamesActions {
     return this.virtualDaa;
   }
 
-  /** What the wallet can spend on names right now (sompi, BigInt). */
+  /** What the wallet can spend on names right now (sompi, BigInt): the marketplace's address
+   *  (`buyerSigner`, iOS eb9b027). */
   async spendable() {
-    const s = this.signer();
+    const s = this.buyerSigner();
     const utxos = await this._walletUtxos(s.address);
     const daa = (await this.engine.currentVirtualDaaScore()) ?? 0n;
     return fundingUtxos(utxos, { me: s.me, virtualDaaScore: daa }).reduce((a, u) => a + u.entry.amount, 0n);
@@ -1160,14 +1312,15 @@ export class KachatNamesActions {
   /** Pulls this wallet's declined offers (OfferInfo[]) back: those made to an earlier owner of the
    *  name (the contract refuses them now), on a name since released, or on a name that has expired
    *  (MAINNET.md C1, iOS 0312a3f: its seller could accept and then reclaim it). A withdraw, signed by the
-   *  buyer - this wallet's chatting address - and paid back to it. Before its refund time only the
+   *  buyer - this wallet's chatting address, or the address the marketplace bought with (iOS
+   *  eb9b027 `ownMarketKeys`) - and paid back to it. Before its refund time only the
    *  buyer or the seller can return an offer, so the buyer's app does it as soon as it sees the name
    *  changed hands; after that, `returnExpiredOffers` covers it from any app. Each offer is tried
    *  once per session. Returns once the withdrawals are started. */
   async withdrawDeclinedOffers(offers) {
-    const me = this.myKey;
-    if (!KachatNamesService.isLaunched || !me || !Array.isArray(offers)) return;
-    const mine = offers.filter((o) => o && bytesEqual(o.buyer, me) && !this.withdrawingOffers.has(o.id) && !this.returningOffers.has(o.id));
+    const keys = this.ownMarketKeys;
+    if (!KachatNamesService.isLaunched || keys.length === 0 || !Array.isArray(offers)) return;
+    const mine = offers.filter((o) => o && keys.some((k) => bytesEqual(o.buyer, k)) && !this.withdrawingOffers.has(o.id) && !this.returningOffers.has(o.id));
     if (mine.length === 0) return;
     /** name -> owner bytes | null (free); absent = lookup failed */
     const ownerByName = new Map();
@@ -1237,7 +1390,8 @@ export class KachatNamesActions {
    *  the end: price + bond + gap deposit + network fees), spendable, affordable }`.
    *  `feeTier` (FeeTier, default normal): the fee speed both transactions will use (iOS e426432). */
   async quote({ name, years, gap, feeTier = FeeTier.normal }) {
-    const s = this.signer();
+    // the marketplace's address pays, and the name will be on it (iOS eb9b027)
+    const s = this.buyerSigner();
     years = BigInt(years);
     const m = await this.registry.prepare();
     await this._refreshChainTime();
@@ -1297,7 +1451,12 @@ export class KachatNamesActions {
    *  (FeeTier, default normal): the fee speed of the commit now and - at the network's rate then -
    *  of the register (and a reclaim); kept on the record (iOS e426432). */
   async startRegistration({ name: raw, years, maxPrice, feeTier = FeeTier.normal }) {
-    const s = this.signer();
+    // paid by, and the name belonging to, the marketplace's address (iOS eb9b027)
+    const s = this.buyerSigner();
+    // kept with the wallet's claims (the record and its salt), whichever address pays (iOS
+    // eb9b027; named apart from the funding coins `wallet` below, iOS 8a83814)
+    const walletAddress = this.myAddress;
+    if (!walletAddress) throw ActionError.noWallet();
     years = BigInt(years);
     if (maxPrice == null) throw new Failure("startRegistration needs the price the person confirmed (maxPrice)");
     const cap = BigInt(maxPrice);
@@ -1308,7 +1467,7 @@ export class KachatNamesActions {
     const manifest = await this.registry.prepare();
     await this._refreshChainTime();
     requireRegistrationOpen(manifest);
-    this._loadPending(s.address);
+    this._loadPending(walletAddress);
     await this.registry.refresh();
     const found = await this.registry.lookup(name);
     // Expired past grace: free to claim. The commit and the reclaim that frees the old record both
@@ -1366,9 +1525,10 @@ export class KachatNamesActions {
   /** Spends the commit back (the name was taken, or the person changed their mind). `p` is a
    *  record from `pending` (or its id). Returns the cancel txid. */
   async cancel(p) {
-    const s = this.signer();
     const stored = this._find(typeof p === "string" ? p : p.id);
     if (!stored) throw new Failure("no such registration");
+    // the address the claim was started from (iOS eb9b027 ownerSigner)
+    const s = this.ownerSigner(unhex32(stored.owner));
     if (!stored.salt) throw ActionError.noSalt();
     const salt = unhex32(stored.salt);
     const txId = await enqueueSend(s.address, async () => {
@@ -1601,8 +1761,9 @@ export class KachatNamesActions {
    *  current fee, after a node dropped the first one (iOS b219bb0). */
   async _resendCommit(p) {
     try {
-      const s = this.signer();
-      if (hex(s.me) !== p.owner) return;
+      // the address the claim was started from, chatting or spending (iOS eb9b027 ownerSigner)
+      let s;
+      try { s = this.ownerSigner(unhex32(p.owner)); } catch { return; }
       const stored = this._find(p.id) ?? p;
       if (!stored.salt) throw ActionError.noSalt();
       const salt = unhex32(stored.salt);
@@ -1632,13 +1793,12 @@ export class KachatNamesActions {
   }
 
   /** This wallet holds `name` as a live registration (a lapsed old record of it doesn't count:
-   *  that is what claiming an expired name registers over; iOS eea52b2). */
+   *  that is what claiming an expired name registers over; iOS eea52b2) - on any of its own
+   *  addresses, since a claim may be paid from a spending address (iOS eb9b027). */
   async _ownsName(name) {
-    const me = this.myKey;
-    if (!me) return false;
     try {
       const r = await this.registry.lookup(name);
-      return r.kind === "registered" && bytesEqual(r.info.owner, me)
+      return r.kind === "registered" && this.ownAddress(r.info.owner) != null
         && r.info.status(this.registry.graceMs, BigInt(nowMs())) !== Status.lapsed;
     } catch {
       return false;
@@ -1647,8 +1807,9 @@ export class KachatNamesActions {
 
   async _register(p, commit) {
     try {
-      const s = this.signer();
-      if (hex(s.me) !== p.owner) return;
+      // the address the claim was started from signs and pays, chatting or spending (iOS eb9b027)
+      let s;
+      try { s = this.ownerSigner(unhex32(p.owner)); } catch { return; }
       if (!p.salt) throw ActionError.noSalt();
       const salt = unhex32(p.salt);
       await this.registry.refresh();

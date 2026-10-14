@@ -13395,3 +13395,7 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 }
 .kl-receipt-locked { width: 100%; padding: 12px; margin-top: 12px; border-radius: 14px; }
 .kl-claim-locked .kl-ico, .kl-receipt-locked .kl-ico { flex: 0 0 16px; width: 16px; height: 16px; margin-top: 1px; }
+
+/* The address card's "Your own address: Address #3" line (iOS 56f004f). */
+.create-chat-preview-own { display: inline-flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 12px; font-weight: 600; color: var(--kaspa-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.create-chat-preview-own svg { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

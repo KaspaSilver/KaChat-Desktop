@@ -15,8 +15,11 @@ import {
   broadcastLanguageDisplayName,
   fetchBroadcastHistory,
   hasBroadcastIndexer,
-  isIndexedBroadcastChannel,
+  isCuratedBroadcastChannel,
+  isIndexerTrackedBroadcastChannel,
   isServiceBroadcastChannel,
+  onIndexerTrackedRoomsChange,
+  refreshIndexerTrackedRooms,
   isValidBroadcastChannel,
   normalizeBroadcastChannel,
   sendBroadcastMessage,
@@ -175,7 +178,7 @@ export function markSelectedRooms(read) {
 /** "Delete" from the room list: a room you added is left for good with its messages; a default
  *  room is only switched off, exactly like its toggle in Public Chats settings (iOS removeFromList). */
 function removeFromList(name) {
-  if (isIndexedBroadcastChannel(name)) setCuratedChannel(name, false);
+  if (isCuratedBroadcastChannel(name)) setCuratedChannel(name, false);
   else leaveChannel(name);
 }
 export function deleteSelectedRooms() {
@@ -206,7 +209,9 @@ export function chatCircleRooms() {
     unread: unreadFor(name),
     lastAt: Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0),
     notify: Boolean(notifyByChannel[name]),
-    indexed: isIndexedBroadcastChannel(name),
+    indexed: isCuratedBroadcastChannel(name), // a default room: switched off, not deleted
+    // the indexer keeps it, so the bell covers it with the room closed (iOS 21c480d)
+    tracked: isIndexerTrackedBroadcastChannel(name),
     joined: joinedChannels.includes(name),
     open: name === activeChannel,
   }));
@@ -244,8 +249,7 @@ export function removeBroadcastRooms(names) {
 /** The room's notifications on or off, as the room's bell sets them. */
 export function setBroadcastRoomNotify(name, on) {
   if (!deps) return;
-  const indexed = isIndexedBroadcastChannel(name);
-  if (indexed && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
+  if (isCuratedBroadcastChannel(name) && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
   if (on) { notifyByChannel[name] = true; deps.ensureNotificationPermission?.(); }
   else delete notifyByChannel[name];
   saveNotify();
@@ -254,7 +258,7 @@ export function setBroadcastRoomNotify(name, on) {
   if (activeChannel === name) document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !on);
   deps.showToast?.(!on
     ? "Notifications are off for this public chat"
-    : (indexed
+    : (isIndexerTrackedBroadcastChannel(name)
       ? "You'll get notifications for new messages in this public chat, even when the app is closed"
       : "You'll get a notification for new messages in this public chat as long as your app remains open"));
 }
@@ -284,7 +288,7 @@ function curatedShown(name) { return !hiddenCurated.has(name); }
 /** Off: the room leaves the list and its bell goes off. On: it comes back - #kaspa and
  *  #kachat-bugs with their bell on again, as they start; the language rooms as they were. */
 function setCuratedChannel(name, shown) {
-  if (!isIndexedBroadcastChannel(name)) return;
+  if (!isCuratedBroadcastChannel(name)) return;
   if (shown) hiddenCurated.delete(name); else hiddenCurated.add(name);
   try { localStorage.setItem(deps.accountScopedKey(HIDDEN_CURATED_KEY), JSON.stringify([...hiddenCurated])); } catch { /* fine */ }
   const isJoined = joinedChannels.includes(name);
@@ -485,12 +489,6 @@ function retentionParts(millis) {
   return { amount: Math.max(1, Math.floor(millis / 1000)), unit: "seconds" };
 }
 
-function retentionDescription(millis) {
-  const { amount, unit } = retentionParts(millis);
-  const label = amount === 1 ? unit.replace(/s$/, "") : unit;
-  return `${amount} ${label}`;
-}
-
 // The share text and links for a room (iOS KaChatInternalLink.broadcastRoomShareText): one human
 // line, then BOTH accepted link forms.
 function roomShareLink(channel) {
@@ -517,7 +515,7 @@ function roomShareText(channel) {
 // the app is open, which is what lets it notify and count unread. The separate "listen" switch
 // is gone; a value stored by an older build is no longer read.
 function alwaysListening(channel) {
-  return Boolean(notifyByChannel[channel]) && !isIndexedBroadcastChannel(channel);
+  return Boolean(notifyByChannel[channel]) && !isIndexerTrackedBroadcastChannel(channel);
 }
 
 /**
@@ -538,7 +536,7 @@ function scanWantedChannels() {
   }
   if (hasBroadcastIndexer()) {
     for (const channel of [...wanted]) {
-      if (isIndexedBroadcastChannel(channel)) wanted.delete(channel);
+      if (isIndexerTrackedBroadcastChannel(channel)) wanted.delete(channel);
     }
   }
   for (const channel of serviceScanWanted) wanted.add(channel);
@@ -577,11 +575,11 @@ function handleBroadcastBlockHits(hits) {
   if (touched) renderChannelList();
 }
 
-/** Effective retention cutoff for a channel: every indexer-backed room (featured + the curated
- *  language rooms) is fixed 30-day, matching iOS; own channels use their configured days,
- *  forever when unset/0. */
+/** Effective retention cutoff for a channel: every room the indexer tracks (the curated rooms,
+ *  and any the operator added on the indexer, iOS 21c480d) keeps the indexer's full 30 days,
+ *  matching iOS; own channels use their configured retention, at most three days. */
 function retentionCutoffMs(channel) {
-  if (isIndexedBroadcastChannel(channel)) return Date.now() - BROADCAST_RETENTION_MS;
+  if (isIndexerTrackedBroadcastChannel(channel)) return Date.now() - BROADCAST_RETENTION_MS;
   return Date.now() - retentionMillisFor(channel);
 }
 
@@ -997,8 +995,6 @@ function bellButtonHtml(name) {
 const GLOBE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z"/></svg>`;
 const CHEVRON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
 
-// `indexed` = an indexer-backed room (featured or curated language). Those rooms have a fixed
-// 30-day retention served by the indexer, so they get no retention gear and no Leave.
 // The rooms tab is a plain list of chat-style rows (iOS 83286b3): a # avatar, the room name,
 // the newest message with its sender and time, a bell-off mark, and an unread badge - #kaspa
 // and #kachat-bugs pinned on top, every other joined room below by latest activity. Language
@@ -1065,7 +1061,7 @@ function renderChannelList() {
   const unopenedLanguages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => !joinedChannels.includes(name) && curatedShown(name));
   listEl.innerHTML = `
     ${FEATURED_BROADCAST_CHANNELS.filter(curatedShown).map((name) => roomRowHtml(name)).join("")}
-    ${others.map((name) => roomRowHtml(name, isIndexedBroadcastChannel(name)
+    ${others.map((name) => roomRowHtml(name, isCuratedBroadcastChannel(name)
       ? { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` }
       : {})).join("")}
     ${unopenedLanguages.length ? `
@@ -1583,9 +1579,10 @@ function renderRoom() {
   if (!inRoom) return;
 
   if (roomTitleEl) roomTitleEl.textContent = `#${activeChannel}`;
-  // A room you made yourself says what "public" does and does not mean; curated rooms are indexed.
+  // A room you made yourself says what "public" does and does not mean. Rooms the indexer tracks
+  // keep their history there, so they need no such warning (iOS 21c480d).
   const aboutButton = document.querySelector("[data-broadcast-own-room-about]");
-  if (aboutButton) aboutButton.hidden = isIndexedBroadcastChannel(activeChannel);
+  if (aboutButton) aboutButton.hidden = isIndexerTrackedBroadcastChannel(activeChannel);
   document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !notifyByChannel[activeChannel]);
   if (composerInput) composerInput.placeholder = `Message #${activeChannel}`;
   // No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
@@ -1614,7 +1611,7 @@ function renderRoom() {
       // A custom room has no history service anywhere, so "empty" here means "nothing has
       // been posted while you were watching" — say that plainly instead of leaving the room
       // looking broken or as if history were still loading.
-      empty.innerHTML = isIndexedBroadcastChannel(activeChannel)
+      empty.innerHTML = isIndexerTrackedBroadcastChannel(activeChannel)
         ? `<strong>No messages yet</strong><span>Be the first to post in #${deps.escapeHtml(activeChannel)}.</span>`
         : `<strong>Listening for new messages</strong><span>#${deps.escapeHtml(activeChannel)} is a live room: messages appear here as they land on chain while it is open, or any time when background listening is on. There is no history to load.</span>`;
       roomBodyEl.append(empty);
@@ -1914,7 +1911,7 @@ function cancelVoiceRecordingIfActive() {
 function openRoom(channel) {
   activeChannel = normalizeBroadcastChannel(channel);
   // Curated language rooms are not auto-joined, so opening one is what creates its row.
-  if (activeChannel && isIndexedBroadcastChannel(activeChannel) && !joinedChannels.includes(activeChannel)) {
+  if (activeChannel && isCuratedBroadcastChannel(activeChannel) && !joinedChannels.includes(activeChannel)) {
     joinedChannels.push(activeChannel);
     saveChannels();
     if (!joinedAtByChannel[activeChannel]) { joinedAtByChannel[activeChannel] = Date.now(); saveJoinedAt(); }
@@ -1930,16 +1927,43 @@ function openRoom(channel) {
   // What was typed here last time comes back (iOS 360e5d2).
   if (composerInput) composerInput.value = deps.readDraft?.(`room:${activeChannel}`) || "";
   updateConnectionDot();
-  // Only the curated rooms have an indexer behind them. A custom room must never call it:
-  // it serves nothing for that channel, so the request is pure noise and a failure there
-  // would log a scary "backfill failed" for a room that was never meant to backfill.
-  if (isIndexedBroadcastChannel(activeChannel)) {
+  // Only the rooms the indexer tracks have history behind them, so only they backfill and poll.
+  // Any other room is asked once, quietly: rows back mean the indexer tracks it after all (one
+  // the operator added), and it turns into a tracked room at once (iOS 21c480d).
+  if (isIndexerTrackedBroadcastChannel(activeChannel)) {
     backfillChannel(activeChannel, { quiet: true });
     startPolling(activeChannel);
   } else {
     stopPolling();
+    probeIndexerForRoom(activeChannel);
   }
   syncScanWanted();
+}
+
+// One newest-row ask for a room the indexer is not known to track (iOS asks the indexer for
+// every room; an indexer stores only rooms it tracks). Nothing is merged or logged here: rows
+// back mark the room as served in the engine, and handleTrackedRoomsChanged takes it from there.
+async function probeIndexerForRoom(channel) {
+  const baseUrl = indexerOverrideFor(channel) || null;
+  if (!baseUrl && !hasBroadcastIndexer()) return;
+  try { await fetchBroadcastHistory({ channel, limit: 1, baseUrl }); }
+  catch { /* a live room: nothing to say */ }
+}
+
+// The set of tracked rooms changed (the indexer listed a room, or returned rows for one): the
+// live scan, the sweep, the wording and retention follow at once (iOS 21c480d). An open room
+// that turned out to be tracked gets its history and the 8 s poll, as a default room does.
+function handleTrackedRoomsChanged() {
+  if (!deps) return;
+  syncScanWanted();
+  renderChannelList();
+  if (!activeChannel) return;
+  renderRoom();
+  if (tabVisible && !pollTimer && isIndexerTrackedBroadcastChannel(activeChannel)) {
+    const channel = activeChannel;
+    backfillChannel(channel, { quiet: true });
+    startPolling(channel);
+  }
 }
 
 function closeRoom() {
@@ -1999,9 +2023,10 @@ function joinChannel(rawName) {
 }
 
 function leaveChannel(name) {
-  // Indexer-backed rooms (featured + curated language) can't be left - both are permanent
-  // fixtures of the list screen, so no UI offers it; this guards stray paths.
-  if (isIndexedBroadcastChannel(name)) return;
+  // Curated rooms (featured + language) can't be left - both are permanent fixtures of the
+  // list screen, so no UI offers it; this guards stray paths. A room added on the indexer is
+  // tracked but stays one you can leave (iOS 21c480d).
+  if (isCuratedBroadcastChannel(name)) return;
   joinedChannels = joinedChannels.filter((c) => c !== name);
   saveChannels();
   delete messageCache[name];
@@ -2206,7 +2231,11 @@ function renderRoomInfoPanel() {
   const panel = infoPanelEl();
   if (!panel || !activeChannel) return;
   const channel = activeChannel;
-  const curated = isIndexedBroadcastChannel(channel);
+  const curated = isCuratedBroadcastChannel(channel);
+  // Only rooms the indexer tracks have history worth a number: the indexer keeps theirs, 30
+  // days, which is what this device keeps too (iOS 21c480d).
+  const keptDays = Math.round(BROADCAST_RETENTION_MS / 86_400_000);
+  const keptFor = isIndexerTrackedBroadcastChannel(channel) ? (keptDays === 1 ? "1 day" : `${keptDays} days`) : "";
   const rows = messageCache[channel] || [];
   const people = new Set(rows.map((m) => m.senderAddress).filter(Boolean)).size;
   const times = rows.map((m) => Number(m.blockTime) || 0).filter(Boolean);
@@ -2246,7 +2275,7 @@ function renderRoomInfoPanel() {
       ${row("People who posted", String(people))}
       ${times.length ? row("Latest", fmt(Math.max(...times))) : ""}
       ${times.length ? row("Oldest held", fmt(Math.min(...times))) : ""}
-      ${curated ? row("Kept for", retentionDescription(retentionMillisFor(channel))) : ""}
+      ${keptFor ? row("Kept for", keptFor) : ""}
     </section>
     <section class="broadcast-info-section">
       <button type="button" class="broadcast-info-action" data-broadcast-share-room>
@@ -2293,7 +2322,7 @@ async function saveRoomIndexer(value) {
     indexerCheck = { state: "failed", reason: `Could not reach it: ${error.message}` };
   }
   if (activeChannel === channel) renderRoomInfoPanel();
-  if (isIndexedBroadcastChannel(channel) || trimmed) backfillChannel(channel, { quiet: true });
+  if (isIndexerTrackedBroadcastChannel(channel) || trimmed) backfillChannel(channel, { quiet: true });
 }
 
 async function copyRoomLink(channel, { text = false } = {}) {
@@ -2390,13 +2419,14 @@ export function resetBroadcastsForAccount() {
   syncScanWanted();
   renderChannelList();
   renderRoom();
+  refreshIndexerTrackedRooms().catch(() => {}); // at most hourly (iOS 21c480d)
 }
 
 /** Called when the Broadcasts tab stops being the visible tab. The open room stops
  *  polling AND stops counting as wanted; always-listen rooms keep their block scan. */
 // Closed rooms are swept from the indexer while the app is on screen (iOS 3c14b46): every
-// listed indexed room with its bell on that is not open asks for its newest rows every 20 s -
-// one small request per room, sequential. The block scan stays the fast path and misses blocks
+// listed room the indexer tracks (iOS 21c480d) with its bell on that is not open asks for its
+// newest rows every 20 s - one small request per room, sequential. The block scan stays the fast path and misses blocks
 // around a stream reconnect; the open room keeps its own 8 s poll. New live rows get the same
 // ping the scan gives; a room's first pass is history, not news, and stays quiet.
 const SWEEP_MS = 20_000;
@@ -2411,7 +2441,7 @@ async function sweepClosedRooms() {
   sweepRunning = true;
   try {
     for (const name of listedChannels()) {
-      if (name === activeChannel || !notifyByChannel[name] || !isIndexedBroadcastChannel(name)) continue;
+      if (name === activeChannel || !notifyByChannel[name] || !isIndexerTrackedBroadcastChannel(name)) continue;
       try {
         const result = await fetchBroadcastHistory({ channel: name, limit: 50, baseUrl: indexerOverrideFor(name) || null });
         if (mergeMessages(name, result.messages) > 0) renderChannelList();
@@ -2478,6 +2508,13 @@ export function initBroadcasts(dependencies) {
   startClosedRoomSweep();
   // Always-listen rooms must start scanning at launch, before the tab is ever opened.
   syncScanWanted();
+  // Rooms added on the indexer count like default rooms (iOS 21c480d): ask which ones on open
+  // and on coming back to the app (at most hourly), and follow the set when it changes.
+  onIndexerTrackedRoomsChange(handleTrackedRoomsChanged);
+  refreshIndexerTrackedRooms().catch(() => {});
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshIndexerTrackedRooms().catch(() => {});
+  });
 
   const joinButton = document.querySelector("[data-broadcast-join]");
   const joinCard = document.querySelector("[data-broadcast-join-card]");
@@ -2509,7 +2546,8 @@ export function initBroadcasts(dependencies) {
     if (!card || roomSelectionActive) return;
     event.preventDefault();
     const name = card.dataset.broadcastOpen;
-    const indexed = isIndexedBroadcastChannel(name);
+    const indexed = isCuratedBroadcastChannel(name);
+    const tracked = isIndexerTrackedBroadcastChannel(name);
     const unread = unreadFor(name) > 0;
     const notifying = Boolean(notifyByChannel[name]);
     const options = [
@@ -2517,8 +2555,8 @@ export function initBroadcasts(dependencies) {
         ? { id: "read", title: "Mark as Read", subtitle: "Clears this room's unread count.", icon: ACTION_TILE_ICONS.envelopeOpen }
         : { id: "unread", title: "Mark as Unread", subtitle: "Keeps a badge on this room until you open it.", icon: ACTION_TILE_ICONS.envelopeBadge },
       notifying
-        ? { id: "notify", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you.", icon: ACTION_TILE_ICONS.bellSlash }
-        : { id: "notify", title: "Turn Notifications On", subtitle: indexed ? "Notifies you of new messages in this room." : "Listens and notifies while the app is open.", icon: ACTION_TILE_ICONS.bell },
+        ? { id: "notify", title: "Turn Off Notifications", subtitle: "No notification for new messages in this room.", icon: ACTION_TILE_ICONS.bellSlash }
+        : { id: "notify", title: "Turn On Notifications", subtitle: tracked ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open.", icon: ACTION_TILE_ICONS.bell },
       { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room.", icon: ACTION_TILE_ICONS.link },
     ];
     if (!indexed && joinedChannels.includes(name)) {
@@ -2539,7 +2577,11 @@ export function initBroadcasts(dependencies) {
       saveNotify();
       syncScanWanted();
       renderChannelList();
-      deps.showToast?.(notifying ? "Notifications are off for this room" : "Notifications are on for this room");
+      deps.showToast?.(notifying
+        ? "Notifications are off for this public chat"
+        : (tracked
+          ? "You'll get notifications for new messages in this public chat, even when the app is closed"
+          : "You'll get a notification for new messages in this public chat as long as your app remains open"));
     } else if (choice === "copy") copyRoomLink(name);
     else if (choice === "switch-off") { setCuratedChannel(name, false); }
     else if (choice === "delete") {
@@ -2588,16 +2630,20 @@ export function initBroadcasts(dependencies) {
     const name = activeChannel;
     if (!name) return;
     const on = Boolean(notifyByChannel[name]);
+    const tracked = isIndexerTrackedBroadcastChannel(name);
     const choice = await chooseDialog({
-      title: `Notifications for #${name}`,
-      message: on ? "New messages here notify you." : "New messages here do not notify you.",
+      title: `#${name}`,
+      message: on
+        ? (tracked ? "You're notified of new messages here, even when the app is closed."
+          : "You're notified of new messages here while the app is open.")
+        : "New messages here don't notify you. The room still updates when you open it.",
       options: on
-        ? [{ id: "off", title: "Turn Notifications Off", subtitle: "New messages here stop notifying you." }]
-        : [{ id: "on", title: "Turn Notifications On", subtitle: isIndexedBroadcastChannel(name) ? "Notifies you of new messages in this room." : "Listens and notifies while the app is open." }],
+        ? [{ id: "off", title: "Turn Off Notifications", subtitle: "No notification for new messages in this room." }]
+        : [{ id: "on", title: "Turn On Notifications", subtitle: tracked ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open." }],
     });
     if (!choice) return;
     if (choice === "on") {
-      if (isIndexedBroadcastChannel(name) && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
+      if (isCuratedBroadcastChannel(name) && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
       notifyByChannel[name] = true;
       deps.ensureNotificationPermission?.();
     } else delete notifyByChannel[name];
@@ -2672,20 +2718,20 @@ export function initBroadcasts(dependencies) {
       const name = notify.dataset.broadcastNotify;
       // Curated language rooms are not auto-joined - the bell creates the row on demand, so
       // the very first tap turns notifications ON rather than silently creating an off row.
-      if (isIndexedBroadcastChannel(name) && !joinedChannels.includes(name)) {
+      if (isCuratedBroadcastChannel(name) && !joinedChannels.includes(name)) {
         joinedChannels.push(name);
         saveChannels();
       }
       if (notifyByChannel[name]) {
         delete notifyByChannel[name];
-        deps.showToast?.("Notifications are off for this broadcast");
+        deps.showToast?.("Notifications are off for this public chat");
       } else {
         notifyByChannel[name] = true;
         // Make sure the OS-level permission is actually granted so the pings can fire.
         deps.ensureNotificationPermission?.();
-        deps.showToast?.(isIndexedBroadcastChannel(name)
-          ? "You'll get notifications for new messages in this broadcast, even when the app is closed"
-          : "You'll get a notification for new messages in this broadcast as long as your app remains open");
+        deps.showToast?.(isIndexerTrackedBroadcastChannel(name)
+          ? "You'll get notifications for new messages in this public chat, even when the app is closed"
+          : "You'll get a notification for new messages in this public chat as long as your app remains open");
       }
       saveNotify();
       syncScanWanted();

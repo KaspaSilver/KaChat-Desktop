@@ -2,7 +2,7 @@
 // transactions (payload `kchat:1:bcast:<channel>:<content>`; the legacy `ciph_msg:1:bcast:`
 // root is read, never written), desktop port of the iOS/
 // Android 4.0 feature. The curated rooms (#kaspa, #kachat-bugs and the eleven per-language
-// rooms) are backed by the KaChat
+// rooms), and any room the operator adds on the indexer (iOS 21c480d), are backed by the KaChat
 // broadcast indexer (BROADCAST_INDEXER.md): it watches the chain 24/7 and serves history over
 // REST, so clients backfill on room open and poll while the room stays visible. Messages are
 // deduped by txid. There is no signature scheme: the sender is whoever signed the inputs, and a
@@ -10,7 +10,9 @@
 // see "Sender verification" below).
 
 import { getEndpoint } from "./endpoints.js";
+import { IS_TESTNET } from "./network.js";
 import { sendPayloadTransaction } from "./transactions.js";
+import { createIndexerTrackedRooms, parseTrackedChannelsResponse, shouldAskTrackedRooms } from "./indexer-tracked-rooms.js";
 
 /// Curated rooms that are AUTO-JOINED for every account and pinned at the top of the Popular
 /// section. Matches iOS `BroadcastService.featuredChannels`.
@@ -42,11 +44,10 @@ export const LANGUAGE_BROADCAST_CHANNELS = Object.freeze([
   "kaspa-hebrew",
 ]);
 
-/// Every indexer-tracked room. EVERYTHING that follows from "the indexer serves this room's
-/// history" keys off this set - the fixed 30-day retention, no per-room retention gear, no
-/// Leave. Only auto-join and the pinned Popular list use `FEATURED_BROADCAST_CHANNELS` alone.
-/// Mirrors iOS `BroadcastService.indexedChannels`.
-export const INDEXED_BROADCAST_CHANNELS = Object.freeze([
+/// The rooms the app ships as defaults (Popular + the language rooms): always in the list,
+/// switched off rather than left, "Popular" in Room Info. Only auto-join and the pinned Popular
+/// list use `FEATURED_BROADCAST_CHANNELS` alone. Mirrors iOS `curatedChannels` (iOS 21c480d).
+export const CURATED_BROADCAST_CHANNELS = Object.freeze([
   ...FEATURED_BROADCAST_CHANNELS,
   ...LANGUAGE_BROADCAST_CHANNELS,
 ]);
@@ -97,9 +98,88 @@ export function isLanguageBroadcastChannel(name) {
   return LANGUAGE_BROADCAST_CHANNELS.includes(normalizeBroadcastChannel(name));
 }
 
-/** True for every indexer-backed room (featured + curated language rooms). */
-export function isIndexedBroadcastChannel(name) {
-  return INDEXED_BROADCAST_CHANNELS.includes(normalizeBroadcastChannel(name));
+/** True for the rooms the app ships (featured + curated language rooms). */
+export function isCuratedBroadcastChannel(name) {
+  return CURATED_BROADCAST_CHANNELS.includes(normalizeBroadcastChannel(name));
+}
+
+// ---------------------------------------------------------------------------
+// Rooms the indexer tracks (iOS 21c480d)
+//
+// Whether the indexer keeps a room's history: the curated rooms, and any other room the
+// indexer tracks - one the operator adds on the indexer (it then keeps 30 days of it) needs no
+// app update. EVERYTHING that follows from "the indexer serves this room's history" keys off
+// `isIndexerTrackedBroadcastChannel` - the 30-day retention on this device, the closed-room
+// sweep behind the bell, no live block scan, the "even when the app is closed" wording and
+// "Kept for" in Room Info. Curated rooms alone still decide auto-join, Popular, switch-off
+// instead of Leave and "Popular" in Room Info: an added tracked room stays one you can leave.
+// ---------------------------------------------------------------------------
+
+const TRACKED_NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
+const trackedRoomListeners = new Set();
+const indexerTrackedRooms = createIndexerTrackedRooms({
+  storage: typeof localStorage !== "undefined" ? localStorage : null,
+  reportedKey: `kachat-broadcast-tracked-reported-v1${TRACKED_NET_SUFFIX}`, // GLOBAL, per network
+  servedKey: `kachat-broadcast-tracked-served-v1${TRACKED_NET_SUFFIX}`,     // GLOBAL, per network
+  normalize: normalizeBroadcastChannel,
+  onChange: () => {
+    for (const listener of trackedRoomListeners) {
+      try { listener(); } catch { /* one listener must not stop the others */ }
+    }
+  },
+});
+
+/** True when the indexer keeps this room's history: a curated room, or one it tracks. */
+export function isIndexerTrackedBroadcastChannel(name) {
+  const clean = normalizeBroadcastChannel(name);
+  return CURATED_BROADCAST_CHANNELS.includes(clean) || indexerTrackedRooms.contains(clean);
+}
+
+/** `fn()` runs whenever the set of tracked rooms changes. Returns an unsubscribe. */
+export function onIndexerTrackedRoomsChange(fn) {
+  if (typeof fn !== "function") return () => {};
+  trackedRoomListeners.add(fn);
+  return () => trackedRoomListeners.delete(fn);
+}
+
+/**
+ * GET /broadcast-channels -> {"channels": [...]}: the rooms this indexer tracks now (set on the
+ * indexer's dashboard). null when the indexer predates the endpoint (404) or can't be reached.
+ */
+export async function fetchTrackedBroadcastChannels({ baseUrl = null } = {}) {
+  const base = String(baseUrl || getEndpoint("broadcastIndexer") || "").trim().replace(/\/+$/, "");
+  if (!base) return null;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 15000) : null;
+  try {
+    const response = await fetch(`${base}/broadcast-channels`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: controller?.signal,
+    });
+    if (!response.ok) return null;
+    return parseTrackedChannelsResponse(await response.json(), normalizeBroadcastChannel);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+let trackedRoomsAskedAt = null; // { base, at }: when the app-wide indexer was last asked
+
+/**
+ * Asks the app-wide broadcast indexer which rooms it tracks, at most once an hour per indexer -
+ * on app open, on coming back to the app and on wallet switch. An indexer without the endpoint
+ * answers nothing and the set keeps what it learned from served rows.
+ */
+export async function refreshIndexerTrackedRooms() {
+  const base = String(getEndpoint("broadcastIndexer") || "").trim();
+  const nowMs = Date.now();
+  if (!shouldAskTrackedRooms(trackedRoomsAskedAt, base, nowMs)) return;
+  trackedRoomsAskedAt = { base, at: nowMs };
+  const channels = await fetchTrackedBroadcastChannels({ baseUrl: base });
+  if (channels) indexerTrackedRooms.setReported(channels);
 }
 
 /** Native display name for a curated language room, or "" for any other channel. */
@@ -110,8 +190,8 @@ export function broadcastLanguageDisplayName(name) {
 // ---------------------------------------------------------------------------
 // On-chain payload parsing + live block scanning
 //
-// The broadcast indexer only tracks the curated rooms, so a user-created room has NO
-// history service anywhere. Its only possible delivery path is watching the chain
+// The broadcast indexer only tracks its own rooms (the curated ones and any the operator added,
+// iOS 21c480d), so any other user-created room has NO history service anywhere. Its only possible delivery path is watching the chain
 // directly: subscribe to the node's block-added notifications and pick the broadcast
 // payloads out of every block. That is exactly what iOS does (BroadcastService's
 // `startScanning` / `extractBroadcastHits`), and it is LIVE ONLY by construction - a
@@ -660,8 +740,8 @@ export async function sendBroadcastMessage({ engine, channel, content, feeKas = 
   return txid;
 }
 
-/** True when a broadcast indexer is configured, i.e. the curated rooms have a history
- *  service. Custom rooms never have one - the indexer only tracks the curated set. */
+/** True when a broadcast indexer is configured, i.e. the tracked rooms have a history
+ *  service. Other custom rooms have none - the indexer only stores the rooms it tracks. */
 export function hasBroadcastIndexer() {
   return String(getEndpoint("broadcastIndexer") || "").trim().length > 0;
 }
@@ -689,8 +769,13 @@ export async function fetchBroadcastHistory({ channel, limit = 200, before = nul
     });
     if (!response.ok) throw new Error(`Broadcast indexer request failed (${response.status}).`);
     const json = await response.json();
+    const messages = Array.isArray(json?.messages) ? json.messages : [];
+    // An indexer only stores the rooms it tracks: rows back mean it keeps this room's history
+    // (iOS 21c480d). The curated rooms are tracked anyway, so they are not written down.
+    const name = normalizeBroadcastChannel(channel);
+    if (messages.length > 0 && !CURATED_BROADCAST_CHANNELS.includes(name)) indexerTrackedRooms.markServed(name);
     return {
-      messages: Array.isArray(json?.messages) ? json.messages : [],
+      messages,
       hasMore: json?.hasMore === true,
     };
   } finally {

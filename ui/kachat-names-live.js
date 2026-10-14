@@ -681,10 +681,17 @@ async function hubReloadOnce() {
     hub.listings = await registry.listings();
     hub.lapsed = await registry.lapsed();
     hub.grace = await registry.inGrace().catch(() => []);
-    const me = myKey();
-    if (me) {
-      hub.mine = await registry.namesOf(me, { includeInactive: true });
-      hub.myOffers = await registry.myOffers(me);
+    // the chatting address and every address the marketplace bought with (iOS eb9b027)
+    const keys = actions.ownMarketKeys ?? [];
+    if (keys.length) {
+      const names = [];
+      const offers = [];
+      for (const key of keys) {
+        names.push(...await registry.namesOf(key, { includeInactive: true }));
+        offers.push(...await registry.myOffers(key));
+      }
+      hub.mine = names;
+      hub.myOffers = offers;
       if (hub.myOffers.length) {
         await actions.refreshVirtualDaa().catch(() => null);
         // Your own expired offers come back to you on their own, and so do the ones whose name
@@ -1322,7 +1329,31 @@ function socialSourceText(link, kind) {
 function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onSaved = null, owner = "market" }) {
   const rt = kachatProfiles();
   if (!rt || !kit) return null;
-  const st = { profile: null, fee: null, quoteError: null, sending: false, sendError: null, txId: null, closed: false, layer: null };
+  const st = { profile: null, fee: null, quoteError: null, sending: false, sendError: null, txId: null, closed: false, layer: null, funding: null };
+  // The "not enough funds" popup: the chatting address's QR to fund it (iOS 2b45d6e).
+  const notEnoughFunds = kasLabel("You don't have enough funds. Please send at least 1 KAS to your chatting address.");
+  /** The save can't be paid: the chatting address has no spendable coin, or too little for the fee. */
+  const isShortOfFunds = (error) => {
+    if (error?.code === "noFunds" || /insufficient/i.test(String(error?.message ?? error ?? ""))) return true;
+    return walletBalanceSompi() === 0n;
+  };
+  const showFunding = () => {
+    const address = String(rt.actions.myAddress || deps().walletAddress?.() || "");
+    if (st.funding || st.closed || !address) return;
+    // Closes by itself once 1 KAS has arrived; either way the fee is worked out again.
+    st.funding = openAddressFundSheet({
+      address, title: notEnoughFunds, dismissAtSompi: SOMPI_PER_KAS, owner,
+      onClose: () => {
+        st.funding = null;
+        if (st.closed) return;
+        st.quoteError = null;
+        st.sendError = null;
+        st.fee = null;
+        render();
+        quote();
+      },
+    });
+  };
   const body = () => {
     const p = st.profile;
     const rows = p ? [
@@ -1382,9 +1413,27 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
         },
       });
     } catch (error) {
-      st.sendError = errorText(error);
+      if (isShortOfFunds(error)) {
+        st.sendError = notEnoughFunds;
+        showFunding();
+      } else {
+        st.sendError = errorText(error);
+      }
     }
     st.sending = false;
+    render();
+  };
+  const quote = async () => {
+    try {
+      st.fee = await rt.actions.profileFee(st.profile);
+    } catch (error) {
+      if (isShortOfFunds(error)) {
+        st.quoteError = notEnoughFunds;
+        showFunding();
+      } else {
+        st.quoteError = errorText(error);
+      }
+    }
     render();
   };
   st.layer = kit.openLayer({
@@ -1392,17 +1441,22 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
     onClick(event) {
       if (event.target.closest("[data-kl-psave-confirm]")) confirm();
     },
-    onClose() { st.closed = true; },
+    onClose() {
+      st.closed = true;
+      // the funding popup is this sheet's, and goes with it
+      if (st.funding) kit.closeLayer(st.funding);
+    },
   });
   (async () => {
     try {
       st.profile = await makeProfile();
-      render();
-      st.fee = await rt.actions.profileFee(st.profile);
     } catch (error) {
       st.quoteError = errorText(error);
+      render();
+      return;
     }
     render();
+    await quote();
   })();
   return st.layer;
 }
@@ -1413,6 +1467,82 @@ function walletBalanceSompi() {
     const value = deps().walletBalanceSompi?.();
     return typeof value === "bigint" ? value : null;
   } catch { return null; }
+}
+
+/** Any address's balance in sompi, read from a node (iOS eb9b027 KachatMarketSourceSheet.balance:
+ *  the sum of its UTXOs), or null when it can't be read. */
+export async function addressBalanceSompi(address) {
+  if (!address || typeof deps().addressBalanceSompi !== "function") return null;
+  try {
+    const value = await deps().addressBalanceSompi(address);
+    return value == null ? null : BigInt(value);
+  } catch { return null; }
+}
+
+/** "Address #3" (or its name) for the marketplace's address, else the short address (iOS eb9b027
+ *  KachatTxSheet.payerLabel). */
+function payerLabel(address) {
+  const source = kachatNames()?.actions?.marketSource;
+  const a = String(address ?? "").toLowerCase();
+  if (source?.kind === "spending" && source.address === a) return source.label;
+  return compactAddress(a);
+}
+
+/**
+ * Fund (iOS ZeroBalanceFundingCardView in a sheet: KachatAddressFundSheet, eb9b027, and the profile
+ * save's "not enough funds" popup, 2b45d6e): the headline, the address's QR code, the address and a
+ * copy button - the zero-balance funding card's look. Closes by itself once the address holds
+ * `dismissAtSompi` (any KAS by default). `onClose()` runs however it closed.
+ */
+export function openAddressFundSheet({ address, title, dismissAtSompi = 1n, owner = "market", onClose = null } = {}) {
+  if (!kit || !address) return null;
+  let timer = null;
+  let closed = false;
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(address);
+      deps().showToast?.("Address copied to clipboard.");
+    } catch { /* clipboard blocked */ }
+  };
+  const layer = kit.openLayer({
+    owner,
+    kind: "sheet",
+    label: title,
+    html: `
+      ${navHtml("", { trailing: { label: "Done", bold: true } })}
+      <div class="kmkt-sheet-body kl-fund-body">
+        <div class="chat-funding-gate kl-fund-card">
+          <strong>${esc(title)}</strong>
+          <canvas width="360" height="360" data-kl-fund-qr></canvas>
+          <button type="button" class="chat-funding-gate-address" data-kl-fund-copy title="Copy address">${esc(address)}</button>
+          <button type="button" class="secondary-button" data-kl-fund-copy>Copy Address</button>
+        </div>
+      </div>`,
+    onClick(event) {
+      if (event.target.closest("[data-kl-fund-copy]")) copy();
+    },
+    onClose() {
+      closed = true;
+      clearTimeout(timer);
+      try { onClose?.(); } catch { /* fine */ }
+    },
+  });
+  const canvas = layer.el.querySelector("[data-kl-fund-qr]");
+  if (canvas && typeof deps().drawQr === "function") {
+    Promise.resolve(deps().drawQr(canvas, address))
+      .then(() => { canvas.style.width = "180px"; canvas.style.height = "180px"; })
+      .catch(() => {});
+  }
+  const need = BigInt(dismissAtSompi);
+  const poll = async () => {
+    if (closed) return;
+    const balance = await addressBalanceSompi(address);
+    if (closed) return;
+    if (balance != null && balance >= need) { kit.closeLayer(layer); return; }
+    timer = setTimeout(poll, 8_000);
+  };
+  timer = setTimeout(poll, 8_000);
+  return layer;
 }
 
 /** The headline each action's finished-transaction sheet shows (iOS doneTitle). */
@@ -1569,8 +1699,11 @@ function openTxSheet(cfg) {
     key: undefined, seq: 0, timer: null, layer: null, closed: false,
     /** the fee rate `plan` was built at: the send uses exactly this (iOS 7e2b6cd, IOS-061) */
     planFeerate: null,
-    /** the spending address that signs and pays for the plan (iOS 881ada6), else null: the chatting address */
+    /** the spending address that signs and pays for the plan (iOS 881ada6; the marketplace's
+     *  address, iOS eb9b027), else null: the chatting address */
     payer: null,
+    /** that address's balance, `{ address, sompi }` once read (iOS eb9b027 payerBalance) */
+    payerBalance: null,
     /** the fee (iOS e426432): a speed, or a typed total (sompi); `touched` once the person chose -
      *  a busy network no longer moves it for them */
     fee: { tier: FeeTier.normal, custom: null, touched: false },
@@ -1603,16 +1736,22 @@ function openTxSheet(cfg) {
     return cardHtml(`${rows}${rows && price ? `<div class="sk-divider" aria-hidden="true"></div>` : ""}${price}`, { cls: "kl-rows-card" });
   };
 
-  /** Names spend from, and pay back to, the chatting address (iOS 8ecc38c): its balance after; an
-   *  owner action on a name a spending address holds is signed and paid by that address (iOS
-   *  881ada6): which one, and what it changes there. */
+  /** Spends from, and pays back to, the address that pays (iOS eb9b027): the chatting address (its
+   *  balance after, iOS 8ecc38c), the marketplace's chosen one, or the spending address holding the
+   *  name (iOS 881ada6) - "From: Address #N" (or the short address) and that address's balance
+   *  after. */
   const pillsHtml = () => {
     if (!sheet.plan) return "";
     const pill = (text) => infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(text)}</span>` });
     const payerKey = sheet.payer ? keyOf(sheet.payer.address) : null;
     if (payerKey) {
-      return pill(`Paid from: Spending address #${sheet.payer.index}`)
-        + pill(`Balance change: ${signedAmount(balanceChange(sheet.plan, payerKey))}`);
+      const balance = sheet.payerBalance?.address === sheet.payer.address ? sheet.payerBalance.sompi : null;
+      let out = pill(`From: ${payerLabel(sheet.payer.address)}`);
+      if (balance != null) {
+        const after = balance + balanceChange(sheet.plan, payerKey);
+        out += pill(`Balance after: ${amountText(after > 0n ? after : 0n)}`);
+      }
+      return out;
     }
     const me = myKey();
     if (!me) return "";
@@ -1696,6 +1835,15 @@ function openTxSheet(cfg) {
         sheet.combinesCoins = Boolean(built.combinesCoins);
         sheet.op = op;
         try { sheet.payer = rt.actions.payerFor?.(op) ?? null; } catch { sheet.payer = null; }
+        // the paying address's balance when it isn't the chatting address (iOS eb9b027)
+        const payerAddress = sheet.payer?.address;
+        if (payerAddress && sheet.payerBalance?.address !== payerAddress) {
+          addressBalanceSompi(payerAddress).then((sompi) => {
+            if (sheet.closed || sompi == null) return;
+            sheet.payerBalance = { address: payerAddress, sompi };
+            sheet.render();
+          });
+        }
       } catch (error) {
         if (seq !== sheet.seq || sheet.closed) return;
         sheet.planError = errorText(error);
@@ -2543,8 +2691,12 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         ${cardNote("Every name from the old registry comes over with the same owner and expiry first.")}`)
     : "");
 
+  // the claim screen says when the marketplace's address is short (iOS eb9b027)
+  const fromSpending = () => rt.actions.marketSource?.kind === "spending";
   const footHtml = () => (quote && !quote.affordable
-    ? `<p class="kl-tx-note kl-red">${esc(kasLabel("Not enough KAS on your chatting address for this name."))}</p>`
+    ? `<p class="kl-tx-note kl-red">${esc(kasLabel(fromSpending()
+      ? "Not enough KAS on this address for this name."
+      : "Not enough KAS on your chatting address for this name."))}</p>`
     : `<p class="kl-tx-note kmkt-muted">The price goes to the miners - KaChat takes nothing. The bond and the deposit come back when you release the name.</p>`);
 
   const step = (n, text) => `
@@ -2564,7 +2716,14 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     const busy = q("[data-kl-claim-busy]");
     if (busy) busy.innerHTML = rt.actions.feeEstimate?.isBusy ? busyNoticeHtml() : "";
     const pills = q("[data-kl-claim-pills]");
-    if (pills) pills.innerHTML = quote ? infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(`Available: ${amountText(quote.spendable)}`)}</span>` }) : "";
+    if (pills) {
+      const pill = (text) => infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(text)}</span>` });
+      // the marketplace's address pays, and the name will be on it (iOS eb9b027)
+      const source = rt.actions.marketSource;
+      pills.innerHTML = quote
+        ? `${source?.kind === "spending" ? pill(`From: ${source.label}`) : ""}${pill(`Available: ${amountText(quote.spendable)}`)}`
+        : "";
+    }
     // many small coins: combined into one before registering, said up front (iOS f1c16ec)
     const combine = q("[data-kl-claim-combine]");
     if (combine) {
@@ -3426,15 +3585,26 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         let offers = [];
         const key = keyOf(address);
         if (key) {
+          // Your own list (the chatting address's) also holds what the marketplace bought with
+          // your other addresses: a name claimed from a fresh address is still yours to find here
+          // (iOS eb9b027).
+          const keys = [key];
+          if (address === String(rt.actions.myAddress ?? "")) {
+            for (const k of rt.actions.ownMarketKeys ?? []) if (!bytesEqual(k, key)) keys.push(k);
+          }
           try {
             if (rt.registry.refreshedAt == null) await rt.registry.refresh();
-            // A name past grace is no longer theirs - it's Available to anyone in the marketplace
-            // (and the bell says so); expired names in grace stay, to be renewed. Your Domains and
-            // each address's tab alike (iOS e26562e / aa36d2a / eea52b2).
-            names = await rt.registry.heldNames(key);
-          } catch { names = []; }
+          } catch { /* each read below says so */ }
+          // A name past grace is no longer theirs - it's Available to anyone in the marketplace
+          // (and the bell says so); expired names in grace stay, to be renewed. Your Domains and
+          // each address's tab alike (iOS e26562e / aa36d2a / eea52b2).
+          for (const k of keys) {
+            try { names.push(...await rt.registry.heldNames(k)); } catch { /* none read */ }
+          }
           if (variant === "domains") {
-            try { offers = await rt.registry.myOffers(key); } catch { offers = []; }
+            for (const k of keys) {
+              try { offers.push(...await rt.registry.myOffers(k)); } catch { /* none read */ }
+            }
             if (offers.length) {
               // expired offers, and ones made to an earlier owner, come back on their own
               await rt.actions.refreshVirtualDaa().catch(() => null);
