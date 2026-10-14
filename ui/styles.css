@@ -1129,6 +1129,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
 .chat-row-silenced { width: 12px; height: 12px; margin-left: 5px; vertical-align: -1px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .chat-row-delivery { width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .chat-row-delivery.failed { stroke: var(--ios-red); }
+.chat-row-delivery.warning { stroke: var(--ios-orange); }
 .chat-row-none { font-style: italic; }
 .chat-list-footer { padding: 10px 0 14px; text-align: center; color: var(--muted); font-size: 12px; }
 .chat-row-time {
@@ -2983,6 +2984,7 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .message-delivery-text { color: inherit; }
 .chat-row-delivery-word { color: var(--muted); font-size: 11px; font-weight: 700; margin-right: 5px; }
 .chat-row-delivery-word.failed { color: var(--ios-red); }
+.chat-row-delivery-word.warning { color: var(--ios-orange); }
 .broadcast-load-earlier {
   display: block; width: 100%; margin: 4px 0 8px; padding: 8px; border: 0; background: transparent;
   color: var(--kaspa-ink); font-size: 12.5px; font-weight: 700; cursor: pointer;
@@ -3013,6 +3015,7 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .message-delivery-icon.pending { color: rgba(174, 184, 197, .7); }
 .message-delivery-icon.failed { color: var(--ios-red); }
 .message-delivery-icon.confirmed { color: var(--ios-green); }
+.message-delivery-icon.warning { color: var(--ios-orange); }
 
 .message-area.selection-mode .message-delivery-icon {
   display: none;
@@ -11602,6 +11605,7 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .chat-row-silenced { width: 11px; height: 11px; }
 .chat-row-delivery-word { font-weight: 400; }
 .chat-row-delivery-word.failed, .chat-row-delivery.failed { color: var(--ios-red); stroke: var(--ios-red); }
+.chat-row-delivery-word.warning, .chat-row-delivery.warning { color: var(--ios-orange); stroke: var(--ios-orange); }
 .chat-list-footer { font-size: 13px; padding: 12px 0 14px; }
 
 .chat-selection-bar { padding: 10px 16px; border-top: 1px solid var(--bar-separator); background: var(--bar-bg); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); }
@@ -11698,7 +11702,9 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .message-delivery-icon.pending { color: var(--muted); }
 .message-delivery-icon.failed { color: var(--ios-red); }
 .message-delivery-icon.confirmed { color: var(--ios-green); }
-.message-delivery-icon.confirmed .status-fill { fill: var(--ios-green); }
+.message-delivery-icon.warning { color: var(--ios-orange); }
+/* An incoming payment's "Needs attention" sits under its bubble, leading (iOS 927322b). */
+.message-row.incoming .message-delivery-icon.warning { grid-column: 3; grid-row: 2; justify-self: start; margin: 4px 0 0; }
 .message-delivery-icon.confirmed .status-check { stroke: #ffffff; }
 
 .message-type-capsule { font-weight: 400; background: var(--ios-gray6); color: var(--muted); }
