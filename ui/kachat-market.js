@@ -59,8 +59,7 @@ const PAGES = [
 ];
 
 const PROFILE_FIELDS = ["Bio", "X handle", "Website", "Telegram", "Discord user id", "Email", "GitHub", "Redirect URL"];
-const GUIDE_DETAIL_FIELDS = ["Bio", "X handle", "Website", "Telegram", "Discord user id", "Email", "GitHub"];
-const GUIDE_STEPS = ["claim", "avatar", "banner", "details", "finished"];
+const GUIDE_STEPS = ["claim", "howItWorks", "useIt", "keepIt", "finished"];
 const EXPIRY_OPTIONS = [
   { id: "1", title: "1 Day" },
   { id: "3", title: "3 Days" },
@@ -725,7 +724,7 @@ export function openKachatProfileEditor() {
       <div class="kmkt-sheet-body kmkt-form">
         ${formSection(
           `<button class="kmkt-form-row kmkt-link-row" type="button" data-kmkt-open-guide>Setup Guide</button>`,
-          { footer: "Walk through claiming your .kachat name and setting up your avatar, banner and details step by step." },
+          { footer: "Walk through claiming your .kachat name and making it yours." },
         )}
         ${formSection(`
           <div class="kmkt-form-row kmkt-label-row">
@@ -756,38 +755,59 @@ function guideStepHeader(title, subtitle, icon) {
     </div>`;
 }
 
-const guideDisabledAction = (title, icon) =>
-  `<button class="secondary-button accent kmkt-wide-button" type="button" disabled>${icon}<span>${esc(title)}</span></button>`;
+// Icons for the names guide (iOS person.text.rectangle, arrow.triangle.2.circlepath, checkmark).
+const GUIDE_ICON = {
+  personCard: svg(`<rect x="2.8" y="4.5" width="18.4" height="15" rx="2.4"/><circle cx="8.6" cy="10.4" r="2.3"/><path d="M5.2 16.4a3.8 3.8 0 0 1 6.8 0M14 9.2h4.4M14 12.6h4.4"/>`),
+  renew: svg(`<path d="M4.5 10.5a7.6 7.6 0 0 1 13-3.6l1.9 1.9M19.4 4.6v4.2h-4.2"/><path d="M19.5 13.5a7.6 7.6 0 0 1-13 3.6l-1.9-1.9M4.6 19.4v-4.2h4.2"/>`),
+  check: `<svg class="kmkt-guide-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="m7.6 12.4 3 3 5.8-6.3" fill="none" stroke="#000" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+};
 
+const guideBullets = (lines) => `
+  <div class="kmkt-guide-bullets">${lines.map((line) => `<div class="kmkt-guide-bullet">${GUIDE_ICON.check}<span>${esc(line)}</span></div>`).join("")}</div>`;
+
+// The .kachat names guide (iOS cdc5611 KachatSetupGuideView): claim a name, how a name works, make
+// it your name, keep it. About the name only - an avatar, banner and bio are the address's profile,
+// set in Edit KaChat Profile, not part of a name.
 function guideStepHtml(step) {
   switch (step) {
-    case "claim":
+    case "claim": {
+      const opens = publicLaunchMs();
+      const countdown = opens != null && !isPubliclyOpen()
+        ? `<small class="kmkt-guide-opens">${esc(`.kachat names open to everyone on ${launchString(opens)}.`)}</small>` : "";
       return `
         ${guideStepHeader("Claim your .kachat name", "It's the name people see you as across KaChat - in chats, on posts and on your profile link. Without one, people see your address.", `<span class="kmkt-guide-mark">${KACHAT_WORDMARK_SVG}</span>`)}
         <div class="kmkt-guide-claim">
           <div class="kmkt-guide-field"><span class="kmkt-placeholder-text">yourname</span><span class="kmkt-search-suffix">.kachat</span></div>
-          <small class="kmkt-muted">${kachatNamesLaunched() ? "On Testnet, claim one in Kaspa Hub &gt; .kachat." : "Registration isn't open yet."}</small>
-        </div>
-        ${kachatNamesLaunched() ? "" : comingSoonPill()}`;
-    case "avatar":
+          <small class="kmkt-muted">Search for the name you want in Kaspa Hub &gt; .kachat, then claim it.</small>
+          ${countdown}
+        </div>`;
+    }
+    case "howItWorks":
       return `
-        ${guideStepHeader("Add a profile photo", "Your avatar shows next to your name everywhere in KaChat.", ICON.personCircle)}
-        <div class="kmkt-guide-avatar">${ICON.personFill}</div>
-        ${guideDisabledAction("Choose Photo", ICON.photo)}
-        ${comingSoonPill()}`;
-    case "banner":
+        ${guideStepHeader("How a name works", "Your name lives on the Kaspa network, held by your chatting address. Nobody can take it or change it while it's yours.", ICON.sealCheck)}
+        ${guideBullets([
+          "Claiming takes two quick transactions: the first keeps your pick secret, the second registers it.",
+          "You pay for one period at a time. Shorter names cost more.",
+          "The price goes to the network's miners, not to KaChat.",
+        ])}`;
+    case "useIt":
       return `
-        ${guideStepHeader("Add a banner", "A wide image across the top of your profile.", ICON.photoStack)}
-        <div class="kmkt-guide-banner">${ICON.photo}</div>
-        ${guideDisabledAction("Choose Banner", ICON.photoStack)}
-        ${comingSoonPill()}`;
-    case "details":
+        ${guideStepHeader("Make it your name", "Set it as your primary name and it's how you appear everywhere in KaChat.", GUIDE_ICON.personCard)}
+        ${guideBullets([
+          "People can find you and message you by typing your name.",
+          "They can send you Kaspa to yourname.kachat instead of a long address.",
+          "Your profile link shows your name.",
+        ])}`;
+    case "keepIt":
       return `
-        ${guideStepHeader("Tell people about you", "A short bio and your links. All of it is optional.", ICON.textLeft)}
-        <div class="kmkt-guide-fields">${GUIDE_DETAIL_FIELDS.map((field) => `<div class="kmkt-guide-fields-row">${esc(field)}</div>`).join("")}</div>
-        ${comingSoonPill()}`;
+        ${guideStepHeader("Keep it", "Your names are in Profile > Your Domains > .kachat.", GUIDE_ICON.renew)}
+        ${guideBullets([
+          "Renew before it expires. It shows when, on each name.",
+          "After it expires there's a grace period to renew it before anyone else can claim it.",
+          "You can transfer it, list it for sale, or accept an offer for it.",
+        ])}`;
     default:
-      return guideStepHeader("That's the whole setup", ".kachat names are coming soon. When they launch, this guide claims your name and saves your profile in one go.", ICON.sealCheck);
+      return guideStepHeader("You're all set", "Claim your name in Kaspa Hub > .kachat whenever you're ready.", ICON.sealCheck);
   }
 }
 
@@ -819,10 +839,10 @@ export function openKachatSetupGuide() {
   openLayer({
     owner: "guide",
     kind: "cover",
-    label: "Setup Guide",
+    label: ".kachat Names",
     dismissOnBackdrop: false,
     html: `
-      ${navBar("Setup Guide", { leading: { label: "Close" } })}
+      ${navBar(".kachat Names", { leading: { label: "Close" } })}
       <div class="kmkt-guide" data-kmkt-guide-body>${guideBodyHtml(index)}</div>`,
     onClick(event, layer) {
       if (event.target.closest("[data-kmkt-guide-prev]")) {

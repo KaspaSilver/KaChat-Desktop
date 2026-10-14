@@ -13239,3 +13239,15 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 
 /* Address Visibility's Hide All (iOS 245a5d2), where the back arrow was. */
 .spending-visibility-hide-all { color: var(--ios-red); }
+
+/* The .kachat Names guide's bullet lists (iOS cdc5611) and the opening date while counting down. */
+.kmkt-guide-bullets {
+  display: flex; flex-direction: column; gap: 12px; width: 100%; padding: 14px;
+  border-radius: 12px; background: var(--surface-2); text-align: left;
+}
+.kmkt-guide-bullet { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; line-height: 1.35; color: var(--text); }
+.kmkt-guide-check { flex: 0 0 20px; width: 20px; height: 20px; color: var(--accent); margin-top: 1px; }
+.kmkt-guide-claim .kmkt-guide-opens { display: block; margin-top: 6px; font-size: 13px; font-weight: 600; color: var(--accent); }
+
+/* Setup guide, Your Chatting Address: the Profile screenshot (iOS 8852cdb). */
+.setup-address-explainer { display: block; width: 100%; max-width: 340px; margin: 0 auto 16px; border-radius: 16px; }

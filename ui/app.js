@@ -84,6 +84,7 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
+import addressExplainerUrl from "./assets/address-explainer.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
@@ -9815,7 +9816,7 @@ document.querySelector("[data-help-welcome]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = true;
   openSetupGuide();
 });
-// Profile > Help's guide row is the .kachat Profile Setup Guide (iOS b000310).
+// Profile > Help's guide row is the .kachat Names Guide (iOS b000310, cdc5611).
 document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
   if (helpScreenEl) helpScreenEl.hidden = true;
   openKachatSetupGuide();
@@ -9827,7 +9828,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 150;
+const APP_BUILD = 151;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -22851,8 +22852,8 @@ const SETUP_STEPS = [
   { icon: SETUP_ICONS.network, title: "How KaChat Uses Kaspa", body: "KaChat lets you send and receive messages on the Kaspa network itself. Kaspa is required to pay fees when sending your messages. The fee you pay goes to miners which secure the network." },
   { icon: SETUP_ICONS.qrcode, qr: true, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started - enough to claim a .kachat name and chat for a while. 5 Kaspa is enough for about 2500 messages.", extra: "funding" },
   { icon: SETUP_ICONS.server, title: "Connect to a Node", body: "KaChat needs to connect to a node. How would you like to connect?", extra: "node" },
-  // Your Addresses, without the old "never send money here" privacy framing (iOS 245a5d2).
-  { icon: null, title: "Your Addresses", body: "", extra: "addresses" },
+  // Your Chatting Address, with the Profile screenshot (iOS 8852cdb).
+  { icon: null, title: "Your Chatting Address", body: "", extra: "addresses" },
   // The guide's final step: the Chat Payment Privacy step after it is gone with the feature (iOS
   // 6333dd3).
   { icon: SETUP_ICONS.chat, title: "Starting a Conversation", body: "To chat with someone, press Create Chat and enter their Kaspa address or .kachat name. Your first message reaches them as a Message Request they can accept. For the most privacy, turn on Private Chat: nothing links you on chain, and they see your messages once they start a private chat with you too." },
@@ -22987,17 +22988,22 @@ function renderSetupExtra(kind) {
     }
     setupExtraEl.appendChild(list);
   } else if (kind === "addresses") {
-    const spendingAddr = deriveSpendingAddressAt(getActiveSpendingIndex());
+    // Profile: Receive Kaspa, the Chatting Address QR and Manage Addresses (iOS 8852cdb).
+    const picture = document.createElement("img");
+    picture.className = "setup-address-explainer";
+    picture.src = addressExplainerUrl;
+    picture.alt = "";
+    setupExtraEl.appendChild(picture);
     const rows = [
-      { title: "Chatting Address", value: engine.address || "--", caption: "Your messaging identity. Messages and your .kachat name are paid from it, and every send starts from it unless you choose another address." },
-      { title: "Spending Address", value: spendingAddr || "Import a recovery phrase to use spending addresses", caption: "More addresses of yours for sending and receiving Kaspa. Pick one under From on any send, or make a new one in Manage Addresses." },
+      { title: "Chatting Address", value: engine.address || "--", caption: "Your identity on KaChat, and yours alone. People message it, your .kachat name and profile live on it, and every message you send is paid from it. Everything it does is public on the Kaspa network and tied to you." },
+      { title: "Everything Else", value: "", caption: "To protect your privacy, use your other addresses for all other activity on the Kaspa network. Receive Kaspa gives you a fresh one, and Manage Addresses lists them all." },
     ];
     for (const r of rows) {
       const box = document.createElement("div");
       box.className = "setup-address-row";
-      box.innerHTML = `<strong></strong><span class="setup-address-value"></span><small></small>`;
+      box.innerHTML = `<strong></strong>${r.value ? `<span class="setup-address-value"></span>` : ""}<small></small>`;
       box.querySelector("strong").textContent = r.title;
-      box.querySelector(".setup-address-value").textContent = r.value;
+      if (r.value) box.querySelector(".setup-address-value").textContent = r.value;
       box.querySelector("small").textContent = r.caption;
       setupExtraEl.appendChild(box);
     }
