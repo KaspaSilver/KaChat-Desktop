@@ -4073,6 +4073,50 @@ export function kachatCachedIdentity(address) {
   return entry?.identity ?? null;
 }
 
+/** User Info > Rescan Profile (iOS bc95d17): the address's on-chain profile asked for again, each
+ *  of its links' avatar, banner and bio looked up again, and both pictures downloaded again -
+ *  whatever the 5-day caches hold - so a change shows now, here and everywhere this person
+ *  appears. The old picture stays if a download fails. -> Promise<boolean>, false when there is
+ *  no profile runtime or the address isn't one. */
+export async function kachatRescanProfile(address) {
+  const rt = kachatProfiles();
+  const key = String(address || "").trim().toLowerCase();
+  if (!rt || !key || !isNetworkAddress(key)) return false;
+  watchIdentitySources(rt.registry);
+  // the identity, whatever the cache holds (one lookup at a time per address)
+  while (identityLookups.has(key)) await new Promise((resolve) => setTimeout(resolve, 100));
+  await lookUpIdentity(rt.registry, key);
+  const profile = cachedIdentities.get(key)?.identity?.profile ?? null;
+  const links = [...new Set([profile?.avatar, profile?.banner, profile?.bio].filter(Boolean))];
+  const pictures = [];
+  for (const link of links) {
+    let source = null;
+    try { source = SocialSource.fromLink(String(link), SocialKind.avatar); } catch { source = null; }
+    if (!source) continue;
+    let fresh = null;
+    try { fresh = (await socialImages().resolve(source.link, { maxAgeMs: 0 }))?.profile ?? null; } catch { fresh = null; }
+    if (!fresh) continue;
+    cachedSocial.set(source.link, { profile: fresh, loading: false, at: Date.now() });
+    if (link === profile?.avatar && fresh.avatar) pictures.push(fresh.avatar);
+    if (link === profile?.banner && fresh.banner) pictures.push(fresh.banner);
+  }
+  // Both pictures downloaded again: the browser's copy is replaced, a relayed copy is fetched anew.
+  for (const url of pictures) {
+    const safe = httpsImageUrl(url);
+    if (!safe) continue;
+    try { await fetch(safe, { cache: "reload", mode: "no-cors", referrerPolicy: "no-referrer" }); } catch { /* the old copy stays */ }
+    cachedImages.delete(safe);
+    for (const blobKey of [...socialImageBlobs.keys()]) if (blobKey.endsWith(`|${safe}`)) socialImageBlobs.delete(blobKey);
+    if (typeof document !== "undefined") {
+      for (const img of document.querySelectorAll("img")) {
+        if (img.getAttribute("src") === safe) { img.removeAttribute("src"); img.setAttribute("src", safe); }
+      }
+    }
+  }
+  scheduleIdentityNotify();
+  return true;
+}
+
 /** The address's `.kachat` name ("alice.kachat"), or null. */
 export function kachatCachedLabel(address) {
   const label = kachatCachedIdentity(address)?.label;

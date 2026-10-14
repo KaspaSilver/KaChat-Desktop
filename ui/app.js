@@ -20,7 +20,7 @@ import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames } from "./kachat-names-live.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -10039,7 +10039,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 160;
+const APP_BUILD = 161;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15754,6 +15754,30 @@ document.querySelector("[data-chat-info-share]")?.addEventListener("click", asyn
   }
   try { await navigator.clipboard.writeText(url); showCopyToast("Profile link copied"); }
   catch { showCopyToast(url); }
+});
+// Rescan Profile (iOS bc95d17): everything this person's profile shows, looked up again now.
+document.querySelector("[data-chat-info-rescan]")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const address = chatInfoContactAddress;
+  if (!address || button.disabled) return;
+  const spinner = button.querySelector("[data-chat-info-rescan-spinner]");
+  button.disabled = true;
+  if (spinner) spinner.hidden = false;
+  try {
+    await kachatRescanProfile(address);
+    // Where .kas profiles are shown (KNS as identity), theirs is fetched again too.
+    if (!kachatNamesUiEnabled() && engine.fetchKnsAddressProfile) {
+      try { await engine.fetchKnsAddressProfile(address, { force: true }); } catch { /* the old one stays */ }
+    }
+    if (chatInfoContactAddress === address) {
+      const contact = state.contacts.find((entry) => entry.address === address) || { address };
+      try { paintChatInfoKachat(contact); } catch { /* the panel closed */ }
+    }
+    showCopyToast("Profile rescanned.");
+  } finally {
+    button.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
 });
 document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", () => {
   const address = chatInfoContactAddress;

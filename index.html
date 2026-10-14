@@ -2943,6 +2943,13 @@
             <span class="chat-info-row-title">Open Chat</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
+          <!-- Rescan Profile (iOS bc95d17): the avatar, banner and bio looked up again now; they refresh
+               by themselves every 5 days, this is for someone who just changed theirs. -->
+          <button class="chat-info-row" type="button" data-chat-info-rescan aria-label="Rescan Profile">
+            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4.5h-4.5"/></svg>
+            <span class="chat-info-row-title">Rescan Profile</span>
+            <span class="sk-spinner chat-info-rescan-spinner" data-chat-info-rescan-spinner aria-hidden="true" hidden></span>
+          </button>
           <!-- This person's kachat.app profile link, the same link-only share your own Profile uses (iOS 95c3760). -->
           <button class="chat-info-row" type="button" data-chat-info-share aria-label="Share this profile">
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg>

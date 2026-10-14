@@ -13399,3 +13399,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* The address card's "Your own address: Address #3" line (iOS 56f004f). */
 .create-chat-preview-own { display: inline-flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 12px; font-weight: 600; color: var(--kaspa-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .create-chat-preview-own svg { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* User Info's Rescan Profile row: a spinner while it looks everything up again (iOS bc95d17). */
+.chat-info-rescan-spinner { margin-left: auto; width: 16px; height: 16px; }
