@@ -13285,3 +13285,99 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   opacity: 0.72;
   transition-duration: 0s;
 }
+
+/* ==== Wide screens: the dock is the iPad's tab bar - a pill fixed at the top centre ==========
+   It used to change place with the tab (a pill at the bottom, then the chats list's bottom
+   section on Chats), so it moved under the pointer every time you switched. Now it sits in one
+   spot on every tab, in a bar across the whole window: status light and balance on the left, the
+   tabs in the middle, the tab's own actions (Select, the bell) on the right. Phones keep the iOS
+   bottom dock (the max-width: 859px rules above). */
+@media (min-width: 860px) {
+  :root { --dock-inset: 0px; --topbar-h: calc(64px + var(--safe-top, 0px)); }
+
+  body .sidebar-tabbar,
+  body.chats-tab .sidebar-tabbar {
+    position: fixed;
+    top: calc(10px + var(--safe-top, 0px));
+    bottom: auto;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    z-index: 410;
+    width: auto;
+    max-width: calc(100vw - 460px);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid var(--bar-separator, var(--line));
+    border-radius: 999px;
+    background: var(--bar-bg);
+    -webkit-backdrop-filter: var(--material-blur);
+    backdrop-filter: var(--material-blur);
+    box-shadow: 0 6px 24px var(--shadow, rgba(0,0,0,.35));
+    overflow: visible;
+  }
+  body .sidebar-tabbar .sidebar-tab,
+  body.chats-tab .sidebar-tabbar .sidebar-tab {
+    position: relative;
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    flex-direction: row;
+    gap: 0;
+    padding: 9px 16px;
+    border-radius: 999px;
+    color: var(--text);
+  }
+  body .sidebar-tabbar .sidebar-tab-icon { display: none; }
+  body .sidebar-tabbar .sidebar-tab > span:last-child,
+  body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0;
+    max-width: none;
+    overflow: visible;
+    white-space: nowrap;
+  }
+  body .sidebar-tabbar .sidebar-tab:hover { background: var(--fill-tertiary, rgba(255,255,255,.06)); color: var(--text); }
+  body .sidebar-tabbar .sidebar-tab.active,
+  body .sidebar-tabbar .sidebar-tab.active:hover {
+    background: var(--fill-secondary, rgba(255,255,255,.12));
+    color: var(--kaspa-ink);
+  }
+  /* Unread count / Profile's dot ride on the label's top-right corner. */
+  body .sidebar-tabbar .sidebar-tab-badge { top: 1px; right: 4px; left: auto; }
+
+  /* One bar across the whole window on every tab, Chats included. */
+  body .app-topbar,
+  body.chats-tab .app-topbar {
+    right: 0;
+    width: auto;
+    border-bottom: 1px solid var(--line);
+    justify-content: flex-start;
+  }
+  /* The balance sits beside the status light; the centre is the tabs'. */
+  .app-topbar .toolbar-balance {
+    position: static;
+    transform: none;
+    min-width: 0;
+    padding: 8px 10px;
+    /* Never under the tabs: a long balance on a narrow window ends in "…" before the pill. */
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: calc(50vw - 285px);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .app-topbar .toolbar-balance > span { overflow: hidden; text-overflow: ellipsis; }
+  .app-topbar .topbar-select-cluster,
+  .app-topbar .topbar-profile-cluster { margin-left: auto; }
+  body .app-body,
+  body.chats-tab .app-body { padding-top: var(--topbar-h); padding-bottom: 0; }
+  body.chats-tab .app-sidebar { padding-top: 0; padding-bottom: 0; margin-bottom: 0; }
+  body.chats-tab .sidebar-scroll { padding-bottom: 88px; }
+  body.chats-tab .new-chat-fab { bottom: 20px; right: 20px; }
+}
