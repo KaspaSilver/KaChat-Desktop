@@ -231,6 +231,14 @@ function params() {
   const rt = kachatNames();
   return rt?.service.manifest?.params ?? rt?.registry.manifest?.params ?? null;
 }
+
+/** The receipt's line for a registration: how much stays locked with the name - the bond and the
+ *  registry deposit, from the registry's params (iOS b3b62f5 KachatLive.lockedNote). */
+function registrationLockedNote() {
+  const p = params();
+  if (!p) return null;
+  return `${amountText(p.bond + p.gapValue)} is locked with this name. It comes back to you when you release it.`;
+}
 function maxYears() { const m = params()?.maxYears; return m ? Number(m) : 2; }
 
 // Registry v4: a period is `periodMs` long - a year on mainnet, 24 hours on the testnet clock.
@@ -346,6 +354,7 @@ const LI = {
   xCircle: svg(`<circle cx="12" cy="12" r="9.2"/><path d="m9 9 6 6M15 9l-6 6"/>`),
   wifiExclaim: svg(`<path d="M2.8 9.2a13.3 13.3 0 0 1 14.6-2.6M5.9 12.6a8.8 8.8 0 0 1 8.4-2.1M9.1 15.9a4.3 4.3 0 0 1 3.4-1"/><path d="M12 19.4h.01"/><path d="M19.4 10.4v4.8M19.4 18.6h.01"/>`),
   clock: svg(`<circle cx="12" cy="12" r="9.2"/><path d="M12 7v5.2l3.4 2"/>`),
+  lockFill: `<svg class="kl-ico" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M8 10V7.6a4 4 0 0 1 8 0V10h.6A2.4 2.4 0 0 1 19 12.4v6.2a2.4 2.4 0 0 1-2.4 2.4H7.4A2.4 2.4 0 0 1 5 18.6v-6.2A2.4 2.4 0 0 1 7.4 10Zm2 0h4V7.6a2 2 0 0 0-4 0Z"/></svg>`,
   // arrow.triangle.merge: two paths joining into one (the coin combine, iOS f1c16ec)
   merge: svg(`<path d="M6 3.5v4.2a4.3 4.3 0 0 0 1.3 3.1L12 15.5M18 3.5v4.2a4.3 4.3 0 0 1-1.3 3.1L12 15.5v5"/><path d="m3.8 5.7 2.2-2.2 2.2 2.2M15.8 5.7 18 3.5l2.2 2.2"/>`),
   arrowDownDoc: svg(`<path d="M14 3.5H7.4A1.9 1.9 0 0 0 5.5 5.4v13.2a1.9 1.9 0 0 0 1.9 1.9h9.2a1.9 1.9 0 0 0 1.9-1.9V8Z"/><path d="M14 3.5V8h4.5"/><path d="M12 10.5v6.5M9.2 14.2 12 17l2.8-2.8"/>`),
@@ -849,7 +858,7 @@ function watchRegistrations() {
         completed = true;
         // Pops up the moment the registration lands (iOS 0870fcc) - already known to be in a
         // block, so nothing to follow (iOS e426432 `accepted`).
-        if (p.registerTxId) openTxDoneSheet({ txId: p.registerTxId, title: "Name registered", accepted: true });
+        if (p.registerTxId) openTxDoneSheet({ txId: p.registerTxId, title: "Name registered", accepted: true, note: registrationLockedNote() });
       }
       registrationStages.set(p.id, p.stage);
     }
@@ -961,7 +970,7 @@ function progressBodyHtml(p) {
 /** The registration buttons inside the progress sheet and the claims list. */
 function registrationActionClick(target) {
   const view = target.closest("[data-kl-reg-view]");
-  if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered", owner: "kachat-registration", accepted: true }); return; }
+  if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered", owner: "kachat-registration", accepted: true, note: registrationLockedNote() }); return; }
   const done = target.closest("[data-kl-reg-done]");
   if (done) { kachatNames()?.actions.dismiss(done.dataset.klRegDone); return; }
   const dismiss = target.closest("[data-kl-reg-dismiss]");
@@ -1448,7 +1457,7 @@ function txStepHtml(title, { done = false, active = false } = {}) {
  * `accepted`: already known to be in a block (a registration the driver saw land) - no progress to
  * follow. A transaction this sheet wasn't handed by `perform` (a profile save) is followed here.
  */
-function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", onClose = null, accepted = false }) {
+function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", onClose = null, accepted = false, note = null }) {
   if (!kit || !txId) return null;
   const explorer = typeof deps().explorerTxUrl === "function" ? deps().explorerTxUrl(txId) : "";
   // profiles save on every network (kachatProfiles), names only where the registry runs
@@ -1466,6 +1475,7 @@ function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", o
         ${icon}
         <strong class="kl-receipt-title">${esc(title)}</strong>
         <p class="kmkt-muted kl-receipt-note">${esc(txStageText(st))}</p>
+        ${note ? `<div class="sk-card kl-receipt-locked">${LI.lockFill}<span>${esc(note)}</span></div>` : ""}
         <div class="sk-card kl-receipt-steps">
           ${txStepHtml("Sent to the network", { done: true })}
           ${txStepHtml("In a block", { done: inBlock, active: !inBlock && st !== TxStage.dropped })}
@@ -2514,7 +2524,9 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         + formRow("Commit (returned at registration)", amountText(quote.commit))
         + formRow("Network fees", amountText(quote.networkFee))
         + `<div class="sk-divider" aria-hidden="true"></div>`
-        + formRow("Total", amountText(quote.total), { bold: true });
+        + formRow("Total", amountText(quote.total), { bold: true })
+        // the bond and the deposit stay with the name: said once, as one amount (iOS b3b62f5)
+        + `<p class="kl-claim-locked">${LI.lockFill}<span>${esc(`${amountText(quote.bond + quote.gapDeposit)} stays locked with your name while you hold it (bond + registry deposit). You get it back when you release the name.`)}</span></p>`;
     } else if (quoteError) {
       rows = `<p class="kl-tx-note kl-red">${esc(quoteError)}</p>`;
     } else if (notOpen) {

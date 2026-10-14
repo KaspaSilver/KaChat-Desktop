@@ -13381,3 +13381,11 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   body.chats-tab .sidebar-scroll { padding-bottom: 88px; }
   body.chats-tab .new-chat-fab { bottom: 20px; right: 20px; }
 }
+
+/* .kachat: what stays locked with a name, under the claim total and on the Name registered receipt (iOS b3b62f5). */
+.kl-claim-locked, .kl-receipt-locked {
+  display: flex; align-items: flex-start; gap: 8px; margin: 6px 0 0;
+  font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--kaspa-ink); text-align: left;
+}
+.kl-receipt-locked { width: 100%; padding: 12px; margin-top: 12px; border-radius: 14px; }
+.kl-claim-locked .kl-ico, .kl-receipt-locked .kl-ico { flex: 0 0 16px; width: 16px; height: 16px; margin-top: 1px; }

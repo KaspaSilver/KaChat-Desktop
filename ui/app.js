@@ -3983,7 +3983,10 @@ async function inboxSupported() {
 /** The inbox tag for a message to this contact, or null to send it untagged. Only the FIRST
  *  message carries it: not once a tagged one has gone out, not once they have written to us,
  *  never in a Private chat, and only when the indexer files `dm` - one that doesn't know it
- *  drops the transaction from its index altogether. */
+ *  drops the transaction from its index altogether.
+ *  Only a MESSAGE from them counts as "written to us" - a payment does not (iOS 1eb4708). Someone
+ *  who just sent KAS may have no chat with us at all, so an untagged reply would never reach them;
+ *  the tag costs nothing there, the payment already links the two addresses on chain. */
 async function firstContactInboxTag(contact, conversationEntry) {
   const address = contact?.address;
   if (!address) return null;
@@ -3991,12 +3994,13 @@ async function firstContactInboxTag(contact, conversationEntry) {
   if (key === String(engine.address || "").toLowerCase()) return null;
   const s = chatRequestState();
   if (s.privateChats.has(key) || s.inboxTagged.has(key)) return null;
-  if ((conversationEntry?.messages || []).some((m) => m?.direction === "incoming")) return null;
+  const wroteToUs = (m) => m?.direction === "incoming" && m?.messageType !== "payment";
+  if ((conversationEntry?.messages || []).some(wroteToUs)) return null;
   // Addresses compare case-insensitively like the checks above (iOS IOS-008): an address typed or
   // scanned in upper case is still the established conversation, wherever its thread lives.
   const heardFrom = (state.conversations || []).some((entry) => entry !== conversationEntry
     && String(contactForConversation(entry)?.address || "").toLowerCase() === key
-    && (entry.messages || []).some((m) => m?.direction === "incoming"));
+    && (entry.messages || []).some(wroteToUs));
   if (heardFrom) return null;
   if (!(await inboxSupported())) return null;
   return engine.inboxTagFor(address);
@@ -5945,6 +5949,15 @@ const KACHAT_PAYLOAD_HEX_PREFIXES = Object.freeze([
   String(KASIA_PROTOCOL?.prefix?.hex || "6b636861743a").toLowerCase(),
   String(KASIA_PROTOCOL?.legacyPrefix?.hex || "636970685f6d73673a").toLowerCase(),
 ]);
+// A chat payment's payload roots (engine/kasia-protocol.js PAYMENT_PAYLOAD_ROOTS), hex-encoded as
+// the REST API serves them.
+const CHAT_PAYMENT_HEX_PREFIXES = ["kchat:1:pay:", "ciph_msg:1:pay:", "ciph_msg:pay:"]
+  .map((root) => Array.from(new TextEncoder().encode(root), (b) => b.toString(16).padStart(2, "0")).join(""));
+function isChatPaymentPayloadHex(payloadHex) {
+  const payload = String(payloadHex || "").toLowerCase();
+  return CHAT_PAYMENT_HEX_PREFIXES.some((prefix) => payload.startsWith(prefix));
+}
+
 function isKachatProtocolPayloadHex(payloadHex) {
   const payload = String(payloadHex || "").toLowerCase();
   return KACHAT_PAYLOAD_HEX_PREFIXES.some((prefix) => prefix && payload.startsWith(prefix));
@@ -6153,6 +6166,7 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   const ownSpending = new Set(activeAccountMnemonic() ? spendingWatchedAddressList() : []);
   let added = 0;
   const contractTxids = [];
+  const chatPaymentSenders = new Set();
   for (const tx of txs) {
     const txid = String(tx?.transaction_id || tx?.transactionId || "").trim();
     if (!txid) continue;
@@ -6164,8 +6178,10 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     const blockTime = Number(tx?.block_time || tx?.blockTime || 0);
     if (!blockTime || blockTime < store.baselineMs) { processed.add(txid); continue; }
     // KaChat protocol txs (messages/handshakes/payments-with-envelopes) are owned by
-    // the normal per-contact sync — only PLAIN payments belong here.
-    if (isKachatProtocolPayloadHex(tx?.payload)) { processed.add(txid); continue; }
+    // the normal per-contact sync — only PLAIN payments belong here. A CHAT payment from someone
+    // we don't know yet has no sync of its own, though: it opens their chat (below).
+    const chatPayment = isChatPaymentPayloadHex(tx?.payload);
+    if (isKachatProtocolPayloadHex(tx?.payload) && !chatPayment) { processed.add(txid); continue; }
     const receivedSompi = (Array.isArray(tx?.outputs) ? tx.outputs : [])
       .filter((output) => (output?.script_public_key_address || output?.scriptPublicKeyAddress) === myAddress)
       .reduce((sum, output) => sum + Number(output?.amount || 0), 0);
@@ -6177,6 +6193,15 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     processed.add(txid);
     if (contactAddresses.has(sender)) continue; // that contact's own sync owns it
     if (ownSpending.has(sender)) continue; // internal move from the own spending chain
+    if (chatPayment) {
+      // Paid from a chat with us (iOS 1eb4708): their own chat opens - a Message Request until
+      // accepted - and their messages are fetched from then on, the payment with its memo first.
+      if (!isOnActiveNetwork(sender) || isChatBlocked(sender) || isContactDeletedAsOf(sender, txid, blockTime)) continue;
+      if (loadDeletedContactAddresses().has(sender)) reopenDeletedContactAddress(sender);
+      chatPaymentSenders.add(sender);
+      contactAddresses.add(sender);
+      continue;
+    }
     const { contact, conversationEntry } = ensureSelfConversation();
     if ((conversationEntry.messages || []).some((entry) => entry.txid === txid)) continue;
     const amountKas = trimKas8(receivedSompi / 1e8);
@@ -6216,7 +6241,24 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   store.processedTxids = [...processed].slice(-300);
   saveStrangerPaymentState(store);
   registerSuppressedPaymentTxIds(contractTxids, "kachat-contract");
-  if (added > 0) { persistState(); renderChats(); }
+  // Each new payer from a chat payment: their own chat, as syncInbox opens one for a first
+  // message (a request until accepted), then their history - the payment and its memo with it.
+  for (const sender of chatPaymentSenders) {
+    if (engine.address !== myAddress) break;
+    if (state.contacts.some((c) => c.address === sender)) continue;
+    const createdAt = Date.now();
+    const contact = {
+      id: nowId(), name: defaultAliasFor(sender), nameIsCustom: false, address: sender, avatar: initialsFor(defaultAliasFor(sender)),
+      createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "", inboxDiscovered: true,
+    };
+    const conversationEntry = createConversation({ contactId: contact.id, createdAt });
+    state.contacts.push(contact);
+    state.conversations.push(conversationEntry);
+    try { added += await syncOneConversation(conversationEntry, { quiet: true, catchUp }); }
+    catch (error) { appendEngineLog(`Chat payment history fetch failed for ${shortAddress(sender)}: ${error.message}`); }
+  }
+  if (chatPaymentSenders.size) { refreshSubscriptionAddresses({ restart: true }); renderMessageRequestsSheet(); }
+  if (added > 0 || chatPaymentSenders.size) { persistState(); renderChats(); }
   return added;
 }
 
@@ -9834,7 +9876,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 155;
+const APP_BUILD = 156;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
