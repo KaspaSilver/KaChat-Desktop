@@ -17,7 +17,7 @@
 // for 45 s after its block time. Every call id this device has rung, placed, answered or seen
 // end is remembered (persisted, bounded) so a re-ingested invite never rings twice.
 
-import { NextcloudTalkClient, TalkError } from "./talk.js";
+import { NextcloudTalkClient, TalkError, FALLBACK_ICE_SERVERS } from "./talk.js";
 
 const RING_TIMEOUT_MS = 35_000;
 const INCOMING_RING_TIMEOUT_MS = 30_000;
@@ -338,8 +338,9 @@ export function handleIncomingCallEnvelope(envelope, message, contactAddress) {
         stopTone();
         call.client = new NextcloudTalkClient({ server, auth: { kind: "guest" } });
         joinAndSignal(call).catch(async (error) => {
-          deps.appendEngineLog?.(`[Call] Joining the hosted call failed: ${error?.message || error}`);
-          deps.showToast?.(`Could not join the call: ${error?.message || error}`);
+          deps.appendEngineLog?.(`[Call] Joining the hosted call failed: ${error?.name || "Error"}: ${error?.message || error}`);
+          call.failureDetail = callFailureText(error);
+          deps.showToast?.(call.failureDetail);
           await finish("failed");
         });
         return;
@@ -420,6 +421,19 @@ async function hostRequestedCall(callId, address, video) {
   }
 }
 
+/** What a failed call says on its screen, in words: the microphone being blocked is the one a
+ *  person can fix themselves. */
+function callFailureText(error) {
+  const name = String(error?.name || "");
+  const message = String(error?.message || error || "");
+  if (name === "NotAllowedError" || /Permission denied|not allowed/i.test(message)) {
+    return "Microphone access is blocked for this site. Allow it in the browser's site settings, then try again.";
+  }
+  if (name === "NotFoundError" || /Requested device not found/i.test(message)) return "No microphone was found on this device.";
+  if (name === "NotReadableError") return "The microphone is in use by another app.";
+  return message ? `Could not join the call: ${message}` : "Could not join the call.";
+}
+
 export async function acceptIncoming() {
   const call = session;
   if (!call || call.phase !== "ringingIn") return;
@@ -436,8 +450,9 @@ export async function acceptIncoming() {
   try {
     await joinAndSignal(call);
   } catch (error) {
-    deps.appendEngineLog?.(`[Call] Joining call failed: ${error?.message || error}`);
-    deps.showToast?.(`Could not join the call: ${error?.message || error}`);
+    deps.appendEngineLog?.(`[Call] Joining call failed: ${error?.name || "Error"}: ${error?.message || error}`);
+    call.failureDetail = callFailureText(error);
+    deps.showToast?.(call.failureDetail);
     await finish("failed");
   }
 }
@@ -598,7 +613,15 @@ async function joinAndSignal(call) {
       throw new Error(`Microphone unavailable: ${error?.message || error}`);
     }
   }
-  const pc = new RTCPeerConnection({ iceServers: settings.iceServers });
+  // The list is already cleaned (talk.js usableIceServers); if a browser still refuses it, the call
+  // goes on with the public STUN server rather than failing.
+  let pc;
+  try {
+    pc = new RTCPeerConnection({ iceServers: settings.iceServers });
+  } catch (error) {
+    deps.appendEngineLog?.(`[Call] The server's ICE list was refused (${error?.message || error}); using public STUN.`);
+    pc = new RTCPeerConnection({ iceServers: FALLBACK_ICE_SERVERS });
+  }
   call.pc = pc;
   call.remoteStream = new MediaStream();
   for (const track of call.localStream.getTracks()) pc.addTrack(track, call.localStream);
@@ -817,9 +840,10 @@ async function finish(reason) {
       if (hostsThisCall) await client.deleteConversation(token);
     })().catch(() => {});
   }
+  // Long enough to read why, when a join failed with a reason.
   window.setTimeout(() => {
     if (session === call) { session = null; hideOverlay(); }
-  }, 1500);
+  }, call.failureDetail ? 6000 : 1500);
 }
 
 function sleep(ms) { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
@@ -922,7 +946,10 @@ function statusText(call) {
     case "connected": return call.statusDetail || (call.connectedAt ? formatDuration((Date.now() - call.connectedAt) / 1000) : "Connected");
     case "ended": {
       const line = callHistoryLine({ type: "call_end", reason: call.endedReason, durationSeconds: call.connectedAt ? Math.floor((Date.now() - call.connectedAt) / 1000) : null }, call.isOutgoing);
-      return call.endedReason === "no_host" ? "One person in this chat needs Nextcloud Talk set up to make calls." : `Call ended · ${line.text}`;
+      if (call.endedReason === "no_host") return "One person in this chat needs Nextcloud Talk set up to make calls.";
+      // a failed join says why on the call screen, not only in a passing toast
+      if (call.endedReason === "failed" && call.failureDetail) return call.failureDetail;
+      return `Call ended · ${line.text}`;
     }
     default: return "";
   }

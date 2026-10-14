@@ -100,16 +100,7 @@ export class NextcloudTalkClient {
   async signalingSettings(token) {
     const data = await this.ocs("GET", "/ocs/v2.php/apps/spreed/api/v3/signaling/settings", { query: { token } });
     const mode = String(data?.signalingMode || "internal");
-    const iceServers = [];
-    for (const entry of Array.isArray(data?.stunservers) ? data.stunservers : []) {
-      const urls = Array.isArray(entry?.urls) ? entry.urls : (entry?.url ? [entry.url] : []);
-      if (urls.length) iceServers.push({ urls });
-    }
-    for (const entry of Array.isArray(data?.turnservers) ? data.turnservers : []) {
-      const urls = Array.isArray(entry?.urls) ? entry.urls : (entry?.url ? [entry.url] : []);
-      if (urls.length) iceServers.push({ urls, username: entry.username || undefined, credential: entry.credential || undefined });
-    }
-    return { mode, iceServers };
+    return { mode, iceServers: usableIceServers(data) };
   }
 
   /** One long-poll of the internal signaling channel. Resolves with the events the server had
@@ -205,6 +196,31 @@ export class NextcloudTalkClient {
     const nativeFetch = window.__kasiaNativeFetch || window.fetch.bind(window);
     return nativeFetch(url, { method, headers, body, cache: "no-store", signal });
   }
+}
+
+// A browser refuses the whole RTCPeerConnection over one bad ICE entry - an address without its
+// stun:/turn: scheme, or a TURN server without a username and password - where the iPhone's
+// WebRTC skips it. The server's list is cleaned the same way here: a bare host:port gets its
+// scheme, a TURN entry without credentials is dropped, and with nothing left the call still
+// gets Nextcloud's public STUN server.
+const ICE_SCHEME_RE = /^(stuns?|turns?):/i;
+export const FALLBACK_ICE_SERVERS = [{ urls: ["stun:stun.nextcloud.com:443"] }];
+export function usableIceServers(data) {
+  const urlsOf = (entry) => (Array.isArray(entry?.urls) ? entry.urls : (entry?.url ? [entry.url] : []))
+    .map((u) => String(u || "").trim()).filter(Boolean);
+  const servers = [];
+  for (const entry of Array.isArray(data?.stunservers) ? data.stunservers : []) {
+    const urls = urlsOf(entry).map((u) => (ICE_SCHEME_RE.test(u) ? u : `stun:${u}`)).filter((u) => /^stuns?:/i.test(u));
+    if (urls.length) servers.push({ urls });
+  }
+  for (const entry of Array.isArray(data?.turnservers) ? data.turnservers : []) {
+    const username = String(entry?.username || "");
+    const credential = String(entry?.credential || "");
+    if (!username || !credential) continue;
+    const urls = urlsOf(entry).map((u) => (ICE_SCHEME_RE.test(u) ? u : `turn:${u}`)).filter((u) => /^turns?:/i.test(u));
+    if (urls.length) servers.push({ urls, username, credential });
+  }
+  return servers.length ? servers : FALLBACK_ICE_SERVERS.map((s) => ({ ...s }));
 }
 
 function ocsData(root) {
