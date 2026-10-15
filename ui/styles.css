@@ -6357,12 +6357,15 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-toast button { border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 800; cursor: pointer; }
 .kaposts-toast-view { color: var(--kaspa-ink); font-weight: 800; text-decoration: underline; }
 
+/* Centred on the screen and above the dock, like every other modal (z 2000 from .modal-backdrop);
+   a long thread scrolls inside the backdrop, and `margin: auto` keeps it centred until then. */
 .kaposts-composer-backdrop {
-  position: fixed; inset: 0; z-index: 60;
+  position: fixed; inset: 0;
   background: rgba(0,0,0,.55); display: flex; align-items: flex-start; justify-content: center;
-  padding: 60px 16px 16px;
+  padding: 16px; overflow-y: auto;
 }
 .kaposts-composer {
+  margin: auto;
   width: 100%; max-width: 560px;
   border: 1px solid var(--card-border); border-radius: 20px;
   background: var(--panel); box-shadow: 0 18px 48px var(--shadow);
