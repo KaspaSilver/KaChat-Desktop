@@ -115,6 +115,8 @@ test("IOS-083: a notice only files a new payment or moves a received plain payme
   // only received plain payments move out of the self-chat
   assert.equal(paymentNoticePlacement([{ chat: "self", direction: "outgoing", messageType: "payment" }], "incoming"), "drop");
   assert.equal(paymentNoticePlacement([{ chat: "self", direction: "incoming", messageType: "text" }], "incoming"), "drop");
+  // a payment from a contact (or from us) is never claimable, even in the self-chat (iOS 3eaa0b6)
+  assert.equal(paymentNoticePlacement([{ ...selfPay, fromKnown: true }], "incoming"), "drop");
 });
 
 test("IOS-083: the chain check wants the exact amount, no payload and no input of ours or another contact's", () => {
@@ -130,6 +132,11 @@ test("IOS-083: the chain check wants the exact amount, no payload and no input o
   assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previous_outpoint_address: OTHER.toUpperCase() }] }), args).ok, false);
   assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previousOutpointAddress: ME }] }), args).ok, false);
   assert.equal(checkPaymentNoticeTx(tx(), { ...args, claimedSompi: "junk" }).ok, false);
+  // inputs not resolved: as good as no chain answer
+  const noInputs = checkPaymentNoticeTx(tx({ inputs: [{}] }), args);
+  assert.equal(noInputs.ok, false);
+  assert.equal(noInputs.unknown, true);
+  assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previous_outpoint_address: OTHER }] }), args).unknown, undefined);
 });
 
 for (const [name, fn] of tests) {

@@ -4,6 +4,7 @@ import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
+import { chattingCatchUpLook } from "./address-activity.js";
 import { setChainTimeSource } from "../engine/kachat-names/launch.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
@@ -6215,22 +6216,9 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     applyMessagePatch(message, { messageType: "payment", paymentAmountKas: String(amountKas), txid });
     appendIncomingOrReactionMessage(conversationEntry, message);
     conversationEntry.updatedAt = Date.now();
-    if (!catchUp && isLiveMessageTime(blockTime)) {
-      const appended = conversationEntry.messages.find((entry) => entry.txid === txid) || message;
-      maybeNotifyIncoming(conversationEntry, contact, appended);
-      // Received KAS at your chatting address — also list it in the global notifications bell.
-      recordGlobalNotification({
-        id: `wallet-${txid}`,
-        source: "wallet",
-        title: `Received ${amountKas} ${KAS_UNIT}`,
-        body: "Your chatting address",
-        timestamp: Date.now(),
-        // Opens the chatting address's history, as a tapped banner does (iOS 95e2cba); it used
-        // to open Portfolio.
-        targetKind: "address",
-        targetId: myAddress,
-      });
-    }
+    // No banner or bell entry of its own: a plain transfer to the chatting address is Address
+    // Activity's "Received X KAS" / "Chatting address ..." now, from any wallet (iOS 56b75c8),
+    // and two banners for one payment is one too many.
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     added += 1;
   }
@@ -7174,10 +7162,13 @@ function spendingLabelFor(state, index) {
 // ---------------------------------------------------------------------------
 // Address Activity notifications (iOS AddressActivityNotifier port).
 //
-// Alerts when any own NON-chatting address — revealed spending-chain addresses
-// or cold-storage watch addresses — receives Kaspa from an external source.
-// Wallet events only, never chat: no conversation, no bubble, just the app's
-// standard desktop notification.
+// Alerts when any own address — the chatting address, revealed spending-chain
+// addresses or cold-storage watch addresses — receives Kaspa from an external
+// source. Wallet events only, never chat: no conversation, no bubble, just the
+// app's standard desktop notification. The chatting address counts plain
+// transfers only (iOS 56b75c8): a payload tx (chat payment, message,
+// handshake) is the chat's own news, and its catch-up only counts plain
+// transfers newer than its last look (ui/address-activity.js).
 //
 // Detection is the balance-diff catch-up model (iOS's runCatchUpIfNeeded):
 // per-account persisted baselines are diffed against live balances (one
@@ -7198,6 +7189,9 @@ function spendingLabelFor(state, index) {
 const ADDR_ACTIVITY_BASELINES_KEY = "kachat-addr-activity-baselines-v1"; // account-scoped { address: sompi string }
 const ADDR_ACTIVITY_HANDLED_KEY = "kachat-addr-activity-handled-txids-v1"; // account-scoped [txid]
 const ADDR_ACTIVITY_HANDLED_CAP = 500;
+// account-scoped { chatting address: ms } - the newest block time the chatting address's catch-up
+// has looked at: older receives were before it was watched, or already notified (iOS 56b75c8)
+const ADDR_ACTIVITY_CHAT_FLOOR_KEY = "kachat-addr-activity-chat-floor-v1";
 let addressActivityRunning = false;
 let addressActivityCheckTimer = 0;
 
@@ -7227,6 +7221,23 @@ function saveAddrActivityHandled(list) {
   } catch {}
 }
 
+function loadChattingCatchUpFloor(address) {
+  try {
+    const map = JSON.parse(localStorage.getItem(accountScopedKey(ADDR_ACTIVITY_CHAT_FLOOR_KEY)) || "{}") || {};
+    const value = Number(map[address] || 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch { return 0; }
+}
+
+function saveChattingCatchUpFloor(address, ms) {
+  try {
+    const key = accountScopedKey(ADDR_ACTIVITY_CHAT_FLOOR_KEY);
+    const map = JSON.parse(localStorage.getItem(key) || "{}") || {};
+    map[address] = Number(ms) || 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch {}
+}
+
 // Every revealed spending-chain address (0...maxIndex) for the active account.
 function spendingWatchedAddressList() {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
@@ -7240,8 +7251,9 @@ function spendingWatchedAddressList() {
 }
 
 // Addresses whose receives should NOTIFY, mapped to a wording kind: watched
-// spending + cold addresses, minus the chatting address (its receives are chat
-// classified).
+// spending + cold addresses and the chatting address. For the chatting address
+// only a plain transfer counts (no payload): a chat payment or a handshake is
+// the chat's own news (iOS 56b75c8).
 function addressActivityWatchedMap() {
   const map = new Map();
   // The spending addresses have their own switch (Manage Addresses); each cold-storage account
@@ -7254,7 +7266,8 @@ function addressActivityWatchedMap() {
     if (entry.notify === false) continue;
     if (!map.has(entry.address)) map.set(entry.address, `cold:${entry.label}`);
   }
-  map.delete(engine.address || "");
+  // the chatting address too, plain transfers only, under the same Address Activity switch
+  if (engine.address) map.set(engine.address, "chatting");
   return map;
 }
 
@@ -7283,6 +7296,7 @@ function ownInputAddressSet() {
 
 function describeActivityAddress(kind, address) {
   const shortA = shortAddress(address);
+  if (kind === "chatting") return `Chatting address ${shortA}`; // iOS 56b75c8
   if (String(kind || "").startsWith("cold:")) return `Cold storage (${String(kind).slice(5)}) ${shortA}`;
   return `Spending address ${shortA}`;
 }
@@ -7360,6 +7374,8 @@ async function runAddressActivityCheck() {
         // Never-tracked address (feature install, newly revealed slot, fresh
         // cold import): seed silently — its history predates our tracking.
         baselines[address] = balanceText;
+        // the chatting address's receives count from now on (iOS 56b75c8)
+        if (address === walletAtStart) saveChattingCatchUpFloor(address, Date.now());
         changed = true;
         continue;
       }
@@ -7386,6 +7402,16 @@ async function attributeAndNotifyAddressActivity(increases) {
     let attributed = false;
     let recentTxs = [];
     try { recentTxs = await fetchRecentFullTransactionsFor(address, 10); } catch {}
+    const isChatting = kind === "chatting";
+    if (isChatting) {
+      // The chatting address (iOS 56b75c8): only plain transfers newer than what was already
+      // looked at - never a burst of old payments, and a payload tx (chat payment, message,
+      // handshake) is the chat's own news. The first look only sets where it starts.
+      const look = chattingCatchUpLook(recentTxs, loadChattingCatchUpFloor(address), Date.now());
+      saveChattingCatchUpFloor(address, look.nextFloor);
+      if (look.firstLook) continue;
+      recentTxs = look.counted;
+    }
     for (const tx of recentTxs) {
       const txid = String(tx?.transaction_id || tx?.transactionId || "").trim();
       if (!txid) continue;
@@ -7426,9 +7452,11 @@ async function attributeAndNotifyAddressActivity(increases) {
         appendEngineLog(`Address activity: suppressed self-send ${txid.slice(0, 12)}…`);
       }
     }
-    if (!attributed) {
+    if (!attributed && !isChatting) {
       // Balance grew but no fetched recent tx pays this address (deep history
-      // page or indexer lag) — neutral fallback rather than staying silent.
+      // page or indexer lag) — neutral fallback rather than staying silent (not
+      // for the chatting address, whose balance moves with every chat payment
+      // too - iOS 56b75c8).
       postDesktopNotification({
         title: `Balance increased by ${formatSompiForNotification(delta)} ${KAS_UNIT}`,
         body: describeActivityAddress(kind, address),
@@ -7550,29 +7578,105 @@ function isPaymentPoolEnvelope(text) {
 /// sendSpendingPaymentNotice): an encrypted `payment_notice` from the chatting address, sent like
 /// an edit or a reaction (a contextual message with no row of its own), so the payee's app files
 /// the payment - and its memo, which travels only here - in the chat with us. Our own bubble is
-/// already there. Fire-and-forget: if it fails, the payee still has the KAS, shown in their
-/// self-chat.
+/// already there. Fire-and-forget: if it fails (usually an empty chatting address), the payee
+/// still has the KAS, shown in their self-chat, and the notice is kept and sent once the chatting
+/// address has KAS (iOS 710fdc0, IOS-086).
 function sendSpendingPaymentNotice(conversationEntry, contact, { txId, amountSompi, memo = "" }) {
   const payload = encodePaymentNotice({ txId, amountSompi, address: contact?.address, memo });
-  if (!payload || !engine.address) return;
+  const walletAddress = engine.address;
+  if (!payload || !walletAddress) return;
   const shortId = String(txId).slice(0, 12);
   Promise.resolve().then(async () => {
     try {
-      const envelope = await engine.createEncryptedMessageEnvelope({
-        conversationId: conversationEntry.id,
-        contactId: contact.id,
-        toAddress: contact.address,
-        fromAddress: engine.address,
-        text: payload,
-        localNonce: nowId(),
-        createdAt: Date.now(),
-      });
-      await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
+      await sendPaymentNoticeEnvelope(conversationEntry, contact, payload);
       appendEngineLog(`Sent payment_notice for ${shortId}`);
     } catch (error) {
-      appendEngineLog(`payment_notice send failed for ${shortId}: ${error?.message || error}`);
+      appendEngineLog(`payment_notice send failed for ${shortId}, kept for later: ${error?.message || error}`);
+      keepUnsentPaymentNotice(walletAddress, { contactAddress: contact.address, payload, txId: String(txId) });
     }
   });
+}
+
+/// The notice itself: an encrypted contextual message from the chatting address.
+async function sendPaymentNoticeEnvelope(conversationEntry, contact, payload) {
+  const envelope = await engine.createEncryptedMessageEnvelope({
+    conversationId: conversationEntry.id,
+    contactId: contact.id,
+    toAddress: contact.address,
+    fromAddress: engine.address,
+    text: payload,
+    localNonce: nowId(),
+    createdAt: Date.now(),
+  });
+  await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
+}
+
+// --- Notices waiting for the chatting address (iOS 710fdc0, IOS-086) ---
+// Kept per wallet as [{ contactAddress, payload, txId }], at most 50, deduped by txId.
+const UNSENT_PAYMENT_NOTICES_KEY = "kachat-unsent-payment-notices-v1";
+function readUnsentPaymentNotices(walletAddress = engine.address) {
+  if (!walletAddress) return [];
+  try {
+    const list = JSON.parse(localStorage.getItem(accountScopedKey(UNSENT_PAYMENT_NOTICES_KEY, walletAddress)) || "[]");
+    return Array.isArray(list) ? list.filter((n) => n && n.contactAddress && n.payload && n.txId) : [];
+  } catch { return []; }
+}
+function writeUnsentPaymentNotices(walletAddress, list) {
+  if (!walletAddress) return;
+  try {
+    const key = accountScopedKey(UNSENT_PAYMENT_NOTICES_KEY, walletAddress);
+    if (list.length) localStorage.setItem(key, JSON.stringify(list));
+    else localStorage.removeItem(key);
+  } catch { /* fine */ }
+}
+function keepUnsentPaymentNotice(walletAddress, notice) {
+  const list = readUnsentPaymentNotices(walletAddress);
+  if (list.some((n) => n.txId === notice.txId)) return;
+  list.push(notice);
+  writeUnsentPaymentNotices(walletAddress, list.slice(-50));
+}
+
+/// Sends the notices that failed for want of KAS on the chatting address - called when its balance
+/// turns positive (`observeChattingBalanceForNotices`). One at a time; any that still fails stays
+/// for next time. A notice whose contact is gone is dropped, as on iOS. In-flight state lives on
+/// the function (this can run from updateWalletUi during boot, before later lets initialise).
+async function sendUnsentPaymentNotices() {
+  const walletAddress = engine.address;
+  if (sendUnsentPaymentNotices.sending || !walletAddress) return;
+  const pending = readUnsentPaymentNotices(walletAddress);
+  if (!pending.length) return;
+  sendUnsentPaymentNotices.sending = true;
+  const done = new Set();
+  try {
+    for (const notice of pending) {
+      if (engine.address !== walletAddress) break; // the account changed under us: the rest wait
+      const address = String(notice.contactAddress).toLowerCase();
+      const contact = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === address);
+      const conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
+      if (!contact || !conversationEntry) { done.add(notice.txId); continue; }
+      try {
+        await sendPaymentNoticeEnvelope(conversationEntry, contact, notice.payload);
+        done.add(notice.txId);
+        appendEngineLog(`Sent a kept payment_notice for ${String(notice.txId).slice(0, 12)}`);
+      } catch { /* stays for next time */ }
+    }
+  } finally {
+    sendUnsentPaymentNotices.sending = false;
+    // Re-read: a notice kept while these went out stays too.
+    writeUnsentPaymentNotices(walletAddress, readUnsentPaymentNotices(walletAddress).filter((n) => !done.has(n.txId)));
+  }
+}
+
+/// The chatting address got KAS: the notices waiting for it go out. Called from updateWalletUi on
+/// every balance render; like iOS's removeDuplicates + filter(> 0), it fires only when the
+/// (wallet, balance) pair changes to a positive balance.
+function observeChattingBalanceForNotices() {
+  const kas = Number(currentBalanceKas);
+  if (!engine.address || !Number.isFinite(kas)) return;
+  const seen = `${engine.address}:${currentBalanceKas}`;
+  if (observeChattingBalanceForNotices.last === seen) return;
+  observeChattingBalanceForNotices.last = seen;
+  if (kas > 0) sendUnsentPaymentNotices().catch(() => {});
 }
 
 /// A `payment_notice` in a 1:1 chat (iOS 927322b handlePaymentNotice) - theirs (they paid us From
@@ -7599,11 +7703,14 @@ function handlePaymentNotice(conversationEntry, message, notice) {
     return null;
   }
   const direction = outgoing ? "outgoing" : "incoming";
-  if (!paymentNoticeMayPlace(conversationEntry, valid.txId, direction)) return null;
+  // Already here, filed unverified: this notice read again gets its chain check again (iOS 3eaa0b6).
+  const here = (conversationEntry.messages || []).find((entry) => normalizePaymentTxId(entry.txid) === valid.txId);
+  const recheck = !outgoing && here && isPaymentNeedingAttention(here);
+  if (!recheck && !paymentNoticeMayPlace(conversationEntry, valid.txId, direction)) return null;
   if (outgoing) return filePaymentNotice(conversationEntry, contact, message, valid, { outgoing: true });
   if (paymentNoticesChecking.has(valid.txId)) return null;
   paymentNoticesChecking.add(valid.txId);
-  checkReceivedPaymentNotice(conversationEntry.id, contact, message, valid, walletAddress)
+  checkReceivedPaymentNotice(conversationEntry.id, contact, message, valid, walletAddress, { recheck })
     .finally(() => paymentNoticesChecking.delete(valid.txId));
   return null;
 }
@@ -7632,7 +7739,11 @@ function paymentNoticeRows(txId, conversationEntry) {
   for (const entry of state.conversations || []) {
     const chat = entry === conversationEntry ? "this" : (isSelfConversation(entry) ? "self" : "other");
     for (const row of entry.messages || []) {
-      if (normalizePaymentTxId(row.txid) === txId) rows.push({ chat, direction: row.direction, messageType: row.messageType });
+      if (normalizePaymentTxId(row.txid) !== txId) continue;
+      const sender = String(row.sender || "").toLowerCase();
+      const fromKnown = !sender || sender === String(engine.address || "").toLowerCase()
+        || (state.contacts || []).some((contact) => String(contact?.address || "").toLowerCase() === sender);
+      rows.push({ chat, direction: row.direction, messageType: row.messageType, fromKnown });
     }
   }
   return rows;
@@ -7670,8 +7781,9 @@ function filePaymentNotice(conversationEntry, contact, message, valid, { outgoin
 
 /// The chain check of a notice we received (IOS-083), then the filing: a transaction that doesn't
 /// pass is dropped and nothing is touched. With no chain answer it files only a payment shown
-/// nowhere yet, marked Needs attention; one already in the self-chat stays there.
-async function checkReceivedPaymentNotice(conversationId, contact, message, valid, walletAddress) {
+/// nowhere yet, marked Needs attention; one already in the self-chat stays there. `recheck`: the
+/// bubble is already here, unverified - a pass marks it verified, anything else leaves it.
+async function checkReceivedPaymentNotice(conversationId, contact, message, valid, walletAddress, { recheck = false } = {}) {
   const { txId, amountSompi } = valid;
   let fullTx = null;
   // The REST index may lag the notice by a moment: a few tries, a few seconds apart.
@@ -7685,22 +7797,32 @@ async function checkReceivedPaymentNotice(conversationId, contact, message, vali
   }
   if (engine.address !== walletAddress) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
-  if (!conversationEntry || !paymentNoticeMayPlace(conversationEntry, txId, "incoming")) return;
-  let unverified = false;
-  if (fullTx) {
-    const verdict = checkPaymentNoticeTx(fullTx, { paidAddress: valid.address, claimedSompi: amountSompi, foreignAddresses: paymentNoticeForeignAddresses(contact.address) });
-    if (!verdict.ok) {
-      appendEngineLog(`Dropped payment_notice ${txId.slice(0, 12)} - the transaction ${verdict.reason}`);
-      return;
-    }
-  } else {
-    if (paymentNoticeRows(txId, conversationEntry).length) return;
-    unverified = true;
+  if (!conversationEntry) return;
+  const verdict = fullTx
+    ? checkPaymentNoticeTx(fullTx, { paidAddress: valid.address, claimedSompi: amountSompi, foreignAddresses: paymentNoticeForeignAddresses(contact.address) })
+    : { ok: false, unknown: true };
+  if (recheck) {
+    const bubble = (conversationEntry.messages || []).find((entry) => normalizePaymentTxId(entry.txid) === txId && isPaymentNeedingAttention(entry));
+    if (!bubble || !verdict.ok) return;
+    applyMessagePatch(bubble, { status: MESSAGE_STATUSES.CONFIRMED });
+    schedulePersistState();
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+    renderChats();
+    appendEngineLog(`Payment ${txId.slice(0, 12)} from a payment_notice verified on chain`);
+    return;
   }
-  const bubble = filePaymentNotice(conversationEntry, contact, message, valid, { unverified });
+  if (!paymentNoticeMayPlace(conversationEntry, txId, "incoming")) return;
+  if (!verdict.ok && !verdict.unknown) {
+    appendEngineLog(`Dropped payment_notice ${txId.slice(0, 12)} - the transaction ${verdict.reason}`);
+    return;
+  }
+  // No chain answer: never move a record on an unchecked claim.
+  if (verdict.unknown && paymentNoticeRows(txId, conversationEntry).length) return;
+  const bubble = filePaymentNotice(conversationEntry, contact, message, valid, { unverified: Boolean(verdict.unknown) });
   if (isLiveMessageTime(bubble.createdAt)) {
     if (activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
-    maybeNotifyIncoming(conversationEntry, contact, bubble);
+    // The notice itself notifies: "Received payment", never the amount it claims.
+    maybeNotifyIncoming(conversationEntry, contact, message);
     renderChats();
   }
 }
@@ -10081,7 +10203,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 165;
+const APP_BUILD = 166;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -13875,6 +13997,10 @@ function updateWalletUi() {
   // The chatting balance is part of Profile's Manage Addresses total and Manage Addresses' first
   // row (iOS 6333dd3).
   try { renderProfileAccountTotal(); refreshChattingRowBalance(); } catch { /* not yet wired during early init */ }
+  // Payment notices kept for an empty chatting address go out once it has KAS, and the Send KAS
+  // sheet's warning follows the balance (iOS 710fdc0, IOS-086).
+  observeChattingBalanceForNotices();
+  try { renderPaymentFromWarning(); } catch { /* the pay sheet isn't wired yet during early init */ }
   installTestnetFaucetButton.render?.(); // Claim Testnet Kaspa follows the loaded account
   if (chattingAddressBalance) chattingAddressBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
@@ -18854,6 +18980,7 @@ const paymentMaxButton = paySheet?.querySelector("[data-pay-max]");
 const payMemoInput = paySheet?.querySelector("[data-pay-memo]");
 const payFeeCustomInput = paySheet?.querySelector("[data-pay-kas-fee-custom]");
 const payNoteEl = paySheet?.querySelector("[data-pay-note]");
+const payFromWarningEl = paySheet?.querySelector("[data-pay-from-warning]");
 const payHoldButton = paySheet?.querySelector("[data-pay-hold]");
 const paySlider = createSendActionButton(payHoldButton, { onAction: () => submitPaymentSheet() });
 // Where this payment comes from (the sheet's From, iOS 6333dd3): null = the chatting address, else
@@ -18977,6 +19104,22 @@ function refreshPaymentSheetState() {
   if (paySlider.busy !== Boolean(paymentSendInFlight)) paySlider.setBusy(paymentSendInFlight);
   paySlider.setEnabled(sompi > 0 && !paymentSendInFlight);
   payFromCtl.setDisabled(Boolean(paymentSendInFlight));
+  renderPaymentFromWarning();
+}
+
+// From a spending address the chatting address tells them about it (a small message fee); an
+// empty one can't, until it has some KAS (iOS 710fdc0, IOS-086). A confirmed zero only, as iOS
+// hasConfirmedZeroChattingBalance.
+function renderPaymentFromWarning() {
+  if (!payFromWarningEl) return;
+  const conversationEntry = isPaySheetOpen() ? state.conversations.find((entry) => entry.id === paySheetConversationId) : null;
+  const contact = conversationEntry ? contactForConversation(conversationEntry) : null;
+  const show = Boolean(contact) && paymentSourceIndex != null && isChattingBalanceZero();
+  payFromWarningEl.hidden = !show;
+  if (!show) return;
+  const name = displayNameForAddress(contact) || shortAddress(contact.address);
+  const textEl = payFromWarningEl.querySelector("[data-pay-from-warning-text]");
+  if (textEl) textEl.textContent = `Your chatting address has no KAS to tell ${name} about this payment, so they see it as a payment from an unknown address, without the memo. KaChat tells them once your chatting address has some KAS.`;
 }
 
 // The fee card (iOS SendFeeControls in the Send KAS sheet, 62c2773). The extra over the base fee:
@@ -19221,7 +19364,10 @@ function openPaymentSheet() {
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const contact = contactForConversation(conversationEntry);
   if (!conversationEntry || !contact) return;
-  if (isChattingBalanceZero()) { updateChatFundingGate(); return; }
+  // No zero-balance guard here, as on iOS (openPaymentSheet): the gated composer already keeps the
+  // "+" route shut, and a payment-mode route (a sender sheet's Send Kaspa) may pay From a spending
+  // address while the chatting address is empty - the sheet then says the payee can't be told yet
+  // (iOS 710fdc0, IOS-086).
   closeComposerMenu();
   paySheetConversationId = conversationEntry.id;
   paymentSourceIndex = null;
@@ -25636,6 +25782,16 @@ queueMicrotask(async () => {
           try { return String(engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() })?.privateKeyHex || "") || null; } catch { return null; }
         },
         kasSignerAddresses: () => listColdWatchedAddresses().map((e) => ({ account: e.label, index: e.index, address: e.address })),
+        // A wallet's names are on all its addresses (iOS d1026de, IOS-085): the .kachat lists look
+        // up every spending address that was ever used. "Used" is for good, so Manage Addresses'
+        // persisted answer counts; an unknown one is probed once (and remembered when used).
+        spendingMaxIndex: () => (activeAccountMnemonic() ? getSpendingState().maxIndex : -1),
+        cachedSpendingAddressUsed: (address) => (loadSpendingBalCache()[address]?.used === true ? true : null),
+        spendingAddressUsed: async (address) => {
+          const used = await spendingAddressHasHistory(address, { timeoutMs: 8000 });
+          if (used === true) saveSpendingBalCacheEntries({ [address]: { ...loadSpendingBalCache()[address], used: true } });
+          return used;
+        },
       },
       // A name transaction moves KAS to contracts (commit, bond, offers): keep it out of the
       // chats from the moment it's sent, before any sync could read it as a payment (iOS 32fdaa4).
@@ -25650,7 +25806,22 @@ queueMicrotask(async () => {
     try { syncOwnKachatProfile(); } catch (error) { appendEngineLog(`.kachat profile sync failed: ${error?.message || error}`); }
     // .kachat news for the Profile bell (iOS 86471dd): offers, sales, renewal, expiry. Testnet only
     // until names launch (no-op without the registry runtime).
-    try { startKachatNamesNotifier({ record: (row) => recordGlobalNotification(row), log: appendEngineLog }); }
+    // A name on a spending address gets no pushes (the indexer pushes only to the chatting
+    // address), so the notifier shows its own renewal reminders (iOS d1026de, XP-024): an OS
+    // notification while the browser allows one, nothing sent anywhere; a tap opens the name.
+    try {
+      startKachatNamesNotifier({
+        record: (row) => recordGlobalNotification(row), log: appendEngineLog,
+        canNotify: () => typeof Notification !== "undefined" && Notification.permission === "granted",
+        notify: ({ id, title, body, name }) => {
+          showAppNotification({
+            title, body, tag: id, silent: (accountShellPrefs.notificationSound ?? true) === false,
+            route: { kind: "tab", tab: "kachat-names" },
+            onClick: () => openKachatNameFromBell(name, { showTab: () => setActiveAppTab("kachat-names") }),
+          }).catch(() => { /* best-effort */ });
+        },
+      });
+    }
     catch (error) { appendEngineLog(`.kachat news did not start: ${error?.message || error}`); }
     // The .kachat countdown runs on the network's clock (XP-020).
     setChainTimeSource(() => engine.currentDagPoint());

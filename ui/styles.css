@@ -12441,6 +12441,10 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .pay-memo textarea::placeholder { color: var(--placeholder, var(--muted)); }
 .pay-sheet-note { margin: 0; text-align: center; font-size: 13px; color: var(--ios-orange, #ff9500); }
 .pay-sheet-note.error { color: var(--ios-red, #ff3b30); }
+/* iOS 710fdc0 (IOS-086): Label(..., systemImage: "exclamationmark.triangle.fill"), footnote, orange, leading. */
+.pay-sheet-from-warning { display: flex; align-items: flex-start; gap: 6px; margin: 0; text-align: left; font-size: 13px; line-height: 1.35; color: var(--ios-orange, #ff9500); }
+.pay-sheet-from-warning[hidden] { display: none; }
+.pay-sheet-from-warning svg { flex: 0 0 15px; width: 15px; height: 15px; margin-top: 1px; }
 .pay-hold-button {
   position: relative; overflow: hidden; height: 56px; width: 100%; border: 0; border-radius: 999px;
   background: var(--kaspa); color: #fff; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;

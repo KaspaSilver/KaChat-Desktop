@@ -30,8 +30,14 @@
 // it. A claim in progress keeps signing with the address it started from (`ownerSigner`, by the
 // record's owner key); its record and salt stay with the wallet (the chatting address). Withdrawing
 // an offer signs with the address it was made from. Addresses picked are remembered per wallet
-// (`marketAddresses`, `ownMarketKeys`), so Your Domains and the marketplace list their names and
-// offers with the chatting address's.
+// (`marketAddresses`), now only a hint.
+//
+// A wallet's names are on all its addresses (iOS d1026de, IOS-085 / XP-024): a name or offer on
+// the chatting address or any revealed spending address is the wallet's, on every device restored
+// from the seed - not only on the one that bought it. `allOwnKeys` / `isOwnKey` for checks in a
+// view ("Yours", Withdraw, the offer clean-ups); `ownNameKeys` / `ownNamesAndOffers` for registry
+// lookups (Your Domains, the marketplace's own lists, the Profile bell): the chatting key plus
+// every spending address that was ever used - a name or an offer needs KAS on its address.
 //
 // Nothing runs at import. The app wires ONE shared registry (registry.js) and one service:
 //
@@ -450,6 +456,19 @@ function kasText(sompi) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errorMessage = (e) => (e && typeof e === "object" && "message" in e ? String(e.message) : String(e));
 
+/** Runs `fn(item)` over `items`, at most `width` at a time (Swift's task group with a pending
+ *  iterator, iOS d1026de); the first failure rejects. */
+async function eachPooled(items, width, fn) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+}
+
 function trimSlash(s) {
   const t = String(s ?? "").trim();
   return t.endsWith("/") ? t.slice(0, -1) : t;
@@ -469,7 +488,11 @@ export class KachatNamesActions {
    *  `wallet` (optional, the wallet's other addresses - iOS 881ada6):
    *    `spendingAddresses()` -> [{ index, address }] (the revealed spending addresses),
    *    `spendingPrivateKey(index)` -> hex | null (that address's derived key),
-   *    `kasSignerAddresses()` -> [{ account, index, address }] (watch-only, never signed for).
+   *    `kasSignerAddresses()` -> [{ account, index, address }] (watch-only, never signed for),
+   *    `spendingMaxIndex()` -> Number (optional: the highest revealed index, the key caches' key),
+   *    `cachedSpendingAddressUsed(address)` -> true | null (optional: persistently known used),
+   *    `spendingAddressUsed(address)` -> Promise<true | false | null> (optional: a live probe;
+   *      null = unknown) - iOS d1026de `ownNameKeys`.
    *  `clock` (optional, tests): `{ now() -> unix ms, sleep(ms) -> Promise }` for the follower. */
   constructor({ engine, service = null, registry, storage = null, wallet = null, clock = null } = {}) {
     if (!registry) throw new Failure("KachatNamesActions needs the app's registry");
@@ -511,6 +534,11 @@ export class KachatNamesActions {
      *  `chattingMarketSource`, or `{ kind: "spending", index, address, label }`. Set with
      *  `setMarketSource`; back to the chatting address when the marketplace closes. */
     this._marketSource = chattingMarketSource;
+    /** `allOwnKeys` / `ownNameKeys` caches, and spending addresses a probe found unused this
+     *  session (never persisted: an unused address can become used at any moment) - iOS d1026de */
+    this._ownKeyCache = null;
+    this._nameKeysCache = null;
+    this._sessionUnused = new Set();
   }
 
   // MARK: Buy From (iOS eb9b027)
@@ -540,9 +568,9 @@ export class KachatNamesActions {
     return wallet ? marketAddressesStorageKey(wallet) : null;
   }
 
-  /** Spending addresses picked to buy with in the marketplace, for this wallet (lowercased): Your
-   *  Domains and the marketplace list the names and offers they hold next to the chatting
-   *  address's (iOS eb9b027 `marketAddresses`). */
+  /** Spending addresses picked to buy with in the marketplace, for this wallet (lowercased; iOS
+   *  eb9b027 `marketAddresses`). Only a hint since iOS d1026de: they count as used without a probe
+   *  (`ownNameKeys`); the wallet's keys come from every revealed address (`allOwnKeys`). */
   get marketAddresses() {
     const key = this._marketAddressesKey;
     if (!key) return [];
@@ -569,17 +597,129 @@ export class KachatNamesActions {
     }
   }
 
-  /** The keys whose names and offers count as this wallet's in the marketplace and Your Domains:
-   *  the chatting address's, then each address bought with (iOS eb9b027 `ownMarketKeys`). */
-  get ownMarketKeys() {
+  // MARK: This wallet's keys (iOS d1026de, IOS-085 / XP-024)
+
+  /** The revealed spending addresses (`wallet.spendingAddresses()`), by index. */
+  _spendingList() {
+    let v = [];
+    try { v = typeof this.wallet.spendingAddresses === "function" ? this.wallet.spendingAddresses() : []; } catch { v = []; }
+    return (Array.isArray(v) ? v : [])
+      .filter((e) => e && Number.isInteger(e.index) && typeof e.address === "string" && e.address)
+      .sort((a, b) => a.index - b.index);
+  }
+
+  /** The caches' key: the account, its address count and the bought-with hints. */
+  _ownKeysCacheKey(wallet) {
+    let max = null;
+    try { max = typeof this.wallet.spendingMaxIndex === "function" ? this.wallet.spendingMaxIndex() : null; } catch { max = null; }
+    const count = Number.isInteger(max) ? max + 1 : this._spendingList().length;
+    return `${wallet}|${count}|${this.marketAddresses.length}`;
+  }
+
+  /** The chatting key and every revealed spending address's key: a name or an offer on any of
+   *  them is this wallet's, on every device restored from the seed - not only on the one that
+   *  bought it. Worked out once per account and address count, so a render may ask (iOS d1026de
+   *  `allOwnKeys`). -> Uint8Array[], the chatting key first. */
+  get allOwnKeys() {
+    const wallet = this.myAddress;
+    if (!wallet) return [];
+    const cacheKey = this._ownKeysCacheKey(wallet);
+    if (this._ownKeyCache?.key === cacheKey) return this._ownKeyCache.keys;
     const keys = [];
-    const me = this.myKey;
-    if (me) keys.push(me);
-    for (const address of this.marketAddresses) {
-      const key = keyOf(address);
-      if (key && !keys.some((k) => bytesEqual(k, key))) keys.push(key);
-    }
+    const hexes = new Set();
+    const add = (key) => {
+      if (!key) return;
+      const h = hex(key);
+      if (hexes.has(h)) return;
+      hexes.add(h);
+      keys.push(key);
+    };
+    add(this.myKey);
+    for (const { address } of this._spendingList()) add(keyOf(address));
+    for (const address of this.marketAddresses) add(keyOf(address));
+    this._ownKeyCache = { key: cacheKey, keys, hexes };
     return keys;
+  }
+
+  /** `key` (x-only bytes) is one of this wallet's (`allOwnKeys`, iOS d1026de `isOwnKey`). */
+  isOwnKey(key) {
+    if (!(key instanceof Uint8Array)) return false;
+    void this.allOwnKeys; // fills the cache for this account and address count
+    return !!this._ownKeyCache?.hexes.has(hex(key));
+  }
+
+  /** A spending address's used-state from caches only: true = known used (persisted by the app),
+   *  false = a probe found it unused this session, null = not known. */
+  _cachedSpendingUsed(address) {
+    try { if (this.wallet.cachedSpendingAddressUsed?.(address) === true) return true; } catch { /* not known */ }
+    if (this._sessionUnused.has(address)) return false;
+    return null;
+  }
+
+  /** A spending address's used-state, probed when no cache knows: true / false, or null when
+   *  the probe failed (unknown - this round treats it as unused, the next asks again). */
+  async _spendingUsed(address) {
+    const known = this._cachedSpendingUsed(address);
+    if (known != null) return known;
+    if (typeof this.wallet.spendingAddressUsed !== "function") return null;
+    let used = null;
+    try { used = await this.wallet.spendingAddressUsed(address); } catch { used = null; }
+    if (used === false) this._sessionUnused.add(address);
+    if (used === true) this._sessionUnused.delete(address);
+    return used === true ? true : used === false ? false : null;
+  }
+
+  /** The keys worth asking the registry about (one lookup each): the chatting key, then every
+   *  revealed spending address that has ever been used - a name or an offer needs KAS on its
+   *  address - and the addresses Buy From was set to. The used answers are cached (used is for
+   *  good), so after the first time this costs no requests; unknown ones are probed eight at a
+   *  time. The list itself is kept ten minutes (iOS d1026de `ownNameKeys`). -> Uint8Array[] */
+  async ownNameKeys() {
+    const wallet = this.myAddress;
+    const me = this.myKey;
+    if (!wallet || !me) return [];
+    const cacheKey = this._ownKeysCacheKey(wallet);
+    const cached = this._nameKeysCache;
+    if (cached && cached.key === cacheKey && this.clock.now() - cached.at < 600_000) return cached.keys;
+    const spending = this._spendingList().map((e) => e.address);
+    const hints = new Set(this.marketAddresses);
+    const used = new Map();
+    const toProbe = [];
+    for (const address of spending) {
+      if (hints.has(address.toLowerCase())) { used.set(address, true); continue; }
+      const known = this._cachedSpendingUsed(address);
+      if (known != null) used.set(address, known); else toProbe.push(address);
+    }
+    await eachPooled(toProbe, 8, async (address) => { used.set(address, (await this._spendingUsed(address)) === true); });
+    const keys = [me];
+    const add = (key) => { if (key && !keys.some((k) => bytesEqual(k, key))) keys.push(key); };
+    for (const address of spending) if (used.get(address) === true) add(keyOf(address));
+    for (const address of this.marketAddresses) add(keyOf(address));
+    // a different wallet signed in meanwhile: this answer isn't its
+    if (this.myAddress !== wallet) return [];
+    this._nameKeysCache = { key: cacheKey, at: this.clock.now(), keys };
+    return keys;
+  }
+
+  /** Every name (`heldOnly` false: lapsed ones too) or held name (active and in grace), and every
+   *  open offer, on this wallet's keys (`ownNameKeys`), asked four at a time (iOS d1026de
+   *  `ownNamesAndOffers`). A failed lookup throws. -> `{ names: NameInfo[], offers: OfferInfo[] }` */
+  async ownNamesAndOffers({ heldOnly = false } = {}) {
+    const keys = await this.ownNameKeys();
+    const results = new Array(keys.length);
+    await eachPooled(keys.map((key, i) => ({ key, i })), 4, async ({ key, i }) => {
+      const names = heldOnly ? await this.registry.heldNames(key) : await this.registry.namesOf(key, { includeInactive: true });
+      const offers = await this.registry.myOffers(key);
+      results[i] = { names, offers };
+    });
+    const names = [];
+    const offers = [];
+    for (const r of results) {
+      if (!r) continue;
+      names.push(...r.names);
+      offers.push(...r.offers);
+    }
+    return { names, offers };
   }
 
   // MARK: Observing (Swift @Published pending / virtualDaa)
@@ -1308,15 +1448,15 @@ export class KachatNamesActions {
   /** Pulls this wallet's declined offers (OfferInfo[]) back: those made to an earlier owner of the
    *  name (the contract refuses them now), on a name since released, or on a name that has expired
    *  (MAINNET.md C1, iOS 0312a3f: its seller could accept and then reclaim it). A withdraw, signed by the
-   *  buyer - this wallet's chatting address, or the address the marketplace bought with (iOS
-   *  eb9b027 `ownMarketKeys`) - and paid back to it. Before its refund time only the
+   *  buyer - this wallet's chatting address or any of its spending addresses (iOS d1026de
+   *  `allOwnKeys`) - and paid back to it. Before its refund time only the
    *  buyer or the seller can return an offer, so the buyer's app does it as soon as it sees the name
    *  changed hands; after that, `returnExpiredOffers` covers it from any app. Each offer is tried
    *  once per session. Returns once the withdrawals are started. */
   async withdrawDeclinedOffers(offers) {
-    const keys = this.ownMarketKeys;
+    const keys = this.allOwnKeys;
     if (!KachatNamesService.isLaunched || keys.length === 0 || !Array.isArray(offers)) return;
-    const mine = offers.filter((o) => o && keys.some((k) => bytesEqual(o.buyer, k)) && !this.withdrawingOffers.has(o.id) && !this.returningOffers.has(o.id));
+    const mine = offers.filter((o) => o && this.isOwnKey(o.buyer) && !this.withdrawingOffers.has(o.id) && !this.returningOffers.has(o.id));
     if (mine.length === 0) return;
     /** name -> owner bytes | null (free); absent = lookup failed */
     const ownerByName = new Map();

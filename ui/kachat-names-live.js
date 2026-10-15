@@ -290,7 +290,10 @@ function renewalOpensText(info, p = params()) {
 }
 
 function myKey() { try { return kachatNames()?.actions.myKey ?? null; } catch { return null; } }
-function isMine(key) { const me = myKey(); return !!(me && key && bytesEqual(me, key)); }
+/** A key of this wallet: the chatting address or any revealed spending address (iOS d1026de,
+ *  IOS-085). Set as Primary still asks for the chatting key itself (`isChattingKey`). */
+function isMine(key) { try { return !!(key && kachatNames()?.actions.isOwnKey(key)); } catch { return false; } }
+function isChattingKey(key) { const me = myKey(); return !!(me && key && bytesEqual(me, key)); }
 function isChainSource() { return kachatNames()?.registry.source?.kind === "chain"; }
 
 /** Why a typed name is not a name (null when it is one). */
@@ -335,6 +338,7 @@ const LI = {
   reclaim: svg(`<path d="M4.5 12a7.5 7.5 0 0 1 13-5.1M19.5 12a7.5 7.5 0 0 1-13 5.1"/><path d="M17.8 3.4v3.7h-3.7M6.2 20.6v-3.7h3.7"/>`),
   personCheck: svg(`<circle cx="10" cy="8" r="3.6"/><path d="M3.5 19.8a6.8 6.8 0 0 1 11.2-4.9"/><path d="m15.4 17.6 2.1 2.1 3.9-4.2"/>`),
   warning: svg(`<path d="M12 3.8 2.8 19.6h18.4Z"/><path d="M12 9.8v4.6M12 17.2h.01"/>`),
+  qrcode: svg(`<rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1"/><path d="M14 14h2.5v2.5H14zM18 18h2.5v2.5H18zM14 18.5v2M18.5 14h2"/>`),
   exclamation: svg(`<circle cx="12" cy="12" r="9.2"/><path d="M12 7.4v5.6M12 16.4h.01"/>`),
   checkCircle: svg(`<circle cx="12" cy="12" r="9.2"/><path d="m8 12.3 2.7 2.7 5.3-5.6"/>`),
   uturn: svg(`<path d="M9 14.5 4 9.5l5-5"/><path d="M4 9.5h10a6 6 0 0 1 0 12h-3"/>`),
@@ -681,17 +685,11 @@ async function hubReloadOnce() {
     hub.listings = await registry.listings();
     hub.lapsed = await registry.lapsed();
     hub.grace = await registry.inGrace().catch(() => []);
-    // the chatting address and every address the marketplace bought with (iOS eb9b027)
-    const keys = actions.ownMarketKeys ?? [];
-    if (keys.length) {
-      const names = [];
-      const offers = [];
-      for (const key of keys) {
-        names.push(...await registry.namesOf(key, { includeInactive: true }));
-        offers.push(...await registry.myOffers(key));
-      }
-      hub.mine = names;
-      hub.myOffers = offers;
+    // the chatting address and every used address of this wallet (iOS d1026de, IOS-085)
+    if (actions.myKey) {
+      const own = await actions.ownNamesAndOffers({ heldOnly: false });
+      hub.mine = own.names;
+      hub.myOffers = own.offers;
       if (hub.myOffers.length) {
         await actions.refreshVirtualDaa().catch(() => null);
         // Your own expired offers come back to you on their own, and so do the ones whose name
@@ -1329,20 +1327,20 @@ function socialSourceText(link, kind) {
 function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onSaved = null, owner = "market" }) {
   const rt = kachatProfiles();
   if (!rt || !kit) return null;
-  const st = { profile: null, fee: null, quoteError: null, sending: false, sendError: null, txId: null, closed: false, layer: null, funding: null };
+  // `fundingShownOnce` / `shortOfFunds` (iOS 43d4bc0, IOS-084): the funding popup opens by itself
+  // once per sheet; after that the Fund button under the message opens it.
+  const st = { profile: null, fee: null, quoteError: null, sending: false, sendError: null, txId: null, closed: false, layer: null, funding: null, fundingShownOnce: false, shortOfFunds: false };
   // The "not enough funds" popup: the chatting address's QR to fund it (iOS 2b45d6e).
   const notEnoughFunds = kasLabel("You don't have enough funds. Please send at least 1 KAS to your chatting address.");
-  /** The save can't be paid: the chatting address has no spendable coin, or too little for the fee. */
-  const isShortOfFunds = (error) => {
-    if (error?.code === "noFunds" || /insufficient/i.test(String(error?.message ?? error ?? ""))) return true;
-    return walletBalanceSompi() === 0n;
-  };
+  /** The save can't be paid: the chatting address has no spendable coin, or too little for the fee
+   *  - read from the error alone (an unreachable node is not "no funds", iOS 43d4bc0). */
+  const isShortOfFunds = (error) => error?.code === "noFunds" || /insufficient/i.test(String(error?.message ?? error ?? ""));
   const showFunding = () => {
     const address = String(rt.actions.myAddress || deps().walletAddress?.() || "");
     if (st.funding || st.closed || !address) return;
-    // Closes by itself once 1 KAS has arrived; either way the fee is worked out again.
+    // Closes once any KAS arrives (iOS 43d4bc0); either way the fee is worked out again.
     st.funding = openAddressFundSheet({
-      address, title: notEnoughFunds, dismissAtSompi: SOMPI_PER_KAS, owner,
+      address, title: notEnoughFunds, owner,
       onClose: () => {
         st.funding = null;
         if (st.closed) return;
@@ -1354,6 +1352,18 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
       },
     });
   };
+  /** Short of funds: the popup the first time, the Fund button after that (iOS 43d4bc0). */
+  const noteShortOfFunds = () => {
+    st.shortOfFunds = true;
+    if (!st.fundingShownOnce) {
+      st.fundingShownOnce = true;
+      showFunding();
+    }
+  };
+  /** A red message, with the Fund button under it while short of funds (iOS 43d4bc0 + a4d3402). */
+  const errorFoot = (text) => st.shortOfFunds
+    ? `${footer(text, "kl-red")}<button class="kl-psave-fund" type="button" data-kl-psave-fund>${LI.qrcode}<span>Fund</span></button>`
+    : footer(text, "kl-red");
   const body = () => {
     const p = st.profile;
     const rows = p ? [
@@ -1375,7 +1385,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
       cost += formRow("Network fee", "", { valueHtml: spinner() });
     }
     const costFoot = st.quoteError
-      ? footer(st.quoteError, "kl-red")
+      ? errorFoot(st.quoteError)
       : footer(readPrivacySeen()
         ? "Saved on chain from your chatting address to itself."
         : "Profiles are public and on chain: anyone can read them, and earlier versions stay readable after you change them.");
@@ -1386,7 +1396,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
       <div class="kmkt-sheet-body kmkt-form kl-tx-body">
         ${section(rows, { header: "Your Profile" })}
         ${section(cost, { footerHtml: costFoot })}
-        ${section(button, { footerHtml: st.sendError ? footer(st.sendError, "kl-red") : "" })}
+        ${section(button, { footerHtml: st.sendError ? errorFoot(st.sendError) : "" })}
       </div>`;
   };
   const render = () => {
@@ -1415,7 +1425,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
     } catch (error) {
       if (isShortOfFunds(error)) {
         st.sendError = notEnoughFunds;
-        showFunding();
+        noteShortOfFunds();
       } else {
         st.sendError = errorText(error);
       }
@@ -1426,10 +1436,11 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
   const quote = async () => {
     try {
       st.fee = await rt.actions.profileFee(st.profile);
+      st.shortOfFunds = false;
     } catch (error) {
       if (isShortOfFunds(error)) {
         st.quoteError = notEnoughFunds;
-        showFunding();
+        noteShortOfFunds();
       } else {
         st.quoteError = errorText(error);
       }
@@ -1440,6 +1451,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
     owner, kind: "tall", label: title, html: body(),
     onClick(event) {
       if (event.target.closest("[data-kl-psave-confirm]")) confirm();
+      else if (event.target.closest("[data-kl-psave-fund]")) showFunding();
     },
     onClose() {
       st.closed = true;
@@ -2926,8 +2938,9 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     try { d.heldBy = rt()?.actions.ownAddress?.(d.info.owner) ?? null; } catch { d.heldBy = null; }
   };
   resolveHeldBy();
-  /** Held by the chatting address: the identity, so "Set as Primary" applies. */
-  const mine = () => d.heldBy?.kind === "chatting" || (d.heldBy == null && isMine(d.info.owner));
+  /** Held by the chatting address: the identity, so "Set as Primary" applies (only there, iOS
+   *  d1026de). */
+  const mine = () => d.heldBy?.kind === "chatting" || (d.heldBy == null && isChattingKey(d.info.owner));
   /** Held by an address this app can sign for (chatting or spending): every owner action. */
   const canActAsOwner = () => mine() || d.heldBy?.kind === "spending";
   /** Held by any of this wallet's addresses - never offered Buy / Make an Offer. */
@@ -3585,25 +3598,28 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         let offers = [];
         const key = keyOf(address);
         if (key) {
-          // Your own list (the chatting address's) also holds what the marketplace bought with
-          // your other addresses: a name claimed from a fresh address is still yours to find here
-          // (iOS eb9b027).
-          const keys = [key];
-          if (address === String(rt.actions.myAddress ?? "")) {
-            for (const k of rt.actions.ownMarketKeys ?? []) if (!bytesEqual(k, key)) keys.push(k);
-          }
           try {
             if (rt.registry.refreshedAt == null) await rt.registry.refresh();
           } catch { /* each read below says so */ }
           // A name past grace is no longer theirs - it's Available to anyone in the marketplace
           // (and the bell says so); expired names in grace stay, to be renewed. Your Domains and
           // each address's tab alike (iOS e26562e / aa36d2a / eea52b2).
-          for (const k of keys) {
-            try { names.push(...await rt.registry.heldNames(k)); } catch { /* none read */ }
+          // Your own list (the chatting address's) holds the names and offers on every address of
+          // this wallet - one claimed with Buy From too, on any device restored from the seed
+          // (iOS d1026de, IOS-085).
+          let own = null;
+          if (String(address).toLowerCase() === String(rt.actions.myAddress ?? "")) {
+            try { own = await rt.actions.ownNamesAndOffers({ heldOnly: true }); } catch { own = null; }
+          }
+          if (own) {
+            names = own.names;
+          } else {
+            try { names = await rt.registry.heldNames(key); } catch { names = []; /* none read */ }
           }
           if (variant === "domains") {
-            for (const k of keys) {
-              try { offers.push(...await rt.registry.myOffers(k)); } catch { /* none read */ }
+            if (own) offers = own.offers;
+            else {
+              try { offers = await rt.registry.myOffers(key); } catch { offers = []; /* none read */ }
             }
             if (offers.length) {
               // expired offers, and ones made to an earlier owner, come back on their own

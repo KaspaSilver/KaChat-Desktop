@@ -1,4 +1,5 @@
-// Amount fields show thousands commas as you type ("12,345.5") while the value the app reads stays
+// Amount fields show thousands commas as you type ("12,345.5", or "12 345,5" where "," is the
+// decimal point - iOS b383ff0) while the value the app reads stays
 // plain (iOS 40c5258: KaspaAmountEntry and Binding.groupedAmount). Each field's `value` is
 // wrapped: reading it gives the plain number, writing it shows the grouped one, so the code
 // that sanitizes, checks and sends an amount is unchanged.
@@ -50,7 +51,7 @@ function attach(input) {
     if (caret < edited.length) {
       at = 0;
       for (let seen = 0; at < next.length && seen < keep; at += 1) if (next[at] >= "0" && next[at] <= "9") seen += 1;
-      if (typedDecimal && next[at] === ".") at += 1;
+      if (typedDecimal && (next[at] === "." || next[at] === ",")) at += 1;
     }
     try { input.setSelectionRange(at, at); } catch { /* not focusable */ }
   }, true);

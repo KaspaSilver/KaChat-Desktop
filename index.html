@@ -2033,6 +2033,11 @@
       <!-- The shared amount entry and slide-to-send button (ui/send-kaspa-components.js). -->
       <!-- From (iOS 6333dd3): the chatting address by default, or Choose an Address. -->
       <div data-sk-mount="from"></div>
+      <!-- From a spending address with an empty chatting address: the payee can't be told yet (iOS 710fdc0, IOS-086). -->
+      <p class="pay-sheet-from-warning" data-pay-from-warning role="note" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18.5A2 2 0 0 0 3.5 21.5h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="currentColor"/><path d="M12 9v4.5M12 17h.01" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+        <span data-pay-from-warning-text></span>
+      </p>
       <div data-sk-mount="amount"></div>
       <label class="pay-memo">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>

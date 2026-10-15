@@ -256,13 +256,15 @@ export function amountEntryHtml({
     conversion: attrName(attrs.conversion || `${p}-conversion`),
     max: attrName(attrs.max || `${p}-max`),
   };
+  // The field gets the plain value: grouped-amount.js shows it in this device's style when it
+  // wraps the input (a "2,500" written here would read back as 2.5 where "," is the point).
   const shown = groupedAmountText(value);
   const size = amountFontSize(shown);
   return `
     <div class="sk-amount" data-${p}-amount-entry>
       <label class="sk-amount-entry">
         <input class="sk-amount-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0"
-          data-${a.input} aria-label="${esc(ariaLabel)}" value="${esc(shown)}"
+          data-${a.input} aria-label="${esc(ariaLabel)}" value="${esc(value)}"
           style="font-size:${size}px;width:${Math.max(1, shown.length || 1) + 0.6}ch" />
         <span class="sk-amount-unit" data-${a.unit} style="font-size:${Math.round(size * 0.55)}px">${esc(unitText)}</span>
       </label>

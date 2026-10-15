@@ -352,6 +352,7 @@ button.kmkt-row:active { background-color: var(--row-pressed); }
 .kmkt-source-pill:hover { color: var(--text); }
 .kmkt-source-pill:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; border-radius: 10px; }
 .kmkt-source-pill-copy { display: flex; flex-direction: column; align-items: center; min-width: 0; line-height: 1.15; }
+.kmkt-source-pill-balance { display: inline-flex; align-items: center; gap: 6px; }
 .kmkt-source-pill-amount { font-size: 13px; font-weight: 600; white-space: nowrap; }
 .kmkt-source-pill-address { font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .kmkt-source-pill .kmkt-ico-chevron-down { width: 12px; height: 12px; stroke-width: 2.6; }

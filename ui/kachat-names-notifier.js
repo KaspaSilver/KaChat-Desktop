@@ -12,12 +12,21 @@
 //
 // Rows go to the app through `record({ id, source: "kachat", title, body, timestamp, targetKind:
 // "kachat", targetId: name })`; ids are stable, so a row is never recorded twice.
+//
+// Every address of this wallet counts, not only the chatting one (iOS d1026de, IOS-085 / XP-024):
+// the names and offers on the chatting key and every used spending address
+// (`actions.ownNamesAndOffers`), offers on them by any of its keys (`actions.isOwnKey`). For a name
+// on a spending address the indexer sends no pushes (they reach only the chatting address), so the
+// app also shows its own LOCAL reminders - renewal opens, expired, a day before grace ends - as OS
+// notifications through `notify({ id, title, body, name })` while `canNotify()` says the browser
+// allows them (engine/kachat-names/reminders.js says how they stand in for iOS's scheduled ones).
 
 import { kachatNames } from "./kachat-names-runtime.js";
 import { KAS_UNIT } from "../engine/network.js";
 import { Status } from "../engine/kachat-names/registry-state.js";
 import { bytesEqual } from "../engine/kachat-names/codec.js";
 import { dayString } from "../engine/kachat-names/actions.js";
+import { wantedReminders, stepReminders, dueArmedReminders, nextReminderAt, remindersStorageKey } from "../engine/kachat-names/reminders.js";
 import { formatSompiPlain } from "./send-kaspa-components.js";
 import { openNameDetailLayer } from "./kachat-names-live.js";
 
@@ -30,6 +39,66 @@ let checking = false;
 let lastCheckAt = 0;
 let trailingTimer = null;
 let watchedRegistry = null;
+let reminderTimer = null;
+
+// MARK: Local reminders (iOS d1026de KachatNameReminders, XP-024)
+
+function readReminders(wallet) {
+  try {
+    const j = JSON.parse(localStorage.getItem(remindersStorageKey(wallet)) || "{}");
+    return j && typeof j === "object" ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeReminders(wallet, armed) {
+  try { localStorage.setItem(remindersStorageKey(wallet), JSON.stringify(armed)); } catch { /* storage full: re-armed next check */ }
+}
+
+function canNotify() {
+  try { return typeof deps?.canNotify === "function" ? !!deps.canNotify() : typeof deps?.notify === "function"; } catch { return false; }
+}
+
+/** Shows the reminders that came due (once each: they leave the armed set) and sets the timer for
+ *  the next one. */
+function fireReminders(wallet, armed, due) {
+  writeReminders(wallet, armed);
+  for (const r of due) {
+    try { deps?.notify?.({ id: r.id, title: r.title, body: r.body, name: r.name }); } catch { /* best-effort, like a push */ }
+  }
+  armReminderTimer(wallet, armed);
+}
+
+/** While the app is open a reminder shows at its time, the way iOS's scheduled one would: one
+ *  timer for the soonest (a long wait is re-checked daily). */
+function armReminderTimer(wallet, armed) {
+  if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+  const at = nextReminderAt(armed);
+  if (at == null) return;
+  const wait = Math.min(Math.max(1_000, at - Date.now() + 1_000), 86_400_000);
+  reminderTimer = setTimeout(() => {
+    reminderTimer = null;
+    const rt = kachatNames();
+    if (!rt || rt.actions.myAddress !== wallet) return;
+    if (!canNotify()) { writeReminders(wallet, {}); return; }
+    const { armed: next, due } = dueArmedReminders(readReminders(wallet), Date.now());
+    fireReminders(wallet, next, due);
+  }, wait);
+}
+
+/** One check's reminders for the names on this wallet's spending addresses (`names`): rearmed
+ *  from their expiry, the due ones shown. Without notification permission nothing is kept (iOS
+ *  removes its pending ones). */
+function updateReminders(wallet, names, params) {
+  if (!canNotify()) {
+    if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+    writeReminders(wallet, {});
+    return;
+  }
+  const { armed, due } = stepReminders(readReminders(wallet), wantedReminders(names, params, { dayString }), Date.now());
+  fireReminders(wallet, armed, due);
+}
 
 function readSnapshot(wallet) {
   try {
@@ -77,9 +146,10 @@ export async function checkKachatNamesNews() {
     const graceMs = registry.graceMs;
     let owned;
     let myOpenOffers;
+    // every address of this wallet, not only the chatting one: a name claimed with Buy From gets
+    // its notices too (iOS d1026de, IOS-085 / XP-024)
     try {
-      owned = await registry.namesOf(me, { includeInactive: true });
-      myOpenOffers = await registry.myOffers(me);
+      ({ names: owned, offers: myOpenOffers } = await actions.ownNamesAndOffers({ heldOnly: false }));
     } catch {
       return;
     }
@@ -89,10 +159,14 @@ export async function checkKachatNamesNews() {
       if (n.status(graceMs, now) !== Status.active) continue;
       let open = [];
       try { open = await registry.offersFor(n.name); } catch { open = []; }
-      for (const o of open) if (bytesEqual(o.seller, me)) offersOnMine.push(o);
+      for (const o of open) if (actions.isOwnKey(o.seller)) offersOnMine.push(o);
     }
     // a different wallet signed in meanwhile: this answer isn't its
     if (actions.myAddress !== wallet) return;
+    // The indexer pushes name reminders only to the chatting address: for a name on another
+    // address of this wallet the app reminds by itself (XP-024).
+    try { updateReminders(wallet, owned.filter((n) => !bytesEqual(n.owner, me)), params); }
+    catch (error) { try { deps?.log?.(`.kachat reminders failed: ${error?.message || error}`); } catch { /* fine */ } }
 
     const old = readSnapshot(wallet);
     const quiet = old == null; // the first check only records where things stand
@@ -227,11 +301,13 @@ function scheduleCheck() {
 /**
  * Starts the notifier (safe to call more than once): checks after every registry change (a
  * refresh bumps its revision) and when the app comes back to the front, which refreshes a stale
- * registry first. `record(row)` puts a row in the bell; `log(text)` is optional.
+ * registry first. `record(row)` puts a row in the bell; `log(text)` is optional; `notify(reminder)`
+ * shows a local renewal reminder as an OS notification and `canNotify()` says whether one can be
+ * shown now (iOS d1026de: both optional - without them there are no reminders).
  */
-export function startKachatNamesNotifier({ record, log = null } = {}) {
+export function startKachatNamesNotifier({ record, log = null, notify = null, canNotify: allowed = null } = {}) {
   if (typeof record !== "function") return;
-  deps = { record, log };
+  deps = { record, log, notify, canNotify: allowed ?? (notify ? () => true : () => false) };
   const rt = kachatNames();
   if (!rt) return; // mainnet: no registry, no .kachat news
   if (watchedRegistry !== rt.registry) {

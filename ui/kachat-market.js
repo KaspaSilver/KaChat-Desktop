@@ -665,10 +665,14 @@ let sourcePillShownFor = null;
 function sourcePillInnerHtml() {
   const source = marketSource();
   const balance = shownSourceBalance(source);
+  // the logo sits right beside the balance, as on every other screen - not out at the side of the
+  // wider address line under it (iOS dbb8b9b)
   return `
-    ${sourcePillEl?.dataset.kmktLogo || ""}
     <span class="kmkt-source-pill-copy">
-      <span class="kmkt-source-pill-amount">${esc(eightDecimals(balance ?? 0n))}</span>
+      <span class="kmkt-source-pill-balance">
+        ${sourcePillEl?.dataset.kmktLogo || ""}
+        <span class="kmkt-source-pill-amount">${esc(eightDecimals(balance ?? 0n))}</span>
+      </span>
       <small class="kmkt-source-pill-address">${esc(`${sourceTitle(source)} · ${compactAddress(sourceAddress(source))}`)}</small>
     </span>
     ${ICON.chevronDown}`;

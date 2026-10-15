@@ -1170,7 +1170,9 @@ async function main() {
       r.check(C.bytesEqual(ba.signerFor(op).me, chatKey), `signerFor(${op.kind}): the chatting address by default`);
       r.eq(ba.payerFor(op), null, `payerFor(${op.kind}): the chatting address by default`);
     }
-    r.eq(ba.ownMarketKeys.length, 1, "ownMarketKeys: just the chatting key before any pick");
+    // a wallet's names are on all its addresses (iOS d1026de): the revealed spending address's key
+    // counts before any pick
+    r.eq(ba.allOwnKeys.length, 2, "allOwnKeys: the chatting key and the revealed spending one before any pick");
     let sourceEvents = 0;
     const unsubSource = ba.subscribe(() => { sourceEvents += 1; });
     ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "" });
@@ -1188,8 +1190,8 @@ async function main() {
     r.check(C.bytesEqual(ba.signerFor(A.Operation.reclaim(someName)).me, chatKey), "signerFor(reclaim): the chatting address");
     r.eq(ba.marketAddresses.join(","), spendAddr.toLowerCase(), "marketAddresses: the picked address is remembered");
     r.eq(buyMem.get(A.marketAddressesStorageKey(chatAddr)), JSON.stringify([spendAddr.toLowerCase()]), "marketAddresses: stored per wallet");
-    r.eq(ba.ownMarketKeys.length, 2, "ownMarketKeys: the chatting key and the bought-with one");
-    r.check(C.bytesEqual(ba.ownMarketKeys[0], chatKey) && C.bytesEqual(ba.ownMarketKeys[1], hx(o0.seller)), "ownMarketKeys: chatting first");
+    r.eq(ba.allOwnKeys.length, 2, "allOwnKeys: the bought-with address is the revealed one, counted once");
+    r.check(C.bytesEqual(ba.allOwnKeys[0], chatKey) && C.bytesEqual(ba.allOwnKeys[1], hx(o0.seller)), "allOwnKeys: chatting first");
     ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "Names" });
     r.eq(ba.marketAddresses.length, 1, "marketAddresses: an address is remembered once");
     // leaving the marketplace: back to the chatting address, the remembered address stays
@@ -1197,7 +1199,7 @@ async function main() {
     r.eq(ba.marketSource.kind, "chatting", "setMarketSource(null): the chatting address");
     r.check(C.bytesEqual(ba.signerFor(A.Operation.buy(someName)).me, chatKey), "signerFor(buy): the chatting address again");
     const ba2 = new A.KachatNamesActions({ engine: { ...actEngine, address: chatAddr, privateKeyHex: C.hex(other) }, service: dry, registry: registryStub, storage: buyStorage, wallet: spend });
-    r.eq(ba2.ownMarketKeys.length, 2, "ownMarketKeys: remembered after a relaunch");
+    r.eq(ba2.allOwnKeys.length, 2, "allOwnKeys: the same after a relaunch");
     const otherWallet = new A.KachatNamesActions({ engine: actEngine, service: dry, registry: registryStub, storage: buyStorage, wallet: spend });
     r.eq(otherWallet.marketAddresses.length, 0, "marketAddresses: another wallet has its own");
     // an offer is withdrawn (or refunded) with the key it was made from, whatever the marketplace uses
@@ -1215,6 +1217,144 @@ async function main() {
     ba.setMarketSource({ kind: "spending", index: 4, address: RS.addressOf(new Uint8Array(32).fill(6)), label: "x" });
     r.check((() => { try { ba.buyerSigner(); return false; } catch (e) { return e.code === "keyMismatch"; } })(), "buyerSigner: refuses a key that isn't the address's");
     ba.setMarketSource(null);
+  }
+
+  // MARK: a wallet's names are on all its addresses (iOS d1026de, IOS-085 / XP-024)
+  {
+    const chatKey = S.xonlyKey(other);
+    const k = (n) => new Uint8Array(32).fill(n);
+    const spendingList = [0, 1, 2, 3].map((i) => ({ index: i, address: RS.addressOf(k(0x30 + i)) }));
+    const [a0, a1, a2, a3] = spendingList.map((e) => e.address);
+    let maxIndex = 2;
+    const persisted = new Set([a1]); // #1: Manage Addresses already knows it is used
+    const answers = { [a0]: false, [a2]: true, [a3]: null }; // #3: the probe fails
+    const probes = [];
+    const wallet = {
+      spendingAddresses: () => spendingList.filter((e) => e.index <= maxIndex),
+      spendingMaxIndex: () => maxIndex,
+      cachedSpendingAddressUsed: (a) => (persisted.has(a) ? true : null),
+      spendingAddressUsed: async (a) => { probes.push(a); if (answers[a] === true) persisted.add(a); return answers[a]; },
+    };
+    let clockNow = 1_000_000;
+    const ownMem = new Map();
+    const ownStorage = { get: (key) => ownMem.get(key) ?? null, set: (key, val) => { ownMem.set(key, val); } };
+    const nameOf = (owner, name, expiresAt) => new RS.NameInfo({ name, key: C.key(name), owner, price: 0n, expiresAt, outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x61), 0) });
+    const soon = BigInt(Date.now()) + 10n * 86_400_000n;
+    const lapsedAt = BigInt(Date.now()) - m.params.graceMs - 60_000n;
+    const byOwner = new Map([
+      [C.hex(chatKey), [nameOf(chatKey, "chat", soon)]],
+      [C.hex(k(0x31)), [nameOf(k(0x31), "one", soon)]],
+      [C.hex(k(0x32)), [nameOf(k(0x32), "spent", soon), nameOf(k(0x32), "gone", lapsedAt)]],
+    ]);
+    const anOffer = new RS.OfferInfo({ outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x62), 0), key: C.key("bob"), name: "bob", buyer: k(0x32), seller: k(0x40), amount: 5n, refundAfter: 9n });
+    const lookups = [];
+    const regOwn = {
+      ...registryStub,
+      namesOf: async (owner, opts) => {
+        lookups.push(C.hex(owner));
+        const all = byOwner.get(C.hex(owner)) ?? [];
+        return opts?.includeInactive ? all : all.filter((n) => n.status(m.params.graceMs) === RS.Status.active);
+      },
+      heldNames: async (owner) => (byOwner.get(C.hex(owner)) ?? []).filter((n) => n.status(m.params.graceMs) !== RS.Status.lapsed),
+      myOffers: async (buyer) => (C.bytesEqual(buyer, k(0x32)) ? [anOffer] : []),
+    };
+    const ownEngine = { ...actEngine, address: RS.addressOf(chatKey), privateKeyHex: C.hex(other) };
+    const oa = new A.KachatNamesActions({ engine: ownEngine, service: dry, registry: regOwn, storage: ownStorage, wallet, clock: { now: () => clockNow } });
+    // allOwnKeys: the chatting key and every revealed spending key (no probes)
+    r.eq(oa.allOwnKeys.length, 4, "allOwnKeys: the chatting key and every revealed spending address");
+    r.check(C.bytesEqual(oa.allOwnKeys[0], chatKey), "allOwnKeys: chatting first");
+    r.check(oa.isOwnKey(chatKey) && oa.isOwnKey(k(0x30)) && oa.isOwnKey(k(0x32)), "isOwnKey: chatting and spending keys");
+    r.check(!oa.isOwnKey(k(0x33)) && !oa.isOwnKey(k(0x50)), "isOwnKey: an unrevealed address or anyone else's is not");
+    r.eq(probes.length, 0, "allOwnKeys: no used probes");
+    maxIndex = 3;
+    r.check(oa.isOwnKey(k(0x33)), "allOwnKeys: a newly revealed address counts (cached per address count)");
+    // ownNameKeys: the chatting key and every used spending address; known-used answers need no probe
+    const keys1 = await oa.ownNameKeys();
+    r.eq(keys1.map(C.hex).join(","), [chatKey, k(0x31), k(0x32)].map(C.hex).join(","), "ownNameKeys: chatting, then each used spending address by index");
+    r.eq([...probes].sort().join(","), [a0, a2, a3].sort().join(","), "ownNameKeys: only the addresses no cache knows are probed");
+    probes.length = 0;
+    await oa.ownNameKeys();
+    r.eq(probes.length, 0, "ownNameKeys: the list is kept (no probes within ten minutes)");
+    clockNow += 601_000;
+    const keys2 = await oa.ownNameKeys();
+    r.eq(probes.join(","), a3, "ownNameKeys: after ten minutes only an unknown address is probed again (used is kept, unused for the session)");
+    r.eq(keys2.length, 3, "ownNameKeys: the same keys");
+    probes.length = 0;
+    // a bought-with address (the hint) counts as used without a probe
+    oa.setMarketSource({ kind: "spending", index: 0, address: a0, label: "" });
+    const keys3 = await oa.ownNameKeys();
+    r.check(keys3.some((x) => C.bytesEqual(x, k(0x30))), "ownNameKeys: a bought-with address counts");
+    r.check(!probes.includes(a0), "ownNameKeys: a bought-with address isn't probed");
+    oa.setMarketSource(null);
+    // ownNamesAndOffers: every key's names and offers
+    lookups.length = 0;
+    const all = await oa.ownNamesAndOffers({ heldOnly: false });
+    r.eq(all.names.map((n) => n.name).sort().join(","), "chat,gone,one,spent", "ownNamesAndOffers: names on every used address, lapsed ones too");
+    r.eq(all.offers.length, 1, "ownNamesAndOffers: an offer made from a spending address");
+    const held = await oa.ownNamesAndOffers({ heldOnly: true });
+    r.eq(held.names.map((n) => n.name).sort().join(","), "chat,one,spent", "ownNamesAndOffers(heldOnly): no lapsed names");
+    await r.throws(() => new A.KachatNamesActions({ engine: ownEngine, service: dry, registry: { ...regOwn, myOffers: async () => { throw new Error("down"); } }, storage: ownStorage, wallet }).ownNamesAndOffers(),
+      (e) => e.message === "down", "ownNamesAndOffers: a failed lookup throws");
+    // another wallet signed in while probing: the answer isn't its
+    const flipEngine = { ...ownEngine };
+    const flip = new A.KachatNamesActions({ engine: flipEngine, service: dry, registry: regOwn, storage: ownStorage,
+      wallet: { ...wallet, cachedSpendingAddressUsed: () => null, spendingAddressUsed: async () => { flipEngine.address = RS.addressOf(k(0x51)); return true; } } });
+    r.eq((await flip.ownNameKeys()).length, 0, "ownNameKeys: nothing for a wallet that changed meanwhile");
+    // no wallet hooks (no seed phrase): just the chatting key
+    const bare = new A.KachatNamesActions({ engine: ownEngine, service: dry, registry: regOwn, storage: { get: () => null, set: () => {} } });
+    r.eq((await bare.ownNameKeys()).length, 1, "ownNameKeys: the chatting key without spending addresses");
+    r.eq(bare.allOwnKeys.length, 1, "allOwnKeys: the chatting key without spending addresses");
+  }
+
+  // MARK: local renewal reminders for names on a spending address (iOS d1026de KachatNameReminders)
+  {
+    const R = await import("../engine/kachat-names/reminders.js");
+    const day = 86_400_000;
+    const p = { graceMs: BigInt(7 * day), renewWindowMs: BigInt(30 * day) };
+    const E = 1_900_000_000_000;
+    const owner = new Uint8Array(32).fill(0x31);
+    const nm = (expiresAt) => new RS.NameInfo({ name: "alice", key: C.key("alice"), owner, price: 0n, expiresAt: BigInt(expiresAt), outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x63), 0) });
+    const ds = (ms) => `D${ms}`;
+    const wanted = R.wantedReminders([nm(E)], p, { dayString: ds });
+    r.eq(wanted.map((w) => w.id.split("-").pop()).join(","), "renew,grace,lastcall", "reminders: renewal opens, expired, last call");
+    r.check(wanted.every((w) => w.id.startsWith(`${R.reminderPrefix}alice-${E}-`)), "reminders: ids carry the name and its expiry");
+    r.eq(wanted[0].at, E - 30 * day, "reminders: renewal opens at expiresAt - renewWindowMs");
+    r.eq(wanted[1].at, E, "reminders: expired at expiresAt");
+    r.eq(wanted[2].at, E + 7 * day - day, "reminders: a day before grace ends");
+    r.eq(R.wantedReminders([nm(E)], { graceMs: BigInt(6 * 3_600_000), renewWindowMs: BigInt(day) }, { dayString: ds })[2].at, E + 3 * 3_600_000,
+      "reminders: last call at most half the grace in (testnet's short grace)");
+    r.eq(wanted[0].title, "Renew alice.kachat", "reminders: renewal title");
+    r.eq(wanted[0].body, `Renewal is open: renew it before D${E} to keep it.`, "reminders: renewal body");
+    r.eq(wanted[1].title, "alice.kachat has expired", "reminders: expired title");
+    r.eq(wanted[2].body, `Renew it before D${E + 7 * day} or anyone can claim it.`, "reminders: grace body");
+    // a check before renewal opens arms all three; nothing fires
+    let st = R.stepReminders({}, wanted, E - 40 * day);
+    r.eq(Object.keys(st.armed).length, 3, "reminders: future ones are armed");
+    r.eq(st.due.length, 0, "reminders: nothing due yet");
+    r.eq(R.nextReminderAt(st.armed), E - 30 * day, "reminders: the soonest is renewal");
+    // renewal opened: it fires once
+    st = R.stepReminders(st.armed, wanted, E - 10 * day);
+    r.eq(st.due.map((d) => d.id.split("-").pop()).join(","), "renew", "reminders: renewal fires when its time comes");
+    r.eq(Object.keys(st.armed).length, 2, "reminders: a fired one leaves the armed set");
+    r.eq(R.stepReminders(st.armed, wanted, E - 9 * day).due.length, 0, "reminders: it fires only once");
+    // app closed through expiry and the last call: only the latest shows
+    const closed = R.stepReminders(st.armed, wanted, E + 6.5 * day);
+    r.eq(closed.due.map((d) => d.id.split("-").pop()).join(","), "lastcall", "reminders: after a long gap only the latest due shows");
+    r.eq(Object.keys(closed.armed).length, 0, "reminders: and none stay armed");
+    // first seen past its time: never armed, never fires
+    r.eq(R.stepReminders({}, wanted, E + day).due.length, 0, "reminders: a time already past when first seen doesn't fire");
+    // renewed: the old expiry's reminders go, the new ones arm
+    const all3 = R.stepReminders({}, wanted, E - 40 * day).armed;
+    const moved = R.stepReminders(all3, R.wantedReminders([nm(E + 365 * day)], p, { dayString: ds }), E - 5 * day);
+    r.eq(moved.due.length, 0, "reminders: a renewed name's old reminders don't fire");
+    r.check(Object.keys(moved.armed).every((id) => id.includes(`-${E + 365 * day}-`)), "reminders: they move to the new expiry");
+    // left the wallet: dropped
+    r.eq(Object.keys(R.stepReminders(all3, [], E - 5 * day).armed).length, 0, "reminders: a name that left the wallet loses them");
+    // the timer: due armed ones without a registry read
+    const timer = R.dueArmedReminders(all3, E + 1);
+    r.eq(timer.due.map((d) => d.id.split("-").pop()).join(","), "grace", "dueArmedReminders: the latest due one");
+    r.eq(Object.keys(timer.armed).length, 1, "dueArmedReminders: the future one stays");
+    r.eq(R.remindersStorageKey("KASPA:QX"), "kachat-name-reminders-v1:kaspa:qx", "remindersStorageKey: per wallet, lowercased");
   }
 
   // MARK: actions: no offers on, or accepts of, expired names (iOS 71128c4, IOS-055)

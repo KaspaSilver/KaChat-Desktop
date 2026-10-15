@@ -125,11 +125,13 @@ export function sompiPaidToAddress(tx, address) {
 }
 
 /**
- * Where a notice may put the payment it names (IOS-083), given every stored row with that txid -
- * `{ chat: "this" | "self" | "other", direction, messageType }` - and the notice's direction:
+ * Where a notice may put the payment it names (IOS-083, iOS 3eaa0b6), given every stored row with
+ * that txid - `{ chat: "this" | "self" | "other", direction, messageType, fromKnown }` (`fromKnown`:
+ * its sender is a contact or ours) - and the notice's direction:
  *   "file" - shown nowhere yet: a new bubble in this chat;
- *   "move" - shown only in the self-chat, as received plain payments, and the notice is one we
- *            received: it moves into this chat;
+ *   "move" - shown only in the self-chat, as received payments from an address that is no contact
+ *            (a plain transfer, "From: <address>"), and the notice is one we received: it moves
+ *            into this chat - the first notice to claim it wins;
  *   "drop" - anything else. A row in this chat is already placed (never refiled the other way
  *            round), and a row in any other chat - another contact's payment, or a message we sent
  *            someone - is never taken by a notice.
@@ -138,7 +140,7 @@ export function paymentNoticePlacement(rows, direction) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return "file";
   if (list.some((row) => row?.chat !== "self")) return "drop";
-  const plainReceived = list.every((row) => row.direction === "incoming" && row.messageType === "payment");
+  const plainReceived = list.every((row) => row.direction === "incoming" && row.messageType === "payment" && !row.fromKnown);
   return direction === "incoming" && plainReceived ? "move" : "drop";
 }
 
@@ -147,7 +149,8 @@ export function paymentNoticePlacement(rows, direction) {
  * inputs resolved (`resolve_previous_outpoints=light`): `{ ok: true }` only when it pays
  * `paidAddress` exactly `claimedSompi`, carries no payload (a chat payment From a spending address
  * is a plain transfer) and none of its inputs is one of `foreignAddresses` (ours, or another
- * contact's: that payment is not this contact's to claim). Else `{ ok: false, reason }`.
+ * contact's: that payment is not this contact's to claim). Else `{ ok: false, reason }`, with
+ * `unknown: true` when the inputs' addresses weren't resolved (as good as no chain answer).
  */
 export function checkPaymentNoticeTx(tx, { paidAddress, claimedSompi, foreignAddresses = [] } = {}) {
   let claimed;
@@ -158,9 +161,10 @@ export function checkPaymentNoticeTx(tx, { paidAddress, claimedSompi, foreignAdd
   const payload = String(tx?.payload ?? "").trim();
   if (payload && !/^0*$/.test(payload)) return { ok: false, reason: "carries a payload, so it is not a plain transfer" };
   const foreign = new Set((foreignAddresses || []).map((address) => String(address || "").trim().toLowerCase()).filter(Boolean));
-  for (const input of Array.isArray(tx?.inputs) ? tx.inputs : []) {
-    const from = String(input?.previous_outpoint_address || input?.previousOutpointAddress || "").trim().toLowerCase();
-    if (from && foreign.has(from)) return { ok: false, reason: "was paid from an address that is yours or another contact's" };
-  }
+  const inputs = (Array.isArray(tx?.inputs) ? tx.inputs : [])
+    .map((input) => String(input?.previous_outpoint_address || input?.previousOutpointAddress || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!inputs.length) return { ok: false, unknown: true, reason: "has no readable inputs yet" };
+  if (inputs.some((from) => foreign.has(from))) return { ok: false, reason: "was paid from an address that is yours or another contact's" };
   return { ok: true };
 }

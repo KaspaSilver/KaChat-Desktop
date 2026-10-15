@@ -40,20 +40,22 @@ assert.equal(u("2,500", ""), "2500", "elsewhere a comma three digits from the en
 // show as a thin space, and a pasted "1.234,5" is 1234.5.
 const cd = { commaDecimal: true };
 assert.equal(g("2500", cd), "2\u202F500");
-assert.equal(g("1234567.25", cd), "1\u202F234\u202F567.25");
+assert.equal(g("1234567.25", cd), "1\u202F234\u202F567,25");
 assert.equal(u("2\u202F500", "2\u202F500", cd), "2500");
 assert.equal(u("0,001", "", cd), "0.001");
 assert.equal(u("2,500", "", cd), "2.500", "a comma is the decimal point there");
 assert.equal(u("1.234,5", "", cd), "1234.5");
 assert.equal(u("1 234,56", "", cd), "1234.56");
 assert.equal(u("12\u202F345,", "12\u202F345", cd), "12345.");
-// IOS-082: a second "," typed after the decimal point is ignored, never read as grouping
-assert.equal(u("0.5,", "0.5", cd), "0.5");
-assert.equal(u("0.05,", "0.05", cd), "0.05");
-assert.equal(u("2\u202F500.5,", "2\u202F500.5", cd), "2500.5");
-assert.equal(u("0,.5", "0.5", cd), "0.5", "typed before the point");
-assert.equal(u("1.234,5", "0.5", cd), "1234.5", "a paste over the field still reads dots as grouping");
-assert.equal(u("1,5", "0.5", cd), "1.5", "a paste of the same length");
+// IOS-082 (iOS b383ff0): the field shows the device's own point, and a second "," is dropped
+assert.equal(g("0.5", cd), "0,5");
+assert.equal(g("12345.5", cd), "12\u202F345,5");
+assert.equal(g("5.", cd), "5,");
+assert.equal(g("0.5"), "0.5");
+assert.equal(u("0,5,", "0,5", cd), "0.5");
+assert.equal(u("0,05,", "0,05", cd), "0.05");
+assert.equal(u("2\u202F500,5,", "2\u202F500,5", cd), "2500.5");
+assert.equal(u("1.234,5", "0,5", cd), "1234.5", "a paste over the field still reads dots as grouping");
 for (const plain of ["0", "5", "1000", "12345.678", "29000000000", "0.00000001"]) {
   assert.equal(u(g(plain, cd), g(plain, cd), cd), plain);
 }

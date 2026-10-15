@@ -181,6 +181,13 @@
 .kl-form-row.bold .kl-form-value { font-weight: 600; }
 .kmkt-form-footer.kl-red { color: var(--ios-red); }
 .kmkt-form-footer.kl-green { color: var(--ios-green); }
+/* Profile save's Fund button under a not-enough-funds message (iOS 43d4bc0 + a4d3402):
+   Label("Fund", systemImage: "qrcode"), subheadline semibold, 8pt under the text. */
+.kl-psave-fund {
+  display: inline-flex; align-items: center; gap: 6px; margin: 8px 16px 0; padding: 0; border: 0;
+  background: transparent; color: var(--kaspa-ink); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.kl-psave-fund .kmkt-ico { width: 17px; height: 17px; stroke-width: 1.9; }
 .kmkt-form-button.kl-destructive { color: var(--ios-red); }
 .kmkt-form-button:disabled.kl-destructive { color: var(--label-tertiary); }
 .kmkt-form-button .kl-spinner { margin: 0 auto; }
