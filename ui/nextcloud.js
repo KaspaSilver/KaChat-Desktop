@@ -2,6 +2,7 @@ import { confirmDialog } from "./dialogs.js";
 import { IS_TESTNET } from "../engine/network.js";
 import { cssUrlValue } from "./css-url.js";
 import { readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged } from "./key-vault.js";
+import { talkCallsFromCapabilities } from "./talk.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -2094,14 +2095,18 @@ export function nextcloudAccount() {
 
 /** Whether this Nextcloud can host a KaChat call: Talk installed with calls enabled, read from
  *  the server's capabilities (spreed.features incl. conversation-v4 and signaling-v3, and
- *  config.call.enabled) - iOS NextcloudService.talkCallsAvailable. Probed once per connection
- *  and remembered for the session; a probe that fails answers false and is retried later. */
+ *  config.call.enabled) - iOS NextcloudService.talkCallsAvailable. A "yes" is remembered for
+ *  the session; anything else asks the server again, so a call about to start (or a request to
+ *  host one) re-checks Talk when it isn't known to be there. A probe that couldn't reach the
+ *  server changes nothing (iOS 88aa3c1): it used to answer "no Talk", and a Desktop with Talk
+ *  then asked the other side to host. */
 let talkProbe = null; // { server, at, value }
 export async function nextcloudTalkCallsAvailable({ force = false } = {}) {
   const account = nextcloudAccount();
   if (!account) return false;
-  if (!force && talkProbe && talkProbe.server === account.server && Date.now() - talkProbe.at < (talkProbe.value ? 6 * 3600_000 : 60_000)) return talkProbe.value;
-  let value = false;
+  const known = talkProbe && talkProbe.server === account.server ? talkProbe : null;
+  if (!force && known?.value && Date.now() - known.at < 6 * 3600_000) return true;
+  let value = null;
   try {
     const response = await ncFetch(`${apiBase(account.server)}/ocs/v2.php/cloud/capabilities?format=json`, {
       headers: {
@@ -2111,15 +2116,13 @@ export async function nextcloudTalkCallsAvailable({ force = false } = {}) {
       },
       cache: "no-store",
     });
-    if (response.ok) {
-      const decoded = await response.json();
-      const spreed = decoded?.ocs?.data?.capabilities?.spreed;
-      const features = Array.isArray(spreed?.features) ? spreed.features : [];
-      const callEnabled = spreed?.config?.call?.enabled;
-      value = Boolean(spreed) && features.includes("conversation-v4") && features.includes("signaling-v3")
-        && (callEnabled === undefined || callEnabled === true || callEnabled === 1 || callEnabled === "1" || callEnabled === "true");
-    }
-  } catch { value = false; }
+    if (response.ok) value = talkCallsFromCapabilities(await response.json());
+  } catch { value = null; }
+  if (value == null) {
+    deps?.appendEngineLog?.(`[Nextcloud] Talk check could not reach the server - keeping ${Boolean(known?.value)}`);
+    return Boolean(known?.value);
+  }
+  if (known?.value !== value) deps?.appendEngineLog?.(`[Nextcloud] Talk calls ${value ? "available" : "not available"}`);
   talkProbe = { server: account.server, at: Date.now(), value };
   return value;
 }

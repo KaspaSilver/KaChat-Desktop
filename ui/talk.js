@@ -223,6 +223,21 @@ export function usableIceServers(data) {
   return servers.length ? servers : FALLBACK_ICE_SERVERS.map((s) => ({ ...s }));
 }
 
+/** Whether a capabilities answer (/ocs/v2.php/cloud/capabilities) says Talk can host a KaChat
+ *  call: true/false when the server answered, null when the body isn't a capabilities answer at
+ *  all (an error page, a login redirect) - not an answer about Talk (iOS 88aa3c1 probeTalkCalls). */
+export function talkCallsFromCapabilities(decoded) {
+  const capabilities = decoded?.ocs?.data?.capabilities;
+  if (!capabilities || typeof capabilities !== "object") return null;
+  // the server answered: no "spreed" entry means Talk isn't installed
+  const spreed = capabilities.spreed;
+  if (!spreed || typeof spreed !== "object") return false;
+  const features = Array.isArray(spreed.features) ? spreed.features : [];
+  if (!features.includes("conversation-v4") || !features.includes("signaling-v3")) return false;
+  const callEnabled = spreed.config?.call?.enabled;
+  return callEnabled === undefined || callEnabled === true || callEnabled === 1 || callEnabled === "1" || callEnabled === "true";
+}
+
 function ocsData(root) {
   return root && typeof root === "object" && root.ocs && "data" in root.ocs ? root.ocs.data : null;
 }

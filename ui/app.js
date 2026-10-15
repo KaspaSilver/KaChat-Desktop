@@ -10203,7 +10203,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 167;
+const APP_BUILD = 168;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -18832,7 +18832,10 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
   }
   if (contact?.address) acceptChat(contact.address);
   let finalText = text;
-  if (replyingToMessageId) {
+  // Never a call message (iOS 40b1461): a call_invite/request/end sent while a reply was queued in
+  // the chat went out as a reply, and the other side never saw a call. The reply stays queued for
+  // the person's next text.
+  if (replyingToMessageId && !Calls.parseCallEnvelope(text)) {
     const replyTarget = conversationEntry.messages.find((entry) => entry.id === replyingToMessageId);
     if (replyTarget) {
       finalText = JSON.stringify({

@@ -22,6 +22,7 @@ import { NextcloudTalkClient, TalkError, FALLBACK_ICE_SERVERS } from "./talk.js"
 const RING_TIMEOUT_MS = 35_000;
 const INCOMING_RING_TIMEOUT_MS = 30_000;
 const INVITE_FRESHNESS_MS = 45_000;
+const JOIN_TIMEOUT_MS = 30_000;
 const OFFER_FALLBACK_MS = 10_000;
 const HANDLED_KEY = "kachat-calls-handled-v1";
 const HANDLED_CAP = 200;
@@ -267,7 +268,11 @@ export async function startCall(address, video) {
   if (!deps.callsEnabledFor(address)) return;
   const callId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`).toLowerCase();
   const account = deps.nextcloudAccount();
+  // A Desktop with Talk always hosts: with Talk not known to be there (never checked, or the last
+  // check failed) this asks the server now. Asking the contact to host while this device could
+  // host left two sides each waiting for the other (iOS 88aa3c1).
   const canHost = account ? await deps.talkCallsAvailable() : false;
+  if (session) return;
   const call = newSession({ id: callId, address, isOutgoing: true, hostsThisCall: Boolean(canHost), server: canHost ? account.server : "", token: "", video, phase: "ringingOut" });
   session = call;
   markHandled(callId);
@@ -316,11 +321,14 @@ export function handleIncomingCallEnvelope(envelope, message, contactAddress) {
       if (isHandled(envelope.callId)) return;
       if (!deps.callsEnabledFor(contactAddress) || age >= INVITE_FRESHNESS_MS) return;
       if (session) return;
-      deps.talkCallsAvailable().then((canHost) => {
-        if (!canHost || session || isHandled(envelope.callId)) { markHandled(envelope.callId); return; }
-        markHandled(envelope.callId);
-        hostRequestedCall(envelope.callId, contactAddress, envelope.video);
-      }).catch(() => markHandled(envelope.callId));
+      markHandled(envelope.callId);
+      // Neither side can host: nothing goes on chain from this side - the caller is the only
+      // one who pays for a call - so the requester's ring-out tells them one of the two needs
+      // Nextcloud Talk. With a Nextcloud connected it rings at once and checks Talk behind the
+      // ring (iOS 40b1461).
+      if (!hostRequestedCall(envelope.callId, contactAddress, envelope.video)) {
+        deps.appendEngineLog?.(`[Call] Request ${envelope.callId.slice(0, 8)} not hosted: no Nextcloud here`);
+      }
       return;
     }
     case "call_invite": {
@@ -400,25 +408,66 @@ function ringIncoming(call) {
 }
 
 /** Hosts a call the contact asked for: rings, and opens the room meanwhile so the requester
- *  can be waiting in it as a guest by the time we accept. */
-async function hostRequestedCall(callId, address, video) {
+ *  can be waiting in it as a guest by the time we accept. Returns false when this device has no
+ *  Nextcloud to host with.
+ *
+ *  The session exists - and rings - at once, so an Accept clicked while the room is still being
+ *  opened finds the call (acceptIncoming waits for the room); whether Talk is really there is
+ *  checked behind the ring. The room is checked usable (internal signaling) before the invite
+ *  goes out, and the invite is sent again if a send fails (iOS 40b1461). */
+function hostRequestedCall(callId, address, video) {
   const account = deps.nextcloudAccount();
-  if (!account) return;
+  if (!account || session) return false;
   const call = newSession({ id: callId, address, isOutgoing: false, hostsThisCall: true, server: account.server, token: "", video, phase: "ringingIn" });
   ringIncoming(call);
-  const client = new NextcloudTalkClient({ server: account.server, auth: { kind: "basic", username: account.username, appPassword: account.appPassword } });
-  call.client = client;
-  try {
-    const token = await client.createPublicConversation(`KaChat call with ${deps.displayNameFor(address)}`);
-    if (session !== call) { await client.deleteConversation(token); return; }
-    call.token = token;
-    // The one message a non-caller ever sends: the requester cannot learn the room otherwise.
-    await deps.sendEnvelope(address, encodeInvite({ callId, server: account.server, token, video, viaRequest: true }));
-  } catch (error) {
-    deps.appendEngineLog?.(`[Call] Hosting a requested call failed: ${error?.message || error}`);
-    deps.showToast?.(`Could not host the call: ${error?.message || error}`);
-    await finish("failed");
-  }
+  (async () => {
+    // Talk not known to be there (never checked, or the last check failed): the check asks the
+    // server again before turning the request away (iOS 88aa3c1).
+    let canHost = false;
+    try { canHost = await deps.talkCallsAvailable(); } catch { canHost = false; }
+    if (session !== call) return;
+    if (!canHost) {
+      deps.appendEngineLog?.(`[Call] Requested call ${callId.slice(0, 8)} can't be hosted: Nextcloud Talk isn't available`);
+      call.failureDetail = `Calls from ${deps.displayNameFor(address)} need Nextcloud Talk here, and it isn't available right now.`;
+      await finish("failed");
+      return;
+    }
+    const client = new NextcloudTalkClient({ server: account.server, auth: { kind: "basic", username: account.username, appPassword: account.appPassword } });
+    call.client = client;
+    try {
+      const token = await client.createPublicConversation(`KaChat call with ${deps.displayNameFor(address)}`);
+      if (session !== call || call.phase === "ended") { await client.deleteConversation(token); return; }
+      // the room must be one the two sides can signal over (not the external HPB)
+      const settings = await client.signalingSettings(token);
+      if (String(settings.mode).toLowerCase() === "external") {
+        await client.deleteConversation(token);
+        throw new TalkError("external", "This Nextcloud uses an external signaling server, which KaChat calls do not support yet.");
+      }
+      call.token = token;
+      // The one message a non-caller ever sends: the requester cannot learn the room otherwise.
+      // (iOS also pushes it to the requester through the push service; Desktop has no push.)
+      const invite = encodeInvite({ callId, server: account.server, token, video, viaRequest: true });
+      let lastFailure = null;
+      for (let attempt = 0; attempt < 3 && session === call; attempt += 1) {
+        try {
+          await deps.sendEnvelope(address, invite);
+          lastFailure = null;
+          break;
+        } catch (error) {
+          lastFailure = error;
+          deps.appendEngineLog?.(`[Call] Invite for ${callId.slice(0, 8)} not sent (try ${attempt + 1}): ${error?.message || error}`);
+          await sleep(1500);
+        }
+      }
+      if (lastFailure && session === call && call.phase === "ringingIn") throw lastFailure;
+    } catch (error) {
+      deps.appendEngineLog?.(`[Call] Hosting a requested call failed: ${error?.message || error}`);
+      if (session !== call) return;
+      deps.showToast?.(`Could not host the call: ${error?.message || error}`);
+      await finish("failed");
+    }
+  })();
+  return true;
 }
 
 /** What a failed call says on its screen, in words: the microphone being blocked is the one a
@@ -440,6 +489,13 @@ export async function acceptIncoming() {
   stopTone();
   window.clearTimeout(call.timeout);
   setPhase(call, "connecting");
+  // The other side has 30 s to show up in the room; a call stuck on "Connecting" forever (they
+  // gave up ringing, or never got the room) ends instead, saying so (iOS 40b1461).
+  call.timeout = window.setTimeout(() => {
+    if (session !== call || call.connectedAt || call.phase !== "connecting") return;
+    call.failureDetail = `${deps.displayNameFor(call.address)} didn't join the call.`;
+    finish("failed");
+  }, JOIN_TIMEOUT_MS);
   // The room may still be on its way (a call we host opens it while ringing).
   let waited = 0;
   while (!call.token && waited < 150 && session === call) { await sleep(100); waited += 1; }
