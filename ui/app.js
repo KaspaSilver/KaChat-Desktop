@@ -12,7 +12,7 @@ import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
-import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, sompiPaidToAddress } from "../engine/payment-notice.js";
+import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
@@ -7578,13 +7578,19 @@ function sendSpendingPaymentNotice(conversationEntry, contact, { txId, amountSom
 /// A `payment_notice` in a 1:1 chat (iOS 927322b handlePaymentNotice) - theirs (they paid us From
 /// a spending address) or our own read back. It names a payment to the receiving side's chatting
 /// address; anything else (an old app's pool payment) is dropped. The payment becomes a payment
-/// bubble in this chat, with its memo; if it already showed elsewhere first (the self-chat,
-/// "From: <address>"), it moves here. Deduped by the payment's txId. Returns the bubble it filed,
-/// or null when it filed nothing.
+/// bubble in this chat, with its memo. Deduped by the payment's txId.
+///
+/// IOS-083: a notice never takes a message from another chat. It files a payment shown nowhere
+/// yet, or moves one received as a plain payment in the self-chat ("From: <address>"); a txid that
+/// is in any other chat (another contact's payment, a message we sent someone) is dropped. A
+/// notice we received is checked against the chain BEFORE anything is filed or moved: the exact
+/// amount to our chatting address, no payload, and no input that is ours or another contact's.
+/// Our own notice read back is ours and is filed at once; it is returned (null otherwise, and a
+/// received notice files - and notifies - when its check answers).
 function handlePaymentNotice(conversationEntry, message, notice) {
   const walletAddress = engine.address;
   const contact = contactForConversation(conversationEntry);
-  if (!walletAddress || !contact?.address) return null;
+  if (!walletAddress || !contact?.address || isSelfConversation(conversationEntry)) return null;
   const outgoing = message.direction === "outgoing";
   const paidAddress = outgoing ? contact.address : walletAddress;
   const valid = validPaymentNotice(notice, paidAddress);
@@ -7592,27 +7598,64 @@ function handlePaymentNotice(conversationEntry, message, notice) {
     if (notice) appendEngineLog(`Dropped payment_notice ${String(notice.txId || "").slice(0, 12)} - not a payment to the chatting address`);
     return null;
   }
-  const { txId, amountSompi, memo } = valid;
   const direction = outgoing ? "outgoing" : "incoming";
-  const here = (conversationEntry.messages || []).find((entry) => normalizePaymentTxId(entry.txid) === txId);
-  if (here && here.direction === direction) return null;
+  if (!paymentNoticeMayPlace(conversationEntry, valid.txId, direction)) return null;
+  if (outgoing) return filePaymentNotice(conversationEntry, contact, message, valid, { outgoing: true });
+  if (paymentNoticesChecking.has(valid.txId)) return null;
+  paymentNoticesChecking.add(valid.txId);
+  checkReceivedPaymentNotice(conversationEntry.id, contact, message, valid, walletAddress)
+    .finally(() => paymentNoticesChecking.delete(valid.txId));
+  return null;
+}
+
+/** Received notices whose chain check is running, by txid (one check per payment). */
+const paymentNoticesChecking = new Set();
+
+/// The guards every notice passes again right before it files (state may change while a check
+/// runs): not deleted from this chat, not a contract transaction, and a placement of "file" or
+/// "move" (`paymentNoticePlacement`).
+function paymentNoticeMayPlace(conversationEntry, txId, direction) {
   // Deleted from this chat: a replayed notice must not bring it back.
-  if ((conversationEntry.hiddenMessageKeys || []).some((key) => normalizePaymentTxId(key) === txId)) return null;
+  if ((conversationEntry.hiddenMessageKeys || []).some((key) => normalizePaymentTxId(key) === txId)) return false;
   // Never a payment: a .kachat name transaction or other contract tx (iOS 32fdaa4).
-  if (isSuppressedPaymentTxId(txId)) return null;
-  // Shown elsewhere first (the self-chat): it belongs to this chat.
-  takePaymentOutOfOtherChats(txId, conversationEntry);
+  if (isSuppressedPaymentTxId(txId)) return false;
+  const placement = paymentNoticePlacement(paymentNoticeRows(txId, conversationEntry), direction);
+  if (placement !== "drop") return true;
+  const here = (conversationEntry.messages || []).some((entry) => normalizePaymentTxId(entry.txid) === txId);
+  if (!here) appendEngineLog(`Dropped payment_notice ${txId.slice(0, 12)} - that transaction is already in another chat`);
+  return false;
+}
+
+/** Every stored row with this txid, as `paymentNoticePlacement` reads them. */
+function paymentNoticeRows(txId, conversationEntry) {
+  const rows = [];
+  for (const entry of state.conversations || []) {
+    const chat = entry === conversationEntry ? "this" : (isSelfConversation(entry) ? "self" : "other");
+    for (const row of entry.messages || []) {
+      if (normalizePaymentTxId(row.txid) === txId) rows.push({ chat, direction: row.direction, messageType: row.messageType });
+    }
+  }
+  return rows;
+}
+
+/// Files the payment a notice names as a bubble in its chat - moving it out of the self-chat when
+/// it showed there first - and returns that bubble. `unverified`: the chain didn't answer, so it is
+/// marked Needs attention (iOS .warning).
+function filePaymentNotice(conversationEntry, contact, message, valid, { outgoing = false, unverified = false } = {}) {
+  const walletAddress = engine.address;
+  const { txId, amountSompi, memo } = valid;
+  takePaymentOutOfSelfChat(txId);
   // The self-chat sweep must not file it again later.
   rememberStrangerPaymentTxid(txId);
   const amountKas = kasTextFromSompi(amountSompi);
   const bubble = createMessage({
     conversationId: conversationEntry.id,
     contactId: contact.id,
-    direction,
+    direction: outgoing ? "outgoing" : "incoming",
     text: paymentNoticeText({ amountKas, unit: KAS_UNIT, memo, outgoing }),
     sender: outgoing ? walletAddress : contact.address,
     receiver: valid.address,
-    status: MESSAGE_STATUSES.CONFIRMED,
+    status: unverified ? MESSAGE_STATUSES.BROADCAST : MESSAGE_STATUSES.CONFIRMED,
     transport: "kaspa-payment",
     createdAt: messageEventTime(message),
   });
@@ -7621,31 +7664,78 @@ function handlePaymentNotice(conversationEntry, message, notice) {
   schedulePersistState();
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   renderChats();
-  appendEngineLog(`Payment ${txId.slice(0, 12)} filed in its chat from a payment_notice`);
-  if (!outgoing) verifyPaymentNotice(conversationEntry.id, { txId, paidAddress: valid.address, claimedSompi: amountSompi, memo, walletAddress });
+  appendEngineLog(`Payment ${txId.slice(0, 12)} filed in its chat from a payment_notice${unverified ? " (not verified yet)" : ""}`);
   return bubble;
 }
 
-/// Removes the message with this payment's txid from every chat but `keepConversation` - hidden
-/// for good there (hiddenMessageKeys), so neither the stored history nor an archive import brings
-/// it back to the self-chat - and a same-txid row of the wrong direction from this chat.
-function takePaymentOutOfOtherChats(txId, keepConversation) {
+/// The chain check of a notice we received (IOS-083), then the filing: a transaction that doesn't
+/// pass is dropped and nothing is touched. With no chain answer it files only a payment shown
+/// nowhere yet, marked Needs attention; one already in the self-chat stays there.
+async function checkReceivedPaymentNotice(conversationId, contact, message, valid, walletAddress) {
+  const { txId, amountSompi } = valid;
+  let fullTx = null;
+  // The REST index may lag the notice by a moment: a few tries, a few seconds apart.
+  for (let attempt = 0; attempt < 5 && !fullTx; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 3000));
+    try {
+      const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+      const response = await fetch(`${base}/transactions/${txId}?inputs=true&outputs=true&resolve_previous_outpoints=light`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (response.ok) fullTx = await response.json();
+    } catch { /* unreachable: try again */ }
+  }
+  if (engine.address !== walletAddress) return;
+  const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
+  if (!conversationEntry || !paymentNoticeMayPlace(conversationEntry, txId, "incoming")) return;
+  let unverified = false;
+  if (fullTx) {
+    const verdict = checkPaymentNoticeTx(fullTx, { paidAddress: valid.address, claimedSompi: amountSompi, foreignAddresses: paymentNoticeForeignAddresses(contact.address) });
+    if (!verdict.ok) {
+      appendEngineLog(`Dropped payment_notice ${txId.slice(0, 12)} - the transaction ${verdict.reason}`);
+      return;
+    }
+  } else {
+    if (paymentNoticeRows(txId, conversationEntry).length) return;
+    unverified = true;
+  }
+  const bubble = filePaymentNotice(conversationEntry, contact, message, valid, { unverified });
+  if (isLiveMessageTime(bubble.createdAt)) {
+    if (activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
+    maybeNotifyIncoming(conversationEntry, contact, bubble);
+    renderChats();
+  }
+}
+
+/** The addresses a contact's payment can't come from: ours (the chatting address and every
+ *  revealed spending address) and every other contact's chatting address. */
+function paymentNoticeForeignAddresses(contactAddress) {
+  const own = String(contactAddress || "").toLowerCase();
+  const addresses = new Set([engine.address]);
+  try {
+    const maxIndex = Number(getSpendingState().maxIndex);
+    for (let index = 0; Number.isInteger(maxIndex) && index <= maxIndex; index += 1) addresses.add(deriveSpendingAddressAt(index));
+  } catch { /* no spending chain yet */ }
+  for (const entry of state.contacts || []) addresses.add(entry?.address);
+  return [...addresses].filter((address) => address && String(address).toLowerCase() !== own);
+}
+
+/// Removes this payment's row from the self-chat - hidden for good there (hiddenMessageKeys), so
+/// neither the stored history nor an archive import brings it back. Only the self-chat: a notice
+/// never takes a message from any other chat (IOS-083).
+function takePaymentOutOfSelfChat(txId) {
   for (const conversationEntry of state.conversations || []) {
+    if (!isSelfConversation(conversationEntry)) continue;
     const gone = (conversationEntry.messages || []).filter((entry) => normalizePaymentTxId(entry.txid) === txId);
     if (!gone.length) continue;
     const goneIds = new Set(gone.map((entry) => entry.id));
-    // In this chat only the row goes: the txid stays visible here for the new bubble.
-    const keys = conversationEntry === keepConversation
-      ? gone.map((entry) => entry.id)
-      : gone.flatMap((entry) => [entry.id, entry.txid].filter(Boolean));
+    const keys = gone.flatMap((entry) => [entry.id, entry.txid].filter(Boolean));
     conversationEntry.hiddenMessageKeys = [...new Set([...(conversationEntry.hiddenMessageKeys || []), ...keys.map(String)])];
     conversationEntry.messages = conversationEntry.messages.filter((entry) => !goneIds.has(entry.id));
     const goneIncoming = gone.filter((entry) => entry.direction === "incoming").length;
-    if (goneIncoming && conversationEntry !== keepConversation) conversationEntry.unreadCount = Math.max(0, Number(conversationEntry.unreadCount || 0) - goneIncoming);
+    if (goneIncoming) conversationEntry.unreadCount = Math.max(0, Number(conversationEntry.unreadCount || 0) - goneIncoming);
     const last = lastMessageFor(conversationEntry);
     conversationEntry.lastActivityAt = last?.createdAt || conversationEntry.createdAt;
     conversationEntry.updatedAt = Date.now();
-    if (activeConversationId === conversationEntry.id && conversationEntry !== keepConversation) renderMessages(conversationEntry);
+    if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   }
 }
 
@@ -7662,39 +7752,6 @@ function paymentTxidShownInAnyChat(txid) {
   const id = normalizePaymentTxId(txid);
   if (!id) return false;
   return (state.conversations || []).some((conversationEntry) => (conversationEntry.messages || []).some((entry) => normalizePaymentTxId(entry.txid) === id));
-}
-
-/// The chain is the judge of a received notice (iOS 927322b verifyPaymentNotice): the amount shown
-/// is what the transaction really paid our chatting address, and a transaction that paid it
-/// nothing is marked with a warning (status BROADCAST, iOS deliveryStatus .warning, "Needs
-/// attention"). Silent when the transaction can't be fetched.
-async function verifyPaymentNotice(conversationId, { txId, paidAddress, claimedSompi, memo, walletAddress }) {
-  let fullTx = null;
-  // The REST index may lag the notice by a moment: a few tries, a couple of seconds apart.
-  for (let attempt = 0; attempt < 3 && !fullTx; attempt += 1) {
-    if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 2000));
-    try {
-      const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
-      const response = await fetch(`${base}/transactions/${txId}?inputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store" });
-      if (response.ok) fullTx = await response.json();
-    } catch { /* unreachable: try again, then stay silent */ }
-  }
-  if (!fullTx || engine.address !== walletAddress) return;
-  const paid = sompiPaidToAddress(fullTx, paidAddress);
-  if (paid === claimedSompi) return;
-  if (paid === 0n) appendEngineLog(`payment_notice ${txId.slice(0, 12)} FAILED verification - pays nothing to the chatting address`);
-  const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
-  const bubble = conversationEntry?.messages?.find((entry) => normalizePaymentTxId(entry.txid) === txId && entry.direction === "incoming");
-  if (!bubble) return;
-  const amountKas = kasTextFromSompi(paid === 0n ? claimedSompi : paid);
-  applyMessagePatch(bubble, {
-    status: paid === 0n ? MESSAGE_STATUSES.BROADCAST : MESSAGE_STATUSES.CONFIRMED,
-    text: paymentNoticeText({ amountKas, unit: KAS_UNIT, memo }),
-    paymentAmountKas: amountKas,
-  });
-  persistState();
-  if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
-  renderChats();
 }
 
 /** An incoming payment the chain says paid nothing of what its notice claimed (iOS .warning). */
@@ -10024,7 +10081,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 164;
+const APP_BUILD = 165;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -21165,10 +21222,10 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
     return null;
   }
   // Payment-pool envelopes are never bubbles (iOS 927322b). A payment_notice may file the
-  // payment it names in this chat (a chat payment sent From a spending address) - that payment
-  // bubble is what is returned, so a new incoming one notifies ("Received payment") and counts as
-  // unread; addr_pool and addr_pool_request are retired and dropped (iOS 6333dd3). Unknown
-  // {type:...} values fall through to the normal pipeline per the wire contract.
+  // payment it names in this chat (a chat payment sent From a spending address): our own read
+  // back returns its bubble; a received one files - and notifies, counting as unread - once the
+  // chain check answers (IOS-083). addr_pool and addr_pool_request are retired and dropped (iOS
+  // 6333dd3). Unknown {type:...} values fall through to the normal pipeline per the wire contract.
   const poolEnvelope = parsePaymentPoolEnvelope(message.text);
   if (poolEnvelope) return poolEnvelope.kind === "notice" ? handlePaymentNotice(conversationEntry, message, poolEnvelope.notice) : null;
   // Calls ride the chat: an invite rings, a request asks this device to host, an end hangs up.

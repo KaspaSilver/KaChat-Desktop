@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   parsePaymentPoolEnvelope, parsePaymentNotice, validPaymentNotice, encodePaymentNotice,
   paymentNoticeText, sompiPaidToAddress, clampPaymentNoticeMemo, PAYMENT_NOTICE_MAX_MEMO_LENGTH,
+  paymentNoticePlacement, checkPaymentNoticeTx,
 } from "../engine/payment-notice.js";
 
 let pass = 0;
@@ -95,6 +96,40 @@ test("chain check: sums only the outputs paying the address", () => {
   assert.equal(sompiPaidToAddress(tx, ME), 150n);
   assert.equal(sompiPaidToAddress(tx, "kaspa:nobody"), 0n);
   assert.equal(sompiPaidToAddress({}, ME), 0n);
+});
+
+test("IOS-083: a notice only files a new payment or moves a received plain payment out of the self-chat", () => {
+  const selfPay = { chat: "self", direction: "incoming", messageType: "payment" };
+  assert.equal(paymentNoticePlacement([], "incoming"), "file");
+  assert.equal(paymentNoticePlacement(undefined, "outgoing"), "file");
+  assert.equal(paymentNoticePlacement([selfPay], "incoming"), "move");
+  // our own notice read back never takes a row from the self-chat
+  assert.equal(paymentNoticePlacement([selfPay], "outgoing"), "drop");
+  // another contact's payment, or a message we sent someone else, is never taken
+  assert.equal(paymentNoticePlacement([{ chat: "other", direction: "incoming", messageType: "payment" }], "incoming"), "drop");
+  assert.equal(paymentNoticePlacement([{ chat: "other", direction: "outgoing", messageType: "text" }], "incoming"), "drop");
+  assert.equal(paymentNoticePlacement([selfPay, { chat: "other", direction: "incoming", messageType: "payment" }], "incoming"), "drop");
+  // already here (either direction): nothing to do, never refiled the other way round
+  assert.equal(paymentNoticePlacement([{ chat: "this", direction: "incoming", messageType: "payment" }], "incoming"), "drop");
+  assert.equal(paymentNoticePlacement([{ chat: "this", direction: "outgoing", messageType: "text" }], "incoming"), "drop");
+  // only received plain payments move out of the self-chat
+  assert.equal(paymentNoticePlacement([{ chat: "self", direction: "outgoing", messageType: "payment" }], "incoming"), "drop");
+  assert.equal(paymentNoticePlacement([{ chat: "self", direction: "incoming", messageType: "text" }], "incoming"), "drop");
+});
+
+test("IOS-083: the chain check wants the exact amount, no payload and no input of ours or another contact's", () => {
+  const OTHER = "kaspa:qqothercontact000000000000000000000000000000000000000000000";
+  const SPEND = "kaspa:qqspendingaddress00000000000000000000000000000000000000000";
+  const tx = (extra = {}) => ({ outputs: [{ script_public_key_address: ME, amount: 500 }, { script_public_key_address: SPEND, amount: 9 }], inputs: [{ previous_outpoint_address: SPEND }], ...extra });
+  const args = { paidAddress: ME, claimedSompi: 500n, foreignAddresses: [ME, OTHER] };
+  assert.deepEqual(checkPaymentNoticeTx(tx(), args), { ok: true });
+  assert.equal(checkPaymentNoticeTx(tx(), { ...args, claimedSompi: 400n }).ok, false);
+  assert.equal(checkPaymentNoticeTx({ outputs: [], inputs: [] }, args).ok, false);
+  assert.equal(checkPaymentNoticeTx(tx({ payload: "6b636861743a313a" }), args).ok, false);
+  assert.equal(checkPaymentNoticeTx(tx({ payload: "" }), args).ok, true);
+  assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previous_outpoint_address: OTHER.toUpperCase() }] }), args).ok, false);
+  assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previousOutpointAddress: ME }] }), args).ok, false);
+  assert.equal(checkPaymentNoticeTx(tx(), { ...args, claimedSompi: "junk" }).ok, false);
 });
 
 for (const [name, fn] of tests) {

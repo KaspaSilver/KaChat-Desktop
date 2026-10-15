@@ -123,3 +123,44 @@ export function sompiPaidToAddress(tx, address) {
   }
   return total;
 }
+
+/**
+ * Where a notice may put the payment it names (IOS-083), given every stored row with that txid -
+ * `{ chat: "this" | "self" | "other", direction, messageType }` - and the notice's direction:
+ *   "file" - shown nowhere yet: a new bubble in this chat;
+ *   "move" - shown only in the self-chat, as received plain payments, and the notice is one we
+ *            received: it moves into this chat;
+ *   "drop" - anything else. A row in this chat is already placed (never refiled the other way
+ *            round), and a row in any other chat - another contact's payment, or a message we sent
+ *            someone - is never taken by a notice.
+ */
+export function paymentNoticePlacement(rows, direction) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return "file";
+  if (list.some((row) => row?.chat !== "self")) return "drop";
+  const plainReceived = list.every((row) => row.direction === "incoming" && row.messageType === "payment");
+  return direction === "incoming" && plainReceived ? "move" : "drop";
+}
+
+/**
+ * The chain's verdict on a notice we received (IOS-083), from the REST transaction read with its
+ * inputs resolved (`resolve_previous_outpoints=light`): `{ ok: true }` only when it pays
+ * `paidAddress` exactly `claimedSompi`, carries no payload (a chat payment From a spending address
+ * is a plain transfer) and none of its inputs is one of `foreignAddresses` (ours, or another
+ * contact's: that payment is not this contact's to claim). Else `{ ok: false, reason }`.
+ */
+export function checkPaymentNoticeTx(tx, { paidAddress, claimedSompi, foreignAddresses = [] } = {}) {
+  let claimed;
+  try { claimed = BigInt(claimedSompi); } catch { return { ok: false, reason: "has no amount" }; }
+  const paid = sompiPaidToAddress(tx, paidAddress);
+  if (paid === 0n) return { ok: false, reason: "pays nothing to the chatting address" };
+  if (paid !== claimed) return { ok: false, reason: "pays a different amount than it says" };
+  const payload = String(tx?.payload ?? "").trim();
+  if (payload && !/^0*$/.test(payload)) return { ok: false, reason: "carries a payload, so it is not a plain transfer" };
+  const foreign = new Set((foreignAddresses || []).map((address) => String(address || "").trim().toLowerCase()).filter(Boolean));
+  for (const input of Array.isArray(tx?.inputs) ? tx.inputs : []) {
+    const from = String(input?.previous_outpoint_address || input?.previousOutpointAddress || "").trim().toLowerCase();
+    if (from && foreign.has(from)) return { ok: false, reason: "was paid from an address that is yours or another contact's" };
+  }
+  return { ok: true };
+}

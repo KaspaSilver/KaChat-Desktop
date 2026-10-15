@@ -98,7 +98,8 @@ export function groupedAmountText(plain, { commaDecimal = false } = {}) {
 
 /** The edited field back to a plain number, "." the decimal point (iOS KaspaAmountEntry.ungrouped).
  *  - Comma-decimal device: the thin spaces shown are ours and go; a "," is the decimal point, and
- *    a pasted "1.234,5" (dots as grouping, a comma decimal) is 1234.5.
+ *    a pasted "1.234,5" (dots as grouping, a comma decimal) is 1234.5 - but a "," typed into an
+ *    amount that already shows its point ("0.5" -> "0.5,") is a second separator and is ignored.
  *  - Otherwise: the commas shown are ours and go; a comma TYPED as the decimal point stays one:
  *    typed at the end, a single comma not three digits from the end in a number that had no
  *    grouping ("0,5" is 0.5, never 5), or after a lone leading zero ("0,001" is 0.001 - no
@@ -108,8 +109,12 @@ export function ungroupedAmountText(edited, previous, { commaDecimal = false } =
   const before = String(previous ?? "");
   if (commaDecimal) {
     text = text.replace(/[\u202F\u00A0 ]/g, "");
+    const shownBefore = before.replace(/[\u202F\u00A0 ]/g, "");
     if (text.includes(",")) {
-      // a comma is the decimal point; dots beside it can only be grouping
+      // one "," typed into an amount that already shows its decimal point is a second separator:
+      // ignored, so "0.5" stays 0.5 and never becomes 5 (IOS-082)
+      if (shownBefore.includes(".") && text.length === shownBefore.length + 1) return text.replaceAll(",", "");
+      // pasted or typed fresh: a comma is the decimal point; dots beside it can only be grouping
       text = text.replaceAll(".", "");
       const first = text.indexOf(",");
       text = `${text.slice(0, first)}.${text.slice(first + 1).replaceAll(",", "")}`;
