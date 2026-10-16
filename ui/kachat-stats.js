@@ -2,6 +2,13 @@
 // transactions KaChat has put on Kaspa, split by kind: direct messages, payments, group and
 // public chat messages, KaPosts, chess moves and so on.
 //
+// Two tabs (iOS 4924787): Transactions, a card per kind - its icon, name and what it counts, then
+// its 24 Hours / 7 Days / All Time figures side by side (a dash where the indexer keeps all-time
+// only), the five .kachat kinds being the one .kachat Domains card - and Fees, what .kachat
+// registrations and renewals paid. The top number is every KaChat transaction, all time. Every
+// number has commas whatever the language, and from a million on reads 1M, 1.01M, 2.5B, rounded
+// down (iOS b6f55a5, 1df1bcb).
+//
 // The numbers are the indexers' (`GET /stats`, STATS_INDEXER.md), never this device's own
 // traffic. Every configured KaChat indexer is asked (deduplicated - by default they are all the
 // same server, so one request); each category comes from the first indexer, in settings order,
@@ -11,6 +18,8 @@
 // the header's refresh button stands in for iOS's pull to refresh.
 
 import "./kachat-stats.css";
+import { statsCountText, statsKasText } from "../engine/amounts.js";
+import { KAS_UNIT } from "../engine/network.js";
 
 const FRESH_FOR_MS = 60_000;
 const TIMEOUT_MS = 15_000;
@@ -65,17 +74,27 @@ const CATEGORIES = [
   { key: "selfStash", title: "Saved Records", detail: "Chat keys and contact notes saved to your own account", icon: "tray", color: "gray" },
 ];
 const CATEGORY_KEYS = new Set(CATEGORIES.map((c) => c.key));
+/** One of the .kachat registry kinds - shown together as the .kachat Domains card (iOS isKachat). */
+const isKachat = (category) => category.key.startsWith("kachat");
+/** The kinds with a card of their own. .kachat's five are one card, .kachat Domains. */
+const CHAT_CATEGORIES = CATEGORIES.filter((c) => !isKachat(c));
 
+/** A card's three figures, side by side, in this order. */
 const RANGES = [
-  { id: "day", title: "24 Hours", caption: "KaChat transactions in the last 24 hours", field: "last24h" },
-  { id: "week", title: "7 Days", caption: "KaChat transactions in the last 7 days", field: "last7d" },
-  { id: "all", title: "All Time", caption: "KaChat transactions on Kaspa, all time", field: "total" },
+  { id: "day", title: "24 Hours", field: "last24h" },
+  { id: "week", title: "7 Days", field: "last7d" },
+  { id: "all", title: "All Time", field: "total" },
+];
+
+const PAGES = [
+  { id: "transactions", title: "Transactions" },
+  { id: "fees", title: "Fees" },
 ];
 
 let deps = null;
 let screenEl = null;
 let active = false;
-let range = "all";
+let page = "transactions";
 
 // The model (iOS KaChatStatsModel): kept for the session so leaving and coming back doesn't refetch.
 /** { counts: Map<key, {total, last24h, last7d}>, updatedAt: ms|null, indexedSince: ms|null, fetchedAt: ms } */
@@ -84,14 +103,16 @@ let snapshot = null;
 let failure = null;
 let isLoading = false;
 let sourceKey = "";
-/** .kachat registry transactions over 24 hours, 7 days and all time (iOS f5d34f4) - from the
- *  registry itself (its indexer, or the chain), so it shows wherever names are live. `{ last24h,
- *  last7d, total }` (BigInt), or null where names aren't live. */
+/** .kachat registry transactions and what they paid (sompi), over 24 hours, 7 days and all time
+ *  (iOS f5d34f4, 4924787) - from the registry itself (its indexer, or the chain), so it shows
+ *  wherever names are live. `{ last24h, last7d, total }` (BigInt), or null where names aren't live
+ *  (fees: or where they can't be worked out). */
 let kachatTransactions = null;
+let kachatFees = null;
+/** The first .kachat read has finished: the Fees tab says it has none instead of a placeholder. */
+let kachatLoaded = false;
 
 const esc = (v) => deps.escapeHtml(String(v ?? ""));
-const numberFormat = new Intl.NumberFormat();
-const percentFormat = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "long" });
 
@@ -201,40 +222,52 @@ async function refresh(force) {
   render();
 }
 
-/** The .kachat Domains card's numbers (iOS f5d34f4 loadKachatTransactions): null where names
- *  aren't live; a failed read keeps the last ones. */
-async function loadKachatTransactions() {
-  let totals;
-  try { totals = await deps.kachatTotals?.(); } catch { return; }
-  kachatTransactions = totals?.transactions ?? null;
+/** The .kachat Domains card's numbers and fees (iOS 4924787 loadKachat): null where names aren't
+ *  live; a failed read keeps the last ones. */
+async function loadKachat() {
+  try {
+    const totals = await deps.kachatTotals?.();
+    kachatTransactions = totals?.transactions ?? null;
+    kachatFees = totals?.fees ?? null;
+  } catch { /* keeps the last */ }
+  kachatLoaded = true;
   render();
 }
 
 /** Both: the indexers' stats and the .kachat card's (iOS .task / .refreshable). */
 function refreshAll(force) {
-  return Promise.all([refresh(force).catch(() => {}), loadKachatTransactions()]);
+  return Promise.all([refresh(force).catch(() => {}), loadKachat()]);
 }
 
 // ---------------------------------------------------------------------------------------------
 // Numbers
 // ---------------------------------------------------------------------------------------------
 
-const currentRange = () => RANGES.find((r) => r.id === range) || RANGES[2];
-
-/** The categories the indexers report, in display order; `value` null when reported without
- *  this range. */
-function reported() {
-  if (!snapshot) return [];
-  const field = currentRange().field;
-  return CATEGORIES.filter((c) => snapshot.counts.has(c.key)).map((category) => ({
-    category,
-    value: snapshot.counts.get(category.key)[field],
-  }));
+/** The .kachat Domains counts (iOS 4924787 kachatTotals): the registry's own, else the indexer's
+ *  five .kachat kinds added up. `{ last24h, last7d, total }` (BigInt) or null. */
+function kachatTotals() {
+  if (kachatTransactions) return kachatTransactions;
+  if (!snapshot) return null;
+  const counts = CATEGORIES.filter(isKachat).map((c) => snapshot.counts.get(c.key)).filter(Boolean);
+  if (!counts.length) return null;
+  const sum = (field) => counts.reduce((acc, c) => acc + BigInt(Math.max(c[field] ?? 0, 0)), 0n);
+  return { last24h: sum("last24h"), last7d: sum("last7d"), total: sum("total") };
 }
 
-function total(rows) {
-  const values = rows.map((r) => r.value).filter((v) => v !== null);
-  return values.length ? values.reduce((a, b) => a + b, 0) : null;
+/** Every KaChat transaction, all time: each kind's all-time count plus .kachat's (BigInt), or
+ *  null when nothing is known yet. */
+function allTimeTotal() {
+  let sum = 0n;
+  let any = false;
+  if (snapshot) {
+    for (const category of CHAT_CATEGORIES) {
+      const value = snapshot.counts.get(category.key)?.total;
+      if (value !== null && value !== undefined) { sum += BigInt(value); any = true; }
+    }
+  }
+  const kachat = kachatTotals();
+  if (kachat) { sum += kachat.total ?? 0n; any = true; }
+  return any ? sum : null;
 }
 
 function relative(ms) {
@@ -252,85 +285,61 @@ function relative(ms) {
 // Rendering
 // ---------------------------------------------------------------------------------------------
 
-const iconCircle = (category) =>
-  `<span class="kstats-row-icon" style="background: var(--kstats-${category.color})">${ICONS[category.icon]}</span>`;
-
-function categoryRowHtml(category, valueHtml) {
-  return `
-    <div class="kstats-row">
-      ${iconCircle(category)}
-      <span class="kstats-row-main">
-        <strong>${esc(category.title)}</strong>
-        <small>${esc(category.detail)}</small>
-      </span>
-      <span class="kstats-row-value">${valueHtml}</span>
-    </div>`;
-}
-
-function heroHtml(rows) {
-  const r = currentRange();
-  const sum = snapshot ? total(rows) : null;
+function heroHtml() {
+  const sum = allTimeTotal();
   let number;
-  if (snapshot && sum !== null) number = `<span>${esc(numberFormat.format(sum))}</span>`;
-  else if (snapshot) number = `<span>--</span>`;
+  if (sum !== null) number = `<span>${esc(statsCountText(sum))}</span>`;
+  else if (snapshot || failure) number = `<span>--</span>`;
   else number = `<span class="kstats-redacted" aria-hidden="true">000,000</span>`;
-  // A kind counted all time only has no number for 24 Hours / 7 Days, so the total leaves it
-  // out - say so rather than let the total look complete.
-  const allTimeNote = r.id !== "all" && snapshot && rows.some((row) => row.value === null)
-    ? `<p class="kstats-hero-note">Kinds marked "All-time only" aren't in this total yet.</p>`
-    : "";
   return `
     <div class="kstats-hero">
       <span class="kstats-hero-icon">${ICONS.chart}</span>
       <div class="kstats-hero-total">${number}</div>
-      <p class="kstats-hero-caption">${esc(r.caption)}</p>
-      ${allTimeNote}
+      <p class="kstats-hero-caption">KaChat transactions on Kaspa, all time</p>
     </div>`;
 }
 
-function pickerHtml() {
+/** Transactions | Fees on the app's underline tab bar (iOS UnderlineTabBar). */
+function tabsHtml() {
   return `
-    <div class="settings-segmented full kstats-picker" role="tablist" aria-label="Range">
-      ${RANGES.map((r) => `<button type="button" role="tab" aria-selected="${r.id === range}" class="settings-segmented-option${r.id === range ? " active" : ""}" data-kstats-range="${r.id}">${esc(r.title)}</button>`).join("")}
-    </div>`;
+    <nav class="domains-tabs kstats-tabs" role="tablist" aria-label="KaChat Stats">
+      ${PAGES.map((p) => `<button type="button" role="tab" aria-selected="${p.id === page}" class="domains-tab${p.id === page ? " active" : ""}" data-kstats-page="${p.id}">${esc(p.title)}</button>`).join("")}
+    </nav>`;
 }
 
-/** Each category's share of the range's total as one segmented bar. */
-function shareBarHtml(rows) {
-  const parts = rows.filter((r) => (r.value ?? 0) > 0);
-  const sum = parts.reduce((a, r) => a + r.value, 0);
-  const inner = sum > 0
-    ? parts.map((p) => `<span class="kstats-share-part" style="flex-grow: ${p.value / sum}; background: var(--kstats-${p.category.color})"></span>`).join("")
-    : `<span class="kstats-share-part kstats-share-empty"></span>`;
-  return `<div class="kstats-share" aria-hidden="true">${inner}</div>`;
-}
-
-function categoryListHtml(rows) {
-  const sum = total(rows) ?? 0;
-  const allRange = range === "all";
+/** One kind (iOS 4924787 statCard): its icon, name and what it counts, then its 24 Hours, 7 Days
+ *  and All Time figures side by side. A figure the indexer doesn't keep (null) shows a dash;
+ *  `redacted` shows the figures' shape only. `values` is already formatted text. */
+function statCardHtml({ icon, color, title, detail }, values, redacted = false) {
+  const columns = RANGES.map((r, index) => {
+    const value = values[index] ?? null;
+    let figure;
+    if (redacted) figure = `<strong class="kstats-redacted" aria-hidden="true">0,000</strong>`;
+    else if (value !== null) figure = `<strong>${esc(value)}</strong>`;
+    else figure = `<strong class="kstats-dash">--</strong>`;
+    return `
+        <div class="kstats-column">
+          ${figure}
+          <small>${esc(r.title)}</small>
+        </div>`;
+  }).join("");
   return `
-    <div class="profile-card kstats-card">
-      ${rows.map(({ category, value }) => {
-        let valueHtml;
-        if (value !== null) {
-          valueHtml = `<strong>${esc(numberFormat.format(value))}</strong>`
-            + (sum > 0 ? `<small>${esc(percentFormat.format(value / sum))}</small>` : "");
-        } else {
-          // Reported, but without this range - the indexer keeps an all-time counter only.
-          valueHtml = `<strong class="kstats-dash">--</strong>` + (allRange ? "" : `<small>All-time only</small>`);
-        }
-        return categoryRowHtml(category, valueHtml);
-      }).join("")}
+    <div class="profile-card kstats-card"${redacted ? ` aria-busy="${isLoading || !kachatLoaded}"` : ""}>
+      <div class="kstats-row">
+        <span class="kstats-row-icon" style="background: var(--kstats-${color})">${ICONS[icon]}</span>
+        <span class="kstats-row-main">
+          <strong>${esc(title)}</strong>
+          <small>${esc(detail)}</small>
+        </span>
+      </div>
+      <div class="kstats-columns">${columns}
+      </div>
     </div>`;
 }
 
-/** Real category names with the numbers redacted - while loading, or when no stats yet. */
-function placeholderListHtml() {
-  return `
-    <div class="profile-card kstats-card" aria-busy="${isLoading}">
-      ${CATEGORIES.map((category) => categoryRowHtml(category, `<strong class="kstats-redacted" aria-hidden="true">00,000</strong>`)).join("")}
-    </div>`;
-}
+const KACHAT_CARD = { icon: "at", color: "mint", title: ".kachat Domains" };
+const countText = (value) => (value === null || value === undefined ? null : statsCountText(value));
+const kasText = (sompi) => statsKasText(sompi, KAS_UNIT);
 
 function unavailableHtml() {
   const body = failure === "noIndexer"
@@ -346,26 +355,38 @@ function unavailableHtml() {
     </div>`;
 }
 
-/** The .kachat Domains card: how many registry transactions there were in each range, the
- *  selected range's title highlighted (iOS f5d34f4 kachatCard). */
-function kachatCardHtml(totals) {
-  const columns = RANGES.map((r) => `
-        <div class="kstats-kachat-column">
-          <strong>${esc(numberFormat.format(totals[r.field] ?? 0n))}</strong>
-          <small${r.id === range ? ' class="is-selected"' : ""}>${esc(r.title)}</small>
-        </div>`).join("");
-  return `
-    <div class="profile-card kstats-card kstats-kachat">
-      <div class="kstats-row">
-        <span class="kstats-row-icon" style="background: var(--kstats-mint)">${ICONS.at}</span>
-        <span class="kstats-row-main">
-          <strong>.kachat Domains</strong>
-          <small>Transactions on the .kachat registry</small>
-        </span>
-      </div>
-      <div class="kstats-kachat-columns">${columns}
-      </div>
+/** Every reported kind's card, else the unavailable card and every kind redacted; then .kachat
+ *  Domains wherever its counts are known (iOS 4924787 transactionsPage). */
+function transactionsPageHtml() {
+  let html;
+  if (snapshot) {
+    html = CHAT_CATEGORIES.filter((c) => snapshot.counts.has(c.key)).map((category) => {
+      const counts = snapshot.counts.get(category.key);
+      return statCardHtml(category, RANGES.map((r) => countText(counts[r.field])));
+    }).join("");
+  } else {
+    html = (failure && !isLoading ? unavailableHtml() : "")
+      + CHAT_CATEGORIES.map((category) => statCardHtml(category, [], true)).join("");
+  }
+  const kachat = kachatTotals();
+  if (kachat) {
+    html += statCardHtml({ ...KACHAT_CARD, detail: "Transactions on the .kachat registry" }, RANGES.map((r) => countText(kachat[r.field] ?? 0n)));
+  }
+  return html;
+}
+
+/** .kachat Domains fees, or a note that the indexer has none (iOS 4924787 feesPage). */
+function feesPageHtml() {
+  const card = { ...KACHAT_CARD, detail: "Paid for registrations and renewals" };
+  if (kachatFees) return statCardHtml(card, RANGES.map((r) => kasText(kachatFees[r.field] ?? 0n)));
+  if (kachatLoaded) {
+    return `
+    <div class="profile-card kstats-unavailable">
+      <strong>Fees aren't available yet</strong>
+      <p>Your indexer doesn't report them yet. They'll show here once it does.</p>
     </div>`;
+  }
+  return statCardHtml(card, [], true);
 }
 
 function footerHtml() {
@@ -379,14 +400,7 @@ function footerHtml() {
 
 function render() {
   if (!screenEl || !active) return;
-  const rows = reported();
   const scrollTop = screenEl.scrollTop;
-  let content;
-  if (snapshot) {
-    content = shareBarHtml(rows) + categoryListHtml(rows);
-  } else {
-    content = (failure && !isLoading ? unavailableHtml() : "") + placeholderListHtml();
-  }
   screenEl.innerHTML = `
     <div class="kaposts-header kstats-header">
       <h1 class="kaposts-title">KaChat Stats</h1>
@@ -396,10 +410,9 @@ function render() {
       </div>
     </div>
     <div class="kstats-body">
-      ${heroHtml(rows)}
-      ${pickerHtml()}
-      ${content}
-      ${kachatTransactions ? kachatCardHtml(kachatTransactions) : ""}
+      ${heroHtml()}
+      ${tabsHtml()}
+      ${page === "fees" ? feesPageHtml() : transactionsPageHtml()}
       ${footerHtml()}
     </div>`;
   screenEl.scrollTop = scrollTop;
@@ -426,10 +439,10 @@ function infoSheetHtml() {
 function onClick(event) {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
-  const rangeButton = target.closest("[data-kstats-range]");
-  if (rangeButton) {
-    const next = rangeButton.getAttribute("data-kstats-range");
-    if (next && next !== range && RANGES.some((r) => r.id === next)) { range = next; render(); }
+  const pageButton = target.closest("[data-kstats-page]");
+  if (pageButton) {
+    const next = pageButton.getAttribute("data-kstats-page");
+    if (next && next !== page && PAGES.some((p) => p.id === next)) { page = next; render(); }
     return;
   }
   if (target.closest("[data-kstats-refresh]") || target.closest("[data-kstats-retry]")) {

@@ -217,3 +217,53 @@ export function fiatTextFloorFromSompi(sompi, price, decimals = 2) {
   const scale = 10 ** decimals;
   return (Math.floor(value * p * scale) / scale).toFixed(decimals);
 }
+
+// KaChat Stats' numbers (iOS b6f55a5 + 1df1bcb, KaChatStatsView.grouped / kas): commas whatever
+// the language, at most two decimals, and from a million on short - "1M", "1.01M", "2.5B" -
+// rounded DOWN, so a figure is never shown before it is reached. Exact (BigInt) math: iOS scales a
+// Double, which can land a hundredth low (1,150,000 -> "1.14M"); this never does.
+
+const statCommas = (digits) => digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+/** A whole part (BigInt) and hundredths (0-99) as "1,234.5": trailing zeros dropped. */
+function statDecimalText(whole, hundredths) {
+  const fraction = hundredths ? `.${String(hundredths).padStart(2, "0").replace(/0$/, "")}` : "";
+  return statCommas(whole.toString()) + fraction;
+}
+
+/** `num / den` as "1M" / "1.01M" / "2.5B" / "3T", rounded down; null below a million. */
+function compactStatText(num, den) {
+  for (const [size, suffix] of [[10n ** 12n, "T"], [10n ** 9n, "B"], [10n ** 6n, "M"]]) {
+    if (num < size * den) continue;
+    const scaled = (num * 100n) / (size * den);
+    return statDecimalText(scaled / 100n, Number(scaled % 100n)) + suffix;
+  }
+  return null;
+}
+
+const statWhole = (value) => {
+  try {
+    const n = BigInt(value ?? 0);
+    return n > 0n ? n : 0n;
+  } catch { return 0n; }
+};
+
+/** A count on KaChat Stats: "774,086"; from a million on "1M", "1.01M", "2.5B". */
+export function statsCountText(value) {
+  const n = statWhole(value);
+  return compactStatText(n, 1n) ?? statCommas(n.toString());
+}
+
+/** Sompi as KAS on KaChat Stats: "21,035.5 KAS" (commas, at most two decimals, rounded half to
+ *  even as iOS's NumberFormatter does); from a million KAS on short like the counts, "1.5M KAS". */
+export function statsKasText(sompi, unit = "KAS") {
+  const s = statWhole(sompi);
+  let text = compactStatText(s, SOMPI_PER_KAS);
+  if (text == null) {
+    let hundredths = s / 1_000_000n;
+    const rest = s % 1_000_000n;
+    if (rest > 500_000n || (rest === 500_000n && hundredths % 2n === 1n)) hundredths += 1n;
+    text = statDecimalText(hundredths / 100n, Number(hundredths % 100n));
+  }
+  return `${text} ${unit}`;
+}

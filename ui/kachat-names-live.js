@@ -551,9 +551,6 @@ const hub = {
   mine: [],
   myOffers: [],
   activity: [],
-  /** What .kachat transactions paid (sompi) over 24 hours, 7 days and all time - `{ last24h,
-   *  last7d, total }` (BigInt); null until known, or where it can't be worked out (iOS f5d34f4). */
-  fees: null,
   loadError: null,
   loaded: false,
   refreshing: false,
@@ -705,7 +702,6 @@ async function hubReloadOnce() {
       hub.myOffers = [];
     }
     hub.activity = await registry.activity();
-    try { hub.fees = (await registry.activityTotals())?.fees ?? null; } catch { /* keeps the last */ }
     hub.loadError = null;
   } catch (error) {
     hub.loadError = errorText(error);
@@ -1259,7 +1255,8 @@ async function claimExpired(info, owner = "market") {
   if (gap) openClaimSheet({ name: info.name, gap, owner });
 }
 
-/** KachatLiveActivityPage: every registry event (iOS 0765ce0). */
+/** KachatLiveActivityPage: every registry event (iOS 0765ce0). Its Fees box is gone: fees live
+ *  on KaChat Stats' Fees tab (iOS b6f55a5). */
 function activityPageHtml() {
   const events = hub.activity.slice(0, 100);
   const list = events.length
@@ -1268,24 +1265,9 @@ function activityPageHtml() {
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
-      ${hub.fees ? feesCardHtml(hub.fees) : ""}
       ${kit.sectionHeader("Recent activity", "Every claim, renewal, listing, sale, offer, transfer and reclaim across the registry.")}
       ${list}
     </div>`;
-}
-
-/** Fees above Recent activity (iOS f5d34f4): what .kachat transactions paid over 24 hours, 7 days
- *  and all time. */
-function feesCardHtml(fees) {
-  const column = (title, sompi) => `
-        <div class="kl-fees-column">
-          <strong>${esc(amountText(sompi ?? 0n))}</strong>
-          <small>${esc(title)}</small>
-        </div>`;
-  return `
-      ${kit.sectionHeader("Fees")}
-      <div class="kmkt-card kl-fees">${column("24 Hours", fees.last24h)}${column("7 Days", fees.last7d)}${column("All Time", fees.total)}
-      </div>`;
 }
 
 /** The selected tab's live page: Marketplace, Available, Expired or Activity (iOS 73128b3). Your

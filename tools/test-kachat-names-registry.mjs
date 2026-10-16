@@ -1120,8 +1120,17 @@ async function runRegistryIndexer(v, r) {
   });
   const seen = [];
   let graceServed = true;
-  // /stats/names (iOS f5d34f4): "full" (transactions + fees), "old" (per-kind activity only), "badFees"
+  // /stats/names (iOS f5d34f4): "full" (transactions + fees), "old" (per-kind activity only), "badFees";
+  // iOS 4a0f256: "activityStats" (/names/activity/stats answers first), "none" (/stats/names 503 as
+  // on mainnet, no /names/activity/stats: the /names/activity feed is counted, page by page)
   let statsServed = "full";
+  const feedEvents = [
+    { txId: "f1", op: "register", name: "alice", at: nowMs - 3_600_000, years: 1, to: owner },
+    { txId: "f2", op: "list", name: "alice", at: nowMs - 2 * 86_400_000, price: "700" },
+    { txId: "f3", op: "extend", name: "bob", at: nowMs - 3 * 86_400_000, years: 2 },
+    { txId: "f4", op: "transfer", name: "zed", at: nowMs - 30 * 86_400_000, to: owner },
+    { txId: "f4", op: "list", name: "zed", at: nowMs - 30 * 86_400_000, price: "5" },
+  ];
   const fetch = async (url) => {
     seen.push(url);
     const u = new URL(url);
@@ -1141,7 +1150,17 @@ async function runRegistryIndexer(v, r) {
     if (p === "/names/bob") return response(200, { name: "bob", key: "00", registered: false, gap: { lo: "00".repeat(32), hi: "ff".repeat(32), outpoint: { txId: "ee".repeat(32), index: 0 } } });
     if (p === `/names/by-owner/${owner}`) return response(200, { names: [nameObj("zed", { registeredAt: 5 }), nameObj("alice")] });
     if (p === "/market/listings") return response(200, { listings: [nameObj("alice", { price: "700" })], next: null });
+    if (p === "/names/activity/stats" && statsServed === "activityStats") {
+      return response(200, { transactions: { total: 11, last24h: 3, last7d: 5 }, fees: { total: "900", last24h: "100", last7d: "300" } });
+    }
+    if (p === "/names/activity" && statsServed === "none") {
+      // two events a page here, whatever `length` asks: the cursor is the next start
+      const start = Number(u.searchParams.get("cursor") ?? 0);
+      const next = start + 2 < feedEvents.length ? String(start + 2) : null;
+      return response(200, { events: feedEvents.slice(start, start + 2), next });
+    }
     if (p === "/stats/names") {
+      if (statsServed === "none" || statsServed === "activityStats") return response(503, { error: "unavailable", message: "names module is off (no manifest)" });
       if (statsServed === "old") return response(200, { activity: { kachatRegistrations: { total: 5, last24h: 1, last7d: 2 }, kachatSales: { total: 3, last24h: 0, last7d: 1 } } });
       const fees = statsServed === "badFees" ? { total: "x", last24h: "1", last7d: "1" } : { total: "123456789012", last24h: "100000000", last7d: "250000000" };
       return response(200, { transactions: { total: 9, last24h: 2, last7d: 4 }, activity: {}, fees });
@@ -1182,6 +1201,23 @@ async function runRegistryIndexer(v, r) {
     "registry (indexer): an indexer from before `transactions`: the per-kind figures added up, no fees");
   statsServed = "badFees";
   r.eq((await reg.activityTotals()).fees, null, "registry (indexer): unreadable fees are no fees");
+  r.check(seen.some((u) => new URL(u).pathname === "/names/activity/stats"), "registry (indexer): activityTotals asks /names/activity/stats first (iOS 4a0f256)");
+  statsServed = "activityStats";
+  r.eq(await reg.activityTotals(), {
+    transactions: { last24h: 3n, last7d: 5n, total: 11n },
+    fees: { last24h: 100n, last7d: 300n, total: 900n },
+  }, "registry (indexer): activityTotals from /names/activity/stats (iOS 4a0f256)");
+  statsServed = "none";
+  const feedFrom = seen.length;
+  const counted = await reg.activityTotals();
+  const feedUrls = seen.slice(feedFrom).filter((u) => new URL(u).pathname === "/names/activity");
+  r.eq(feedUrls.map((u) => new URL(u).search), ["?length=200", "?length=200&cursor=2", "?length=200&cursor=4"],
+    "registry (indexer): neither stats endpoint answering, the feed is read page by page (iOS 4a0f256)");
+  r.eq(counted.transactions, { last24h: 1n, last7d: 3n, total: 4n }, "registry (indexer): the feed counted one per transaction");
+  const aliceRegister = M.paramsRegisterCost(m.params, 5, 1n);
+  const bobExtend = M.paramsRenewPrice(m.params, 3) * 2n;
+  r.eq(counted.fees, { last24h: aliceRegister, last7d: aliceRegister + bobExtend, total: aliceRegister + bobExtend },
+    "registry (indexer): the feed's register / extend priced at the fixed prices");
   statsServed = "full";
   r.eq((await reg.offersFor("alice")).map((o) => o.name), ["alice"], "registry (indexer): offers take the asked name (one without a seller dropped)");
   r.eq(reg.registerPrices, m.params.registerPrices, "registry (indexer): registerPrices from the manifest");

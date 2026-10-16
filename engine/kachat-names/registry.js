@@ -730,17 +730,24 @@ export class KachatNamesRegistry {
   }
 
   /** How many .kachat transactions there were and what they paid, across the registry - for
-   *  KaChat Stats and the market's Activity page (iOS f5d34f4, Swift `activityTotals()`). An
-   *  indexer reports both (`GET /stats/names`: fees = what each transaction paid miners, the
-   *  registry's price included, since that is how the price is paid). Read from the chain
-   *  instead, the walker counts its events and prices each registration, extension and renewal at
-   *  the registry's fixed prices. -> `{ transactions: Totals, fees: Totals|null }`, Totals =
+   *  KaChat Stats (iOS f5d34f4, Swift `activityTotals()`). An indexer reports both
+   *  (`GET /names/activity/stats`, else `GET /stats/names`: fees = what each transaction paid
+   *  miners, the registry's price included, since that is how the price is paid); one answering
+   *  neither has its `/names/activity` feed counted like the chain's events (iOS 4a0f256). Read
+   *  from the chain instead, the walker counts its events and prices each registration,
+   *  extension and renewal at the registry's fixed prices. -> `{ transactions: Totals, fees: Totals|null }`, Totals =
    *  `{ last24h, last7d, total }` (BigInt); `fees` is null where they can't be worked out (an
    *  indexer too old to record them). */
   async activityTotals() {
     const m = await this.prepare();
     if (this.source.kind === "indexer") {
-      const j = IndexerAPI.stats(await this._get(this.source.base, "/stats/names"));
+      // `/names/activity/stats` first (iOS 4a0f256): a proxy may send /stats/* to a server
+      // without the names module (mainnet today). Neither answering, the activity feed is counted.
+      let j = null;
+      for (const path of ["/names/activity/stats", "/stats/names"]) {
+        try { j = IndexerAPI.stats(await this._get(this.source.base, path)); break; } catch { /* the next */ }
+      }
+      if (!j) return KachatNamesRegistry.totals(await this._allIndexerEvents(this.source.base), m.params, this._nowMs());
       let fees = null;
       if (j.fees) {
         const t = parseU64(j.fees.total);
@@ -759,9 +766,25 @@ export class KachatNamesRegistry {
     return KachatNamesRegistry.totals(this.chainState?.events ?? [], m.params, this._nowMs());
   }
 
-  /** Counts and prices a walker's events (`activityTotals` from the chain), one per transaction:
-   *  a register at `paramsRegisterCost`, an extend or renew at the renewal price per period.
-   *  Swift `static totals(of:params:nowMs:)`. */
+  /** Every registry event an indexer's `/names/activity` holds, newest first, page by page (at
+   *  most 50 pages of 200). iOS 4a0f256 `allIndexerEvents`. */
+  async _allIndexerEvents(base) {
+    const events = [];
+    let cursor = null;
+    for (let i = 0; i < 50; i++) {
+      let path = "/names/activity?length=200";
+      if (cursor) path += `&cursor=${encodeURIComponent(cursor)}`;
+      const page = IndexerAPI.events(await this._get(base, path));
+      events.push(...page.events);
+      if (!page.next || !page.events.length) break;
+      cursor = page.next;
+    }
+    return events;
+  }
+
+  /** Counts and prices registry events (`activityTotals` from the chain, or from an indexer's
+   *  feed without its figures), one per transaction: a register at `paramsRegisterCost`, an
+   *  extend or renew at the renewal price per period. Swift `static totals(of:params:nowMs:)`. */
   static totals(events, params, nowMs) {
     const now = bigNow(nowMs);
     const d1 = now - 86_400_000n;

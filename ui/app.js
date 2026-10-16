@@ -9524,9 +9524,8 @@ document.querySelector("[data-open-customize-dock]")?.addEventListener("click", 
 // everything else in its grid order, also by dragging, each with a green plus that moves it to the
 // end of the dock, shown only while the dock has room (five at most).
 //
-// The arrangement is a draft until this screen is left (iOS 1b7618c, 0ec564e): the live dock is
-// rebuilt once, on the way out, from the arrangement as it stood when the screen closed. iOS waits
-// 0.6 s after the close because UIKit could leave the next page black; nothing here needs that.
+// Every move is applied at once (iOS 476ea20): the live dock is rebuilt as each one is made, so
+// it is already right when the screen is left. The draft is only what this screen draws from.
 
 const dockSubscreenEl = document.querySelector('[data-settings-subscreen="dock"]');
 const dockListEls = {
@@ -9598,9 +9597,13 @@ function commitDockPrefs(dock, hub) {
   applyDockLayout();
 }
 
+/** Every move is applied at once (iOS 476ea20): the dock beside Settings follows each one, so
+ *  leaving the screen has nothing left to apply. The draft then takes the arrangement as written. */
 function editDockDraft(next) {
   if (!dockDraft || next === dockDraft) return;
   dockDraft = next;
+  persistDockDraft();
+  dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
   renderDockEditor();
 }
 
@@ -9612,9 +9615,9 @@ function persistDockDraft() {
   commitDockPrefs(dockDraft.dock, dockDraft.hub);
 }
 
-/** Seeds the draft when Customize Dock comes on screen and applies it when the screen is left -
- *  by the back bar, another settings page, or closing Settings. Watching the screen itself rather
- *  than each of those exits means a way out added later cannot skip the save. */
+/** Seeds the draft when Customize Dock comes on screen and drops it when the screen is left - by
+ *  the back bar, another settings page, or closing Settings. Each move is already written
+ *  (editDockDraft); the save on the way out stays as a safety net. */
 function syncDockDraftWithScreen() {
   const open = !!dockSubscreenEl && !dockSubscreenEl.hidden && !accountOverlay.hidden;
   if (open && !dockDraft) {
@@ -9634,8 +9637,8 @@ if (typeof MutationObserver === "function") {
   observer.observe(accountOverlay, { attributes: true, attributeFilter: ["hidden"] });
 }
 
-// Going to the background is the one way off this screen that never leaves it, and a tab closed
-// from there would otherwise lose the arrangement (iOS scenePhase).
+// Going to the background is the one way off this screen that never leaves it: a safety net like
+// the save on leaving, since every move is written as it is made (iOS 476ea20).
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") persistDockDraft();
 });
@@ -10219,7 +10222,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 170;
+const APP_BUILD = 171;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -25948,7 +25951,8 @@ queueMicrotask(async () => {
       infoSheet,
       // Every KaChat indexer the app is configured with; the screen asks each once.
       indexerUrls: () => ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"].map((key) => getEndpoint(key)).filter(Boolean),
-      // The .kachat Domains card (iOS f5d34f4): the registry's own totals, wherever names are live.
+      // The .kachat Domains cards (iOS f5d34f4, 4924787: Transactions and Fees): the registry's own
+      // totals, wherever names are live.
       kachatTotals: async () => {
         const registry = kachatNamesLaunched() ? kachatNames()?.registry : null;
         if (!registry) return null;
