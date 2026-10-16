@@ -137,6 +137,11 @@ test("IOS-083: the chain check wants the exact amount, no payload and no input o
   assert.equal(noInputs.ok, false);
   assert.equal(noInputs.unknown, true);
   assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previous_outpoint_address: OTHER }] }), args).unknown, undefined);
+  // one resolved stranger input and one unresolved: the unresolved one could be ours (IOS-083 run 11)
+  const partly = checkPaymentNoticeTx(tx({ inputs: [{ previous_outpoint_address: SPEND }, {}] }), args);
+  assert.equal(partly.ok, false);
+  assert.equal(partly.unknown, true);
+  assert.equal(checkPaymentNoticeTx(tx({ inputs: [] }), args).unknown, true, "no inputs at all: unknown");
 });
 
 test("iOS dcb329a: a chat payment's notification body is \"Sent you 1.5 KAS\", no trailing zeros", () => {

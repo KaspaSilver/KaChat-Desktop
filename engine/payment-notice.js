@@ -174,7 +174,8 @@ export function paymentNoticePlacement(rows, direction) {
  * `paidAddress` exactly `claimedSompi`, carries no payload (a chat payment From a spending address
  * is a plain transfer) and none of its inputs is one of `foreignAddresses` (ours, or another
  * contact's: that payment is not this contact's to claim). Else `{ ok: false, reason }`, with
- * `unknown: true` when the inputs' addresses weren't resolved (as good as no chain answer).
+ * `unknown: true` when any input's address isn't resolved (as good as no chain answer: an
+ * unresolved input could be one of ours - IOS-083 run 11).
  */
 export function checkPaymentNoticeTx(tx, { paidAddress, claimedSompi, foreignAddresses = [] } = {}) {
   let claimed;
@@ -186,9 +187,8 @@ export function checkPaymentNoticeTx(tx, { paidAddress, claimedSompi, foreignAdd
   if (payload && !/^0*$/.test(payload)) return { ok: false, reason: "carries a payload, so it is not a plain transfer" };
   const foreign = new Set((foreignAddresses || []).map((address) => String(address || "").trim().toLowerCase()).filter(Boolean));
   const inputs = (Array.isArray(tx?.inputs) ? tx.inputs : [])
-    .map((input) => String(input?.previous_outpoint_address || input?.previousOutpointAddress || "").trim().toLowerCase())
-    .filter(Boolean);
-  if (!inputs.length) return { ok: false, unknown: true, reason: "has no readable inputs yet" };
+    .map((input) => String(input?.previous_outpoint_address || input?.previousOutpointAddress || "").trim().toLowerCase());
+  if (!inputs.length || inputs.some((from) => !from)) return { ok: false, unknown: true, reason: "has inputs that aren't readable yet" };
   if (inputs.some((from) => foreign.has(from))) return { ok: false, reason: "was paid from an address that is yours or another contact's" };
   return { ok: true };
 }
