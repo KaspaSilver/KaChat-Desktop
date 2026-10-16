@@ -1315,13 +1315,22 @@ async function main() {
     const owner = new Uint8Array(32).fill(0x31);
     const nm = (expiresAt) => new RS.NameInfo({ name: "alice", key: C.key("alice"), owner, price: 0n, expiresAt: BigInt(expiresAt), outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x63), 0) });
     const ds = (ms) => `D${ms}`;
-    const wanted = R.wantedReminders([nm(E)], p, { dayString: ds });
+    const W = "kaspatest:qpwalletaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaxyzw1234abcd";
+    const W2 = "kaspatest:qpwalletbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbxyzw9999abcd";
+    const ctx = { dayString: ds, wallet: W, network: "testnet-10" };
+    const wanted = R.wantedReminders([nm(E)], p, ctx);
     r.eq(wanted.map((w) => w.id.split("-").pop()).join(","), "renew,grace,lastcall", "reminders: renewal opens, expired, last call");
-    r.check(wanted.every((w) => w.id.startsWith(`${R.reminderPrefix}alice-${E}-`)), "reminders: ids carry the name and its expiry");
+    r.check(wanted.every((w) => w.id.startsWith(`kachat-reminder-testnet-10-${W.slice(-12)}-alice-${E}-`)),
+      "reminders: ids carry the network, the wallet tag, the name and its expiry (iOS 6128f1e)");
+    r.eq(R.reminderWalletTag("KASPA:QXYZ0123456789AB"), "0123456789ab", "reminderWalletTag: the address's last 12, lowercased");
+    r.check(R.wantedReminders([nm(E)], p, { ...ctx, wallet: W2 }).every((w) => !w.id.startsWith(R.reminderIdPrefix(W, "testnet-10"))),
+      "reminders: another wallet's ids differ");
+    r.check(R.wantedReminders([nm(E)], p, { ...ctx, network: "mainnet" }).every((w) => !w.id.startsWith(R.reminderIdPrefix(W, "testnet-10"))),
+      "reminders: the other network's ids differ");
     r.eq(wanted[0].at, E - 30 * day, "reminders: renewal opens at expiresAt - renewWindowMs");
     r.eq(wanted[1].at, E, "reminders: expired at expiresAt");
     r.eq(wanted[2].at, E + 7 * day - day, "reminders: a day before grace ends");
-    r.eq(R.wantedReminders([nm(E)], { graceMs: BigInt(6 * 3_600_000), renewWindowMs: BigInt(day) }, { dayString: ds })[2].at, E + 3 * 3_600_000,
+    r.eq(R.wantedReminders([nm(E)], { graceMs: BigInt(6 * 3_600_000), renewWindowMs: BigInt(day) }, ctx)[2].at, E + 3 * 3_600_000,
       "reminders: last call at most half the grace in (testnet's short grace)");
     r.eq(wanted[0].title, "Renew alice.kachat", "reminders: renewal title");
     r.eq(wanted[0].body, `Renewal is open: renew it before D${E} to keep it.`, "reminders: renewal body");
@@ -1345,7 +1354,7 @@ async function main() {
     r.eq(R.stepReminders({}, wanted, E + day).due.length, 0, "reminders: a time already past when first seen doesn't fire");
     // renewed: the old expiry's reminders go, the new ones arm
     const all3 = R.stepReminders({}, wanted, E - 40 * day).armed;
-    const moved = R.stepReminders(all3, R.wantedReminders([nm(E + 365 * day)], p, { dayString: ds }), E - 5 * day);
+    const moved = R.stepReminders(all3, R.wantedReminders([nm(E + 365 * day)], p, ctx), E - 5 * day);
     r.eq(moved.due.length, 0, "reminders: a renewed name's old reminders don't fire");
     r.check(Object.keys(moved.armed).every((id) => id.includes(`-${E + 365 * day}-`)), "reminders: they move to the new expiry");
     // left the wallet: dropped
@@ -1354,7 +1363,14 @@ async function main() {
     const timer = R.dueArmedReminders(all3, E + 1);
     r.eq(timer.due.map((d) => d.id.split("-").pop()).join(","), "grace", "dueArmedReminders: the latest due one");
     r.eq(Object.keys(timer.armed).length, 1, "dueArmedReminders: the future one stays");
-    r.eq(R.remindersStorageKey("KASPA:QX"), "kachat-name-reminders-v1:kaspa:qx", "remindersStorageKey: per wallet, lowercased");
+    r.eq(R.remindersStorageKey("KASPA:QX", "mainnet"), "kachat-name-reminders-v2:mainnet:kaspa:qx", "remindersStorageKey: per wallet and network, lowercased");
+    r.check(R.remindersStorageKey(W, "testnet-10") !== R.remindersStorageKey(W2, "testnet-10")
+      && R.remindersStorageKey(W, "testnet-10") !== R.remindersStorageKey(W, "mainnet"), "remindersStorageKey: one set per wallet and network");
+    r.eq(R.remindersStorageKeysForWallet("KASPA:QX").join(","),
+      "kachat-name-reminders-v2:mainnet:kaspa:qx,kachat-name-reminders-v2:testnet-10:kaspa:qx,kachat-name-reminders-v1:kaspa:qx",
+      "remindersStorageKeysForWallet: every network's set and the first build's");
+    r.eq(R.remindersStorageKeysForWallet("").length, 0, "remindersStorageKeysForWallet: nothing for no wallet");
+    r.check(!R.remindersStorageKey(W, "mainnet").startsWith(R.legacyRemindersStoragePrefix), "the legacy prefix never matches a current set");
   }
 
   // MARK: actions: no offers on, or accepts of, expired names (iOS 71128c4, IOS-055)

@@ -13235,7 +13235,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 }
 .kmkt-guide-bullet { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; line-height: 1.35; color: var(--text); }
 .kmkt-guide-check { flex: 0 0 20px; width: 20px; height: 20px; color: var(--accent); margin-top: 1px; }
-.kmkt-guide-claim .kmkt-guide-opens { display: block; margin-top: 6px; font-size: 13px; font-weight: 600; color: var(--accent); }
 
 /* Setup guide, Your Chatting Address: the Profile screenshot (iOS 8852cdb). */
 .setup-address-explainer { display: block; width: 100%; max-width: 340px; margin: 0 auto 16px; border-radius: 16px; }

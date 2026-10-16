@@ -34,6 +34,7 @@ import {
 } from "../engine/kachat-names/registry-state.js";
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
 import { ProfileIdentityStore } from "../engine/kachat-names/profile-cache.js";
+import { unnamedSweepDue, nextUnnamedAnswers } from "./kachat-unnamed-sweep.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
@@ -2768,8 +2769,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
       quoteTier = tier;
     } catch (error) {
       if (mySeq !== seq || closed) return;
-      // the v5 migration deadline or mainnet's public opening: a notice, not an error (iOS c6ebf74)
-      if (error?.code === "registrationNotOpen" || error?.code === "notPublicYet") notOpen = errorText(error);
+      // the v5 migration deadline: a notice, not an error (iOS dd836cb; notPublicYet gone, iOS 48d194d)
+      if (error?.code === "registrationNotOpen") notOpen = errorText(error);
       else quoteError = errorText(error);
     }
     render();
@@ -4038,12 +4039,12 @@ async function lookUpIdentity(registry, key) {
     const prev = cachedIdentities.get(key) ?? null;
     if (failed && !own) {
       // Keep what we had (the copy loaded at launch too); ask again in a minute rather than on
-      // every render.
+      // every render. `failed`: the unnamed sweep asks again on its next pass (iOS cbb8a83).
       const retryMs = registry.isLaunched === false ? profileMissPauseMs : IDENTITY_RETRY_MS;
       cachedIdentities.set(key, {
         identity: prev?.identity ?? null, sig: prev?.sig ?? "", revision: registry.revision,
         at: Date.now() - IDENTITY_MAX_AGE_MS + retryMs,
-        confirmedAt: prev?.confirmedAt ?? 0, fromDisk: prev?.fromDisk === true,
+        confirmedAt: prev?.confirmedAt ?? 0, fromDisk: prev?.fromDisk === true, failed: true,
       });
       return;
     }
@@ -4134,17 +4135,21 @@ export async function kachatRescanProfile(address) {
   return true;
 }
 
-// People shown as an address (iOS 3214a2b, KachatNamesRegistry.startUnnamedIdentitySweep): a "no
-// name" answer or a failed lookup is not trusted for long - a name can be registered at any
-// moment, and a lookup can fail while the registry is still loading - and the cache only re-asks
-// when a render reads it. So while the app is open, once a minute, everyone with no name you gave
-// them and no .kachat name known is asked again (most recent chats first, up to 40 a pass); an
-// answer updates every screen at once (onKachatIdentityChange).
+// People shown as an address (iOS 3214a2b, KachatNamesRegistry.startUnnamedIdentitySweep): the
+// cache only re-asks when a render reads it, so while the app is open, once a minute, everyone with
+// no name you gave them and no .kachat name known may be asked again (most recent chats first, up
+// to 40 a pass); an answer updates every screen at once (onKachatIdentityChange). Never asked yet,
+// or the last lookup failed (the registry still loading at launch): this pass. A "no name" answer
+// backs off - asked again after 1, then 5, 15 and 60 minutes - and sooner (after a minute) only
+// once the registry's revision moved, since a name only appears through a registry transaction
+// (iOS cbb8a83, IOS-087; the rules are kachat-unnamed-sweep.js).
 const UNNAMED_SWEEP_FIRST_MS = 8_000;
 const UNNAMED_SWEEP_EVERY_MS = 60_000;
 const UNNAMED_SWEEP_MAX = 40;
 let unnamedSweepStarted = false;
 let unnamedSweepRunning = false;
+/** "No name" answers in a row, per address (in memory: a relaunch starts over at a minute). */
+const unnamedAnswers = new Map();
 
 /** Starts the sweep, once. `candidates()` -> the addresses of contacts with no name you gave them
  *  (chat or Address Book), most recent chats first. */
@@ -4168,11 +4173,7 @@ export function startKachatUnnamedIdentitySweep({ candidates } = {}) {
         const key = String(address || "").trim().toLowerCase();
         if (!key || key === me || seen.has(key) || !isNetworkAddress(key)) continue;
         seen.add(key);
-        const entry = cachedIdentities.get(key);
-        if (entry) {
-          if (entry.identity?.label) continue;
-          if (now - entry.at < UNNAMED_SWEEP_EVERY_MS) continue;
-        }
+        if (!unnamedSweepDue(cachedIdentities.get(key) ?? null, unnamedAnswers.get(key) ?? 0, rt.registry.revision, now)) continue;
         targets.push(key);
         if (targets.length >= UNNAMED_SWEEP_MAX) break;
       }
@@ -4182,7 +4183,11 @@ export function startKachatUnnamedIdentitySweep({ candidates } = {}) {
       for (const key of targets) {
         if (!visible()) return;
         if (identityLookups.has(key)) continue;
-        try { await lookUpIdentity(rt.registry, key); } catch { /* asked again next minute */ }
+        try { await lookUpIdentity(rt.registry, key); } catch { continue; /* asked again next minute */ }
+        // one more "no name" in a row backs the next ask off further; a failed lookup changes nothing
+        const answers = nextUnnamedAnswers(unnamedAnswers.get(key) ?? null, cachedIdentities.get(key) ?? null);
+        if (answers == null) unnamedAnswers.delete(key);
+        else unnamedAnswers.set(key, answers);
       }
     } finally {
       unnamedSweepRunning = false;

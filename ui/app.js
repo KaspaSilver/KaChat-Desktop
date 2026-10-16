@@ -6,7 +6,6 @@ import { installGroupedAmountInputs } from "./grouped-amount.js";
 import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { chattingCatchUpLook } from "./address-activity.js";
-import { setChainTimeSource } from "../engine/kachat-names/launch.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
@@ -23,7 +22,7 @@ import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBro
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
-import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
+import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
@@ -1205,6 +1204,8 @@ function removeAccountScopedLocalData(address) {
   }
   // Removing an account clears its data on BOTH networks (iOS 741c005): one key, two addresses.
   for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")])) {
+    // its .kachat reminders would keep firing for names this device no longer holds (iOS 6128f1e)
+    if (encoded) { try { removeKachatNameReminders(encoded); } catch { /* not stored */ } }
     // The pre-DSK-011 faucet lock lived outside the account prefix under a global key.
     try { localStorage.removeItem(`kachat_tn10_faucet_claimed_${String(encoded || "").toLowerCase()}`); } catch { /* not stored */ }
     const prefix = `${ACCOUNT_DATA_PREFIX}:${encoded}:`;
@@ -10249,7 +10250,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 173;
+const APP_BUILD = 174;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -25941,8 +25942,6 @@ queueMicrotask(async () => {
       });
     }
     catch (error) { appendEngineLog(`.kachat news did not start: ${error?.message || error}`); }
-    // The .kachat countdown runs on the network's clock (XP-020).
-    setChainTimeSource(() => engine.currentDagPoint());
     initKachatMarket({
       escapeHtml, showToast: showCopyToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
       openChat: (address) => openChatWithAddress({ address }),

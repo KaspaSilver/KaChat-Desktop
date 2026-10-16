@@ -22,11 +22,14 @@
 // allows them (engine/kachat-names/reminders.js says how they stand in for iOS's scheduled ones).
 
 import { kachatNames } from "./kachat-names-runtime.js";
-import { KAS_UNIT } from "../engine/network.js";
+import { KAS_UNIT, NETWORK_ID } from "../engine/network.js";
 import { Status } from "../engine/kachat-names/registry-state.js";
 import { bytesEqual } from "../engine/kachat-names/codec.js";
 import { dayString } from "../engine/kachat-names/actions.js";
-import { wantedReminders, stepReminders, dueArmedReminders, nextReminderAt, remindersStorageKey } from "../engine/kachat-names/reminders.js";
+import {
+  wantedReminders, stepReminders, dueArmedReminders, nextReminderAt, remindersStorageKey, remindersStorageKeysForWallet,
+  legacyRemindersStoragePrefix,
+} from "../engine/kachat-names/reminders.js";
 import { formatSompiPlain } from "./send-kaspa-components.js";
 import { openNameDetailLayer } from "./kachat-names-live.js";
 
@@ -40,12 +43,19 @@ let lastCheckAt = 0;
 let trailingTimer = null;
 let watchedRegistry = null;
 let reminderTimer = null;
+/** The wallet the reminder timer is for. */
+let reminderTimerWallet = null;
+let legacyRemindersCleared = false;
 
 // MARK: Local reminders (iOS d1026de KachatNameReminders, XP-024)
+//
+// Kept per wallet and network (iOS 6128f1e, IOS-088): a check reads and writes only the active
+// wallet's set on the active network, so another account or the other network never loses its
+// reminders; a wallet's sets go when its saved account is removed (removeKachatNameReminders).
 
 function readReminders(wallet) {
   try {
-    const j = JSON.parse(localStorage.getItem(remindersStorageKey(wallet)) || "{}");
+    const j = JSON.parse(localStorage.getItem(remindersStorageKey(wallet, NETWORK_ID)) || "{}");
     return j && typeof j === "object" ? j : {};
   } catch {
     return {};
@@ -53,7 +63,37 @@ function readReminders(wallet) {
 }
 
 function writeReminders(wallet, armed) {
-  try { localStorage.setItem(remindersStorageKey(wallet), JSON.stringify(armed)); } catch { /* storage full: re-armed next check */ }
+  try { localStorage.setItem(remindersStorageKey(wallet, NETWORK_ID), JSON.stringify(armed)); } catch { /* storage full: re-armed next check */ }
+}
+
+/** The first build's sets, one per wallet whatever the network: removed wherever found (once a
+ *  run). */
+function clearLegacyReminders() {
+  if (legacyRemindersCleared) return;
+  legacyRemindersCleared = true;
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(legacyRemindersStoragePrefix)) localStorage.removeItem(key);
+    }
+  } catch { /* storage unreadable: tried again next run */ }
+}
+
+function stopReminderTimer() {
+  if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+  reminderTimerWallet = null;
+}
+
+/** A wallet's reminders on every network, for when its saved account leaves this device (iOS
+ *  6128f1e KachatNameReminders.removeAll(forWallet:)): they would keep firing for names this
+ *  device no longer holds. */
+export function removeKachatNameReminders(walletAddress) {
+  const wallet = String(walletAddress ?? "").trim().toLowerCase();
+  if (!wallet) return;
+  if (reminderTimerWallet === wallet) stopReminderTimer();
+  for (const key of remindersStorageKeysForWallet(wallet)) {
+    try { localStorage.removeItem(key); } catch { /* not stored */ }
+  }
 }
 
 function canNotify() {
@@ -73,12 +113,14 @@ function fireReminders(wallet, armed, due) {
 /** While the app is open a reminder shows at its time, the way iOS's scheduled one would: one
  *  timer for the soonest (a long wait is re-checked daily). */
 function armReminderTimer(wallet, armed) {
-  if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+  stopReminderTimer();
   const at = nextReminderAt(armed);
   if (at == null) return;
   const wait = Math.min(Math.max(1_000, at - Date.now() + 1_000), 86_400_000);
+  reminderTimerWallet = wallet;
   reminderTimer = setTimeout(() => {
     reminderTimer = null;
+    reminderTimerWallet = null;
     const rt = kachatNames();
     if (!rt || rt.actions.myAddress !== wallet) return;
     if (!canNotify()) { writeReminders(wallet, {}); return; }
@@ -91,12 +133,14 @@ function armReminderTimer(wallet, armed) {
  *  from their expiry, the due ones shown. Without notification permission nothing is kept (iOS
  *  removes its pending ones). */
 function updateReminders(wallet, names, params) {
+  clearLegacyReminders();
   if (!canNotify()) {
-    if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+    stopReminderTimer();
     writeReminders(wallet, {});
     return;
   }
-  const { armed, due } = stepReminders(readReminders(wallet), wantedReminders(names, params, { dayString }), Date.now());
+  const wanted = wantedReminders(names, params, { dayString, wallet, network: NETWORK_ID });
+  const { armed, due } = stepReminders(readReminders(wallet), wanted, Date.now());
   fireReminders(wallet, armed, due);
 }
 
@@ -164,7 +208,8 @@ export async function checkKachatNamesNews() {
     // a different wallet signed in meanwhile: this answer isn't its
     if (actions.myAddress !== wallet) return;
     // The indexer pushes name reminders only to the chatting address: for a name on another
-    // address of this wallet the app reminds by itself (XP-024).
+    // address of this wallet the app reminds by itself (XP-024), after the guard above, into this
+    // wallet's set on this network (iOS 6128f1e).
     try { updateReminders(wallet, owned.filter((n) => !bytesEqual(n.owner, me)), params); }
     catch (error) { try { deps?.log?.(`.kachat reminders failed: ${error?.message || error}`); } catch { /* fine */ } }
 
