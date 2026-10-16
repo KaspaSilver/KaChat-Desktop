@@ -108,12 +108,13 @@ function readJson(key) {
 
 // `name` may be empty: the person removed the name they gave, and the address goes by who it is
 // on chain again (its .kachat name, else the address) - iOS 2831fab AddressBookEntry.customName.
-// An export file's rows still need one (`requireName`), as iOS importExport skips them.
-function cleanEntry(raw, { requireName = false } = {}) {
+// That holds for an export file's rows too (IOS-089): a nameless entry keeps its note and photo,
+// and a newer one clears the name here.
+function cleanEntry(raw) {
   if (!raw || typeof raw !== "object") return null;
   const address = normalizeAddressBookAddress(raw.address);
   const name = String(raw.name ?? "").trim();
-  if (!address || (requireName && !name)) return null;
+  if (!address) return null;
   const createdAt = parseTime(raw.createdAt) || parseTime(raw.updatedAt) || config.now();
   return {
     id: UUID_PATTERN.test(String(raw.id || "")) ? String(raw.id).toLowerCase() : newUuid(),
@@ -467,7 +468,7 @@ export function importAddressBookExport(input) {
   let named = 0;
   let otherNetworkMessage = null;
   for (const raw of file.entries) {
-    const entry = cleanEntry(raw, { requireName: true });
+    const entry = cleanEntry(raw);
     if (!entry) continue;
     let ok = false;
     try { ok = config.isValidAddress(entry.address) !== false; } catch { ok = false; }

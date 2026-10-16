@@ -6173,6 +6173,9 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   const processed = new Set(store.processedTxids);
   const contactAddresses = new Set((state.contacts || []).map((entry) => entry.address));
   const ownSpending = new Set(activeAccountMnemonic() ? spendingWatchedAddressList() : []);
+  // Cold Storage and the other saved accounts are yours too: a move from them is internal, never a
+  // stranger's payment in Note to Self (IOS-083 run 9).
+  for (const address of allOwnAddressSet()) ownSpending.add(address);
   let added = 0;
   const contractTxids = [];
   const chatPaymentSenders = new Set();
@@ -7308,6 +7311,27 @@ function ownInputAddressSet() {
   return set;
 }
 
+/** Every address this person owns, lowercased: this account's (chatting, spending chain, Cold
+ *  Storage) and every other saved account's chatting address plus the spending addresses its
+ *  Manage Addresses has listed (IOS-083 run 9: a payment between your own addresses is never a
+ *  contact's to claim with a payment_notice). */
+function allOwnAddressSet() {
+  const set = new Set([...ownInputAddressSet()].map((address) => String(address || "").toLowerCase()));
+  try {
+    for (const account of loadSavedAccounts()) {
+      const address = String(account?.address || "").trim();
+      if (!address) continue;
+      set.add(address.toLowerCase());
+      try {
+        const listed = JSON.parse(localStorage.getItem(accountScopedKey(SPENDING_BAL_CACHE_KEY, address)) || "{}") || {};
+        for (const spending of Object.keys(listed)) set.add(spending.toLowerCase());
+      } catch { /* no list kept for it */ }
+    }
+  } catch { /* no saved accounts readable */ }
+  set.delete("");
+  return set;
+}
+
 function describeActivityAddress(kind, address) {
   const shortA = shortAddress(address);
   if (kind === "chatting") return `Chatting address ${shortA}`; // iOS 56b75c8
@@ -7750,12 +7774,14 @@ function paymentNoticeMayPlace(conversationEntry, txId, direction) {
 /** Every stored row with this txid, as `paymentNoticePlacement` reads them. */
 function paymentNoticeRows(txId, conversationEntry) {
   const rows = [];
+  const ownAddresses = allOwnAddressSet();
   for (const entry of state.conversations || []) {
     const chat = entry === conversationEntry ? "this" : (isSelfConversation(entry) ? "self" : "other");
     for (const row of entry.messages || []) {
       if (normalizePaymentTxId(row.txid) !== txId) continue;
       const sender = String(row.sender || "").toLowerCase();
-      const fromKnown = !sender || sender === String(engine.address || "").toLowerCase()
+      // From one of your own addresses (any account, Cold Storage too) or a contact: never claimable.
+      const fromKnown = !sender || ownAddresses.has(sender)
         || (state.contacts || []).some((contact) => String(contact?.address || "").toLowerCase() === sender);
       rows.push({ chat, direction: row.direction, messageType: row.messageType, fromKnown });
     }
@@ -7841,17 +7867,18 @@ async function checkReceivedPaymentNotice(conversationId, contact, message, vali
   }
 }
 
-/** The addresses a contact's payment can't come from: ours (the chatting address and every
- *  revealed spending address) and every other contact's chatting address. */
+/** The addresses a contact's payment can't come from: every address of ours (`allOwnAddressSet`:
+ *  this account's chatting, spending and Cold Storage addresses and the other saved accounts' -
+ *  IOS-083 run 9) and every other contact's chatting address. */
 function paymentNoticeForeignAddresses(contactAddress) {
   const own = String(contactAddress || "").toLowerCase();
-  const addresses = new Set([engine.address]);
+  const addresses = allOwnAddressSet();
   try {
     const maxIndex = Number(getSpendingState().maxIndex);
-    for (let index = 0; Number.isInteger(maxIndex) && index <= maxIndex; index += 1) addresses.add(deriveSpendingAddressAt(index));
+    for (let index = 0; Number.isInteger(maxIndex) && index <= maxIndex; index += 1) addresses.add(String(deriveSpendingAddressAt(index) || "").toLowerCase());
   } catch { /* no spending chain yet */ }
-  for (const entry of state.contacts || []) addresses.add(entry?.address);
-  return [...addresses].filter((address) => address && String(address).toLowerCase() !== own);
+  for (const entry of state.contacts || []) addresses.add(String(entry?.address || "").toLowerCase());
+  return [...addresses].filter((address) => address && address !== own);
 }
 
 /// Removes this payment's row from the self-chat - hidden for good there (hiddenMessageKeys), so
@@ -10222,7 +10249,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 172;
+const APP_BUILD = 173;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;

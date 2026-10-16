@@ -334,7 +334,7 @@ test("import: adds, updates only from a newer edit, lifts a tombstone, brings th
       { id: "9f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", address: DAVE, name: "Dave", note: "x", createdAt: iso(t0 - 1000), updatedAt: iso(t0 - 1000), photo: PHOTO_B64 },
       // Unusable rows are skipped, not fatal.
       { address: "kaspa:nope", name: "Bad" },
-      { address: DAVE, name: "  " },
+      { address: "", name: "Nobody" },
     ],
   };
   let events = 0;
@@ -413,6 +413,20 @@ test("other network (IOS-063): save refuses it, import skips and counts it, all-
   assert.equal(addressBookEntry(TN), null);
   assert.throws(() => importAddressBookExport(file([row(TN, "Testy")])), /Every address in that file is a Testnet address\. KaChat is on Mainnet\./);
   configureAddressBook({ otherNetworkReason: () => null });
+});
+
+test("import (IOS-089): a nameless entry imports with its note, and a newer one clears the name", () => {
+  fresh();
+  saveAddressBookEntry({ address: ALICE, name: "Alice" });
+  tick(10_000);
+  const file = (entries) => ({ type: "kachat-address-book", version: 1, exportedAt: iso(clock), walletAddress: WALLET_A, entries });
+  const row = (address, name, note = "") => ({ id: crypto.randomUUID(), address, name, note, createdAt: iso(clock), updatedAt: iso(clock) });
+  assert.deepEqual(importAddressBookExport(file([row(ALICE, ""), row(BOB, "  ", "only a note")])), { added: 1, updated: 1, skipped: 0 });
+  assert.equal(addressBookEntry(ALICE).name, "", "the newer nameless entry cleared the name");
+  assert.equal(addressBookEntry(BOB).name, "");
+  assert.equal(addressBookEntry(BOB).note, "only a note");
+  fresh();
+  assert.deepEqual(importAddressBookExport(file([row(CAROL, "")])), { added: 1, updated: 0, skipped: 0 }, "a file of nameless entries is not empty");
 });
 
 test("normalise", () => {
