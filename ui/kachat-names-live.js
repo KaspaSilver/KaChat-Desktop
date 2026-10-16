@@ -551,6 +551,9 @@ const hub = {
   mine: [],
   myOffers: [],
   activity: [],
+  /** What .kachat transactions paid (sompi) over 24 hours, 7 days and all time - `{ last24h,
+   *  last7d, total }` (BigInt); null until known, or where it can't be worked out (iOS f5d34f4). */
+  fees: null,
   loadError: null,
   loaded: false,
   refreshing: false,
@@ -702,6 +705,7 @@ async function hubReloadOnce() {
       hub.myOffers = [];
     }
     hub.activity = await registry.activity();
+    try { hub.fees = (await registry.activityTotals())?.fees ?? null; } catch { /* keeps the last */ }
     hub.loadError = null;
   } catch (error) {
     hub.loadError = errorText(error);
@@ -1264,9 +1268,24 @@ function activityPageHtml() {
   return `
     <div class="kmkt-page">
       ${loadErrorHtml()}
+      ${hub.fees ? feesCardHtml(hub.fees) : ""}
       ${kit.sectionHeader("Recent activity", "Every claim, renewal, listing, sale, offer, transfer and reclaim across the registry.")}
       ${list}
     </div>`;
+}
+
+/** Fees above Recent activity (iOS f5d34f4): what .kachat transactions paid over 24 hours, 7 days
+ *  and all time. */
+function feesCardHtml(fees) {
+  const column = (title, sompi) => `
+        <div class="kl-fees-column">
+          <strong>${esc(amountText(sompi ?? 0n))}</strong>
+          <small>${esc(title)}</small>
+        </div>`;
+  return `
+      ${kit.sectionHeader("Fees")}
+      <div class="kmkt-card kl-fees">${column("24 Hours", fees.last24h)}${column("7 Days", fees.last7d)}${column("All Time", fees.total)}
+      </div>`;
 }
 
 /** The selected tab's live page: Marketplace, Available, Expired or Activity (iOS 73128b3). Your
@@ -4131,6 +4150,66 @@ export async function kachatRescanProfile(address) {
   }
   scheduleIdentityNotify();
   return true;
+}
+
+// People shown as an address (iOS 3214a2b, KachatNamesRegistry.startUnnamedIdentitySweep): a "no
+// name" answer or a failed lookup is not trusted for long - a name can be registered at any
+// moment, and a lookup can fail while the registry is still loading - and the cache only re-asks
+// when a render reads it. So while the app is open, once a minute, everyone with no name you gave
+// them and no .kachat name known is asked again (most recent chats first, up to 40 a pass); an
+// answer updates every screen at once (onKachatIdentityChange).
+const UNNAMED_SWEEP_FIRST_MS = 8_000;
+const UNNAMED_SWEEP_EVERY_MS = 60_000;
+const UNNAMED_SWEEP_MAX = 40;
+let unnamedSweepStarted = false;
+let unnamedSweepRunning = false;
+
+/** Starts the sweep, once. `candidates()` -> the addresses of contacts with no name you gave them
+ *  (chat or Address Book), most recent chats first. */
+export function startKachatUnnamedIdentitySweep({ candidates } = {}) {
+  if (unnamedSweepStarted || typeof candidates !== "function") return;
+  unnamedSweepStarted = true;
+  const visible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
+  const pass = async () => {
+    const rt = kachatProfiles();
+    if (!rt || unnamedSweepRunning || !visible()) return;
+    const me = String(rt.engine?.address || "").trim().toLowerCase();
+    if (!me) return;
+    unnamedSweepRunning = true;
+    try {
+      let list = [];
+      try { list = candidates() || []; } catch { list = []; }
+      const targets = [];
+      const seen = new Set();
+      const now = Date.now();
+      for (const address of list) {
+        const key = String(address || "").trim().toLowerCase();
+        if (!key || key === me || seen.has(key) || !isNetworkAddress(key)) continue;
+        seen.add(key);
+        const entry = cachedIdentities.get(key);
+        if (entry) {
+          if (entry.identity?.label) continue;
+          if (now - entry.at < UNNAMED_SWEEP_EVERY_MS) continue;
+        }
+        targets.push(key);
+        if (targets.length >= UNNAMED_SWEEP_MAX) break;
+      }
+      watchIdentitySources(rt.registry);
+      profileIdentityStore();
+      // a few at a time, the people you talk to most recently first
+      for (const key of targets) {
+        if (!visible()) return;
+        if (identityLookups.has(key)) continue;
+        try { await lookUpIdentity(rt.registry, key); } catch { /* asked again next minute */ }
+      }
+    } finally {
+      unnamedSweepRunning = false;
+    }
+  };
+  // the first pass once the app has settled after launch
+  setTimeout(function tick() {
+    pass().finally(() => setTimeout(tick, UNNAMED_SWEEP_EVERY_MS));
+  }, UNNAMED_SWEEP_FIRST_MS);
 }
 
 /** The address's `.kachat` name ("alice.kachat"), or null. */

@@ -82,6 +82,19 @@ function changed(kind) {
   try { deps?.onChange?.(kind); } catch { /* the host repaint never breaks a save */ }
 }
 
+/** The name an entry shows: the one you gave it, else who the address is on chain - its .kachat
+ *  name, else the short address (iOS 2831fab: `customName ?? displayName(for:)`). */
+function entryName(entry) {
+  if (!entry) return "";
+  const own = String(entry.name || "").trim();
+  if (own) return own;
+  try {
+    const shown = deps?.displayNameFor?.(entry.address);
+    if (shown) return shown;
+  } catch { /* fall back to the address */ }
+  return short(entry.address);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Kaspa Hub > Address Book
 // ---------------------------------------------------------------------------------------------
@@ -91,7 +104,7 @@ function rowHtml(entry) {
     <button type="button" class="ab-row" data-ab-open="${esc(entry.address)}">
       ${addressBookAvatarHtml(entry.address, "chat-avatar ab-avatar ab-avatar-38")}
       <span class="ab-row-copy">
-        <strong>${esc(entry.name)}</strong>
+        <strong>${esc(entryName(entry))}</strong>
         <small>${esc(short(entry.address))}</small>
       </span>
     </button>`;
@@ -140,7 +153,7 @@ function detailHtml(address) {
   const header = `
     <div class="kaposts-header ab-header">
       <button class="kaposts-icon-button ab-back" type="button" data-ab-back aria-label="Address Book" title="Address Book">${ICONS.back}</button>
-      <h1 class="kaposts-title ab-detail-title">${esc(entry?.name || "")}</h1>
+      <h1 class="kaposts-title ab-detail-title">${esc(entry ? entryName(entry) : "")}</h1>
       <span class="ab-header-spacer" aria-hidden="true"></span>
     </div>`;
   if (!entry) {
@@ -155,7 +168,7 @@ function detailHtml(address) {
     <div class="ab-body">
       <div class="ab-card ab-hero">
         ${addressBookAvatarHtml(entry.address, "chat-avatar ab-avatar ab-avatar-76")}
-        <strong class="ab-hero-name">${esc(entry.name)}</strong>
+        <strong class="ab-hero-name">${esc(entryName(entry))}</strong>
         ${entry.note ? `<p class="ab-hero-note">${esc(entry.note)}</p>` : ""}
       </div>
       <p class="ab-section-title">Address</p>
@@ -196,7 +209,7 @@ function renderListRowsOnly() {
 async function confirmDelete(entry) {
   if (!entry) return false;
   const ok = await deps?.confirmDialog?.({
-    title: `Delete ${entry.name} from your Address Book?`,
+    title: `Delete ${entryName(entry)} from your Address Book?`,
     confirmLabel: "Delete",
     destructive: true,
   });
@@ -272,7 +285,9 @@ function attachScreen() {
 
 /** deps: { escapeHtml, shortAddress, personGlyphSvg, profileAvatarHtml(address, className),
  *  ownAddress(), canSend(), openSend(address), openChat(address), copyText(text), showToast(text),
- *  confirmDialog(opts), formatBytes(bytes), onChange(kind: "edit" | "photos" | "restore") } */
+ *  confirmDialog(opts), formatBytes(bytes), onChange(kind: "edit" | "photos" | "restore"),
+ *  displayNameFor(address) (who an unnamed entry is), setContactName(address, name) (the chat
+ *  with that address takes the entry's name; "" clears it) } */
 export function initAddressBook(dependencies) {
   deps = dependencies;
   attachScreen();
@@ -576,8 +591,9 @@ function editorAvatarHtml() {
   return addressBookAvatarHtml(address, "chat-avatar ab-avatar ab-avatar-84", pending === undefined ? undefined : (pending || null));
 }
 
+// An empty name saves too (iOS 2831fab): the address goes by its .kachat name or itself.
 function editorCanSave() {
-  return Boolean(String(editorState?.name || "").trim()) && Boolean(editorEffectiveAddress());
+  return Boolean(editorEffectiveAddress());
 }
 
 function renderEditor() {
@@ -751,12 +767,15 @@ function saveEditor() {
   if (!editorState || !editorCanSave()) return;
   try {
     const p = editorState.pendingPhoto;
-    saveAddressBookEntry({
+    const saved = saveAddressBookEntry({
       address: editorEffectiveAddress(),
       name: editorState.name,
       note: editorState.note,
       photo: typeof p === "string" ? p : (p === null ? null : undefined),
     });
+    // One name per person (iOS 2831fab): a chat with them goes by the same one - so clearing it
+    // here really clears it, and they go by their .kachat name or their address.
+    try { deps?.setContactName?.(saved.address, saved.name); } catch { /* the entry is saved */ }
     closeEditor("saved");
   } catch (error) {
     editorState.error = String(error?.message || error || "");
@@ -856,7 +875,7 @@ function pickerRowsHtml() {
       <button type="button" class="create-chat-picker-row ab-picker-row${ticked ? " picked" : ""}${otherNetwork ? " ab-other-network" : ""}" data-ab-pick="${esc(entry.address)}"${pickerState.multiple ? ` aria-pressed="${ticked}"` : ""}${otherNetwork ? " disabled" : ""}>
         ${addressBookAvatarHtml(entry.address, "create-chat-picker-avatar")}
         <span class="create-chat-picker-copy">
-          <span class="create-chat-picker-name">${esc(entry.name)}</span>
+          <span class="create-chat-picker-name">${esc(entryName(entry))}</span>
           <span class="create-chat-picker-sub">${esc(short(entry.address))}</span>
           ${otherNetwork ? `<span class="ab-other-network-note">${esc(otherNetwork)}</span>` : ""}
         </span>

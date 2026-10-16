@@ -106,11 +106,14 @@ function readJson(key) {
   } catch { return null; }
 }
 
-function cleanEntry(raw) {
+// `name` may be empty: the person removed the name they gave, and the address goes by who it is
+// on chain again (its .kachat name, else the address) - iOS 2831fab AddressBookEntry.customName.
+// An export file's rows still need one (`requireName`), as iOS importExport skips them.
+function cleanEntry(raw, { requireName = false } = {}) {
   if (!raw || typeof raw !== "object") return null;
   const address = normalizeAddressBookAddress(raw.address);
   const name = String(raw.name ?? "").trim();
-  if (!address || !name) return null;
+  if (!address || (requireName && !name)) return null;
   const createdAt = parseTime(raw.createdAt) || parseTime(raw.updatedAt) || config.now();
   return {
     id: UUID_PATTERN.test(String(raw.id || "")) ? String(raw.id).toLowerCase() : newUuid(),
@@ -234,7 +237,8 @@ export function addressBookEntry(address) {
   return entry ? { ...entry } : null;
 }
 
-/** The saved name for an address, or null - cheap, for display names. */
+/** The saved name for an address, or null when it has none (an entry may keep an empty name:
+ *  iOS 2831fab `customName`) - cheap, for display names. */
 export function addressBookName(address) {
   const key = normalizeAddressBookAddress(address);
   if (!key) return null;
@@ -269,14 +273,14 @@ export function hasAddressBookPhoto(address) {
 /**
  * Adds `address`, or updates its entry when it is already saved. `photo`: undefined keeps the
  * saved photo, a data URL sets it, null removes it. Throws an Error whose message is the text
- * to show ("Open a wallet first." / "Enter a name." / "Enter a valid Kaspa address.").
+ * to show ("Open a wallet first." / "Enter a valid Kaspa address."). An empty name is allowed
+ * (iOS 2831fab): the entry keeps its note and photo, and the address goes by who it is on chain.
  */
 export function saveAddressBookEntry({ address, name, note = "", photo } = {}) {
   const c = load();
   if (!c.wallet) throw new Error("Open a wallet first.");
   const key = normalizeAddressBookAddress(address);
   const cleanName = String(name ?? "").trim();
-  if (!cleanName) throw new Error("Enter a name.");
   let otherNetwork = null;
   try { otherNetwork = key ? config.otherNetworkReason(key) : null; } catch { otherNetwork = null; }
   if (otherNetwork) throw new Error(otherNetwork);
@@ -463,7 +467,7 @@ export function importAddressBookExport(input) {
   let named = 0;
   let otherNetworkMessage = null;
   for (const raw of file.entries) {
-    const entry = cleanEntry(raw);
+    const entry = cleanEntry(raw, { requireName: true });
     if (!entry) continue;
     let ok = false;
     try { ok = config.isValidAddress(entry.address) !== false; } catch { ok = false; }
@@ -551,7 +555,7 @@ export function mergeAddressBooks(entrySides = [], tombstoneSides = []) {
     for (const raw of Array.isArray(side) ? side : []) {
       if (!raw || typeof raw !== "object") continue;
       const address = normalizeAddressBookAddress(raw.address);
-      if (!address || !String(raw.name ?? "").trim()) continue;
+      if (!address) continue;
       const at = parseTime(raw.updatedAt);
       const have = latest.get(address);
       if (have && have.at >= at) continue;

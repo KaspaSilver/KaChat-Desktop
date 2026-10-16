@@ -1790,6 +1790,32 @@ export const IndexerAPI = Object.freeze({
     return { events: reqArray(j, "events", "events").map((x) => IndexerAPI.event(x)), next: optString(j, "next", "events") };
   },
 
+  /** `GET /stats/names`, the parts the app reads (iOS f5d34f4 StatsJSON): transaction counts and
+   *  fees (sompi as strings), each over 24 hours, 7 days and all time ->
+   *  `{ transactions: Counts|null, activity: { [kind]: Counts }|null, fees: { total, last24h,
+   *  last7d } (strings)|null }`, Counts = `{ total, last24h, last7d }` (BigInt). */
+  stats(j) {
+    const w = "stats";
+    if (j == null || typeof j !== "object") throw decodeFail(w);
+    const count = (v) => {
+      const n = intOf(v, w);
+      if (n < 0n) throw decodeFail(w);
+      return n;
+    };
+    const counts = (o) => {
+      if (o == null || typeof o !== "object" || Array.isArray(o)) throw decodeFail(w);
+      return { total: count(o.total), last24h: count(o.last24h), last7d: count(o.last7d) };
+    };
+    const t = optObject(j, "transactions", w);
+    const a = optObject(j, "activity", w);
+    const f = optObject(j, "fees", w);
+    return {
+      transactions: t == null ? null : counts(t),
+      activity: a == null ? null : Object.fromEntries(Object.entries(a).map(([kind, v]) => [kind, counts(v)])),
+      fees: f == null ? null : { total: reqString(f, "total", w), last24h: reqString(f, "last24h", w), last7d: reqString(f, "last7d", w) },
+    };
+  },
+
   /** An offer object -> OfferInfo|null (`name` falls back to `fallbackName`; the buyer and seller
    *  addresses must decode to x-only keys). An indexer without the seller (registry v2) gives
    *  null: a v3 offer can't be accepted or declined without it. */

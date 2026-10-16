@@ -1082,6 +1082,9 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
       text: memo ? `Received ${amountKas} ${KAS_UNIT} — ${memo}` : `Received ${amountKas} ${KAS_UNIT}`, sender: contact.address, receiver: walletAddress,
       status: "confirmed", txid, confirmations: 1, network: NETWORK, messageType: "payment",
       paymentAmountKas: amountKas, transport: "kaspa-payment-rest", createdAt, updatedAt: Date.now(),
+      // Sent from a chat (a kchat:1:pay: / tip payload), not a plain transfer: the chat's own news,
+      // which notifies (iOS dcb329a "Sent you 1.5 KAS"); a plain transfer is Address Activity's.
+      chatPayment: Boolean(paymentPayloadEncryptedHex(tx?.payload)),
     });
     known.add(txid);
   }

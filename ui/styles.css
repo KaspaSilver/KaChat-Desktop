@@ -6255,6 +6255,16 @@ body.session-logged-out [data-account-rename-modal] {
   color: var(--kaspa-ink); font-weight: 750; font-size: 12.5px;
 }
 .kaposts-follow.following { color: var(--muted); font-weight: 600; }
+/* The bell beside Follow (iOS a6bd60a): outlined off, filled on, always the accent. */
+.kaposts-bell {
+  flex-shrink: 0; border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+  display: inline-flex; align-items: center; color: var(--kaspa-ink);
+}
+.kaposts-bell svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-bell.on svg { fill: currentColor; }
+.kaposts-bell:hover { opacity: .82; }
+/* What the bell just did, for a moment under the name. */
+.kaposts-bell-note { color: var(--kaspa-ink); font-size: 11.5px; font-weight: 650; margin-top: -2px; }
 .kaposts-cell-text { font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .kaposts-cell-text.folded {
   display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden;
@@ -6304,6 +6314,10 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-action.kaposts-tip span { font-size: 12.5px; }
 .kaposts-action.kaposts-tip:hover { opacity: .82; }
 .kaposts-tip-logo { width: 15px; height: 15px; border-radius: 50%; }
+/* How many times it was tipped, inside the Tip button (iOS 8015069); your own post's logo + count. */
+.kaposts-action.kaposts-tip .kaposts-tip-count { font-size: 11.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.kaposts-action.kaposts-tips-own { gap: 4px; }
+.kaposts-action.kaposts-tips-own span { font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .kaposts-countdown {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 50%;
@@ -6441,78 +6455,34 @@ body.session-logged-out [data-account-rename-modal] {
 .hub-empty h3 { margin: 0; font-size: 16px; }
 .hub-empty p { margin: 0; max-width: 42ch; font-size: 13px; color: var(--muted); line-height: 1.55; }
 
-.settings-page-form.dock-editor { display: grid; gap: 8px; }
-.dock-editor-head { display: flex; flex-direction: column; gap: 4px; }
-.dock-editor-head strong { font-size: 13.5px; }
-.dock-editor-head small { font-size: 12px; color: var(--muted); line-height: 1.45; }
-.dock-editor-head-split { flex-direction: row; align-items: baseline; justify-content: space-between; }
-.dock-editor-head-split strong { white-space: nowrap; }
-/* The settings form's own span rule stretches this to fill the row, so the count is right-ALIGNED
-   rather than right-positioned - space-between has nothing to push when one item already fills. */
-.dock-editor-count { font-size: 12px; color: var(--muted); text-align: right; }
-.dock-editor-count.full { color: var(--ios-orange); }
-/* Not the Hub's fixed three columns: this grid takes as many as the width allows, so the four
-   tiles a default arrangement has sit on ONE row and the dock preview stays above the fold. Three
-   across with a near-empty second row was what pushed it under. */
-.dock-editor-grid {
-  padding: 0;
-  overflow: visible;
-  max-width: none;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-}
-.dock-editor-grid .hub-tile { aspect-ratio: auto; min-height: 72px; gap: 6px; padding: 9px 6px; }
-.dock-editor-grid .hub-tile-icon { height: 24px; }
-.dock-editor-grid .hub-tile-icon svg,
-.dock-editor-grid .hub-tile-icon img { width: 22px; height: 22px; }
-.dock-editor-grid .hub-tile-label { font-size: 11.5px; }
-.dock-editor-empty {
-  margin: 0;
-  padding: 24px 16px;
-  border: 1.5px dashed rgba(255,255,255,.25);
-  border-radius: 18px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--muted);
-}
-.dock-editor-refusal { color: var(--ios-orange); }
-/* The dock drawn the way it is drawn for real, because the point of the screen is that it looks
-   like the thing being arranged. No placeholder slots for the spare capacity: the real dock
-   divides its width between however many items it has, so a preview with a gap on the right would
-   be showing an arrangement nobody is going to see. The count says how much room is left. */
-.dock-editor-preview {
-  display: flex;
-  gap: 4px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 24px;
-  background: #0d1116;
-}
-.dock-preview-item {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 4px;
-  border: 0;
-  border-radius: 16px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.dock-preview-item:hover { background: var(--surface-2); }
-.dock-preview-item.dragging { opacity: .45; }
-/* Pinned items are dimmed rather than hidden: they hold their real position, and the dimming is
-   what says "this one is not yours to move OUT" before you click it. Dragging them is still fine,
-   because a reorder cannot evict anything. */
-.dock-preview-item.pinned { opacity: .55; }
-.dock-preview-icon { display: grid; place-items: center; height: 24px; }
-.dock-preview-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.dock-preview-icon img { width: 22px; height: 22px; object-fit: contain; }
-.dock-preview-label { font-size: 10px; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dock-editor-hint { font-size: 11.5px; color: var(--muted); line-height: 1.45; text-align: center; }
+/* Customize Dock (iOS 4da34ab MenuVisibilityView): the dock and Kaspa Hub as two drag lists. Each
+   row is lock or red minus (dock) / green plus (Hub, only while the dock has room), the tab's icon,
+   its name, and the grip it is dragged by - on the right, where iOS's edit mode draws it. */
+.dock-list-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.dock-list-count { padding-right: 4px; color: var(--muted); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dock-row { min-height: 52px; padding: 9px 9px 9px 15px; gap: 14px; }
+.dock-row-control, .dock-row-lock { flex: 0 0 24px; width: 24px; height: 24px; display: grid; place-items: center; }
+.dock-row-control { padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.dock-row-control svg { width: 22px; height: 22px; }
+.dock-row-control circle { stroke: none; }
+.dock-row-control.remove circle { fill: var(--ios-red); }
+.dock-row-control.add circle { fill: var(--ios-green); }
+.dock-row-control path { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; }
+.dock-row-lock { color: var(--muted); }
+.dock-row-lock svg { width: 15px; height: 15px; }
+.dock-row-lock rect { fill: currentColor; stroke: none; }
+.dock-row-lock path { fill: none; stroke: currentColor; stroke-width: 2.4; }
+.dock-row-icon { flex: 0 0 28px; width: 28px; display: grid; place-items: center; color: var(--kaspa-ink); }
+.dock-row-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dock-row-icon img { width: 20px; height: 20px; object-fit: contain; }
+.dock-row-icon .kmkt-wordmark { width: 28px !important; max-width: 28px; height: auto !important; fill: currentColor; stroke: none; }
+.dock-row-label { flex: 1; min-width: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* touch-action: none so a finger on the grip drags the row instead of scrolling the page. */
+.dock-row-grip { flex: 0 0 36px; width: 36px; height: 36px; display: grid; place-items: center; color: var(--muted); cursor: grab; touch-action: none; }
+.dock-row-grip svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.dock-list.reordering { user-select: none; -webkit-user-select: none; }
+.dock-list.reordering, .dock-list.reordering .dock-row-grip { cursor: grabbing; }
+.dock-row.dragging { position: relative; z-index: 1; background: var(--surface-2); box-shadow: 0 6px 18px rgba(0,0,0,.35); }
 
 @media (max-width: 859px) {
   .hub-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -6632,6 +6602,10 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-notification-kind.kind-dislike { color: var(--ios-orange); }
 .kaposts-notification-kind.kind-reply, .kaposts-notification-kind.kind-follow, .kaposts-notification-kind.kind-mention { color: var(--kaspa-ink); }
 .kaposts-notification-kind.kind-quote, .kaposts-notification-kind.kind-repost { color: var(--ios-green); }
+/* A tip's badge is the Tip button's own mark, the Kaspa logo (iOS 09f6ae0). */
+.kaposts-notification-kind.kind-tip img { width: 12px; height: 12px; border-radius: 50%; display: block; }
+/* Who tipped a post (iOS a6bd60a / 8015069): the amount at the row's end, in the accent. */
+.kaposts-tipper-amount { flex-shrink: 0; color: var(--kaspa-ink); font-weight: 700; font-size: 13.5px; font-variant-numeric: tabular-nums; }
 .kaposts-notification-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; }
 .kaposts-notification-snippet { color: var(--muted); font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .kaposts-view-link { flex-shrink: 0; border: 0; background: transparent; color: var(--kaspa-ink); font-weight: 800; font-size: 12.5px; text-decoration: underline; cursor: pointer; }
@@ -12134,7 +12108,7 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .kachat-expired-banner-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
 
 /* The .kachat wordmark is wider than tall: sized by height in the dock and the Hub grid. */
-.kachat-wordmark-icon svg, .hub-tile-icon .kmkt-wordmark, .dock-preview-icon .kmkt-wordmark { width: auto !important; max-width: 44px; height: 18px !important; fill: currentColor; stroke: none; }
+.kachat-wordmark-icon svg, .hub-tile-icon .kmkt-wordmark { width: auto !important; max-width: 44px; height: 18px !important; fill: currentColor; stroke: none; }
 
 /* The KNS create/edit buttons on the Profile hero are retired (iOS 09e0403): the hero edits your
    .kachat profile; a .kas profile is edited from its domain in Your Domains. */

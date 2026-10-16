@@ -98,6 +98,11 @@ export const KAPOSTS_PROTOCOL = Object.freeze({
     `kchat:1:poll:${pubkey}:${signature}:${b64Question}:${optionsCsv}:${closesAtMs}:${mentionsJson}`,
   pollVotePayload: (pubkey, signature, pollId, optionIndex) =>
     `kchat:1:pollvote:${pubkey}:${signature}:${pollId}:${optionIndex}`,
+  // Tips (§5.11, iOS a6bd60a): the sealed note is in what is signed, so two tips of one post never
+  // share a signature. Sent to the author's chatting address, not as a self-send (buildKaPostTipPayload).
+  tipSigningString: (postId, authorPubkey, sealedHex) => `tip:${postId}:${authorPubkey}:${sealedHex}`,
+  tipPayload: (pubkey, signature, postId, authorPubkey, sealedHex) =>
+    `kchat:1:tip:${pubkey}:${signature}:${postId}:${authorPubkey}:${sealedHex}`,
   // Scheduled posts (§5.10): what the author signs when handing a signed transaction to the indexer.
   scheduleSigningString: (txId, notBeforeMs) => `schedule:${txId}:${notBeforeMs}`,
   cancelScheduleSigningString: (txId) => `cancel-schedule:${txId}`,
@@ -385,6 +390,16 @@ export async function fetchFollowListAll({ engine, pubkey, followers = false, ma
   return rows;
 }
 
+/** Who tipped a post, newest first (`get-post-tippers`, KAPOSTS_INDEXER.md 5.11, iOS a6bd60a
+ *  fetchTippers): rows `{ id (the tip's txid), userPublicKey, amountSompi, timestamp }`. */
+export async function fetchPostTippers({ postId, limit = 50, before = null } = {}) {
+  const json = await kapostGet("get-post-tippers", { postId, limit, before });
+  return {
+    tippers: Array.isArray(json?.tippers) ? json.tippers : [],
+    pagination: json?.pagination || null,
+  };
+}
+
 export async function fetchKaPostUserDetails({ engine, pubkey } = {}) {
   return kapostGet("get-user-details", {
     user: pubkey, requesterPubkey: requesterPubkeyFor(engine),
@@ -426,6 +441,34 @@ async function submitKaPostPayload(engine, protocolString) {
   if (!txid) throw new Error("KaPost transaction broadcast returned no txid.");
   engine.log?.(`KaPost action on-chain: ${protocolString.slice(0, 12)}… tx ${txid.slice(0, 12)}…`);
   return txid;
+}
+
+/**
+ * A KaPosts tip's payload (KAPOSTS_INDEXER.md 5.11, iOS a6bd60a sendPaymentInternal(tip:)): the
+ * same sealed payment record a chat payment carries (memo and amount, sealed to the author's chat
+ * key), inside a payload signed by the tipper that names the post:
+ *   kchat:1:tip:<pubkey>:<signature>:<post_id>:<author_pubkey>:<sealed_hex>
+ * Not sent here: the caller pays it from the chatting address to `receiver` (the author's chatting
+ * address), like a chat payment. Returns { payloadBytes (UTF-8 of the text), payloadText, sealedHex }.
+ */
+export async function buildKaPostTipPayload({ engine, receiver, note = "", amountSompi, postId, authorPubkey }) {
+  if (!/^[0-9a-f]{64}$/i.test(String(postId || ""))) throw new Error("This post isn't on the network yet.");
+  if (!/^0[23][0-9a-f]{64}$/i.test(String(authorPubkey || ""))) throw new Error("This post has no author key.");
+  const { sealedHex } = await engine.sealPaymentRecord({ receiver, note, amountSompi });
+  return kaPostTipPayloadFor({
+    pubkey: requesterPubkeyFor(engine),
+    sign: (message) => signKaPostString(engine, message),
+    postId: String(postId).toLowerCase(),
+    authorPubkey: String(authorPubkey).toLowerCase(),
+    sealedHex,
+  });
+}
+
+/** The signing and assembly half of buildKaPostTipPayload, with the seal already made. */
+export function kaPostTipPayloadFor({ pubkey, sign, postId, authorPubkey, sealedHex }) {
+  const signature = sign(KAPOSTS_PROTOCOL.tipSigningString(postId, authorPubkey, sealedHex));
+  const payloadText = KAPOSTS_PROTOCOL.tipPayload(pubkey, signature, postId, authorPubkey, sealedHex);
+  return { payloadBytes: new TextEncoder().encode(payloadText), payloadText, sealedHex };
 }
 
 /**

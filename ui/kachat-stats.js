@@ -37,6 +37,8 @@ const ICONS = {
   renew: svg(`<circle cx="12" cy="12" r="9"/><path d="M16 12a4 4 0 1 1-1.2-2.85"/><path d="M15.2 6.9v2.5h-2.5"/>`),
   cart: svg(`<path d="M2.5 3.5h2.6l2.4 11.2a1.5 1.5 0 0 0 1.5 1.2h8.5a1.5 1.5 0 0 0 1.5-1.2l1.4-7.2H6.2"/><circle cx="9.6" cy="20" r="1.3"/><circle cx="17.4" cy="20" r="1.3"/>`),
   handRaised: svg(`<path d="M8 13.2V5.6a1.5 1.5 0 0 1 3 0V11M11 10.6V4.1a1.5 1.5 0 0 1 3 0v6.5M14 10.6V5.6a1.5 1.5 0 0 1 3 0v7.2M17 9.6a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-1.2a6 6 0 0 1-4.6-2.2L4 14.7a1.6 1.6 0 0 1 2.4-2.1L8 14.2"/>`),
+  // .kachat Domains card (iOS f5d34f4: "at")
+  at: svg(`<circle cx="12" cy="12" r="3.6"/><path d="M15.6 8.6v4.6a2.4 2.4 0 0 0 4.8 0V12a8.4 8.4 0 1 0-3.3 6.7"/>`),
   tag: svg(`<path d="M3.5 12.2V4.6a1.1 1.1 0 0 1 1.1-1.1h7.6a1.1 1.1 0 0 1 .8.3l7.7 7.7a1.1 1.1 0 0 1 0 1.6l-7.6 7.6a1.1 1.1 0 0 1-1.6 0l-7.7-7.7a1.1 1.1 0 0 1-.3-.8Z"/><circle cx="8" cy="8" r="1.4"/>`),
 };
 
@@ -82,6 +84,10 @@ let snapshot = null;
 let failure = null;
 let isLoading = false;
 let sourceKey = "";
+/** .kachat registry transactions over 24 hours, 7 days and all time (iOS f5d34f4) - from the
+ *  registry itself (its indexer, or the chain), so it shows wherever names are live. `{ last24h,
+ *  last7d, total }` (BigInt), or null where names aren't live. */
+let kachatTransactions = null;
 
 const esc = (v) => deps.escapeHtml(String(v ?? ""));
 const numberFormat = new Intl.NumberFormat();
@@ -193,6 +199,20 @@ async function refresh(force) {
     failure = "unavailable";
   }
   render();
+}
+
+/** The .kachat Domains card's numbers (iOS f5d34f4 loadKachatTransactions): null where names
+ *  aren't live; a failed read keeps the last ones. */
+async function loadKachatTransactions() {
+  let totals;
+  try { totals = await deps.kachatTotals?.(); } catch { return; }
+  kachatTransactions = totals?.transactions ?? null;
+  render();
+}
+
+/** Both: the indexers' stats and the .kachat card's (iOS .task / .refreshable). */
+function refreshAll(force) {
+  return Promise.all([refresh(force).catch(() => {}), loadKachatTransactions()]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -326,6 +346,28 @@ function unavailableHtml() {
     </div>`;
 }
 
+/** The .kachat Domains card: how many registry transactions there were in each range, the
+ *  selected range's title highlighted (iOS f5d34f4 kachatCard). */
+function kachatCardHtml(totals) {
+  const columns = RANGES.map((r) => `
+        <div class="kstats-kachat-column">
+          <strong>${esc(numberFormat.format(totals[r.field] ?? 0n))}</strong>
+          <small${r.id === range ? ' class="is-selected"' : ""}>${esc(r.title)}</small>
+        </div>`).join("");
+  return `
+    <div class="profile-card kstats-card kstats-kachat">
+      <div class="kstats-row">
+        <span class="kstats-row-icon" style="background: var(--kstats-mint)">${ICONS.at}</span>
+        <span class="kstats-row-main">
+          <strong>.kachat Domains</strong>
+          <small>Transactions on the .kachat registry</small>
+        </span>
+      </div>
+      <div class="kstats-kachat-columns">${columns}
+      </div>
+    </div>`;
+}
+
 function footerHtml() {
   if (!snapshot) return "";
   const lines = [];
@@ -357,6 +399,7 @@ function render() {
       ${heroHtml(rows)}
       ${pickerHtml()}
       ${content}
+      ${kachatTransactions ? kachatCardHtml(kachatTransactions) : ""}
       ${footerHtml()}
     </div>`;
   screenEl.scrollTop = scrollTop;
@@ -390,7 +433,7 @@ function onClick(event) {
     return;
   }
   if (target.closest("[data-kstats-refresh]") || target.closest("[data-kstats-retry]")) {
-    refresh(true).catch(() => {});
+    refreshAll(true).catch(() => {});
     return;
   }
   if (target.closest("[data-kstats-info]")) {
@@ -402,7 +445,8 @@ function onClick(event) {
 // Lifecycle
 // ---------------------------------------------------------------------------------------------
 
-/** deps: { escapeHtml, indexerUrls: () => string[], infoSheet: ({ title, html }) => Promise } */
+/** deps: { escapeHtml, indexerUrls: () => string[], infoSheet: ({ title, html }) => Promise,
+ *  kachatTotals: () => Promise<{ transactions, fees }|null> (null where names aren't live) } */
 export function initKachatStats(dependencies) {
   deps = dependencies;
   screenEl = document.querySelector("[data-kachat-stats]");
@@ -422,7 +466,7 @@ export function showKachatStats() {
   }
   active = true;
   render();
-  refresh(false).catch(() => {});
+  refreshAll(false).catch(() => {});
 }
 
 export function hideKachatStats() {

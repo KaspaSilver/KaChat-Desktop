@@ -39,8 +39,12 @@
 import { Failure, hex, normalize, validate, isValid, key as nameKey } from "./codec.js";
 import {
   RegistryState, TxView, Lookup, GapInfo, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
-  addressOf, keyOf, shortAddress, compactAddress, p2shAddress, step, decodeAddress,
+  addressOf, keyOf, shortAddress, compactAddress, p2shAddress, step, decodeAddress, parseU64,
 } from "./registry-state.js";
+import { paramsRegisterCost, paramsRenewPrice } from "./manifest.js";
+
+/** A name's length in bytes, as the prices count it (Swift `name.utf8.count`). */
+function utf8Length(name) { return new TextEncoder().encode(String(name)).length; }
 
 export {
   KachatSocialImageResolver, socialImageCachePrefix, socialImageLegacyCachePrefix, socialFreshForMs, socialLookupDeadlineMs, socialRequestTimeoutMs, socialRecentMs,
@@ -723,6 +727,70 @@ export class KachatNamesRegistry {
       return IndexerAPI.events(await this._get(this.source.base, "/market/activity")).events;
     }
     return (this.chainState?.events ?? []).slice().reverse().slice(0, 200);
+  }
+
+  /** How many .kachat transactions there were and what they paid, across the registry - for
+   *  KaChat Stats and the market's Activity page (iOS f5d34f4, Swift `activityTotals()`). An
+   *  indexer reports both (`GET /stats/names`: fees = what each transaction paid miners, the
+   *  registry's price included, since that is how the price is paid). Read from the chain
+   *  instead, the walker counts its events and prices each registration, extension and renewal at
+   *  the registry's fixed prices. -> `{ transactions: Totals, fees: Totals|null }`, Totals =
+   *  `{ last24h, last7d, total }` (BigInt); `fees` is null where they can't be worked out (an
+   *  indexer too old to record them). */
+  async activityTotals() {
+    const m = await this.prepare();
+    if (this.source.kind === "indexer") {
+      const j = IndexerAPI.stats(await this._get(this.source.base, "/stats/names"));
+      let fees = null;
+      if (j.fees) {
+        const t = parseU64(j.fees.total);
+        const d = parseU64(j.fees.last24h);
+        const w = parseU64(j.fees.last7d);
+        if (t != null && d != null && w != null) fees = { last24h: d, last7d: w, total: t };
+      }
+      if (j.transactions) {
+        return { transactions: { last24h: j.transactions.last24h, last7d: j.transactions.last7d, total: j.transactions.total }, fees };
+      }
+      // an indexer from before `transactions`: the per-kind figures, added up
+      const kinds = Object.values(j.activity ?? {});
+      const sum = (k) => kinds.reduce((acc, c) => acc + c[k], 0n);
+      return { transactions: { last24h: sum("last24h"), last7d: sum("last7d"), total: sum("total") }, fees };
+    }
+    return KachatNamesRegistry.totals(this.chainState?.events ?? [], m.params, this._nowMs());
+  }
+
+  /** Counts and prices a walker's events (`activityTotals` from the chain), one per transaction:
+   *  a register at `paramsRegisterCost`, an extend or renew at the renewal price per period.
+   *  Swift `static totals(of:params:nowMs:)`. */
+  static totals(events, params, nowMs) {
+    const now = bigNow(nowMs);
+    const d1 = now - 86_400_000n;
+    const d7 = now - 7n * 86_400_000n;
+    const at = new Map();
+    const paid = new Map();
+    for (const e of events ?? []) {
+      if (!e?.txId) continue;
+      const time = e.at ?? 0n;
+      at.set(e.txId, (at.get(e.txId) ?? 0n) > time ? at.get(e.txId) : time);
+      const years = e.years ?? 0n;
+      if (e.name == null || !(years > 0n)) continue;
+      const length = utf8Length(e.name);
+      if (e.op === "register") {
+        paid.set(e.txId, (paid.get(e.txId) ?? 0n) + paramsRegisterCost(params, length, years));
+      } else if (e.op === "extend" || e.op === "renew") {
+        paid.set(e.txId, (paid.get(e.txId) ?? 0n) + paramsRenewPrice(params, length) * years);
+      }
+    }
+    const transactions = { last24h: 0n, last7d: 0n, total: 0n };
+    const fees = { last24h: 0n, last7d: 0n, total: 0n };
+    for (const [tx, time] of at) {
+      const fee = paid.get(tx) ?? 0n;
+      transactions.total += 1n;
+      fees.total += fee;
+      if (time > d7) { transactions.last7d += 1n; fees.last7d += fee; }
+      if (time > d1) { transactions.last24h += 1n; fees.last24h += fee; }
+    }
+    return { transactions, fees };
   }
 
   // MARK: - Prices (registry v4: fixed, baked into the pinned gap and name templates)

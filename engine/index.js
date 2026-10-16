@@ -8,7 +8,7 @@ import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
 import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
-import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload } from "./kasia-protocol.js";
+import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload, sealPaymentRecord } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
@@ -1577,6 +1577,12 @@ export class KaspaEngine {
       amountSompi,
       encryptMessage: encryptKasiaMessage,
     });
+  }
+
+  /** The same payment record sealed to `receiver`'s chat key, as lowercase hex (iOS a6bd60a
+   *  sealedPaymentHex) - the last field of a KaPosts tip. Returns { sealedHex, clearText }. */
+  async sealPaymentRecord({ receiver, note = "", amountSompi }) {
+    return sealPaymentRecord({ receiver, note, amountSompi, encryptMessage: encryptKasiaMessage });
   }
 
   async createEncryptedHandshakeEnvelope(details) {

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   parsePaymentPoolEnvelope, parsePaymentNotice, validPaymentNotice, encodePaymentNotice,
   paymentNoticeText, sompiPaidToAddress, clampPaymentNoticeMemo, PAYMENT_NOTICE_MAX_MEMO_LENGTH,
-  paymentNoticePlacement, checkPaymentNoticeTx,
+  paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody,
 } from "../engine/payment-notice.js";
 
 let pass = 0;
@@ -137,6 +137,23 @@ test("IOS-083: the chain check wants the exact amount, no payload and no input o
   assert.equal(noInputs.ok, false);
   assert.equal(noInputs.unknown, true);
   assert.equal(checkPaymentNoticeTx(tx({ inputs: [{ previous_outpoint_address: OTHER }] }), args).unknown, undefined);
+});
+
+test("iOS dcb329a: a chat payment's notification body is \"Sent you 1.5 KAS\", no trailing zeros", () => {
+  assert.equal(chatPaymentNotificationBody({ amountKas: "1.5" }), "Sent you 1.5 KAS");
+  assert.equal(chatPaymentNotificationBody({ amountKas: "1.50000000" }), "Sent you 1.5 KAS");
+  assert.equal(chatPaymentNotificationBody({ amountKas: "2" }), "Sent you 2 KAS");
+  assert.equal(chatPaymentNotificationBody({ amountKas: "0.00000001" }), "Sent you 0.00000001 KAS");
+  assert.equal(chatPaymentNotificationBody({ amountSompi: 150_000_000n }), "Sent you 1.5 KAS");
+  assert.equal(chatPaymentNotificationBody({ amountSompi: "250000000", amountKas: "9" }), "Sent you 2.5 KAS", "sompi wins");
+  assert.equal(chatPaymentNotificationBody({ amountSompi: 100_000_000, unit: "TKAS" }), "Sent you 1 TKAS", "the network's unit");
+  // exact past 2^53 sompi
+  assert.equal(chatPaymentNotificationBody({ amountSompi: 9_007_199_254_740_993n }), "Sent you 90071992.54740993 KAS");
+  // unknown or nothing: no amount
+  for (const amount of [{}, { amountKas: "" }, { amountKas: "abc" }, { amountKas: "0" }, { amountSompi: 0 }, { amountSompi: "x" }]) {
+    assert.equal(chatPaymentNotificationBody(amount), "Sent you a payment", JSON.stringify(amount));
+  }
+  assert.equal(chatPaymentNotificationBody(), "Sent you a payment");
 });
 
 for (const [name, fn] of tests) {

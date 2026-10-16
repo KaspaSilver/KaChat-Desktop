@@ -21,6 +21,7 @@ import {
   fetchKaPostNotifications,
   fetchKaPostUserDetails,
   fetchPostEngagement,
+  fetchPostTippers,
   fetchReplies,
   fetchUserPosts,
   fetchUserReplies,
@@ -58,6 +59,7 @@ import {
 import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { KAS_UNIT } from "../engine/network.js";
+import { kasTextFromSompi } from "../engine/amounts.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
 // Who a poster is: their .kachat name, avatar, banner and bio (iOS 3d6fb7c, KachatLive.identityName /
 // profileBanner / profileBio). Profiles are on every network (mainnet: profile-only identities).
@@ -184,6 +186,63 @@ function savePrefs() {
 
 function isHiddenAuthor(address) {
   return prefs.muted.includes(address) || prefs.blocked.includes(address);
+}
+
+// KaPosts' bell (iOS a6bd60a KaPostsWatchStore, PUSH_EXTENSIONS.md 3a): the people this account
+// wants to hear from whenever they post. Kept per account (each account is its own KaPosts
+// identity), and follows the current account by itself through the account-scoped key.
+// iOS sends the list to its push service as `kaposts_watch_authors` on every change. Desktop has
+// no push channel yet (no device registration with the push service at all), so the choice is
+// only kept here, ready for one; nothing is sent anywhere.
+const KAPOSTS_WATCH_KEY = "kachat-kaposts-watch-v1"; // [lowercased kaspa: address] - account-scoped
+let watchCache = null; // { key, addresses: Set }
+
+function watchedAuthors() {
+  const key = deps.accountScopedKey(KAPOSTS_WATCH_KEY);
+  if (watchCache?.key === key) return watchCache.addresses;
+  let stored = [];
+  try { stored = JSON.parse(localStorage.getItem(key) || "[]"); } catch { stored = []; }
+  watchCache = { key, addresses: new Set((Array.isArray(stored) ? stored : []).map((a) => String(a).toLowerCase())) };
+  return watchCache.addresses;
+}
+
+function isWatchingAuthor(address) {
+  return watchedAuthors().has(String(address || "").toLowerCase());
+}
+
+/** Turns the bell on or off for `address`; returns whether it is now on. */
+function toggleWatchAuthor(address) {
+  const key = String(address || "").toLowerCase();
+  const own = String(deps.engine.address || "").toLowerCase();
+  if (!key || !own || key === own) return false;
+  const set = new Set(watchedAuthors());
+  const on = !set.has(key);
+  if (on) set.add(key); else set.delete(key);
+  const storageKey = deps.accountScopedKey(KAPOSTS_WATCH_KEY);
+  watchCache = { key: storageKey, addresses: set };
+  try { localStorage.setItem(storageKey, JSON.stringify([...set].sort())); } catch { /* kept for this session */ }
+  return on;
+}
+
+// What the bell just did, said for a moment under the name wherever that post shows (iOS bellNote):
+// post id -> text, cleared after 2.8 s unless a newer note replaced it.
+const bellNotes = new Map();
+
+function toggleBell(post) {
+  const on = toggleWatchAuthor(post.posterAddress);
+  const name = posterName(post.posterAddress);
+  const note = on
+    ? `You'll now be notified when ${name} posts.`
+    : `You won't be notified about ${name}'s posts anymore.`;
+  // The feed and thread, and a panel showing post cells (bookmarks, a profile, search) on top.
+  const repaint = () => { renderAll(); if (activePanel) repaintPosterIdentities(); };
+  bellNotes.set(post.id, note);
+  repaint();
+  window.setTimeout(() => {
+    if (bellNotes.get(post.id) !== note) return;
+    bellNotes.delete(post.id);
+    repaint();
+  }, 2800);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +521,7 @@ function clearPagerSentinel(key) {
 }
 
 function clearPanelPagerSentinels() {
-  for (const key of ["profile-posts", "profile-replies", "notifications", "engagement"]) {
+  for (const key of ["profile-posts", "profile-replies", "notifications", "engagement", "engagement-tips", "tippers"]) {
     clearPagerSentinel(key);
   }
 }
@@ -563,6 +622,8 @@ function mapRemotePost(post) {
     likes: post.upVotesCount || 0,
     dislikes: post.downVotesCount || 0,
     reposts: post.quotesCount || 0,
+    // How many times it was tipped (KAPOSTS_INDEXER.md 5.11, iOS a6bd60a); absent on an older indexer.
+    tips: Number(post.tipsCount) || 0,
     likedByMe: post.isUpvoted === true,
     dislikedByMe: post.isDownvoted === true,
     repostedByMe: false,
@@ -1447,11 +1508,21 @@ function pollCardHtml(post) {
     </div>`;
 }
 
+// The bell beside Follow (iOS "bell" / "bell.fill"): outlined off, filled on (.kaposts-bell.on).
+const KAPOSTS_BELL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>`;
+
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false } = {}) {
   const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
   const isMine = post.posterAddress === deps.engine.address;
   const isFollowing = prefs.following.includes(post.posterAddress);
+  // The bell beside Follow, and what it just did (iOS a6bd60a).
+  const isWatching = !isMine && isWatchingAuthor(post.posterAddress);
+  const bellNote = bellNotes.get(post.id) || "";
+  // How many times it was tipped (iOS 8015069): inside the Tip button, beside it like the likes
+  // beside the heart. Your own post has no Tip button: its Kaspa logo and count show on their own,
+  // and a click lists who tipped (Post Activity > Tips lists them for any post).
+  const tips = Math.max(0, Number(post.tips) || 0);
   // Measured on the text on screen (a translation can run longer than the original), with the
   // line count over the first 281 characters, as iOS does.
   const shownText = postDisplayText(post);
@@ -1496,10 +1567,12 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
         <div class="kaposts-cell-head">
           <strong class="kaposts-cell-name" data-kaposts-profile="${pid}">${deps.escapeHtml(name)}</strong>
           ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${pid}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
+          ${!isMine ? `<button class="kaposts-bell${isWatching ? " on" : ""}" type="button" data-kaposts-bell="${pid}" aria-label="${isWatching ? "Stop post notifications" : "Notify me when they post"}" title="${isWatching ? "Stop post notifications" : "Notify me when they post"}">${KAPOSTS_BELL_SVG}</button>` : ""}
           <button class="kaposts-action kaposts-more" type="button" data-kaposts-more="${pid}" aria-label="More">
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
           </button>
         </div>
+        ${bellNote ? `<div class="kaposts-bell-note">${deps.escapeHtml(bellNote)}</div>` : ""}
         <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? foldedPrefix(postDisplayText(post)) : postDisplayText(post))}</div>
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${pid}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
@@ -1521,7 +1594,8 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
           </button>
           <button class="kaposts-action${post.bookmarkedByMe ? " active-bookmark" : ""}" type="button" data-kaposts-bookmark="${pid}" title="${post.bookmarkedByMe ? "Remove Bookmark" : "Bookmark"}">${ICONS.bookmark}</button>
           ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${pid}" title="Copy share link">${ICONS.share}</button>` : ""}
-          ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${pid}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span></button>`}
+          ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${pid}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span>${tips > 0 ? `<span class="kaposts-tip-count">${tips}</span>` : ""}</button>`}
+          ${isMine && tips > 0 && post.remoteId ? `<button class="kaposts-action kaposts-tips-own" type="button" data-kaposts-tippers="${pid}" aria-label="Who tipped this post" title="Who tipped this post"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>${tips}</span></button>` : ""}
         </div>
         <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span></div>
         ${!inThread && isThreadRootPost(post) ? `<button class="kaposts-view-thread" type="button" data-kaposts-open="${pid}">⤷ View thread</button>` : ""}
@@ -2803,7 +2877,7 @@ function renderPanel() {
   const previousTop = panelBodyEl.scrollTop || 0;
   const restorePanelScroll = () => { panelBodyEl.scrollTop = previousTop; };
   const titles = {
-    profile: "Profile", notifications: "Notifications", engagement: "Post Activity", search: "Search",
+    profile: "Profile", notifications: "Notifications", engagement: "Post Activity", tippers: "Tips", search: "Search",
     bookmarks: "Bookmarks", drafts: "Drafts", scheduled: "Scheduled", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
   };
   panelTitleEl.textContent = titles[panel.type === "list" ? panel.kind : panel.type] || "Panel";
@@ -2896,7 +2970,7 @@ function renderPanel() {
             <div class="kaposts-notification-row openable" data-kaposts-notification="${deps.escapeHtml(item.id)}">
               <span class="kaposts-notification-avatar">
                 ${posterAvatarHtml(item.actorAddress)}
-                <span class="kaposts-notification-kind kind-${item.kind}">${NOTIFICATION_KIND_ICONS[item.kind] || NOTIFICATION_KIND_ICONS.other}</span>
+                <span class="kaposts-notification-kind kind-${item.kind}">${item.kind === "tip" ? `<img src="${kaspaLogoUrl}" alt="" aria-hidden="true" />` : (NOTIFICATION_KIND_ICONS[item.kind] || NOTIFICATION_KIND_ICONS.other)}</span>
               </span>
               <div class="kaposts-notification-main">
                 <span><strong>${deps.escapeHtml(posterName(item.actorAddress))}</strong> ${deps.escapeHtml(item.action)}</span>
@@ -2921,25 +2995,21 @@ function renderPanel() {
     const rows = lists[tab] || [];
     const activityPost = findPost(panel.postId);
     const tabLabel = (key, label) => {
-      const loaded = (lists[key] || []).length;
+      const loaded = key === "tips" ? (panel.tips || []).length : (lists[key] || []).length;
       const count = key === "likes" ? Math.max(activityPost?.likes || 0, loaded)
         : key === "dislikes" ? Math.max(activityPost?.dislikes || 0, loaded)
+        : key === "tips" ? Math.max(activityPost?.tips || 0, loaded)
         : loaded;
       return count > 0 ? `${label} (${count})` : label;
     };
-    panelBodyEl.innerHTML = `
-      <div class="kaposts-feed-tabs kaposts-profile-tabs">
-        ${["likes:Likes", "dislikes:Dislikes", "reposts:Reposts", "quotes:Quotes"].map((entry) => {
-          const [key, label] = entry.split(":");
-          return `<button class="kaposts-feed-tab${tab === key ? " active" : ""}" type="button" data-kaposts-engagement-tab="${key}">${tabLabel(key, label)}</button>`;
-        }).join("")}
-      </div>
-      <div class="kaposts-panel-list" data-kaposts-panel-list>
-        ${panel.loading
-          ? `<div class="kaposts-feed-status">Loading…</div>`
-          : rows.length === 0
-            ? `<div class="no-results-card"><strong>Nothing here yet</strong><span>When someone engages with this post, they'll show up here.</span></div>`
-            : rows.map((entry) => `
+    // Tips (iOS 8015069): who tipped, how much and when, from get-post-tippers on its own cursor.
+    const listHtml = tab === "tips"
+      ? tipperRowsHtml(panel, { showError: false })
+      : panel.loading
+        ? `<div class="kaposts-feed-status">Loading…</div>`
+        : rows.length === 0
+          ? `<div class="no-results-card"><strong>Nothing here yet</strong><span>When someone engages with this post, they'll show up here.</span></div>`
+          : rows.map((entry) => `
                 <div class="kaposts-notification-row">
                   ${posterAvatarHtml(entry.actorAddress)}
                   <div class="kaposts-notification-main">
@@ -2947,14 +3017,38 @@ function renderPanel() {
                     <span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(entry.timestamp))}</span>
                   </div>
                   <a class="kaposts-view-link" href="${deps.escapeHtml(deps.explorerTxUrl(entry.actionTxId))}" target="_blank" rel="noopener">View</a>
-                </div>`).join("")}
+                </div>`).join("");
+    panelBodyEl.innerHTML = `
+      <div class="kaposts-feed-tabs kaposts-profile-tabs">
+        ${["likes:Likes", "dislikes:Dislikes", "reposts:Reposts", "quotes:Quotes", "tips:Tips"].map((entry) => {
+          const [key, label] = entry.split(":");
+          return `<button class="kaposts-feed-tab${tab === key ? " active" : ""}" type="button" data-kaposts-engagement-tab="${key}">${tabLabel(key, label)}</button>`;
+        }).join("")}
+      </div>
+      <div class="kaposts-panel-list" data-kaposts-panel-list>
+        ${listHtml}
       </div>
       ${panel.postTxId ? `<a class="kaposts-view-link kaposts-post-tx-link" href="${deps.escapeHtml(deps.explorerTxUrl(panel.postTxId))}" target="_blank" rel="noopener">View Post Transaction in Explorer</a>` : ""}`;
+    const listEl = panelBodyEl.querySelector("[data-kaposts-panel-list]");
+    if (tab === "tips") {
+      clearPagerSentinel("engagement");
+      mountPagerSentinel("engagement-tips", listEl, panel.tipsLoaded ? panel.tipsPager : null, loadMoreTips);
+    } else {
+      clearPagerSentinel("engagement-tips");
+      mountPagerSentinel("engagement", listEl, panel.loading ? null : panel.pager, loadMoreEngagement);
+    }
+    restorePanelScroll();
+    return;
+  }
+
+  if (panel.type === "tippers") {
+    // Who tipped a post (iOS a6bd60a KaPostTippersView): opened from your own post's tip count.
+    panelBodyEl.innerHTML = `<div class="kaposts-panel-list" data-kaposts-panel-list>${tipperRowsHtml(panel, { showError: true })}</div>`;
     mountPagerSentinel(
-      "engagement",
+      "tippers",
       panelBodyEl.querySelector("[data-kaposts-panel-list]"),
-      panel.loading ? null : panel.pager,
-      loadMoreEngagement,
+      panel.tipsLoaded ? panel.tipsPager : null,
+      loadMoreTips,
     );
     restorePanelScroll();
     return;
@@ -3423,8 +3517,15 @@ function saveSeenKaPostNotificationIds(ids) {
   catch {}
 }
 
+/** "tipped your post: 1.5 KAS" (iOS 09f6ae0): contentType "tip" rows carry what the tip paid you. */
+function kaPostsTipActionText(n) {
+  const amount = n?.tipAmountSompi;
+  return amount != null && amount !== "" ? `tipped your post: ${kasTextFromSompi(amount)} ${KAS_UNIT}` : "tipped your post";
+}
+
 function kaPostsNotificationAction(n, text) {
   if (n.contentType === "vote") return n.voteType === "downvote" ? "disliked your post" : "liked your post";
+  if (n.contentType === "tip") return kaPostsTipActionText(n);
   if (n.contentType === "reply") return "replied to your post";
   if (n.contentType === "quote") return text ? "quoted your post" : "reposted your post";
   if (n.contentType === "follow") return "followed you";
@@ -3599,9 +3700,11 @@ function mapNotificationRow(n) {
     targetTxId = text ? n.id : n.contentId;
   } else if (n.contentType === "follow") { action = "followed you"; targetTxId = null; }
   else if (n.contentType === "mention") { action = "mentioned you in a post"; targetTxId = n.contentId || n.id; }
+  // A tip opens the tipped post (contentId), iOS 09f6ae0.
+  else if (n.contentType === "tip") { action = kaPostsTipActionText(n); targetTxId = n.contentId || null; }
   const kind = n.contentType === "vote" ? (n.voteType === "downvote" ? "dislike" : "like")
     : n.contentType === "quote" ? (text ? "quote" : "repost")
-    : ["reply", "follow", "mention"].includes(n.contentType) ? n.contentType : "other";
+    : ["reply", "follow", "mention", "tip"].includes(n.contentType) ? n.contentType : "other";
   return {
     kind,
     id: n.id, actorAddress, action, snippet: text || null,
@@ -3691,9 +3794,12 @@ async function openEngagementPanel(post) {
   activePanel = beginPanel({
     type: "engagement", postId: post.id, postTxId: post.remoteId, tab: "likes", lists: null, loading: true,
     pager: makePager({ pageSize: PAGER_THREAD_PAGE_SIZE }),
+    // the Tips tab's own list (iOS 8015069)
+    tips: [], tipsLoaded: false, tipsError: "", tipsPager: makePager({ pageSize: KAPOSTS_TIPPERS_PAGE_SIZE }),
   });
   const panel = activePanel;
   renderPanel();
+  loadFirstTips(panel);
   const lists = { likes: [], dislikes: [], reposts: [], quotes: [] };
   try {
     const page = await fetchPostEngagement({
@@ -3732,6 +3838,91 @@ async function openEngagementPanel(post) {
   panel.lists = lists;
   panel.loading = false;
   renderPanel();
+}
+
+// ---------------------------------------------------------------------------
+// Tips of a post (KAPOSTS_INDEXER.md 5.11): Post Activity's Tips tab (iOS 8015069) and the list
+// your own post's tip count opens (iOS a6bd60a KaPostTippersView). Both page get-post-tippers,
+// newest first: who tipped, how much and when.
+// ---------------------------------------------------------------------------
+
+const KAPOSTS_TIPPERS_PAGE_SIZE = 50;
+
+function mapTipperRow(row) {
+  const actorAddress = kaspaAddressFromPubkey(deps.engine, row?.userPublicKey);
+  if (!actorAddress || !row?.id) return null;
+  return { id: String(row.id), actorAddress, amountSompi: row.amountSompi ?? 0, timestamp: Number(row.timestamp) || Date.now() };
+}
+
+/** The rows of a panel holding { tips, tipsLoaded, tipsError }. `showError`: the Tips list says
+ *  why it is empty; Post Activity's tab just says there are none (as iOS). */
+function tipperRowsHtml(panel, { showError = false } = {}) {
+  if (!panel.tipsLoaded) return `<div class="kaposts-feed-status">Loading…</div>`;
+  if (!panel.tips.length) {
+    return `<div class="no-results-card"><strong>${deps.escapeHtml((showError && panel.tipsError) || "No tips yet.")}</strong></div>`;
+  }
+  return panel.tips.map((tip) => `
+    <div class="kaposts-notification-row">
+      ${posterAvatarHtml(tip.actorAddress)}
+      <div class="kaposts-notification-main">
+        <span><strong>${deps.escapeHtml(posterName(tip.actorAddress))}</strong></span>
+        <span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(tip.timestamp))}</span>
+      </div>
+      <span class="kaposts-tipper-amount">${deps.escapeHtml(`${kasTextFromSompi(tip.amountSompi)} ${KAS_UNIT}`)}</span>
+    </div>`).join("");
+}
+
+async function loadFirstTips(panel) {
+  const generation = panelGeneration;
+  const isStale = () => generation !== panelGeneration || activePanel !== panel;
+  if (!panel.postTxId) { panel.tipsLoaded = true; panel.tipsPager.hasMore = false; return; }
+  try {
+    const page = await fetchPostTippers({ postId: panel.postTxId, limit: KAPOSTS_TIPPERS_PAGE_SIZE });
+    if (isStale()) return;
+    panel.tips = page.tippers.map(mapTipperRow).filter(Boolean);
+    seedPager(panel.tipsPager, page.tippers, page.pagination);
+    resolvePosterIdentities(panel.tips.map((tip) => tip.actorAddress), () => { if (activePanel === panel) renderPanel(); });
+  } catch (error) {
+    if (isStale()) return;
+    panel.tipsError = userFacingError(error);
+    panel.tipsPager.hasMore = false;
+  }
+  panel.tipsLoaded = true;
+  renderPanel();
+}
+
+function loadMoreTips() {
+  const panel = activePanel;
+  if (!panel?.tipsPager || !panel.postTxId) return;
+  const generation = panelGeneration;
+  return runPager(panel.tipsPager, {
+    fetchPage: async (before, limit) => {
+      const page = await fetchPostTippers({ postId: panel.postTxId, limit, before });
+      return { items: page.tippers, pagination: page.pagination };
+    },
+    absorb: (fresh) => {
+      const rows = fresh.map(mapTipperRow).filter(Boolean);
+      panel.tips = [...panel.tips, ...rows];
+      renderPanel();
+      resolvePosterIdentities(rows.map((tip) => tip.actorAddress), () => { if (activePanel === panel) renderPanel(); });
+      return rows.length;
+    },
+    isStale: () => generation !== panelGeneration || activePanel !== panel,
+    onUpdate: () => renderPanel(),
+  });
+}
+
+function openTippersPanel(post) {
+  rememberFeedScroll();
+  panelGeneration += 1;
+  clearPanelPagerSentinels();
+  activePanel = beginPanel({
+    type: "tippers", postId: post.id, postTxId: post.remoteId,
+    tips: [], tipsLoaded: false, tipsError: "", tipsPager: makePager({ pageSize: KAPOSTS_TIPPERS_PAGE_SIZE }),
+  });
+  const panel = activePanel;
+  renderPanel();
+  loadFirstTips(panel);
 }
 
 /**
@@ -5305,6 +5496,10 @@ export function initKaPosts(dependencies) {
 
     const follow = event.target.closest("[data-kaposts-follow]");
     if (follow) { const p = findPost(follow.dataset.kapostsFollow); if (p) toggleFollow(p); return; }
+    const bell = event.target.closest("[data-kaposts-bell]");
+    if (bell) { const p = findPost(bell.dataset.kapostsBell); if (p) toggleBell(p); return; }
+    const tippers = event.target.closest("[data-kaposts-tippers]");
+    if (tippers) { const p = findPost(tippers.dataset.kapostsTippers); if (p?.remoteId) openTippersPanel(p); return; }
 
     const mentionTap = event.target.closest("[data-kaposts-mention]");
     if (mentionTap) {
@@ -5359,7 +5554,9 @@ export function initKaPosts(dependencies) {
     const tip = event.target.closest("[data-kaposts-tip]");
     if (tip) {
       const p = findPost(tip.dataset.kapostsTip);
-      if (p) deps.tipUser?.(p.posterAddress, posterName(p.posterAddress));
+      // The tip names the post it is for, so the post counts it (iOS a6bd60a, KAPOSTS_INDEXER.md 5.11).
+      const target = p?.remoteId && p?.posterPubkey ? { postId: p.remoteId, authorPubkey: p.posterPubkey } : null;
+      if (p) deps.tipUser?.(p.posterAddress, posterName(p.posterAddress), target);
       return;
     }
 

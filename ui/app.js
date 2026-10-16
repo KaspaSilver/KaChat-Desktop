@@ -3,6 +3,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
+import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { chattingCatchUpLook } from "./address-activity.js";
 import { setChainTimeSource } from "../engine/kachat-names/launch.js";
@@ -13,22 +14,22 @@ import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
-import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx } from "../engine/payment-notice.js";
+import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
-import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64 } from "../engine/kaposts.js";
+import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames } from "./kachat-names-live.js";
+import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
 import {
   configureAddressBook, addressBookName, addressBookEntry, addressBookIsEmpty, archiveAddressBook,
-  importAddressBookArchive, mergeAddressBookArchives, removeAddressBookForWallet,
+  importAddressBookArchive, mergeAddressBookArchives, removeAddressBookForWallet, saveAddressBookEntry,
 } from "./address-book-store.js";
 import {
   initAddressBook, showAddressBook, hideAddressBook, resetAddressBookForAccount, openAddressBookEditor,
@@ -3186,10 +3187,17 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   }
   // Don't notify for the conversation you're already looking at in a focused window.
   if (activeConversationId === conversationEntry.id && !document.hidden) return;
+  // Who sent it - the name you gave them, else their .kachat name, else the short address - and a
+  // chat payment says what: "Sent you 1.5 KAS" (iOS dcb329a). A notice still reads "Received
+  // payment", never the amount it claims.
   const title = displayNameForAddress(contact) || contact?.name || shortAddress(contact?.address || "");
+  let body;
+  if (poolEnvelope) body = "Received payment";
+  else if (isPaymentBubble(message)) body = chatPaymentNotificationBody({ amountKas: message.paymentAmountKas, unit: KAS_UNIT });
+  else body = displayTextForMessage(message) || "New message";
   showAppNotification({
     title,
-    body: poolEnvelope ? "Received payment" : (displayTextForMessage(message) || "New message"),
+    body,
     tag: `kachat-${conversationEntry.id}`,
     silent: mode !== "sound",
     route: { kind: "chat", conversationId: conversationEntry.id },
@@ -5671,7 +5679,13 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
         if ((conversationEntry.messages || []).some((message) => message.txid && message.txid === incoming.txid)) continue;
         const message = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
         applyMessagePatch(message, incoming);
-        if (appendIncomingOrReactionMessage(conversationEntry, message)) added += 1;
+        if (appendIncomingOrReactionMessage(conversationEntry, message)) {
+          added += 1;
+          // A live payment sent from their chat notifies like a message: "<who>" / "Sent you 1.5
+          // KAS" (iOS dcb329a, the "payment" push). A plain transfer is Address Activity's banner
+          // (iOS 56b75c8), so it stays silent here.
+          if (incoming.chatPayment && !catchUp && isLiveMessageTime(message.createdAt)) maybeNotifyIncoming(conversationEntry, contact, message);
+        }
       }
     } catch (error) {
       appendEngineLog(`Payment sync failed for ${contact.name}: ${error.message}`);
@@ -5945,8 +5959,8 @@ const KACHAT_PAYLOAD_HEX_PREFIXES = Object.freeze([
   String(KASIA_PROTOCOL?.legacyPrefix?.hex || "636970685f6d73673a").toLowerCase(),
 ]);
 // A chat payment's payload roots (engine/kasia-protocol.js PAYMENT_PAYLOAD_ROOTS), hex-encoded as
-// the REST API serves them.
-const CHAT_PAYMENT_HEX_PREFIXES = ["kchat:1:pay:", "ciph_msg:1:pay:", "ciph_msg:pay:"]
+// the REST API serves them - and a KaPosts tip, a chat payment that names the post (iOS a6bd60a).
+const CHAT_PAYMENT_HEX_PREFIXES = ["kchat:1:pay:", "ciph_msg:1:pay:", "ciph_msg:pay:", "kchat:1:tip:"]
   .map((root) => Array.from(new TextEncoder().encode(root), (b) => b.toString(16).padStart(2, "0")).join(""));
 function isChatPaymentPayloadHex(payloadHex) {
   const payload = String(payloadHex || "").toLowerCase();
@@ -9289,30 +9303,24 @@ sidebarTabButtons.forEach((button) => {
 // Placement, not visibility (iOS AppTab). Every assignable tab is either IN THE DOCK or IN THE
 // HUB, and always in exactly one of them, so a feature can never end up nowhere. The dock holds
 // five items at most - the phones' hard cap, kept here so an arrangement made on one device
-// describes the same dock on the other - and Kaspa Hub and Profile are pinned into it: the Hub
-// because it is what holds everything not in the dock, Profile because it is the way to Settings
-// and the account list.
+// describes the same dock on the other - and Chats, Kaspa Hub and Profile are pinned into it
+// (iOS 0a3848f). The tab lists and the arrangement rules live in ui/dock-arrangement.js.
 // ---------------------------------------------------------------------------
 
 const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
-const DOCK_MAX_ITEMS = 5;
-const DOCK_PINNED = ["hub", "profile"];
-/** Tabs the user can place. Excludes the pinned two. */
-// .kachat and KaChat Stats (iOS 5.2) are Hub sections like the rest: first in the Hub on a fresh
-// install, appended for an existing arrangement (normalizeDockPrefs), assignable to the dock.
-// Address Book (iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
-// KaChat Bots (iOS 82ab31d AppTab.kachatBots) follows KaChat Stats in the Hub; Simple Mode keeps it.
-const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book", "kachat-bots"]; // Public Chats live under Chats now (iOS a566da7)
-const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "kaposts", "apps", "chess"];
-const DOCK_DEFAULT =["cold-storage", "portfolio", "chats", "hub", "profile"];
-const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kachat-bots", "kaposts", "apps", "chess"];
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
 const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
-  const btn = document.querySelector(`.sidebar-tab[data-app-tab="${tab}"] > span:last-child`);
-  return btn?.textContent?.trim() || tab;
+  return tabDockLabel(tab);
+}
+
+/** The short name the dock button wears (iOS AppTab.label). Not `span:last-child`: a badge
+ *  appended to the button would be read as the name. */
+function tabDockLabel(tab) {
+  const label = document.querySelector(`.sidebar-tab[data-app-tab="${tab}"] > span:not(.sidebar-tab-icon):not(.sidebar-tab-badge)`);
+  return label?.textContent?.trim() || tab;
 }
 
 /** The tab's dock glyph, cloned out of its dock button so the two can never drift apart. */
@@ -9333,49 +9341,15 @@ function loadDockPrefs() {
   if (stored && Array.isArray(stored.hiddenTabs) && !Array.isArray(stored.dock)) {
     const order = (Array.isArray(stored.order) ? stored.order : DOCK_DEFAULT_ORDER)
       .filter((t) => DOCK_ASSIGNABLE.includes(t) && !stored.hiddenTabs.includes(t));
-    const dock = [];
-    for (const tab of order) {
-      if (dock.length >= DOCK_MAX_ITEMS - DOCK_PINNED.length) break;
-      dock.push(tab);
-    }
-    return normalizeDockPrefs({ dock, hub: [] });
+    // normalizeDockPrefs keeps the first picks up to the cap and slots the pinned tabs in.
+    return normalizeDockPrefs({ dock: order, hub: [] });
   }
 
   if (stored && Array.isArray(stored.dock)) return normalizeDockPrefs(stored);
   return normalizeDockPrefs({ dock: [...DOCK_DEFAULT], hub: [...HUB_DEFAULT] });
 }
 
-/** Resolves any stored pair into a legal arrangement: pinned present, cap respected, every
- *  assignable tab in exactly one list. Anything a stored list has never heard of (a tab added by
- *  an update) is appended in default order rather than lost. */
-function normalizeDockPrefs(prefs) {
-  const seen = new Set();
-  const dock = [];
-  for (const tab of Array.isArray(prefs.dock) ? prefs.dock : []) {
-    if (!DOCK_ASSIGNABLE.includes(tab) && !DOCK_PINNED.includes(tab)) continue;
-    if (seen.has(tab) || dock.length >= DOCK_MAX_ITEMS) continue;
-    seen.add(tab); dock.push(tab);
-  }
-  // Reinserted whatever the stored list says, so no saved arrangement can leave the app without
-  // the Hub that holds everything else, or without Profile.
-  for (const pinned of DOCK_PINNED) {
-    if (seen.has(pinned)) continue;
-    if (dock.length >= DOCK_MAX_ITEMS) dock.pop();
-    const at = Math.min(DOCK_DEFAULT.indexOf(pinned), dock.length);
-    dock.splice(at < 0 ? dock.length : at, 0, pinned);
-    seen.add(pinned);
-  }
-  const hub = [];
-  for (const tab of Array.isArray(prefs.hub) ? prefs.hub : []) {
-    if (!DOCK_ASSIGNABLE.includes(tab) || seen.has(tab)) continue;
-    seen.add(tab); hub.push(tab);
-  }
-  for (const tab of DOCK_DEFAULT_ORDER) {
-    if (!DOCK_ASSIGNABLE.includes(tab) || seen.has(tab)) continue;
-    seen.add(tab); hub.push(tab);
-  }
-  return { dock, hub };
-}
+// normalizeDockPrefs (ui/dock-arrangement.js) resolves any stored pair into a legal arrangement.
 
 let dockPrefs = loadDockPrefs();
 
@@ -9385,6 +9359,8 @@ function persistDockPrefs() {
 
 function reloadDockPrefsForAccount() {
   dockPrefs = loadDockPrefs();
+  // A draft open across an account switch was the other account's: start again from this one's.
+  if (dockDraft) dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
   hubSection = null;
   applyDockLayout();
 }
@@ -9541,66 +9517,78 @@ document.querySelector("[data-open-customize-dock]")?.addEventListener("click", 
 
 // --- Customize Dock ---------------------------------------------------------
 //
-// The Hub grid up top and the dock bar along the bottom, both drawn the way they actually appear,
-// because the screen is about a layout and a list of switches was not one (iOS MenuVisibilityView).
+// Two lists ordered by dragging, the way Brave arranges its menu actions (iOS 4da34ab
+// MenuVisibilityView). Your Dock is the dock itself, all of it, in order: every row drags, Chats,
+// Kaspa Hub and Profile included - always there, so they carry a lock instead of a remove button -
+// and the two picks carry a red minus that sends them to the top of Kaspa Hub. Kaspa Hub lists
+// everything else in its grid order, also by dragging, each with a green plus that moves it to the
+// end of the dock, shown only while the dock has room (five at most).
 //
-// Two gestures, one job each. A CLICK moves a tab between the two. A DRAG only reorders, within
-// whichever section the tab is already in - dragging across to a target you cannot see while the
-// pointer is over it was the fiddly part, so moving is a click and dragging is left to the one
-// thing a click cannot express, which is position.
+// The arrangement is a draft until this screen is left (iOS 1b7618c, 0ec564e): the live dock is
+// rebuilt once, on the way out, from the arrangement as it stood when the screen closed. iOS waits
+// 0.6 s after the close because UIKit could leave the next page black; nothing here needs that.
 
-const dockHubGrid = document.querySelector("[data-dock-hub-grid]");
-const dockPreview = document.querySelector("[data-dock-preview]");
+const dockSubscreenEl = document.querySelector('[data-settings-subscreen="dock"]');
+const dockListEls = {
+  dock: document.querySelector('[data-dock-list="dock"]'),
+  hub: document.querySelector('[data-dock-list="hub"]'),
+};
 const dockCountEl = document.querySelector("[data-dock-count]");
-const dockHintEl = document.querySelector("[data-dock-hint]");
-const dockRefusalEl = document.querySelector("[data-dock-refusal]");
 
-function refuseDockMove(message) {
-  if (!dockRefusalEl) return;
-  dockRefusalEl.textContent = message;
-  dockRefusalEl.hidden = false;
+/** The arrangement being edited, or null while Customize Dock is not on screen. */
+let dockDraft = null;
+/** The row being dragged by its grip: { list, listEl, row, pointerId }. */
+let dockDrag = null;
+
+const DOCK_ROW_LOCK = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>';
+const DOCK_ROW_MINUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path d="M7 12h10"/></svg>';
+const DOCK_ROW_PLUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path d="M7 12h10M12 7v10"/></svg>';
+const DOCK_ROW_GRIP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16M4 12h16M4 16h16"/></svg>';
+
+function dockEditorArrangement() {
+  return dockDraft || dockPrefs;
 }
 
-function clearDockRefusal() {
-  if (dockRefusalEl) dockRefusalEl.hidden = true;
+function dockEditorRowMarkup(tab, list, full) {
+  const hubLabel = tabDockLabel("hub");
+  let control = "";
+  if (list === "dock") {
+    control = isPinnedToDock(tab)
+      ? `<span class="dock-row-lock" role="img" aria-label="Always in your dock">${DOCK_ROW_LOCK}</span>`
+      : `<button class="dock-row-control remove" type="button" data-dock-remove="${tab}" aria-label="${escapeHtml(`Move ${tabDockLabel(tab)} to ${hubLabel}`)}">${DOCK_ROW_MINUS}</button>`;
+  } else if (!full) {
+    control = `<button class="dock-row-control add" type="button" data-dock-add="${tab}" aria-label="${escapeHtml(`Add ${tabDockLabel(tab)} to your dock`)}">${DOCK_ROW_PLUS}</button>`;
+  }
+  // The dock list wears the dock's own short labels, Kaspa Hub its full names (iOS label vs
+  // ecosystemTitle).
+  const name = list === "dock" ? tabDockLabel(tab) : tabFullName(tab);
+  return `<div class="settings-list-row dock-row" data-dock-row="${tab}">
+    ${control}
+    <span class="dock-row-icon" aria-hidden="true">${tabIconMarkup(tab)}</span>
+    <span class="dock-row-label">${escapeHtml(name)}</span>
+    <span class="dock-row-grip" data-dock-grip aria-hidden="true">${DOCK_ROW_GRIP}</span>
+  </div>`;
 }
 
 function renderDockEditor() {
-  const dock = dockVisibleTabs();
-  const hub = hubVisibleTabs();
-  const full = dock.length >= DOCK_MAX_ITEMS;
+  if (dockDrag) return; // redrawn when the drag ends; redrawing now would drop the row being held
+  const arrangement = dockEditorArrangement();
+  const dock = arrangement.dock.filter(tabAllowed);
+  const hub = arrangement.hub.filter(tabAllowed);
+  const full = dockIsFull(arrangement, tabAllowed);
+  const hubLabel = tabDockLabel("hub");
 
-  if (dockHubGrid) {
-    dockHubGrid.innerHTML = hub.map((tab) => `<button class="hub-tile" type="button" draggable="true" data-dock-move="hub" data-dock-tab="${tab}">
-      <span class="hub-tile-icon" aria-hidden="true">${tabIconMarkup(tab)}</span>
-      <span class="hub-tile-label">${escapeHtml(tabFullName(tab))}</span>
-    </button>`).join("");
-    dockHubGrid.hidden = hub.length === 0;
+  if (dockListEls.dock) dockListEls.dock.innerHTML = dock.map((tab) => dockEditorRowMarkup(tab, "dock", full)).join("");
+  if (dockListEls.hub) dockListEls.hub.innerHTML = hub.map((tab) => dockEditorRowMarkup(tab, "hub", full)).join("");
+  if (dockCountEl) dockCountEl.textContent = `${dock.length}/${DOCK_MAX_ITEMS}`;
+  const dockFooter = document.querySelector('[data-dock-footer="dock"]');
+  if (dockFooter) dockFooter.textContent = `${tabDockLabel("chats")}, ${hubLabel} and ${tabDockLabel("profile")} always stay in your dock.`;
+  const hubFooter = document.querySelector('[data-dock-footer="hub"]');
+  if (hubFooter) {
+    hubFooter.textContent = full
+      ? "Your dock is full. Remove one from it to add one of these."
+      : `In the order ${hubLabel} shows them.`;
   }
-  const hubEmptyNote = document.querySelector("[data-dock-hub-empty]");
-  if (hubEmptyNote) hubEmptyNote.hidden = hub.length > 0;
-
-  if (dockPreview) {
-    // No placeholder slots for the unused capacity: the real dock divides its whole width between
-    // however many tabs it has, so a four-tab dock is four WIDER items, not four and a gap. The
-    // count above the bar is what says how much room is left.
-    dockPreview.innerHTML = dock.map((tab) => `<button class="dock-preview-item${DOCK_PINNED.includes(tab) ? " pinned" : ""}" type="button" draggable="true" data-dock-move="dock" data-dock-tab="${tab}">
-      <span class="dock-preview-icon" aria-hidden="true">${tabIconMarkup(tab)}</span>
-      <span class="dock-preview-label">${escapeHtml(tabFullName(tab))}</span>
-    </button>`).join("");
-  }
-  if (dockCountEl) {
-    dockCountEl.textContent = `${dock.length} of ${DOCK_MAX_ITEMS}`;
-    dockCountEl.classList.toggle("full", full);
-  }
-  if (dockHintEl) {
-    dockHintEl.textContent = full
-      ? "Your dock is full. Click one of these to move it up to Kaspa Hub and free a slot. Kaspa Hub and Profile must stay in the dock."
-      : "Click a dock item to move it up to Kaspa Hub, or drag to reorder. Kaspa Hub and Profile must stay in the dock.";
-  }
-
-  const childNote = document.querySelector("[data-child-dock-note]");
-  if (childNote) childNote.hidden = !isChildModeEnabled();
 }
 
 /** Both lists are written together, so a tab can never be missing from both or in both. */
@@ -9610,80 +9598,108 @@ function commitDockPrefs(dock, hub) {
   applyDockLayout();
 }
 
-/** Click in the Hub: join the dock, at the end, where the empty slot already is. */
-function moveTabToDock(tab) {
-  if (dockVisibleTabs().length >= DOCK_MAX_ITEMS) {
-    refuseDockMove("Your dock is full. Click something in the dock to move it up here first.");
-    return;
-  }
-  clearDockRefusal();
-  commitDockPrefs([...dockPrefs.dock.filter((t) => t !== tab), tab], dockPrefs.hub.filter((t) => t !== tab));
+function editDockDraft(next) {
+  if (!dockDraft || next === dockDraft) return;
+  dockDraft = next;
+  renderDockEditor();
 }
 
-/** Click in the dock: back to the Hub, at the end of the grid. */
-function moveTabToHub(tab) {
-  if (DOCK_PINNED.includes(tab)) {
-    refuseDockMove(`${tabFullName(tab)} has to stay in your dock.`);
-    return;
-  }
-  clearDockRefusal();
-  commitDockPrefs(dockPrefs.dock.filter((t) => t !== tab), [...dockPrefs.hub.filter((t) => t !== tab), tab]);
+/** Writes the draft to the real arrangement, and so rebuilds the dock - only when it changed. */
+function persistDockDraft() {
+  if (!dockDraft) return;
+  const same = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
+  if (same(dockDraft.dock, dockPrefs.dock) && same(dockDraft.hub, dockPrefs.hub)) return;
+  commitDockPrefs(dockDraft.dock, dockDraft.hub);
 }
 
-document.querySelectorAll("[data-dock-hub-grid], [data-dock-preview]").forEach((container) => {
-  container.addEventListener("click", (event) => {
-    if (dockEditorDragged) return; // a drag ends in a click on the item; reordering must not also move it
-    const item = event.target.closest("[data-dock-move]");
-    if (!item) return;
-    if (item.dataset.dockMove === "hub") moveTabToDock(item.dataset.dockTab);
-    else moveTabToHub(item.dataset.dockTab);
+/** Seeds the draft when Customize Dock comes on screen and applies it when the screen is left -
+ *  by the back bar, another settings page, or closing Settings. Watching the screen itself rather
+ *  than each of those exits means a way out added later cannot skip the save. */
+function syncDockDraftWithScreen() {
+  const open = !!dockSubscreenEl && !dockSubscreenEl.hidden && !accountOverlay.hidden;
+  if (open && !dockDraft) {
+    dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
+    renderDockEditor();
+  } else if (!open && dockDraft) {
+    endDockDrag(false);
+    persistDockDraft();
+    dockDraft = null;
+    renderDockEditor();
+  }
+}
+
+if (typeof MutationObserver === "function") {
+  const observer = new MutationObserver(syncDockDraftWithScreen);
+  if (dockSubscreenEl) observer.observe(dockSubscreenEl, { attributes: true, attributeFilter: ["hidden"] });
+  observer.observe(accountOverlay, { attributes: true, attributeFilter: ["hidden"] });
+}
+
+// Going to the background is the one way off this screen that never leaves it, and a tab closed
+// from there would otherwise lose the arrangement (iOS scenePhase).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") persistDockDraft();
+});
+
+Object.values(dockListEls).forEach((listEl) => {
+  listEl?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-dock-remove]");
+    if (remove && dockDraft) { editDockDraft(removeFromDock(dockDraft, remove.dataset.dockRemove)); return; }
+    const add = event.target.closest("[data-dock-add]");
+    if (add && dockDraft) editDockDraft(addToDock(dockDraft, add.dataset.dockAdd, tabAllowed));
   });
 });
 
-// Drag reorders and nothing else, enforced by MEMBERSHIP rather than at the drag source: a tab
-// dragged out of the dock and dropped on a Hub tile is simply refused, instead of moving by a
-// gesture the screen says is for ordering. That is also what lets the pinned two drag freely - a
-// reorder cannot evict anything by construction.
-let dockEditorDragged = null;
+// Dragging by the grip, with pointer events so a finger works the same as a mouse (HTML5 drag and
+// drop never starts from a touch on iOS Safari). The row follows the pointer within its own list;
+// the NEIGHBOURS are moved past it rather than the row itself, because taking the captured row out
+// of the page would drop the pointer capture mid-drag.
 
-function reorderDockList(list, tab, target) {
-  const next = list.filter((t) => t !== tab);
-  const index = next.indexOf(target);
-  if (index < 0) return list;
-  // Read AFTER the removal. Taking the target's index from the ORIGINAL list overshoots by one
-  // whenever the tab moves forwards, which is what lands a rightward drag a slot too far.
-  next.splice(index, 0, tab);
-  return next;
+function endDockDrag(commit) {
+  if (!dockDrag) return;
+  const { list, listEl, row } = dockDrag;
+  dockDrag = null;
+  row.classList.remove("dragging");
+  listEl.classList.remove("reordering");
+  if (!commit || !dockDraft) { renderDockEditor(); return; }
+  const order = [...listEl.querySelectorAll("[data-dock-row]")].map((el) => el.dataset.dockRow);
+  const next = reorderVisible(dockDraft[list], order, tabAllowed);
+  editDockDraft(next === dockDraft[list] ? dockDraft : { ...dockDraft, [list]: next });
 }
 
-document.querySelectorAll("[data-dock-hub-grid], [data-dock-preview]").forEach((container) => {
-  container.addEventListener("dragstart", (event) => {
-    const item = event.target.closest("[data-dock-move]");
-    if (!item) return;
-    dockEditorDragged = { tab: item.dataset.dockTab, from: item.dataset.dockMove };
-    item.classList.add("dragging");
-    try { event.dataTransfer.setData("text/plain", item.dataset.dockTab); event.dataTransfer.effectAllowed = "move"; } catch { /* optional */ }
-  });
-  container.addEventListener("dragover", (event) => {
-    if (!dockEditorDragged) return;
-    const item = event.target.closest("[data-dock-move]");
-    if (!item || item.dataset.dockMove !== dockEditorDragged.from) return;
+Object.entries(dockListEls).forEach(([list, listEl]) => {
+  if (!listEl) return;
+  listEl.addEventListener("pointerdown", (event) => {
+    const grip = event.target.closest("[data-dock-grip]");
+    if (!grip || !dockDraft || event.button > 0 || dockDrag) return;
+    const row = grip.closest("[data-dock-row]");
+    if (!row) return;
     event.preventDefault();
+    try { grip.setPointerCapture(event.pointerId); } catch { /* still works while over the list */ }
+    dockDrag = { list, listEl, row, pointerId: event.pointerId };
+    row.classList.add("dragging");
+    listEl.classList.add("reordering");
   });
-  container.addEventListener("drop", (event) => {
-    const item = event.target.closest("[data-dock-move]");
-    if (!dockEditorDragged || !item) return;
+  listEl.addEventListener("pointermove", (event) => {
+    if (!dockDrag || dockDrag.listEl !== listEl || event.pointerId !== dockDrag.pointerId) return;
     event.preventDefault();
-    const { tab, from } = dockEditorDragged;
-    const target = item.dataset.dockTab;
-    if (item.dataset.dockMove !== from || target === tab) return;
-    if (from === "dock") commitDockPrefs(reorderDockList(dockPrefs.dock, tab, target), dockPrefs.hub);
-    else commitDockPrefs(dockPrefs.dock, reorderDockList(dockPrefs.hub, tab, target));
+    const { row } = dockDrag;
+    const y = event.clientY;
+    for (let prev = row.previousElementSibling; prev; prev = row.previousElementSibling) {
+      const box = prev.getBoundingClientRect();
+      if (y >= box.top + box.height / 2) break;
+      row.after(prev);
+    }
+    for (let next = row.nextElementSibling; next; next = row.nextElementSibling) {
+      const box = next.getBoundingClientRect();
+      if (y <= box.top + box.height / 2) break;
+      row.before(next);
+    }
   });
-  container.addEventListener("dragend", () => {
-    container.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
-    // Cleared on the next frame so the click the drag ends with still sees it and is swallowed.
-    window.requestAnimationFrame(() => { dockEditorDragged = null; });
+  listEl.addEventListener("pointerup", (event) => {
+    if (dockDrag?.pointerId === event.pointerId) endDockDrag(true);
+  });
+  listEl.addEventListener("pointercancel", (event) => {
+    if (dockDrag?.pointerId === event.pointerId) endDockDrag(false);
   });
 });
 
@@ -10203,7 +10219,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 169;
+const APP_BUILD = 170;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -15543,7 +15559,9 @@ function openChatInfoFor(contact, conversationEntry) {
   if (chatInfoNameInput) chatInfoNameInput.readOnly = isSelf;
   if (chatInfoPhotoPick) chatInfoPhotoPick.hidden = isSelf;
   if (isSelf && chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = true;
-  if (chatInfoNameInput) chatInfoNameInput.value = contact.name || "";
+  // The name you gave them, wherever you gave it - the chat or the Address Book (iOS 2831fab).
+  const addressBookGiven = !isSelf && !contact.nameIsCustom ? addressBookName(contact.address) : null;
+  if (chatInfoNameInput) chatInfoNameInput.value = addressBookGiven || contact.name || "";
   // Testnet (iOS e52357d): the field holds only YOUR name for them. With none it is empty and its
   // placeholder says who they are (their .kachat name), so Save never turns a default name into a
   // custom one that would hide their .kachat name. Your own card's title is your .kachat name.
@@ -15551,7 +15569,7 @@ function openChatInfoFor(contact, conversationEntry) {
     chatInfoNameInput.placeholder = "Name";
     if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || displayNameForAddress(contact);
     else if (!contact.nameIsCustom) {
-      chatInfoNameInput.value = "";
+      chatInfoNameInput.value = addressBookGiven || "";
       chatInfoNameInput.placeholder = displayNameForAddress(contact);
     }
   }
@@ -15849,6 +15867,12 @@ function saveChatInfo() {
     if (!contact.nameIsCustom) applyKnsPrimaryDomainToContact(contact);
     contact.updatedAt = Date.now();
     persistState();
+    // One name per person (iOS 2831fab): the Address Book entry, if there is one, takes the same
+    // name - so clearing it here really clears it, and they go by their .kachat name or address.
+    const bookEntry = addressBookEntry(contact.address);
+    if (bookEntry && String(bookEntry.name || "").trim() !== trimmed) {
+      try { saveAddressBookEntry({ address: bookEntry.address, name: trimmed, note: bookEntry.note }); } catch { /* the chat's name is saved */ }
+    }
     if (activeConversationId) {
       const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
       if (conversationEntry) {
@@ -16224,9 +16248,11 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
 // shared pieces (send-kaspa-components.js): "Tip / to <name>", From (iOS 6333dd3: the chatting
 // address by default, or Choose an Address, with that address's balance), the big amount with the
 // KAS / currency switch and Max, the fee card (speed, custom fee, Coin Control), the small-amount
-// question, and slide-to-send. The send itself: a plain payment with no payload to their chatting
-// address, from the From address, with the payment bubble in the 1:1 conversation. The contact is
-// created only when a tip is actually sent.
+// question, and slide-to-send. The send itself: a payment to their chatting address with the payment
+// bubble in the 1:1 conversation. A tip of a post (iOS a6bd60a) carries a signed kchat:1:tip:
+// payload naming it and always comes from the chatting address (From locked); one without a post is
+// a plain payment, no payload, from the From address. The contact is created only when a tip is
+// actually sent.
 const TIP_FEE_MULTIPLIERS = { normal: 1n, fast: 2n, priority: 5n };
 const tipModal = document.querySelector("[data-tip-modal]");
 mountSendPieces(tipModal, {
@@ -16250,7 +16276,7 @@ const tipFromCtl = sendFromControls(tipModal, "tip", {
   onChatting: () => tipSetSource(null),
   onChoose: () => {
     const tip = tipState;
-    if (!tip || tip.sending) return;
+    if (!tip || tip.sending || tip.tip) return; // a tip that names a post is the chatting address's
     openOwnAddressPickerFor({
       title: "Send From",
       selectedAddress: tip.fundingAddress || engine.address,
@@ -16276,8 +16302,7 @@ function setKaPostsDefaultTipKas(kas) {
     else localStorage.removeItem(KAPOSTS_DEFAULT_TIP_KEY);
   } catch { /* fine */ }
 }
-const KAPOSTS_TIP_ON_TEXT = "Tapping Tip on a post sends this amount straight away, no amount screen. It goes out exactly like a payment in that person's chat: from your primary spending address when Payment Privacy is on, otherwise your chatting address, to their fresh address when they shared one.";
-const KAPOSTS_TIP_OFF_TEXT = "Off: tapping Tip opens the amount screen every time.";
+// No description under Tipping or Notifications: they explain themselves (iOS 1b7618c).
 function openKaPostsSettings() {
   document.querySelector("[data-kaposts-settings-modal]")?.remove();
   const backdrop = document.createElement("div");
@@ -16300,10 +16325,9 @@ function openKaPostsSettings() {
           </div>
         </div>
       </div>
-      <p class="settings-group-footer" data-kaposts-tip-footer>${current > 0 ? KAPOSTS_TIP_ON_TEXT : KAPOSTS_TIP_OFF_TEXT}</p>
       <p class="settings-group-label">Notifications</p>
       <div class="settings-list-card">
-        <button class="settings-list-row" type="button" data-kaposts-open-notifications><span class="settings-row-copy"><strong>Notifications</strong><small>Which KaPosts activity reaches you: likes, dislikes, reposts, comments, follows and mentions.</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+        <button class="settings-list-row" type="button" data-kaposts-open-notifications><span class="settings-row-copy"><strong>Notifications</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
       </div>
     </section>`;
   document.body.append(backdrop);
@@ -16312,7 +16336,6 @@ function openKaPostsSettings() {
   const toggle = backdrop.querySelector("[data-kaposts-instant-tip]");
   const amountRow = backdrop.querySelector("[data-kaposts-tip-amount-row]");
   const amount = backdrop.querySelector("[data-kaposts-tip-amount]");
-  const footer = backdrop.querySelector("[data-kaposts-tip-footer]");
   const commit = () => {
     if (!toggle.checked) { setKaPostsDefaultTipKas(0); return; }
     // The one exact parser (iOS IOS-010): comma or dot, at most 8 decimals, capped at the supply.
@@ -16322,7 +16345,6 @@ function openKaPostsSettings() {
   toggle.addEventListener("change", () => {
     amountRow.hidden = !toggle.checked;
     if (toggle.checked && !String(amount.value || "").trim()) amount.value = "1";
-    footer.textContent = toggle.checked ? KAPOSTS_TIP_ON_TEXT : KAPOSTS_TIP_OFF_TEXT;
     commit();
   });
   amount.addEventListener("input", commit);
@@ -16333,9 +16355,27 @@ function openKaPostsSettings() {
   });
 }
 
+// A KaPosts tip's payload (iOS a6bd60a, KAPOSTS_INDEXER.md 5.11): the sealed record a chat payment
+// carries (the memo, sealed to their chat key), inside a signed kchat:1:tip: that names the post.
+// Always paid from the chatting address, whose key signs it.
+async function kaPostTipPayloadBytes(tip, receiver, amountSompi, note = "") {
+  const built = await buildKaPostTipPayload({
+    engine, receiver, note, amountSompi: Number(amountSompi), postId: tip.postId, authorPubkey: tip.authorPubkey,
+  });
+  return built.payloadBytes;
+}
+// Its size for the fee estimate: the root, the tipper's key, a signature, the post id, the author's
+// key and four colons, then the sealed record as hex (two characters a byte; the record's bytes
+// as estimatePaymentPayloadBytes counts them).
+function estimateTipPayloadBytes(memo, amountSompi) {
+  const sealedBytes = estimatePaymentPayloadBytes(memo, amountSompi) - "kchat:1:pay:".length;
+  return "kchat:1:tip:".length + 66 + 128 + 64 + 66 + 4 + sealedBytes * 2;
+}
+
 // The default tip, sent at once: same contact creation, funding source and destination rules
 // as a payment in that person's chat (and as the tip sheet's Send), with a toast and no screen.
-async function sendInstantTip(address, name, amountKasNumber) {
+// With `tip` ({ postId, authorPubkey }) it names the post (iOS a6bd60a sendDefaultTip(tip:)).
+async function sendInstantTip(address, name, amountKasNumber, tip = null) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean) || clean === engine.address) throw new Error("No one to tip.");
   const amountKas = trimKas8(Number(amountKasNumber));
@@ -16376,7 +16416,12 @@ async function sendInstantTip(address, name, amountKasNumber) {
   const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
   showCopyToast(`Sending ${amountKas} ${KAS_UNIT} tip…`);
   try {
-    const result = await engine.send(destinationAddress, amountKas, "0");
+    // A tip that names the post carries its signed kchat:1:tip: payload (iOS a6bd60a); without a
+    // post it stays the plain payment it always was.
+    const payload = tip ? await kaPostTipPayloadBytes(tip, contact.address, kasTextToSompi(amountKas)) : null;
+    const result = payload
+      ? await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true })
+      : await engine.send(destinationAddress, amountKas, "0");
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -16545,7 +16590,7 @@ function tipSetSource(index, label = null) {
 }
 
 // The fee from the address the tip will spend from (and the chosen coins), debounced like the
-// chat sheet's. A plain payment: no payload bytes.
+// chat sheet's. A tip of a post counts its kchat:1:tip: payload; a plain one has none.
 function tipScheduleFee() {
   if (tipFeeTimer) window.clearTimeout(tipFeeTimer);
   tipFeeTimer = null;
@@ -16570,9 +16615,11 @@ function tipScheduleFee() {
       await ensureRuntimes({ quiet: true });
       const amountKas = kasTextFromSompi(amountSompi);
       const selection = state.manualUtxos ? state.manualUtxos.map((coin) => coin.key) : null;
+      // A tip that names the post carries its kchat:1:tip: payload (iOS a6bd60a), counted here.
+      const payloadBytes = state.tip && !state.fundingAddress ? estimateTipPayloadBytes("", Number(amountSompi)) : 0;
       const detail = state.fundingAddress
         ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas, selection)
-        : await engine.estimateSendFee(amountKas, selection);
+        : await engine.estimateSendFee(amountKas, selection, payloadBytes);
       base = detail?.sdkFeeSompi ?? null;
     } catch {
       base = null;
@@ -16586,8 +16633,9 @@ function tipScheduleFee() {
 
 // Max spends the chosen coins, else every coin the tip can spend (reserved ones left out), as ONE
 // output of (total - fee): the exact network floor for that transaction plus any Fast / Priority /
-// custom extra, so no change is left (audit DSK-042; the chat sheet's Max). A tip carries no
-// payload, so this is plain sendMaxKaspa. The amount is pinned (DSK-043): tip.max =
+// custom extra, so no change is left (audit DSK-042; the chat sheet's Max). A tip of a post prices
+// its kchat:1:tip: payload in, as the chat sheet prices kchat:1:pay:; a plain tip has none. The
+// amount is pinned (DSK-043): tip.max =
 // { amountSompi, outpoints, extraFeeSompi, settingsKey, text, unit }.
 function activeTipMax() {
   const tip = tipState;
@@ -16613,6 +16661,9 @@ async function tipSetMax() {
       sourceAddress: tip.fundingAddress || engine.address,
       destinationAddress: tip.address,
       manualUtxos: tip.manualUtxos ? tip.manualUtxos.map((coin) => coin.key) : null,
+      // A tip that names the post: its kchat:1:tip: payload, built for the whole total as the
+      // chat sheet's Max builds the payment's (iOS a6bd60a).
+      payloadFor: tip.tip && !tip.fundingAddress ? (totalSompi) => kaPostTipPayloadBytes(tip.tip, tip.address, totalSompi) : undefined,
     });
   } catch (error) {
     if (token !== tipMaxToken || tipState !== tip) return;
@@ -16680,7 +16731,9 @@ function commitTipCustomFee() {
   if (activeTipMax()) scheduleTipMaxRefill(0); // Max follows the fee at once (DSK-043)
 }
 
-async function openTipModal({ address, name } = {}) {
+// `tip` ({ postId, authorPubkey }): the post being tipped. Then the tip names the post and is paid
+// from the chatting address only, so From offers no choice (iOS a6bd60a SendFromSection isLocked).
+async function openTipModal({ address, name, tip = null } = {}) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean)) { showCopyToast("This poster has no valid Kaspa address."); return; }
   if (clean === engine.address) { showCopyToast("That's your own address."); return; }
@@ -16711,9 +16764,12 @@ async function openTipModal({ address, name } = {}) {
     // the fee card: base (Normal) fee in sompi, speed, custom extra; coin control (null = automatic)
     baseFeeSompi: null, estimating: false, tier: "normal", customExtraFeeSompi: null, manualUtxos: null,
     unit: "kas", price: null, error: "", sending: false,
+    // the post this tip names (iOS a6bd60a), null for a plain one
+    tip: tip?.postId && tip?.authorPubkey ? { postId: String(tip.postId), authorPubkey: String(tip.authorPubkey) } : null,
   };
   // (not `state`: that is the app's contacts and conversations, read above)
   const sheet = tipState;
+  tipFromCtl.setLocked(Boolean(sheet.tip));
 
   const shownName = (contact?.name || displayName).trim() || shortAddress(clean);
   const titleEl = tipQ("[data-tip-title]");
@@ -16867,11 +16923,13 @@ async function sendTipNow(tipSompi) {
     // From a spending address the change goes to a never-used address, revealed rather than made
     // primary (iOS 6333dd3). A Max tip leaves no change, so no fresh change address is used.
     const tipFresh = tip.fundingAddress && !max ? freshSpendingChangeAddress() : null;
-    // A plain payment, no payload: the tip's on-chain shape is unchanged. The fee card's extra goes
-    // as the priority fee and coin control limits the coins, exactly as in the chat's sheet.
-    // Max: one output of exactly the shown amount from exactly its coins (DSK-042), or nothing if
-    // the coins changed (DSK-043) - plain sendMaxKaspa, still no payload.
-    const maxPin = max ? { extraFeeSompi, manualUtxos: manualKeys, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
+    // A tip that names the post carries its signed kchat:1:tip: payload, from the chatting address
+    // (iOS a6bd60a); one without a post is a plain payment, no payload, as before. The fee card's
+    // extra goes as the priority fee and coin control limits the coins, exactly as in the chat's
+    // sheet. Max: one output of exactly the shown amount from exactly its coins (DSK-042), or
+    // nothing if the coins changed (DSK-043).
+    const payload = tip.tip && !tip.fundingAddress ? await kaPostTipPayloadBytes(tip.tip, contact.address, requestedSompi) : null;
+    const maxPin = max ? { extraFeeSompi, manualUtxos: manualKeys, payload, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
     const result = maxPin
       ? (tip.fundingAddress
         ? await engine.sendMaxFromSpending({
@@ -16894,7 +16952,9 @@ async function sendTipNow(tipSompi) {
           manualUtxos: manualKeys,
           changeAddress: tipFresh?.address || null,
         })
-      : await engine.send(destinationAddress, amountKas, "0", { extraFeeSompi, manualUtxos: manualKeys });
+      : await engine.send(destinationAddress, amountKas, "0", payload
+        ? { payload, exactAmount: true, extraFeeSompi, manualUtxos: manualKeys }
+        : { extraFeeSompi, manualUtxos: manualKeys });
     if (tipFresh) runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(tipFresh));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
@@ -25511,10 +25571,12 @@ queueMicrotask(async () => {
       // payment rules (matches iOS's KaPostTipSheet).
       // A default tip, when set, goes out at once through the same path as the tip sheet's Send;
       // a failure falls back to the amount screen.
-      tipUser: (address, name) => {
+      // `tip` = { postId, authorPubkey }: the tip names the post, so the post counts it (iOS
+      // a6bd60a, KAPOSTS_INDEXER.md 5.11); null only for something not on the network yet.
+      tipUser: (address, name, tip = null) => {
         const kas = kaPostsDefaultTipKas();
-        if (kas > 0) sendInstantTip(address, name, kas).catch(() => openTipModal({ address, name }));
-        else openTipModal({ address, name });
+        if (kas > 0) sendInstantTip(address, name, kas, tip).catch(() => openTipModal({ address, name, tip }));
+        else openTipModal({ address, name, tip });
       },
       openKaPostsSettings,
       startChat: (address, name) => openChatWithAddress({ address, name }),
@@ -25804,6 +25866,23 @@ queueMicrotask(async () => {
       },
     });
     installKachatIdentityRepaint();
+    // People shown as their address are asked again for a .kachat name, once a minute (iOS
+    // 3214a2b): contacts with no name you gave them (chat or Address Book), most recent chats first.
+    try {
+      startKachatUnnamedIdentitySweep({
+        candidates: () => {
+          const lastAt = new Map();
+          for (const entry of state.conversations || []) {
+            const at = Number(entry.lastActivityAt || entry.updatedAt || 0);
+            if (at > (lastAt.get(entry.contactId) || 0)) lastAt.set(entry.contactId, at);
+          }
+          return (state.contacts || [])
+            .filter((contact) => contact?.address && !contact.nameIsCustom && !addressBookName(contact.address))
+            .sort((a, b) => (lastAt.get(b.id) || 0) - (lastAt.get(a.id) || 0))
+            .map((contact) => contact.address);
+        },
+      });
+    } catch (error) { appendEngineLog(`.kachat name sweep did not start: ${error?.message || error}`); }
     try { kachatNames()?.actions.resume(); } catch (error) { appendEngineLog(`.kachat resume failed: ${error?.message || error}`); }
     // App start, every network: this wallet's own profile follows the chain (iOS 5d4ce87).
     try { syncOwnKachatProfile(); } catch (error) { appendEngineLog(`.kachat profile sync failed: ${error?.message || error}`); }
@@ -25857,6 +25936,11 @@ queueMicrotask(async () => {
       drawQr: (canvas, text) => engine.drawQrFor(canvas, text, { dark: "#06110f", light: "#ffffff" }),
       openOwnAddressPicker: ({ title, selectedAddress, onPick }) => openOwnAddressPickerFor({ title, selectedAddress, onPick }),
     });
+    // The startup tab restore can show .kachat before the runtime above existed, and that show
+    // started nothing (no registry yet): the page sat on "Coming soon" with empty cards until it
+    // was left and opened again. Shown now, it starts for real.
+    const marketScreen = document.querySelector("[data-kachat-market]");
+    if (marketScreen && !marketScreen.closest("[hidden]")) showKachatMarket();
   } catch (error) { appendEngineLog(`.kachat did not start: ${error?.message || error}`); }
   try {
     initKachatStats({
@@ -25864,6 +25948,13 @@ queueMicrotask(async () => {
       infoSheet,
       // Every KaChat indexer the app is configured with; the screen asks each once.
       indexerUrls: () => ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"].map((key) => getEndpoint(key)).filter(Boolean),
+      // The .kachat Domains card (iOS f5d34f4): the registry's own totals, wherever names are live.
+      kachatTotals: async () => {
+        const registry = kachatNamesLaunched() ? kachatNames()?.registry : null;
+        if (!registry) return null;
+        try { await registry.refreshIfStale(); } catch { /* use what we have */ }
+        return registry.activityTotals();
+      },
     });
   } catch (error) { appendEngineLog(`KaChat Stats did not start: ${error?.message || error}`); }
   try {
@@ -25891,6 +25982,30 @@ queueMicrotask(async () => {
       showToast: showCopyToast,
       confirmDialog,
       formatBytes: (bytes) => formatCacheBytes(bytes),
+      // An entry with no name shows who the address is (iOS 2831fab: displayName(for:)).
+      displayNameFor: (address) => {
+        const contact = (state.contacts || []).find((c) => c.address === address);
+        return contact ? displayNameForAddress(contact) : identityNameForAddress(address);
+      },
+      // One name per person (iOS 2831fab AddressBookEntryEditor.save): the chat with that address
+      // takes the entry's name; an empty one clears it, and the chat goes by its .kachat name or
+      // address again.
+      setContactName: (address, name) => {
+        const contact = (state.contacts || []).find((c) => c.address === address);
+        if (!contact) return;
+        const trimmed = String(name || "").trim();
+        const assigned = contact.nameIsCustom ? String(contact.name || "").trim() : "";
+        if (assigned === trimmed) return;
+        contact.nameIsCustom = Boolean(trimmed);
+        contact.name = trimmed || defaultAliasFor(contact.address);
+        contact.updatedAt = Date.now();
+        persistState();
+        try { renderChats(); } catch { /* not ready */ }
+        try {
+          const open = activeConversationId ? state.conversations.find((entry) => entry.id === activeConversationId) : null;
+          if (open && contactForConversation(open) === contact && conversationName) conversationName.textContent = displayNameForAddress(contact);
+        } catch { /* not ready */ }
+      },
       onChange: (kind) => {
         try { renderChats(); } catch { /* not ready */ }
         try {

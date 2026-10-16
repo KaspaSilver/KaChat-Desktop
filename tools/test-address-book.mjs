@@ -80,13 +80,28 @@ test("add, rename, note, search; entries sorted by name", () => {
   assert.equal(searchAddressBook("").length, 2);
 });
 
-test("save refuses: no wallet, empty name, invalid address", () => {
+test("save refuses: no wallet, invalid address", () => {
   fresh();
-  assert.throws(() => saveAddressBookEntry({ address: ALICE, name: "  " }), /Enter a name\./);
   assert.throws(() => saveAddressBookEntry({ address: "kaspa:nope", name: "X" }), /Enter a valid Kaspa address\./);
   wallet = "";
   assert.throws(() => saveAddressBookEntry({ address: ALICE, name: "Alice" }), /Open a wallet first\./);
   assert.equal(addressBookEntries().length, 0);
+});
+
+test("an empty name saves (iOS 2831fab): the entry keeps its note and photo, and has no name", () => {
+  fresh();
+  saveAddressBookEntry({ address: ALICE, name: "Alice", note: "n", photo: PHOTO });
+  tick();
+  const cleared = saveAddressBookEntry({ address: ALICE, name: "  ", note: "n" });
+  assert.equal(cleared.name, "");
+  assert.equal(addressBookName(ALICE), null, "no name: the address goes by who it is on chain");
+  assert.equal(addressBookEntry(ALICE).note, "n");
+  assert.ok(hasAddressBookPhoto(ALICE));
+  configureAddressBook({});
+  assert.equal(addressBookEntry(ALICE)?.name, "", "kept across a reload");
+  const merged = mergeAddressBooks([[addressBookEntry(ALICE)]], [[]]);
+  assert.equal(merged.entries.length, 1, "and through a merge");
+  assert.equal(archiveAddressBook().addressBook[0].name, "", "and a backup");
 });
 
 test("delete leaves a tombstone; re-adding lifts it", () => {

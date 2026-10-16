@@ -921,7 +921,7 @@
               <div class="settings-toggle-row"><span><strong>Show Fee Estimate</strong><small>Show an estimated transaction cost before sending.</small></span><label class="switch-control"><input type="checkbox" data-pref-estimate-fees><span></span></label></div>
               <div class="settings-toggle-row"><span><strong>Show Setup Guides</strong><small>Keeps the Welcome Guide reachable from your profile.</small></span><label class="switch-control"><input type="checkbox" data-pref-show-setup-guides checked><span></span></label></div>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="dock">
-                <span class="settings-row-copy"><strong>Customize Dock</strong><small>Choose which tabs appear in your dock.</small></span>
+                <span class="settings-row-copy"><strong>Customize Dock</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
             </div>
@@ -982,25 +982,19 @@
 
           <section class="settings-group" data-settings-subscreen="dock">
             <p class="settings-group-label">Customize Dock</p>
-            <div class="settings-list-card">
-              <div class="settings-page-form dock-editor">
-                <div class="dock-editor-head">
-                  <strong>Kaspa Hub</strong>
-                  <small>Opened from the Kaspa Hub tab, in this order. Nothing here is switched off, it is one click further away. Click one to move it into your dock, or drag to reorder.</small>
-                </div>
-                <div class="hub-grid dock-editor-grid" data-dock-hub-grid></div>
-                <p class="dock-editor-empty" data-dock-hub-empty hidden>Everything is in your dock. Click a dock item to move it back here.</p>
-                <p class="field-hint dock-editor-refusal" data-dock-refusal hidden></p>
-                <p class="field-hint" data-child-dock-note hidden>KaPosts and Public Chats are hidden while Simple Mode is on. The password brings them back in Settings &gt; Security &gt; Simple Mode.</p>
-
-                <div class="dock-editor-head dock-editor-head-split">
-                  <strong>Your Dock</strong>
-                  <span class="dock-editor-count" data-dock-count>5 of 5</span>
-                </div>
-                <div class="dock-editor-preview" data-dock-preview></div>
-                <small class="dock-editor-hint" data-dock-hint></small>
-              </div>
+            <!-- Two drag lists (iOS 4da34ab MenuVisibilityView): the dock, then Kaspa Hub. Rows are
+                 drawn by renderDockEditor; the footers' text depends on the arrangement. -->
+            <div class="dock-list-head">
+              <p class="settings-group-label">Your Dock</p>
+              <span class="dock-list-count" data-dock-count>5/5</span>
             </div>
+            <div class="settings-list-card dock-list" data-dock-list="dock"></div>
+            <p class="settings-group-footer" data-dock-footer="dock"></p>
+            <div class="dock-list-head">
+              <p class="settings-group-label">Kaspa Hub</p>
+            </div>
+            <div class="settings-list-card dock-list" data-dock-list="hub"></div>
+            <p class="settings-group-footer" data-dock-footer="hub"></p>
           </section>
 
           <section class="settings-group">
@@ -1247,7 +1241,7 @@
                   <div class="settings-toggle-row"><span><strong>Mentions</strong></span><label class="switch-control"><input type="checkbox" data-pref-kaposts-notify-mentions checked><span></span></label></div>
               </div>
             </div>
-            <p class="settings-group-footer">Choose which KaPosts activity reaches you. Anything switched off sends no notification and does not appear in the KaPosts bell. Quotes of your posts count as reposts.</p>
+            <!-- No description under the switches: they explain themselves (iOS 1b7618c). -->
           </section>
 
           <section class="settings-group">

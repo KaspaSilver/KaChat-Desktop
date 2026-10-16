@@ -448,3 +448,34 @@ a.kl-receipt-txid:hover { background: var(--primary-08, var(--row-hover)); }
    (QR, address, copy) in a sheet. */
 .kl-fund-body { padding: 4px 16px 20px; }
 .kl-fund-card { margin-top: 0; }
+
+/* Market > Activity: Fees for 24 Hours, 7 Days and All Time above Recent activity (iOS f5d34f4). */
+.kl-fees {
+  display: flex;
+  align-items: stretch;
+  padding: 12px 0;
+  margin-bottom: 6px;
+}
+.kl-fees-column {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  text-align: center;
+}
+.kl-fees-column + .kl-fees-column { border-left: .5px solid var(--line); }
+.kl-fees-column strong {
+  max-width: 100%;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kl-fees-column small { color: var(--muted); font-size: 12px; line-height: 1.3; }

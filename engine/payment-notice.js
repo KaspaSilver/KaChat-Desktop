@@ -111,6 +111,30 @@ export function paymentNoticeText({ amountKas, unit = "KAS", memo = "", outgoing
   return memo ? `${head} — ${memo}` : head;
 }
 
+/** A chat payment's notification body, under the payer's name as the title (iOS dcb329a
+ *  NotificationService.handlePayment): "Sent you 1.5 KAS" - the amount without trailing zeros -
+ *  or "Sent you a payment" when the amount is unknown or zero. `amountSompi` (integer sompi) wins
+ *  over `amountKas` (KAS text); `unit` is the network's (TKAS on testnet, as iOS unitLabel). A
+ *  notice-filed payment is not one of these: it reads "Received payment", never the amount it
+ *  claims (iOS 927322b, IOS-080). */
+export function chatPaymentNotificationBody({ amountSompi = null, amountKas = null, unit = "KAS" } = {}) {
+  let sompi = null;
+  try {
+    if (amountSompi != null && String(amountSompi).trim() !== "") sompi = BigInt(amountSompi);
+  } catch { sompi = null; }
+  if (sompi == null && amountKas != null) {
+    const m = /^\s*([0-9]+)(?:\.([0-9]*))?\s*$/.exec(String(amountKas));
+    if (m) {
+      const fraction = String(m[2] || "").slice(0, 8).padEnd(8, "0");
+      sompi = BigInt(m[1]) * 100_000_000n + BigInt(fraction);
+    }
+  }
+  if (sompi == null || sompi <= 0n) return "Sent you a payment";
+  const whole = sompi / 100_000_000n;
+  const fraction = (sompi % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
+  return `Sent you ${whole}${fraction ? `.${fraction}` : ""} ${unit}`;
+}
+
 /** What a REST transaction (`/transactions/{txid}`) paid `address`, in BigInt sompi. */
 export function sompiPaidToAddress(tx, address) {
   const target = String(address || "").trim().toLowerCase();

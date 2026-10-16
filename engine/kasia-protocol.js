@@ -510,7 +510,10 @@ export async function buildEncryptedHandshake({
 // sender) can read it back. Readers accept the legacy ciph_msg:1:pay: and ciph_msg:pay: roots too.
 export const PAYMENT_PAYLOAD_ROOTS = Object.freeze(["kchat:1:pay:", "ciph_msg:1:pay:", "ciph_msg:pay:"]);
 
-export async function buildEncryptedPaymentPayload({ receiver, note = "", amountSompi, createdAt = Date.now(), encryptMessage } = {}) {
+// The sealed payment record on its own (iOS a6bd60a KasiaTransactionBuilder.sealedPaymentHex): the
+// cipher bytes of that JSON as lowercase hex - what follows kchat:1:pay: (as raw bytes), and the
+// last field of a KaPosts tip (as text, see KAPOSTS_TIP_PREFIX).
+export async function sealPaymentRecord({ receiver, note = "", amountSompi, createdAt = Date.now(), encryptMessage } = {}) {
   if (typeof encryptMessage !== "function") throw new Error("Kasia cipher encryptor is required.");
   const normalizedReceiver = normalizeAddress(receiver);
   if (!normalizedReceiver) throw new Error("A valid kaspa: receiver address is required for the payment.");
@@ -524,10 +527,15 @@ export async function buildEncryptedPaymentPayload({ receiver, note = "", amount
     version: 1,
   });
   const encrypted = await encryptMessage(normalizedReceiver, clearText);
-  const encryptedHex = String(encrypted?.encryptedHex || "").replace(/^0x/i, "");
+  const encryptedHex = String(encrypted?.encryptedHex || "").replace(/^0x/i, "").toLowerCase();
   if (!encryptedHex) throw new Error("Kasia cipher returned an empty payment payload.");
+  return { sealedHex: encryptedHex, clearText };
+}
+
+export async function buildEncryptedPaymentPayload(details = {}) {
+  const { sealedHex, clearText } = await sealPaymentRecord(details);
   const prefixBytes = new TextEncoder().encode(PAYMENT_PAYLOAD_ROOTS[0]);
-  const cipherBytes = hexToBytes(encryptedHex);
+  const cipherBytes = hexToBytes(sealedHex);
   const payloadBytes = new Uint8Array(prefixBytes.length + cipherBytes.length);
   payloadBytes.set(prefixBytes, 0);
   payloadBytes.set(cipherBytes, prefixBytes.length);
@@ -535,10 +543,35 @@ export async function buildEncryptedPaymentPayload({ receiver, note = "", amount
   return { payloadBytes, payloadHex, clearText };
 }
 
-/** The cipher hex inside a payment payload (any of the three roots), or "" when the hex is not one. */
+// A KaPosts tip (iOS a6bd60a, KAPOSTS_INDEXER.md 5.11): a chat payment to a post's author that
+// names the post, all of it text:
+//
+//   kchat:1:tip:<pubkey>:<signature>:<post_id>:<author_pubkey>:<sealed_hex>
+//
+// <sealed_hex> is sealPaymentRecord's hex, sealed to the author's chat key, so a reader takes a tip
+// as a chat payment whose sealed record is the hex in its last field (iOS
+// isPaymentRawPayload / decryptPaymentPayloadFromRawPayloadSync). Built in engine/kaposts.js.
+export const KAPOSTS_TIP_PREFIX = "kchat:1:tip:";
+
+/** A tip's fields from its payload text, or null when it isn't a well-formed tip (iOS ChatService.tipParts:
+ *  exactly five fields after the root, the last not empty). */
+export function kaPostTipParts(text) {
+  const value = String(text ?? "");
+  if (!value.startsWith(KAPOSTS_TIP_PREFIX)) return null;
+  const fields = value.slice(KAPOSTS_TIP_PREFIX.length).split(":");
+  if (fields.length !== 5 || !fields[4]) return null;
+  return { pubkey: fields[0], signature: fields[1], postId: fields[2], authorPubkey: fields[3], sealedHex: fields[4] };
+}
+
+/** The cipher hex inside a payment payload (any of the three roots, or a KaPosts tip's last field),
+ *  or "" when the hex is not one. */
 export function paymentPayloadEncryptedHex(payloadHex) {
   const clean = String(payloadHex || "").replace(/^0x/i, "").trim().toLowerCase();
   if (!clean) return "";
+  if (clean.startsWith(toHex(KAPOSTS_TIP_PREFIX))) {
+    const sealed = String(kaPostTipParts(fromHex(clean))?.sealedHex || "").toLowerCase();
+    return /^(?:[0-9a-f]{2})+$/.test(sealed) ? sealed : "";
+  }
   for (const root of PAYMENT_PAYLOAD_ROOTS) {
     const rootHex = toHex(root);
     if (clean.startsWith(rootHex) && clean.length > rootHex.length) return clean.slice(rootHex.length);

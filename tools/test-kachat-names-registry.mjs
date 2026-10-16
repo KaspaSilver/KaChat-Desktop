@@ -1080,6 +1080,35 @@ async function runRegistryFailures(v, r) {
   }
 }
 
+/** KachatNamesRegistry.totals (iOS f5d34f4 `totals(of:params:nowMs:)`): the walker's events
+ *  counted once per transaction, a register / extend / renew priced at the fixed prices. */
+function runActivityTotals(v, r) {
+  const m = M.decodeManifest(v.manifest);
+  const p = m.params;
+  const now = 1_800_000_000_000n;
+  const hour = 3_600_000n;
+  const day = 24n * hour;
+  const ev = (txId, op, name, at, years = null) => new R.Event({ txId, op, name, at, years });
+  const events = [
+    ev("t1", "register", "alice", now - hour, 2n), // 5+ bytes, 2 periods: last 24 hours
+    ev("t2", "renew", "bo", now - 3n * day, 1n), // 2 bytes: last 7 days
+    ev("t3", "extend", "abc", now - 30n * day, 3n), // 3 bytes, 3 periods: all time only
+    ev("t4", "sale", "alice", now - 2n * hour), // a sale: counted, priced at nothing
+    ev("t5", "list", "alice", now - 40n * day), // one tx with two events: counted once
+    ev("t5", "offer", "alice", now - 40n * day),
+    ev("t6", "register", "zed", now - hour, 0n), // no periods: no price
+  ];
+  const got = KachatNamesRegistry.totals(events, p, now);
+  const aliceCost = M.paramsRegisterCost(p, 5, 2n);
+  const boRenew = M.paramsRenewPrice(p, 2);
+  const abcExtend = M.paramsRenewPrice(p, 3) * 3n;
+  r.eq(aliceCost, p.registerPrices[4] + p.renewPrices[4], "totals: a 2-period registration = the register price + one renewal");
+  r.eq(got.transactions, { last24h: 3n, last7d: 4n, total: 6n }, "totals: one per transaction, by when");
+  r.eq(got.fees, { last24h: aliceCost, last7d: aliceCost + boRenew, total: aliceCost + boRenew + abcExtend }, "totals: fees at the fixed prices");
+  r.eq(KachatNamesRegistry.totals([], p, now), { transactions: { last24h: 0n, last7d: 0n, total: 0n }, fees: { last24h: 0n, last7d: 0n, total: 0n } }, "totals: nothing walked");
+  r.eq(KachatNamesRegistry.totals([ev("u1", "register", "\u00e9t\u00e9", now, 1n)], p, now).fees.total, M.paramsRegisterPrice(p, 5), "totals: a name's length is its UTF-8 bytes");
+}
+
 async function runRegistryIndexer(v, r) {
   const m = M.decodeManifest(v.manifest);
   const ownerKey = new Uint8Array(32).fill(0xab);
@@ -1091,6 +1120,8 @@ async function runRegistryIndexer(v, r) {
   });
   const seen = [];
   let graceServed = true;
+  // /stats/names (iOS f5d34f4): "full" (transactions + fees), "old" (per-kind activity only), "badFees"
+  let statsServed = "full";
   const fetch = async (url) => {
     seen.push(url);
     const u = new URL(url);
@@ -1110,6 +1141,11 @@ async function runRegistryIndexer(v, r) {
     if (p === "/names/bob") return response(200, { name: "bob", key: "00", registered: false, gap: { lo: "00".repeat(32), hi: "ff".repeat(32), outpoint: { txId: "ee".repeat(32), index: 0 } } });
     if (p === `/names/by-owner/${owner}`) return response(200, { names: [nameObj("zed", { registeredAt: 5 }), nameObj("alice")] });
     if (p === "/market/listings") return response(200, { listings: [nameObj("alice", { price: "700" })], next: null });
+    if (p === "/stats/names") {
+      if (statsServed === "old") return response(200, { activity: { kachatRegistrations: { total: 5, last24h: 1, last7d: 2 }, kachatSales: { total: 3, last24h: 0, last7d: 1 } } });
+      const fees = statsServed === "badFees" ? { total: "x", last24h: "1", last7d: "1" } : { total: "123456789012", last24h: "100000000", last7d: "250000000" };
+      return response(200, { transactions: { total: 9, last24h: 2, last7d: 4 }, activity: {}, fees });
+    }
     if (p === "/names/alice/history") return response(200, { events: [{ txId: "aa", op: "sale", name: "alice", at: 5, price: "700" }], next: null });
     if (p === "/names/alice/offers") {
       return response(200, { offers: [
@@ -1137,6 +1173,16 @@ async function runRegistryIndexer(v, r) {
   r.check(seen.some((u) => u.endsWith(`/names/by-owner/${owner}?includeInactive=false`)), "registry (indexer): by-owner URL");
   r.eq((await reg.listings()).map((n) => n.price), [700n], "registry (indexer): listings");
   r.eq((await reg.history("alice")).map((e) => e.price), [700n], "registry (indexer): history");
+  r.eq(await reg.activityTotals(), {
+    transactions: { last24h: 2n, last7d: 4n, total: 9n },
+    fees: { last24h: 100000000n, last7d: 250000000n, total: 123456789012n },
+  }, "registry (indexer): activityTotals from /stats/names (iOS f5d34f4)");
+  statsServed = "old";
+  r.eq(await reg.activityTotals(), { transactions: { last24h: 1n, last7d: 3n, total: 8n }, fees: null },
+    "registry (indexer): an indexer from before `transactions`: the per-kind figures added up, no fees");
+  statsServed = "badFees";
+  r.eq((await reg.activityTotals()).fees, null, "registry (indexer): unreadable fees are no fees");
+  statsServed = "full";
   r.eq((await reg.offersFor("alice")).map((o) => o.name), ["alice"], "registry (indexer): offers take the asked name (one without a seller dropped)");
   r.eq(reg.registerPrices, m.params.registerPrices, "registry (indexer): registerPrices from the manifest");
   r.eq(reg.renewPrices, m.params.renewPrices, "registry (indexer): renewPrices from the manifest");
@@ -1947,6 +1993,7 @@ async function main() {
     await runRegistryFailures(v, r);
     console.log(`+ KachatNamesRegistry refusals and failed refreshes: ${r.pass} pass, ${r.fail} fail`);
     await runRegistryIndexer(v, r);
+    runActivityTotals(v, r);
     console.log(`+ KachatNamesRegistry over a fake indexer: ${r.pass} pass, ${r.fail} fail`);
     await runRestPaging(v, r);
     console.log(`+ REST history paged past dust (IOS-065): ${r.pass} pass, ${r.fail} fail`);
