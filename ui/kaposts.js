@@ -1594,8 +1594,11 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
           </button>
           <button class="kaposts-action${post.bookmarkedByMe ? " active-bookmark" : ""}" type="button" data-kaposts-bookmark="${pid}" title="${post.bookmarkedByMe ? "Remove Bookmark" : "Bookmark"}">${ICONS.bookmark}</button>
           ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${pid}" title="Copy share link">${ICONS.share}</button>` : ""}
-          ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${pid}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span>${tips > 0 ? `<span class="kaposts-tip-count">${tips}</span>` : ""}</button>`}
-          ${isMine && tips > 0 && post.remoteId ? `<button class="kaposts-action kaposts-tips-own" type="button" data-kaposts-tippers="${pid}" aria-label="Who tipped this post" title="Who tipped this post"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>${tips}</span></button>` : ""}
+          ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${pid}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span></button>`}
+          ${/* How many times it was tipped, the way likes show theirs (iOS 0f241ce): a gray number
+               against the Tip button on someone else's post, the Kaspa mark and the count on your own.
+               A tap lists who tipped. */ ""}
+          ${tips > 0 && post.remoteId ? `<button class="kaposts-action kaposts-tips-count${isMine ? " own" : ""}" type="button" data-kaposts-tippers="${pid}" aria-label="Who tipped this post" title="Who tipped this post">${isMine ? `<img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" />` : ""}<span>${tips}</span></button>` : ""}
         </div>
         <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span></div>
         ${!inThread && isThreadRootPost(post) ? `<button class="kaposts-view-thread" type="button" data-kaposts-open="${pid}">⤷ View thread</button>` : ""}
@@ -5556,7 +5559,9 @@ export function initKaPosts(dependencies) {
       const p = findPost(tip.dataset.kapostsTip);
       // The tip names the post it is for, so the post counts it (iOS a6bd60a, KAPOSTS_INDEXER.md 5.11).
       const target = p?.remoteId && p?.posterPubkey ? { postId: p.remoteId, authorPubkey: p.posterPubkey } : null;
-      if (p) deps.tipUser?.(p.posterAddress, posterName(p.posterAddress), target);
+      // A tip sent counts on its post at once; the indexer's count takes over on the next refresh (iOS 0f241ce).
+      const countTip = target ? () => { mutatePost(p.id, (post) => { post.tips = (Number(post.tips) || 0) + 1; }); renderAll(); } : null;
+      if (p) deps.tipUser?.(p.posterAddress, posterName(p.posterAddress), target, countTip);
       return;
     }
 

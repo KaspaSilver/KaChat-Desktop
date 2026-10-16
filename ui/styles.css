@@ -6315,9 +6315,10 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-action.kaposts-tip:hover { opacity: .82; }
 .kaposts-tip-logo { width: 15px; height: 15px; border-radius: 50%; }
 /* How many times it was tipped, inside the Tip button (iOS 8015069); your own post's logo + count. */
-.kaposts-action.kaposts-tip .kaposts-tip-count { font-size: 11.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.kaposts-action.kaposts-tips-own { gap: 4px; }
-.kaposts-action.kaposts-tips-own span { font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.kaposts-action.kaposts-tips-count { gap: 4px; color: var(--muted); }
+.kaposts-action.kaposts-tips-count span { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* against the Tip button like a like count against its heart (iOS 0f241ce) */
+.kaposts-action.kaposts-tip + .kaposts-tips-count:not(.own) { margin-left: -10px; }
 .kaposts-countdown {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 50%;

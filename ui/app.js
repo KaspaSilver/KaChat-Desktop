@@ -10222,7 +10222,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 171;
+const APP_BUILD = 172;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
@@ -16736,7 +16736,7 @@ function commitTipCustomFee() {
 
 // `tip` ({ postId, authorPubkey }): the post being tipped. Then the tip names the post and is paid
 // from the chatting address only, so From offers no choice (iOS a6bd60a SendFromSection isLocked).
-async function openTipModal({ address, name, tip = null } = {}) {
+async function openTipModal({ address, name, tip = null, onTipped = null } = {}) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean)) { showCopyToast("This poster has no valid Kaspa address."); return; }
   if (clean === engine.address) { showCopyToast("That's your own address."); return; }
@@ -16760,6 +16760,7 @@ async function openTipModal({ address, name, tip = null } = {}) {
   if (tipMaxTimer) window.clearTimeout(tipMaxTimer);
   tipMaxTimer = null;
   tipState = {
+    onTipped, // the post counts the tip once it has gone out (iOS 0f241ce)
     max: null, // an exact Max, pinned (tipSetMax)
     // From (iOS 6333dd3): null = the chatting address, the default; else a spending address.
     contact, conversationEntry, address: clean, displayName, fundingIndex: null, fundingAddress: null, sourceLabel: null,
@@ -16974,6 +16975,7 @@ async function sendTipNow(tipSompi) {
     });
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
     showCopyToast(`Tip sent · ${(verifiedTxid || txid).slice(0, 10)}…`);
+    try { tip.onTipped?.(); } catch { /* the feed moved on */ }
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -25576,10 +25578,14 @@ queueMicrotask(async () => {
       // a failure falls back to the amount screen.
       // `tip` = { postId, authorPubkey }: the tip names the post, so the post counts it (iOS
       // a6bd60a, KAPOSTS_INDEXER.md 5.11); null only for something not on the network yet.
-      tipUser: (address, name, tip = null) => {
+      // `onTipped`: the tip went out, so its post counts it at once (iOS 0f241ce).
+      tipUser: (address, name, tip = null, onTipped = null) => {
         const kas = kaPostsDefaultTipKas();
-        if (kas > 0) sendInstantTip(address, name, kas, tip).catch(() => openTipModal({ address, name, tip }));
-        else openTipModal({ address, name, tip });
+        if (kas > 0) {
+          sendInstantTip(address, name, kas, tip)
+            .then(() => { try { onTipped?.(); } catch { /* the feed moved on */ } })
+            .catch(() => openTipModal({ address, name, tip, onTipped }));
+        } else openTipModal({ address, name, tip, onTipped });
       },
       openKaPostsSettings,
       startChat: (address, name) => openChatWithAddress({ address, name }),
