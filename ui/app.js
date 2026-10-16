@@ -7312,11 +7312,36 @@ function ownInputAddressSet() {
   return set;
 }
 
+// Other saved accounts' spending addresses, derived from their own seed (account:index -> address).
+const otherAccountSpendingMemo = new Map();
+
+/** An unlocked saved account's revealed spending addresses (0...its maxIndex), derived from its
+ *  seed - not only what its Manage Addresses happened to list (IOS-083 run 10). */
+function savedAccountSpendingAddresses(account) {
+  const out = [];
+  const mnemonic = account?.mnemonic;
+  if (!mnemonic || account.locked || !engine.kaspa) return out;
+  const maxIndex = Math.min(500, Number(getSpendingState(account.address).maxIndex) || 0);
+  for (let index = 0; index <= maxIndex; index += 1) {
+    const key = `${account.address}:${index}`;
+    let address = otherAccountSpendingMemo.get(key);
+    if (!address) {
+      try { address = engine.deriveSpendingWallet(mnemonic, index, account.passphrase || "", { passphraseForm: passphraseFormForRecord(account) })?.address || ""; } catch { address = ""; }
+      if (address) otherAccountSpendingMemo.set(key, address);
+    }
+    if (address) out.push(address);
+  }
+  return out;
+}
+
 /** Every address this person owns, lowercased: this account's (chatting, spending chain, Cold
- *  Storage) and every other saved account's chatting address plus the spending addresses its
- *  Manage Addresses has listed (IOS-083 run 9: a payment between your own addresses is never a
- *  contact's to claim with a payment_notice). */
+ *  Storage) and every other saved account's chatting address and spending addresses - derived
+ *  from its seed while unlocked, plus what its Manage Addresses listed (IOS-083 runs 9 and 10: a
+ *  payment between your own addresses is never a contact's to claim with a payment_notice). */
+let allOwnAddressCache = null; // { account, at, set } - the sweep asks every few seconds
 function allOwnAddressSet() {
+  const now = Date.now();
+  if (allOwnAddressCache && allOwnAddressCache.account === engine.address && now - allOwnAddressCache.at < 30_000) return new Set(allOwnAddressCache.set);
   const set = new Set([...ownInputAddressSet()].map((address) => String(address || "").toLowerCase()));
   try {
     for (const account of loadSavedAccounts()) {
@@ -7327,9 +7352,11 @@ function allOwnAddressSet() {
         const listed = JSON.parse(localStorage.getItem(accountScopedKey(SPENDING_BAL_CACHE_KEY, address)) || "{}") || {};
         for (const spending of Object.keys(listed)) set.add(spending.toLowerCase());
       } catch { /* no list kept for it */ }
+      if (address !== engine.address) for (const spending of savedAccountSpendingAddresses(account)) set.add(spending.toLowerCase());
     }
   } catch { /* no saved accounts readable */ }
   set.delete("");
+  allOwnAddressCache = { account: engine.address, at: now, set: new Set(set) };
   return set;
 }
 
@@ -7844,7 +7871,18 @@ async function checkReceivedPaymentNotice(conversationId, contact, message, vali
     : { ok: false, unknown: true };
   if (recheck) {
     const bubble = (conversationEntry.messages || []).find((entry) => normalizePaymentTxId(entry.txid) === txId && isPaymentNeedingAttention(entry));
-    if (!bubble || !verdict.ok) return;
+    if (!bubble || verdict.unknown) return;
+    if (!verdict.ok) {
+      // Filed unverified and now shown false (IOS-083 run 10): the bubble goes, and the payment
+      // (if it paid us at all) may show in Note to Self again like any stranger's transfer.
+      conversationEntry.messages = conversationEntry.messages.filter((entry) => entry !== bubble);
+      forgetStrangerPaymentTxid(txId);
+      schedulePersistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      renderChats();
+      appendEngineLog(`Removed the unverified payment ${txId.slice(0, 12)} - the transaction ${verdict.reason}`);
+      return;
+    }
     applyMessagePatch(bubble, { status: MESSAGE_STATUSES.CONFIRMED });
     schedulePersistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -7901,6 +7939,14 @@ function takePaymentOutOfSelfChat(txId) {
     conversationEntry.updatedAt = Date.now();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   }
+}
+
+function forgetStrangerPaymentTxid(txId) {
+  const store = loadStrangerPaymentState();
+  const kept = store.processedTxids.filter((id) => normalizePaymentTxId(id) !== txId);
+  if (kept.length === store.processedTxids.length) return;
+  store.processedTxids = kept;
+  saveStrangerPaymentState(store);
 }
 
 function rememberStrangerPaymentTxid(txId) {
@@ -10250,7 +10296,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 174;
+const APP_BUILD = 175;
 const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
