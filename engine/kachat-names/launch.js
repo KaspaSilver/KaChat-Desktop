@@ -23,6 +23,12 @@ let chainTimeSource = null;
 let chainTimeRefresh = null;
 let chainTimeTriedAt = -Infinity;
 
+/** How far a node's past median time trails the real time: it is the median of the timestamps of
+ *  the DAG's past window (263 samples, one per 10 blocks at 10 blocks a second, so ~263 s), which
+ *  puts it about half the window - ~131 s - behind the newest blocks (measured 2026-10-16: 136 s).
+ *  Without it the countdown ran 2+ minutes past the opening. */
+export const PAST_MEDIAN_TIME_LAG_MS = 131_500;
+
 /** A node's past median time (unix ms), as just read. */
 export function noteChainTimeMs(ms) {
   const chainMs = Number(ms);
@@ -30,9 +36,10 @@ export function noteChainTimeMs(ms) {
   chainClock = { chainMs, at: monotonicMs() };
 }
 
-/** The network's time now, or null before any node has answered. */
+/** The network's time now (its past median time carried forward, plus the median's lag), or null
+ *  before any node has answered. */
 export function networkNowMs() {
-  return chainClock ? chainClock.chainMs + (monotonicMs() - chainClock.at) : null;
+  return chainClock ? chainClock.chainMs + PAST_MEDIAN_TIME_LAG_MS + (monotonicMs() - chainClock.at) : null;
 }
 
 /** What reads the DAG when the countdown needs the network's time (the app's engine). */
@@ -70,17 +77,22 @@ function rememberOpen(network) {
   try { globalThis.localStorage?.setItem(openedKey(network), "1"); } catch { /* fine */ }
 }
 
-/** Open once the network's time reaches the opening (iOS 6975e3e, XP-020); closed while that time
- *  is unknown. `nowMs` defaults to the network's time - never the device's. */
-export function isPubliclyOpen(nowMs = undefined, network = NETWORK_ID) {
+/** Open once the network's time reaches the opening (iOS 6975e3e, XP-020). `nowMs` defaults to
+ *  the network's time. The device's clock (`deviceNowMs`) also opens it once it is past the
+ *  opening: this rule shipped after mainnet opened (2026-10-16), when a clock set ahead can't open
+ *  anything early any more, and it spares a first visit the countdown while no node has answered
+ *  yet. It is never remembered; only the network's own time is. */
+export function isPubliclyOpen(nowMs = undefined, network = NETWORK_ID, deviceNowMs = Date.now()) {
   const opens = publicLaunchMs(network);
   if (opens == null) return true;
   if (rememberedOpen(network)) return true;
   const fromNetwork = nowMs === undefined;
   const now = fromNetwork ? networkNowMs() : nowMs;
-  if (now == null || now < opens) return false;
-  if (fromNetwork) rememberOpen(network); // only the network's own time is remembered
-  return true;
+  if (now != null && now >= opens) {
+    if (fromNetwork) rememberOpen(network); // only the network's own time is remembered
+    return true;
+  }
+  return fromNetwork && Number.isFinite(deviceNowMs) && deviceNowMs >= opens;
 }
 
 /** "Friday, October 16 at 8:00 AM" in the person's own time zone and language (iOS launchString). */
