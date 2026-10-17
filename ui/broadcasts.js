@@ -1163,7 +1163,8 @@ function buildMessageElement(m) {
   // The sender's name is a label, not a button (iOS PublicChatMessageRow): the avatar opens the
   // sender sheet.
   const sender = document.createElement("strong");
-  sender.textContent = senderName(m.senderAddress);
+  // "You" over your own messages (iOS PublicChatMessageRow).
+  sender.textContent = mine ? "You" : senderName(m.senderAddress);
   head.append(sender);
   // Your own messages carry the same delivery label as 1:1 and group bubbles, under the
   // message (iOS 21baa36): Sending, Sent, Failed · Tap to retry. Appended below, after the body.

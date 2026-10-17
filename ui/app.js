@@ -2673,6 +2673,57 @@ function buildNextcloudRevealCard(shareUrl, downloadUrl) {
 /** Progressive type probe (cross-origin headers are unreadable without CORS, but media
  *  element `src` loads need none): <video> that reports a finite duration wins; on error
  *  retry as <img>; if both fail, an "Open in Nextcloud" link. */
+// What a Nextcloud server answers for a share that was deleted, expired or unlinked (iOS
+// shareGoneStatuses). A password prompt, a 5xx or a relay refusal is NOT read as revoked.
+const NEXTCLOUD_SHARE_GONE_STATUSES = new Set([404, 410]);
+
+/// `attachment; filename*=UTF-8''na%20me.pdf` or `filename="name.pdf"` -> the name.
+function filenameFromContentDisposition(value) {
+  const text = String(value || "");
+  const star = text.match(/filename\*\s*=\s*([^']*)''([^;]+)/i);
+  if (star) { try { return decodeURIComponent(star[2].trim().replace(/^"|"$/g, "")); } catch { /* fall through */ } }
+  const plain = text.match(/filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i);
+  return plain ? String(plain[1] || plain[2] || "").trim() || null : null;
+}
+
+/// iOS fetchNextcloudPreview: a 2-byte ranged GET of the share's /download, through the relay so
+/// the headers are readable - the type, the file's name, its size (Content-Range's total), or
+/// that the share is gone. null when there is no answer to go on.
+async function nextcloudShareInfo(downloadUrl) {
+  try {
+    if (!(await isProxyAvailable())) return null;
+    const response = await fetch(proxiedUrl(downloadUrl), { headers: { Range: "bytes=0-1" }, cache: "no-store" });
+    try { response.body?.cancel?.(); } catch { /* nothing to drop */ }
+    if (NEXTCLOUD_SHARE_GONE_STATUSES.has(response.status)) return { revoked: true };
+    if (!response.ok) return null;
+    const type = String(response.headers.get("content-type") || "").toLowerCase();
+    const kind = type.startsWith("image/") ? "image"
+      : type.startsWith("video/") ? "video"
+        : type.startsWith("audio/") ? "audio"
+          : type.includes("pdf") ? "pdf" : "file";
+    const filename = filenameFromContentDisposition(response.headers.get("content-disposition"));
+    const total = Number(String(response.headers.get("content-range") || "").split("/").pop());
+    const bytes = Number.isFinite(total) && total > 0 ? total : (Number(response.headers.get("content-length")) || null);
+    return { kind, filename, bytes };
+  } catch { return null; }
+}
+
+/// iOS attachmentCaption: "PDF", the file's own extension ("DOCX"), "AUDIO" or "FILE", then
+/// " · 1.2 MB" when the size is known.
+function nextcloudAttachmentCaption(info) {
+  const ext = String(info?.filename || "").includes(".") ? String(info.filename).split(".").pop().toUpperCase() : "";
+  const label = info?.kind === "audio" ? "AUDIO" : info?.kind === "pdf" ? "PDF" : (ext || "FILE");
+  return info?.bytes > 0 ? `${label} · ${formatFileBytes(info.bytes)}` : label;
+}
+
+/// iOS revokedShareTile: says only that the file is gone - no link, no server address.
+function buildNextcloudRevokedTile() {
+  const tile = document.createElement("div");
+  tile.className = "message-nextcloud-revoked";
+  tile.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.1A10.9 10.9 0 0 1 12 5c5 0 9 4 10 7a11.8 11.8 0 0 1-2.6 3.9M6.6 6.6C4.4 8 2.9 10 2 12c1 3 5 7 10 7a9.7 9.7 0 0 0 3.4-.6"/></svg><span>This file is no longer shared</span>';
+  return tile;
+}
+
 function probeNextcloudMedia(placeholder, shareUrl, downloadUrl) {
   placeholder.disabled = true;
   const label = placeholder.querySelector("span");
@@ -2683,6 +2734,7 @@ function probeNextcloudMedia(placeholder, shareUrl, downloadUrl) {
     settled = true;
     placeholder.replaceWith(el);
   };
+  let shareInfo = null;
 
   // Probe order: video -> audio (a media element that has duration but no video track is an
   // mp3/m4a) -> image -> attachment card. Office docs and other unrenderable types land on the
@@ -2693,7 +2745,10 @@ function probeNextcloudMedia(placeholder, shareUrl, downloadUrl) {
     card.href = shareUrl;
     card.target = "_blank";
     card.rel = "noopener noreferrer";
-    card.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg><span><strong>File on Nextcloud</strong><small>Open in Nextcloud</small></span>';
+    // iOS nextcloudAttachmentCard: the file's icon, its name and "PDF · 1.2 MB".
+    card.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg><span><strong></strong><small></small></span>';
+    card.querySelector("strong").textContent = shareInfo?.filename || (shareInfo?.kind === "pdf" ? "PDF" : "File");
+    card.querySelector("small").textContent = nextcloudAttachmentCaption(shareInfo);
     card.addEventListener("click", (event) => event.stopPropagation());
     settle(card);
   };
@@ -2728,7 +2783,15 @@ function probeNextcloudMedia(placeholder, shareUrl, downloadUrl) {
   }, { once: true });
   video.addEventListener("error", tryImage, { once: true });
   video.addEventListener("click", (event) => event.stopPropagation());
-  video.src = downloadUrl;
+  // Ask the server what the share is first: gone -> the revoked tile; a document -> the card
+  // straight away; media (or no answer) -> the element probe, which plays it.
+  nextcloudShareInfo(downloadUrl).then((info) => {
+    if (settled) return;
+    shareInfo = info;
+    if (info?.revoked) { settle(buildNextcloudRevokedTile()); return; }
+    if (info && (info.kind === "pdf" || info.kind === "file")) { attachmentFallback(); return; }
+    video.src = downloadUrl;
+  });
 }
 
 // --- Reply-to-message (matches iOS's ChatService.replyingTo/cancelReply) ---
@@ -6592,7 +6655,10 @@ function renderSettingsHeader() {
   if (value) value.textContent = `${settingsBalanceExact() ?? "--"} ${KAS_UNIT}`;
   const led = document.querySelector("[data-settings-health-led]");
   if (led && serviceHealthLed) led.className = serviceHealthLed.className;
+  // The other places the dot appears (a public room's bar, a group chat's) follow the same state.
+  if (serviceHealthLed) document.querySelectorAll("[data-mirror-health-led]").forEach((el) => { el.className = serviceHealthLed.className; });
 }
+document.querySelectorAll("[data-mirror-health-button]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); openConnectionOverlay(); }));
 document.querySelector("[data-settings-health-button]")?.addEventListener("click", () => openConnectionOverlay());
 document.querySelector("[data-settings-balance]")?.addEventListener("click", async () => {
   const exact = settingsBalanceExact();
@@ -10834,7 +10900,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 181;
+const APP_BUILD = 182;
 // "5.2 (176)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -16723,23 +16789,6 @@ if (kachatNamesUiEnabled()) {
   });
 }
 
-// Re-render the open chat info avatar + every avatar of this contact across the app.
-function refreshContactAvatars(contact) {
-  if (contact.photo) {
-    if (chatInfoAvatarImage) { chatInfoAvatarImage.src = contact.photo; chatInfoAvatarImage.hidden = false; }
-    if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = true;
-  } else {
-    if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = false;
-    if (chatInfoAvatarImage) { chatInfoAvatarImage.hidden = true; chatInfoAvatarImage.src = ""; }
-  }
-  if (activeConversationId) {
-    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
-    if (conversationEntry && conversationEntry.contactId === contact.id) {
-      updateAvatarElement(conversationAvatarInitials, conversationAvatarImage, contact);
-    }
-  }
-  renderChats();
-}
 
 /// Bare, lowercased domain key (".kas" stripped) - `/primary-name` and `/assets` do not agree on
 /// whether the suffix is present, so compare without it (iOS normalizedDomainKey).
@@ -28465,7 +28514,6 @@ function msgMenuHint(label) {
   if (hints[text]) return hints[text];
   if (/^Reactions \(\d+\)$/.test(text)) return "Who reacted, and with what.";
   if (text.startsWith("Translate into ")) return `Shows this message in ${text.slice(15)}.`;
-  if (text.startsWith("Hide ")) return "Hides their messages in this room, on this device.";
   return "";
 }
 

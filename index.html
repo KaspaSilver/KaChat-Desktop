@@ -158,6 +158,8 @@
               <button class="kaposts-icon-button" type="button" data-broadcast-back aria-label="Back">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
               </button>
+              <!-- The connection dot beside back (iOS PublicChatChannelView's leading items). -->
+              <button class="service-health-button mirror-health-button" type="button" data-mirror-health-button aria-label="Open Connection Status" title="Open Connection Status"><span class="service-health-led busy" data-mirror-health-led aria-hidden="true"></span></button>
 
               <!-- The room's header chip (iOS BroadcastRoomTitleChip): a # circle over a name
                    capsule, and the way into Room Info. -->
@@ -426,6 +428,9 @@
                     <p class="conversation-bio group-chat-sub" data-group-chat-sub></p>
                   </span>
                 </button>
+                <!-- The trailing connection dot (iOS GroupChatDetailView): tapping the header opens
+                     Group Info, so the right of the bar is free for it. -->
+                <button class="service-health-button mirror-health-button group-chat-health" type="button" data-mirror-health-button aria-label="Open Connection Status" title="Open Connection Status"><span class="service-health-led busy" data-mirror-health-led aria-hidden="true"></span></button>
               </div>
               <div class="message-selection-toolbar" data-group-selection-toolbar hidden>
                 <button class="selection-cancel" type="button" data-group-cancel-selection>Cancel</button>

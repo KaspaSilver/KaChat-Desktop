@@ -14439,3 +14439,58 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   .kstats-toolbar-actions .kaposts-icon-button svg { width: 24px; height: 24px; }
   body:has([data-app-tab-screen="kachat-stats"]:not([hidden]) .kstats-toolbar-actions) .toolbar-balance { padding-right: 56px; }
 }
+/* iOS PublicChatMessageRow: the name above the bubble (caption, semibold, accent; "You" on your
+   own), a reply's quote as its own small box, then the bubble holding just the text, then the
+   time line under it - the bubble is the text, not the whole stack. */
+.broadcast-message, .broadcast-message.mine {
+  background: transparent; border: 0; padding: 0; color: var(--text);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; max-width: calc(100% - 48px);
+}
+.broadcast-message.mine { align-items: flex-end; }
+.broadcast-message-head { margin: 0; }
+.broadcast-message-head strong,
+.broadcast-message.mine .broadcast-message-head strong { color: var(--kaspa-ink); font-size: 12px; font-weight: 600; }
+.broadcast-message-body,
+.broadcast-message .message-audio-bubble {
+  background: var(--bubble-public-in); border-radius: 18px; padding: 8px 14px; font-size: 17px; line-height: 1.3; max-width: 100%;
+}
+.broadcast-message.mine .broadcast-message-body,
+.broadcast-message.mine .message-audio-bubble { background: var(--bubble-out); color: #fff; }
+.broadcast-message .message-reply-quote {
+  margin: 0; padding: 8px; border-radius: 10px; max-width: 240px; border: 0;
+  background: var(--fill-tertiary, rgba(118,118,128,.24));
+}
+.broadcast-message .message-reply-quote strong { color: var(--kaspa-ink); font-size: 11px; font-weight: 600; }
+.broadcast-message .message-reply-quote span { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.broadcast-message .broadcast-time-line { justify-content: flex-start; margin-top: 0; }
+.broadcast-message.mine .broadcast-time-line { justify-content: flex-end; }
+.broadcast-message .broadcast-time, .broadcast-message.mine .broadcast-time { color: var(--muted); font-size: 12px; }
+.broadcast-message.mine .broadcast-message-head { color: var(--muted); }
+@media (max-width: 859px) {
+  /* iOS PublicChatChannelView toolbar: back and the bell in round glass buttons. */
+  .broadcast-room > .kaposts-thread-header > [data-broadcast-back],
+  .broadcast-room > .kaposts-thread-header > .broadcast-room-bell,
+  .broadcast-room > .kaposts-thread-header > .broadcast-own-room-about {
+    width: 40px; height: 40px; flex: 0 0 40px; border-radius: 999px; padding: 0; display: grid; place-items: center;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+  .broadcast-room > .kaposts-thread-header > [data-broadcast-back] { color: var(--text); }
+  .broadcast-room > .kaposts-thread-header > [data-broadcast-back] svg { display: none; }
+  .broadcast-room > .kaposts-thread-header > [data-broadcast-back]::before { content: ""; width: 11px; height: 11px; border-left: 2.4px solid currentColor; border-bottom: 2.4px solid currentColor; transform: translateX(2px) rotate(45deg); border-radius: 1px; }
+  .broadcast-room > .kaposts-thread-header > .broadcast-room-bell svg { width: 22px; height: 22px; }
+}
+@media (max-width: 859px) {
+  /* 1:1 and group chat toolbars: iOS 26's round glass back button with the chevron. */
+  .conversation-header .back-button {
+    width: 40px; height: 40px; border-radius: 999px; padding: 0; font-size: 0; color: var(--text);
+    display: grid; place-items: center;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+  .conversation-header .back-button::before { content: ""; width: 11px; height: 11px; border-left: 2.4px solid currentColor; border-bottom: 2.4px solid currentColor; transform: translateX(2px) rotate(45deg); border-radius: 1px; }
+}
+/* The connection dot in a group chat's bar sits on the right, as a 1:1's call button does. */
+.conversation-header .group-chat-health { position: absolute; right: 10px; top: calc(var(--safe-top, 0px) + (100% - var(--safe-top, 0px)) / 2); transform: translateY(-50%); pointer-events: auto; }
+.mirror-health-button { width: 40px; height: 40px; flex: 0 0 40px; }
+.broadcast-room > .kaposts-thread-header > .mirror-health-button { margin-left: 6px; }
+.message-nextcloud-revoked { display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 14px; background: color-mix(in srgb, var(--text) 5%, transparent); color: var(--muted); font-size: 12px; }
+.message-nextcloud-revoked svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
