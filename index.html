@@ -926,33 +926,41 @@
           <span data-settings-balance-value>-- KAS</span>
         </button>
         <button class="settings-done-button" type="button" data-close-account-overlay>Done</button>
+        <!-- Inside a category or sub-page the toolbar is iOS's pushed-page bar: a round back
+             button and the page's inline title, no Done. -->
+        <button class="settings-nav-back" type="button" data-settings-nav-back aria-label="Back" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5.5 8.5 12l6.5 6.5"/></svg></button>
+        <h2 class="settings-nav-title" data-settings-nav-title hidden></h2>
       </header>
       <div class="account-overlay-body">
         <section class="app-screen utility-screen settings-screen" data-screen="settings">
           <section class="settings-group">
             <p class="settings-group-label">Customization</p>
             <div class="settings-list-card">
-              <div class="settings-toggle-row settings-segmented-row">
-                <span><strong data-i18n="appearance">Appearance</strong></span>
-                <div class="settings-segmented" role="group" aria-label="Appearance" data-theme-segmented>
-                  <button type="button" class="settings-segmented-option" data-theme-option="system" data-i18n="theme.system">System</button>
-                  <button type="button" class="settings-segmented-option" data-theme-option="light" data-i18n="theme.light">Light</button>
-                  <button type="button" class="settings-segmented-option" data-theme-option="dark" data-i18n="theme.dark">Dark</button>
-                </div>
-              </div>
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="language">
+              <!-- iOS AppWideCustomizationPickers: three menu pickers, the value in the accent colour
+                   with up/down chevrons; a click opens the choices as a menu (a native select). -->
+              <label class="settings-list-row settings-menu-row">
+                <span class="settings-row-copy"><strong data-i18n="appearance">Appearance</strong></span>
+                <span class="settings-menu-value"><span data-theme-current>System</span><svg class="settings-menu-updown" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9.5 12 5.5l4 4M8 14.5l4 4 4-4"/></svg></span>
+                <select class="settings-menu-select" data-theme-select aria-label="Appearance">
+                  <option value="system" data-i18n="theme.system">System</option>
+                  <option value="light" data-i18n="theme.light">Light</option>
+                  <option value="dark" data-i18n="theme.dark">Dark</option>
+                </select>
+              </label>
+              <label class="settings-list-row settings-menu-row">
                 <span class="settings-row-copy"><strong data-i18n="language">Language</strong></span>
-                <span class="settings-dropdown-value" data-language-current>System</span>
-                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-              </button>
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="currency">
+                <span class="settings-menu-value"><span data-language-current>System</span><svg class="settings-menu-updown" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9.5 12 5.5l4 4M8 14.5l4 4 4-4"/></svg></span>
+                <select class="settings-menu-select" data-language-select aria-label="Language"></select>
+              </label>
+              <label class="settings-list-row settings-menu-row">
                 <span class="settings-row-copy"><strong data-i18n="currency">Currency</strong></span>
-                <span class="settings-dropdown-value" data-currency-current>US Dollar (USD)</span>
-                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-              </button>
+                <span class="settings-menu-value"><span data-currency-current>US Dollar (USD)</span><svg class="settings-menu-updown" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9.5 12 5.5l4 4M8 14.5l4 4 4-4"/></svg></span>
+                <select class="settings-menu-select" data-currency-select aria-label="Currency"></select>
+              </label>
               <!-- iOS SettingsView customizationPage: pickers, Customize Dock, then Show Fee Estimate
                    (default on). No Show Setup Guides switch: the guides are always shown. -->
               <button class="settings-list-row" type="button" data-settings-open-subscreen="dock">
+                <span class="settings-row-icon settings-row-icon-plain" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.5" cy="6.5" r=".9"/><circle cx="4.5" cy="12" r=".9"/><circle cx="4.5" cy="17.5" r=".9"/></svg></span>
                 <span class="settings-row-copy"><strong>Customize Dock</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
@@ -960,59 +968,7 @@
             </div>
           </section>
 
-          <!-- Customization sub-screens (iOS: every picker is its own page). -->
-          <section class="settings-group" data-settings-subscreen="language">
-            <p class="settings-group-label" data-i18n="language">Language</p>
-            <div class="settings-list-card">
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="system">System</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="ar">العربية</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="ar-EG">العربية (مصر)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="bn">বাংলা</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="de">Deutsch</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="en">English</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="es">Español</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="fa">فارسی</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="fr">Français</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="he">עברית</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="hi">हिन्दी</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="id">Bahasa Indonesia</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="it">Italiano</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="ja">日本語</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="ko">한국어</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="pt">Português</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="ru">Русский</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="tr">Türkçe</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="vi">Tiếng Việt</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-language-option="zh-Hans">简体中文</button>
-            </div>
-          </section>
-
-          <section class="settings-group" data-settings-subscreen="currency">
-            <p class="settings-group-label" data-i18n="currency">Currency</p>
-            <div class="settings-list-card">
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="usd">US Dollar (USD)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="eur">Euro (EUR)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="gbp">British Pound (GBP)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="jpy">Japanese Yen (JPY)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="cny">Chinese Yuan (CNY)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="aud">Australian Dollar (AUD)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="cad">Canadian Dollar (CAD)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="chf">Swiss Franc (CHF)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="hkd">Hong Kong Dollar (HKD)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="inr">Indian Rupee (INR)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="krw">South Korean Won (KRW)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="sgd">Singapore Dollar (SGD)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="idr">Indonesian Rupiah (IDR)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="nzd">New Zealand Dollar (NZD)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="mxn">Mexican Peso (MXN)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="brl">Brazilian Real (BRL)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="rub">Russian Ruble (RUB)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="try">Turkish Lira (TRY)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="zar">South African Rand (ZAR)</button>
-                  <button class="settings-dropdown-row settings-select-row" type="button" data-currency-option="btc">Bitcoin (BTC)</button>
-            </div>
-          </section>
-
+          <!-- Customization sub-screen. -->
           <section class="settings-group" data-settings-subscreen="dock">
             <p class="settings-group-label">Customize Dock</p>
             <!-- Two drag lists (iOS 4da34ab MenuVisibilityView): the dock, then Kaspa Hub. Rows are
@@ -1034,7 +990,7 @@
             <p class="settings-group-label">Security</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-change-password><span class="settings-row-copy"><strong>Change Password</strong><small data-password-status>No password set</small></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-copy"><strong>Simple Mode</strong></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+              <button class="settings-list-row" type="button" data-settings-open-subscreen="child-mode"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.2 19.5 6v5.6c0 4.4-3.1 7.9-7.5 9.2-4.4-1.3-7.5-4.8-7.5-9.2V6z"/><rect class="fill" x="9.3" y="11" width="5.4" height="4.4" rx=".8"/><path d="M10.4 11V9.6a1.6 1.6 0 0 1 3.2 0V11"/></svg></span><span class="settings-row-copy"><strong>Simple Mode</strong></span><span class="settings-dropdown-caption" data-child-mode-caption>Off</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
             </div>
           </section>
 
@@ -1052,7 +1008,7 @@
                    the testnet values while this is on. -->
               <div class="settings-toggle-row testnet-toggle-row">
                 <span class="testnet-toggle-label">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-8.5V3"/><path d="M7.5 14h9"/></svg>
+                  <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.5 3.5h5M14.5 3.5h5"/><path d="M5.5 3.5v15a1.5 1.5 0 0 0 3 0v-15M15.5 3.5v15a1.5 1.5 0 0 0 3 0v-15"/><path class="fill" d="M5.5 11h3v7.5a1.5 1.5 0 0 1-3 0z"/><path d="M5.5 7h1.5M5.5 9h1"/><path d="M17 7h1.5M17.5 9h1M17 11h1.5"/></svg></span>
                   <strong>Testnet</strong>
                 </span>
                 <label class="switch-control testnet-switch"><input type="checkbox" data-pref-testnet><span></span></label>
@@ -1063,12 +1019,14 @@
                 <button type="button" class="testnet-reload-button" data-testnet-reload>Reload Now</button>
               </div>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="connection-settings">
+                <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.6 5.2 3.6 8.5s-1.2 6.1-3.6 8.5c-2.4-2.4-3.6-5.2-3.6-8.5S9.6 5.9 12 3.5z"/></svg></span>
                 <span class="settings-row-copy"><strong>Connection Settings</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
             </div>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="explorer">
+                <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path class="fill" d="m15.6 8.4-2.1 5.1-5.1 2.1 2.1-5.1z"/></svg></span>
                 <span class="settings-row-copy"><strong>Kaspa Explorer</strong></span>
                 <span class="settings-dropdown-value" data-explorer-current>kaspa.stream</span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
@@ -1229,10 +1187,12 @@
             <p class="settings-group-label">Notifications</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="notifications-chats">
+                <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5.5A2 2 0 0 1 5 3.5h8.5a2 2 0 0 1 2 2V10a2 2 0 0 1-2 2H8l-3 2.5V12a2 2 0 0 1-2-2z"/><path d="M15.5 8H19a2 2 0 0 1 2 2v4.5a2 2 0 0 1-2 2v2.5l-3-2.5h-4.5a2 2 0 0 1-2-2V12"/></svg></span>
                 <span class="settings-row-copy"><strong>Chats</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
               <button class="settings-list-row" type="button" data-settings-open-subscreen="notifications-wallet">
+                <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2.5" y="6.5" width="19" height="11"/><rect x="4.5" y="8.5" width="15" height="7"/><ellipse cx="12" cy="12" rx="2.2" ry="3.2"/></svg></span>
                 <span class="settings-row-copy"><strong>Wallet</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
@@ -1283,36 +1243,39 @@
             <div class="settings-list-card">
               <!-- iOS SettingsView chatsPage: the photo-approval switch, then Quick Reactions with its six emojis trailing. -->
               <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
-              <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-copy"><strong>Quick Reactions</strong></span><span class="settings-dropdown-caption" data-quick-reactions-preview>👍❤️😂😮😢🙏</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+              <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><circle class="fill" cx="12" cy="12" r="9.5"/><circle cx="9" cy="10" r="1.1" fill="var(--sheet-row, #2c2c2e)" stroke="none"/><circle cx="15" cy="10" r="1.1" fill="var(--sheet-row, #2c2c2e)" stroke="none"/><path d="M8.6 14a4 4 0 0 0 6.8 0" stroke="var(--sheet-row, #2c2c2e)"/></svg></span><span class="settings-row-copy"><strong>Quick Reactions</strong></span><span class="settings-dropdown-caption" data-quick-reactions-preview>👍❤️😂😮😢🙏</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
             </div>
           </section>
 
           <section class="settings-group">
-            <p class="settings-group-label">Storage</p>
+            <!-- The hub's row name; the page opens on its first section (iOS storagePage). -->
+            <p class="settings-group-label" hidden>Storage</p>
             <p class="settings-group-label">On This Device</p>
             <div class="settings-list-card">
               <!-- iOS storagePage: an inline menu picker, then "Local storage used: X" as a footnote. -->
-              <div class="settings-toggle-row">
+              <label class="settings-toggle-row settings-menu-row">
                 <span><strong>Message retention</strong></span>
-                <select class="settings-inline-select" data-retention-select aria-label="Message retention">
+                <span class="settings-menu-value"><span data-retention-current>Keep forever</span><svg class="settings-menu-updown" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9.5 12 5.5l4 4M8 14.5l4 4 4-4"/></svg></span>
+                <select class="settings-menu-select" data-retention-select aria-label="Message retention">
                   <option value="forever">Keep forever</option>
                   <option value="days30">30 days</option>
                   <option value="days90">90 days</option>
                   <option value="year1">1 year</option>
                 </select>
-              </div>
+              </label>
               <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small data-local-storage-used>Local storage used: Unknown</small></span></div>
             </div>
             <p class="settings-group-footer">How long messages are kept on this device, and how much space they use. Applies before any cloud storage.</p>
             <!-- Your own data, not cache (iOS cda0d99): photos you assigned in the Address Book. Kept
                  apart from Cache, whose "clear" must never delete anything you'd miss. -->
             <div class="settings-list-card">
-              <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Address Book Photos</strong></span><span class="settings-dropdown-caption" data-address-book-photos-size>…</span></div>
+              <div class="settings-list-row settings-info-row"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3.5h11.5v15H7.25A1.75 1.75 0 0 0 5.5 20.25V5A1.5 1.5 0 0 1 7 3.5z"/><path d="M5.5 20.25A1.25 1.25 0 0 0 6.75 21.5H17.5v-3"/></svg></span><span class="settings-row-copy"><strong>Address Book Photos</strong></span><span class="settings-row-value" data-address-book-photos-size>…</span></div>
               <button class="settings-list-row danger-row" type="button" data-address-book-photos-remove hidden><span class="settings-row-copy"><strong>Remove Address Book Photos</strong></span></button>
             </div>
             <p class="settings-group-footer">Photos you assigned to saved addresses, for every wallet on this device. They're kept until you remove them, and they're included in your chat backup.</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="cache">
+                <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.5 6h15M9.5 6V4.2h5V6M6.5 6l.9 14.3h9.2L17.5 6"/><path d="M10 9.5v8M12 9.5v8M14 9.5v8"/></svg></span>
                 <span class="settings-row-copy"><strong>Cache</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
@@ -1321,7 +1284,7 @@
             <p class="settings-group-label">Cloud Storage</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="nextcloud">
-                <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M17.5 18.5h-11a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 16.5 9a4.75 4.75 0 0 1 1 9.4z"/></svg></span>
+                <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 9.5 7 4.5h10l2 5"/><rect x="4" y="9.5" width="16" height="6" rx="1.5"/><circle class="fill" cx="16.5" cy="12.5" r=".9"/><path d="M12 15.5v3.5M3.5 19h17"/><circle cx="12" cy="19" r="1.3"/></svg></span>
                 <span class="settings-row-copy"><strong>Nextcloud</strong></span>
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
@@ -1355,17 +1318,17 @@
           <section class="settings-group">
             <p class="settings-group-label">Chat History</p>
             <div class="settings-list-card">
-              <button class="settings-list-row" type="button" data-shell-action="export-history"><span class="settings-row-icon">⇧</span><span class="settings-row-copy"><strong>Export Chat History</strong></span></button>
-              <button class="settings-list-row" type="button" data-shell-action="import-history"><span class="settings-row-icon">⇩</span><span class="settings-row-copy"><strong>Import Chat History</strong></span></button>
+              <button class="settings-list-row settings-action-row" type="button" data-shell-action="export-history"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 9.5H7a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17 9.5h-1.5"/><path d="M12 14.5V3M8.5 6.5 12 3l3.5 3.5"/></svg></span><span class="settings-row-copy"><strong>Export Chat History</strong></span></button>
+              <button class="settings-list-row settings-action-row" type="button" data-shell-action="import-history"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 9.5H7a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17 9.5h-1.5"/><path d="M12 4v10.5M8.5 11 12 14.5l3.5-3.5"/></svg></span><span class="settings-row-copy"><strong>Import Chat History</strong></span></button>
               <input type="file" accept=".json,application/json" hidden data-chat-history-file />            </div>
           </section>
 
           <section class="settings-group">
             <p class="settings-group-label">Diagnostics</p>
             <div class="settings-list-card">
-              <button class="settings-list-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon">◉</span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong></span></button>
+              <!-- iOS diagnosticsPage: the explanation sits inside the row, under the button. -->
+              <button class="settings-list-row settings-action-row diagnostics-export-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path class="fill" d="M9.2 6.6a2.8 2.4 0 0 1 5.6 0z"/><path d="M9.6 4.4 8.6 3.3M14.4 4.4l1-1.1"/><path class="fill" d="M7.3 8h9.4c.9 1.2 1.3 2.8 1.3 4.6 0 4-2.6 7.2-6 7.2s-6-3.2-6-7.2c0-1.8.4-3.4 1.3-4.6z"/><path d="M4 10.5h2.4M17.6 10.5H20M4 14.5h2.2M17.8 14.5H20M5 18.5l1.9-1.4M19 18.5l-1.9-1.4"/><path d="M12 8.5v11" stroke="var(--sheet-row, #2c2c2e)"/></svg></span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong></span><small class="diagnostics-export-note">Exports app/device info, connection settings, local message counts, and recent app logs as a zip - for troubleshooting with support. No private keys, seed phrases, or decrypted message content are included.</small></button>
             </div>
-            <p class="settings-group-footer">Exports app/device info, connection settings, local message counts, and recent app logs as a zip - for troubleshooting with support. No private keys, seed phrases, or decrypted message content are included.</p>
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Verbose API Logging</strong></span><label class="switch-control"><input type="checkbox" data-pref-verbose-api-logging><span></span></label></div>
             </div>
@@ -1375,7 +1338,7 @@
           <section class="settings-group danger-zone-group">
             <p class="settings-group-label">Danger Zone</p>
             <div class="settings-list-card danger-list-card">
-              <button class="settings-list-row danger-row" type="button" data-shell-action="resync"><span class="settings-row-icon">↻</span><span class="settings-row-copy"><strong>Wipe and re-sync incoming messages</strong></span></button>            </div>
+              <button class="settings-list-row danger-row" type="button" data-shell-action="resync"><span class="settings-row-icon settings-row-icon-accent settings-row-icon-red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5.2 10a7 7 0 0 1 12.6-2.6"/><path class="fill" d="m19.6 5.2-.2 4.6-4.3-1.6z"/><path d="M18.8 14a7 7 0 0 1-12.6 2.6"/><path class="fill" d="m4.4 18.8.2-4.6 4.3 1.6z"/></svg></span><span class="settings-row-copy"><strong>Wipe and re-sync incoming messages</strong></span></button>            </div>
           </section>
 
           <details class="diagnostics-panel">

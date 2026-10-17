@@ -10834,7 +10834,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 177;
+const APP_BUILD = 178;
 // "5.2 (176)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -12955,7 +12955,10 @@ function startMessageRetentionSweeps() {
 // confirm and no toast (iOS storagePage: saveSettings + refreshMessageStoreSize).
 const retentionSelectEl = document.querySelector("[data-retention-select]");
 function refreshRetentionSelectionUi() {
-  if (retentionSelectEl) retentionSelectEl.value = messageRetentionKeyValue();
+  if (!retentionSelectEl) return;
+  retentionSelectEl.value = messageRetentionKeyValue();
+  const current = document.querySelector("[data-retention-current]");
+  if (current) current.textContent = retentionSelectEl.selectedOptions[0]?.textContent || "";
 }
 retentionSelectEl?.addEventListener("change", () => {
   const key = retentionSelectEl.value;
@@ -12968,7 +12971,7 @@ retentionSelectEl?.addEventListener("change", () => {
 });
 refreshRetentionSelectionUi();
 
-document.querySelectorAll(".settings-segmented-option:not([data-theme-option])").forEach((option) => {
+document.querySelectorAll(".settings-segmented-option").forEach((option) => {
   option.addEventListener("click", () => {
     const group = option.closest(".settings-segmented");
     group?.querySelectorAll(".settings-segmented-option").forEach((sibling) => sibling.classList.toggle("active", sibling === option));
@@ -12995,15 +12998,16 @@ function applyThemePreference(preference) {
   document.documentElement.setAttribute("data-theme", effective);
   const themeColorMeta = document.querySelector('meta[name="theme-color"]');
   if (themeColorMeta) themeColorMeta.setAttribute("content", effective === "light" ? "#f2f2f7" : "#000000");
-  document.querySelectorAll("[data-theme-option]").forEach((button) => {
-    // Highlight the chosen preference (System/Light/Dark), not the resolved theme.
-    button.classList.toggle("active", button.getAttribute("data-theme-option") === themePreference);
-  });
+  // Settings > Customization's Appearance menu shows the preference, not the resolved theme.
+  const themeSelect = document.querySelector("[data-theme-select]");
+  if (themeSelect) {
+    themeSelect.value = themePreference;
+    const current = document.querySelector("[data-theme-current]");
+    if (current) current.textContent = themeSelect.selectedOptions[0]?.textContent || themePreference;
+  }
 }
+document.querySelector("[data-theme-select]")?.addEventListener("change", (event) => applyThemePreference(event.target.value));
 
-document.querySelectorAll("[data-theme-option]").forEach((button) => {
-  button.addEventListener("click", () => applyThemePreference(button.getAttribute("data-theme-option")));
-});
 
 systemThemeMedia.addEventListener("change", () => {
   if (themePreference === "system") applyThemePreference("system");
@@ -13066,26 +13070,23 @@ function formatFiatValue(kasAmount, price) {
 }
 
 const currencyCurrentLabel = document.querySelector("[data-currency-current]");
-const currencyOptionButtons = document.querySelectorAll("[data-currency-option]");
-function refreshCurrencyUi() {
-  if (currencyCurrentLabel) currencyCurrentLabel.textContent = currencyMeta().name;
-  currencyOptionButtons.forEach((b) => b.classList.toggle("selected", b.dataset.currencyOption === selectedCurrency));
-}
-currencyOptionButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    const key = button.dataset.currencyOption;
+const currencySelect = document.querySelector("[data-currency-select]");
+if (currencySelect) {
+  currencySelect.innerHTML = Object.entries(CURRENCIES).map(([code, meta]) => `<option value="${code}">${escapeHtml(meta.name)}</option>`).join("");
+  // iOS: a menu picker; picking only changes the setting (no toast).
+  currencySelect.addEventListener("change", () => {
+    const key = currencySelect.value;
     if (!CURRENCIES[key]) return;
     selectedCurrency = key;
     localStorage.setItem(CURRENCY_PREF_KEY, key);
     refreshCurrencyUi();
-    const body = button.closest(".settings-dropdown-body");
-    const toggle = button.closest(".settings-dropdown")?.querySelector("[data-dropdown-toggle]");
-    if (body) body.hidden = true;
-    if (toggle) toggle.setAttribute("aria-expanded", "false");
     document.dispatchEvent(new CustomEvent("kachat:currency-changed"));
-    showCopyToast(`Currency set to ${currencyMeta().name}`);
   });
-});
+}
+function refreshCurrencyUi() {
+  if (currencyCurrentLabel) currencyCurrentLabel.textContent = currencyMeta().name;
+  if (currencySelect) currencySelect.value = selectedCurrency;
+}
 refreshCurrencyUi();
 
 // --- Language (matches iOS AppLanguage). Persists the choice, sets the document
@@ -13143,25 +13144,22 @@ function applyLanguage() {
   applyI18n();
 }
 const languageCurrentLabel = document.querySelector("[data-language-current]");
-const languageOptionButtons = document.querySelectorAll("[data-language-option]");
-function refreshLanguageUi() {
-  if (languageCurrentLabel) languageCurrentLabel.textContent = LANGUAGES[selectedLanguage] || "System";
-  languageOptionButtons.forEach((b) => b.classList.toggle("selected", b.dataset.languageOption === selectedLanguage));
-}
-languageOptionButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    const key = button.dataset.languageOption;
+const languageSelect = document.querySelector("[data-language-select]");
+if (languageSelect) {
+  languageSelect.innerHTML = Object.entries(LANGUAGES).map(([code, name]) => `<option value="${code}">${escapeHtml(name)}</option>`).join("");
+  languageSelect.addEventListener("change", () => {
+    const key = languageSelect.value;
     if (!LANGUAGES[key]) return;
     selectedLanguage = key;
     localStorage.setItem(LANGUAGE_PREF_KEY, key);
     applyLanguage();
     refreshLanguageUi();
-    const body = button.closest(".settings-dropdown-body");
-    const toggle = button.closest(".settings-dropdown")?.querySelector("[data-dropdown-toggle]");
-    if (body) body.hidden = true;
-    if (toggle) toggle.setAttribute("aria-expanded", "false");
   });
-});
+}
+function refreshLanguageUi() {
+  if (languageCurrentLabel) languageCurrentLabel.textContent = LANGUAGES[selectedLanguage] || "System";
+  if (languageSelect) languageSelect.value = selectedLanguage;
+}
 applyLanguage();
 refreshLanguageUi();
 
@@ -18142,26 +18140,33 @@ const settingsScreenEl = document.querySelector('[data-screen="settings"]');
 const settingsGroupsEls = settingsScreenEl
   ? [...settingsScreenEl.querySelectorAll(":scope > .settings-group")]
   : [];
-// The engineering diagnostics <details> rides along with the Diagnostics page only.
+// The engineering diagnostics <details>: never shown (no iOS counterpart).
 const settingsDiagnosticsDetailsEl = settingsScreenEl?.querySelector(":scope > .diagnostics-panel") || null;
-const settingsDiagnosticsIndex = settingsGroupsEls.findIndex(
-  (group) => group.querySelector(".settings-group-label")?.textContent?.trim() === "Diagnostics"
-);
 
 // iOS SettingsView category icons (SF-symbol equivalents as inline SVGs), keyed by
 // the .settings-group-label text.
 const SETTINGS_HUB_ICONS = {
-  "Customization": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 4 6 6-8.5 8.5L6 20l1.5-5.5z"/><path d="m12.5 5.5 6 6"/></svg>',
-  "Security": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 2.8v5.4c0 4.5-3 8.2-7 9.8-4-1.6-7-5.3-7-9.8V5.8z"/><circle cx="12" cy="10.6" r="1.6"/><path d="M12 12.2v2.8"/></svg>',
-  "Connection": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1.8"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>',
+  // paintbrush
+  "Customization": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 3.5 11.4 12.6"/><path d="M11.6 12.4c1.5 1.5 1.4 3.6-.2 5.2-1.7 1.7-4.8 2.4-7.7 2.2.6-1.3.8-2.6.9-3.9.1-2.2 3.4-6 7-3.5Z"/></svg>',
+  // lock.shield
+  "Security": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 2.8v5.4c0 4.5-3 8.2-7 9.8-4-1.6-7-5.3-7-9.8V5.8z"/><rect x="9.3" y="11" width="5.4" height="4.2" rx="1"/><path d="M10.5 11V9.8a1.5 1.5 0 0 1 3 0V11"/></svg>',
+  // antenna.radiowaves.left.and.right
+  "Connection": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="9" r="1.4"/><path d="M12 10.5V21"/><path d="M8.6 12.4a4.8 4.8 0 0 1 0-6.8M15.4 5.6a4.8 4.8 0 0 1 0 6.8M5.8 15.2a8.8 8.8 0 0 1 0-12.4M18.2 2.8a8.8 8.8 0 0 1 0 12.4"/></svg>',
+  // bubble.left.and.bubble.right
   "Chats": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.3 4.5h9.1a3.8 3.8 0 0 1 3.8 3.8v2.7a3.8 3.8 0 0 1-3.8 3.8H8.7l-4.45 3.05.02-3.44A3.78 3.78 0 0 1 .5 10.65V8.3a3.8 3.8 0 0 1 3.8-3.8Z"/><path d="M9.65 8.15h6.1a3.75 3.75 0 0 1 3.75 3.75v1.95a3.75 3.75 0 0 1-3.75 3.75h-2.7L9.5 20.1v-2.5"/></svg>',
-  "Notifications": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a5.5 5.5 0 0 1 5.5 5.5c0 3.2.8 5 1.8 6.2.4.5.05 1.3-.6 1.3H5.3c-.65 0-1-.8-.6-1.3 1-1.2 1.8-3 1.8-6.2A5.5 5.5 0 0 1 12 4Z"/><path d="M10 19.5a2 2 0 0 0 4 0"/><path d="M12 4V2.8"/></svg>',
+  // bell.badge
+  "Notifications": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.6 4.2A5.5 5.5 0 0 0 6.5 9.5c0 3.2-.8 5-1.8 6.2-.4.5-.05 1.3.6 1.3h13.4c.65 0 1-.8.6-1.3-.8-.95-1.5-2.3-1.7-4.6"/><path d="M10 19.5a2 2 0 0 0 4 0"/><circle cx="17.5" cy="6" r="2.4" fill="currentColor" stroke="none"/></svg>',
   "Contacts": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3"/><path d="M3.5 19c.9-3 2.9-4.5 5.5-4.5s4.6 1.5 5.5 4.5"/><path d="M15.2 5.9a2.9 2.9 0 1 1 1.3 5.5M17.3 14.7c1.7.7 2.8 2 3.2 4.3"/></svg>',
-  "Storage": '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="8" rx="2.2"/><path d="M6.5 12h.01M10 12h.01"/><circle cx="17.4" cy="12" r=".4"/></svg>',
-  "Chat History": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 1.8"/></svg>',
-  "Diagnostics": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.5-6 4 12L16 12h5"/></svg>',
+  // externaldrive
+  "Storage": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5 6 6.5h12l3 7"/><rect x="3" y="13.5" width="18" height="5.5" rx="1.6"/><path d="M7.5 16.3h.01M10 16.3h.01M12.5 16.3h.01M15 16.3h.01"/></svg>',
+  // clock.arrow.circlepath
+  "Chat History": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.3l2.8 1.7"/></svg>',
+  // stethoscope
+  "Diagnostics": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5H5.5a1 1 0 0 0-1 1V9a4.25 4.25 0 0 0 8.5 0V4.5a1 1 0 0 0-1-1h-1"/><path d="M8.75 13.25v1.95a4.6 4.6 0 0 0 9.2 0v-2"/><circle cx="17.95" cy="10.9" r="2.2"/></svg>',
+  // exclamationmark.triangle
   "Danger Zone": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="16.6" r=".3"/></svg>',
 };
+
 
 const settingsHubEl = (() => {
   if (!settingsScreenEl || settingsGroupsEls.length === 0) return null;
@@ -18176,7 +18181,7 @@ const settingsHubEl = (() => {
     if (danger) {
       // View Seed Phrase: a direct action right above Danger Zone, not a sub-page (matches iOS).
       rows.push(`<button class="settings-list-row settings-hub-row seed" type="button" data-settings-hub-seed>
-        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z"/></svg></span>
+        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg></span>
         <span class="settings-hub-label">View Seed Phrase</span>
       </button>`);
     }
@@ -18203,13 +18208,26 @@ const settingsHubEl = (() => {
 // parent category instead of the hub.
 let settingsSubscreenParentIndex = null;
 
-function setSettingsBackBar(visible, label) {
+// iOS pushes each category as its own page: the toolbar swaps the connection dot, balance and
+// Done for a round back button and the page's inline title. The in-page back link stays hidden.
+function setSettingsBackBar(visible, label, title = "") {
   const backBar = settingsScreenEl?.querySelector("[data-settings-hub-back]");
-  if (!backBar) return;
-  backBar.hidden = !visible;
-  const labelEl = backBar.querySelector("[data-settings-hub-back-label]");
-  if (labelEl) labelEl.textContent = label || "Settings";
+  if (backBar) {
+    backBar.hidden = true;
+    const labelEl = backBar.querySelector("[data-settings-hub-back-label]");
+    if (labelEl) labelEl.textContent = label || "Settings";
+  }
+  const header = document.querySelector(".settings-overlay-header");
+  if (!header) return;
+  header.classList.toggle("settings-pushed", !!visible);
+  const back = header.querySelector("[data-settings-nav-back]");
+  const titleEl = header.querySelector("[data-settings-nav-title]");
+  if (back) back.hidden = !visible;
+  if (titleEl) { titleEl.hidden = !visible; titleEl.textContent = visible ? title : ""; }
 }
+document.querySelector("[data-settings-nav-back]")?.addEventListener("click", () => {
+  showSettingsCategory(settingsSubscreenParentIndex != null ? settingsSubscreenParentIndex : null);
+});
 
 function refreshSettingsCaptions() {
   const child = document.querySelector("[data-child-mode-caption]");
@@ -18232,9 +18250,11 @@ function showSettingsCategory(index) {
   const inCategory = Number.isInteger(index);
   settingsSubscreenParentIndex = null;
   settingsHubEl.hidden = inCategory;
-  setSettingsBackBar(inCategory, "Settings");
+  setSettingsBackBar(inCategory, "Settings", inCategory ? settingsGroupsEls[index]?.querySelector(".settings-group-label")?.textContent?.trim() || "" : "");
   settingsGroupsEls.forEach((group, i) => { group.hidden = !inCategory || i !== index; });
-  if (settingsDiagnosticsDetailsEl) settingsDiagnosticsDetailsEl.hidden = !inCategory || index !== settingsDiagnosticsIndex;
+  // Engineering diagnostics is Desktop-only, and iOS's Diagnostics page has nothing like it, so it
+  // stays hidden (its status lines are still kept up to date for the diagnostics archive).
+  if (settingsDiagnosticsDetailsEl) settingsDiagnosticsDetailsEl.hidden = true;
   settingsScreenEl.scrollTop = 0;
 }
 
@@ -18321,7 +18341,7 @@ function showSettingsSubscreen(name, parentIndex) {
   const parentLabel = settingsSubscreenParentIndex != null
     ? settingsGroupsEls[settingsSubscreenParentIndex]?.querySelector(".settings-group-label")?.textContent?.trim()
     : null;
-  setSettingsBackBar(true, parentLabel || "Settings");
+  setSettingsBackBar(true, parentLabel || "Settings", target.querySelector(".settings-group-label")?.textContent?.trim() || "");
   settingsScreenEl.scrollTop = 0;
 }
 
@@ -18361,10 +18381,14 @@ function cacheCategoryDefs() { return [
   { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
   { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
 ]; }
+// iOS CacheManager.formatted: ByteCountFormatter, file count style (1000-based), KB/MB/GB only,
+// adaptive digits (KB whole, MB one decimal, GB two), and "Zero KB" for nothing.
 function formatCacheBytes(bytes) {
-  if (!(bytes > 0)) return "0 KB";
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  const n = Number(bytes) || 0;
+  if (n <= 0) return "Zero KB";
+  if (n < 1e6) return `${Math.max(1, Math.round(n / 1e3))} KB`;
+  if (n < 1e9) return `${Number((n / 1e6).toFixed(1))} MB`;
+  return `${Number((n / 1e9).toFixed(2))} GB`;
 }
 function cacheCategories() {
   const keys = [];

@@ -14051,3 +14051,186 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   background-size: 250% 100%; animation: fee-shimmer 1.4s linear infinite;
 }
 .kachat-composer > [hidden] { display: none !important; }
+
+/* ==== Phones: the iOS tab bar and toolbar, side by side with the iPhone app ==================
+   The dock floats as a rounded pill inset from the screen edges, the selected tab in its own
+   lighter capsule with the accent tint, the others in the primary text colour - not a flat bar
+   across the bottom. On Chats the balance sits next to the status light (leading), and the gear and
+   Select share one capsule on the trailing side; there is no hairline under the toolbar. */
+@media (max-width: 859px) {
+  body .sidebar-tabbar,
+  body.chats-tab .sidebar-tabbar {
+    left: 12px;
+    right: 12px;
+    bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 4px;
+    gap: 0;
+    border: 1px solid var(--bar-separator, var(--line));
+    border-radius: 999px;
+    background: var(--bar-bg);
+    -webkit-backdrop-filter: var(--material-blur);
+    backdrop-filter: var(--material-blur);
+    box-shadow: 0 8px 28px var(--shadow, rgba(0,0,0,.4));
+  }
+  body .sidebar-tabbar .sidebar-tab {
+    border-radius: 999px;
+    padding: 6px 2px 5px;
+    gap: 2px;
+    color: var(--text);
+  }
+  body .sidebar-tabbar .sidebar-tab.active {
+    background: var(--fill-secondary, rgba(255,255,255,.12));
+    color: var(--kaspa-ink);
+  }
+  body .sidebar-tabbar .sidebar-tab > span:last-child { font-size: 11px; font-weight: 500; }
+  :root { --dock-inset: calc(84px + env(safe-area-inset-bottom, 0px)); }
+
+  body .app-topbar,
+  body.chats-tab .app-topbar { border-bottom: 0; box-shadow: none; }
+  body.chats-tab .app-topbar .toolbar-balance { justify-content: flex-start; padding-left: 6px; min-width: 0; overflow: visible; }
+  body.chats-tab .topbar-select-cluster {
+    flex: 0 0 auto;
+    gap: 12px;
+    padding: 4px 12px;
+    border: 1px solid var(--bar-separator, var(--line));
+    border-radius: 999px;
+    background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+}
+
+/* The profile hero's empty avatar is iOS's: a filled person in the accent on a dark accent circle
+   (as the chat rows draw it), not a grey outline. */
+.profile-hero-avatar:not(:has(img)) { background: color-mix(in srgb, var(--kaspa) 22%, var(--bg-plain)); }
+.profile-hero-avatar:not(:has(img)) svg { fill: var(--kaspa-ink); stroke: none; width: 38px; height: 38px; }
+/* The toolbar balance in iOS's weight and secondary tone. */
+.toolbar-balance [data-toolbar-balance-value] { font-weight: 600; color: color-mix(in srgb, var(--text) 80%, transparent); }
+@media (max-width: 859px) {
+  /* Profile's bell in a round glass button, like the status light beside it (iOS toolbar). */
+  .topbar-bell-button {
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--bar-separator, var(--line));
+    background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+}
+@media (max-width: 859px) {
+  /* The tab bar draws its symbols filled, as iOS's does (lock.shield.fill, chart.pie.fill,
+     bubble.left.and.bubble.right.fill, person.crop.circle.fill); the inner details cut out in
+     the bar's colour. The Hub tiles keep the outline icons, as on iOS. */
+  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > path:first-child { fill: currentColor; }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > rect,
+  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > path:last-child { stroke: var(--bar-bg); }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > rect { fill: var(--bar-bg); }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="portfolio"] svg > path { fill: currentColor; }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="portfolio"] svg > path:last-child { stroke: var(--bar-bg); stroke-width: 1.4; }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="chats"] svg > path { fill: currentColor; }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="chats"] svg > path:last-child { stroke: var(--bar-bg); stroke-width: 1.3; }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] svg > circle:first-child { fill: currentColor; }
+  .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] svg > circle:nth-child(2),
+  .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] svg > path { fill: var(--bar-bg); stroke: var(--bar-bg); }
+}
+
+/* Kaspa Hub tiles at iOS's proportions: a 30pt symbol, a 15pt semibold title, the .kachat
+   wordmark drawn large like iOS's text mark; the Customize Dock (sliders) button in a round glass
+   button as in the iOS toolbar. */
+.hub-tile { gap: 12px; border-radius: 22px; }
+.hub-tile-icon { height: 34px; }
+.hub-tile-icon svg { width: 30px; height: 30px; }
+.hub-tile-icon img { width: 30px; height: 30px; }
+.hub-tile-label { font-size: 15px; font-weight: 600; line-height: 1.25; }
+.hub-tile-icon .kmkt-wordmark,
+.hub-tile-icon .kachat-wordmark-icon svg { max-width: 92px !important; height: 26px !important; }
+.hub-screen .kaposts-header .kaposts-icon-button {
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--bar-separator, var(--line));
+  border-radius: 999px;
+  background: var(--fill-tertiary, rgba(255,255,255,.06));
+}
+/* One line per title, shrinking with the screen the way iOS's minimum scale factor does. */
+.hub-tile { padding: 8px 4px; }
+.hub-tile-label { white-space: nowrap; font-size: min(15px, 3.15vw); letter-spacing: -0.01em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 859px) { .hub-grid { gap: 12px; } .hub-tile { padding: 8px 2px; } }
+
+/* Settings at iOS's scale: 26pt category symbols, 17pt row titles, rows ~52pt tall; Done in a
+   glass capsule; no hairline under the toolbar. */
+.settings-hub-icon { width: 30px; }
+.settings-hub-icon svg,
+.settings-hub-row .settings-hub-icon svg { width: 26px; height: 26px; stroke-width: 1.5; }
+.settings-hub-row { min-height: 52px; font-size: 17px; font-weight: 400; gap: 14px; }
+.settings-done-button {
+  padding: 8px 18px;
+  border: 1px solid var(--bar-separator, var(--line));
+  border-radius: 999px;
+  background: var(--fill-tertiary, rgba(255,255,255,.06));
+}
+.settings-overlay-header { border-bottom: 0; box-shadow: none; }
+/* iOS Settings hub: separators start under the titles and stop short of the card's edge, Done
+   is a regular-weight 17pt label, and the list sits a little lower under the toolbar. */
+.settings-hub .settings-hub-row { background-size: calc(100% - 76px) .5px; background-position: left 60px bottom; }
+.settings-hub .settings-list-card > :last-child { background-image: none; }
+.settings-done-button { font-size: 17px; font-weight: 400; }
+@media (max-width: 859px) { .settings-hub { margin-top: 40px; } }
+/* Pushed Settings page toolbar (iOS inline navigation title): round glass back button on the
+   left, the page title centred, nothing else. */
+.settings-overlay-header.settings-pushed > .settings-health-button,
+.settings-overlay-header.settings-pushed > .settings-overlay-balance,
+.settings-overlay-header.settings-pushed > .settings-done-button,
+.settings-overlay-header.settings-pushed > [data-settings-overlay-title] { display: none; }
+.settings-nav-back {
+  width: 40px; height: 40px; flex: 0 0 auto; padding: 0;
+  display: grid; place-items: center;
+  border: 1px solid var(--bar-separator, var(--line));
+  border-radius: 999px;
+  background: var(--fill-tertiary, rgba(255,255,255,.06));
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-nav-back[hidden], .settings-nav-title[hidden] { display: none; }
+.settings-nav-back svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.settings-nav-title {
+  position: absolute; left: 64px; right: 64px; top: 50%; transform: translateY(-50%);
+  margin: 0; text-align: center; font-size: 17px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+}
+/* iOS 26 grouped-form section headers: title case, semibold, secondary label colour. */
+.settings-screen .settings-group-label {
+  text-transform: none; letter-spacing: 0; font-size: 17px; font-weight: 600;
+  color: var(--label-secondary, var(--muted)); padding-left: 16px; margin: 4px 0 10px;
+}
+/* iOS menu pickers (Appearance / Language / Currency): value in the accent colour with up/down
+   chevrons; an invisible native select covers the row so a click opens the choices as a menu. */
+.settings-menu-row { position: relative; cursor: pointer; }
+.settings-menu-value { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--kaspa-ink); white-space: nowrap; min-width: 0; }
+.settings-menu-value > span { overflow: hidden; text-overflow: ellipsis; }
+.settings-menu-updown { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.settings-menu-select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 16px; }
+.settings-row-icon-plain { color: var(--text); }
+.settings-row-icon-plain svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; display: block; margin: 0 auto; }
+.settings-row-icon-plain svg circle { fill: currentColor; }
+.settings-menu-updown { width: 18px; height: 18px; stroke-width: 2; }
+.settings-row-icon-plain svg { stroke-width: 1.6; }
+.settings-row-icon-plain svg circle { r: 1.1; }
+.settings-row-icon-accent { color: var(--kaspa-ink); }
+.settings-row-icon-accent svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; display: block; margin: 0 auto; }
+.settings-row-icon-accent svg .fill { fill: currentColor; stroke: none; }
+.testnet-toggle-row .testnet-toggle-label { gap: 12px; }
+.testnet-toggle-row .testnet-toggle-label .settings-row-icon-accent svg { width: 26px; height: 26px; stroke: currentColor; stroke-width: 1.5; }
+/* Separate iOS Form sections sit apart, not stacked card on card. */
+.settings-screen .settings-list-card + .settings-list-card { margin-top: 32px; }
+.settings-screen .settings-group-footer { font-size: 14px; }
+.settings-screen .settings-group-footer + .settings-group-label { margin-top: 22px; }
+[data-quick-reactions-preview] { font-size: 16px; letter-spacing: 0; }
+/* A plain trailing value (iOS secondary Text in a row), at body size. */
+.settings-row-value { margin-left: auto; color: var(--muted); font-size: 17px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.settings-screen .settings-group-footer + .settings-list-card { margin-top: 24px; }
+/* iOS Button rows in a Form: the title in the accent colour. */
+.settings-action-row .settings-row-copy strong { color: var(--kaspa-ink); font-weight: 400; }
+.diagnostics-export-row { align-items: flex-start; flex-wrap: nowrap; }
+.diagnostics-export-row .settings-row-copy { display: flex; flex-direction: column; gap: 8px; }
+.diagnostics-export-row .settings-row-copy small { color: var(--muted); font-size: 15px; line-height: 1.35; white-space: normal; }
+.diagnostics-export-row { flex-wrap: wrap; align-items: center; row-gap: 6px; }
+.diagnostics-export-row .settings-row-copy { flex: 1 1 0; }
+.diagnostics-export-note { flex: 0 0 100%; color: var(--muted); font-size: 15px; line-height: 1.35; text-align: left; }
+.settings-row-icon-red { color: var(--ios-red); }
+.danger-row .settings-row-copy strong { font-weight: 400; }
