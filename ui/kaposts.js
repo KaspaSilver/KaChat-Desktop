@@ -4970,16 +4970,40 @@ function ensureLanguageDetector() {
   }
   kapostDetectorPromise = (async () => {
     try {
-      // A model that has to download first reports "downloadable"; creating it then would pull a
-      // model in the background for a convenience feature, so only a ready one is used.
       if (typeof Detector.availability === "function") {
         const availability = await Detector.availability();
+        if (availability === "downloadable" || availability === "downloading") {
+          // iOS has its detector built in, and without one Translate is never offered (iOS
+          // canOffer), so the browser's small detection model is fetched - which Chrome allows
+          // only from a user gesture: the next click or key press starts it. Until it is ready
+          // the texts read as "could not tell"; then they are detected again.
+          fetchLanguageDetectorOnNextGesture(Detector);
+          return null;
+        }
         if (availability !== "available") return null;
       }
       return await Detector.create();
     } catch { return null; }
   })();
   return kapostDetectorPromise;
+}
+
+let kapostDetectorFetchArmed = false;
+function fetchLanguageDetectorOnNextGesture(Detector) {
+  if (kapostDetectorFetchArmed || typeof window === "undefined") return;
+  kapostDetectorFetchArmed = true;
+  const start = () => {
+    window.removeEventListener("pointerdown", start, true);
+    window.removeEventListener("keydown", start, true);
+    Detector.create().then((detector) => {
+      kapostDetectorPromise = Promise.resolve(detector);
+      // Forget the "could not tell" verdicts made without it, so every text is looked at again.
+      for (const [text, code] of [...kapostDetected]) if (!code) kapostDetected.delete(text);
+      scheduleDetectionRepaint();
+    }).catch(() => { kapostDetectorFetchArmed = false; });
+  };
+  window.addEventListener("pointerdown", start, true);
+  window.addEventListener("keydown", start, true);
 }
 
 /// Other screens that draw translations (public chat rooms) repaint through here.
@@ -5093,21 +5117,25 @@ function canOfferTranslation(post) {
   // A verdict this reader already collected, from any earlier session: the post was already in
   // their language, or the pair is not served. Settled questions stay settled.
   if (rememberedVerdict(post)) return false;
-  const languages = kapostLanguages;
-  if (languages && kapostLanguagesUrl === translationServiceUrl()) {
-    if (!languages.target.has(readerLanguage())) return false;
-  }
-  // Nothing to offer if the post is already written in the reader's language. Withheld rather
-  // than shown-then-retracted while the answer is pending: a link that appears and vanishes is
-  // the same wrong affordance, just briefly. Where the browser has no detector this resolves to
-  // "could not tell" immediately and the server settles it on the first tap, once.
+  // Withheld while detection is pending rather than shown-then-retracted: a link that appears and
+  // vanishes is the same wrong affordance, just briefly.
   const detected = kapostDetected.get(strippedForDetection(text));
   if (detected === undefined) {
     detectLanguageSoon(post);
     return false;
   }
-  if (detected && detected === readerLanguage()) return false;
-  return true;
+  return detectedLanguageIsOfferable(detected);
+}
+
+/// iOS PostTranslationService.canOffer: only a text CONFIDENTLY in another language than the
+/// reader's - "could not tell" (no detector in this browser, too few letters, low confidence)
+/// offers nothing - and, once the service's language list is known, only a pair it serves.
+function detectedLanguageIsOfferable(detected) {
+  const target = readerLanguage();
+  if (!detected || detected === target) return false;
+  const languages = kapostLanguages;
+  if (!languages || kapostLanguagesUrl !== translationServiceUrl()) return true;
+  return languages.source.has(detected) && languages.target.has(target);
 }
 
 async function translatePost(post) {
@@ -5182,20 +5210,17 @@ async function translatePost(post) {
 // no id is sent, so the server translates without caching (TRANSLATION_SERVICE.md). Only ever
 // for text that is public already - 1:1 and group messages are encrypted and never leave the device.
 
-/** Worth offering: enough text, a served pair, and not already in the reader's language as far
- *  as the browser can tell (the server settles it on the first request otherwise). */
+/** Worth offering: enough text, confidently detected in another language than the reader's, and a
+ *  pair the service serves (iOS canOffer - nothing when the language could not be told). */
 export function canOfferTextTranslation(key, text) {
   if (!translationServiceUrl()) return false;
   const clean = String(text || "").trim();
   if (clean.length < 8) return false;
   const state = kapostTranslations.get(key);
   if (state?.status === "unavailable") return false;
-  const languages = kapostLanguages;
-  if (languages && kapostLanguagesUrl === translationServiceUrl() && !languages.target.has(readerLanguage())) return false;
   const detected = kapostDetected.get(strippedForDetection(clean));
   if (detected === undefined) { detectLanguageSoon({ text: clean }); return false; }
-  if (detected && detected === readerLanguage()) return false;
-  return true;
+  return detectedLanguageIsOfferable(detected);
 }
 export function textTranslationState(key) {
   const state = kapostTranslations.get(key) || null;
