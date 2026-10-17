@@ -16,7 +16,9 @@ const ungroupedAmountText = (edited, previous) => ungroupedWith(edited, previous
 // Storage, tips, Request Payment), the .kachat offer and list price, and a portfolio entry's
 // amount and price. The portfolio converter keeps its own formatting, as on iOS.
 const SELECTOR = ".sk-amount-input, .kl-amount-input, .kmkt-amount-input, "
-  + "[data-portfolio-editor-amount], [data-portfolio-editor-price]";
+  + "[data-portfolio-editor-amount], [data-portfolio-editor-price], "
+  // Add to Portfolio from a transaction (iOS AddToPortfolioSheet, $amountText.groupedAmount).
+  + "[data-cold-pf-amount], [data-cold-pf-price]";
 
 const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
 const wrapped = new WeakSet();

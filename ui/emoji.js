@@ -107,8 +107,12 @@ function ensureReactionHost() {
   return reactionHost;
 }
 
-export function openEmojiReactionPicker({ onPick }) {
+/// `title`: the sheet's title - "React" for a reaction, "Choose Emoji" for a Quick Reactions slot (iOS).
+export function openEmojiReactionPicker({ onPick, title = "React" }) {
   const host = ensureReactionHost();
+  const heading = host.querySelector(".modal-header h2");
+  if (heading) heading.textContent = title;
+  host.querySelector(".emoji-picker-sheet")?.setAttribute("aria-label", title);
   const body = host.querySelector("[data-emoji-body]");
   const search = host.querySelector("[data-emoji-search]");
   const close = () => { host.hidden = true; host.onclick = null; host.onkeydown = null; search.oninput = null; };

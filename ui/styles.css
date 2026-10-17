@@ -586,6 +586,38 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   letter-spacing: -.01em;
 }
 
+/* Settings top bar (iOS SettingsView toolbar): dot left, balance centred, Done right. */
+.settings-overlay-header { position: relative; min-height: 64px; }
+.settings-overlay-header .settings-health-button { flex: 0 0 auto; }
+.settings-overlay-balance {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-done-button {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  color: var(--kaspa-ink);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+
 .account-overlay-body {
   flex: 1;
   min-height: 0;
@@ -2540,6 +2572,8 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   min-width: 116px;
   padding: 5px 8px 5px 12px;
 }
+/* a click copies the balance (iOS balanceToolbarView's tap) */
+[data-toolbar-balance] { cursor: pointer; }
 
 /* Kaspa logo next to the top-bar total balance — matches iOS's
    BalanceToolbarLabel (15pt logo + bold tabular-figure "x.xxxxxxxx KAS"). */
@@ -2691,6 +2725,7 @@ body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
   opacity: 1;
   transform: translate(-50%, 0);
 }
+.copy-toast.error .copy-toast-icon { background: var(--ios-red, #ff453a); color: #fff; }
 .copy-toast-icon {
   width: 18px;
   height: 18px;
@@ -3825,6 +3860,18 @@ body.session-logged-out [data-account-rename-modal] {
   top: 26px;
   right: 26px;
 }
+/* iOS SeedPhraseView navigation title. */
+.recovery-title {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  right: 0;
+  margin: 0;
+  text-align: center;
+  font-size: 17px;
+  font-weight: 700;
+  pointer-events: none;
+}
 
 .recovery-hold-target {
   width: 100%;
@@ -3939,6 +3986,13 @@ body.session-logged-out [data-account-rename-modal] {
 .settings-dropdown-toggle .settings-row-copy { flex: 1; min-width: 0; }
 .settings-dropdown-toggle .architecture-badge,
 .settings-dropdown-caption { margin-left: auto; }
+/* An inline menu picker in a settings row (iOS Picker .menu): the value in the accent colour. */
+.settings-inline-select {
+  margin-left: auto; flex: 0 0 auto; max-width: 55%;
+  border: 0; background: transparent; color: var(--kaspa-ink);
+  font: inherit; font-size: 15px; text-align: right; cursor: pointer; padding: 4px 2px;
+}
+.settings-inline-select:focus-visible { outline: 2px solid color-mix(in srgb, var(--kaspa) 55%, transparent); border-radius: 6px; }
 
 .settings-dropdown-caption {
   color: var(--muted);
@@ -4115,6 +4169,7 @@ body.session-logged-out [data-account-rename-modal] {
 /* Connection Status overlay */
 
 .connection-status-value { display: flex; align-items: center; gap: 8px; font-weight: 650; flex: 0 0 auto; }
+.connection-status-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
 
 .connection-status-dot {
   width: 10px;
@@ -4308,6 +4363,28 @@ body.session-logged-out [data-account-rename-modal] {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+
+/* Receive Kaspa before its address is decided: the spinner with "Preparing a fresh address", or
+   the unlocking line alone (iOS ReceiveKaspaQRView's ProgressView / secondary Text). The QR,
+   address and captions step aside meanwhile. */
+.chatting-address-body.showing-status > :not(.chatting-address-status) { display: none; }
+.chatting-address-body.showing-status { cursor: default; }
+.chatting-address-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+}
+.chatting-address-status[hidden] { display: none; }
+.chatting-address-status p { margin: 0; font-size: 15px; color: rgba(6,17,15,.6); }
+.chatting-address-status-spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2.5px solid rgba(6,17,15,.15);
+  border-top-color: rgba(6,17,15,.55);
+  animation: initial-sync-spin 0.9s linear infinite;
+}
+.chatting-address-status-spinner[hidden] { display: none; }
 
 /* Manage Address screen (Transaction History / UTXOs).
    Unlike the other address overlays, this one is NOT a full-window light-mode
@@ -5058,13 +5135,6 @@ body.session-logged-out [data-account-rename-modal] {
    guide's funding step (a .modal-backdrop at 2000), so it has to clear that as
    well — 2050 keeps it under the send modal and the guide's own picker layers. */
 [data-chatting-address-screen] { z-index: 2050; }
-[data-spending-send-modal] { z-index: 2100; }
-.spending-send-source {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12.5px;
-  color: var(--kaspa-ink);
-  margin: 0 0 4px;
-}
 
 /* Chats / Group Chats underline tab bar, at the top of the sidebar. */
 .chats-tab-bar {
@@ -6398,7 +6468,8 @@ body.session-logged-out [data-account-rename-modal] {
   border: 1px solid var(--line); border-radius: 12px; padding: 10px;
 }
 .kaposts-composer-quote strong { font-size: 12.5px; }
-.kaposts-composer-quote span { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+/* Five lines of the post being quoted or answered (iOS quotedPostCard .lineLimit(5)). */
+.kaposts-composer-quote > span:not(.kaposts-quote-head) { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 
 
 /* ============================================================
@@ -6578,8 +6649,21 @@ body.session-logged-out [data-account-rename-modal] {
   color: var(--kaspa-ink); font-weight: 700; font-size: 12.5px; padding: 6px 12px; cursor: pointer;
 }
 .kaposts-profile-chat:hover, .kaposts-edit-kns:hover { background: rgba(112,199,186,.2); }
-.kaposts-profile-chat svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.kaposts-edit-kns { margin: 0 14px 12px; align-self: flex-start; }
+.kaposts-profile-chat svg, .kaposts-edit-kns svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* iOS: the capsule sits under the bio, inside the name/counts/bio column (own profile only). */
+.kaposts-edit-kns { margin: 4px 0 0; align-self: flex-start; }
+/* The side-menu panels' refresh button (stands in for iOS pull-to-refresh), at the header's end. */
+.kaposts-panel-refresh { margin-left: auto; height: 34px; border-bottom: 0; }
+.kaposts-panel-refresh[hidden] { display: none; }
+/* Notification rows end in a chevron (iOS itemRow chevron.right). */
+.kaposts-notification-row .kaposts-notification-chevron { margin-top: 4px; } /* top-aligned, like the iOS row's HStack(alignment: .top) */
+/* Scheduled rows: a status mark in the line's tint (iOS scheduledIcon / scheduledTint), error below. */
+.kaposts-scheduled-line { display: inline-flex; align-items: center; gap: 6px; }
+.kaposts-scheduled-line svg { width: 13px; height: 13px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-scheduled-row.scheduled .kaposts-scheduled-line { color: var(--kaspa-ink); }
+.kaposts-scheduled-error { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.kaposts-scheduled-row .kaposts-draft-open { cursor: default; }
+.kaposts-scheduled-row .kaposts-draft-open:hover { background: transparent; }
 .kaposts-profile-tabs { margin-top: 2px; }
 
 .kaposts-notification-row {
@@ -6671,7 +6755,8 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-search-depth small { color: var(--muted); font-size: 11.5px; }
 .kaposts-search-depth[disabled] { opacity: .6; cursor: default; }
 .kaposts-search-keep { margin: 8px auto 0; }
-.kaposts-rail-post { margin: 12px 8px 6px; border-radius: 999px; padding: 12px 0; font-weight: 800; }
+.kaposts-rail-post { margin: 12px 8px 6px; border-radius: 999px; padding: 12px 0; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.kaposts-rail-post svg { width: 19px; height: 19px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .kaposts-rail-refresh { margin-left: 12px; }
 .kaposts-content {
   flex: 1; min-width: 0; min-height: 0; align-self: stretch;
@@ -6682,8 +6767,7 @@ body.session-logged-out [data-account-rename-modal] {
   .kaposts-rail { width: 56px; }
   .kaposts-rail .kaposts-title, .kaposts-rail-item span { display: none; }
   .kaposts-rail-item { justify-content: center; padding: 12px 0; }
-  .kaposts-rail-post { font-size: 0; }
-  .kaposts-rail-post::after { content: "+"; font-size: 20px; }
+  .kaposts-rail-post span { display: none; }
 }
 
 
@@ -6759,7 +6843,13 @@ body.session-logged-out [data-account-rename-modal] {
 .broadcast-retention-row input, .broadcast-retention-row select { flex: 1; min-width: 0; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-1); color: var(--text); padding: 9px 12px; font: inherit; font-size: 14px; }
 .broadcast-retention-warning { color: var(--ios-orange); }
 /* The recording bar (iOS recordingBar), the fee pill and the funding gate in a room. */
-.broadcast-recording-bar { align-items: center; gap: 10px; }
+.broadcast-recording-bar { display: flex; align-items: center; gap: 8px; padding: 0 0 2px; }
+.broadcast-recording-field {
+  flex: 1; min-width: 0; min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 20px;
+  background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
+  border: 1px solid var(--glass-stroke); box-shadow: var(--glass-shadow); color: var(--muted);
+}
+.broadcast-recording-mic { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: var(--ios-red); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .broadcast-recording-trash { width: 30px; height: 30px; border: 0; background: transparent; color: var(--ios-red); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
 .broadcast-recording-trash svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .broadcast-fee-row { display: flex; justify-content: flex-end; min-height: 0; }
@@ -6825,7 +6915,9 @@ body.session-logged-out [data-account-rename-modal] {
   color: var(--text);
 }
 .quick-reaction-slot:focus { outline: none; border-color: var(--kaspa, #70c7ba); }
+button.quick-reaction-slot { cursor: pointer; padding: 0; line-height: 1; }
 .quick-reactions-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.quick-reactions-actions .danger-text { color: var(--ios-red); }
 
 /* Reply banner above the room composer (context-menu Reply). */
 .broadcast-reply-banner {
@@ -6871,8 +6963,7 @@ body.session-logged-out [data-account-rename-modal] {
 }
 .broadcast-message.mine { align-self: flex-end; border-color: rgba(112,199,186,.35); background: linear-gradient(180deg, rgba(112,199,186,.12), rgba(255,255,255,.02)); }
 .broadcast-message-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
-.broadcast-message-head strong { color: var(--kaspa-ink); cursor: pointer; font-size: 12.5px; }
-.broadcast-message.mine .broadcast-message-head strong { cursor: default; }
+.broadcast-message-head strong { color: var(--kaspa-ink); font-size: 12.5px; }
 .broadcast-pending { color: var(--muted); }
 .broadcast-failed { color: var(--ios-red); }
 .broadcast-message-body { font-size: 14px; white-space: pre-wrap; word-break: break-word; }
@@ -6899,7 +6990,18 @@ body.session-logged-out [data-account-rename-modal] {
 .broadcast-message.mine .message-reaction-pill { right: auto; left: 8px; }
 /* Chips hang below the bubble — leave room so they don't overlap the next row. */
 .broadcast-message.has-reactions { margin-bottom: 8px; }
-.message-reaction-pill-entry.active { cursor: pointer; }
+/* Your reaction failed (iOS ReactionPillView): red outline, red mark, "Retry" by the time. */
+.broadcast-message .message-reaction-pill.failed { box-shadow: inset 0 0 0 1px rgba(255,59,48,.6); }
+.broadcast-message .reaction-status { margin: 0 2px 0 0; cursor: default; }
+.broadcast-reaction-retry { display: block; margin: 4px 0 0 auto; padding: 0; border: 0; background: transparent; color: var(--ios-red); font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
+.broadcast-message:not(.mine) .broadcast-reaction-retry { margin-left: 0; }
+/* A message that is a link card and nothing else (iOS loneInternalLink / loneLinkURL): no bubble. */
+.broadcast-message.link-card-only { background: transparent; padding: 0; color: var(--text); }
+.broadcast-message.link-card-only .message-link-card { margin-top: 2px; }
+.broadcast-message.mine.link-card-only { background: transparent; color: var(--text); }
+.broadcast-message.mine.link-card-only .broadcast-message-head,
+.broadcast-message.mine.link-card-only .broadcast-time { color: var(--muted); }
+.broadcast-message.mine.link-card-only .broadcast-message-head strong { color: var(--kaspa-ink); }
 
 /* Broadcast voice notes: on-chain (10s) by default, via Nextcloud when media send is on */
 .broadcast-voice-btn { flex: 0 0 auto; }
@@ -7179,7 +7281,9 @@ body.session-logged-out [data-account-rename-modal] {
 .settings-hub-row { justify-content: space-between; font-weight: 700; cursor: pointer; }
 .settings-hub-row svg { width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 .settings-hub-row.danger span { color: var(--ios-red); }
-.settings-hub-row.seed span { color: var(--kaspa-ink); }
+/* View Seed Phrase: red text and key, no chevron (iOS SettingsView). */
+.settings-hub-row.seed span { color: var(--ios-red); }
+.settings-hub-row.seed .settings-hub-icon svg { stroke: var(--ios-red); }
 .settings-hub-back {
   display: inline-flex; align-items: center; gap: 10px;
   border: 0; background: transparent; color: var(--kaspa-ink);
@@ -7220,6 +7324,29 @@ body.session-logged-out [data-account-rename-modal] {
   padding: 20px 20px 40px;
 }
 .apps-tab-screen .apps-screen-grid { padding: 4px 0 12px; }
+
+/* Kaspa Websites bubbles (iOS ProfileAppsView): an adaptive grid (min 96, 20 apart, rows 24
+   apart), a 68pt material circle holding the site's symbol in the accent colour (28pt semibold)
+   or the Kaspa logo (34pt), the name in caption semibold on one line. */
+.apps-tab-screen .profile-apps-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); column-gap: 20px; row-gap: 24px; padding: 24px 0 12px; }
+.apps-tab-screen .profile-app-bubble { gap: 8px; padding: 0; border-radius: 0; background: none; min-width: 0; }
+.apps-tab-screen .profile-app-bubble:hover { background: none; }
+.apps-tab-screen .profile-app-bubble:hover .profile-app-icon { filter: brightness(1.08); }
+.apps-tab-screen .profile-app-icon {
+  width: 68px; height: 68px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--glass-fill); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border: .8px solid rgba(255,255,255,.18); box-shadow: 0 4px 8px rgba(0,0,0,.12); color: var(--accent);
+}
+.apps-tab-screen .profile-app-icon svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.apps-tab-screen .profile-app-icon svg .fill { fill: currentColor; stroke: none; }
+.apps-tab-screen .profile-app-icon img { width: 34px; height: 34px; object-fit: contain; }
+.apps-tab-screen .profile-app-bubble strong { font-size: 12px; font-weight: 600; color: var(--text); max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Chess's icon: the rook and knight glyphs, tinted like a symbol (iOS ChessTabIcon). */
+.chess-tab-glyph { display: inline-block; font-family: -apple-system, "Segoe UI Symbol", "Apple Symbols", "DejaVu Sans", sans-serif; font-weight: 400; line-height: 1; letter-spacing: 0; color: currentColor; white-space: nowrap; font-size: 22px; }
+.sidebar-tab .sidebar-tab-icon .chess-tab-glyph { font-size: 23px; max-width: none; overflow: visible; }
+.hub-tile-icon .chess-tab-glyph { font-size: 28px; }
+.dock-row-icon .chess-tab-glyph { font-size: 17px; }
 
 /* Profile > Help screen: guide rows (iOS ProfileHelpView.helpRow). */
 .help-guide-list { display: flex; flex-direction: column; padding: 4px 4px 14px; }
@@ -7796,6 +7923,52 @@ body.session-logged-out [data-account-rename-modal] {
 .cold-send-txid { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid var(--card-border, var(--line)); border-radius: 12px; text-decoration: none; color: inherit; }
 .cold-send-txid span { font-size: 12px; color: var(--muted); }
 .cold-send-txid code { font-family: ui-monospace, monospace; font-size: 12px; color: var(--kaspa-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Cold Storage parity with iOS (ColdStorageView.swift). */
+/* Address row: label, short address, balance, then the badges on their own line - no chevron. */
+.cold-address-row .spending-address-row-main { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.cold-address-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 18px; }
+.cold-address-badges:empty { display: none; }
+.cold-detail-spinner { display: flex; justify-content: center; padding: 20px 0 8px; }
+.cold-detail-spinner .initial-sync-spinner, .portfolio-chart-loading .initial-sync-spinner, .cold-send-wait .initial-sync-spinner { width: 22px; height: 22px; border-width: 2.5px; }
+.cold-summary-actions .sk-spinner { margin: 0; border-color: #000; border-right-color: transparent; }
+.cold-sheet-subtitle { margin: 2px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.cold-sheet-section { margin: 4px 2px 6px; font-size: 12px; font-weight: 650; color: var(--muted); }
+.cold-actions-busy-count { font-size: 12.5px; color: var(--muted); }
+.cold-actions-busy p { font-size: 11.5px; }
+.cold-actions-keep-scanning {
+  width: 100%; margin-top: 6px; padding: 12px; border-radius: 14px; cursor: pointer;
+  border: 1px solid var(--card-border, var(--line)); background: var(--surface-1, rgba(255,255,255,.04));
+  color: var(--kaspa-ink); font: inherit; font-size: 14px; font-weight: 650;
+}
+.cold-action-copy small svg, .cold-portfolio-warn svg { width: 12px; height: 12px; margin-right: 4px; vertical-align: -1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.cold-action-row-warn .cold-action-copy small { color: var(--ios-orange); font-weight: 650; }
+.cold-portfolio-form textarea { resize: vertical; min-height: 38px; font: inherit; }
+/* UTXO row (iOS utxoRow): icon, then label / amount / outpoint stacked; Coinbase and the pencil. */
+.cold-utxo-icon { display: grid; place-items: center; flex: 0 0 auto; color: var(--kaspa-ink); }
+.cold-utxo-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.cold-utxo-amount { font-size: 13.5px; font-weight: 650; }
+.cold-utxo-row .manage-address-utxo-meta { flex: 1; min-width: 0; }
+.cold-utxo-row .manage-address-utxo-outpoint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* iOS UtxoLoadFailureRow. */
+.cold-utxo-failure { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 4px; }
+.cold-utxo-failure strong { display: inline-flex; align-items: center; gap: 6px; color: var(--ios-red); font-size: 14px; }
+.cold-utxo-failure strong svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.cold-utxo-failure span { font-size: 12px; color: var(--muted); }
+.cold-send-start-scan { width: 100%; }
+.cold-send-camera-denied { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 18px 8px; text-align: center; }
+.cold-send-camera-icon svg { width: 56px; height: 56px; fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cold-send-scan-progress { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.cold-send-scan-count { margin: 0; font-size: 15px; font-weight: 700; }
+.cold-send-wait { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.cold-send-wait p { margin: 0; }
+/* Success screen (iOS successView): the From and To cards around the check. */
+.cold-send-card { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--card-border, var(--line)); border-radius: 12px; background: var(--surface-1, rgba(255,255,255,.04)); }
+.cold-send-card code { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+.cold-send-card-label { font-size: 12px; color: var(--muted); }
+.cold-send-card-sub { font-size: 13px; color: var(--muted); }
+.cold-send-txid-icon svg { width: 12px; height: 12px; vertical-align: -1px; fill: none; stroke: var(--kaspa-ink); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sk-pill-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 
 /* Zero-balance chat gate: funding card above a disabled composer */
 .chat-funding-gate {
@@ -9640,6 +9813,28 @@ body.session-logged-out [data-account-rename-modal] {
    screens, the same button Manage Addresses has at its foot. */
 .address-actions-pill { display: block; width: calc(100% - 32px); margin: 4px 16px 10px; padding: 13px 16px; border: 0; border-radius: 999px; background: var(--kaspa); color: #000; font-size: 14px; font-weight: 700; text-align: center; cursor: pointer; }
 .address-actions-pill:hover { filter: brightness(1.05); }
+/* Busy (Generate / Discover running, iOS accountSummary): a spinner in place of the label, off. */
+.address-actions-pill:disabled { cursor: default; filter: none; }
+.address-actions-pill .sk-spinner { margin: 0; vertical-align: -2px; }
+
+/* Discover Addresses progress inside the Address Actions sheet (iOS addressActionsSheet). */
+.spending-discover-progress { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 8px 4px; text-align: center; }
+.spending-discover-progress .sk-spinner { margin: 0 0 4px; width: 18px; height: 18px; color: var(--muted); }
+.spending-discover-progress strong { font-size: 14px; font-weight: 650; }
+.spending-discover-progress span { font-size: 12.5px; color: var(--muted); }
+.spending-discover-progress small { font-size: 11.5px; color: var(--muted); padding: 0 16px; }
+.app-dialog-footer { margin: 10px 0 0; text-align: center; font-weight: 650; }
+
+/* Spending address UTXOs (iOS utxoRow): icon, label / amount / outpoint, Coinbase, pencil. */
+.spending-utxo-row { gap: 10px; }
+.spending-utxo-icon { display: flex; flex: 0 0 auto; color: var(--kaspa-ink); }
+.spending-utxo-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.spending-utxo-amount { font-size: 13.5px; font-weight: 650; }
+.spending-utxo-compound-note { margin: 0 2px 10px; font-size: 12px; color: var(--muted); }
+.spending-utxo-failure { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 2px; }
+.spending-utxo-failure strong { color: var(--ios-red, #ff453a); font-size: 13.5px; }
+.spending-utxo-failure span { font-size: 12px; color: var(--muted); }
+.spending-detail-screen [data-spending-detail-send]:disabled { opacity: .5; cursor: default; }
 .manage-address-row-trailing { display: inline-flex; margin-left: 8px; color: var(--kaspa); flex: 0 0 auto; }
 .manage-address-row-trailing svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -9681,8 +9876,15 @@ body.session-logged-out [data-account-rename-modal] {
 .modal-actions.stacked { flex-direction: column; }
 .resync-picker-list { display: grid; gap: 6px; max-height: 320px; overflow-y: auto; margin: 6px 0 10px; }
 .resync-picker-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--line); cursor: pointer; }
-.resync-picker-copy { display: grid; }
+.resync-picker-copy { display: grid; flex: 1 1 auto; min-width: 0; }
+.resync-picker-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resync-picker-copy small { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.resync-picker-copy small.saved-account-address { display: flex; min-width: 0; overflow: hidden; }
+.resync-picker-row .resync-picker-avatar { width: 44px; height: 44px; flex: 0 0 auto; }
+/* The check circle on the right (iOS checkmark.circle.fill / circle). */
+.resync-picker-check { appearance: none; -webkit-appearance: none; flex: 0 0 auto; width: 22px; height: 22px; margin: 0; border-radius: 50%; border: 1.5px solid var(--muted); cursor: pointer; display: grid; place-items: center; }
+.resync-picker-check:checked { background: var(--kaspa); border-color: var(--kaspa); }
+.resync-picker-check:checked::after { content: ""; width: 9px; height: 5px; border-left: 2px solid var(--on-accent, #000); border-bottom: 2px solid var(--on-accent, #000); transform: translateY(-1px) rotate(-45deg); }
 .cache-total-row { justify-content: space-between; }
 .field-hint.accent { color: var(--kaspa-ink, var(--kaspa)); }
 
@@ -9961,7 +10163,7 @@ html.standalone .ios-install-hint { display: none; }
     display: grid; place-items: center;
     box-shadow: 0 10px 30px rgba(112,199,186,.35), 0 4px 14px rgba(0,0,0,.35);
   }
-  .kaposts-rail-post::after { font-size: 30px; line-height: 1; }
+  .kaposts-rail-post svg { width: 24px; height: 24px; }
   .kaposts-content { padding-right: 0; scrollbar-gutter: auto; }
 }
 
@@ -9971,9 +10173,81 @@ html.standalone .ios-install-hint { display: none; }
   .photo-preview-overlay img { max-width: 100%; max-height: 100%; border-radius: 12px; }
 }
 
-/* Why a post failed, next to Retry (the reason used to live only in the engine log). */
-.kaposts-delivery.failed { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.kaposts-failure-reason { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+/* ---- KaPosts parity with iOS KaPostsView ---------------------------------------------------- */
+/* The action row runs the cell's width: the actions from the left, then the delivery state at
+   the far end (iOS: HStack(spacing: 18) ... Spacer() ... status). Retry stands alone. */
+.kaposts-actions { justify-content: flex-start; gap: 6px; max-width: none; }
+.kaposts-actions .kaposts-delivery { margin-left: auto; min-height: 0; padding: 0 4px; }
+.kaposts-delivery.failed { display: inline-flex; align-items: center; }
+.kaposts-delivery.failed button svg circle { fill: currentColor; stroke: none; }
+.kaposts-delivery.failed button svg path { stroke: var(--bg); }
+/* A held action (5 s undo): the undo arrow in an orange capsule, no seconds (iOS countdownButton). */
+.kaposts-action.kaposts-undo-pill { padding: 3px 7px; margin: 0 2px; border: 1px solid rgba(255,149,0,.55); border-radius: 999px; color: var(--ios-orange); }
+.kaposts-action.kaposts-undo-pill svg { width: 12px; height: 12px; stroke-width: 2.6; }
+.kaposts-action.kaposts-undo-pill:hover { color: var(--ios-orange); opacity: .82; }
+/* A poll option while its vote is held: a clock at the end of each row (iOS KaPostPollCard). */
+.kaposts-poll-option { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.kaposts-poll-option svg { width: 13px; height: 13px; flex-shrink: 0; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-poll-bar .kaposts-poll-check { width: 13px; height: 13px; margin-left: 4px; vertical-align: -2px; fill: currentColor; stroke: none; color: var(--kaspa-ink); }
+/* "Show N new posts" floats over the feed and stays put while it scrolls (iOS overlay(alignment:
+   .top)): a zero-height sticky holder, so the pill never pushes the posts down. */
+.kaposts-new-pill-holder { position: sticky; top: 8px; z-index: 6; height: 0; margin-bottom: -10px; display: flex; justify-content: center; overflow: visible; pointer-events: none; }
+.kaposts-new-pill-holder .kaposts-new-pill { margin: 0; pointer-events: auto; }
+/* The empty feed's own spinner while page one loads (iOS ProgressView under the empty state). */
+.kaposts-empty-loading { display: flex; justify-content: center; padding: 12px 0; }
+.kaposts-translate-note.with-spinner { display: inline-flex; align-items: center; gap: 6px; }
+.kaposts-inline-note.with-spinner { display: flex; align-items: center; gap: 8px; }
+/* The thread's reply box is pinned under the thread (iOS postDetailSheet). */
+/* At least its content's height (so the sticky bar's containing block holds every reply) and
+   grown to the screen when short (so the bar sits at the bottom, margin-top: auto). */
+.kaposts-thread { flex: 1 0 auto; }
+.kaposts-reply-inline.kaposts-reply-pinned {
+  position: sticky; bottom: 0; z-index: 5; margin: auto 0 0;
+  background: linear-gradient(var(--surface-1), var(--surface-1)), var(--bg);
+  align-items: center;
+}
+/* The undo and confirmation toasts ride above the pinned box while a thread is open (iOS pads its
+   thread toast layer by 70pt for the same reason). */
+.kaposts-thread:not([hidden]) ~ .kaposts-toasts { bottom: 76px; }
+.kaposts-reply-send {
+  flex-shrink: 0; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%;
+  background: transparent; color: var(--kaspa); cursor: pointer; display: grid; place-items: center;
+}
+.kaposts-reply-send svg { width: 30px; height: 30px; }
+.kaposts-reply-send svg circle { fill: currentColor; stroke: none; }
+.kaposts-reply-send svg path { fill: none; stroke: var(--bg); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-reply-send:disabled { color: var(--muted); cursor: default; }
+/* "This post could not be loaded" (iOS postDetailSheet's else branch). */
+.kaposts-thread-missing { padding-top: 48px; }
+/* Composer chips: an icon and a label; filled once on (Remove poll / Reschedule), dimmed when off. */
+.kaposts-chip { display: inline-flex; align-items: center; gap: 6px; }
+.kaposts-chip svg { width: 14px; height: 14px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-chip.filled { background: var(--kaspa); border-color: var(--kaspa); color: var(--on-accent); }
+.kaposts-chip.filled:hover { background: var(--kaspa); filter: brightness(1.05); }
+.kaposts-chip[disabled] { opacity: .4; cursor: default; }
+.kaposts-composer-quote .kaposts-quote-head .kaposts-cell-time { font-size: 11px; }
+/* iOS scheduleRow: "Scheduled for ..." with a way to clear it. */
+.kaposts-schedule-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.kaposts-schedule-row[hidden] { display: none; }
+.kaposts-schedule-row svg { width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-schedule-row strong { flex: 1; font-size: 14px; }
+/* The schedule picker sheet, over the composer. */
+.kaposts-schedule-backdrop { z-index: 2100; }
+.kaposts-schedule-sheet {
+  width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: stretch; gap: 14px;
+  border: 1px solid var(--card-border); border-radius: 20px; background: var(--sheet-bg, var(--panel));
+  box-shadow: 0 18px 48px var(--shadow); padding: 20px 22px; text-align: center;
+}
+.kaposts-schedule-sheet strong { font-size: 17px; }
+.kaposts-schedule-sheet p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.kaposts-schedule-sheet input { font: inherit; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-1); color: inherit; }
+.kaposts-schedule-sheet .primary-button { border-radius: 14px; padding: 12px 0; font-weight: 600; }
+/* The on-chain confirmation toast leads with a green filled check (iOS actionToast). */
+.kaposts-toast-check { width: 17px; height: 17px; flex-shrink: 0; }
+.kaposts-toast-check circle { fill: var(--ios-green); stroke: none; }
+.kaposts-toast-check path { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+/* Search post rows: the post's plain text, three lines (iOS KaPostsSearchView). */
+.kaposts-search-snippet.plain { white-space: pre-wrap; }
 
 /* =============================================================================================
    Phone widths, screen by screen (audited at 375px; the numbers in the comments are from there).
@@ -10259,13 +10533,12 @@ body.call-active .sidebar-tabbar { display: none; }
 .manage-address-row-fee { font-size: 11px; color: var(--muted); white-space: nowrap; }
 
 /* Chess Online: home, kind tabs, waiting room, game chips, result. */
-.broadcast-room-bell.off { color: var(--muted); }
-.broadcast-room-bell.off svg { opacity: .6; }
 .chess-t-home, .chess-t-result { align-items: stretch; }
 .chess-t-hero { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 18px 16px 6px; }
 .chess-t-hero h2 { margin: 0; font-size: 22px; }
 .chess-t-hero p { margin: 0; color: var(--muted); font-size: 14px; max-width: 420px; }
 .chess-t-hero-icon { width: 64px; height: 64px; color: var(--kaspa-ink); display: grid; place-items: center; }
+.chess-t-hero-icon .chess-tab-glyph { font-size: 44px; }
 .chess-t-hero-icon svg { width: 56px; height: 56px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .chess-t-hero-icon.won { color: var(--ios-yellow); }
 .chess-t-hero-icon.lost { color: var(--ios-red); }
@@ -10310,9 +10583,20 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-chip-clock small { color: var(--muted); font-size: 12px; }
 .chess-t-chip-clock b { font-size: 18px; }
 .chess-t-resign { border: 0; background: transparent; color: var(--ios-red); font: inherit; font-weight: 700; cursor: pointer; padding: 6px 8px; }
-.chess-t-bubble { position: relative; }
-.chess-t-tick { position: absolute; right: 6px; bottom: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--ios-green); }
-.chess-t-tick.pending { background: transparent; border: 1.5px solid rgba(0,0,0,.45); }
+/* One chat line: the bubble, and under ours its state - green check sent, clock on the way,
+   red mark failed (iOS chatBubble). */
+.chess-t-msg { align-self: flex-start; max-width: 80%; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.chess-t-msg.mine { align-self: flex-end; align-items: flex-end; }
+.chess-t-msg .chess-t-bubble { align-self: auto; max-width: 100%; }
+.chess-t-tick { display: inline-flex; width: 12px; height: 12px; }
+.chess-t-tick svg { width: 12px; height: 12px; }
+.chess-t-tick.sent { color: var(--ios-green); }
+.chess-t-tick.pending { color: var(--muted); }
+.chess-t-tick.failed { color: var(--ios-red); }
+.chess-t-composer button[disabled] { opacity: .5; cursor: default; }
+/* The result screen's top five (iOS leaderboardTop): plain counts, the lost tournaments small. */
+.chess-t-wl.plain { color: inherit; white-space: nowrap; }
+.chess-t-wl-lost { font-size: 12px; font-weight: 600; color: inherit; align-self: center; }
 .chess-t-end { position: absolute; inset: 0; z-index: 6; display: grid; place-items: center; background: rgba(0,0,0,.55); overflow: hidden; }
 .chess-t-end-card { display: flex; flex-direction: column; align-items: center; gap: 6px; color: #fff; text-align: center; }
 .chess-t-end-card strong { font-size: 28px; }
@@ -10405,6 +10689,48 @@ button.chess-t-row { cursor: pointer; }
 .portfolio-pair-flip.static { cursor: default; }
 .portfolio-screen-header { display: flex; align-items: center; justify-content: space-between; }
 .portfolio-pair-gear { margin-left: auto; }
+/* The card's gear (iOS gearshape.fill, "Edit <name>"). */
+.portfolio-card-menu-btn { display: grid; place-items: center; width: 26px; height: 26px; }
+.portfolio-card-menu-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Portfolio parity with iOS (PortfolioView.swift). */
+.portfolio-screen-title { flex: 1; text-align: center; font-size: 16px; font-weight: 700; }
+.portfolio-screen-header-spacer { width: 36px; flex: 0 0 auto; }
+.portfolio-back-btn { flex: 0 0 auto; }
+.portfolio-card-heading { margin: 0 0 10px; font-size: 16px; font-weight: 700; color: var(--text); }
+.portfolio-tx-header .portfolio-card-heading { margin: 0; }
+.portfolio-value-title { margin: 0 0 2px; }
+/* iOS ChartCurrencyChip: what the big number counts in, lit while flipped to the pair. */
+.portfolio-detail-price-row.portfolio-pair-flip { display: flex; align-items: baseline; gap: 10px; }
+.portfolio-unit-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 650; color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent); align-self: center; }
+.portfolio-unit-chip svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.portfolio-unit-chip.flipped { color: var(--ios-orange); background: color-mix(in srgb, var(--ios-orange) 14%, transparent); }
+/* iOS ChartRangeSummary: two lines above the big number while a span is selected. */
+.portfolio-range-summary { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; }
+.portfolio-range-dates { font-size: 13px; color: var(--muted); }
+.portfolio-range-change { font-size: 13.5px; }
+.portfolio-range-change.gain { color: var(--kaspa-ink); }
+.portfolio-range-change.loss { color: var(--ios-red); }
+.portfolio-chart-loading { display: flex; align-items: center; justify-content: center; }
+.portfolio-chart-empty[style] { display: flex; align-items: center; justify-content: center; padding: 0 12px; }
+/* Value labels down the chart's leading edge (iOS chartYAxis). */
+.portfolio-yaxis { position: absolute; inset: 0 auto 0 0; pointer-events: none; z-index: 1; }
+.portfolio-yaxis span { position: absolute; left: 4px; transform: translateY(-50%); font-size: 10.5px; color: var(--muted); background: color-mix(in srgb, var(--bg, #000) 55%, transparent); padding: 0 3px; border-radius: 4px; white-space: nowrap; }
+.portfolio-converter-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 12px; background: color-mix(in srgb, var(--text) 6%, transparent); }
+.portfolio-converter-row span { width: 44px; flex: 0 0 auto; font-size: 13px; font-weight: 650; color: var(--muted); }
+.portfolio-converter-row input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 20px; font-weight: 650; text-align: right; outline: none; }
+.portfolio-converter-row em { width: 44px; flex: 0 0 auto; text-align: right; font-style: normal; font-size: 13px; color: var(--muted); }
+.portfolio-hashrate-field { flex: 1 1 160px; font-size: 18px; font-weight: 650; }
+.portfolio-tx-icon-btn { display: inline-flex; align-items: center; gap: 3px; border: 0; background: transparent; padding: 2px; cursor: pointer; color: var(--kaspa-ink); font: inherit; font-size: 14px; font-weight: 650; }
+.portfolio-tx-icon-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.portfolio-tx-icon-btn.portfolio-select-delete { color: var(--ios-red); }
+.portfolio-tx-icon-btn[disabled] { color: var(--muted); cursor: default; }
+.portfolio-reorder-value { margin-left: auto; font-size: 13px; color: var(--muted); }
+.portfolio-pair-intro { text-align: center; }
+.portfolio-pair-rows { display: flex; flex-direction: column; border: 1px solid var(--card-border, var(--line)); border-radius: 18px; overflow: hidden; }
+.portfolio-pair-row:last-child { border-bottom: 0; }
+.portfolio-import-buttons { display: flex; justify-content: space-between; gap: 12px; }
+.portfolio-import-address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .manage-address-notify { margin: 8px 12px 4px; }
 .address-resolution-card { margin-top: 8px; }
 .seed-entry-head { display: flex; align-items: center; gap: 10px; }
@@ -10517,6 +10843,12 @@ button.chess-t-row { cursor: pointer; }
   color: var(--muted);
 }
 .saved-account-chevron { display: none; }           /* iOS row has no chevron */
+/* Full address, truncated in the middle (iOS .truncationMode(.middle)). */
+.saved-account-copy small.saved-account-address { display: flex; min-width: 0; overflow: hidden; }
+.saved-account-address-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-account-address-tail { flex: 0 0 auto; white-space: nowrap; }
+/* At most four rows (4 x 64 + 3 x 10), then the list scrolls (iOS visibleSavedAccountRows). */
+.saved-account-list { max-height: 286px; overflow-y: auto; }
 .saved-account-edit {
   width: 32px; height: 32px; min-height: 0;         /* was 52px wide, full height */
   border: 0; border-left: 0;                        /* drop the divider */
@@ -10744,6 +11076,11 @@ button.chess-t-row { cursor: pointer; }
 .import-source-row.selected { border: 1.2px solid color-mix(in srgb, var(--kaspa) 60%, transparent); }
 .import-source-mark { width: 20px; text-align: center; font-size: 17px; line-height: 1; color: var(--muted); } /* was 13px accent */
 .import-source-row.selected .import-source-mark { color: var(--kaspa); }
+/* iOS ImportSourceWalletView: each wallet's icon, and the wallet.pass header icon. */
+.import-source-icon { width: 24px; flex: 0 0 auto; display: inline-flex; justify-content: center; color: var(--kaspa); }
+.import-source-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.import-source-header-icon { display: flex; justify-content: center; color: var(--kaspa); margin-top: 4px; }
+.import-source-header-icon svg { width: 44px; height: 44px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .import-source-copy { gap: 2px; }                  /* was 1px */
 .import-source-copy strong { font-size: 15px; font-weight: 600; line-height: 20px; } /* was 14 */
 .import-source-default { margin-left: 6px; font-size: 11px; font-weight: 700; color: var(--kaspa); } /* was 10.5/800 */
@@ -11004,11 +11341,19 @@ button.chess-t-row { cursor: pointer; }
   text-align: center;                               /* was left */
   color: var(--text);
 }
-.setup-funding .secondary-button {                  /* Show QR Code / Change Chatting Address = accent links */
+.setup-funding .secondary-button,
+.setup-funding .setup-funding-link {                /* Show QR Code / Change Chatting Address = accent links */
   background: transparent; color: var(--kaspa);
   font-size: 15px; font-weight: 600;
   padding: 6px 12px; min-height: 0; box-shadow: none;
 }
+.setup-funding .setup-funding-link { display: inline-flex; align-items: center; gap: 6px; }
+.setup-funding .setup-funding-link svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* Address explainer rows: the SF Symbol beside each card (iOS addressMockRow). */
+.setup-address-row.with-icon { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 12px; align-items: start; }
+.setup-address-row.with-icon > .setup-address-icon { grid-row: 1 / span 3; color: var(--kaspa); display: inline-flex; justify-content: center; padding-top: 2px; }
+.setup-address-row.with-icon > :not(.setup-address-icon) { grid-column: 2; }
+.setup-address-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Address explainer rows */
 .setup-address-row {
@@ -11028,6 +11373,9 @@ button.chess-t-row { cursor: pointer; }
 .setup-address-row small { font-size: 12px; line-height: 16px; color: var(--muted); }
 
 .chatting-picker-title { padding: 8px 24px 8px; font-size: 20px; font-weight: 700; line-height: 25px; text-align: center; } /* was 18px left, 4/20/6 */
+/* iOS ChattingAddressPickerView header: the person.text.rectangle symbol above the title. */
+.chatting-picker-header-icon { display: flex; justify-content: center; padding-top: 12px; color: var(--kaspa); }
+.chatting-picker-header-icon svg { width: 44px; height: 44px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .chatting-picker-screen .spending-manage-subtitle { padding: 0 24px 16px; font-size: 15px; line-height: 20px; text-align: center; color: var(--muted); } /* was 12.5 left */
 .chatting-picker-list { gap: 10px; }
 .chatting-picker-row {
@@ -11455,6 +11803,15 @@ button.chess-t-row { cursor: pointer; }
 .saved-node-btn { color: var(--text); }
 .saved-node-btn.danger { color: var(--ios-red); border-color: color-mix(in srgb, var(--ios-red) 30%, transparent); }
 .saved-node-btn:hover { background: var(--fill-tertiary); }
+/* iOS IP Address Book row: the text copies, a red trash removes; the + adds. */
+button.saved-node-copy { flex: 1 1 auto; border: 0; background: none; color: var(--text); text-align: left; padding: 0; cursor: pointer; }
+.saved-node-trash { flex: 0 0 auto; border: 0; background: none; color: var(--ios-red); padding: 4px; cursor: pointer; display: inline-flex; }
+.saved-node-trash svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.saved-node-add-row { display: flex; align-items: center; gap: 8px; }
+.saved-node-add-row .field-input { flex: 1 1 auto; min-width: 0; }
+.saved-node-add-button { flex: 0 0 auto; border: 0; background: none; color: var(--kaspa); padding: 2px; cursor: pointer; display: inline-flex; }
+.saved-node-add-button:disabled { opacity: .4; cursor: default; }
+.saved-node-add-button svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .node-insecure-warning { color: var(--ios-orange); }
 .security-warning-card { background: color-mix(in srgb, var(--ios-orange) 12%, transparent); }
 .security-warning-card strong { color: var(--ios-orange); }
@@ -11936,13 +12293,16 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
   background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
   border: 1px solid var(--glass-stroke); box-shadow: var(--glass-shadow);
 }
-.broadcast-room .broadcast-voice-btn, .broadcast-room [data-broadcast-send] {
+.broadcast-room .broadcast-voice-btn, .broadcast-room .broadcast-send-btn {
   height: 38px; border-radius: 12px;
   background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
   border: 1px solid var(--glass-stroke); box-shadow: var(--glass-shadow); color: var(--kaspa-ink);
 }
 .broadcast-room .broadcast-voice-btn { width: 38px; }
-.broadcast-room [data-broadcast-send] { padding: 0 14px; font-weight: 600; }
+/* The send arrow (iOS arrow.up.circle.fill), in the composer and on the recording bar. */
+.broadcast-room .broadcast-send-btn { width: 38px; flex: 0 0 auto; }
+.broadcast-room .broadcast-send-btn:disabled { color: var(--muted); cursor: default; }
+.broadcast-room .broadcast-send-btn svg { stroke-width: 2.2; }
 
 [data-chat-info-overlay] .account-overlay-card { background: var(--grouped-bg-elevated); border: 0; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
 [data-chat-info-overlay] .account-overlay-header { border-bottom: 1px solid var(--line); }
@@ -12134,6 +12494,9 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 
 /* Connection Settings tabs (iOS ee01f81). */
 .connection-tabs { margin: 0 0 8px; }
+.connection-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.connection-settings-head .settings-group-label { margin-bottom: 0; }
+.connection-save-button { padding: 6px 4px; color: var(--kaspa-ink); font-size: 16px; font-weight: 700; }
 .connection-tabs .domains-tab { font-size: 14px; }
 .connection-panel[hidden] { display: none !important; }
 .connection-readonly-list { gap: 12px; }
@@ -12377,6 +12740,7 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
   gap: 2px;
 }
 .composer-plus-sheet .composer-plus-title { margin: 2px 0 6px; text-align: center; font-size: 15px; font-weight: 600; color: var(--text); }
+.composer-plus-sheet .composer-plus-caption { margin: -4px 8px 8px; text-align: center; font-size: 12px; line-height: 1.3; color: var(--muted); }
 .composer-plus-menu .composer-plus-copy { display: grid; gap: 2px; min-width: 0; text-align: left; color: var(--text); font-size: inherit; }
 .composer-plus-menu .composer-plus-copy strong { color: var(--text); }
 .composer-plus-menu .composer-plus-copy small { font-size: 12px; line-height: 1.3; font-weight: 400; color: var(--muted); }
@@ -13197,6 +13561,18 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .addr-domains-back svg { width: 18px; height: 18px; }
 .addr-domains-names { display: flex; flex-direction: column; }
 .addr-domains-empty { margin: 0; padding: 24px 8px; text-align: center; color: var(--muted); }
+/* Refresh (the platform's stand-in for pull-to-refresh): above the cards, and at the right of a
+   service's list heading; it spins while the lookups run. Your Domains has its own in the header. */
+.addr-domains-bar { display: flex; justify-content: flex-end; margin: -4px 0 8px; }
+.addr-domains-refresh {
+  display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0;
+  border: 0; border-radius: 50%; background: none; color: var(--accent); cursor: pointer;
+}
+.addr-domains-subhead .addr-domains-refresh { position: absolute; right: 0; top: 50%; transform: translateY(-50%); }
+.addr-domains-refresh svg { width: 20px; height: 20px; }
+.addr-domains-refresh.spinning svg, .domains-refresh.spinning svg { animation: addr-domains-spin .9s linear infinite; }
+.addr-domains-refresh:disabled, .domains-refresh:disabled { cursor: default; }
+.domains-loading { display: flex; justify-content: center; padding: 24px 0; }
 
 /* Profile's Manage Addresses card (iOS 6333dd3): one card for every address of the account, with
    the account total, in place of the Chatting and Spending rows. */
@@ -13397,3 +13773,281 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .password-reveal .eye-closed { display: none; }
 .password-reveal.revealed .eye-open { display: none; }
 .password-reveal.revealed .eye-closed { display: block; }
+
+/* ==== Sent confirmation (iOS ActionSheet.swift SentConfirmationSheet) ====
+   The sheet every send finishes on - Send Kaspa, KaPosts tips, Send Domain: check, "Sent", the
+   amount, "to ...", the txid as an explorer link (shortened in the middle), Done. */
+.sk-sent-backdrop { z-index: 3060; }
+.sk-sent-sheet { width: min(100%, 420px); display: flex; flex-direction: column; align-items: center; text-align: center; padding: 28px 20px 20px; gap: 0; }
+.sk-sent-check { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: var(--ios-green); color: #ffffff; }
+.sk-sent-check svg { width: 30px; height: 30px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.sk-sent-title { margin: 12px 0 0; font-size: 20px; font-weight: 700; }
+.sk-sent-amount { margin: 2px 0 0; font-size: 17px; font-weight: 600; color: var(--muted); }
+.sk-sent-to { margin: 2px 0 0; padding: 0 12px; max-width: 100%; display: flex; justify-content: center; font-size: 15px; color: var(--muted); white-space: nowrap; }
+.sk-sent-to-word { flex: 0 0 auto; }
+.sk-mid-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-mid-tail { flex: 0 0 auto; white-space: nowrap; }
+.sk-sent-txid { margin: 20px 0 0; width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 12px 14px; border-radius: 14px;
+  background: var(--glass-fill, var(--fill-tertiary)); border: .8px solid var(--glass-stroke, transparent); color: var(--kaspa-ink); text-decoration: none; box-sizing: border-box; }
+.sk-sent-txid.plain { color: var(--muted); background: transparent; border: 0; }
+.sk-sent-txid-text { min-width: 0; display: flex; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.sk-sent-open { flex: 0 0 15px; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sk-sent-hint { margin: 8px 0 0; padding: 0 12px; font-size: 12px; color: var(--muted); }
+.sk-sent-done { margin-top: 24px; align-self: stretch; }
+/* Coin Control load failure (iOS UtxoLoadFailureRow) */
+.sk-coin-failure { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 4px 4px; }
+.sk-coin-failure-title { margin: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; color: var(--ios-red); }
+.sk-coin-failure-title svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sk-coin-failure-detail { margin: 0; font-size: 12px; color: var(--muted); }
+.sk-coin-failure .cold-inline-link { font-weight: 600; padding: 0; }
+
+/* KaPosts Settings (iOS KaPostsSettingsView): the amount row is logo, field, KAS - no label; the
+   Notifications row has its bell; the KaPosts page is a sub-page with Back. */
+.kaposts-tip-amount-row .kaposts-tip-amount-field { flex: 1; min-width: 0; }
+.kaposts-tip-amount-row .kaposts-tip-amount-field .field-input { flex: 1; width: auto; min-width: 0; text-align: left; }
+.kaposts-settings-row-icon { flex: 0 0 22px; width: 22px; height: 22px; fill: none; stroke: var(--kaspa-ink); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-settings-subheader { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+.kaposts-settings-subheader h2 { margin: 0; text-align: center; }
+.kaposts-settings-subheader .modal-close { justify-self: end; }
+.kaposts-settings-subheader .create-chat-nav-button { justify-self: start; }
+
+/* --- Chats list / Create chat / New Group / Add Members / Group Info / User Info (iOS parity) --- */
+/* The large "Chats" title over the search field (iOS navigationTitle, .large). */
+.chats-list-title { margin: 6px 16px 0; }
+/* Per-row history fetch (iOS ConversationRow): a mini spinner while loading, an orange triangle
+   when the last fetch failed, just before the time. */
+.chat-row-fetch-slot { display: inline-flex; align-items: center; vertical-align: -2px; }
+.chat-row-fetch-slot:empty { display: none; }
+.chat-row-fetch { margin-right: 5px; }
+.chat-row-fetch.loading {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  border: 1.6px solid var(--muted); border-right-color: transparent; animation: sk-spin .8s linear infinite;
+}
+.chat-row-fetch.failed { width: 12px; height: 12px; fill: var(--ios-orange); stroke: none; }
+.chat-row-fetch.failed .chat-row-fetch-mark { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; }
+/* Icons only in the selection bar (iOS envelope.open / envelope.badge / trash). */
+.chat-selection-action svg { width: 20px; height: 20px; }
+/* Create chat: status, preview and error sit inside the address card, above the tools row. */
+.create-chat-address-card > .create-chat-status,
+.create-chat-address-card > .create-chat-preview,
+.create-chat-address-card > .create-chat-error { margin: 0 16px 12px; }
+/* New Group Chat: Cancel / title / Create in the bar, inside the sheet's own padding. */
+.group-create-modal .group-create-header { margin: 0 0 8px; padding: 0; position: static; background: transparent; flex: 0 0 auto; }
+.group-create-modal .group-create-header h2 { font-size: 17px; }
+.group-add-members-footer { margin-top: 8px; }
+/* Add Members (iOS AddGroupMembersView). */
+.add-members-modal { width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 64px)); display: flex; flex-direction: column; padding: 0 18px; overflow: hidden; }
+.add-members-modal .create-chat-header h2 { font-size: 17px; }
+.add-members-scroll { overflow-y: auto; padding: 14px 0 20px; display: flex; flex-direction: column; gap: 14px; }
+.add-members-card { border-radius: 12px; overflow: hidden; background: var(--grouped-cell, var(--panel)); }
+.add-members-search { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 16px; padding: 12px 14px; }
+.add-members-status { margin: 0 14px 10px; }
+.add-members-typed { border-top: 1px solid var(--line); }
+.add-members-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 14px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.add-members-row + .add-members-row { border-top: 1px solid var(--line); }
+.add-members-row .chat-avatar { width: 32px; height: 32px; flex: 0 0 32px; font-size: 12px; }
+.add-members-row-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.add-members-row-meta strong { font-weight: 500; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-members-row-meta span { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-members-check svg { width: 22px; height: 22px; fill: none; stroke: var(--muted); stroke-width: 1.6; }
+.add-members-check .add-members-check-mark { stroke: none; }
+.add-members-check.on svg { fill: var(--kaspa); stroke: var(--kaspa); }
+.add-members-check.on .add-members-check-mark { stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.add-members-empty { margin: 0; padding: 12px 14px; font-size: 12px; color: var(--muted); }
+.add-members-footer { margin: -6px 14px 0; font-size: 12px; line-height: 1.35; color: var(--muted); }
+.add-members-spinner { display: inline-block; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); border-right-color: transparent; animation: sk-spin .8s linear infinite; vertical-align: -3px; }
+.add-members-spinner.small { width: 11px; height: 11px; border-width: 1.6px; margin-right: 4px; vertical-align: -1px; }
+/* Group Info: the Admin tag is a plain caption (iOS Text("Admin").font(.caption)). */
+.group-manage-body .group-member-admin-badge { background: transparent; color: var(--muted); font-weight: 400; font-size: 12px; padding: 0; }
+.group-hidden-users-header { margin: 4px 16px 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; }
+.group-hidden-users-empty { margin: 0; padding: 12px 16px; color: var(--muted); }
+.group-hidden-users-modal .group-member-line { padding: 8px 16px; }
+.group-hidden-unhide { margin-left: auto; border: 0; background: transparent; color: var(--kaspa-ink); font: inherit; font-weight: 500; cursor: pointer; }
+/* User Info */
+.chat-info-stats-card .profile-about-row[hidden] { display: none; }
+.chat-info-avatar-fullscreen { position: fixed; inset: 0; z-index: 9000; background: #000; display: flex; align-items: center; justify-content: center; }
+.chat-info-avatar-fullscreen-bar { position: absolute; top: 12px; left: 16px; right: 16px; display: flex; align-items: center; gap: 12px; color: #fff; }
+.chat-info-avatar-fullscreen-bar strong { flex: 1; min-width: 0; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-info-avatar-fullscreen-button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: rgba(255,255,255,.18); color: #fff; display: grid; place-items: center; cursor: pointer; }
+.chat-info-avatar-fullscreen-button:disabled { opacity: .45; cursor: default; }
+.chat-info-avatar-fullscreen-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.chat-info-avatar-fullscreen-glyph { width: 220px; height: 220px; border-radius: 50%; background: rgba(255,255,255,.12); color: rgba(255,255,255,.8); display: grid; place-items: center; overflow: hidden; }
+.chat-info-avatar-fullscreen-glyph svg { width: 60%; height: 60%; fill: currentColor; }
+
+/* ==== Send Domain (iOS KNSDomainSendView): a Form - Domain, Recipient Address, Fee - with Cancel /
+   Send in the bar, its progress in a sheet of its own. ==== */
+.kns-send-modal { width: min(100%, 460px); max-height: calc(100dvh - 44px); overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.kns-send-header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; margin-bottom: 6px; }
+.kns-send-header h2 { margin: 0; font-size: 17px; font-weight: 600; text-align: center; }
+.kns-send-header .create-chat-nav-button:first-child { justify-self: start; }
+.kns-send-header-action { justify-self: end; display: inline-flex; align-items: center; }
+.kns-send-header-action .create-chat-nav-button { font-weight: 600; }
+.kns-send-header-action .create-chat-nav-button[hidden], .kns-send-header-action .sk-spinner[hidden] { display: none; }
+.kns-send-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.kns-send-domain { font-size: 16px; font-weight: 600; }
+.kns-send-asset { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kns-send-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.kns-send-actions { display: flex; justify-content: space-between; }
+.kns-send-action { display: inline-flex; align-items: center; gap: 6px; }
+.kns-send-action svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.kns-send-footer { margin: 0 4px 8px; font-size: 12px; }
+.kns-send-fee-row { margin-top: 2px; }
+.kns-send-error { margin: 0; font-size: 12px; }
+.kns-send-progress-backdrop { z-index: 3055; }
+.kns-send-progress { width: min(100%, 400px); display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding: 24px; text-align: center; }
+.kns-send-progress h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.kns-send-progress-track { height: 4px; border-radius: 2px; background: var(--fill-tertiary, rgba(120,120,128,.24)); overflow: hidden; }
+.kns-send-progress-fill { display: block; height: 100%; width: 10%; background: var(--kaspa-ink); transition: width .4s ease; }
+.kns-send-progress-stage { margin: 0; font-size: 15px; font-weight: 600; }
+.kns-send-progress-note { margin: 0; font-size: 12px; color: var(--muted); }
+
+/* ==== Chat composer (iOS inputBar / group composeBar): [field][emoji][+], the "+" turning into
+   Send once there is something to send. A pending photo, the voice recorder and "Conversation
+   declined" take the text field's place. ==== */
+.kachat-composer[data-composer], .kachat-composer[data-group-composer] {
+  display: flex; align-items: flex-end; gap: 12px; grid-template-columns: none;
+}
+.kachat-composer[data-group-composer] { gap: 8px; }
+.kachat-composer > .composer-field-wrap {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 2px;
+}
+.kachat-composer > .composer-field-wrap > .composer-input { flex: 1 1 auto; min-width: 0; }
+.kachat-composer > .composer-field-wrap > [hidden] { display: none !important; }
+.kachat-composer.composer-field-replaced > .composer-field-wrap > .composer-input { display: none; }
+.kachat-composer > .composer-emoji,
+.kachat-composer > .composer-plus,
+.kachat-composer > .composer-send,
+.kachat-composer > .composer-audio-switch > .composer-tool {
+  flex: 0 0 44px; width: 44px; height: 44px; margin: 0; padding: 0; border-radius: 14px;
+  display: grid; place-items: center; cursor: pointer;
+  background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
+  border: 1px solid var(--glass-stroke); box-shadow: var(--glass-shadow);
+}
+.kachat-composer > .composer-emoji, .kachat-composer > .composer-audio-switch > .composer-tool { color: var(--text); }
+.kachat-composer > .composer-audio-switch > .composer-tool[data-composer-audio-text] { color: var(--kaspa-ink); }
+.kachat-composer > .composer-emoji svg,
+.kachat-composer > .composer-audio-switch svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.kachat-composer > .composer-audio-switch img { width: 28px; height: 28px; border-radius: 999px; }
+.composer-audio-switch { display: inline-flex; gap: 8px; flex: 0 0 auto; }
+.composer-audio-switch[hidden] { display: none !important; }
+/* Send: arrow.up.circle.fill in accent, on the same 44pt glass as the "+". */
+.kachat-composer > .composer-send { color: var(--kaspa-ink); align-self: flex-end; }
+.kachat-composer > .composer-send svg { width: 30px; height: 30px; padding: 6px; border-radius: 50%; background: var(--kaspa); color: #fff; box-sizing: border-box; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.kachat-composer > .composer-send.composer-send-mic svg { padding: 6px; }
+.kachat-composer > .composer-send.composer-send-stop svg { background: var(--kaspa); }
+.kachat-composer > .composer-send:disabled { opacity: .5; cursor: default; }
+.kachat-composer > .composer-send:disabled svg { background: var(--muted); }
+.kachat-composer > .composer-send .composer-field-spinner { width: 22px; height: 22px; }
+.kachat-composer:not(.composer-has-content) > .composer-send { display: none; }
+.kachat-composer.composer-has-content > .composer-plus { display: none; }
+.kachat-composer.composer-declined > :not(.composer-field-wrap) { display: none !important; }
+.kachat-composer.composer-declined > .composer-field-wrap { opacity: .7; }
+.composer-declined-field { flex: 1 1 auto; min-height: 36px; display: flex; align-items: center; padding: 8px 12px; color: var(--muted); font-size: 16px; }
+/* The rows that stand in for the field: no card of their own, they sit in the field's glass. */
+.composer-field-wrap > .composer-field-row,
+.composer-field-wrap > .composer-field-row.preview {
+  flex: 1 1 auto; min-width: 0; min-height: 36px; display: flex; align-items: center; gap: 10px;
+  margin: 0; padding: 2px 8px 2px 4px; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+.composer-field-row .pending-photo-meta { flex: 1 1 auto; color: var(--text); font-size: 15px; }
+.composer-field-row .pending-photo-meta.sending { color: var(--muted); }
+.composer-field-row img { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; }
+.composer-field-row .pending-photo-remove,
+.composer-field-row .voice-field-trash { width: 30px; height: 30px; border: 0; padding: 0; border-radius: 50%; background: transparent; color: var(--ios-red); display: grid; place-items: center; cursor: pointer; }
+.composer-field-row .pending-photo-remove svg,
+.composer-field-row .voice-field-trash svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.composer-field-row .voice-field-label { flex: 1 1 auto; min-width: 0; color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.composer-field-row .voice-field-hint { flex: 1 1 auto; color: var(--muted); font-size: 15px; }
+.composer-field-row .voice-field-mic { width: 12px; height: 12px; color: var(--ios-red); flex: 0 0 auto; }
+.composer-field-row .voice-field-mic svg { width: 12px; height: 12px; fill: currentColor; }
+.composer-field-row .voice-preview-play { width: 26px; height: 26px; background: transparent; color: var(--kaspa-ink); }
+.composer-field-row .voice-preview-play svg { width: 24px; height: 24px; fill: currentColor; }
+.composer-field-spinner {
+  display: inline-block; flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--muted); border-top-color: transparent; animation: initial-sync-spin .8s linear infinite;
+}
+.composer-field-spinner[hidden] { display: none; }
+/* The funding card's address carries its copy icon (iOS ZeroBalanceFundingCardView). */
+.chat-funding-gate-address { display: inline-flex; align-items: center; gap: 8px; text-align: left; }
+.chat-funding-gate-copy-icon { flex: 0 0 auto; width: 26px; height: 26px; padding: 6px; box-sizing: border-box; border-radius: 10px; background: var(--material); border: 1px solid var(--glass-stroke); fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* The "+" sits at the right now, so its sheets open from the right edge. */
+.composer-shell .composer-plus-menu { left: auto; right: 0; }
+.kachat-composer.composer-drop-target > .composer-field-wrap { box-shadow: inset 0 0 0 1.5px rgba(112,199,186,.65), var(--glass-shadow); }
+.composer-field-row .group-photo-remove { color: var(--muted); }
+.composer-field-row .group-photo-remove svg { width: 22px; height: 22px; }
+.composer-field-row .group-photo-remove path { stroke: var(--bg); stroke-width: 2.2; }
+.composer-field-row .group-photo-remove:disabled { opacity: .5; }
+.group-send-error { margin: 0 4px 6px; padding: 0 12px; color: var(--ios-red); font-size: 12px; }
+.group-send-error[hidden] { display: none; }
+
+/* ==== Message rows (iOS MessageBubbleView / group bubble) ==== */
+/* The time under every message, your own message's delivery status after it. */
+.message-time-line { display: inline-flex; align-items: center; gap: 6px; margin-top: 3px; padding: 0 4px; font-size: 11px; line-height: 1.2; color: var(--muted); font-variant-numeric: tabular-nums; }
+.message-time-line .message-delivery-icon { margin: 0; font-size: 11px; }
+.message-edited-line { padding: 0 4px; font-size: 11px; color: var(--muted); }
+.message-reaction-retry { border: 0; background: transparent; padding: 1px 4px; color: var(--ios-red); font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
+.message-bubble-stack > .message-type-capsule { margin-bottom: 4px; }
+/* The reaction pill hangs ~10px below the bubble; keep that room (iOS pads 16pt). */
+.message-bubble.has-reactions { margin-bottom: 14px; }
+.message-reaction-pill { align-items: center; }
+.message-reaction-pill.failed { box-shadow: inset 0 0 0 1px rgba(255,59,48,.6); }
+.message-reaction-pill .reaction-status { display: inline-grid; place-items: center; }
+.message-reaction-pill .reaction-status svg { width: 11px; height: 11px; display: block; }
+.message-reaction-pill .reaction-status.sent { color: var(--ios-green); }
+.message-reaction-pill .reaction-status.failed { color: var(--ios-red); }
+/* A group message's sender, in accent, above its bubble ("You" on your own). */
+.group-sender-caption { padding: 0 4px; margin-bottom: 2px; font-size: 11px; font-weight: 600; color: var(--kaspa-ink); }
+/* iOS MessageActionsSheet header: the kind of bubble, then up to two lines of it. */
+.msg-context-head { display: grid; gap: 3px; justify-items: center; padding: 10px 12px 8px; text-align: center; }
+.msg-context-head strong { font-size: 15px; font-weight: 600; color: var(--text); }
+.msg-context-head span { font-size: 12.5px; line-height: 1.3; color: var(--muted); max-width: 300px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+/* Photo viewer (iOS ImagePreviewView): a bar with Close, the file name and Share over a black stage. */
+.photo-preview-overlay { grid-template-rows: auto minmax(0, 1fr); place-items: stretch; padding: 0; background: #000; cursor: default; }
+.photo-preview-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: calc(10px + var(--safe-top, 0px)) 16px 10px; color: #fff; }
+.photo-preview-title { min-width: 0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; text-align: center; }
+.photo-preview-close { justify-self: start; border: 0; background: transparent; color: var(--kaspa-ink); font: inherit; font-size: 16px; cursor: pointer; padding: 4px 0; }
+.photo-preview-share { justify-self: end; width: 34px; height: 34px; border: 0; padding: 0; background: transparent; color: var(--kaspa-ink); display: grid; place-items: center; cursor: pointer; }
+.photo-preview-share svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.photo-preview-stage { display: grid; place-items: center; overflow: hidden; min-height: 0; padding: 0 0 calc(8px + var(--safe-bottom, 0px)); }
+.photo-preview-overlay .photo-preview-stage img { max-width: 100%; max-height: 100%; border-radius: 0; box-shadow: none; object-fit: contain; cursor: zoom-in; transition: transform .18s ease; }
+.photo-preview-overlay.zoomed .photo-preview-stage img { cursor: zoom-out; }
+.message-photo-hidden { width: 220px; height: 160px; padding: 12px; border: 0; border-radius: 12px; background: var(--ios-gray6); color: var(--muted); font-size: 12px; font-weight: 400; text-align: center; cursor: default; }
+.message-photo-hidden svg { width: 26px; height: 26px; }
+.message-photo-show { border: 0; border-radius: 999px; padding: 5px 12px; background: var(--kaspa); color: #fff; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+/* Chess in the thread (iOS chessInviteBubble / chessLiveCard / chessLogEntry). */
+.message-bubble.chess-bubble { background: transparent; padding: 0; }
+.chess-invite-bubble { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; max-width: 300px; padding: 12px; border-radius: 16px; background: var(--ios-gray6); color: var(--text); cursor: pointer; }
+.chess-invite-head { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.chess-invite-glyph { font-size: 20px; line-height: 1; }
+.chess-invite-chip, .chess-thumb-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; }
+.chess-invite-chip { padding: 4px 8px; border-radius: 999px; color: var(--kaspa-ink); background: rgba(112,199,186,.12); }
+.chess-invite-chip svg, .chess-thumb-chip svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.chess-invite-actions { display: flex; gap: 12px; align-self: stretch; }
+.chess-invite-actions button { flex: 1; padding: 8px; border: 0; border-radius: 10px; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.chess-invite-accept { background: var(--bubble-out, var(--kaspa)); color: #fff; }
+.chess-invite-decline { background: var(--ios-gray5, var(--surface-2)); color: var(--muted); }
+.chess-invite-status { font-size: 12px; color: var(--muted); }
+.message-bubble.chess-bubble .chess-thumb { padding: 10px; border-radius: 16px; background: var(--ios-gray6); }
+.chess-thumb-board { width: 160px; height: 160px; }
+.chess-thumb-status { display: flex; align-items: center; gap: 6px; width: 160px; font-size: 12px; font-weight: 600; text-align: left; color: var(--text); }
+.chess-thumb-status.over { color: var(--muted); }
+.chess-thumb-status-text { flex: 1 1 auto; min-width: 0; }
+.chess-thumb-chip { font-size: 11px; color: var(--muted); }
+.message-bubble.chess-bubble .message-chess { padding: 6px 10px; border-radius: 999px; background: var(--ios-gray6); color: var(--muted); font-size: 12px; gap: 4px; }
+.message-bubble.chess-bubble .message-chess-label { font-weight: 400; text-decoration: none; }
+.message-bubble.chess-bubble .message-chess-icon { font-size: 14px; }
+.message-load-earlier-spinner { display: flex; justify-content: center; padding: 8px 0 12px; }
+.message-load-earlier-spinner .composer-field-spinner { width: 18px; height: 18px; }
+/* Select mode: Cancel at the left, a red trash at the right (iOS). */
+.message-selection-toolbar { justify-content: space-between; }
+.selection-trash { display: grid; place-items: center; width: 36px; height: 32px; padding: 0; background: transparent !important; color: var(--ios-red) !important; border: 0; }
+.selection-trash svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.selection-trash:disabled { opacity: .4; }
+.message-payment-card.payment-resolving { position: relative; overflow: hidden; }
+.message-payment-card.payment-resolving::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.28) 50%, transparent 70%);
+  background-size: 250% 100%; animation: fee-shimmer 1.4s linear infinite;
+}
+.kachat-composer > [hidden] { display: none !important; }

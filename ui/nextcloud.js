@@ -1346,22 +1346,10 @@ function renderRestoreOverlay() {
 
   if (restore.phase === "success") {
     title.textContent = "Restore Complete";
-    const summary = restore.summary || { messages: 0, conversations: 0, groups: 0, held: null };
-    const groups = summary.groups
-      ? `<p class="field-hint">Recovered ${summary.groups} group${summary.groups === 1 ? "" : "s"}.</p>` : "";
-    const held = summary.held;
-    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-    const heldLine = held && (held.messages || held.conversations)
-      ? `<p class="field-hint">The backup holds ${plural(held.messages, "message")} across ${plural(held.conversations, "chat")}.</p>`
-      : "";
-    const mergedLine = summary.messages > 0
-      ? `<p class="field-hint">${plural(summary.messages, "message")} in ${plural(summary.conversations, "chat")} ${summary.messages === 1 ? "was" : "were"} new to this device and ${summary.messages === 1 ? "has" : "have"} been merged in.</p>`
-      : `<p class="field-hint">This device already had every message in it, so nothing needed merging.</p>`;
+    // iOS ChatRestoreProgressModal.successMessage, word for word.
+    const summary = restore.summary || { messages: 0, conversations: 0 };
     body.innerHTML = `
-      ${bar(100)}
-      ${heldLine}
-      ${mergedLine}
-      ${groups}`;
+      <p class="field-hint">Restored ${Number(summary.messages) || 0} messages from ${Number(summary.conversations) || 0} chats.</p>`;
     actions.innerHTML = `<button class="primary-button" type="button" data-nc-restore-close>Done</button>`;
     return;
   }
@@ -1616,7 +1604,7 @@ function renderSettings() {
         <p class="field-error" data-nc-connect-error hidden></p>
         <button class="primary-button full" type="button" data-nc-connect disabled>Connect</button>
       </div>
-      <p class="settings-group-footer">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions. Don't use your account password. KaChat stores it on this device, encrypted with your KaChat password when you have set one.</p>`;
+      <p class="settings-group-footer">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions - don't use your account password. KaChat stores it on this device, encrypted with your KaChat password when you have set one.</p>`;
     updateComposerButton();
     return;
   }
@@ -1642,7 +1630,9 @@ function renderSettings() {
       <button class="settings-list-row" type="button" data-nc-pick-backup><span class="settings-row-copy"><strong>Backup Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.backupFolder || `${DEFAULT_BACKUP_FOLDER} (default)`)}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
       <button class="settings-list-row" type="button" data-nc-backup-now><span class="settings-row-copy"><strong>Back Up Messages Now</strong></span></button>
       <button class="settings-list-row" type="button" data-nc-restore ${restoreDisabled ? "disabled" : ""}><span class="settings-row-copy"><strong>Restore from Backup</strong></span></button>
-      <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small data-nc-backup-status>Checking last backup…</small></span></div>
+      <div class="settings-list-row settings-info-row" data-nc-last-backup-row hidden><span class="settings-row-copy"><strong>Last backup</strong></span><span class="settings-dropdown-caption" data-nc-last-backup></span></div>
+      <div class="settings-list-row settings-info-row" data-nc-backup-status-row hidden><span class="settings-row-copy"><small data-nc-backup-status></small></span></div>
+      <div class="settings-list-row settings-info-row" data-nc-backup-result-row hidden><span class="settings-row-copy"><small data-nc-backup-result></small></span></div>
     </div>
     <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history.</p>
     <p class="settings-group-footer">Your Address Book and portfolios are in the same backup and sync between your devices the same way.</p>
@@ -1663,10 +1653,32 @@ async function refreshBackupStatusLine() {
   if (!current) return;
   const restoreBtn = settingsEl?.querySelector("[data-nc-restore]");
   if (restoreBtn) restoreBtn.disabled = !info || restore.phase === "running";
-  if (!info) { current.textContent = "No backup on this server yet."; return; }
-  const when = info.modified ? info.modified.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "unknown time";
+  // iOS: a "Last backup" row (date · size), or the line "No backup on this server yet."
+  const statusRow = settingsEl?.querySelector("[data-nc-backup-status-row]");
+  const lastRow = settingsEl?.querySelector("[data-nc-last-backup-row]");
+  const lastValue = settingsEl?.querySelector("[data-nc-last-backup]");
+  if (!info) {
+    current.textContent = "No backup on this server yet.";
+    if (statusRow) statusRow.hidden = false;
+    if (lastRow) lastRow.hidden = true;
+    return;
+  }
+  if (statusRow) statusRow.hidden = true;
+  if (!info.modified) { if (lastRow) lastRow.hidden = true; return; }
+  const when = info.modified.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   const size = info.size ? ` · ${formatFileSize(info.size)}` : "";
-  current.textContent = `Last backup: ${when}${size}`;
+  if (lastValue) lastValue.textContent = `${when}${size}`;
+  if (lastRow) lastRow.hidden = false;
+}
+
+/// The Back Up Now result under the rows (iOS backupStatusMessage in green, backupErrorMessage in red).
+function setBackupResult(message, isError = false) {
+  const row = settingsEl?.querySelector("[data-nc-backup-result-row]");
+  const text = settingsEl?.querySelector("[data-nc-backup-result]");
+  if (!row || !text) return;
+  text.textContent = message || "";
+  text.style.color = isError ? "var(--ios-red)" : "var(--ios-green)";
+  row.hidden = !message;
 }
 
 function updateComposerButton() {
@@ -2018,11 +2030,12 @@ function wireSettings() {
     if (event.target.closest("[data-nc-pick-start]")) { openPicker("folder-start"); return; }
     if (event.target.closest("[data-nc-pick-backup]")) { openPicker("folder-backup"); return; }
     if (event.target.closest("[data-nc-backup-now]")) {
-      const status = settingsEl.querySelector("[data-nc-backup-status]");
       // The manual button bypasses the debounce and the automatic-sync floor, but still waits
       // for whatever already owns the store rather than racing it.
-      if (isBusy()) { if (status) status.textContent = "A sync is already running. Try again in a moment."; return; }
-      if (status) status.textContent = "Backing up…";
+      if (isBusy()) { setBackupResult("A sync is already running. Try again in a moment.", true); return; }
+      const button = event.target.closest("[data-nc-backup-now]");
+      if (button) button.disabled = true;
+      setBackupResult("");
       syncInFlight = true;
       syncDirty = false;
       try {
@@ -2030,11 +2043,13 @@ function wireSettings() {
         lastAutoSyncAt = Date.now();
         nc.lastAutoBackup = lastAutoSyncAt;
         saveState();
-        deps.showToast?.("Backup uploaded. Merged with what your other devices had already backed up.");
+        // iOS backUpNow: "Backup uploaded." under the rows, not a toast.
+        setBackupResult("Backup uploaded.");
       } catch (error) {
         syncDirty = true;
-        deps.showToast?.(corsHint(error));
+        setBackupResult(corsHint(error), true);
       } finally {
+        if (button?.isConnected) button.disabled = false;
         syncInFlight = false;
         lastActivityFingerprint = activityFingerprint();
       }

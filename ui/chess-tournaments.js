@@ -9,7 +9,7 @@
 import * as T from "../engine/chess-tournament.js";
 import * as Chess from "../engine/chess.js";
 import { fetchBroadcastHistory, hasBroadcastIndexer, sendBroadcastMessage, broadcastPayloadBytes } from "../engine/broadcasts.js";
-import { confirmDialog, promptDialog, alertDialog, chooseDialog } from "./dialogs.js";
+import { confirmDialog, promptDialog, chooseDialog } from "./dialogs.js";
 import { setServiceScanWanted } from "./broadcasts.js";
 import { KAS_UNIT } from "../engine/network.js";
 
@@ -46,18 +46,21 @@ let historyDeadline = 0;
 let now = Date.now();
 let lastError = "";
 const pendingMoveGames = new Set();   // "<tournament>|<game>" sent and not yet seen back
-const claimedGames = new Map();       // game key -> when a claim was posted; retried after CLAIM_RETRY_MS if the board is still open
-const CLAIM_RETRY_MS = 30_000;
+const claimedGames = new Set();       // game keys whose claim was posted - one is enough; the chain confirms it (iOS)
+/** Our chat lines on their way (sending, or failed): { id, tournament, game, text, failed }.
+ *  A line the chain returned is in the tournament's chat instead (iOS pendingChat). */
+let pendingChat = [];
+let pendingChatSerial = 0;
 let queuedPublicRoomId = null;
 let joinFeeText = null;               // "0.0017 KAS" once estimated this session
 
 // Navigation. mode: "duel" | "tournament". tab: play | active | finished | leaderboard.
 let view = { name: "home", mode: "duel", tab: "play", tournamentId: null, gameId: null };
 let autoOpenedGameId = null;
+let spectatorSwitchedFor = null;  // the player's game the board-watching spectator was sent to the bracket for
 let selectedSquare = null;
 let pendingPromotion = null;   // { from, to }
 let busy = false;              // a join/create/leave in flight
-let waitingNotice = "";
 // End-of-game flow: the burst over the board, then the result screen for the two players.
 let endOverlayFor = null;      // "<tournament>|<game>" showing the overlay
 let endHandledFor = null;
@@ -302,7 +305,7 @@ async function estimateJoinFee() {
     render();
   } catch { /* the label falls back to "Join" */ }
 }
-const joinLabel = () => (joinFeeText ? `Join (Fee: ${joinFeeText})` : "Join (one transaction)");
+const joinLabel = () => (joinFeeText ? `Join (Fee: ${joinFeeText})` : "Join");
 
 // ---------------------------------------------------------------------------------------------
 // Actions (each one a broadcast transaction)
@@ -360,30 +363,72 @@ async function joinPublicRoom(duel) {
   return send(T.messages.join(id));
 }
 
-async function createPrivate(duel) {
-  const name = await promptDialog({
-    title: duel ? "Create a private 1v1" : "Create a private tournament",
-    message: duel
-      ? "You get a code to share with the person you want to play. The game starts when they join. Creating it is one transaction."
-      : "You take the first seat and get a code to share. It starts when eight players have joined. Creating it is one transaction.",
-    label: "Name", initial: "", confirmLabel: duel ? "Create" : "Next", maxLength: T.NAME_MAX_LENGTH,
+/** The create alert (iOS ChessTournamentsView): Name - and for a tournament the Creator code -
+ *  in one dialog, Cancel or Create; Create reads "Creating…" while the transaction goes out.
+ *  `onCreate(name, code)` runs the send; the dialog closes when it is done. */
+function createPrivateDialog(duel, onCreate) {
+  return new Promise((resolve) => {
+    const host = document.createElement("div");
+    host.className = "modal-backdrop app-dialog-backdrop";
+    host.innerHTML = `
+      <form class="contact-modal app-dialog" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <div><h2>${esc(duel ? "Create a private 1v1" : "Create a private tournament")}</h2></div>
+          <button class="modal-close" type="button" data-chess-t-dialog-cancel aria-label="Close">×</button>
+        </div>
+        <p class="field-hint">${esc(duel
+          ? "You get a code to share with the person you want to play. The game starts when they join. Creating it is one transaction."
+          : "You take the first seat and get a code to share. It starts when eight players have joined. Creating it is one transaction.")}</p>
+        <div class="portfolio-editor-body">
+          <label class="portfolio-editor-field"><input type="text" name="name" placeholder="Name" aria-label="Name" maxlength="${T.NAME_MAX_LENGTH}" autocomplete="off" /></label>
+          ${duel ? "" : `<label class="portfolio-editor-field"><input type="text" name="code" placeholder="Creator code" aria-label="Creator code" maxlength="64" autocomplete="off" /></label>`}
+        </div>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-chess-t-dialog-cancel>Cancel</button>
+          <button class="primary-button" type="submit">Create</button>
+        </div>
+      </form>`;
+    document.body.appendChild(host);
+    const form = host.querySelector("form");
+    let creating = false;
+    const close = () => { host.remove(); resolve(); };
+    host.addEventListener("mousedown", (event) => { if (event.target === host && !creating) close(); });
+    host.addEventListener("click", (event) => { if (event.target.closest("[data-chess-t-dialog-cancel]") && !creating) close(); });
+    host.addEventListener("keydown", (event) => { if (event.key === "Escape" && !creating) close(); });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (creating) return;
+      creating = true;
+      const button = form.querySelector('button[type="submit"]');
+      button.textContent = "Creating…";
+      button.disabled = true;
+      Promise.resolve(onCreate(String(form.elements.name?.value || ""), String(form.elements.code?.value || "")))
+        .catch(() => {})
+        .finally(close);
+    });
+    form.elements.name?.focus();
   });
-  if (name === null || name === undefined) return;
-  let message;
-  const id = T.newPrivateId();
-  const clean = String(name).trim();
-  if (duel) message = T.messages.createDuel(id, clean || "1v1");
-  else {
-    const code = await promptDialog({ title: "Creator code", message: "Creating a private tournament needs the creator code.", label: "Creator code", initial: "", confirmLabel: "Create", maxLength: 64 });
-    if (!code) return;
-    if (T.createKey(code, "check") !== T.createKey(T.PRIVATE_CREATE_CODE, "check")) { deps.showToast?.("That creator code is not right."); return; }
-    message = T.messages.create(id, clean || "Private tournament", code);
-  }
-  busy = true; render();
-  const ok = await send(message);
-  busy = false;
+}
+
+async function createPrivate(duel) {
+  let createdId = null;
+  await createPrivateDialog(duel, async (name, code) => {
+    const id = T.newPrivateId();
+    const clean = name.trim();
+    let message;
+    if (duel) message = T.messages.createDuel(id, clean || "1v1");
+    else {
+      // Checked before anything is sent (iOS createPrivateTournament).
+      if (T.createKey(code, "check") !== T.createKey(T.PRIVATE_CREATE_CODE, "check")) { deps.showToast?.("That creator code is not right."); return; }
+      message = T.messages.create(id, clean || "Private tournament", code);
+    }
+    busy = true; render();
+    const ok = await send(message);
+    busy = false;
+    if (ok) createdId = id;
+  });
   // The creator holds the first seat: straight into the waiting room.
-  if (ok) openWaitingRoom(id); else render();
+  if (createdId) openWaitingRoom(createdId); else render();
 }
 
 async function joinPrivate() {
@@ -392,7 +437,7 @@ async function joinPrivate() {
   const id = String(raw).trim().toLowerCase();
   const t = tournaments[id];
   if (!t || T.isPublicId(id)) {
-    alertDialog({ title: "No open tournament with that code", message: "Codes are eight characters; the tournament must exist and still have seats." });
+    deps.showToast?.("No open tournament with that code. Codes are eight characters; the tournament must exist and still have seats.");
     return;
   }
   if (T.tournamentStatus(t) !== "open") { deps.showToast?.("That tournament has already started."); return; }
@@ -421,7 +466,7 @@ async function leaveTournament(t) {
   const ok = await confirmDialog({
     title: "Leave the queue?",
     message: "Leaving means you will no longer be searching for another player. Leaving is one transaction; you can join again any time.",
-    confirmLabel: "Leave", destructive: true,
+    confirmLabel: "Leave", cancelLabel: "Keep waiting", destructive: true,
   });
   if (!ok) return false;
   queuedPublicRoomId = null;
@@ -434,7 +479,7 @@ async function leaveTournament(t) {
 
 async function cancelTournament(t) {
   if (t.creator !== me() || T.tournamentStatus(t) !== "open") return;
-  const ok = await confirmDialog({ title: "Cancel this tournament?", message: "Everyone who joined is released. This is one transaction.", confirmLabel: "Cancel tournament", destructive: true });
+  const ok = await confirmDialog({ title: "Cancel this tournament?", message: "Everyone who joined is released. This is one transaction.", confirmLabel: "Cancel tournament", cancelLabel: "Keep it", destructive: true });
   if (ok) await send(T.messages.cancel(t.id));
 }
 
@@ -465,17 +510,25 @@ async function resign(t, game, { leaving = false } = {}) {
   const ok = await confirmDialog({
     title: leaving ? "Leave the game?" : "Resign this game?",
     message: leaving ? `If you leave, you resign the game. ${consequence}` : consequence,
-    confirmLabel: leaving ? "Resign and leave" : "Resign", destructive: true,
+    confirmLabel: leaving ? "Resign and leave" : "Resign", cancelLabel: leaving ? "Stay" : "Keep playing", destructive: true,
   });
   if (!ok) return false;
   await send(T.messages.resign(t.id, game.id));
   return true;
 }
 
+/** Our line shows at once with a clock, a red mark if it failed, and gives way to the chain's
+ *  line (green check) once sent (iOS chatSection). */
 async function sendChat(t, gameId, text) {
   const clean = String(text || "").trim();
   if (!clean) return;
-  await send(T.messages.chat(t.id, gameId, clean));
+  const line = { id: `pending_${++pendingChatSerial}`, tournament: t.id, game: gameId, text: clean, failed: false };
+  pendingChat = [...pendingChat, line];
+  render();
+  const ok = await send(T.messages.chat(t.id, gameId, clean));
+  if (ok) pendingChat = pendingChat.filter((l) => l !== line);
+  else line.failed = true;
+  render();
 }
 
 /** The opponent flagged in one of our games: post the claim (once). Runs on every tick. */
@@ -489,11 +542,10 @@ function claimTimeoutsIfDue() {
       const mine = T.colorOf(game, my);
       if (!mine || game.board.sideToMove === mine) continue;
       const key = keyOf(t.id, game.id);
-      // A claim the chain rejected (a clock a little ahead) or that never sent is tried again.
-      if (claimedGames.has(key) && now - claimedGames.get(key) < CLAIM_RETRY_MS) continue;
+      if (claimedGames.has(key)) continue;
       // A second's margin past zero, so the claim's block time is safely after.
       if (T.remainingMs(game, game.board.sideToMove, now - 1_500) !== 0) continue;
-      claimedGames.set(key, now);
+      claimedGames.add(key);
       send(T.messages.claim(t.id, game.id)).catch(() => {});
     }
   }
@@ -512,6 +564,11 @@ function clockText(ms, { tenths = false } = {}) {
 function roundName(game, t) {
   if (T.isDuel(t)) return "1v1";
   return game.round === 3 ? "Final" : game.round === 2 ? "Semifinal" : "Round 1";
+}
+/** The round inside a sentence (iOS ChessTournamentView.roundName): "You won the semifinal." */
+function roundPhrase(game, t) {
+  if (T.isDuel(t)) return "the game";
+  return game.round === 3 ? "the final" : game.round === 2 ? "the semifinal" : "round 1";
 }
 function outcomeText(game, { short = false } = {}) {
   if (!game.winner || !game.outcome) {
@@ -545,7 +602,11 @@ const ICON_EYE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5
 const ICON_KEY = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M15 8l2 2M18 5l2 2"/></svg>`;
 const ICON_PLUS = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>`;
 const ICON_FLAG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4m0 0h11l-2 4 2 4H5"/></svg>`;
-const ICON_CHESS = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21h7M4.5 18.5h6M5 18.5V10M10 18.5V10M4 10h7l-1-2H5l-1 2ZM4.5 5v3h6V5M6.5 5v2M8.5 5v2"/><path d="M13 21h8M13.5 18.5h7M15 18.5c0-3 .5-5.5 2.5-7.5 1.2-1.2 2-2.2 2-3.5 0-1-.5-2-1.5-2.5L17 6l-1.5 1.5c-1 .5-1.7 1.6-1.7 2.8 0 .8.3 1.4.8 1.8l1.6-.3"/></svg>`;
+// iOS SF Symbols hourglass / play.fill on the resume card.
+const ICON_HOURGLASS = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3h11M6.5 21h11M7.5 3v3.5a4.5 4.5 0 0 0 2 3.7L12 12l-2.5 1.8a4.5 4.5 0 0 0-2 3.7V21M16.5 3v3.5a4.5 4.5 0 0 1-2 3.7L12 12l2.5 1.8a4.5 4.5 0 0 1 2 3.7V21"/></svg>`;
+const ICON_PLAY = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5L8 5.5Z" fill="currentColor"/></svg>`;
+// The iOS Chess Online mark (ChessTabIcon.swift): the text glyphs, tinted (U+FE0E keeps them text, not emoji).
+const ICON_CHESS = `<span class="chess-tab-glyph" aria-hidden="true">♜\uFE0E♞\uFE0E</span>`;
 
 function render() {
   if (!screenEl || !active) return;
@@ -591,7 +652,7 @@ function headerHtml(title, { back = null, trailing = "" } = {}) {
 function rowHtml({ icon, title, subtitle, action = "", attrs = "", trailing = "" }) {
   return `
     <button class="chess-t-row" type="button" ${attrs}>
-      <span class="chess-t-row-icon">${icon}</span>
+      ${icon ? `<span class="chess-t-row-icon">${icon}</span>` : ""}
       <span class="chess-t-row-main"><strong>${title}</strong>${subtitle ? `<small>${subtitle}</small>` : ""}</span>
       ${trailing}
       ${action ? `<span class="chess-t-row-action">${esc(action)}</span>` : ""}
@@ -615,8 +676,8 @@ function renderHome() {
       </div>
       ${mine ? `
         <button class="chess-t-resume" type="button" data-chess-t-resume="${esc(mine.id)}">
-          <span class="chess-t-row-icon">${waiting ? "⏳" : "▶"}</span>
-          <span class="chess-t-row-main"><strong>${waiting ? "You're waiting in" : "You're playing in"} ${esc(mine.name)}</strong><small>Click to go back to it</small></span>
+          <span class="chess-t-row-icon">${waiting ? ICON_HOURGLASS : ICON_PLAY}</span>
+          <span class="chess-t-row-main"><strong>${waiting ? "You're waiting in" : "You're playing in"} ${esc(mine.name)}</strong><small>Tap to go back to it</small></span>
           <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
         </button>` : ""}
       <button class="chess-t-game-card" type="button" data-chess-t-mode="duel">
@@ -650,7 +711,6 @@ function renderKind() {
     </nav>
     <div class="chess-t-body">
       ${body}
-      ${waitingNotice ? `<p class="field-hint chess-t-error">${esc(waitingNotice)}</p>` : ""}
       ${errorHtml()}
     </div>`;
 }
@@ -673,14 +733,8 @@ function publicRoomCardHtml() {
   else if (busyElsewhere) cta = `<button class="secondary-button chess-t-cta" type="button" data-chess-t-resume="${esc(mine.id)}">${T.tournamentStatus(mine) === "open" ? "You're waiting in" : "You're playing in"} ${esc(mine.name)}</button>`;
   else cta = `<button class="${historyReady ? "primary-button" : "secondary-button"} chess-t-cta" type="button" data-chess-t-join-public ${busy || !historyReady ? "disabled" : ""}>${busy ? "Joining…" : historyReady ? joinLabel() : "Loading rooms…"}</button>`;
   const seats = Array.from({ length: capacity }, (_, i) => `<span class="chess-t-seat${i < count ? " taken" : ""}"></span>`).join("");
-  // Before the arena's history has loaded (a first visit on this device has no cache), every room
-  // looks empty and the lowest open one is #1 - a number that is wrong the moment history lands.
-  // Say it is still being found instead of showing it.
   const kind = duel ? "Public 1v1" : "Public tournament";
-  const findingRoom = !historyReady && !room;
-  const roomTitleHtml = findingRoom
-    ? `<strong>${kind}</strong><small>Finding the current room…</small>`
-    : `<strong>${kind} #${number}</strong><small>${count} of ${capacity} players waiting</small>`;
+  const roomTitleHtml = `<strong>${kind} #${number}</strong><small>${count} of ${capacity} players waiting</small>`;
   return `
     <div class="chess-t-card">
       <div class="chess-t-card-top">
@@ -709,16 +763,18 @@ function renderPlayTab() {
     <p class="screen-kicker">Private</p>
     <div class="chess-t-list">
       ${privates.map((t) => tournamentRowHtml(t, T.tournamentStatus(t) === "open" ? (duel ? "Waiting" : `${T.seatsLeft(t)} seat${T.seatsLeft(t) === 1 ? "" : "s"} left`) : "In play")).join("")}
-      ${rowHtml({ icon: ICON_KEY, title: "Join with a code", subtitle: "The eight-character code a friend shared.", attrs: "data-chess-t-join-private" })}
-      ${rowHtml({ icon: ICON_PLUS, title: duel ? "Create a private 1v1" : "Create a private tournament", subtitle: duel ? "Share its code with the person you want to play." : "Needs the creator code.", attrs: "data-chess-t-create" })}
+      ${rowHtml({ icon: ICON_KEY, title: "Join with a code", attrs: "data-chess-t-join-private" })}
+      ${rowHtml({ icon: ICON_PLUS, title: duel ? "Create a private 1v1" : "Create a private tournament", attrs: "data-chess-t-create" })}
     </div>
     <p class="field-hint">${duel
       ? "Play a friend: create a 1v1, share its code. Private 1v1s count on the leaderboard too."
       : "A private tournament is for friends: the creator shares its eight-character code. Creating one needs the creator code."}</p>`;
 }
 
-function gameNamesHtml(game, { bold = true } = {}) {
-  const winner = T.decidedWinner(game, now);
+function gameNamesHtml(game, { bold = true, chainWinner = false } = {}) {
+  // The bracket's Game rows bold the chain's winner only (iOS gameRow); the lists bold the
+  // decided one, a flag with the claim still to come included.
+  const winner = chainWinner ? game.winner : T.decidedWinner(game, now);
   const w = `<span class="${bold && winner === game.white ? "won" : ""}">${esc(nameFor(game.white))}</span>`;
   const b = `<span class="${bold && winner === game.black ? "won" : ""}">${esc(nameFor(game.black))}</span>`;
   return `${w} <em>vs</em> ${b}`;
@@ -749,7 +805,7 @@ function renderActiveTab() {
       <p class="field-hint">Watching is free - nothing is sent. Only the two players can move or chat.</p>`;
   }
   return live.map((t) => {
-    const games = Object.values(t.games).filter((g) => !g.winner).sort((a, b) => a.round - b.round || a.index - b.index);
+    const games = Object.values(t.games).filter((g) => !T.isDecided(g, now)).sort((a, b) => a.round - b.round || a.index - b.index);
     return `<p class="screen-kicker">${esc(t.name)}</p><div class="chess-t-list">${games.map((g) => liveGameRowHtml(g, t)).join("")}${tournamentRowHtml(t, "Bracket")}</div>`;
   }).join("");
 }
@@ -877,7 +933,8 @@ function checkWaitingRoom() {
     if (game && !game.winner) { autoOpenedGameId = game.id; openGame(t.id, game.id); }
     else openTournament(t.id);
   } else if (status === "cancelled" || !T.isSeated(t, my, now)) {
-    waitingNotice = status === "cancelled" ? "" : "No one joined in time. You're out of the queue - join again whenever you like.";
+    // iOS: a toast on the 1v1 / Tournaments screen.
+    if (status !== "cancelled") deps.showToast?.("No one joined in time. You're out of the queue - join again whenever you like.");
     view = { ...view, name: "kind", tournamentId: null, gameId: null };
     render();
   }
@@ -895,20 +952,20 @@ function renderTournament() {
   if (status === "open") {
     const left = T.seatsLeft(t);
     statusHtml += `<p class="chess-t-status">${duel ? "Waiting for your opponent. The game starts by itself when they join." : `Waiting for ${left} more player${left === 1 ? "" : "s"}. It starts by itself when the eighth joins.`}</p>`;
+    // A seated player leaves from the waiting room only (iOS: no Leave here).
     if (my && !T.isSeated(t, my, now)) statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-join="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Joining…" : joinLabel()}</button>`;
-    else if (my) statusHtml += `<button class="secondary-button chess-t-cta danger" type="button" data-chess-t-leave="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Leaving…" : "Leave (one transaction)"}</button>`;
     if (t.creator === my && !T.isPublicId(t.id)) statusHtml += `<button class="secondary-button chess-t-cta danger" type="button" data-chess-t-cancel="${esc(t.id)}">Cancel tournament</button>`;
-    if (!T.isPublicId(t.id)) statusHtml += `<div class="chess-t-code"><span>Code: <b>${esc(t.id)}</b></span><span><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button> <button class="secondary-button" type="button" data-chess-t-share="${esc(t.id)}" data-kind="${duel ? "1v1" : "Tournaments"}">Share</button></span></div>`;
+    if (!T.isPublicId(t.id)) statusHtml += `<div class="chess-t-code"><span>Code: <b>${esc(t.id)}</b></span><span><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button> <button class="secondary-button" type="button" data-chess-t-share="${esc(t.id)}" data-kind="${duel ? "1v1" : "Tournaments"}" data-invite="tournament">Share</button></span></div>`;
   } else if (status === "live") {
     const game = my ? T.currentGameFor(t, my) : null;
     if (game) {
-      const decidedWinner = T.decidedWinner(game, now);
-      if (decidedWinner) statusHtml += `<p class="chess-t-status">${decidedWinner === my ? `You won ${duel ? "the game" : roundName(game, t).toLowerCase()}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
+      // Over on the chain (iOS isOver), not merely flagged.
+      if (game.winner) statusHtml += `<p class="chess-t-status">${game.winner === my ? `You won ${roundPhrase(game, t)}. Waiting for your next opponent - watch the other game meanwhile.` : "You are out of this tournament. Watch the rest of the bracket."}</p>`;
       else if (nextGameCountdownMs(t) != null) {
         const myColor = T.colorOf(game, my);
-        statusHtml += `<div class="chess-t-next"><span><strong>Next: ${esc(roundName(game, t))} vs ${esc(nameFor(T.addressOf(game, Chess.opposite(myColor))))}</strong><small>Your game starts in</small></span><b data-chess-t-next-countdown>${Math.ceil(nextGameCountdownMs(t) / 1000)}</b></div>`;
+        statusHtml += `<div class="chess-t-next"><span><strong>Next: ${esc(roundPhrase(game, t))} vs ${esc(nameFor(T.addressOf(game, Chess.opposite(myColor))))}</strong><small>Your game starts in</small></span><b data-chess-t-next-countdown>${Math.ceil(nextGameCountdownMs(t) / 1000)}</b></div>`;
       } else statusHtml += `<button class="primary-button chess-t-cta" type="button" data-chess-t-game="${esc(game.id)}">Go to your game</button>`;
-    } else statusHtml += `<p class="chess-t-status">In play. Open any game to watch it live.</p>`;
+    } else statusHtml += `<p class="chess-t-status">In play. Tap any game to watch it live.</p>`;
   } else if (status === "finished") {
     const champ = T.champion(t);
     if (champ) statusHtml += `<p class="chess-t-status chess-t-champion">${ICON_TROPHY} ${esc(nameFor(champ))} won${duel ? "" : " the tournament"}</p>`;
@@ -916,7 +973,7 @@ function renderTournament() {
 
   let bracketHtml = "";
   if (!duel && status !== "open" && status !== "cancelled") {
-    bracketHtml = `<p class="screen-kicker">Bracket · click a game to watch</p>${bracketHtml_(t)}`;
+    bracketHtml = `<p class="screen-kicker">Bracket · tap a game to watch</p>${bracketHtml_(t)}`;
   } else if (status === "open") {
     const seated = T.seatedPlayers(t, now);
     bracketHtml = `<p class="screen-kicker">Players (${seated.length} of ${t.capacity})</p><div class="chess-t-list">
@@ -927,11 +984,12 @@ function renderTournament() {
     for (let round = 1; round <= T.roundsOf(t); round += 1) {
       const games = T.gamesInRound(t, round);
       if (!games.length) continue;
+      // iOS gameRow: no icon; the chain's result, else the move and who is to move, and the clock.
       bracketHtml += `<p class="screen-kicker">${duel ? "Game" : round === 3 ? "Final" : round === 2 ? "Semifinals" : "Round 1"}</p><div class="chess-t-list">${games.map((game) => rowHtml({
-        icon: T.isDecided(game, now) ? ICON_TROPHY : ICON_EYE,
-        title: gameNamesHtml(game),
-        subtitle: esc(T.isDecided(game, now) ? outcomeText(game, { short: true }) : `Move ${Math.floor(game.moves.length / 2) + 1} · ${game.board.sideToMove} to move`),
-        trailing: T.isDecided(game, now) ? "" : `<span class="chess-t-row-action mono" data-chess-t-clock-for="${esc(keyOf(t.id, game.id))}">${clockText(T.remainingMs(game, game.board.sideToMove, now))}</span>`,
+        icon: null,
+        title: gameNamesHtml(game, { chainWinner: true }),
+        subtitle: esc(game.winner && game.outcome ? outcomeText(game, { short: true }) : `Move ${Math.floor(game.moves.length / 2) + 1} · ${game.board.sideToMove} to move`),
+        trailing: game.winner ? "" : `<span class="chess-t-row-action mono" data-chess-t-clock-for="${esc(keyOf(t.id, game.id))}">${clockText(T.remainingMs(game, game.board.sideToMove, now))}</span>`,
         attrs: `data-chess-t-game="${esc(game.id)}"`,
       })).join("")}</div>`;
     }
@@ -1032,7 +1090,7 @@ function renderGame() {
     const running = !game.winner && game.board.sideToMove === color;
     const label = !myColor ? (color === Chess.WHITE ? "White" : "Black") : (color === myColor ? "You" : "Them");
     return `
-      <div class="chess-t-chip${running ? " running" : ""}${running && remaining < 20_000 ? " low" : ""}" data-chess-t-chip="${color}">
+      <div class="chess-t-chip${running ? " running" : ""}${remaining < 20_000 ? " low" : ""}" data-chess-t-chip="${color}">
         ${avatarFor(address, "chess-t-avatar small")}
         <strong>${esc(nameFor(address))}</strong>
         <span class="chess-t-chip-clock"><small>${label}</small><b data-chess-t-clock="${color}">${clockText(remaining, { tenths: true })}</b></span>
@@ -1055,7 +1113,7 @@ function renderGame() {
     }
   }
   const waitingOverlay = myColor && !game.winner && game.board.sideToMove !== myColor
-    ? `<div class="chess-waiting"><span>Waiting on opponent…</span></div>` : "";
+    ? `<div class="chess-waiting"><span data-chess-t-waiting-dots>${waitingOnOpponentText()}</span></div>` : "";
   let endOverlay = "";
   if (endOverlayFor === pendingKey && game.winner) {
     const iWon = myColor ? game.winner === my : null;
@@ -1074,16 +1132,27 @@ function renderGame() {
       </div></div>
     </div>` : "";
 
-  const lines = t.chat.filter((l) => l.game === game.id).slice(-120);
+  // Lines the chain returned (green check on ours), then ours still on the way (clock) or
+  // failed (red) - the three states a 1:1 bubble has (iOS chatSection).
+  const lines = [
+    ...t.chat.filter((l) => l.game === game.id).slice(-120).map((l) => ({ line: l, status: "sent" })),
+    ...pendingChat.filter((p) => p.tournament === t.id && p.game === game.id).map((p) => ({ line: { id: p.id, sender: my, text: p.text }, status: p.failed ? "failed" : "pending" })),
+  ];
+  const tickIcon = {
+    sent: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="m7.5 12.3 3 3 6-6.3" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    pending: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
+    failed: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7v6" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="16.8" r="1.4" fill="#fff"/></svg>`,
+  };
+  const draft = String(drafts[game.id] || "").trim();
   const chat = game.winner
     ? `<p class="field-hint center">Chat was live only.</p>`
     : `<div class="chess-t-chat bubbles">
-        ${lines.length ? lines.map((l) => `<div class="chess-t-bubble${l.sender === my ? " mine" : ""}">${l.sender === my ? "" : `<small>${esc(nameFor(l.sender))}</small>`}<span>${esc(l.text)}</span>${l.sender === my ? `<i class="chess-t-tick${rows.get(l.id)?.local ? " pending" : ""}" aria-hidden="true"></i>` : ""}</div>`).join("") : `<p class="field-hint">No messages yet. Each message is one transaction.</p>`}
+        ${lines.length ? lines.map(({ line: l, status }) => `<div class="chess-t-msg${l.sender === my ? " mine" : ""}"><div class="chess-t-bubble${l.sender === my ? " mine" : ""}">${l.sender === my ? "" : `<small>${esc(nameFor(l.sender))}</small>`}<span>${esc(l.text)}</span></div>${l.sender === my ? `<i class="chess-t-tick ${status}" aria-hidden="true">${tickIcon[status]}</i>` : ""}</div>`).join("") : `<p class="field-hint">No messages yet. Each message is one transaction.</p>`}
       </div>
       ${myColor ? `
       <form class="chess-t-composer" data-chess-t-chat="${esc(game.id)}">
         <input class="kaposts-reply-input" type="text" data-chess-t-chat-input="${esc(game.id)}" placeholder="Message (one transaction)" maxlength="${T.CHAT_MAX_LENGTH}" autocomplete="off" />
-        <button class="primary-button" type="submit">Send</button>
+        <button class="primary-button" type="submit" data-chess-t-chat-send ${draft ? "" : "disabled"}>Send</button>
       </form>` : ""}`;
 
   return `
@@ -1094,7 +1163,7 @@ function renderGame() {
     <div class="chess-t-body chess-t-game">
       <div class="chess-t-game-head">
         <strong>${myColor ? esc(nameFor(T.addressOf(game, Chess.opposite(myColor)))) : `${esc(nameFor(game.white))} vs ${esc(nameFor(game.black))}`}</strong>
-        <span class="chess-t-status center${game.winner ? " muted" : ""}" data-chess-t-status>${esc(gameStatusText(t, game))}</span>
+        <span class="chess-t-status center${T.isDecided(game, now) ? " muted" : ""}" data-chess-t-status>${esc(gameStatusText(t, game))}</span>
       </div>
       ${clockChip(flipped ? Chess.WHITE : Chess.BLACK)}
       <div class="chess-board-wrap"><div class="chess-board chess-t-board">${board}</div>${waitingOverlay}${endOverlay}${promo}</div>
@@ -1104,24 +1173,23 @@ function renderGame() {
     </div>`;
 }
 
+/** iOS WaitingOnOpponentOverlay: one to three dots, a step every half second. */
+function waitingOnOpponentText() {
+  return `Waiting on opponent${".".repeat((Math.floor(Date.now() / 500) % 3) + 1)}`;
+}
+
 function gameStatusText(t, game) {
   const my = me();
   const myColor = my ? T.colorOf(game, my) : null;
   if (T.isDecided(game, now)) return outcomeText(game);
   if (pendingMoveGames.has(keyOf(t.id, game.id))) return "Sending your move…";
-  // The clock runs from the moment the board opens (iOS 11ac2b7): games from the 25 s window
-  // still say when it starts; newer ones say nothing.
-  let grace = "";
-  if (game.moves.length < 2 && game.startedAt < T.ALLOWANCE_V2_FROM_MS) {
-    const left = T.allowanceLeftMs(game, now);
-    if (left > 0) grace = ` · clock starts in ${clockText(left)}`;
-  }
+  // The clock runs from the moment the board opens (the match-found countdown covers the
+  // start): nothing to count down here (iOS statusLine).
   if (myColor) {
-    if (game.board.sideToMove !== myColor && T.remainingMs(game, game.board.sideToMove, now) === 0) return "They ran out of time. Claiming the win…";
-    if (game.board.sideToMove === myColor && Chess.isKingInCheck(game.board, myColor)) return `Check. Your move.${grace}`;
-    return `${game.board.sideToMove === myColor ? "Your move" : "Their move"}${grace}`;
+    if (game.board.sideToMove === myColor && Chess.isKingInCheck(game.board, myColor)) return "Check. Your move.";
+    return game.board.sideToMove === myColor ? "Your move" : "Their move";
   }
-  return `${game.board.sideToMove === Chess.WHITE ? "White to move" : "Black to move"}${grace}`;
+  return game.board.sideToMove === Chess.WHITE ? "White to move" : "Black to move";
 }
 
 // --- Result screen (iOS 759a2d3, af865b4) ---
@@ -1184,7 +1252,8 @@ function renderResult() {
   const shownRow = resultRevealed ? mine : recordBeforeEnd;
   const w = wins(shownRow), l = losses(shownRow);
   const rate = w + l === 0 ? "-" : `${Math.round((w / (w + l)) * 100)}%`;
-  const stat = (label, value, delta, cls) => `<div class="chess-t-stat"><b class="${cls}">${value}</b><small>${label}</small><i class="${cls}">${delta > 0 ? `+${delta}` : ""}</i></div>`;
+  // The "+1" comes in with the new count (iOS stat: shown once revealed).
+  const stat = (label, value, delta, cls) => `<div class="chess-t-stat"><b class="${cls}">${value}</b><small>${label}</small><i class="${cls}">${resultRevealed && delta > 0 ? `+${delta}` : ""}</i></div>`;
   const note = duel ? "" : `<p class="chess-t-status center">${iWon
     ? (T.tournamentStatus(t) === "finished" ? "You won the tournament." : "You go through to the next round. Your next game opens by itself when your opponent is decided.")
     : "You are out of this tournament. You can watch the rest of the bracket."}</p>`;
@@ -1214,8 +1283,8 @@ function renderResult() {
             ${avatarFor(r.address)}
             <span class="chess-t-row-main"><strong>${esc(nameFor(r.address))}</strong></span>
             ${duel
-              ? `<span class="chess-t-wl"><b class="w">${r.wins} W</b><b class="l">${r.losses} L</b></span>`
-              : `<span class="chess-t-wl"><span class="chess-t-titles">${ICON_TROPHY}${r.tournamentsWon}</span><b class="l">${r.tournamentsLost} L</b></span>`}
+              ? `<span class="chess-t-wl plain">${r.wins} W&nbsp;&nbsp;${r.losses} L</span>`
+              : `<span class="chess-t-wl"><span class="chess-t-titles">${ICON_TROPHY}${r.tournamentsWon}</span><small class="chess-t-wl-lost">${r.tournamentsLost} L</small></span>`}
           </button>`).join("")}
       </div>
     </div>`;
@@ -1227,13 +1296,11 @@ function renderResult() {
 
 function openKind(mode) {
   view = { name: "kind", mode, tab: "play", tournamentId: null, gameId: null };
-  waitingNotice = "";
   render();
   showWaitingRoomIfSeated();
 }
 function openWaitingRoom(id) {
   view = { ...view, name: "waiting", tournamentId: id, gameId: null };
-  waitingNotice = "";
   render();
   checkWaitingRoom();
 }
@@ -1262,7 +1329,10 @@ function openTournament(id) {
   autoOpenMyGameIfNeeded();
 }
 function openGame(tid, gameId) {
-  view = { ...view, name: "game", tournamentId: tid, gameId };
+  // Back returns to where the board was opened from, as iOS's navigation stack does: the
+  // bracket, or the 1v1 / Tournaments screen (its tabs, the waiting room's hand-over).
+  const from = view.name === "tournament" ? "tournament" : view.name === "game" ? (view.from || "kind") : "kind";
+  view = { ...view, name: "game", tournamentId: tid, gameId, from };
   selectedSquare = null;
   pendingPromotion = null;
   endHandledFor = null;
@@ -1279,9 +1349,9 @@ function resumeTournament(id) {
 }
 function goBack() {
   if (view.name === "game") {
-    const t = tournaments[view.tournamentId];
-    // A finished 1v1 opened straight from Finished / Active: back to the kind screen.
-    view = { ...view, name: t && T.isDuel(t) && T.isPublicId(t.id) ? "kind" : "tournament", gameId: null };
+    view = view.from === "tournament"
+      ? { ...view, name: "tournament", gameId: null }
+      : { ...view, name: "kind", tournamentId: null, gameId: null };
   } else if (view.name === "tournament" || view.name === "result") view = { ...view, name: "kind", tournamentId: null, gameId: null };
   else view = { ...view, name: "home", tournamentId: null, gameId: null };
   selectedSquare = null;
@@ -1316,6 +1386,14 @@ function autoOpenMyGameIfNeeded() {
   if (view.name === "game" && view.gameId === game.id) { autoOpenedGameId = game.id; return; }
   // Cool-down on the bracket before the next round: the bracket says who is next and counts down.
   if (nextGameCountdownMs(t) != null) {
+    // Watching someone else's game when the player's own next one comes into being: the
+    // bracket takes over, once per game (iOS switchToMyGameIfNeeded).
+    const viewed = view.name === "game" ? t.games[view.gameId] : null;
+    if (viewed && !T.isDuel(t) && !T.colorOf(viewed, my) && spectatorSwitchedFor !== game.id) {
+      spectatorSwitchedFor = game.id;
+      openTournament(t.id);
+      return;
+    }
     if (view.name === "tournament") { const el = screenEl.querySelector("[data-chess-t-next-countdown]"); if (el) el.textContent = String(Math.ceil(nextGameCountdownMs(t) / 1000)); else render(); }
     return;
   }
@@ -1407,7 +1485,10 @@ function onClick(event) {
   if (cancel) { const t = tournaments[cancel.dataset.chessTCancel]; if (t) cancelTournament(t).catch(() => {}); return; }
   const share = event.target.closest("[data-chess-t-share]");
   if (share) {
-    const text = `Play me at chess in KaChat: open Kaspa Hub > Chess Online > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
+    // The tournament screen and the waiting room word the invite differently (iOS ShareLink).
+    const text = share.dataset.invite === "tournament"
+      ? `Join my KaChat chess tournament: open Kaspa Hub > Chess Online > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`
+      : `Play me at chess in KaChat: open Kaspa Hub > Chess Online > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
     if (navigator.share) navigator.share({ text }).catch(() => {});
     else navigator.clipboard?.writeText(text).then(() => deps.showToast?.("Invite copied"), () => {});
     return;
@@ -1451,12 +1532,18 @@ function onSubmit(event) {
   if (!t || !text) return;
   if (input) input.value = "";
   delete drafts[gameId];
+  const sendButton = form.querySelector("[data-chess-t-chat-send]");
+  if (sendButton) sendButton.disabled = true;
   sendChat(t, gameId, text).catch(() => {});
 }
 
 function onInput(event) {
   const input = event.target.closest("[data-chess-t-chat-input]");
-  if (input) drafts[input.dataset.chessTChatInput || ""] = input.value;
+  if (!input) return;
+  drafts[input.dataset.chessTChatInput || ""] = input.value;
+  // Send waits for something to send (iOS composer).
+  const sendButton = input.closest("[data-chess-t-chat]")?.querySelector("[data-chess-t-chat-send]");
+  if (sendButton) sendButton.disabled = !input.value.trim();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1501,6 +1588,26 @@ export function showChessTournaments() {
   showWaitingRoomIfSeated();
 }
 
+/**
+ * May the dock take the player away from Chess Online? (iOS: the waiting room is a full-screen
+ * cover nothing else is reachable from, and a player's live game hides the tab bar, its back
+ * button asking first because leaving means resigning.) Resolves false in the waiting room -
+ * Leave is the way out - and, on a live board of theirs, asks the leave-means-resign question:
+ * true once they chose "Resign and leave", false for "Stay". Free everywhere else.
+ */
+export async function chessTournamentsMayLeave() {
+  if (!active) return true;
+  if (view.name === "waiting") return false;
+  if (view.name === "game" && isLockedIn()) {
+    const t = tournaments[view.tournamentId];
+    const game = t?.games[view.gameId];
+    const ok = await resign(t, game, { leaving: true }).catch(() => false);
+    if (ok) goBack();
+    return ok;
+  }
+  return true;
+}
+
 export function hideChessTournaments() {
   if (!active) return;
   active = false;
@@ -1514,6 +1621,8 @@ export function hideChessTournaments() {
 export function resetChessTournamentsForAccount() {
   pendingMoveGames.clear();
   claimedGames.clear();
+  pendingChat = [];
+  spectatorSwitchedFor = null;
   queuedPublicRoomId = null;
   joinFeeText = null;
   view = { name: "home", mode: "duel", tab: "play", tournamentId: null, gameId: null };
@@ -1546,13 +1655,18 @@ function renderClocks() {
       if (!el) continue;
       const remaining = T.remainingMs(game, color, now);
       el.textContent = clockText(remaining, { tenths: true });
-      chip?.classList.toggle("low", !game.winner && game.board.sideToMove === color && remaining < 20_000);
+      // Red under twenty seconds, running or not (iOS clockChip).
+      chip?.classList.toggle("low", remaining < 20_000);
     }
     const status = screenEl.querySelector("[data-chess-t-status]");
     if (status && !game.winner) {
       const text = gameStatusText(t, game);
       if (status.textContent !== text) status.textContent = text;
+      // Grey once decided, a flag with the claim still to come included (iOS statusLine).
+      status.classList.toggle("muted", T.isDecided(game, now));
     }
+    const dots = screenEl.querySelector("[data-chess-t-waiting-dots]");
+    if (dots) { const text = waitingOnOpponentText(); if (dots.textContent !== text) dots.textContent = text; }
     return;
   }
   // Rows with a running clock (bracket cards, Active games).

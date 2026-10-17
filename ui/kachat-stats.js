@@ -114,7 +114,8 @@ let kachatLoaded = false;
 
 const esc = (v) => deps.escapeHtml(String(v ?? ""));
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
-const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "long" });
+// iOS RelativeDateTimeFormatter (.full, numeric): always a number ("1 day ago", never "yesterday").
+const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: "always", style: "long" });
 
 // ---------------------------------------------------------------------------------------------
 // Fetching
@@ -270,15 +271,17 @@ function allTimeTotal() {
   return any ? sum : null;
 }
 
+// The largest whole unit, weeks included, as iOS RelativeDateTimeFormatter picks it.
 function relative(ms) {
-  const seconds = Math.round((Math.min(ms, Date.now()) - Date.now()) / 1000);
-  const abs = Math.abs(seconds);
-  if (abs < 60) return relativeFormat.format(seconds, "second");
-  if (abs < 3600) return relativeFormat.format(Math.round(seconds / 60), "minute");
-  if (abs < 86400) return relativeFormat.format(Math.round(seconds / 3600), "hour");
-  if (abs < 86400 * 30) return relativeFormat.format(Math.round(seconds / 86400), "day");
-  if (abs < 86400 * 365) return relativeFormat.format(Math.round(seconds / (86400 * 30)), "month");
-  return relativeFormat.format(Math.round(seconds / (86400 * 365)), "year");
+  const abs = Math.max(0, Math.round((Date.now() - Math.min(ms, Date.now())) / 1000));
+  const ago = (n, unit) => relativeFormat.format(-Math.floor(n), unit);
+  if (abs < 60) return ago(abs, "second");
+  if (abs < 3600) return ago(abs / 60, "minute");
+  if (abs < 86400) return ago(abs / 3600, "hour");
+  if (abs < 86400 * 7) return ago(abs / 86400, "day");
+  if (abs < 86400 * 30) return ago(abs / (86400 * 7), "week");
+  if (abs < 86400 * 365) return ago(abs / (86400 * 30), "month");
+  return ago(abs / (86400 * 365), "year");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -421,7 +424,7 @@ function render() {
 function infoSheetHtml() {
   return `
     <div class="kstats-info">
-      <p class="kstats-info-header">Every KaChat action is its own Kaspa transaction. These totals come from KaChat's indexer, counting what it has seen on chain - nothing is read from your device.</p>
+      <p class="kstats-info-header">Every KaChat action is its own Kaspa transaction. These totals come from KaChat's indexer, counting what it has seen on chain - nothing is read from your phone.</p>
       <div class="kstats-info-list">
         ${CATEGORIES.map((category) => `
           <div class="kstats-info-row">

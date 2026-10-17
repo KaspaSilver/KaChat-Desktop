@@ -639,7 +639,10 @@ function paintSourcePill() {
 function showSourcePill() {
   const rt = kachatNames();
   const original = document.querySelector("[data-toolbar-balance]");
-  if (!rt || !original) return;
+  // the marketplace opened over Your Domains: the pill sits in that sheet's bar, as iOS's sheet
+  // has it in its own toolbar
+  const coverSlot = marketCover?.pillSlot ?? null;
+  if (!rt || (!original && !coverSlot)) return;
   if (!sourcePillEl) {
     sourcePillEl = document.createElement("button");
     sourcePillEl.type = "button";
@@ -648,12 +651,16 @@ function showSourcePill() {
     sourcePillEl.title = "Choose the address the marketplace buys with";
     sourcePillEl.setAttribute("aria-label", "Choose the address the marketplace buys with");
     // the app's own Kaspa logo (its built URL), as the balance it stands in for
-    const logo = original.querySelector("img");
+    const logo = original?.querySelector("img");
     sourcePillEl.dataset.kmktLogo = logo ? logo.outerHTML : "";
     sourcePillEl.addEventListener("click", () => openBuyFromSheet());
   }
-  if (!sourcePillEl.isConnected) original.after(sourcePillEl);
-  original.hidden = true;
+  if (coverSlot) {
+    if (sourcePillEl.parentNode !== coverSlot) coverSlot.appendChild(sourcePillEl);
+  } else {
+    if (!sourcePillEl.isConnected || sourcePillEl.parentNode !== original.parentNode) original.after(sourcePillEl);
+    original.hidden = true;
+  }
   paintSourcePill();
   sourcePillUnsubscribe ??= rt.actions.subscribe(() => {
     const source = marketSource();
@@ -970,8 +977,11 @@ function guideStepHeader(title, subtitle, icon) {
     </div>`;
 }
 
-// Icons for the names guide (iOS person.text.rectangle, arrow.triangle.2.circlepath, checkmark).
+// Icons for the names guide (iOS seal.fill, person.text.rectangle, arrow.triangle.2.circlepath,
+// checkmark).
 const GUIDE_ICON = {
+  // seal.fill: the seal without the check (the last step's checkmark.seal.fill is ICON.sealCheck)
+  seal: `<svg class="kmkt-ico kmkt-ico-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.8l2.4 1.8 3-.2.9 2.9 2.5 1.7-1 2.8 1 2.8-2.5 1.7-.9 2.9-3-.2L12 22.2l-2.4-1.8-3 .2-.9-2.9-2.5-1.7 1-2.8-1-2.8 2.5-1.7.9-2.9 3 .2Z"/></svg>`,
   personCard: svg(`<rect x="2.8" y="4.5" width="18.4" height="15" rx="2.4"/><circle cx="8.6" cy="10.4" r="2.3"/><path d="M5.2 16.4a3.8 3.8 0 0 1 6.8 0M14 9.2h4.4M14 12.6h4.4"/>`),
   renew: svg(`<path d="M4.5 10.5a7.6 7.6 0 0 1 13-3.6l1.9 1.9M19.4 4.6v4.2h-4.2"/><path d="M19.5 13.5a7.6 7.6 0 0 1-13 3.6l-1.9-1.9M4.6 19.4v-4.2h4.2"/>`),
   check: `<svg class="kmkt-guide-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="m7.6 12.4 3 3 5.8-6.3" fill="none" stroke="#000" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
@@ -995,7 +1005,7 @@ function guideStepHtml(step) {
     }
     case "howItWorks":
       return `
-        ${guideStepHeader("How a name works", "Your name lives on the Kaspa network, held by your chatting address. Nobody can take it or change it while it's yours.", ICON.sealCheck)}
+        ${guideStepHeader("How a name works", "Your name lives on the Kaspa network, held by your chatting address. Nobody can take it or change it while it's yours.", GUIDE_ICON.seal)}
         ${guideBullets([
           "Claiming takes two quick transactions: the first keeps your pick secret, the second registers it.",
           "You pay for one period at a time. Shorter names cost more.",
@@ -1092,6 +1102,63 @@ export function initKachatMarket(dependencies) {
     openNameDetail,
   });
   screen();
+}
+
+/** The marketplace opened over Your Domains, while it is up: { layer, pillSlot }. */
+let marketCover = null;
+
+/**
+ * The .kachat marketplace as a sheet over Your Domains (iOS KachatLiveDomainsTab's Inscribe:
+ * KachatMarketView in a .sheet), whether or not .kachat is in the dock or Kaspa Hub: the .kachat
+ * screen itself moves into a full cover while it is up, with the Buy From pill in its bar. Close
+ * (the platform's stand-in for swiping the sheet away) or Escape puts the screen back where it
+ * lives; `onClose` then runs (Your Domains refreshes the registry, so a new name lands there).
+ * Messaging a name's owner from inside closes it first.
+ */
+export function openKachatMarketSheet({ onClose = null } = {}) {
+  const el = screen();
+  if (!el || marketCover) return false;
+  const home = { parent: el.parentNode, next: el.nextSibling, hidden: el.hidden };
+  const openChat = deps?.openChat;
+  const layer = openLayer({
+    owner: "market-cover",
+    kind: "cover",
+    label: ".kachat",
+    dismissOnBackdrop: false,
+    html: `
+      <header class="kmkt-navbar kmkt-cover-bar">
+        <button class="kmkt-nav-button leading" type="button" data-kmkt-close>Close</button>
+        <span class="kmkt-cover-pill" data-kmkt-cover-pill></span>
+        <span></span>
+      </header>
+      <div class="kmkt-cover-slot" data-kmkt-cover-slot></div>`,
+    onClose() {
+      marketCover = null;
+      if (deps && openChat) deps.openChat = openChat;
+      // back where it lives first (the cover is already gone), then the market's own sheets
+      // close and the pill goes back to the app's balance
+      el.hidden = home.hidden;
+      if (home.parent && home.parent.isConnected) {
+        home.parent.insertBefore(el, home.next && home.next.parentNode === home.parent ? home.next : null);
+      }
+      hideKachatMarket();
+      // the .kachat tab was the one showing underneath: it comes back on
+      if (!home.hidden) showKachatMarket();
+      try { onClose?.(); } catch { /* the caller's */ }
+    },
+  });
+  marketCover = { layer, pillSlot: layer.el.querySelector("[data-kmkt-cover-pill]") };
+  if (deps && openChat) {
+    deps.openChat = (address) => {
+      if (marketCover?.layer === layer) closeLayer(layer);
+      openChat(address);
+    };
+  }
+  layer.el.querySelector("[data-kmkt-cover-slot]")?.appendChild(el);
+  el.hidden = false;
+  el.scrollTop = 0;
+  showKachatMarket();
+  return true;
 }
 
 /** The .kachat screen came on (the app has un-hidden [data-kachat-market]). */

@@ -31,7 +31,7 @@ import {
   legacyRemindersStoragePrefix,
 } from "../engine/kachat-names/reminders.js";
 import { formatSompiPlain } from "./send-kaspa-components.js";
-import { openNameDetailLayer } from "./kachat-names-live.js";
+import { openNameRouteLayer } from "./kachat-names-live.js";
 
 const SNAPSHOT_PREFIX = "kachat-names-notifier-v1:";
 /** A check runs at most this often (refreshes and front-of-screen both ask). */
@@ -317,19 +317,16 @@ export async function checkKachatNamesNews() {
 
 /**
  * A tapped .kachat row (iOS 86471dd: the name, the way a tapped .kachat push opens it). `showTab()`
- * brings the .kachat screen up; a registered name then opens its own sheet over it - one past its
- * grace shows there as free to claim, with Claim (iOS eea52b2) - and a name that is free again
- * (reclaimed, released) leaves you on the screen to claim it.
+ * brings the .kachat screen up, then the name opens over it, looked up by name (iOS
+ * KachatNameRouteView, `claimLookup`): a registered name's own detail; one released, reclaimed or
+ * past its grace as free to claim, with its price and Claim; a failed lookup says so, with Try Again.
  */
 export async function openKachatNameFromNotification(name, { showTab = null } = {}) {
   const clean = String(name || "").trim().toLowerCase().replace(/\.kachat$/, "");
   try { showTab?.(); } catch { /* fine */ }
-  const rt = kachatNames();
-  if (!clean || !rt) return;
+  if (!clean || !kachatNames()) return;
   try {
-    await rt.registry.refreshIfStale();
-    const r = await rt.registry.lookup(clean);
-    if (r?.kind === "registered" && r.info) openNameDetailLayer(r.info, "market");
+    openNameRouteLayer(clean, "market");
   } catch (error) {
     try { deps?.log?.(`.kachat name ${clean} didn't open: ${error?.message || error}`); } catch { /* fine */ }
   }

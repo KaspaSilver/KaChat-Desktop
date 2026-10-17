@@ -98,18 +98,17 @@ export function callHistoryLine(envelope, outgoing) {
       if (envelope.viaRequest) return { icon: envelope.video ? "video" : "phone", text: `${kind} ready` };
       return { icon: envelope.video ? "video" : "phone", text: outgoing ? `${kind} started` : `Incoming ${kind.toLowerCase()}` };
     case "call_response":
-      if (envelope.reason === "no_host") return { icon: "phone-down", text: "Calls need Nextcloud Talk" };
+      if (envelope.reason === "no_host") return { icon: "phone-down", text: "Calls need Nextcloud Talk on one side" };
       return { icon: envelope.accepted ? "phone" : "phone-down", text: envelope.accepted ? "Call answered" : "Call declined" };
     case "call_end": {
       if (envelope.durationSeconds != null && envelope.durationSeconds > 0) return { icon: "phone", text: `Call · ${formatDuration(envelope.durationSeconds)}` };
       switch (envelope.reason) {
         case "no_answer": return { icon: "phone-down", text: outgoing ? "No answer" : "Missed call" };
         case "cancelled": return { icon: "phone-down", text: outgoing ? "Call cancelled" : "Missed call" };
-        case "declined": return { icon: "phone-down", text: "Call declined" };
-        case "no_host": return { icon: "phone-down", text: "Calls need Nextcloud Talk" };
         case "failed": return { icon: "phone-down", text: "Call failed" };
-        case "missed": return { icon: "phone-down", text: "Missed call" };
-        default: return { icon: "phone", text: "Call ended" };
+        case "declined": return { icon: "phone-down", text: "Call declined" };
+        // Any other reason (no_host and missed included) reads as iOS's plain "Call ended".
+        default: return { icon: "phone-down", text: "Call ended" };
       }
     }
     default:
@@ -127,11 +126,10 @@ export function callPreviewText(envelope, outgoing) {
       return envelope.reason === "no_host" ? "📞 Calls need Nextcloud Talk" : (envelope.accepted ? "📞 Call answered" : "📞 Call declined");
     case "call_end":
       if (envelope.durationSeconds != null && envelope.durationSeconds > 0) return `📞 Call · ${formatDuration(envelope.durationSeconds)}`;
+      // iOS ConversationRow.formatPreview's call_end reasons, and only those.
       switch (envelope.reason) {
-        case "no_answer": case "cancelled": case "missed": return "📞 Missed call";
+        case "no_answer": case "cancelled": return "📞 Missed call";
         case "declined": return "📞 Call declined";
-        case "no_host": return "📞 Calls need Nextcloud Talk";
-        case "failed": return "📞 Call failed";
         default: return "📞 Call ended";
       }
     default:
@@ -238,11 +236,12 @@ export async function requestCallFromHeader(address) {
   if (session) { deps.showToast?.("You are already on a call."); return; }
   const name = deps.displayNameFor(address);
   if (!deps.callsEnabledFor(address)) {
+    // iOS ChatDetailView.enableCallsSheet.
     const choice = await deps.chooseDialog({
       title: `Enable calls and video calls with ${name}?`,
-      message: "Calls go over Nextcloud Talk. One of you needs a Nextcloud with Talk; the other joins as a guest.",
+      message: "They will be able to call you too. You can turn this off any time in User Info.",
       options: [
-        { id: "enable", title: "Enable", subtitle: `Lets ${name} ring you, and lets you call them.` },
+        { id: "enable", title: "Enable calls", subtitle: `Saves this for ${name} and lets you call now.` },
         { id: "later", title: "Not now", subtitle: "Calls stay off for this contact." },
       ],
     });
@@ -250,11 +249,12 @@ export async function requestCallFromHeader(address) {
     deps.setCallsEnabled(address, true);
     await primeCallPermissions();
   }
+  // iOS ChatDetailView.callOptionsSheet.
   const kind = await deps.chooseDialog({
     title: `Call ${name}`,
     options: [
-      { id: "voice", title: "Voice call", subtitle: "Audio only." },
-      { id: "video", title: "Video call", subtitle: "Camera and audio." },
+      { id: "voice", title: "Voice call", subtitle: "Rings them in KaChat; your Nextcloud carries the call." },
+      { id: "video", title: "Video call", subtitle: "Same, with your camera on from the start." },
     ],
   });
   if (kind !== "voice" && kind !== "video") return;

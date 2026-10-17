@@ -260,6 +260,31 @@ export function deriveSpendingWallet(kaspa, phrase, index, passphrase = "", { pa
   return { ...wallet, derivationPath: path, index: Math.max(0, Math.floor(Number(index) || 0)) };
 }
 
+// Batch spending derivation for Discover Addresses (iOS spendingAddresses(inRange:)): the
+// seed -> PBKDF2 -> master XPrv work is done ONCE for the whole range and only the per-index
+// path step repeats, so a thousand-address window is not a thousand seed derivations. Same paths
+// as deriveSpendingWallet. Returns [{ index, address }]; an index that fails is skipped.
+export function deriveSpendingAddressRange(kaspa, phrase, passphrase = "", { start = 0, count = 100, passphraseForm = "nfkd" } = {}) {
+  if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
+    throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
+  }
+  const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!cleanPhrase) throw new Error("A recovery phrase is required to derive spending addresses.");
+  const first = Math.max(0, Math.floor(Number(start) || 0));
+  const total = Math.max(0, Math.floor(Number(count) || 0));
+  const master = new kaspa.XPrv(seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm));
+  const results = [];
+  for (let index = first; index < first + total; index += 1) {
+    try {
+      const key = master.derivePath(spendingDerivationPath(index)).toPrivateKey();
+      results.push({ index, address: importPrivateKey(kaspa, key.toString()).address });
+    } catch {
+      // A single unusable index must not sink the whole batch.
+    }
+  }
+  return results;
+}
+
 export function importPrivateKey(kaspa, hex) {
   const clean = validatePrivateKeyHex(hex);
   const privateKey = new kaspa.PrivateKey(clean);

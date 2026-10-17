@@ -369,6 +369,22 @@ export async function fetchFollowList({ engine, pubkey, followers = false, limit
   return json?.posts || json?.users || json?.following || json?.followers || [];
 }
 
+/// One page of a follow list WITH its cursor, for the endless Followers / Following lists
+/// (iOS KaPostsFollowListView.loadPage: `fetchFollowList(ofPubkey:followers:limit:before:)`).
+export async function fetchFollowListPage({ engine, pubkey, followers = false, limit = 50, before = null } = {}) {
+  const path = followers ? "get-users-followers" : "get-users-following";
+  const json = await kapostGet(path, {
+    requesterPubkey: requesterPubkeyFor(engine),
+    userPubkey: pubkey,
+    limit: Math.max(1, Math.min(100, Number(limit) || 50)),
+    before,
+  });
+  return {
+    users: json?.posts || json?.users || json?.following || json?.followers || [],
+    pagination: json?.pagination || null,
+  };
+}
+
 /// Every page of a follow list, not just the first (iOS KaPostsFollowStore.syncFromChain).
 ///
 /// Asking for the whole list in one request was the bug: `limit: 500` is over the indexer's cap,

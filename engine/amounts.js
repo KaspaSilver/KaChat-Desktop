@@ -142,6 +142,19 @@ export function kasTextFromSompi(sompi) {
 }
 
 /**
+ * A balance as iOS shows it, `String(format: "%.8f")`: exactly 8 decimals ("1.50000000"). Takes the
+ * KAS text or number a balance carries; "--" for an unknown one ("--", empty, null, not a number).
+ * Exact (BigInt), where %.8f on a Double is not past 15 digits.
+ */
+export function kasExact8Text(value) {
+  if (value == null || value === "" || value === "--") return "--";
+  const sompi = kasToSompi(value);
+  if (sompi == null) return "--";
+  const whole = sompi / SOMPI_PER_KAS;
+  return `${whole}.${(sompi % SOMPI_PER_KAS).toString().padStart(8, "0")}`;
+}
+
+/**
  * An amount handed to the engine in KAS, in sompi (BigInt), or null when it isn't one. Strings go
  * through sompiFromUserText; a plain decimal string with more than 8 decimals (float arithmetic
  * such as "0.30000000000000004") is cut to 8, as the SDK's own kaspaToSompi does; a JS number is

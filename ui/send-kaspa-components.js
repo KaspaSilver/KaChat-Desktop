@@ -110,6 +110,15 @@ export function formatSompiPlain(sompi) {
   return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
 }
 
+/** Sompi as KAS with all 8 decimals ("1.50000000", iOS String(format: "%.8f")). */
+export function fixedKas8(sompi) {
+  let value;
+  try { value = BigInt(sompi ?? 0); } catch { value = BigInt(Math.round(Number(sompi) || 0)); }
+  const negative = value < 0n;
+  if (negative) value = -value;
+  return `${negative ? "-" : ""}${value / 100000000n}.${(value % 100000000n).toString().padStart(8, "0")}`;
+}
+
 // --- Recipient ----------------------------------------------------------------------------------
 
 // --- Other domains -------------------------------------------------------------------------------
@@ -167,7 +176,7 @@ export function pickOtherDomain(event, resolutions) {
 export function recipientStatusHtml({ input = "", resolving = false, error = null, resolvedAddress = null, resolvedName = null, valid = false, nameResolutions = [], selectedTld = null } = {}) {
   const trimmed = String(input || "").trim();
   if (!trimmed) return "";
-  if (resolving) return '<p class="sk-status muted"><span class="sk-spinner" aria-hidden="true"></span>Looking up domain…</p>';
+  if (resolving) return '<p class="sk-status muted"><span class="sk-spinner" aria-hidden="true"></span>Looking up domain...</p>';
   const others = otherDomainsHtml({ resolutions: nameResolutions, selectedTld });
   if (error) return `<p class="sk-status bad">✕ ${esc(error)}</p>${others}`;
   if (resolvedAddress) {
@@ -182,7 +191,7 @@ export function recipientStatusHtml({ input = "", resolving = false, error = nul
 
 /**
  * Who the Kaspa goes to. Data attributes, with P = prefix: P-recipient (the input), P-paste,
- * P-scan, P-check (the green tick in the field), P-resolution (the address card's host, inside
+ * P-scan (no tick in the field: the status line says it, as iOS), P-resolution (the address card's host, inside
  * P-resolution-wrap),
  * P-status (the status line), P-locked / P-locked-address / P-locked-note (Compound UTXOs) and
  * P-recipient-row (the editable row, hidden while locked), P-address-book (the Address Book
@@ -206,7 +215,6 @@ export function recipientCardHtml({
         <span class="sk-recipient-field">
           <input class="sk-recipient-input" type="text" data-${p}-recipient placeholder="${esc(placeholder)}"
             autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Recipient address or name" value="${esc(value)}" />
-          <span class="sk-recipient-check" data-${p}-check ${valid ? "" : "hidden"} aria-hidden="true">${SEND_ICONS.check}</span>
         </span>
         <button type="button" class="sk-icon-button" data-${p}-paste aria-label="Paste" title="Paste">${SEND_ICONS.paste}</button>
         <button type="button" class="sk-icon-button" data-${p}-scan aria-label="Scan QR" title="Scan QR">${SEND_ICONS.scan}</button>
@@ -422,10 +430,11 @@ export function feeControls(root, prefix) {
  */
 export function sendActionButtonHtml({
   attr, labelAttr = "", title = "Slide to Send", requiresSlide = true, disabled = true, busy = false,
-  busyLabel = "Sending…", type = "button",
+  busyLabel = "", type = "button",
 } = {}) {
   const a = attrName(attr);
   const l = labelAttr ? `data-${attrName(labelAttr)}` : "";
+  // Busy is a spinner only (iOS SendActionButton label: ProgressView), unless a screen names a label.
   const text = busy ? busyLabel : title;
   if (!requiresSlide) {
     return `<button type="${type === "submit" ? "submit" : "button"}" class="sk-action sk-action-plain${busy ? " busy" : ""}" data-${a} ${disabled || busy ? "disabled" : ""} aria-busy="${busy ? "true" : "false"}">
@@ -446,7 +455,7 @@ export function sendActionButtonHtml({
  * press or a screen reader's activation (a click with no pointer behind it, detail 0) is the plain
  * action; a mouse click on the track does nothing. Returns { setBusy, setEnabled, setTitle, reset }.
  */
-export function createSendActionButton(root, { onAction, busyLabel = "Sending…" } = {}) {
+export function createSendActionButton(root, { onAction, busyLabel = "" } = {}) {
   const noop = { setBusy() {}, setEnabled() {}, setTitle() {}, reset() {}, get busy() { return false; } };
   if (!root) return noop;
   const knob = root.querySelector(".sk-slide-knob");
@@ -542,7 +551,11 @@ export function createSendActionButton(root, { onAction, busyLabel = "Sending…
       busy = Boolean(on);
       root.classList.toggle("busy", busy);
       root.setAttribute("aria-busy", busy ? "true" : "false");
-      if (label) label.textContent = busy ? busyLabel : title;
+      // Busy: the spinner only (iOS SendActionButton), or a screen's own busy label beside it.
+      if (label) {
+        if (busy) label.innerHTML = `<span class="sk-spinner" aria-hidden="true"></span>${busyLabel ? esc(busyLabel) : ""}`;
+        else label.textContent = title;
+      }
       applyDisabled();
       if (!busy) reset(); else paint(false);
     },
@@ -814,7 +827,7 @@ let activeCoinPicker = null;
 
 /**
  * Opens Coin Control over the current screen (iOS CoinControlView): the coins at the address
- * paying, largest first, each one tickable, with Select All / Automatic (Clear Selection) and the
+ * paying, in the order the node lists them, each one tickable, with Select All / Automatic (Clear Selection) and the
  * selected total. `loadEntries()` resolves to UTXO entries; `initialSelection` is the current
  * "txid:index" list (null = automatic). Confirming calls `onDone(selection)`, where selection is
  * [{ key, amountSompi, entry }] or null for automatic (an empty pick means automatic, never
@@ -851,12 +864,18 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
       doneButton.textContent = selected.size ? "Confirm Selection" : "Use Automatic Selection";
     }
     if (loading) {
-      body.innerHTML = '<p class="sk-source-empty"><span class="sk-spinner" aria-hidden="true"></span>Loading this address\'s UTXOs…</p>';
+      // A spinner only (iOS CoinControlView: ProgressView).
+      body.innerHTML = '<p class="sk-source-empty"><span class="sk-spinner" aria-hidden="true"></span></p>';
       return;
     }
     if (!entries.length) {
+      // iOS UtxoLoadFailureRow: an outage never reads as an empty address.
       body.innerHTML = loadError
-        ? `<p class="sk-source-empty bad">${esc(loadError)}</p><div class="sk-coin-retry"><button type="button" class="cold-inline-link" data-sk-coin-retry>Retry</button></div>`
+        ? `<div class="sk-coin-failure">
+            <p class="sk-coin-failure-title"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 10v4.5M12 17.2v.3"/></svg>Couldn't load the coins at this address</p>
+            <p class="sk-coin-failure-detail">${esc(loadError)}</p>
+            <button type="button" class="cold-inline-link" data-sk-coin-retry>Try Again</button>
+          </div>`
         : '<p class="sk-source-empty">No UTXOs found at this address.</p>';
       return;
     }
@@ -878,13 +897,13 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
             <span class="cold-coincontrol-check" aria-hidden="true">${on ? SEND_ICONS.checkCircle : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.25"/></svg>'}</span>
             <span class="cold-coincontrol-copy">
               ${label ? `<span class="cold-coincontrol-label">${esc(label)}</span>` : ""}
-              <span class="cold-coincontrol-amount">${esc(formatSompiPlain(utxoEntrySompi(entry)))} ${esc(kasUnit)}</span>
-              <span class="cold-coincontrol-outpoint">${esc(txid.slice(0, 10))}…:${esc(index)}</span>
+              <span class="cold-coincontrol-amount">${esc(fixedKas8(utxoEntrySompi(entry)))} ${esc(kasUnit)}</span>
+              <span class="cold-coincontrol-outpoint">${esc(txid.slice(0, 10))}...:${esc(index)}</span>
             </span>
           </button>`;
         }).join("")}
       </div>
-      ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${esc(formatSompiPlain(total))} ${esc(kasUnit)} (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`;
+      ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${esc(fixedKas8(total))} ${esc(kasUnit)} (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`;
   }
 
   function load() {
@@ -895,11 +914,8 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
       .then(() => loadEntries?.())
       .then((loaded) => {
         if (!backdrop.isConnected) return;
-        entries = [...(loaded || [])].sort((a, b) => {
-          const x = utxoEntrySompi(a);
-          const y = utxoEntrySompi(b);
-          return x > y ? -1 : (x < y ? 1 : 0);
-        });
+        // In the order the node lists them (iOS CoinControlView).
+        entries = [...(loaded || [])];
         // A coin spent since it was picked can't stay ticked.
         const live = new Set(entries.map(utxoEntryKey));
         for (const key of [...selected]) if (!live.has(key)) selected.delete(key);
@@ -964,4 +980,77 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
 
 export function closeCoinControlPicker() {
   if (activeCoinPicker) activeCoinPicker();
+}
+
+// --- Sent confirmation (every successful send ends here) ----------------------------------------
+
+let activeSentSheet = null;
+
+/** A line that shortens in the middle when it doesn't fit: both ends of a txid or an address
+ *  identify it, the middle doesn't (iOS `.truncationMode(.middle)`). */
+function middleTruncatedHtml(text, tail = 10) {
+  const value = String(text || "");
+  if (value.length <= tail * 2) return `<span class="sk-mid-tail">${esc(value)}</span>`;
+  return `<span class="sk-mid-head">${esc(value.slice(0, -tail))}</span><span class="sk-mid-tail">${esc(value.slice(-tail))}</span>`;
+}
+
+/**
+ * The sheet every successful Kaspa send finishes on (iOS ActionSheet.swift SentConfirmationSheet):
+ * a check, "Sent", the amount ("1.5 KAS", trailing zeros trimmed), "to <domain or address>", the
+ * txid as a link to the explorer, and Done. Send Kaspa, KaPosts tips and Send Domain all use it.
+ * `amountSompi` null leaves the amount line out, `recipient` empty the "to" line. `explorerUrl`
+ * is the txid's explorer page (null shows the id as plain text). Done, Escape or the backdrop
+ * close it and call `onDone`.
+ */
+export function openSentConfirmation({ txid, amountSompi = null, recipient = null, explorerUrl = null, kasUnit = "KAS", onDone } = {}) {
+  closeSentConfirmation();
+  const id = String(txid || "").trim();
+  const amountLine = amountSompi == null ? "" : `${formatSompiPlain(amountSompi)} ${kasUnit}`;
+  const to = String(recipient || "").trim();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop sk-sent-backdrop";
+  backdrop.dataset.skSentSheet = "";
+  backdrop.innerHTML = `
+    <section class="contact-modal sk-sent-sheet" role="dialog" aria-modal="true" aria-labelledby="sk-sent-title">
+      <span class="sk-sent-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6.5 12.5 3.6 3.6L17.5 8.5"/></svg></span>
+      <h2 class="sk-sent-title" id="sk-sent-title">Sent</h2>
+      ${amountLine ? `<p class="sk-sent-amount">${esc(amountLine)}</p>` : ""}
+      ${to ? `<p class="sk-sent-to" title="${esc(to)}"><span class="sk-sent-to-word">to&nbsp;</span>${middleTruncatedHtml(to, 8)}</p>` : ""}
+      ${id && explorerUrl
+        ? `<a class="sk-sent-txid" href="${esc(explorerUrl)}" target="_blank" rel="noopener noreferrer" title="${esc(id)}">
+             <span class="sk-sent-txid-text">${middleTruncatedHtml(id, 12)}</span>
+             <svg class="sk-sent-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></svg>
+           </a>`
+        : (id ? `<p class="sk-sent-txid plain" title="${esc(id)}"><span class="sk-sent-txid-text">${middleTruncatedHtml(id, 12)}</span></p>` : "")}
+      <p class="sk-sent-hint">Click the transaction to open it in the explorer.</p>
+      <button class="primary-button full sk-sent-done" type="button" data-sk-sent-done>Done</button>
+    </section>`;
+  let done = false;
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    // Only this sheet closes, not the screen under it.
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    close();
+  };
+  const close = () => {
+    window.removeEventListener("keydown", onKey, true);
+    backdrop.remove();
+    if (activeSentSheet === close) activeSentSheet = null;
+    if (done) return;
+    done = true;
+    try { onDone?.(); } catch { /* the screen tidies up on its own */ }
+  };
+  activeSentSheet = close;
+  window.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+  backdrop.addEventListener("click", (event) => { if (event.target.closest("[data-sk-sent-done]")) close(); });
+  document.body.appendChild(backdrop);
+  backdrop.querySelector("[data-sk-sent-done]")?.focus?.();
+  return close;
+}
+
+export function closeSentConfirmation() {
+  if (activeSentSheet) activeSentSheet();
 }

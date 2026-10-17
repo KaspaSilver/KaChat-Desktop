@@ -293,7 +293,7 @@ export function renderUserTypeGuideStep(container) {
     <div class="setup-child-password">
       ${passwordFieldHtml("guide-password", "Password")}
       ${passwordFieldHtml("guide-confirm", "Confirm password")}
-      <p class="field-hint">4 digits, 8 digits, or anything you like. Just don't forget it, it's needed to turn Simple Mode off.</p>
+      <p class="field-hint">4 digits, 8 digits, or anything you like - just don't forget it. It's needed to turn Simple Mode off.</p>
     </div>` : ""}
     <p class="field-error" data-cm-error="guide" ${guideError ? "" : "hidden"}></p>`;
   setGuideError(guideError);
@@ -352,7 +352,6 @@ export async function applyUserTypeGuideChoice() {
   resetGuideScratch();
   markUserTypeChosen();
   renderChildModeSettingsPage();
-  deps.showToast?.("Simple Mode is on");
   return true;
 }
 
@@ -364,14 +363,17 @@ let pageEl = null;
 let pageWired = false;
 let changeSucceeded = false;
 
+// iOS ChildModeSettingsView aboutSection: header, the three rows, then the footer. Desktop has
+// no Swaps and no Face ID, so the iOS sentence names only what this app hides and drops the
+// Face ID clause.
 const ABOUT_CARD_HTML = `
+  <p class="settings-group-label">What stays available</p>
   <div class="settings-list-card">
-    <div class="settings-page-form">
-      <p class="child-mode-heading">What stays available</p>
-      <p class="child-mode-keeps"><strong>Chats &amp; Group Chats · Portfolio · Cold Storage</strong></p>
-      <p class="field-hint">While Simple Mode is on, KaPosts and Public Chats are removed everywhere: the dock, the Customize Dock page and every other entry point. Only the password turns it off.</p>
-    </div>
-  </div>`;
+    <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Chats &amp; Group Chats</strong></span></div>
+    <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Portfolio</strong></span></div>
+    <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Cold Storage</strong></span></div>
+  </div>
+  <p class="settings-group-footer">While Simple Mode is on, KaPosts and Public Chats are removed everywhere - the dock, links and notifications. Only the password unlocks Simple Mode.</p>`;
 
 export function renderChildModeSettingsPage() {
   if (!pageEl) pageEl = document.querySelector("[data-child-mode-page]");
@@ -381,65 +383,84 @@ export function renderChildModeSettingsPage() {
 
   if (!hasPassword) {
     pageEl.innerHTML = `
+      <p class="settings-group-label">Set a Password</p>
       <div class="settings-list-card">
         <div class="settings-page-form">
-          <p class="child-mode-heading">Set a Password</p>
           ${passwordFieldHtml("setup-password", "Password")}
           ${passwordFieldHtml("setup-confirm", "Confirm password")}
-          <p class="field-hint">4 digits, 8 digits, or anything you like, just don't forget it. It's needed to turn Simple Mode off later.</p>
-          <p class="field-error" data-cm-error="setup" hidden></p>
-          <button class="primary-button" type="button" data-cm-action="setup">Set Password &amp; Turn On</button>
+          <button class="primary-button" type="button" data-cm-action="setup" data-cm-needs="setup-password setup-confirm" disabled>Set Password &amp; Turn On</button>
         </div>
       </div>
+      <p class="settings-group-footer" data-cm-footer="setup">4 digits, 8 digits, or anything you like - just don't forget it. It's needed to turn Simple Mode off later.</p>
+      <p class="settings-group-footer field-error" data-cm-error="setup" hidden></p>
       ${ABOUT_CARD_HTML}`;
   } else {
+    // The turn-off and clear prompts are iOS sheets: a header, the password, a footer, and a
+    // button that stays disabled while the field is empty.
     pageEl.innerHTML = `
       <div class="settings-list-card">
-        <div class="settings-toggle-row"><span><strong>Simple Mode</strong><small>${enabled
-          ? "Simple Mode is on. Turning it off requires the password."
-          : "A password is already set, so turning Simple Mode on doesn't ask for it."}</small></span><label class="switch-control"><input type="checkbox" data-cm-toggle${enabled ? " checked" : ""}><span></span></label></div>
+        <div class="settings-toggle-row"><span><strong>Simple Mode</strong></span><label class="switch-control"><input type="checkbox" data-cm-toggle${enabled ? " checked" : ""}><span></span></label></div>
         <div class="settings-page-form child-mode-prompt" data-cm-turnoff-prompt hidden>
+          <p class="child-mode-heading">Turn Off Simple Mode</p>
           ${passwordFieldHtml("turnoff-password", "Password")}
-          <p class="field-hint">Enter the Simple Mode password to turn it off.</p>
+          <p class="field-hint" data-cm-footer="turnoff">Enter the Simple Mode password to turn it off.</p>
           <p class="field-error" data-cm-error="turnoff" hidden></p>
           <div class="child-mode-prompt-actions">
             <button class="secondary-button" type="button" data-cm-action="turnoff-cancel">Cancel</button>
-            <button class="primary-button" type="button" data-cm-action="turnoff-confirm">Turn Off</button>
+            <button class="primary-button" type="button" data-cm-action="turnoff-confirm" data-cm-needs="turnoff-password" disabled>Turn Off</button>
           </div>
         </div>
       </div>
+      <p class="settings-group-footer">${enabled
+        ? "Simple Mode is on. Turning it off requires the password."
+        : "A password is already set - turning Simple Mode on doesn't ask for it."}</p>
+      <p class="settings-group-label">Change Password</p>
       <div class="settings-list-card">
         <div class="settings-page-form">
-          <p class="child-mode-heading">Change Password</p>
           ${passwordFieldHtml("change-current", "Current password")}
           ${passwordFieldHtml("change-new", "New password")}
           ${passwordFieldHtml("change-confirm", "Confirm new password")}
-          <p class="field-error" data-cm-error="change" hidden></p>
-          <p class="child-mode-success" data-cm-change-ok${changeSucceeded ? "" : " hidden"}>Password changed.</p>
-          <button class="primary-button" type="button" data-cm-action="change">Change Password</button>
+          <button class="primary-button" type="button" data-cm-action="change" data-cm-needs="change-current change-new change-confirm" disabled>Change Password</button>
         </div>
       </div>
+      <p class="settings-group-footer field-error" data-cm-error="change" hidden></p>
+      <p class="settings-group-footer child-mode-success" data-cm-change-ok${changeSucceeded ? "" : " hidden"}>Password changed.</p>
       <div class="settings-list-card">
-        <button class="settings-list-row danger-row" type="button" data-cm-action="clear-open"><span class="settings-row-copy"><strong>Clear Password</strong><small>Deletes the Simple Mode password and turns Simple Mode off, returning it to a never-set-up state. Requires the current password.</small></span></button>
+        <div class="settings-page-form">
+          <button class="primary-button danger" type="button" data-cm-action="clear-open">Clear Password</button>
+        </div>
         <div class="settings-page-form child-mode-prompt" data-cm-clear-prompt hidden>
+          <p class="child-mode-heading">Clear Password</p>
           ${passwordFieldHtml("clear-password", "Password")}
-          <p class="field-hint">Enter the Simple Mode password to delete it and turn Simple Mode off.</p>
+          <p class="field-hint" data-cm-footer="clear">Enter the Simple Mode password to delete it and turn Simple Mode off.</p>
           <p class="field-error" data-cm-error="clear" hidden></p>
           <div class="child-mode-prompt-actions">
             <button class="secondary-button" type="button" data-cm-action="clear-cancel">Cancel</button>
-            <button class="primary-button danger" type="button" data-cm-action="clear-confirm">Clear Password</button>
+            <button class="primary-button danger" type="button" data-cm-action="clear-confirm" data-cm-needs="clear-password" disabled>Clear Password</button>
           </div>
         </div>
       </div>
+      <p class="settings-group-footer">Deletes the Simple Mode password and turns Simple Mode off, returning it to a never-set-up state. Requires the current password.</p>
       ${ABOUT_CARD_HTML}`;
   }
   changeSucceeded = false;
   wirePage();
 }
 
+/// iOS `.disabled(field.isEmpty)`: each submit button names the fields it needs.
+function refreshNeededButtons() {
+  pageEl?.querySelectorAll("[data-cm-needs]").forEach((button) => {
+    const names = String(button.dataset.cmNeeds || "").split(/\s+/).filter(Boolean);
+    button.disabled = names.some((name) => !fieldValue(name));
+  });
+}
+
 function pageError(name, message) {
   const el = pageEl?.querySelector(`[data-cm-error="${name}"]`);
   if (el) { el.textContent = message || ""; el.hidden = !message; }
+  // iOS: the error takes the footer's place.
+  const footer = pageEl?.querySelector(`[data-cm-footer="${name}"]`);
+  if (footer) footer.hidden = Boolean(message);
 }
 
 function pageField(name) {
@@ -456,6 +477,7 @@ function showPrompt(selector) {
   prompt.hidden = false;
   const input = prompt.querySelector("input");
   if (input) { input.value = ""; input.focus(); }
+  refreshNeededButtons();
 }
 
 async function handlePageAction(action) {
@@ -472,7 +494,6 @@ async function handlePageAction(action) {
     }
     setChildModeEnabled(true);
     renderChildModeSettingsPage();
-    deps.showToast?.("Simple Mode is on");
   } else if (action === "turnoff-cancel") {
     const prompt = pageEl?.querySelector("[data-cm-turnoff-prompt]");
     if (prompt) prompt.hidden = true;
@@ -484,16 +505,16 @@ async function handlePageAction(action) {
     if (!(await verifyChildModePassword(fieldValue("turnoff-password")))) {
       pageError("turnoff", lockoutMessage() || "Wrong password. Simple Mode stays on.");
       if (input) input.value = "";
+      refreshNeededButtons();
       return;
     }
     setChildModeEnabled(false);
     renderChildModeSettingsPage();
-    deps.showToast?.("Simple Mode is off");
   } else if (action === "change") {
     const current = fieldValue("change-current");
     const next = fieldValue("change-new");
     const confirm = fieldValue("change-confirm");
-    if (!current || !next || !confirm) { pageError("change", "Fill in every field first."); return; }
+    if (!current || !next || !confirm) return;
     if (next !== confirm) { pageError("change", "New passwords don't match."); return; }
     const lockedChange = lockoutMessage();
     if (lockedChange) { pageError("change", lockedChange); return; }
@@ -508,6 +529,7 @@ async function handlePageAction(action) {
       pageError("change", lockoutMessage() || "Wrong current password. Nothing changed.");
       const input = pageField("change-current");
       if (input) input.value = "";
+      refreshNeededButtons();
       return;
     }
     changeSucceeded = true;
@@ -532,11 +554,11 @@ async function handlePageAction(action) {
       pageError("clear", lockoutMessage() || "Wrong password. Nothing changed.");
       const input = pageField("clear-password");
       if (input) input.value = "";
+      refreshNeededButtons();
       return;
     }
     // Back to the first-time state (the service already turned the flag off).
     renderChildModeSettingsPage();
-    deps.showToast?.("Simple Mode password cleared");
   }
 }
 
@@ -555,7 +577,6 @@ function wirePage() {
       // Turning ON with a password already set needs no password.
       setChildModeEnabled(true);
       renderChildModeSettingsPage();
-      deps.showToast?.("Simple Mode is on");
     } else {
       // Turning OFF requires the password — don't change anything yet.
       toggle.checked = true;
@@ -567,8 +588,10 @@ function wirePage() {
     // Typing anywhere clears that flow's error (mirrors the iOS onChange resets).
     if (!event.target.closest("[data-cm-field]")) return;
     pageEl.querySelectorAll("[data-cm-error]").forEach((el) => { el.hidden = true; });
+    pageEl.querySelectorAll("[data-cm-footer]").forEach((el) => { el.hidden = false; });
     const ok = pageEl.querySelector("[data-cm-change-ok]");
     if (ok) ok.hidden = true;
+    refreshNeededButtons();
   });
 }
 

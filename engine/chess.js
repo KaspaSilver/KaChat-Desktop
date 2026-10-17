@@ -627,23 +627,19 @@ export function chessSummaryStatusText(summary) {
   }
 }
 
-// Short label for the compact chess card shown on a non-latest chess message — the desktop
-// equivalent of iOS's MessageBubbleView.chessLogText, including the "3 | 2" chip on a timed
-// invite and the flag-fall wording on a timeout resign.
+// Short label for the compact log entry shown on a non-latest chess message - iOS
+// MessageBubbleView.chessLogText exactly (a move's piece glyph is drawn beside it by the UI).
 export function chessEnvelopeLabel(text) {
   const env = parseChessEnvelope(unwrapReplyText(text));
   if (!env) return null;
   switch (env.kind) {
-    case "invite": {
-      const label = chessTimeControlLabel(chessTimeControlFromInvite(env));
-      return label ? `Chess invite - ${label}` : "Chess invite";
-    }
-    case "response": return env.accepted ? "Chess accepted" : "Chess declined";
+    case "invite": return "Chess invite";
+    case "response": return env.accepted ? "Accepted the game" : "Declined the game";
     case "move": {
       const promo = env.promotion ? ` (${String(env.promotion).toUpperCase()})` : "";
-      return `Chess: ${env.from}→${env.to}${promo}`;
+      return `${env.from} → ${env.to}${promo}`;
     }
-    case "resign": return env.reason === "timeout" ? "Chess: lost on time" : "Chess resigned";
+    case "resign": return env.reason === "timeout" ? "Lost on time" : "Resigned";
     default: return "Chess";
   }
 }

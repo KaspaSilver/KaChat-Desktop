@@ -378,7 +378,9 @@ test("import refuses: not an export, wrong type or version, no addresses, no wal
   assert.throws(() => importAddressBookExport("[]"), NOT);
   assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, type: "kachat-backup" })), NOT);
   assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, type: undefined })), NOT);
-  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: 2 })), NOT, "an unsupported version");
+  assert.deepEqual(importAddressBookExport(JSON.stringify({ ...ok, version: 2 })), { added: 1, updated: 0, skipped: 0 }, "iOS never compares the version");
+  removeAddressBookEntry(ALICE);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: 1.5 })), NOT, "but it must be a whole number");
   assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: "1" })), NOT);
   assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, version: undefined })), NOT);
   assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: {} })), NOT);
@@ -403,7 +405,8 @@ test("Nextcloud: manual exports keep their spaces in the KaChat folder", () => {
 test("other network (IOS-063): save refuses it, import skips and counts it, all-other-network is refused", () => {
   fresh();
   const reason = (a) => (a.startsWith("kaspatest:") ? "This is a Testnet address. KaChat is on Mainnet." : null);
-  configureAddressBook({ otherNetworkReason: reason });
+  // Like the app: isValidAddress only accepts the active network's addresses.
+  configureAddressBook({ otherNetworkReason: reason, isValidAddress: (a) => /^kaspa:[a-z0-9]{20,}$/.test(a) });
   const TN = "kaspatest:qptestnet0000000000000000000000000000000000000000000000000";
   assert.throws(() => saveAddressBookEntry({ address: TN, name: "Testy" }), /This is a Testnet address\. KaChat is on Mainnet\./);
   assert.equal(addressBookEntry(TN), null);
@@ -412,6 +415,7 @@ test("other network (IOS-063): save refuses it, import skips and counts it, all-
   assert.deepEqual(importAddressBookExport(file([row(ALICE, "Alice"), row(TN, "Testy")])), { added: 1, updated: 0, skipped: 1 });
   assert.equal(addressBookEntry(TN), null);
   assert.throws(() => importAddressBookExport(file([row(TN, "Testy")])), /Every address in that file is a Testnet address\. KaChat is on Mainnet\./);
+  assert.deepEqual(importAddressBookExport(file([row(BOB, "Bob"), row(TN, "Testy"), row("kaspa:nope", "Bad")])), { added: 1, updated: 0, skipped: 1 }, "an invalid address is neither added nor skipped");
   configureAddressBook({ otherNetworkReason: () => null });
 });
 

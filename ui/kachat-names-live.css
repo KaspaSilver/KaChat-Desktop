@@ -247,29 +247,24 @@
 }
 .kl-src-retry:hover { text-decoration: underline; }
 
-/* The review card, laid out like the profile header: banner, avatar, bio. */
-.kl-review { display: flex; flex-direction: column; }
-.kl-review-banner {
-  height: 104px; overflow: hidden;
+/* A field whose lookup found its piece (iOS KachatSocialPreview.found): the avatar (64, round),
+   the banner (90 high, the row's width) or the bio, then "From <platform>" under it. */
+.kl-src-found { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 10px; padding-bottom: 10px; }
+.kl-src-found-avatar {
+  position: relative; width: 64px; height: 64px; flex: 0 0 auto;
+  display: grid; place-items: center; border-radius: 50%; overflow: hidden;
+  background: var(--fill-secondary); color: var(--muted);
+}
+.kl-src-found-avatar > .kmkt-ico { width: 34px; height: 34px; }
+.kl-src-found-avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.kl-src-found-banner {
+  width: 100%; height: 90px; border-radius: 8px; overflow: hidden;
   background: linear-gradient(135deg, color-mix(in srgb, var(--kaspa) 55%, transparent), color-mix(in srgb, var(--kaspa) 15%, transparent));
 }
-.kl-review-banner-img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.kl-review-avatar {
-  position: relative; width: 70px; height: 70px; margin: -35px 0 0 14px; flex: 0 0 auto;
-  display: grid; place-items: center; border-radius: 50%; overflow: hidden;
-  border: 3px solid var(--grouped-cell-elevated); background: var(--fill-secondary); color: var(--muted);
-}
-.kmkt-sheet-cover .kl-review-avatar { border-color: var(--grouped-row); }
-.kl-review-avatar > .kmkt-ico { width: 38px; height: 38px; }
-.kl-review-avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.kl-review-avatar-img[hidden], .kl-review-banner-img[hidden] { display: none; }
-.kl-review-body { display: flex; flex-direction: column; gap: 6px; padding: 8px 16px 14px; }
-.kl-review-bio {
-  margin: 0; font-size: 15px; line-height: 20px; color: var(--text);
-  white-space: pre-line; overflow-wrap: anywhere;
-}
-.kl-review-notes { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: 12px; line-height: 16px; color: var(--muted); }
-.kl-review-notes .kl-review-from { font-weight: 600; }
+.kl-src-found-banner-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.kl-src-found-avatar-img[hidden], .kl-src-found-banner-img[hidden] { display: none; }
+.kl-src-found-bio { margin: 0; font-size: 15px; line-height: 20px; color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
+.kl-src-from { font-size: 12px; font-weight: 600; line-height: 16px; color: var(--muted); }
 
 /* ---- Your Domains > .kachat ------------------------------------------------------------- */
 
@@ -448,3 +443,30 @@ a.kl-receipt-txid:hover { background: var(--primary-08, var(--row-hover)); }
    (QR, address, copy) in a sheet. */
 .kl-fund-body { padding: 4px 16px 20px; }
 .kl-fund-card { margin-top: 0; }
+
+/* Renew, step 1 (iOS KachatRenewSheet): "How long?", then a full-width radio row per period - the
+   circle, the period, what it costs on the right; the picked one filled with the accent - and Next. */
+.kl-renew-step { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+.kl-renew-title { margin: 0; font-size: 22px; font-weight: 700; color: var(--text); }
+.kl-renew-sub { margin: 0; font-size: 15px; line-height: 1.35; }
+.kl-renew-choices { display: flex; flex-direction: column; gap: 14px; }
+.kl-renew-choice {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 16px;
+  border: 1.5px solid var(--kaspa); border-radius: 12px; background: transparent; color: var(--kaspa-ink);
+  font: inherit; font-size: 17px; font-weight: 600; text-align: left; cursor: pointer;
+}
+.kl-renew-choice.on { background: var(--kaspa); color: #fff; }
+.kl-renew-choice .kmkt-ico { flex: 0 0 auto; width: 22px; height: 22px; }
+.kl-renew-choice-label { flex: 1 1 auto; min-width: 0; }
+.kl-renew-choice-price { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.kl-renew-choice:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.kl-renew-next { width: 100%; margin-top: 6px; min-height: 50px; }
+
+/* A name a notification pointed at (iOS KachatNameRouteView): free to claim, or the lookup failed. */
+.kl-route-body { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
+.kl-route-claim { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; }
+.kl-route-claim .kmkt-ico { width: 18px; height: 18px; }
+.kl-route-failed { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px; text-align: center; }
+.kl-route-failed strong { font-size: 17px; font-weight: 600; color: var(--text); }
+.kl-route-failed p { margin: 0; font-size: 15px; }
+.kl-route-loading { display: flex; justify-content: center; padding: 48px 0; }

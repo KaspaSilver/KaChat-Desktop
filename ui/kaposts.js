@@ -12,8 +12,8 @@ import { splitTypedName, primary as primaryName } from "../engine/name-services.
 import {
   KAPOSTS_POST_CHARACTER_LIMIT,
   fetchFollowingFeed,
-  fetchFollowList,
   fetchFollowListAll,
+  fetchFollowListPage,
   fetchPost,
   fetchChainPost,
   fetchThread,
@@ -61,6 +61,14 @@ import { getEndpoint } from "../engine/endpoints.js";
 import { KAS_UNIT } from "../engine/network.js";
 import { kasTextFromSompi } from "../engine/amounts.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
+import {
+  kapostsCharCount,
+  kapostsClampChars,
+  kapostsFoldedPrefix,
+  kapostsEditWindowText,
+  kapostsLongRelativeTime,
+  kapostsNamedRelativeTime,
+} from "./kaposts-format.js";
 // Who a poster is: their .kachat name, avatar, banner and bio (iOS 3d6fb7c, KachatLive.identityName /
 // profileBanner / profileBio). Profiles are on every network (mainnet: profile-only identities).
 import { kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, kachatRetryImage, onKachatIdentityChange } from "./kachat-names-live.js";
@@ -84,6 +92,7 @@ let composerEl, composerInput, composerMeter, composerSubmit, composerTitle, com
 // State
 let activeFeedTab = "feed";
 let panelEl, panelTitleEl, panelBodyEl, popoverEl;
+let panelRefreshEl = null; // the panel header's refresh button (built on first render)
 // activePanel: null | {type:"profile", address, pubkey, tab, posts, replies, details, loading}
 //            | {type:"notifications", items, loading}
 //            | {type:"engagement", postId, postTxId, tab, lists, loading}
@@ -105,6 +114,13 @@ let checkingForNewPosts = false;
 const NEW_POSTS_CHECK_INTERVAL_MS = 60_000;
 let feedLoading = false;
 let feedError = null;
+/// Which endpoint remotePosts was filled from ("global" | "following"). Feed and Popular share the
+/// global feed, so switching between them keeps every page already loaded (iOS loadedFeedSource).
+let loadedFeedSource = null;
+/// When Popular last swept its ranking window; at most once per FEED_STALE_AFTER_MS unless a
+/// page-one refresh threw that window away (iOS FeedLoadGates.popularSweptAt).
+let popularSweptAt = 0;
+function feedSourceFor(tab) { return tab === "following" ? "following" : "global"; }
 let prefs = { following: [], muted: [], blocked: [] };
 let threadStack = [];     // post ids (local ids)
 // A panel opened from INSIDE an open thread (Post Activity, a poster's profile) presents OVER
@@ -521,7 +537,7 @@ function clearPagerSentinel(key) {
 }
 
 function clearPanelPagerSentinels() {
-  for (const key of ["profile-posts", "profile-replies", "notifications", "engagement", "engagement-tips", "tippers"]) {
+  for (const key of ["profile-posts", "profile-replies", "notifications", "engagement", "engagement-tips", "tippers", "followList"]) {
     clearPagerSentinel(key);
   }
 }
@@ -534,7 +550,7 @@ function clearAllPagerSentinels() {
 
 function pagerFooterHtml(pager, key) {
   if (pager.loading) {
-    return `<span class="kaposts-pager-spinner" aria-hidden="true"></span><span>Loading more…</span>`;
+    return `<span class="kaposts-pager-spinner" aria-hidden="true"></span><span>Loading more...</span>`;
   }
   if (pager.error) {
     return `<button type="button" class="kaposts-pager-failure" data-kaposts-pager-retry="${deps.escapeHtml(key)}">
@@ -701,17 +717,22 @@ async function syncFollowingFromChain() {
 async function checkForNewPosts() {
   if (!deps || checkingForNewPosts || feedLoading || !remotePosts.length) return;
   if (deps.kaPostsSuppressed?.()) return;
+  const source = feedSourceFor(activeFeedTab);
+  if (source !== loadedFeedSource) return;
   checkingForNewPosts = true;
   try {
     const result = await fetchFeedPage(null);
+    // The feed may have been refreshed or switched while this was in flight.
+    if (source !== loadedFeedSource || feedLoading) return;
     const known = new Set(remotePosts.map((post) => post.remoteId).filter(Boolean));
-    const pendingIds = new Set(pendingNewPosts.map((post) => post.remoteId).filter(Boolean));
+    // Page one against what is on screen, muted and blocked authors left out: the pill never
+    // counts a post it would not show (iOS checkForNewPosts).
     const fresh = result.posts
       .map(mapRemotePost)
       .filter(Boolean)
-      .filter((post) => post.remoteId && !known.has(post.remoteId) && !pendingIds.has(post.remoteId));
+      .filter((post) => post.remoteId && !known.has(post.remoteId) && !isHiddenAuthor(post.posterAddress));
     if (fresh.length) {
-      pendingNewPosts = [...fresh, ...pendingNewPosts];
+      pendingNewPosts = fresh;
       renderAll();
     }
   } catch { /* the next tick asks again; a missed check costs nothing */ }
@@ -749,9 +770,11 @@ function stopNewPostsCheck() {
 function newPostsPillHtml() {
   if (!pendingNewPosts.length) return "";
   const count = pendingNewPosts.length;
-  return `<button class="kaposts-new-pill" type="button" data-kaposts-show-new>`
+  // Floating over the feed, not a row in it (iOS overlay): a reader scrolled past a row would never
+  // learn there is anything new. The zero-height sticky holder keeps it at the top of the screen.
+  return `<div class="kaposts-new-pill-holder"><button class="kaposts-new-pill" type="button" data-kaposts-show-new>`
     + `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`
-    + `<span>Show ${count} new post${count === 1 ? "" : "s"}</span></button>`;
+    + `<span>${count === 1 ? "Show 1 new post" : `Show ${count} new posts`}</span></button></div>`;
 }
 
 async function loadFeed() {
@@ -763,28 +786,40 @@ async function loadFeed() {
   const generation = ++feedGeneration; // any in-flight page from the previous tab is now stale
   clearPagerSentinel("feed");
   feedPager = makePager();
+  // The page being fetched owns the footer's spinner (iOS feedPage.isLoading): "Loading more..."
+  // under the posts already on screen, a spinner under the empty state when there are none.
+  feedPager.loading = true;
+  loadedFeedSource = feedSourceFor(activeFeedTab);
   feedLoading = true;
   feedError = null;
   renderStatus();
+  renderFeed();
+  let loaded = false;
   try {
     const result = await fetchFeedPage(null);
     if (generation !== feedGeneration) return;
     remotePosts = result.posts.map(mapRemotePost).filter(Boolean);
+    // A refresh just delivered whatever the pill was offering.
     pendingNewPosts = [];
     seedPager(feedPager, result.posts, result.pagination);
+    loaded = true;
+    // A refresh re-arms Popular's deep sweep: the window it ranked was just thrown away.
+    popularSweptAt = 0;
   } catch (error) {
     if (generation !== feedGeneration) return;
-    feedError = error?.message || "Could not load the feed.";
-    feedPager.hasMore = false;
+    feedError = userFacingError(error);
+    // A failed refresh keeps whatever is already on screen, and the footer offers the retry
+    // (iOS KaPostsLoadMoreFooter: "Couldn't load more" / the reason / "Tap to retry").
+    feedPager.loading = false;
+    feedPager.error = feedError;
     deps.appendEngineLog?.(`KaPosts feed load failed: ${feedError}`);
   } finally {
     if (generation === feedGeneration) {
       feedLoading = false;
-      lastFeedLoadAt = Date.now();
+      if (loaded) lastFeedLoadAt = Date.now();
       renderStatus();
-      renderFeed({ resetScroll: true });
+      renderFeed({ resetScroll: loaded });
       refreshVisiblePosterNames();
-      deepenPopularRanking();
     }
   }
 }
@@ -800,6 +835,11 @@ const POPULAR_SWEEP_MAX_PASSES = 4;
 let popularDeepening = false;
 async function deepenPopularRanking() {
   if (activeFeedTab !== "popular" || popularDeepening || !feedPager) return;
+  // At most once per staleness window unless page one was refreshed in between (iOS
+  // FeedLoadGates.popularSweptAt): a heavily filtered stretch of history never reaches the depth,
+  // and every return to the tab would otherwise re-spend the whole request budget chasing it.
+  if (popularSweptAt && Date.now() - popularSweptAt < FEED_STALE_AFTER_MS) return;
+  popularSweptAt = Date.now();
   popularDeepening = true;
   try {
     let passes = 0;
@@ -941,6 +981,21 @@ function findPostByRemoteId(remoteId) {
   return findPostWhere((post) => post.remoteId === remoteId);
 }
 
+/// Everything bookmarked, posts and their comments alike, newest first (iOS bookmarkedPosts:
+/// posts + their comments). One row per post: the same post can sit in several loaded lists.
+function bookmarkedPostsAndComments() {
+  const seen = new Set();
+  const out = [];
+  for (const post of allPostLists()) {
+    for (const entry of [post, ...(post.comments || [])]) {
+      if (!entry?.bookmarkedByMe || isHiddenAuthor(entry.posterAddress) || seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      out.push(entry);
+    }
+  }
+  return out.sort((a, b) => b.timestamp - a.timestamp);
+}
+
 /** Widens the resolution pool without dropping what it already holds (dedupe by txid). */
 function mergeIntoResolutionPool(mapped) {
   const known = new Set(myContentPosts.map((post) => post.remoteId).filter(Boolean));
@@ -986,31 +1041,66 @@ const fetchedAncestors = new Map();
 const expandedPostIds = new Set();
 /// Comments whose reply chain is expanded inline in the thread, by local id.
 const expandedCommentIds = new Set();
-/// Comment local id -> "loading" | "loaded" | "failed", so an expander can say which it is
-/// instead of spinning on an empty list forever.
-const commentReplyState = new Map();
-
-/// Pulls one comment's replies into its own comments array, for inline expansion.
+/// Pulls one comment's replies into its own comments array, for inline expansion, from page one
+/// of its own pager (iOS expandReplies -> loadThreadReplies(reset: true), keyed by the comment's
+/// id like every thread page). The pager is what lets the expander say which state it is in -
+/// "Loading replies...", the failure with Retry, or "No replies" - and lets a long chain page on.
 ///
 /// Reading a conversation used to mean opening each reply as its own thread and tapping Back for
 /// every level; expanding in place keeps you where you are.
 async function loadCommentReplies(comment) {
-  if (!comment?.remoteId || commentReplyState.get(comment.id) === "loading") return;
-  commentReplyState.set(comment.id, "loading");
+  if (!comment?.remoteId) return;
+  if (threadPagers.get(comment.id)?.loading) return;
+  const pager = makePager({ pageSize: PAGER_THREAD_PAGE_SIZE });
+  pager.loading = true;
+  threadPagers.set(comment.id, pager);
+  const generation = threadGeneration;
   renderThread();
   try {
-    const page = await fetchReplies({ engine: deps.engine, postId: comment.remoteId, limit: 50 });
+    const page = await fetchReplies({ engine: deps.engine, postId: comment.remoteId, limit: PAGER_THREAD_PAGE_SIZE });
+    if (generation !== threadGeneration || threadPagers.get(comment.id) !== pager) return;
     const replies = (page?.posts || []).map(mapRemotePost).filter(Boolean);
+    seedPager(pager, page?.posts, page?.pagination);
     mutatePost(comment.id, (target) => {
       const known = new Set(target.comments.map((entry) => entry.remoteId).filter(Boolean));
       target.comments = [...target.comments, ...replies.filter((reply) => !known.has(reply.remoteId))];
     });
-    commentReplyState.set(comment.id, "loaded");
     resolvePosterIdentities(replies.map((reply) => reply.posterAddress), () => renderThread());
-  } catch {
-    commentReplyState.set(comment.id, "failed");
+  } catch (error) {
+    if (generation !== threadGeneration || threadPagers.get(comment.id) !== pager) return;
+    pager.loading = false;
+    pager.error = userFacingError(error);
   }
   renderThread();
+}
+
+/// The next page of an expanded comment's inline chain (its footer sentinel).
+function loadMoreCommentReplies(commentId) {
+  const comment = findPost(commentId);
+  const pager = threadPagers.get(commentId);
+  if (!comment?.remoteId || !pager) return;
+  const generation = threadGeneration;
+  return runPager(pager, {
+    fetchPage: async (before, limit) => {
+      const result = await fetchReplies({ engine: deps.engine, postId: comment.remoteId, limit, before });
+      return { items: result.posts, pagination: result.pagination };
+    },
+    absorb: (fresh) => {
+      const mapped = fresh.map(mapRemotePost).filter(Boolean);
+      let added = 0;
+      mutatePost(commentId, (p) => {
+        const known = new Set(p.comments.map((c) => c.remoteId).filter(Boolean));
+        const rows = mapped.filter((reply) => reply.remoteId && !known.has(reply.remoteId));
+        p.comments = [...p.comments, ...rows];
+        added = Math.max(added, rows.filter((reply) => !isHiddenAuthor(reply.posterAddress)).length);
+      });
+      renderThread();
+      resolvePosterIdentities(mapped.map((reply) => reply.posterAddress), () => renderThread());
+      return added;
+    },
+    isStale: () => generation !== threadGeneration || !expandedCommentIds.has(commentId),
+    onUpdate: () => renderThread(),
+  });
 }
 
 /// One post from the indexer by txid, mapped and merged into the resolution pool so every later
@@ -1047,6 +1137,22 @@ async function chainPost(txId) {
     parentRemoteId: record.action === "reply" ? record.referencedId : null,
     delivery: "sent", editedAt: null, sentAt: null, poll: null,
   };
+  // Real numbers and this viewer's own votes from get-post-engagement, which answers for any post
+  // id, instead of a row of zeros (iOS chainEngagement). A quote counts as a repost.
+  try {
+    const { engagement } = await fetchPostEngagement({ engine: deps.engine, postId: record.txId });
+    const me = String(safeRequesterPubkey() || "").toLowerCase();
+    const isRepost = (entry) => entry?.kind === "repost" || entry?.kind === "quote";
+    const mine = (entry) => Boolean(me) && String(entry?.actorPubkey || "").toLowerCase() === me;
+    post.likes = engagement.filter((entry) => entry?.kind === "upvote").length;
+    post.dislikes = engagement.filter((entry) => entry?.kind === "downvote").length;
+    post.reposts = engagement.filter(isRepost).length;
+    post.likedByMe = engagement.some((entry) => entry?.kind === "upvote" && mine(entry));
+    post.dislikedByMe = engagement.some((entry) => entry?.kind === "downvote" && mine(entry));
+    post.repostedByMe = engagement.some((entry) => isRepost(entry) && mine(entry));
+  } catch { /* the counts stay at zero */ }
+  // Replace rather than duplicate, so a like made in the thread lands on one node.
+  myContentPosts = myContentPosts.filter((entry) => entry.remoteId !== post.remoteId);
   mergeIntoResolutionPool([post]);
   return post;
 }
@@ -1072,7 +1178,60 @@ async function loadAncestorsFor(post) {
   }
 }
 
-async function openResolvedPost(post, { parentRemoteIdHint = null, ownContentLoaded = false } = {}) {
+/// Who holds this comment, at any depth (iOS findParent(ofCommentId:)).
+function findParentOf(id) {
+  const search = (list) => {
+    for (const post of list || []) {
+      if ((post.comments || []).some((comment) => comment.id === id)) return post;
+      const hit = search(post.comments);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return search(allPostLists());
+}
+
+/// The chain above `post` from what is in memory, oldest first, for when get-thread has not
+/// answered (a session post, or the moment before the fetch lands) - iOS walkAncestorChain: the
+/// levels walked down through (trusted only when the last of them really holds this post), then
+/// the loaded tree upward from the oldest of those, at most eight hops.
+function walkAncestorChain(post) {
+  let walked = threadStack.slice(0, -1).map((id) => findPost(id)).filter(Boolean);
+  const last = walked[walked.length - 1];
+  if (last && findParentOf(post.id)?.id !== last.id && !(last.comments || []).some((c) => c.id === post.id)) {
+    walked = [];
+  }
+  const above = [];
+  let cursor = walked[0] || post;
+  for (let hops = 0; cursor && hops < 8; hops += 1) {
+    const parent = findParentOf(cursor.id);
+    if (!parent) break;
+    // A cycle would hang the view rather than merely look wrong.
+    if (above.some((entry) => entry.id === parent.id) || walked.some((entry) => entry.id === parent.id)) break;
+    above.push(parent);
+    cursor = parent;
+  }
+  return [...above.reverse(), ...walked];
+}
+
+/// Own posts and replies, unless they were loaded within the staleness window (iOS
+/// reloadMyProfileIfStale). Returns whether it fetched.
+let ownContentLoadedAt = 0;
+async function reloadOwnContentIfStale() {
+  if (ownContentLoadedAt && Date.now() - ownContentLoadedAt < FEED_STALE_AFTER_MS) return false;
+  const loaded = await loadOwnContentIntoResolutionPool();
+  if (loaded) ownContentLoadedAt = Date.now();
+  return loaded;
+}
+
+/**
+ * A resolved deep-link/notification target that is itself a REPLY opens its PARENT's thread -
+ * the post that was replied to on top, the reply scrolled into view below and spliced into the
+ * comments when the indexer has not caught up on it yet (iOS openResolvedPost). The parent
+ * resolves from what is loaded, then own posts+replies, then the indexer, then its own
+ * transaction; when it still cannot be found, the reply's own thread opens.
+ */
+async function openResolvedPost(post, { parentRemoteIdHint = null } = {}) {
   const parentId = post.parentRemoteId || parentRemoteIdHint || null;
   if (!parentId || parentId === post.remoteId) {
     closePanel();
@@ -1080,36 +1239,29 @@ async function openResolvedPost(post, { parentRemoteIdHint = null, ownContentLoa
     return;
   }
   let parent = findPostByRemoteId(parentId);
-  if (!parent && !ownContentLoaded) {
-    await loadOwnContentIntoResolutionPool();
-    parent = findPostByRemoteId(parentId);
-  }
-  // The indexer answers a single id now, so a parent outside every loaded list is one request
-  // away rather than unreachable.
+  if (!parent && await reloadOwnContentIfStale()) parent = findPostByRemoteId(parentId);
+  // Ask the indexer for the parent directly rather than hoping a feed contains it.
   if (!parent) parent = await indexerPost(parentId);
+  // Not indexed yet - read it off its own transaction.
+  if (!parent) parent = await chainPost(parentId).catch(() => null);
   closePanel();
-  if (parent) openThread(parent, { scrollToRemoteId: post.remoteId });
+  if (parent) openThread(parent, { scrollToRemoteId: post.remoteId, ensureComment: post });
   else openThread(post);
 }
 
 /**
- * Shared-link/notification landing: resolve a txid to a loaded post — loaded lists first,
- * then a feed refresh, then OWN content from the indexer (notification targets are almost
- * always your posts, which live outside the feed window). Matches iOS's openSharedPost.
+ * Shared-link/notification landing, in iOS openSharedPost's order: what is loaded; page one again
+ * only when nothing is loaded or it is over five minutes old (a reset throws away every page the
+ * reader scrolled in); own posts+replies; the notification's author's posts+replies; the indexer's
+ * single-post read; the post's own transaction. Nothing found says so, with the transaction.
  */
 async function resolveAndOpenPost(txId, { parentRemoteIdHint = null } = {}) {
   let post = findPostByRemoteId(txId);
-  let ownContentLoaded = false;
-  // One request for the exact id, before re-fetching whole feeds in the hope it falls inside one.
-  if (!post) post = await indexerPost(txId);
-  if (!post) {
+  if (!post && (remotePosts.length === 0 || Date.now() - lastFeedLoadAt >= FEED_STALE_AFTER_MS)) {
     await loadFeed();
     post = findPostByRemoteId(txId);
   }
-  if (!post) {
-    ownContentLoaded = await loadOwnContentIntoResolutionPool();
-    post = findPostByRemoteId(txId);
-  }
+  if (!post && await reloadOwnContentIfStale()) post = findPostByRemoteId(txId);
   if (!post) {
     // Still unresolved: the txid is usually a notification's ACTING content — someone
     // ELSE's reply/quote/mentioning post, which neither the feed window nor the own-content
@@ -1148,12 +1300,14 @@ async function resolveAndOpenPost(txId, { parentRemoteIdHint = null } = {}) {
       deps.appendEngineLog?.(`KaPost actor-content fetch failed: ${error.message}`);
     }
   }
+  // The indexer answers a single id, which is what every search above was working around.
+  if (!post) post = await indexerPost(txId);
   // Last: the chain itself - a post the indexer has not caught up on, or one past its window.
-  if (!post) post = await chainPost(txId);
+  if (!post) post = await chainPost(txId).catch(() => null);
   if (post) {
-    await openResolvedPost(post, { parentRemoteIdHint, ownContentLoaded });
+    await openResolvedPost(post, { parentRemoteIdHint });
   } else {
-    deps.showToast?.("Post not found - it may be older than the current feed");
+    showActionToast("Post not found - it may be older than the current feed", txId);
   }
 }
 
@@ -1168,10 +1322,10 @@ function scheduleUndoable(key, action, undo = null, label = null) {
     pendingActions.delete(key);
     stopTickerIfIdle();
     // Repaint every surface NOW rather than trusting the action to do it. The countdown is
-    // not only a toast: countdownOrIconHtml swaps it in for the like/repost icon inside the
-    // post cell itself, so the cell has to be re-rendered for the icon to come back. The
-    // action re-renders at best one surface, and only after its network round trip, which
-    // left a dead countdown frozen at 1 on the cell.
+    // not only a toast: pendingActionButtonHtml swaps the undo capsule in for the like/repost
+    // button inside the post cell itself, so the cell has to be re-rendered for the button to
+    // come back. The action re-renders at best one surface, and only after its network round
+    // trip, which left a dead capsule on the cell.
     renderAll();
     action();
   }, UNDO_DELAY_MS);
@@ -1218,28 +1372,21 @@ function renderAll() {
   renderToasts();
 }
 
+// iOS has no feed status line: page one loading is the empty state's spinner (or the footer's
+// "Loading more..." under posts already on screen), and a failed refresh is the footer's
+// "Couldn't load more ... Tap to retry". The line stays hidden.
 function renderStatus() {
-  if (!statusEl) return;
-  if (feedLoading && remotePosts.length === 0) {
-    statusEl.hidden = false;
-    statusEl.textContent = "Loading the feed…";
-  } else if (feedError && remotePosts.length === 0) {
-    statusEl.hidden = false;
-    statusEl.textContent = feedError;
-  } else {
-    statusEl.hidden = true;
-  }
+  if (statusEl) statusEl.hidden = true;
 }
 
-function countdownOrIconHtml(key, iconHtml) {
-  const pending = pendingActions.get(key);
-  if (pending) {
-    // Real remaining seconds, not a hardcoded 5: any re-render mid-countdown (a sibling
-    // action, an arriving post) would otherwise flash the badge back to 5 until the next tick.
-    const seconds = Math.max(0, Math.ceil((pending.deadline - Date.now()) / 1000));
-    return `<span class="kaposts-countdown" data-kaposts-countdown="${deps.escapeHtml(key)}">${seconds}</span>`;
-  }
-  return iconHtml;
+const UNDO_ARROW_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>`;
+
+/// A held action takes the place of its button (iOS countdownButton): the undo arrow in an
+/// orange capsule, deliberately without the seconds - the ticking number belongs in the undo
+/// toast. A click cancels it. Returns null when nothing is held under `key`.
+function pendingActionButtonHtml(key) {
+  if (!pendingActions.has(key)) return null;
+  return `<button class="kaposts-action kaposts-undo-pill" type="button" data-kaposts-cancel-pending="${deps.escapeHtml(key)}" aria-label="Undo" title="Undo">${UNDO_ARROW_SVG}</button>`;
 }
 
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
@@ -1459,10 +1606,14 @@ function scheduleSentCheckExpiry(postId, at) {
   setTimeout(() => { sentCheckTimers.delete(postId); renderAll(); }, Math.max(0, at - Date.now()) + 50);
 }
 
-function quoteCardHeadHtml(quoted) {
+// `withTime`: the composer's card also says when it was posted, relatively (iOS quotedPostCard:
+// "5 minutes ago"); the feed's quote embed shows only the face and the name.
+function quoteCardHeadHtml(quoted, { withTime = false } = {}) {
+  const when = withTime && quoted.timestamp ? kapostsNamedRelativeTime(Number(quoted.timestamp)) : "";
   return `<span class="kaposts-quote-head">
     ${posterAvatarHtml(quoted.posterAddress)}
     <strong>${deps.escapeHtml(posterName(quoted.posterAddress))}</strong>
+    ${when ? `<span class="kaposts-cell-time">${deps.escapeHtml(when)}</span>` : ""}
   </span>`;
 }
 
@@ -1481,14 +1632,17 @@ function pollCardHtml(post) {
   const closed = Boolean(poll.closesAt) && Date.now() >= poll.closesAt;
   const voted = poll.myVote != null;
   const showResults = closed || voted;
+  // A held vote changes nothing yet (iOS votePoll applies it when the transaction lands): the
+  // options stay, disabled, each with a clock at its end.
   const pending = pendingActions.has(`vote:${post.id}`);
   const canVote = !showResults && !pending && Boolean(post.remoteId) && post.delivery !== "failed";
+  const clock = pending ? `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>` : "";
   const total = Math.max(0, Number(poll.total) || 0);
   const rows = poll.options.map((option, index) => {
     const count = Number(poll.counts?.[index]) || 0;
     const share = total > 0 ? count / total : 0;
     if (!showResults) {
-      return `<button class="kaposts-poll-option" type="button" data-kaposts-poll-vote="${pid}" data-index="${index}" ${canVote ? "" : "disabled"}>${deps.escapeHtml(option)}</button>`;
+      return `<button class="kaposts-poll-option" type="button" data-kaposts-poll-vote="${pid}" data-index="${index}" ${canVote ? "" : "disabled"}><span>${deps.escapeHtml(option)}</span>${clock}</button>`;
     }
     return `
       <div class="kaposts-poll-bar${poll.myVote === index ? " mine" : ""}">
@@ -1504,14 +1658,14 @@ function pollCardHtml(post) {
   return `
     <div class="kaposts-poll" data-kaposts-poll="${pid}">
       ${rows}
-      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"}${timeLeft ? ` · ${deps.escapeHtml(timeLeft)}` : ""}${pending ? ` · <span data-kaposts-countdown="vote:${pid}"></span>` : ""}</div>
+      <div class="kaposts-poll-meta">${total} vote${total === 1 ? "" : "s"}${timeLeft ? ` · ${deps.escapeHtml(timeLeft)}` : ""}</div>
     </div>`;
 }
 
 // The bell beside Follow (iOS "bell" / "bell.fill"): outlined off, filled on (.kaposts-bell.on).
 const KAPOSTS_BELL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>`;
 
-function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false } = {}) {
+function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false, showReply = true } = {}) {
   const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
   const isMine = post.posterAddress === deps.engine.address;
@@ -1526,7 +1680,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   // Measured on the text on screen (a translation can run longer than the original), with the
   // line count over the first 281 characters, as iOS does.
   const shownText = postDisplayText(post);
-  const isLong = shownText.length > 280 || (shownText.slice(0, 281).match(/\n/g) || []).length >= 8;
+  const isLong = kapostsCharCount(shownText) > 280 || (shownText.slice(0, 281).match(/\n/g) || []).length >= 8;
   // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
   // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
   // all. Opening the post is what tapping the post itself is for.
@@ -1536,19 +1690,20 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   const commentCount = Math.max(post.remoteReplyCount || 0, post.comments.filter((c) => !isHiddenAuthor(c.posterAddress)).length);
 
   // Delivery: a spinner while submitting, a green check for the first minute once the K
-  // transaction is on the network, red Retry when it didn't go through. Only session posts
-  // carry a delivery state; feed rows arrive as "sent" with an old timestamp and show nothing.
-  // An edit counts from the edit landing (sentAt), not from the original post's time, so an
-  // edit on an old post still gets its check (iOS 90331bc).
+  // transaction is on the network, red Retry when it didn't go through - at the far end of the
+  // action row (iOS). Only session posts and this session's replies carry a delivery state; feed
+  // rows arrive as "sent" with an old timestamp and show nothing. An edit counts from the edit
+  // landing (sentAt), not from the original post's time, so an edit on an old post still gets its
+  // check (iOS 90331bc).
   const sentBasis = post.sentAt || post.timestamp;
-  const sentCheck = post.delivery === "sent" && post.remoteId && (post.sentAt || localPosts.some((p) => p.id === post.id))
-    && Date.now() - sentBasis < 60_000;
+  const sessionPost = Boolean(post.sentAt) || localPosts.some((p) => p.id === post.id) || sessionReplyIds.has(post.remoteId);
+  const sentCheck = post.delivery === "sent" && post.remoteId && sessionPost && Date.now() - sentBasis < 60_000;
   if (sentCheck) scheduleSentCheckExpiry(post.id, sentBasis + 60_000);
-  const deleting = pendingActions.has(`delete:${post.id}`);
+  const deleting = pendingActions.has(`delete:${post.id}`) || post.pendingDeletion === true;
   const deliveryHtml = post.delivery === "pending"
     ? `<div class="kaposts-delivery pending" title="Posting"><span class="kaposts-spinner" aria-label="Posting"></span></div>`
     : post.delivery === "failed"
-      ? `<div class="kaposts-delivery failed" title="${deps.escapeHtml(post.failureReason || "Could not post")}"><button type="button" data-kaposts-retry="${pid}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg>Retry</button>${post.failureReason ? `<span class="kaposts-failure-reason">${deps.escapeHtml(post.failureReason)}</span>` : ""}</div>`
+      ? `<div class="kaposts-delivery failed"><button type="button" data-kaposts-retry="${pid}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16v.5"/></svg>Retry</button></div>`
       : sentCheck
         ? `<div class="kaposts-delivery sent" data-kaposts-sent-check="${(Number(post.timestamp) || 0) + 60_000}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>`
         : "";
@@ -1556,7 +1711,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   const quotedHtml = post.quoted
     ? `<div class="kaposts-quote-embed" ${post.quoted.remoteId ? `data-kaposts-open-remote="${deps.escapeHtml(post.quoted.remoteId)}"` : ""}>
          ${quoteCardHeadHtml(post.quoted)}
-         <span>${post.quoted.text ? markdownPreviewHtml(post.quoted.text) : "Reposted"}</span>
+         <span>${markdownPreviewHtml(post.quoted.text || "")}</span>
        </div>`
     : "";
 
@@ -1573,25 +1728,26 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
           </button>
         </div>
         ${bellNote ? `<div class="kaposts-bell-note">${deps.escapeHtml(bellNote)}</div>` : ""}
-        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? foldedPrefix(postDisplayText(post)) : postDisplayText(post))}</div>
+        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? kapostsFoldedPrefix(shownText) : shownText)}</div>
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${pid}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
-        ${deliveryHtml}
         <div class="kaposts-actions">
-          <button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${pid}"` : `data-kaposts-open="${pid}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
+          ${/* The focused post of a thread has no reply button of its own: its reply box is pinned
+               under the thread (iOS threadCell onComment: isRoot ? nil). */ ""}
+          ${showReply ? `<button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${pid}"` : `data-kaposts-open="${pid}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}
-          </button>
-          <button class="kaposts-action${post.likedByMe ? " active-like" : ""}" type="button" data-kaposts-like="${pid}" title="Like">
-            ${countdownOrIconHtml(`like:${post.id}`, ICONS.like)}${(Number(post.likes) || 0) > 0 ? `<span>${Number(post.likes) || 0}</span>` : ""}
-          </button>
-          <button class="kaposts-action${post.dislikedByMe ? " active-dislike" : ""}" type="button" data-kaposts-dislike="${pid}" title="Dislike">
-            ${countdownOrIconHtml(`dislike:${post.id}`, ICONS.dislike)}${(Number(post.dislikes) || 0) > 0 ? `<span>${Number(post.dislikes) || 0}</span>` : ""}
-          </button>
-          <button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${pid}" title="Repost">
-            ${countdownOrIconHtml(`repost:${post.id}`, ICONS.repost)}${(Number(post.reposts) || 0) > 0 ? `<span>${Number(post.reposts) || 0}</span>` : ""}
-          </button>
+          </button>` : ""}
+          ${pendingActionButtonHtml(`like:${post.id}`) ?? `<button class="kaposts-action${post.likedByMe ? " active-like" : ""}" type="button" data-kaposts-like="${pid}" title="Like">
+            ${ICONS.like}${(Number(post.likes) || 0) > 0 ? `<span>${Number(post.likes) || 0}</span>` : ""}
+          </button>`}
+          ${pendingActionButtonHtml(`dislike:${post.id}`) ?? `<button class="kaposts-action${post.dislikedByMe ? " active-dislike" : ""}" type="button" data-kaposts-dislike="${pid}" title="Dislike">
+            ${ICONS.dislike}${(Number(post.dislikes) || 0) > 0 ? `<span>${Number(post.dislikes) || 0}</span>` : ""}
+          </button>`}
+          ${pendingActionButtonHtml(`repost:${post.id}`) ?? `<button class="kaposts-action${post.repostedByMe ? " active-repost" : ""}" type="button" data-kaposts-repost="${pid}" title="Repost">
+            ${ICONS.repost}${(Number(post.reposts) || 0) > 0 ? `<span>${Number(post.reposts) || 0}</span>` : ""}
+          </button>`}
           <button class="kaposts-action${post.bookmarkedByMe ? " active-bookmark" : ""}" type="button" data-kaposts-bookmark="${pid}" title="${post.bookmarkedByMe ? "Remove Bookmark" : "Bookmark"}">${ICONS.bookmark}</button>
           ${post.remoteId ? `<button class="kaposts-action" type="button" data-kaposts-share="${pid}" title="Copy share link">${ICONS.share}</button>` : ""}
           ${isMine ? "" : `<button class="kaposts-action kaposts-tip" type="button" data-kaposts-tip="${pid}" title="Send a Kaspa tip"><img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" /><span>Tip</span></button>`}
@@ -1599,6 +1755,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
                against the Tip button on someone else's post, the Kaspa mark and the count on your own.
                A tap lists who tipped. */ ""}
           ${tips > 0 && post.remoteId ? `<button class="kaposts-action kaposts-tips-count${isMine ? " own" : ""}" type="button" data-kaposts-tippers="${pid}" aria-label="Who tipped this post" title="Who tipped this post">${isMine ? `<img class="kaposts-tip-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" />` : ""}<span>${tips}</span></button>` : ""}
+          ${deliveryHtml}
         </div>
         <div class="kaposts-cell-foot"><span class="kaposts-cell-stamp">${deps.escapeHtml(postTimestamp(post.timestamp))}${post.editedAt ? ` <span class="kaposts-cell-edited" title="Edited">· edited</span>` : ""}</span></div>
         ${!inThread && isThreadRootPost(post) ? `<button class="kaposts-view-thread" type="button" data-kaposts-open="${pid}">⤷ View thread</button>` : ""}
@@ -1642,26 +1799,30 @@ function renderFeed({ resetScroll = false } = {}) {
   const scroller = kapostsScrollEl();
   const previousTop = scroller?.scrollTop || 0;
   const posts = visibleFeedPosts();
-  if (posts.length === 0 && !feedLoading && !feedError) {
+  if (posts.length === 0) {
     renderedFeedIds = new Set();
-    // Everything fetched so far was filtered away (all muted, or - on Following - none of it
-    // from accounts you follow) while the server still has older pages. No auto-sentinel here:
+    // The tab's empty state, always (iOS feedContent): while page one loads a spinner sits under
+    // it. Everything fetched so far was filtered away (all muted, or - on Following - none of it
+    // from accounts you follow) while the server still has older pages: no auto-sentinel here,
     // with nothing on screen it would walk the whole history unattended, so this stays a tap.
-    const canLoadOlder = feedPager && !feedPager.loading && feedPager.hasMore && feedPager.cursor;
+    const loading = Boolean(feedPager?.loading) || feedLoading;
+    const canLoadOlder = feedPager && !loading && feedPager.hasMore && feedPager.cursor;
+    clearPagerSentinel("feed");
     feedEl.innerHTML = `
       <div class="no-results-card kaposts-empty">
         ${FEED_EMPTY_STATES[activeFeedTab].icon}
         <strong>${FEED_EMPTY_STATES[activeFeedTab].title}</strong>
         <span>${FEED_EMPTY_STATES[activeFeedTab].body}</span>
       </div>
-      ${canLoadOlder ? `<button class="kaposts-load-older" type="button" data-kaposts-load-older>Load older posts</button>` : ""}`;
+      ${canLoadOlder ? `<button class="kaposts-load-older" type="button" data-kaposts-load-older>Load older posts</button>` : ""}
+      ${loading ? `<div class="kaposts-empty-loading"><span class="kaposts-pager-spinner" aria-label="Loading"></span></div>` : ""}`;
   } else {
     renderedFeedIds = new Set(posts.map((post) => post.id));
     feedEl.innerHTML = newPostsPillHtml() + posts.map((post) => postCellHtml(post)).join("");
+    // The footer: "Loading more..." while a page (page one included) is in flight, the failure
+    // with "Tap to retry", or the sentinel that pulls the next page (iOS KaPostsLoadMoreFooter).
+    mountPagerSentinel("feed", feedEl, feedPager, loadMoreFeed);
   }
-  // While page one is in flight the status line owns the loading state — no sentinel yet, or
-  // it would fire a second request for the same page.
-  mountPagerSentinel("feed", feedEl, feedLoading ? null : feedPager, loadMoreFeed);
   if (scroller) scroller.scrollTop = resetScroll ? 0 : previousTop;
   // Thread-root probes for commented posts (throttled, once per post per session) so the
   // "View thread" link can appear on other people's threads too.
@@ -1727,13 +1888,31 @@ function syncReplyBarGate() {
   if (replyInput) replyInput.readOnly = gated;
 }
 
+// Inline "View N replies" chains each own a footer sentinel; their keys are tracked so a rebuild
+// of the replies list can drop the observers of the old ones.
+const inlinePagerKeys = new Set();
+
 function renderThread() {
   syncReplyBarGate();
   const post = currentThreadPost();
-  const showThread = Boolean(post);
-  syncSurfaces(post);
-  if (!showThread) clearPagerSentinel("thread");
-  if (!post || !threadRootEl) return;
+  // A thread whose post cannot be resolved says so instead of falling back to the feed (iOS
+  // postDetailSheet's "This post could not be loaded").
+  const missing = !post && threadStack.length > 0;
+  const showThread = Boolean(post) || missing;
+  syncSurfaces(post || (missing ? { missing: true } : null));
+  if (!post) clearPagerSentinel("thread");
+  const replyBar = replyInput?.closest(".kaposts-reply-bar");
+  if (replyBar) replyBar.hidden = !post;
+  if (missing && threadRootEl) {
+    threadRootEl.innerHTML = `
+      <div class="no-results-card kaposts-empty kaposts-thread-missing">
+        <svg class="kaposts-empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg>
+        <strong>This post could not be loaded</strong>
+        <span>It may have been removed, or the network may be unreachable.</span>
+      </div>`;
+    if (threadRepliesEl) threadRepliesEl.innerHTML = "";
+  }
+  if (!showThread || !post || !threadRootEl) return;
   const scroller = kapostsScrollEl();
   const previousTop = scroller?.scrollTop || 0;
   // Thread segments are the author's own continuation - they render as a connected section
@@ -1746,7 +1925,10 @@ function renderThread() {
     // Ancestors render as the posts they are - full cells, every action live - connected to the
     // post below by a rail down the avatar column, the way X draws a conversation. Tapping one
     // opens it.
-    const ancestors = fetchedAncestors.get(post.remoteId) || [];
+    // The exact chain from get-thread once it has answered; until then (and for a session post,
+    // which is all it has) the in-memory walk (iOS ancestorChain).
+    const fetched = fetchedAncestors.get(post.remoteId) || [];
+    const ancestors = fetched.length ? fetched : walkAncestorChain(post);
     const ancestorsHtml = ancestors.length
       ? `<div class="kaposts-ancestors">${ancestors
           .map((entry) => `<div class="kaposts-ancestor" data-kaposts-ancestor="${deps.escapeHtml(String(entry.id))}">${postCellHtml(entry, { inThread: true, replyInline: true, truncates: true })}</div>`)
@@ -1756,7 +1938,7 @@ function renderThread() {
     // people's replies it is a conversation, and calling it a thread credits them to the author.
     const isSelfThread = chain.every((segment) => segment.posterAddress === post.posterAddress);
     threadRootEl.innerHTML = ancestorsHtml
-      + postCellHtml(post, { inThread: true, isRoot: true, replyInline: true })
+      + postCellHtml(post, { inThread: true, isRoot: true, replyInline: true, showReply: false })
       + (chain.length ? `
       <div class="kaposts-thread-chain">
         <div class="kaposts-thread-chain-header">${isSelfThread ? "Thread" : "Conversation"} · ${chain.length + 1} posts</div>
@@ -1768,6 +1950,8 @@ function renderThread() {
     // this list - so "no comments yet" would contradict the replies the reader can already see.
     const emptyCommentsHtml = comments.length ? "" : `
       <p class="kaposts-comments-empty">${chain.length ? "Every reply is in the conversation above." : "No comments yet - be the first to reply."}</p>`;
+    for (const key of inlinePagerKeys) clearPagerSentinel(key);
+    inlinePagerKeys.clear();
     threadRepliesEl.innerHTML = `
       <div class="kaposts-comments-header">${comments.length ? `Comments (${comments.length})` : "Comments"}</div>
       ${emptyCommentsHtml}
@@ -1775,19 +1959,21 @@ function renderThread() {
         ${comments.map((comment) => {
           const nested = (comment.comments || []).filter((c) => !isHiddenAuthor(c.posterAddress));
           const expanded = expandedCommentIds.has(comment.id);
-          const state = commentReplyState.get(comment.id);
+          const inlinePager = threadPagers.get(comment.id);
           const hasReplies = (comment.remoteReplyCount || 0) > 0 || nested.length > 0;
-          // Expands in place rather than opening its own thread. The empty case says which it is:
-          // a count that is a whole subtree while get-replies returns direct replies only would
-          // otherwise spin on "Loading" forever.
+          // Expands in place rather than opening its own thread. The empty case says which it is
+          // from the chain's page state - still fetching, failed (with the reason and Retry), or
+          // answered with nothing - since a count that is a whole subtree while get-replies returns
+          // direct replies only would otherwise spin forever (iOS threadRepliesSection). With
+          // replies on screen the chain pages on through its own footer.
           const nestedHtml = !expanded ? "" : `
-            <div class="kaposts-inline-replies">
+            <div class="kaposts-inline-replies" data-kaposts-inline-replies="${deps.escapeHtml(String(comment.id))}">
               ${nested.length
                 ? nested.map((reply) => `<div class="kaposts-thread-reply">${postCellHtml(reply, { inThread: true, replyInline: true })}</div>`).join("")
-                : state === "loading"
-                  ? `<p class="kaposts-inline-note">Loading replies…</p>`
-                  : state === "failed"
-                    ? `<p class="kaposts-inline-note">Could not load replies. <button type="button" class="kaposts-inline-retry" data-kaposts-retry-replies="${deps.escapeHtml(String(comment.id))}">Retry</button></p>`
+                : inlinePager?.loading
+                  ? `<p class="kaposts-inline-note with-spinner"><span class="kaposts-pager-spinner" aria-hidden="true"></span><span>Loading replies...</span></p>`
+                  : inlinePager?.error
+                    ? `<p class="kaposts-inline-note">${deps.escapeHtml(inlinePager.error)} <button type="button" class="kaposts-inline-retry" data-kaposts-retry-replies="${deps.escapeHtml(String(comment.id))}">Retry</button></p>`
                     : `<p class="kaposts-inline-note">No replies</p>`}
             </div>`;
           return `
@@ -1800,6 +1986,17 @@ function renderThread() {
       </div>`;
     const pager = threadPagers.get(post.id);
     mountPagerSentinel("thread", threadRepliesEl, pager, () => loadMoreThreadReplies(post.id));
+    for (const comment of comments) {
+      if (!expandedCommentIds.has(comment.id)) continue;
+      const nested = (comment.comments || []).filter((c) => !isHiddenAuthor(c.posterAddress));
+      const inlinePager = threadPagers.get(comment.id);
+      if (!nested.length || !inlinePager) continue;
+      const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(String(comment.id)) : String(comment.id);
+      const holder = threadRepliesEl.querySelector(`[data-kaposts-inline-replies="${escaped}"]`);
+      const key = `inline-${comment.id}`;
+      inlinePagerKeys.add(key);
+      mountPagerSentinel(key, holder, inlinePager, () => loadMoreCommentReplies(comment.id));
+    }
     // The replies list is rebuilt whole (comment counts and countdowns live in every row),
     // so hold the scroll position explicitly or paging in older replies would jump the view.
     if (scroller) scroller.scrollTop = previousTop;
@@ -1864,6 +2061,9 @@ function toastLabelFor(key) {
 }
 
 const actionToasts = [];
+/** The feed's action toast (check, text, "View" on the explorer), for the app's instant tip
+ *  (iOS KaPostsView showActionToast "Tipped ... to ..."). */
+export function showKaPostsActionToast(text, txId = null) { showActionToast(text, txId); }
 function showActionToast(text, txId = null) {
   const toast = { text, txId };
   actionToasts.push(toast);
@@ -1881,6 +2081,7 @@ function renderToasts() {
   for (const toast of actionToasts) {
     parts.push(`
       <div class="kaposts-toast kaposts-toast-action">
+        <svg class="kaposts-toast-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m7.75 12.25 2.75 2.75 5.75-6"/></svg>
         <span>${deps.escapeHtml(toast.text)}</span>
         ${toast.txId && deps.explorerTxUrl ? `<a class="kaposts-toast-view" href="${deps.escapeHtml(deps.explorerTxUrl(toast.txId))}" target="_blank" rel="noopener">View</a>` : ""}
       </div>`);
@@ -1944,9 +2145,9 @@ function schedulePost(text) {
       const txid = await submitKaPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text) });
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
+      // The red Retry on the card is the whole report (iOS schedulePost): no toast.
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost submit failed: ${error.message}`);
-      deps.showToast?.(`Post failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
@@ -1971,43 +2172,38 @@ function schedulePoll(question, options, lengthMs) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost poll failed: ${error.message}`);
-      deps.showToast?.(`Poll failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
     localPosts = localPosts.filter((p) => p.id !== post.id);
     restoreComposerDraft(question);
-  });
+  }, "Posting poll");
 }
 
-// A vote is one transaction behind the usual 5 s undo; the card shows the choice at once and
-// takes the indexer's numbers once it has counted it.
+// A vote is one transaction behind the usual 5 s undo (iOS votePoll). Nothing changes on the card
+// while it is held - Undo has nothing to put back - and the choice lands once the transaction is
+// on the network, with the usual confirmation toast; the indexer's numbers follow.
 function scheduleVote(post, optionIndex) {
-  if (!post.remoteId || !post.poll) return;
-  const before = { ...post.poll, counts: [...post.poll.counts] };
-  mutatePost(post.id, (p) => {
-    if (!p.poll) return;
-    if (p.poll.myVote != null && p.poll.counts[p.poll.myVote] != null) p.poll.counts[p.poll.myVote] = Math.max(0, p.poll.counts[p.poll.myVote] - 1);
-    else p.poll.total += 1;
-    p.poll.counts[optionIndex] = (p.poll.counts[optionIndex] || 0) + 1;
-    p.poll.myVote = optionIndex;
-  });
-  renderAll();
+  const closed = Boolean(post.poll?.closesAt) && Date.now() >= post.poll.closesAt;
+  if (!post.remoteId || !post.poll || closed || optionIndex >= post.poll.options.length) return;
   scheduleUndoable(`vote:${post.id}`, async () => {
     try {
-      await submitKaPollVote({ engine: deps.engine, pollId: post.remoteId, optionIndex });
-      deps.showToast?.("Vote posted to the network");
+      const txid = await submitKaPollVote({ engine: deps.engine, pollId: post.remoteId, optionIndex });
+      mutatePost(post.id, (p) => {
+        if (!p.poll) return;
+        if (p.poll.myVote != null && p.poll.counts[p.poll.myVote] != null) p.poll.counts[p.poll.myVote] = Math.max(0, p.poll.counts[p.poll.myVote] - 1);
+        else p.poll.total += 1;
+        p.poll.counts[optionIndex] = (p.poll.counts[optionIndex] || 0) + 1;
+        p.poll.myVote = optionIndex;
+      });
+      renderAll();
+      showActionToast("Vote posted to the network", txid);
       refreshPollNumbers(post);
     } catch (error) {
-      mutatePost(post.id, (p) => { p.poll = before; });
       deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
-      deps.showToast?.(`Vote failed: ${userFacingError(error)}`);
       renderAll();
     }
-  }, () => {
-    mutatePost(post.id, (p) => { p.poll = before; });
-    renderAll();
-  }, "Voting");
+  }, null, "Voting");
 }
 
 async function refreshPollNumbers(post) {
@@ -2172,7 +2368,6 @@ async function continueThread(localId) {
   } catch (error) {
     mutatePost(localId, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
     deps.appendEngineLog?.(`KaPost thread submit failed (resumable): ${error.message}`);
-    deps.showToast?.(`Post failed: ${userFacingError(error)}`);
   }
   renderAll();
 }
@@ -2193,7 +2388,6 @@ function scheduleQuote(target, text) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost quote failed: ${error.message}`);
-      deps.showToast?.(`Quote failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
@@ -2203,21 +2397,22 @@ function scheduleQuote(target, text) {
 }
 
 /**
- * Same optimistic-now / submit-after-the-countdown rule as toggleVote. Already reposted means
- * the countdown ends in the fork's `unquote` counter-action, which nets the repost out on the
- * indexer (the chain keeps both transactions) - iOS performUnrepost.
+ * Same countdown-then-act rule as toggleVote (iOS handleRepostAction): nothing changes while the
+ * repost is held - the button turns into the undo capsule - and the state lands with the
+ * transaction once the countdown ends. Already reposted means the countdown ends in the fork's
+ * `unquote` counter-action, which nets the repost out on the indexer (the chain keeps both
+ * transactions) - iOS performUnrepost.
  */
 function scheduleRepost(target) {
   const key = `repost:${target.id}`;
   if (pendingActions.has(key)) { cancelUndoable(key); return; }
   const wasReposted = (findPost(target.id) || target).repostedByMe === true;
-  if (wasReposted) {
-    mutatePost(target.id, (p) => { p.repostedByMe = false; p.reposts = Math.max(0, (p.reposts || 0) - 1); });
-  } else {
-    mutatePost(target.id, (p) => { p.repostedByMe = true; p.reposts = (p.reposts || 0) + 1; });
-  }
-  renderAll();
   scheduleUndoable(key, async () => {
+    mutatePost(target.id, (p) => {
+      if (wasReposted && p.repostedByMe) { p.repostedByMe = false; p.reposts = Math.max(0, (p.reposts || 0) - 1); }
+      else if (!wasReposted && !p.repostedByMe) { p.repostedByMe = true; p.reposts = (p.reposts || 0) + 1; }
+    });
+    renderAll();
     try {
       if (wasReposted) {
         const txid = await submitKaPostUnquote({ engine: deps.engine, contentId: target.remoteId });
@@ -2229,13 +2424,7 @@ function scheduleRepost(target) {
     } catch (error) {
       deps.appendEngineLog?.(`KaPost ${wasReposted ? "unrepost" : "repost"} failed: ${error.message}`);
     }
-  }, () => {
-    if (wasReposted) {
-      mutatePost(target.id, (p) => { p.repostedByMe = true; p.reposts = (p.reposts || 0) + 1; });
-    } else {
-      mutatePost(target.id, (p) => { p.repostedByMe = false; p.reposts = Math.max(0, (p.reposts || 0) - 1); });
-    }
-  }, wasReposted ? "Removing repost" : "Reposting");
+  }, null, wasReposted ? "Removing repost" : "Reposting");
 }
 
 function playVoteBurst(postId, kind) {
@@ -2275,52 +2464,46 @@ function spawnKaspaLogoBurst(anchor) {
 }
 
 /**
- * Like/dislike. The state change is OPTIMISTIC and lands immediately — filled icon, bumped
- * count, burst — on every copy of the post; only the on-chain submit waits out the 5s undo
- * countdown, and Undo reverts the state it applied. Deferring the mutation to the end of the
- * countdown (as this used to) read as a dead button for five seconds, worst of all inside an
- * open thread. Tapping the same button again while the countdown runs cancels it and rolls
- * the state back, exactly like pressing Undo.
+ * Like/dislike, as iOS toggleLike/toggleDislike: the tap holds the action for the 5 s undo and the
+ * button becomes the undo capsule - nothing changes yet, so Undo (or a click on the capsule) has
+ * nothing to put back. When the countdown ends the state lands on every copy of the post (filled
+ * icon, count, the Kaspa-logo burst for a like) and the vote goes on chain. Removing a like from a
+ * post that never reached the network is local and instant.
  */
 function toggleVote(post, kind) {
   const flag = kind === "like" ? "likedByMe" : "dislikedByMe";
-  const other = kind === "like" ? "dislikedByMe" : "likedByMe";
-  const count = kind === "like" ? "likes" : "dislikes";
-  const otherCount = kind === "like" ? "dislikes" : "likes";
   const key = `${kind}:${post.id}`;
   if (pendingActions.has(key)) { cancelUndoable(key); return; }
   const current = findPost(post.id) || post;
   const wasSet = current[flag] === true;
-  const clearedOther = !wasSet && current[other] === true;
+  if (wasSet && !current.remoteId) { performVote(post, kind, wasSet); return; }
+  scheduleUndoable(key, () => performVote(post, kind, wasSet), null, wasSet
+    ? (kind === "like" ? "Removing like" : "Removing dislike")
+    : (kind === "like" ? "Liking" : "Disliking"));
+}
+
+/** The like/dislike landing once its countdown ran out (iOS performLike / performDislike). */
+function performVote(post, kind, wasSet) {
+  const flag = kind === "like" ? "likedByMe" : "dislikedByMe";
+  const other = kind === "like" ? "dislikedByMe" : "likedByMe";
+  const count = kind === "like" ? "likes" : "dislikes";
+  const otherCount = kind === "like" ? "dislikes" : "likes";
+  if (post.remoteId && post.posterPubkey) {
+    const vote = wasSet ? "unvote" : (kind === "like" ? "upvote" : "downvote");
+    submitKaPostVote({ engine: deps.engine, postId: post.remoteId, vote, authorPubkey: post.posterPubkey })
+      .then((txid) => showActionToast(`${kind === "like" ? "Like" : "Dislike"} ${wasSet ? "removed on" : "posted to"} the network`, txid))
+      .catch((error) => deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`));
+  }
   mutatePost(post.id, (p) => {
-    if (wasSet) { p[flag] = false; p[count] = Math.max(0, (p[count] || 0) - 1); }
+    if (p[flag]) { p[flag] = false; p[count] = Math.max(0, (p[count] || 0) - 1); }
     else {
       p[flag] = true; p[count] = (p[count] || 0) + 1;
-      if (clearedOther) { p[other] = false; p[otherCount] = Math.max(0, (p[otherCount] || 0) - 1); }
+      if (p[other]) { p[other] = false; p[otherCount] = Math.max(0, (p[otherCount] || 0) - 1); }
     }
   });
   renderAll();
-  if (!wasSet) playVoteBurst(post.id, kind);
-  scheduleUndoable(key, async () => {
-    if (!post.remoteId || !post.posterPubkey) return;
-    try {
-      const vote = wasSet ? "unvote" : (kind === "like" ? "upvote" : "downvote");
-      const txid = await submitKaPostVote({ engine: deps.engine, postId: post.remoteId, vote, authorPubkey: post.posterPubkey });
-      showActionToast(`${kind === "like" ? "Like" : "Dislike"} ${wasSet ? "removed on" : "posted to"} the network`, txid);
-    } catch (error) {
-      deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
-    }
-  }, () => {
-    mutatePost(post.id, (p) => {
-      if (wasSet) { p[flag] = true; p[count] = (p[count] || 0) + 1; }
-      else {
-        p[flag] = false; p[count] = Math.max(0, (p[count] || 0) - 1);
-        if (clearedOther) { p[other] = true; p[otherCount] = (p[otherCount] || 0) + 1; }
-      }
-    });
-  }, wasSet
-    ? (kind === "like" ? "Removing like" : "Removing dislike")
-    : (kind === "like" ? "Liking" : "Disliking"));
+  // The burst plays when the like actually lands, not on the tap that armed it (iOS).
+  if (!wasSet && kind === "like") playVoteBurst(post.id, kind);
 }
 
 function toggleFollow(post) {
@@ -2342,19 +2525,21 @@ function toggleFollow(post) {
  * view and flashed. It is cleared on every normal open, so a stale target from an earlier
  * landing can never yank a later thread around (iOS pendingThreadScrollRemoteId).
  */
-async function openThread(post, { scrollToRemoteId = null } = {}) {
+async function openThread(post, { scrollToRemoteId = null, ensureComment = null } = {}) {
   rememberFeedScroll();
   pendingThreadScrollRemoteId = scrollToRemoteId;
   // A thread always takes over the viewport: any panel it was opened from waits underneath.
   panelOverThread = false;
   threadStack.push(post.id);
+  // The first page owns the footer while it loads ("Loading more..."), and a failure stays there
+  // with "Tap to retry" (iOS loadThreadReplies(reset: true) through the thread's page state).
+  const pager = post.remoteId ? makePager({ pageSize: PAGER_THREAD_PAGE_SIZE }) : null;
+  if (pager) { pager.loading = true; threadPagers.set(post.id, pager); }
   renderThread();
   // The real chain above this post, not just the levels you happened to tap through.
   loadAncestorsFor(post);
   if (!post.remoteId) return;
   const generation = ++threadGeneration;
-  const pager = makePager({ pageSize: PAGER_THREAD_PAGE_SIZE });
-  threadPagers.set(post.id, pager);
   try {
     const result = await fetchReplies({ engine: deps.engine, postId: post.remoteId, limit: PAGER_THREAD_PAGE_SIZE });
     if (generation !== threadGeneration) return;
@@ -2365,7 +2550,13 @@ async function openThread(post, { scrollToRemoteId = null } = {}) {
       // is not "local" - it is remembered by id and kept on top until the server returns it.
       const kept = p.comments.filter((c) => (!c.remoteId || sessionReplyIds.has(c.remoteId)) && !replies.some((r) => r.remoteId === c.remoteId));
       p.comments = [...kept, ...replies];
+      // The reply a notification was tapped FOR: the indexer can lag the push by seconds, so a
+      // brand-new reply is spliced in when the page came back without it (iOS openDetail
+      // ensureComment) - the landing scroll then has something to land on.
+      const ensuredId = ensureComment?.remoteId;
+      if (ensuredId && !p.comments.some((c) => c.remoteId === ensuredId)) p.comments = [...p.comments, ensureComment];
     });
+    if (ensureComment) resolvePosterIdentities([ensureComment.posterAddress], () => renderThread());
     renderThread();
     resolvePosterIdentities(replies.map((reply) => reply.posterAddress), () => {
       if (threadStack[threadStack.length - 1] === post.id) renderThread();
@@ -2375,7 +2566,8 @@ async function openThread(post, { scrollToRemoteId = null } = {}) {
     if (generation === threadGeneration) renderThread();
   } catch (error) {
     if (generation !== threadGeneration) return;
-    pager.hasMore = false;
+    pager.loading = false;
+    pager.error = userFacingError(error);
     deps.appendEngineLog?.(`KaPost replies load failed: ${error.message}`);
     renderThread();
   }
@@ -2441,20 +2633,13 @@ async function submitReply(parent, text) {
   }, () => {
     mutatePost(parent.id, (p) => { p.comments = p.comments.filter((c) => c.id !== comment.id); });
     renderThread();
-    // Back where it was written: the inline box when it answered the open post, the composer
-    // when it answered one of the replies.
-    const topId = threadStack[threadStack.length - 1];
-    if (replyInput && parent.id === topId) {
-      replyInput.value = text;
-      replyInput.dispatchEvent(new Event("input", { bubbles: true }));
-      replyInput.focus();
-    } else {
-      openComposer(null, { replyTarget: parent });
-      if (composerInput) {
-        composerInput.value = text;
-        composerInput.dispatchEvent(new Event("input", { bubbles: true }));
-        composerInput.focus();
-      }
+    // An undone reply reopens the reply composer with its parent attached and the words still in
+    // it, wherever it was written - the pinned box or the composer (iOS restoreDraft).
+    openComposer(null, { replyTarget: parent });
+    if (composerInput && !composerEl.hidden) {
+      composerInput.value = text;
+      composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+      composerInput.focus();
     }
   });
 }
@@ -2467,16 +2652,28 @@ function retryPost(post) {
   }
   mutatePost(post.id, (p) => { p.delivery = "pending"; });
   renderAll();
+  // A failed REPLY goes out again as a reply to the post it answers (iOS retryPost resolves the
+  // parent); re-sending it as a top-level post would put a stray answer in the feed.
+  const parent = findParentOf(post.id);
   (async () => {
     try {
-      const txid = post.quoted?.remoteId && post.quoted?.posterPubkey
-        ? await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey })
-        : await submitKaPost({ engine: deps.engine, text: post.text, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
+      let txid;
+      if (parent) {
+        if (!parent.remoteId) throw new Error("The post this replies to is not on the network yet.");
+        txid = await submitKaPostReply({
+          engine: deps.engine, text: post.text, postId: parent.remoteId, parentAuthorPubkey: parent.posterPubkey,
+          mentionedPubkeys: await mentionedPubkeysFor(post.text),
+        });
+        sessionReplyIds.add(txid);
+      } else if (post.quoted?.remoteId && post.quoted?.posterPubkey) {
+        txid = await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey });
+      } else {
+        txid = await submitKaPost({ engine: deps.engine, text: post.text, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
+      }
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost retry failed: ${userFacingError(error)}`);
-      deps.showToast?.(`Post failed: ${userFacingError(error)}`);
     }
     renderAll();
   })();
@@ -2490,8 +2687,10 @@ function retryPost(post) {
 // first character, orange with a live remaining count in the final 10%, red at the wall.
 function updateMeter(input, meter, submit = null) {
   const limit = KAPOSTS_POST_CHARACTER_LIMIT;
-  if (input.value.length > limit) input.value = input.value.slice(0, limit);
-  const count = input.value.length;
+  // Counted in characters as the reader sees them (code points, so an emoji is one), as iOS
+  // counts `text.count` - not UTF-16 units, which charged an emoji twice.
+  if (input.value.length > limit && kapostsCharCount(input.value) > limit) input.value = kapostsClampChars(input.value, limit);
+  const count = kapostsCharCount(input.value);
   const remaining = limit - count;
   const progress = Math.min(1, count / limit);
   const nearLimit = progress >= 0.9;
@@ -2507,6 +2706,8 @@ function updateMeter(input, meter, submit = null) {
     </svg>`;
   if (submit) submit.disabled = input.value.trim().length === 0;
   if (input === composerInput) scheduleComposerFeeEstimate();
+  // The pinned reply box's arrow is grey and inert while there is nothing to send (iOS).
+  if (input === replyInput && replySend) replySend.disabled = input.value.trim().length === 0;
 }
 
 // Live network-fee estimate while typing (Settings > Show Fee Estimate), matching the chat
@@ -2567,14 +2768,23 @@ function renderComposerThreadUi() {
   // The + appears once you type, and never while quoting or replying - both are one post about
   // one other post, so neither stacks into a thread.
   if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || Boolean(composerEditTarget) || !trimmed || Boolean(composerPoll) || composerScheduleAt != null;
-  if (composerTitle && !composerQuoteTarget && !composerReplyTarget) {
-    composerTitle.textContent = composerThreadSegments.length ? "New Thread" : "New Post";
+  // iOS KaPostComposerView's header: an edit is "Edit Post" / "Save" whatever it edits, a reply
+  // "Reply to Post" / "Reply", a quote "Quote Post"; this runs on every keystroke, so each mode
+  // has to win here or the next render resets it.
+  if (composerTitle) {
+    composerTitle.textContent = composerEditTarget ? "Edit Post"
+      : composerReplyTarget ? "Reply to Post"
+        : composerQuoteTarget ? "Quote Post"
+          : (composerThreadSegments.length ? "New Thread" : "New Post");
   }
   if (composerSubmit) {
-    // Reply mode keeps its own wording: this runs on every keystroke, and would otherwise reset
-    // the button to "Post" the moment anything re-rendered the composer.
-    composerSubmit.textContent = composerReplyTarget ? "Reply" : (total > 1 ? `Post All (${total})` : composerScheduleAt != null ? "Schedule" : composerPoll ? "Post Poll" : "Post");
-    composerSubmit.disabled = total === 0;
+    composerSubmit.textContent = composerEditTarget ? "Save"
+      : composerReplyTarget ? "Reply"
+        : composerPoll ? "Post Poll"
+          : composerScheduleAt != null ? "Schedule"
+            : (total > 1 ? `Post All (${total})` : "Post");
+    // A poll posts only with its question and two to four valid options (iOS canPost).
+    composerSubmit.disabled = composerPoll ? !(trimmed && pollEditorValid()) : total === 0;
   }
   if (composerInput) {
     composerInput.placeholder = composerReplyTarget
@@ -2590,19 +2800,9 @@ function renderComposerThreadUi() {
 function restoreComposerDraft(text, { quoted = null, segments = [] } = {}) {
   const value = String(text || "");
   if (!value.trim()) return;
+  // Straight back into the composer, as iOS restoreDraft does: the zero-balance gate guards the
+  // create-post button, not the way back to writing already done.
   openComposer(quoted);
-  // openComposer refuses to open on a confirmed-zero chatting balance (it shows the funding gate
-  // instead). Undo must not be the thing that loses the writing, so keep it as a draft.
-  if (composerEl.hidden) {
-    kapostDrafts = [{
-      id: nowId(), text: value, threadSegments: [...segments],
-      quotedRemoteId: quoted?.remoteId || null, savedAt: Date.now(),
-    }, ...kapostDrafts];
-    saveDrafts();
-    deps.showToast?.("Saved as a draft");
-    renderAll();
-    return;
-  }
   composerThreadSegments = [...segments];
   composerInput.value = value;
   composerInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2624,22 +2824,17 @@ function autoGrowReply() {
   replyInput.style.height = `${Math.min(replyInput.scrollHeight, REPLY_MAX_HEIGHT_PX)}px`;
 }
 
+// The zero-balance gate lives on the create-post button (iOS createPostButton) and on the
+// thread's pinned reply box - not here: a reply or quote composer, an edit, a reopened draft and
+// an undone post all open as they are.
 function openComposer(quoteTarget = null, { replyTarget = null, editTarget = null } = {}) {
   editingDraftId = null;
   composerEditTarget = editTarget;
-  // Posting costs KAS — with a confirmed-zero chatting balance, show the funding
-  // popup (QR + address + copy) instead of a composer that could never submit.
-  if (deps.isChattingBalanceZero?.()) {
-    deps.showFundingGate?.();
-    return;
-  }
   // Replying is a composer now, not a bar under the thread: the whole screen to write in, with
   // the post being answered rendered below - the same card a quote shows.
   composerReplyTarget = replyTarget;
   quoteTarget = replyTarget || quoteTarget;
   composerQuoteTarget = replyTarget ? null : quoteTarget;
-  composerTitle.textContent = editTarget ? (editTarget.parentRemoteId ? "Edit Comment" : "Edit Post") : replyTarget ? "Reply to Post" : (quoteTarget ? "Quote Post" : "New Post");
-  if (composerSubmit) composerSubmit.textContent = editTarget ? "Save" : replyTarget ? "Reply" : "Post";
   if (composerInput) composerInput.placeholder = replyTarget ? "Post your reply" : quoteTarget ? "Add a comment" : "What's happening on Kaspa?";
   // Edit mode opens on the post's current text (no threading, no draft prompt on close).
   composerInput.value = editTarget ? editTarget.text : "";
@@ -2648,8 +2843,10 @@ function openComposer(quoteTarget = null, { replyTarget = null, editTarget = nul
   composerThreadSegments = [];
   if (quoteTarget) {
     composerQuote.hidden = false;
+    // The post this composer is about, five lines of it, with who wrote it and when (iOS
+    // quotedPostCard).
     composerQuote.innerHTML = `
-      ${quoteCardHeadHtml(quoteTarget)}
+      ${quoteCardHeadHtml(quoteTarget, { withTime: true })}
       <span>${markdownPreviewHtml(quoteTarget.text)}</span>`;
   } else {
     composerQuote.hidden = true;
@@ -2663,21 +2860,42 @@ function openComposer(quoteTarget = null, { replyTarget = null, editTarget = nul
   composerInput.focus();
 }
 
-// Poll and Schedule (iOS 3b1aecf) belong to a plain new post: never to a reply, a quote, an
-// edit or a thread.
+// Poll and Schedule (iOS 3b1aecf extrasAvailable) belong to a plain new post: never to a reply, a
+// quote, an edit, a thread - or a reopened draft, whose composer iOS opens without them.
 function composerExtrasAllowed() {
-  return !composerQuoteTarget && !composerReplyTarget && !composerEditTarget && composerThreadSegments.length === 0;
+  return !composerQuoteTarget && !composerReplyTarget && !composerEditTarget && !editingDraftId
+    && composerThreadSegments.length === 0;
 }
+
+/// "Sep 24, 2026 at 9:27 AM" style, as iOS DateFormatter.localizedString(.medium, .short).
+function scheduleWhenText(ms) {
+  return new Date(ms).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
 function renderComposerExtras() {
   const pollEditor = document.querySelector("[data-kaposts-poll-editor]");
-  const scheduleEditor = document.querySelector("[data-kaposts-schedule-editor]");
+  const scheduleRow = document.querySelector("[data-kaposts-schedule-editor]");
   const pollToggle = document.querySelector("[data-kaposts-poll-toggle]");
   const scheduleToggle = document.querySelector("[data-kaposts-schedule-toggle]");
   const allowed = composerExtrasAllowed();
-  if (pollToggle) { pollToggle.hidden = !allowed || Boolean(composerPoll); }
-  if (scheduleToggle) { scheduleToggle.hidden = !allowed || Boolean(composerPoll) || composerScheduleAt != null; }
+  // iOS extrasRow: both chips stay while extras are allowed. Poll toggles to a filled "Remove
+  // poll"; Schedule reads "Reschedule" (filled) once a time is set, and is dimmed and disabled
+  // while a poll is on.
+  if (pollToggle) {
+    pollToggle.hidden = !allowed;
+    pollToggle.classList.toggle("filled", Boolean(composerPoll));
+    const label = pollToggle.querySelector("span");
+    if (label) label.textContent = composerPoll ? "Remove poll" : "Poll";
+  }
+  if (scheduleToggle) {
+    scheduleToggle.hidden = !allowed;
+    scheduleToggle.disabled = Boolean(composerPoll);
+    scheduleToggle.classList.toggle("filled", composerScheduleAt != null);
+    const label = scheduleToggle.querySelector("span");
+    if (label) label.textContent = composerScheduleAt != null ? "Reschedule" : "Schedule";
+  }
   if (pollEditor) {
-    pollEditor.hidden = !composerPoll;
+    pollEditor.hidden = !(allowed && composerPoll);
     if (composerPoll) {
       const list = pollEditor.querySelector("[data-kaposts-poll-options]");
       if (list) {
@@ -2693,28 +2911,65 @@ function renderComposerExtras() {
       if (length) length.value = String(composerPoll.lengthMs);
     }
   }
-  if (scheduleEditor) {
-    scheduleEditor.hidden = composerScheduleAt == null;
-    const input = scheduleEditor.querySelector("[data-kaposts-schedule-input]");
-    if (input && composerScheduleAt != null) {
-      const d = new Date(composerScheduleAt);
-      const pad = (n) => String(n).padStart(2, "0");
-      input.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-      const min = new Date(Date.now() + KAPOSTS_SCHEDULE_MIN_MS);
-      input.min = `${min.getFullYear()}-${pad(min.getMonth() + 1)}-${pad(min.getDate())}T${pad(min.getHours())}:${pad(min.getMinutes())}`;
-    }
+  if (scheduleRow) {
+    scheduleRow.hidden = !(allowed && composerScheduleAt != null);
+    const label = scheduleRow.querySelector("[data-kaposts-schedule-label]");
+    if (label) label.textContent = composerScheduleAt != null ? `Scheduled for ${scheduleWhenText(composerScheduleAt)}` : "";
   }
-  if (composerSubmit && !composerEditTarget && !composerReplyTarget) {
-    composerSubmit.textContent = composerScheduleAt != null ? "Schedule" : composerPoll ? "Post Poll" : "Post";
-  }
+  renderComposerThreadUi();
+}
+
+/// The options a poll would post: trimmed, the empty ones left out (iOS validPollOptions).
+function validPollOptions() {
+  return (composerPoll?.options || []).map((o) => String(o || "").trim()).filter(Boolean);
 }
 function pollEditorValid() {
   if (!composerPoll) return true;
-  const options = composerPoll.options.map((o) => String(o || "").trim());
+  const options = validPollOptions();
   if (options.length < KAPOSTS_POLL_MIN_OPTIONS || options.length > KAPOSTS_POLL_MAX_OPTIONS) return false;
   // XP-007: counted in Unicode scalars, as the indexer counts them (not UTF-16 `length`).
-  if (options.some((o) => !o || pollOptionLength(o) > KAPOSTS_POLL_OPTION_MAX_LENGTH)) return false;
+  if (options.some((o) => pollOptionLength(o) > KAPOSTS_POLL_OPTION_MAX_LENGTH)) return false;
   return new Set(options).size === options.length;
+}
+
+// --- Schedule picker (iOS extrasRow's sheet): a time 5 minutes to 30 days out ---------------
+function scheduleSheetEl() { return document.querySelector("[data-kaposts-schedule-sheet]"); }
+function localInputValue(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function scheduleSheetPick() {
+  const input = scheduleSheetEl()?.querySelector("[data-kaposts-schedule-input]");
+  const when = input ? new Date(input.value).getTime() : NaN;
+  if (!Number.isFinite(when)) return null;
+  // Clamped into the picker's range, as the iOS DatePicker's `in:` range clamps.
+  const now = Date.now();
+  return Math.min(now + KAPOSTS_SCHEDULE_MAX_MS, Math.max(now + KAPOSTS_SCHEDULE_MIN_MS, when));
+}
+function syncScheduleSheetButton() {
+  const sheet = scheduleSheetEl();
+  const confirm = sheet?.querySelector("[data-kaposts-schedule-confirm]");
+  if (!confirm) return;
+  const pick = scheduleSheetPick();
+  confirm.textContent = pick != null ? `Schedule for ${scheduleWhenText(pick)}` : "Schedule";
+  confirm.disabled = pick == null;
+}
+function openScheduleSheet() {
+  const sheet = scheduleSheetEl();
+  const input = sheet?.querySelector("[data-kaposts-schedule-input]");
+  if (!sheet || !input) return;
+  const now = Date.now();
+  input.min = localInputValue(now + KAPOSTS_SCHEDULE_MIN_MS);
+  input.max = localInputValue(now + KAPOSTS_SCHEDULE_MAX_MS);
+  input.value = localInputValue(composerScheduleAt ?? now + 60 * 60 * 1000);
+  syncScheduleSheetButton();
+  sheet.hidden = false;
+  input.focus();
+}
+function closeScheduleSheet() {
+  const sheet = scheduleSheetEl();
+  if (sheet) sheet.hidden = true;
 }
 
 async function closeComposer({ keepDraft = null } = {}) {
@@ -2739,6 +2994,7 @@ async function closeComposer({ keepDraft = null } = {}) {
   }
   if (save) saveDraftFromComposer();
 
+  closeScheduleSheet();
   composerEl.hidden = true;
   composerPoll = null;
   composerScheduleAt = null;
@@ -2758,22 +3014,25 @@ async function closeComposer({ keepDraft = null } = {}) {
 // the old text. The green check counts from the edit landing.
 function scheduleEdit(post, text) {
   const previous = post.text;
-  const next = String(text || "");
-  if (!post.remoteId || next === previous) return;
-  mutatePost(post.id, (p) => { p.text = next; });
+  const previousEditedAt = post.editedAt ?? null;
+  const next = String(text || "").trim();
+  if (!post.remoteId || !next || next === previous) return;
+  // Shown at once as an edit in flight (iOS editPost): the new text, "· edited" and the spinner.
+  // Undo, or a failed transaction, puts the text and its edited state back exactly.
+  const restore = (p) => { p.text = previous; p.editedAt = previousEditedAt; p.delivery = "sent"; };
+  mutatePost(post.id, (p) => { p.text = next; p.editedAt = Date.now(); p.delivery = "pending"; });
   renderAll();
   scheduleUndoable(`edit:${post.id}`, async () => {
     try {
       await submitKaPostEdit({ engine: deps.engine, postId: post.remoteId, text: next, mentionedPubkeys: await mentionedPubkeysFor(next) });
-      mutatePost(post.id, (p) => { p.editedAt = Date.now(); p.sentAt = Date.now(); p.delivery = "sent"; });
+      mutatePost(post.id, (p) => { p.sentAt = Date.now(); p.delivery = "sent"; });
     } catch (error) {
-      mutatePost(post.id, (p) => { p.text = previous; });
+      mutatePost(post.id, restore);
       deps.appendEngineLog?.(`KaPost edit failed: ${error.message}`);
-      deps.showToast?.(`Edit failed: ${userFacingError(error)}`);
     }
     renderAll();
   }, () => {
-    mutatePost(post.id, (p) => { p.text = previous; });
+    mutatePost(post.id, restore);
     renderAll();
   }, "Saving edit");
 }
@@ -2782,18 +3041,22 @@ function scheduleEdit(post, text) {
 // Undo just lifts it - then the delete goes on chain and the post leaves every list and
 // comment tree; deleting the post an open thread is about closes the thread.
 function scheduleDelete(post) {
-  if (!post.remoteId) return;
+  if (!post.remoteId || post.delivery !== "sent" || post.pendingDeletion) return;
+  // The card stays dimmed until the delete is on chain (iOS pendingDeletion); the post leaving
+  // every list is the whole confirmation, and a failed delete just lifts the dim.
+  mutatePost(post.id, (p) => { p.pendingDeletion = true; });
   scheduleUndoable(`delete:${post.id}`, async () => {
     try {
       await submitKaPostDelete({ engine: deps.engine, postId: post.remoteId });
       removePostEverywhere(post);
-      deps.showToast?.(post.parentRemoteId ? "Comment deleted" : "Post deleted");
     } catch (error) {
+      mutatePost(post.id, (p) => { p.pendingDeletion = false; });
       deps.appendEngineLog?.(`KaPost delete failed: ${error.message}`);
-      deps.showToast?.(`Delete failed: ${userFacingError(error)}`);
     }
     renderAll();
-  }, null, post.parentRemoteId ? "Deleting comment" : "Deleting post");
+  }, () => {
+    mutatePost(post.id, (p) => { p.pendingDeletion = false; });
+  }, "Deleting post");
 }
 
 function removePostEverywhere(post) {
@@ -2869,10 +3132,74 @@ function closePanel() {
   restoreFeedScroll();
 }
 
+// Outline paths for the side-menu panels' empty states and row marks, standing in for the SF
+// Symbols iOS uses there (KaPostsView.swift profileFeedPage / KaPostsFollowListView /
+// KaPostsNotificationsView / moderationSheet / scheduledSheet / bookmarksSheet).
+const PANEL_ICONS = {
+  compose: "m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10", // square.and.pencil
+  bubble: "M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z", // bubble.left
+  idCard: "M15 9h3.75M15 12h3.75M15 15h3.75M4.5 19.5h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Zm6-10.125a1.875 1.875 0 1 1-3.75 0 1.875 1.875 0 0 1 3.75 0Zm1.294 6.336a6.721 6.721 0 0 1-3.17.789 6.721 6.721 0 0 1-3.168-.789 3.376 3.376 0 0 1 6.338 0Z", // person.text.rectangle
+  personPlus: "M19 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM4 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 10.374 21c-2.331 0-4.512-.645-6.374-1.766Z", // person.badge.plus
+  people: "M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z", // person.2
+  bell: "M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0", // bell
+  bookmark: "M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z", // bookmark
+  speakerSlash: "M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z", // speaker.slash
+  handRaised: "M10.05 4.575a1.575 1.575 0 1 0-3.15 0v3m3.15-3v-1.5a1.575 1.575 0 0 1 3.15 0v1.5m-3.15 0 .075 5.925m3.075.75V4.575m0 0a1.575 1.575 0 0 1 3.15 0V15M6.9 7.575a1.575 1.575 0 1 0-3.15 0v8.175a6.75 6.75 0 0 0 6.75 6.75h2.018a5.25 5.25 0 0 0 3.712-1.538l1.732-1.732a5.25 5.25 0 0 0 1.538-3.712l.003-2.024a.668.668 0 0 1 .198-.471 1.575 1.575 0 1 0-2.228-2.228 3.818 3.818 0 0 0-1.12 2.687M6.9 7.575V12m6.27 4.318A4.49 4.49 0 0 1 16.35 15m.002 0h-.002", // hand.raised
+  clock: "M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", // clock
+  computer: "M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25", // iphone: "held on this device"
+  checkCircle: "M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", // checkmark.circle.fill
+  alertCircle: "M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z", // exclamationmark.circle.fill
+  xCircle: "m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", // xmark.circle
+  chevron: "m8.25 4.5 7.5 7.5-7.5 7.5", // chevron.right
+};
+
+/** iOS's empty-state stack: a large secondary icon, a headline, then the optional body line. */
+function panelEmptyHtml(icon, title, body = null) {
+  return `<div class="no-results-card kaposts-empty">`
+    + (PANEL_ICONS[icon] ? `<svg class="kaposts-empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS[icon]}"/></svg>` : "")
+    + `<strong>${deps.escapeHtml(title)}</strong>`
+    + (body ? `<span>${deps.escapeHtml(body)}</span>` : "")
+    + `</div>`;
+}
+
+// The panels iOS gives a pull-to-refresh: a profile, Followers / Following, Notifications and
+// Scheduled. A mouse has no pull gesture, so the header's refresh button stands in for it.
+function panelHasRefresh(panel) {
+  return panel?.type === "profile" || panel?.type === "followList" || panel?.type === "notifications"
+    || (panel?.type === "list" && panel.kind === "scheduled");
+}
+
+function ensurePanelRefreshButton() {
+  if (panelRefreshEl || !panelEl) return panelRefreshEl;
+  const header = panelEl.querySelector(".kaposts-thread-header");
+  if (!header) return null;
+  panelRefreshEl = document.createElement("button");
+  panelRefreshEl.type = "button";
+  panelRefreshEl.className = "kaposts-feed-refresh kaposts-panel-refresh";
+  panelRefreshEl.setAttribute("aria-label", "Refresh");
+  panelRefreshEl.title = "Refresh";
+  panelRefreshEl.hidden = true;
+  panelRefreshEl.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>`;
+  panelRefreshEl.addEventListener("click", () => refreshActivePanel());
+  header.appendChild(panelRefreshEl);
+  return panelRefreshEl;
+}
+
+function refreshActivePanel() {
+  const panel = activePanel;
+  if (!panelHasRefresh(panel)) return;
+  if (panel.type === "profile") refreshProfilePanel(panel);
+  else if (panel.type === "followList") refreshFollowList(panel);
+  else if (panel.type === "notifications") loadNotificationsFirstPage(panel);
+  else if (panel.type === "list" && panel.kind === "scheduled") refreshScheduledPanel(panel);
+}
+
 function renderPanel() {
   const show = Boolean(activePanel);
   syncSurfaces(currentThreadPost());
   if (!show) clearPanelPagerSentinels();
+  const refreshButton = ensurePanelRefreshButton();
+  if (refreshButton) refreshButton.hidden = !show || !panelHasRefresh(activePanel);
   if (!show || !panelBodyEl) return;
   const panel = activePanel;
   // Panels rebuild their body wholesale (hero, tab bar and rows share one template), so the
@@ -2915,12 +3242,15 @@ function renderPanel() {
         <div class="kaposts-profile-row">
           ${posterAvatarHtml(address)}
           <div class="kaposts-profile-meta">
+            ${/* iOS myProfileSheet / posterProfileSheet order: name, counts, bio, then (own
+                 profile only) the Edit KaChat Profile capsule. Counts read 0 until they load. */ ""}
             <strong>${deps.escapeHtml(posterName(address))}</strong>
-            ${profile.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
             <span class="kaposts-profile-counts">
-              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${isMine ? prefs.following.filter((a) => a !== address).length : (panel.details?.followingCount ?? "--")}</b> Following</button>&nbsp;&nbsp;
-              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? "--"}</b> Followers</button>
+              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="following"${panel.pubkey ? "" : " disabled"}><b>${isMine ? prefs.following.filter((a) => a !== address).length : (panel.details?.followingCount ?? 0)}</b> Following</button>&nbsp;&nbsp;
+              <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? 0}</b> Followers</button>
             </span>
+            ${profile.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
+            ${isMine ? `<button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.idCard}"/></svg>Edit KaChat Profile</button>` : ""}
           </div>
           ${!isMine ? `<span class="kaposts-profile-actions">
             <button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-profile-follow>${isFollowing ? "Following" : "Follow"}</button>
@@ -2930,7 +3260,6 @@ function renderPanel() {
             </button>
           </span>` : ""}
         </div>
-        ${isMine ? `<button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns>Edit KaChat Profile</button>` : ""}
       </div>
       <div class="kaposts-feed-tabs kaposts-profile-tabs">
         <button class="kaposts-feed-tab${panel.tab !== "replies" ? " active" : ""}" type="button" data-kaposts-profile-tab="posts">Posts</button>
@@ -2940,7 +3269,11 @@ function renderPanel() {
         ${panel.loading && feedItems.length === 0
           ? `<div class="kaposts-feed-status">Loading…</div>`
           : feedItems.length === 0
-            ? `<div class="no-results-card"><strong>${panel.tab === "replies" ? "No replies yet" : "No posts yet"}</strong>${isMine ? `<span>${panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here."}</span>` : ""}</div>`
+            ? panelEmptyHtml(
+                panel.tab === "replies" ? "bubble" : "compose",
+                panel.tab === "replies" ? "No replies yet" : "No posts yet",
+                isMine ? (panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here.") : null,
+              )
             : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
       </div>`;
     // The whole banner at the full width, at its own proportions (iOS c66bfc7).
@@ -2968,7 +3301,7 @@ function renderPanel() {
       panel.loading && items.length === 0
       ? `<div class="kaposts-feed-status">Loading…</div>`
       : items.length === 0
-        ? `<div class="no-results-card"><strong>Nothing yet</strong><span>When someone likes, replies to or shares your posts, it shows up here.</span></div>`
+        ? panelEmptyHtml("bell", "Nothing yet", "When someone likes, replies to or shares your posts, it shows up here.")
         : items.map((item) => `
             <div class="kaposts-notification-row openable" data-kaposts-notification="${deps.escapeHtml(item.id)}">
               <span class="kaposts-notification-avatar">
@@ -2980,6 +3313,7 @@ function renderPanel() {
                 ${item.snippet ? `<span class="kaposts-notification-snippet">${deps.escapeHtml(item.snippet)}</span>` : ""}
                 <span class="kaposts-cell-time">${deps.escapeHtml(formatRelativeTime(item.timestamp))}</span>
               </div>
+              <svg class="kaposts-search-chevron kaposts-notification-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.chevron}"/></svg>
             </div>`).join("")
     }</div>`;
     mountPagerSentinel(
@@ -3065,15 +3399,18 @@ function renderPanel() {
       panel.loading && rows.length === 0
         ? `<div class="kaposts-feed-status">Loading…</div>`
         : rows.length === 0
-          ? `<div class="no-results-card"><strong>${panel.mode === "followers" ? "No followers yet" : "Not following anyone yet"}</strong><span>${panel.mode === "followers" ? "When someone follows you, they'll show up here." : "Accounts you follow will show up here."}</span></div>`
+          ? (panel.mode === "followers"
+            ? panelEmptyHtml("people", "No followers yet", "When someone follows you, they'll show up here.")
+            : panelEmptyHtml("personPlus", "Not following anyone yet", "Accounts you follow will show up here."))
           : rows.map((row) => {
               const isMe = row.address === deps.engine.address;
               const isFollowing = prefs.following.includes(row.address);
               // Unfollow in the Following list; Follow Back (or Unfollow) in the Followers list.
               // Rows stay in place after a toggle so it's reversible.
               const label = isFollowing ? "Unfollow" : (panel.mode === "followers" ? "Follow Back" : "Follow");
+              // The row itself does nothing (iOS entryRow has no tap); only its button acts.
               return `
-              <div class="kaposts-notification-row openable" data-kaposts-follow-list-row data-address="${deps.escapeHtml(row.address)}" data-pubkey="${deps.escapeHtml(row.pubkey || "")}">
+              <div class="kaposts-notification-row">
                 ${posterAvatarHtml(row.address)}
                 <div class="kaposts-notification-main">
                   <span><strong>${deps.escapeHtml(posterName(row.address))}</strong></span>
@@ -3083,6 +3420,10 @@ function renderPanel() {
               </div>`;
             }).join("")
     }</div>`;
+    // Endless scroll on the server list (iOS KaPostsFollowListView: trigger row + load-more footer).
+    if (rows.length > 0) {
+      mountPagerSentinel("followList", panelBodyEl.querySelector("[data-kaposts-panel-list]"), panel.pager, loadMoreFollowList);
+    }
     restorePanelScroll();
     return;
   }
@@ -3095,11 +3436,21 @@ function renderPanel() {
       // Bookmarks are a local flag on already-loaded posts — the indexer has no bookmark
       // endpoint and no cursor to follow, so this list grows as the feed pages in rather
       // than paging itself.
-      const bookmarks = allPostLists().filter((p) => p.bookmarkedByMe && !isHiddenAuthor(p.posterAddress))
-        .sort((a, b) => b.timestamp - a.timestamp);
+      const bookmarks = bookmarkedPostsAndComments();
       panelBodyEl.innerHTML = bookmarks.length === 0
-        ? `<div class="no-results-card"><strong>No bookmarks yet</strong><span>Tap the bookmark on any post to save it here.</span></div>`
+        ? panelEmptyHtml("bookmark", "No bookmarks yet", "Tap the bookmark on any post to save it here.")
         : bookmarks.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("");
+      // iOS bookmarksSheet: the card tap stays inert and the name/avatar open nothing
+      // (onOpenProfile: {}); the post's own buttons and a quoted post's embed still work.
+      panelBodyEl.querySelectorAll(".kaposts-cell").forEach((cell) => {
+        cell.classList.remove("openable");
+        cell.removeAttribute("data-kaposts-open-remote");
+        cell.removeAttribute("data-kaposts-open");
+        cell.querySelectorAll("[data-kaposts-profile]").forEach((tap) => {
+          tap.removeAttribute("data-kaposts-profile");
+          tap.classList.remove("kaposts-avatar-tap");
+        });
+      });
       restorePanelScroll();
       return;
     }
@@ -3111,14 +3462,19 @@ function renderPanel() {
     if (panel.kind === "scheduled") {
       panelBodyEl.innerHTML = scheduledPanelHtml();
       restorePanelScroll();
-      if (!panel.refreshed) { panel.refreshed = true; refreshScheduledFromServer().then(() => { if (activePanel === panel) renderPanel(); }); }
+      if (!panel.refreshed) { panel.refreshed = true; refreshScheduledPanel(panel); }
       return;
     }
-    const addresses = panel.kind === "muted" ? prefs.muted : prefs.blocked;
+    // Sorted, as iOS moderationSheet lists them (`.sorted()`).
+    const addresses = [...(panel.kind === "muted" ? prefs.muted : prefs.blocked)].sort();
     panelBodyEl.innerHTML = addresses.length === 0
-      ? `<div class="no-results-card"><strong>No ${panel.kind} accounts</strong><span>${panel.kind === "muted"
-          ? "Accounts you mute disappear from your feeds but can still interact with you."
-          : "Blocked accounts are removed everywhere and can't interact with you."}</span></div>`
+      ? panelEmptyHtml(
+          panel.kind === "muted" ? "speakerSlash" : "handRaised",
+          `No ${panel.kind} accounts`,
+          panel.kind === "muted"
+            ? "Accounts you mute disappear from your feeds but can still interact with you."
+            : "Blocked accounts are removed everywhere and can't interact with you.",
+        )
       : addresses.map((address) => `
           <div class="kaposts-notification-row">
             ${posterAvatarHtml(address)}
@@ -3171,7 +3527,9 @@ function loadMoreSearch() {
   const known = new Set(panel.scanned.map((post) => post.remoteId));
   return runPager(panel.pager, {
     fetchPage: async (before, limit) => {
-      const result = await fetchFeedPage(before, limit);
+      // Always the global feed, whichever feed tab is showing (iOS KaPostsSearchView pages
+      // fetchGlobalFeed): searching from Following must not search only the people you follow.
+      const result = await fetchGlobalFeed({ engine: deps.engine, limit, before });
       return { items: result.posts, pagination: result.pagination };
     },
     absorb: (fresh) => {
@@ -3240,11 +3598,12 @@ function renderSearchPanel(panel) {
   if (!panelBodyEl.querySelector("[data-kaposts-search-root]")) {
     panelBodyEl.innerHTML = `
       <div class="kaposts-search-root" data-kaposts-search-root>
+        ${/* iOS: the search field sits in the navigation bar drawer, above the Posts | People picker. */ ""}
+        <input class="kaposts-search-input" type="search" data-kaposts-search-input placeholder="Posts and people" autocomplete="off" spellcheck="false" />
         <div class="kaposts-search-scope" role="tablist">
           <button type="button" data-kaposts-search-scope="posts">Posts</button>
           <button type="button" data-kaposts-search-scope="people">People</button>
         </div>
-        <input class="kaposts-search-input" type="search" data-kaposts-search-input placeholder="Posts and people" autocomplete="off" spellcheck="false" />
         <div class="kaposts-search-results" data-kaposts-search-results></div>
       </div>`;
   }
@@ -3299,7 +3658,9 @@ function renderSearchResults(panel) {
     return;
   }
   if (rows.length === 0) {
-    results.innerHTML = `<p class="kaposts-inline-note">Reading posts…</p>`;
+    // Still reading with nothing matched yet: iOS shows the empty list with only its depth
+    // footer ("Reading older posts" / "N read").
+    results.innerHTML = depthFooter;
     return;
   }
   results.innerHTML = (panel.scope === "people"
@@ -3316,8 +3677,9 @@ function renderSearchResults(panel) {
         <button type="button" class="kaposts-search-row kaposts-search-post" data-kaposts-search-post="${deps.escapeHtml(post.remoteId)}">
           <span class="kaposts-search-row-main">
             <strong>${deps.escapeHtml(posterName(post.posterAddress))}</strong>
-            <span class="kaposts-search-snippet">${markdownPreviewHtml(post.text)}</span>
-            <small>${deps.escapeHtml(formatRelativeTime(post.timestamp))}</small>
+            ${/* iOS: the post's plain text in three lines, then how long ago, spelled out */ ""}
+            <span class="kaposts-search-snippet plain">${deps.escapeHtml(post.text)}</span>
+            <small>${deps.escapeHtml(kapostsLongRelativeTime(post.timestamp))}</small>
           </span>
         </button>`)
   ).join("") + depthFooter;
@@ -3358,7 +3720,7 @@ async function openPosterProfile(address, pubkey) {
     const mapped = content.posts.map(mapRemotePost).filter(Boolean);
     panel.posts = mapped.filter((p) => !p.parentRemoteId);
     panel.replies = repliesContent.posts.map(mapRemotePost).filter(Boolean);
-    panel.details = details;
+    panel.details = address === deps.engine.address ? ownProfileDetails(details, pubkey) : details;
     panel.loading = false;
     seedPager(panel.pagers.posts, content.posts, content.pagination);
     seedPager(panel.pagers.replies, repliesContent.posts, repliesContent.pagination);
@@ -3375,50 +3737,137 @@ async function openPosterProfile(address, pubkey) {
   }
 }
 
+// Your own profile never counts you as your own follower (iOS myProfileSheet .task):
+// `followedUser` there means "requester follows user", and with both being you, true is a stale
+// on-chain self-follow from before the no-self-follow rule. Shown without it, and one unfollow
+// per session scrubs it from the indexer.
+const selfUnfollowScrubbed = new Set();
+function ownProfileDetails(details, pubkey) {
+  if (!details || details.followedUser !== true) return details;
+  if (pubkey && !selfUnfollowScrubbed.has(pubkey)) {
+    selfUnfollowScrubbed.add(pubkey);
+    submitKaPostFollow({ engine: deps.engine, follow: false, followedPubkey: pubkey })
+      .then(() => deps.appendEngineLog?.("KaPosts: submitted self-unfollow scrub"))
+      .catch((error) => deps.appendEngineLog?.(`KaPosts self-unfollow scrub failed: ${error.message}`));
+  }
+  return { ...details, followersCount: Math.max(0, (Number(details.followersCount) || 0) - 1) };
+}
+
+/** Pull-to-refresh on a profile (iOS profileFeedPage onRefresh): page one of the tab on screen. */
+async function refreshProfilePanel(panel) {
+  if (!panel?.pubkey) return;
+  const tab = panel.tab === "replies" ? "replies" : "posts";
+  if (panel.pagers?.[tab]?.loading) return;
+  const generation = panelGeneration;
+  // A fresh pager: a load-more still in flight on the old one sees it was replaced and drops out.
+  const pager = makePager();
+  panel.pagers[tab] = pager;
+  pager.loading = true;
+  renderPanel();
+  try {
+    const content = tab === "replies"
+      ? await fetchUserReplies({ engine: deps.engine, pubkey: panel.pubkey, limit: PAGER_PAGE_SIZE })
+      : await fetchUserPosts({ engine: deps.engine, pubkey: panel.pubkey, limit: PAGER_PAGE_SIZE });
+    if (activePanel !== panel || generation !== panelGeneration || panel.pagers[tab] !== pager) return;
+    const mapped = content.posts.map(mapRemotePost).filter(Boolean);
+    panel[tab] = tab === "replies" ? mapped : mapped.filter((post) => !post.parentRemoteId);
+    seedPager(pager, content.posts, content.pagination);
+    renderPanel();
+  } catch (error) {
+    deps.appendEngineLog?.(`KaPost profile refresh failed: ${error.message}`);
+    if (activePanel === panel && panel.pagers[tab] === pager) {
+      pager.loading = false;
+      pager.error = userFacingError(error);
+      renderPanel();
+    }
+  }
+}
+
 // Followers / Following list, opened by tapping a profile's counts. `parent` carries the profile
 // we came from so the panel's Back button returns there instead of dropping to the feed.
+// Pages the server list newest-first on its own cursor (iOS KaPostsFollowListView.loadPage).
 async function openFollowListPanel({ address, pubkey, mode, parent }) {
   if (!pubkey) { deps.showToast?.("This profile has no public key to look up yet."); return; }
   panelGeneration += 1;
   clearPanelPagerSentinels();
-  const generation = panelGeneration;
-  activePanel = beginPanel({ type: "followList", mode, address, pubkey, parent: parent || null, rows: [], loading: true });
-  const panel = activePanel;
+  activePanel = beginPanel({
+    type: "followList", mode, address, pubkey, parent: parent || null,
+    rows: [], serverRows: [], loading: true, pager: makePager(),
+  });
   renderPanel();
   syncRailActive();
-  try {
-    const raw = await fetchFollowList({ engine: deps.engine, pubkey, followers: mode === "followers" });
-    if (activePanel !== panel || generation !== panelGeneration) return;
-    // The list endpoints return each user under one of several possible pubkey fields; resolve
-    // whichever is present to a Kaspa address so the row can render a name/avatar and open.
-    const rows = [];
-    const seen = new Set();
-    for (const item of raw || []) {
-      const rowPubkey = item?.userPublicKey || item?.publicKey || item?.pubkey
-        || item?.followedPubkey || item?.followerPubkey || item?.user || "";
-      const rowAddress = item?.address || kaspaAddressFromPubkey(deps.engine, rowPubkey) || "";
-      if (!rowAddress || seen.has(rowAddress)) continue;
-      seen.add(rowAddress);
-      const timestamp = Number(item?.timestamp || item?.createdAt || item?.followedAt) || null;
-      rows.push({ address: rowAddress, pubkey: rowPubkey, timestamp });
-    }
-    // Your own Following list also carries follows made on this device that the indexer has
-    // not reported yet, as a tail (iOS localOnlyEntries).
-    if (mode === "following" && address === deps.engine.address) {
-      for (const followed of [...prefs.following].sort()) {
-        if (followed === deps.engine.address || seen.has(followed)) continue;
-        seen.add(followed);
-        rows.push({ address: followed, pubkey: null, timestamp: null });
+  loadMoreFollowList();
+}
+
+// The list endpoints return each user under one of several possible pubkey fields.
+function followItemPubkey(item) {
+  return item?.userPublicKey || item?.publicKey || item?.pubkey
+    || item?.followedPubkey || item?.followerPubkey || item?.user || "";
+}
+
+/** Follows made on this device that the indexer has not reported yet: a fixed tail after the
+ *  server rows, own Following list only (iOS localOnlyEntries). */
+function followListLocalTail(panel, known) {
+  if (panel.mode !== "following" || panel.address !== deps.engine.address) return [];
+  return [...prefs.following]
+    .filter((address) => address !== deps.engine.address && !known.has(address))
+    .sort()
+    .map((address) => ({ address, pubkey: null, timestamp: null }));
+}
+
+function loadMoreFollowList() {
+  const panel = activePanel;
+  if (panel?.type !== "followList" || !panel.pager) return;
+  const pager = panel.pager;
+  const generation = panelGeneration;
+  // Only your OWN list hides you (you never follow yourself); on someone else's list you may
+  // legitimately appear, and the row just has no Follow button.
+  const ownList = panel.address === deps.engine.address;
+  const isStale = () => generation !== panelGeneration || activePanel !== panel || panel.pager !== pager;
+  const recompute = () => {
+    panel.rows = [...panel.serverRows, ...followListLocalTail(panel, new Set(panel.serverRows.map((row) => row.address)))];
+  };
+  return runPager(pager, {
+    fetchPage: async (before, limit) => {
+      const page = await fetchFollowListPage({
+        engine: deps.engine, pubkey: panel.pubkey, followers: panel.mode === "followers", limit, before,
+      });
+      return { items: page.users, pagination: page.pagination };
+    },
+    idOf: (item) => followItemPubkey(item) || item?.address || null,
+    absorb: (fresh) => {
+      const seen = new Set(panel.serverRows.map((row) => row.address));
+      const added = [];
+      for (const item of fresh) {
+        const rowPubkey = followItemPubkey(item);
+        const rowAddress = item?.address || kaspaAddressFromPubkey(deps.engine, rowPubkey) || "";
+        if (!rowAddress || seen.has(rowAddress) || (ownList && rowAddress === deps.engine.address)) continue;
+        seen.add(rowAddress);
+        const timestamp = Number(item?.timestamp || item?.createdAt || item?.followedAt) || null;
+        added.push({ address: rowAddress, pubkey: rowPubkey || null, timestamp });
       }
-    }
-    panel.rows = rows;
-    panel.loading = false;
-    renderPanel();
-    resolvePosterIdentities(rows.map((row) => row.address), () => { if (activePanel === panel) renderPanel(); });
-  } catch (error) {
-    deps.appendEngineLog?.(`KaPost ${mode} list load failed: ${error.message}`);
-    if (activePanel === panel) { panel.loading = false; renderPanel(); }
-  }
+      panel.serverRows = [...panel.serverRows, ...added];
+      panel.loading = false;
+      recompute();
+      renderPanel();
+      resolvePosterIdentities(added.map((row) => row.address), () => { if (activePanel === panel) renderPanel(); });
+      return added.length;
+    },
+    isStale,
+    onUpdate: () => {
+      // A failed first page still shows your local follows rather than an empty screen.
+      if (!pager.loading) { panel.loading = false; recompute(); }
+      renderPanel();
+    },
+  });
+}
+
+/** Pull-to-refresh on a follow list: back to page one; the rows on screen stay until it lands. */
+function refreshFollowList(panel) {
+  if (panel?.type !== "followList" || panel.pager?.loading) return;
+  panel.pager = makePager();
+  panel.serverRows = [];
+  return loadMoreFollowList();
 }
 
 /** Sentinel hit under a profile's Posts or Replies tab (own profile and other users' alike). */
@@ -3449,6 +3898,7 @@ function loadMoreProfile(tab) {
     },
     isStale: () => generation !== panelGeneration
       || activePanel !== panel
+      || panel.pagers?.[tab] !== pager // a refresh started page one over again
       || (panel.tab === "replies" ? "replies" : "posts") !== tab,
     onUpdate: () => renderPanel(),
   });
@@ -3728,19 +4178,41 @@ async function openNotificationsPanel() {
   // Opening the list IS seeing them - cleared on open rather than on close so the badge does
   // not sit there while you read.
   markAllKaPostsNotificationsSeen();
+  if (generation !== panelGeneration) return;
+  await loadNotificationsFirstPage(panel);
+}
+
+/** Page one of the notification stream - the open and the pull-to-refresh (iOS loadPage(reset:)). */
+async function loadNotificationsFirstPage(panel) {
+  if (panel?.type !== "notifications") return;
+  const generation = panelGeneration;
+  // A fresh pager: a load-more still in flight on the old one sees it was replaced and drops out.
+  const pager = makePager({ pageSize: PAGER_THREAD_PAGE_SIZE });
+  panel.pager = pager;
+  panel.loading = true;
+  renderPanel();
   try {
     const page = await fetchKaPostNotifications({ engine: deps.engine, limit: PAGER_THREAD_PAGE_SIZE });
-    if (activePanel !== panel || generation !== panelGeneration) return;
+    if (activePanel !== panel || generation !== panelGeneration || panel.pager !== pager) return;
     panel.items = page.notifications.map(mapNotificationRow).filter(Boolean);
     panel.loading = false;
-    seedPager(panel.pager, page.notifications, page.pagination);
+    seedPager(pager, page.notifications, page.pagination);
+    // Everything now on screen counts as seen - the background poller will not ping for it
+    // later (iOS markSeen(upTo:), only the first, newest page advances it).
+    const seen = loadSeenKaPostNotificationIds().map(String);
+    const seenSet = new Set(seen);
+    for (const n of page.notifications) {
+      const id = String(n?.id || "");
+      if (id && !seenSet.has(id)) { seenSet.add(id); seen.push(id); }
+    }
+    saveSeenKaPostNotificationIds(seen);
     renderPanel();
     resolvePosterIdentities(panel.items.map((item) => item.actorAddress), () => {
       if (activePanel === panel) renderPanel();
     });
   } catch (error) {
     deps.appendEngineLog?.(`KaPost notifications load failed: ${error.message}`);
-    if (activePanel === panel) { panel.loading = false; panel.pager.hasMore = false; renderPanel(); }
+    if (activePanel === panel && panel.pager === pager) { panel.loading = false; pager.hasMore = false; renderPanel(); }
   }
 }
 
@@ -3749,7 +4221,8 @@ function loadMoreNotifications() {
   const panel = activePanel;
   if (panel?.type !== "notifications" || !panel.pager) return;
   const generation = panelGeneration;
-  return runPager(panel.pager, {
+  const pager = panel.pager;
+  return runPager(pager, {
     fetchPage: async (before, limit) => {
       const page = await fetchKaPostNotifications({ engine: deps.engine, limit, before });
       return { items: page.notifications, pagination: page.pagination };
@@ -3765,7 +4238,7 @@ function loadMoreNotifications() {
       });
       return rows.length;
     },
-    isStale: () => generation !== panelGeneration || activePanel !== panel,
+    isStale: () => generation !== panelGeneration || activePanel !== panel || panel.pager !== pager,
     onUpdate: () => renderPanel(),
   });
 }
@@ -4006,24 +4479,25 @@ function openRepostPopover(anchor, post) {
 
 function openMorePopover(anchor, post) {
   const isMine = post.posterAddress === deps.engine.address;
-  // Bookmark and Share are their own buttons on every post's action bar (matches iOS), so the
-  // ⋯ menu is just Post Activity, Mute, and Block.
+  // Bookmark and Share are their own buttons on every post's action bar (matches iOS), so they
+  // are not in the ⋯ menu.
   // The name is in the label ("Mute alice"), as iOS words it: a bare "Mute" on a busy feed
   // leaves you checking which post the menu came from.
   const name = posterName(post.posterAddress);
   // The same half sheet every other menu in the app uses, each row saying what it does (iOS
   // e9fa63e), rather than a popover of bare labels.
   void anchor;
+  // iOS overflowSheet, in its order: Edit (on chain, settled and inside the two-hour window),
+  // Post Activity, Delete (on chain, settled, not already going), then for someone else's post
+  // Report, Mute and Block.
   const options = [];
+  const editLeft = KAPOSTS_EDIT_WINDOW_MS - (Date.now() - post.timestamp);
+  if (isMine && post.remoteId && post.delivery === "sent" && editLeft > 0) {
+    options.push({ id: "edit", title: "Edit", subtitle: `Change the text. Posts can be edited for two hours; after that they stay as they are. ${kapostsEditWindowText(editLeft)}.` });
+  }
   if (post.remoteId) options.push({ id: "activity", title: "Post Activity", subtitle: "Who liked, disliked, reposted and quoted this post." });
-  if (isMine && post.remoteId) {
-    const left = KAPOSTS_EDIT_WINDOW_MS - (Date.now() - post.timestamp);
-    if (left > 0) {
-      const minutes = Math.ceil(left / 60000);
-      const leftText = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m left` : `${minutes}m left`;
-      options.push({ id: "edit", title: post.parentRemoteId ? "Edit Comment" : "Edit Post", subtitle: `Replace the text. ${leftText} of the two-hour window.` });
-    }
-    options.push({ id: "delete", title: post.parentRemoteId ? "Delete Comment" : "Delete Post", subtitle: "Removes this post everywhere. You have five seconds to undo.", destructive: true });
+  if (isMine && post.remoteId && post.delivery === "sent" && !post.pendingDeletion && !pendingActions.has(`delete:${post.id}`)) {
+    options.push({ id: "delete", title: "Delete", subtitle: "Removes this post everywhere. You have five seconds to undo.", destructive: true });
   }
   if (!isMine) {
     // Reporting (iOS dd58e26): the post goes to support by email. Posts are on a public chain and
@@ -4174,13 +4648,15 @@ async function openDraft(id) {
   const sourceId = draft.replyRemoteId || draft.quotedRemoteId || null;
   let source = sourceId ? allPostLists().find((post) => post.remoteId === sourceId) || null : null;
   if (sourceId && !source) source = await indexerPost(sourceId);
+  if (sourceId && !source) source = await chainPost(sourceId).catch(() => null);
   if (draft.replyRemoteId) openComposer(null, { replyTarget: source });
   else openComposer(source);
   editingDraftId = draft.id;
   composerThreadSegments = [...(draft.threadSegments || [])];
   composerInput.value = draft.text || "";
   composerInput.dispatchEvent(new Event("input", { bubbles: true }));
-  renderComposerThreadUi();
+  // A reopened draft's composer has no Poll or Schedule (iOS draftComposer passes neither).
+  renderComposerExtras();
   composerInput.focus();
 }
 
@@ -4209,13 +4685,14 @@ function reservedOutpoints() {
 function publishReserved() { setReservedOutpoints(reservedOutpoints()); }
 
 async function scheduleForLater(text, notBefore) {
-  deps.showToast?.("Signing the post…");
   let built;
   try {
     built = await buildScheduledPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text), reservedOutpoints });
   } catch (error) {
     deps.appendEngineLog?.(`KaPost schedule build failed: ${error.message}`);
-    deps.showToast?.(`Couldn't schedule: ${userFacingError(error)}`);
+    // iOS scheduleDelayedPost reports both outcomes on the KaPosts confirmation toast, with no
+    // explorer link: nothing is on chain until its time comes.
+    showActionToast(`Couldn't schedule: ${userFacingError(error)}`);
     restoreComposerDraft(text);
     return;
   }
@@ -4228,10 +4705,10 @@ async function scheduleForLater(text, notBefore) {
     await scheduleOnServer({ engine: deps.engine, txId: built.txId, notBeforeMs: notBefore, restJson: built.restJson });
     entry.onServer = true;
     saveScheduled();
-    deps.showToast?.(`Scheduled for ${when}`);
+    showActionToast(`Scheduled for ${when}`);
   } catch (error) {
     deps.appendEngineLog?.(`Scheduling on the indexer failed, keeping it local: ${error.message}`);
-    deps.showToast?.(`Scheduled for ${when} - sends from this browser`);
+    showActionToast(`Scheduled for ${when} - sends from this browser`);
   }
   renderAll();
 }
@@ -4260,7 +4737,6 @@ async function sendDueScheduledNow() {
         if (list !== scheduledPosts) return;
         entry.status = "submitted";
         entry.submittedAt = Date.now();
-        deps.showToast?.("Scheduled post sent");
       } catch (error) {
         if (list !== scheduledPosts) return;
         const message = error?.message || String(error);
@@ -4299,40 +4775,51 @@ async function refreshScheduledFromServer() {
   if (changed) saveScheduled();
 }
 
+// iOS KaPostsScheduledStore.cancel / remove: straight from the row's button, no confirmation,
+// and a cancel the indexer did not hear is dropped silently (`try?`).
 async function cancelScheduledPost(id) {
   const entry = scheduledPosts.find((e) => e.id === id);
   if (!entry) return;
-  if (entry.status === "scheduled") {
-    const ok = await deps.confirmDialog?.({ title: "Cancel this scheduled post?", message: "It will not go out. The coins it reserved are free again.", confirmLabel: "Cancel post", destructive: true });
-    if (!ok) return;
-    if (entry.onServer) {
-      try { await cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }); }
-      catch { deps.showToast?.("Could not reach the indexer - the post may still go out at its time"); }
-    }
+  if (entry.status === "scheduled" && entry.onServer) {
+    try { await cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }); }
+    catch (error) { deps.appendEngineLog?.(`Scheduled post cancel on the indexer failed: ${error?.message || error}`); }
   }
   scheduledPosts = scheduledPosts.filter((e) => e.id !== id);
   saveScheduled();
   renderAll();
 }
 
+/** What the Scheduled screen does on appear and on pull-to-refresh (iOS scheduledSheet):
+ *  send what is due from here first, then read the indexer's statuses. */
+async function refreshScheduledPanel(panel) {
+  try { await sendDueScheduled(); } catch { /* the next pass retries */ }
+  await refreshScheduledFromServer();
+  if (activePanel === panel) renderPanel();
+}
+
 function scheduledPanelHtml() {
   if (!scheduledPosts.length) {
-    return `<div class="no-results-card"><strong>No scheduled posts</strong>`
-      + `<span>Write a post, tap Schedule in the composer and pick a time. It is signed now and goes out then.</span></div>`;
+    return panelEmptyHtml("clock", "No scheduled posts", "Write a post, tap Schedule in the composer and pick a time. It is signed now and goes out then.");
   }
   const fmt = (ms) => new Date(ms).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   return scheduledPosts.map((entry) => {
     const when = fmt(entry.notBefore);
+    // iOS scheduledIcon / scheduledLine: a status mark in the line's tint, the error on its own line.
     let meta;
-    if (entry.status === "submitted") meta = `Posted ${entry.submittedAt ? fmt(entry.submittedAt) : when}`;
-    else if (entry.status === "failed") meta = `Failed to post at ${when}${entry.error ? `: ${entry.error}` : ""}`;
-    else if (entry.status === "cancelled") meta = "Cancelled";
-    else meta = entry.onServer ? `Goes out ${when}` : `Goes out ${when} - from this browser, so keep KaChat open around then`;
+    let icon;
+    if (entry.status === "submitted") { meta = `Posted ${entry.submittedAt ? fmt(entry.submittedAt) : when}`; icon = "checkCircle"; }
+    else if (entry.status === "failed") { meta = `Failed to post at ${when}`; icon = "alertCircle"; }
+    else if (entry.status === "cancelled") { meta = "Cancelled"; icon = "xCircle"; }
+    else {
+      meta = entry.onServer ? `Goes out ${when}` : `Goes out ${when} - from this browser, so keep KaChat open around then`;
+      icon = entry.onServer ? "clock" : "computer";
+    }
     return `
       <div class="kaposts-draft-row kaposts-scheduled-row ${entry.status}">
         <div class="kaposts-draft-open">
           <span class="kaposts-draft-preview">${deps.escapeHtml(entry.text)}</span>
-          <span class="kaposts-draft-meta">${deps.escapeHtml(meta)}</span>
+          <span class="kaposts-draft-meta kaposts-scheduled-line"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS[icon]}"/></svg>${deps.escapeHtml(meta)}</span>
+          ${entry.status === "failed" && entry.error ? `<span class="kaposts-scheduled-error">${deps.escapeHtml(entry.error)}</span>` : ""}
         </div>
         <button class="kaposts-draft-delete" type="button" data-kaposts-cancel-scheduled="${deps.escapeHtml(entry.id)}" aria-label="${entry.status === "scheduled" ? "Cancel scheduled post" : "Remove"}" title="${entry.status === "scheduled" ? "Cancel" : "Remove"}">&times;</button>
       </div>`;
@@ -4346,7 +4833,8 @@ function draftsPanelHtml() {
   }
   return kapostDrafts.map((draft) => {
     const count = draftSegmentCount(draft);
-    const meta = [formatRelativeTime(draft.savedAt), count > 1 ? `${count} posts` : ""].filter(Boolean).join(" · ");
+    // When it was saved, spelled out ("2 hours, 23 minutes"), as iOS's Text(savedAt, style: .relative).
+    const meta = [kapostsLongRelativeTime(draft.savedAt), count > 1 ? `${count} posts` : ""].filter(Boolean).join(" · ");
     return `
       <div class="kaposts-draft-row">
         <button class="kaposts-draft-open" type="button" data-kaposts-open-draft="${deps.escapeHtml(draft.id)}">
@@ -4778,24 +5266,20 @@ function translateAffordanceHtml(post) {
   const link = (label) => `<button class="kaposts-translate-link" type="button" data-kaposts-translate="${id}">${deps.escapeHtml(label)}</button>`;
 
   if (!state) return canOfferTranslation(post) ? link("Translate post") : "";
-  if (state.status === "translating") return `<span class="kaposts-translate-note">Translating…</span>`;
+  if (state.status === "translating") return `<span class="kaposts-translate-note with-spinner"><span class="kaposts-spinner" aria-hidden="true"></span>Translating...</span>`;
   if (state.status === "failed") return link("Translation unavailable - try again");
   if (state.status === "unavailable") return `<span class="kaposts-translate-note">${deps.escapeHtml(state.reason || "Translation unavailable")}</span>`;
   if (kapostShowingOriginal.has(key)) {
     return `<button class="kaposts-translate-link" type="button" data-kaposts-show-translation="${id}">Show translation</button>`;
   }
   return `<span class="kaposts-translate-note">Translated from ${deps.escapeHtml(state.sourceName || "another language")}`
-    + ` · <button class="kaposts-translate-link" type="button" data-kaposts-show-original="${id}">Show original</button></span>`;
+    + ` - <button class="kaposts-translate-link" type="button" data-kaposts-show-original="${id}">Show original</button></span>`;
 }
 
 /// The text a post should render with: its translation, unless the reader asked for the original.
-// A folded cell shows eight lines at most, which never need more than ~1 200 characters; laying
-// out a 25 000-character post to clip it was the feed's lag (iOS a3a7524). Unfolding shows it all.
-function foldedPrefix(text) {
-  const value = String(text || "");
-  return value.length > 1200 ? value.slice(0, 1200) : value;
-}
-
+// (A folded cell lays out only kapostsFoldedPrefix of it - eight lines never need more than
+// ~1 200 characters, and laying out a 25 000-character post to clip it was the feed's lag, iOS
+// a3a7524. Unfolding shows it all.)
 function postDisplayText(post) {
   const key = translationKeyFor(post);
   const state = kapostTranslations.get(key);
@@ -4822,6 +5306,8 @@ function renderKaPostsUnavailable() {
   if (!feedEl) return;
   feedEl.innerHTML = `
     <div class="no-results-card kaposts-empty">
+      ${/* iOS KaPostsUnavailableView's "text.bubble" */ ""}
+      <svg class="kaposts-empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>
       <strong>KaPosts isn't available on Testnet yet</strong>
       <span>There is no KaPost indexer for testnet. Turn off Testnet in Settings > Connection to read and post on mainnet.</span>
     </div>`;
@@ -4890,7 +5376,13 @@ export function resetKaPostsForAccount() {
   threadRootProbe.clear();
   renderedFeedIds = new Set();
   lastFeedLoadAt = 0;
+  // Nothing loaded belongs to the new identity (iOS loadGates.reset, loadedFeedSource = nil).
+  loadedFeedSource = null;
+  popularSweptAt = 0;
+  ownContentLoadedAt = 0;
+  fetchedAncestors.clear();
   clearAllPagerSentinels();
+  inlinePagerKeys.clear();
   renderAll();
   renderPanel();
 }
@@ -5079,14 +5571,25 @@ export function initKaPosts(dependencies) {
   tabsEl?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-kaposts-feed-tab]");
     if (!button) return;
-    activeFeedTab = button.dataset.kapostsFeedTab;
+    const tab = button.dataset.kapostsFeedTab;
+    // Re-selecting the tab on screen changes nothing (iOS onChange(of: selectedFeed)).
+    if (tab === activeFeedTab) return;
+    activeFeedTab = tab;
     tabsEl.querySelectorAll("[data-kaposts-feed-tab]").forEach((b) => b.classList.toggle("active", b === button));
+    // Feed <-> Popular share the global feed: keep every page already scrolled in (Popular is a
+    // re-sort of the same set) and only deepen Popular's window. Only a real source change - to
+    // or from Following - starts a new paginated feed.
+    if (feedSourceFor(tab) === loadedFeedSource && remotePosts.length > 0) {
+      renderFeed({ resetScroll: true });
+      if (tab === "popular") deepenPopularRanking();
+      return;
+    }
     // Retire the outgoing tab's cursor before anything can repaint: its sentinel must not
     // fire a "load more" that would page the tab the user just left.
     feedPager = null;
     clearPagerSentinel("feed");
     renderFeed();
-    loadFeed();
+    loadFeed().then(() => { if (activeFeedTab === "popular") deepenPopularRanking(); });
   });
 
   document.querySelector("[data-kaposts-refresh]")?.addEventListener("click", () => loadFeed());
@@ -5095,11 +5598,19 @@ export function initKaPosts(dependencies) {
     if (feedPager) { feedPager.stalled = false; feedPager.unproductive = 0; feedPager.error = null; }
     loadMoreFeed();
   });
-  document.querySelector("[data-kaposts-compose]")?.addEventListener("click", () => openComposer());
+  // The create-post button is where the zero-balance gate lives (iOS createPostButton): with a
+  // confirmed-zero chatting balance it shows the funding card (QR + address + copy) instead of a
+  // composer that could never submit.
+  document.querySelector("[data-kaposts-compose]")?.addEventListener("click", () => {
+    if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return; }
+    openComposer();
+  });
   // X-style persistent rail: the sections are always visible on the left.
   document.querySelectorAll("[data-kaposts-rail]").forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.kapostsRail;
+      // KaPosts Settings, the last rail item as on iOS: its own window over whatever is open.
+      if (key === "settings") { deps.openKaPostsSettings?.(); return; }
       threadStack = [];
       threadGeneration += 1; // drops any reply page still in flight for the thread we left
       // The rail always leaves the thread, so nothing here is an over-thread panel.
@@ -5214,18 +5725,16 @@ export function initKaPosts(dependencies) {
     // The post is on its way, so the draft it came from has served its purpose. Explicit
     // keepDraft: false, because closeComposer would otherwise ask whether to keep writing that
     // is already being sent.
-    const poll = composerPoll;
-    const scheduleAt = composerScheduleAt;
-    if (poll && composerExtrasAllowed()) {
-      if (!pollEditorValid()) { deps.showToast?.("A poll needs two to four different options of up to 40 characters."); return; }
-    }
-    if (scheduleAt != null && composerExtrasAllowed()) {
-      const lead = scheduleAt - Date.now();
-      if (lead < KAPOSTS_SCHEDULE_MIN_MS || lead > KAPOSTS_SCHEDULE_MAX_MS) { deps.showToast?.("Pick a time between 5 minutes and 30 days from now."); return; }
-    }
+    const extras = composerExtrasAllowed();
+    const poll = extras ? composerPoll : null;
+    const scheduleAt = extras ? composerScheduleAt : null;
+    // A poll posts with its question and its valid options only - the empty ones are left out,
+    // and the button stays off until there are two to four (iOS postAll / pollIsValid).
+    if (poll && (!text || !pollEditorValid())) return;
+    const pollOptions = poll ? validPollOptions() : null;
     if (editingDraftId) deleteDraft(editingDraftId);
     closeComposer({ keepDraft: false });
-    if (poll && !editTarget && !replyTarget && !quoteTarget && segments.length === 1) { schedulePoll(segments[0], poll.options.map((o) => String(o).trim()), poll.lengthMs); return; }
+    if (poll && !editTarget && !replyTarget && !quoteTarget && segments.length === 1) { schedulePoll(segments[0], pollOptions, poll.lengthMs); return; }
     if (scheduleAt != null && !editTarget && !replyTarget && !quoteTarget && segments.length === 1) { scheduleForLater(segments[0], scheduleAt); return; }
     if (editTarget) scheduleEdit(editTarget, segments[0]);
     else if (replyTarget) submitReply(replyTarget, segments[0]);
@@ -5235,14 +5744,18 @@ export function initKaPosts(dependencies) {
   });
 
   // Poll and Schedule chips and their editors.
+  // Poll toggles (iOS: pollEnabled.toggle(); turning it on clears a scheduled time).
   document.querySelector("[data-kaposts-poll-toggle]")?.addEventListener("click", () => {
+    if (composerPoll) {
+      composerPoll = null;
+      renderComposerExtras();
+      return;
+    }
     composerPoll = { options: ["", ""], lengthMs: 86400000 };
     composerScheduleAt = null;
     renderComposerExtras();
-    renderComposerThreadUi();
     document.querySelector("[data-kaposts-poll-option='0']")?.focus();
   });
-  document.querySelector("[data-kaposts-poll-remove]")?.addEventListener("click", () => { composerPoll = null; renderComposerExtras(); renderComposerThreadUi(); });
   document.querySelector("[data-kaposts-poll-add]")?.addEventListener("click", () => {
     if (!composerPoll || composerPoll.options.length >= KAPOSTS_POLL_MAX_OPTIONS) return;
     composerPoll.options.push("");
@@ -5259,6 +5772,7 @@ export function initKaPosts(dependencies) {
       option.value = prefixPollOption(option.value, KAPOSTS_POLL_OPTION_MAX_LENGTH);
     }
     composerPoll.options[Number(option.dataset.kapostsPollOption)] = option.value;
+    renderComposerThreadUi(); // Post Poll turns on once the options are valid
   };
   document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("input", syncPollOption);
   document.querySelector("[data-kaposts-poll-editor]")?.addEventListener("compositionend", syncPollOption);
@@ -5271,19 +5785,30 @@ export function initKaPosts(dependencies) {
     composerPoll.options.splice(Number(remove.dataset.kapostsPollOptionRemove), 1);
     renderComposerExtras();
   });
+  // Schedule / Reschedule opens the picker sheet; its button sets the time ("Schedule for
+  // <date>"), and the row under the composer clears it (iOS extrasRow + scheduleRow).
   document.querySelector("[data-kaposts-schedule-toggle]")?.addEventListener("click", () => {
-    composerScheduleAt = Date.now() + 60 * 60 * 1000;
+    if (composerPoll) return;
+    openScheduleSheet();
+  });
+  const scheduleSheet = scheduleSheetEl();
+  scheduleSheet?.querySelector("[data-kaposts-schedule-input]")?.addEventListener("input", syncScheduleSheetButton);
+  scheduleSheet?.querySelector("[data-kaposts-schedule-input]")?.addEventListener("change", syncScheduleSheetButton);
+  scheduleSheet?.querySelector("[data-kaposts-schedule-confirm]")?.addEventListener("click", () => {
+    const pick = scheduleSheetPick();
+    if (pick == null) return;
+    composerScheduleAt = pick;
     composerPoll = null;
+    closeScheduleSheet();
     renderComposerExtras();
-    renderComposerThreadUi();
-    document.querySelector("[data-kaposts-schedule-input]")?.focus();
+    composerInput?.focus();
   });
-  document.querySelector("[data-kaposts-schedule-remove]")?.addEventListener("click", () => { composerScheduleAt = null; renderComposerExtras(); renderComposerThreadUi(); });
-  document.querySelector("[data-kaposts-schedule-input]")?.addEventListener("change", (event) => {
-    const when = new Date(event.target.value).getTime();
-    if (Number.isFinite(when)) composerScheduleAt = when;
-    if (composerSubmit && !composerEditTarget && !composerReplyTarget) composerSubmit.textContent = "Schedule";
+  // Dismissed like a sheet: a click outside it, or Escape.
+  scheduleSheet?.addEventListener("click", (event) => { if (event.target === scheduleSheet) closeScheduleSheet(); });
+  scheduleSheet?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.stopPropagation(); closeScheduleSheet(); }
   });
+  document.querySelector("[data-kaposts-schedule-remove]")?.addEventListener("click", () => { composerScheduleAt = null; renderComposerExtras(); });
 
   // X-style +: stack the current text as a thread segment and keep writing.
   composerThreadAddEl()?.addEventListener("click", () => {
@@ -5292,18 +5817,19 @@ export function initKaPosts(dependencies) {
     composerThreadSegments.push(text);
     composerInput.value = "";
     updateMeter(composerInput, composerMeter, composerSubmit);
-    renderComposerThreadUi();
+    // A thread has no Poll or Schedule (iOS extrasAvailable), so the chips go with the first segment.
+    renderComposerExtras();
     composerInput.focus();
   });
   composerSegmentsEl()?.addEventListener("click", (event) => {
     const remove = event.target.closest("[data-kaposts-thread-remove]");
     if (!remove) return;
     composerThreadSegments.splice(Number(remove.dataset.kapostsThreadRemove), 1);
-    renderComposerThreadUi();
+    renderComposerExtras();
   });
 
-  // The inline reply box under the post you opened (X's shape). Replying to a specific reply
-  // still opens the composer - see the data-kaposts-reply-to handler.
+  // The reply box pinned under the open thread (iOS postDetailSheet). Replying to a specific
+  // reply still opens the composer - see the data-kaposts-reply-to handler.
   replyInput?.addEventListener("input", () => { updateMeter(replyInput, replyMeter); autoGrowReply(); });
   // The zero-balance gate: a reply costs KAS, so with a confirmed 0 balance the bar greys and
   // a click on it presents the funding card instead of the keyboard. Reading is untouched.
@@ -5335,7 +5861,6 @@ export function initKaPosts(dependencies) {
     const vote = event.target.closest("[data-kaposts-poll-vote]");
     if (vote) {
       event.stopPropagation();
-      if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return; }
       const post = findPost(vote.dataset.kapostsPollVote);
       if (post) scheduleVote(post, Number(vote.dataset.index));
       return;
@@ -5389,6 +5914,9 @@ export function initKaPosts(dependencies) {
 
     const countdown = event.target.closest("[data-kaposts-countdown]");
     if (countdown) { cancelUndoable(countdown.dataset.kapostsCountdown); return; }
+    // The undo capsule a held like / dislike / repost shows in place of its button.
+    const cancelPending = event.target.closest("[data-kaposts-cancel-pending]");
+    if (cancelPending) { cancelUndoable(cancelPending.dataset.kapostsCancelPending); return; }
 
     const like = event.target.closest("[data-kaposts-like]");
     if (like) { const p = findPost(like.dataset.kapostsLike); if (p) toggleVote(p, "like"); return; }
@@ -5470,12 +5998,6 @@ export function initKaPosts(dependencies) {
       // Follow/unfollow straight from the row without opening the profile behind it.
       toggleFollow({ posterAddress: followListFollow.dataset.address, posterPubkey: followListFollow.dataset.pubkey || null });
       renderPanel();
-      return;
-    }
-
-    const followListRow = event.target.closest("[data-kaposts-follow-list-row]");
-    if (followListRow) {
-      openPosterProfile(followListRow.dataset.address, followListRow.dataset.pubkey || null);
       return;
     }
 
@@ -5569,8 +6091,8 @@ export function initKaPosts(dependencies) {
     if (bookmark) {
       const p = findPost(bookmark.dataset.kapostsBookmark);
       if (p) {
+        // The filled bookmark is the whole confirmation (iOS toggleBookmark): no toast.
         mutatePost(p.id, (target) => { target.bookmarkedByMe = !target.bookmarkedByMe; });
-        deps.showToast?.(p.bookmarkedByMe ? "Bookmarked" : "Bookmark removed");
         renderAll();
       }
       return;
@@ -5591,7 +6113,7 @@ export function initKaPosts(dependencies) {
     const retryReplies = event.target.closest("[data-kaposts-retry-replies]");
     if (retryReplies) {
       const comment = findPost(retryReplies.dataset.kapostsRetryReplies);
-      if (comment) { commentReplyState.delete(comment.id); loadCommentReplies(comment); }
+      if (comment) loadCommentReplies(comment);
       return;
     }
 
@@ -5600,11 +6122,13 @@ export function initKaPosts(dependencies) {
       const item = (activePanel.items || []).find((row) => String(row.id) === notificationRow.dataset.kapostsNotification);
       if (!item) return;
       // One tap, two possible destinations - a menu that names both, headed by who did it, so
-      // "open the post" and "open the transaction" never compete for the same row.
+      // "open the post" and "open the transaction" never compete for the same row. View in
+      // Explorer only when there is a transaction URL to open (iOS: `if let url = txURL(for:)`).
+      const explorerUrl = txIdOrNull(item.id) && deps.explorerTxUrl ? deps.explorerTxUrl(item.id) : "";
       openPopover(notificationRow, `
         <div class="kaposts-pop-title">${deps.escapeHtml(posterName(item.actorAddress))}</div>
         ${item.targetTxId ? `<button type="button" class="kaposts-pop-row" data-kaposts-notif-open="${deps.escapeHtml(item.targetTxId)}" data-kaposts-notif-parent="${deps.escapeHtml(item.parentTxId || "")}"><strong>Open in KaPosts</strong><small>Goes to the post this is about, in the app.</small></button>` : ""}
-        <button type="button" class="kaposts-pop-row" data-kaposts-notif-explorer="${deps.escapeHtml(deps.explorerTxUrl(item.id))}"><strong>View in Explorer</strong><small>Opens the transaction on your chosen block explorer.</small></button>`);
+        ${explorerUrl ? `<button type="button" class="kaposts-pop-row" data-kaposts-notif-explorer="${deps.escapeHtml(explorerUrl)}"><strong>View in Explorer</strong><small>Opens the transaction on your chosen block explorer.</small></button>` : ""}`);
       event.stopPropagation();
       return;
     }

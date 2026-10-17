@@ -10,20 +10,20 @@ import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwo
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
 import { createGroupManager } from "../engine/group-store.js";
-import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
+import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
-import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange } from "./kaposts.js";
+import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
-import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount } from "./chess-tournaments.js";
+import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
-import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab } from "./kachat-market.js";
+import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab, openKachatMarketSheet } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
 import {
@@ -35,9 +35,9 @@ import {
   pickFromAddressBook, pickManyFromAddressBook, refreshAddressBookStorageRow, ADDRESS_BOOK_ICONS,
 } from "./address-book.js";
 import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
-import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioArchive, importPortfolioArchive } from "./portfolio.js";
+import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioArchive, importPortfolioArchive, portfolioAmountsHidden } from "./portfolio.js";
 import { mergePortfolioArchives } from "./portfolio-sync.js";
-import { initColdStorage, refreshColdStorage, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
+import { initColdStorage, refreshColdStorage, refreshColdStorageOnActivity, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 import {
   mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
@@ -46,6 +46,7 @@ import {
   sendFromSectionHtml, sendFromControls, selectablePillHtml, setSelectedPill,
   otherDomainsHtml, pickOtherDomain, nameNotFoundText,
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
+  openSentConfirmation, closeSentConfirmation, fixedKas8,
 } from "./send-kaspa-components.js";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
 import * as Calls from "./calls.js";
@@ -56,6 +57,7 @@ import {
   isUserTypePending, markUserTypePending,
   isOnboardingRunPending, pendingOnboardingRunKind, markOnboardingRunPending, clearOnboardingRunPending,
   renderUserTypeGuideStep, applyUserTypeGuideChoice, renderChildModeSettingsPage,
+  EYE_SVG, EYE_SLASH_SVG,
 } from "./childmode.js";
 import {
   initChatStorage,
@@ -87,9 +89,11 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
 import addressExplainerUrl from "./assets/address-explainer.png";
-import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
+import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
+import { createStoredZip } from "./zip-store.js";
+import { discoverSpendingMatches, applySpendingDiscovery, fetchAddressActivity } from "./spending-discovery.js";
 import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -287,9 +291,19 @@ function setGroupNotify(groupId, value) {
   saveGroupPrefs();
 }
 
-// Photos revealed this session when a photo bubble is held back (per-contact "manual",
-// or the global approval gate for a contact you have not accepted yet).
-const revealedPhotoIds = new Set();
+// Photos revealed when a photo bubble is held back (per-contact "manual", or the global approval
+// gate for a contact you have not accepted yet). Kept across launches, by txid (iOS
+// PhotoRevealStore "kachat.revealedPhotoTxIds": txids are unique chain-wide).
+const REVEALED_PHOTOS_KEY = "kachat-revealed-photo-txids-v1";
+const revealedPhotoIds = (() => {
+  try { return new Set(JSON.parse(localStorage.getItem(REVEALED_PHOTOS_KEY) || "[]").map(String)); } catch { return new Set(); }
+})();
+function markPhotoRevealed(message) {
+  const key = String(message?.txid || message?.id || "");
+  if (!key || revealedPhotoIds.has(key)) return;
+  revealedPhotoIds.add(key);
+  try { localStorage.setItem(REVEALED_PHOTOS_KEY, JSON.stringify([...revealedPhotoIds].slice(-5000))); } catch { /* fine */ }
+}
 const BALANCE_REFRESH_MS = 15000;
 const MESSAGE_REFRESH_MS = 5000;
 // Ceiling for the sweep's failure backoff, matching iOS's foregroundSweepMaxInterval.
@@ -962,7 +976,8 @@ function savedAccountSummaries() {
   try { metadata = loadAccountMetaMap(); } catch {}
   return loadSavedAccounts().map((entry) => ({
     ...entry,
-    name: metadata[entry.address]?.name || entry.name || `Account ${entry.address.slice(-6)}`,
+    // A blank name reads "Saved Account" (iOS SavedAccountSummary.displayAlias).
+    name: String(metadata[entry.address]?.name || entry.name || "").trim() || "Saved Account",
     createdAt: metadata[entry.address]?.createdAt || entry.createdAt || entry.savedAt || null,
   }));
 }
@@ -1058,13 +1073,10 @@ function renderSavedAccountsScreen() {
   if (!savedAccountList) return;
   savedAccountList.replaceChildren();
   const accounts = savedAccountSummaries();
-  if (!accounts.length) {
-    const empty = document.createElement("div");
-    empty.className = "saved-account-empty";
-    empty.textContent = "Create or import an account to continue.";
-    savedAccountList.append(empty);
-    return;
-  }
+  // iOS OnboardingView: no Saved Accounts section at all until there is one.
+  const section = savedAccountList.closest(".saved-accounts-section");
+  if (section) section.hidden = !accounts.length;
+  if (!accounts.length) return;
   for (const account of accounts) {
     const row = document.createElement("div");
     row.className = "saved-account-card";
@@ -1076,7 +1088,20 @@ function renderSavedAccountsScreen() {
     signInButton.setAttribute("aria-label", `Sign in to ${account.name}`);
     signInButton.innerHTML = `<span class="saved-account-icon" aria-hidden="true">✓</span><span class="saved-account-copy"><strong></strong><small></small></span><span class="saved-account-chevron" aria-hidden="true">›</span>`;
     signInButton.querySelector("strong").textContent = account.name;
-    signInButton.querySelector("small").textContent = shortAddress(account.address);
+    // The full address, truncated in the middle by CSS (iOS formattedPublicAddress, .middle).
+    {
+      const full = String(account.address || "");
+      const small = signInButton.querySelector("small");
+      small.className = "saved-account-address";
+      small.title = full;
+      const head = document.createElement("span");
+      head.className = "saved-account-address-head";
+      head.textContent = full.slice(0, -8);
+      const tail = document.createElement("span");
+      tail.className = "saved-account-address-tail";
+      tail.textContent = full.slice(-8);
+      small.append(head, tail);
+    }
     signInButton.addEventListener("click", async () => {
       try {
         if (isAppLocked()) {
@@ -1089,7 +1114,8 @@ function renderSavedAccountsScreen() {
         activateSavedAccount(account.address);
         reloadKaChat();
       } catch (error) {
-        showCopyToast(userFacingError(error));
+        // iOS OnboardingView: an alert, not a toast.
+        alertDialog({ title: "Sign In Failed", message: userFacingError(error) || "Unable to sign in to this account." });
       }
     });
 
@@ -1126,7 +1152,7 @@ async function toggleAccountActionMenu(button, account) {
   closeAccountActionMenu();
   const choice = await chooseDialog({
     title: account.name,
-    message: shortAddress(account.address),
+    message: savedAccountShortAddress(account.address),
     options: [
       { id: "rename", title: "Rename", subtitle: "Gives this account a name of your own." },
       { id: "delete", title: "Delete", subtitle: "Removes this account and its local data from this device.", destructive: true },
@@ -1178,20 +1204,31 @@ function hideLoggedOutScreen() {
   document.body.classList.remove("session-logged-out");
 }
 
-const accountDeleteModal = document.querySelector("[data-account-delete-modal]");
-const accountDeleteCopy = document.querySelector("[data-account-delete-copy]");
-
-function openSavedAccountDelete(account) {
+// iOS OnboardingView: "Remove Saved Account" in the same chooser as every other confirm
+// (ConfirmActionSheet): the red "Remove from Device" row with its consequence, then "Cancel".
+async function openSavedAccountDelete(account) {
   pendingSavedAccountRemoval = account;
-  if (accountDeleteCopy) {
-    accountDeleteCopy.textContent = `Deletes ${account.name} (${shortAddress(account.address)}) and its local data from this device.`;
+  const choice = await chooseDialog({
+    title: "Remove Saved Account",
+    options: [
+      { id: "remove", title: "Remove from Device", subtitle: `Deletes ${account.name} (${savedAccountShortAddress(account.address)}) and its local data from this device.`, destructive: true },
+      { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
+    ],
+  });
+  pendingSavedAccountRemoval = null;
+  if (choice !== "remove") return;
+  try {
+    removeSavedAccountFromDevice(account);
+  } catch (error) {
+    appendEngineLog(`Saved-account removal failed: ${error.message}`);
+    showCopyToast(userFacingError(error));
   }
-  if (accountDeleteModal) accountDeleteModal.hidden = false;
 }
 
-function closeSavedAccountDelete() {
-  pendingSavedAccountRemoval = null;
-  if (accountDeleteModal) accountDeleteModal.hidden = true;
+/// iOS SavedAccountSummary.shortPublicAddress: first 10 and last 6 characters.
+function savedAccountShortAddress(address) {
+  const value = String(address || "");
+  return value.length > 16 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
 }
 
 function removeAccountScopedLocalData(address) {
@@ -1292,25 +1329,7 @@ function removeSavedAccountFromDevice(account) {
   persistSavedAccounts(remaining);
   removeAccountScopedLocalData(address);
   renderSavedAccountsScreen();
-  showCopyToast("Saved account removed");
 }
-
-document.querySelector("[data-confirm-account-delete]")?.addEventListener("click", () => {
-  const account = pendingSavedAccountRemoval;
-  if (!account) return closeSavedAccountDelete();
-  try {
-    removeSavedAccountFromDevice(account);
-    closeSavedAccountDelete();
-  } catch (error) {
-    appendEngineLog(`Saved-account removal failed: ${error.message}`);
-    showCopyToast(userFacingError(error));
-  }
-});
-
-document.querySelector("[data-cancel-account-delete]")?.addEventListener("click", closeSavedAccountDelete);
-accountDeleteModal?.addEventListener("click", (event) => {
-  if (event.target === accountDeleteModal) closeSavedAccountDelete();
-});
 
 let pendingSavedAccountRename = null;
 const accountRenameModal = document.querySelector("[data-account-rename-modal]");
@@ -1358,15 +1377,12 @@ accountRenameForm?.addEventListener("submit", (event) => {
   const account = pendingSavedAccountRename;
   if (!account) return closeSavedAccountRename();
   const name = String(accountRenameForm.elements.accountName?.value || "").trim();
-  if (!name) {
-    if (accountRenameError) { accountRenameError.textContent = "Enter an account name."; accountRenameError.hidden = false; }
-    return;
-  }
+  // iOS: a blank name just closes the alert, nothing saved.
+  if (!name) return closeSavedAccountRename();
   try {
     renameSavedAccount(account.address, name);
     closeSavedAccountRename();
     renderSavedAccountsScreen();
-    showCopyToast("Account name saved");
   } catch (error) {
     if (accountRenameError) { accountRenameError.textContent = error.message; accountRenameError.hidden = false; }
   }
@@ -1383,8 +1399,9 @@ const utxoRenameModal = document.querySelector("[data-utxo-rename-modal]");
 const utxoRenameForm = document.querySelector("[data-utxo-rename-form]");
 const utxoRenameOutpoint = document.querySelector("[data-utxo-rename-outpoint]");
 
-function openUtxoRename(address, outpointKey, currentLabel) {
-  pendingUtxoRename = { address, outpointKey };
+// `onSaved`: the list to repaint when it is not the chatting address's (a spending address's UTXOs).
+function openUtxoRename(address, outpointKey, currentLabel, onSaved = null) {
+  pendingUtxoRename = { address, outpointKey, onSaved };
   if (utxoRenameForm?.elements?.utxoName) utxoRenameForm.elements.utxoName.value = currentLabel || "";
   if (utxoRenameOutpoint) utxoRenameOutpoint.textContent = outpointKey;
   if (utxoRenameModal) utxoRenameModal.hidden = false;
@@ -1401,7 +1418,7 @@ utxoRenameForm?.addEventListener("submit", (event) => {
   const name = String(utxoRenameForm.elements.utxoName?.value || "").trim();
   setUtxoLabel(pending.address, pending.outpointKey, name);
   closeUtxoRename();
-  renderManageAddressUtxos();
+  if (pending.onSaved) pending.onSaved(); else renderManageAddressUtxos();
   showCopyToast(name ? "UTXO name saved" : "UTXO name removed");
 });
 document.querySelectorAll("[data-close-utxo-rename]").forEach((el) => el.addEventListener("click", closeUtxoRename));
@@ -1425,13 +1442,68 @@ const profileQrOverlay = document.querySelector("[data-profile-qr-overlay]");
 const photoPreviewOverlay = document.querySelector("[data-photo-preview-overlay]");
 const photoPreviewImage = document.querySelector("[data-photo-preview-image]");
 
-function openPhotoPreview(dataUrl) {
+// iOS ImagePreviewView: the file name as the title, Close, Share, and zoom (up to 4x).
+let photoPreviewZoom = 1;
+let photoPreviewName = "photo.jpg";
+function setPhotoPreviewZoom(zoom, originEvent = null) {
+  photoPreviewZoom = Math.min(4, Math.max(1, zoom));
+  if (!photoPreviewImage) return;
+  if (originEvent && photoPreviewZoom > 1) {
+    const rect = photoPreviewImage.getBoundingClientRect();
+    const ox = ((originEvent.clientX - rect.left) / rect.width) * 100;
+    const oy = ((originEvent.clientY - rect.top) / rect.height) * 100;
+    photoPreviewImage.style.transformOrigin = `${Math.min(100, Math.max(0, ox))}% ${Math.min(100, Math.max(0, oy))}%`;
+  }
+  photoPreviewImage.style.transform = photoPreviewZoom > 1 ? `scale(${photoPreviewZoom})` : "";
+  photoPreviewOverlay?.classList.toggle("zoomed", photoPreviewZoom > 1);
+}
+function openPhotoPreview(dataUrl, name = "") {
   if (!photoPreviewOverlay || !photoPreviewImage) return;
+  photoPreviewName = String(name || "").trim() || "photo.jpg";
   photoPreviewImage.src = dataUrl;
+  const title = photoPreviewOverlay.querySelector("[data-photo-preview-title]");
+  if (title) title.textContent = String(name || "").trim() || "Photo";
+  photoPreviewImage.style.transformOrigin = "";
+  setPhotoPreviewZoom(1);
   photoPreviewOverlay.hidden = false;
 }
-
-photoPreviewOverlay?.addEventListener("click", () => { photoPreviewOverlay.hidden = true; });
+function closePhotoPreview() {
+  if (!photoPreviewOverlay) return;
+  photoPreviewOverlay.hidden = true;
+  setPhotoPreviewZoom(1);
+}
+// Share hands the photo on as a file (the system share sheet where there is one, else a download).
+async function sharePhotoPreview() {
+  const src = photoPreviewImage?.src;
+  if (!src) return;
+  try {
+    const blob = await (await fetch(src)).blob();
+    const file = new File([blob], photoPreviewName, { type: blob.type || "image/jpeg" });
+    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: photoPreviewName }); return; }
+  } catch (error) { if (error?.name === "AbortError") return; }
+  const anchor = document.createElement("a");
+  anchor.href = src;
+  anchor.download = photoPreviewName;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+}
+photoPreviewOverlay?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-photo-preview-close]")) { closePhotoPreview(); return; }
+  if (event.target.closest("[data-photo-preview-share]")) { sharePhotoPreview(); return; }
+  if (event.target === photoPreviewImage) { setPhotoPreviewZoom(photoPreviewZoom > 1 ? 1 : 2, event); return; }
+  if (event.target.closest(".photo-preview-bar")) return;
+  if (photoPreviewZoom > 1) { setPhotoPreviewZoom(1); return; }
+  closePhotoPreview();
+});
+photoPreviewOverlay?.addEventListener("wheel", (event) => {
+  if (photoPreviewOverlay.hidden) return;
+  event.preventDefault();
+  setPhotoPreviewZoom(photoPreviewZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), event);
+}, { passive: false });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && photoPreviewOverlay && !photoPreviewOverlay.hidden) closePhotoPreview();
+});
 
 // --- Message link previews -----------------------------------------------------
 // Linkifies URLs in message text and, for previewable links, appends a media
@@ -1539,6 +1611,9 @@ function openProfileLink(address) {
   const known = state.contacts.find((entry) => String(entry.address || "").toLowerCase() === normalized);
   openChatInfoForAddress(known ? known.address : normalized);
 }
+function knownBroadcastRoom(channel) {
+  try { return chatCircleRooms().some((room) => room.name === channel); } catch { return true; }
+}
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
   if (link?.kind === "pay") return buildPaymentRequestCard(link.request);
@@ -1570,7 +1645,8 @@ function buildInternalLinkCard(link) {
     ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
     : isProfile
       ? (profileContact ? "Tap to see their User Info." : "Tap to see their profile on KaChat.")
-      : "Tap to open this KaChat public chat room.";
+      // iOS: a featured room or one in your list just opens; any other is joined on the tap.
+      : (knownBroadcastRoom(link.channel) ? "Tap to open this KaChat public chat room." : "Tap to join this KaChat public chat room.");
   const profileAvatar = isProfile ? (avatarHtmlForAnyAddress(link.address, "message-avatar") || "") : "";
   card.innerHTML = `<span class="internal-link-icon ${entry?.avatarHtml || profileAvatar ? "avatar" : ""}">${entry?.avatarHtml || profileAvatar || icon}</span>
     <span class="message-link-card-meta">
@@ -1745,7 +1821,8 @@ async function payPaymentRequestAsChatPayment(request, { amountKas, feeKas, sele
   });
   if (!sent) throw new Error("A payment is already being sent. Try again in a moment.");
   sendKaspaPaidAsChatPayment = true;
-  return { txids: [] };
+  // Its txid, for the Sent sheet (iOS WithdrawKaspaView send: txId from sendPayment).
+  return { txids: typeof sent === "string" ? [sent] : [] };
 }
 
 // The request's link, copied or shared (iOS Copy Payment Request / ShareLink). The browser's share
@@ -1898,9 +1975,10 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
     const value = Number(amountInput?.value);
     let text = "";
     if (isFinite(value) && value > 0 && price) {
+      // No "≈" (iOS conversionLabelText).
       text = unit === "kas"
-        ? `≈ ${formatFiatValue(value, price)}`
-        : `≈ ${(value / price).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
+        ? formatFiatValue(value, price)
+        : `${trimKas8(value / price)} ${KAS_UNIT}`;
     }
     conversion.textContent = text || (unit === "kas" ? selectedCurrency.toUpperCase() : KAS_UNIT);
   };
@@ -2008,10 +2086,10 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
       catch { showCopyToast(link); }
       return;
     }
-    // Into the chat as a message: it shows there as a Payment Request card they tap to pay.
-    const blocked = ["outgoing-request", "declined", "request-failed"].includes(recipient.relationshipState);
-    if (blocked || !state.conversations.some((entry) => entry.id === conversationId)) {
-      setError(recipient.relationshipState === "declined" ? "Communication request declined" : recipient.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "This chat can't send messages right now.");
+    // Into the chat as a message: it shows there as a Payment Request card they tap to pay. Like
+    // any message it is not held back by an unanswered handshake (iOS sendMessage).
+    if (!state.conversations.some((entry) => entry.id === conversationId)) {
+      setError("This chat can't send messages right now.");
       return;
     }
     const request = await makeRequest();
@@ -2330,25 +2408,31 @@ function buildRichLinkCard(url, data) {
 }
 
 /** Renders `text` into `container` with URLs as clickable links; returns the URLs found. */
+// A bare "www." address is a link too (iOS's link detector); it opens over https.
+const URL_OR_WWW_IN_TEXT_RE = /(?:https?:\/\/|\bwww\.)[^\s<>"']+/gi;
 function renderTextWithLinks(container, text) {
   const source = String(text ?? "");
   const urls = [];
   let last = 0;
-  for (const match of source.matchAll(URL_IN_TEXT_RE)) {
+  for (const match of source.matchAll(URL_OR_WWW_IN_TEXT_RE)) {
     let url = match[0];
     const trailing = url.match(/[),.;:!?\]]+$/); // sentence punctuation isn't part of the URL
     if (trailing) url = url.slice(0, -trailing[0].length);
     if (!url) continue;
+    const bareWww = !/^https?:\/\//i.test(url);
+    if (bareWww && !/^www\.[^.\s]+\.[^\s]+/i.test(url)) continue;
+    const href = bareWww ? `https://${url}` : url;
     if (match.index > last) container.append(source.slice(last, match.index));
     const anchor = document.createElement("a");
     anchor.className = "message-link";
-    anchor.href = url;
+    anchor.href = href;
     anchor.target = "_blank";
     anchor.rel = "noopener noreferrer";
     anchor.textContent = url;
     anchor.addEventListener("click", (event) => event.stopPropagation());
     container.append(anchor);
-    urls.push(url);
+    // A bare www. address is linked but never previewed: only a full URL fetches a card.
+    if (!bareWww) urls.push(url);
     last = match.index + url.length;
   }
   if (last < source.length) container.append(source.slice(last));
@@ -2502,7 +2586,9 @@ async function decodeWaveform(src) {
     return decoded;
   } catch { return null; }
 }
-function buildVoicePlayer(src, { outgoing = false, durationHint = null } = {}) {
+// `chatStyle` (1:1 and group threads, iOS AudioBubble): the total length as "00:07" whether or not
+// it is playing, no seeking on the waveform, and "--:--" when it can't be read.
+function buildVoicePlayer(src, { outgoing = false, durationHint = null, chatStyle = false } = {}) {
   const wrap = document.createElement("div");
   wrap.className = `voice-player${outgoing ? " outgoing" : ""}`;
   wrap.innerHTML = `<button type="button" class="voice-player-toggle" aria-label="Play">
@@ -2529,7 +2615,8 @@ function buildVoicePlayer(src, { outgoing = false, durationHint = null } = {}) {
     const bars = wave.children;
     const progress = dur ? Math.min(1, audio.currentTime / dur) : 0;
     for (let i = 0; i < bars.length; i += 1) bars[i].classList.toggle("played", (i + 0.5) / bars.length <= progress && !audio.paused);
-    if (!audio.paused && dur) time.textContent = `${fmt(audio.currentTime)} / ${fmt(dur)}`;
+    if (chatStyle) time.textContent = dur ? formatAudioDuration(dur) : "--:--";
+    else if (!audio.paused && dur) time.textContent = `${fmt(audio.currentTime)} / ${fmt(dur)}`;
     else time.textContent = dur ? fmt(dur) : "--:--";
     wrap.classList.toggle("playing", !audio.paused && !audio.ended);
     toggle.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
@@ -2546,17 +2633,21 @@ function buildVoicePlayer(src, { outgoing = false, durationHint = null } = {}) {
   audio.addEventListener("play", paint);
   audio.addEventListener("pause", paint);
   audio.addEventListener("ended", () => { audio.currentTime = 0; paint(); });
-  audio.addEventListener("error", () => { time.textContent = "Unavailable"; });
+  audio.addEventListener("error", () => { time.textContent = chatStyle ? "--:--" : "Unavailable"; });
   toggle.addEventListener("click", (event) => {
     event.stopPropagation();
     // One voice at a time, like iOS: starting this one pauses any other.
     if (audio.paused) {
       document.querySelectorAll(".voice-player audio").forEach((other) => { if (other !== audio && !other.paused) other.pause(); });
-      audio.play().catch(() => { time.textContent = "Failed to play audio."; });
+      audio.play().catch((error) => {
+        if (chatStyle) appendEngineLog(`Voice message playback failed: ${error?.message || error}`);
+        else time.textContent = "Failed to play audio.";
+      });
     } else audio.pause();
   });
   wave.addEventListener("click", (event) => {
     event.stopPropagation();
+    if (chatStyle) return;
     const dur = total();
     if (!dur) return;
     const rect = wave.getBoundingClientRect();
@@ -2609,7 +2700,7 @@ function probeNextcloudMedia(placeholder, shareUrl, downloadUrl) {
 
   const settleAudio = () => {
     if (settled) return;
-    const player = buildVoicePlayer(downloadUrl, { outgoing: placeholder.dataset.outgoing === "1" });
+    const player = buildVoicePlayer(downloadUrl, { outgoing: placeholder.dataset.outgoing === "1", chatStyle: true });
     player.classList.add("message-link-audio");
     settle(player);
   };
@@ -2655,12 +2746,6 @@ function cancelReply() {
 // Editing (iOS 913e95f): Edit fills the composer with the current text under an "Editing
 // message" banner; Send posts the edit envelope, never a new bubble.
 let editingMessageId = null;
-function editedMarkElement(status = null) {
-  const mark = document.createElement("span");
-  mark.className = `message-edited${status ? ` ${status}` : ""}`;
-  mark.textContent = status === "pending" ? "edited · sending" : status === "failed" ? "edit failed" : "edited";
-  return mark;
-}
 function startEditMessage(messageId) {
   if (!activeConversationId) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
@@ -2701,7 +2786,7 @@ async function sendEdit(conversationEntry, message, text) {
     if (message.edit) { delete message.edit.status; persistState(); rerender(); }
   } catch (error) {
     appendEngineLog(`Edit send failed (local text already applied): ${error.message}`);
-    showCopyToast(`Edit failed: ${userFacingError(error)}`);
+    showFailedToSend(userFacingError(error));
     if (message.edit) { message.edit.status = "failed"; persistState(); rerender(); }
   }
 }
@@ -2716,19 +2801,35 @@ function startReplyTo(messageId) {
   const replyBannerTitle = replyBanner?.querySelector("[data-reply-banner-title]");
   if (replyBannerTitle) {
     const contact = contactForConversation(conversationEntry);
-    replyBannerTitle.textContent = `Replying to ${message.direction === "outgoing" ? "yourself" : (displayNameForAddress(contact) || shortAddress(contact?.address || ""))}`;
+    // iOS replyDisplayName: "You" for your own message.
+    replyBannerTitle.textContent = `Replying to ${message.direction === "outgoing" ? "You" : (displayNameForAddress(contact) || shortAddress(contact?.address || ""))}`;
   }
   if (replyBanner) replyBanner.hidden = false;
   composer.elements.message?.focus();
 }
 
-document.querySelector("[data-cancel-reply]")?.addEventListener("click", cancelReply);
+// The banner's X: cancelling an edit also empties the composer (iOS editBanner: cancelEditing +
+// messageText = ""); cancelling a reply keeps what was typed.
+document.querySelector("[data-cancel-reply]")?.addEventListener("click", () => {
+  const wasEditing = Boolean(editingMessageId);
+  cancelReply();
+  if (!wasEditing) return;
+  const input = composer?.elements?.message;
+  if (input) { input.value = ""; autoGrowComposer(); }
+  if (activeConversationId) clearConversationDraft(activeConversationId);
+});
 
 // The dead space beside the header chip takes you to the start of the conversation (iOS
 // jumpToChatStart). The chip itself still opens Chat Info.
 document.querySelector(".conversation-header")?.addEventListener("click", (event) => {
   if (event.target.closest("button")) return;
   if (!activeConversationId || !messageArea) return;
+  // The whole history first (iOS jumpToChatStart loads every page), then the very top.
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  if (conversationEntry && Number(messageArea.dataset.hiddenCount || 0) > 0) {
+    messageWindowByThread.set(`c:${conversationEntry.id}`, Number.MAX_SAFE_INTEGER);
+    renderMessages(conversationEntry);
+  }
   const first = messageArea.querySelector("[data-message-id]");
   if (!first) return;
   messageArea.scrollTo({ top: 0, behavior: "smooth" });
@@ -2745,7 +2846,7 @@ function jumpToMessageByTxid(txid) {
   const target = conversationEntry?.messages.find((entry) => entry.txid === txid || entry.id === txid);
   if (!target) {
     const refetching = scheduleReplyGapRefetch(conversationEntry, { force: true, onlyTxid: txid });
-    showCopyToast(refetching ? "Original message not here yet; fetching it now." : "Original message not available.");
+    showCopyToast(refetching ? "Original message isn't on this device yet - fetching it." : "Original message not available.");
     return;
   }
   const highlight = (el, behavior) => {
@@ -2994,9 +3095,6 @@ function updateAvatarElement(initialsEl, imageEl, contact) {
 }
 const chatInfoOverlay = document.querySelector("[data-chat-info-overlay]");
 const chatInfoAvatar = document.querySelector("[data-chat-info-avatar]");
-const chatInfoPhotoPick = document.querySelector("[data-chat-info-photo-pick]");
-const chatInfoPhotoInput = document.querySelector("[data-chat-info-photo-input]");
-const chatInfoRemovePhoto = document.querySelector("[data-chat-info-remove-photo]");
 const chatInfoAvatarInitials = document.querySelector("[data-chat-info-avatar-initials]");
 const chatInfoAvatarImage = document.querySelector("[data-chat-info-avatar-image]");
 const chatInfoNameInput = document.querySelector("[data-chat-info-name-input]");
@@ -3046,31 +3144,46 @@ async function revealChatInfoAlias(which) {
     if (!chatInfoRevealedAliases) {
       chatInfoRevealedAliases = await engine.deriveConversationAliases(chatInfoContactAddress);
     }
-  } catch (error) {
-    showCopyToast(`Could not derive aliases: ${userFacingError(error)}`);
+  } catch {
+    showCopyToast("Alias unavailable.");
     return;
   }
   const el = which === "receiving" ? chatInfoAliasReceiving : chatInfoAliasSending;
-  const value = which === "receiving" ? chatInfoRevealedAliases.myAlias : chatInfoRevealedAliases.theirAlias;
-  if (el && value) { el.textContent = value; el.classList.add("revealed"); }
+  const value = which === "receiving" ? chatInfoRevealedAliases?.myAlias : chatInfoRevealedAliases?.theirAlias;
+  if (!value) { showCopyToast("Alias unavailable."); return; }
+  if (el) { el.textContent = value; el.classList.add("revealed"); }
 }
 
 chatInfoAliasReceivingEye?.addEventListener("click", () => revealChatInfoAlias("receiving"));
 chatInfoAliasSendingEye?.addEventListener("click", () => revealChatInfoAlias("sending"));
 chatInfoAliasReceiving?.addEventListener("click", async () => {
   if (!chatInfoAliasReceiving.classList.contains("revealed")) { revealChatInfoAlias("receiving"); return; }
-  try { await copyTextToClipboard(chatInfoAliasReceiving.textContent); showCopyToast("Receiving alias copied."); } catch {}
+  try { await copyTextToClipboard(chatInfoAliasReceiving.textContent); showCopyToast("Alias copied to clipboard."); } catch {}
 });
 chatInfoAliasSending?.addEventListener("click", async () => {
   if (!chatInfoAliasSending.classList.contains("revealed")) { revealChatInfoAlias("sending"); return; }
-  try { await copyTextToClipboard(chatInfoAliasSending.textContent); showCopyToast("Sending alias copied."); } catch {}
+  try { await copyTextToClipboard(chatInfoAliasSending.textContent); showCopyToast("Alias copied to clipboard."); } catch {}
 });
 
+// Notifications and Photos are staged while User Info is open and land on Save, as iOS keeps
+// them in @State until saveChanges (Cancel drops them). null = nothing staged: the stored value.
+let chatInfoStagedNotify = null;
+let chatInfoStagedPhotos = null;
+function chatInfoNotifyChoice() {
+  return chatInfoStagedNotify ?? (getContactNotifyOverride(chatInfoContactAddress) || "default");
+}
+function chatInfoPhotosChoice() {
+  return chatInfoStagedPhotos ?? getContactPhotos(chatInfoContactAddress);
+}
+const CHAT_INFO_BELL_SVG = '<path d="M18 15v-4a6 6 0 1 0-12 0v4l-2 3h16zM10 21h4"/>';
 function refreshChatInfoContactControls() {
   const callsToggle = document.querySelector("[data-chat-info-calls]");
   if (callsToggle) callsToggle.checked = contactCallsEnabled(chatInfoContactAddress);
+  // The Notifications row's bell is slashed while the (staged) choice is Off (iOS bell.slash).
+  const bell = document.querySelector("[data-chat-info-bell]");
+  if (bell) bell.innerHTML = CHAT_INFO_BELL_SVG + (chatInfoNotifyChoice() === "off" ? '<path d="M3 3l18 18"/>' : "");
   if (chatInfoNotifyToggle) {
-    chatInfoNotifyToggle.value = getContactNotifyOverride(chatInfoContactAddress) || "default";
+    chatInfoNotifyToggle.value = chatInfoNotifyChoice();
     // iOS spells out what Default currently resolves to, so the row never just says "Default"
     // and leaves you to go to Settings to find out what that means.
     const option = chatInfoNotifyToggle.querySelector("[data-chat-info-notify-default]");
@@ -3081,7 +3194,7 @@ function refreshChatInfoContactControls() {
   // could not say "follow the default" at all - flipping it on and then off again left the
   // contact pinned to an override that no longer tracked the setting it came from.
   if (chatInfoPhotosToggle) {
-    chatInfoPhotosToggle.value = getContactPhotos(chatInfoContactAddress);
+    chatInfoPhotosToggle.value = chatInfoPhotosChoice();
     const auto = chatInfoPhotosToggle.querySelector("[data-chat-info-photos-auto]");
     if (auto) {
       const contact = (state.contacts || []).find((entry) => entry.address === chatInfoContactAddress);
@@ -3091,28 +3204,36 @@ function refreshChatInfoContactControls() {
     }
   }
 }
-chatInfoNotifyToggle?.addEventListener("change", async () => {
+chatInfoNotifyToggle?.addEventListener("change", () => {
   if (!chatInfoContactAddress) return;
-  const choice = String(chatInfoNotifyToggle.value || "default");
-  // "default" stores nothing: an override that happens to equal today's default would silently
-  // stop following it the next time the default changes.
-  setContactPref(chatInfoContactAddress, "notify", choice === "default" ? undefined : choice);
-  if (choice !== "off") {
-    const granted = await ensureNotificationPermission();
-    if (!granted) showCopyToast(notificationsUnavailableMessage());
-  }
+  chatInfoStagedNotify = String(chatInfoNotifyToggle.value || "default");
+  refreshChatInfoContactControls();
 });
 chatInfoPhotosToggle?.addEventListener("change", () => {
   if (!chatInfoContactAddress) return;
-  // "auto" stores nothing, for the same reason "default" does on the notification row: an
-  // override that happens to match today's default would quietly stop following it the next
-  // time that default changed.
-  const choice = String(chatInfoPhotosToggle.value || "auto");
-  setContactPref(chatInfoContactAddress, "photos", choice === "auto" ? undefined : choice);
+  chatInfoStagedPhotos = String(chatInfoPhotosToggle.value || "auto");
   refreshChatInfoContactControls();
-  const conv = state.conversations.find((entry) => entry.id === activeConversationId);
-  if (conv && contactForConversation(conv)?.address === chatInfoContactAddress) renderMessages(conv);
 });
+/** Save: the staged Notifications and Photos choices land. "default" / "auto" store nothing: an
+ *  override that happens to equal today's default would silently stop following it the next
+ *  time the default changes. */
+function applyChatInfoStagedPrefs() {
+  const address = chatInfoContactAddress;
+  if (address && chatInfoStagedNotify != null) {
+    const choice = chatInfoStagedNotify;
+    setContactPref(address, "notify", choice === "default" ? undefined : choice);
+    // The browser has to allow notifications at all; asked once, quietly.
+    if (choice !== "off") ensureNotificationPermission().catch(() => {});
+  }
+  if (address && chatInfoStagedPhotos != null) {
+    const choice = chatInfoStagedPhotos;
+    setContactPref(address, "photos", choice === "auto" ? undefined : choice);
+    const conv = state.conversations.find((entry) => entry.id === activeConversationId);
+    if (conv && contactForConversation(conv)?.address === address) renderMessages(conv);
+  }
+  chatInfoStagedNotify = null;
+  chatInfoStagedPhotos = null;
+}
 // Best-effort permission request at load (browsers that require a gesture will
 // no-op; the Chat Info toggle also requests it on demand).
 ensureNotificationPermission();
@@ -3215,6 +3336,8 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
 const pendingNotificationClicks = new Map();
 let nextNotificationClickId = 1;
 async function showAppNotification({ title, body, tag, silent = false, route = null, onClick = null } = {}) {
+  // Push Notifications off silences every OS notification (iOS NotificationsHubPage footer).
+  if (!pushNotificationsEnabled()) return;
   const options = { body: body || "", tag: tag || undefined, icon: kachatLogoUrl, silent: Boolean(silent) };
   try {
     const note = new Notification(title || "KaChat", options);
@@ -3259,6 +3382,7 @@ window.addEventListener("kachat:notification-click", (event) => {
 // activity, KaPosts). Honors the Play sound preference; falls back to the
 // in-app toast when browser notifications are unavailable/denied.
 function postDesktopNotification({ title, body, tag, onClick, route = null } = {}) {
+  if (!pushNotificationsEnabled()) return;
   if (typeof Notification === "undefined" || Notification.permission !== "granted") {
     showCopyToast(body ? `${title}: ${body}` : title);
     return;
@@ -3316,7 +3440,6 @@ const kasPaymentAlertCancel = document.querySelector("[data-kas-payment-alert-ca
 const contactModal = document.querySelector("[data-contact-modal]");
 const contactForm = document.querySelector("[data-contact-form]");
 const contactAddressInput = contactForm?.elements?.address;
-const contactNameInput = contactForm?.elements?.name;
 const createChatAddButton = document.querySelector("[data-create-chat-add]");
 const createChatError = document.querySelector("[data-create-chat-error]");
 const contactAddressBookButton = document.querySelector("[data-contact-address-book]");
@@ -3398,6 +3521,7 @@ function setActiveConversationId(id) {
   // Opening a 1:1 thread is enough to raise the handshake warning (no typing
   // needed); leaving one drops it.
   try { updateHandshakeWarningBanner(); } catch { /* banner section not evaluated yet */ }
+  syncComposerSlots();
 }
 
 function nowId() {
@@ -3954,7 +4078,6 @@ function rejectChatRequest(conversationEntry) {
   persistState();
   renderChats();
   renderMessageRequestsSheet();
-  showCopyToast("Request rejected.");
 }
 
 /** Whether the configured indexer answers inbox lookups - probed once per indexer URL; an
@@ -4109,19 +4232,7 @@ function renderMessageRequestsSheet() {
     listEl.innerHTML = `<div class="message-requests-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.2 6.3A2 2 0 0 1 8.1 5h7.8a2 2 0 0 1 1.9 1.3L20 13.5h-4.2a1 1 0 0 0-.9.6l-.6 1.3a1 1 0 0 1-.9.6h-2.8a1 1 0 0 1-.9-.6l-.6-1.3a1 1 0 0 0-.9-.6Z"/></svg><strong>No message requests</strong></div>`;
     return;
   }
-  listEl.innerHTML = `<div class="message-requests-card">${requests.map((entry) => {
-    const contact = contactForConversation(entry);
-    const last = lastMessageFor(entry);
-    return `
-      <button class="chat-row" type="button" data-request-conversation-id="${escapeHtml(entry.id)}">
-        <span class="chat-row-time">${escapeHtml(last ? formatChatListDate(last.createdAt) : "")}</span>
-        ${avatarHtmlFor(contact)}
-        <span class="chat-meta">
-          <strong>${escapeHtml(displayNameForAddress(contact))}</strong>
-          ${last ? `<span>${escapeHtml(conversationPreview(entry))}</span>` : `<span class="chat-row-none">Loading messages…</span>`}
-        </span>
-      </button>`;
-  }).join("")}</div>
+  listEl.innerHTML = `<div class="message-requests-card">${requests.map((entry) => conversationRowHtml(entry, { idAttr: "data-request-conversation-id" })).join("")}</div>
   <p class="message-requests-footer">Open a request to read it. Accept to reply and move it to your chats; Reject deletes it and stops that address reaching you until you write to them.</p>`;
 }
 function openMessageRequestsSheet() {
@@ -4156,6 +4267,8 @@ function updateMessageRequestUi(conversationEntry) {
   const plusHandshake = document.querySelector("[data-composer-handshake]");
   if (plusHandshake) plusHandshake.hidden = !handshakeOffered;
   if (inboxSupportKnown() === undefined && engine.address) inboxSupported().catch(() => {});
+  // A declined chat shows "Conversation declined" in the composer's place.
+  syncComposerSlots();
 }
 
 /** The accepted/established-contact predicate behind the stranger-gating features, mirroring
@@ -4185,7 +4298,7 @@ function isAcceptedContact(contact, conversationEntry = null) {
  *  photo" placeholder. Mirrors iOS ContactsManager.shouldAutoDisplayPhotos: the per-contact
  *  Chat Info override wins outright, and otherwise Settings > Chats > "Require approval for
  *  photos from new contacts" (default ON) holds back photos from contacts you have not
- *  accepted yet. Revealing one is per session (revealedPhotoIds), never persisted. */
+ *  accepted yet. A revealed one stays revealed (revealedPhotoIds, persisted by txid). */
 function shouldAutoDisplayPhotosFrom(contact, conversationEntry = null) {
   const override = getContactPhotos(contact?.address);
   if (override === "manual") return false;
@@ -5016,6 +5129,8 @@ function closeExportChoice() {
 function updateSelectionUi() {
   if (selectionToolbar) selectionToolbar.hidden = !messageSelectionMode;
   if (selectionCount) selectionCount.textContent = `${selectedMessageIds.size} selected`;
+  const deleteSelectedButton = document.querySelector("[data-delete-selected]");
+  if (deleteSelectedButton) deleteSelectedButton.disabled = selectedMessageIds.size === 0;
   const selectAllButton = document.querySelector("[data-select-all-messages]");
   if (selectAllButton) {
     const total = messageArea?.querySelectorAll("[data-message-id]").length || 0;
@@ -5216,25 +5331,36 @@ function webLinkPreviewLabel(text) {
 function chatListPreviewText(message) {
   if (!message) return "";
   if (message.edit?.text != null) message = { ...message, text: messageContent(message) };
-  const callEnv = Calls.parseCallEnvelope(message.text);
-  if (callEnv) return Calls.callPreviewText(callEnv, message.direction === "outgoing");
-  const linkLabel = webLinkPreviewLabel(message.text);
-  if (linkLabel) return linkLabel;
-  const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
+  // As iOS ConversationRow.formatPreview: unwrap a reply first, so the reply's own text (or its
+  // attachment) is what is previewed rather than the envelope.
+  const unwrapped = Chess.unwrapReplyText(String(message.text || ""));
+  // A message that is nothing but a KaChat link previews as what it opens; a link inside other
+  // text is just a web link below.
+  const internal = firstInternalLinkIn(unwrapped);
+  if (internal && unwrapped.trim() === internal.raw) {
+    if (internal.kind === "kapost") return "Shared a KaPosts post";
+    if (internal.kind === "profile") return "Shared a KaChat profile";
+    if (internal.kind === "broadcast") return `Public chat room #${internal.channel}`;
+    if (internal.kind === "pay") return kasLabel(`Payment request: ${paymentRequestAmountText(internal.request)} KAS`);
+  }
+  const linkSafe = (text) => (WEB_LINK_RE.test(text) ? "📎 Sent a link" : text);
+  const trimmed = unwrapped.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return linkSafe(unwrapped);
+  const chessEnv = Chess.parseChessEnvelope(unwrapped);
   if (chessEnv) {
     const control = chessEnv.kind === "invite" ? Chess.chessTimeControlLabel(Chess.chessTimeControlFromInvite(chessEnv)) : null;
     return control ? `♟️ Chess game - ${control}` : "♟️ Chess game";
   }
-  const replyEnvelope = parseReplyEnvelope(message.text);
-  if (replyEnvelope) return replyEnvelope.text;
-  const fileMime = sniffInlineFileMime(message.text);
+  const callEnv = Calls.parseCallEnvelope(unwrapped);
+  if (callEnv) return Calls.callPreviewText(callEnv, message.direction === "outgoing");
+  const fileMime = sniffInlineFileMime(unwrapped);
   if (fileMime != null) {
     if (fileMime.startsWith("image/")) return "Photo";
     if (fileMime.startsWith("audio/")) return "Voice message";
     if (fileMime.startsWith("video/")) return "Video";
     return "File";
   }
-  return message.text || "";
+  return linkSafe(unwrapped);
 }
 
 function conversationPreview(conversationEntry) {
@@ -5245,18 +5371,18 @@ function conversationPreview(conversationEntry) {
   // If the most recent activity was a reaction (newer than the last real
   // message, or there's no message at all yet), the preview describes whose
   // message got reacted to rather than showing stale message text.
-  if (reactionEvent && (!last || reactionEvent.timestamp >= last.createdAt)) {
+  // iOS reactionPreviewText: only a reaction strictly newer than the last message (a tie keeps
+  // the message), and only when there is a message at all. A target not on this device counts
+  // as theirs (targetMessageIsOutgoing ?? false).
+  if (!last) return "";
+  if (reactionEvent && reactionEvent.timestamp > last.createdAt) {
     const targetMessage = conversationEntry.messages.find((entry) => entry.txid === reactionEvent.targetTxId || entry.id === reactionEvent.targetTxId);
     const reactedByMe = Boolean(reactionEvent.reactorAddress) && reactionEvent.reactorAddress === engine.address;
-    if (targetMessage) {
-      const targetIsMine = targetMessage.direction === "outgoing";
-      if (reactedByMe) return targetIsMine ? "You reacted to your message" : "You reacted to their message";
-      return targetIsMine ? "Reacted to your message" : "Reacted to their message";
-    }
-    return reactedByMe ? "You reacted to a message" : "Reacted to a message";
+    const targetIsMine = targetMessage?.direction === "outgoing";
+    if (reactedByMe) return targetIsMine ? "You reacted to your message" : "You reacted to their message";
+    return targetIsMine ? "Reacted to your message" : "Reacted to their message";
   }
 
-  if (!last) return "";
   return chatListPreviewText(last);
 }
 
@@ -5331,9 +5457,14 @@ async function copyTextToClipboard(value) {
   if (!copied) throw new Error("Clipboard access was blocked by the browser");
 }
 
-function showCopyToast(message) {
+/// `style: "error"`: the iOS error toast - a red mark instead of the green check.
+function showCopyToast(message, { style = null } = {}) {
   if (!copyToast || !copyToastText) return;
   copyToastText.textContent = message;
+  const isError = style === "error";
+  copyToast.classList.toggle("error", isError);
+  const icon = copyToast.querySelector(".copy-toast-icon");
+  if (icon) icon.textContent = isError ? "!" : "✓";
   copyToast.hidden = false;
   requestAnimationFrame(() => copyToast.classList.add("visible"));
   window.clearTimeout(copyToastTimer);
@@ -5346,16 +5477,19 @@ function showCopyToast(message) {
 function updateGlobalHealthIndicator() {
   if (!serviceHealthLed) return;
 
-  const { stateName, latencyMs } = computeConnectionHealth();
+  const { stateName, latencyMs, connecting } = computeConnectionHealth();
 
   serviceHealthLed.classList.remove("ready", "busy", "error");
   serviceHealthLed.classList.add(stateName);
+  try { renderSettingsHeader(); } catch { /* the Settings bar isn't wired yet during early init */ }
   if (serviceHealthButton) {
     const stateLabel = stateName === "error"
       ? "Disconnected"
-      : stateName === "busy"
-        ? `Connected · high latency${latencyMs ? ` (${latencyMs} ms)` : ""}`
-        : "Connected";
+      : connecting
+        ? "Connecting"
+        : stateName === "busy"
+          ? `Connected · high latency${latencyMs ? ` (${latencyMs} ms)` : ""}`
+          : "Connected";
     serviceHealthButton.setAttribute("aria-label", `${stateLabel}. Open Connection Status`);
     serviceHealthButton.title = stateLabel;
   }
@@ -5605,8 +5739,16 @@ async function syncOneConversation(conversationEntry, { quiet = true, catchUp = 
   if (!contact || !engine.address || !engine.isKasiaCipherLoaded?.()) return 0;
   if (conversationSyncInFlight.has(conversationEntry.id)) return 0;
   conversationSyncInFlight.add(conversationEntry.id);
+  // The row's spinner shows for a history load (catch-up), not for every quiet sweep tick; a
+  // failure leaves the triangle until a later fetch succeeds (iOS begin/endChatFetch).
+  if (catchUp) setChatFetchState(conversationEntry.id, "loading");
   try {
-    return await syncOneConversationWork(conversationEntry, { quiet, catchUp, contact });
+    const added = await syncOneConversationWork(conversationEntry, { quiet, catchUp, contact });
+    setChatFetchState(conversationEntry.id, null);
+    return added;
+  } catch (error) {
+    setChatFetchState(conversationEntry.id, "failed");
+    throw error;
   } finally {
     conversationSyncInFlight.delete(conversationEntry.id);
   }
@@ -6436,7 +6578,27 @@ function openAccountOverlay() {
   accountOverlay.hidden = false;
   renderTransportReadiness();
   updateLocalStorageUsedLabel();
+  renderSettingsHeader();
 }
+
+// The Settings top bar (iOS SettingsView toolbar): the connection dot, the balance as
+// "x.xxxxxxxx KAS" (a click copies it: "Balance copied to clipboard."), Done.
+function settingsBalanceExact() {
+  const kas = Number(currentBalanceKas);
+  return currentBalanceKas === "--" || !Number.isFinite(kas) ? null : kas.toFixed(8);
+}
+function renderSettingsHeader() {
+  const value = document.querySelector("[data-settings-balance-value]");
+  if (value) value.textContent = `${settingsBalanceExact() ?? "--"} ${KAS_UNIT}`;
+  const led = document.querySelector("[data-settings-health-led]");
+  if (led && serviceHealthLed) led.className = serviceHealthLed.className;
+}
+document.querySelector("[data-settings-health-button]")?.addEventListener("click", () => openConnectionOverlay());
+document.querySelector("[data-settings-balance]")?.addEventListener("click", async () => {
+  const exact = settingsBalanceExact();
+  if (exact == null) return;
+  try { await copyTextToClipboard(exact); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
+});
 
 function closeAccountOverlay() {
   accountOverlay.hidden = true;
@@ -6452,6 +6614,7 @@ const connectionOverlay = document.querySelector("[data-connection-overlay]");
 function openConnectionOverlay() {
   connectionOverlay.hidden = false;
   selectedNodeMode = null; // re-sync the node-mode cards to the saved setting
+  renderNodeChoice();
   renderConnectionStatus();
 }
 
@@ -6734,6 +6897,14 @@ let activeDomainsTab = DEFAULT_DOMAIN_TAB;
 let otherServiceNames = { k: null, kaspa: null }; // { state, names: [{ name, display, settling }] }
 let otherServiceNamesFor = "";
 let otherServiceNamesAt = 0;
+// The address whose KNS lookup has answered, so Your Domains' count can say "0" (iOS shows a
+// number once anything answered).
+let ownKnsDomainsFor = "";
+// Your Domains > .kachat's list state (iOS KachatLiveDomainsTab `loaded`): its Inscribe button
+// shows only once the list has its answer, and not while the registry is being upgraded.
+let kachatDomainsListState = null; // { address, upgrading }
+// A refresh in flight from Your Domains' refresh button (the platform's pull-to-refresh).
+let domainsRefreshing = false;
 // The account's .kachat names for the Your Domains count (iOS 10e4a1a): the set its .kachat tab
 // lists - active and in grace, never lapsed (iOS aa36d2a); 0 where the registry isn't launched.
 let kachatOwnedCount = 0;
@@ -6773,7 +6944,7 @@ function refreshKachatIdentity() {
       refreshKachatIdentity.label = label;
       if (changed) {
         const nameEl = document.querySelector("[data-profile-hero-name]");
-        if (nameEl) nameEl.textContent = label ? `${label}.kachat` : shortAddress(address);
+        if (nameEl) nameEl.textContent = label ? `${label}.kachat` : defaultAliasFor(address);
       }
       return kachatHeroProfile(address);
     })
@@ -6924,7 +7095,7 @@ function updateProfileHero(info, profileInfo) {
     ? `${kachatLabel}.kachat`
     : domain
       ? (domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain)
-      : shortAddress(engine.address || "");
+      : defaultAliasFor(engine.address || ""); // iOS Contact.generateDefaultAlias
   if (nameEl) nameEl.textContent = displayName;
   if (kachatProfiles() && (refreshKachatIdentity.address !== engine.address || Date.now() - (refreshKachatIdentity.at || 0) > 60_000)) {
     refreshKachatIdentity();
@@ -7168,6 +7339,58 @@ function deriveSpendingAddressAt(index) {
   catch (error) { appendEngineLog(`Spending derive #${index} failed: ${error.message}`); return null; }
 }
 
+// Spending addresses start..<end as a Map(index -> address), memo first, the misses through ONE
+// seed derivation per chunk of 100 (iOS spendingAddresses(inRange:)), yielding between chunks so
+// a thousand-address Discover window doesn't freeze the page.
+async function deriveSpendingAddressesInRange(start, end) {
+  const result = new Map();
+  const mnemonic = activeAccountMnemonic();
+  if (!mnemonic || !engine.kaspa) return result;
+  const prefix = `${engine.address || ""}:`;
+  for (let base = start; base < end; base += 100) {
+    const upper = Math.min(base + 100, end);
+    let missing = false;
+    for (let i = base; i < upper; i += 1) {
+      const cached = spendingAddressMemo.get(`${prefix}${i}`);
+      if (cached) result.set(i, cached); else missing = true;
+    }
+    if (!missing) continue;
+    try {
+      const derived = engine.deriveSpendingAddressRange(mnemonic, base, upper - base, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() });
+      for (const { index, address } of derived) {
+        if (!address) continue;
+        spendingAddressMemo.set(`${prefix}${index}`, address);
+        result.set(index, address);
+      }
+    } catch (error) {
+      appendEngineLog(`Spending derive #${base}-#${upper - 1} failed: ${error.message}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return result;
+}
+
+/** The short address form on the address screens: 14 characters, "...", the last 6 (iOS
+ *  SpendingAddressEntry.shortAddress). */
+function spendingShortAddress(address) {
+  const value = String(address || "");
+  return value.length > 20 ? `${value.slice(0, 14)}...${value.slice(-6)}` : value;
+}
+
+/** A balance on the address screens: always 8 decimals (iOS formatKasExact, "%.8f"). */
+function spendingKasText(sompi) {
+  const value = typeof sompi === "bigint" ? sompi : BigInt(Math.round(Number(sompi) || 0));
+  const negative = value < 0n;
+  const digits = (negative ? -value : value).toString().padStart(9, "0");
+  return `${negative ? "-" : ""}${digits.slice(0, -8)}.${digits.slice(-8)}`;
+}
+
+/** The label the user gave this address, "" when none. */
+function spendingCustomLabel(state, index) {
+  const custom = state.labels?.[index] ?? state.labels?.[String(index)];
+  return custom != null ? String(custom).trim() : "";
+}
+
 function spendingLabelFor(state, index) {
   const custom = state.labels?.[index] ?? state.labels?.[String(index)];
   const trimmed = custom != null ? String(custom).trim() : "";
@@ -7268,6 +7491,21 @@ function spendingWatchedAddressList() {
   return list;
 }
 
+// Manage Addresses > "Notify on receive", per wallet (iOS AddressActivityNotifier
+// spendingReceiveNotificationsEnabled, kachat_spending_receive_notify_<wallet>), default on. A
+// wallet with no choice of its own yet keeps the old app-wide switch's value.
+function spendingReceiveNotifyEnabled() {
+  try {
+    const stored = localStorage.getItem(accountScopedKey("kachat-spending-receive-notify-v1"));
+    if (stored === "1") return true;
+    if (stored === "0") return false;
+  } catch { /* unreadable: fall through */ }
+  return (accountShellPrefs.spendingReceiveNotifications ?? true) !== false;
+}
+function setSpendingReceiveNotifyEnabled(on) {
+  try { localStorage.setItem(accountScopedKey("kachat-spending-receive-notify-v1"), on ? "1" : "0"); } catch { /* best-effort */ }
+}
+
 // Addresses whose receives should NOTIFY, mapped to a wording kind: watched
 // spending + cold addresses and the chatting address. For the chatting address
 // only a plain transfer counts (no payload): a chat payment or a handshake is
@@ -7277,7 +7515,7 @@ function addressActivityWatchedMap() {
   // The spending addresses have their own switch (Manage Addresses); each cold-storage account
   // its own (the account's menu). An address switched off is still ours for the self-send
   // check (ownInputAddressSet) - it just stays quiet. The Settings switch remains the master.
-  if ((accountShellPrefs.spendingReceiveNotifications ?? true) !== false) {
+  if (spendingReceiveNotifyEnabled()) {
     for (const address of spendingWatchedAddressList()) map.set(address, "spending");
   }
   for (const entry of listColdWatchedAddresses()) {
@@ -7293,7 +7531,7 @@ function addressActivityWatchedMap() {
 // baseline keeps up: switching them back on must not replay every receive that landed meanwhile.
 function addressActivityMutedList() {
   const muted = new Set();
-  if ((accountShellPrefs.spendingReceiveNotifications ?? true) === false) {
+  if (!spendingReceiveNotifyEnabled()) {
     for (const address of spendingWatchedAddressList()) muted.add(address);
   }
   for (const entry of listColdWatchedAddresses()) {
@@ -7432,6 +7670,7 @@ async function runAddressActivityCheck() {
     const baselines = loadAddrActivityBaselines();
     const isFirstRun = Object.keys(baselines).length === 0;
     let changed = false;
+    let balanceMoved = false;
     const increases = [];
     for (const [address, balance] of balances) {
       const balanceText = balance.toString();
@@ -7445,7 +7684,7 @@ async function runAddressActivityCheck() {
         changed = true;
         continue;
       }
-      if (previous !== balanceText) changed = true;
+      if (previous !== balanceText) { changed = true; balanceMoved = true; }
       let previousSompi = 0n;
       try { previousSompi = BigInt(previous); } catch {}
       if (!isFirstRun && balance > previousSompi && addressActivityFeatureEnabled() && watched.has(address)) {
@@ -7454,6 +7693,9 @@ async function runAddressActivityCheck() {
       baselines[address] = balanceText;
     }
     if (changed) saveAddrActivityBaselines(baselines);
+    // An open Cold Storage account reloads on any own-address balance move, self-sends included
+    // (iOS ColdStorageDetailView listens to .ownAddressActivity and .ownAddressUtxoActivity).
+    if (balanceMoved) { try { refreshColdStorageOnActivity(); } catch { /* not started */ } }
     if (increases.length) await attributeAndNotifyAddressActivity(increases);
   } finally {
     addressActivityRunning = false;
@@ -8034,7 +8276,8 @@ function renderProfileAccountTotal() {
     el.innerHTML = '<span class="sk-spinner" aria-hidden="true"></span>';
     return;
   }
-  el.textContent = `${kasTextFromSompi(chatting + (needsSpending ? spendingTotalSompi : 0n))} ${KAS_UNIT}`;
+  // 8 decimals, as iOS's card shows it (formatKaspaExact).
+  el.textContent = `${spendingKasText(chatting + (needsSpending ? spendingTotalSompi : 0n))} ${KAS_UNIT}`;
 }
 
 let spendingTotalToken = 0;
@@ -8111,7 +8354,7 @@ function spendingRowHtml(index, address, state, balanceText, used, hasDomain = f
     <div class="spending-address-row" data-spending-row="${index}">
       <button type="button" class="spending-address-row-main" data-spending-open="${index}" aria-label="Open ${escapeHtml(label)}">
         <span class="spending-address-label">${escapeHtml(label)}</span>
-        <span class="spending-address-value">${escapeHtml(shortAddress(address))}</span>
+        <span class="spending-address-value">${escapeHtml(spendingShortAddress(address))}</span>
         <span class="spending-address-balance" data-spending-balance-cell="${index}">${escapeHtml(balanceText)}</span>
         <span class="spending-address-row-tags">${usage}${domainTag}</span>
       </button>
@@ -8128,12 +8371,12 @@ function spendingRowHtml(index, address, state, balanceText, used, hasDomain = f
 // screen (history, UTXOs, Domains, Send / Receive), the one Profile's Chatting row used to.
 function chattingAddressRowHtml() {
   const address = engine.address || "";
-  const balanceText = currentBalanceKas != null && currentBalanceKas !== "" ? `${currentBalanceKas} ${KAS_UNIT}` : `-- ${KAS_UNIT}`;
+  const balanceText = currentBalanceKas != null && currentBalanceKas !== "" ? `${formatKasExact(currentBalanceKas)} ${KAS_UNIT}` : `-- ${KAS_UNIT}`;
   return `
     <div class="spending-address-row chatting-address-row">
       <button type="button" class="spending-address-row-main" data-spending-open-chatting aria-label="Open Chatting Address">
         <span class="spending-address-label">Chatting Address<svg class="chatting-address-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg></span>
-        <span class="spending-address-value">${escapeHtml(shortAddress(address))}</span>
+        <span class="spending-address-value">${escapeHtml(spendingShortAddress(address))}</span>
         <span class="spending-address-balance" data-chatting-row-balance>${escapeHtml(balanceText)}</span>
         <span class="spending-address-row-tags"><span class="spending-address-usage chatting-used">Used</span></span>
       </button>
@@ -8168,7 +8411,7 @@ function updateSpendingTotalBalance(entries) {
   const hasChatting = currentBalanceKas != null && currentBalanceKas !== "" && Number.isFinite(chattingKas);
   if (!known.length && !hasChatting) { totalEl.textContent = `-- ${KAS_UNIT}`; return; }
   const sum = known.reduce((total, e) => total + (Number(e.kas) || 0), 0) + (hasChatting ? chattingKas : 0);
-  totalEl.textContent = `${trimKas8(sum)} ${KAS_UNIT}`;
+  totalEl.textContent = `${formatKasExact(sum)} ${KAS_UNIT}`;
 }
 
 async function renderSpendingList() {
@@ -8195,7 +8438,7 @@ async function renderSpendingList() {
   // instantly with real numbers instead of a wall of "…" — the live refresh replaces it below.
   const balCache = loadSpendingBalCache();
   spendingListEl.innerHTML = chattingRow + (items.length
-    ? items.map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${balCache[it.address].kas} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null)).join("")
+    ? items.map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${formatKasExact(balCache[it.address].kas)} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null)).join("")
     : emptyHtml);
   updateSpendingTotalBalance(all.map((it) => ({ kas: balCache[it.address]?.kas != null ? Number(balCache[it.address].kas) : null })));
   if (!all.length) return;
@@ -8251,12 +8494,16 @@ async function renderSpendingList() {
   // In number order, #0 first (iOS 245a5d2).
   enriched.sort((a, b) => a.index - b.index);
   spendingListEl.innerHTML = (engine.address ? chattingAddressRowHtml() : "") + (enriched.length
-    ? enriched.map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${e.totalKas} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address))).join("")
+    ? enriched.map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${formatKasExact(e.totalKas)} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address))).join("")
     : emptyHtml);
 }
 
 function openSpendingManageScreen() {
   if (!spendingManageScreen) return;
+  // This wallet's own Notify on receive (iOS reloadSpendingSwitchForCurrentWallet).
+  const notifyToggle = spendingManageScreen.querySelector("[data-pref-spending-receive]");
+  if (notifyToggle) notifyToggle.checked = spendingReceiveNotifyEnabled();
+  updateSpendingActionsPill();
   spendingManageScreen.hidden = false;
   renderSpendingList();
 }
@@ -8265,7 +8512,7 @@ function openSpendingManageScreen() {
 function refreshChattingRowBalance() {
   if (!spendingManageScreen || spendingManageScreen.hidden) return;
   const cell = spendingListEl?.querySelector("[data-chatting-row-balance]");
-  if (cell) cell.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  if (cell) cell.textContent = `${formatKasExact(currentBalanceKas)} ${KAS_UNIT}`;
   const kasEntries = [];
   const cache = loadSpendingBalCache();
   const state = getSpendingState();
@@ -8333,7 +8580,7 @@ function spendingVisibilityRowHtml(index, address, state, visible) {
           ${customLabel ? `<span class="spending-visibility-label">${escapeHtml(customLabel)}</span>` : ""}
           <span class="spending-address-usage spending-visibility-usage" data-vis-usage="${index}">…</span>
         </div>
-        <span class="spending-address-value">${address ? escapeHtml(shortAddress(address)) : "deriving…"}</span>
+        <span class="spending-address-value">${address ? escapeHtml(address.length > 22 ? `${address.slice(0, 16)}…${address.slice(-6)}` : address) : "deriving…"}</span>
       </div>
     </div>`;
 }
@@ -8369,7 +8616,8 @@ async function renderSpendingVisibilityPage() {
         cell.textContent = `${usage.kas.toFixed(4)} ${KAS_UNIT}`;
         cell.classList.add("used");
       } else {
-        cell.textContent = usage.used === true ? "Used" : usage.used === false ? "Unused" : "Checking";
+        // A probe that has not answered keeps the neutral "…" (iOS usedTag), never a guess.
+        cell.textContent = usage.used === true ? "Used" : usage.used === false ? "Unused" : "…";
         cell.classList.add(usage.used === true ? "used" : usage.used === false ? "unused" : "checking");
       }
     }));
@@ -8461,15 +8709,15 @@ spendingListEl?.addEventListener("click", async (event) => {
     if (action === "copy") {
       const addr = deriveSpendingAddressAt(index);
       if (!addr) { showCopyToast("Address is not ready yet."); return; }
-      try { await copyTextToClipboard(addr); showCopyToast("Spending address copied to clipboard."); }
+      try { await copyTextToClipboard(addr); showCopyToast(addressCopiedToastText(addr)); }
       catch (error) { appendEngineLog(error.message); }
     } else if (action === "receive") {
       const addr = deriveSpendingAddressAt(index);
       if (!addr) { showCopyToast("Address is not ready yet."); return; }
-      const cell = spendingListEl.querySelector(`[data-spending-balance-cell="${index}"]`);
-      openChattingAddressScreen({ address: addr, balanceText: cell?.textContent || "", subtitle: null });
+      openSpendingQrScreen(index, addr);
     } else if (action === "rename") {
-      const current = spendingLabelFor(state, index);
+      // Starts from the address's own label, empty when it has none (iOS renameText = entry.label ?? "").
+      const current = spendingCustomLabel(state, index);
       const next = await promptDialog({ title: "Rename Address", label: "Label", message: "Give this address a label to help you recognize it.", initial: current, confirmLabel: "Save" });
       if (next == null) return;
       const labels = { ...state.labels };
@@ -8502,8 +8750,9 @@ spendingListEl?.addEventListener("click", async (event) => {
       { id: "receive", title: "Show QR Code", subtitle: "Full screen, for scanning with another device." },
       { id: "hide", title: "Hide Address", subtitle: "Removes it from this list. Re-enable it in Address Visibility." },
     ];
-    const label = spendingLabelFor(state, index);
-    const choice = await chooseDialog({ title: label || `Address ${index}`, message: address ? shortAddress(address) : "", options });
+    // Its own label, else "Address N" (iOS addressRowActionsSheet), over the short address.
+    const label = spendingCustomLabel(state, index);
+    const choice = await chooseDialog({ title: label || `Address ${index}`, message: address ? spendingShortAddress(address) : "", options });
     if (choice) spendingListEl.querySelector(`[data-spending-action="${choice}"][data-index="${index}"]`)?.click();
     return;
   }
@@ -8534,7 +8783,6 @@ document.addEventListener("click", (event) => {
 const spendingDetailScreen = document.querySelector("[data-spending-detail-screen]");
 const spendingDetailTitle = document.querySelector("[data-spending-detail-title]");
 const spendingDetailBalanceEl = document.querySelector("[data-spending-detail-balance]");
-const spendingDetailAddressEl = document.querySelector("[data-spending-detail-address]");
 const spendingDetailExplorer = document.querySelector("[data-spending-detail-explorer]");
 const spendingDetailTxList = document.querySelector("[data-spending-detail-transactions]");
 const spendingDetailUtxoList = document.querySelector("[data-spending-detail-utxos]");
@@ -8548,40 +8796,114 @@ initAddressDomainsTab({
   engine,
   renderKachat: (el, address) => renderKachatLiveDomainsTab(el, address, { variant: "address" }),
   kachatNames: (address) => kachatHeldNamesOf(address),
+  // the .kachat list's refresh (iOS KachatAddressLiveNamesList: registry.refresh)
+  refreshKachat: async () => { await kachatNames()?.registry?.refresh?.(); },
   escapeHtml,
 });
 
-// --- Send KNS Domain modal (spending-address transfers) ---
+// --- Send Domain (iOS ContactsView.swift KNSDomainSendView) ---
+// The recipient takes an address or a domain on any service, .kachat first, with Other domains
+// under the resolved name; the fee is the reveal's priority fee: 0.02 KAS x Normal 1 / Fast 2 /
+// Priority 5, or a custom one (click the amount). Send is in the bar; the transfer's progress is
+// its own sheet; it ends on the shared Sent sheet with the reveal's txid.
 const knsTransferModal = document.querySelector("[data-kns-transfer-modal]");
 const knsTransferDomainEl = document.querySelector("[data-kns-transfer-domain]");
+const knsTransferAssetEl = document.querySelector("[data-kns-transfer-asset]");
 const knsTransferRecipientInput = document.querySelector("[data-kns-transfer-recipient]");
 const knsTransferErrorEl = document.querySelector("[data-kns-transfer-error]");
+const knsTransferErrorCard = document.querySelector("[data-kns-transfer-error-card]");
 const knsTransferStatusEl = document.querySelector("[data-kns-transfer-status]");
 const knsTransferSendBtn = document.querySelector("[data-kns-transfer-send]");
+const knsTransferSpinner = document.querySelector("[data-kns-transfer-spinner]");
+const knsTransferCardEl = document.querySelector("[data-kns-transfer-card]");
+const knsTransferProgressEl = document.querySelector("[data-kns-transfer-progress]");
 let knsTransferContext = null;
 let knsTransferInFlight = false;
-// The recipient field takes a domain on any service, .kachat first, with Other domains under the
-// resolved name (iOS 6ac48a7 KNSDomainSendView): the address it resolved to and every answer.
 const knsTransferResolutionEl = document.querySelector("[data-kns-transfer-resolution]");
-const knsTransferName = { token: 0, typed: "", address: null, name: null, tld: null, results: [], resolving: false };
-function renderKnsTransferResolution(html) {
-  if (!knsTransferResolutionEl) return;
-  knsTransferResolutionEl.innerHTML = html || "";
-  knsTransferResolutionEl.hidden = !html;
+const knsTransferName = { token: 0, typed: "", address: null, name: null, tld: null, results: [], resolving: false, error: null, valid: false };
+// The fee (iOS priorityFeeSompi): the tier's multiple of 0.02 KAS, or the custom one typed.
+const KNS_TRANSFER_BASE_FEE_SOMPI = 2_000_000n;
+const KNS_TRANSFER_FEE_MULTIPLIERS = { normal: 1n, fast: 2n, priority: 5n };
+const knsTransferFee = { tier: "normal", customSompi: null, editing: false };
+function knsTransferFeeSompi() {
+  return knsTransferFee.customSompi != null ? knsTransferFee.customSompi : KNS_TRANSFER_BASE_FEE_SOMPI * (KNS_TRANSFER_FEE_MULTIPLIERS[knsTransferFee.tier] || 1n);
+}
+function renderKnsTransferFee() {
+  knsTransferModal?.querySelectorAll("[data-kns-transfer-fee]").forEach((button) => {
+    const on = button.dataset.knsTransferFee === knsTransferFee.tier;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const summary = knsTransferModal?.querySelector("[data-kns-transfer-fee-summary]");
+  if (summary) summary.textContent = `${formatSompiPlain(knsTransferFeeSompi())} ${KAS_UNIT}`;
+  const editor = knsTransferModal?.querySelector("[data-kns-transfer-fee-editor]");
+  const edit = knsTransferModal?.querySelector("[data-kns-transfer-fee-edit]");
+  if (editor) editor.hidden = !knsTransferFee.editing;
+  if (edit) edit.hidden = knsTransferFee.editing;
+}
+// The usable recipient (iOS hasValidRecipient / effectiveAddress): a resolved name's address, or a
+// valid address once nothing is being looked up.
+function knsTransferRecipient() {
+  const raw = String(knsTransferRecipientInput?.value || "").trim();
+  if (knsTransferName.typed !== raw) return null;
+  if (knsTransferName.address) return knsTransferName.address;
+  return knsTransferName.valid && !knsTransferName.resolving ? raw : null;
+}
+function refreshKnsTransferSend() {
+  const resume = Boolean(knsTransferContext?.resume);
+  if (knsTransferSendBtn) {
+    knsTransferSendBtn.hidden = knsTransferInFlight;
+    knsTransferSendBtn.disabled = knsTransferInFlight || (!resume && !knsTransferRecipient());
+  }
+  if (knsTransferSpinner) knsTransferSpinner.hidden = !knsTransferInFlight;
+}
+function setKnsTransferError(message) {
+  if (knsTransferErrorEl) knsTransferErrorEl.textContent = message || "";
+  if (knsTransferErrorCard) knsTransferErrorCard.hidden = !message;
+}
+// The lookup line under the field (iOS: Looking up domain... / the not-found reason / Resolved: +
+// the address / Valid address or why not), Other domains under it, and who the address is.
+function renderKnsTransferRecipient() {
+  const raw = String(knsTransferRecipientInput?.value || "").trim();
+  if (knsTransferResolutionEl) {
+    knsTransferResolutionEl.innerHTML = recipientStatusHtml({
+      input: raw,
+      resolving: knsTransferName.resolving,
+      error: knsTransferName.error,
+      resolvedAddress: knsTransferName.address,
+      resolvedName: knsTransferName.name,
+      valid: knsTransferName.valid,
+      nameResolutions: knsTransferName.resolving ? [] : knsTransferName.results,
+      selectedTld: knsTransferName.tld,
+    });
+  }
+  const shown = knsTransferName.address || (knsTransferName.valid ? raw : null);
+  if (knsTransferCardEl) {
+    knsTransferCardEl.hidden = !shown;
+    knsTransferCardEl.innerHTML = shown
+      ? addressResolutionCardHtml(shown, { domain: knsTransferName.name, onLoaded: (loaded) => { if (loaded === (knsTransferName.address || (knsTransferName.valid ? String(knsTransferRecipientInput?.value || "").trim() : null))) renderKnsTransferRecipient(); } })
+      : "";
+  }
+  refreshKnsTransferSend();
 }
 function useKnsTransferResolution(address, name, tld) {
-  Object.assign(knsTransferName, { address, name, tld: tld || null });
-  renderKnsTransferResolution(`<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(name)}</span>`
-    + `<span class="create-chat-status-mono">${escapeHtml(address)}</span>`
-    + otherDomainsHtml({ resolutions: knsTransferName.results, selectedTld: knsTransferName.tld }));
+  Object.assign(knsTransferName, { address, name, tld: tld || null, error: null });
+  renderKnsTransferRecipient();
 }
 function updateKnsTransferRecipient() {
   const raw = String(knsTransferRecipientInput?.value || "").trim();
   const token = ++knsTransferName.token;
-  Object.assign(knsTransferName, { typed: raw, address: null, name: null, tld: null, results: [], resolving: false });
-  if (!raw || knsTransferRecipientInput?.readOnly || !engine.looksLikeName(raw)) { renderKnsTransferResolution(""); return; }
+  Object.assign(knsTransferName, { typed: raw, address: null, name: null, tld: null, results: [], resolving: false, error: null, valid: false });
+  if (!raw) { renderKnsTransferRecipient(); return; }
+  if (/^kaspa(test)?:/i.test(raw)) {
+    // The other network's address is the same key on another chain: refused (iOS isValidOnActiveNetwork).
+    try { validateContactAddress(raw); knsTransferName.valid = true; } catch { knsTransferName.valid = false; }
+    renderKnsTransferRecipient();
+    return;
+  }
+  if (!engine.looksLikeName(raw)) { renderKnsTransferRecipient(); return; }
   knsTransferName.resolving = true;
-  renderKnsTransferResolution('<span class="create-chat-status-muted">Looking up domain…</span>');
+  renderKnsTransferRecipient();
   window.setTimeout(async () => {
     if (token !== knsTransferName.token) return;
     try {
@@ -8592,13 +8914,14 @@ function updateKnsTransferRecipient() {
       if (resolution?.ownerAddress) {
         useKnsTransferResolution(resolution.ownerAddress, resolution.domain || raw, resolution.tld);
       } else {
-        renderKnsTransferResolution(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw, knsTransferName.results))}</span>`
-          + otherDomainsHtml({ resolutions: knsTransferName.results }));
+        knsTransferName.error = nameNotFoundText(raw, knsTransferName.results);
+        renderKnsTransferRecipient();
       }
     } catch {
       if (token !== knsTransferName.token) return;
       knsTransferName.resolving = false;
-      renderKnsTransferResolution(`<span class="create-chat-status-bad">✕ ${escapeHtml(nameNotFoundText(raw))}</span>`);
+      knsTransferName.error = nameNotFoundText(raw);
+      renderKnsTransferRecipient();
     }
   }, 300);
 }
@@ -8607,19 +8930,74 @@ knsTransferResolutionEl?.addEventListener("click", (event) => {
   const entry = pickOtherDomain(event, knsTransferName.results);
   if (entry) useKnsTransferResolution(entry.address, entry.name, entry.tld);
 });
+function setKnsTransferRecipientValue(value) {
+  if (!knsTransferRecipientInput || knsTransferRecipientInput.readOnly) return;
+  knsTransferRecipientInput.value = value;
+  updateKnsTransferRecipient();
+}
+knsTransferModal?.querySelector("[data-kns-transfer-paste]")?.addEventListener("click", async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) setKnsTransferRecipientValue(text.trim());
+  } catch { showCopyToast("Clipboard unavailable. Paste manually."); }
+});
+knsTransferModal?.querySelector("[data-kns-transfer-scan]")?.addEventListener("click", async () => {
+  const scanned = await scanKaspaAddress({
+    title: "Scan a recipient code",
+    hint: "Point the camera at the address QR code you want to send to.",
+  });
+  // A kaspa: URI goes in without its ?query (iOS handleScannedQRCode).
+  if (scanned) setKnsTransferRecipientValue(String(scanned).trim().replace(/^(kaspa(test)?:[^?]*)\?.*$/i, "$1"));
+});
+knsTransferModal?.querySelectorAll("[data-kns-transfer-fee]").forEach((button) => button.addEventListener("click", () => {
+  if (knsTransferInFlight) return;
+  knsTransferFee.tier = button.dataset.knsTransferFee;
+  knsTransferFee.customSompi = null;
+  knsTransferFee.editing = false;
+  renderKnsTransferFee();
+}));
+const knsTransferFeeInput = knsTransferModal?.querySelector("[data-kns-transfer-fee-custom]");
+knsTransferModal?.querySelector("[data-kns-transfer-fee-edit]")?.addEventListener("click", () => {
+  if (knsTransferInFlight) return;
+  knsTransferFee.editing = true;
+  if (knsTransferFeeInput) knsTransferFeeInput.value = formatSompiPlain(knsTransferFeeSompi());
+  renderKnsTransferFee();
+  knsTransferFeeInput?.focus();
+  knsTransferFeeInput?.select?.();
+});
+// iOS commitCustomFee: whatever reads as an amount is the fee; otherwise nothing changes.
+function commitKnsTransferCustomFee() {
+  const sompi = sompiFromUserText(String(knsTransferFeeInput?.value || ""));
+  if (sompi != null) knsTransferFee.customSompi = sompi;
+  knsTransferFee.editing = false;
+  renderKnsTransferFee();
+}
+knsTransferModal?.querySelector("[data-kns-transfer-fee-commit]")?.addEventListener("click", commitKnsTransferCustomFee);
+knsTransferFeeInput?.addEventListener("input", () => {
+  const sanitized = sanitizeAmountText(knsTransferFeeInput.value, 8);
+  if (sanitized !== knsTransferFeeInput.value) knsTransferFeeInput.value = sanitized;
+});
+knsTransferFeeInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); commitKnsTransferCustomFee(); return; }
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); knsTransferFee.editing = false; renderKnsTransferFee(); }
+});
 
 // Opens Send Domain. A domain with an unfinished transfer (EXT-005) opens in resume mode instead:
-// the recipient is fixed to the recorded one and the button finishes that transfer (no new
-// commit). `pending` passes the record when the caller already has it.
+// the recipient is fixed to the recorded one and Send finishes that transfer (no new commit).
+// `pending` passes the record when the caller already has it.
 function openKnsTransferModal({ domain, assetId, spendingIndex = null, pending = null }) {
   if (!knsTransferModal) return;
+  closeSentConfirmation();
   knsTransferContext = { domain, assetId, spendingIndex, resume: null };
   if (knsTransferDomainEl) knsTransferDomainEl.textContent = domain;
+  if (knsTransferAssetEl) { knsTransferAssetEl.textContent = assetId || ""; knsTransferAssetEl.title = assetId || ""; knsTransferAssetEl.hidden = !assetId; }
   if (knsTransferRecipientInput) { knsTransferRecipientInput.value = ""; knsTransferRecipientInput.readOnly = false; }
-  updateKnsTransferRecipient();
-  if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
+  Object.assign(knsTransferFee, { tier: "normal", customSompi: null, editing: false });
+  renderKnsTransferFee();
+  setKnsTransferError("");
   if (knsTransferStatusEl) knsTransferStatusEl.hidden = true;
-  if (knsTransferSendBtn) { knsTransferSendBtn.disabled = false; knsTransferSendBtn.textContent = "Send Domain"; }
+  if (knsTransferSendBtn) knsTransferSendBtn.textContent = "Send";
+  updateKnsTransferRecipient();
   const known = pending || pendingKnsTransferFor(assetId);
   if (known) setKnsTransferResumeMode(known);
   knsTransferModal.hidden = false;
@@ -8643,6 +9021,7 @@ function setKnsTransferResumeMode(record) {
     knsTransferStatusEl.textContent = `A transfer of ${record.domain || "this domain"} to ${shortAddress(record.recipient || "")} was started but not finished. Finishing it reveals the commit already sent; no new 2 KAS commit is made.`;
     knsTransferStatusEl.hidden = false;
   }
+  refreshKnsTransferSend();
 }
 
 function pendingKnsTransferFor(assetId) {
@@ -8698,20 +9077,67 @@ function closeKnsTransferModal() {
   knsTransferContext = null;
 }
 
-const KNS_TRANSFER_STATUS_LABELS = {
-  "resolving-recipient": "Resolving recipient domain…",
-  "verifying-ownership": "Verifying domain ownership…",
-  "committing": "Broadcasting commit transaction…",
-  "committed": "Commit accepted…",
-  "revealing": "Broadcasting reveal inscription…",
-  "revealed": "Reveal accepted…",
-  "verifying": "Waiting for the KNS indexer…",
-  "locating-commit": "Looking for the commit on chain…",
+// The progress sheet's stages (iOS KNSDomainTransferService.TransferStage title / fraction), from
+// the engine's statuses.
+const KNS_TRANSFER_STAGES = {
+  preparing: ["Preparing transfer", 0.1],
+  submittingCommit: ["Submitting commit transaction", 0.3],
+  waitingForCommit: ["Waiting for the commit to settle", 0.55],
+  submittingReveal: ["Submitting reveal transaction", 0.8],
+  verifying: ["Confirming the new owner", 0.95],
 };
-
+const KNS_TRANSFER_STATUS_STAGES = {
+  "resolving-recipient": "preparing",
+  "verifying-ownership": "preparing",
+  "locating-commit": "preparing",
+  "committing": "submittingCommit",
+  "committed": "waitingForCommit",
+  "revealing": "submittingReveal",
+  "revealed": "verifying",
+  "verifying": "verifying",
+};
+function showKnsTransferProgress(stage) {
+  if (!knsTransferProgressEl) return;
+  if (!stage) { knsTransferProgressEl.hidden = true; return; }
+  const [title, fraction] = KNS_TRANSFER_STAGES[stage] || KNS_TRANSFER_STAGES.preparing;
+  const heading = knsTransferProgressEl.querySelector("[data-kns-transfer-progress-title]");
+  if (heading) heading.textContent = `Sending ${knsTransferContext?.domain || ""}`.trim();
+  const fill = knsTransferProgressEl.querySelector("[data-kns-transfer-progress-fill]");
+  if (fill) fill.style.width = `${Math.round(fraction * 100)}%`;
+  const stageEl = knsTransferProgressEl.querySelector("[data-kns-transfer-progress-stage]");
+  if (stageEl) stageEl.textContent = title;
+  knsTransferProgressEl.hidden = false;
+}
 function showKnsTransferStatus(patch) {
-  const label = KNS_TRANSFER_STATUS_LABELS[patch?.status];
-  if (label && knsTransferStatusEl) { knsTransferStatusEl.textContent = label; knsTransferStatusEl.hidden = false; }
+  const stage = KNS_TRANSFER_STATUS_STAGES[patch?.status];
+  if (stage && knsTransferInFlight) showKnsTransferProgress(stage);
+}
+function setKnsTransferBusy(busy) {
+  knsTransferInFlight = Boolean(busy);
+  if (knsTransferRecipientInput && !knsTransferContext?.resume) knsTransferRecipientInput.readOnly = knsTransferInFlight;
+  refreshKnsTransferSend();
+}
+
+// Done on the Sent sheet (iOS onTransferComplete): the domain's page closes, Your Domains reloads,
+// and a toast says whether the indexer already shows the new owner.
+function finishKnsTransferFlow(result, domain) {
+  closeKnsTransferModal();
+  if (domainDetailTarget) closeDomainDetail();
+  showCopyToast(result?.verified
+    ? `${domain} transferred to ${result.recipientAddress}.`
+    : `Transfer submitted for ${domain}.`);
+  Promise.resolve().then(() => refreshYourDomains()).catch(() => {});
+}
+function showKnsTransferSent(result, domain) {
+  const txid = String(result?.revealTxid || "").trim();
+  if (!txid) { finishKnsTransferFlow(result, domain); return; }
+  // Only the reveal's txid: a transfer moves a name, not an amount (iOS SentTransaction(txId:)).
+  openSentConfirmation({
+    txid,
+    explorerUrl: explorerTxUrl(txid),
+    kasUnit: KAS_UNIT,
+    onDone: () => finishKnsTransferFlow(result, domain),
+  });
 }
 
 // Finish transfer / Retry reveal: reveals the commit an earlier attempt already sent.
@@ -8719,9 +9145,9 @@ async function finishKnsTransfer() {
   const context = knsTransferContext;
   const record = context?.resume;
   if (!record || knsTransferInFlight) return;
-  knsTransferInFlight = true;
-  if (knsTransferSendBtn) knsTransferSendBtn.disabled = true;
-  if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
+  setKnsTransferBusy(true);
+  setKnsTransferError("");
+  showKnsTransferProgress("preparing");
   const fromSpending = record.source?.kind === "spending";
   try {
     const result = await engine.resumeKnsTransfer({
@@ -8731,12 +9157,12 @@ async function finishKnsTransfer() {
       passphraseForm: activeAccountPassphraseForm(),
       onStatus: showKnsTransferStatus,
     });
-    knsTransferInFlight = false;
+    setKnsTransferBusy(false);
+    showKnsTransferProgress(null);
     if (result.status === "no-commit") {
       // No commit on chain and none recorded: it never went out, or it is too fresh to show.
-      if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
       if (Date.now() - Number(record.createdAt || 0) < 10 * 60_000) {
-        if (knsTransferErrorEl) { knsTransferErrorEl.textContent = "The commit has not shown up on chain yet. Try again in a minute."; knsTransferErrorEl.hidden = false; }
+        setKnsTransferError("The commit has not shown up on chain yet. Try again in a minute.");
         return;
       }
       const discard = await confirmDialog({
@@ -8752,15 +9178,12 @@ async function finishKnsTransfer() {
       return;
     }
     await refreshPendingKnsTransfers();
-    closeKnsTransferModal();
-    showCopyToast(result.verified
-      ? `${record.domain} sent to ${shortAddress(result.recipientAddress)}.`
-      : `${record.domain} transfer finished. The indexer may take a moment to reflect it.`);
+    showKnsTransferSent({ ...result, recipientAddress: result.recipientAddress || record.recipient }, record.domain);
   } catch (error) {
-    knsTransferInFlight = false;
+    setKnsTransferBusy(false);
+    showKnsTransferProgress(null);
     if (error?.pendingTransfer && knsTransferContext === context) setKnsTransferResumeMode(error.pendingTransfer);
-    if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
-    if (knsTransferErrorEl) { knsTransferErrorEl.textContent = error.message; knsTransferErrorEl.hidden = false; }
+    setKnsTransferError(userFacingError(error) || error?.message || "Transfer failed.");
     refreshPendingKnsTransfers();
   }
 }
@@ -8768,28 +9191,15 @@ async function finishKnsTransfer() {
 async function submitKnsTransfer() {
   if (!knsTransferContext || knsTransferInFlight) return;
   if (knsTransferContext.resume) { finishKnsTransfer(); return; }
-  const typed = String(knsTransferRecipientInput?.value || "").trim();
-  if (!typed) {
-    if (knsTransferErrorEl) { knsTransferErrorEl.textContent = "Enter an address or a domain."; knsTransferErrorEl.hidden = false; }
-    return;
-  }
   // A typed domain goes out as the address it resolved to (.kachat first, or the Other domains pick).
-  let recipient = typed;
-  if (engine.looksLikeName(typed)) {
-    if (knsTransferName.typed !== typed || !knsTransferName.address) {
-      if (knsTransferErrorEl) {
-        knsTransferErrorEl.textContent = knsTransferName.typed === typed && knsTransferName.resolving ? "Looking up domain…" : nameNotFoundText(typed);
-        knsTransferErrorEl.hidden = false;
-      }
-      return;
-    }
-    recipient = knsTransferName.address;
-  }
-  knsTransferInFlight = true;
-  if (knsTransferSendBtn) knsTransferSendBtn.disabled = true;
-  if (knsTransferErrorEl) knsTransferErrorEl.hidden = true;
+  const recipient = knsTransferRecipient();
+  if (!recipient) return;
+  setKnsTransferBusy(true);
+  setKnsTransferError("");
+  showKnsTransferProgress("preparing");
   const context = knsTransferContext;
   const { domain, assetId, spendingIndex } = context;
+  const revealPriorityFeeSompi = knsTransferFeeSompi();
   let committed = false;
   try {
     const fresh = spendingIndex != null ? freshChangeForSpendingIndex(spendingIndex) : null;
@@ -8802,6 +9212,7 @@ async function submitKnsTransfer() {
       passphrase: spendingIndex != null ? activeAccountPassphrase() : "",
       passphraseForm: activeAccountPassphraseForm(),
       changeAddress: fresh?.address || null,
+      revealPriorityFeeSompi,
       onStatus: (patch) => {
         showKnsTransferStatus(patch);
         // The primary moves once the node has accepted the commit (the reveal's change follows it).
@@ -8811,77 +9222,104 @@ async function submitKnsTransfer() {
         }
       },
     });
-    knsTransferInFlight = false;
+    setKnsTransferBusy(false);
+    showKnsTransferProgress(null);
     refreshPendingKnsTransfers();
-    closeKnsTransferModal();
-    showCopyToast(result.verified
-      ? `${domain} sent to ${shortAddress(result.recipientAddress)}.`
-      : `${domain} transfer broadcast. The indexer may take a moment to reflect it.`);
+    showKnsTransferSent(result, domain);
   } catch (error) {
-    knsTransferInFlight = false;
+    setKnsTransferBusy(false);
+    showKnsTransferProgress(null);
     // Once a commit is out (or one from an earlier attempt is unfinished), Send must not come
     // back: pressing it would commit another 2 KAS. The button becomes Retry reveal (EXT-005).
     // A commit whose broadcast ended unclear (a timeout) also left a record: Finish transfer
     // then looks it up on chain.
     const record = error?.pendingTransfer || await engine.getPendingKnsTransfer(assetId).catch(() => null);
     if (committed || record) {
-      if (record && knsTransferContext === context) {
-        setKnsTransferResumeMode(record);
-        if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
-      }
+      if (record && knsTransferContext === context) setKnsTransferResumeMode(record);
       refreshPendingKnsTransfers();
-    } else {
-      if (knsTransferSendBtn) knsTransferSendBtn.disabled = false;
-      if (knsTransferStatusEl) knsTransferStatusEl.hidden = true;
     }
-    if (knsTransferErrorEl) { knsTransferErrorEl.textContent = error.message; knsTransferErrorEl.hidden = false; }
+    setKnsTransferError(userFacingError(error) || error?.message || "Transfer failed.");
   }
 }
 
 knsTransferSendBtn?.addEventListener("click", submitKnsTransfer);
-document.querySelector("[data-kns-transfer-close]")?.addEventListener("click", closeKnsTransferModal);
 document.querySelector("[data-kns-transfer-cancel]")?.addEventListener("click", closeKnsTransferModal);
+knsTransferModal?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.preventDefault(); closeKnsTransferModal(); }
+});
 
-function renderSpendingDetailUtxos(address, utxos) {
+// iOS SpendingAddressTransactionHistoryView utxosList: Compound UTXOs (more than one) with its
+// footer, then each coin - icon (a cube for coinbase), its label, amount and outpoint, a
+// "Coinbase" tag, and the rename pencil. A failed load is said as such (iOS UtxoLoadFailureRow),
+// never as "No UTXOs.", and the list keeps what it had.
+const SPENDING_UTXO_GRID_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="7.5" r="3.2"/><circle cx="16.5" cy="7.5" r="3.2"/><circle cx="7.5" cy="16.5" r="3.2"/><circle cx="16.5" cy="16.5" r="3.2"/></svg>';
+const SPENDING_UTXO_CUBE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8 20.5 7.5v9L12 21.2 3.5 16.5v-9Z"/><path d="M3.5 7.5 12 12.2l8.5-4.7M12 12.2v9"/></svg>';
+let spendingDetailUtxos = [];
+function renderSpendingDetailUtxos(address, utxos, loadError = null) {
   if (!spendingDetailUtxoList) return;
-  if (!utxos.length) { spendingDetailUtxoList.innerHTML = '<div class="manage-address-empty">No UTXOs at this address.</div>'; return; }
   const labels = getUtxoLabels(address);
-  spendingDetailUtxoList.replaceChildren();
-  // Compound UTXOs (matches iOS): only meaningful with more than one UTXO. Merges them into one
-  // by sending the balance back to this same address, so future sends need fewer inputs.
+  const parts = [];
   if (utxos.length > 1) {
-    const consolidate = document.createElement("button");
-    consolidate.type = "button";
-    consolidate.className = "manage-address-consolidate-btn";
-    consolidate.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7 3 12l5 5"/><path d="M16 7l5 5-5 5"/><path d="M3 12h18"/></svg><span>Compound UTXOs</span>';
-    consolidate.addEventListener("click", () => openSendKaspaModal({ compound: true, spendingIndex: spendingDetailIndex }));
-    spendingDetailUtxoList.appendChild(consolidate);
+    parts.push('<button type="button" class="manage-address-consolidate-btn" data-spending-utxo-compound><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4v6a4 4 0 0 0 4 4v6M16 4v6a4 4 0 0 1-4 4"/><path d="m9 17 3 3 3-3"/></svg><span>Compound UTXOs</span></button>'
+      + '<p class="spending-utxo-compound-note">Combines this address\'s UTXOs to reduce the inputs a future send needs. A single transaction can only merge so many at once, so if this address has a very large number, tap Compound again after it confirms to keep reducing.</p>');
+  }
+  if (!utxos.length) {
+    parts.push(loadError
+      ? `<div class="spending-utxo-failure" role="alert"><strong>Couldn't load the coins at this address</strong><span>${escapeHtml(loadError)}</span><button type="button" class="cold-inline-link" data-spending-utxo-retry>Try Again</button></div>`
+      : '<div class="manage-address-empty">No UTXOs.</div>');
   }
   for (const entry of utxos) {
     const outpointKey = utxoOutpointKey(entry.outpoint || {});
     const label = labels[outpointKey];
-    const row = document.createElement("div");
-    row.className = "manage-address-utxo-row";
-    const meta = document.createElement("div"); meta.className = "manage-address-utxo-meta";
-    if (label) { const l = document.createElement("span"); l.className = "manage-address-utxo-label"; l.textContent = label; meta.appendChild(l); }
-    const op = document.createElement("span"); op.className = "manage-address-utxo-outpoint"; op.textContent = outpointKey; meta.appendChild(op);
-    const amt = document.createElement("span"); amt.className = "manage-address-utxo-amount"; amt.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} ${KAS_UNIT}`;
-    row.append(meta, amt);
-    spendingDetailUtxoList.appendChild(row);
+    const coinbase = Boolean(entry.isCoinbase ?? entry.entry?.isCoinbase);
+    parts.push(`
+      <div class="manage-address-utxo-row spending-utxo-row">
+        <span class="spending-utxo-icon" aria-hidden="true">${coinbase ? SPENDING_UTXO_CUBE_ICON : SPENDING_UTXO_GRID_ICON}</span>
+        <div class="manage-address-utxo-meta">
+          ${label ? `<span class="manage-address-utxo-label">${escapeHtml(label)}</span>` : ""}
+          <span class="spending-utxo-amount">${spendingKasText(BigInt(entry.amount || 0))} ${KAS_UNIT}</span>
+          <span class="manage-address-utxo-outpoint">${escapeHtml(outpointKey)}</span>
+        </div>
+        ${coinbase ? '<span class="cold-coinbase-tag">Coinbase</span>' : ""}
+        <button type="button" class="cold-inline-icon" data-spending-utxo-rename="${escapeHtml(outpointKey)}" aria-label="Rename UTXO"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg></button>
+      </div>`);
   }
+  spendingDetailUtxoList.innerHTML = parts.join("");
+}
+spendingDetailUtxoList?.addEventListener("click", (event) => {
+  if (!spendingDetailAddress) return;
+  if (event.target.closest("[data-spending-utxo-compound]")) { openSendKaspaModal({ compound: true, spendingIndex: spendingDetailIndex }); return; }
+  if (event.target.closest("[data-spending-utxo-retry]")) { loadSpendingDetailUtxos(spendingDetailAddress); return; }
+  const rename = event.target.closest("[data-spending-utxo-rename]");
+  if (rename) {
+    const address = spendingDetailAddress;
+    const key = rename.dataset.spendingUtxoRename;
+    openUtxoRename(address, key, getUtxoLabels(address)[key] || "", () => {
+      if (spendingDetailAddress === address) renderSpendingDetailUtxos(address, spendingDetailUtxos);
+    });
+  }
+});
+
+// Send needs something to send: off at a zero balance (iOS .disabled(entry.balanceSompi == 0)).
+function setSpendingDetailBalance(sompi) {
+  if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = sompi == null ? "…" : `${spendingKasText(sompi)} ${KAS_UNIT}`;
+  const send = document.querySelector("[data-spending-detail-send]");
+  if (send) send.disabled = sompi != null && BigInt(sompi) === 0n;
 }
 
 async function loadSpendingDetailUtxos(address) {
   if (!spendingDetailUtxoList) return;
-  spendingDetailUtxoList.innerHTML = '<div class="manage-address-empty">Loading…</div>';
+  if (!spendingDetailUtxos.length) spendingDetailUtxoList.innerHTML = '<div class="manage-address-empty">Loading…</div>';
   try {
     const balance = await engine.balanceForAddress(address);
     if (spendingDetailAddress !== address) return; // user navigated away
-    renderSpendingDetailUtxos(address, balance.entries || []);
-    if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = `${balance.totalKas} ${KAS_UNIT}`;
+    spendingDetailUtxos = balance.entries || [];
+    renderSpendingDetailUtxos(address, spendingDetailUtxos);
+    setSpendingDetailBalance(BigInt(balance.totalSompi ?? 0));
   } catch (error) {
     if (spendingDetailAddress !== address) return;
-    spendingDetailUtxoList.innerHTML = `<div class="manage-address-empty">Could not load UTXOs: ${escapeHtml(error.message)}</div>`;
+    // The list keeps what it had; an outage is not an empty address.
+    renderSpendingDetailUtxos(address, spendingDetailUtxos, userFacingError(error));
   }
 }
 
@@ -8943,8 +9381,10 @@ async function openSpendingDetailScreen(index) {
   spendingDetailAddress = address;
   const state = getSpendingState();
   if (spendingDetailTitle) spendingDetailTitle.textContent = spendingLabelFor(state, index);
-  if (spendingDetailAddressEl) spendingDetailAddressEl.textContent = shortAddress(address);
-  if (spendingDetailBalanceEl) spendingDetailBalanceEl.textContent = "…";
+  // The list's last-known balance until the live one lands (iOS shows the row's entry).
+  const cachedKas = loadSpendingBalCache()[address]?.kas;
+  setSpendingDetailBalance(cachedKas != null ? sompiFromUserText(String(cachedKas)) : null);
+  spendingDetailUtxos = [];
   if (spendingDetailExplorer) spendingDetailExplorer.href = explorerAddressUrl(address);
   setSpendingDetailTab("transactions");
   spendingDetailScreen.hidden = false;
@@ -8968,7 +9408,38 @@ document.querySelectorAll("[data-spending-detail-tab]").forEach((b) => b.addEven
 document.querySelector("[data-close-spending-detail]")?.addEventListener("click", closeSpendingDetailScreen);
 document.querySelector("[data-spending-detail-receive]")?.addEventListener("click", () => {
   if (!spendingDetailAddress) return;
-  openChattingAddressScreen({ address: spendingDetailAddress, balanceText: spendingDetailBalanceEl?.textContent || "", subtitle: null });
+  openSpendingQrScreen(spendingDetailIndex, spendingDetailAddress);
+});
+
+// A spending address's QR (iOS SpendingAddressQRView): title "Address #N", Close, the QR, the full
+// address, and the whole card copies it. No balance and no Copy button - that is the chatting
+// address's Receive screen, not this one.
+const spendingQrScreen = document.querySelector("[data-spending-qr-screen]");
+let spendingQrAddress = null;
+async function openSpendingQrScreen(index, address) {
+  if (!spendingQrScreen || !address) return;
+  spendingQrAddress = address;
+  const title = spendingQrScreen.querySelector("[data-spending-qr-title]");
+  if (title) title.textContent = `Address #${index}`;
+  const addressEl = spendingQrScreen.querySelector("[data-spending-qr-address]");
+  if (addressEl) addressEl.textContent = address;
+  spendingQrScreen.hidden = false;
+  const canvas = spendingQrScreen.querySelector("[data-spending-qr-canvas]");
+  if (canvas) {
+    canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+    try { await engine.drawQrFor(canvas, address, { dark: "#06110f", light: "#ffffff" }); }
+    catch (error) { appendEngineLog(`QR failed: ${error.message}`); }
+  }
+}
+function closeSpendingQrScreen() {
+  if (spendingQrScreen) spendingQrScreen.hidden = true;
+  spendingQrAddress = null;
+}
+spendingQrScreen?.querySelector("[data-close-spending-qr]")?.addEventListener("click", closeSpendingQrScreen);
+spendingQrScreen?.querySelector(".chatting-address-card")?.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-close-spending-qr]") || !spendingQrAddress) return;
+  try { await copyTextToClipboard(spendingQrAddress); showCopyToast(addressCopiedToastText(spendingQrAddress)); }
+  catch (error) { appendEngineLog(error.message); }
 });
 // Every send has the From section: Chatting Address by default, this address under Choose an
 // Address (iOS 6333dd3).
@@ -8981,19 +9452,62 @@ function closeSpendingActionsMenu() {
   if (spendingActionsMenu) spendingActionsMenu.hidden = true;
   spendingActionsToggle?.setAttribute("aria-expanded", "false");
 }
-spendingActionsToggle?.addEventListener("click", async (event) => {
+// The capsule spins and is off while Generate or Discover runs (iOS accountSummary).
+function updateSpendingActionsPill() {
+  if (!spendingActionsToggle) return;
+  const busy = Boolean(spendingGenerateBusy || spendingDiscovering);
+  spendingActionsToggle.disabled = busy;
+  spendingActionsToggle.setAttribute("aria-busy", String(busy));
+  spendingActionsToggle.innerHTML = busy ? '<span class="sk-spinner" aria-hidden="true"></span>' : "Address Actions";
+}
+
+// The Address Actions sheet (iOS addressActionsSheet). While Discover runs it shows where the scan
+// is, counting up, with "Close and Keep Scanning"; closing it does not stop the scan, which then
+// reports in a toast. Left open, it turns back into the actions with the summary under them.
+let spendingActionsSheet = null; // { token, mode: "menu" | "progress" } while it is up
+let spendingActionsSheetToken = 0;
+async function openSpendingActionsSheet(summary = "") {
+  const token = ++spendingActionsSheetToken;
+  if (spendingDiscovering) {
+    spendingActionsSheet = { token, mode: "progress" };
+    const progress = spendingDiscoveryProgress || { checkingIndex: 0, foundCount: 0 };
+    await infoSheet({
+      title: "Address Actions",
+      html: `<div class="spending-discover-progress">
+          <span class="sk-spinner" aria-hidden="true"></span>
+          <strong data-spending-discover-checking>Checking address #${progress.checkingIndex}</strong>
+          <span data-spending-discover-found>${escapeHtml(spendingDiscoveryFoundText(progress.foundCount))}</span>
+          <small>Checks the first thousand addresses whatever the gaps, then keeps going while it keeps finding.</small>
+        </div>`,
+      confirmLabel: "Close and Keep Scanning",
+    });
+  } else {
+    spendingActionsSheet = { token, mode: "menu" };
+    const choice = await chooseDialog({
+      title: "Address Actions",
+      options: [
+        { id: "generate", title: "Generate New Spending Address", subtitle: "Reveals the next unused address in this wallet." },
+        { id: "discover", title: "Discover Addresses", subtitle: "Finds addresses holding a balance or a domain." },
+        { id: "visibility", title: "Address Visibility", subtitle: "Check off every address you want on the list, in one sitting." },
+      ],
+      footer: summary,
+    });
+    if (spendingActionsSheet?.token === token) spendingActionsSheet = null;
+    if (choice === "generate") spendingGenerateBtn?.click();
+    else if (choice === "discover") { spendingScanBtn?.click(); if (spendingDiscovering) openSpendingActionsSheet(); }
+    else if (choice === "visibility") spendingVisibilityOpenBtn?.click();
+    return;
+  }
+  // Closed by hand (a sheet replaced by the next one never resolves).
+  if (spendingActionsSheet?.token === token) spendingActionsSheet = null;
+}
+function spendingDiscoveryFoundText(foundCount) {
+  return foundCount === 0 ? "No addresses with a balance or domain yet" : `${foundCount} found so far`;
+}
+spendingActionsToggle?.addEventListener("click", (event) => {
   event.stopPropagation();
-  const choice = await chooseDialog({
-    title: "Address Actions",
-    options: [
-      { id: "generate", title: "Generate New Spending Address", subtitle: "Reveals the next unused address in this wallet." },
-      { id: "discover", title: "Discover Addresses", subtitle: "Finds addresses holding a balance or a domain." },
-      { id: "visibility", title: "Address Visibility", subtitle: "Check off every address you want on the list, in one sitting." },
-    ],
-  });
-  if (choice === "generate") spendingGenerateBtn?.click();
-  else if (choice === "discover") spendingScanBtn?.click();
-  else if (choice === "visibility") spendingVisibilityOpenBtn?.click();
+  if (spendingActionsToggle.disabled) return;
+  openSpendingActionsSheet();
 });
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".spending-actions-wrap")) closeSpendingActionsMenu();
@@ -9033,6 +9547,7 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
   if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
   if (spendingGenerateBusy) return null;
   spendingGenerateBusy = true;
+  updateSpendingActionsPill();
   try {
     const state = getSpendingState();
     const addressByIndex = new Map();
@@ -9081,173 +9596,71 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
     return readyIndex;
   } finally {
     spendingGenerateBusy = false;
+    updateSpendingActionsPill();
   }
 }
 
-// Discovery scan: reveal any derived address that already holds a BALANCE or owns a KNS
-// DOMAIN. The old gap-only loop started at maxIndex+1 and quit after 20 consecutive empties,
-// so a funded address far out (e.g. #97 on a fresh install) was unreachable. Now a guaranteed
-// window (at least the first SPENDING_SCAN_MIN_INDEX indices) is always swept - balances in
-// parallel chunks, KNS through the batched/cached/429-paced engine lookup - and a classic
-// gap-limit tail extends past the window while hits keep landing near its end.
-const SPENDING_SCAN_MIN_INDEX = 120;
+// Discover Addresses (iOS discoverSpendingAddresses, ui/spending-discovery.js): from index 0, the
+// first thousand addresses whatever the gaps through the bulk activity route, balances and names
+// asked only of the touched ones; a batched sweep where that route is missing. Every match is
+// shown (un-hidden), the bound covers the highest one, and the empty rows it sweeps in stay hidden.
+let spendingDiscovering = false;
+let spendingDiscoveryProgress = null;
 spendingScanBtn?.addEventListener("click", async () => {
   closeSpendingActionsMenu();
   if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return; }
-  const label = spendingScanBtn.querySelector("span");
-  const original = label?.textContent;
-  spendingScanBtn.disabled = true;
-  if (label) label.textContent = "Scanning…";
+  if (spendingDiscovering) return;
+  const wallet = engine.address;
+  spendingDiscovering = true;
+  spendingDiscoveryProgress = { checkingIndex: 0, foundCount: 0 };
+  updateSpendingActionsPill();
+  let summary;
   try {
-    const state = getSpendingState();
-    let highestHit = state.maxIndex;
-    const scanEnd = Math.max(state.maxIndex + SPENDING_GAP_LIMIT, SPENDING_SCAN_MIN_INDEX);
-
-    const windowEntries = [];
-    for (let i = state.maxIndex + 1; i <= scanEnd; i++) {
-      const address = deriveSpendingAddressAt(i);
-      if (address) windowEntries.push({ index: i, address });
+    const result = await discoverSpendingMatches({
+      derive: deriveSpendingAddressesInRange,
+      activity: (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" }),
+      fundedAmong: async (addresses) => {
+        const byAddress = await spendingBalancesBatchSompi(addresses);
+        return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
+      },
+      ownersAmong: (addresses) => engine.addressesOwningAnyName(addresses),
+      onProgress: (progress) => {
+        spendingDiscoveryProgress = progress;
+        if (spendingActionsSheet?.mode !== "progress") return;
+        const checking = document.querySelector("[data-spending-discover-checking]");
+        if (checking) checking.textContent = `Checking address #${progress.checkingIndex}`;
+        const found = document.querySelector("[data-spending-discover-found]");
+        if (found) found.textContent = spendingDiscoveryFoundText(progress.foundCount);
+      },
+    });
+    if (engine.address === wallet) {
+      saveSpendingState(applySpendingDiscovery(getSpendingState(), result));
+      if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
+      refreshSpendingSummary();
     }
-
-    // Balance sweep in small paced chunks — a hard parallel burst trips api.kaspa.org's rate
-    // limiter, whose error responses carry no CORS headers and flood the console red.
-    const hits = new Set();
-    for (let start = 0; start < windowEntries.length; start += 5) {
-      const chunk = windowEntries.slice(start, start + 5);
-      if (label) label.textContent = `Scanning… #${chunk[0].index}`;
-      await Promise.all(chunk.map(async (entry) => {
-        try {
-          const bal = await engine.balanceForAddress(entry.address);
-          if ((Number(bal?.totalKas) || 0) > 0) hits.add(entry.index);
-        } catch { /* lookup failed: skip this index */ }
-      }));
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-
-    // A name on any service (.kas, .k, .kaspa) counts as "in use" too (iOS ownsAnyName) - KNS
-    // is batched/cached/paced by the engine, .k and .kaspa go six addresses at a time.
-    if (label) label.textContent = "Checking names…";
-    let nameOwners = new Set();
-    try { nameOwners = await engine.addressesOwningAnyName(windowEntries.filter((entry) => !hits.has(entry.index)).map((entry) => entry.address)); }
-    catch { /* no names counted for this scan */ }
-    for (const entry of windowEntries) {
-      if (nameOwners.has(entry.address)) hits.add(entry.index);
-    }
-    for (const index of hits) highestHit = Math.max(highestHit, index);
-
-    // Gap-limit tail past the guaranteed window: keeps extending while recent hits keep the
-    // gap alive (seeded with the distance from the last hit to the window's end).
-    let index = scanEnd + 1;
-    let consecutiveEmpty = Math.max(0, scanEnd - highestHit);
-    let discoveryHits = 0;
-    while (consecutiveEmpty < SPENDING_GAP_LIMIT) {
-      const address = deriveSpendingAddressAt(index);
-      if (!address) break;
-      if (label) label.textContent = `Scanning… #${index}`;
-      let held = 0;
-      try { const bal = await engine.balanceForAddress(address); held = Number(bal?.totalKas) || 0; }
-      catch { break; }
-      if (held > 0) { highestHit = index; consecutiveEmpty = 0; discoveryHits += 1; }
-      else consecutiveEmpty += 1;
-      index += 1;
-    }
-
-    if (highestHit > state.maxIndex) {
-      saveSpendingState({ maxIndex: highestHit });
-      renderSpendingList();
-      showCopyToast(`Found ${discoveryHits} address${discoveryHits === 1 ? "" : "es"} with a balance or domain.`);
-    } else {
-      showCopyToast("No addresses with a balance or domain found.");
-    }
+    // The count is addresses that hold a balance or a domain, every one, not only new ones.
+    summary = result.matchCount === 0
+      ? "No addresses with a balance or domain found."
+      : `Found ${result.matchCount} address${result.matchCount === 1 ? "" : "es"} with a balance or domain.`;
+  } catch (error) {
+    appendEngineLog(`Spending discovery failed: ${error?.message || error}`);
+    summary = userFacingError(error);
   } finally {
-    spendingScanBtn.disabled = false;
-    if (label && original != null) label.textContent = original;
+    spendingDiscovering = false;
+    spendingDiscoveryProgress = null;
+    updateSpendingActionsPill();
   }
+  // Still watching? The sheet goes back to the actions with the summary under them; closed and
+  // carried on, the summary has nowhere to render, so it is a toast.
+  const sheetUp = spendingActionsSheet?.mode === "progress" && document.querySelector("[data-spending-discover-checking]")?.closest(".app-dialog-backdrop:not([hidden])");
+  if (sheetUp) openSpendingActionsSheet(summary);
+  else { spendingActionsSheet = null; showCopyToast(summary); }
 });
 
 // Profile's Manage Addresses card (iOS 6333dd3).
 document.querySelector("[data-open-spending-manage]")?.addEventListener("click", openSpendingManageScreen);
 document.querySelector("[data-close-spending-manage]")?.addEventListener("click", closeSpendingManageScreen);
 
-// --- Send from a spending address (Stage C). Reuses makeSendController with a
-// spending-scoped sendFn (engine.sendFromSpending) + balance source, so recipient
-// resolution / amount validation / progress behave exactly like the chatting send. ---
-const spendingSendModal = document.querySelector("[data-spending-send-modal]");
-const spendingSendSourceEl = document.querySelector("[data-spending-send-source]");
-const spendingSendFeeButtons = document.querySelectorAll("[data-spending-send-fee]");
-const spendingSendFeeCustom = document.querySelector("[data-spending-send-fee-custom]");
-const spendingSendFeeSummary = document.querySelector("[data-spending-send-fee-summary]");
-let spendingSendIndex = 0;
-let spendingSendFeeTier = "0";
-
-function spendingSendGetFeeKas() {
-  // The one exact parser (iOS IOS-010): "0,002" reads as a fee, and the text handed on is exact.
-  const sompi = sompiFromUserText(String(spendingSendFeeCustom?.value || ""));
-  return sompi != null && sompi > 0n ? kasTextFromSompi(sompi) : "0";
-}
-function updateSpendingSendFeeSummary() {
-  if (!spendingSendFeeSummary) return;
-  const labels = { "0": "Normal", "0.00002": "Priority", custom: "Custom" };
-  spendingSendFeeSummary.textContent = `${labels[spendingSendFeeTier] || "Normal"} · ${spendingSendGetFeeKas()} ${KAS_UNIT}`;
-}
-function selectSpendingSendFeeTier(tier) {
-  spendingSendFeeTier = tier;
-  spendingSendFeeButtons.forEach((b) => b.classList.toggle("active", b.dataset.spendingSendFee === tier));
-  if (spendingSendFeeCustom) {
-    if (tier === "custom") { spendingSendFeeCustom.readOnly = false; spendingSendFeeCustom.value = ""; spendingSendFeeCustom.focus(); }
-    else { spendingSendFeeCustom.readOnly = true; spendingSendFeeCustom.value = tier; }
-  }
-  updateSpendingSendFeeSummary();
-}
-spendingSendFeeButtons.forEach((b) => b.addEventListener("click", () => selectSpendingSendFeeTier(b.dataset.spendingSendFee)));
-spendingSendFeeCustom?.addEventListener("input", updateSpendingSendFeeSummary);
-
-function closeSpendingSendModal() { if (spendingSendModal) spendingSendModal.hidden = true; }
-
-const spendingSendController = makeSendController({
-  recipient: document.querySelector("[data-spending-send-recipient]"),
-  resolvedHint: document.querySelector("[data-spending-send-resolved]"),
-  amount: document.querySelector("[data-spending-send-amount]"),
-  balanceHint: document.querySelector("[data-spending-send-balance]"),
-  error: document.querySelector("[data-spending-send-error]"),
-  progress: document.querySelector("[data-spending-send-progress]"),
-  submit: document.querySelector("[data-spending-send-submit]"),
-}, {
-  onOpen: () => { if (spendingSendModal) spendingSendModal.hidden = false; },
-  onClose: () => { closeSpendingSendModal(); if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); refreshSpendingDetailIfOpen(); refreshSpendingSummary(); },
-  getFeeKas: spendingSendGetFeeKas,
-  getBalance: () => engine.balanceForAddress(deriveSpendingAddressAt(spendingSendIndex)),
-  sendFn: async ({ destination, amountKas, feeKas, selectedOutpoints }) => {
-    const fresh = freshChangeForSpendingIndex(spendingSendIndex);
-    const result = await engine.sendFromSpending({
-      mnemonic: activeAccountMnemonic(),
-      index: spendingSendIndex,
-      passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
-      destinationAddress: destination,
-      amountKas,
-      feeKas,
-      selectedOutpoints: selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null,
-      changeAddress: fresh?.address || null,
-    });
-    if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh));
-    return result;
-  },
-});
-
-function openSpendingSendModal(index) {
-  if (!activeAccountMnemonic()) {
-    showCopyToast("This account has no recovery phrase, so spending sends aren't available.");
-    return;
-  }
-  spendingSendIndex = Math.max(0, Math.floor(Number(index) || 0));
-  const addr = deriveSpendingAddressAt(spendingSendIndex);
-  if (!addr) { showCopyToast("Spending address is not ready yet."); return; }
-  if (spendingSendSourceEl) spendingSendSourceEl.textContent = `From spending #${spendingSendIndex} · ${shortAddress(addr)}`;
-  selectSpendingSendFeeTier("0");
-  spendingSendController.open();
-}
-
-document.querySelectorAll("[data-close-spending-send]").forEach((b) => b.addEventListener("click", closeSpendingSendModal));
 
 // Refresh keeps your place: the active tab persists and is re-applied at boot (the
 // screens themselves refetch their data, so the restored spot is fresh, not a snapshot).
@@ -9301,6 +9714,8 @@ function setActiveAppTab(tab) {
   });
 
   currentAppTab = tab;
+  toolbarBalanceScreen = screenTab;
+  renderToolbarBalance();
   try { updatePublicChatsSettingsButton(); } catch { /* not ready yet */ }
   const isChats = screenTab === "chats";
   if (appSidebar) appSidebar.hidden = !isChats;
@@ -9338,7 +9753,7 @@ function setActiveAppTab(tab) {
     if (detailEmptyState) detailEmptyState.hidden = groupOpen || Boolean(activeConversationId);
   }
   updateDetailActiveClass();
-  if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummaryOnShow(); }
+  if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummaryOnShow(); warmReceiveAddressOnShow(); }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
   // The room circles sit above the Chats list, so the rooms stay live while Chats is up (and an
@@ -9356,8 +9771,11 @@ function setActiveAppTab(tab) {
 }
 
 sidebarTabButtons.forEach((button) => {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     const tab = button.dataset.appTab;
+    // Chess Online holds the dock while a seat waits (iOS full-screen waiting room) or the
+    // player's game is on (leaving means resigning, and it asks first).
+    if (tab !== "chess" && !(await chessTournamentsMayLeave().catch(() => true))) return;
     // Kaspa Hub is its own way back: clicking it while a section is open closes the section and
     // returns to the grid, so the button that opened a section is the one that leaves it.
     if (tab === "hub" && currentAppTab === "hub" && hubSection) hubSection = null;
@@ -9802,7 +10220,7 @@ const RECEIVE_INDEX_KEY = "kachat-receive-address-index-v1";
 // never relabelled, only a bare KAS).
 const RECEIVE_SUBTITLE = kasLabel("A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or domains.");
 const CHATTING_ADDRESS_SUBTITLE = kasLabel("This address should be for chatting and domains only. 1 Kaspa is enough for about 500 interactions in the app. Domains cost from 35 to 4,000 Kaspa, depending on the name.");
-async function freshReceiveAddress() {
+async function freshReceiveAddress({ revealing = true } = {}) {
   if (!activeAccountMnemonic()) return null;
   const state = getSpendingState();
   const untouched = async (address) => {
@@ -9811,67 +10229,128 @@ async function freshReceiveAddress() {
     const usage = await spendingUsageFor(address);
     return usage.used !== true;
   };
-  // The address handed out is back on the Manage Addresses list, even when the person had hidden
-  // it (Hide All): money is about to land there (iOS 245a5d2 showIfHidden).
-  const showIfHidden = (index) => {
+  // The address handed out goes on the Manage Addresses list - past its end the list grows to it
+  // (the slots between stay hidden), and one the person had hidden (Hide All) comes back: money is
+  // about to land there (iOS 245a5d2 showIfHidden, revealSpendingAddress). Profile's warm-up only
+  // decides, it reveals nothing (iOS freshReceiveAddress(revealing: false)).
+  const reveal = (index) => {
+    if (!revealing) return;
     const current = getSpendingState();
-    if (!current.hidden.includes(index)) return;
-    saveSpendingState({ hidden: current.hidden.filter((i) => i !== index) });
+    let hidden = current.hidden;
+    const patch = {};
+    if (index > current.maxIndex) {
+      patch.maxIndex = index;
+      for (let i = current.maxIndex + 1; i < index; i += 1) if (!hidden.includes(i)) hidden = [...hidden, i];
+    }
+    if (hidden.includes(index)) hidden = hidden.filter((i) => i !== index);
+    if (hidden !== current.hidden) patch.hidden = hidden;
+    if (Object.keys(patch).length) saveSpendingState(patch);
   };
   let remembered = null;
   try { remembered = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY)) || "null"); } catch { remembered = null; }
   if (Number.isInteger(remembered) && remembered >= 0) {
     const address = deriveSpendingAddressAt(remembered);
-    if (await untouched(address)) { showIfHidden(remembered); return address; }
+    if (await untouched(address)) { reveal(remembered); return address; }
   }
   const primary = deriveSpendingAddressAt(state.activeIndex);
   if (await untouched(primary)) {
     try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(state.activeIndex)); } catch {}
-    showIfHidden(state.activeIndex);
+    reveal(state.activeIndex);
     return primary;
   }
   const index = state.maxIndex + 1;
   const address = deriveSpendingAddressAt(index);
   if (!address) return primary;
-  saveSpendingState({ maxIndex: index });
   try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(index)); } catch {}
+  reveal(index);
   return address;
 }
 
-// Profile's Receive Kaspa button, and the Chats New sheet's "Receive Kaspa" row (iOS e6400d6),
-// which has no button of its own to busy - one run at a time either way.
-async function openReceiveKaspaScreen(button = null) {
-  if (!engine.address || openReceiveKaspaScreen.busy) return;
-  if (!activeAccountMnemonic()) {
-    showCopyToast("Spending address is unlocking. Go back and try again.");
-    return;
-  }
-  openReceiveKaspaScreen.busy = true;
-  if (button) button.disabled = true;
-  const label = button?.querySelector("span:last-child");
-  const original = label?.textContent;
-  if (label) label.textContent = "Preparing a fresh address";
-  try {
-    const address = await freshReceiveAddress();
-    if (!address) { showCopyToast("Spending address is unlocking. Go back and try again."); return; }
-    let balanceText = `0 ${KAS_UNIT}`;
-    try { balanceText = `${(await engine.balanceForAddress(address)).totalKas} ${KAS_UNIT}`; } catch {}
-    openChattingAddressScreen({ address, balanceText, subtitle: RECEIVE_SUBTITLE });
-  } finally {
-    openReceiveKaspaScreen.busy = false;
-    if (button) button.disabled = false;
-    if (label && original) label.textContent = original;
+// Profile decides the Receive address on its way in (iOS warmReceiveAddress /
+// ReceiveAddressWarmCache), so opening Receive Kaspa is a read rather than a round trip. At most
+// every 30 s per account, like Profile's other on-show refreshes; a keychain still unlocking is
+// asked again on the next show.
+let receiveAddressWarm = null; // { account, address }
+function warmReceiveAddressOnShow() {
+  const st = warmReceiveAddressOnShow;
+  const account = engine.address || "";
+  if (!account || !activeAccountMnemonic()) return;
+  if (st.key === account && Date.now() - (st.at || 0) < 30_000) return;
+  st.key = account;
+  st.at = Date.now();
+  freshReceiveAddress({ revealing: false }).then((address) => {
+    if (engine.address !== account) return;
+    if (address) receiveAddressWarm = { account, address };
+    else st.at = 0;
+  }).catch(() => { st.at = 0; });
+}
+
+// The Receive screen's in-place states (iOS ReceiveKaspaQRView): the spinner while the fresh
+// address is decided, the unlocking line when it can't be. null puts the QR back.
+function setChattingAddressStatus(text, { spinner = false } = {}) {
+  const body = chattingAddressScreen?.querySelector(".chatting-address-body");
+  const status = chattingAddressScreen?.querySelector("[data-chatting-address-status]");
+  if (!body || !status) return;
+  body.classList.toggle("showing-status", text != null);
+  status.hidden = text == null;
+  const spinnerEl = status.querySelector("[data-chatting-address-status-spinner]");
+  if (spinnerEl) spinnerEl.hidden = !spinner;
+  const textEl = status.querySelector("[data-chatting-address-status-text]");
+  if (textEl) textEl.textContent = text ?? "";
+  if (text != null) {
+    chattingAddressScreenAddress = null;
+    if (chattingAddressBalance) chattingAddressBalance.textContent = "";
   }
 }
+
+// Profile's Receive Kaspa button, and the Chats New sheet's "Receive Kaspa" row (iOS e6400d6).
+// The screen opens at once: on the warmed address when Profile already decided one, else on
+// "Preparing a fresh address" until it is decided. The live check then runs either way and swaps
+// the code only if the warmed answer went stale - a QR is scanned the instant it appears. The
+// balance shows "--" until the node answers, and stays "--" when it can't (never 0 KAS).
+let receiveScreenRun = 0;
+async function openReceiveKaspaScreen() {
+  if (!engine.address || !chattingAddressScreen) return;
+  const run = ++receiveScreenRun;
+  const account = engine.address;
+  const live = () => run === receiveScreenRun && engine.address === account && !chattingAddressScreen.hidden;
+  const warmed = receiveAddressWarm?.account === account ? receiveAddressWarm.address : null;
+  let shown = warmed;
+  // shown now: it goes on the Manage Addresses list. One decision at a time, shared by quick reopens.
+  const deciding = openReceiveKaspaScreen.inflight ??= freshReceiveAddress({ revealing: true })
+    .catch(() => null)
+    .finally(() => { openReceiveKaspaScreen.inflight = null; });
+  if (warmed) await openChattingAddressScreen({ address: warmed, balanceText: "--", subtitle: RECEIVE_SUBTITLE });
+  else {
+    chattingAddressScreen.hidden = false;
+    setChattingAddressStatus("Preparing a fresh address", { spinner: true });
+  }
+  const resolved = await deciding;
+  if (!live()) return;
+  receiveAddressWarm = resolved ? { account, address: resolved } : null;
+  if (!resolved) {
+    setChattingAddressStatus("Spending address is unlocking - go back and try again.");
+    return;
+  }
+  if (resolved !== shown) {
+    shown = resolved;
+    await openChattingAddressScreen({ address: resolved, balanceText: "--", subtitle: RECEIVE_SUBTITLE });
+  }
+  let balanceText = "--";
+  try { balanceText = kasExact8Label((await engine.balanceForAddress(resolved)).totalKas); } catch { /* unknown stays "--" */ }
+  if (live() && chattingAddressScreenAddress === resolved && chattingAddressBalance) chattingAddressBalance.textContent = balanceText;
+}
 document.querySelectorAll("[data-profile-qr-trigger]").forEach((button) => {
-  button.addEventListener("click", () => { openReceiveKaspaScreen(button); });
+  button.addEventListener("click", () => { openReceiveKaspaScreen(); });
 });
 
 async function openChattingAddressScreen(options = {}) {
   if (!chattingAddressScreen) return;
   const address = options.address || engine.address;
   if (!address) return;
-  const balanceText = options.balanceText != null ? options.balanceText : `${currentBalanceKas} ${KAS_UNIT}`;
+  // the chatting balance with its 8 decimals, "--" while unknown (iOS ChattingAddressQRView)
+  const balanceText = options.balanceText != null ? options.balanceText : kasExact8Label(currentBalanceKas);
+  setChattingAddressStatus(null);
   chattingAddressScreen.hidden = false;
   // Subtitle: default chat-fee note for the chatting address; callers pass their
   // own text (or null to hide it) — spending receive hides the chat-fee note.
@@ -9899,18 +10378,18 @@ async function openChattingAddressScreen(options = {}) {
 }
 
 function closeChattingAddressScreen() {
+  receiveScreenRun += 1; // a Receive still deciding its address no longer paints this screen
   if (chattingAddressScreen) chattingAddressScreen.hidden = true;
 }
 
 document.querySelector("[data-open-chatting-address]")?.addEventListener("click", openChattingAddressScreen);
 document.querySelector("[data-close-chatting-address]")?.addEventListener("click", closeChattingAddressScreen);
 
-// Tap anywhere on the chatting-address card to copy it (iOS ChattingAddressQRView). The whole
-// screen is the target, not just the Copy button - the QR and the address text are what a reader
-// is looking at, so those are what they will reach for. The back button and the copy button keep
-// their own behaviour.
+// Tap anywhere on the chatting-address card to copy it (iOS ChattingAddressQRView, which has no
+// Copy button: "Tap anywhere to copy" is the whole affordance). The back button keeps its own
+// behaviour; Receive's "Preparing" / unlocking states have nothing to copy.
 document.querySelector("[data-chatting-address-screen] .chatting-address-body")?.addEventListener("click", async (event) => {
-  if (event.target.closest("[data-copy-engine-address]")) return; // its own handler copies
+  if (event.currentTarget.classList.contains("showing-status")) return;
   const target = chattingAddressScreenAddress || engine.address;
   if (!target) return;
   try {
@@ -9925,7 +10404,7 @@ document.addEventListener("keydown", (event) => {
 // --- Profile > Apps and Help screens (iOS ProfileAppsView / ProfileHelpView).
 // Both follow the full-screen overlay pattern of the address screens: back
 // button and Escape close them. The Help rows launch the existing guides
-// (setup guide modals sit below the 1500 z-band, so close Help first).
+// over Help (their modal band, z 2000, is above these overlays' 1500).
 const helpScreenEl = document.querySelector("[data-help-screen]");
 
 document.querySelector("[data-open-help-screen]")?.addEventListener("click", () => {
@@ -9945,6 +10424,7 @@ let ownKnsPrimaryDomain = "";
 function setProfileDomains(info) {
   ownKnsDomains = Array.isArray(info?.allDomains) ? info.allDomains : [];
   ownKnsPrimaryDomain = info?.explicitPrimaryDomain || info?.primaryDomain || "";
+  if (info) ownKnsDomainsFor = engine.address || "";
   renderProfileDomains();
 }
 
@@ -10078,37 +10558,58 @@ document.querySelector("[data-kachat-expired-banner]")?.addEventListener("click"
   renderKachatExpiredBanner();
 });
 
+/** Your Domains' pinned button: each outside service's "Get a domain", or .kachat's Inscribe -
+ *  that one only once the .kachat list has loaded and not while the registry is being upgraded
+ *  (iOS KachatLiveDomainsTab: `loaded && !registryUpgrading`). None on a domain's detail. */
+function syncDomainsGetButton() {
+  const getButton = document.querySelector("[data-domains-inscribe]");
+  if (!getButton) return;
+  const detailEl = document.querySelector("[data-domain-detail]");
+  const service = NAME_SERVICES[activeDomainsTab];
+  // .kachat: a pinned Inscribe button that opens the .kachat marketplace over Your Domains (iOS
+  // e4da63d), on every network (iOS 7227d69).
+  const kachatInscribe = activeDomainsTab === "kachat" && kachatNamesUiEnabled()
+    && kachatDomainsListState?.address === engine.address && !kachatDomainsListState.upgrading;
+  getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || (activeDomainsTab === "kachat" && !kachatInscribe)
+    || Boolean(detailEl && !detailEl.hidden);
+  if (kachatInscribe) getButton.textContent = "Inscribe";
+  else if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
+}
+
 function renderProfileDomains() {
   const countEl = document.querySelector("[data-profile-domains-count]");
-  // Blank rather than "0" until a lookup has actually answered. The count includes .k and .kaspa,
-  // and the .kachat names (iOS 10e4a1a).
-  const otherCount = (otherServiceNamesFor === engine.address)
+  // Blank until a lookup has actually answered, then a number - "0" included (iOS). The count
+  // includes .k and .kaspa, and the .kachat names (iOS 10e4a1a).
+  const address = engine.address || "";
+  const otherCount = (otherServiceNamesFor === address)
     ? (otherServiceNames.k?.names?.length || 0) + (otherServiceNames.kaspa?.names?.length || 0) : 0;
-  const kachatCount = kachatOwnedCountFor === engine.address ? kachatOwnedCount : 0;
-  const total = ownKnsDomains.length + otherCount + kachatCount;
-  if (countEl) countEl.textContent = total ? String(total) : "";
+  const kachatCount = kachatOwnedCountFor === address ? kachatOwnedCount : 0;
+  const knsCount = ownKnsDomainsFor === address ? ownKnsDomains.length : 0;
+  const total = knsCount + otherCount + kachatCount;
+  const answered = Boolean(address) && (ownKnsDomainsFor === address || otherServiceNamesFor === address || kachatOwnedCountFor === address);
+  if (countEl) countEl.textContent = answered ? String(total) : "";
   const listEl = document.querySelector("[data-profile-domains-list]");
   const detailEl = document.querySelector("[data-domain-detail]");
   if (!listEl) return;
   document.querySelectorAll("[data-domains-tab]").forEach((tab) => tab.classList.toggle("active", tab.dataset.domainsTab === activeDomainsTab));
-  const getButton = document.querySelector("[data-domains-inscribe]");
+  // another tab replaces the .kachat list: coming back, it loads (and earns Inscribe) again
+  if (activeDomainsTab !== "kachat") kachatDomainsListState = null;
+  syncDomainsGetButton();
   const service = NAME_SERVICES[activeDomainsTab];
-  if (getButton) {
-    // .kachat on testnet: a pinned Inscribe button that opens the .kachat marketplace (iOS e4da63d),
-    // hidden while the registry is being upgraded.
-    // Every network (iOS 7227d69): on mainnet it opens the hub's "Coming soon" pages.
-    const kachatInscribe = activeDomainsTab === "kachat" && kachatNamesUiEnabled() && !kachatNames()?.service?.registryUpgrading;
-    getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || Boolean(detailEl && !detailEl.hidden);
-    if (kachatInscribe) getButton.textContent = "Inscribe";
-    else if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
-  }
   if (detailEl && !detailEl.hidden && domainDetailTarget) {
     renderDomainDetail(domainDetailTarget);
     return;
   }
   if (activeDomainsTab === "kachat") {
-    // Testnet: your .kachat names, live from the registry (iOS KachatLiveDomainsTab).
-    if (renderKachatLiveDomainsTab(listEl, engine.address)) return;
+    // Testnet: your .kachat names, live from the registry (iOS KachatLiveDomainsTab). Inscribe
+    // waits for the list's answer.
+    const kachatFor = engine.address;
+    const onLoaded = (state) => {
+      if (engine.address !== kachatFor || activeDomainsTab !== "kachat") return;
+      kachatDomainsListState = { address: kachatFor, upgrading: Boolean(state?.upgrading) };
+      syncDomainsGetButton();
+    };
+    if (renderKachatLiveDomainsTab(listEl, engine.address, { onLoaded })) return;
     listEl.innerHTML = `
       <div class="domains-kachat-placeholder">
         <span class="domains-kachat-mark" aria-hidden="true">${KACHAT_WORDMARK_SVG}</span>
@@ -10125,9 +10626,13 @@ function renderProfileDomains() {
   }
   const owned = otherServiceNamesFor === engine.address ? otherServiceNames[activeDomainsTab] : null;
   const names = owned?.names || [];
-  const notice = owned?.state === "unreachable"
-    ? `<p class="spending-address-empty">Couldn't reach ${escapeHtml(service.serviceName)}. Try again in a moment.</p>`
-    : (!owned ? '<p class="spending-address-empty">Looking up names…</p>' : (!names.length ? `<p class="spending-address-empty">No ${escapeHtml(service.suffix || `.${activeDomainsTab}`)} names yet.</p>` : ""));
+  // iOS serviceNameList: the names; with none, a spinner while the first lookup runs, else
+  // "Couldn't reach" (the refresh button stands in for pull-to-refresh) or "No .k names yet."
+  const notice = names.length ? ""
+    : !owned ? '<div class="domains-loading"><span class="addr-domains-spinner" role="status" aria-label="Loading"></span></div>'
+      : owned.state === "unreachable"
+        ? `<p class="spending-address-empty">Couldn't reach ${escapeHtml(service.serviceName)}. Refresh to try again.</p>`
+        : `<p class="spending-address-empty">No ${escapeHtml(service.suffix || `.${activeDomainsTab}`)} names yet.</p>`;
   listEl.innerHTML = names.map((entry) => domainNameCardHtml(entry.display || entry.name, entry.settling ? "Settling" : "")).join("") + notice;
 }
 
@@ -10155,10 +10660,9 @@ function renderDomainDetail(domain) {
   if (title) title.textContent = domain.fullName;
   detailEl.hidden = false;
   detailEl.innerHTML = `
-    <div class="domains-back-row"><button type="button" data-domain-detail-back>‹ Your Domains</button></div>
     ${knsDomainCardHtml(domain, { clickable: false })}
     <div class="profile-domain-detail-rows">
-      <div class="profile-domain-detail-row"><span>Asset ID</span><span class="kns-asset-id" title="${escapeHtml(assetId)}">${escapeHtml(assetId || "--")}</span></div>
+      <div class="profile-domain-detail-row"><span>Asset ID</span><span class="kns-asset-id" title="${escapeHtml(assetId)}">${escapeHtml(assetId)}</span></div>
       ${assetId ? `<button type="button" class="profile-domain-detail-row actionable" data-domain-customize="${escapeHtml(assetId)}"><span>Customize Profile</span><span class="star">◉</span></button>` : ""}
       ${isPrimary
         ? `<div class="profile-domain-detail-row"><span>Primary Domain</span><span class="star">★</span></div>`
@@ -10217,7 +10721,6 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
     if (domain) renderDomainDetail(domain);
     return;
   }
-  if (event.target.closest("[data-domain-detail-back]")) { closeDomainDetail(); return; }
   const setPrimary = event.target.closest("[data-domain-set-primary]");
   if (setPrimary && domainDetailTarget) { setPrimaryDomain(domainDetailTarget); return; }
   // KaChat no longer SHOWS .kas profiles, but a domain's own profile can still be customized
@@ -10250,12 +10753,19 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
     openKnsTransferModal({ domain: domainDetailTarget.fullName, assetId: domainDetailTarget.inscriptionId });
     return;
   }
+  if (event.target.closest("[data-domains-refresh]")) { refreshYourDomains(); return; }
   if (event.target.closest("[data-domains-inscribe]")) {
     // Each outside service sells its own names; KaChat links to it (iOS 718724b).
-    // .kachat: the marketplace (Kaspa Hub > .kachat), whether or not it is in the dock.
+    // .kachat: the marketplace as a sheet over Your Domains, whether or not it is in the dock or
+    // Kaspa Hub; closing it comes back here and refreshes the registry, so a new name lands in the
+    // list (iOS KachatLiveDomainsTab showMarketplace, onDismiss registry.refresh()).
     if (activeDomainsTab === "kachat" && kachatNamesUiEnabled()) {
-      if (domainsScreenEl) domainsScreenEl.hidden = true;
-      setActiveAppTab("kachat-names");
+      openKachatMarketSheet({
+        onClose: () => {
+          Promise.resolve().then(() => kachatNames()?.registry?.refresh?.()).catch(() => { /* the list keeps what it has */ });
+          renderProfileDomains();
+        },
+      });
       return;
     }
     const url = NAME_SERVICES[activeDomainsTab]?.websiteURL;
@@ -10263,7 +10773,34 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
   }
 });
 
+/** Your Domains' refresh button, the platform's stand-in for iOS's pull-to-refresh on each tab:
+ *  .kachat re-reads the registry, .kas the KNS domains (iOS refreshKNSDomainsOnly), .k and .kaspa
+ *  their services (NameServicesClient.refresh). */
+async function refreshYourDomains() {
+  if (domainsRefreshing) return;
+  const tab = activeDomainsTab;
+  domainsRefreshing = true;
+  paintDomainsRefresh();
+  try {
+    if (tab === "kachat") await kachatNames()?.registry?.refresh?.();
+    else if (tab === "kas") await refreshOwnKnsProfile({ force: true });
+    else await refreshOtherServiceNames();
+  } catch { /* each list says what it could read */ }
+  domainsRefreshing = false;
+  paintDomainsRefresh();
+  renderProfileDomains();
+}
+function paintDomainsRefresh() {
+  const button = document.querySelector("[data-domains-refresh]");
+  if (!button) return;
+  button.classList.toggle("spinning", domainsRefreshing);
+  button.disabled = domainsRefreshing;
+}
+
 document.querySelector("[data-open-domains-screen]")?.addEventListener("click", () => {
+  // A fresh screen every time, on the first tab (iOS: the list's @State starts on .defaultTab).
+  activeDomainsTab = DEFAULT_DOMAIN_TAB;
+  if (domainDetailTarget) closeDomainDetail();
   renderProfileDomains();
   refreshOtherServiceNames();
   refreshPendingKnsTransfers(); // Finish transfer for an interrupted .kas transfer (EXT-005)
@@ -10276,17 +10813,18 @@ document.querySelector("[data-close-domains-screen]")?.addEventListener("click",
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  else if (helpScreenEl && !helpScreenEl.hidden) helpScreenEl.hidden = true;
+  // a guide or dialog over Help takes the Escape, not Help under it
+  else if (helpScreenEl && !helpScreenEl.hidden) { if (!document.querySelector(".modal-backdrop:not([hidden])")) helpScreenEl.hidden = true; }
   else if (domainsScreenEl && !domainsScreenEl.hidden) domainsScreenEl.hidden = true;
 });
 
+// Help stays open under a guide it starts (the guides' modal band is above the overlays), so
+// closing the guide comes back to Help, as iOS's cover over the Help screen does.
 document.querySelector("[data-help-welcome]")?.addEventListener("click", () => {
-  if (helpScreenEl) helpScreenEl.hidden = true;
   openSetupGuide();
 });
 // Profile > Help's guide row is the .kachat Names Guide (iOS b000310, cdc5611).
 document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
-  if (helpScreenEl) helpScreenEl.hidden = true;
   openKachatSetupGuide();
 });
 // The Profile hero's button edits your .kachat profile (iOS 09e0403).
@@ -10296,8 +10834,9 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 176;
-const APP_VERSION_LABEL = `${APP_VERSION} (Build:${APP_BUILD})`;
+const APP_BUILD = 177;
+// "5.2 (176)", as iOS appVersionDisplay writes it.
+const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 
@@ -10428,8 +10967,19 @@ function recordOutgoingPaymentChat({ destination, amountKas, txid }) {
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
 }
 
-function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent, slideToSend = false, onBusyChange = null } = {}) {
+function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent, slideToSend = false, onBusyChange = null, onRecipientChange = null } = {}) {
   let resolvedAddress = null;
+  // The domain the recipient resolved from (the Sent sheet's "to" line), null for an address.
+  let resolvedDomain = null;
+  // The usable recipient (iOS hasValidRecipient): a resolved name's address or a valid address,
+  // told to the screen so its Max and fee estimate wait for one.
+  let validRecipient = null;
+  function setValidRecipient(address) {
+    const next = address || null;
+    if (next === validRecipient) return;
+    validRecipient = next;
+    try { onRecipientChange?.(validRecipient); } catch { /* the screen's extras never block a send */ }
+  }
   let resolveToken = 0;
   // Every service's answer for a typed name and the one in use (iOS 6ac48a7): the rest go under
   // "Other domains", where picking one switches the recipient.
@@ -10464,7 +11014,9 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     const raw = String(els.recipient?.value || "").trim();
     const amountValid = (sompiFromUserText(String(els.amount?.value || "")) ?? 0n) > 0n;
     resolvedAddress = resolution.ownerAddress;
+    resolvedDomain = resolution.domain || raw || null;
     selectedTld = resolution.tld || null;
+    setValidRecipient(resolution.ownerAddress);
     setRecipientStatus({ input: raw, resolvedAddress: resolution.ownerAddress, resolvedName: resolution.domain || raw, nameResolutions: nameResults, selectedTld });
     if (els.resolvedHint) {
       // Show the domain AND the full resolved address below it, matching iOS's WithdrawKaspaView.
@@ -10486,50 +11038,27 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     }
   }
 
-  // iOS WithdrawalSuccessCard parity: after a successful send the modal STAYS OPEN and flips
-  // to a checkmark + "Sent" + the clickable transaction id (explorer link) until Done/close.
-  function successHost() {
-    return els.submit?.closest(".contact-modal") || null;
-  }
-  function clearSendSuccess() {
-    const host = successHost();
-    if (!host) return;
-    host.classList.remove("send-success-active");
-    const card = host.querySelector("[data-send-success]");
-    if (card) card.hidden = true;
-  }
-  function showSendSuccess(txid, amountKas) {
-    const host = successHost();
-    if (!host) { onClose?.(); return; }
-    let card = host.querySelector("[data-send-success]");
-    if (!card) {
-      card = document.createElement("div");
-      card.className = "send-success-card";
-      card.dataset.sendSuccess = "";
-      host.appendChild(card);
-    }
-    card.innerHTML = `
-      <span class="send-success-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
-      <strong>Sent ${escapeHtml(String(amountKas))} ${KAS_UNIT}</strong>
-      ${txid
-        ? `<span class="send-success-label">Transaction ID</span>
-           <a class="send-success-txid" href="${escapeHtml(explorerTxUrl(txid))}" target="_blank" rel="noopener noreferrer">${escapeHtml(txid)}</a>`
-        : `<span class="send-success-label">Transaction broadcast to the network.</span>`}
-      <button class="primary-button full" type="button" data-send-success-done>Done</button>`;
-    card.hidden = false;
-    host.classList.add("send-success-active");
-    card.querySelector("[data-send-success-done]")?.addEventListener("click", () => {
-      clearSendSuccess();
-      onClose?.();
+  // Every send finishes on the shared Sent sheet (iOS SentConfirmationSheet): check, "Sent", the
+  // amount, "to <domain or address>", the txid as an explorer link, Done - which closes the screen.
+  function showSendSuccess(txid, amountSompi, recipient) {
+    openSentConfirmation({
+      txid,
+      amountSompi,
+      recipient,
+      explorerUrl: txid ? explorerTxUrl(txid) : null,
+      kasUnit: KAS_UNIT,
+      onDone: () => { onClose?.(); },
     });
   }
 
   async function open() {
     if (!engine.address) return;
-    clearSendSuccess();
+    closeSentConfirmation();
     if (els.recipient) els.recipient.value = "";
     if (els.amount) els.amount.value = "";
     resolvedAddress = null;
+    resolvedDomain = null;
+    setValidRecipient(null);
     typedName = "";
     nameResults = [];
     selectedTld = null;
@@ -10585,6 +11114,8 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     }
     typedName = raw;
     resolvedAddress = null;
+    resolvedDomain = null;
+    setValidRecipient(null);
     nameResults = [];
     selectedTld = null;
     renderOtherDomains(false);
@@ -10602,6 +11133,7 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       if (els.checkEl) els.checkEl.hidden = !valid; // green check once it's a valid address
       if (els.submit) els.submit.disabled = !amountValid || !valid;
       if (valid) showResolutionCard(raw);
+      setValidRecipient(valid ? raw : null);
       setRecipientStatus({ input: raw, valid });
       return;
     }
@@ -10649,7 +11181,8 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
     const feeKas = getFeeKas ? getFeeKas() : "0";
     if (els.submit) els.submit.disabled = true;
     try { onBusyChange?.(true); } catch { /* the button's look never blocks a send */ }
-    if (els.progress) { els.progress.hidden = false; els.progress.textContent = "Broadcasting transaction…"; }
+    // The slide button's spinner says it on the slide screens (iOS SendActionButton).
+    if (els.progress && !slideToSend) { els.progress.hidden = false; els.progress.textContent = "Broadcasting transaction…"; }
     try {
       const result = sendFn
         ? await sendFn({ destination, amountKas, feeKas, selectedOutpoints })
@@ -10661,8 +11194,9 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       // self-send the engine reduced to fit the fee; otherwise it is exactly the field's amount.
       const sentSompi = result?.amountSompi ?? (result?.result?.summary?.reduced ? result.result.summary.amountSompi : null);
       const sentKas = sentSompi != null ? kasTextFromSompi(sentSompi) : amountKas;
-      // Keep the modal open and flip to the success card (checkmark + clickable txid).
-      showSendSuccess(txid, sentKas);
+      // The Sent sheet over the screen; its Done closes both (iOS WithdrawKaspaView).
+      // The domain when one was resolved, otherwise the address itself.
+      showSendSuccess(txid, sentSompi != null ? sentSompi : kasToSompi(sentKas), resolvedDomain || destination);
       try { onSent?.({ txid, destination, amountKas: sentKas }); } catch { /* chat bookkeeping must never break the send UI */ }
       refreshBalanceOnly({ quiet: true }).catch(() => {});
     } catch (error) {
@@ -10691,16 +11225,17 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
 // Paste, fiat/KAS toggle + conversion, Max, Network Fee tiers (Normal/Priority/Custom), and Coin
 // Control (UTXO selection).
 const sendKaspaModal = document.querySelector("[data-send-kaspa-modal]");
-function closeSendKaspaModal() { closeOwnAddressPicker(); if (sendKaspaModal) sendKaspaModal.hidden = true; }
+function closeSendKaspaModal() { closeOwnAddressPicker(); closeCoinControlPicker(); if (sendKaspaModal) sendKaspaModal.hidden = true; }
 // The screen is built from the shared Send Kaspa pieces (send-kaspa-components.js, iOS 4d0324f),
 // mounted before the element lookups below.
 mountSendPieces(sendKaspaModal, {
   from: sendFromSectionHtml({ prefix: "send-kaspa" }),
   recipient: recipientCardHtml({ prefix: "send-kaspa" }),
-  amount: amountEntryHtml({ prefix: "send-kaspa", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, attrs: { conversion: "send-kaspa-fiat" } }),
+  amount: amountEntryHtml({ prefix: "send-kaspa", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, maxDisabled: true, attrs: { conversion: "send-kaspa-fiat" } }),
   // Compound UTXOs has no From (it merges this one address): its balance shows here (iOS 6333dd3).
   pills: `<div class="sk-pills" data-send-kaspa-pills hidden>${infoPillHtml({ attr: "send-kaspa-source-pill" })}</div>`,
-  fee: feeControlsHtml({ prefix: "send-kaspa", coinList: true }),
+  // Coin Control opens the shared picker (iOS CoinControlView), like the chat's Send KAS sheet.
+  fee: feeControlsHtml({ prefix: "send-kaspa" }),
   action: sendActionButtonHtml({ attr: "send-kaspa-submit", title: "Slide to Send" }),
 });
 const sendKaspaFeeCtl = feeControls(sendKaspaModal, "send-kaspa");
@@ -10718,8 +11253,6 @@ const sendKaspaFeeButtons = document.querySelectorAll("[data-send-kaspa-fee]");
 const sendKaspaFeeCustom = document.querySelector("[data-send-kaspa-fee-custom]");
 const sendKaspaFeeSummary = document.querySelector("[data-send-kaspa-fee-summary]");
 const sendKaspaCoinToggle = document.querySelector("[data-send-kaspa-coin-toggle]");
-const sendKaspaCoinList = document.querySelector("[data-send-kaspa-coin-list]");
-const sendKaspaCoinSummary = document.querySelector("[data-send-kaspa-coin-summary]");
 
 let sendKaspaUnit = "kas";        // "kas" | "fiat"
 let sendKaspaPrice = null;        // live KAS price in selectedCurrency
@@ -10788,9 +11321,10 @@ function updateSendKaspaFiatHint() {
   const raw = Number(sendKaspaAmountInput?.value);
   let text = "";
   if (isFinite(raw) && raw > 0 && sendKaspaPrice) {
+    // No "≈": the converted value as it is (iOS conversionLabelText).
     text = sendKaspaUnit === "kas"
-      ? `≈ ${formatFiatValue(raw, sendKaspaPrice)}`
-      : `≈ ${(raw / sendKaspaPrice).toLocaleString(undefined, { maximumFractionDigits: 8 })} ${KAS_UNIT}`;
+      ? formatFiatValue(raw, sendKaspaPrice)
+      : `${trimKas8(raw / sendKaspaPrice)} ${KAS_UNIT}`;
   }
   sendKaspaFiatHint.textContent = text || (sendKaspaUnit === "kas" ? sendKaspaCurrencyCode() : KAS_UNIT);
 }
@@ -10834,26 +11368,25 @@ sendKaspaAmountInput?.addEventListener("input", () => {
   scheduleSendKaspaFeeEstimate();
 });
 
-// Network fee — matches iOS WithdrawKaspaView: an estimated base (Normal) fee scaled by the tier
+// Network fee - matches iOS WithdrawKaspaView: an estimated base (Normal) fee scaled by the tier
 // multiplier (Normal 1x, Fast 2x, Priority 5x), shown as a real KAS amount, editable for a custom
 // fee. engine.send() takes the PRIORITY tip on top of the SDK's automatic base fee, so we pass
-// (displayed total − base).
+// (displayed total − base). Estimated only once there is a valid recipient and an amount; "--"
+// until then (iOS feeEstimationKey task).
 const SEND_FEE_MULTIPLIERS = { normal: 1, fast: 2, priority: 5 };
-const SEND_FEE_LABELS = { normal: "Normal", fast: "Fast", priority: "Priority" };
-let sendKaspaBaseFeeKas = null;         // policy base fee (Normal tier), matches iOS (mass * 100/gram)
+let sendKaspaBaseFeeKas = null;         // policy base fee (Normal tier, iOS normalFeeSompi); null = "--"
 let sendKaspaSdkBaseKas = 0;            // the SDK's automatic base fee engine.send already applies
-let sendKaspaFeeCustomOverride = false; // true once the user types a custom fee
+// A committed custom total (iOS customExtraFeeSompi, kept as the typed total): null = the tier's.
+// It never goes under the Normal fee, and the tier stays lit (iOS commitCustomFee).
+let sendKaspaCustomFeeKas = null;
+let sendKaspaFeeToken = 0;
+// The usable recipient (iOS hasValidRecipient), from the controller: Max and the fee wait for it.
+let sendKaspaRecipient = null;
 
-function formatFeeKas(kas) {
-  return Number(kas || 0).toLocaleString(undefined, { maximumFractionDigits: 8 });
-}
 function sendKaspaTotalFeeKas() {
-  if (sendKaspaFeeCustomOverride) {
-    // The one exact parser (iOS IOS-010): "0,002" from a comma-decimal keyboard is a fee, not 0.
-    const sompi = sompiFromUserText(String(sendKaspaFeeCustom?.value || ""));
-    return sompi != null ? Number(sompi) / 1e8 : 0;
-  }
-  return (sendKaspaBaseFeeKas ?? 0) * (SEND_FEE_MULTIPLIERS[sendKaspaFeeTier] || 1);
+  if (sendKaspaBaseFeeKas == null) return 0;
+  if (sendKaspaCustomFeeKas != null) return Math.max(sendKaspaCustomFeeKas, sendKaspaBaseFeeKas);
+  return sendKaspaBaseFeeKas * (SEND_FEE_MULTIPLIERS[sendKaspaFeeTier] || 1);
 }
 // engine.send() auto-applies the SDK base fee; we pass the priority tip that lifts the total up to
 // the displayed policy fee (mass * 100/gram), so what's shown is what's actually paid (iOS parity).
@@ -10861,22 +11394,16 @@ function sendKaspaGetFeeKas() {
   const tip = sendKaspaTotalFeeKas() - (sendKaspaSdkBaseKas ?? 0);
   return tip > 0 ? trimKas8(tip) : "0";
 }
-// The fee card's amount (the shared SendFeeControls): what's paid; the speed buttons say the tier,
-// none lit for a custom fee.
+// The fee card's amount (the shared SendFeeControls): what's paid, "--" before an estimate.
 function updateSendKaspaFeeSummary() {
-  if (!sendKaspaFeeSummary) return;
-  sendKaspaFeeSummary.textContent = `${formatFeeKas(sendKaspaTotalFeeKas())} ${KAS_UNIT}`;
+  sendKaspaFeeCtl.setText(sendKaspaBaseFeeKas == null ? "--" : `${trimKas8(sendKaspaTotalFeeKas())} ${KAS_UNIT}`);
 }
-// Reflect the current total into the (editable) fee field, unless the user is typing a custom fee.
 function applySendKaspaFeeField() {
-  if (sendKaspaFeeCustom && !sendKaspaFeeCustomOverride) {
-    sendKaspaFeeCustom.value = sendKaspaBaseFeeKas == null ? "" : formatFeeKas(sendKaspaTotalFeeKas());
-  }
   updateSendKaspaFeeSummary();
 }
 function selectSendKaspaFeeTier(tier) {
   sendKaspaFeeTier = tier;
-  sendKaspaFeeCustomOverride = false;
+  sendKaspaCustomFeeKas = null;
   sendKaspaFeeCtl.setTier(tier);
   sendKaspaFeeCtl.setEditing(false);
   applySendKaspaFeeField();
@@ -10890,136 +11417,157 @@ sendKaspaFeeButtons.forEach((button) => button.addEventListener("click", () => {
   refillSendKaspaMaxIfActive();
 }));
 sendKaspaFeeCustom?.addEventListener("input", () => {
-  sendKaspaFeeCustomOverride = true;
-  sendKaspaFeeCtl.setTier(null);
-  updateSendKaspaFeeSummary();
+  const sanitized = sanitizeAmountText(sendKaspaFeeCustom.value, 8);
+  if (sanitized !== sendKaspaFeeCustom.value) sendKaspaFeeCustom.value = sanitized;
 });
-// Click the fee amount to type a custom fee; ✓ or Return uses it. An empty or unreadable entry
-// goes back to the selected speed.
+// Click the fee amount to type a custom fee; ✓ or Return uses it (iOS commitCustomFee): under the
+// Normal fee it is the Normal fee, an unreadable entry changes nothing.
 function commitSendKaspaCustomFee() {
   const typed = sompiFromUserText(String(sendKaspaFeeCustom?.value || ""));
-  if (!sendKaspaFeeCustomOverride || typed == null) {
-    selectSendKaspaFeeTier(sendKaspaFeeTier);
-    refillSendKaspaMaxIfActive();
-    return;
-  }
   sendKaspaFeeCtl.setEditing(false);
+  if (sendKaspaBaseFeeKas != null && typed != null) sendKaspaCustomFeeKas = Number(typed) / 1e8;
   updateSendKaspaFeeSummary();
   refillSendKaspaMaxIfActive();
 }
 sendKaspaModal?.querySelector("[data-send-kaspa-fee-edit]")?.addEventListener("click", () => {
+  if (sendKaspaBaseFeeKas == null) return; // nothing to edit before an estimate (iOS startEditingFee)
   sendKaspaFeeCtl.setEditing(true, trimKas8(sendKaspaTotalFeeKas()));
 });
 sendKaspaModal?.querySelector("[data-send-kaspa-fee-commit]")?.addEventListener("click", commitSendKaspaCustomFee);
 sendKaspaFeeCustom?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); commitSendKaspaCustomFee(); }
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); commitSendKaspaCustomFee(); return; }
+  // Escape leaves the fee field, not the whole screen.
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); sendKaspaFeeCtl.setEditing(false); }
 });
 
-// Estimate the base (Normal) network fee for the CURRENT amount so it reflects the UTXOs the send
-// would actually spend (matches iOS). Debounced, since it runs on every amount keystroke.
+// The amount the fee is estimated for: the typed one (in KAS), or null when there's none.
+function sendKaspaFeeAmountKas() {
+  let amountKas = NaN;
+  try { amountKas = Number(sendKaspaResolveAmountKas()); } catch { amountKas = NaN; }
+  return isFinite(amountKas) && amountKas > 0 ? amountKas : null;
+}
+// Estimate the base (Normal) network fee for the CURRENT recipient + amount, so it reflects the
+// UTXOs the send would actually spend (iOS). Debounced, since it runs on every amount keystroke.
 let sendKaspaFeeEstimateTimer = null;
 async function estimateSendKaspaBaseFee() {
   // A Max fill owns the fee it was computed with (audit DSK-043): an amount estimate landing
   // afterwards must not move it, or the shown Max would no longer match the fee.
-  if (sendKaspaMaxMode) return;
-  try {
-    let amountKas = Number(sendKaspaResolveAmountKas());
-    if (!isFinite(amountKas) || amountKas <= 0) amountKas = 0.2;
-    // Never estimate a send larger than the balance (that throws "insufficient") — cap just under it.
-    if (sendKaspaAvailableKas != null && amountKas > sendKaspaAvailableKas) {
-      amountKas = Math.max(0.0001, sendKaspaAvailableKas - 0.001);
-    }
-    const selection = sendKaspaGetSelection();
-    const detail = await sendKaspaEstimateFee(String(amountKas), selection.length ? selection : null);
-    if (sendKaspaMaxMode) return; // Max was filled while this estimate ran
-    const policy = Number(detail?.policyFeeKas);
-    if (isFinite(policy) && policy > 0) {
-      sendKaspaBaseFeeKas = policy;
-      sendKaspaSdkBaseKas = Number(detail?.sdkFeeKas) || 0;
-    } else if (sendKaspaBaseFeeKas == null) {
-      // No previous estimate to keep — fall back to the 1-input placeholder. A FAILED
-      // estimate must never clobber a good earlier one (Max sets the all-input fee, and
-      // resetting it to 0.002 here made the subsequent send underpay and fail).
-      sendKaspaBaseFeeKas = 0.002; sendKaspaSdkBaseKas = 0.00002;
-    }
-  } catch {
-    if (sendKaspaBaseFeeKas == null) { sendKaspaBaseFeeKas = 0.002; sendKaspaSdkBaseKas = 0.00002; }
+  if (sendKaspaMaxMode) { sendKaspaFeeCtl.setEstimating(false); return; }
+  const token = ++sendKaspaFeeToken;
+  const amountKas = sendKaspaFeeAmountKas();
+  if (!sendKaspaRecipient || amountKas == null) {
+    sendKaspaBaseFeeKas = null;
+    sendKaspaFeeCtl.setEstimating(false);
+    applySendKaspaFeeField();
+    return;
   }
+  sendKaspaFeeCtl.setEstimating(true);
+  let base = null;
+  let sdkBase = 0;
+  try {
+    const selection = sendKaspaGetSelection();
+    const detail = await sendKaspaEstimateFee(trimKas8(amountKas), selection.length ? selection : null);
+    const policy = Number(detail?.policyFeeKas);
+    if (isFinite(policy) && policy > 0) { base = policy; sdkBase = Number(detail?.sdkFeeKas) || 0; }
+  } catch { base = null; }
+  if (token !== sendKaspaFeeToken || sendKaspaMaxMode) return; // superseded, or Max was filled meanwhile
+  sendKaspaBaseFeeKas = base;
+  sendKaspaSdkBaseKas = sdkBase;
+  sendKaspaFeeCtl.setEstimating(false);
   applySendKaspaFeeField();
+}
+// Max owns the fee now: an amount estimate the fill's own input event scheduled stands down.
+function stopSendKaspaFeeEstimate() {
+  if (sendKaspaFeeEstimateTimer) clearTimeout(sendKaspaFeeEstimateTimer);
+  sendKaspaFeeEstimateTimer = null;
+  sendKaspaFeeToken += 1;
+  sendKaspaFeeCtl.setEstimating(false);
 }
 function scheduleSendKaspaFeeEstimate() {
   if (sendKaspaFeeEstimateTimer) clearTimeout(sendKaspaFeeEstimateTimer);
+  sendKaspaFeeEstimateTimer = null;
+  if (sendKaspaMaxMode) return;
+  if (!sendKaspaRecipient || sendKaspaFeeAmountKas() == null) {
+    // No recipient or no amount: "--" at once (iOS feeEstimationKey task).
+    sendKaspaFeeToken += 1;
+    sendKaspaBaseFeeKas = null;
+    sendKaspaFeeCtl.setEstimating(false);
+    applySendKaspaFeeField();
+    return;
+  }
+  sendKaspaFeeCtl.setEstimating(true);
   sendKaspaFeeEstimateTimer = window.setTimeout(estimateSendKaspaBaseFee, 400);
 }
 
-// Coin control (UTXO selection).
+// Max waits for a valid recipient and spins while it computes (iOS KaspaAmountEntry maxEnabled /
+// isEstimatingMax).
+let sendKaspaMaxBusy = 0;
+function updateSendKaspaMaxButton() {
+  if (!sendKaspaMaxButton) return;
+  const busy = sendKaspaMaxBusy > 0;
+  sendKaspaMaxButton.disabled = !sendKaspaRecipient || busy;
+  sendKaspaMaxButton.innerHTML = busy ? '<span class="sk-spinner" aria-hidden="true"></span>' : "Max";
+}
+// The screen's red line under the fee card (iOS errorMessage): Max's failures go here too.
+function setSendKaspaError(message) {
+  const el = sendKaspaModal?.querySelector("[data-send-kaspa-error]");
+  if (!el) return;
+  el.textContent = message || "";
+  el.hidden = !message;
+}
+function onSendKaspaRecipientChange(address) {
+  sendKaspaRecipient = address || null;
+  updateSendKaspaMaxButton();
+  scheduleSendKaspaFeeEstimate();
+}
+
+// Coin Control (iOS CoinControlView): the shared picker over the screen; nothing picked = automatic.
+const sendKaspaSelectedSompi = new Map(); // "txid:index" -> sompi of each picked coin
 function sendKaspaGetSelection() { return [...sendKaspaSelected]; }
 function updateSendKaspaCoinSummary() {
-  if (!sendKaspaCoinSummary) return;
-  if (!sendKaspaSelected.size) { sendKaspaCoinSummary.textContent = "Automatic"; return; }
-  let totalSompi = 0n;
-  for (const entry of sendKaspaUtxos) {
-    if (sendKaspaSelected.has(utxoOutpointKey(entry.outpoint || {}))) totalSompi += BigInt(entry.amount || 0);
-  }
-  sendKaspaCoinSummary.textContent = `${sendKaspaSelected.size} · ${sompiToKasDisplay(totalSompi)} ${KAS_UNIT}`;
+  sendKaspaFeeCtl.setCoinSummary(coinControlSummaryText(sendKaspaSelected.size));
 }
+// Coins picked on one address can't pay from another: a new screen or source starts automatic.
 function renderSendKaspaCoinControl() {
   sendKaspaSelected.clear();
+  sendKaspaSelectedSompi.clear();
+  closeCoinControlPicker();
   updateSendKaspaCoinSummary();
-  if (sendKaspaCoinList) sendKaspaCoinList.hidden = true;
-  if (sendKaspaCoinToggle) sendKaspaCoinToggle.setAttribute("aria-expanded", "false");
-  if (!sendKaspaCoinList) return;
-  sendKaspaCoinList.replaceChildren();
-  if (!sendKaspaUtxos.length) { sendKaspaCoinList.innerHTML = '<div class="manage-address-empty">No UTXOs to select.</div>'; return; }
-  const labels = getUtxoLabels(sendKaspaSourceAddress());
-  for (const entry of sendKaspaUtxos) {
-    const outpointKey = utxoOutpointKey(entry.outpoint || {});
-    const row = document.createElement("label");
-    row.className = "manage-send-coin-row";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "manage-send-coin-check";
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) sendKaspaSelected.add(outpointKey); else sendKaspaSelected.delete(outpointKey);
+}
+sendKaspaCoinToggle?.addEventListener("click", () => {
+  if (sendKaspaSlider.busy) return;
+  const address = sendKaspaSourceAddress();
+  if (!address) return;
+  const source = sendKaspaSourceIndex;
+  openCoinControlPicker({
+    // The coins Max and the send can spend (reserved ones left out, DSK-043), in the node's order.
+    loadEntries: async () => sendKaspaUnreservedBalance(await sendKaspaLoadBalance()).entries,
+    initialSelection: sendKaspaSelected.size ? [...sendKaspaSelected] : null,
+    labels: getUtxoLabels(address),
+    kasUnit: KAS_UNIT,
+    onDone: (selection) => {
+      // The screen may have closed, or the source changed, while it was open.
+      if (sendKaspaModal?.hidden || source !== sendKaspaSourceIndex) return;
+      sendKaspaSelected.clear();
+      sendKaspaSelectedSompi.clear();
+      for (const coin of selection || []) {
+        sendKaspaSelected.add(coin.key);
+        sendKaspaSelectedSompi.set(coin.key, BigInt(coin.amountSompi || 0));
+      }
+      updateSendKaspaCoinSummary();
       // A changed input set re-runs a filled Max for the new coins (audit DSK-043); the stale
       // amount can't be sent meanwhile, since its pin names the old selection.
       refillSendKaspaMaxIfActive();
-      updateSendKaspaCoinSummary();
       scheduleSendKaspaFeeEstimate();
-    });
-    const meta = document.createElement("span");
-    meta.className = "manage-send-coin-meta";
-    if (labels[outpointKey]) {
-      const labelEl = document.createElement("span");
-      labelEl.className = "manage-send-coin-label";
-      labelEl.textContent = labels[outpointKey];
-      meta.appendChild(labelEl);
-    }
-    const outpointEl = document.createElement("span");
-    outpointEl.className = "manage-send-coin-outpoint";
-    outpointEl.textContent = outpointKey;
-    meta.appendChild(outpointEl);
-    const amountEl = document.createElement("span");
-    amountEl.className = "manage-send-coin-amount";
-    amountEl.textContent = `${sompiToKasDisplay(BigInt(entry.amount || 0))} ${KAS_UNIT}`;
-    row.append(checkbox, meta, amountEl);
-    sendKaspaCoinList.appendChild(row);
-  }
-}
-sendKaspaCoinToggle?.addEventListener("click", () => {
-  if (!sendKaspaCoinList) return;
-  const willShow = sendKaspaCoinList.hidden;
-  sendKaspaCoinList.hidden = !willShow;
-  sendKaspaCoinToggle.setAttribute("aria-expanded", String(willShow));
+    },
+  });
 });
 
 // Sompi total of the coins Max would spend: the coin-control selection, else the whole address.
 function sendKaspaSpendableKas() {
   if (sendKaspaSelected.size) {
     let sompi = 0n;
-    for (const entry of sendKaspaUtxos) {
-      if (sendKaspaSelected.has(utxoOutpointKey(entry.outpoint || {}))) sompi += BigInt(entry.amount || 0);
-    }
+    for (const value of sendKaspaSelectedSompi.values()) sompi += value;
     return Number(sompi) / 1e8;
   }
   return sendKaspaAvailableKas;
@@ -11031,18 +11579,32 @@ function sendKaspaSpendableKas() {
 // amount = spendable - fee, so amount + fee = balance and the send doesn't fail on "insufficient".
 // Send (not Compound) then asks the engine for the exact amount (estimateMaxSend: the coins at the
 // address now, reserved ones left out, the same fee the send pays) and pins it (audit DSK-043).
+// Max (iOS setMaxAmount): only with a valid recipient, Max spinning meanwhile, its errors in the
+// screen's red line rather than a toast.
 async function fillMaxAmount() {
+  if (!sendKaspaRecipient) return;
+  setSendKaspaError("");
+  sendKaspaMaxBusy += 1;
+  updateSendKaspaMaxButton();
+  try {
+    await fillMaxAmountNow();
+  } finally {
+    sendKaspaMaxBusy = Math.max(0, sendKaspaMaxBusy - 1);
+    updateSendKaspaMaxButton();
+  }
+}
+async function fillMaxAmountNow() {
   const token = ++sendKaspaMaxToken;
   const source = sendKaspaSourceIndex;
   if (sendKaspaAvailableKas == null) {
     try {
       const b = sendKaspaUnreservedBalance(await sendKaspaLoadBalance());
       sendKaspaAvailableKas = Number(b.totalKas);
-      if (!sendKaspaUtxos.length) { sendKaspaUtxos = b.entries; renderSendKaspaCoinControl(); }
+      if (!sendKaspaUtxos.length) sendKaspaUtxos = b.entries;
     } catch { /* handled below */ }
   }
   const spendable = sendKaspaSpendableKas();
-  if (spendable == null || !isFinite(spendable)) { showCopyToast("Balance unavailable right now."); return; }
+  if (spendable == null || !isFinite(spendable)) { setSendKaspaError("Balance unavailable right now."); return; }
 
   const selection = sendKaspaGetSelection();
   // iOS-parity Max fee (WalletManager/kspt estimateMaxAmount): compute the fee directly from
@@ -11061,6 +11623,9 @@ async function fillMaxAmount() {
       // The SDK's own automatic base fee is ~1 sompi/gram of the same mass; the send path
       // passes total - sdkBase as the priority tip, so this keeps paid == displayed.
       sendKaspaSdkBaseKas = Number(mass) / 1e8;
+      // An amount estimate still running must not land over Max's fee.
+      sendKaspaFeeToken += 1;
+      sendKaspaFeeCtl.setEstimating(false);
       // A custom fee stays (a fee change in Max mode re-runs Max with it, DSK-043).
       applySendKaspaFeeField();
     }
@@ -11071,7 +11636,7 @@ async function fillMaxAmount() {
   if (sendKaspaCompound) {
     // Compound shows what the sweep will leave; the sweep itself (sweepAllToSelf) pays the fee.
     const maxKas = spendable - sendKaspaTotalFeeKas();
-    if (!(maxKas > 0)) { showCopyToast("Balance too low after network fees."); return; }
+    if (!(maxKas > 0)) { setSendKaspaError("Balance too low after network fees."); return; }
     const maxSompi = kasToSompi(trimKas8(maxKas)) ?? 0n;
     sendKaspaAmountInput.value = (sendKaspaUnit === "fiat" && sendKaspaPrice)
       ? fiatTextFloorFromSompi(maxSompi, sendKaspaPrice, fiatDecimals)
@@ -11079,6 +11644,7 @@ async function fillMaxAmount() {
     updateSendKaspaFiatHint();
     sendKaspaAmountInput.dispatchEvent(new Event("input"));
     sendKaspaMaxMode = true;
+    stopSendKaspaFeeEstimate();
     return;
   }
 
@@ -11095,7 +11661,7 @@ async function fillMaxAmount() {
       selectedOutpoints: selectedOutpoints.length ? selectedOutpoints : null,
     });
   } catch (error) {
-    if (token === sendKaspaMaxToken) showCopyToast(userFacingError(error) || "Balance too low after network fees.");
+    if (token === sendKaspaMaxToken) setSendKaspaError(userFacingError(error) || "Balance too low after network fees.");
     return;
   }
   if (token !== sendKaspaMaxToken || source !== sendKaspaSourceIndex) return; // superseded
@@ -11112,6 +11678,7 @@ async function fillMaxAmount() {
   // Route the actual send through the exact-fee max path (set AFTER the dispatch above —
   // the amount listener clears this flag on every USER edit).
   sendKaspaMaxMode = true;
+  stopSendKaspaFeeEstimate();
   sendKaspaMaxPin = {
     source,
     selectionKey: sendKaspaSelectionKey(selectedOutpoints),
@@ -11124,14 +11691,10 @@ async function fillMaxAmount() {
 function sendKaspaSelectionKey(selection) {
   return [...(selection || [])].map(String).sort().join(",");
 }
-// The address Max is priced for: the typed recipient when it is an address, else the source
+// The address Max is priced for: the recipient (a resolved name's address too), else the source
 // (only the output script's size matters, and only when a custom fee is under the network floor).
 function sendKaspaMaxDestination() {
-  const raw = String(document.querySelector("[data-send-kaspa-recipient]")?.value || "").trim();
-  if (/^kaspa(test)?:/.test(raw)) {
-    try { validateContactAddress(raw); return raw; } catch { /* not an address yet */ }
-  }
-  return sendKaspaSourceAddress();
+  return sendKaspaRecipient || sendKaspaSourceAddress();
 }
 // Available and Max leave out coins a scheduled KaPost has reserved, as the send does (DSK-043).
 function sendKaspaUnreservedBalance(balance) {
@@ -11208,17 +11771,16 @@ function resetSendKaspaExtras() {
   sendKaspaMaxPin = null;
   sendKaspaMaxToken += 1; // a Max still computing for the previous screen must not land here
   applySendKaspaUnit();
-  // Clear any stale "valid address" check from a previous open (e.g. a compound self-send) - the
-  // recipient starts empty, so the check stays hidden until a valid address is entered.
-  const chk = document.querySelector("[data-send-kaspa-check]");
-  if (chk) chk.hidden = true;
-  // Show a sensible base fee immediately (a fee estimate over a slow/contended RPC can take a
-  // moment; the field should never sit blank), then refine it with the real estimate.
-  sendKaspaBaseFeeKas = 0.002;
-  sendKaspaSdkBaseKas = 0.00002;
-  sendKaspaFeeCustomOverride = false;
+  // No fee before a recipient and an amount: "--" (iOS), estimated once both are in.
+  sendKaspaRecipient = null;
+  sendKaspaMaxBusy = 0;
+  updateSendKaspaMaxButton();
+  setSendKaspaError("");
+  sendKaspaBaseFeeKas = null;
+  sendKaspaSdkBaseKas = 0;
+  sendKaspaCustomFeeKas = null;
   selectSendKaspaFeeTier("normal");
-  estimateSendKaspaBaseFee();
+  scheduleSendKaspaFeeEstimate();
   sendKaspaPrice = null;
   updateSendKaspaFiatHint();
   sendKaspaAvailableKas = null;
@@ -11232,7 +11794,6 @@ function resetSendKaspaExtras() {
     const b = sendKaspaUnreservedBalance(loaded); // reserved coins are neither Available nor Max (DSK-043)
     sendKaspaAvailableKas = Number(b.totalKas);
     sendKaspaUtxos = b.entries;
-    renderSendKaspaCoinControl();
     renderSendKaspaSourcePill(b.totalKas);
     if (sendKaspaCompound) applySendKaspaCompoundPrefill();
   }).catch(() => { if (source === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
@@ -11276,14 +11837,11 @@ function renderSendKaspaSourcePill(balanceText) {
 let sendKaspaCompound = false;
 function applySendKaspaCompoundUi() {
   const titleEl = document.querySelector("[data-send-kaspa-title]");
-  const kickerEl = document.querySelector("[data-send-kaspa-kicker]");
-  const note = document.querySelector("[data-send-kaspa-compound-note]");
   // iOS WithdrawKaspaView: "Compound UTXOs", "Payment Request" while paying one (iOS c6851d6), else
   // "Send Kaspa" - which address pays is the From section's to say (iOS 6333dd3).
   if (titleEl) titleEl.textContent = sendKaspaCompound
     ? "Compound UTXOs"
     : (sendKaspaPaymentRequest ? "Payment Request" : "Send Kaspa");
-  if (kickerEl) kickerEl.textContent = sendKaspaCompound ? "Consolidating this address" : "Real Kaspa transaction";
   // From on every send but Compound UTXOs, whose balance shows in the Available pill instead.
   const from = sendKaspaModal?.querySelector("[data-send-kaspa-from]");
   if (from) from.hidden = sendKaspaCompound;
@@ -11292,7 +11850,6 @@ function applySendKaspaCompoundUi() {
   // The shared recipient card, locked to this address for Compound UTXOs, and to a payment
   // request's address while paying one (iOS c6851d6 lockedAddress: activeRequest?.address).
   setRecipientLocked(sendKaspaModal, "send-kaspa", sendKaspaCompound ? sendKaspaSourceAddress() : (sendKaspaPaymentRequest?.address || null));
-  if (note) note.hidden = !sendKaspaCompound;
   sendKaspaSlider.setTitle(sendKaspaCompound ? "Slide to Consolidate" : "Slide to Send");
 }
 function applySendKaspaCompoundPrefill() {
@@ -11304,18 +11861,17 @@ function applySendKaspaCompoundPrefill() {
 
 const sendKaspaController = makeSendController({
   recipient: document.querySelector("[data-send-kaspa-recipient]"),
-  checkEl: document.querySelector("[data-send-kaspa-check]"),
   // The shared recipient card: its status line and the address card's spot.
   statusEl: sendKaspaModal?.querySelector("[data-send-kaspa-status]") || null,
   cardHost: sendKaspaModal?.querySelector("[data-send-kaspa-resolution]") || null,
   addressBook: sendKaspaModal ? { root: sendKaspaModal, prefix: "send-kaspa" } : null,
   amount: sendKaspaAmountInput,
   error: document.querySelector("[data-send-kaspa-error]"),
-  progress: document.querySelector("[data-send-kaspa-progress]"),
   submit: document.querySelector("[data-send-kaspa-submit]"),
 }, {
   slideToSend: true,
   onBusyChange: (busy) => sendKaspaSlider.setBusy(busy),
+  onRecipientChange: onSendKaspaRecipientChange,
   onOpen: () => { if (sendKaspaModal) sendKaspaModal.hidden = false; },
   onClose: closeSendKaspaModal,
   getBalance: sendKaspaLoadBalance,
@@ -11485,7 +12041,7 @@ function switchSendKaspaSource(pickedIndex, label = null) {
   sendKaspaSourceLabel = next == null ? null : (label || spendingSourceLabel(next));
   const index = next;
   sendKaspaMaxMode = false;
-  sendKaspaFeeCustomOverride = false;
+  sendKaspaCustomFeeKas = null;
   selectSendKaspaFeeTier(sendKaspaFeeTier);
   const errorEl = document.querySelector("[data-send-kaspa-error]");
   if (errorEl) errorEl.hidden = true;
@@ -11499,7 +12055,6 @@ function switchSendKaspaSource(pickedIndex, label = null) {
     const b = sendKaspaUnreservedBalance(loaded); // reserved coins are neither Available nor Max (DSK-043)
     sendKaspaAvailableKas = Number(b.totalKas);
     sendKaspaUtxos = b.entries;
-    renderSendKaspaCoinControl();
     renderSendKaspaSourcePill(b.totalKas);
   }).catch(() => { if (index === sendKaspaSourceIndex) renderSendKaspaSourcePill("--"); });
   scheduleSendKaspaFeeEstimate();
@@ -11571,7 +12126,8 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
   }
   listEl.innerHTML = '<div class="manage-address-empty">Loading…</div>';
   try {
-    const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=50&offset=0&resolve_previous_outpoints=light`;
+    // The newest 200, as iOS reads every address's history (pageSize 200, maxTransactions 200).
+    const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
     const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
     if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
     const transactions = await response.json();
@@ -11606,7 +12162,7 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
       if (info) {
         const amountEl = document.createElement("span");
         amountEl.className = `manage-address-row-amount ${info.isOutgoing ? "outgoing" : "incoming"}`;
-        amountEl.textContent = `${info.isOutgoing ? "-" : "+"}${sompiToKasDisplay(info.amountSompi)} ${KAS_UNIT}`;
+        amountEl.textContent = `${info.isOutgoing ? "-" : "+"}${spendingKasText(info.amountSompi)} ${KAS_UNIT}`;
         const feeText = transactionFeeText(tx);
         if (feeText) {
           const wrap = document.createElement("span");
@@ -11637,8 +12193,10 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
       });
       listEl.appendChild(row);
     }
-  } catch (error) {
-    listEl.innerHTML = `<div class="manage-address-empty">Could not load transaction history: ${escapeHtml(error.message)}</div>`;
+  } catch {
+    // A failed fetch is not an empty history (iOS): say so, with a way to ask again.
+    listEl.innerHTML = '<div class="manage-address-empty utxo-load-failed"><span>Could not load transactions.</span><button type="button" class="cold-inline-link" data-manage-tx-retry>Try Again</button></div>';
+    listEl.querySelector("[data-manage-tx-retry]")?.addEventListener("click", () => loadManageAddressTransactions(address, listEl));
   }
 }
 
@@ -12077,10 +12635,11 @@ document.querySelectorAll("[data-manage-address-tab]").forEach((tabButton) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (manageAddressScreen && !manageAddressScreen.hidden) closeManageAddressScreen();
-  if (sendKaspaModal && !sendKaspaModal.hidden) closeSendKaspaModal();
-  if (spendingSendModal && !spendingSendModal.hidden) closeSpendingSendModal();
-  else if (spendingDetailScreen && !spendingDetailScreen.hidden) closeSpendingDetailScreen();
+  // Only the topmost screen closes: Send Kaspa sits over the address page that opened it.
+  if (spendingQrScreen && !spendingQrScreen.hidden) { closeSpendingQrScreen(); return; }
+  if (sendKaspaModal && !sendKaspaModal.hidden) { closeSendKaspaModal(); return; }
+  if (manageAddressScreen && !manageAddressScreen.hidden) { closeManageAddressScreen(); return; }
+  if (spendingDetailScreen && !spendingDetailScreen.hidden) closeSpendingDetailScreen();
   else if (spendingVisibilityScreen && !spendingVisibilityScreen.hidden) closeSpendingVisibilityScreen();
   else if (spendingManageScreen && !spendingManageScreen.hidden) closeSpendingManageScreen();
 });
@@ -12201,22 +12760,6 @@ document.addEventListener("click", async (event) => {
   try { await copyTextToClipboard(copy.dataset.copyPublicKey); showCopyToast("Public key copied"); } catch {}
 });
 
-document.querySelector("[data-spending-address-actions]")?.addEventListener("click", async () => {
-  if (!spendingDetailAddress) return;
-  const choice = await chooseDialog({
-    title: "Address Actions",
-    message: shortAddress(spendingDetailAddress),
-    options: [
-      { id: "private", title: "View Private Key", subtitle: "The key that spends this address. Never share it." },
-      { id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." },
-      { id: "explorer", title: "View in Explorer", subtitle: "Opens this address on your chosen block explorer." },
-    ],
-  });
-  if (choice === "private") document.querySelector("[data-spending-detail-privatekey]")?.click();
-  else if (choice === "copy") { try { await copyTextToClipboard(spendingDetailAddress); showCopyToast(addressCopiedToastText(spendingDetailAddress)); } catch {} }
-  else if (choice === "explorer") window.open(explorerAddressUrl(spendingDetailAddress), "_blank", "noopener,noreferrer");
-});
-
 // Export a specific spending address's private key (derived from the account phrase at its index).
 document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("click", async () => {
   const mnemonic = activeAccountMnemonic();
@@ -12229,7 +12772,9 @@ document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("c
     const spending = engine.deriveSpendingWallet(mnemonic, spendingDetailIndex, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() });
     const key = String(spending?.privateKeyHex || "").trim();
     if (!key) { showCopyToast("Could not derive this address's private key."); return; }
-    openPrivatekeyModal(key, `This is the private key for spending address #${spendingDetailIndex}. Anyone with it can spend from this address. Never share it.`);
+    // iOS SpendingAddressPrivateKeyView: the modal's own warning, and one gate - the password
+    // asked above - so the reveal inside does not ask again.
+    openPrivatekeyModal(key);
   } catch (error) {
     showCopyToast(`Could not derive private key: ${userFacingError(error)}`);
   }
@@ -12239,7 +12784,9 @@ privatekeyModal?.addEventListener("click", (event) => { if (event.target === pri
 // Click-to-view (no longer hold): password-gated when the seed-phrase protection
 // is on, since the value is now protected by the password.
 revealPrivatekeyButton?.addEventListener("click", async () => {
-  if (accountShellPrefs.passwordForSeed && hasAppPassword()) {
+  // A spending address's key was gated when its sheet opened (iOS: one DeviceAuth before
+  // SpendingAddressPrivateKeyView), so only the chatting key asks here.
+  if (!privatekeyRevealValue && accountShellPrefs.passwordForSeed && hasAppPassword()) {
     const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view the private key." });
     if (!ok) return;
   }
@@ -12294,7 +12841,6 @@ explorerOptionButtons.forEach((button) => {
     const dropdownToggle = button.closest(".settings-dropdown")?.querySelector("[data-dropdown-toggle]");
     if (dropdownBody) dropdownBody.hidden = true;
     if (dropdownToggle) dropdownToggle.setAttribute("aria-expanded", "false");
-    showCopyToast(`Explorer set to ${KASPA_EXPLORERS[key].displayName}`);
   });
 });
 refreshExplorerSelectionUi();
@@ -12405,33 +12951,20 @@ function startMessageRetentionSweeps() {
   }, RETENTION_SWEEP_INTERVAL_MS);
 }
 
-const retentionLabelEl = document.querySelector("[data-retention-label]");
-const retentionOptionButtons = document.querySelectorAll("[data-retention-option]");
+// Settings > Storage > Message retention: an inline menu picker that applies at once, no
+// confirm and no toast (iOS storagePage: saveSettings + refreshMessageStoreSize).
+const retentionSelectEl = document.querySelector("[data-retention-select]");
 function refreshRetentionSelectionUi() {
-  const current = messageRetentionKeyValue();
-  if (retentionLabelEl) retentionLabelEl.textContent = messageRetentionOption().label;
-  retentionOptionButtons.forEach((button) => {
-    button.classList.toggle("selected", button.dataset.retentionOption === current);
-  });
+  if (retentionSelectEl) retentionSelectEl.value = messageRetentionKeyValue();
 }
-retentionOptionButtons.forEach((button) => {
-  button.addEventListener("click", async () => {
-    const key = button.dataset.retentionOption;
-    const option = MESSAGE_RETENTION_OPTIONS.find((entry) => entry.key === key);
-    if (!option || key === messageRetentionKeyValue()) return;
-    if (!engine.address) { showCopyToast("Sign in to change message retention."); return; }
-    // Shortening the window deletes history, so say exactly how much before doing it.
-    if (option.days) {
-      const doomed = countMessagesOutsideRetention(Date.now() - option.days * 86400000);
-      if (doomed > 0 && !await confirmText(`Keep only the last ${option.label.toLowerCase()} of messages?\n\n${doomed} older message${doomed === 1 ? "" : "s"} will be deleted from this browser. This cannot be undone here, and they will not be downloaded again.`)) return;
-    }
-    try { localStorage.setItem(accountScopedKey(MESSAGE_RETENTION_KEY), key); } catch {}
-    refreshRetentionSelectionUi();
-    const removed = applyMessageRetention();
-    showCopyToast(option.days
-      ? `Keeping the last ${option.label.toLowerCase()}${removed ? `. Removed ${removed} older message${removed === 1 ? "" : "s"}` : ""}.`
-      : "Keeping messages forever.");
-  });
+retentionSelectEl?.addEventListener("change", () => {
+  const key = retentionSelectEl.value;
+  const option = MESSAGE_RETENTION_OPTIONS.find((entry) => entry.key === key);
+  if (!option || key === messageRetentionKeyValue() || !engine.address) { refreshRetentionSelectionUi(); return; }
+  try { localStorage.setItem(accountScopedKey(MESSAGE_RETENTION_KEY), key); } catch {}
+  refreshRetentionSelectionUi();
+  applyMessageRetention();
+  updateLocalStorageUsedLabel();
 });
 refreshRetentionSelectionUi();
 
@@ -12495,13 +13028,13 @@ const CURRENCIES = {
   inr: { name: "Indian Rupee (INR)", symbol: "₹" },
   krw: { name: "South Korean Won (KRW)", symbol: "₩" },
   sgd: { name: "Singapore Dollar (SGD)", symbol: "S$" },
+  idr: { name: "Indonesian Rupiah (IDR)", symbol: "Rp" },
   nzd: { name: "New Zealand Dollar (NZD)", symbol: "NZ$" },
   mxn: { name: "Mexican Peso (MXN)", symbol: "MX$" },
   brl: { name: "Brazilian Real (BRL)", symbol: "R$" },
   rub: { name: "Russian Ruble (RUB)", symbol: "₽" },
   try: { name: "Turkish Lira (TRY)", symbol: "₺" },
   zar: { name: "South African Rand (ZAR)", symbol: "R" },
-  idr: { name: "Indonesian Rupiah (IDR)", symbol: "Rp" },
   btc: { name: "Bitcoin (BTC)", symbol: "₿" },
 };
 const DEFAULT_CURRENCY = "usd";
@@ -12560,11 +13093,12 @@ refreshCurrencyUi();
 // actual UI strings needs a translation layer that isn't built yet, so today
 // this drives lang/dir and the picker state; see summary. ---
 const LANGUAGE_PREF_KEY = "kachat-language-v1";
+// In iOS AppLanguage.allCases order (the Settings list and the Welcome Guide both read it).
 const LANGUAGES = {
-  system: "System", en: "English", es: "Español", de: "Deutsch", fr: "Français",
-  it: "Italiano", pt: "Português", ru: "Русский", tr: "Türkçe", ar: "العربية",
-  "ar-EG": "العربية (مصر)", fa: "فارسی", he: "עברית", hi: "हिन्दी", bn: "বাংলা",
-  ja: "日本語", ko: "한국어", vi: "Tiếng Việt", id: "Bahasa Indonesia", "zh-Hans": "简体中文",
+  system: "System", ar: "العربية", "ar-EG": "العربية (مصر)", bn: "বাংলা", de: "Deutsch",
+  en: "English", es: "Español", fa: "فارسی", fr: "Français", he: "עברית", hi: "हिन्दी",
+  id: "Bahasa Indonesia", it: "Italiano", ja: "日本語", ko: "한국어", pt: "Português",
+  ru: "Русский", tr: "Türkçe", vi: "Tiếng Việt", "zh-Hans": "简体中文",
 };
 const RTL_LANG_PREFIXES = ["ar", "fa", "he"];
 let selectedLanguage = localStorage.getItem(LANGUAGE_PREF_KEY) || "system";
@@ -12646,21 +13180,37 @@ function endpointFieldError(key, message) {
   el.textContent = message || "";
   el.hidden = !message;
 }
+// Settings > Connection Settings > Domains: the .kas API as text (iOS knsBaseURL).
+document.querySelectorAll("[data-kns-url]").forEach((el) => { el.textContent = getEndpoint("knsApi"); });
+const HTTPS_REQUIRED_ERROR = "Use https. Unencrypted connections are not supported.";
 document.querySelectorAll("[data-endpoint]").forEach((input) => {
   if (input.readOnly || input.dataset.endpoint === "trustedNode") return;
   input.addEventListener("input", () => {
-    endpointFieldError(input.dataset.endpoint, /^http:\/\//i.test(input.value.trim()) ? "Use https. Unencrypted connections are not supported." : "");
+    endpointFieldError(input.dataset.endpoint, /^http:\/\//i.test(input.value.trim()) ? HTTPS_REQUIRED_ERROR : "");
   });
-  input.addEventListener("change", () => {
-    const value = input.value.trim();
-    // iOS: an unencrypted URL is refused outright, not saved and quietly used.
-    if (/^http:\/\//i.test(value)) { endpointFieldError(input.dataset.endpoint, "Use https. Unencrypted connections are not supported."); return; }
-    if (value && !/^https:\/\//i.test(value)) { endpointFieldError(input.dataset.endpoint, "Enter a full https:// URL."); return; }
+});
+/// iOS ConnectionSettingsView.normalizedHTTPSURL: a scheme-less value ("kachat.duckdns.org") is
+/// taken as https://; blank stays blank, which saves as the network's default.
+function normalizedHttpsEndpoint(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed || /^https:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+// One Save for every tab (iOS saveSettings): refused while any field holds http://, otherwise
+// every field is written (blank = the network's default) and the page closes.
+document.querySelector("[data-connection-save]")?.addEventListener("click", () => {
+  const inputs = [...document.querySelectorAll("[data-endpoint]")].filter((input) => !input.readOnly && input.dataset.endpoint !== "trustedNode");
+  if (inputs.some((input) => /^http:\/\//i.test(input.value.trim()))) {
+    inputs.forEach((input) => { if (/^http:\/\//i.test(input.value.trim())) endpointFieldError(input.dataset.endpoint, HTTPS_REQUIRED_ERROR); });
+    showCopyToast(HTTPS_REQUIRED_ERROR);
+    return;
+  }
+  for (const input of inputs) {
     endpointFieldError(input.dataset.endpoint, "");
-    setEndpoint(input.dataset.endpoint, value);
-    loadEndpointInputs();
-    showCopyToast("Connection setting saved");
-  });
+    setEndpoint(input.dataset.endpoint, normalizedHttpsEndpoint(input.value));
+  }
+  loadEndpointInputs();
+  showSettingsCategory(settingsSubscreenParentIndex != null ? settingsSubscreenParentIndex : null);
 });
 loadEndpointInputs();
 
@@ -12677,9 +13227,16 @@ function nodeChoiceLooksValid(value) {
 // Automatic Scan = the public resolver picks the node (kaspa-ng's web behaviour), KaChat's node
 // as the fallback. A saved or custom address connects only to that node.
 const NODE_CHOICE_SCAN = "__scan__";
+// A bare host or host:port from the address book is a wRPC endpoint over TLS.
+function nodeChoiceUrl(value) {
+  const v = String(value || "").trim();
+  return v && !/^wss?:\/\//i.test(v) ? `wss://${v}` : v;
+}
+// Both pickers - Connection Settings and the Connection Status sheet (iOS
+// KaspaNodeQuickAccessSections, "a quick-select surface over that same underlying list").
 function renderNodeChoice() {
-  const select = document.querySelector("[data-node-choice]");
-  if (!select) return;
+  const selects = document.querySelectorAll("[data-node-choice]");
+  if (!selects.length) return;
   const custom = getEndpointOverride("trustedNode").trim();
   const current = custom || NODE_CHOICE_SCAN;
   const saved = loadSavedNodes();
@@ -12687,28 +13244,31 @@ function renderNodeChoice() {
     { value: NODE_CHOICE_SCAN, label: "Automatic Scan (Recommended)" },
     // The shipped default node is a mainnet node: not offered on testnet.
     ...(DEFAULT_TRUSTED_NODE ? [{ value: DEFAULT_TRUSTED_NODE, label: "Kasia Public Node (Better)" }] : []),
-    ...saved.map((entry) => ({ value: entry.address.trim(), label: entry.label || entry.address }))
+    ...saved.map((entry) => ({ value: nodeChoiceUrl(entry.address), label: entry.label || entry.address }))
       .filter((o) => !DEFAULT_TRUSTED_NODE || o.value.toLowerCase() !== DEFAULT_TRUSTED_NODE.toLowerCase()),
   ];
   if (custom && !options.some((o) => o.value === custom)) options.push({ value: custom, label: custom });
-  select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
-  select.value = current;
-  const note = document.querySelector("[data-node-choice-note]");
-  if (note) {
-    note.hidden = !current;
-    note.textContent = custom
-      ? (DEFAULT_TRUSTED_NODE && custom.toLowerCase() === DEFAULT_TRUSTED_NODE.toLowerCase() ? "Connected only to Kasia's node" : "Connected only to this node")
-      : "A healthy public node is picked automatically";
-  }
+  selects.forEach((select) => {
+    select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
+    select.value = current;
+  });
+  // iOS: the note only when a specific node is chosen.
+  document.querySelectorAll("[data-node-choice-note]").forEach((note) => {
+    note.hidden = !custom;
+    note.textContent = "Connected only to this node";
+  });
 }
-document.querySelector("[data-node-choice]")?.addEventListener("change", async (event) => {
+document.querySelectorAll("[data-node-choice]").forEach((select) => select.addEventListener("change", async (event) => {
+  const quick = event.target.hasAttribute("data-node-choice-quick");
   const value = String(event.target.value || "").trim();
   const errorEl = document.querySelector("[data-node-choice-error]");
   const scan = value === NODE_CHOICE_SCAN;
-  // A bare host or host:port from the address book is a wRPC endpoint over TLS.
-  const custom = scan ? "" : (value && !/^wss?:\/\//i.test(value) ? `wss://${value}` : value);
+  const custom = scan ? "" : nodeChoiceUrl(value);
   if (custom && !nodeChoiceLooksValid(custom)) {
-    if (errorEl) { errorEl.textContent = "Enter a node as host:port or a wss:// URL."; errorEl.hidden = false; }
+    const message = "Enter a node as host:port or a wss:// URL.";
+    if (quick) showCopyToast(message);
+    else if (errorEl) { errorEl.textContent = message; errorEl.hidden = false; }
+    renderNodeChoice();
     return;
   }
   if (errorEl) errorEl.hidden = true;
@@ -12716,24 +13276,19 @@ document.querySelector("[data-node-choice]")?.addEventListener("change", async (
   setEndpoint("trustedNode", custom);
   loadEndpointInputs();
   renderNodeChoice();
-  showCopyToast(custom ? "Connecting only to this node…" : "Scanning public nodes…");
+  // The status sheet's picker says what it did (iOS KaspaNodeQuickAccessSections.apply); the
+  // Connection Settings one does not.
+  if (quick) showCopyToast(scan ? "Automatic scan enabled." : "Node updated.");
   try { await engine.connect({ force: true }); await connectAndRefresh({ quiet: true }); }
-  catch (error) { showCopyToast(`Could not connect: ${describeConnectError(error)}`); }
+  catch (error) { appendEngineLog(`Could not connect: ${describeConnectError(error)}`); }
   renderConnectionStatus();
-});
+}));
 
-document.querySelector("[data-reset-connection-defaults]")?.addEventListener("click", () => {
-  resetEndpoints();
-  loadEndpointInputs();
-  renderNodeChoice();
-  document.querySelectorAll("[data-endpoint-error]").forEach((el) => { el.hidden = true; });
-  if (indexerUrlInput) { indexerUrlInput.value = ENDPOINT_DEFAULTS.kasiaIndexer; localStorage.setItem(INDEXER_URL_KEY, indexerUrlInput.value); }
-  showCopyToast("Connection settings reset to defaults");
-});
+// No "Reset to Defaults" (iOS ConnectionSettingsView has none: a blank field saves as the default).
 
 // IP Address Book: a user-managed list of saved Kaspa node addresses (label + address),
-// mirroring iOS's Connection Settings "IP Address Book". Save your own nodes here, then
-// "Use" one to fill the Trusted Node field above, or copy the raw address.
+// mirroring iOS's Connection Settings "IP Address Book". Save your own nodes here; clicking a
+// row copies its address, the trash removes it, and the Kaspa Node picker above offers them.
 // One IP Address Book per network (iOS ConnectionProfile.savedNodeAddresses).
 const SAVED_NODES_KEY = IS_TESTNET ? "kachat-saved-nodes-testnet-v1" : "kachat-saved-nodes-v1";
 function loadSavedNodes() {
@@ -12771,8 +13326,14 @@ function renderSavedNodes() {
     const row = document.createElement("div");
     row.className = "saved-node-row";
 
-    const copy = document.createElement("div");
+    // The row's text copies the address (iOS onTapGesture: "Node address copied.").
+    const copy = document.createElement("button");
+    copy.type = "button";
     copy.className = "saved-node-copy";
+    copy.addEventListener("click", async () => {
+      try { await copyTextToClipboard(entry.address); showCopyToast("Node address copied."); }
+      catch { /* clipboard unavailable */ }
+    });
     if (entry.label) {
       const label = document.createElement("strong");
       label.textContent = entry.label;
@@ -12786,44 +13347,26 @@ function renderSavedNodes() {
       copy.append(addr);
     }
 
-    const actions = document.createElement("div");
-    actions.className = "saved-node-actions";
-
-    const useBtn = document.createElement("button");
-    useBtn.type = "button";
-    useBtn.className = "saved-node-btn";
-    useBtn.textContent = "Use";
-    useBtn.addEventListener("click", () => {
-      setEndpoint("trustedNode", entry.address);
-      loadEndpointInputs();
-      renderNodeChoice();
-      showCopyToast("Trusted Node set");
-    });
-
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.className = "saved-node-btn";
-    copyBtn.textContent = "Copy";
-    copyBtn.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(entry.address); showCopyToast(addressCopiedToastText(entry.address)); }
-      catch { showCopyToast("Copy failed"); }
-    });
-
+    // Trash (iOS deleteSavedNodeAddress): the node selection is left alone, and the toast says
+    // whether this was the node in use.
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";
-    deleteBtn.className = "saved-node-btn danger";
+    deleteBtn.className = "saved-node-trash";
     deleteBtn.setAttribute("aria-label", "Delete saved address");
-    deleteBtn.textContent = "Delete";
+    deleteBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h17"/><path d="M18.5 6.5V19a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2V6.5"/><path d="M8.5 6.5V4.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v2"/></svg>`;
     deleteBtn.addEventListener("click", () => {
       const next = loadSavedNodes();
       next.splice(index, 1);
       persistSavedNodes(next);
       renderSavedNodes();
       renderNodeChoice();
+      const pinned = getEndpointOverride("trustedNode").trim().toLowerCase();
+      const removed = entry.address.trim().toLowerCase();
+      const inUse = pinned && (pinned === removed || pinned === `wss://${removed}`);
+      showCopyToast(inUse ? "Removed from address book. Still connected to this node." : "Address removed.");
     });
 
-    actions.append(useBtn, copyBtn, deleteBtn);
-    row.append(copy, actions);
+    row.append(copy, deleteBtn);
     list.appendChild(row);
   });
 }
@@ -12832,39 +13375,66 @@ function addSavedNodeFromInputs() {
   const addressInput = document.querySelector("[data-saved-node-address]");
   if (!addressInput) return;
   const address = addressInput.value.trim();
-  if (!address) { setSavedNodeError("Enter a node address."); return; }
+  if (!address) return;
+  // iOS: an address that is not one is refused in place (wRPC here, so host:port or wss://).
+  if (!nodeChoiceLooksValid(address)) { setSavedNodeError("Enter a node as host:port or a wss:// URL."); return; }
   const label = labelInput ? labelInput.value.trim() : "";
   const next = loadSavedNodes();
-  if (next.some((e) => e.address.toLowerCase() === address.toLowerCase())) {
-    setSavedNodeError("That address is already saved.");
-    return;
-  }
   next.push({ label, address });
   persistSavedNodes(next);
   renderNodeChoice();
   setSavedNodeError("");
   if (labelInput) labelInput.value = "";
   addressInput.value = "";
+  updateSavedNodeAddEnabled();
   renderSavedNodes();
+}
+function updateSavedNodeAddEnabled() {
+  const button = document.querySelector("[data-add-saved-node]");
+  const addressInput = document.querySelector("[data-saved-node-address]");
+  if (button) button.disabled = !String(addressInput?.value || "").trim();
 }
 document.querySelector("[data-add-saved-node]")?.addEventListener("click", addSavedNodeFromInputs);
 document.querySelector("[data-saved-node-address]")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); addSavedNodeFromInputs(); }
 });
-document.querySelector("[data-saved-node-address]")?.addEventListener("input", () => setSavedNodeError(""));
+document.querySelector("[data-saved-node-address]")?.addEventListener("input", () => { setSavedNodeError(""); updateSavedNodeAddEnabled(); });
 renderSavedNodes();
 
+/// Byte counts the way iOS ByteCountFormatter(.file) writes them: decimal units, "Zero KB".
+function formatFileBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return "Zero KB";
+  if (n < 1000) return `${n} bytes`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
+  return `${unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+/// "Local storage used: X" (iOS refreshMessageStoreSize). The chats live in IndexedDB, so the
+/// browser's own measure of this site's storage is used; the KaChat localStorage keys are the
+/// fallback where the browser does not give one.
+let localStorageUsedToken = 0;
 function updateLocalStorageUsedLabel() {
   const label = document.querySelector("[data-local-storage-used]");
   if (!label) return;
-  let bytes = 0;
-  for (let i = 0; i < localStorage.length; i += 1) {
-    const key = localStorage.key(i);
-    if (!key || !key.startsWith("kachat-")) continue;
-    bytes += key.length + (localStorage.getItem(key) || "").length;
-  }
-  const kb = bytes / 1024;
-  label.textContent = kb < 1000 ? `${kb.toFixed(1)} KB` : `${(kb / 1024).toFixed(2)} MB`;
+  const token = ++localStorageUsedToken;
+  const fallback = () => {
+    let bytes = 0;
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith("kachat")) continue;
+        bytes += (key.length + (localStorage.getItem(key) || "").length) * 2;
+      }
+    } catch { return null; }
+    return bytes;
+  };
+  const show = (bytes) => { if (token === localStorageUsedToken) label.textContent = `Local storage used: ${bytes == null ? "Unknown" : formatFileBytes(bytes)}`; };
+  const estimate = navigator.storage?.estimate?.();
+  if (!estimate) { show(fallback()); return; }
+  estimate.then((result) => show(Number.isFinite(result?.usage) ? result.usage : fallback())).catch(() => show(fallback()));
 }
 
 // Single source of truth for every green/orange/red connection dot in the
@@ -12899,7 +13469,8 @@ function computeConnectionHealth() {
           if (connectionOverlay && !connectionOverlay.hidden) renderConnectionStatus();
         }, DISCONNECT_GRACE_MS - downMs + 50);
       }
-      return { stateName: "busy", latencyMs: null };
+      // Inside the grace window it is still connecting, not "high latency" (iOS).
+      return { stateName: "busy", latencyMs: null, connecting: true };
     }
     return { stateName: "error", latencyMs: null };
   }
@@ -12976,80 +13547,45 @@ function renderConnectionStatus() {
   const statusDot = document.querySelector("[data-connection-status-dot]");
   const statusText = document.querySelector("[data-connection-status-text]");
   const health = computeConnectionHealth();
+  // iOS ConnectionStatus.description: Connected / Connecting / Disconnected (the dot carries latency).
   const stateText = health.stateName === "error"
     ? "Disconnected"
-    : health.stateName === "busy"
-      ? `Connected · high latency (${health.latencyMs} ms)`
-      : "Connected";
+    : health.connecting ? "Connecting" : "Connected";
   if (statusDot) { statusDot.classList.remove("ready", "busy", "error"); statusDot.classList.add(health.stateName); }
   if (statusText) statusText.textContent = stateText;
 
+  // Connected Node and Latency only while there is one (iOS).
   const primaryEl = document.querySelector("[data-connection-primary-endpoint]");
-  if (primaryEl) primaryEl.textContent = connection.primaryEndpoint ? hostFromEndpoint(connection.primaryEndpoint) : (connection.primary === "connecting" ? "Connecting…" : "Not connected");
-
-  const standbyEl = document.querySelector("[data-connection-standby-endpoint]");
-  if (standbyEl) {
-    const customConfigured = Boolean(getEndpointOverride("trustedNode").trim());
-    standbyEl.textContent = connection.standbyEndpoint
-      ? hostFromEndpoint(connection.standbyEndpoint)
-      : customConfigured
-        ? "Not used with a custom node"
-        : (connection.standby === "connecting" ? "Preparing…" : "Not ready");
-  }
+  const nodeRow = document.querySelector("[data-connection-node-row]");
+  const connectedHost = primaryReady && connection.primaryEndpoint ? hostFromEndpoint(connection.primaryEndpoint) : "";
+  if (primaryEl) primaryEl.textContent = connectedHost;
+  if (nodeRow) nodeRow.hidden = !connectedHost;
 
   const lastGoodRecord = (registry.endpoints || []).find((entry) => entry.endpoint === (connection.primaryEndpoint || registry.lastGoodEndpoint));
   const latencyEl = document.querySelector("[data-connection-latency]");
+  const latencyRow = document.querySelector("[data-connection-latency-row]");
+  const ms = connectedHost ? lastGoodRecord?.averageLatencyMs : null;
   if (latencyEl) {
     latencyEl.classList.remove("good", "warn", "bad");
-    const ms = lastGoodRecord?.averageLatencyMs;
     latencyEl.textContent = ms ? `${ms} ms` : "--";
     const color = connectionLatencyColor(ms);
     if (color) latencyEl.classList.add(color);
   }
+  if (latencyRow) latencyRow.hidden = !ms;
+
+  // The indexer, and the push indexer only when it is a different one (iOS).
+  const indexerHost = hostFromEndpoint(getEndpoint("kasiaIndexer")) || getEndpoint("kasiaIndexer");
+  const pushHost = hostFromEndpoint(getEndpoint("pushIndexer")) || getEndpoint("pushIndexer");
+  const indexerEl = document.querySelector("[data-connection-indexer]");
+  if (indexerEl) indexerEl.textContent = indexerHost || "--";
+  const pushEl = document.querySelector("[data-connection-push]");
+  if (pushEl) pushEl.textContent = pushHost || "--";
+  const pushRow = document.querySelector("[data-connection-push-row]");
+  if (pushRow) pushRow.hidden = getEndpoint("pushIndexer") === getEndpoint("kasiaIndexer");
 
   const lastSyncEl = document.querySelector("[data-connection-last-sync]");
-  if (lastSyncEl) lastSyncEl.textContent = subscription.status === "connecting" ? "In progress" : formatRelativeTime(subscription.updatedAt);
-
-  // Warm-standby readiness badge (the standby is what makes a drop recover instantly).
-  const standbyBadge = document.querySelector("[data-connection-standby-badge]");
-  if (standbyBadge) standbyBadge.hidden = !standbyReady;
-
-  // Node-selection cards reflect the saved trustedNode override ("" = Automatic).
-  renderNodeModeCards();
-
-  const failoversCountEl = document.querySelector("[data-connection-failovers-count]");
-  if (failoversCountEl) failoversCountEl.textContent = String(registry.failovers?.length || 0);
-
-  const failoversList = document.querySelector("[data-connection-failovers-list]");
-  if (failoversList) {
-    failoversList.replaceChildren();
-    if (!registry.failovers?.length) {
-      const empty = document.createElement("div");
-      empty.className = "settings-list-row settings-info-row";
-      const copy = document.createElement("span");
-      copy.className = "settings-row-copy";
-      const small = document.createElement("small");
-      small.textContent = "No automatic reconnects yet.";
-      copy.appendChild(small);
-      empty.appendChild(copy);
-      failoversList.appendChild(empty);
-    } else {
-      registry.failovers.slice(0, 10).forEach((event) => {
-        const row = document.createElement("div");
-        row.className = "settings-list-row settings-info-row";
-        const copy = document.createElement("span");
-        copy.className = "settings-row-copy";
-        const strong = document.createElement("strong");
-        strong.textContent = `${event.success ? "✓" : "✗"} ${hostFromEndpoint(event.from) || "auto"} → ${hostFromEndpoint(event.to) || "none"}`;
-        const small = document.createElement("small");
-        small.textContent = event.error ? `${formatRelativeTime(event.at)} · ${event.error}` : formatRelativeTime(event.at);
-        copy.appendChild(strong);
-        copy.appendChild(small);
-        row.appendChild(copy);
-        failoversList.appendChild(row);
-      });
-    }
-  }
+  if (lastSyncEl) lastSyncEl.textContent = subscription.status === "connecting" ? "in progress" : formatRelativeTime(subscription.updatedAt);
+  // No Backup Node row and no Recent Auto-Reconnects list: iOS shows neither.
 }
 
 const photoQualityModal = document.querySelector("[data-photo-quality-modal]");
@@ -13857,53 +14393,8 @@ document.querySelector("[data-kns-editor-save]")?.addEventListener("click", asyn
   }
 });
 
-// Rebuilds contacts purely from on-chain self-stash data plus the active
-// wallet's seed/private key — no local backup file required. See
-// stashHandshakeForRecovery() for what gets written, and
-// engine.syncSelfStashFromChain for the scan/decrypt side.
-async function recoverConversationsFromBlockchain() {
-  await ensureRuntimes({ quiet: true });
-  if (!engine.address) throw new Error("Generate or import a wallet first.");
-  const result = await engine.syncSelfStashFromChain({});
-  let recovered = 0;
-  for (const stash of result.stashes || []) {
-    if (!stash.partnerAddress || stash.partnerAddress === engine.address) continue;
-    if (state.contacts.some((entry) => entry.address === stash.partnerAddress)) continue;
-    // A chat deleted here stays deleted: recovery brings back what was lost, not what was removed.
-    if (loadDeletedContactAddresses().has(stash.partnerAddress)) continue;
-    const createdAt = Number(stash.timestamp || stash.blockTime || Date.now());
-    const displayName = shortAddress(stash.partnerAddress);
-    const contact = {
-      id: nowId(), name: displayName, nameIsCustom: false, address: stash.partnerAddress, avatar: initialsFor(displayName),
-      createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "",
-    };
-    const conversationEntry = createConversation({ contactId: contact.id, createdAt });
-    state.contacts.push(contact);
-    state.conversations.push(conversationEntry);
-    recovered += 1;
-  }
-  if (recovered > 0) {
-    refreshSubscriptionAddresses({ restart: true });
-    persistState();
-    renderChats();
-  }
-  return { recovered, scanned: result.scannedCount || 0, errors: result.errors || [] };
-}
-
-document.querySelector("[data-recover-conversations]")?.addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  button.disabled = true;
-  try {
-    const { recovered, scanned, errors } = await recoverConversationsFromBlockchain();
-    if (errors.length) appendEngineLog(`Recovery scan warnings: ${errors.join(" | ")}`);
-    appendEngineLog(`Recovery scan complete: ${scanned} self-stash record(s) found, ${recovered} new conversation(s) recovered.`);
-    showCopyToast(recovered > 0 ? `Recovered ${recovered} conversation${recovered === 1 ? "" : "s"}` : "No new conversations found");
-  } catch (error) {
-    showCopyToast(`Recovery failed: ${userFacingError(error)}`);
-  } finally {
-    button.disabled = false;
-  }
-});
+// No "Recover Conversations from Blockchain" in Settings > Chat History (owner, iOS
+// chatHistoryPage has only Export and Import).
 
 function saveProfileAccountName() {
   if (!profileAccountName || !engine.address) return;
@@ -14033,6 +14524,14 @@ function showFundingGateModal() {
   fundingGateModalEl.hidden = false;
 }
 
+/** iOS ZeroBalanceFundingCardView: the address with a copy icon beside it (no separate button). */
+function fillFundingGateAddress(el, address) {
+  if (el.dataset.address === address) return;
+  el.dataset.address = address || "";
+  el.innerHTML = `<span>${escapeHtml(address || "")}</span><svg class="chat-funding-gate-copy-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>`;
+  el.setAttribute("aria-label", "Copy chatting address");
+}
+
 function updateChatFundingGate() {
   // Looked up per call (not a module const): this runs from setActiveConversationId too,
   // which can fire before module evaluation reaches this section.
@@ -14048,7 +14547,7 @@ function updateChatFundingGate() {
   if (!shouldGate) return;
 
   const addressEl = fundingGateEl.querySelector("[data-funding-gate-address]");
-  if (addressEl) addressEl.textContent = engine.address;
+  if (addressEl) fillFundingGateAddress(addressEl, engine.address);
   const canvas = fundingGateEl.querySelector("[data-funding-gate-qr]");
   if (canvas && fundingGateQrDrawnFor !== engine.address) {
     fundingGateQrDrawnFor = engine.address;
@@ -14061,7 +14560,7 @@ function updateChatFundingGate() {
 document.querySelector("[data-funding-gate]")?.addEventListener("click", async (event) => {
   if (event.target.closest("[data-funding-gate-address]") || event.target.closest("[data-funding-gate-copy]")) {
     if (!engine.address) return;
-    try { await copyTextToClipboard(engine.address); showCopyToast("Address copied to clipboard."); }
+    try { await copyTextToClipboard(engine.address); showCopyToast(addressCopiedToastText(engine.address)); }
     catch (error) { appendEngineLog(error.message); }
   }
 });
@@ -14080,13 +14579,31 @@ function restoreLastBalance() {
     if (saved && /^\d+(\.\d+)?$/.test(saved)) currentBalanceKas = saved;
   } catch { /* fine */ }
 }
+// The QR screens' header (iOS ChattingAddressQRView): "1.50000000 KAS", or the bare dash while the
+// balance is unknown.
+function kasExact8Label(value) {
+  const text = kasExact8Text(value);
+  return text === "--" ? "--" : `${text} ${KAS_UNIT}`;
+}
+// Which screen the toolbar balance sits over - Portfolio's eye masks it (iOS PortfolioView's
+// principal toolbar item: "•••••• KAS" while amounts are hidden).
+var toolbarBalanceScreen; // var, no initializer: setActiveAppTab can run before this line is reached
+function renderToolbarBalance() {
+  // Eight fixed decimals, "-- KAS" while unknown (iOS ChatListView balanceToolbarView).
+  let masked = false;
+  try { masked = toolbarBalanceScreen === "portfolio" && portfolioAmountsHidden(); } catch { /* not ready */ }
+  const text = masked ? `•••••• ${KAS_UNIT}` : `${kasExact8Text(currentBalanceKas)} ${KAS_UNIT}`;
+  if (toolbarBalanceValue) toolbarBalanceValue.textContent = text;
+  else if (toolbarBalance) toolbarBalance.textContent = text;
+}
+document.addEventListener("kachat:portfolio-amounts-hidden", () => renderToolbarBalance());
 function updateWalletUi() {
   updateChatFundingGate();
   const address = engine.address;
   const meta = activeAccountMetadata();
   const accountName = meta?.name || (address ? "Current Account" : "No Active Account");
-  if (toolbarBalanceValue) toolbarBalanceValue.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
-  else toolbarBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  renderToolbarBalance();
+  try { renderSettingsHeader(); } catch { /* not yet wired during early init */ }
   // The chatting balance is part of Profile's Manage Addresses total and Manage Addresses' first
   // row (iOS 6333dd3).
   try { renderProfileAccountTotal(); refreshChattingRowBalance(); } catch { /* not yet wired during early init */ }
@@ -14095,14 +14612,19 @@ function updateWalletUi() {
   observeChattingBalanceForNotices();
   try { renderPaymentFromWarning(); } catch { /* the pay sheet isn't wired yet during early init */ }
   installTestnetFaucetButton.render?.(); // Claim Testnet Kaspa follows the loaded account
-  if (chattingAddressBalance) chattingAddressBalance.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  // Only while the QR screen shows the chatting address itself - a Receive or spending QR keeps
+  // its own address's balance.
+  if (chattingAddressBalance && chattingAddressScreenAddress === address) {
+    chattingAddressBalance.textContent = kasExact8Label(currentBalanceKas);
+  }
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
   if (profileInitial) profileInitial.textContent = address ? accountName.trim().charAt(0).toUpperCase() || "K" : "◎";
   if (profileAccountName && document.activeElement !== profileAccountName) profileAccountName.value = accountName;
   const profileAccountNameText = document.querySelector("[data-profile-account-name-text]");
   if (profileAccountNameText) profileAccountNameText.textContent = accountName;
   if (profileSessionState) profileSessionState.textContent = "";
-  if (profileCreated) profileCreated.textContent = meta?.createdAt ? new Date(meta.createdAt).toLocaleString() : "--";
+  // iOS SharedFormatting.mediumDateShortTime: medium date, short time.
+  if (profileCreated) profileCreated.textContent = meta?.createdAt ? new Date(meta.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "--";
   if (settingsAccountName) settingsAccountName.textContent = accountName;
   if (settingsAccountAddress) settingsAccountAddress.textContent = address ? shortAddress(address) : "No wallet loaded";
   if (accountModalName) accountModalName.textContent = accountName;
@@ -14727,8 +15249,10 @@ function visibleChatConversations() {
   return sortedConversations().filter((conversationEntry) => {
     const contact = contactForConversation(conversationEntry);
     if (!contact) return false;
-    // Requests sit behind the Message Requests row; blocked chats nowhere.
+    // Requests sit behind the Message Requests row; blocked and declined chats nowhere (iOS
+    // isConversationVisibleInChatList).
     if (isMessageRequest(conversationEntry) || isChatBlocked(contact.address)) return false;
+    if (contact.relationshipState === "declined") return false;
     // Bot chats never sit in the list or its search: Kaspa Hub > KaChat Bots, and their circle
     // once you have written to the bot (iOS d576941 / 5fcf755).
     if (isKachatBot(contact.address)) return false;
@@ -14744,6 +15268,53 @@ function visibleChatConversations() {
       return text.toLowerCase().includes(query);
     });
   });
+}
+
+/** Per chat, a history fetch in flight ("loading") or the last one failed ("failed"), as iOS
+ *  ChatService.chatFetchStates: the row shows a small spinner or an orange triangle. */
+// A hoisted accessor rather than a const: the boot-time renderChats can run before this line.
+function chatFetchStates() { return chatFetchStates.map || (chatFetchStates.map = new Map()); }
+function chatFetchIndicatorHtml(conversationId) {
+  const fetchState = chatFetchStates().get(conversationId);
+  if (fetchState === "loading") return `<span class="chat-row-fetch loading" role="img" aria-label="Loading"></span>`;
+  if (fetchState === "failed") return `<svg class="chat-row-fetch failed" viewBox="0 0 24 24" role="img" aria-label="Couldn't load"><path d="M10.3 3.9 2.4 17.6A2 2 0 0 0 4.1 20.6h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path class="chat-row-fetch-mark" d="M12 9v4.5M12 16.8v.2"/></svg>`;
+  return "";
+}
+function setChatFetchState(conversationId, value) {
+  if (!conversationId || (chatFetchStates().get(conversationId) || null) === (value || null)) return;
+  if (value) chatFetchStates().set(conversationId, value); else chatFetchStates().delete(conversationId);
+  // Only the indicator changes: patch it in place rather than redrawing the list.
+  for (const slot of document.querySelectorAll(`[data-chat-fetch-for="${CSS.escape(conversationId)}"]`)) {
+    slot.innerHTML = chatFetchIndicatorHtml(conversationId);
+  }
+}
+
+/** One chat row (iOS ConversationRow), shared by the chat list and Message Requests. */
+function conversationRowHtml(conversationEntry, { selecting = false, selected = false, active = false, idAttr = "data-conversation-id" } = {}) {
+  const contact = contactForConversation(conversationEntry);
+  const last = lastMessageFor(conversationEntry);
+  const preview = conversationPreview(conversationEntry);
+  // No time at all before the first message, as on iOS - the row's own creation date is
+  // not activity.
+  const time = last ? formatChatListDate(last.createdAt) : "";
+  // Silenced: no banner from this conversation, ever. Worth a mark on the row - a chat that
+  // never pings otherwise looks like a chat nobody is using.
+  const silenced = getContactNotifyOverride(contact?.address) === "off";
+  const unread = Number(conversationEntry.unreadCount || 0);
+  return `
+        <button class="chat-row${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active ? " active" : ""}" type="button" ${idAttr}="${escapeHtml(conversationEntry.id)}">
+          ${selecting ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
+          <span class="chat-row-time"><span class="chat-row-fetch-slot" data-chat-fetch-for="${escapeHtml(conversationEntry.id)}">${chatFetchIndicatorHtml(conversationEntry.id)}</span>${escapeHtml(time)}</span>
+          ${avatarHtmlFor(contact)}
+          <span class="chat-meta">
+            <strong>${escapeHtml(displayNameForAddress(contact))}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
+            ${last
+              ? `<span>${chatListDeliveryGlyphHtml(last)}${escapeHtml(preview)}</span>`
+              : `<span class="chat-row-none">No messages yet</span>`}
+          </span>
+          ${unread > 0 ? `<b class="unread-badge">${unread}</b>` : ``}
+        </button>
+      `;
 }
 
 function renderChats() {
@@ -14762,31 +15333,12 @@ function renderChats() {
   setChatToolRowsForGroupsTab(false);
 
   const visibleConversations = visibleChatConversations();
-
-  // Bot chats alone are no chats: the empty state shows below the circles (iOS displayed.isEmpty).
-  if (!state.conversations.some((entry) => !isKachatBot(contactForConversation(entry)?.address))) {
-    emptyState.hidden = false;
-    chatList.hidden = true;
-    chatList.innerHTML = "";
-    return;
-  }
-
-  emptyState.hidden = true;
-  chatList.hidden = false;
-
-  if (visibleConversations.length === 0) {
-    chatList.innerHTML = `
-      <div class="no-results-card">
-        <strong>No matching chats</strong>
-        <span>Try a different name, address, or message.</span>
-      </div>
-    `;
-    return;
-  }
+  const searching = Boolean(searchInput.value.trim());
 
   // People who wrote first and haven't been accepted: one row, always there, right above your
-  // own chat - hidden only while searching or selecting (iOS 74bd52c).
-  const showsRequestsRow = !searchInput.value.trim() && !chatSelectionModeActive;
+  // own chat - hidden only while searching or selecting (iOS 74bd52c). It stays with no chats
+  // too: the empty state sits below it (iOS emptyStateView overlay).
+  const showsRequestsRow = !searching && !chatSelectionModeActive;
   const requestCount = showsRequestsRow ? messageRequestConversations().length : 0;
   const requestsRowHtml = showsRequestsRow ? `
         <button class="chat-row message-requests-row" type="button" data-open-message-requests>
@@ -14795,39 +15347,26 @@ function renderChats() {
             <strong>Message Requests</strong>
             <span>${requestCount > 0 ? "People who wrote to you first" : "No new requests"}</span>
           </span>
-          ${requestCount > 0 ? `<b class="message-requests-count">${requestCount > 99 ? "99+" : requestCount}</b>` : ""}
+          ${requestCount > 0 ? `<b class="message-requests-count">${requestCount}</b>` : ""}
           <svg class="message-requests-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         </button>` : "";
 
+  // No chats and no search: the empty state, under the circles and the requests row. A search
+  // with no match shows nothing at all (iOS has no "no results" card).
+  emptyState.hidden = !(visibleConversations.length === 0 && !searching);
+  chatList.hidden = !requestsRowHtml && visibleConversations.length === 0;
+  if (visibleConversations.length === 0) {
+    chatList.innerHTML = requestsRowHtml;
+    return;
+  }
+
   chatList.innerHTML = requestsRowHtml + visibleConversations
-    .map((conversationEntry) => {
-      const contact = contactForConversation(conversationEntry);
-      const last = lastMessageFor(conversationEntry);
-      const preview = conversationPreview(conversationEntry);
-      // No time at all before the first message, as on iOS - the row's own creation date is
-      // not activity.
-      const time = last ? formatChatListDate(last.createdAt) : "";
-      const selected = selectedChatConversationIds.has(conversationEntry.id);
-      // Silenced: no banner from this conversation, ever. Worth a mark on the row - a chat that
-      // never pings otherwise looks like a chat nobody is using.
-      const silenced = getContactNotifyOverride(contact?.address) === "off";
-      return `
-        <button class="chat-row${chatSelectionModeActive ? " selecting" : ""}${selected ? " selected" : ""}${conversationEntry.id === activeConversationId ? " active" : ""}" type="button" data-conversation-id="${escapeHtml(conversationEntry.id)}">
-          ${chatSelectionModeActive ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
-          <span class="chat-row-time">${escapeHtml(time)}</span>
-          ${avatarHtmlFor(contact)}
-          <span class="chat-meta">
-            <strong>${escapeHtml(displayNameForAddress(contact))}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
-            ${last
-              ? `<span>${chatListDeliveryGlyphHtml(last)}${escapeHtml(preview)}</span>`
-              : `<span class="chat-row-none">No messages yet</span>`}
-          </span>
-          ${conversationEntry.unreadCount > 0 ? `<b class="unread-badge">${conversationEntry.unreadCount > 99 ? "99+" : conversationEntry.unreadCount}</b>` : ``}
-        </button>
-      `;
-    })
-    .join("")
-    + `<div class="chat-list-footer">${visibleConversations.length} chat${visibleConversations.length === 1 ? "" : "s"}</div>`;
+    .map((conversationEntry) => conversationRowHtml(conversationEntry, {
+      selecting: chatSelectionModeActive,
+      selected: selectedChatConversationIds.has(conversationEntry.id),
+      active: conversationEntry.id === activeConversationId,
+    }))
+    .join("");
 
   refreshVisibleKnsNames(visibleConversations);
 }
@@ -14877,6 +15416,76 @@ async function refreshVisibleKnsNames(visibleConversations) {
 // reader could not tell apart. With `onRetry`, the failed state is the retry button.
 // An incoming payment whose notice the chain did not back shows "Needs attention" (iOS
 // DeliveryStatusLabel .warning, 927322b).
+/** iOS MessageTimeLine + the lines under it: the time (with the delivery status after it), a
+ *  plain "edited", and a failed reaction's red "Retry". */
+function buildMessageTimeLines({ createdAt, statusEl = null, edited = false, failedReaction = null } = {}) {
+  const lines = [];
+  const timeLine = document.createElement("div");
+  timeLine.className = "message-time-line";
+  if (createdAt) {
+    const time = document.createElement("span");
+    time.className = "message-time-line-time";
+    time.textContent = formatTime(createdAt);
+    timeLine.append(time);
+  }
+  if (statusEl) timeLine.append(statusEl);
+  if (timeLine.childNodes.length) lines.push(timeLine);
+  if (edited) {
+    const mark = document.createElement("span");
+    mark.className = "message-edited-line";
+    mark.textContent = "edited";
+    lines.push(mark);
+  }
+  if (failedReaction) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "message-reaction-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => { event.stopPropagation(); failedReaction.retry?.(); });
+    lines.push(retry);
+  }
+  return lines;
+}
+
+/** Your own reaction's send state on a message (keys "surface|target|emoji"), or null. */
+function localReactionStatusFor(prefix) {
+  for (const [key, entry] of reactionSendStatus) if (key.startsWith(prefix)) return entry;
+  return null;
+}
+
+/** iOS ReactionPillView: the emoji with their counts; your own reaction's state leads it - a
+ *  green check once sent, a red error icon and a red outline when it failed, nothing in flight. */
+function buildReactionPill(reactions, localReaction = null) {
+  const pill = document.createElement("div");
+  pill.className = "message-reaction-pill";
+  if (localReaction?.status === "failed") pill.classList.add("failed");
+  if (localReaction?.status === "failed" || localReaction?.status === "sent") {
+    const icon = document.createElement("span");
+    icon.className = `reaction-status ${localReaction.status}`;
+    icon.innerHTML = localReaction.status === "failed"
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7v6" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="16.8" r="1.2" fill="#fff"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="m7.6 12.3 3 3 5.8-6.4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    icon.setAttribute("aria-label", localReaction.status === "failed" ? "Reaction failed to send" : "Reaction sent");
+    pill.append(icon);
+  }
+  const counts = new Map();
+  for (const entry of reactions) counts.set(entry.emoji, (counts.get(entry.emoji) || 0) + 1);
+  for (const [emoji, count] of counts) {
+    const entryEl = document.createElement("span");
+    entryEl.className = "message-reaction-pill-entry";
+    entryEl.textContent = emoji;
+    if (count > 1) {
+      const countEl = document.createElement("span");
+      countEl.className = "message-reaction-pill-count";
+      countEl.textContent = String(count);
+      entryEl.append(countEl);
+    }
+    pill.append(entryEl);
+  }
+  pill.addEventListener("click", (event) => event.stopPropagation());
+  return pill;
+}
+
 function createDeliveryStatusIcon(message, { onRetry = null } = {}) {
   if (isPaymentNeedingAttention(message)) {
     const icon = document.createElement("span");
@@ -14957,7 +15566,9 @@ function messageTypeCapsule(message, { hasPaymentCard = false } = {}) {
     kind = completed ? "handshake-done" : "handshake";
   } else if (message.messageType === "payment" || message.transport === "kaspa-payment" || message.transport === "kaspa-payment-rest") {
     if (!hasPaymentCard) kind = "payment";
-  } else if (text.length <= 256 && /^(sent|received) \S+ domain$/i.test(text.trim())) {
+  } else if (text.length <= 256 && /^(sent|received) (\S+ domain|domain transfer)$/i.test(text.trim())) {
+    // iOS isKNSTransferMessage: "Sent %@ domain" / "Received %@ domain", or the bare
+    // "Sent domain transfer" / "Received domain transfer".
     kind = "domain";
   } else {
     const mime = sniffInlineFileMime(text);
@@ -14994,13 +15605,24 @@ function messageWindowFor(key, isThreadSwitch) {
   if (isThreadSwitch) messageWindowByThread.delete(key);
   return messageWindowByThread.get(key) || MESSAGE_WINDOW_FIRST;
 }
+// Older messages load as you scroll up (iOS: the top-pagination spinner, no button). The spinner
+// sits above the oldest row shown; reaching it loads the next page even where the list is too
+// short to scroll.
 function buildLoadEarlierButton(hiddenCount, onLoad) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "message-load-earlier";
-  button.textContent = `Show earlier messages (${hiddenCount.toLocaleString()} more)`;
-  button.addEventListener("click", (event) => { event.stopPropagation(); onLoad(); });
-  return button;
+  const row = document.createElement("div");
+  row.className = "message-load-earlier-spinner";
+  row.setAttribute("role", "progressbar");
+  row.setAttribute("aria-label", "Loading earlier messages");
+  row.innerHTML = '<span class="composer-field-spinner" aria-hidden="true"></span>';
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting) || !row.isConnected) return;
+      observer.disconnect();
+      window.setTimeout(() => { if (row.isConnected) onLoad(); }, 150);
+    });
+    queueMicrotask(() => { if (row.isConnected) observer.observe(row); });
+  }
+  return row;
 }
 // Grows the window while keeping the reader on the same row: the distance from the bottom is
 // what stays constant when rows are added above.
@@ -15014,7 +15636,8 @@ function extendMessageWindow(area, key, rerender) {
 function renderMessages(conversationEntry) {
   // The call button is for someone else: the self-chat has nobody to ring.
   const callButton = document.querySelector("[data-open-call]");
-  if (callButton) callButton.hidden = !conversationEntry || contactForConversation(conversationEntry)?.address === engine.address;
+  // Not while selecting messages, where the bar is Cancel and the trash (iOS).
+  if (callButton) callButton.hidden = !conversationEntry || messageSelectionMode || contactForConversation(conversationEntry)?.address === engine.address;
   // The header's name and bio were written just before this; re-measure so the thread's top inset
   // matches whatever height they came out at.
   syncChatHeaderInsets();
@@ -15099,15 +15722,12 @@ function renderMessages(conversationEntry) {
     selector.setAttribute("aria-hidden", "true");
     selector.innerHTML = '<svg viewBox="0 0 20 20"><path d="m5.1 10.1 3.1 3.1 6.7-7"/></svg>';
 
-    // Incoming messages match iMessage's grouping: an avatar sits next to
-    // the last bubble of a consecutive run, not every single one. Your own
-    // messages always get one, on every message, per request.
+    // The sender's avatar beside every message, theirs on the left and yours on the right (iOS
+    // MessageBubbleView avatarView).
     const avatarSlot = document.createElement("span");
     avatarSlot.className = "message-avatar-slot";
     if (message.direction === "incoming") {
-      const nextMessage = windowed[index + 1];
-      const isLastInGroup = !nextMessage || nextMessage.direction !== message.direction;
-      if (isLastInGroup && requestContact) avatarSlot.innerHTML = peerAvatarHtml;
+      if (requestContact) avatarSlot.innerHTML = peerAvatarHtml;
     } else {
       avatarSlot.innerHTML = ownAvatarHtml;
     }
@@ -15119,22 +15739,8 @@ function renderMessages(conversationEntry) {
     // Set when a caption+link message builds a preview card: rendered below the bubble.
     let detachedLinkCard = null;
 
-    // Broadcast-room style card header: sender name + send time at the top of every
-    // bubble. Photo-only and link-only bubbles hide it via CSS and keep their overlay
-    // timestamp instead.
-    {
-      const cardHead = document.createElement("div");
-      cardHead.className = "message-card-head";
-      const cardSender = document.createElement("strong");
-      cardSender.textContent = message.direction === "incoming" ? peerName : "You";
-      cardHead.append(cardSender);
-      if (message.createdAt) {
-        const cardTime = document.createElement("span");
-        cardTime.textContent = formatTime(message.createdAt);
-        cardHead.append(cardTime);
-      }
-      bubble.append(cardHead);
-    }
+    // No name in a 1:1 bubble and no time inside it: the time sits on its own line under every
+    // message (iOS MessageTimeLine), built when the row is assembled.
     bubble.title = messageSelectionMode ? "Select message" : "Open message actions";
     bubble.tabIndex = 0;
     bubble.setAttribute("role", messageSelectionMode ? "checkbox" : "button");
@@ -15169,26 +15775,38 @@ function renderMessages(conversationEntry) {
       card.querySelector("span").textContent = line.text;
       bubble.append(card);
     } else if (chessEnv) {
-      // The latest chess message of a game renders as a live board thumbnail with
-      // status (so on your turn you see the position); earlier ones stay compact.
+      // iOS chessBubble: an invite is always its invite bubble; of the rest, the game's latest
+      // message is the live board and earlier ones a one-line log entry.
       const isLatestChess = (message.createdAt || 0) >= (latestChessByGame.get(chessEnv.gameId) ?? 0);
       const contactAddr = requestContact?.address;
-      const summary = (isLatestChess && contactAddr && engine.address)
+      const wantsSummary = chessEnv.kind === "invite" || isLatestChess;
+      const summary = (wantsSummary && contactAddr && engine.address)
         ? Chess.summarizeChessGame(chessEnv.gameId, (conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED })), engine.address, contactAddr)
         : null;
-      if (summary) {
+      bubble.classList.add("chess-bubble");
+      if (chessEnv.kind === "invite") {
+        bubble.append(buildChessInviteBubble(chessEnv, summary, message.direction === "outgoing"));
+      } else if (isLatestChess && summary) {
         bubble.append(buildChessThumb(summary, chessEnv.gameId));
       } else {
         const card = document.createElement("button");
         card.type = "button";
         card.className = "message-chess";
-        const icon = document.createElement("span");
-        icon.className = "message-chess-icon";
-        icon.textContent = "♟";
+        // A move shows the piece that moved, in its own colour (iOS ChessPieceGlyphView).
+        if (chessEnv.kind === "move" && contactAddr && engine.address) {
+          const record = Chess.summarizeChessGame(chessEnv.gameId, (conversationEntry.messages || []).map((m) => ({ text: m.text, outgoing: m.direction === "outgoing", txid: m.txid || m.id, at: m.createdAt || 0, blockTime: Number(m.blockTime || 0), failed: m.status === MESSAGE_STATUSES.FAILED })), engine.address, contactAddr)
+            ?.moveHistory?.find((entry) => entry.messageTxid && entry.messageTxid === (message.txid || message.id));
+          if (record) {
+            const glyph = document.createElement("span");
+            glyph.className = `message-chess-icon chess-piece ${record.color}`;
+            glyph.textContent = Chess.PIECE_GLYPHS[record.pieceType] || "";
+            card.append(glyph);
+          }
+        }
         const label = document.createElement("span");
         label.className = "message-chess-label";
         label.textContent = Chess.chessEnvelopeLabel(message.text) || "Chess";
-        card.append(icon, label);
+        card.append(label);
         card.addEventListener("click", (event) => { event.stopPropagation(); openChessGame(chessEnv.gameId); });
         bubble.append(card);
       }
@@ -15202,6 +15820,8 @@ function renderMessages(conversationEntry) {
     if (paymentParts) {
       bubble.classList.add("has-payment-card");
       const paymentCard = buildPaymentCard(paymentParts, message.direction !== "incoming");
+      // A payment still on its way shimmers (iOS shouldShowResolvingOverlay).
+      if (![MESSAGE_STATUSES.CONFIRMED, MESSAGE_STATUSES.FAILED].includes(message.status) && message.direction !== "incoming") paymentCard.classList.add("payment-resolving");
       // One click opens its details (iOS PaymentCardTaps, 80a6aae); a double-click still reacts,
       // so the single click waits a beat and a second click cancels it.
       paymentCard.setAttribute("role", "button");
@@ -15249,13 +15869,14 @@ function renderMessages(conversationEntry) {
     if (imageEnvelope) {
       const heldBackPhoto = message.direction === "incoming"
         && !shouldAutoDisplayPhotosFrom(requestContact, conversationEntry)
-        && !revealedPhotoIds.has(message.id);
+        && !revealedPhotoIds.has(String(message.txid || message.id));
       if (heldBackPhoto) {
-        const reveal = document.createElement("button");
-        reveal.type = "button";
+        // iOS LazyImageBubble hiddenBubble: eye.slash, "<name> sent a photo", Show Photo.
+        const reveal = document.createElement("div");
         reveal.className = "message-photo-hidden";
-        reveal.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/></svg><span>Tap to view photo</span>';
-        reveal.addEventListener("click", (event) => { event.stopPropagation(); revealedPhotoIds.add(message.id); renderMessages(conversationEntry); });
+        reveal.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7c2 0 3.7.7 5.1 1.6M22 12s-3.6 7-10 7c-2 0-3.7-.7-5.1-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/></svg><span></span><button type="button" class="message-photo-show">Show Photo</button>';
+        reveal.querySelector("span").textContent = `${peerName} sent a photo`;
+        reveal.querySelector("button").addEventListener("click", (event) => { event.stopPropagation(); markPhotoRevealed(message); renderMessages(conversationEntry); });
         bubble.append(reveal);
       } else {
         // Photo-only bubble: no chat-bubble background, just the image (timestamp overlays it).
@@ -15264,13 +15885,13 @@ function renderMessages(conversationEntry) {
         img.className = "message-photo";
         img.src = imageEnvelope.content;
         img.alt = imageEnvelope.name || "Photo";
-        img.addEventListener("click", () => openPhotoPreview(imageEnvelope.content));
+        img.addEventListener("click", () => openPhotoPreview(imageEnvelope.content, imageEnvelope.name));
         bubble.append(img);
       }
     } else if (audioEnvelope) {
       const audioWrap = document.createElement("div");
       audioWrap.className = "message-audio-bubble";
-      audioWrap.append(buildVoicePlayer(audioEnvelope.content, { outgoing: message.direction !== "incoming", durationHint: audioEnvelope.duration }));
+      audioWrap.append(buildVoicePlayer(audioEnvelope.content, { outgoing: message.direction !== "incoming", durationHint: audioEnvelope.duration, chatStyle: true }));
       bubble.append(audioWrap);
     } else {
       const text = document.createElement("span");
@@ -15290,11 +15911,13 @@ function renderMessages(conversationEntry) {
         more.textContent = "Show More";
         more.addEventListener("click", (event) => {
           event.stopPropagation();
-          alertDialog({ title: "Message", message: fullBodyText, confirmLabel: "Done" });
+          // iOS FullMessageTextView: the whole text, Done, and a copy button.
+          confirmDialog({ title: "Message", message: fullBodyText, confirmLabel: "Copy", cancelLabel: "Done" }).then((copy) => {
+            if (copy) copyTextToClipboard(fullBodyText).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {});
+          });
         });
         text.append(more);
       }
-      if (message.edit?.text != null) text.append(editedMarkElement(message.edit.status));
       // An in-app link (KaPosts post, broadcast room) previews as a native card and opens the
       // target screen; it is never scraped like a stranger's URL (iOS KaChatInternalLink).
       const internalLink = firstInternalLinkIn(bodyText);
@@ -15309,10 +15932,13 @@ function renderMessages(conversationEntry) {
         ? buildInternalLinkCard(internalLink)
         : previewable ? (autoFetch ? buildLinkPreviewCard(previewable, { autoLoad: true, outgoing: message.direction !== "incoming" }) : buildTapToLoadCard(previewable, conversationEntry)) : null;
       // A link-only message renders as just the preview card (no chat bubble, timestamp below),
-      // matching iOS. With a caption or other text, show the text bubble + card beneath it.
-      const linkOnly = card && !replyEnvelope && (internalLink
-        ? String(bodyText).trim() === internalLink.raw
-        : (linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));
+      // matching iOS. A link into KaChat is the whole message even with text around it (iOS
+      // KaChatInternalLinkCardView: KaPosts' share text quotes the post above the link, which drew
+      // it twice); Copy and reply still carry the full text. With a caption, any other link shows
+      // the text bubble + its card beneath.
+      const linkOnly = card && (internalLink
+        ? true
+        : (!replyEnvelope && linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));
       if (linkOnly) {
         bubble.classList.add("link-card-bubble");
         bubble.append(card);
@@ -15329,42 +15955,14 @@ function renderMessages(conversationEntry) {
     // wired below via the bubble's "contextmenu" handler.
 
     const reactions = conversationEntry.reactionsByTxId?.[message.txid || message.id] || [];
-    if (reactions.length) {
-      const pill = document.createElement("div");
-      pill.className = "message-reaction-pill";
-      const counts = new Map();
-      for (const entry of reactions) counts.set(entry.emoji, (counts.get(entry.emoji) || 0) + 1);
-      for (const [emoji, count] of counts) {
-        const entryEl = document.createElement("span");
-        entryEl.className = "message-reaction-pill-entry";
-        entryEl.textContent = emoji;
-        if (count > 1) {
-          const countEl = document.createElement("span");
-          countEl.className = "message-reaction-pill-count";
-          countEl.textContent = String(count);
-          entryEl.append(countEl);
-        }
-        // Delivery indicator on YOUR just-sent reaction: ✓ once on-chain, red ! to retry.
-        const statusEl = reactionStatusIndicator(`dm|${message.txid || message.id}|${emoji}`);
-        if (statusEl) entryEl.append(statusEl);
-        pill.append(entryEl);
-      }
-      pill.addEventListener("click", (event) => event.stopPropagation());
-      bubble.append(pill);
-    }
-
-    // 12-hour send time in the corner of every bubble.
-    if (message.createdAt) {
-      const timeEl = document.createElement("span");
-      timeEl.className = "message-time";
-      timeEl.textContent = formatTime(message.createdAt);
-      bubble.append(timeEl);
-    }
+    const localReaction = localReactionStatusFor(`dm|${message.txid || message.id}|`);
+    if (reactions.length) { bubble.classList.add("has-reactions"); bubble.append(buildReactionPill(reactions, localReaction)); }
 
     // Right-click opens the Telegram-style actions menu (reactions + reply/copy/select/etc.).
     onContextGesture(bubble, (event) => {
       event.preventDefault();
       if (messageSelectionMode) return;
+      if (openLinkActionsMenuFor(event, () => startReplyTo(message.id))) return;
       openOneToOneMessageMenu(message.id, event.clientX, event.clientY);
     });
     // Double-click opens the quick-reaction bar (iOS double-tap): the six quick emoji, a "+"
@@ -15380,21 +15978,26 @@ function renderMessages(conversationEntry) {
 
     // Only a failed message of yours can be retried, so only that one pays for the chess check
     // (which replays the whole game).
-    const retryable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED && chessRetryFits(conversationEntry, message);
+    // A failed payment is not retried from the thread (iOS): it is sent again from Send KAS.
+    const retryable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED
+      && message.messageType !== "payment" && !bubble.classList.contains("has-payment-card") && chessRetryFits(conversationEntry, message);
     const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: retryable ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
-    if (detachedLinkCard || typeCapsule || replyQuoteEl) {
-      const stack = document.createElement("div");
-      stack.className = "message-bubble-stack";
-      if (typeCapsule) stack.append(typeCapsule);
-      if (replyQuoteEl) stack.append(replyQuoteEl);
-      stack.append(bubble);
-      if (detachedLinkCard) stack.append(detachedLinkCard);
-      row.append(selector, avatarSlot, stack);
-    } else {
-      row.append(selector, avatarSlot, bubble);
-    }
-    if (deliveryIcon) row.append(deliveryIcon);
+    const stack = document.createElement("div");
+    stack.className = "message-bubble-stack";
+    if (typeCapsule) stack.append(typeCapsule);
+    if (replyQuoteEl) stack.append(replyQuoteEl);
+    stack.append(bubble);
+    if (detachedLinkCard) stack.append(detachedLinkCard);
+    // Under every message: the time, and for your own its delivery status ("Failed · Tap to
+    // retry" is itself the retry); then "edited"; then a failed reaction's red "Retry".
+    stack.append(...buildMessageTimeLines({
+      createdAt: message.createdAt,
+      statusEl: deliveryIcon,
+      edited: message.edit?.text != null,
+      failedReaction: localReaction?.status === "failed" ? localReaction : null,
+    }));
+    row.append(selector, avatarSlot, stack);
     messageArea.appendChild(row);
   });
 
@@ -15599,6 +16202,8 @@ function openChatInfoFor(contact, conversationEntry) {
 
   chatInfoContactId = contact.id;
   chatInfoContactAddress = contact.address;
+  chatInfoStagedNotify = null;
+  chatInfoStagedPhotos = null;
   resetChatInfoAliases();
   refreshChatInfoContactControls();
   if (chatInfoAvatarInitials) chatInfoAvatarInitials.innerHTML = personGlyphSvg();
@@ -15609,7 +16214,6 @@ function openChatInfoFor(contact, conversationEntry) {
     if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = false;
     if (chatInfoAvatarImage) { chatInfoAvatarImage.hidden = true; chatInfoAvatarImage.src = ""; }
   }
-  if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
   // "User Info", as iOS titles it everywhere. The contact's name is the heading of the card
   // immediately below, so putting it in the bar as well said the same thing twice.
   const chatInfoTitle = document.querySelector("[data-chat-info-title]");
@@ -15634,8 +16238,6 @@ function openChatInfoFor(contact, conversationEntry) {
   const namePencil = document.querySelector("[data-chat-info-name-edit]");
   if (namePencil) namePencil.hidden = isSelf;
   if (chatInfoNameInput) chatInfoNameInput.readOnly = isSelf;
-  if (chatInfoPhotoPick) chatInfoPhotoPick.hidden = isSelf;
-  if (isSelf && chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = true;
   // The name you gave them, wherever you gave it - the chat or the Address Book (iOS 2831fab).
   const addressBookGiven = !isSelf && !contact.nameIsCustom ? addressBookName(contact.address) : null;
   if (chatInfoNameInput) chatInfoNameInput.value = addressBookGiven || contact.name || "";
@@ -15652,7 +16254,8 @@ function openChatInfoFor(contact, conversationEntry) {
   }
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
   if (chatInfoAddressMono) chatInfoAddressMono.textContent = contact.address;
-  if (chatInfoAdded) chatInfoAdded.textContent = contact.createdAt ? new Date(contact.createdAt).toLocaleDateString() : "--";
+  // iOS Text(addedAt, style: .date): the long date, "October 16, 2026".
+  if (chatInfoAdded) chatInfoAdded.textContent = contact.createdAt ? new Date(contact.createdAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "--";
 
   // There is no conversation at all when this is User Info for someone never messaged.
   const messages = conversationEntry?.messages || [];
@@ -15665,6 +16268,9 @@ function openChatInfoFor(contact, conversationEntry) {
   if (chatInfoLastMessage) {
     // Under a day reads as a relative time; past that iOS counts whole days, which stays
     // legible where a bare date does not tell you how long it has been.
+    // No message yet: no row at all (iOS shows Last Message only with one).
+    const lastRow = chatInfoLastMessage.closest(".profile-about-row");
+    if (lastRow) lastRow.hidden = !last;
     if (!last) chatInfoLastMessage.textContent = "--";
     else {
       const elapsed = Date.now() - Number(last.createdAt || 0);
@@ -15927,9 +16533,13 @@ function renderChatInfoProfile(contact, profile, domains, domainName = null) {
 function closeChatInfo() {
   if (chatInfoOverlay) chatInfoOverlay.hidden = true;
   chatInfoContactId = null;
+  // Cancel (or Done) drops whatever was staged.
+  chatInfoStagedNotify = null;
+  chatInfoStagedPhotos = null;
 }
 
 function saveChatInfo() {
+  applyChatInfoStagedPrefs();
   const contact = state.contacts.find((entry) => entry.id === chatInfoContactId);
   if (contact) {
     delete contact.viewedOnly; // saved on purpose: a contact now
@@ -16106,7 +16716,6 @@ if (kachatNamesUiEnabled()) {
 
 // Re-render the open chat info avatar + every avatar of this contact across the app.
 function refreshContactAvatars(contact) {
-  if (chatInfoRemovePhoto) chatInfoRemovePhoto.hidden = !contact.photo;
   if (contact.photo) {
     if (chatInfoAvatarImage) { chatInfoAvatarImage.src = contact.photo; chatInfoAvatarImage.hidden = false; }
     if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = true;
@@ -16183,12 +16792,35 @@ function renderChatInfoDomains(info) {
   }).join("");
 }
 
-// Tapping the photo previews it; the camera badge below picks a new one. With no photo there is
-// nothing to enlarge, so the tap does nothing rather than opening an empty overlay.
+// Tapping the avatar opens it full screen (iOS KNSAvatarFullscreenView): the photo when there is
+// one, else the same person glyph, large, on black, under the person's name.
 document.querySelector("[data-chat-info-avatar-preview]")?.addEventListener("click", () => {
   const src = chatInfoAvatarImage && !chatInfoAvatarImage.hidden ? chatInfoAvatarImage.src : "";
-  if (src) openPhotoPreview(src);
+  if (src) { openPhotoPreview(src); return; }
+  openChatInfoAvatarFallback();
 });
+function openChatInfoAvatarFallback() {
+  const contact = state.contacts.find((entry) => entry.id === chatInfoContactId)
+    || (chatInfoContactAddress ? { address: chatInfoContactAddress } : null);
+  if (!contact) return;
+  const title = contact.id ? displayNameForAddress(contact) : identityNameForAddress(contact.address);
+  const el = document.createElement("div");
+  el.className = "chat-info-avatar-fullscreen";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+  el.innerHTML = `
+    <div class="chat-info-avatar-fullscreen-bar">
+      <button type="button" class="chat-info-avatar-fullscreen-button" data-avatar-fullscreen-close aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      <strong>${escapeHtml(title)}</strong>
+      <button type="button" class="chat-info-avatar-fullscreen-button" disabled aria-label="Share"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg></button>
+    </div>
+    <span class="chat-info-avatar-fullscreen-glyph" aria-hidden="true">${personGlyphSvg()}</span>`;
+  const close = () => { el.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (event) => { if (event.key === "Escape") { event.stopPropagation(); close(); } };
+  el.addEventListener("click", (event) => { if (event.target.closest("[data-avatar-fullscreen-close]")) close(); });
+  document.addEventListener("keydown", onKey, true);
+  document.body.appendChild(el);
+}
 
 // The pencil focuses the name field, so it works as the affordance it looks like rather than
 // being decoration beside the real target.
@@ -16208,37 +16840,6 @@ chatInfoOverlay?.addEventListener("click", async (event) => {
   } catch (error) { appendEngineLog(error.message); }
 });
 
-chatInfoPhotoPick?.addEventListener("click", () => chatInfoPhotoInput?.click());
-chatInfoPhotoInput?.addEventListener("change", async () => {
-  const file = chatInfoPhotoInput.files?.[0];
-  chatInfoPhotoInput.value = "";
-  if (!file) return;
-  const contact = state.contacts.find((entry) => entry.id === chatInfoContactId);
-  if (!contact) return;
-  try {
-    setStatus("Preparing photo…");
-    // A small square thumbnail keeps the backup/state light (avatars don't need the
-    // full message-photo budget).
-    const compressed = await compressImageBlob(file, { targetBytes: 48 * 1024, maxDimension: 256 });
-    contact.photo = compressed.dataUrl;
-    contact.updatedAt = Date.now();
-    persistState();
-    refreshContactAvatars(contact);
-    setStatus("Contact photo updated");
-  } catch (error) {
-    setStatus(`Could not set photo: ${error.message}`);
-    showCopyToast(`Could not set photo. ${userFacingError(error)}`);
-  }
-});
-chatInfoRemovePhoto?.addEventListener("click", () => {
-  const contact = state.contacts.find((entry) => entry.id === chatInfoContactId);
-  if (!contact || !contact.photo) return;
-  contact.photo = "";
-  contact.updatedAt = Date.now();
-  persistState();
-  refreshContactAvatars(contact);
-  setStatus("Contact photo removed");
-});
 chatInfoOverlay?.addEventListener("click", (event) => {
   if (event.target === chatInfoOverlay) closeChatInfo();
 });
@@ -16379,37 +16980,77 @@ function setKaPostsDefaultTipKas(kas) {
     else localStorage.removeItem(KAPOSTS_DEFAULT_TIP_KEY);
   } catch { /* fine */ }
 }
+// The six KaPosts notification switches (iOS KaPostsNotificationSettingsView), the same prefs
+// Settings > Notifications > KaPosts writes.
+const KAPOSTS_NOTIFY_TOGGLES = [
+  ["Likes", "kaPostsNotifyLikes", "data-pref-kaposts-notify-likes"],
+  ["Reposts", "kaPostsNotifyReposts", "data-pref-kaposts-notify-reposts"],
+  ["Follows", "kaPostsNotifyFollows", "data-pref-kaposts-notify-follows"],
+  ["Dislikes", "kaPostsNotifyDislikes", "data-pref-kaposts-notify-dislikes"],
+  ["Comments", "kaPostsNotifyComments", "data-pref-kaposts-notify-comments"],
+  ["Mentions", "kaPostsNotifyMentions", "data-pref-kaposts-notify-mentions"],
+];
 // No description under Tipping or Notifications: they explain themselves (iOS 1b7618c).
+// iOS KaPostsSettingsView: "Tipping" (the instant-tip switch, then the amount row: Kaspa logo, the
+// field, KAS), and a Notifications row (bell) opening the "KaPosts" page of six switches.
 function openKaPostsSettings() {
   document.querySelector("[data-kaposts-settings-modal]")?.remove();
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.setAttribute("data-kaposts-settings-modal", "");
   const current = kaPostsDefaultTipKas();
+  const bell = '<svg class="kaposts-settings-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a5.5 5.5 0 0 1 5.5 5.5c0 3.2.8 5 1.8 6.2.4.5.05 1.3-.6 1.3H5.3c-.65 0-1-.8-.6-1.3 1-1.2 1.8-3 1.8-6.2A5.5 5.5 0 0 1 12 4Z"/><path d="M10 19.5a2 2 0 0 0 4 0"/></svg>';
   backdrop.innerHTML = `
-    <section class="contact-modal kaposts-settings-modal" role="dialog" aria-modal="true" aria-label="KaPosts Settings">
-      <div class="modal-header">
-        <div><p class="modal-kicker">KaPosts</p><h2>KaPosts Settings</h2></div>
-        <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
+    <section class="contact-modal kaposts-settings-modal" role="dialog" aria-modal="true" aria-labelledby="kaposts-settings-title">
+      <div data-kaposts-settings-page="main">
+        <div class="modal-header">
+          <div><h2 id="kaposts-settings-title">KaPosts Settings</h2></div>
+          <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
+        </div>
+        <p class="settings-group-label">Tipping</p>
+        <div class="settings-list-card">
+          <div class="settings-page-form">
+            <div class="settings-toggle-row"><span><strong>Send a default tip instantly</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-instant-tip ${current > 0 ? "checked" : ""}><span></span></label></div>
+            <div class="settings-toggle-row kaposts-tip-amount-row" data-kaposts-tip-amount-row ${current > 0 ? "" : "hidden"}>
+              <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" /><input class="field-input" type="text" inputmode="decimal" placeholder="1" aria-label="Default tip" data-kaposts-tip-amount value="${escapeHtml(current > 0 ? trimKas8(current) : "")}" /><span>${KAS_UNIT}</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="settings-list-card">
+          <button class="settings-list-row" type="button" data-kaposts-open-notifications>${bell}<span class="settings-row-copy"><strong>Notifications</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+        </div>
       </div>
-      <p class="settings-group-label">Tipping</p>
-      <div class="settings-list-card">
-        <div class="settings-page-form">
-          <div class="settings-toggle-row"><span><strong>Send a default tip instantly</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-instant-tip ${current > 0 ? "checked" : ""}><span></span></label></div>
-          <div class="settings-toggle-row" data-kaposts-tip-amount-row ${current > 0 ? "" : "hidden"}>
-            <span><strong>Default tip</strong></span>
-            <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" /><input class="field-input" type="text" inputmode="decimal" placeholder="1" data-kaposts-tip-amount value="${escapeHtml(current > 0 ? trimKas8(current) : "")}" /><span>${KAS_UNIT}</span></span>
+      <div data-kaposts-settings-page="notifications" hidden>
+        <div class="modal-header kaposts-settings-subheader">
+          <button class="create-chat-nav-button" type="button" data-kaposts-settings-back aria-label="Back">‹ Back</button>
+          <h2>KaPosts</h2>
+          <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
+        </div>
+        <div class="settings-list-card">
+          <div class="settings-page-form">
+            ${KAPOSTS_NOTIFY_TOGGLES.map(([title, key]) => `<div class="settings-toggle-row"><span><strong>${escapeHtml(title)}</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-notify-toggle="${escapeHtml(key)}" ${(accountShellPrefs[key] ?? true) ? "checked" : ""}><span></span></label></div>`).join("")}
           </div>
         </div>
       </div>
-      <p class="settings-group-label">Notifications</p>
-      <div class="settings-list-card">
-        <button class="settings-list-row" type="button" data-kaposts-open-notifications><span class="settings-row-copy"><strong>Notifications</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-      </div>
     </section>`;
   document.body.append(backdrop);
-  const close = () => backdrop.remove();
-  backdrop.addEventListener("click", (event) => { if (event.target === backdrop || event.target.closest("[data-kaposts-settings-close]")) close(); });
+  const mainPage = backdrop.querySelector('[data-kaposts-settings-page="main"]');
+  const notifyPage = backdrop.querySelector('[data-kaposts-settings-page="notifications"]');
+  const showPage = (notifications) => { mainPage.hidden = notifications; notifyPage.hidden = !notifications; };
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    // Back from the KaPosts page first, as the navigation stack would.
+    if (!notifyPage.hidden) showPage(false); else close();
+  };
+  const close = () => { window.removeEventListener("keydown", onKey, true); backdrop.remove(); };
+  window.addEventListener("keydown", onKey, true);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop || event.target.closest("[data-kaposts-settings-close]")) { close(); return; }
+    if (event.target.closest("[data-kaposts-settings-back]")) { showPage(false); return; }
+    if (event.target.closest("[data-kaposts-open-notifications]")) showPage(true);
+  });
   const toggle = backdrop.querySelector("[data-kaposts-instant-tip]");
   const amountRow = backdrop.querySelector("[data-kaposts-tip-amount-row]");
   const amount = backdrop.querySelector("[data-kaposts-tip-amount]");
@@ -16425,10 +17066,16 @@ function openKaPostsSettings() {
     commit();
   });
   amount.addEventListener("input", commit);
-  backdrop.querySelector("[data-kaposts-open-notifications]")?.addEventListener("click", () => {
-    close();
-    openAccountOverlay();
-    window.setTimeout(() => { try { showSettingsSubscreen("notifications-kaposts"); } catch {} }, 0);
+  // The same prefs as Settings > Notifications > KaPosts; its switches follow.
+  backdrop.querySelectorAll("[data-kaposts-notify-toggle]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const key = input.getAttribute("data-kaposts-notify-toggle");
+      accountShellPrefs[key] = input.checked;
+      persistAccountShellPreferences();
+      const entry = KAPOSTS_NOTIFY_TOGGLES.find(([, k]) => k === key);
+      const mirror = entry ? document.querySelector(`[${entry[2]}]`) : null;
+      if (mirror) mirror.checked = input.checked;
+    });
   });
 }
 
@@ -16491,7 +17138,6 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null) {
   persistState();
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   const liveMessage = conversationEntry.messages.find((entry) => entry.id === message.id) || message;
-  showCopyToast(`Sending ${amountKas} ${KAS_UNIT} tip…`);
   try {
     // A tip that names the post carries its signed kchat:1:tip: payload (iOS a6bd60a); without a
     // post it stays the plain payment it always was.
@@ -16509,7 +17155,8 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null) {
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     const finalTxid = verifiedTxid || txid;
-    showCopyToast(`Tip sent · ${finalTxid.slice(0, 10)}…`);
+    // iOS sendDefaultTip: "Tipped 1.5 KAS to <name>" with View on the explorer.
+    showKaPostsActionToast(`Tipped ${amountKas} ${KAS_UNIT} to ${displayName || shortAddress(clean)}`, finalTxid);
     appendEngineLog(`Instant tip sent: ${explorerTxUrl(finalTxid)}`);
     return finalTxid;
   } catch (error) {
@@ -16572,8 +17219,8 @@ function tipRenderFee() {
   const total = tipTotalFeeSompi();
   tipFeeCtl.setEstimating(Boolean(tip?.estimating));
   tipFeeCtl.setText(total == null ? null : `${formatSompiPlain(total)} ${KAS_UNIT}`);
-  // A custom fee lights no speed; picking one goes back to it.
-  tipFeeCtl.setTier(tip?.customExtraFeeSompi != null ? null : (tip?.tier || "normal"));
+  // A custom fee keeps the speed lit; picking one drops the custom fee (iOS SendFeeControls).
+  tipFeeCtl.setTier(tip?.tier || "normal");
   tipFeeCtl.setCoinSummary(coinControlSummaryText(tip?.manualUtxos?.length || 0));
 }
 
@@ -16609,7 +17256,7 @@ function tipRefreshUnitUi() {
     const sompi = tipAmountSompi();
     const kas = sompi > 0n ? Number(sompi) / 1e8 : null;
     let label = "";
-    if (kas != null && tip?.price > 0) label = fiat ? `≈ ${formatKasPlain(kas)} ${KAS_UNIT}` : `≈ ${formatFiatValue(kas, tip.price)}`;
+    if (kas != null && tip?.price > 0) label = fiat ? `${formatKasPlain(kas)} ${KAS_UNIT}` : formatFiatValue(kas, tip.price);
     const conversion = tipQ("[data-tip-conversion]");
     if (conversion) conversion.textContent = label || (fiat ? KAS_UNIT : code);
   }
@@ -16692,8 +17339,11 @@ function tipScheduleFee() {
       await ensureRuntimes({ quiet: true });
       const amountKas = kasTextFromSompi(amountSompi);
       const selection = state.manualUtxos ? state.manualUtxos.map((coin) => coin.key) : null;
-      // A tip that names the post carries its kchat:1:tip: payload (iOS a6bd60a), counted here.
-      const payloadBytes = state.tip && !state.fundingAddress ? estimateTipPayloadBytes("", Number(amountSompi)) : 0;
+      // The payload from the chatting address, its memo included (iOS estimatePaymentFee(note:tip:)):
+      // kchat:1:tip: for a post (iOS a6bd60a), else kchat:1:pay:.
+      const memo = String(state.memo || "").trim();
+      const payloadBytes = state.fundingAddress ? 0
+        : (state.tip ? estimateTipPayloadBytes(memo, Number(amountSompi)) : estimatePaymentPayloadBytes(memo, Number(amountSompi)));
       const detail = state.fundingAddress
         ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas, selection)
         : await engine.estimateSendFee(amountKas, selection, payloadBytes);
@@ -16720,7 +17370,32 @@ function activeTipMax() {
   return max && String(tipQ("[data-tip-amount]")?.value || "") === max.text && tip.unit === max.unit ? max : null;
 }
 function tipMaxSettingsKey(tip) {
-  return JSON.stringify([tip?.fundingAddress || engine.address || "", [...(tip?.manualUtxos || []).map((coin) => coin.key)].sort(), tip?.tier || "normal", tip?.customExtraFeeSompi == null ? null : String(tip.customExtraFeeSompi)]);
+  return JSON.stringify([tip?.fundingAddress || engine.address || "", [...(tip?.manualUtxos || []).map((coin) => coin.key)].sort(), tip?.tier || "normal", tip?.customExtraFeeSompi == null ? null : String(tip.customExtraFeeSompi), tip?.memo || ""]);
+}
+// The tip's memo (iOS KaPostTipSheet memoField): 140 characters as a person counts them, up to
+// three lines, trimmed when it goes.
+const TIP_MEMO_MAX_LENGTH = 140;
+function clampTipMemo(value) {
+  const text = String(value || "");
+  let chars;
+  try { chars = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].map((part) => part.segment); }
+  catch { chars = Array.from(text); }
+  return chars.length > TIP_MEMO_MAX_LENGTH ? chars.slice(0, TIP_MEMO_MAX_LENGTH).join("") : text;
+}
+// The payload a tip from the chatting address carries, the memo sealed to the poster inside it
+// (iOS sendPayment(note:tip:)): a tip that names the post is kchat:1:tip:, one that doesn't the
+// chat payment's kchat:1:pay:. From a spending address it is a plain transfer (null).
+async function tipPayloadBytesFor(tip, receiver, amountSompi) {
+  if (tip.fundingAddress) return null;
+  const memo = String(tip.memo || "").trim();
+  if (tip.tip) return kaPostTipPayloadBytes(tip.tip, receiver, amountSompi, memo);
+  try {
+    return (await engine.buildPaymentPayload({ receiver, note: memo, amountSompi: Number(amountSompi) }))?.payloadBytes || null;
+  } catch (error) {
+    if (memo) throw new Error(`Couldn't encrypt the memo. (${userFacingError(error)})`);
+    appendEngineLog(`Tip payload unavailable, sending without one: ${error.message}`);
+    return null;
+  }
 }
 async function tipSetMax() {
   const tip = tipState;
@@ -16738,9 +17413,9 @@ async function tipSetMax() {
       sourceAddress: tip.fundingAddress || engine.address,
       destinationAddress: tip.address,
       manualUtxos: tip.manualUtxos ? tip.manualUtxos.map((coin) => coin.key) : null,
-      // A tip that names the post: its kchat:1:tip: payload, built for the whole total as the
-      // chat sheet's Max builds the payment's (iOS a6bd60a).
-      payloadFor: tip.tip && !tip.fundingAddress ? (totalSompi) => kaPostTipPayloadBytes(tip.tip, tip.address, totalSompi) : undefined,
+      // From the chatting address: its payload with the memo (kchat:1:tip: for a post, else
+      // kchat:1:pay:), built for the whole total as the chat sheet's Max builds the payment's (iOS a6bd60a).
+      payloadFor: !tip.fundingAddress ? (totalSompi) => tipPayloadBytesFor(tip, tip.address, totalSompi) : undefined,
     });
   } catch (error) {
     if (token !== tipMaxToken || tipState !== tip) return;
@@ -16810,7 +17485,7 @@ function commitTipCustomFee() {
 
 // `tip` ({ postId, authorPubkey }): the post being tipped. Then the tip names the post and is paid
 // from the chatting address only, so From offers no choice (iOS a6bd60a SendFromSection isLocked).
-async function openTipModal({ address, name, tip = null, onTipped = null } = {}) {
+async function openTipModal({ address, name, tip = null, onTipped = null, error = "" } = {}) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean)) { showCopyToast("This poster has no valid Kaspa address."); return; }
   if (clean === engine.address) { showCopyToast("That's your own address."); return; }
@@ -16841,7 +17516,7 @@ async function openTipModal({ address, name, tip = null, onTipped = null } = {})
     availableSompi: null, availableFailed: false,
     // the fee card: base (Normal) fee in sompi, speed, custom extra; coin control (null = automatic)
     baseFeeSompi: null, estimating: false, tier: "normal", customExtraFeeSompi: null, manualUtxos: null,
-    unit: "kas", price: null, error: "", sending: false,
+    unit: "kas", price: null, error: String(error || ""), sending: false, memo: "",
     // the post this tip names (iOS a6bd60a), null for a plain one
     tip: tip?.postId && tip?.authorPubkey ? { postId: String(tip.postId), authorPubkey: String(tip.authorPubkey) } : null,
   };
@@ -16850,12 +17525,15 @@ async function openTipModal({ address, name, tip = null, onTipped = null } = {})
   tipFromCtl.setLocked(Boolean(sheet.tip));
 
   const shownName = (contact?.name || displayName).trim() || shortAddress(clean);
+  sheet.shownName = shownName;
   const titleEl = tipQ("[data-tip-title]");
   if (titleEl) titleEl.textContent = "Tip";
   const recipientEl = tipQ("[data-tip-recipient]");
   if (recipientEl) { recipientEl.textContent = `to ${shownName}`; recipientEl.title = clean; }
   const amountEl = tipQ("[data-tip-amount]");
   if (amountEl) amountEl.value = "";
+  const memoEl = tipQ("[data-tip-memo]");
+  if (memoEl) { memoEl.value = ""; memoEl.style.height = ""; }
   const customFeeEl = tipQ("[data-tip-kas-fee-custom]");
   if (customFeeEl) customFeeEl.value = "";
   tipFeeCtl.setEditing(false);
@@ -16978,11 +17656,13 @@ async function sendTipNow(tipSompi) {
   // Paid to their chatting address (iOS 6333dd3: no pool destinations any more).
   const destinationAddress = chatPaymentDestination(contact);
   const createdAt = Date.now();
+  // The memo goes into your own bubble, as a chat payment's does (it is sealed to the poster).
+  const memo = String(tip.memo || "").trim();
   const message = createMessage({
     conversationId: conversationEntry.id,
     contactId: contact.id,
     direction: "outgoing",
-    text: `Sent ${amountKas} ${KAS_UNIT}`,
+    text: memo ? `Sent ${amountKas} ${KAS_UNIT} — ${memo}` : `Sent ${amountKas} ${KAS_UNIT}`,
     sender: engine.address || null,
     receiver: destinationAddress,
     status: MESSAGE_STATUSES.PENDING,
@@ -17001,12 +17681,12 @@ async function sendTipNow(tipSompi) {
     // From a spending address the change goes to a never-used address, revealed rather than made
     // primary (iOS 6333dd3). A Max tip leaves no change, so no fresh change address is used.
     const tipFresh = tip.fundingAddress && !max ? freshSpendingChangeAddress() : null;
-    // A tip that names the post carries its signed kchat:1:tip: payload, from the chatting address
-    // (iOS a6bd60a); one without a post is a plain payment, no payload, as before. The fee card's
-    // extra goes as the priority fee and coin control limits the coins, exactly as in the chat's
-    // sheet. Max: one output of exactly the shown amount from exactly its coins (DSK-042), or
-    // nothing if the coins changed (DSK-043).
-    const payload = tip.tip && !tip.fundingAddress ? await kaPostTipPayloadBytes(tip.tip, contact.address, requestedSompi) : null;
+    // From the chatting address the memo rides sealed in the payload (iOS sendPayment(note:tip:)):
+    // a tip that names the post is a signed kchat:1:tip: (iOS a6bd60a), one without a post the chat
+    // payment's kchat:1:pay:. The fee card's extra goes as the priority fee and coin control limits
+    // the coins, exactly as in the chat's sheet. Max: one output of exactly the shown amount from
+    // exactly its coins (DSK-042), or nothing if the coins changed (DSK-043).
+    const payload = await tipPayloadBytesFor(tip, contact.address, requestedSompi);
     const maxPin = max ? { extraFeeSompi, manualUtxos: manualKeys, payload, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
     const result = maxPin
       ? (tip.fundingAddress
@@ -17047,14 +17727,25 @@ async function sendTipNow(tipSompi) {
         ? "Kaspa payment verified at recipient output."
         : "Kaspa node accepted and broadcast the payment transaction.",
     });
+    // From a spending address the chatting address tells the chat about it, the memo with it, as
+    // a chat payment from one does (iOS sendPayment(sourceSpendingIndex:), 927322b).
+    if (tip.fundingAddress) sendSpendingPaymentNotice(conversationEntry, contact, { txId: txid, amountSompi: requestedSompi, memo });
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
-    showCopyToast(`Tip sent · ${(verifiedTxid || txid).slice(0, 10)}…`);
     try { tip.onTipped?.(); } catch { /* the feed moved on */ }
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     tip.sending = false;
-    if (tipState === tip) closeTipModal({ force: true });
+    // The shared Sent sheet over the tip sheet (iOS KaPostTipSheet sentTransaction); Done closes both.
+    if (tipState === tip) tipRefreshState();
+    openSentConfirmation({
+      txid: verifiedTxid || txid,
+      amountSompi: max ? max.amountSompi : requestedSompi,
+      recipient: tip.shownName || tip.displayName || shortAddress(tip.address),
+      explorerUrl: explorerTxUrl(verifiedTxid || txid),
+      kasUnit: KAS_UNIT,
+      onDone: () => { if (tipState === tip) closeTipModal({ force: true }); },
+    });
   } catch (error) {
     if (error?.code === MAX_AMOUNT_CHANGED) {
       // Nothing was sent: no failed bubble, and the new Max goes in the field.
@@ -17091,6 +17782,20 @@ tipQ("[data-tip-amount]")?.addEventListener("input", (event) => {
   if (sanitized !== input.value) input.value = sanitized;
   if (tipState) tipState.error = "";
   tipRefreshUnitUi();
+  tipScheduleFee();
+});
+// The memo (iOS memoField): 140 characters, the field growing to three lines; the fee (and a
+// Max) follow it, since it rides in the payload.
+tipQ("[data-tip-memo]")?.addEventListener("input", () => {
+  const input = tipQ("[data-tip-memo]");
+  const clamped = clampTipMemo(input.value);
+  if (clamped !== input.value) input.value = clamped;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 84)}px`;
+  if (!tipState) return;
+  tipState.memo = clamped;
+  tipState.error = "";
+  tipRefreshState();
   tipScheduleFee();
 });
 tipQ("[data-tip-unit]")?.addEventListener("click", () => {
@@ -17211,6 +17916,8 @@ async function sendOutgoingHandshake(contact, conversationEntry, { accepting = f
     contact.relationshipState = accepting ? "incoming-request" : "request-failed";
     persistState();
     setStatus(`Communication request failed: ${error.message}`);
+    // iOS sendHandshake: the reason in the "Failed to Send" alert.
+    showFailedToSend(userFacingError(error));
     return false;
   }
 }
@@ -17471,7 +18178,6 @@ const settingsHubEl = (() => {
       rows.push(`<button class="settings-list-row settings-hub-row seed" type="button" data-settings-hub-seed>
         <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z"/></svg></span>
         <span class="settings-hub-label">View Seed Phrase</span>
-        ${chevron}
       </button>`);
     }
     rows.push(`<button class="settings-list-row settings-hub-row${danger ? " danger" : ""}" type="button" data-settings-hub-row="${index}">
@@ -17516,6 +18222,8 @@ function refreshSettingsCaptions() {
   try { if (cacheCaption) cacheCaption.textContent = formatCacheBytes(cacheCategories().reduce((sum, c) => sum + c.bytes, 0)); } catch {}
   // Storage > Address Book Photos: the space they take on this device (iOS cda0d99).
   try { refreshAddressBookStorageRow(); } catch {}
+  // Storage > Message retention is per account, so its picker is re-read on every visit.
+  try { refreshRetentionSelectionUi(); updateLocalStorageUsedLabel(); } catch {}
 }
 
 function showSettingsCategory(index) {
@@ -17569,7 +18277,7 @@ if (IS_TESTNET) {
   // Translation is the same service on both networks (iOS 2ca41aa).
   document.querySelectorAll('[data-endpoint="translationService"]').forEach((input) => { input.placeholder = ENDPOINT_DEFAULTS.translationService; });
   document.querySelectorAll('[data-endpoint="kaspaApi"]').forEach((input) => { input.placeholder = ENDPOINT_DEFAULTS.kaspaApi; });
-  const readonly = document.querySelectorAll(".connection-readonly code");
+  const readonly = document.querySelectorAll(".connection-readonly code:not([data-kns-url])");
   if (readonly[0]) readonly[0].textContent = "https://api-tn10.dotk.name/v1";
   if (readonly[1]) { const em = document.createElement("em"); em.textContent = "Not available on this network"; readonly[1].replaceWith(em); }
   // .kachat is live on both networks (iOS ef6b21e; index.html says Live on Mainnet): read through
@@ -17599,7 +18307,13 @@ function showSettingsSubscreen(name, parentIndex) {
   // The retention window is per account, so the checkmark is only right once the page opens.
   if (name === "retention") refreshRetentionSelectionUi();
   if (name === "cache") renderCachePage();
-  if (name === "connection-settings") { renderNodeChoice(); showConnectionTab("indexer"); }
+  // Unsaved edits are dropped on the way back in (iOS loadCurrentSettings onAppear).
+  if (name === "connection-settings") {
+    loadEndpointInputs();
+    document.querySelectorAll("[data-endpoint-error]").forEach((el) => { el.hidden = true; });
+    renderNodeChoice();
+    showConnectionTab("indexer");
+  }
   settingsSubscreenParentIndex = Number.isInteger(parentIndex) && parentIndex >= 0 ? parentIndex : null;
   settingsHubEl.hidden = true;
   settingsGroupsEls.forEach((group) => { group.hidden = group !== target; });
@@ -17634,9 +18348,7 @@ showSettingsCategory(null);
 // with a way to drop any of it. Nothing here is user data.
 // ---------------------------------------------------------------------------
 function cacheCategoryDefs() { return [
-  { id: "broadcasts", title: "Public Chats History", detail: "Messages and reactions from Public Chats.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
-  { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
-  { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
+  // Profiles first, as iOS CacheManager.Category lists it.
   // iOS 5e408f7: one Profiles cache on every network - the identities (who has which avatar, banner,
   // bio and Linktree; this network's 1000 most recent, loaded stale at launch), the avatar, banner
   // and bio looked up from each social link (and their pre-2026-10-07 keys), and the .kas name
@@ -17645,6 +18357,9 @@ function cacheCategoryDefs() { return [
   { id: "profiles", title: "Profiles", detail: "Avatars, banners and bios of your profile and of the people you see. Loaded again when you next see them.",
     match: (k) => k.startsWith("kachat-profile-cache-v1:") || k.startsWith("kachat-social-image-v1:") || (k.startsWith("kachat-kns-") && k.includes("cache")),
     clear: () => { kachatClearProfileCache().catch(() => {}); try { clearAllKnsCache(); } catch {} } },
+  { id: "broadcasts", title: "Public Chats History", detail: "Messages and reactions from Public Chats.", match: (k) => k.startsWith("kachat-broadcast-") && k.includes("cache") },
+  { id: "prices", title: "Price Data", detail: "KAS prices and chart history in your currency.", match: (k) => k.startsWith("kachat-kas-price") || k.startsWith("kachat-kas-daily-price") },
+  { id: "balances", title: "Balance Snapshots", detail: "Last-known balances of your spending and cold storage addresses.", match: (k) => k.includes("kachat-spending-balcache") || k.includes("kachat-cold-cache") },
 ]; }
 function formatCacheBytes(bytes) {
   if (!(bytes > 0)) return "0 KB";
@@ -17693,20 +18408,25 @@ document.querySelector("[data-cache-list]")?.addEventListener("click", async (ev
   if (!row || row.disabled) return;
   const category = cacheCategories().find((c) => c.id === row.dataset.cacheCategory);
   if (!category) return;
-  const ok = await confirmDialog({ title: `Clear ${category.title}?`, message: `${formatCacheBytes(category.bytes)} freed. ${category.detail}`, confirmLabel: "Clear", destructive: true });
-  if (!ok) return;
+  // iOS ConfirmActionSheet: the red action with what it frees, then Cancel. No toast after.
+  const choice = await chooseDialog({ title: `Clear ${category.title}?`, options: [
+    { id: "clear", title: "Clear", subtitle: `${formatCacheBytes(category.bytes)} freed. ${category.detail}`, destructive: true },
+    { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
+  ] });
+  if (choice !== "clear") return;
   clearCacheCategory(category);
   renderCachePage();
-  showCopyToast(`${category.title} cleared.`);
 });
 document.querySelector("[data-cache-clear-all]")?.addEventListener("click", async () => {
   const categories = cacheCategories();
   const total = categories.reduce((sum, c) => sum + c.bytes, 0);
-  const ok = await confirmDialog({ title: "Clear All Cache?", message: `Frees ${formatCacheBytes(total)}. Your messages, contacts and keys are not touched.`, confirmLabel: "Clear All", destructive: true });
-  if (!ok) return;
+  const choice = await chooseDialog({ title: "Clear All Cache?", options: [
+    { id: "clear", title: "Clear All", subtitle: `Frees ${formatCacheBytes(total)}. Your messages, contacts and keys are not touched.`, destructive: true },
+    { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
+  ] });
+  if (choice !== "clear") return;
   categories.forEach(clearCacheCategory);
   renderCachePage();
-  showCopyToast("Cache cleared.");
 });
 
 // ---------------------------------------------------------------------------
@@ -17728,6 +18448,16 @@ function setSettingsAppOnlyMode(appOnly) {
   });
   const seedRow = settingsHubEl?.querySelector("[data-settings-hub-seed]");
   if (seedRow) seedRow.hidden = appOnly;
+  // iOS AppSettingsView: titled "App Settings" (no connection dot or balance), and its
+  // Customization page has only Appearance, Language and Currency.
+  const title = document.querySelector("[data-settings-overlay-title]");
+  if (title) title.hidden = !appOnly;
+  const healthButton = document.querySelector("[data-settings-health-button]");
+  if (healthButton) healthButton.hidden = appOnly;
+  const balance = document.querySelector("[data-settings-balance]");
+  if (balance) balance.hidden = appOnly;
+  const feeRow = document.querySelector("[data-fee-estimate-row]");
+  if (feeRow) feeRow.hidden = appOnly;
 }
 
 document.querySelector("[data-logged-out-settings]")?.addEventListener("click", () => {
@@ -17808,7 +18538,6 @@ contactScanButton?.addEventListener("click", async () => {
 contactForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(contactForm);
-  const name = String(formData.get("name") || "").trim();
   const addressInput = contactForm.elements.address;
   const rawAddress = String(formData.get("address") || "").trim();
 
@@ -17840,22 +18569,33 @@ contactForm.addEventListener("submit", async (event) => {
       address = validateContactAddress(rawAddress);
     }
 
-    if (address === engine.address) throw new Error("That's your own address.");
+    // A deliberate add refuses only the account in use (iOS ContactsManager.addContact,
+    // KasiaError.ownAccountAddress).
+    if (address === engine.address) throw new Error("That address is one of your own accounts, so it cannot be added as a contact.");
     // Starting a chat accepts it; Private also keeps it from ever carrying the inbox tag.
     if (formData.get("privateChat")) setPrivateChat(address, true);
     else acceptChat(address);
-    // A domain finds the address; it does not name the person (iOS 509c0fe).
-    const displayName = name || (engine.knsNamesAsIdentity ? resolvedDomain : "") || shortAddress(address);
+    // A domain finds the address; it does not name the person (iOS 509c0fe). No name is typed
+    // here: one is only ever given later, in User Info.
+    const displayName = (engine.knsNamesAsIdentity ? resolvedDomain : "") || shortAddress(address);
     const existing = state.contacts.find((contact) => contact.address === address);
     if (existing) {
-      const existingConversation = state.conversations.find((entry) => entry.contactId === existing.id);
+      // A known contact opens its chat, which is made if it has none yet (iOS
+      // getOrCreateConversation).
+      let existingConversation = state.conversations.find((entry) => entry.contactId === existing.id);
+      if (!existingConversation) {
+        existingConversation = createConversation({ contactId: existing.id, createdAt: Date.now() });
+        state.conversations.push(existingConversation);
+        refreshSubscriptionAddresses({ restart: true });
+        persistState();
+      }
       closeContactModal();
-      if (existingConversation) openConversation(existingConversation.id);
+      openConversation(existingConversation.id);
       return;
     }
     const createdAt = Date.now();
     const contact = {
-      id: nowId(), name: displayName, nameIsCustom: Boolean(name), address, avatar: initialsFor(displayName), createdAt, updatedAt: createdAt,
+      id: nowId(), name: displayName, nameIsCustom: false, address, avatar: initialsFor(displayName), createdAt, updatedAt: createdAt,
       relationshipState: "legacy-manual", handshakeTxid: "",
     };
     // Deliberate re-add wins over an old deletion — future restores may include it again.
@@ -17888,12 +18628,8 @@ chatList.addEventListener("click", (event) => {
     updateChatSelectionBar();
     return;
   }
-  // Clicking the already-open chat again closes it (clears the detail pane).
-  if (conversationId === activeConversationId) {
-    setActiveConversationId(null);
-    renderChats();
-    return;
-  }
+  // The already-open chat stays open (iOS split layout: selecting it again changes nothing).
+  if (conversationId === activeConversationId) return;
   openConversation(conversationId);
 });
 
@@ -18416,7 +19152,6 @@ document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () =>
   }
   if (selectedChatConversationIds.size) persistState();
   setChatSelectionMode(false);
-  showCopyToast("Marked as read");
 });
 
 document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () => {
@@ -18431,7 +19166,6 @@ document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () 
   }
   if (selectedChatConversationIds.size) persistState();
   setChatSelectionMode(false);
-  showCopyToast("Marked as unread");
 });
 
 document.querySelector("[data-chat-delete-selected]")?.addEventListener("click", async () => {
@@ -18449,11 +19183,12 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   if (chats) parts.push("This permanently deletes every message in each selected chat from this device. This cannot be undone.");
   if (groups) parts.push("This removes each selected group and its messages from this device. This cannot be undone, and other members won't be notified.");
   if (rooms) parts.push("Rooms you added are removed with their messages. Default rooms are only switched off - turn them back on any time in Public Chats settings (the gear).");
-  if (!await confirmDialog({ title, message: parts.join("\n"), confirmLabel: "Delete", destructive: true })) return;
+  if (!await confirmDialog({ title, message: parts.join("\n\n"), confirmLabel: "Delete", destructive: true })) return;
   const chatIds = [...selectedChatConversationIds];
   const groupIds = [...selectedGroupIds];
   const roomNames = [...selectedRoomNames];
-  if (chatIds.length) deleteConversationsByIds(chatIds);
+  // iOS shows the chats toast, then the groups one over it; rooms have none.
+  if (chatIds.length) deleteConversationsByIds(chatIds, { quiet: groupIds.length > 0 });
   if (groupIds.length) {
     const mgr = getGroupManager();
     if (activeGroupId && groupIds.includes(activeGroupId)) closeGroupChat();
@@ -18462,9 +19197,7 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   if (roomNames.length) { try { removeBroadcastRooms(roomNames); } catch { /* rooms not started */ } }
   dropChatCirclePins([...groupIds.map((id) => `g:${id}`), ...roomNames.map((name) => `r:${name}`)]);
   setChatSelectionMode(false);
-  // A chats-only delete keeps deleteConversationsByIds' own toast.
-  if (groups && !chats && !rooms) showCopyToast(groups === 1 ? "Group deleted." : `${groups} groups deleted.`);
-  else if (groups || rooms) showCopyToast(`${total} deleted.`);
+  if (groups) showCopyToast(groups === 1 ? "Group deleted." : `${groups} groups deleted.`);
 });
 
 // Removes chats and their contacts from this device. Shared by the Select-mode bulk bar and the
@@ -18932,11 +19665,7 @@ async function runEngineSendPipeline(conversationId, messageId) {
     setStatus(`Message failed: ${reason}`);
     appendEngineLog(`Message send failed: ${reason}`);
     // iOS "Failed to Send": the reason, in front of you, rather than a status line nobody reads.
-    alertDialog({
-      title: "Failed to Send",
-      message: `${reason}\n\nPlease check your network connection and try again.`,
-      confirmLabel: "OK",
-    });
+    showFailedToSend(reason);
   }
 }
 
@@ -18965,10 +19694,8 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
   // Writing to someone is consent (iOS 5.2): their chat is accepted and a block on them lifts. A
   // handshake request from an old client is answered just by writing back.
   if (contact?.relationshipState === "incoming-request") contact.relationshipState = "established";
-  if (["outgoing-request", "declined", "request-failed"].includes(contact?.relationshipState)) {
-    setStatus(contact.relationshipState === "declined" ? "Communication request declined" : contact.relationshipState === "outgoing-request" ? "Waiting for communication request acceptance" : "Communication request failed");
-    return;
-  }
+  // Never held back by an unanswered or failed handshake (iOS ChatService.sendMessage has no such
+  // gate); a declined chat has no composer to send from ("Conversation declined").
   if (contact?.address) acceptChat(contact.address);
   let finalText = text;
   // Never a call message (iOS 40b1461): a call_invite/request/end sent while a reply was queued in
@@ -19196,9 +19923,12 @@ function formatKasPlain(kas) {
 }
 // The memo as it will be sent: one line, trimmed, at most 140 characters (counted as characters,
 // not UTF-16 units, so an emoji is one).
+// The limit counts what a person sees as characters (Swift's String.count is graphemes: a flag or
+// a family emoji is one), not code points.
+const paymentMemoSegmenter = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
 function clampPaymentMemo(value) {
   const oneLine = String(value || "").replace(/\s*[\r\n]+\s*/g, " ");
-  const chars = Array.from(oneLine);
+  const chars = paymentMemoSegmenter ? Array.from(paymentMemoSegmenter.segment(oneLine), (part) => part.segment) : Array.from(oneLine);
   return chars.length > PAYMENT_MEMO_MAX_LENGTH ? chars.slice(0, PAYMENT_MEMO_MAX_LENGTH).join("") : oneLine;
 }
 function currentPaymentMemo() { return clampPaymentMemo(payMemoInput?.value || "").trim(); }
@@ -19387,7 +20117,8 @@ function paymentMaxSettingsKey(settings) {
 async function fillPaymentMax() {
   if (!payAmountInput || paymentSendInFlight || !isPaySheetOpen()) return;
   const settings = paymentMaxSettings();
-  if (!settings.contact || !settings.address) { showCopyToast("Balance unavailable right now."); return; }
+  // A Max that can't be worked out is only logged (iOS onMax: "Max calculation failed").
+  if (!settings.contact || !settings.address) { appendEngineLog("Max calculation failed: balance unavailable"); return; }
   const token = ++paymentMaxToken;
   paySheetError = "";
   renderPaymentFeePill(null, { estimating: true });
@@ -19412,7 +20143,7 @@ async function fillPaymentMax() {
   } catch (error) {
     if (token !== paymentMaxToken || !isPaySheetOpen()) return;
     renderPaymentFeePill(paymentBaseFeeSompi);
-    paySheetError = userFacingError(error) || "Balance too low after network fees.";
+    appendEngineLog(`Max calculation failed: ${userFacingError(error)}`);
     refreshPaymentSheetState();
     return;
   }
@@ -19673,7 +20404,10 @@ async function activateComposerMode() {
   input.setAttribute("aria-label", "Message");
   setComposerHint("Message");
   hideFeeEstimateBanner();
+  // A recording belongs to the chat it was made in.
+  try { exitChatAudioMode(); } catch { /* voice section not evaluated yet */ }
   updateHandshakeWarningBanner();
+  syncComposerSlots();
 }
 
 
@@ -19980,9 +20714,9 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
         throw changed;
       }
     } else if (requestedSompi + feeReserveSompi > spendableSompi) {
-      throw new Error(manualKeys
-        ? `Not enough ${KAS_UNIT} in the chosen coins: planned spend ${amountKas} ${KAS_UNIT}, but they hold ${formatSompiPlain(spendableSompi)} ${KAS_UNIT}, less than required after the network fee.`
-        : `Not enough ${KAS_UNIT}: planned spend ${amountKas} ${KAS_UNIT}, but the available balance ${balance.totalKas} ${KAS_UNIT} is less than required after the network fee.`);
+      // iOS ChatService.formatInsufficientBalanceError: amount + fee against what can be spent
+      // (the chosen coins under Coin Control).
+      throw new Error(`Planned spend ${formatSompiPlain(requestedSompi + feeReserveSompi)} ${KAS_UNIT}, but available balance ${formatSompiPlain(spendableSompi)} ${KAS_UNIT} is less than required.`);
     }
     // The payment payload, as iOS writes it: kchat:1:pay: + the payment JSON (the memo is its
     // "message") encrypted to the contact's chat address. From a spending address it is a plain
@@ -20105,7 +20839,9 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
     refreshComposerAvailableBalance();
-    return true;
+    // The txid (truthy, so callers that only ask "did it go?" still read it as yes): paying a
+    // payment request from Send Kaspa shows it on the Sent sheet.
+    return verifiedTxid || txid || true;
   } finally {
     paymentSendInFlight = false;
     refreshPaymentSheetState();
@@ -20121,10 +20857,10 @@ if (composerPlusButton && composerPlusMenu) {
     const secondStepOpen = (tcMenu && !tcMenu.hidden) || (composerMediaRouteMenu && !composerMediaRouteMenu.hidden);
     if (secondStepOpen) { closeComposerMenu(); return; }
     const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
-    // In your own chat there is no one to shake hands with or to play. The handshake row is only
+    // In your own chat there is no one to shake hands with. The handshake row is only
     // there where first contact still needs one (iOS: canSendRequestToCommunicate && !inboxSupported).
     const selfChat = isSelfConversation(conversationEntry);
-    composerPlusMenu.querySelectorAll("[data-chess-open]").forEach((row) => { row.hidden = selfChat; });
+    // Play Chess is always offered (iOS composerPlusOptions has no condition on it).
     composerPlusMenu.querySelectorAll("[data-composer-handshake]").forEach((row) => { row.hidden = selfChat || inboxSupportKnown() === true; });
     // File appears with a connected Nextcloud (nextcloud.js keeps it in step too).
     composerPlusMenu.querySelectorAll("[data-nextcloud-pick]").forEach((row) => { row.hidden = !isNextcloudConnected(); });
@@ -20517,16 +21253,56 @@ function closeChess() {
   if (chessWaitingEl) chessWaitingEl.hidden = true;
 }
 
-// Small live board thumbnail for the latest chess message in the chat.
+// iOS chessInviteBubble: "♟️" and who invited whom, a "3 | 2" timer chip on a timed game,
+// Accept / Decline while an invite to you waits, else the game's status. A click opens the board.
+function buildChessInviteBubble(env, summary, outgoing) {
+  const card = document.createElement("div");
+  card.className = "chess-invite-bubble";
+  const head = document.createElement("div");
+  head.className = "chess-invite-head";
+  head.innerHTML = '<span class="chess-invite-glyph" aria-hidden="true">♟️</span><span></span>';
+  head.querySelector("span:last-child").textContent = outgoing ? "Chess game invite sent" : "Invited you to a game of chess";
+  card.append(head);
+  const tcLabel = Chess.chessTimeControlLabel(Chess.chessTimeControlFromInvite(env));
+  if (tcLabel) {
+    const chip = document.createElement("span");
+    chip.className = "chess-invite-chip";
+    chip.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg><span></span>';
+    chip.querySelector("span").textContent = tcLabel;
+    card.append(chip);
+  }
+  const showsResponse = !outgoing && summary?.status?.kind === "pendingResponse";
+  if (showsResponse) {
+    const actions = document.createElement("div");
+    actions.className = "chess-invite-actions";
+    actions.innerHTML = '<button type="button" class="chess-invite-accept">Accept</button><button type="button" class="chess-invite-decline">Decline</button>';
+    actions.querySelector(".chess-invite-accept").addEventListener("click", (event) => { event.stopPropagation(); chessSendEnvelope(Chess.chessResponse(env.gameId, true)); });
+    actions.querySelector(".chess-invite-decline").addEventListener("click", (event) => { event.stopPropagation(); chessSendEnvelope(Chess.chessResponse(env.gameId, false)); });
+    card.append(actions);
+  } else if (summary) {
+    const status = document.createElement("span");
+    status.className = "chess-invite-status";
+    status.textContent = Chess.chessSummaryStatusText(summary);
+    card.append(status);
+  }
+  card.addEventListener("click", (event) => {
+    if (showsResponse) return;
+    event.stopPropagation();
+    openChessGame(env.gameId);
+  });
+  return card;
+}
+
+// Small live board thumbnail for the latest chess message in the chat (iOS chessLiveCard: the
+// board with white at the bottom, the status and, on a timed game, its timer chip).
 function buildChessThumb(summary, gameId) {
   const wrap = document.createElement("button");
   wrap.type = "button";
   wrap.className = "chess-thumb";
   const boardEl = document.createElement("div");
   boardEl.className = "chess-thumb-board";
-  const orient = summary.viewerColor || "white";
-  const ranks = orient === "white" ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
-  const files = orient === "white" ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+  const ranks = [7, 6, 5, 4, 3, 2, 1, 0];
+  const files = [0, 1, 2, 3, 4, 5, 6, 7];
   for (const rank of ranks) {
     for (const file of files) {
       const cell = document.createElement("div");
@@ -20543,13 +21319,19 @@ function buildChessThumb(summary, gameId) {
   }
   const status = document.createElement("span");
   status.className = "chess-thumb-status";
-  // "3 | 2" chip alongside the status while a timed game is still live (the iOS invite bubble
-  // shows the same label); once it is over the time control is no longer news.
-  const tcLabel = Chess.isChessGameOver(summary.status) ? null : Chess.chessTimeControlLabel(summary.timeControl);
-  status.textContent = tcLabel
-    ? `${Chess.chessSummaryStatusText(summary)} - ${tcLabel}`
-    : Chess.chessSummaryStatusText(summary);
-  if (summary.status.kind === "inProgress" && summary.viewerColor && summary.board.sideToMove === summary.viewerColor) status.classList.add("you");
+  const statusText = document.createElement("span");
+  statusText.className = "chess-thumb-status-text";
+  statusText.textContent = Chess.chessSummaryStatusText(summary);
+  if (Chess.isChessGameOver(summary.status)) status.classList.add("over");
+  status.append(statusText);
+  const tcLabel = Chess.chessTimeControlLabel(summary.timeControl);
+  if (tcLabel) {
+    const chip = document.createElement("span");
+    chip.className = "chess-thumb-chip";
+    chip.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg><span></span>';
+    chip.querySelector("span").textContent = tcLabel;
+    status.append(chip);
+  }
   wrap.append(boardEl, status);
   wrap.addEventListener("click", (event) => { event.stopPropagation(); openChessGame(gameId); });
   return wrap;
@@ -20744,12 +21526,35 @@ document.querySelectorAll("[data-chess-open]").forEach((btn) => btn.addEventList
 chessTcMenu?.querySelectorAll("[data-chess-tc]").forEach((btn) => btn.addEventListener("click", () => {
   chessTcMenu.hidden = true;
   const raw = String(btn.dataset.chessTc || "").trim();
-  if (!raw || raw === "casual") { openChessGame(null, null); return; }
+  if (!raw || raw === "casual") { startChessGameFromSheet(null); return; }
   const [minutes, inc] = raw.split("|").map((part) => Number(part.trim()));
-  openChessGame(null, Number.isFinite(minutes) && minutes > 0
+  startChessGameFromSheet(Number.isFinite(minutes) && minutes > 0
     ? { minutes, incSeconds: Number.isFinite(inc) ? inc : 0 }
     : null);
 }));
+// Back returns to the "+" options (iOS chessTimeControlSheet's Back).
+chessTcMenu?.querySelector("[data-chess-tc-back]")?.addEventListener("click", () => {
+  chessTcMenu.hidden = true;
+  if (composerPlusMenu) composerPlusMenu.hidden = false;
+});
+// iOS ChatDetailView.startChessGame: a new game always supersedes whichever one is active
+// against this contact (Casual included) - it is resigned first - and the invite goes out without
+// opening the board; the invite bubble in the chat is where it shows.
+function startChessGameFromSheet(timeControl) {
+  const { contact, messages } = chessConversationContext();
+  if (!contact?.address || !engine.address) return;
+  const existing = Chess.activeChessGame(messages, engine.address, contact.address);
+  if (existing && !Chess.isChessGameOver(existing.status)) {
+    chessSendEnvelope(Chess.chessResign(existing.gameId));
+    clearChessClock(existing.gameId);
+  }
+  chessSendEnvelope(Chess.chessInvite(
+    Chess.newGameId(),
+    Math.random() < 0.5 ? "white" : "black",
+    timeControl?.minutes ?? null,
+    timeControl?.incSeconds ?? null,
+  ));
+}
 document.querySelector("[data-chess-close]")?.addEventListener("click", closeChess);
 chessResignBtn?.addEventListener("click", resignChess);
 document.querySelector("[data-chess-accept]")?.addEventListener("click", () => {
@@ -20873,23 +21678,101 @@ function clearPendingPhoto() {
   pendingPhotoAttachment = null;
   // A discarded photo drops the route it was picked with; a send snapshots it first.
   photoViaNextcloud = false;
+  setPendingPhotoSending(false);
   if (pendingPhotoPreview) pendingPhotoPreview.hidden = true;
   if (pendingPhotoThumb) pendingPhotoThumb.src = "";
   if (photoFileInput) photoFileInput.value = "";
+  syncComposerSlots();
+  scheduleFeeEstimate();
 }
 
+// iOS pendingPhotoRow: the photo takes the text field's place - its thumbnail, "Photo" (a
+// spinner and "Sending…" while it goes) and a trash can. Whatever was typed is kept underneath
+// and comes back once the photo is sent or removed.
+let pendingPhotoSending = false;
+function setPendingPhotoSending(sending) {
+  pendingPhotoSending = Boolean(sending);
+  const spinner = pendingPhotoPreview?.querySelector("[data-pending-photo-spinner]");
+  if (spinner) spinner.hidden = !pendingPhotoSending;
+  if (pendingPhotoMeta) {
+    pendingPhotoMeta.textContent = pendingPhotoSending ? "Sending…" : "Photo";
+    pendingPhotoMeta.classList.toggle("sending", pendingPhotoSending);
+  }
+  syncComposerSlots();
+}
 function setPendingPhoto(attachment) {
+  // Only when the composer can take one (iOS canAcceptImageAttachment).
+  if (!canAcceptChatImageAttachment()) return false;
   pendingPhotoAttachment = attachment;
   if (pendingPhotoThumb) pendingPhotoThumb.src = attachment.dataUrl;
-  const overBudget = attachment.bytes > photoQualityTargetBytes();
-  if (pendingPhotoMeta) {
-    pendingPhotoMeta.textContent = `Photo · ${attachment.width}×${attachment.height} · ${(attachment.bytes / 1024).toFixed(1)} KB${overBudget ? " · larger fee" : ""}`;
-  }
   if (pendingPhotoPreview) pendingPhotoPreview.hidden = false;
-  composer.elements.message?.focus();
+  setPendingPhotoSending(false);
+  composer.elements.message?.blur();
+  scheduleFeeEstimate();
+  return true;
+}
+/** iOS canAcceptImageAttachment: not declined, not in audio mode, no photo already pending. */
+function canAcceptChatImageAttachment() {
+  if (!activeConversationId || pendingPhotoAttachment || pendingPhotoSending || chatAudioMode) return false;
+  const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+  return contactForConversation(conversationEntry)?.relationshipState !== "declined";
+}
+
+/** iOS ChatDetailView's error alert: "Failed to Send", the reason, and - unless it is the
+ *  insufficient-balance message - "Please check your network connection and try again." */
+function showFailedToSend(reason) {
+  const text = String(reason || "Unknown error");
+  const balance = /planned spend .+ but available balance .+ is less than required/i.test(text);
+  alertDialog({
+    title: "Failed to Send",
+    message: balance ? text : `${text}\n\nPlease check your network connection and try again.`,
+    confirmLabel: "OK",
+  });
+}
+
+let composerSendIconState = "";
+const COMPOSER_SEND_ICONS = {
+  send: '<path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/>',
+  stop: '<rect x="7.5" y="7.5" width="9" height="9" rx="1.5" fill="currentColor"/>',
+  mic: '<rect x="9.5" y="4.5" width="5" height="9.5" rx="2.5"/><path d="M7 11.5a5 5 0 0 0 10 0M12 16.5V19.5"/>',
+};
+/** The 1:1 composer's slots (iOS inputBar): what stands in the field, whether the emoji button
+ *  shows, and whether "+" or Send sits at the right - "+" while there is nothing to send. */
+function syncComposerSlots() {
+  try {
+    if (!composer) return;
+    const input = composer.elements?.message;
+    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
+    const declined = contactForConversation(conversationEntry)?.relationshipState === "declined";
+    const audio = !declined && chatAudioMode;
+    const hasPhoto = !declined && Boolean(pendingPhotoAttachment);
+    const voiceState = audio ? chatVoiceState() : "idle";
+    const declinedEl = composer.querySelector("[data-composer-declined]");
+    if (declinedEl) declinedEl.hidden = !declined;
+    composer.classList.toggle("composer-declined", declined);
+    composer.classList.toggle("composer-field-replaced", declined || hasPhoto || audio);
+    const hasText = /\S/.test(String(input?.value || ""));
+    composer.classList.toggle("composer-has-content", !declined && (audio || hasPhoto || hasText));
+    const emoji = composer.querySelector("[data-composer-emoji]");
+    if (emoji) emoji.hidden = declined || audio || hasPhoto;
+    const audioSwitch = composer.querySelector("[data-composer-audio-switch]");
+    if (audioSwitch) audioSwitch.hidden = !(audio && voiceState === "idle");
+    const send = composer.querySelector(".composer-send");
+    if (send) {
+      const icon = audio ? (voiceState === "recording" ? "stop" : voiceState === "idle" ? "mic" : "send") : "send";
+      const svg = send.querySelector("svg");
+      if (svg && composerSendIconState !== icon) { svg.innerHTML = COMPOSER_SEND_ICONS[icon]; composerSendIconState = icon; }
+      send.classList.toggle("composer-send-stop", icon === "stop");
+      send.classList.toggle("composer-send-mic", icon === "mic");
+      // A photo can't be sent twice while it goes (iOS canSend); nor a recording still encoding.
+      send.disabled = (hasPhoto && pendingPhotoSending) || voiceState === "encoding";
+      send.setAttribute("aria-label", icon === "stop" ? "Stop recording" : icon === "mic" ? "Record" : "Send message");
+    }
+  } catch { /* the composer section may not be evaluated yet */ }
 }
 
 async function attachPhotoBlob(blob) {
+  if (!canAcceptChatImageAttachment()) { photoViaNextcloud = false; return false; }
   setStatus("Compressing photo…");
   try {
     const attachment = await compressImageBlob(blob);
@@ -20897,11 +21780,14 @@ async function attachPhotoBlob(blob) {
     // upload the ORIGINAL full-quality file instead of the payload-sized recompression.
     attachment.originalBlob = blob;
     attachment.originalName = blob.name || "photo.jpg";
-    setPendingPhoto(attachment);
+    if (!setPendingPhoto(attachment)) { photoViaNextcloud = false; return false; }
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB`);
+    return true;
   } catch (error) {
     photoViaNextcloud = false;
-    showCopyToast(error.message || "Could not attach that photo.");
+    appendEngineLog(`Photo attach failed: ${userFacingError(error)}`);
+    showFailedToSend("Couldn't load that photo. Please try a PNG, JPEG, or HEIF image.");
+    return false;
   }
 }
 
@@ -21048,6 +21934,10 @@ let voiceElapsedSeconds = 0;
 const voicePreviews = new Map(); // panel element -> { blob, mimeType, seconds, audio, playing }
 function renderVoicePanel(panel, state, { prefix = "voice-recording", seconds = 0 } = {}) {
   if (!panel) return;
+  // The 1:1 recorder sits in the composer's field (iOS inputField .audio) and draws itself.
+  if (panel.hasAttribute("data-voice-recording-panel")) { renderChatVoiceField(); return; }
+  // So does the group's (iOS recordingRow).
+  if (panel.hasAttribute("data-group-voice-panel")) { renderGroupVoiceRow(); return; }
   panel.hidden = false;
   panel.classList.toggle("preview", state === "preview");
   if (state === "recording") {
@@ -21094,40 +21984,130 @@ function toggleVoicePreviewPlayback(panel) {
 const chatVoiceRecorder = createVoiceRecorder({
   maxDurationSeconds: voiceMaxDurationSeconds,
   onElapsed: (elapsed) => {
+    const wholeSecondChanged = Math.floor(elapsed) !== Math.floor(voiceElapsedSeconds);
     voiceElapsedSeconds = elapsed;
     const el = voiceRecordingPanel?.querySelector("[data-voice-recording-time]");
-    if (el) el.textContent = formatRecordingTime(elapsed);
+    if (el) el.textContent = String(Math.floor(elapsed));
+    // The fee follows the recording's length (iOS updateRecordingFeeEstimate).
+    if (wholeSecondChanged) scheduleFeeEstimate();
   },
   onFinish: handleChatVoiceRecordingFinished,
 });
 
+// iOS 1:1 audio mode (InputMode.audio): "Voice Message" puts the composer in it and starts
+// recording. The field reads "Recording... Ns", then "Encoding…", then "Audio ready • 00:05"
+// with play; the trash discards and stays in audio mode ("Tap send to record"); the send button
+// stops, sends, or records again. A sent voice message goes back to the text composer.
+let chatAudioMode = false;
+let chatVoiceEncoding = false;
+const VOICE_TRASH_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
+function chatVoiceState() {
+  if (chatVoiceEncoding) return "encoding";
+  if (chatVoiceRecorder.isRecording()) return "recording";
+  if (voicePreviews.get(voiceRecordingPanel)) return "preview";
+  return "idle";
+}
+/** iOS formatDuration: "00:07". */
+function formatAudioDuration(seconds) {
+  if (!Number.isFinite(Number(seconds))) return "--:--";
+  const total = Math.max(0, Math.round(Number(seconds)));
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+function renderChatVoiceField() {
+  const panel = voiceRecordingPanel;
+  if (!panel) return;
+  panel.classList.remove("preview");
+  if (!chatAudioMode) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    syncComposerSlots();
+    if (lastChatVoiceFeeState) { lastChatVoiceFeeState = ""; scheduleFeeEstimate(); }
+    return;
+  }
+  panel.hidden = false;
+  const trash = `<button type="button" class="voice-field-trash" data-voice-recording-cancel aria-label="Discard recording">${VOICE_TRASH_SVG}</button>`;
+  const voiceState = chatVoiceState();
+  if (voiceState === "recording") {
+    panel.innerHTML = `<span class="composer-field-spinner" aria-hidden="true"></span><span class="voice-field-label">Recording... <span data-voice-recording-time>${Math.floor(voiceElapsedSeconds)}</span>s</span>${trash}`;
+  } else if (voiceState === "encoding") {
+    panel.innerHTML = `<span class="composer-field-spinner" aria-hidden="true"></span><span class="voice-field-label">Encoding…</span>${trash}`;
+  } else if (voiceState === "preview") {
+    const entry = voicePreviews.get(panel);
+    const playing = Boolean(entry?.playing);
+    panel.innerHTML = `<button type="button" class="voice-preview-play" data-voice-recording-play aria-label="${playing ? "Pause" : "Play"}">${playing
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-2.5 6h1.8v8H9.5zm3.2 0h1.8v8h-1.8z"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-2 5.8 6 4.2-6 4.2z"/></svg>'}</button>
+      <span class="voice-field-label">Audio ready • ${formatAudioDuration(entry?.seconds)}</span>${trash}`;
+  } else {
+    panel.innerHTML = `<span class="voice-field-hint">Tap send to record</span>`;
+  }
+  syncComposerSlots();
+  // The fee pill follows the recorder's state, not every playback tick.
+  if (voiceState !== lastChatVoiceFeeState) { lastChatVoiceFeeState = voiceState; scheduleFeeEstimate(); }
+}
+let lastChatVoiceFeeState = "";
+/** Leaves audio mode for the text composer (iOS switchMode(.message)), discarding any recording. */
+function exitChatAudioMode() {
+  if (!chatAudioMode) return;
+  chatAudioMode = false;
+  chatVoiceEncoding = false;
+  voiceViaNextcloud = false; // the route belongs to this round of audio mode
+  if (chatVoiceRecorder.isRecording()) chatVoiceRecorder.stop(true);
+  clearVoicePreview(voiceRecordingPanel);
+  renderChatVoiceField();
+}
+
 async function startVoiceRecording() {
   if (chatVoiceRecorder.isRecording()) return;
   clearVoicePreview(voiceRecordingPanel);
+  chatAudioMode = true;
+  chatVoiceEncoding = false;
+  voiceElapsedSeconds = 0;
+  renderChatVoiceField();
   const error = await chatVoiceRecorder.start();
   if (error) {
-    showCopyToast(error);
+    // iOS: "Microphone access denied." in the Failed to Send alert; audio mode stays up.
+    showFailedToSend(error === "Microphone access was denied." ? "Microphone access denied." : error);
+    renderChatVoiceField();
     return;
   }
   voiceElapsedSeconds = 0;
-  renderVoicePanel(voiceRecordingPanel, "recording", { seconds: 0 });
+  renderChatVoiceField();
 }
 
 function stopVoiceRecording(cancelled) {
+  if (!cancelled && chatVoiceRecorder.isRecording()) chatVoiceEncoding = true;
   chatVoiceRecorder.stop(cancelled);
+  renderChatVoiceField();
 }
 
 // Stop hands the recording to the preview; Send on the preview is what actually sends it.
+let chatVoiceDiscardNext = false; // trashed while it was still encoding
 async function handleChatVoiceRecordingFinished({ blob, mimeType, cancelled }) {
-  if (cancelled || !blob || !activeConversationId) { clearVoicePreview(voiceRecordingPanel); return; }
+  chatVoiceEncoding = false;
+  const discard = chatVoiceDiscardNext || !chatAudioMode;
+  chatVoiceDiscardNext = false;
+  if (cancelled || discard || !blob || !activeConversationId) { clearVoicePreview(voiceRecordingPanel); renderChatVoiceField(); return; }
   setVoicePreview(voiceRecordingPanel, { blob, mimeType, seconds: Math.round(voiceElapsedSeconds) }, "voice-recording");
+}
+
+// The composer's send button in audio mode (iOS handleSend .audio).
+function handleChatAudioSend() {
+  const voiceState = chatVoiceState();
+  if (voiceState === "recording") stopVoiceRecording(false);
+  else if (voiceState === "encoding") return;
+  else if (voiceState === "preview") sendChatVoicePreview();
+  else startVoiceRecording();
 }
 
 async function sendChatVoicePreview() {
   const entry = voicePreviews.get(voiceRecordingPanel);
   if (!entry || !activeConversationId) return;
   const { blob, mimeType } = entry;
+  // Back to the text composer once it is on its way (iOS sendAudio: switchMode(.message)).
+  chatAudioMode = false;
   clearVoicePreview(voiceRecordingPanel);
+  renderChatVoiceField();
 
   // "Record via Nextcloud" (chosen in the "+" sheet): upload the recording and send its share
   // link (renders as an audio card + player on the recipient's side). Failure falls back to the
@@ -21143,7 +22123,8 @@ async function sendChatVoicePreview() {
       setStatus("Voice note sent via Nextcloud.");
       return;
     } catch (error) {
-      showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
+      appendEngineLog(`Nextcloud voice upload failed, sending on-chain: ${userFacingError(error)}`);
+      showCopyToast("Nextcloud upload failed - sending on-chain instead");
     }
   }
 
@@ -21153,7 +22134,7 @@ async function sendChatVoicePreview() {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(blob);
   }).catch(() => null);
-  if (!dataUrl) { showCopyToast("Could not process the recording."); return; }
+  if (!dataUrl) { showFailedToSend("Audio encoding failed. Please record again."); return; }
 
   const envelope = JSON.stringify({
     type: "file",
@@ -21166,13 +22147,23 @@ async function sendChatVoicePreview() {
 }
 
 voiceRecordingPanel?.addEventListener("click", (event) => {
-  if (event.target.closest("[data-voice-recording-stop]")) { stopVoiceRecording(false); return; }
-  if (event.target.closest("[data-voice-recording-send]")) { sendChatVoicePreview(); return; }
   if (event.target.closest("[data-voice-recording-play]")) { toggleVoicePreviewPlayback(voiceRecordingPanel); return; }
+  // The trash (iOS cancelRecording): the recording goes, audio mode stays.
   if (event.target.closest("[data-voice-recording-cancel]")) {
-    if (chatVoiceRecorder.isRecording()) stopVoiceRecording(true);
-    else clearVoicePreview(voiceRecordingPanel);
+    if (chatVoiceEncoding) chatVoiceDiscardNext = true;
+    chatVoiceEncoding = false;
+    if (chatVoiceRecorder.isRecording()) chatVoiceRecorder.stop(true);
+    clearVoicePreview(voiceRecordingPanel);
+    renderChatVoiceField();
   }
+});
+document.querySelector("[data-composer-audio-text]")?.addEventListener("click", () => {
+  exitChatAudioMode();
+  composer?.elements?.message?.focus();
+});
+document.querySelector("[data-composer-audio-pay]")?.addEventListener("click", () => {
+  exitChatAudioMode();
+  openPaymentSheet();
 });
 
 // Envelope parses are memoized by content string: the thread re-renders constantly (sync
@@ -21387,13 +22378,31 @@ function renderQuickReactionSlots() {
   const wrap = document.querySelector("[data-quick-reactions-slots]");
   if (!wrap) return;
   wrap.innerHTML = quickReactionEmojis()
-    .map((emoji, index) => `<input class="quick-reaction-slot" data-quick-slot="${index}" type="text" value="${escapeHtml(emoji)}" aria-label="Reaction ${index + 1}">`)
+    .map((emoji, index) => `<button class="quick-reaction-slot" data-quick-slot="${index}" type="button" aria-label="Reaction ${index + 1}">${escapeHtml(emoji)}</button>`)
     .join("");
 }
+// A tile opens the emoji picker; the pick replaces that slot and saves at once (iOS).
+document.querySelector("[data-quick-reactions-slots]")?.addEventListener("click", (event) => {
+  const slot = event.target.closest("[data-quick-slot]");
+  if (!slot) return;
+  const index = Number(slot.dataset.quickSlot);
+  openEmojiReactionPicker({
+    title: "Choose Emoji",
+    onPick: (emoji) => {
+      const emojis = quickReactionEmojis().slice();
+      const picked = firstGrapheme(emoji);
+      if (!picked || !(index >= 0 && index < emojis.length)) return;
+      emojis[index] = picked;
+      try { localStorage.setItem(QUICK_REACTIONS_KEY, JSON.stringify(emojis)); } catch { /* storage full */ }
+      renderQuickReactionSlots();
+      updateQuickReactionsPreview();
+    },
+  });
+});
 
 function updateQuickReactionsPreview() {
   const el = document.querySelector("[data-quick-reactions-preview]");
-  if (el) el.textContent = quickReactionEmojis().join(" ");
+  if (el) el.textContent = quickReactionEmojis().join("");
 }
 
 document.querySelector("[data-open-quick-reactions]")?.addEventListener("click", () => {
@@ -21408,16 +22417,6 @@ document.querySelector("[data-quick-reactions-reset]")?.addEventListener("click"
   localStorage.removeItem(QUICK_REACTIONS_KEY);
   renderQuickReactionSlots();
   updateQuickReactionsPreview();
-  showCopyToast("Quick reactions reset to default");
-});
-document.querySelector("[data-quick-reactions-save]")?.addEventListener("click", () => {
-  const inputs = [...document.querySelectorAll("[data-quick-slot]")];
-  const emojis = inputs.map((input) => firstGrapheme(input.value));
-  if (emojis.some((e) => !e)) { showCopyToast("Every slot needs an emoji."); return; }
-  localStorage.setItem(QUICK_REACTIONS_KEY, JSON.stringify(emojis));
-  updateQuickReactionsPreview();
-  closeQuickReactionsModal();
-  showCopyToast("Quick reactions saved");
 });
 
 const DEFAULT_QUICK_REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
@@ -22529,30 +23528,6 @@ function setReactionSendStatus(key, status, { retry = null, rerender = null } = 
   try { rerender?.(); } catch {}
 }
 
-/** Tiny status element for a reaction chip, or null when there's nothing to show. */
-function reactionStatusIndicator(key) {
-  const entry = reactionSendStatus.get(key);
-  if (!entry) return null;
-  const el = document.createElement("span");
-  if (entry.status === "pending") {
-    el.className = "reaction-status pending";
-    el.textContent = "…";
-    el.title = "Sending reaction…";
-  } else if (entry.status === "sent") {
-    el.className = "reaction-status sent";
-    el.textContent = "✓";
-    el.title = "Reaction sent";
-  } else {
-    el.className = "reaction-status failed";
-    el.textContent = "!";
-    el.title = "Reaction failed to send. Click to retry.";
-    el.addEventListener("click", (event) => {
-      event.stopPropagation();
-      entry.retry?.();
-    });
-  }
-  return el;
-}
 
 async function sendReaction(conversationEntry, targetMessage, emoji) {
   const contact = contactForConversation(conversationEntry);
@@ -22652,6 +23627,40 @@ composer.elements.message?.addEventListener("paste", async (event) => {
   photoViaNextcloud = false;
   await attachPhotoBlob(file);
 });
+
+// With a photo pending, Return sends it (iOS pendingPhotoReturnShortcutButton) - the text field is
+// out of the way then, so the key is taken wherever the focus is, short of another field or sheet.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || event.shiftKey || !pendingPhotoAttachment || pendingPhotoSending) return;
+  if (!activeConversationId || conversation?.hidden) return;
+  const target = event.target;
+  if (target?.closest?.("input, textarea, select, button, a, [contenteditable='true'], .modal-backdrop, [role='dialog']")) return;
+  event.preventDefault();
+  composer?.requestSubmit?.();
+});
+
+// An image dropped anywhere on the chat stages it like a pasted one (iOS ChatDetailView .onDrop),
+// with the composer outlined while it is over the window.
+{
+  const dropZone = conversation;
+  const hasImageFile = (event) => Array.from(event.dataTransfer?.items || []).some((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
+  const setTarget = (on) => composer?.classList.toggle("composer-drop-target", Boolean(on));
+  dropZone?.addEventListener("dragover", (event) => {
+    if (!hasImageFile(event) || !canAcceptChatImageAttachment()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    setTarget(true);
+  });
+  dropZone?.addEventListener("dragleave", (event) => { if (!dropZone.contains(event.relatedTarget)) setTarget(false); });
+  dropZone?.addEventListener("drop", async (event) => {
+    setTarget(false);
+    const file = Array.from(event.dataTransfer?.files || []).find((f) => String(f.type || "").startsWith("image/"));
+    if (!file || !canAcceptChatImageAttachment()) return;
+    event.preventDefault();
+    photoViaNextcloud = false;
+    await attachPhotoBlob(file);
+  });
+}
 
 // The input bubble keeps only the desktop's own emoji picker; camera, mic and the Kaspa logo
 // moved into the "+" sheet (iOS 8b13460).
@@ -22787,17 +23796,45 @@ function composerFeeEstimateIsCurrent(length, lastLength, lastFeeKas) {
   return lastFeeKas != null && lastLength != null && Math.abs(length - lastLength) < 24;
 }
 
+// What the fee pill is for (iOS shouldShowFeeBubble): a pending photo, a recording, or the typed
+// text. Via Nextcloud the chain only carries the share link (iOS nextcloudLinkPayloadSize, 96).
+const NEXTCLOUD_LINK_PAYLOAD_BYTES = 96;
+function composerFeeSubject() {
+  // A declined chat has no composer, so no fee pill either (iOS: !isDeclined).
+  if (composer?.classList.contains("composer-declined")) return null;
+  try {
+    if (chatAudioMode) {
+      const voiceState = chatVoiceState();
+      if (voiceState === "idle") return null;
+      if (voiceViaNextcloud && isNextcloudConnected()) return { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 };
+      const entry = voicePreviews.get(voiceRecordingPanel);
+      const audioBytes = entry?.blob?.size ?? Math.ceil(voiceElapsedSeconds * VOICE_AUDIO_BITS_PER_SECOND / 8);
+      // The {type:"file"} envelope: the audio as base64 plus its few JSON fields.
+      const envelopeBytes = Math.ceil(audioBytes / 3) * 4 + 120;
+      return { payloadBytes: estimateCommPayloadBytes("x".repeat(envelopeBytes)), length: envelopeBytes };
+    }
+    if (pendingPhotoAttachment) {
+      if (photoViaNextcloud && isNextcloudConnected()) return { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 };
+      const envelope = buildImageEnvelopeJson(pendingPhotoAttachment);
+      return { payloadBytes: estimateCommPayloadBytes(envelope), length: envelope.length };
+    }
+  } catch { /* voice / photo sections not evaluated yet */ }
+  const text = String(composer?.elements?.message?.value || "").trim();
+  if (!text) return null;
+  return { payloadBytes: estimateCommPayloadBytes(text), length: utf8ByteLength(text) };
+}
+
 function scheduleFeeEstimate({ typing = false } = {}) {
-  if (!feeEstimateBanner || !accountShellPrefs.estimateFees || composerMode !== "message") {
+  if (!feeEstimateBanner || !feeEstimateEnabled() || composerMode !== "message") {
     hideFeeEstimateBanner();
     return;
   }
-  const text = String(composer.elements.message?.value || "").trim();
-  if (!text || !activeConversationId || !engine.address) {
+  const subject = composerFeeSubject();
+  if (!subject || !activeConversationId || !engine.address) {
     hideFeeEstimateBanner();
     return;
   }
-  const length = utf8ByteLength(text);
+  const { length } = subject;
   // Typing near the estimated length: the pill already shows the right fee - no estimate, no
   // pill redraw. (A pending debounce still restarts below, so it fires after the pause.)
   if (typing && !feeEstimateDebounceTimer && composerFeeOverrideKas == null && !feeEstimateBanner.hidden
@@ -22812,8 +23849,7 @@ function scheduleFeeEstimate({ typing = false } = {}) {
   feeEstimateDebounceTimer = window.setTimeout(async () => {
     feeEstimateDebounceTimer = null;
     try {
-      const payloadBytes = estimateCommPayloadBytes(text);
-      const feeKas = await engine.estimateMessageFee(payloadBytes);
+      const feeKas = await engine.estimateMessageFee(subject.payloadBytes);
       if (token !== feeEstimateRequestToken || !feeEstimateBanner) return;
       composerFeeEstimateKas = feeKas == null ? null : String(feeKas);
       composerFeeEstimateLength = feeKas == null ? null : length;
@@ -22855,8 +23891,11 @@ feeEstimateBanner?.addEventListener("click", async () => {
     message: "If the network is busy, a higher fee can help your transaction confirm faster.",
     initial: formatKasExact(current),
     confirmLabel: "Save",
+    extraLabel: "Use Default",
   });
   if (typed == null) return;
+  // "Use Default" (iOS): back to the live estimate.
+  if (typed === PROMPT_EXTRA) { composerFeeOverrideKas = null; scheduleFeeEstimate(); return; }
   // The one exact parser (iOS IOS-010): comma or dot, at most 8 decimals; the override is kept as
   // exact KAS text, so "1e-3" or a 9th decimal never reaches the send as something else.
   const typedSompi = String(typed).trim() === "" ? 0n : sompiFromUserText(String(typed));
@@ -22884,34 +23923,47 @@ composer.addEventListener("submit", async (event) => {
   const input = composer.elements.message;
   const text = String(input.value || "").trim();
 
+  // A declined chat has no composer (iOS "Conversation declined").
+  if (contactForConversation(state.conversations.find((entry) => entry.id === activeConversationId))?.relationshipState === "declined") return;
+  // Audio mode: the button stops, sends, or records (iOS handleSend .audio).
+  if (chatAudioMode) { handleChatAudioSend(); return; }
+
   if (pendingPhotoAttachment) {
+    if (pendingPhotoSending) return;
     const attachment = pendingPhotoAttachment;
-    // Snapshot before clearPendingPhoto drops it: "via Nextcloud" chosen in the "+" sheet.
+    const conversationId = activeConversationId;
+    // "Via Nextcloud" chosen in the "+" sheet.
     const viaNextcloud = photoViaNextcloud && isNextcloudConnected();
-    input.value = "";
-    autoGrowComposer();
-    clearPendingPhoto();
     hideFeeEstimateBanner();
+    // What was typed stays in the composer under the photo row and comes back once the photo is
+    // sent (iOS: the photo is its own message, the text is never dropped or sent with it).
     // Via Nextcloud: upload the full-quality original and send its share link (renders as a
     // media bubble on the recipient's side). Any failure falls back to the on-chain envelope so
     // the message never silently vanishes.
     if (viaNextcloud && attachment.originalBlob) {
-      const conversationId = activeConversationId;
+      setPendingPhotoSending(true);
       setStatus("Uploading photo to Nextcloud…");
+      let url = null;
       try {
-        const url = await uploadNextcloudMedia(
+        url = await uploadNextcloudMedia(
           attachment.originalBlob,
           attachment.originalName || "photo.jpg",
           attachment.originalBlob.type || "image/jpeg"
         );
+      } catch (error) {
+        appendEngineLog(`Nextcloud photo upload failed, sending on-chain: ${userFacingError(error)}`);
+        showCopyToast("Nextcloud upload failed - sending on-chain instead");
+      }
+      if (pendingPhotoAttachment !== attachment) return; // removed or replaced meanwhile
+      if (url) {
         queueConversationMessage(conversationId, url);
         setStatus("Photo sent via Nextcloud.");
+        clearPendingPhoto();
         return;
-      } catch (error) {
-        showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
       }
     }
-    queueConversationMessage(activeConversationId, buildImageEnvelopeJson(attachment));
+    queueConversationMessage(conversationId, buildImageEnvelopeJson(attachment));
+    clearPendingPhoto();
     return;
   }
 
@@ -22950,6 +24002,7 @@ function clearConversationDraft(conversationId) {
 // content up to its CSS max-height, then scrolls. Enter sends; Shift+Enter adds a newline.
 const composerInputField = composer?.elements?.message;
 function autoGrowComposer() {
+  syncComposerSlots();
   if (!composerInputField) return;
   composerInputField.style.height = "auto";
   composerInputField.style.height = `${Math.min(composerInputField.scrollHeight, 132)}px`;
@@ -23200,6 +24253,15 @@ function resetPassphrasePreview(flow) {
 
 function showCreateStep(step) {
   document.querySelectorAll("[data-create-step]").forEach((el) => { el.hidden = el.dataset.createStep !== step; });
+  // iOS PassphraseOptionView is titled "Passphrase"; every other step "Create Account".
+  const title = document.querySelector("[data-create-title]");
+  if (title) title.textContent = step === "passphrase" ? "Passphrase" : "Create Account";
+}
+/// The passphrase fields' eye (iOS eye / eye.slash): shows or hides both fields at once.
+function setPassphraseEye(button, revealed) {
+  if (!button) return;
+  button.innerHTML = revealed ? EYE_SLASH_SVG : EYE_SVG;
+  button.setAttribute("aria-label", revealed ? "Hide passphrase" : "Show passphrase");
 }
 // Create Account, iOS acd879b / c6bd716: step 1 the name (local to this device), step 2 the seed
 // length as two buttons (with the warning that the seed phrase comes next), step 3 the seed phrase,
@@ -23416,33 +24478,50 @@ createContinueBtn?.addEventListener("click", () => {
   if (createPassphraseInput) { createPassphraseInput.value = ""; createPassphraseInput.type = "password"; }
   if (createPassphraseConfirm) createPassphraseConfirm.value = "";
   if (createPassphraseError) createPassphraseError.hidden = true;
-  if (passphraseToggleBtn) passphraseToggleBtn.textContent = "Show";
+  setPassphraseEye(passphraseToggleBtn, false);
+  updateCreatePassphraseSubmitEnabled();
   showCreateStep("passphrase");
   showPassphraseScreen("create", "question");
   queueMicrotask(() => createPassphraseInput?.focus());
 });
+// Back on the seed step (iOS navigation back): to the length step; the words are made again.
+document.querySelector("[data-create-seed-back]")?.addEventListener("click", () => {
+  showCreateStep("length");
+});
+// Back on the passphrase question: to the seed phrase, still revealed and confirmed.
+document.querySelector("[data-create-passphrase-question-back]")?.addEventListener("click", () => {
+  if (createAccountModal?.dataset.busy === "1") return;
+  showCreateStep("seed");
+});
 
+setPassphraseEye(passphraseToggleBtn, false);
 passphraseToggleBtn?.addEventListener("click", () => {
   if (!createPassphraseInput) return;
   const show = createPassphraseInput.type === "password";
   createPassphraseInput.type = show ? "text" : "password";
   if (createPassphraseConfirm) createPassphraseConfirm.type = show ? "text" : "password";
-  passphraseToggleBtn.textContent = show ? "Hide" : "Show";
+  setPassphraseEye(passphraseToggleBtn, show);
 });
+// iOS canSubmitPassphrase: Continue stays off while the passphrase is empty.
+function updateCreatePassphraseSubmitEnabled() {
+  if (continueWithPassphraseBtn && createAccountModal?.dataset.busy !== "1") continueWithPassphraseBtn.disabled = !String(createPassphraseInput?.value || "");
+}
+createPassphraseInput?.addEventListener("input", updateCreatePassphraseSubmitEnabled);
 
 // STEP 3 → enter app: derive with the chosen passphrase ("" when skipped),
 // persist, and launch the setup guide.
 async function commitPendingAccount(passphrase) {
   if (!pendingNewAccount) return;
   const account = { ...pendingNewAccount, passphrase };
-  const buttons = [continueWithPassphraseBtn, skipPassphraseBtn];
+  // iOS: Yes, No and "What is a passphrase?" (and Back) are all off while it commits.
+  const buttons = [continueWithPassphraseBtn, skipPassphraseBtn, ...document.querySelectorAll("[data-create-passphrase-yes], [data-create-passphrase-explain], [data-create-passphrase-question-back], [data-create-passphrase-back]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
+  if (createAccountModal) createAccountModal.dataset.busy = "1";
   if (createPassphraseError) createPassphraseError.hidden = true;
   try {
     await finalizeNewAccount(account);
     pendingNewAccount = null;
     if (createAccountModal) createAccountModal.hidden = true;
-    showCopyToast("Account created");
     // First-run experience begins. Both markers are persisted BEFORE presenting
     // (iOS MainTabView does the same): the in-memory "just created" trigger is
     // lost on a page reload, so without them a reload mid-guide would be a
@@ -23453,9 +24532,11 @@ async function commitPendingAccount(passphrase) {
     openSetupGuide({ onboardingRun: true });
   } catch (error) {
     appendEngineLog(`Create account failed: ${error.message}`);
-    if (createPassphraseError) { createPassphraseError.textContent = error.message; createPassphraseError.hidden = false; }
+    alertDialog({ title: "Error", message: error.message });
   } finally {
+    if (createAccountModal) delete createAccountModal.dataset.busy;
     buttons.forEach((b) => { if (b) b.disabled = false; });
+    updateCreatePassphraseSubmitEnabled();
   }
 }
 
@@ -23477,17 +24558,19 @@ document.querySelector("[data-create-passphrase-back]")?.addEventListener("click
   if (createPassphraseInput) createPassphraseInput.value = "";
   if (createPassphraseConfirm) createPassphraseConfirm.value = "";
   if (createPassphraseError) createPassphraseError.hidden = true;
+  updateCreatePassphraseSubmitEnabled();
   showPassphraseScreen("create", "question");
 });
 
+// iOS PassphraseOptionView.submitFromEntry: the problems come up as an "Error" alert.
 continueWithPassphraseBtn?.addEventListener("click", () => {
   const pass = String(createPassphraseInput?.value || "");
   if (!pass) {
-    if (createPassphraseError) { createPassphraseError.textContent = "Enter a passphrase, or go Back and choose No to continue without one."; createPassphraseError.hidden = false; }
+    alertDialog({ title: "Error", message: "Enter a passphrase, or go back and choose No." });
     return;
   }
   if (pass !== String(createPassphraseConfirm?.value || "")) {
-    if (createPassphraseError) { createPassphraseError.textContent = "The passphrases don't match. Please re-enter them."; createPassphraseError.hidden = false; }
+    alertDialog({ title: "Error", message: "The passphrases do not match. Please re-enter them." });
     return;
   }
   void commitPendingAccount(pass);
@@ -23533,7 +24616,8 @@ const SETUP_STEPS = [
   { icon: SETUP_ICONS.globe, title: "Choose Your Language", body: "Select the language you'd like to use in KaChat.", extra: "language" },
   { icon: SETUP_ICONS.currency, title: "Choose Your Currency", body: "Select the currency you'd like prices displayed in.", extra: "currency" },
   { icon: SETUP_ICONS.network, title: "How KaChat Uses Kaspa", body: "KaChat lets you send and receive messages on the Kaspa network itself. Kaspa is required to pay fees when sending your messages. The fee you pay goes to miners which secure the network." },
-  { icon: SETUP_ICONS.qrcode, qr: true, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started - enough to claim a .kachat name and chat for a while. 5 Kaspa is enough for about 2500 messages.", extra: "funding" },
+  // The qrcode glyph, as iOS fundingStep's scaffold icon; the code itself is behind Show QR Code.
+  { icon: SETUP_ICONS.qrcode, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started - enough to claim a .kachat name and chat for a while. 5 Kaspa is enough for about 2500 messages.", extra: "funding" },
   { icon: SETUP_ICONS.server, title: "Connect to a Node", body: "KaChat needs to connect to a node. How would you like to connect?", extra: "node" },
   // Your Chatting Address, with the Profile screenshot (iOS 8852cdb).
   { icon: null, title: "Your Chatting Address", body: "", extra: "addresses" },
@@ -23599,11 +24683,12 @@ function renderSetupExtra(kind) {
     addrBtn.type = "button";
     addrBtn.className = "setup-funding-address";
     addrBtn.textContent = addr;
-    addrBtn.addEventListener("click", async () => { if (engine.address) { await copyTextToClipboard(engine.address); showCopyToast("Address copied to clipboard."); } });
+    addrBtn.addEventListener("click", async () => { if (engine.address) { await copyTextToClipboard(engine.address); showCopyToast(addressCopiedToastText(engine.address)); } });
+    // iOS: links with their SF Symbol (qrcode, person.text.rectangle), not buttons.
     const qrBtn = document.createElement("button");
     qrBtn.type = "button";
-    qrBtn.className = "secondary-button";
-    qrBtn.textContent = "Show QR Code";
+    qrBtn.className = "linklike-button setup-funding-link";
+    qrBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 20h1"/></svg><span>Show QR Code</span>`;
     // Don't close the guide — the address screen (z-index 1500) layers above it,
     // so backing out of the QR returns here on the funding step.
     qrBtn.addEventListener("click", () => { openChattingAddressScreen(); });
@@ -23616,8 +24701,8 @@ function renderSetupExtra(kind) {
     if (setupGuideIsOnboardingRun && setupGuideIsImportRun && activeAccountMnemonic()) {
       const pickerBtn = document.createElement("button");
       pickerBtn.type = "button";
-      pickerBtn.className = "secondary-button";
-      pickerBtn.textContent = "Change Chatting Address";
+      pickerBtn.className = "linklike-button setup-funding-link";
+      pickerBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10.5" r="2"/><path d="M5.5 16c.6-1.6 1.6-2.4 3-2.4s2.4.8 3 2.4M14 9.5h4M14 13h4"/></svg><span>Change Chatting Address</span>`;
       pickerBtn.addEventListener("click", () => openChattingAddressPicker());
       wrap.append(pickerBtn);
     }
@@ -23665,11 +24750,19 @@ function renderSetupExtra(kind) {
           accountShellPrefs.nodeAddress = input.value.trim();
           persistAccountShellPreferences();
           applySetupNodeChoice();
+          const error = setupExtraEl.querySelector("[data-setup-node-error]");
+          if (error) error.hidden = true;
         });
         list.appendChild(input);
       }
     }
     setupExtraEl.appendChild(list);
+    // iOS nodeValidationError: an own node that is not an address says so in place, on Next.
+    const nodeError = document.createElement("p");
+    nodeError.className = "field-error";
+    nodeError.dataset.setupNodeError = "";
+    nodeError.hidden = true;
+    setupExtraEl.appendChild(nodeError);
   } else if (kind === "addresses") {
     // Profile: Receive Kaspa, the Chatting Address QR and Manage Addresses (iOS 8852cdb).
     const picture = document.createElement("img");
@@ -23678,13 +24771,13 @@ function renderSetupExtra(kind) {
     picture.alt = "";
     setupExtraEl.appendChild(picture);
     const rows = [
-      { title: "Chatting Address", value: engine.address || "--", caption: "Your identity on KaChat, and yours alone. People message it, your .kachat name and profile live on it, and every message you send is paid from it. Everything it does is public on the Kaspa network and tied to you." },
-      { title: "Everything Else", value: "", caption: "To protect your privacy, use your other addresses for all other activity on the Kaspa network. Receive Kaspa gives you a fresh one, and Manage Addresses lists them all." },
+      { icon: SETUP_ICONS.chat, title: "Chatting Address", value: engine.address || "--", caption: "Your identity on KaChat, and yours alone. People message it, your .kachat name and profile live on it, and every message you send is paid from it. Everything it does is public on the Kaspa network and tied to you." },
+      { icon: SETUP_ICONS.shield, title: "Everything Else", value: "", caption: "To protect your privacy, use your other addresses for all other activity on the Kaspa network. Receive Kaspa gives you a fresh one, and Manage Addresses lists them all." },
     ];
     for (const r of rows) {
       const box = document.createElement("div");
-      box.className = "setup-address-row";
-      box.innerHTML = `<strong></strong>${r.value ? `<span class="setup-address-value"></span>` : ""}<small></small>`;
+      box.className = "setup-address-row with-icon";
+      box.innerHTML = `<span class="setup-address-icon" aria-hidden="true">${r.icon}</span><strong></strong>${r.value ? `<span class="setup-address-value"></span>` : ""}<small></small>`;
       box.querySelector("strong").textContent = r.title;
       if (r.value) box.querySelector(".setup-address-value").textContent = r.value;
       box.querySelector("small").textContent = r.caption;
@@ -23710,9 +24803,16 @@ function applySetupNodeChoice() {
     if (getEndpointOverride("trustedNode").trim()) setEndpoint("trustedNode", "");
     return;
   }
-  const url = String(accountShellPrefs.nodeAddress || "").trim();
-  const usable = /^wss?:\/\/[^\s/]+/i.test(url);
-  setEndpoint("trustedNode", usable ? url : "");
+  const url = setupOwnNodeUrl();
+  setEndpoint("trustedNode", url || "");
+}
+/// The own-node field as a wRPC URL, or null when it is not one yet: a wss:// / ws:// URL, or
+/// host:port (taken as wss://, like Connection Settings).
+function setupOwnNodeUrl() {
+  const raw = String(accountShellPrefs.nodeAddress || "").trim();
+  if (/^wss?:\/\/[^\s/]+/i.test(raw)) return raw;
+  if (/^[^\s/:]+:\d{1,5}$/.test(raw)) return `wss://${raw}`;
+  return null;
 }
 
 function renderSetupStep() {
@@ -23750,7 +24850,8 @@ function renderSetupStep() {
     setupBackBtn.hidden = false;
     setupBackBtn.disabled = setupStepIndex === 0;
   }
-  if (setupProgressEl) setupProgressEl.textContent = `${setupStepIndex + 1} / ${SETUP_STEPS.length}`;
+  // No "1 / 9" step counter: iOS WelcomeGuideView shows none.
+  if (setupProgressEl) { setupProgressEl.textContent = ""; setupProgressEl.hidden = true; }
   // Skip exists ONLY on replays (Profile > Help). EVERY account-onboarding run
   // — create or import, fresh or re-presented after a page reload — is fully
   // unskippable: every step must be advanced through to Finish. Decided purely
@@ -23865,6 +24966,11 @@ setupNextBtn?.addEventListener("click", async () => {
     try { advance = await applyUserTypeGuideChoice(); } finally { setupNextBtn.disabled = false; }
     if (!advance) return;
   }
+  if (SETUP_STEPS[setupStepIndex]?.extra === "node" && accountShellPrefs.nodeChoice === "own" && !setupOwnNodeUrl()) {
+    const error = setupExtraEl?.querySelector("[data-setup-node-error]");
+    if (error) { error.textContent = "Enter a node as host:port or a wss:// URL."; error.hidden = false; }
+    return;
+  }
   if (setupStepIndex >= SETUP_STEPS.length - 1) { closeSetupGuide({ completed: true }); return; }
   setupStepIndex += 1;
   renderSetupStep();
@@ -23940,7 +25046,7 @@ function renderChattingPickerFooter() {
   if (chattingPickerScanning) {
     const from = escapeHtml(String(chattingPickerScanned + 1));
     const to = escapeHtml(String(chattingPickerScanned + CHATTING_PICKER_BATCH));
-    chattingPickerFooterEl.innerHTML = `<span>Scanning addresses ${from} to ${to}…</span>`;
+    chattingPickerFooterEl.innerHTML = `<span>Scanning addresses ${from} to ${to}...</span>`;
     return;
   }
   if (!chattingPickerScanned) { chattingPickerFooterEl.replaceChildren(); return; }
@@ -23969,7 +25075,7 @@ function renderChattingPickerList() {
     return `<button type="button" class="chatting-picker-row${entry.index === current ? " current" : ""}" data-chatting-picker-open="${escapeHtml(String(entry.index))}">`
       + `<span class="chatting-picker-row-index">#${escapeHtml(String(entry.index))}</span>`
       + `<span class="chatting-picker-row-copy">`
-      + `<span class="chatting-picker-row-address">${escapeHtml(shortAddress(entry.address))}</span>`
+      + `<span class="chatting-picker-row-address">${escapeHtml(savedAccountShortAddress(entry.address))}</span>`
       + `<span class="chatting-picker-row-meta"><span>${escapeHtml(formatSompiForNotification(entry.balanceSompi))} ${KAS_UNIT}</span>${pill}</span>`
       + `</span>${badge}`
       + `<svg class="chatting-picker-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>`
@@ -24116,22 +25222,26 @@ function renderChattingPickerDetail() {
   chattingPickerDetailBody.innerHTML = `
     <p class="chatting-picker-detail-heading">Address #${escapeHtml(String(candidate.index))}</p>
     <button type="button" class="chatting-picker-detail-address" data-chatting-picker-copy>${escapeHtml(candidate.address)}</button>
-    <p class="chatting-picker-detail-hint">Click the address to copy it.</p>
+    <p class="chatting-picker-detail-hint" data-chatting-picker-copy-hint>Tap the address to copy it</p>
     <div class="chatting-picker-detail-stat"><span>Balance</span><span>${escapeHtml(formatSompiForNotification(candidate.balanceSompi))} ${KAS_UNIT}</span></div>
     ${kachatNamesHtml}
     ${otherNamesHtml}
-    ${domainsHtml}`;
+    ${domainsHtml}
+    ${chattingPickerDetailError ? `<p class="field-error chatting-picker-detail-error">${escapeHtml(chattingPickerDetailError)}</p>` : ""}`;
   if (chattingPickerSetBtn) {
     chattingPickerSetBtn.disabled = isCurrent || chattingPickerSwitching;
     chattingPickerSetBtn.textContent = chattingPickerSwitching
-      ? "Switching…"
+      ? "Switching..."
       : isCurrent ? "Current Chatting Address" : "Set as Chatting Address";
   }
 }
+// iOS ChattingAddressDetailView errorMessage: a failed switch says why in the sheet, not a toast.
+let chattingPickerDetailError = "";
 
 function openChattingPickerDetail(index) {
   if (!chattingPickerDetailScreen || !chattingPickerCandidateAt(index)) return;
   chattingPickerDetailIndex = index;
+  chattingPickerDetailError = "";
   renderChattingPickerDetail();
   chattingPickerDetailScreen.hidden = false;
 }
@@ -24156,6 +25266,7 @@ async function performChattingAddressSwitch() {
   const name = String(activeAccountMetadata()?.name || record?.name || "My Account");
   const previousAddress = String(engine.address || "");
   chattingPickerSwitching = true;
+  chattingPickerDetailError = "";
   renderChattingPickerDetail();
   try {
     await importAndEnterAccount({
@@ -24175,12 +25286,11 @@ async function performChattingAddressSwitch() {
     }
     chattingPickerSwitching = false;
     closeChattingAddressPicker();
-    showCopyToast("Chatting address updated");
     // Back on the funding step, which re-renders with the new address.
     if (setupGuideModal && !setupGuideModal.hidden) renderSetupStep();
   } catch (error) {
     appendEngineLog(`Chatting address switch failed: ${error.message}`);
-    showCopyToast(userFacingError(error));
+    chattingPickerDetailError = userFacingError(error);
     chattingPickerSwitching = false;
     renderChattingPickerDetail();
   }
@@ -24198,7 +25308,15 @@ chattingPickerFooterEl?.addEventListener("click", (event) => {
 chattingPickerDetailBody?.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-chatting-picker-copy]");
   if (!button) return;
-  try { await copyTextToClipboard(button.textContent); showCopyToast("Address copied to clipboard."); }
+  // iOS: the hint under the address turns into "Copied to clipboard" for 1.5 s, no toast.
+  try {
+    await copyTextToClipboard(button.textContent);
+    const hint = chattingPickerDetailBody.querySelector("[data-chatting-picker-copy-hint]");
+    if (hint) {
+      hint.textContent = "Copied to clipboard";
+      window.setTimeout(() => { if (hint.isConnected) hint.textContent = "Tap the address to copy it"; }, 1500);
+    }
+  }
   catch (error) { appendEngineLog(error.message); }
 });
 document.querySelector("[data-close-chatting-picker]")?.addEventListener("click", () => closeChattingAddressPicker());
@@ -24300,13 +25418,15 @@ document.querySelector("[data-copy-seed-phrase]")?.addEventListener("click", asy
 
 // Paste on Import: 12 or 24 words, any spacing; the clipboard is cleared after.
 document.querySelector("[data-import-seed-paste]")?.addEventListener("click", async () => {
+  // iOS ImportWalletView.pasteSeedPhrase: problems come up as an "Error" alert; success is silent.
+  const pasteError = (message) => alertDialog({ title: "Error", message });
   let text = "";
-  try { text = await navigator.clipboard.readText(); } catch { showCopyToast("Nothing to paste."); return; }
+  try { text = await navigator.clipboard.readText(); } catch { pasteError("Nothing to paste."); return; }
   const pasted = String(text || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
-  if (!pasted.length) { showCopyToast("Nothing to paste."); return; }
-  if (pasted.length !== 12 && pasted.length !== 24) { showCopyToast(`A recovery phrase is 12 or 24 words - the clipboard holds ${pasted.length}.`); return; }
+  if (!pasted.length) { pasteError("Nothing to paste."); return; }
+  if (pasted.length !== 12 && pasted.length !== 24) { pasteError(`A recovery phrase is 12 or 24 words - the clipboard holds ${pasted.length}.`); return; }
   const unknown = pasted.filter((w) => !isBip39Word(w));
-  if (unknown.length) { showCopyToast(`Not a recovery phrase word: ${unknown.slice(0, 3).join(", ")}`); return; }
+  if (unknown.length) { pasteError(`Not a recovery phrase word: ${unknown.slice(0, 3).join(", ")}.`); return; }
   importWordCount = pasted.length;
   importWords = Array(24).fill("");
   pasted.forEach((w, i) => { importWords[i] = w; });
@@ -24315,7 +25435,6 @@ document.querySelector("[data-import-seed-paste]")?.addEventListener("click", as
   importActiveSlot = importWordCount - 1;
   renderImportSeedGrid();
   try { await navigator.clipboard.writeText(""); } catch { /* fine */ }
-  showCopyToast("Recovery phrase pasted. Clipboard cleared.");
 });
 
 function focusImportSlot(i) {
@@ -24336,15 +25455,13 @@ function resetImportSeedGrid() {
   importActiveSlot = 0;
   renderImportSeedGrid();
 }
-// Manage Addresses > "Notify on receive": the spending addresses' own switch (iOS ba352a2).
+// Manage Addresses > "Notify on receive": the spending addresses' own switch, per wallet (iOS
+// ba352a2); openSpendingManageScreen re-reads it for the account on screen.
 {
   const toggle = document.querySelector("[data-pref-spending-receive]");
   if (toggle) {
-    toggle.checked = (accountShellPrefs.spendingReceiveNotifications ?? true) !== false;
-    toggle.addEventListener("change", () => {
-      accountShellPrefs.spendingReceiveNotifications = toggle.checked;
-      persistAccountShellPreferences();
-    });
+    toggle.checked = spendingReceiveNotifyEnabled();
+    toggle.addEventListener("change", () => setSpendingReceiveNotifyEnabled(toggle.checked));
   }
 }
 // Import's length step: the same two buttons as Create Account. The words grid takes the length on Next.
@@ -24374,7 +25491,9 @@ importSeedGrid?.addEventListener("input", (event) => {
     focusImportSlot(Math.min(importWordCount - 1, i + parts.length));
     return;
   }
-  const clean = raw.replace(/[^a-z]/g, "");
+  let clean = raw.replace(/[^a-z]/g, "");
+  // Only letters that lead to a real recovery word are taken (iOS SeedPhraseKeyboardView).
+  while (clean && !bip39Matches(clean, 1).length) clean = clean.slice(0, -1);
   if (clean !== input.value) input.value = clean;
   importWords[i] = clean;
   importActiveSlot = i;
@@ -24430,6 +25549,7 @@ document.querySelector("[data-import-passphrase-explain-back]")?.addEventListene
 document.querySelector("[data-import-passphrase-back]")?.addEventListener("click", () => {
   if (importPassphraseInput) importPassphraseInput.value = "";
   if (importPassphraseError) importPassphraseError.hidden = true;
+  updateImportPassphraseSubmitEnabled();
   showPassphraseScreen("import", "question");
 });
 let pendingImport = null;
@@ -24439,18 +25559,31 @@ let pendingImport = null;
 // family — KaChat derives the chatting identity where that wallet actually
 // kept the user's funds and KNS domains. The spending chain always stays on
 // KaChat's own m/44'/111111'/1' branch regardless of this choice.
+// Per-wallet icons drawn after the SF Symbols iOS uses (ImportSourceWalletView.options).
+const importSourceIcon = (paths) => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
+const IMPORT_SOURCE_ICONS = {
+  chats: importSourceIcon('<path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h8A2.5 2.5 0 0 1 16 6.5v3a2.5 2.5 0 0 1-2.5 2.5H8l-3.5 3v-3.2A2.5 2.5 0 0 1 3 9.5Z"/><path d="M18.5 8.5A2.5 2.5 0 0 1 21 11v3a2.5 2.5 0 0 1-1.5 2.3V19l-3-2.5H12a2.5 2.5 0 0 1-2.4-1.8"/>'),
+  puzzle: importSourceIcon('<path d="M10 4a2 2 0 0 1 4 0v1h4v4h-1a2 2 0 0 0 0 4h1v5H5v-5h1a2 2 0 0 0 0-4H5V5h5Z"/>'),
+  iphone: importSourceIcon('<rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18.5h2"/>'),
+  shield: importSourceIcon('<path d="M12 3l7 2.8v5.4c0 4.5-3 8.2-7 9.8-4-1.6-7-5.3-7-9.8V5.8z"/>'),
+  desktop: importSourceIcon('<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/>'),
+  terminal: importSourceIcon('<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5M12 15h5"/>'),
+  grid: importSourceIcon('<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>'),
+  key: importSourceIcon('<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2 2M14 9l2 2"/>'),
+  drive: importSourceIcon('<rect x="3" y="12" width="18" height="7" rx="2"/><path d="M5 12l2.5-6.5h9L19 12M17 15.5h.01"/>'),
+};
 const IMPORT_SOURCE_WALLETS = [
-  { name: "KaChat", family: "kaspaStandard", isDefault: true },
-  { name: "KasWare Wallet", family: "kaspaStandard" },
-  { name: "Kaspium Wallet", family: "kaspaStandard" },
+  { name: "KaChat", family: "kaspaStandard", isDefault: true, icon: "chats" },
+  { name: "KasWare Wallet", family: "kaspaStandard", icon: "puzzle" },
+  { name: "Kaspium Wallet", family: "kaspaStandard", icon: "iphone" },
   // Kastle derives m/44'/111111'/{account}'/0/{index}; account 0 is
   // byte-identical to the standard family.
-  { name: "Kastle Wallet", family: "kaspaStandard" },
-  { name: "KDX Wallet", family: "kaspaLegacy972" },
-  { name: "Core Golang Cli Wallet", family: "kaspaStandard" },
-  { name: "OKX Wallet", family: "kaspaStandard" },
-  { name: "OneKey Wallet", family: "oneKey" },
-  { name: "Ledger Wallet", family: "kaspaStandard" },
+  { name: "Kastle Wallet", family: "kaspaStandard", icon: "shield" },
+  { name: "KDX Wallet", family: "kaspaLegacy972", icon: "desktop" },
+  { name: "Core Golang Cli Wallet", family: "kaspaStandard", icon: "terminal" },
+  { name: "OKX Wallet", family: "kaspaStandard", icon: "grid" },
+  { name: "OneKey Wallet", family: "oneKey", icon: "key" },
+  { name: "Ledger Wallet", family: "kaspaStandard", icon: "drive" },
 ];
 let importSourceSelection = 0;
 
@@ -24473,6 +25606,9 @@ function renderImportSourceList() {
     const mark = document.createElement("span");
     mark.className = "import-source-mark";
     mark.textContent = index === importSourceSelection ? "●" : "○";
+    const icon = document.createElement("span");
+    icon.className = "import-source-icon";
+    icon.innerHTML = IMPORT_SOURCE_ICONS[option.icon] || "";
     const copy = document.createElement("span");
     copy.className = "import-source-copy";
     const title = document.createElement("strong");
@@ -24486,7 +25622,7 @@ function renderImportSourceList() {
     const path = document.createElement("small");
     path.textContent = importSourcePathDescription(option.family);
     copy.append(title, path);
-    row.append(mark, copy);
+    row.append(mark, icon, copy);
     row.addEventListener("click", () => {
       importSourceSelection = index;
       renderImportSourceList();
@@ -24501,6 +25637,9 @@ function selectedImportSourceFamily() {
 
 function showImportStep(step) {
   document.querySelectorAll("[data-import-step]").forEach((el) => { el.hidden = el.dataset.importStep !== step; });
+  // iOS PassphraseOptionView is titled "Passphrase"; every other step "Import Account".
+  const title = document.querySelector("[data-import-title]");
+  if (title) title.textContent = step === "passphrase" ? "Passphrase" : "Import Account";
   // The name and length steps carry iOS's large title, as Create Account's do; the rest stay inline.
   const flow = importAccountModal?.querySelector(".import-account-flow");
   if (flow) flow.dataset.importAt = step;
@@ -24675,7 +25814,8 @@ importContinueBtn?.addEventListener("click", async () => {
     pendingImport = { name, recoveryPhrase: phrase, family: selectedImportSourceFamily() };
     if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
     if (importPassphraseError) importPassphraseError.hidden = true;
-    if (importPassphraseToggle) importPassphraseToggle.textContent = "Show";
+    setPassphraseEye(importPassphraseToggle, false);
+    updateImportPassphraseSubmitEnabled();
     showImportStep("passphrase");
     showPassphraseScreen("import", "question");
     queueMicrotask(() => importPassphraseInput?.focus());
@@ -24684,11 +25824,22 @@ importContinueBtn?.addEventListener("click", async () => {
   }
 });
 
+setPassphraseEye(importPassphraseToggle, false);
 importPassphraseToggle?.addEventListener("click", () => {
   if (!importPassphraseInput) return;
   const show = importPassphraseInput.type === "password";
   importPassphraseInput.type = show ? "text" : "password";
-  importPassphraseToggle.textContent = show ? "Hide" : "Show";
+  setPassphraseEye(importPassphraseToggle, show);
+});
+// iOS canSubmitPassphrase: Import stays off while the passphrase is empty.
+function updateImportPassphraseSubmitEnabled() {
+  if (importWithPassphraseBtn && importAccountModal?.dataset.busy !== "1") importWithPassphraseBtn.disabled = !String(importPassphraseInput?.value || "");
+}
+importPassphraseInput?.addEventListener("input", updateImportPassphraseSubmitEnabled);
+// Back on the passphrase question (iOS navigation back): to the words, still filled in.
+document.querySelector("[data-import-passphrase-question-back]")?.addEventListener("click", () => {
+  if (importAccountModal?.dataset.busy === "1") return;
+  showImportStep("form");
 });
 
 // STEP 2 → enter app: import with the chosen passphrase ("" when skipped), then
@@ -24697,28 +25848,31 @@ importPassphraseToggle?.addEventListener("click", () => {
 // IMPORT run so the funding step offers "Change Chatting Address".
 async function commitImport(passphrase) {
   if (!pendingImport) return;
-  const buttons = [importWithPassphraseBtn, importSkipPassphraseBtn];
+  // iOS: Yes, No and "What is a passphrase?" (and Back) are all off while it imports.
+  const buttons = [importWithPassphraseBtn, importSkipPassphraseBtn, ...document.querySelectorAll("[data-import-passphrase-yes], [data-import-passphrase-explain], [data-import-passphrase-question-back], [data-import-passphrase-back]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
+  if (importAccountModal) importAccountModal.dataset.busy = "1";
   if (importPassphraseError) importPassphraseError.hidden = true;
   try {
     await importAndEnterAccount({ ...pendingImport, passphrase });
     pendingImport = null;
     if (importAccountModal) importAccountModal.hidden = true;
-    showCopyToast("Account imported");
     markUserTypePending();
     markOnboardingRunPending("import");
     openSetupGuide({ onboardingRun: true, importRun: true });
   } catch (error) {
     appendEngineLog(`Import account failed: ${error.message}`);
-    if (importPassphraseError) { importPassphraseError.textContent = error.message; importPassphraseError.hidden = false; }
+    alertDialog({ title: "Error", message: error.message });
   } finally {
+    if (importAccountModal) delete importAccountModal.dataset.busy;
     buttons.forEach((b) => { if (b) b.disabled = false; });
+    updateImportPassphraseSubmitEnabled();
   }
 }
 importWithPassphraseBtn?.addEventListener("click", () => {
   const pass = String(importPassphraseInput?.value || "");
   if (!pass) {
-    if (importPassphraseError) { importPassphraseError.textContent = "Enter a passphrase, or tap Skip to continue without one."; importPassphraseError.hidden = false; }
+    alertDialog({ title: "Error", message: "Enter a passphrase, or go back and choose No." });
     return;
   }
   void commitImport(pass);
@@ -24776,7 +25930,8 @@ document.querySelector("[data-copy-seed-privatekey]")?.addEventListener("click",
 
 function renderRecoveryCountdown() {
   const label = recoveryPhraseBox?.querySelector("[data-recovery-countdown]");
-  if (label) label.textContent = `Hiding in ${recoveryViewCountdown}s`;
+  // iOS hides the words again after 7s without a countdown line.
+  if (label) label.textContent = "";
 }
 
 function revealRecoveryPhraseAfterHold() {
@@ -24898,21 +26053,27 @@ revealRecoveryButton?.addEventListener("click", async () => {
   revealRecoveryPhraseAfterHold();
 });
 
-const logoutModal = document.querySelector("[data-logout-modal]");
-function openLogoutModal() { if (logoutModal) logoutModal.hidden = false; }
-function closeLogoutModal() { if (logoutModal) logoutModal.hidden = true; }
+// Profile's Log Out asks in the same chooser as every other confirm (iOS ProfileView logOutSection
+// -> ConfirmActionSheet): the red "Log Out" row with its consequence, then "Cancel".
+async function openLogoutModal() {
+  const choice = await chooseDialog({
+    title: "Log Out",
+    options: [
+      { id: "logout", title: "Log Out", subtitle: "Signs out of this account. Wallet and message data stay on this device.", destructive: true },
+      { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
+    ],
+  });
+  if (choice === "logout") performLogout();
+}
 
 document.querySelectorAll('[data-shell-action="logout"]').forEach((button) => button.addEventListener("click", openLogoutModal));
-document.querySelectorAll("[data-close-logout]").forEach((button) => button.addEventListener("click", closeLogoutModal));
-logoutModal?.addEventListener("click", (event) => { if (event.target === logoutModal) closeLogoutModal(); });
 
-document.querySelector("[data-confirm-logout]")?.addEventListener("click", async () => {
+async function performLogout() {
   try {
     persistState();
     if (engine.privateKeyHex) persistTestingWallet();
     localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
     clearSessionActive();
-    closeLogoutModal();
     await engine.disconnect?.();
     engine.clearSession();
     lockKeyVault(); // with a password, signing back in asks for it again
@@ -24926,14 +26087,11 @@ document.querySelector("[data-confirm-logout]")?.addEventListener("click", async
   } catch (error) {
     appendEngineLog(`Logout failed: ${error.message}`);
   }
-});
+}
 
 // ---------------------------------------------------------------------------
-// Danger Zone (Settings) — real, destructive actions matching iOS's Danger Zone.
-// Each is gated by an explicit confirm. Order of destructiveness:
-//   resync         → wipe incoming messages, keep account + sent, re-sync from chain
-//   remove-account → wipe the CURRENT account (data + messages) from this device, log out
-//   wipe-all       → erase EVERY saved account and all local KaChat data, reload fresh
+// Danger Zone (Settings), matching iOS's Danger Zone: only "Wipe and re-sync incoming
+// messages" (wipe incoming messages, keep account + sent, re-sync from chain).
 // ---------------------------------------------------------------------------
 
 // iOS: "This removes all incoming messages locally and in iCloud, then re-syncs them from the
@@ -24969,10 +26127,16 @@ function renderResyncPicker() {
   if (!candidates.length) {
     listEl.innerHTML = '<p class="spending-address-empty">No chats to re-sync.</p>';
   } else {
+    // iOS ResyncChatPickerView row: avatar, name over the full address (middle-truncated), then
+    // the check circle on the right.
     listEl.innerHTML = candidates.map((entry) => {
       const contact = contactForConversation(entry);
       const checked = resyncPickerSelection.has(entry.id);
-      return `<label class="resync-picker-row"><input type="checkbox" data-resync-pick="${escapeHtml(entry.id)}" ${checked ? "checked" : ""}><span class="resync-picker-copy"><strong>${escapeHtml(displayNameForAddress(contact) || shortAddress(contact.address))}</strong><small>${escapeHtml(shortAddress(contact.address))}</small></span></label>`;
+      const address = String(contact.address || "");
+      return `<label class="resync-picker-row${checked ? " selected" : ""}">${avatarHtmlFor(contact, "chat-avatar resync-picker-avatar")}`
+        + `<span class="resync-picker-copy"><strong>${escapeHtml(displayNameForAddress(contact) || shortAddress(address))}</strong>`
+        + `<small class="saved-account-address"><span class="saved-account-address-head">${escapeHtml(address.slice(0, -8))}</span><span class="saved-account-address-tail">${escapeHtml(address.slice(-8))}</span></small></span>`
+        + `<input class="resync-picker-check" type="checkbox" data-resync-pick="${escapeHtml(entry.id)}" ${checked ? "checked" : ""} aria-label="Select"></label>`;
     }).join("");
   }
   const n = resyncPickerSelection.size;
@@ -25060,18 +26224,24 @@ async function runIncomingResync(conversationIds) {
     }
     await ensureRuntimes({ quiet: true });
     let added = 0;
+    // iOS IncomingResyncCoordinator stages and fractions.
+    resyncRun.fraction = 0.05;
+    renderResyncProgress();
     if (all) {
-      resyncRun.stage = "Re-syncing handshakes...";
-      resyncRun.fraction = 0.1;
+      resyncRun.stage = "Re-fetching handshakes...";
+      resyncRun.fraction = 0.12;
       renderResyncProgress();
       try { added += await syncIncomingHandshakeRequests({ quiet: true }); } catch (error) { appendEngineLog(`Re-sync handshakes failed: ${error.message}`); }
     }
     for (let i = 0; i < targets.length; i += 1) {
-      resyncRun.stage = `Re-syncing chat ${i + 1} of ${targets.length}`;
-      resyncRun.fraction = 0.1 + 0.9 * (i / Math.max(1, targets.length));
+      resyncRun.stage = `Re-syncing... ${i} of ${targets.length} chats`;
+      resyncRun.fraction = 0.30 + 0.65 * (i / Math.max(1, targets.length));
       renderResyncProgress();
       added += await syncOneConversation(targets[i], { quiet: true, catchUp: true });
     }
+    resyncRun.stage = "Finishing up...";
+    resyncRun.fraction = 0.96;
+    renderResyncProgress();
     persistState();
     renderChats();
     pendingInitialCatchUp = false;
@@ -25083,81 +26253,32 @@ async function runIncomingResync(conversationIds) {
   renderResyncProgress();
 }
 
-// iOS: "This removes local account data and messages." Desktop equivalent: remove the active
-// saved account (wallet, contacts, conversations, account-scoped storage) from this device and
-// return to the logged-out / accounts screen.
-async function dangerWipeCurrentAccount() {
-  const account = activeSavedAccountRecord();
-  if (!account) { showCopyToast("No active account to wipe."); return; }
-  // iOS 78152d3: the confirmation says what is removed and that on-chain messages cannot be;
-  // with Nextcloud connected a second option removes the encrypted archive too.
-  const connected = isNextcloudConnected();
-  const message = connected
-    ? `This deletes "${account.name}", its messages, groups, drafts and settings from this browser, and forgets the Nextcloud login stored here. Your encrypted Nextcloud backup stays unless you choose to remove it. Messages and posts on the Kaspa blockchain cannot be deleted. Make sure you have your recovery phrase.`
-    : `This deletes "${account.name}", its messages, groups, drafts and settings from this browser. Messages and posts on the Kaspa blockchain cannot be deleted. Make sure you have your recovery phrase.`;
-  let removeRemoteBackup = false;
-  if (connected) {
-    const choice = await chooseDialog({
-      title: "Delete account?",
-      message,
-      options: [
-        { id: "delete", title: "Delete Account", subtitle: "The Nextcloud backup stays for your other devices.", destructive: true },
-        { id: "delete-remote", title: "Delete and Remove Nextcloud Backup", subtitle: "Also deletes the encrypted archive from your Nextcloud.", destructive: true },
-        { id: "cancel", title: "Cancel" },
-      ],
-    });
-    if (!choice || choice === "cancel") return;
-    removeRemoteBackup = choice === "delete-remote";
-  } else if (!await confirmDialog({ title: "Delete account?", message, confirmLabel: "Delete Account", destructive: true })) {
-    return;
-  }
-  if (removeRemoteBackup) {
-    try { await deleteRemoteNextcloudBackup(); }
-    catch (error) {
-      appendEngineLog(`Remote backup removal failed: ${error.message}`);
-      if (!await confirmDialog({ title: "Couldn't remove the Nextcloud backup", message: `${userFacingError(error)}\n\nDelete the account from this browser anyway? The archive stays on your Nextcloud.`, confirmLabel: "Delete Anyway", destructive: true })) return;
-    }
-  }
-  try {
-    localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
-    clearSessionActive();
-    await engine.disconnect?.();
-    engine.clearSession();
-    // Removes the saved-account record + every account-scoped key for this address.
-    removeSavedAccountFromDevice(account);
-    setActiveConversationId(null);
-    state = { contacts: [], conversations: [] };
-    currentBalanceKas = "--";
-    updateWalletUi();
-    updateServiceSummary();
-    renderChats();
-    closeAccountOverlay();
-    showLoggedOutScreen();
-    showCopyToast("Account and messages wiped.");
-  } catch (error) {
-    appendEngineLog(`Danger Zone account wipe failed: ${error.message}`);
-    showCopyToast(userFacingError(error));
-  }
-}
+// No "Delete Account" or "Wipe all saved accounts & local data" here (owner, iOS SettingsView
+// dangerZonePage): removing an account is the accounts screen's job, where you can see which
+// one you are removing.
 
 // Chat History (iOS chatHistoryPage): the same archive file every device shares, saved to a
 // file here rather than a share sheet; import merges a file through the blocking restore modal.
 async function exportChatHistoryFile() {
   try {
     const archive = buildLocalChatArchive();
-    const stamp = new Date().toISOString().slice(0, 10);
+    // iOS exportChatHistoryArchive: "kachat-history-<ISO 8601 with fractional seconds>.json",
+    // colons swapped for dashes. The file itself is the confirmation; no toast.
+    const stamp = new Date().toISOString().replace(/:/g, "-");
     // Sealed with the same envelope the Nextcloud backup uses (iOS does the same for its local
     // export): the file carries group keys, and a plaintext copy in Downloads is not a place for
     // them. Every platform's importer already opens envelopes.
     const sealed = await sealSharedBackupJson(JSON.stringify(archive));
-    downloadBlob(`kachat-chat-history-${stamp}.json`, "application/json", typeof sealed === "string" ? sealed : JSON.stringify(sealed));
-    showCopyToast("Chat history exported.");
+    downloadBlob(`kachat-history-${stamp}.json`, "application/json", typeof sealed === "string" ? sealed : JSON.stringify(sealed));
   } catch (error) {
     appendEngineLog(`Chat history export failed: ${error.message}`);
     showCopyToast(error.message || "Export failed.");
   }
 }
-const historyRestore = { phase: "idle", summary: null, error: "" };
+// The blocking restore modal for a local archive (iOS ChatRestoreProgressModal over
+// BackupRestoreCoordinator.startLocalRestore): no confirm first, the stage and a percentage while
+// it runs, then Done, or Try Again / Close.
+const historyRestore = { phase: "idle", summary: null, error: "", fraction: 0, stage: "", fileText: null };
 function renderHistoryRestore() {
   const modal = document.querySelector("[data-history-restore-modal]");
   const body = document.querySelector("[data-history-restore-body]");
@@ -25165,42 +26286,62 @@ function renderHistoryRestore() {
   modal.hidden = historyRestore.phase === "idle";
   if (historyRestore.phase === "idle") return;
   if (historyRestore.phase === "running") {
-    body.innerHTML = `<div class="progress-card-icon">↻</div><h2>Restoring Backup</h2>
-      <div class="progress-track"><div class="progress-fill indeterminate"></div></div>
+    const percent = Math.round(historyRestore.fraction * 100);
+    body.innerHTML = `<div class="progress-card-icon">↓</div><h2>Restoring Backup</h2>
+      <div class="progress-track"><div class="progress-fill" style="width:${percent}%"></div></div>
+      <div class="progress-meta"><span>${escapeHtml(historyRestore.stage)}</span><span>${percent}%</span></div>
       <p class="field-hint">Please keep the app open. Leaving now could corrupt your chat history.</p>`;
   } else if (historyRestore.phase === "success") {
     const s = historyRestore.summary || {};
     body.innerHTML = `<div class="progress-card-icon ok">✓</div><h2>Restore Complete</h2>
-      <p class="field-hint">Restored ${s.messages || 0} ${s.messages === 1 ? "message" : "messages"} across ${s.conversations || 0} ${s.conversations === 1 ? "chat" : "chats"}${s.groups ? ` and ${s.groups} ${s.groups === 1 ? "group" : "groups"}` : ""}.</p>
+      <p class="field-hint">Restored ${Number(s.messages) || 0} messages from ${Number(s.conversations) || 0} chats.</p>
       <div class="modal-actions"><button class="primary-button full" type="button" data-history-restore-done>Done</button></div>`;
   } else {
     body.innerHTML = `<div class="progress-card-icon warn">⚠</div><h2>Restore Failed</h2>
       <p class="field-hint">${escapeHtml(historyRestore.error || "Something went wrong.")}</p>
-      <div class="modal-actions"><button class="secondary-button full" type="button" data-history-restore-done>Close</button></div>`;
+      <div class="modal-actions stacked"><button class="primary-button full" type="button" data-history-restore-retry>Try Again</button><button class="secondary-button full" type="button" data-history-restore-done>Close</button></div>`;
   }
 }
-document.querySelector("[data-history-restore-modal]")?.addEventListener("click", (event) => {
-  if (event.target.closest("[data-history-restore-done]")) { historyRestore.phase = "idle"; renderHistoryRestore(); }
-});
-document.querySelector("[data-chat-history-file]")?.addEventListener("change", async (event) => {
-  const file = event.target.files?.[0];
-  event.target.value = "";
-  if (!file) return;
-  const ok = await confirmDialog({ title: "Restore from Backup", message: "Messages from the file are merged into this device's chat history. Nothing is deleted.", confirmLabel: "Restore" });
-  if (!ok) return;
-  historyRestore.phase = "running";
+function advanceHistoryRestore(fraction, stage) {
+  historyRestore.fraction = Math.max(historyRestore.fraction, Math.min(fraction, 1));
+  historyRestore.stage = stage;
+  renderHistoryRestore();
+  return new Promise((resolve) => window.setTimeout(resolve, 30)); // let the bar paint
+}
+async function runLocalHistoryRestore(fileText) {
+  if (historyRestore.phase === "running") return;
+  Object.assign(historyRestore, { phase: "running", summary: null, error: "", fraction: 0, stage: "Reading archive...", fileText });
   renderHistoryRestore();
   await new Promise((resolve) => window.setTimeout(resolve, 50));
   try {
-    const text = await openSharedBackupJson(await file.text());
+    await advanceHistoryRestore(0.05, "Validating backup...");
+    const text = await openSharedBackupJson(fileText);
+    await advanceHistoryRestore(0.36, "Preparing messages...");
     const summary = importPhoneChatArchive(text);
-    Object.assign(historyRestore, { phase: "success", summary });
+    await advanceHistoryRestore(0.92, "Finishing up...");
+    Object.assign(historyRestore, { phase: "success", summary, fraction: 1, stage: "Done", fileText: null });
     refreshAllConversations({ quiet: true }).catch(() => {});
   } catch (error) {
     appendEngineLog(`Chat history import failed: ${error.message}`);
     Object.assign(historyRestore, { phase: "failure", error: error?.message || "Failed to open archive." });
   }
   renderHistoryRestore();
+}
+document.querySelector("[data-history-restore-modal]")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-history-restore-done]")) { Object.assign(historyRestore, { phase: "idle", fileText: null }); renderHistoryRestore(); return; }
+  if (event.target.closest("[data-history-restore-retry]") && historyRestore.fileText != null) {
+    historyRestore.phase = "idle";
+    void runLocalHistoryRestore(historyRestore.fileText);
+  }
+});
+document.querySelector("[data-chat-history-file]")?.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  let fileText;
+  try { fileText = await file.text(); }
+  catch (error) { showCopyToast(`Failed to open archive: ${userFacingError(error)}`); return; }
+  void runLocalHistoryRestore(fileText);
 });
 
 // Diagnostics archive (iOS DiagnosticsSettingsPage): app/device info, connection settings,
@@ -25217,41 +26358,23 @@ function exportDiagnosticsFile() {
       account: { chattingAddress: engine.address ? `${engine.address.slice(0, 16)}…${engine.address.slice(-6)}` : null },
       connection: { endpoints: getEndpoints(), explorer: currentExplorer().displayName, runtime: window.__kaspaEngineStep || null },
       counts: { contacts: (state.contacts || []).length, conversations: conversations.length, incomingMessages: incoming, outgoingMessages: outgoing },
-      logs: logLines,
     };
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    downloadBlob(`kachat-diagnostics-${stamp}.json`, "application/json", JSON.stringify(archive, null, 2));
-    showCopyToast("Diagnostics archive exported.");
+    // iOS DiagnosticsSettingsPage: a zip, "kasia-diagnostics-<ISO 8601>.zip" (colons as dashes),
+    // holding diagnostics.json and app.log. The file is the confirmation; no toast.
+    const stamp = new Date().toISOString().replace(/:/g, "-");
+    const zip = createStoredZip([
+      { name: "diagnostics.json", data: JSON.stringify(archive, null, 2) },
+      { name: "app.log", data: logLines.join("\n") },
+    ]);
+    downloadBlob(`kasia-diagnostics-${stamp}.zip`, "application/zip", new Blob([zip], { type: "application/zip" }));
   } catch (error) {
-    showCopyToast(`Diagnostics export failed: ${userFacingError(error)}`);
+    appendEngineLog(`Diagnostics export failed: ${error?.message || error}`);
+    showCopyToast("Failed to export diagnostics.");
   }
-}
-
-// The desktop's broadest reset (no iOS iCloud analogue): erase every saved account and all
-// KaChat-owned local data, then reload to a clean first-run state.
-async function dangerWipeEverything() {
-  if (!await confirmText("Wipe ALL saved accounts and local data?\n\nThis permanently erases every account, and all messages, contacts, and settings stored in this browser. Make sure you have backed up every recovery phrase. This cannot be undone.")) return;
-  try { await engine.disconnect?.(); } catch {}
-  try { engine.clearSession?.(); } catch {}
-  try {
-    const keys = [];
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (key && key.startsWith("kachat")) keys.push(key);
-    }
-    for (const key of keys) localStorage.removeItem(key);
-  } catch {}
-  try { clearSessionActive(); } catch {}
-  try { lockKeyVault(); } catch {} // the data key in memory; a plain reload hands nothing over
-  // The chat store is IndexedDB-backed when available (see ui/storage.js DB_NAME).
-  try { indexedDB.deleteDatabase("kachat-desktop"); } catch {}
-  window.location.reload();
 }
 
 const DANGER_ZONE_ACTIONS = {
   resync: dangerWipeAndResyncIncoming,
-  "wipe-all": dangerWipeEverything,
-  "delete-account": dangerWipeCurrentAccount,
   "export-history": exportChatHistoryFile,
   "import-history": () => document.querySelector("[data-chat-history-file]")?.click(),
   "diagnostics-export": exportDiagnosticsFile,
@@ -25273,25 +26396,39 @@ document.querySelector("[data-logged-out-create]")?.addEventListener("click", ()
 
 document.querySelector("[data-logged-out-import]")?.addEventListener("click", () => unlockBeforeAddingAccount(openImportAccountModal));
 
-document.querySelector("[data-copy-balance]")?.addEventListener("click", async () => {
-  try { await copyTextToClipboard(Number(currentBalanceKas).toFixed(8)); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
+// Clicking the toolbar balance copies it with its 8 decimals (iOS balanceToolbarView); nothing
+// while it is unknown ("--") or masked on Portfolio.
+toolbarBalance?.addEventListener("click", async () => {
+  const exact = kasExact8Text(currentBalanceKas);
+  if (exact === "--" || !/\d/.test(toolbarBalanceValue?.textContent ?? toolbarBalance.textContent ?? "")) return;
+  try { await copyTextToClipboard(exact); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
 });
 
 document.querySelectorAll('[data-shell-action="view-recovery"]').forEach((button) => button.addEventListener("click", openRecoveryModal));
 
-// The profile "Welcome Guide" row is gated by the Show Setup Guides pref, like
-// iOS (walletManager.showSetupGuides).
-function refreshSetupGuideRow() {
-  const show = accountShellPrefs.showSetupGuides ?? true;
-  document.querySelectorAll("[data-setup-guide-row]").forEach((el) => { el.hidden = !show; });
+// Settings > Notifications > Push Notifications: the master switch over every OS notification
+// (iOS NotificationsHubPage). Stored under the old Chats key so existing choices carry over.
+function pushNotificationsEnabled() {
+  return (accountShellPrefs.chatNotifications ?? true) !== false;
+}
+function renderPushNotificationsFooter() {
+  const footer = document.querySelector("[data-push-notifications-footer]");
+  if (!footer) return;
+  footer.textContent = pushNotificationsEnabled()
+    ? "Everything you have switched on below can reach you, even when the app is closed. Turning this off silences all of it."
+    : "Turn this on to receive anything you have switched on below, even when the app is closed.";
+}
+
+// Settings > Customization > Show Fee Estimate, default ON (iOS AppSettings.showFeeEstimate).
+// There is no Show Setup Guides switch any more: the guides are always shown.
+function feeEstimateEnabled() {
+  return (accountShellPrefs.estimateFees ?? true) !== false;
 }
 
 const prefBindings = [
-  ["[data-pref-estimate-fees]", "estimateFees", false],
+  ["[data-pref-estimate-fees]", "estimateFees", true],
   ["[data-pref-hide-payment-chats]", "hidePaymentChats", false],
   ["[data-pref-show-contact-balance]", "showContactBalance", true],
-  ["[data-pref-store-messages]", "storeMessages", true],
-  ["[data-pref-show-setup-guides]", "showSetupGuides", true],
   // Settings > Chats: hold back inline photos from contacts you haven't accepted yet
   // (iOS AppSettings.requirePhotoApprovalForNewContacts, default ON).
   ["[data-pref-photo-approval]", "photoApprovalForNewContacts", true],
@@ -25317,7 +26454,7 @@ prefBindings.forEach(([selector, key, fallback]) => {
     accountShellPrefs[key] = input.checked;
     persistAccountShellPreferences();
     if (key === "estimateFees") scheduleFeeEstimate();
-    if (key === "showSetupGuides") refreshSetupGuideRow();
+    if (key === "chatNotifications") renderPushNotificationsFooter();
     if (key === "verboseApiLogging") setVerboseApiLogging(input.checked, appendEngineLog);
     if (key === "photoApprovalForNewContacts") {
       // Apply to the open thread immediately, and re-sync the Chat Info toggle that mirrors it.
@@ -25332,7 +26469,7 @@ prefBindings.forEach(([selector, key, fallback]) => {
     }
   });
 });
-refreshSetupGuideRow();
+renderPushNotificationsFooter();
 // The Notifications page tells a phone reader what it takes (a Safari tab cannot notify at all).
 {
   const hint = document.querySelector("[data-notif-phone-hint]");
@@ -25404,26 +26541,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && profileQrOverlay && !profileQrOverlay.hidden) {
     profileQrOverlay.hidden = true;
   }
-});
-
-document.querySelectorAll("[data-copy-engine-address]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    // Whatever the screen is showing wins; engine.address is only the fallback for the
-    // plain chatting view (see chattingAddressScreenAddress).
-    const target = chattingAddressScreenAddress || engine.address;
-    if (!target) {
-      appendEngineLog("Copy failed: no wallet loaded.");
-      return;
-    }
-    try {
-      await copyTextToClipboard(target);
-      appendEngineLog("Copied address.");
-      showCopyToast(addressCopiedToastText(target));
-    } catch (error) {
-      appendEngineLog(`Copy failed: ${error.message}`);
-      showCopyToast("Copy failed");
-    }
-  });
 });
 
 // Claim Testnet Kaspa (iOS 182ae68, 2a81767): Profile, testnet only. The official TN10 faucet sits
@@ -25508,8 +26625,7 @@ function installTestnetFaucetButton() {
         const now = await readBalanceSompi();
         if (now !== null && now > before) {
           try { localStorage.setItem(storageKey(address), String(Date.now())); } catch { /* storage off */ }
-          refreshBalanceOnly();
-          showCopyToast("Testnet Kaspa received");
+          refreshBalanceOnly(); // no toast: the button turning to "Claimed" says it (iOS checkForClaim)
           return;
         }
       }
@@ -25658,7 +26774,11 @@ queueMicrotask(async () => {
         if (kas > 0) {
           sendInstantTip(address, name, kas, tip)
             .then(() => { try { onTipped?.(); } catch { /* the feed moved on */ } })
-            .catch(() => openTipModal({ address, name, tip, onTipped }));
+            // iOS: "Tip didn't send: <why>", then the amount screen so it can go by hand.
+            .catch(async (error) => {
+              const why = `Tip didn't send: ${userFacingError(error) || "Send failed."}`;
+              await openTipModal({ address, name, tip, onTipped, error: why });
+            });
         } else openTipModal({ address, name, tip, onTipped });
       },
       openKaPostsSettings,
@@ -25666,7 +26786,7 @@ queueMicrotask(async () => {
       // Routes to the Profile tab's KNS editor rather than a second copy of it.
       // KaPosts' profile button edits your .kachat profile too (iOS 09e0403).
       editKnsProfile: () => openKachatProfileEditor(),
-      showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
+      showFeeEstimate: () => feeEstimateEnabled(),
       // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
       // signature of the right width, so the estimate is for the bytes that will actually go.
       estimatePostFeeKas: (text) => {
@@ -25742,14 +26862,9 @@ queueMicrotask(async () => {
       buildLinkPreviewCard,
       buildVoicePlayer,
       isPreviewableUrl,
-      // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer, and the
-      // same preview bar before anything is sent.
+      // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer. A room
+      // draws its own recording bar and sends on stop (iOS recordingBar), so no preview bar here.
       createVoiceRecorder,
-      formatRecordingTime,
-      voicePreview: {
-        render: renderVoicePanel, set: setVoicePreview, clear: clearVoicePreview,
-        toggle: toggleVoicePreviewPlayback, get: (panel) => voicePreviews.get(panel),
-      },
       // Public chats' mic asks on chain or via Nextcloud while a server is connected (iOS 8b13460).
       isNextcloudConnected,
       chooseMediaRoute: (kind) => chooseMediaRouteDialog(kind),
@@ -25764,7 +26879,6 @@ queueMicrotask(async () => {
       parseReplyEnvelope,
       parseImageEnvelope,
       parseAudioEnvelope,
-      openPhotoPreview,
       // Right-click context menu (1:1 parity): quick reactions + Reply/Copy/Explorer/Hide.
       // Functions are hoisted; MSG_MENU_ICONS is a const declared later in the module, so
       // it is handed over lazily to dodge the temporal dead zone at init time.
@@ -25779,6 +26893,9 @@ queueMicrotask(async () => {
       // Translate from the message menu (iOS 03e5128): the KaPosts service, public rooms only.
       translation: { canOffer: canOfferTextTranslation, state: textTranslationState, textFor: translatedTextFor, showOriginal: showOriginalText, showTranslation: showTranslatedText, readerLanguageName, translate: translateText, onChange: onTranslationChange },
       firstInternalLinkIn,
+      // KaChat links (posts, rooms, profiles, payment requests) as the native card (iOS
+      // KaChatInternalLinkCardView), the same one 1:1 and group bubbles draw.
+      buildInternalLinkCard,
       // The avatar menu's destinations (iOS BroadcastChannelView.avatarButton).
       openUserInfo: (address) => openChatInfoForAddress(address),
       openChat: (address, name) => openChatWithAddress({ address, name }),
@@ -25787,7 +26904,7 @@ queueMicrotask(async () => {
       // Shared reaction surfaces and the fee pill's estimate (Settings > Show Fee Estimate).
       openQuickReactionBar: openQuickReactionBarFor,
       showReactionsSheet,
-      showFeeEstimate: () => Boolean(accountShellPrefs.estimateFees),
+      showFeeEstimate: () => feeEstimateEnabled(),
       estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
       chattingAddress: () => engine.address || "",
       appWideBroadcastIndexer: () => String(getEndpoint("broadcastIndexer") || ""),
@@ -25835,6 +26952,8 @@ queueMicrotask(async () => {
       addressCardHtml: (address, opts) => addressResolutionCardHtml(address, opts),
       showToast: showCopyToast, appendEngineLog,
       explorerAddressUrl, explorerTxUrl, addressCopiedToastText,
+      // The success screen's "tap to view in <explorer>" (iOS kaspaExplorer.displayName).
+      explorerDisplayName: () => currentExplorer().displayName,
       txDirectionForAddress: manageAddressTxDirection,
       transactionFeeText,
       // Fiat toggle in the send flow: live KAS price in the user's selected currency,
@@ -25861,10 +26980,11 @@ queueMicrotask(async () => {
       // "Send from Nextcloud" staging: the picked file's share link lands in the composer for
       // review instead of auto-sending — the user presses send themselves.
       stageComposerText: (text) => {
-        activateComposerMode("message");
+        // Added after whatever is typed (iOS stageNextcloudLink), never in its place.
+        try { exitChatAudioMode(); } catch { /* voice section not evaluated yet */ }
         const input = composer?.elements?.message;
         if (!input) return;
-        input.value = text;
+        input.value = input.value ? `${input.value} ${text}` : text;
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.focus();
       },
@@ -26028,7 +27148,8 @@ queueMicrotask(async () => {
       escapeHtml,
       infoSheet,
       // Every KaChat indexer the app is configured with; the screen asks each once.
-      indexerUrls: () => ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"].map((key) => getEndpoint(key)).filter(Boolean),
+      // iOS KaChatStatsView.indexerBases: indexer, public chat (broadcast) indexer, KaPost indexer.
+      indexerUrls: () => ["kasiaIndexer", "broadcastIndexer", "kapostIndexer"].map((key) => getEndpoint(key)).filter(Boolean),
       // The .kachat Domains cards (iOS f5d34f4, 4924787: Transactions and Fees): the registry's own
       // totals, wherever names are live.
       kachatTotals: async () => {
@@ -26830,23 +27951,21 @@ function openGroupMemberMenu(address, x, y) {
   if (!address) return;
   const mine = address === engine.address;
   const muted = Boolean(activeGroupId && !mine && isGroupMemberMuted(activeGroupId, address));
-  const hidden = Boolean(activeGroupId && !mine && isGroupMemberHidden(activeGroupId, address));
   // iOS GroupChatDetailView's sender sheet: a header naming the sender and their address, then
   // one row per option saying what it does.
   const options = [{ id: "profile", title: "View Profile", subtitle: "Their profile, .kachat name and address." }];
   if (!mine) {
-    options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this member." });
+    options.push({ id: "chat", title: "Open Chat", subtitle: "Message them directly, one to one." });
     // "Send Kaspa", was "Pay in Kaspa" (iOS aaa45ae).
-    options.push({ id: "pay", title: "Send Kaspa", subtitle: `Send ${KAS_UNIT} to this member from your chatting address.` });
+    options.push({ id: "pay", title: "Send Kaspa", subtitle: "Open your chat with them in payment mode." });
   }
-  options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
+  options.push({ id: "copy", title: "Copy Address", subtitle: "Copy their Kaspa address." });
   if (!mine) {
     options.push(muted
-      ? { id: "mute", title: "Unmute User", subtitle: "Their messages notify you again." }
-      : { id: "mute", title: "Mute User", subtitle: "Their messages stop notifying you; they still appear." });
-    options.push(hidden
-      ? { id: "hide", title: "Unhide User", subtitle: "Their messages show in this group again." }
-      : { id: "hide", title: "Hide User", subtitle: "Their messages disappear from this group on this device.", destructive: true });
+      ? { id: "mute", title: "Unmute User", subtitle: "Get notified for their messages again." }
+      : { id: "mute", title: "Mute User", subtitle: "Their messages still show, but never notify you." });
+    // Always Hide (iOS): unhiding is Group Info > Hidden Users.
+    options.push({ id: "hide", title: "Hide User", subtitle: "Stop seeing their messages in this group. Undo it in Group Info.", destructive: true });
   }
   chooseDialog({ title: groupSenderLabel(address), message: address, options }).then((choice) => {
     if (choice === "profile") openChatInfoForAddress(address);
@@ -26857,9 +27976,9 @@ function openGroupMemberMenu(address, x, y) {
       setGroupMemberMuted(activeGroupId, address, !muted);
       showCopyToast(muted ? "User unmuted." : "User muted.");
     } else if (choice === "hide" && activeGroupId) {
-      setGroupMemberHidden(activeGroupId, address, !hidden);
+      setGroupMemberHidden(activeGroupId, address, true);
       renderGroupMessages();
-      if (!hidden) showCopyToast("User hidden.");
+      showCopyToast("User hidden.");
     }
   });
 }
@@ -27023,7 +28142,7 @@ function syncGroupFundingGate() {
   if (groupComposerInput) groupComposerInput.disabled = gated;
   if (!gated) return;
   const addressEl = gate.querySelector("[data-group-funding-gate-address]");
-  if (addressEl) addressEl.textContent = engine.address;
+  if (addressEl) fillFundingGateAddress(addressEl, engine.address);
   const canvas = gate.querySelector("[data-group-funding-gate-qr]");
   if (canvas && groupFundingGateQrDrawnFor !== engine.address) {
     groupFundingGateQrDrawnFor = engine.address;
@@ -27063,9 +28182,25 @@ function hideGroupFeePill() {
 }
 // Typing waits for a 0.6 s pause and skips the estimate while within 24 bytes of the estimated
 // length; other callers force it (see scheduleFeeEstimate, iOS 0977a5b).
+// What the group fee pill is for (iOS shouldShowFeeBubble): a pending photo, a recording, or the
+// typed text.
+function groupFeeSubjectText() {
+  try {
+    if (groupVoiceRecorder || groupVoiceEncoding) {
+      if (groupVoiceViaNextcloud && isNextcloudConnected()) return "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES);
+      const audioBytes = Math.ceil(((Date.now() - groupVoiceStartMs) / 1000) * VOICE_AUDIO_BITS_PER_SECOND / 8);
+      return "x".repeat(Math.ceil(audioBytes / 3) * 4 + 120);
+    }
+    if (groupPendingPhoto) {
+      if (groupPhotoViaNextcloud && isNextcloudConnected()) return "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES);
+      return buildImageEnvelopeJson(groupPendingPhoto.attachment, groupPendingPhoto.fileName);
+    }
+  } catch { /* voice / photo sections not evaluated yet */ }
+  return String(groupComposerInput?.value || "").trim();
+}
 function scheduleGroupFeeEstimate({ typing = false } = {}) {
-  const text = String(groupComposerInput?.value || "").trim();
-  if (!activeGroupId || !text || !accountShellPrefs.estimateFees) { hideGroupFeePill(); return; }
+  const text = groupFeeSubjectText();
+  if (!activeGroupId || !text || !feeEstimateEnabled()) { hideGroupFeePill(); return; }
   if (groupFeeOverrideKas != null) { renderGroupFeePill(groupFeeOverrideKas); return; }
   const length = utf8ByteLength(text);
   if (typing && !groupFeeTimer && !document.querySelector("[data-group-fee]")?.hidden
@@ -27102,8 +28237,10 @@ document.querySelector("[data-group-fee]")?.addEventListener("click", async () =
     message: "If the network is busy, a higher fee can help your transaction confirm faster.",
     initial: formatKasExact(current),
     confirmLabel: "Save",
+    extraLabel: "Use Default",
   });
   if (typed == null) return;
+  if (typed === PROMPT_EXTRA) { groupFeeOverrideKas = null; scheduleGroupFeeEstimate(); return; }
   // The one exact parser (iOS IOS-010), kept as exact KAS text.
   const typedSompi = String(typed).trim() === "" ? 0n : sompiFromUserText(String(typed));
   if (typedSompi === 0n) { groupFeeOverrideKas = null; scheduleGroupFeeEstimate(); return; }
@@ -27134,6 +28271,7 @@ function openGroupChat(groupId) {
   markGroupOpened(groupId);
   groupFeeOverrideKas = null;
   hideGroupFeePill();
+  setGroupSendError(null);
   if (groupSelectionMode) { groupSelectionMode = false; selectedGroupMessageKeys.clear(); updateGroupSelectionUi(); }
   // Take over the detail pane: clear any open 1:1 and hide its empty state. Setting
   // activeGroupId first means setActiveConversationId(null) treats the group as the pane
@@ -27142,7 +28280,8 @@ function openGroupChat(groupId) {
   setActiveConversationId(null);
   setGroupUnread(groupId, 0);
   if (groupChatName) groupChatName.textContent = g.name || "Group";
-  if (groupChatSub) groupChatSub.textContent = `${g.members.length} member${g.members.length === 1 ? "" : "s"}`;
+  // The header is the photo and the name only (iOS groupTitleChip): no member count.
+  if (groupChatSub) { groupChatSub.textContent = ""; groupChatSub.hidden = true; }
   if (groupChatAvatar) groupChatAvatar.innerHTML = groupAvatarHtml(g.photoHex);
   const amMember = g.members.some((m) => m.address === engine.address);
   if (groupReadonlyNote) groupReadonlyNote.hidden = amMember;
@@ -27157,6 +28296,7 @@ function openGroupChat(groupId) {
   // Fresh composer state per group open - except the text, which is the group's draft (iOS
   // 360e5d2): what was typed comes back when the group reopens.
   try {
+    if (groupVoiceRecorder || groupVoiceEncoding) cancelGroupVoice(); // a recording belongs to its group
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
     if (groupComposerInput) { groupComposerInput.value = readDraft(`group:${groupId}`); autoGrowGroupComposer(); }
   } catch { /* composer wiring not ready during boot */ }
@@ -27213,6 +28353,8 @@ const MSG_MENU_ICONS = {
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.6-9-9.4C2 7.6 4.3 4.5 7.6 4.5c1.9 0 3.4 1 4.4 2.5 1-1.5 2.5-2.5 4.4-2.5 3.3 0 5.6 3.1 4.6 6.6-1.5 4.8-9 9.4-9 9.4Z"/></svg>',
   link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13.5a4 4 0 0 0 6 .4l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7"/><path d="M14 10.5a4 4 0 0 0-6-.4l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/></svg>',
+  save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>',
+  openApp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M10 14 16 8M11 8h5v5"/></svg>',
 };
 
 // Shared Telegram-style right-click menu for a message. Renders a quick-reaction row at the
@@ -27273,7 +28415,6 @@ function msgMenuHint(label) {
   const hints = {
     Reply: "Quotes this message above your reply.",
     Edit: "Changes the text. Everyone sees the new version.",
-    "Retry Edit": "Sends your edit again.",
     "Copy Message": "Copies the text to your clipboard.",
     "Copy Link": "Copies the address to your clipboard.",
     "Open Link": "Opens it in your browser.",
@@ -27282,8 +28423,9 @@ function msgMenuHint(label) {
     "Show Original": "Back to the text as it was sent.",
     "Show Translation": "The translated text again.",
     Select: "Pick several messages at once.",
-    "Message info": "The message and its details.",
-    "Delete for me": "Removes it from this device only.",
+    "Copy File Name": "Copies the name to your clipboard.",
+    "Save Audio": "Saves or shares the recording as a file.",
+    "Open in KaChat": "Opens it right here in the app.",
   };
   if (hints[text]) return hints[text];
   if (/^Reactions \(\d+\)$/.test(text)) return "Who reacted, and with what.";
@@ -27292,10 +28434,27 @@ function msgMenuHint(label) {
   return "";
 }
 
-function openMsgContextMenu({ x, y, reaction, items }) {
+function openMsgContextMenu({ x, y, reaction, items, title = "", preview = "" }) {
   document.querySelectorAll(".msg-context-menu, .group-msg-menu").forEach((m) => m.remove());
   const menu = document.createElement("div");
   menu.className = "msg-context-menu";
+
+  // iOS MessageActionsSheet's header: what was pressed ("Message", "File", "Link", ...) and up to
+  // two lines of it.
+  if (title || preview) {
+    const head = document.createElement("div");
+    head.className = "msg-context-head";
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    if (title) head.append(strong);
+    const shown = String(preview || "").trim();
+    if (shown) {
+      const line = document.createElement("span");
+      line.textContent = shown;
+      head.append(line);
+    }
+    menu.append(head);
+  }
 
   if (reaction) {
     const row = document.createElement("div");
@@ -27392,7 +28551,7 @@ function openQuickReactionBarFor({ anchor, alignRight = false, current = null, o
   bar.innerHTML = `
     <div class="quick-reaction-row">
       <button type="button" class="quick-reaction-more" data-quick-more aria-label="More reactions">+</button>
-      ${quickReactionEmojis().map((emoji) => `<button type="button" class="quick-reaction-emoji${emoji === current ? " active" : ""}" data-quick-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join("")}
+      ${quickReactionEmojis().map((emoji) => `<button type="button" class="quick-reaction-emoji" data-quick-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join("")}
     </div>
     <button type="button" class="quick-reaction-reply" data-quick-reply aria-label="Reply">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
@@ -27469,99 +28628,174 @@ function avatarHtmlForAnyAddress(address, className = "message-avatar") {
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
-// Right-click menu for a 1:1 message: reactions + Reply, Copy, Select, Explorer, Info, Retry, Delete.
+/** What a message is, for its long-press menu (iOS: each bubble kind carries its own menu). */
+function messageMenuKind(rawText, bodyText) {
+  const text = String(rawText || "");
+  if (Calls.parseCallEnvelope(text)) return { kind: "call" };
+  if (Chess.parseChessEnvelope(Chess.unwrapReplyText(text))) return { kind: "chess" };
+  const image = parseImageEnvelope(text);
+  if (image) return { kind: "file", name: image.name || "photo.jpg", image };
+  const audio = parseAudioEnvelope(text);
+  if (audio) return { kind: "voice", audio };
+  const body = String(bodyText ?? "");
+  const internal = firstInternalLinkIn(body);
+  // A link into KaChat is the whole message (iOS KaChatInternalLinkCardView).
+  if (internal) return { kind: "kachatLink", link: internal, url: internal.raw };
+  const urls = [...body.matchAll(URL_IN_TEXT_RE)].map((m) => m[0].replace(/[),.;:!?\]]+$/, "")).filter(Boolean);
+  if (urls.length === 1 && body.trim() === urls[0] && isPreviewableUrl(urls[0])) return { kind: "link", url: urls[0] };
+  return { kind: "text" };
+}
+
+/** Save Audio (iOS AudioShareSheet): the recording as a file in Downloads. */
+function saveAudioEnvelope(audio) {
+  const anchor = document.createElement("a");
+  anchor.href = audio.content;
+  anchor.download = audio.name || voiceFileName(audio.mimeType);
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+/** The menu rows every bubble kind shares, by iOS MessageAction. */
+function messageMenuRows({ txid, kindInfo, copyText, onReply, onSelect, onRetry, onEdit, reactionCount = 0, onReactions }) {
+  const explorer = txid ? { label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(txid), "_blank", "noopener,noreferrer") } : null;
+  const reply = onReply ? { label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: onReply } : null;
+  const select = onSelect ? { label: "Select", icon: MSG_MENU_ICONS.select, onClick: onSelect } : null;
+  const retry = onRetry ? { label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: onRetry } : null;
+  const copyMessage = { label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(copyText).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) };
+  switch (kindInfo.kind) {
+    case "call": return [explorer, reply, select];
+    case "chess": return [retry, explorer];
+    case "payment": return [copyMessage, explorer, reply, select];
+    case "file": return [
+      { label: "Copy File Name", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(kindInfo.name).then(() => showCopyToast("File name copied.")).catch(() => {}) },
+      explorer, reply, retry, select,
+    ];
+    case "voice": return [
+      { label: "Save Audio", icon: MSG_MENU_ICONS.save, onClick: () => saveAudioEnvelope(kindInfo.audio) },
+      explorer, reply, retry, select,
+    ];
+    case "kachatLink": return [
+      { label: "Open in KaChat", icon: MSG_MENU_ICONS.openApp, onClick: () => openKaChatInternalLink(kindInfo.link) },
+      { label: "Copy Link", icon: MSG_MENU_ICONS.link, onClick: () => copyTextToClipboard(kindInfo.url).catch(() => {}) },
+      explorer, select,
+    ];
+    // A Nextcloud share's link is never handed out (iOS LinkPreviewCardView.menuActions).
+    case "link": return [
+      isNextcloudShareLink(kindInfo.url) ? null : { label: "Copy Link", icon: MSG_MENU_ICONS.link, onClick: () => copyTextToClipboard(kindInfo.url).catch(() => {}) },
+      explorer, select,
+    ];
+    default: return [
+      copyMessage, explorer,
+      reactionCount > 0 && onReactions ? { label: `Reactions (${reactionCount})`, icon: MSG_MENU_ICONS.heart, onClick: onReactions } : null,
+      onEdit ? { label: "Edit", icon: MSG_MENU_ICONS.edit, onClick: onEdit } : null,
+      reply, retry, select,
+    ];
+  }
+}
+const MESSAGE_MENU_TITLES = { call: "Call", chess: "Chess", payment: "Payment", file: "File", voice: "Voice Message", kachatLink: "KaChat Link", link: "Link", text: "Message" };
+
+/** Right-click on a link inside a message's text (iOS LinkActionsSheet): the address, then Open
+ *  Link, Copy Link and Reply. True when it handled the click. */
+function openLinkActionsMenuFor(event, onReply) {
+  const anchor = event.target?.closest?.(".message-text a.message-link");
+  if (!anchor) return false;
+  const url = anchor.getAttribute("href") || anchor.textContent || "";
+  if (!url) return false;
+  openMsgContextMenu({
+    x: event.clientX, y: event.clientY, preview: url,
+    items: [
+      { label: "Open Link", hint: "Opens in your browser.", icon: MSG_MENU_ICONS.explorer, onClick: () => {
+        const internal = firstInternalLinkIn(url);
+        if (internal && internal.raw === url) openKaChatInternalLink(internal);
+        else window.open(url, "_blank", "noopener,noreferrer");
+      } },
+      { label: "Copy Link", hint: "Copies the address to your clipboard.", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(url).then(() => showCopyToast("Link copied to clipboard.")).catch(() => {}) },
+      onReply ? { label: "Reply", hint: "Reply to this message instead.", icon: MSG_MENU_ICONS.reply, onClick: onReply } : null,
+    ].filter(Boolean),
+  });
+  return true;
+}
+
+// Right-click on a 1:1 message: iOS's long-press half sheet for that kind of bubble, with its
+// title and a two-line preview on top.
 function openOneToOneMessageMenu(messageId, x, y) {
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const message = conversationEntry?.messages?.find((m) => m.id === messageId);
   if (!conversationEntry || !message) return;
   const targetTxId = message.txid || message.id;
-  const isText = !parseImageEnvelope(message.text) && !parseAudioEnvelope(message.text);
-  const myAddress = engine.address || "";
-  const current = (conversationEntry.reactionsByTxId?.[targetTxId] || []).find((e) => e.reactorAddress === myAddress)?.emoji || null;
-  const items = [];
-  items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startReplyTo(message.id) });
-  // Your own text message, once it is on chain: Edit (iOS 913e95f).
-  if (message.direction === "outgoing" && message.txid && message.status !== MESSAGE_STATUSES.FAILED && isEditableContent(message.text)) {
-    items.push({ label: "Edit", icon: MSG_MENU_ICONS.edit, onClick: () => startEditMessage(message.id) });
-    if (message.edit?.status === "failed") items.push({ label: "Retry Edit", icon: MSG_MENU_ICONS.retry, onClick: () => sendEdit(conversationEntry, message, message.edit.text) });
-  }
-  if (isText && !isNextcloudShareLink(message.text)) {
-    items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(displayTextForMessage(message)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
-  }
-  if (message.txid) {
-    items.push({ label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(message.txid), "_blank", "noopener,noreferrer") });
-  }
-  const reactionCount = (conversationEntry.reactionsByTxId?.[targetTxId] || []).length;
-  if (reactionCount > 0) {
-    items.push({ label: `Reactions (${reactionCount})`, icon: MSG_MENU_ICONS.heart, onClick: () => openReactionsSheet(conversationEntry, targetTxId) });
-  }
-  items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterMessageSelection(message.id) });
-  items.push({ label: "Message info", icon: MSG_MENU_ICONS.info, onClick: () => openMessageDetails(message.id) });
-  if (message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED) {
-    if (chessRetryFits(conversationEntry, message)) items.push({ label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: () => runEngineSendPipeline(conversationEntry.id, message.id) });
-  }
-  items.push({ label: "Delete for me", icon: MSG_MENU_ICONS.trash, danger: true, onClick: () => deleteOneMessageLocal(conversationEntry, message) });
-  // Reactions need a real target (txid or local id) to send against.
-  const reaction = targetTxId ? { current, onPick: (emoji) => sendReaction(conversationEntry, message, emoji) } : null;
-  openMsgContextMenu({ x, y, reaction, items });
+  const shown = messageContent(message);
+  const bodyText = parseReplyEnvelope(shown)?.text ?? shown;
+  const paymentParts = parsePaymentCardParts(message);
+  const kindInfo = paymentParts || message.messageType === "payment" ? { kind: "payment" } : messageMenuKind(message.text, bodyText);
+  const failed = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED;
+  // iOS onEdit: your own ordinary message, sent, editable, not chess.
+  const editable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.CONFIRMED && Boolean(message.txid)
+    && kindInfo.kind === "text" && !["handshake", "payment"].includes(message.messageType) && isEditableContent(message.text);
+  const copyText = displayTextForMessage(message);
+  const items = messageMenuRows({
+    txid: message.txid,
+    kindInfo,
+    copyText,
+    onReply: () => startReplyTo(message.id),
+    onSelect: () => enterMessageSelection(message.id),
+    onRetry: failed && chessRetryFits(conversationEntry, message) ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null,
+    onEdit: editable ? () => startEditMessage(message.id) : null,
+    reactionCount: (conversationEntry.reactionsByTxId?.[targetTxId] || []).length,
+    onReactions: () => openReactionsSheet(conversationEntry, targetTxId),
+  }).filter(Boolean);
+  if (!items.length) return;
+  const preview = kindInfo.kind === "file" ? kindInfo.name
+    : (kindInfo.kind === "link" || kindInfo.kind === "kachatLink") ? kindInfo.url
+    : (kindInfo.kind === "text" || kindInfo.kind === "payment") ? copyText : "";
+  openMsgContextMenu({ x, y, title: MESSAGE_MENU_TITLES[kindInfo.kind], preview, items });
 }
 
-// Hide a single 1:1 message from this browser only (mirrors deleteSelectedMessages for one).
-function deleteOneMessageLocal(conversationEntry, message) {
-  if (!conversationEntry || !message) return;
-  conversationEntry.hiddenMessageKeys = [...new Set([
-    ...(conversationEntry.hiddenMessageKeys || []),
-    ...[message.id, message.txid].filter(Boolean).map(String),
-  ])];
-  conversationEntry.messages = (conversationEntry.messages || []).filter((m) => m.id !== message.id);
-  const last = lastMessageFor(conversationEntry);
-  conversationEntry.lastActivityAt = last?.createdAt || conversationEntry.createdAt;
-  conversationEntry.updatedAt = Date.now();
-  persistState();
-  renderMessages(conversationEntry);
-  setStatus("Message deleted locally");
-}
 
-// Right-click / context menu for a group message: reactions + Reply, Copy, Retry, Delete (local).
+// Right-click on a group message: iOS's long-press sheet. A text bubble's runs Reply, Edit, Copy
+// Message, View in Explorer, Reactions, Retry Send, Select (GroupChatDetailView); photos, voice
+// notes and links carry the same menus as in a 1:1 chat.
 function openGroupMessageMenu(message, x, y) {
   const shown = groupMessageContent(activeGroupId, message);
   const plain = parseReplyEnvelope(shown)?.text ?? shown;
-  const isText = !parseImageEnvelope(message.text) && !parseAudioEnvelope(message.text);
   const key = groupMsgKey(message);
-  const current = key ? (groupReactionsFor(activeGroupId, key).find((e) => e.reactorAddress === engine.address)?.emoji || null) : null;
-  const items = [];
-  items.push({ label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: () => startGroupReply(message) });
-  if (message.direction === "local" && message.txId && message.status !== MESSAGE_STATUSES.FAILED && isEditableContent(message.text)) {
-    items.push({ label: "Edit", icon: MSG_MENU_ICONS.edit, onClick: () => startGroupEdit(message) });
-    const edit = groupEditFor(activeGroupId, key);
-    if (edit?.status === "failed") items.push({ label: "Retry Edit", icon: MSG_MENU_ICONS.retry, onClick: () => sendGroupEdit(activeGroupId, message, edit.text) });
-  }
-  if (isText && !isNextcloudShareLink(plain)) {
-    items.push({ label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(decodeGroupMentions(plain)).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) });
-  }
-  if (message.txId) {
-    items.push({ label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(message.txId), "_blank", "noopener,noreferrer") });
-  }
-  // The pill shows WHICH emoji are on the bubble; it has no room to say how many or from whom.
-  // In a group that is the interesting question.
+  const kindInfo = messageMenuKind(message.text, plain);
+  const failed = message.direction === "local" && message.status === MESSAGE_STATUSES.FAILED;
   const reactionRows = key ? groupReactionsFor(activeGroupId, key) : [];
-  if (reactionRows.length) {
-    items.push({
-      label: `Reactions (${reactionRows.length})`, icon: MSG_MENU_ICONS.heart,
-      onClick: () => showReactionsSheet({
-        entries: reactionRows.map((entry) => ({ emoji: entry.emoji, reactorAddress: entry.reactorAddress })),
-        nameFor: (address) => groupSenderLabel(address),
-        avatarFor: (address) => memberAvatarHtml(address, "chat-avatar reactions-sheet-avatar"),
-      }),
-    });
+  const copyText = decodeGroupMentions(plain);
+  const onReply = () => startGroupReply(message);
+  const onSelect = () => enterGroupSelection(key);
+  const onRetry = failed ? () => retryGroupMessage(message) : null;
+  let items;
+  if (kindInfo.kind === "text") {
+    const explorer = message.txId ? { label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(message.txId), "_blank", "noopener,noreferrer") } : null;
+    items = [
+      { label: "Reply", icon: MSG_MENU_ICONS.reply, onClick: onReply },
+      message.direction === "local" && message.txId && message.status === MESSAGE_STATUSES.CONFIRMED && isEditableContent(message.text)
+        ? { label: "Edit", icon: MSG_MENU_ICONS.edit, onClick: () => startGroupEdit(message) } : null,
+      { label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(copyText).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) },
+      explorer,
+      // The pill shows WHICH emoji are on the bubble; it has no room to say how many or from whom.
+      reactionRows.length ? {
+        label: `Reactions (${reactionRows.length})`, icon: MSG_MENU_ICONS.heart,
+        onClick: () => showReactionsSheet({
+          entries: reactionRows.map((entry) => ({ emoji: entry.emoji, reactorAddress: entry.reactorAddress })),
+          nameFor: (address) => groupSenderLabel(address),
+          avatarFor: (address) => memberAvatarHtml(address, "chat-avatar reactions-sheet-avatar"),
+        }),
+      } : null,
+      onRetry ? { label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: onRetry } : null,
+      { label: "Select", icon: MSG_MENU_ICONS.select, onClick: onSelect },
+    ];
+  } else {
+    items = messageMenuRows({ txid: message.txId, kindInfo, copyText, onReply, onSelect, onRetry });
   }
-  if (message.direction === "local" && message.status === MESSAGE_STATUSES.FAILED) {
-    items.push({ label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: () => retryGroupMessage(message) });
-  }
-  items.push({ label: "Select", icon: MSG_MENU_ICONS.select, onClick: () => enterGroupSelection(key) });
-  items.push({ label: "Delete for me", icon: MSG_MENU_ICONS.trash, danger: true, onClick: () => deleteGroupMessageLocal(message) });
-  const reaction = key ? { current, onPick: (emoji) => sendGroupReaction(activeGroupId, message, emoji) } : null;
-  openMsgContextMenu({ x, y, reaction, items });
+  items = items.filter(Boolean);
+  if (!items.length) return;
+  const preview = kindInfo.kind === "file" ? kindInfo.name
+    : (kindInfo.kind === "link" || kindInfo.kind === "kachatLink") ? kindInfo.url
+    : kindInfo.kind === "text" ? copyText : "";
+  openMsgContextMenu({ x, y, title: MESSAGE_MENU_TITLES[kindInfo.kind] || "Message", preview, items });
 }
 
 // Select mode for group messages (iOS enterSelectMode): entered from a message's menu with that
@@ -27617,16 +28851,6 @@ document.querySelector("[data-group-delete-selected]")?.addEventListener("click"
   renderGroupList();
 });
 
-// Remove a group message from THIS device only (other members keep their copy; the on-chain
-// tx stays) — matches iOS's local group-message delete.
-function deleteGroupMessageLocal(message) {
-  if (!activeGroupId) return;
-  const key = message.msgIdHex || message.txId || message.id;
-  const list = groupMessages(activeGroupId).filter((m) => (m.msgIdHex || m.txId || m.id) !== key);
-  saveGroupMessages(activeGroupId, list);
-  renderGroupMessages();
-  renderGroupList();
-}
 
 /// Keeps each thread's top inset equal to its own header's real height.
 ///
@@ -27678,8 +28902,9 @@ function renderGroupMessages() {
   groupMessageArea.innerHTML = "";
   if (!msgs.length) {
     if (groupMessageEmpty) {
+      // An empty group is just empty (iOS shows no placeholder text).
       groupMessageEmpty.hidden = false;
-      groupMessageEmpty.textContent = "No messages yet. Say hello to the group.";
+      groupMessageEmpty.textContent = "";
       groupMessageArea.appendChild(groupMessageEmpty);
     }
     return;
@@ -27733,31 +28958,16 @@ function renderGroupMessages() {
     // Set when a caption+link message builds a preview card: rendered below the bubble.
     let detachedLinkCard = null;
 
-    // Broadcast-room style card header: sender name + send time at the top.
-    {
-      const cardHead = document.createElement("div");
-      cardHead.className = "message-card-head";
-      const cardSender = document.createElement("strong");
-      cardSender.textContent = incoming ? groupSenderLabel(message.senderAddress) : "You";
-      cardHead.append(cardSender);
-      if (message.createdAt) {
-        const cardTime = document.createElement("span");
-        cardTime.textContent = formatTime(message.createdAt);
-        cardHead.append(cardTime);
-      }
-      bubble.append(cardHead);
-    }
+    // iOS group row: the sender's name in accent above every bubble ("You" on your own), and
+    // their avatar beside every message.
+    const senderCaption = document.createElement("span");
+    senderCaption.className = "group-sender-caption";
+    senderCaption.textContent = incoming ? groupSenderLabel(message.senderAddress) : "You";
 
     if (incoming) {
-      // Sender name now lives in the card header on every message (broadcast-room style),
-      // so the old first-in-run sender label is gone.
-      const next = windowed[index + 1];
-      const lastInRun = !next || next.senderAddress !== message.senderAddress || next.direction !== message.direction;
-      if (lastInRun) {
-        avatarSlot.innerHTML = memberAvatarHtml(message.senderAddress, "message-avatar");
-        avatarSlot.classList.add("group-avatar-clickable");
-        avatarSlot.addEventListener("click", (event) => { event.stopPropagation(); openGroupMemberMenu(message.senderAddress, event.clientX, event.clientY); });
-      }
+      avatarSlot.innerHTML = memberAvatarHtml(message.senderAddress, "message-avatar");
+      avatarSlot.classList.add("group-avatar-clickable");
+      avatarSlot.addEventListener("click", (event) => { event.stopPropagation(); openGroupMemberMenu(message.senderAddress, event.clientX, event.clientY); });
     } else {
       avatarSlot.innerHTML = selfAvatarHtml("message-avatar");
       avatarSlot.classList.add("group-avatar-clickable");
@@ -27792,19 +29002,18 @@ function renderGroupMessages() {
       img.className = "message-photo";
       img.src = imageEnvelope.content;
       img.alt = imageEnvelope.name || "Photo";
-      img.addEventListener("click", () => openPhotoPreview(imageEnvelope.content));
+      img.addEventListener("click", () => openPhotoPreview(imageEnvelope.content, imageEnvelope.name));
       bubble.append(img);
     } else if (audioEnvelope) {
       const audioWrap = document.createElement("div");
       audioWrap.className = "message-audio-bubble";
-      audioWrap.append(buildVoicePlayer(audioEnvelope.content, { outgoing: message.direction !== "incoming", durationHint: audioEnvelope.duration }));
+      audioWrap.append(buildVoicePlayer(audioEnvelope.content, { outgoing: message.direction !== "incoming", durationHint: audioEnvelope.duration, chatStyle: true }));
       bubble.append(audioWrap);
     } else {
       const text = document.createElement("span");
       text.className = "message-text";
       const bodyText = replyEnvelope ? replyEnvelope.text : shownContent;
       const linkUrls = renderTextWithMentions(text, bodyText);
-      if (groupEdit) text.append(editedMarkElement(groupEdit.status));
       const internalLink = firstInternalLinkIn(bodyText);
       const previewable = internalLink ? null : (linkUrls || []).find(isPreviewableUrl);
       // The 1:1 rule (iOS 680cff3): your own messages and senders you have accepted as contacts
@@ -27820,9 +29029,10 @@ function renderGroupMessages() {
             ? buildLinkPreviewCard(previewable, { autoLoad: true, outgoing: message.direction !== "incoming" })
             : buildTapToLoadCard(previewable, null, () => renderGroupMessages()))
           : null;
-      const linkOnly = card && !replyEnvelope && (internalLink
-        ? String(bodyText).trim() === internalLink.raw
-        : (linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));
+      // A link into KaChat is the whole message, as in 1:1 (iOS group bubble).
+      const linkOnly = card && (internalLink
+        ? true
+        : (!replyEnvelope && linkUrls.length === 1 && String(bodyText).trim() === linkUrls[0]));
       if (linkOnly) {
         bubble.classList.add("link-card-bubble");
         bubble.appendChild(card);
@@ -27833,45 +29043,21 @@ function renderGroupMessages() {
       }
     }
 
-    if (message.createdAt) {
-      const timeEl = document.createElement("span");
-      timeEl.className = "message-time";
-      timeEl.textContent = formatTime(message.createdAt);
-      bubble.append(timeEl);
-    }
-
-
     // Reactions and message actions live on the right-click menu now (Telegram-style),
     // wired below via the bubble's "contextmenu" handler.
     const key = groupMsgKey(message);
 
-    // Reaction pills (counts).
+    // Reaction pills (counts), your own reaction's state leading.
     const reactions = groupReactionsFor(activeGroupId, key);
-    if (reactions.length) {
-      const pill = document.createElement("div");
-      pill.className = "message-reaction-pill";
-      const counts = new Map();
-      for (const entry of reactions) counts.set(entry.emoji, (counts.get(entry.emoji) || 0) + 1);
-      for (const [emoji, count] of counts) {
-        const entryEl = document.createElement("span");
-        entryEl.className = "message-reaction-pill-entry";
-        entryEl.textContent = emoji;
-        if (count > 1) {
-          const countEl = document.createElement("span");
-          countEl.className = "message-reaction-pill-count";
-          countEl.textContent = String(count);
-          entryEl.append(countEl);
-        }
-        // Delivery indicator on YOUR just-sent reaction: ✓ once on-chain, red ! to retry.
-        const statusEl = reactionStatusIndicator(`grp|${key}|${emoji}`);
-        if (statusEl) entryEl.append(statusEl);
-        pill.append(entryEl);
-      }
-      pill.addEventListener("click", (event) => event.stopPropagation());
-      bubble.append(pill);
-    }
+    const localReaction = localReactionStatusFor(`grp|${key}|`);
+    if (reactions.length) { bubble.classList.add("has-reactions"); bubble.append(buildReactionPill(reactions, localReaction)); }
 
-    onContextGesture(bubble, (event) => { event.preventDefault(); if (!groupSelectionMode) openGroupMessageMenu(message, event.clientX, event.clientY); });
+    onContextGesture(bubble, (event) => {
+      event.preventDefault();
+      if (groupSelectionMode) return;
+      if (openLinkActionsMenuFor(event, () => startGroupReply(message))) return;
+      openGroupMessageMenu(message, event.clientX, event.clientY);
+    });
     // Double-click: the quick-reaction bar (iOS double-tap), "+" into the full picker.
     onDoubleGesture(bubble, (event) => {
       if (groupSelectionMode || !key) return;
@@ -27890,22 +29076,24 @@ function renderGroupMessages() {
       row.addEventListener("click", () => toggleGroupSelected(key));
     }
 
-    if (detachedLinkCard || groupReplyQuoteEl) {
-      const stack = document.createElement("div");
-      stack.className = "message-bubble-stack";
-      if (groupReplyQuoteEl) stack.append(groupReplyQuoteEl);
-      stack.append(bubble);
-      if (detachedLinkCard) stack.append(detachedLinkCard);
-      row.append(selector, avatarSlot, stack);
-    } else {
-      row.append(selector, avatarSlot, bubble);
-    }
-    // Delivery status (checkmark / pending / failed) on your own messages — same as 1:1.
-    // Group messages use direction "local", so shim it to "outgoing" for the shared icon.
-    if (!incoming && message.status) {
-      const icon = createDeliveryStatusIcon({ ...message, direction: "outgoing" }, { onRetry: () => retryGroupMessage(message) });
-      if (icon) row.append(icon);
-    }
+    const stack = document.createElement("div");
+    stack.className = "message-bubble-stack";
+    stack.append(senderCaption);
+    if (groupReplyQuoteEl) stack.append(groupReplyQuoteEl);
+    stack.append(bubble);
+    if (detachedLinkCard) stack.append(detachedLinkCard);
+    // Delivery status (pending / sent / failed) on your own messages, after the time - same as
+    // 1:1. Group messages use direction "local", so shim it to "outgoing" for the shared icon.
+    const groupStatusIcon = !incoming && message.status
+      ? createDeliveryStatusIcon({ ...message, direction: "outgoing" }, { onRetry: () => retryGroupMessage(message) })
+      : null;
+    stack.append(...buildMessageTimeLines({
+      createdAt: message.createdAt,
+      statusEl: groupStatusIcon,
+      edited: Boolean(groupEdit),
+      failedReaction: localReaction?.status === "failed" ? localReaction : null,
+    }));
+    row.append(selector, avatarSlot, stack);
     groupMessageArea.appendChild(row);
   });
   groupMessageArea.dataset.renderedGroupId = String(activeGroupId);
@@ -28108,10 +29296,9 @@ function setGroupCreateAddressBookMode(on) {
   if (contactsSection) contactsSection.hidden = on;
   const title = document.querySelector("[data-group-add-members-title]");
   if (title) title.hidden = !on;
+  // The footer under "Add to Group" (iOS AddContactView "Add Members" section footer).
   const hint = document.querySelector("[data-group-add-by-address-hint]");
-  if (hint) hint.textContent = on
-    ? "Pick people from your Address Book, or add anyone by Kaspa address or domain."
-    : "Not in your contacts? Add anyone by Kaspa address or domain:";
+  if (hint) hint.hidden = !on;
 }
 function openGroupCreate() {
   // Opened from the Chats New sheet, the caller marks it again right after this (see newChatSheet).
@@ -28120,8 +29307,8 @@ function openGroupCreate() {
   groupModalMode = "create";
   groupModalTargetId = null;
   groupCreateSelected.clear();
-  if (groupCreateTitle) groupCreateTitle.textContent = "New Group";
-  if (groupCreateSubmit) groupCreateSubmit.textContent = "Create Group";
+  if (groupCreateTitle) groupCreateTitle.textContent = "New Group Chat";
+  if (groupCreateSubmit) groupCreateSubmit.textContent = "Create";
   if (groupNameInput) { groupNameInput.value = ""; groupNameInput.hidden = false; }
   const identityRow = document.querySelector("[data-group-identity-row]");
   if (identityRow) identityRow.hidden = false;
@@ -28142,36 +29329,255 @@ function openGroupCreate() {
   window.setTimeout(() => groupNameInput?.focus(), 0);
   return true;
 }
+// Add Members for an existing group (iOS AddGroupMembersView): one field that searches your
+// contacts and also takes an address or a domain, the typed person as a row of their own, your
+// contacts as checkable rows, and Add (N) in the bar. The sheet stays up while the members are
+// added, Add turning into a spinner, and closes once they all are.
+const addMembersSheet = { groupId: null, query: "", selected: new Set(), adding: false, token: 0, resolving: false, resolvedAddress: null, resolvedName: null, results: [], tld: null, notFound: null };
 function openGroupAddMember(groupId) {
   const mgr = getGroupManager();
   const g = mgr && mgr.getGroup(groupId);
   if (!g) return;
-  groupModalMode = "add";
-  groupModalTargetId = groupId;
-  groupCreateSelected.clear();
-  if (groupCreateTitle) groupCreateTitle.textContent = "Add Members";
-  if (groupCreateSubmit) groupCreateSubmit.textContent = "Add";
-  if (groupNameInput) { groupNameInput.value = ""; groupNameInput.hidden = true; }
-  const identityRow = document.querySelector("[data-group-identity-row]");
-  if (identityRow) identityRow.hidden = true;
-  if (groupPickerHint) groupPickerHint.textContent = "New members can read messages from the moment they're added, not earlier history.";
-  if (groupCreateError) groupCreateError.hidden = true;
-  if (groupMemberSearch) groupMemberSearch.value = "";
-  groupPickerExclude = g.members.map((m) => m.address);
-  clearGroupCreatePhoto();
-  resetGroupAddressSection();
-  // Adding to an existing group keeps its Contacts list (iOS AddGroupMembersView, unchanged).
-  setGroupCreateAddressBookMode(false);
-  renderGroupMemberPicker(groupPickerExclude);
-  updateGroupCreateSubmit();
-  loadCreateChatPicker().then(() => {
-    if (!groupCreateModal || groupCreateModal.hidden) return;
-    renderGroupMemberPicker(groupPickerExclude);
+  Object.assign(addMembersSheet, { groupId, query: "", selected: new Set(), adding: false, resolving: false, resolvedAddress: null, resolvedName: null, results: [], tld: null, notFound: null });
+  addMembersSheet.token += 1;
+  const el = addMembersSheetEl();
+  const input = el.querySelector("[data-add-members-search]");
+  if (input) input.value = "";
+  el.hidden = false;
+  renderAddMembersSheet();
+  window.setTimeout(() => input?.focus(), 0);
+}
+function addMembersGroup() {
+  return getGroupManager()?.getGroup(addMembersSheet.groupId) || null;
+}
+/** Contacts not already in the group, by name, filtered by the field (name or address). */
+function addMembersCandidates() {
+  const g = addMembersGroup();
+  const existing = new Set((g?.members || []).map((m) => m.address));
+  const query = addMembersSheet.query.trim().toLowerCase();
+  const all = addMembersActiveContacts()
+    .filter((contact) => !existing.has(contact.address))
+    .sort((a, b) => displayNameForAddress(a).localeCompare(displayNameForAddress(b), undefined, { sensitivity: "base" }));
+  if (!query) return all;
+  return all.filter((contact) => displayNameForAddress(contact).toLowerCase().includes(query) || contact.address.toLowerCase().includes(query));
+}
+function addMembersActiveContacts() {
+  return (state.contacts || []).filter((contact) => contact.address && contact.address !== engine.address && !isKachatBot(contact.address));
+}
+function addMembersValidAddress(text) {
+  try { return validateContactAddress(text); } catch { return null; }
+}
+/** The address typed (or the domain's), when it is someone new to offer: not you, not already in
+ *  the group, and not one of the contacts listed below. */
+function addMembersTypedAddress() {
+  const query = addMembersSheet.query.trim();
+  if (!query) return null;
+  const candidate = addMembersValidAddress(query) || (addMembersSheet.resolvedAddress ? addMembersValidAddress(addMembersSheet.resolvedAddress) : null);
+  if (!candidate || candidate === engine.address) return null;
+  if ((addMembersGroup()?.members || []).some((m) => m.address === candidate)) return null;
+  if (addMembersCandidates().some((contact) => contact.address === candidate)) return null;
+  return candidate;
+}
+function addMembersResolveTypedDomain() {
+  const query = addMembersSheet.query.trim().toLowerCase();
+  Object.assign(addMembersSheet, { resolvedAddress: null, resolvedName: null, results: [], tld: null, notFound: null });
+  const token = ++addMembersSheet.token;
+  if (!query || addMembersValidAddress(query) || !engine.looksLikeName(query) || query.length < 2) {
+    addMembersSheet.resolving = false;
+    return;
+  }
+  addMembersSheet.resolving = true;
+  window.setTimeout(async () => {
+    if (token !== addMembersSheet.token) return;
+    let lookup = null;
+    try { lookup = await engine.lookUpName(query); } catch { lookup = null; }
+    if (token !== addMembersSheet.token) return;
+    addMembersSheet.resolving = false;
+    addMembersSheet.results = lookup?.results || [];
+    const resolution = lookup?.resolution;
+    if (resolution?.ownerAddress) {
+      addMembersSheet.resolvedAddress = resolution.ownerAddress;
+      addMembersSheet.resolvedName = resolution.domain || query;
+      addMembersSheet.tld = resolution.tld || null;
+    } else if (!addMembersCandidates().length) {
+      // A name that matched contacts is not a failed lookup.
+      addMembersSheet.notFound = nameNotFoundText(query, addMembersSheet.results);
+    }
+    renderAddMembersSheet();
+  }, 300);
+}
+const ADD_MEMBERS_CHECK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path class="add-members-check-mark" d="m7.6 12.3 3 3 5.8-6.2"/></svg>';
+function renderAddMembersSheet() {
+  const el = document.querySelector("[data-add-members-modal]");
+  if (!el || el.hidden) return;
+  const sheet = addMembersSheet;
+  const count = sheet.selected.size;
+  const addButton = el.querySelector("[data-add-members-add]");
+  if (addButton) {
+    addButton.disabled = sheet.adding || count === 0;
+    addButton.innerHTML = sheet.adding
+      ? '<span class="add-members-spinner" role="img" aria-label="Adding"></span>'
+      : escapeHtml(count ? `Add (${count})` : "Add");
+  }
+  const status = el.querySelector("[data-add-members-status]");
+  if (status) {
+    let html = "";
+    if (sheet.resolving) {
+      html = '<span class="create-chat-status-muted"><span class="add-members-spinner small" aria-hidden="true"></span> Looking up domain...</span>';
+    } else if (sheet.resolvedAddress && sheet.resolvedName) {
+      html = `<span class="create-chat-status-good">✓ Resolved: ${escapeHtml(sheet.resolvedName)}</span><span class="create-chat-status-mono">${escapeHtml(sheet.resolvedAddress)}</span>`;
+    } else if (sheet.notFound) {
+      html = `<span class="create-chat-status-bad">✕ ${escapeHtml(sheet.notFound)}</span>`;
+    }
+    if (!sheet.resolving) html += otherDomainsHtml({ resolutions: sheet.results, selectedTld: sheet.tld });
+    status.innerHTML = html;
+    status.hidden = !html;
+  }
+  const typed = el.querySelector("[data-add-members-typed]");
+  if (typed) {
+    const address = addMembersTypedAddress();
+    if (!address) { typed.hidden = true; typed.innerHTML = ""; }
+    else {
+      watchResolutionAvatars();
+      const name = resolutionCardName(address, sheet.resolvedAddress === address ? sheet.resolvedName : null, () => renderAddMembersSheet());
+      const looking = resolutionCardLooking(address);
+      const lookups = addMembersSheet.lookups || (addMembersSheet.lookups = new Set());
+      if (looking && !lookups.has(address)) {
+        lookups.add(address);
+        resolutionCardLookUp(address).then(() => { lookups.delete(address); renderAddMembersSheet(); });
+      }
+      const on = sheet.selected.has(address);
+      typed.hidden = false;
+      typed.innerHTML = `
+        <button type="button" class="add-members-row add-members-typed-row${on ? " selected" : ""}" data-add-members-toggle="${escapeHtml(address)}">
+          ${resolutionAvatarHtml(address)}
+          <span class="create-chat-preview-copy">
+            <span class="create-chat-preview-name${name ? "" : " muted"}">${escapeHtml(name || (looking ? "Looking up…" : "No domain"))}</span>
+            <span class="create-chat-preview-address">${escapeHtml(address)}</span>
+          </span>
+          <span class="add-members-check${on ? " on" : ""}">${ADD_MEMBERS_CHECK_SVG}</span>
+        </button>`;
+    }
+  }
+  const list = el.querySelector("[data-add-members-list]");
+  if (list) {
+    const candidates = addMembersCandidates();
+    if (!addMembersActiveContacts().length) {
+      list.innerHTML = '<p class="add-members-empty">You have no contacts yet. Paste an address or a domain above to invite someone.</p>';
+    } else if (!candidates.length) {
+      list.innerHTML = `<p class="add-members-empty">${sheet.query ? "No contacts match your search. Paste an address or a domain to invite someone new." : "Everyone in your contacts is already in this group."}</p>`;
+    } else {
+      list.innerHTML = candidates.map((contact) => {
+        const on = sheet.selected.has(contact.address);
+        return `
+          <button type="button" class="add-members-row${on ? " selected" : ""}" data-add-members-toggle="${escapeHtml(contact.address)}">
+            ${avatarHtmlFor(contact, "chat-avatar")}
+            <span class="add-members-row-meta">
+              <strong>${escapeHtml(displayNameForAddress(contact))}</strong>
+              <span>${escapeHtml(defaultAliasFor(contact.address))}</span>
+            </span>
+            <span class="add-members-check${on ? " on" : ""}">${ADD_MEMBERS_CHECK_SVG}</span>
+          </button>`;
+      }).join("");
+    }
+  }
+}
+function addMembersSheetEl() {
+  let el = document.querySelector("[data-add-members-modal]");
+  if (el) return el;
+  el = document.createElement("div");
+  el.className = "modal-backdrop add-members-backdrop";
+  el.dataset.addMembersModal = "";
+  el.hidden = true;
+  el.innerHTML = `
+    <div class="contact-modal add-members-modal" role="dialog" aria-modal="true" aria-label="Add Members">
+      <header class="create-chat-header">
+        <button class="create-chat-nav-button" type="button" data-add-members-cancel>Cancel</button>
+        <h2>Add Members</h2>
+        <button class="create-chat-nav-button" type="button" data-add-members-add disabled>Add</button>
+      </header>
+      <div class="add-members-scroll">
+        <div class="add-members-card">
+          <input class="add-members-search" type="text" placeholder="Search contacts, or an address or domain" autocomplete="off" spellcheck="false" data-add-members-search />
+          <div class="create-chat-status add-members-status" data-add-members-status hidden></div>
+          <div class="add-members-typed" data-add-members-typed hidden></div>
+        </div>
+        <div class="add-members-card add-members-list" data-add-members-list></div>
+        <p class="add-members-footer">New members can read messages from the moment they're added, not earlier history.</p>
+      </div>
+    </div>`;
+  el.querySelector("[data-add-members-search]")?.addEventListener("input", (event) => {
+    addMembersSheet.query = String(event.target.value || "");
+    addMembersResolveTypedDomain();
+    renderAddMembersSheet();
   });
-  // In add-member mode, open Contacts straight away since picking people is the whole task.
-  setGroupSection(groupMembersToggle, groupMembersBody, false);
-  setGroupSection(groupContactsToggle, groupContactsBody, true);
-  if (groupCreateModal) groupCreateModal.hidden = false;
+  el.addEventListener("click", (event) => {
+    if (event.target === el || event.target.closest("[data-add-members-cancel]")) {
+      if (addMembersSheet.adding) return;
+      el.hidden = true;
+      return;
+    }
+    const picked = pickOtherDomain(event, addMembersSheet.results);
+    if (picked) {
+      addMembersSheet.resolvedAddress = picked.address;
+      addMembersSheet.resolvedName = picked.name;
+      addMembersSheet.tld = picked.tld;
+      addMembersSheet.notFound = null;
+      renderAddMembersSheet();
+      return;
+    }
+    const toggle = event.target.closest("[data-add-members-toggle]");
+    if (toggle && !addMembersSheet.adding) {
+      const address = toggle.dataset.addMembersToggle;
+      if (addMembersSheet.selected.has(address)) addMembersSheet.selected.delete(address);
+      else addMembersSheet.selected.add(address);
+      renderAddMembersSheet();
+      return;
+    }
+    if (event.target.closest("[data-add-members-add]")) addSelectedGroupMembers();
+  });
+  document.body.appendChild(el);
+  return el;
+}
+async function addSelectedGroupMembers() {
+  const mgr = getGroupManager();
+  const groupId = addMembersSheet.groupId;
+  const rec = addMembersGroup();
+  const members = [...addMembersSheet.selected];
+  if (!mgr || !rec || !members.length || addMembersSheet.adding) return;
+  // Each added member rotates the group key to everyone, so the cost grows with how many you add.
+  const k = members.length;
+  const finalOthers = groupOtherMemberCount(rec) + k;
+  const fee = await groupOpFeeHint(groupId, { controlTx: k * (2 * finalOthers + 1), photoTx: rec.photoHex ? k * finalOthers : 0 });
+  if (!await confirmDialog({ title: "Add members", message: `Add ${k} member${k === 1 ? "" : "s"} to the group?${fee}`, confirmLabel: "Add" })) return;
+  addMembersSheet.adding = true;
+  renderAddMembersSheet();
+  let failures = 0;
+  for (const address of members) {
+    try {
+      await mgr.addMember(groupId, address, {});
+      // iMessage-style membership line for the admin (other members get theirs on the rotation).
+      const epAdd = mgr.getGroup(groupId)?.currentEpoch;
+      appendGroupSystemMessage(groupId, `${groupSenderLabel(address)} was added to the group chat`, Date.now(), `sys:${groupId}:${epAdd}:add:${address}`);
+      addMembersSheet.selected.delete(address);
+    } catch (error) {
+      appendEngineLog(`Add member failed for ${address}: ${error.message}`);
+      failures += 1;
+    }
+  }
+  addMembersSheet.adding = false;
+  renderGroupList();
+  if (activeGroupId === groupId) {
+    openGroupChat(groupId);
+    if (groupManageScreen && !groupManageScreen.hidden) openGroupManage(groupId);
+  }
+  if (failures === 0) {
+    const el = document.querySelector("[data-add-members-modal]");
+    if (el) el.hidden = true;
+    return;
+  }
+  renderAddMembersSheet();
+  await alertDialog({ title: "Add Members", message: `${failures} member(s) could not be added. Please try again.` });
 }
 function closeGroupCreate(options = {}) {
   if (!groupCreateModal) return;
@@ -28346,6 +29752,61 @@ function addResolvedGroupAddress() {
 }
 
 // --- manage / group info ---
+/** A member as Group Info names them (iOS GroupChatInfoView.displayName): the app's one name
+ *  rule for everyone, your own row included - this screen is about who someone is, so it is
+ *  never "You". */
+function groupInfoMemberName(address) {
+  if (address !== engine.address) return groupSenderLabel(address);
+  const own = (state.contacts || []).find((c) => c.address === address);
+  return own ? displayNameForAddress(own) : identityNameForAddress(address);
+}
+
+/** Hidden Users (iOS HiddenGroupMembersView): everyone hidden in this group, each with Unhide. */
+function openGroupHiddenUsersSheet(groupId) {
+  let el = document.querySelector("[data-group-hidden-users-modal]");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "modal-backdrop group-hidden-users-backdrop";
+    el.dataset.groupHiddenUsersModal = "";
+    el.innerHTML = `
+      <div class="contact-modal message-requests-modal group-hidden-users-modal" role="dialog" aria-modal="true" aria-label="Hidden Users">
+        <header class="create-chat-header">
+          <span></span>
+          <h2>Hidden Users</h2>
+          <button class="create-chat-nav-button" type="button" data-group-hidden-users-done>Done</button>
+        </header>
+        <div class="message-requests-list" data-group-hidden-users-list></div>
+      </div>`;
+    el.addEventListener("click", (event) => {
+      if (event.target === el || event.target.closest("[data-group-hidden-users-done]")) { el.hidden = true; return; }
+      const unhide = event.target.closest("[data-group-unhide-member]");
+      if (!unhide) return;
+      const id = el.dataset.groupId;
+      setGroupMemberHidden(id, unhide.dataset.groupUnhideMember, false);
+      if (activeGroupId === id) renderGroupMessages();
+      renderGroupHiddenUsersSheet();
+    });
+    document.body.appendChild(el);
+  }
+  el.dataset.groupId = groupId;
+  el.hidden = false;
+  renderGroupHiddenUsersSheet();
+}
+function renderGroupHiddenUsersSheet() {
+  const el = document.querySelector("[data-group-hidden-users-modal]");
+  if (!el || el.hidden) return;
+  const list = el.querySelector("[data-group-hidden-users-list]");
+  const hidden = groupHiddenMembersFor(el.dataset.groupId);
+  list.innerHTML = hidden.length
+    ? `<p class="group-hidden-users-header">Hidden Users</p><div class="message-requests-card">${hidden.map((addr) => `
+        <div class="group-member-line">
+          ${memberAvatarHtml(addr, "chat-avatar")}
+          <span class="group-member-line-meta"><strong>${escapeHtml(groupInfoMemberName(addr))}</strong></span>
+          <button type="button" class="group-hidden-unhide" data-group-unhide-member="${escapeHtml(addr)}">Unhide</button>
+        </div>`).join("")}</div>`
+    : `<div class="message-requests-card"><p class="group-hidden-users-empty">No hidden users in this group.</p></div>`;
+}
+
 function openGroupManage(groupId) {
   const mgr = getGroupManager();
   const g = mgr && mgr.getGroup(groupId);
@@ -28360,38 +29821,17 @@ function openGroupManage(groupId) {
       <div class="group-member-line" data-group-member-profile="${escapeHtml(m.address)}" title="View user info">
         ${memberAvatarHtml(m.address, "chat-avatar")}
         <span class="group-member-line-meta">
-          <strong>${escapeHtml(groupSenderLabel(m.address))}</strong>
+          <strong>${escapeHtml(groupInfoMemberName(m.address))}</strong>
         </span>
         ${m.isAdmin ? `<span class="group-member-admin-badge">Admin</span>` : ``}
-        ${m.address === engine.address ? `` : (() => {
-          const muted = isGroupMemberMuted(groupId, m.address);
-          return `<button type="button" class="group-member-mute-btn${muted ? " on" : ""}" data-group-mute-member="${escapeHtml(m.address)}" title="${muted ? "Unmute notifications from this member" : "Mute notifications from this member"}" aria-label="${muted ? "Unmute member" : "Mute member"}" aria-pressed="${muted}">${muted
-            ? `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="m17 9 4 6M21 9l-4 6"/></svg>`
-            : `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>`}</button>`;
-        })()}
         ${canManageMember ? `<button type="button" class="group-member-resend-btn" data-group-resend-member="${escapeHtml(m.address)}" title="Resend invite to this member" aria-label="Resend invite"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg></button>` : ``}
         ${canManageMember ? `<button type="button" class="group-member-remove-btn" data-group-remove-member="${escapeHtml(m.address)}" title="Remove from group" aria-label="Remove from group"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ``}
       </div>`;
   }).join("");
-  // Hidden members: whose messages are filtered from your view, with an Unhide control. Shown as
-  // its own always-present "Hidden Users" dropdown (matching iOS), empty state included.
-  const hiddenAddrs = groupHiddenMembersFor(groupId);
-  const hiddenRows = hiddenAddrs.length
-    ? hiddenAddrs.map((addr) => `
-        <div class="group-member-line">
-          ${memberAvatarHtml(addr, "chat-avatar")}
-          <span class="group-member-line-meta">
-            <strong>${escapeHtml(groupSenderLabel(addr))}</strong>
-            <span>${escapeHtml(shortAddress(addr))}</span>
-          </span>
-          <button type="button" class="group-member-remove" data-group-unhide-member="${escapeHtml(addr)}">Unhide</button>
-        </div>`).join("")
-    : `<p class="group-manage-empty">No hidden users in this group.</p>`;
   const icEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a18 18 0 0 1-2.16 3.19M6.6 6.6A18 18 0 0 0 2 12s3 8 10 8a9 9 0 0 0 5.4-1.6"/><path d="m2 2 20 20"/></svg>`;
   const icPencil = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
   const icResend = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg>`;
   const icAdd = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19.5c.6-3.3 2.7-5 5.5-5s4.9 1.7 5.5 5"/><path d="M18 8v6M15 11h6"/></svg>`;
-  const icBell = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 6-2.5 7-2.5 7h17S18 14 18 8"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/></svg>`;
   // Per-group notification mode (iOS Group Info > "Only Notify if I'm Mentioned", widened to the
   // same three choices the 1:1 Chat Info offers plus mentions). Sits on the group's info screen,
   // where the 1:1 notification toggle lives for a contact.
@@ -28418,7 +29858,7 @@ function openGroupManage(groupId) {
         ${isAdmin ? `<span class="group-photo-edit-badge" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>` : ``}
       </div>
       <p class="group-photo-name">${escapeHtml(g.name || "Group")}</p>
-      <p class="group-photo-count">${g.members.length} member${g.members.length === 1 ? "" : "s"}</p>
+      <p class="group-photo-count">${g.members.length} members</p>
       ${isAdmin && g.photoHex ? `<button type="button" class="group-manage-remove-photo" data-group-photo-remove>Remove photo</button>` : ``}
     </div>
     <div class="group-manage-section">
@@ -28428,27 +29868,18 @@ function openGroupManage(groupId) {
       </details>
     </div>
     <div class="group-manage-section">
-      <details class="group-members-details">
-        <summary class="group-manage-section-title group-members-summary"><span class="group-manage-row-icon">${icEye}</span> Hidden Users</summary>
-        ${hiddenRows}
-      </details>
+      <button type="button" class="group-manage-row" data-group-hidden-users><span class="group-manage-row-icon">${icEye}</span> Hidden Users</button>
     </div>
+    <!-- One section, as iOS: Refresh Messages, then the two notification switches. -->
     <div class="group-manage-section">
       <button type="button" class="group-manage-row" data-group-refresh><span class="group-manage-row-icon">${icResend}</span> Refresh Messages</button>
-    </div>
-    <div class="group-manage-section">
-      <details class="group-members-details">
-        <summary class="group-manage-section-title group-members-summary"><span class="group-manage-row-icon">${icBell}</span> Notifications</summary>
-        ${notifyRows}
-        <p class="group-manage-footer">Only when I'm mentioned: you are notified about messages that @mention you and replies to your own messages. Everything else arrives in the chat silently. Mute this group: no notifications at all. Unread counts still update either way.</p>
-      </details>
+      ${notifyRows}
     </div>
     ${isAdmin ? `
     <div class="group-manage-section">
       <button type="button" class="group-manage-row" data-group-rename><span class="group-manage-row-icon">${icPencil}</span> Rename Group</button>
       <button type="button" class="group-manage-row" data-group-resend-invites><span class="group-manage-row-icon">${icResend}</span> Resend invites to all</button>
       <button type="button" class="group-manage-row" data-group-add-member><span class="group-manage-row-icon">${icAdd}</span> Add Members</button>
-      <p class="group-manage-footer">Resends the group invite to every member (or use a member's ↻ to resend just theirs). Use this if someone didn't receive the group. Adding members rotates the group key, so new members see messages from when they join onward.</p>
     </div>` : ``}
     <div class="group-manage-section">
       <!-- iOS shows Delete Group to everyone, admin or not. A non-admin was being offered "Leave
@@ -28712,7 +30143,7 @@ function newChatSheetJoinHtml() {
     <p class="new-chat-sheet-caption">Anyone who joins the same channel name can see and post messages there - there is no owner and no invite.</p>
     <label class="new-chat-sheet-field">
       <span aria-hidden="true">#</span>
-      <input type="text" data-new-chat-room-input placeholder="channel-name" maxlength="36" autocapitalize="none" autocomplete="off" spellcheck="false" aria-label="Channel name" />
+      <input type="text" data-new-chat-room-input placeholder="channel-name" autocapitalize="none" autocomplete="off" spellcheck="false" aria-label="Channel name" />
     </label>
     <p class="new-chat-sheet-error" data-new-chat-room-error role="alert" hidden></p>
     <button class="primary-button new-chat-sheet-join" type="button" data-new-chat-room-join disabled>Join</button>`;
@@ -28752,9 +30183,10 @@ function openNewChatSheet() {
     if (!raw) return;
     const problem = broadcastJoinError(raw);
     if (problem) { setJoinError(problem); return; }
-    close();
+    // A join that does not take says so in place and the sheet stays (iOS joinRoomFromCreateSheet).
     openPublicChatsTab();
-    if (!joinBroadcastChannelFromSheet(raw)) showCopyToast("Something went wrong joining that channel.");
+    if (!joinBroadcastChannelFromSheet(raw)) { setJoinError("Something went wrong joining that channel."); return; }
+    close();
   };
   const onKey = (event) => {
     if (event.key !== "Escape") return;
@@ -28947,7 +30379,8 @@ groupCreateSubmit?.addEventListener("click", async () => {
           const total = perInvite * (members.length + 1) + perPhoto * photoTx;
           if (total > 0) feeLine = `\n\nEstimated network fee ≈ ${total.toFixed(6)} ${KAS_UNIT} across ${txCount} transaction${txCount === 1 ? "" : "s"}.`;
         } catch {}
-        if (!await confirmText(`Create "${name}" and invite ${members.length} member${members.length === 1 ? "" : "s"}?${feeLine}`)) { updateGroupCreateSubmit(); return; }
+        // iOS AddContactView's "Create group" alert: the question and fee, Cancel / Create.
+        if (!await confirmDialog({ title: "Create group", message: `Create "${name}" and invite ${members.length} member${members.length === 1 ? "" : "s"}?${feeLine}`, confirmLabel: "Create" })) { updateGroupCreateSubmit(); return; }
       }
       setStatus("Creating group and inviting members…");
       const record = await mgr.createGroup({ name, memberAddresses: members });
@@ -28986,6 +30419,11 @@ document.querySelector("[data-group-chat-back]")?.addEventListener("click", clos
 document.querySelector("[data-open-group-manage]")?.addEventListener("click", () => { if (activeGroupId) openGroupManage(activeGroupId); });
 document.querySelector(".group-chat-header")?.addEventListener("click", (event) => {
   if (event.target.closest("button") || !activeGroupId || !groupMessageArea) return;
+  // The whole history first, then the very top (iOS jumpToGroupStart).
+  if (Number(groupMessageArea.dataset.hiddenCount || 0) > 0) {
+    messageWindowByThread.set(`g:${activeGroupId}`, Number.MAX_SAFE_INTEGER);
+    renderGroupMessages();
+  }
   groupMessageArea.scrollTo({ top: 0, behavior: "smooth" });
   const first = groupMessageArea.querySelector("[data-group-msg-key]");
   if (first) { first.classList.add("message-row-highlight"); window.setTimeout(() => first.classList.remove("message-row-highlight"), 1600); }
@@ -29010,6 +30448,7 @@ const groupDraftMentions = new Map();   // inserted @label -> kaspa address (for
 let groupVoiceRecorder = null, groupVoiceChunks = [], groupVoiceStartMs = 0, groupVoiceTimer = null, groupVoiceMime = "";
 
 function autoGrowGroupComposer() {
+  syncGroupComposerSlots();
   if (!groupComposerInput) return;
   groupComposerInput.style.height = "auto";
   groupComposerInput.style.height = `${Math.min(groupComposerInput.scrollHeight, 132)}px`;
@@ -29018,7 +30457,7 @@ function autoGrowGroupComposer() {
 function startGroupReply(message) {
   groupReplyTarget = message;
   const title = document.querySelector("[data-group-reply-title]");
-  if (title) title.textContent = `Replying to ${message.direction === "incoming" ? groupSenderLabel(message.senderAddress) : "yourself"}`;
+  if (title) title.textContent = `Replying to ${message.direction === "incoming" ? groupSenderLabel(message.senderAddress) : "You"}`;
   if (groupReplyPreview) groupReplyPreview.textContent = decodeGroupMentions(replyPreviewTextFor({ ...message, text: groupMessageContent(activeGroupId, message) })) || "Message";
   if (groupReplyBanner) groupReplyBanner.hidden = false;
   groupComposerInput?.focus();
@@ -29137,10 +30576,11 @@ async function retryGroupMessage(message) {
 
 // Optimistic group send: the bubble appears instantly (pending), then flips to a delivered
 // checkmark or a failed+retry state — so a slow/failed broadcast never leaves the feed blank.
-async function sendGroupWire(text, { feeKas = null } = {}) {
+async function sendGroupWire(text, { feeKas = null, errorPrefix = "" } = {}) {
   const mgr = getGroupManager();
   if (!mgr || !activeGroupId) return false;
   const gid = activeGroupId;
+  setGroupSendError(null);
   const localId = nowId();
   appendGroupMessage(gid, {
     id: localId, senderAddress: engine.address, direction: "local",
@@ -29160,8 +30600,17 @@ async function sendGroupWire(text, { feeKas = null } = {}) {
     patchGroupMessage(gid, localId, { status: MESSAGE_STATUSES.FAILED });
     if (activeGroupId === gid) renderGroupMessages();
     setStatus(`Group send failed: ${error.message}`);
+    // iOS: the reason in red above the composer.
+    if (activeGroupId === gid) setGroupSendError(`${errorPrefix}${userFacingError(error)}`);
     return false;
   }
+}
+/** iOS GroupChatDetailView errorMessage: a red caption above the compose bar, cleared by the next send. */
+function setGroupSendError(message) {
+  const el = document.querySelector("[data-group-send-error]");
+  if (!el) return;
+  el.textContent = message || "";
+  el.hidden = !message;
 }
 
 groupComposer?.addEventListener("submit", async (event) => {
@@ -29169,25 +30618,31 @@ groupComposer?.addEventListener("submit", async (event) => {
   if (!activeGroupId || !getGroupManager()) return;
   const raw = String(groupComposerInput?.value || "").trim();
   if (Number(currentBalanceKas) === 0) { syncGroupFundingGate(); return; }
-  // A staged photo sends on Send (with the typed caption as a following message, if any).
+  // Recording: the send button stops it and sends it in one step (iOS recordingRow).
+  if (groupVoiceRecorder) { finishGroupVoice(true); return; }
+  if (groupVoiceEncoding) return;
+  // A staged photo is its own message (iOS sendPendingPhoto); what was typed stays in the
+  // composer under the photo row and comes back once it has gone.
   if (groupPendingPhoto) {
-    const { attachment, fileName } = groupPendingPhoto;
-    // "Via Nextcloud" chosen in the "+" sheet (snapshot before the clear drops it): the
-    // full-quality original goes to the server and the group gets its share link; any failure
-    // falls back to the on-chain envelope.
+    if (groupPendingPhotoSending) return;
+    const pending = groupPendingPhoto;
+    const { attachment, fileName } = pending;
+    // "Via Nextcloud" chosen in the "+" sheet: the full-quality original goes to the server and
+    // the group gets its share link; any upload failure falls back to the on-chain envelope.
     const viaNextcloud = groupPhotoViaNextcloud && isNextcloudConnected();
-    clearGroupPendingPhoto();
+    setGroupPendingPhotoSending(true);
+    let url = null;
     if (viaNextcloud && attachment.originalBlob) {
       try {
-        const url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
-        sendGroupWire(url);
+        url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
       } catch (error) {
-        showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
-        sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
+        appendEngineLog(`Nextcloud photo upload failed, sending on-chain: ${userFacingError(error)}`);
+        showCopyToast("Nextcloud upload failed - sending on-chain instead");
       }
-    } else {
-      sendGroupWire(buildImageEnvelopeJson(attachment, fileName));
     }
+    await sendGroupWire(url || buildImageEnvelopeJson(attachment, fileName));
+    if (groupPendingPhoto === pending) clearGroupPendingPhoto();
+    return;
   }
   if (!raw) return;
   const encoded = encodeGroupMentions(raw);
@@ -29230,14 +30685,49 @@ groupComposerInput?.addEventListener("input", () => scheduleGroupFeeEstimate({ t
 // Enter sends, Shift+Enter is a newline; keep the box auto-growing.
 groupComposerInput?.addEventListener("keydown", (event) => {
   // On a phone keyboard Return is a newline and Send is the button, as in the iOS app.
-  if (event.key === "Enter" && !event.shiftKey && !isTouchDevice()) { event.preventDefault(); groupComposer?.requestSubmit(); }
+  if (event.key !== "Enter" || event.isComposing || isTouchDevice()) return;
+  // Shift, Control or Option with Return mean "new line" (iOS ComposerKeyCommandPolicy, as 1:1).
+  if (event.shiftKey) return;
+  event.preventDefault();
+  if (event.ctrlKey || event.altKey) {
+    const start = groupComposerInput.selectionStart ?? groupComposerInput.value.length;
+    const end = groupComposerInput.selectionEnd ?? start;
+    groupComposerInput.setRangeText("\n", start, end, "end");
+    groupComposerInput.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  groupComposer?.requestSubmit();
 });
 groupComposerInput?.addEventListener("input", () => { autoGrowGroupComposer(); refreshGroupMentions(); });
+// Cmd+V of an image stages it as the pending photo (iOS handlePastedImageData), on chain.
+groupComposerInput?.addEventListener("paste", async (event) => {
+  const file = Array.from(event.clipboardData?.items || []).find((item) => item.type?.startsWith("image/"))?.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  if (!canAcceptGroupImageAttachment()) return;
+  groupPhotoViaNextcloud = false;
+  try {
+    const attachment = await compressImageBlob(file);
+    attachment.originalBlob = file;
+    attachment.originalName = file.name || "photo.jpg";
+    if (canAcceptGroupImageAttachment()) setGroupPendingPhoto(attachment, file.name || "photo.jpg");
+  } catch {
+    setGroupSendError("Couldn't load that photo. Please try a PNG, JPEG, or HEIF image.");
+  }
+});
 groupMentionSuggestions?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-mention-address]");
   if (btn) insertGroupMention(btn.dataset.mentionAddress, btn.dataset.mentionHandle);
 });
-groupCancelReplyBtn?.addEventListener("click", cancelGroupReply);
+// Cancelling an edit empties the composer too (iOS group editBanner); a reply keeps the text.
+groupCancelReplyBtn?.addEventListener("click", () => {
+  const wasEditing = Boolean(groupEditTarget);
+  cancelGroupReply();
+  if (!wasEditing || !groupComposerInput) return;
+  groupComposerInput.value = "";
+  if (activeGroupId) saveDraft(`group:${activeGroupId}`, "");
+  autoGrowGroupComposer();
+});
 
 // Plus-menu (Photo / Voice).
 function closeGroupPlusMenu() { if (groupPlusMenu) groupPlusMenu.hidden = true; }
@@ -29315,17 +30805,47 @@ const groupPendingPhotoThumb = document.querySelector("[data-group-pending-photo
 const groupPendingPhotoMeta = document.querySelector("[data-group-pending-photo-meta]");
 const groupPendingPhotoRemove = document.querySelector("[data-group-pending-photo-remove]");
 let groupPendingPhoto = null;
+let groupPendingPhotoSending = false;
 function clearGroupPendingPhoto() {
   groupPendingPhoto = null;
   groupPhotoViaNextcloud = false;
+  setGroupPendingPhotoSending(false);
   if (groupPendingPhotoPreview) groupPendingPhotoPreview.hidden = true;
+  syncGroupComposerSlots();
+  try { scheduleGroupFeeEstimate(); } catch { /* fee section not evaluated yet */ }
+}
+// iOS photoPreviewRow: "Photo ready to send", then "Sending photo…" while it goes.
+function setGroupPendingPhotoSending(sending) {
+  groupPendingPhotoSending = Boolean(sending);
+  if (groupPendingPhotoMeta) groupPendingPhotoMeta.textContent = groupPendingPhotoSending ? "Sending photo…" : "Photo ready to send";
+  if (groupPendingPhotoRemove) groupPendingPhotoRemove.disabled = groupPendingPhotoSending;
+  syncGroupComposerSlots();
 }
 function setGroupPendingPhoto(attachment, fileName) {
   groupPendingPhoto = { attachment, fileName };
   if (groupPendingPhotoThumb) groupPendingPhotoThumb.src = attachment.dataUrl;
-  if (groupPendingPhotoMeta) groupPendingPhotoMeta.textContent = `Photo · ${attachment.width}×${attachment.height} · ${(attachment.bytes / 1024).toFixed(1)} KB`;
   if (groupPendingPhotoPreview) groupPendingPhotoPreview.hidden = false;
-  groupComposerInput?.focus();
+  setGroupPendingPhotoSending(false);
+  groupComposerInput?.blur();
+  scheduleGroupFeeEstimate();
+}
+/** iOS canAcceptImageAttachment (group): no photo pending or going, not recording. */
+function canAcceptGroupImageAttachment() {
+  return Boolean(activeGroupId) && !groupPendingPhoto && !groupPendingPhotoSending && !groupVoiceRecorder && !groupVoiceEncoding;
+}
+/** The group bar's slots (iOS composeBar/textRow): "+" with an empty field, Send otherwise; a
+ *  pending photo or the recorder in the field's place. */
+function syncGroupComposerSlots() {
+  try {
+    if (!groupComposer) return;
+    const recording = Boolean(groupVoiceRecorder) || groupVoiceEncoding;
+    const hasPhoto = Boolean(groupPendingPhoto);
+    const hasText = /\S/.test(String(groupComposerInput?.value || ""));
+    groupComposer.classList.toggle("composer-field-replaced", recording || hasPhoto);
+    groupComposer.classList.toggle("composer-has-content", recording || hasPhoto || hasText);
+    const send = groupComposer.querySelector(".composer-send");
+    if (send) send.disabled = groupVoiceEncoding || (hasPhoto && groupPendingPhotoSending);
+  } catch { /* group section not evaluated yet */ }
 }
 groupPendingPhotoRemove?.addEventListener("click", clearGroupPendingPhoto);
 async function handleGroupMediaFile(input) {
@@ -29350,12 +30870,14 @@ async function handleGroupMediaFile(input) {
     attachment.originalBlob = file;
     attachment.originalName = file.name || "photo.jpg";
     const via = groupPhotoViaNextcloud;
+    if (!canAcceptGroupImageAttachment()) { groupPhotoViaNextcloud = false; return; }
     setGroupPendingPhoto(attachment, file.name || "photo.jpg");
     groupPhotoViaNextcloud = via;
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB · press Send`);
   } catch (error) {
     groupPhotoViaNextcloud = false;
-    showCopyToast(error.message || "Could not attach that photo.");
+    appendEngineLog(`Group photo attach failed: ${userFacingError(error)}`);
+    setGroupSendError("Couldn't load that photo. Please try another.");
   }
 }
 groupPhotoInput?.addEventListener("change", () => handleGroupMediaFile(groupPhotoInput));
@@ -29365,9 +30887,31 @@ groupCameraInput?.addEventListener("change", () => handleGroupMediaFile(groupCam
   if (!groupPendingPhoto) groupPhotoViaNextcloud = false;
 }));
 
-// Voice send (native MediaRecorder → the same {type:"file",audio/...} envelope as 1:1).
+// Voice send (native MediaRecorder → the same {type:"file",audio/...} envelope as 1:1). iOS
+// recordingRow: [trash][mic]"Recording... Ns" in the field and the send button beside it, which
+// stops and sends in one step - no preview. Reaching the length limit sends it the same way.
+let groupVoiceEncoding = false;
+function renderGroupVoiceRow() {
+  const panel = groupVoicePanel;
+  if (!panel) return;
+  panel.classList.remove("preview");
+  const recording = Boolean(groupVoiceRecorder);
+  if (!recording && !groupVoiceEncoding) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    syncGroupComposerSlots();
+    return;
+  }
+  panel.hidden = false;
+  const secs = Math.floor((Date.now() - groupVoiceStartMs) / 1000);
+  panel.innerHTML = `<button type="button" class="voice-field-trash" data-group-voice-cancel aria-label="Discard recording">${VOICE_TRASH_SVG}</button>
+    <span class="voice-field-mic" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="13" rx="4"/><path d="M5 11a7 7 0 0 0 14 0h-2a5 5 0 0 1-10 0zM11 18h2v4h-2z"/></svg></span>
+    <span class="voice-field-label">${groupVoiceEncoding ? "Encoding…" : `Recording... <span data-group-voice-time>${secs}</span>s`}</span>`;
+  syncGroupComposerSlots();
+}
 async function startGroupVoice() {
-  if (!activeGroupId) return;
+  if (!activeGroupId || groupVoiceRecorder || groupVoiceEncoding) return;
+  setGroupSendError(null);
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     groupVoiceMime = pickVoiceMimeType();
@@ -29378,64 +30922,74 @@ async function startGroupVoice() {
     groupVoiceRecorder.start();
     groupVoiceStartMs = Date.now();
     clearVoicePreview(groupVoicePanel);
-    renderVoicePanel(groupVoicePanel, "recording", { prefix: "group-voice", seconds: 0 });
+    renderGroupVoiceRow();
+    let lastWhole = 0;
     groupVoiceTimer = window.setInterval(() => {
       const secs = (Date.now() - groupVoiceStartMs) / 1000;
       const el = groupVoicePanel?.querySelector("[data-group-voice-time]");
-      if (el) el.textContent = formatRecordingTime(secs);
+      if (el) el.textContent = String(Math.floor(secs));
+      if (Math.floor(secs) !== lastWhole) { lastWhole = Math.floor(secs); scheduleGroupFeeEstimate(); }
       if (secs >= groupVoiceMaxDurationSeconds()) finishGroupVoice(true);
     }, 250);
-  } catch (error) { showCopyToast("Microphone access denied or unavailable."); }
+  } catch (error) {
+    // iOS PublicChatAudioRecording's failure, shown as the composer's red caption.
+    groupVoiceRecorder = null;
+    setGroupSendError("Microphone access denied");
+    renderGroupVoiceRow();
+  }
 }
 function stopGroupVoiceTimer() { if (groupVoiceTimer) { clearInterval(groupVoiceTimer); groupVoiceTimer = null; } }
 function cancelGroupVoice() {
   stopGroupVoiceTimer();
   try { groupVoiceRecorder?.stop(); } catch {}
   groupVoiceRecorder = null; groupVoiceChunks = [];
+  groupVoiceEncoding = false;
+  groupVoiceViaNextcloud = false;
   clearVoicePreview(groupVoicePanel);
+  renderGroupVoiceRow();
+  scheduleGroupFeeEstimate();
 }
-// Stop moves the recording into the preview; Send on the preview sends it.
+// Stop and send in one step (iOS sendRecording).
 async function finishGroupVoice(send) {
   stopGroupVoiceTimer();
   const recorder = groupVoiceRecorder;
   groupVoiceRecorder = null;
   if (!recorder) return;
   const durationSec = Math.round((Date.now() - groupVoiceStartMs) / 1000);
+  const gid = activeGroupId;
+  groupVoiceEncoding = Boolean(send);
+  renderGroupVoiceRow();
   await new Promise((resolve) => { recorder.addEventListener("stop", resolve, { once: true }); try { recorder.stop(); } catch { resolve(); } });
-  if (!send || !groupVoiceChunks.length || !activeGroupId) { groupVoiceChunks = []; clearVoicePreview(groupVoicePanel); return; }
-  const blob = new Blob(groupVoiceChunks, { type: groupVoiceMime || "audio/webm" });
+  const cancelledMeanwhile = !groupVoiceEncoding && Boolean(send);
+  groupVoiceEncoding = false;
+  const chunks = groupVoiceChunks;
   groupVoiceChunks = [];
-  setVoicePreview(groupVoicePanel, { blob, mimeType: groupVoiceMime || "audio/webm", seconds: durationSec }, "group-voice");
+  renderGroupVoiceRow();
+  if (!send || cancelledMeanwhile || !chunks.length || !activeGroupId || activeGroupId !== gid) { groupVoiceViaNextcloud = false; scheduleGroupFeeEstimate(); return; }
+  const blob = new Blob(chunks, { type: groupVoiceMime || "audio/webm" });
+  await sendGroupVoiceBlob(blob, durationSec);
+  scheduleGroupFeeEstimate();
 }
-async function sendGroupVoicePreview() {
-  const entry = voicePreviews.get(groupVoicePanel);
-  if (!entry || !activeGroupId) return;
-  const { blob, seconds: durationSec } = entry;
-  clearVoicePreview(groupVoicePanel);
+async function sendGroupVoiceBlob(blob, durationSec) {
   // "Record via Nextcloud" (chosen in the "+" sheet): the server carries it, the group gets the link.
   const viaNextcloud = groupVoiceViaNextcloud && isNextcloudConnected();
   groupVoiceViaNextcloud = false;
   if (viaNextcloud) {
     try {
       const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(groupVoiceMime).split(".").pop()}`, groupVoiceMime || "audio/webm");
-      await sendGroupWire(url);
+      await sendGroupWire(url, { errorPrefix: "Failed to send voice message: " });
       return;
     } catch (error) {
-      showCopyToast(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
+      appendEngineLog(`Nextcloud voice upload failed, sending on-chain: ${userFacingError(error)}`);
+      showCopyToast("Nextcloud upload failed - sending on-chain instead");
     }
   }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
   if (!dataUrl.startsWith("data:")) return;
-  await sendGroupWire(JSON.stringify({ type: "file", name: voiceFileName(groupVoiceMime), size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }));
+  await sendGroupWire(JSON.stringify({ type: "file", name: voiceFileName(groupVoiceMime), size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }), { errorPrefix: "Failed to send voice message: " });
 }
 groupVoicePanel?.addEventListener("click", (event) => {
-  if (event.target.closest("[data-group-voice-stop]")) { finishGroupVoice(true); return; }
-  if (event.target.closest("[data-group-voice-send]")) { sendGroupVoicePreview(); return; }
-  if (event.target.closest("[data-group-voice-play]")) { toggleVoicePreviewPlayback(groupVoicePanel); return; }
-  if (event.target.closest("[data-group-voice-cancel]")) {
-    if (groupVoiceRecorder) cancelGroupVoice();
-    else clearVoicePreview(groupVoicePanel);
-  }
+  if (event.target.closest("[data-group-voice-cancel]")) cancelGroupVoice();
 });
 
 /** Keeps a chat pinned to its bottom while the content under it grows - a link preview, a photo or
@@ -29498,7 +31052,7 @@ keepChatPinnedWhileGrowing(groupMessageArea);
     const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
     const unseen = (conversationEntry?.messages || []).filter((m) => m.direction === "incoming" && (m.createdAt || 0) > bottomSeenAt).length;
     countEl.hidden = unseen === 0;
-    countEl.textContent = unseen > 99 ? "99+" : String(unseen);
+    countEl.textContent = String(Math.min(unseen, 99)); // iOS caps the badge at 99
   }
   btn.addEventListener("click", () => messageArea.scrollTo({ top: messageArea.scrollHeight, behavior: "smooth" }));
   messageArea.addEventListener("scroll", update, { passive: true });
@@ -29580,15 +31134,11 @@ groupManageBody?.addEventListener("click", async (event) => {
       mentionsEl.disabled = silent;
       mentionsEl.closest(".group-manage-toggle-row")?.classList.toggle("is-disabled", silent);
     }
-    if (mode === "muted") {
-      showCopyToast("Silent. This group will not notify you.");
-    } else {
-      const granted = await ensureNotificationPermission();
-      if (!granted) showCopyToast(notificationsUnavailableMessage());
-      else showCopyToast(mode === "all" ? "Notifying for all messages in this group." : "Notifying only for mentions and replies to you.");
-    }
+    // No toast: iOS's switches simply change.
     return;
   }
+  const hiddenUsers = event.target.closest("[data-group-hidden-users]");
+  if (hiddenUsers && activeGroupId) { openGroupHiddenUsersSheet(activeGroupId); return; }
   // Change the group photo (admin): pick a file, compress, and push to every member.
   const photoEdit = event.target.closest("[data-group-photo-edit]");
   if (photoEdit && activeGroupId) {
@@ -29614,17 +31164,19 @@ groupManageBody?.addEventListener("click", async (event) => {
           const per = parseFloat(await engine.estimateMessageFee(2 * (300 + hex.length)) || "0");
           if (per * others > 0) feeLine = `\n\nEstimated network fee ≈ ${(per * others).toFixed(6)} ${KAS_UNIT} across ${others} transaction${others === 1 ? "" : "s"}.`;
         } catch {}
-        if (!await confirmText(`Set this as the group photo for everyone?${feeLine}`)) { setStatus(""); return; }
+        if (!await confirmDialog({ title: "Set group photo", message: `Set this as the group photo for everyone?${feeLine}`, confirmLabel: "Send" })) { setStatus(""); return; }
         setStatus("Updating group photo…");
-        await mgr.setGroupPhoto(gid, hex);
+        try { await mgr.setGroupPhoto(gid, hex); } catch (error) { error.groupPhotoSend = true; throw error; }
         appendGroupSystemMessage(gid, "You changed the group photo", Date.now(), `sys:${gid}:photo:${hex.length}:${hex.slice(0, 16)}`);
         openGroupManage(gid);
         openGroupChat(gid);
         renderGroupList();
         setStatus("Group photo updated");
       } catch (error) {
+        // A photo that could not be prepared says so (iOS "Group photo" alert); a send that fails
+        // is quiet there (try?), so only the status line records it.
         setStatus(`Could not set group photo: ${error.message}`);
-        showCopyToast(`Could not set group photo. ${userFacingError(error)}`);
+        if (!error?.groupPhotoSend) alertDialog({ title: "Group photo", message: userFacingError(error) });
       }
     });
     input.click();
@@ -29635,7 +31187,7 @@ groupManageBody?.addEventListener("click", async (event) => {
   if (photoRemove && activeGroupId) {
     const mgr = getGroupManager();
     if (!mgr) return;
-    if (!await confirmText(`Remove the group photo for everyone?${await groupOpFeeHint(activeGroupId, { controlTx: groupOtherMemberCount(mgr.getGroup(activeGroupId)) })}`)) return;
+    if (!await confirmDialog({ title: "Remove group photo", message: `Remove the group photo for everyone?${await groupOpFeeHint(activeGroupId, { controlTx: groupOtherMemberCount(mgr.getGroup(activeGroupId)) })}`, confirmLabel: "Remove", destructive: true })) return;
     try {
       setStatus("Removing group photo…");
       await mgr.setGroupPhoto(activeGroupId, "");
@@ -29658,31 +31210,22 @@ groupManageBody?.addEventListener("click", async (event) => {
     return;
   }
   // Resend an invite to ONE member (admin) — targeted retry.
-  const muteMember = event.target.closest("[data-group-mute-member]");
-  if (muteMember && activeGroupId) {
-    const address = muteMember.dataset.groupMuteMember;
-    const nowMuted = !isGroupMemberMuted(activeGroupId, address);
-    setGroupMemberMuted(activeGroupId, address, nowMuted);
-    openGroupManage(activeGroupId);
-    showCopyToast(nowMuted ? "Muted. Their messages still show in the thread." : "Unmuted.");
-    return;
-  }
-
   const resendOne = event.target.closest("[data-group-resend-member]");
   if (resendOne && activeGroupId) {
     const mgr = getGroupManager();
     if (!mgr) return;
     const addr = resendOne.dataset.groupResendMember;
-    if (!await confirmText(`Resend the group invite to ${groupSenderLabel(addr)}?${await groupOpFeeHint(activeGroupId, { controlTx: 1 })}`)) return;
+    if (!await confirmDialog({ title: "Resend invite", message: `Resend the group invite to ${groupInfoMemberName(addr)}?${await groupOpFeeHint(activeGroupId, { controlTx: 1 })}`, confirmLabel: "Send" })) return;
     resendOne.disabled = true;
     setStatus("Resending invite…");
+    // The outcome in iOS's "Resend Invites" alert, not a toast.
     try {
       await mgr.resendInviteToMember(activeGroupId, addr);
       setStatus("Invite resent");
-      showCopyToast("Invite resent.");
+      alertDialog({ title: "Resend Invites", message: "Invite resent." });
     } catch (error) {
       setStatus(`Invite failed: ${error.message}`);
-      showCopyToast(`Invite failed. ${userFacingError(error)}`);
+      alertDialog({ title: "Resend Invites", message: userFacingError(error) });
     } finally {
       resendOne.disabled = false;
     }
@@ -29696,16 +31239,16 @@ groupManageBody?.addEventListener("click", async (event) => {
     const rec = mgr.getGroup(activeGroupId);
     const others = groupOtherMemberCount(rec);
     const hasPhoto = Boolean(rec?.photoHex);
-    if (!await confirmText(`Resend the group invite to every member? Use this if someone didn't receive the group.${await groupOpFeeHint(activeGroupId, { controlTx: others + 1, photoTx: hasPhoto ? others : 0 })}`)) return;
+    if (!await confirmDialog({ title: "Resend invites to all", message: `Resend the group invite to every member? Use this if someone didn't receive the group.${await groupOpFeeHint(activeGroupId, { controlTx: others + 1, photoTx: hasPhoto ? others : 0 })}`, confirmLabel: "Send" })) return;
     resend.disabled = true;
     setStatus("Resending invites…");
     try {
       await mgr.resendInvites(activeGroupId);
       setStatus("Invites resent");
-      showCopyToast("Invites resent to all members.");
+      alertDialog({ title: "Resend Invites", message: "Invites resent to all members." });
     } catch (error) {
       setStatus(`Some invites still failed: ${error.message}`);
-      showCopyToast(`Some invites still failed. ${userFacingError(error)}`);
+      alertDialog({ title: "Resend Invites", message: userFacingError(error) });
     } finally {
       resend.disabled = false;
     }
@@ -29732,9 +31275,11 @@ groupManageBody?.addEventListener("click", async (event) => {
       const rec = mgr.getGroup(activeGroupId);
       const afterN = Math.max(0, groupOtherMemberCount(rec) - 1);          // remaining others after removal
       const hasPhoto = Boolean(rec?.photoHex);
-      if (!await confirmText(`Remove ${groupSenderLabel(removeAddr)} from the group chat? A fresh group key is issued to everyone who stays.${await groupOpFeeHint(activeGroupId, { controlTx: 2 * afterN + 1, photoTx: hasPhoto ? afterN : 0 })}`)) return;
+      if (!await confirmDialog({ title: "Remove member", message: `Remove ${groupInfoMemberName(removeAddr)} from the group chat? A fresh group key is issued to everyone who stays.${await groupOpFeeHint(activeGroupId, { controlTx: 2 * afterN + 1, photoTx: hasPhoto ? afterN : 0 })}`, confirmLabel: "Yes", destructive: true })) return;
       setStatus("Removing member…");
-      await mgr.removeMember(activeGroupId, removeAddr);
+      // iOS reports a failed removal in the same "Resend Invites" alert as a failed resend.
+      try { await mgr.removeMember(activeGroupId, removeAddr); }
+      catch (error) { setStatus(`Group action failed: ${error.message}`); alertDialog({ title: "Resend Invites", message: userFacingError(error) }); return; }
       // iMessage-style membership line for the admin (other members get theirs on the rotation).
       const epRem = mgr.getGroup(activeGroupId)?.currentEpoch;
       appendGroupSystemMessage(activeGroupId, `${groupSenderLabel(removeAddr)} was removed from the group chat`, Date.now(), `sys:${activeGroupId}:${epRem}:rem:${removeAddr}`);
@@ -29747,17 +31292,20 @@ groupManageBody?.addEventListener("click", async (event) => {
       const current = mgr.getGroup(activeGroupId)?.name || "";
       // One alert with the field in it (iOS): the name, the consequence and the fee together.
       const others = groupOtherMemberCount(mgr.getGroup(activeGroupId));
-      const name = String(await promptDialog({
+      const pendingName = promptDialog({
         title: "Rename Group",
-        label: "Name",
         message: `Every member will see the new name.${await groupOpFeeHint(activeGroupId, { controlTx: others + 1 })}`,
         initial: current,
-        confirmLabel: "Rename",
-      }) || "").trim();
+        confirmLabel: "Save",
+      });
+      // The field's placeholder, as iOS's TextField("Group name").
+      document.querySelector("[data-app-dialog-input]")?.setAttribute("placeholder", "Group name");
+      const name = String(await pendingName || "").trim();
       if (!name || name === current) return;
       setStatus("Renaming group…");
       const prevName = mgr.getGroup(activeGroupId)?.name;
-      await mgr.renameGroup(activeGroupId, name);
+      try { await mgr.renameGroup(activeGroupId, name); }
+      catch (error) { setStatus(`Group action failed: ${error.message}`); alertDialog({ title: "Couldn't Rename Group", message: userFacingError(error) }); return; }
       if (prevName !== name) appendGroupSystemMessage(activeGroupId, `You changed the group name to "${name}"`, Date.now(), `sys:${activeGroupId}:name:${name}`);
       openGroupManage(activeGroupId);
       openGroupChat(activeGroupId);

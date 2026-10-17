@@ -1,7 +1,7 @@
 import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, markBadNode, probeRpc, recordFailover } from "./rpc.js";
-import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
+import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, deriveSpendingAddressRange, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
 import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
@@ -1299,6 +1299,11 @@ export class KaspaEngine {
     this.requireSdk();
     return deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
   }
+  /** Spending addresses start..<start+count through one seed derivation (Discover Addresses). */
+  deriveSpendingAddressRange(mnemonic, start, count, passphrase = "", { passphraseForm = "nfkd" } = {}) {
+    this.requireSdk();
+    return deriveSpendingAddressRange(this.kaspa, mnemonic, passphrase, { start, count, passphraseForm });
+  }
   spendingDerivationPath(index) { return spendingDerivationPath(index); }
 
   async balanceForAddress(address) {
@@ -1962,7 +1967,8 @@ export class KaspaEngine {
   // passphrase) makes a derived spending address the owner/funder/signer of
   // the commit/reveal pair — iOS's fromSpendingAddressIndex analog; omitted,
   // the chatting identity transfers its own domain.
-  async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", passphraseForm = "nfkd", changeAddress = null, onStatus = () => {} }) {
+  // `revealPriorityFeeSompi`: the Send Domain sheet's fee (iOS KNSDomainSendView priorityFeeSompi).
+  async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", passphraseForm = "nfkd", changeAddress = null, revealPriorityFeeSompi = undefined, onStatus = () => {} }) {
     this.requireWallet();
     await this.connect();
     let signer = null;
@@ -1973,7 +1979,7 @@ export class KaspaEngine {
     }
     // `source` goes into the pending-transfer record so Finish transfer can derive the same key.
     const source = spendingIndex != null ? { kind: "spending", index: Number(spendingIndex) } : { kind: "identity" };
-    return knsTransferDomain({ engine: this, domain, assetId, toAddress, signer, source, changeAddress, onStatus, log: this.log });
+    return knsTransferDomain({ engine: this, domain, assetId, toAddress, signer, source, changeAddress, revealPriorityFeeSompi, onStatus, log: this.log });
   }
 
   // Unfinished .kas transfers (commit sent, reveal not accepted yet) on this network; with

@@ -13,8 +13,8 @@ import { NETWORK_ID, KAS_UNIT } from "../engine/network.js";
 import { sompiFromUserText, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer } from "../engine/amounts.js";
 import { kachatOwnersOfNames } from "./kachat-names-live.js";
 import { renderAddressDomainsTab } from "./address-domains-tab.js";
-import { userFacingError } from "./dialogs.js";
-import QRCode from "qrcode";
+import { userFacingError, alertDialog } from "./dialogs.js";
+import { drawKasSignerFrame } from "../engine/qr.js";
 import jsQR from "jsqr";
 import {
   KSPT_MAX_INPUTS, MIN_RELAY_FEE_PER_GRAM, REFERENCE_MASS_FOR_FEE_EDITOR,
@@ -30,11 +30,10 @@ import {
   availablePillInnerHtml, infoPillHtml, feeControlsHtml, coinControlSummaryText, sendActionButtonHtml,
   shortSendAddress, refreshRecipientAddressBook, pickOtherDomain, nameNotFoundText,
 } from "./send-kaspa-components.js";
-import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx, historicalKasPrice } from "./portfolio.js";
+import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx, historicalKasPrice, parsePortfolioNumber, formatPortfolioCurrency } from "./portfolio.js";
 
 const COLD_ACCOUNTS_KEY = "kachat-cold-accounts-v1"; // account-scoped: [{ id, label, kpub, addedAt, maxIndex, labels, hidden }]
 const COLD_UTXO_LABELS_KEY = "kachat-cold-utxo-labels-v1"; // account-scoped: { [address]: { [outpointKey]: label } }
-const GAP_LIMIT = 20;
 
 let deps = null;
 let rootEl = null;
@@ -66,6 +65,8 @@ let addrToken = 0;
 let detailDomainOwning = new Set();
 /// What the last discover on this account turned up, shown in the Address Actions sheet.
 let detailDiscoverySummary = null;
+/// Live scan position while discovering (iOS DiscoveryProgress): `{ checkingIndex, foundCount }`.
+let detailDiscoveryProgress = null;
 
 function nowId() {
   return typeof crypto?.randomUUID === "function" ? crypto.randomUUID() : `c-${Date.now()}-${Math.random()}`;
@@ -85,9 +86,6 @@ function normalizeAccount(raw) {
     maxIndex: Number.isFinite(raw.maxIndex) ? Math.max(0, Math.floor(raw.maxIndex)) : 0,
     labels: raw.labels && typeof raw.labels === "object" ? raw.labels : {},
     hidden: Array.isArray(raw.hidden) ? raw.hidden : [],
-    // Desktop nicety over iOS: the first time an account is opened, run the gap-limit
-    // discovery scan automatically instead of waiting for a manual "Discover Addresses".
-    discovered: raw.discovered === true,
     // Per-account receive notifications (iOS notifyOnReceive); older records read as on.
     receiveNotifications: raw.receiveNotifications !== false,
   };
@@ -257,6 +255,16 @@ async function fetchBalancesBatch(addresses) {
   return byAddress;
 }
 
+/** True only when a live read says this address holds nothing. A network error is NOT an empty
+ *  balance: hiding then fails closed (iOS ColdStorageManager.setAddressHidden). */
+async function addressConfirmedEmpty(address) {
+  if (!String(address || "").trim()) return false;
+  try {
+    const balances = await fetchBalancesBatch([address]);
+    return (balances.get(address) || 0) === 0;
+  } catch { return false; }
+}
+
 /** Bounded-concurrency map: REST endpoints tolerate a few parallel requests fine — it's
  *  full-blast parallelism that risks rate limiting, and strictly-sequential that made the
  *  Used/Unused backfill crawl. */
@@ -274,16 +282,21 @@ async function mapWithConcurrency(items, limit, worker) {
 
 // An address counts as "used" if it holds a balance now or has any on-chain
 // transaction history — mirrors iOS's everUsed || balance>0.
+//
+// Tri-state, like iOS ChatService.spendingAddressUsedState (the same `transactions-count` read):
+// true / false only from a successful answer, null when the probe failed. A failed probe used to
+// read as "never used", which let Generate More hand out an address that had been used and let a
+// row claim "Unused" on a rate-limited request.
 async function addressHasHistory(address) {
-  if (!String(address || "").trim()) return false; // empty address would 404 as /addresses//…
+  if (!String(address || "").trim()) return null; // empty address would 404 as /addresses//…
   try {
     const base = String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
-    const url = `${base}/addresses/${encodeURIComponent(address)}/full-transactions?limit=1&offset=0&resolve_previous_outpoints=no`;
-    const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
-    if (!response.ok) return false;
-    const txs = await response.json();
-    return Array.isArray(txs) && txs.length > 0;
-  } catch { return false; }
+    const url = `${base}/addresses/${encodeURIComponent(address)}/transactions-count`;
+    const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return null;
+    const total = Number((await response.json())?.total);
+    return Number.isFinite(total) ? total > 0 : null;
+  } catch { return null; }
 }
 
 // Exact 8-decimal formatting like iOS's formatKasExact.
@@ -308,6 +321,13 @@ const EXTERNAL_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 
 const CHECK_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M8 12.4l2.6 2.6L16 9.6"/></svg>`;
 const CIRCLE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/></svg>`;
 const EYE_SLASH_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.1A9.9 9.9 0 0 1 12 5c5 0 9 4.5 10 7a15.5 15.5 0 0 1-3.2 4.2"/><path d="M6.5 6.9C4.4 8.3 2.7 10.3 2 12c1 2.5 5 7 10 7a9.7 9.7 0 0 0 4.4-1.05"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>`;
+
+const UTXO_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="7.5" r="3.2"/><circle cx="16.5" cy="7.5" r="3.2"/><circle cx="7.5" cy="16.5" r="3.2"/><circle cx="16.5" cy="16.5" r="3.2"/></svg>`;
+const CUBE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8 20.5 7.5v9L12 21.2 3.5 16.5v-9Z"/><path d="M3.5 7.5 12 12.2l8.5-4.7M12 12.2v9"/></svg>`;
+const WARNING_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4.5M12 17h.01"/></svg>`;
+const REFRESH_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>`;
+/// A list's loading state: a spinner, as iOS's ProgressView row, not a "Loading…" line.
+const COLD_LIST_SPINNER = '<div class="cold-detail-spinner"><span class="initial-sync-spinner" aria-hidden="true"></span></div>';
 
 const CHECKLIST_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 2 2 3-3"/><path d="M11 6h10"/><path d="m3 12.5 2 2 3-3"/><path d="M11 12.5h10"/><path d="m3 19 2 2 3-3"/><path d="M11 19h10"/></svg>`;
 
@@ -369,17 +389,15 @@ function addressRowHtml(account, entry) {
       ? '<span class="spending-address-usage used" data-cold-usage-cell="' + entry.index + '">Used</span>'
       : '<span class="spending-address-usage unused" data-cold-usage-cell="' + entry.index + '">Unused</span>';
   const balanceText = entry.balanceSompi === undefined ? `… ${KAS_UNIT}` : `${fmtKasExact(entry.balanceSompi)} ${KAS_UNIT}`;
+  // iOS ColdStorageDetailView.addressRow: label, short address, balance, then the Used / Unused /
+  // Checking badge with the Contains domain tag on their own line. No chevron.
   return `
     <div class="spending-address-row cold-address-row" data-cold-address-row="${entry.index}">
-      <button type="button" class="spending-address-row-main" data-cold-addr-open="${entry.index}" aria-label="Open address #${entry.index} on explorer">
-        <div class="spending-address-row-head">
-          <span class="spending-address-label cold-addr-label">${deps.escapeHtml(displayLabelFor(account, entry.index))}</span>
-          ${usageBadge}
-          ${detailDomainOwning.has(entry.address) ? '<span class="cold-address-domain-tag">Contains domain</span>' : ""}
-        </div>
+      <button type="button" class="spending-address-row-main" data-cold-addr-open="${entry.index}">
+        <span class="spending-address-label cold-addr-label">${deps.escapeHtml(displayLabelFor(account, entry.index))}</span>
         <span class="spending-address-value">${deps.escapeHtml(shortColdAddress(entry.address))}</span>
         <span class="spending-address-balance" data-cold-balance-cell="${entry.index}">${deps.escapeHtml(balanceText)}</span>
-        <span class="spending-address-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+        <span class="cold-address-badges" data-cold-badges="${entry.index}">${usageBadge}${detailDomainOwning.has(entry.address) ? '<span class="cold-address-domain-tag">Contains domain</span>' : ""}</span>
       </button>
       <div class="spending-address-row-menu-wrap">
         <button type="button" class="spending-row-menu-btn" data-cold-addr-menu-toggle="${entry.index}" aria-haspopup="dialog" aria-label="Address options">${DOTS_ICON}</button>
@@ -403,8 +421,6 @@ function renderDetail() {
     if (aActive !== bActive) return aActive ? -1 : 1;
     return b.index - a.index;
   });
-
-  const busyLabel = detailBusy === "generate" ? "Generating…" : detailBusy === "discover" ? "Discovering…" : detailBusy === "refresh" ? "Refreshing…" : null;
 
   rootEl.innerHTML = `
     <div class="kaposts-thread-header cold-detail-header">
@@ -431,13 +447,13 @@ function renderDetail() {
         <p class="cold-summary-label">Total Balance</p>
         <p class="cold-summary-balance">${fmtKasExact(totalSompi)} ${KAS_UNIT}</p>
       </div>
-      <button class="primary-button cold-capsule cold-summary-actions" type="button" data-cold-actions-toggle ${detailBusy ? "disabled" : ""}>
-        ${busyLabel ? deps.escapeHtml(busyLabel) : "Address Actions"}
+      <button class="primary-button cold-capsule cold-summary-actions" type="button" data-cold-actions-toggle ${detailBusy ? "disabled" : ""}${detailBusy ? ' aria-busy="true" aria-label="Address Actions"' : ""}>
+        ${detailBusy ? '<span class="sk-spinner" aria-hidden="true"></span>' : "Address Actions"}
       </button>
     </div>
     <div class="cold-address-list">
       ${detailLoading && detailEntries.length === 0
-        ? '<p class="cold-detail-note">Loading addresses…</p>'
+        ? '<div class="cold-detail-spinner"><span class="initial-sync-spinner" aria-hidden="true"></span></div>'
         : sorted.length === 0
           ? '<p class="cold-detail-note">No addresses discovered yet.</p>'
           : sorted.map((e) => addressRowHtml(account, e)).join("")}
@@ -521,16 +537,17 @@ function renderColdPortfolioPicker() {
   const duplicates = coldSheet.duplicates || new Set();
   body.innerHTML = `
     <div class="modal-head">
-      <div><p class="modal-kicker plain">Add to Portfolio</p><h2>Which portfolio?</h2></div>
+      <div><h2>Add to Portfolio</h2></div>
       <button class="modal-close" type="button" data-cold-actions-close aria-label="Close">×</button>
     </div>
+    <p class="cold-sheet-section">Which portfolio?</p>
     <div class="cold-action-rows">
       ${coldSheet.portfolios.map((portfolio) => coldSheetRow({
         attr: `data-cold-portfolio-pick="${deps.escapeHtml(portfolio.id)}"`,
         title: deps.escapeHtml(portfolio.name),
         subtitle: duplicates.has(portfolio.id)
-          ? "Already added. Adding it again will double-count it."
-          : (portfolio.isActive ? "Current" : "&nbsp;"),
+          ? `${WARNING_ICON}Already added`
+          : (portfolio.isActive ? "Current" : ""),
         icon: PIE_ICON,
         warn: duplicates.has(portfolio.id),
       })).join("")}
@@ -538,15 +555,32 @@ function renderColdPortfolioPicker() {
     <p class="field-hint cold-actions-summary">${deps.escapeHtml(coldTxSummaryLine(coldSheet.tx))}</p>`;
 }
 
+/// iOS AddToPortfolioSheet.summaryLine: "Sent 1,234.5 KAS on Oct 16, 2026, 3:04 PM".
 function coldTxSummaryLine(tx) {
   const direction = tx.outgoing ? "Sent" : "Received";
-  const when = tx.blockTime ? new Date(Number(tx.blockTime)).toLocaleString() : null;
-  return `${direction} ${fmtKasExact(tx.amountSompi)} ${KAS_UNIT}${when ? ` on ${when}` : ""}`;
+  const when = new Date(tx.blockTime ? Number(tx.blockTime) : Date.now());
+  const kas = (Number(tx.amountSompi) / 1e8).toLocaleString("en-US", { maximumFractionDigits: 4 });
+  return `${direction} ${kas} ${KAS_UNIT} on ${when.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`;
 }
 
-function fmtFiatLike(value, currency) {
-  try { return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(value || 0); }
-  catch { return `${(value || 0).toFixed(2)} ${currency}`; }
+/// iOS AddToPortfolioSheet.trimmed: fixed decimals with trailing zeros dropped down to two.
+function trimmedDecimal(value, maxDecimals = 8) {
+  let text = Number(value || 0).toFixed(maxDecimals);
+  while (text.endsWith("0") && (text.split(".")[1]?.length || 0) > 2) text = text.slice(0, -1);
+  return text;
+}
+
+/// Amount and price as typed: either separator (the field is grouped as you type).
+function coldPortfolioNumber(text) {
+  const value = parsePortfolioNumber(String(text ?? ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+/// "Total" shows once both amount and price read as numbers (iOS totalValue).
+function coldPortfolioTotal(d) {
+  const amount = coldPortfolioNumber(d.amount);
+  const priceValue = coldPortfolioNumber(d.price);
+  return amount === null || priceValue === null ? null : amount * priceValue;
 }
 
 function toDatetimeLocalValue(ts) {
@@ -564,15 +598,15 @@ function renderColdPortfolioDetails() {
   const body = modalsEl?.querySelector("[data-cold-actions-body]");
   if (!body) return;
   const d = coldSheet.details;
-  const total = (Number(d.amount) || 0) * (Number(d.price) || 0);
-  const currency = deps.currencyCode?.() || "USD";
+  const total = coldPortfolioTotal(d);
+  const canConfirm = (coldPortfolioNumber(d.amount) || 0) > 0;
   body.innerHTML = `
     <div class="modal-head">
-      <div><p class="modal-kicker plain">${deps.escapeHtml(d.portfolioName)}</p><h2>Transaction Details</h2></div>
+      <div><h2>Transaction Details</h2></div>
       <button class="modal-close" type="button" data-cold-actions-close aria-label="Close">×</button>
     </div>
     ${coldSheet.duplicates?.has(d.portfolioId)
-      ? `<p class="field-hint cold-portfolio-warn">This transaction is already in ${deps.escapeHtml(d.portfolioName)}. Adding it again will double-count it.</p>`
+      ? `<p class="field-hint cold-portfolio-warn">${WARNING_ICON}This transaction is already in ${deps.escapeHtml(d.portfolioName)}. Adding it again will double-count it.</p>`
       : ""}
     <div class="portfolio-editor-body cold-portfolio-form">
       <div class="settings-segmented full" role="group" aria-label="Type">
@@ -582,28 +616,29 @@ function renderColdPortfolioDetails() {
           </button>`).join("")}
       </div>
       <label class="portfolio-editor-field">
-        <span>Amount (${KAS_UNIT})</span>
-        <input type="number" step="any" min="0" data-cold-pf-amount value="${deps.escapeHtml(String(d.amount))}" />
+        <span>Amount</span>
+        <input type="text" inputmode="decimal" autocomplete="off" placeholder="0" data-cold-pf-amount value="${deps.escapeHtml(String(d.amount))}" />
       </label>
       <label class="portfolio-editor-field">
-        <span>Price per KAS (${deps.escapeHtml(currency)})</span>
-        <input type="number" step="any" min="0" placeholder="${d.priceLoading ? "Looking up…" : "0"}" data-cold-pf-price value="${deps.escapeHtml(String(d.price ?? ""))}" />
+        <span>Price per KAS${d.priceLoading ? ' <span class="sk-spinner" aria-hidden="true"></span>' : ""}</span>
+        <input type="text" inputmode="decimal" autocomplete="off" placeholder="0" data-cold-pf-price value="${deps.escapeHtml(String(d.price ?? ""))}" />
       </label>
-      <div class="portfolio-editor-field cold-portfolio-total"><span>${d.type === "transfer" ? "Value at the Time" : "Total"}</span><span>${deps.escapeHtml(fmtFiatLike(total, currency))}</span></div>
+      <div class="portfolio-editor-field cold-portfolio-total" ${total === null ? "hidden" : ""}><span>Total</span><span>${deps.escapeHtml(formatPortfolioCurrency(total || 0))}</span></div>
       <label class="portfolio-editor-field">
         <span>Date</span>
         <input type="datetime-local" data-cold-pf-date value="${deps.escapeHtml(d.dateLocal)}" />
       </label>
       <label class="portfolio-editor-field">
         <span>Note</span>
-        <input type="text" maxlength="120" placeholder="Optional" data-cold-pf-notes value="${deps.escapeHtml(d.notes || "")}" />
+        <textarea rows="1" maxlength="120" placeholder="Optional" data-cold-pf-notes>${deps.escapeHtml(d.notes || "")}</textarea>
       </label>
+      <p class="cold-sheet-section">Transaction</p>
       <p class="cold-sheet-txid">${deps.escapeHtml(coldSheet.tx.txId)}</p>
       <p class="field-hint">Recorded with the row, so this transaction is recognised if you add it again.</p>
     </div>
     <div class="modal-actions">
       <button class="secondary-button" type="button" data-cold-pf-back>Back</button>
-      <button class="primary-button" type="button" data-cold-pf-confirm ${(Number(d.amount) || 0) > 0 ? "" : "disabled"}>Add to Portfolio</button>
+      <button class="primary-button" type="button" data-cold-pf-confirm ${canConfirm ? "" : "disabled"}>Confirm</button>
     </div>`;
 }
 
@@ -621,7 +656,7 @@ function openColdPortfolioDetails(portfolioId) {
       portfolioName: portfolio.name,
       // Money leaving the address is a sale, money arriving a buy. Both editable.
       type: tx.outgoing ? "sell" : "buy",
-      amount: Number(tx.amountSompi) / 1e8,
+      amount: trimmedDecimal(Number(tx.amountSompi) / 1e8),
       price: "",
       priceLoading: true,
       timestamp: when,
@@ -634,7 +669,7 @@ function openColdPortfolioDetails(portfolioId) {
     // Never overwrite something already typed - the lookup can land late.
     if (coldSheet?.kind !== "portfolio-details" || coldSheet.details.price !== "") return;
     coldSheet.details.priceLoading = false;
-    if (price != null) coldSheet.details.price = Number(price);
+    if (price != null) coldSheet.details.price = trimmedDecimal(Number(price), 6);
     renderColdSheet();
   }).catch(() => {
     if (coldSheet?.kind !== "portfolio-details") return;
@@ -647,18 +682,20 @@ function openColdPortfolioDetails(portfolioId) {
 function confirmColdPortfolioAdd() {
   const d = coldSheet?.details;
   const tx = coldSheet?.tx;
-  if (!d || !tx || !(Number(d.amount) > 0)) return;
+  const amount = coldPortfolioNumber(d?.amount);
+  if (!d || !tx || !(amount > 0)) return;
   addTransactionToPortfolio(d.portfolioId, {
     type: d.type,
-    amountKas: Number(d.amount),
-    fiatValue: (Number(d.amount) || 0) * (Number(d.price) || 0),
+    amountKas: amount,
+    fiatValue: coldPortfolioTotal(d) ?? 0,
     timestamp: d.timestamp,
     notes: d.notes?.trim() ? d.notes.trim() : null,
     sourceTxId: tx.txId,
     sourceAddress: coldSheet.sourceAddress || detailEntries.find((e) => e.index === activeAddressIndex)?.address || null,
   });
   closeColdActionsSheet();
-  deps.showToast?.(`Added to ${d.portfolioName}.`);
+  // iOS PortfolioAddedCapsule: "Added to <portfolio>".
+  deps.showToast?.(`Added to ${d.portfolioName}`);
 }
 
 
@@ -670,7 +707,7 @@ function renderColdAccountSheet() {
   if (!body || !account) return;
   body.innerHTML = `
     <div class="modal-head">
-      <div><p class="modal-kicker plain">Cold Storage</p><h2>${deps.escapeHtml(account.label)}</h2></div>
+      <div><h2>${deps.escapeHtml(account.label)}</h2></div>
       <button class="modal-close" type="button" data-cold-actions-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">
@@ -696,7 +733,7 @@ function renderColdAddressSheet() {
   const i = entry.index;
   body.innerHTML = `
     <div class="modal-head">
-      <div><p class="modal-kicker">${deps.escapeHtml(shortColdAddress(entry.address))}</p><h2>${deps.escapeHtml(displayLabelFor(account, i))}</h2></div>
+      <div><h2>${deps.escapeHtml(displayLabelFor(account, i))}</h2><p class="cold-sheet-subtitle">${deps.escapeHtml(shortColdAddress(entry.address))}</p></div>
       <button class="modal-close" type="button" data-cold-actions-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">
@@ -719,17 +756,21 @@ function renderColdActionsSheet() {
   const discovering = detailBusy === "discover";
   const row = (action, title, subtitle, icon, disabled = false) =>
     coldSheetRow({ attr: `data-cold-${action}`, title, subtitle, icon, disabled });
+  // iOS addressActionsSheet: while a discover runs the sheet counts up ("Checking address #N",
+  // how many it has found so far) instead of the rows.
+  const progress = detailDiscoveryProgress || { checkingIndex: 0, foundCount: 0 };
   body.innerHTML = `
     <div class="modal-head">
-      <div><p class="modal-kicker plain">Cold Storage</p><h2>Address Actions</h2></div>
+      <div><h2>Address Actions</h2></div>
       <button class="modal-close" type="button" data-cold-actions-close aria-label="Close">×</button>
     </div>
     ${discovering
       ? `<div class="cold-actions-busy">
            <span class="initial-sync-spinner" aria-hidden="true"></span>
-           <strong>Discovering addresses</strong>
+           <strong>Checking address #${progress.checkingIndex}</strong>
+           <span class="cold-actions-busy-count">${progress.foundCount === 0 ? "No used addresses yet" : `${progress.foundCount} found so far`}</span>
            <p>Checks the first thousand addresses whatever the gaps, then keeps going while it keeps finding.</p>
-           <button type="button" class="cold-inline-link" data-cold-actions-close>Close and Keep Scanning</button>
+           <button type="button" class="cold-actions-keep-scanning" data-cold-actions-close>Close and Keep Scanning</button>
          </div>`
       : `<div class="cold-action-rows">
            ${row("generate", "Generate More Addresses", "Reveals the next unused address in this account.",
@@ -769,6 +810,8 @@ export function openTransactionActionsSheet({ txId, outgoing = false, amountSomp
 function closeColdActionsSheet() {
   const modal = modalsEl?.querySelector("[data-cold-actions-modal]");
   if (modal) modal.hidden = true;
+  // The discover summary belongs to the sheet it was shown in (iOS clears it on dismiss).
+  if (coldSheet?.kind === "actions") detailDiscoverySummary = null;
   coldSheet = null;
 }
 
@@ -838,7 +881,7 @@ function renderVisibility() {
             ${customLabel ? `<span class="spending-visibility-label">${deps.escapeHtml(customLabel)}</span>` : ""}
             <span class="spending-address-usage spending-visibility-usage" data-cold-vis-usage="${index}">…</span>
           </div>
-          <span class="spending-address-value">${deps.escapeHtml(shortColdAddress(address))}</span>
+          <span class="spending-address-value">${deps.escapeHtml(`${address.slice(0, 16)}…${address.slice(-6)}`)}</span>
         </div>
       </div>`;
   }).join("");
@@ -893,21 +936,28 @@ function renderVisibility() {
   })();
 }
 
-function toggleVisibilityRow(index, address) {
+async function toggleVisibilityRow(index, address) {
   const account = activeAccount();
   if (!account) return;
+  // Funded rows don't toggle (iOS ColdStorageAddressVisibilityView.toggle) - the row says so by
+  // its dimmed check, so a click on one simply does nothing.
+  const knownSompi = detailEntries.find((e) => e.index === index)?.balanceSompi;
+  const cachedSompi = visUsageCache.get(address)?.sompi;
+  if ((knownSompi || 0) > 0 || (cachedSompi || 0) > 0) return;
   const hiddenSet = new Set(account.hidden.map(Number));
   const isVisible = index <= account.maxIndex && !hiddenSet.has(index);
   if (isVisible) {
-    // Funded rows stay visible — hiding is a display preference, never a way to
-    // lose sight of real funds (same rule as the spending chain).
-    const knownSompi = detailEntries.find((e) => e.index === index)?.balanceSompi;
-    const cachedSompi = visUsageCache.get(address)?.sompi;
-    if ((knownSompi || 0) > 0 || (cachedSompi || 0) > 0) {
-      deps.showToast?.("Addresses holding a balance stay visible.");
-      return;
-    }
-    hiddenSet.add(index);
+    // Hiding is a display preference, never a way to lose sight of real funds: it needs a live
+    // zero-balance answer (iOS ColdStorageManager.setAddressHidden), and fails closed.
+    if (!(await addressConfirmedEmpty(address))) return;
+    if (activeAccount() !== account || !showingVisibility) return;
+    // Re-read: another row may have been toggled while the balance was being asked.
+    const latest = new Set(account.hidden.map(Number));
+    latest.add(index);
+    account.hidden = [...latest];
+    saveState();
+    renderVisibility();
+    return;
   } else if (index <= account.maxIndex) {
     hiddenSet.delete(index);
   } else {
@@ -927,7 +977,7 @@ function toggleVisibilityRow(index, address) {
 // capsules pinned at the bottom, globe -> explorer in the header). -------------
 
 function addressTxRowsHtml(entry) {
-  if (addrTxs.state === "loading" && !addrTxs.txs.length) return '<div class="manage-address-empty">Loading…</div>';
+  if (addrTxs.state === "loading" && !addrTxs.txs.length) return COLD_LIST_SPINNER;
   if (addrTxs.state === "error") return `<div class="manage-address-empty cold-txs-failed"><span>Could not load transactions.</span><button type="button" class="cold-inline-link" data-cold-txs-retry>Try Again</button></div>`;
   if (!addrTxs.txs.length) return '<div class="manage-address-empty">No transactions yet.</div>';
   return addrTxs.txs.map((tx) => {
@@ -952,9 +1002,14 @@ function addressTxRowsHtml(entry) {
 }
 
 function addressUtxoRowsHtml(entry) {
-  if (addrUtxos.state === "loading" && !addrUtxos.entries.length) return '<div class="manage-address-empty">Loading…</div>';
-  if (addrUtxos.state === "error") return `<div class="manage-address-empty cold-txs-failed"><span>Could not load UTXOs: ${deps.escapeHtml(addrUtxos.error || "")}</span><button type="button" class="cold-inline-link" data-cold-utxos-retry>Try Again</button></div>`;
-  if (!addrUtxos.entries.length) return '<div class="manage-address-empty">No UTXOs.</div>';
+  if (addrUtxos.state === "loading" && !addrUtxos.entries.length) return COLD_LIST_SPINNER;
+  // An outage is not an empty address (iOS UtxoLoadFailureRow): the list keeps what it had, and
+  // only an empty one says the coins could not be read.
+  if (!addrUtxos.entries.length) {
+    return addrUtxos.state === "error"
+      ? utxoLoadFailureHtml(addrUtxos.error, "data-cold-utxos-retry")
+      : '<div class="manage-address-empty">No UTXOs.</div>';
+  }
   const labels = coldUtxoLabels(entry.address);
   // Compound row above the list when >1 UTXO, matching iOS's UTXOs-tab section.
   const compoundRow = addrUtxos.entries.length > 1
@@ -964,20 +1019,33 @@ function addressUtxoRowsHtml(entry) {
        </button>
        <p class="cold-compound-note">Combines all UTXOs at this address into a single one, to reduce the number of inputs a future send needs.</p>`
     : "";
+  // iOS utxoRow: icon, then the label, the amount and the outpoint stacked; "Coinbase" and the
+  // rename pencil at the end.
   return compoundRow + addrUtxos.entries.map((utxo) => {
     const key = utxoOutpointKey(utxo.outpoint || {});
     const label = labels[key];
     return `
       <div class="manage-address-utxo-row cold-utxo-row">
+        <span class="cold-utxo-icon" aria-hidden="true">${utxo.isCoinbase ? CUBE_ICON : UTXO_ICON}</span>
         <div class="manage-address-utxo-meta">
           ${label ? `<span class="manage-address-utxo-label">${deps.escapeHtml(label)}</span>` : ""}
+          <span class="cold-utxo-amount">${fmtKasExact(Number(utxo.amount || 0))} ${KAS_UNIT}</span>
           <span class="manage-address-utxo-outpoint">${deps.escapeHtml(key)}</span>
         </div>
         ${utxo.isCoinbase ? '<span class="cold-coinbase-tag">Coinbase</span>' : ""}
-        <span class="manage-address-utxo-amount">${fmtKasExact(Number(utxo.amount || 0))} ${KAS_UNIT}</span>
         <button type="button" class="cold-inline-icon" data-cold-utxo-rename="${deps.escapeHtml(key)}" aria-label="Rename UTXO">${PENCIL_ICON}</button>
       </div>`;
   }).join("");
+}
+
+/// iOS UtxoLoadFailureRow: the node could not be asked, said in place of "no coins".
+function utxoLoadFailureHtml(detail, retryAttr) {
+  return `
+    <div class="cold-utxo-failure" role="alert">
+      <strong>${WARNING_ICON}Couldn't load the coins at this address</strong>
+      ${detail ? `<span>${deps.escapeHtml(detail)}</span>` : ""}
+      <button type="button" class="cold-inline-link" ${retryAttr}>Try Again</button>
+    </div>`;
 }
 
 function renderAddressScreen() {
@@ -993,6 +1061,8 @@ function renderAddressScreen() {
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
       </button>
       <strong>${deps.escapeHtml(displayLabelFor(account, entry.index))}</strong>
+      <!-- Stands in for iOS's pull to refresh on the History and UTXOs lists. -->
+      <button class="kaposts-icon-button cold-globe-link" type="button" data-cold-addr-refresh aria-label="Refresh" title="Refresh">${REFRESH_ICON}</button>
       <a class="kaposts-icon-button cold-globe-link" href="${deps.escapeHtml(deps.explorerAddressUrl(entry.address))}" target="_blank" rel="noopener" aria-label="View address in explorer">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
       </a>
@@ -1000,7 +1070,6 @@ function renderAddressScreen() {
     <div class="spending-detail-balance">
       <span class="spending-detail-balance-label">Balance</span>
       <span class="spending-detail-balance-value">${fmtKasExact(balanceSompi)} ${KAS_UNIT}</span>
-      <span class="spending-detail-balance-address">${deps.escapeHtml(shortColdAddress(entry.address))}</span>
     </div>
     <!-- History / UTXOs / Domains on the app's underline tab bar (iOS b96d727, 718b88c, fe52376). -->
     <nav class="domains-tabs address-tabs" aria-label="Cold address view">
@@ -1043,37 +1112,55 @@ async function openAddressScreen(index) {
   render();
 
   // Transactions and UTXOs load concurrently; each re-renders on arrival.
-  (async () => {
-    try {
-      const base = String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
-      const url = `${base}/addresses/${encodeURIComponent(entry.address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
-      const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
-      if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
-      const txs = await response.json();
-      if (addrToken !== token) return;
-      addrTxs = { state: "ready", txs: Array.isArray(txs) ? txs : [], error: null };
-    } catch (error) {
-      if (addrToken !== token) return;
-      addrTxs = { state: "error", txs: [], error: error.message };
-    }
-    render();
-  })();
+  loadAddrTxs(entry, token);
+  loadAddrUtxos(entry, token);
+}
 
-  (async () => {
-    try {
-      const balance = await deps.engine.balanceForAddress(entry.address);
-      if (addrToken !== token) return;
-      addrUtxos = { state: "ready", entries: balance.entries || [], error: null };
-      // Keep the account detail's cached balance in sync with what the node reports.
-      const fresh = Number(balance.totalSompi ?? 0);
-      entry.balanceSompi = fresh;
-      balanceCache.set(entry.address, fresh);
-    } catch (error) {
-      if (addrToken !== token) return;
-      addrUtxos = { state: "error", entries: [], error: error.message };
-    }
-    render();
-  })();
+/// The address screen's History (iOS loadTransactions). A refresh keeps the rows on screen while
+/// it asks again.
+async function loadAddrTxs(entry, token) {
+  try {
+    const base = String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
+    const url = `${base}/addresses/${encodeURIComponent(entry.address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
+    const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
+    const txs = await response.json();
+    if (addrToken !== token) return;
+    addrTxs = { state: "ready", txs: Array.isArray(txs) ? txs : [], error: null };
+  } catch (error) {
+    if (addrToken !== token) return;
+    addrTxs = { state: "error", txs: [], error: error.message };
+  }
+  render();
+}
+
+/// The address screen's UTXOs (iOS loadUtxos): a failure keeps what the list had.
+async function loadAddrUtxos(entry, token) {
+  try {
+    const balance = await deps.engine.balanceForAddress(entry.address);
+    if (addrToken !== token) return;
+    addrUtxos = { state: "ready", entries: balance.entries || [], error: null };
+    // Keep the account detail's cached balance in sync with what the node reports.
+    const fresh = Number(balance.totalSompi ?? 0);
+    entry.balanceSompi = fresh;
+    balanceCache.set(entry.address, fresh);
+  } catch (error) {
+    if (addrToken !== token) return;
+    addrUtxos = { state: "error", entries: addrUtxos.entries || [], error: userFacingError(error) };
+  }
+  render();
+}
+
+/// The refresh control on the address screen: both lists again, without blanking them first.
+function refreshAddressScreen() {
+  const entry = detailEntries.find((e) => e.index === activeAddressIndex);
+  if (!entry) return;
+  const token = ++addrToken;
+  addrTxs = { ...addrTxs, state: addrTxs.txs.length ? addrTxs.state : "loading" };
+  addrUtxos = { ...addrUtxos, state: addrUtxos.entries.length ? addrUtxos.state : "loading" };
+  render();
+  loadAddrTxs(entry, token);
+  loadAddrUtxos(entry, token);
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,19 +1458,20 @@ async function openCoinControl() {
   send.step = "coincontrol";
   send.coinControlLoading = true;
   send.coinControlSelection = send.manualUtxoKeys ? [...send.manualUtxoKeys] : [];
+  send.coinControlError = null;
   renderSendFlow();
   let utxos = [];
   try {
     utxos = await fetchSpendableUtxos(deps.engine, send.fromAddress);
   } catch (error) {
     if (!send) return;
-    deps.showToast?.(error.message || "Could not read this address's UTXOs.");
+    // Said in place of "no coins" (iOS CoinControlView.loadError): an outage must never read as
+    // an empty address when the coins here are about to be spent.
+    send.coinControlError = userFacingError(error);
   }
   if (!send || send.step !== "coincontrol") return;
-  // Largest first, matching the automatic selector's own order, so the list reads the way the
-  // wallet would have spent it.
-  send.coinControlUtxos = [...utxos].sort((a, b) =>
-    (a.amountSompi > b.amountSompi ? -1 : a.amountSompi < b.amountSompi ? 1 : 0));
+  // In the node's order, as iOS lists them.
+  send.coinControlUtxos = [...utxos];
   // Drop anything that has been spent since the selection was made, rather than carrying a key
   // the build would fail on.
   const live = new Set(send.coinControlUtxos.map(utxoKey));
@@ -1430,8 +1518,9 @@ async function sendBuild() {
     renderSendFlow();
     startSendFrameTimer();
   } catch (error) {
+    // A build that fails goes to the failed screen with Try Again (iOS buildTransaction).
     if (!send) return;
-    send.step = "form";
+    send.step = "failed";
     send.error = error.message;
     renderSendFlow();
   }
@@ -1462,10 +1551,8 @@ async function drawSendFrame() {
   const frame = send.frames[send.frameIndex];
   if (!frame) return;
   try {
-    await QRCode.toCanvas(canvas, [{ data: frame, mode: "byte" }], {
-      errorCorrectionLevel: "M", margin: 3, width: 480,
-      color: { dark: "#06110f", light: "#ffffff" },
-    });
+    // Error correction "L", version 1-6 only (iOS ByteModeQRCode) - what KasSigner reads.
+    await drawKasSignerFrame(canvas, frame);
   } catch (error) {
     deps.appendEngineLog?.(`KSPT QR failed: ${error.message}`);
   }
@@ -1475,7 +1562,7 @@ async function drawSendFrame() {
     dot.classList.toggle("active", i === send.frameIndex);
   });
   const counter = modalsEl.querySelector("[data-cold-send-frame-counter]");
-  if (counter) counter.textContent = `Frame ${send.frameIndex + 1} of ${send.frames.length}`;
+  if (counter) counter.textContent = `Frame ${send.frameIndex + 1} / ${send.frames.length}`;
   const playBtn = modalsEl.querySelector("[data-cold-send-frame-play]");
   if (playBtn) playBtn.textContent = send.playing ? "⏸" : "▶";
 }
@@ -1487,16 +1574,16 @@ async function startSendScan() {
   if (!send) return;
   send.step = "scanning";
   send.scanProgress = null;
+  send.cameraDenied = false;
   renderSendFlow();
   const video = modalsEl.querySelector("[data-cold-send-scan-video]");
   if (!video) return;
   try {
     sendScanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
   } catch {
-    send.step = "qr";
+    if (!send || send.step !== "scanning") return;
+    send.cameraDenied = true;
     renderSendFlow();
-    startSendFrameTimer();
-    deps.showToast?.("Camera unavailable. Cannot scan the signed transaction.");
     return;
   }
   video.srcObject = sendScanStream;
@@ -1619,29 +1706,31 @@ function renderSendStatusOnly() {
 function renderSendScanProgress() {
   const el = modalsEl?.querySelector("[data-cold-send-scan-progress]");
   if (!el || !send) return;
-  if (!send.scanProgress) { el.textContent = "Waiting for QR frames…"; return; }
+  // iOS MultiFrameQRScannerView: one line until a frame lands, then the dots and "R / T frames".
+  if (!send.scanProgress?.total) { el.innerHTML = `<p class="cold-send-scan-hint">Point camera at the KasSigner screen</p>`; return; }
   const { received, total, indices } = send.scanProgress;
-  el.innerHTML = `Scanned ${received} of ${total} frames
-    <span class="cold-send-scan-dots">${Array.from({ length: total }, (_, i) =>
-      `<span class="${indices?.has(i) ? "got" : ""}"></span>`).join("")}</span>`;
+  el.innerHTML = `<span class="cold-send-scan-dots">${Array.from({ length: total }, (_, i) =>
+      `<span class="${indices?.has(i) ? "got" : ""}"></span>`).join("")}</span>
+    <p class="cold-send-scan-count">${received} / ${total} frames</p>`;
 }
 
 function renderSendFlow() {
   const body = modalsEl?.querySelector("[data-cold-send-body]");
   if (!body || !send) return;
-  const title = send.isCompound ? "Compound UTXOs" : "Send from Cold Storage";
+  // The signed-response scanner is its own screen on iOS (MultiFrameQRScannerView), titled for it.
+  const title = send.step === "scanning" ? "Scan Signed Transaction" : send.isCompound ? "Compound UTXOs" : "Send from Cold Storage";
   const shortFrom = `${send.fromAddress.slice(0, 14)}...${send.fromAddress.slice(-6)}`;
 
   const header = `
     <div class="modal-header">
-      <div><p class="modal-kicker">Cold Storage · KasSigner</p><h2>${title}</h2></div>
+      <div><h2>${title}</h2></div>
       <button class="modal-close" type="button" data-cold-send-close aria-label="Close">×</button>
     </div>`;
 
   if (send.step === "form" || send.step === "building") {
     const building = send.step === "building";
     const canBuild = sendHasValidRecipient() && sendAmountSompi() !== null;
-    const feeText = `${fmtKasBig(sendEffectiveFee())} ${KAS_UNIT}`;
+    const feeText = `~${fmtKasBig(sendEffectiveFee())} ${KAS_UNIT}`;
     // The same pieces as every Send Kaspa screen (send-kaspa-components.js, iOS 4d0324f): the
     // recipient card (locked to this address for Compound UTXOs), the amount entry, the
     // Available / From pills, the fee card with Coin Control, and - KasSigner signs, so nothing
@@ -1649,6 +1738,10 @@ function renderSendFlow() {
     body.innerHTML = `
       ${header}
       <div class="sk-screen">
+        <div class="sk-pills">
+          ${infoPillHtml({ innerHtml: `From <code class="sk-pill-mono">${deps.escapeHtml(shortFrom)}</code>` })}
+          ${infoPillHtml({ innerHtml: availablePillInnerHtml({ text: `Available ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}` }) })}
+        </div>
         ${recipientCardHtml({
           prefix: "cold-send",
           value: send.toInput,
@@ -1671,10 +1764,6 @@ function renderSendFlow() {
           maxBusy: send.estimatingMax,
           ariaLabel: send.amountUnit === "kas" ? `Amount (${KAS_UNIT})` : `Amount (${deps.currencyCode?.() || "USD"})`,
         })}
-        <div class="sk-pills">
-          ${infoPillHtml({ innerHtml: availablePillInnerHtml({ text: `Available: ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}` }) })}
-          ${infoPillHtml({ innerHtml: deps.escapeHtml(`From ${shortSendAddress(send.fromAddress)}`) })}
-        </div>
         ${feeControlsHtml({
           prefix: "cold-send",
           feeText,
@@ -1691,7 +1780,7 @@ function renderSendFlow() {
           requiresSlide: false,
           disabled: !canBuild,
           busy: building,
-          busyLabel: "Building…",
+          busyLabel: "",
         })}
       </div>`;
     if (send.editingFee) {
@@ -1711,13 +1800,15 @@ function renderSendFlow() {
       .reduce((sum, u) => sum + BigInt(u.amountSompi), 0n);
     body.innerHTML = `
       <div class="modal-head">
-        <div><p class="modal-kicker">Cold Storage</p><h2>Coin Control</h2></div>
+        <div><h2>Coin Control</h2></div>
         <button class="modal-close" type="button" data-cold-coincontrol-cancel aria-label="Close">×</button>
       </div>
       ${send.coinControlLoading
-        ? `<p class="field-hint">Loading this address's UTXOs…</p>`
+        ? COLD_LIST_SPINNER
         : utxos.length === 0
-          ? `<p class="field-hint">No UTXOs found at this address.</p>`
+          ? (send.coinControlError
+            ? utxoLoadFailureHtml(send.coinControlError, "data-cold-coincontrol-retry")
+            : `<p class="field-hint">No UTXOs found at this address.</p>`)
           : `
       <div class="cold-coincontrol-actions">
         <button type="button" class="cold-inline-link" data-cold-coincontrol-all>Select All</button>
@@ -1734,7 +1825,7 @@ function renderSendFlow() {
             <span class="cold-coincontrol-copy">
               ${label ? `<span class="cold-coincontrol-label">${deps.escapeHtml(label)}</span>` : ""}
               <span class="cold-coincontrol-amount">${fmtKasExact(utxo.amountSompi)} ${KAS_UNIT}</span>
-              <span class="cold-coincontrol-outpoint">${deps.escapeHtml(String(utxo.transactionId).slice(0, 10))}…:${utxo.index}</span>
+              <span class="cold-coincontrol-outpoint">${deps.escapeHtml(String(utxo.transactionId).slice(0, 10))}...:${utxo.index}</span>
             </span>
           </button>`;
         }).join("")}
@@ -1750,6 +1841,8 @@ function renderSendFlow() {
   }
 
   if (send.step === "qr") {
+    // iOS qrView: From / Available / Network Fee, the hint, the animated QR (dots, the frame
+    // controls, then "Frame N / M"), and Scan Signed Transaction. Cancel is the only way back.
     body.innerHTML = `
       ${header}
       <div class="cold-send-qr-panel">
@@ -1758,30 +1851,38 @@ function renderSendFlow() {
           <div class="cold-send-row"><span>Available</span><span>${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</span></div>
           <div class="cold-send-row"><span>Network Fee</span><span>${deps.escapeHtml(fmtKasBig(send.unsigned.feeSompi))} ${KAS_UNIT}</span></div>
         </div>
-        ${send.unsigned.foldedChangeSompi > 0n ? `
-          <p class="cold-send-fee-warning" role="note">This fee includes ${deps.escapeHtml(fmtKasBig(send.unsigned.foldedChangeSompi))} ${KAS_UNIT} of change that is too small for the network to accept as its own output, so it goes to the network instead of back to this address.</p>` : ""}
         <p class="cold-send-qr-hint">Scan this on your KasSigner device</p>
         <div class="cold-qr-frame"><canvas width="480" height="480" data-cold-send-qr-canvas></canvas></div>
         ${send.frames.length > 1 ? `
           <div class="cold-send-frame-dots">${send.frames.map((_, i) =>
             `<span data-cold-send-frame-dot class="${i === send.frameIndex ? "active" : ""}"></span>`).join("")}</div>
-          <p class="cold-send-frame-counter" data-cold-send-frame-counter>Frame ${send.frameIndex + 1} of ${send.frames.length}</p>
           <div class="cold-send-frame-controls">
             <button type="button" data-cold-send-frame-prev aria-label="Previous frame">⏮</button>
             <button type="button" data-cold-send-frame-play aria-label="Play/pause">${send.playing ? "⏸" : "▶"}</button>
             <button type="button" data-cold-send-frame-next aria-label="Next frame">⏭</button>
-          </div>` : ""}
-      </div>
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-send-back-to-form>Back</button>
-        <button class="primary-button" type="button" data-cold-send-start-scan>Scan Signed Transaction</button>
+          </div>
+          <p class="cold-send-frame-counter" data-cold-send-frame-counter>Frame ${send.frameIndex + 1} / ${send.frames.length}</p>` : ""}
+        <button class="primary-button cold-capsule cold-send-start-scan" type="button" data-cold-send-start-scan>Scan Signed Transaction</button>
       </div>`;
     drawSendFrame();
     return;
   }
 
   if (send.step === "scanning") {
-    body.innerHTML = `
+    // iOS MultiFrameQRScannerView. Without a camera it says so here, as iOS does, rather than
+    // dropping back to the QR with a toast.
+    body.innerHTML = send.cameraDenied
+      ? `
+      ${header}
+      <div class="cold-send-camera-denied">
+        <span class="cold-send-camera-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.1l1.3-2h6.2l1.3 2h2.1A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z"/><circle cx="12" cy="12.8" r="3.4"/></svg></span>
+        <p class="cold-send-result-title">Camera Access Required</p>
+        <p class="field-hint cold-send-fail-message">Please enable camera access in Settings to scan the signed transaction.</p>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-cold-send-cancel-scan>Cancel</button>
+      </div>`
+      : `
       ${header}
       <div class="cold-send-scan-wrap">
         <div class="cold-send-scan-frame">
@@ -1790,32 +1891,44 @@ function renderSendFlow() {
             <span></span><span></span><span></span><span></span>
           </div>
         </div>
-        <p class="cold-send-scan-hint">Line the signed-transaction QR up inside the square</p>
-        <p class="cold-send-scan-progress" data-cold-send-scan-progress>Waiting for QR frames…</p>
+        <div class="cold-send-scan-progress" data-cold-send-scan-progress></div>
       </div>
       <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-send-cancel-scan>Back</button>
+        <button class="secondary-button" type="button" data-cold-send-cancel-scan>Cancel</button>
       </div>`;
     renderSendScanProgress();
     return;
   }
 
   if (send.step === "broadcasting") {
-    body.innerHTML = `${header}<p class="cold-send-wait">Broadcasting…</p>`;
+    body.innerHTML = `${header}
+      <div class="cold-send-wait">
+        <span class="initial-sync-spinner" aria-hidden="true"></span>
+        <p>Broadcasting...</p>
+      </div>`;
     return;
   }
 
   if (send.step === "success") {
+    // iOS successView: the From card (full address and what was available), the check and
+    // "Sent", the To card (what was typed), and the transaction ID opening the chosen explorer.
+    const toText = send.isCompound ? send.fromAddress : send.toInput.trim();
+    const explorerName = deps.explorerDisplayName?.() || "the explorer";
     body.innerHTML = `
       ${header}
+      <div class="cold-send-card">
+        <span class="cold-send-card-label">From</span>
+        <code>${deps.escapeHtml(send.fromAddress)}</code>
+        <span class="cold-send-card-sub">Available: ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</span>
+      </div>
       <div class="cold-send-result-icon good">✓</div>
       <p class="cold-send-result-title">Sent</p>
-      <div class="cold-send-rows">
-        <div class="cold-send-row"><span>From</span><code>${deps.escapeHtml(shortFrom)}</code></div>
-        <div class="cold-send-row"><span>To</span><code>${deps.escapeHtml(`${sendEffectiveAddress().slice(0, 14)}...${sendEffectiveAddress().slice(-6)}`)}</code></div>
+      <div class="cold-send-card">
+        <span class="cold-send-card-label">To</span>
+        <code>${deps.escapeHtml(toText)}</code>
       </div>
       <a class="cold-send-txid" href="${deps.escapeHtml(deps.explorerTxUrl(send.txId))}" target="_blank" rel="noopener">
-        <span>Transaction ID · view in explorer ↗</span><code>${deps.escapeHtml(send.txId)}</code>
+        <span>Transaction ID · tap to view in ${deps.escapeHtml(explorerName)} <span class="cold-send-txid-icon" aria-hidden="true">${EXTERNAL_ICON}</span></span><code>${deps.escapeHtml(send.txId)}</code>
       </a>
       <div class="modal-actions">
         <button class="primary-button" type="button" data-cold-send-done>Done</button>
@@ -1830,7 +1943,6 @@ function renderSendFlow() {
       <p class="cold-send-result-title">Something Went Wrong</p>
       <p class="field-hint cold-send-fail-message">${deps.escapeHtml(send.error || "")}</p>
       <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-send-close>Close</button>
         <button class="primary-button" type="button" data-cold-send-try-again>Try Again</button>
       </div>`;
   }
@@ -1886,7 +1998,7 @@ function buildModals() {
     <div class="modal-backdrop" data-cold-confirm-modal hidden>
       <form class="contact-modal create-account-modal" data-cold-confirm-form>
         <div class="modal-header">
-          <div><p class="modal-kicker">Cold Storage</p><h2 data-cold-confirm-title></h2></div>
+          <div><h2 data-cold-confirm-title></h2></div>
           <button class="modal-close" type="button" data-cold-confirm-cancel aria-label="Close">×</button>
         </div>
         <p class="field-hint" data-cold-confirm-message></p>
@@ -1905,7 +2017,6 @@ function buildModals() {
         <div class="cold-qr-frame"><canvas width="480" height="480" data-cold-qr-canvas></canvas></div>
         <p class="cold-qr-address" data-cold-qr-address></p>
         <p class="cold-qr-note" data-cold-qr-note hidden></p>
-        <button class="cold-qr-copy" type="button" data-cold-qr-copy>${COPY_ICON}Copy Address</button>
         <p class="qr-tap-hint dark">Tap anywhere to copy</p>
       </div>
     </div>
@@ -1953,13 +2064,16 @@ function buildModals() {
       if (Number.isFinite(parsed)) { coldSheet.details.timestamp = parsed; coldSheet.details.dateLocal = target.value; }
       return;
     } else return;
-    // Total and the Add button both follow amount and price, refreshed in place rather than by
+    // Total and Confirm both follow amount and price, refreshed in place rather than by
     // re-rendering the field being typed into.
-    const total = (Number(coldSheet.details.amount) || 0) * (Number(coldSheet.details.price) || 0);
-    const totalEl = actionsModal.querySelector(".cold-portfolio-total span:last-child");
-    if (totalEl) totalEl.textContent = fmtFiatLike(total, deps.currencyCode?.() || "USD");
+    const total = coldPortfolioTotal(coldSheet.details);
+    const totalRow = actionsModal.querySelector(".cold-portfolio-total");
+    if (totalRow) {
+      totalRow.hidden = total === null;
+      totalRow.querySelector("span:last-child").textContent = formatPortfolioCurrency(total || 0);
+    }
     const confirm = actionsModal.querySelector("[data-cold-pf-confirm]");
-    if (confirm) confirm.disabled = !((Number(coldSheet.details.amount) || 0) > 0);
+    if (confirm) confirm.disabled = !((coldPortfolioNumber(coldSheet.details.amount) || 0) > 0);
   });
 
   actionsModal.addEventListener("click", (event) => {
@@ -1977,10 +2091,8 @@ function buildModals() {
       if (!portfolios.length) { deps.showToast?.("No portfolio to add this to yet."); return; }
       const duplicates = portfolioIdsContainingTx(coldSheet.tx.txId);
       const tx = coldSheet.tx;
-      // One portfolio still gets the details step - that is where the type, the price and the
-      // date are confirmed, and skipping it would record guesses. What it skips is the CHOICE.
+      // Always the choice first, even with one portfolio (iOS AddToPortfolioSheet .choosePortfolio).
       openColdSheet({ kind: "portfolio-pick", tx, portfolios, duplicates, sourceAddress: coldSheet.sourceAddress || null });
-      if (portfolios.length === 1) openColdPortfolioDetails(portfolios[0].id);
       return;
     }
     const portfolioPick = event.target.closest("[data-cold-portfolio-pick]");
@@ -2015,13 +2127,7 @@ function buildModals() {
   // Tap anywhere on the card, not only the button (iOS ColdStorageAddressQRView). The close
   // button keeps its own job.
   modalsEl.querySelector(".cold-qr-card")?.addEventListener("click", (event) => {
-    if (event.target.closest("[data-cold-qr-close]") || event.target.closest("[data-cold-qr-copy]")) return;
-    const payload = qrModal.dataset.payload;
-    if (!payload) return;
-    navigator.clipboard?.writeText(payload);
-    deps.showToast?.(qrModal.dataset.copyToast || "Copied to clipboard.");
-  });
-  modalsEl.querySelector("[data-cold-qr-copy]").addEventListener("click", () => {
+    if (event.target.closest("[data-cold-qr-close]")) return;
     const payload = qrModal.dataset.payload;
     if (!payload) return;
     navigator.clipboard?.writeText(payload);
@@ -2111,6 +2217,7 @@ function buildModals() {
       return;
     }
     if (event.target.closest("[data-cold-coincontrol-done]")) { commitCoinControl(); return; }
+    if (event.target.closest("[data-cold-coincontrol-retry]")) { openCoinControl(); return; }
     if (event.target.closest("[data-cold-send-unit]")) {
       if (!send.price || send.price <= 0) { deps.showToast?.("KAS price unavailable right now."); return; }
       // Convert the currently-typed value into the new unit so it stays equivalent (iOS
@@ -2141,12 +2248,12 @@ function buildModals() {
     }
     if (event.target.closest("[data-cold-send-build]")) { sendBuild(); return; }
     if (event.target.closest("[data-cold-send-start-scan]")) { stopSendFrameTimer(); startSendScan(); return; }
-    if (event.target.closest("[data-cold-send-back-to-form]")) { stopSendFrameTimer(); send.step = "form"; renderSendFlow(); return; }
+    // Cancelling the scanner goes back to the form (iOS isScanningSignedResponse's setter).
     if (event.target.closest("[data-cold-send-cancel-scan]")) {
       stopSendScan();
-      send.step = "qr";
+      send.step = "form";
+      send.cameraDenied = false;
       renderSendFlow();
-      startSendFrameTimer();
       return;
     }
     if (event.target.closest("[data-cold-send-frame-prev]")) {
@@ -2205,7 +2312,10 @@ function promptModal({ kicker, title, message, label, placeholder = "", initial 
   const modal = modalsEl.querySelector("[data-cold-input-modal]");
   const form = modalsEl.querySelector("[data-cold-input-form]");
   const field = modalsEl.querySelector("[data-cold-input-field]");
-  modalsEl.querySelector("[data-cold-input-kicker]").textContent = kicker || "Cold Storage";
+  // iOS sheets carry a title only; a kicker shows only where one is passed.
+  const kickerEl = modalsEl.querySelector("[data-cold-input-kicker]");
+  kickerEl.textContent = kicker || "";
+  kickerEl.hidden = !kicker;
   modalsEl.querySelector("[data-cold-input-title]").textContent = title;
   const messageEl = modalsEl.querySelector("[data-cold-input-message]");
   messageEl.hidden = !message;
@@ -2252,7 +2362,6 @@ function openQrModal(account, entry) {
   return presentQr({
     title: displayLabelFor(account, entry.index),
     payload: entry.address,
-    copyLabel: "Copy Address",
     copyToast: deps.addressCopiedToastText ? deps.addressCopiedToastText(entry.address) : "Address copied to clipboard.",
   });
 }
@@ -2264,20 +2373,21 @@ function openKpubQrModal(account) {
   return presentQr({
     title: account.label,
     payload: account.kpub,
-    copyLabel: "Copy kpub",
     copyToast: "kpub copied to clipboard.",
     note: "Watch-only. This cannot spend, but it reveals every address in this account.",
+    // "L" where the address QR uses "M" (iOS ColdStorageKpubQRView.generateQR): a kpub is several
+    // times longer, and "M" pushes it into a denser symbol that scans worse on screen.
+    errorCorrectionLevel: "L",
   });
 }
 
 /// One presenter for both QRs, so the address QR and the kpub QR cannot drift apart.
-async function presentQr({ title, payload, copyLabel, copyToast, note }) {
+async function presentQr({ title, payload, copyToast, note, errorCorrectionLevel = "M" }) {
   const modal = modalsEl.querySelector("[data-cold-qr-modal]");
   const canvas = modalsEl.querySelector("[data-cold-qr-canvas]");
   const noteEl = modalsEl.querySelector("[data-cold-qr-note]");
   modalsEl.querySelector("[data-cold-qr-title]").textContent = title;
   modalsEl.querySelector("[data-cold-qr-address]").textContent = payload;
-  modalsEl.querySelector("[data-cold-qr-copy]").innerHTML = `${COPY_ICON}${deps.escapeHtml(copyLabel)}`;
   noteEl.textContent = note || "";
   noteEl.hidden = !note;
   modal.dataset.payload = payload;
@@ -2285,7 +2395,7 @@ async function presentQr({ title, payload, copyLabel, copyToast, note }) {
   modal.hidden = false;
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  try { await deps.engine.drawQrFor(canvas, payload, { dark: "#06110f", light: "#ffffff" }); }
+  try { await deps.engine.drawQrFor(canvas, payload, { dark: "#06110f", light: "#ffffff", errorCorrectionLevel }); }
   catch (error) { deps.appendEngineLog?.(`Cold QR failed: ${error.message}`); }
   // QRCode.toCanvas writes an inline style sized to its render width (512px), which
   // overrides the stylesheet and overflows the card — pin the display size back down.
@@ -2310,18 +2420,7 @@ async function openAccount(id) {
   detailEntries = [];
   balanceCache = new Map();
   saveColdSpot({ accountId: id, addressIndex: null });
-  const account = activeAccount();
-  if (account && !account.discovered) {
-    detailBusy = "discover";
-    detailLoading = true;
-    render();
-    await discoverAddresses(account);
-    if (activeAccountId !== account.id) return; // user backed out mid-scan; rescan next open
-    account.discovered = true;
-    saveState();
-    detailBusy = null;
-    detailLoading = false;
-  }
+  // No automatic discover on open: as on iOS, Discover Addresses is the reader's to run.
   await loadDetail();
 }
 
@@ -2399,11 +2498,17 @@ async function loadDetail({ useCache = true } = {}) {
   // a time through `full-transactions?limit=1` - four in flight at a time, which still crawled on
   // a big account. Falls back to the per-address requests only where the bulk route is absent.
   const pending = detailEntries.filter((e) => (e.balanceSompi || 0) === 0 && e.everUsed === undefined);
+  // A failed probe (null) leaves the row's "Checking" up rather than claiming "Unused" (iOS
+  // unknownUsedAddresses).
   const markUsed = (entry, used) => {
+    if (used === null || used === undefined) return;
     entry.everUsed = used;
-    const row = rootEl?.querySelector(`[data-cold-address-row="${entry.index}"] .spending-address-row-head`);
-    if (row && !row.querySelector("[data-cold-usage-cell]")) {
-      row.insertAdjacentHTML("beforeend",
+    const cell = rootEl?.querySelector(`[data-cold-usage-cell="${entry.index}"]`);
+    if (cell) {
+      cell.className = `spending-address-usage ${used ? "used" : "unused"}`;
+      cell.textContent = used ? "Used" : "Unused";
+    } else {
+      rootEl?.querySelector(`[data-cold-badges="${entry.index}"]`)?.insertAdjacentHTML("afterbegin",
         `<span class="spending-address-usage ${used ? "used" : "unused"}" data-cold-usage-cell="${entry.index}">${used ? "Used" : "Unused"}</span>`);
     }
   };
@@ -2440,6 +2545,11 @@ const ACTIVE_CONCURRENCY = 2;
 /// KNS has no bulk endpoint, so domain ownership is only probed this far in - and now only for
 /// addresses the chain says were actually touched, which is a handful rather than all of them.
 const KNS_PROBE_DEPTH = 200;
+/// The fallback sweep (iOS ColdStorageManager): addresses per balance request, how many misses in a
+/// row end it once past the floor, and the hard stop so it always terminates.
+const SWEEP_BATCH = 100;
+const SWEEP_GAP_LIMIT = 60;
+const SWEEP_MAX_INDEX = 5000;
 
 /// Which of these addresses the chain has ever seen, in one request per [ACTIVE_BATCH].
 ///
@@ -2498,76 +2608,112 @@ async function fetchActiveAddresses(addresses) {
 /// sequential HTTP lookup per address - is asked only about addresses the chain already says are
 /// real. A balance or a domain cannot exist on an address that has never been touched, so
 /// nothing is lost by that filter.
-async function discoverAddresses(account) {
+async function discoverAddresses(account, onProgress = null) {
+  const report = (checkingIndex, foundCount) => { try { onProgress?.({ checkingIndex, foundCount }); } catch { /* UI only */ } };
   let addresses;
   try { addresses = deriveReceiveAddresses(account.kpub, 0, DISCOVER_DEPTH); }
-  catch { return discoverAddressesByWalk(account); }
-  if (activeAccountId !== account.id) return;
+  catch { return 0; }
+  if (activeAccountId !== account.id) return 0;
+  report(0, 0);
 
   let active;
   try { active = await fetchActiveAddresses(addresses); }
   catch { active = null; }
-  // The configured REST server does not serve /addresses/active (or could not be reached). The
-  // old walk is slower and shallower, but it is the difference between a slow answer and none.
-  if (!active) return discoverAddressesByWalk(account);
-  if (activeAccountId !== account.id) return;
+  if (activeAccountId !== account.id) return 0;
 
-  const touched = addresses
-    .map((address, index) => ({ address, index }))
-    .filter(({ address }) => active.has(address));
-
-  // Balances for the touched addresses only - one batched call over a handful rather than over
-  // the whole window.
-  let balances = new Map();
-  if (touched.length) {
-    try { balances = await fetchBalancesBatch(touched.map((t) => t.address)); }
-    catch { /* a balance we cannot read is not evidence of an empty one; KNS still decides below */ }
-    for (const [address, sompi] of balances) balanceCache.set(address, sompi);
-  }
-  if (activeAccountId !== account.id) return;
-
-  // KNS, concurrently, and only for addresses the chain says exist. This is the step that used to
-  // dominate the whole scan as 200 sequential lookups.
-  const knsCandidates = touched.filter(({ index, address }) =>
-    index < KNS_PROBE_DEPTH && !((balances.get(address) || 0) > 0));
-  const ownsDomain = new Set();
-  if (knsCandidates.length) {
-    // Any name counts - .kas, .k or .kaspa (iOS NameServicesClient.ownsAnyName).
-    try {
-      const owners = await deps.engine.addressesOwningAnyName(knsCandidates.map((c) => c.address));
-      for (const address of owners) ownsDomain.add(address);
-    } catch { /* tags are a nicety; a balance is what actually matters here */ }
-  }
-
-  // An address is worth surfacing when it HOLDS something - a balance or a domain. Having merely
-  // been used once and emptied is what the Used badge is for, not what this list is for.
   let lastMatchIndex = -1;
   const matchedIndices = new Set();
-  for (const { index, address } of touched) {
-    if ((balances.get(address) || 0) > 0 || ownsDomain.has(address)) {
-      matchedIndices.add(index);
-      lastMatchIndex = Math.max(lastMatchIndex, index);
+
+  if (active) {
+    const touched = addresses
+      .map((address, index) => ({ address, index }))
+      .filter(({ address }) => active.has(address));
+
+    // Balances for the touched addresses only - one batched call over a handful rather than over
+    // the whole window. A balance that cannot be read is not evidence of an empty one.
+    let funded = new Set();
+    if (touched.length) {
+      try {
+        const balances = await fetchBalancesBatch(touched.map((t) => t.address));
+        for (const [address, sompi] of balances) {
+          balanceCache.set(address, sompi);
+          if (sompi > 0) funded.add(address);
+        }
+      } catch { funded = new Set(); }
     }
-  }
-  // Nothing held anywhere: keep at least the addresses the chain has seen, so a used-and-emptied
-  // account still shows its history rather than collapsing to one row.
-  if (lastMatchIndex < 0 && touched.length) {
-    lastMatchIndex = touched[touched.length - 1].index;
-    for (const { index } of touched) matchedIndices.add(index);
+    if (activeAccountId !== account.id) return 0;
+    report(touched.length ? touched[touched.length - 1].index : 0, funded.size);
+
+    // KNS, concurrently, and only for touched, unfunded addresses inside the probe depth. This is
+    // the step that used to dominate the whole scan as 200 sequential lookups.
+    const knsCandidates = touched.filter(({ index, address }) => index < KNS_PROBE_DEPTH && !funded.has(address));
+    const ownsDomain = new Set();
+    if (knsCandidates.length) {
+      // Any name counts - .kas, .k or .kaspa (iOS NameServicesClient.ownsAnyName).
+      try {
+        const owners = await deps.engine.addressesOwningAnyName(knsCandidates.map((c) => c.address));
+        for (const address of owners) ownsDomain.add(address);
+      } catch { /* tags are a nicety; a balance is what actually matters here */ }
+    }
+
+    // An address is worth surfacing when it HOLDS something - a balance or a domain. Having merely
+    // been used once and emptied is what the Used badge is for, not what this list is for.
+    for (const { index, address } of touched) {
+      if (funded.has(address) || ownsDomain.has(address)) {
+        matchedIndices.add(index);
+        lastMatchIndex = Math.max(lastMatchIndex, index);
+      }
+    }
+  } else {
+    // The configured REST server does not serve /addresses/active, or could not be reached: the
+    // batched sweep iOS falls back to. A floor of DISCOVER_DEPTH whatever the gaps, then on while
+    // it keeps finding (60 misses in a row stop it), never past SWEEP_MAX_INDEX.
+    let consecutiveMisses = 0;
+    let index = 0;
+    while (index < SWEEP_MAX_INDEX) {
+      if (index >= DISCOVER_DEPTH && consecutiveMisses >= SWEEP_GAP_LIMIT) break;
+      if (activeAccountId !== account.id) return 0;
+      const upper = Math.min(index + SWEEP_BATCH, SWEEP_MAX_INDEX);
+      report(index, matchedIndices.size);
+      let derived;
+      try { derived = deriveReceiveAddresses(account.kpub, index, upper); }
+      catch { break; }
+      if (!derived.length) break;
+
+      let balances;
+      try { balances = await fetchBalancesBatch(derived); }
+      catch { break; } // balances unavailable: stop rather than read an outage as empty
+      if (activeAccountId !== account.id) return 0;
+      for (const [address, sompi] of balances) balanceCache.set(address, sompi);
+
+      // Domains only this far in (KNS has no bulk endpoint), for the unfunded ones.
+      const knsCandidates = derived.filter((address, i) => index + i < KNS_PROBE_DEPTH && !((balances.get(address) || 0) > 0));
+      let owners = new Set();
+      if (knsCandidates.length) {
+        try { owners = new Set(await deps.engine.addressesOwningAnyName(knsCandidates)); }
+        catch { owners = new Set(); }
+      }
+      if (activeAccountId !== account.id) return 0;
+
+      derived.forEach((address, i) => {
+        if ((balances.get(address) || 0) > 0 || owners.has(address)) {
+          lastMatchIndex = index + i;
+          matchedIndices.add(index + i);
+          consecutiveMisses = 0;
+        } else {
+          consecutiveMisses += 1;
+        }
+      });
+      index += derived.length;
+    }
   }
 
   // Raising the bound is not enough on its own. Rows default to VISIBLE unless explicitly hidden,
   // so a match at index 291 would raise the bound to 292 and fill this account's list with 291
-  // empty rows - which is exactly what both phones sweep up here and desktop never did. It only
-  // showed once the scan started reaching a thousand deep with no gap limit to stop it early.
+  // empty rows. Anything the scan MATCHED is un-hidden instead: a previously-hidden address that
+  // now holds a balance would otherwise be found and dropped straight back out of the list.
   //
-  // Anything the scan MATCHED is un-hidden instead: a previously-hidden address that now holds a
-  // balance would otherwise be found and dropped straight back out of the list, which reads as
-  // not finding it at all.
-  //
-  // Strict `>` against the STORED bound, and a half-open range - the shape iOS and Android both
-  // use. A closed range here would be silently empty rather than fatal, being JavaScript, but it
-  // would be wrong in the same way.
+  // Strict `>` against the STORED bound, and a half-open range - the shape iOS uses.
   const previousMax = account.maxIndex;
   const hiddenSet = new Set(account.hidden.map(Number));
   if (lastMatchIndex > previousMax) {
@@ -2579,55 +2725,8 @@ async function discoverAddresses(account) {
   for (const index of matchedIndices) hiddenSet.delete(index);
   account.hidden = [...hiddenSet];
   saveState();
-}
-
-/// The pre-4.1 scan, kept only for a REST server without `/addresses/active`. Windowed gap-limit
-/// walk: one batched balance call per window, then a history request for each unfunded address,
-/// stopping at the first window with nothing in it.
-async function discoverAddressesByWalk(account) {
-  const HARD_STOP = 512; // far beyond any real wallet; guards against a pathological kpub
-  let lastUsedIndex = -1;
-  let windowStart = 0;
-  while (windowStart < HARD_STOP) {
-    if (activeAccountId !== account.id) return;
-    let addresses;
-    try { addresses = deriveReceiveAddresses(account.kpub, windowStart, windowStart + GAP_LIMIT); }
-    catch { break; }
-
-    let balances = null;
-    try {
-      balances = await fetchBalancesBatch(addresses);
-      for (const [address, sompi] of balances) balanceCache.set(address, sompi);
-    } catch { /* node pool unreachable — the worker falls back to per-address REST */ }
-
-    const usedFlags = await mapWithConcurrency(addresses, 4, async (address) => {
-      if (activeAccountId !== account.id) return false;
-      let funded = false;
-      if (balances) {
-        funded = (balances.get(address) || 0) > 0;
-      } else {
-        try {
-          const sompi = await fetchBalance(address);
-          balanceCache.set(address, sompi);
-          funded = sompi > 0;
-        } catch { /* treat as unfunded, fall through to history check */ }
-      }
-      return funded || addressHasHistory(address);
-    });
-    if (activeAccountId !== account.id) return;
-
-    let anyUsed = false;
-    usedFlags.forEach((used, i) => {
-      if (used) { anyUsed = true; lastUsedIndex = Math.max(lastUsedIndex, windowStart + i); }
-    });
-    if (!anyUsed) break;
-    windowStart += GAP_LIMIT;
-  }
-  const discovered = lastUsedIndex + 1;
-  if (discovered > account.maxIndex) {
-    account.maxIndex = discovered;
-    saveState();
-  }
+  // The COUNT of addresses worth showing - not the bound.
+  return matchedIndices.size;
 }
 
 // ---------------------------------------------------------------------------
@@ -2637,18 +2736,13 @@ async function discoverAddressesByWalk(account) {
 async function beginImport(kpubRaw) {
   const kpub = validateKpub(kpubRaw);
   if (!kpub) {
-    deps.showToast?.("That doesn't look like a valid Kaspa extended public key (kpub).");
+    // iOS ColdStorageListView: an "Import Failed" alert with ColdStorageError.invalidKpub's text.
+    await alertDialog({ title: "Import Failed", message: "That doesn't look like a valid Kaspa extended public key (kpub)." });
     return;
   }
-  const existing = accounts.find((a) => a.kpub === kpub);
-  if (existing) {
-    // Re-scanning a kpub you already watch renames that account in place (iOS).
-    const name = await promptModal({ kicker: "Cold Storage", title: "Rename Cold Storage Account", label: "Name", initial: existing.label });
-    if (name?.trim()) { existing.label = name.trim(); saveState(); render(); }
-    return;
-  }
+  // Always the naming step, defaulted to the next "Cold Storage N". A kpub already watched keeps
+  // its account and takes the new name (iOS ColdStorageManager.importAccount).
   const label = await promptModal({
-    kicker: "Cold Storage",
     title: "Name This Account",
     message: "Give this account a name so you can recognize it.",
     label: "Name",
@@ -2656,19 +2750,19 @@ async function beginImport(kpubRaw) {
     submitLabel: "Import",
   });
   if (!label?.trim()) return;
-  accounts.push(normalizeAccount({ id: nowId(), label: label.trim(), kpub, addedAt: Date.now() }));
+  const existing = accounts.find((a) => a.kpub === kpub);
+  if (existing) existing.label = label.trim();
+  else accounts.push(normalizeAccount({ id: nowId(), label: label.trim(), kpub, addedAt: Date.now() }));
   saveState();
   render();
-  deps.showToast?.("Cold storage account imported.");
 }
 
 async function pasteImport() {
   let clip = "";
   try { clip = (await navigator.clipboard.readText())?.trim() || ""; } catch { /* permission */ }
   const input = await promptModal({
-    kicker: "Extended Public Key",
     title: "Enter kpub",
-    message: "Paste the kpub exported from your KasSigner device. This contains no private key material.",
+    message: "Paste the kpub exported from your KasSigner device. It contains no private key material.",
     label: "kpub",
     placeholder: "kpub...",
     initial: clip.startsWith("kpub") ? clip : "",
@@ -2681,8 +2775,8 @@ async function pasteImport() {
 // --- kpub QR scanning -------------------------------------------------------
 // Runs on the shared scanner in ui/qr-scan.js (jsQR frame decode, so it works in
 // every browser, and it degrades to a typed kpub where the camera is unavailable).
-// `validate` here means a QR that isn't a kpub keeps the viewfinder scanning instead
-// of closing the scanner on the wrong code.
+// Any code closes the scanner, and one that isn't a kpub gets the same "Import Failed" as a
+// pasted one (iOS QRScannerView -> beginImport).
 
 async function startScan() {
   const value = await scanQrCode({
@@ -2691,11 +2785,8 @@ async function startScan() {
     manualTitle: "Enter the kpub",
     manualLabel: "kpub",
     manualPlaceholder: "kpub...",
-    manualHint: "Paste the kpub exported from your KasSigner device. This contains no private key material.",
+    manualHint: "Paste the kpub exported from your KasSigner device. It contains no private key material.",
     mono: true,
-    validate: (candidate) => (validateKpub(candidate)
-      ? null
-      : "That is not a valid Kaspa extended public key (kpub)."),
   });
   if (value) beginImport(value);
 }
@@ -2717,17 +2808,21 @@ async function handleAccountMenuAction(action, id) {
     account.receiveNotifications = account.receiveNotifications === false;
     saveState();
     coldWatchedCache.fingerprint = "";
-    deps.showToast?.(account.receiveNotifications ? "Receive notifications on for this account." : "Receive notifications off for this account.");
     render();
   } else if (action === "rename") {
-    const name = await promptModal({
-      kicker: "Cold Storage",
-      title: "Rename Cold Storage Account",
-      label: "Name",
-      initial: account.label,
-    });
-    if (name?.trim()) { account.label = name.trim(); saveState(); render(); }
+    await renameAccountPrompt(account);
   }
+}
+
+/// iOS RenameSheet "Rename Account", with the current name under the title.
+async function renameAccountPrompt(account) {
+  const name = await promptModal({
+    title: "Rename Account",
+    message: account.label,
+    label: "Name",
+    initial: account.label,
+  });
+  if (name?.trim()) { account.label = name.trim(); saveState(); render(); }
 }
 
 async function handleAddressAction(action, index) {
@@ -2740,21 +2835,23 @@ async function handleAddressAction(action, index) {
   } else if (action === "qr") {
     openQrModal(account, entry);
   } else if (action === "hide") {
-    // Refuse rather than silently do nothing if a balance landed between the render and the tap.
-    if ((entry.balanceSompi || 0) > 0) {
+    // The row's balance may be stale, so hiding asks the node again and fails closed: an error
+    // or a balance refuses it (iOS ColdStorageDetailView.hideAddress / setAddressHidden).
+    if ((entry.balanceSompi || 0) > 0 || !(await addressConfirmedEmpty(entry.address))) {
       deps.showToast?.("This address can't be hidden.");
       return;
     }
+    if (activeAccount() !== account) return;
     if (!account.hidden.includes(index)) account.hidden.push(index);
     saveState();
-    await loadDetail();
+    // Updated in place - the row just leaves the list; nothing else needs fetching again.
+    render();
     deps.showToast?.("Address hidden. Re-enable it in Address Visibility.");
   } else if (action === "rename") {
     const custom = account.labels?.[index] ?? account.labels?.[String(index)] ?? "";
+    // iOS "Rename Address" alert: a Label field, and an empty one goes back to the default name.
     const label = await promptModal({
-      kicker: "Cold Storage",
       title: "Rename Address",
-      message: "Leave blank to use the default name.",
       label: "Label",
       initial: custom,
       required: false,
@@ -2801,8 +2898,11 @@ async function runAddressAction(kind) {
         }
         if (activeAccountId !== account.id) return;
         if ((balance || 0) > 0) continue;
-        if (await addressHasHistory(address)) continue;
+        // Recycle only on a CONFIRMED-unused probe (iOS lowestUnusedAddress): true is used, and
+        // null - the probe failed - skips the index too.
+        const used = await addressHasHistory(address);
         if (activeAccountId !== account.id) return;
+        if (used !== false) continue;
         pick = index;
         break;
       }
@@ -2816,15 +2916,26 @@ async function runAddressAction(kind) {
       await loadDetail();
       deps.showToast?.(`Address #${pick} is ready.`);
     } else if (kind === "discover") {
-      await discoverAddresses(account);
+      detailDiscoverySummary = null;
+      detailDiscoveryProgress = { checkingIndex: 0, foundCount: 0 };
+      renderColdSheet();
+      const found = await discoverAddresses(account, (progress) => {
+        if (activeAccountId !== account.id) return;
+        detailDiscoveryProgress = progress;
+        if (coldSheet?.kind === "actions") renderColdSheet();
+      });
+      detailDiscoveryProgress = null;
+      if (activeAccountId !== account.id) return;
       await loadDetail();
-      // What it found, reported in the sheet the way iOS reports `discoverySummary` - the COUNT
-      // of addresses worth showing, not the high-water index, which is a number nobody asked for.
-      const found = detailEntries.filter((e) => (e.balanceSompi || 0) > 0 || detailDomainOwning.has(e.address)).length;
-      detailDiscoverySummary = found === 0
+      // The COUNT of addresses holding a balance or a domain (iOS discoverAddresses' summary).
+      const summary = found === 0
         ? "No addresses with a balance or domain found."
         : `Found ${found} address${found === 1 ? "" : "es"} with a balance or domain.`;
-      deps.showToast?.(detailDiscoverySummary);
+      const sheetOpen = coldSheet?.kind === "actions" && !modalsEl?.querySelector("[data-cold-actions-modal]")?.hidden;
+      // In the sheet when it is still up; closed and carried on, the summary has nowhere to
+      // render, so it is a toast instead.
+      if (sheetOpen) detailDiscoverySummary = summary;
+      else deps.showToast?.(summary);
     } else if (kind === "refresh") {
       await loadDetail({ useCache: false });
     }
@@ -2929,6 +3040,14 @@ export function refreshColdStorage() {
   else render();
 }
 
+/// An own address's balance moved (iOS .ownAddressActivity / .ownAddressUtxoActivity, which the
+/// detail screen listens to): the open account reloads its balances, so funds show without a
+/// manual refresh. Cached figures paint first, so the list does not blank.
+export function refreshColdStorageOnActivity() {
+  if (!deps || !activeAccountId || showingVisibility || detailBusy) return;
+  loadDetail();
+}
+
 export function resetColdStorageForAccount() {
   closeActiveScanner();
   closeSendFlow();
@@ -3025,7 +3144,10 @@ export function initColdStorage(dependencies) {
       toggleVisibilityRow(Number(visRow.dataset.coldVisRow), visRow.dataset.address || "");
       return;
     }
-    if (event.target.closest("[data-cold-txs-retry]") || event.target.closest("[data-cold-utxos-retry]")) { if (activeAddressIndex !== null) openAddressScreen(activeAddressIndex); return; }
+    if (event.target.closest("[data-cold-txs-retry]") || event.target.closest("[data-cold-utxos-retry]") || event.target.closest("[data-cold-addr-refresh]")) {
+      if (activeAddressIndex !== null) refreshAddressScreen();
+      return;
+    }
     if (event.target.closest("[data-cold-paste]")) { pasteImport(); return; }
     if (event.target.closest("[data-cold-scan]")) { startScan(); return; }
     if (event.target.closest("[data-cold-remove]")) { removeActiveAccount(); return; }
@@ -3039,14 +3161,7 @@ export function initColdStorage(dependencies) {
     }
     if (event.target.closest("[data-cold-rename-account]")) {
       const account = activeAccount();
-      if (!account) return;
-      const name = await promptModal({
-        kicker: "Cold Storage",
-        title: "Rename Cold Storage Account",
-        label: "Name",
-        initial: account.label,
-      });
-      if (name?.trim()) { account.label = name.trim(); saveState(); render(); }
+      if (account) await renameAccountPrompt(account);
       return;
     }
     const addrOpen = event.target.closest("[data-cold-addr-open]");
@@ -3091,13 +3206,12 @@ export function initColdStorage(dependencies) {
       if (!entry) return;
       const key = utxoRename.dataset.coldUtxoRename;
       const current = coldUtxoLabels(entry.address)[key] || "";
+      // iOS RenameSheet: "Rename UTXO" over the outpoint, a Name that cannot be saved blank.
       const label = await promptModal({
-        kicker: "UTXO",
         title: "Rename UTXO",
-        message: "Leave blank to remove the name. Labels are stored on this device only.",
+        message: key,
         label: "Name",
         initial: current,
-        required: false,
       });
       if (label === null) return;
       setColdUtxoLabel(entry.address, key, label);

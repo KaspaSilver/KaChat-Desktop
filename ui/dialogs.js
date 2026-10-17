@@ -24,6 +24,7 @@ function ensureHost() {
   host.addEventListener("mousedown", (event) => { if (event.target === host) finish(null); });
   host.addEventListener("click", (event) => {
     if (event.target.closest("[data-app-dialog-cancel]")) { finish(null); return; }
+    if (event.target.closest("[data-app-dialog-extra]")) { finish(PROMPT_EXTRA); return; }
     if (event.target.closest("[data-app-dialog-ok]")) {
       const input = host.querySelector("[data-app-dialog-input]");
       finish(input ? String(input.value) : true);
@@ -84,21 +85,25 @@ function present(html, focusSelector, variantClass = "") {
 }
 
 /// Resolves true when confirmed, false otherwise - never rejects, so callers read as an `if`.
-export function confirmDialog({ title, message = "", kicker = null, confirmLabel = "Confirm", destructive = false } = {}) {
+/// `cancelLabel`: the dismiss button's text, where iOS names it ("Keep waiting", "Keep it", "Stay").
+export function confirmDialog({ title, message = "", kicker = null, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false } = {}) {
   return new Promise((resolve) => {
     settle = (value) => resolve(value !== null);
     present(`
       ${headerHtml(kicker, title)}
       ${bodyHtml(message)}
       <div class="modal-actions">
-        <button class="secondary-button" type="button" data-app-dialog-cancel>Cancel</button>
+        <button class="secondary-button" type="button" data-app-dialog-cancel>${escape(cancelLabel)}</button>
         <button class="primary-button${destructive ? " danger" : ""}" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
       </div>`);
   });
 }
 
 /// Resolves the typed string, or null when cancelled.
-export function promptDialog({ title, label = "", message = "", kicker = null, initial = "", confirmLabel = "Save", maxLength = 120 } = {}) {
+/// `extraLabel`: a third button between Cancel and Save (iOS alert's "Use Default"); choosing it
+/// resolves PROMPT_EXTRA instead of the text.
+export const PROMPT_EXTRA = Symbol("prompt-extra");
+export function promptDialog({ title, label = "", message = "", kicker = null, initial = "", confirmLabel = "Save", extraLabel = "", maxLength = 120 } = {}) {
   return new Promise((resolve) => {
     settle = resolve;
     present(`
@@ -112,6 +117,7 @@ export function promptDialog({ title, label = "", message = "", kicker = null, i
       </div>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-app-dialog-cancel>Cancel</button>
+        ${extraLabel ? `<button class="secondary-button" type="button" data-app-dialog-extra>${escape(extraLabel)}</button>` : ""}
         <button class="primary-button" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
       </div>`, "[data-app-dialog-input]");
   });
@@ -169,7 +175,8 @@ export const ACTION_TILE_ICONS = {
 /// a row: `option.icon` (trusted SVG/HTML, e.g. from ACTION_TILE_ICONS) over the short `title`,
 /// with `subtitle` moved to the tooltip and the accessible description. The long-press menus use
 /// it; every other sheet keeps the default row form.
-export function chooseDialog({ title, message = "", kicker = null, options = [], layout = "rows" } = {}) {
+/// `footer`: a line under the rows (iOS: Manage Addresses' discovery summary under its actions).
+export function chooseDialog({ title, message = "", kicker = null, options = [], layout = "rows", footer = "" } = {}) {
   const tiles = layout === "tiles";
   return new Promise((resolve) => {
     settle = resolve;
@@ -193,7 +200,8 @@ export function chooseDialog({ title, message = "", kicker = null, options = [],
               ${option.subtitle ? `<small>${escape(option.subtitle)}</small>` : ""}
             </span>
           </button>`).join("")}
-      </div>`}`, null, tiles ? "app-dialog-tiles" : "");
+      </div>`}
+      ${footer ? `<p class="field-hint app-dialog-footer">${escape(footer)}</p>` : ""}`, null, tiles ? "app-dialog-tiles" : "");
   });
 }
 

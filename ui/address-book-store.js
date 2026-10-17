@@ -448,7 +448,7 @@ export function addressBookExportJson() {
  * tombstone is lifted; one already saved takes the file's name, note and photo only when the
  * file's `updatedAt` is newer. Photos come with their entry. Returns { added, updated }.
  * Throws an Error whose message is the text to show: "Open a wallet first.", a file whose type
- * isn't kachat-address-book or whose version isn't supported (ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT),
+ * isn't kachat-address-book or has no whole-number version (ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT),
  * or one with no usable address (ADDRESS_BOOK_IMPORT_EMPTY).
  */
 export function importAddressBookExport(input) {
@@ -460,7 +460,8 @@ export function importAddressBookExport(input) {
   }
   if (!file || typeof file !== "object" || Array.isArray(file)
     || file.type !== ADDRESS_BOOK_EXPORT_TYPE
-    || file.version !== ADDRESS_BOOK_EXPORT_VERSION
+    // iOS decodes `version` as an Int but never compares it: any whole number is fine.
+    || !Number.isInteger(file.version)
     || !Array.isArray(file.entries)) {
     throw new Error(ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT);
   }
@@ -470,13 +471,15 @@ export function importAddressBookExport(input) {
   for (const raw of file.entries) {
     const entry = cleanEntry(raw);
     if (!entry) continue;
-    let ok = false;
-    try { ok = config.isValidAddress(entry.address) !== false; } catch { ok = false; }
-    if (!ok) continue;
-    named += 1;
-    // The other network's entries are skipped and counted (iOS IOS-063).
+    // A valid address of either network counts (iOS ContactsManager.isValidKaspaAddress);
+    // config.isValidAddress only accepts the active network's, so the other network's is
+    // recognised by its otherNetworkReason, then skipped and counted (iOS IOS-063).
     let reason = null;
     try { reason = config.otherNetworkReason(entry.address); } catch { reason = null; }
+    let ok = Boolean(reason);
+    if (!ok) { try { ok = config.isValidAddress(entry.address) !== false; } catch { ok = false; } }
+    if (!ok) continue;
+    named += 1;
     if (reason) { otherNetworkMessage = reason; continue; }
     valid.push({ entry, photo: addressBookPhotoFromBase64(raw.photo) });
   }

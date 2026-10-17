@@ -36,8 +36,8 @@ export const LANGUAGE_BROADCAST_CHANNELS = Object.freeze([
   "kaspa-francais",
   "kaspa-portugues",
   "kaspa-romania",
-  "kaspa-russian",
   "kaspa-slovak",
+  "kaspa-russian",
   "kaspa-chinese",
   "kaspa-japanese",
   "kaspa-korean",
@@ -73,16 +73,18 @@ const BROADCAST_LANGUAGE_DISPLAY_NAMES = Object.freeze({
   "kaspa-francais": "Français",
   "kaspa-portugues": "Português",
   "kaspa-romania": "Română",
-  "kaspa-russian": "Русский",
   "kaspa-slovak": "Slovenčina",
+  "kaspa-russian": "Русский",
   "kaspa-chinese": "中文",
   "kaspa-japanese": "日本語",
   "kaspa-korean": "한국어",
   "kaspa-hebrew": "עברית",
 });
 
+/// Trimmed and lowercased, nothing more (iOS PublicChatChannelName.normalize): a leading "#" is
+/// part of the name, so "#kaspa" is a different room from "kaspa", exactly as on the phone.
 export function normalizeBroadcastChannel(rawName) {
-  return String(rawName || "").trim().toLowerCase().replace(/^#/, "");
+  return String(rawName || "").trim().toLowerCase();
 }
 
 export function isValidBroadcastChannel(name) {

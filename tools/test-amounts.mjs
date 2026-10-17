@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import {
   sompiFromUserText, sanitizeAmountInput, kasTextFromSompi, kasToSompi, utxoAmountSompi,
-  MAX_TYPED_SOMPI, MAX_U64, MAX_SUPPLY_SOMPI, checkedUtxoAnswer,
+  MAX_TYPED_SOMPI, MAX_U64, MAX_SUPPLY_SOMPI, checkedUtxoAnswer, kasExact8Text,
 } from "../engine/amounts.js";
 
 globalThis.fetch = async () => new Response("", { status: 404 });
@@ -72,6 +72,18 @@ test("kasTextFromSompi is exact and round-trips", () => {
   assert.equal(kasTextFromSompi(-250_000_000n), "-2.5");
   assert.equal(kasTextFromSompi("not a number"), "0");
   for (const s of [1n, 29_000_000n, 3_825_128_251n, MAX_TYPED_SOMPI]) assert.equal(sompiFromUserText(kasTextFromSompi(s)), s);
+});
+// MARK: kasExact8Text - balances with iOS's %.8f (toolbar, QR screens, toolbar copy)
+test("kasExact8Text: exactly 8 decimals, -- when unknown", () => {
+  assert.equal(kasExact8Text("1.5"), "1.50000000");
+  assert.equal(kasExact8Text("0"), "0.00000000");
+  assert.equal(kasExact8Text("12"), "12.00000000");
+  assert.equal(kasExact8Text("0.00000001"), "0.00000001");
+  assert.equal(kasExact8Text("38.25128251"), "38.25128251");
+  assert.equal(kasExact8Text(2.5), "2.50000000");
+  // exact past what a Double holds (%.8f would round the last digits)
+  assert.equal(kasExact8Text("12345678901.12345678"), "12345678901.12345678");
+  for (const unknown of ["--", "", null, undefined, "abc", "1.2.3"]) assert.equal(kasExact8Text(unknown), "--");
 });
 test("kasToSompi: engine-side reading of KAS text and numbers", () => {
   assert.equal(kasToSompi("1,5"), 150_000_000n);

@@ -100,7 +100,8 @@ function unreadFor(bot) {
 
 function cardHtml(bot) {
   const unavailable = kachatBotUnavailableReason(bot);
-  const unread = unavailable ? 0 : unreadFor(bot);
+  // The badge shows on an unavailable card too (iOS KaChatBotCard takes unread either way).
+  const unread = unreadFor(bot);
   const hint = unavailable || "Opens a chat with this bot.";
   return `
     <button type="button" class="kb-card" data-kb-open="${esc(bot.id)}"${unavailable ? " disabled" : ""} title="${esc(hint)}">

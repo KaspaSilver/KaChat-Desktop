@@ -25,7 +25,7 @@ import {
   sendBroadcastMessage,
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
-import { confirmDialog, promptDialog, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
+import { confirmDialog, promptDialog, PROMPT_EXTRA, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
@@ -63,7 +63,7 @@ let voiceViaNextcloud = false;
 let deps = null;
 
 let listEl, roomEl, roomTitleEl, roomDotEl, roomBodyEl, composerInput, sendBtn, joinInput;
-let voicePanelEl, voiceTimeEl, voiceBtn;
+let voicePanelEl, voiceBtn;
 let joinedChannels = [];
 let hiddenByRoom = {};
 let notifyByChannel = {};    // { [channel]: true } — the bell: OS pings for new messages
@@ -200,11 +200,9 @@ function listedChannels() {
  *  the room was last opened), latest activity (for the row's order), and the half sheet's state. */
 export function chatCircleRooms() {
   if (!deps) return [];
-  // Every curated language room whose toggle (Settings > Public Chats) is on shows as a circle,
-  // joined or not: the old "Other Languages" list is gone, so this is where they are opened (opening
-  // one joins it). Unopened ones have no bell, so the closed-room sweep never polls them.
-  const languages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => curatedShown(name) && !isServiceBroadcastChannel(name));
-  return [...new Set([...listedChannels(), ...languages])].map((name) => ({
+  // The same rooms the Public Chats list shows - the featured ones plus every joined room - as
+  // iOS ChatListView's circles read PublicChatService.listedChannels (no unjoined language rooms).
+  return listedChannels().map((name) => ({
     name,
     unread: unreadFor(name),
     lastAt: Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0),
@@ -255,7 +253,7 @@ export function setBroadcastRoomNotify(name, on) {
   saveNotify();
   syncScanWanted();
   renderChannelList();
-  if (activeChannel === name) document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !on);
+  if (activeChannel === name) syncRoomBell();
   deps.showToast?.(!on
     ? "Notifications are off for this public chat"
     : (isIndexerTrackedBroadcastChannel(name)
@@ -415,9 +413,14 @@ function loadState({ caches = true } = {}) {
   // The two featured rooms are always present for every account (matches iOS/Android). The
   // curated LANGUAGE rooms are deliberately NOT auto-joined - they are joined on first open or
   // bell tap, so a user who wants none of them pays for none of them.
+  // Like iOS PublicChatStore (joinedAt = Date() when a room is first stored), an auto-joined
+  // featured room is stamped too, so Room Info shows its "Joined" row.
+  let stamped = false;
   for (const name of FEATURED_BROADCAST_CHANNELS) {
     if (!joinedChannels.includes(name)) joinedChannels.push(name);
+    if (!joinedAtByChannel[name]) { joinedAtByChannel[name] = Date.now(); stamped = true; }
   }
+  if (stamped) { try { saveJoinedAt(); } catch {} }
   migrateCachedReactionRows();
   pruneCache();
 }
@@ -830,15 +833,19 @@ function mergeMessages(channel, rows) {
   if (!curatedShown(channel)) freshIncoming.length = 0;
   if (freshIncoming.length) deps.onIncomingBroadcast?.(freshIncoming);
   // The per-channel bell (iOS parity): OS pings for LIVE messages in notify-enabled channels
-  // you're not currently reading. Capped so one poll can't fire a burst.
+  // you're not currently reading, never from a sender hidden in that room (iOS
+  // PublicChatService.notifyIfEnabled). Capped so one poll can't fire a burst.
+  const hiddenHere = hiddenIn(channel);
   const pingable = freshIncoming.filter((row) =>
     notifyByChannel[row.channel]
     && row.channel !== activeChannel
+    && !hiddenHere.has(row.senderAddress)
     && Number(row.blockTime || 0) >= broadcastSessionStartMs);
   for (const row of pingable.slice(0, 3)) {
     deps.postDesktopNotification?.({
+      // Title the room, body the message preview alone (iOS: "#room" over previewText).
       title: `#${row.channel}`,
-      body: `${senderName(row.senderAddress)}: ${humanizeBroadcastContent(row.content).slice(0, 90)}`,
+      body: humanizeBroadcastContent(row.content).slice(0, 90),
       tag: `kachat-broadcast-${row.txId}`,
       // Clicking it opens the room (the app routes "room" to the detail pane).
       route: { kind: "room", channel: row.channel },
@@ -987,6 +994,18 @@ const BELL_ON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a
 const BELL_OFF_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a5.5 5.5 0 0 1 5.5 5.5c0 3.2.8 5 1.8 6.2.4.5.05 1.3-.6 1.3H5.3c-.65 0-1-.8-.6-1.3 1-1.2 1.8-3 1.8-6.2A5.5 5.5 0 0 1 12 4Z"/><path d="M10 19.5a2 2 0 0 0 4 0"/><path d="M4 4l16 16"/></svg>`;
 const GEAR_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>`;
 
+/** The room's top-right bell (iOS toolbar): bell.fill while notifications are on, bell.slash
+ *  while off, and the label says which. */
+function syncRoomBell() {
+  const bell = document.querySelector("[data-broadcast-room-bell]");
+  if (!bell || !activeChannel) return;
+  const on = Boolean(notifyByChannel[activeChannel]);
+  bell.innerHTML = on ? BELL_ON_SVG : BELL_OFF_SVG;
+  const label = on ? "Notifications on" : "Notifications off";
+  bell.setAttribute("aria-label", label);
+  bell.title = label;
+}
+
 function bellButtonHtml(name) {
   const on = Boolean(notifyByChannel[name]);
   return `<button class="broadcast-card-icon${on ? " active" : ""}" type="button" data-broadcast-notify="${deps.escapeHtml(name)}" title="${on ? "Notifications on" : "Notifications off"}" aria-label="Toggle notifications">${on ? BELL_ON_SVG : BELL_OFF_SVG}</button>`;
@@ -1097,6 +1116,13 @@ function buildMessageRow(m) {
   return row;
 }
 
+/** The URL when the whole message is one http(s) link and nothing else (iOS
+ *  MessageTextRenderPlan.isEntirelyLink), else null. */
+function entirelyLinkUrl(text) {
+  const match = String(text || "").trim().match(/^https?:\/\/\S+$/i);
+  return match ? match[0] : null;
+}
+
 /** The bare text a message could be translated from: a plain or reply-wrapped text message, not a
  *  photo, voice note or KaChat link card. Empty when there is nothing to translate. */
 function translatableText(m) {
@@ -1134,8 +1160,9 @@ function buildMessageElement(m) {
   const head = document.createElement("div");
   head.className = "broadcast-message-head";
   el.dataset.broadcastTxid = m.txId;
+  // The sender's name is a label, not a button (iOS PublicChatMessageRow): the avatar opens the
+  // sender sheet.
   const sender = document.createElement("strong");
-  sender.dataset.broadcastSender = m.senderAddress;
   sender.textContent = senderName(m.senderAddress);
   head.append(sender);
   // Your own messages carry the same delivery label as 1:1 and group bubbles, under the
@@ -1155,13 +1182,13 @@ function buildMessageElement(m) {
   }
   el.append(head);
 
-  // Decode the same wire envelopes 1:1 chats use - replies, photos, and voice notes all
-  // arrive as JSON payloads that must never render raw.
+  // Decode the same wire envelopes 1:1 chats use - replies and voice notes arrive as JSON
+  // payloads. A room draws no photo bubble (iOS: text and voice only), so any other envelope
+  // reads as its text.
   const shownContent = effectiveContent(activeChannel, m);
   const roomEdit = editFor(activeChannel, m);
   const replyEnvelope = deps.parseReplyEnvelope?.(shownContent) || null;
-  const imageEnvelope = replyEnvelope ? null : (deps.parseImageEnvelope?.(m.content) || null);
-  const audioEnvelope = (replyEnvelope || imageEnvelope) ? null : (deps.parseAudioEnvelope?.(m.content) || null);
+  const audioEnvelope = replyEnvelope ? null : (deps.parseAudioEnvelope?.(m.content) || null);
 
   if (replyEnvelope) {
     const quote = document.createElement("div");
@@ -1178,13 +1205,27 @@ function buildMessageElement(m) {
     el.append(quote);
   }
 
-  if (imageEnvelope) {
-    const img = document.createElement("img");
-    img.className = "broadcast-photo";
-    img.src = imageEnvelope.content;
-    img.alt = imageEnvelope.name || "Photo";
-    img.addEventListener("click", () => deps.openPhotoPreview?.(imageEnvelope.content));
-    el.append(img);
+  // What the message says (iOS displayText): a reply's own text, else the content.
+  const originalText = String((replyEnvelope ? replyEnvelope.text : shownContent) ?? "");
+  const withinInline = new TextEncoder().encode(originalText).length <= LONG_MESSAGE_BYTES;
+  const isEnvelopeText = originalText.startsWith("{");
+  // A link into KaChat itself: the native card is the WHOLE message, even with text around it
+  // (iOS loneInternalLink - KaPosts' share text quotes the post above the link).
+  const internalLink = !audioEnvelope && !isEnvelopeText ? (deps.firstInternalLinkIn?.(originalText) || null) : null;
+  const internalCard = internalLink && withinInline ? (deps.buildInternalLinkCard?.(internalLink) || null) : null;
+  // A message that is nothing but a link: the preview card replaces the bubble (iOS loneLinkURL).
+  const loneLink = !audioEnvelope && !internalLink && withinInline && !isEnvelopeText ? entirelyLinkUrl(originalText) : null;
+  // Public rooms are open to anyone, so no preview loads by itself - your own links included
+  // (iOS autoFetch: false): a card is tap-to-load until this session has it.
+  const previewCardFor = (url) => (deps.previewApproved?.(url)
+    ? deps.buildLinkPreviewCard?.(url, { autoLoad: true, outgoing: mine })
+    : deps.buildTapToLoadCard?.(url, () => renderRoom()));
+
+  const loneCard = !internalCard && loneLink && deps.isPreviewableUrl?.(loneLink) ? previewCardFor(loneLink) : null;
+
+  if (internalCard || loneCard) {
+    el.classList.add("link-card-only");
+    el.append(internalCard || loneCard);
   } else if (audioEnvelope) {
     const audioWrap = document.createElement("div");
     audioWrap.className = "message-audio-bubble";
@@ -1202,7 +1243,6 @@ function buildMessageElement(m) {
   } else {
     const body = document.createElement("div");
     body.className = "broadcast-message-body";
-    const originalText = replyEnvelope ? replyEnvelope.text : shownContent;
     // The translation while one is showing, otherwise the message (iOS 03e5128).
     const translationKey = !mine && deps.translation ? translationKeyFor(m) : null;
     const fullText = translationKey ? deps.translation.textFor(translationKey, originalText) : originalText;
@@ -1219,14 +1259,18 @@ function buildMessageElement(m) {
       more.textContent = "Show More";
       more.addEventListener("click", (event) => {
         event.stopPropagation();
-        alertDialog({ title: "Message", message: fullText, confirmLabel: "Done" });
+        // iOS FullMessageTextView: the whole text, Done, and a copy button.
+        confirmDialog({ title: "Message", message: fullText, confirmLabel: "Copy", cancelLabel: "Done" }).then((copy) => {
+          if (copy) deps.copyText?.(String(fullText)).then(() => deps.showToast?.("Message copied.")).catch(() => {});
+        });
       });
       body.append(more);
     }
     if (roomEdit) {
+      // Just "edited", whatever the edit's delivery (iOS isEdited chip).
       const mark = document.createElement("span");
-      mark.className = `message-edited${roomEdit.status ? ` ${roomEdit.status}` : ""}`;
-      mark.textContent = roomEdit.status === "pending" ? "edited · sending" : roomEdit.status === "failed" ? "edit failed" : "edited";
+      mark.className = "message-edited";
+      mark.textContent = "edited";
       body.append(mark);
     }
     el.append(body);
@@ -1244,21 +1288,18 @@ function buildMessageElement(m) {
         button.addEventListener("click", (event) => { event.stopPropagation(); onClick(); });
         return button;
       };
-      if (tState.status === "translating") note.textContent = "Translating…";
+      if (tState.status === "translating") note.textContent = "Translating...";
       else if (tState.status === "failed") note.append(link("Translation unavailable - try again", () => deps.translation.translate(translationKey, translatableText(m))));
       else if (tState.status === "unavailable") note.textContent = tState.reason || "Translation unavailable";
       else if (tState.showingOriginal) note.append(link("Show translation", () => deps.translation.showTranslation(translationKey)));
-      else { note.append(`Translated from ${tState.sourceName || "another language"} · `); note.append(link("Show original", () => deps.translation.showOriginal(translationKey))); }
+      else { note.append(`Translated from ${tState.sourceName || "another language"} - `); note.append(link("Show original", () => deps.translation.showOriginal(translationKey))); }
       el.append(note);
     }
-    const previewable = urls.find((url) => deps.isPreviewableUrl?.(url));
+    // A link inside longer text gets its card below the bubble (iOS trailingLinkPreview); never
+    // for a KaChat link (that one is the card above) or a JSON envelope.
+    const previewable = !internalLink && !isEnvelopeText ? urls.find((url) => deps.isPreviewableUrl?.(url)) : null;
     if (previewable) {
-      // Your own links load; anyone else's wait for a tap (the rule 1:1 and groups use), so a
-      // stranger in a public room never learns every reader's IP address from a link.
-      const autoLoad = mine || deps.previewApproved?.(previewable);
-      const card = autoLoad
-        ? deps.buildLinkPreviewCard?.(previewable, { autoLoad: true, outgoing: mine })
-        : deps.buildTapToLoadCard?.(previewable, () => renderRoom());
+      const card = previewCardFor(previewable);
       if (card) el.append(card);
     }
   }
@@ -1321,15 +1362,18 @@ function openBroadcastSenderMenu(address, x, y) {
   void x; void y;
   if (!address) return;
   const mine = address === deps.engine.address;
-  // iOS BroadcastChannelView's sender sheet: a header naming the sender and their address, then
-  // one row per option saying what it does.
+  // iOS PublicChatChannelView.senderSheet: a header naming the sender and their address, then
+  // one row per option saying what it does - View Profile, Open Chat, Send Kaspa, Copy Address,
+  // Hide User, in that order.
   const options = [{ id: "profile", title: "View Profile", subtitle: "Their profile, .kachat name and address." }];
-  if (!mine) options.push({ id: "chat", title: "Open Chat", subtitle: "A private conversation with this sender." });
-  options.push({ id: "copy", title: "Copy Address", subtitle: "Puts the full address on the clipboard." });
   if (!mine) {
+    options.push({ id: "chat", title: "Open Chat", subtitle: "Message them directly, one to one." });
     // "Send Kaspa", was "Pay in Kaspa" (iOS aaa45ae).
-    options.push({ id: "pay", title: "Send Kaspa", subtitle: `Send ${KAS_UNIT} to this sender from your chatting address.` });
-    options.push({ id: "hide", title: "Hide User", subtitle: "Their messages disappear from this room on this device.", destructive: true });
+    options.push({ id: "pay", title: "Send Kaspa", subtitle: "Open your chat with them in payment mode." });
+  }
+  options.push({ id: "copy", title: "Copy Address", subtitle: "Copy their Kaspa address." });
+  if (!mine) {
+    options.push({ id: "hide", title: "Hide User", subtitle: "Stop seeing their messages in this room. Undo it in Room Info.", destructive: true });
   }
   chooseDialog({ title: senderName(address), message: address, options }).then((choice) => {
     if (choice === "profile") deps.openUserInfo?.(address);
@@ -1374,12 +1418,25 @@ function cancelBroadcastReply() {
   renderBroadcastReplyBanner();
 }
 
+/** The banner's X: a reply is dropped; an edit is dropped with the text it put in the composer
+ *  (iOS editBanner's cancel empties the composer). */
+function cancelBroadcastComposeBanner() {
+  const wasEditing = Boolean(broadcastEditTarget);
+  cancelBroadcastReply();
+  if (wasEditing && composerInput) {
+    composerInput.value = "";
+    if (activeChannel) deps.saveDraft?.(`room:${activeChannel}`, "");
+    syncComposerButtons();
+    hideFeePill();
+  }
+}
+
 let broadcastEditTarget = null; // the row being edited
 function startBroadcastEdit(m) {
   cancelBroadcastReply();
   broadcastEditTarget = m;
   const current = effectiveContent(activeChannel, m);
-  if (composerInput) { composerInput.value = String(deps.parseReplyEnvelope?.(current)?.text ?? current); }
+  if (composerInput) { composerInput.value = String(deps.parseReplyEnvelope?.(current)?.text ?? current); syncComposerButtons(); }
   const banner = document.querySelector("[data-broadcast-reply-banner]");
   const title = document.querySelector("[data-broadcast-reply-title]");
   const preview = document.querySelector("[data-broadcast-reply-preview]");
@@ -1405,7 +1462,7 @@ async function sendBroadcastEdit(channel, targetTxId, text) {
     if (sent && sent.editor === myAddress) delete sent.status;
   } catch (error) {
     deps.appendEngineLog?.(`Broadcast edit send failed (local applied): ${error.message}`);
-    deps.showToast?.(`Edit failed: ${userFacingError(error)}`);
+    deps.showToast?.(`Failed to edit: ${userFacingError(error)}`);
     const edit = editsCache[channel]?.[targetTxId];
     if (edit) edit.status = "failed";
   }
@@ -1441,8 +1498,6 @@ function openBroadcastMessageMenu(m, x, y) {
   }
   if (mine && !pending && deps.isEditableContent?.(m.content)) {
     items.push({ label: "Edit", icon: icons.edit, onClick: () => startBroadcastEdit(m) });
-    const edit = editFor(activeChannel, m);
-    if (edit?.status === "failed") items.push({ label: "Retry Edit", icon: icons.retry, onClick: () => sendBroadcastEdit(activeChannel, m.txId, edit.text) });
   }
   const firstLink = (String(text || "").match(/https?:\/\/[^\s<>"']+/) || [])[0] || null;
   // A Nextcloud share is the address of someone's photo or file: it can be opened, never copied
@@ -1469,7 +1524,8 @@ function openBroadcastMessageMenu(m, x, y) {
         ? { label: "Show Translation", icon: icons.info, onClick: () => translation.showTranslation(key) }
         : { label: "Show Original", icon: icons.info, onClick: () => translation.showOriginal(key) });
     } else if ((!state || state.status === "failed") && translation.canOffer(key, translatableText(m))) {
-      items.push({ label: `Translate into ${translation.readerLanguageName()}`, icon: icons.info, onClick: () => translation.translate(key, translatableText(m)) });
+      // iOS MessageAction.translate(into:): "Translate", saying the language underneath.
+      items.push({ label: "Translate", hint: `Shows this message in ${translation.readerLanguageName()}.`, icon: icons.info, onClick: () => translation.translate(key, translatableText(m)) });
     }
   }
   if (!pending && deps.explorerTxUrl) {
@@ -1493,9 +1549,7 @@ function openBroadcastMessageMenu(m, x, y) {
       }),
     });
   }
-  if (!mine) {
-    items.push({ label: `Hide ${senderName(m.senderAddress)}`, icon: icons.trash, danger: true, onClick: () => hideSender(m.senderAddress) });
-  }
+  // Hiding a sender is the avatar's sheet only (iOS), not this menu.
   deps.openMsgContextMenu({
     x, y,
     reaction: pending ? null : { current, onPick: (emoji) => sendBroadcastReaction(m.txId, emoji) },
@@ -1515,43 +1569,49 @@ function humanizeBroadcastContent(content) {
 
 function appendReactionUi(el, m) {
   if (m.status) return; // pending/failed rows have no on-chain txid to react to
-  const myAddress = deps.engine.address || "";
   const perReactor = reactionsFor(activeChannel)[m.txId] || {};
-  const myEntry = perReactor[myAddress];
-  const myCurrentEmoji = myEntry && !myEntry.removed ? myEntry.emoji : null;
 
   // No hover bar: reacting is the right-click menu (and double-click), like everywhere else.
 
-  // Aggregated chips under the bubble; clicking your own active emoji removes it.
+  // The pill under the bubble (iOS ReactionPillView): which emoji are on it, with counts. It is
+  // not a button - your own reaction comes off the way it went on, from the menu or the bar.
   const entries = Object.values(perReactor).filter((entry) => !entry.removed);
+  const status = broadcastReactionStatus.get(m.txId) || null;
   if (entries.length) {
     const chips = document.createElement("div");
     chips.className = "message-reaction-pill";
+    // Your reaction's delivery, once per pill: nothing while it is in flight, a green check for
+    // ten minutes once it is on chain, a red mark (and the pill outlined) when it failed.
+    const statusEl = broadcastReactionStatusEl(status);
+    if (statusEl) chips.append(statusEl);
+    if (status?.status === "failed") chips.classList.add("failed");
     const counts = new Map();
     for (const entry of entries) counts.set(entry.emoji, (counts.get(entry.emoji) || 0) + 1);
     for (const [emoji, count] of counts) {
       const chip = document.createElement("span");
       chip.className = "message-reaction-pill-entry";
       chip.textContent = emoji;
-      if (emoji === myCurrentEmoji) {
-        chip.classList.add("active");
-        chip.dataset.broadcastReact = m.txId;
-        chip.dataset.emoji = emoji;
-        chip.title = "Remove your reaction";
-      }
       if (count > 1) {
         const countEl = document.createElement("span");
         countEl.className = "message-reaction-pill-count";
         countEl.textContent = String(count);
         chip.append(countEl);
       }
-      // Delivery indicator on YOUR just-sent reaction: ✓ once on-chain, red ! to retry.
-      const statusEl = broadcastReactionStatusEl(`${m.txId}|${emoji}`);
-      if (statusEl) chip.append(statusEl);
       chips.append(chip);
     }
     el.append(chips);
     el.classList.add("has-reactions");
+  }
+  // A reaction of yours that failed to send: a red "Retry" by the time line (iOS, under the
+  // message); the pill hangs off the bubble's bottom edge, so it goes just above that line.
+  if (status?.status === "failed" && status.retry) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "broadcast-reaction-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => { event.stopPropagation(); status.retry(); });
+    const timeLine = el.querySelector(".broadcast-time-line");
+    if (timeLine) el.insertBefore(retry, timeLine); else el.append(retry);
   }
 }
 
@@ -1583,7 +1643,7 @@ function renderRoom() {
   // keep their history there, so they need no such warning (iOS 21c480d).
   const aboutButton = document.querySelector("[data-broadcast-own-room-about]");
   if (aboutButton) aboutButton.hidden = isIndexerTrackedBroadcastChannel(activeChannel);
-  document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !notifyByChannel[activeChannel]);
+  syncRoomBell();
   if (composerInput) composerInput.placeholder = `Message #${activeChannel}`;
   // No in-room retention banner: iOS removed it so the room reads clean. The 30-day rule is
   // stated once, beside the Popular header in the channel list.
@@ -1608,12 +1668,9 @@ function renderRoom() {
     if (messages.length === 0) {
       const empty = document.createElement("div");
       empty.className = "no-results-card";
-      // A custom room has no history service anywhere, so "empty" here means "nothing has
-      // been posted while you were watching" — say that plainly instead of leaving the room
-      // looking broken or as if history were still loading.
-      empty.innerHTML = isIndexerTrackedBroadcastChannel(activeChannel)
-        ? `<strong>No messages yet</strong><span>Be the first to post in #${deps.escapeHtml(activeChannel)}.</span>`
-        : `<strong>Listening for new messages</strong><span>#${deps.escapeHtml(activeChannel)} is a live room: messages appear here as they land on chain while it is open, or any time when background listening is on. There is no history to load.</span>`;
+      // The same words in every room (iOS emptyState); a room you made says what "public" means
+      // behind its info button instead.
+      empty.innerHTML = `<strong>No messages yet</strong><span>Be the first to post in #${deps.escapeHtml(activeChannel)}.</span>`;
       roomBodyEl.append(empty);
     } else {
       // "Today"/"Yesterday"/date pill whenever the calendar day changes (iOS parity;
@@ -1644,10 +1701,9 @@ function renderRoom() {
       const { height, top } = keepInPlaceAfterOlderLoad;
       keepInPlaceAfterOlderLoad = null;
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight - height + top;
-    } else if (lastRenderedNewestKey === null || wasAtBottom
-      || (newestKey !== lastRenderedNewestKey && newest?.senderAddress === deps.engine.address)) {
-      // First paint, a reader already at the bottom, or your own new message: to the bottom.
-      // Someone else's message never pulls a reader out of the history they are reading.
+    } else if (lastRenderedNewestKey === null || wasAtBottom || newestKey !== lastRenderedNewestKey) {
+      // First paint, a reader already at the bottom, or a new newest message from anyone: to the
+      // bottom (iOS onChange of messages.last?.id).
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight;
     } else if (messages.length !== lastRenderedCount) {
       roomBodyEl.scrollTop = before.top + (roomBodyEl.scrollHeight - before.height);
@@ -1769,8 +1825,11 @@ async function editBroadcastFee() {
     message: "If the network is busy, a higher fee can help your transaction confirm faster.",
     initial: formatKasExact(current),
     confirmLabel: "Save",
+    extraLabel: "Use Default",
   });
   if (typed == null) return;
+  // "Use Default" (iOS fee alert): back to the live estimate.
+  if (typed === PROMPT_EXTRA) { feeOverrideKas = null; scheduleBroadcastFeeEstimate(); return; }
   // The one exact parser (iOS IOS-010), kept as exact KAS text.
   const typedSompi = String(typed).trim() === "" ? 0n : sompiFromUserText(String(typed));
   if (typedSompi === 0n) { feeOverrideKas = null; scheduleBroadcastFeeEstimate(); return; }
@@ -1791,8 +1850,57 @@ function updateConnectionDot() {
 // ---------------------------------------------------------------------------
 
 function updateVoiceButtonVisibility() {
-  // The mic is always there (iOS sendOrRecordButton). Nextcloud only changes where the bytes go.
-  if (voiceBtn) voiceBtn.hidden = false;
+  syncComposerButtons();
+}
+
+/** The composer's one button (iOS sendOrRecordButton): the mic while the field is empty, the
+ *  send arrow once there is text. Nextcloud only changes where a voice note's bytes go. */
+function syncComposerButtons() {
+  const hasText = Boolean(String(composerInput?.value || "").trim());
+  if (voiceBtn) voiceBtn.hidden = hasText;
+  if (sendBtn) sendBtn.hidden = !hasText;
+}
+
+// The room's own recording bar (iOS recordingBar), drawn here rather than by the 1:1/group
+// composers' shared panel: trash, a red mic, "Recording... Ns" (or "Encoding…" once stopped) and
+// the send arrow. It takes the composer's place while it is up. There is no preview step in a
+// room: the arrow - or the length cap - sends the note at once.
+function showRecordingBar(state) { // "recording" | "encoding" | null
+  if (!voicePanelEl) return;
+  const bar = composerInput?.closest(".kaposts-reply-bar");
+  voicePanelEl.hidden = !state;
+  if (bar) bar.hidden = Boolean(state);
+  if (!state) return;
+  const timeEl = voicePanelEl.querySelector("[data-broadcast-voice-time]");
+  if (timeEl) timeEl.textContent = state === "encoding" ? "Encoding…" : `Recording... ${Math.floor(Number(voiceRecordedSeconds) || 0)}s`;
+  const send = voicePanelEl.querySelector("[data-broadcast-voice-stop]");
+  if (send) send.disabled = state === "encoding";
+}
+
+// A Nextcloud share link's worst-case payload size (iOS nextcloudLinkPayloadSize).
+const NEXTCLOUD_LINK_PAYLOAD_BYTES = 96;
+let recordingFeeBytes = null;
+/** The fee pill while recording (iOS updateRecordingFeeEstimate): the final size is not known
+ *  until the note is done, so on chain it is 150 bytes plus 2870 per second recorded; via
+ *  Nextcloud the chain only carries the share link. Asked once per new size. */
+function updateRecordingFeeEstimate(elapsedSeconds) {
+  if (!deps.showFeeEstimate?.() || !deps.estimateFeeKas) return;
+  const viaNextcloud = voiceViaNextcloud && Boolean(deps.isNextcloudConnected?.());
+  const bytes = viaNextcloud ? NEXTCLOUD_LINK_PAYLOAD_BYTES : Math.floor(150 + Math.floor(Number(elapsedSeconds) || 0) * 2870);
+  if (bytes === recordingFeeBytes) return;
+  recordingFeeBytes = bytes;
+  renderFeePill(feeOverrideKas ?? feeEstimateKas);
+  const token = ++feeToken;
+  Promise.resolve(deps.estimateFeeKas(bytes)).then((fee) => {
+    if (token !== feeToken || !voiceRecorder?.isRecording()) return;
+    feeEstimateKas = fee == null ? null : String(fee);
+    renderFeePill(feeOverrideKas ?? feeEstimateKas);
+  }).catch(() => {});
+}
+function endRecordingFee() {
+  recordingFeeBytes = null;
+  feeToken += 1;
+  hideFeePill();
 }
 
 function ensureVoiceRecorder() {
@@ -1803,8 +1911,10 @@ function ensureVoiceRecorder() {
       : ONCHAIN_VOICE_MAX_SECONDS),
     onElapsed: (elapsed) => {
       voiceRecordedSeconds = elapsed;
-      const el = voicePanelEl?.querySelector("[data-broadcast-voice-time]");
-      if (el) el.textContent = deps.formatRecordingTime ? deps.formatRecordingTime(elapsed) : `${Math.floor(elapsed)}s`;
+      if (voiceRecordingChannel) {
+        showRecordingBar("recording");
+        updateRecordingFeeEstimate(elapsed);
+      }
     },
     onFinish: handleVoiceRecordingFinished,
   });
@@ -1832,69 +1942,78 @@ async function startVoiceRecording() {
     voiceViaNextcloud = false;
   }
   voiceRecordingChannel = activeChannel;
+  voiceRecordedSeconds = 0;
   const error = await recorder.start();
   if (error) {
     deps.showToast?.(error);
     voiceRecordingChannel = null;
+    voiceViaNextcloud = false;
     return;
   }
-  voiceRecordedSeconds = 0;
-  deps.voicePreview?.clear(voicePanelEl);
-  if (deps.voicePreview) deps.voicePreview.render(voicePanelEl, "recording", { prefix: "broadcast-voice", seconds: 0 });
-  else if (voicePanelEl) voicePanelEl.hidden = false;
+  showRecordingBar("recording");
+  updateRecordingFeeEstimate(0);
 }
 
-// Stop hands the recording to the preview bar (play/pause, length, trash, Send); Send is what
-// sends it - the same bar the 1:1 and group composers use.
-let voicePreviewChannel = null;
+// The arrow on the bar, and the length cap, both end here: the note goes straight out (iOS
+// stopAndSendRecording). The trash ends here too, cancelled.
 async function handleVoiceRecordingFinished({ blob, mimeType, cancelled }) {
   const channel = voiceRecordingChannel;
   voiceRecordingChannel = null;
-  if (cancelled || !blob || !channel) { deps.voicePreview?.clear(voicePanelEl); if (voicePanelEl) voicePanelEl.hidden = true; return; }
-  if (!deps.voicePreview) { await sendBroadcastVoice({ blob, mimeType, channel }); return; }
-  voicePreviewChannel = channel;
-  deps.voicePreview.set(voicePanelEl, { blob, mimeType, seconds: Math.round(Number(voiceRecordedSeconds) || 0) }, "broadcast-voice");
+  const seconds = Math.round(Number(voiceRecordedSeconds) || 0);
+  endRecordingFee();
+  if (cancelled || !blob || !channel) {
+    voiceViaNextcloud = false;
+    showRecordingBar(null);
+    return;
+  }
+  showRecordingBar("encoding");
+  try {
+    await sendBroadcastVoice({ blob, mimeType, channel, seconds });
+  } finally {
+    if (!voiceRecorder?.isRecording()) showRecordingBar(null);
+  }
 }
-async function sendBroadcastVoicePreview() {
-  const entry = deps.voicePreview?.get(voicePanelEl);
-  const channel = voicePreviewChannel;
-  voicePreviewChannel = null;
-  deps.voicePreview?.clear(voicePanelEl);
-  if (!entry || !channel) return;
-  await sendBroadcastVoice({ blob: entry.blob, mimeType: entry.mimeType, channel });
-}
-async function sendBroadcastVoice({ blob, mimeType, channel }) {
-  // "Record via Nextcloud": the bytes go to the server and the room gets the share link (an audio
-  // card on every client). Otherwise, or when the upload fails, the note goes on chain in the
-  // same envelope 1:1 and group voice notes use - if it is short enough.
+async function sendBroadcastVoice({ blob, mimeType, channel, seconds }) {
+  // Via Nextcloud the bytes go to the server and the room gets the share link (an audio card on
+  // every client). Otherwise, or when the upload fails, the note goes on chain in the same
+  // envelope 1:1 and group voice notes use. Wording as iOS stopAndSendRecording.
   const viaNextcloud = voiceViaNextcloud && Boolean(deps.isNextcloudConnected?.());
   voiceViaNextcloud = false;
-  if (viaNextcloud) {
-    try {
-      const url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.${(deps.voiceFileName?.(mimeType) || "voice.webm").split(".").pop()}`, mimeType);
-      await sendBroadcastText(channel, url);
-      renderChannelList();
-      return;
-    } catch (error) {
-      deps.showToast?.(`Nextcloud upload failed, sending on-chain instead. (${userFacingError(error)})`);
-      deps.appendEngineLog?.(`Broadcast voice note upload failed: ${error.message}`);
-    }
-  }
-  const dataUrl = await new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => resolve("");
-    reader.readAsDataURL(blob);
-  });
-  if (!dataUrl.startsWith("data:")) { deps.showToast?.("Could not process the recording."); return; }
-  const durationSec = Math.round(Number(voiceRecordedSeconds) || 0);
-  const envelope = JSON.stringify({ type: "file", name: deps.voiceFileName?.(mimeType) || "voice.webm", size: blob.size, mimeType: mimeType || "audio/webm", content: dataUrl, duration: durationSec });
   try {
+    if (viaNextcloud) {
+      let url = null;
+      try {
+        showRecordingBar(null);
+        url = await deps.uploadNextcloudMedia(blob, `voice_${Date.now()}.${(deps.voiceFileName?.(mimeType) || "voice.webm").split(".").pop()}`, mimeType);
+      } catch (error) {
+        deps.appendEngineLog?.(`Broadcast voice note upload failed: ${error.message}`);
+        // The on-chain envelope is capped: a longer note would arrive cut short, so say so instead.
+        if (seconds > ONCHAIN_VOICE_MAX_SECONDS) {
+          deps.showToast?.("Nextcloud upload failed, and the recording is too long to send on-chain.");
+          return;
+        }
+        deps.showToast?.("Nextcloud upload failed - sending on-chain instead");
+      }
+      if (url) {
+        await sendBroadcastText(channel, url);
+        renderChannelList();
+        return;
+      }
+    }
+    const dataUrl = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => resolve("");
+      reader.readAsDataURL(blob);
+    });
+    if (!dataUrl.startsWith("data:")) throw new Error("Could not process the recording.");
+    const envelope = JSON.stringify({ type: "file", name: deps.voiceFileName?.(mimeType) || "voice.webm", size: blob.size, mimeType: mimeType || "audio/webm", content: dataUrl, duration: seconds });
+    if (!voiceRecorder?.isRecording()) showRecordingBar(null);
     await sendBroadcastText(channel, envelope, { feeKas: feeOverrideKas });
     feeOverrideKas = null;
     renderChannelList();
   } catch (error) {
-    deps.showToast?.(`Voice note failed: ${userFacingError(error)}`);
+    deps.showToast?.(`Failed to send voice message: ${userFacingError(error)}`);
     deps.appendEngineLog?.(`Broadcast voice note failed: ${error.message}`);
   }
 }
@@ -1926,6 +2045,7 @@ function openRoom(channel) {
   renderRoom();
   // What was typed here last time comes back (iOS 360e5d2).
   if (composerInput) composerInput.value = deps.readDraft?.(`room:${activeChannel}`) || "";
+  syncComposerButtons();
   updateConnectionDot();
   // Only the rooms the indexer tracks have history behind them, so only they backfill and poll.
   // Any other room is asked once, quietly: rows back mean the indexer tracks it after all (one
@@ -1979,9 +2099,10 @@ function closeRoom() {
 
 /** Why `name` (already normalized) can't be joined, or null. Shared by the join card's alert and
  *  the Chats New sheet, which shows the message in place (iOS joinRoomFromCreateSheet). */
+// The only rule is the name's (iOS joinRoomFromCreateSheet): a service room such as #chess-arena
+// joins like any other and simply stays out of the lists.
 function broadcastJoinProblem(name) {
   if (!isValidBroadcastChannel(name)) return { title: "Couldn't Join Channel", message: "Channel names must be 1-36 characters with no spaces or colons." };
-  if (isServiceBroadcastChannel(name)) return { title: "That room is machinery", message: "#chess-arena carries chess tournaments. Play them from Kaspa Hub > Chess." };
   return null;
 }
 
@@ -2058,6 +2179,7 @@ async function sendCurrentMessage() {
   if (broadcastEditTarget) {
     const target = broadcastEditTarget;
     composerInput.value = "";
+    syncComposerButtons();
     deps.saveDraft?.(`room:${activeChannel}`, "");
     cancelBroadcastReply();
     sendBroadcastEdit(activeChannel, target.txId, text);
@@ -2065,6 +2187,7 @@ async function sendCurrentMessage() {
   }
   sendInFlight = true;
   composerInput.value = "";
+  syncComposerButtons();
   deps.saveDraft?.(`room:${activeChannel}`, "");
   const channel = activeChannel;
   // Reply mode: wrap in the exact cross-platform reply envelope the room renders.
@@ -2086,7 +2209,7 @@ async function sendCurrentMessage() {
     await sendBroadcastText(channel, content, { feeKas });
     renderChannelList();
   } catch (error) {
-    deps.showToast?.(userFacingError(error));
+    deps.showToast?.(`Failed to send: ${userFacingError(error)}`);
     deps.appendEngineLog?.(`Broadcast send failed: ${error.message}`);
   } finally {
     sendInFlight = false;
@@ -2115,8 +2238,9 @@ async function sendBroadcastReaction(targetTxId, emoji) {
   renderChannelList();
 
   const payload = JSON.stringify({ type: "reaction", targetTxId, emoji, action });
-  // Delivery indicator only for ADDs — a removal deletes the chip (matches iOS/1:1).
-  const statusKey = action === "add" ? `${targetTxId}|${emoji}` : null;
+  // One delivery status per message: yours is the only reaction here that has one (iOS
+  // localReaction). A removal that fails is offered again the same way.
+  const statusKey = targetTxId;
   const attempt = async () => {
     if (statusKey) setBroadcastReactionStatus(statusKey, "pending");
     try {
@@ -2127,25 +2251,29 @@ async function sendBroadcastReaction(targetTxId, emoji) {
         (entry.txIds ||= []).push(txid);
         saveReactions();
       }
-      if (statusKey) setBroadcastReactionStatus(statusKey, "sent");
+      // A removal leaves no reaction of yours to mark (iOS: no local reaction, no status).
+      if (action === "remove") { broadcastReactionStatus.delete(statusKey); renderRoom(); }
+      else setBroadcastReactionStatus(statusKey, "sent");
     } catch (error) {
+      // No toast (iOS): the pill turns red and "Retry" shows under the message.
       deps.appendEngineLog?.(`Broadcast reaction send failed (local state already applied): ${error.message}`);
-      deps.showToast?.(`Reaction failed: ${userFacingError(error)}`);
       if (statusKey) setBroadcastReactionStatus(statusKey, "failed", attempt);
     }
   };
   await attempt();
 }
 
-// Reaction delivery status (1:1 parity): ✓ once on-chain (auto-hides after 60s),
-// red "!" that retries on click when the send failed. In-memory only.
-const broadcastReactionStatus = new Map(); // "txId|emoji" -> { status, retry }
+// Reaction delivery status (iOS ReactionPillView's localReactionStatus), per message: pending
+// shows nothing, "sent" a green check for ten minutes, "failed" a red mark plus "Retry" under the
+// message. In-memory only.
+const broadcastReactionStatus = new Map(); // targetTxId -> { status, retry }
 
 function setBroadcastReactionStatus(key, status, retry = null) {
-  broadcastReactionStatus.set(key, { status, retry });
+  const entry = { status, retry };
+  broadcastReactionStatus.set(key, entry);
   if (status === "sent") {
     window.setTimeout(() => {
-      if (broadcastReactionStatus.get(key)?.status === "sent") {
+      if (broadcastReactionStatus.get(key) === entry) {
         broadcastReactionStatus.delete(key);
         renderRoom();
       }
@@ -2154,26 +2282,17 @@ function setBroadcastReactionStatus(key, status, retry = null) {
   renderRoom();
 }
 
-function broadcastReactionStatusEl(key) {
-  const entry = broadcastReactionStatus.get(key);
-  if (!entry) return null;
+function broadcastReactionStatusEl(entry) {
+  if (!entry || entry.status === "pending") return null;
   const el = document.createElement("span");
-  if (entry.status === "pending") {
-    el.className = "reaction-status pending";
-    el.textContent = "…";
-    el.title = "Sending reaction…";
-  } else if (entry.status === "sent") {
+  if (entry.status === "sent") {
     el.className = "reaction-status sent";
     el.textContent = "✓";
     el.title = "Reaction sent";
   } else {
     el.className = "reaction-status failed";
     el.textContent = "!";
-    el.title = "Reaction failed to send. Click to retry.";
-    el.addEventListener("click", (event) => {
-      event.stopPropagation();
-      entry.retry?.();
-    });
+    el.title = "Reaction failed to send";
   }
   return el;
 }
@@ -2185,7 +2304,6 @@ function hideSender(address) {
   hiddenByRoom[activeChannel] = [...set];
   saveHidden();
   renderRoom();
-  deps.showToast?.("User hidden in this room");
 }
 
 function infoPanelEl() {
@@ -2224,6 +2342,19 @@ function renderHiddenUsersPanel() {
           </div>`).join("")}`;
 }
 
+/** Room Info's indexer field as it is typed (iOS): Save only once the text differs from what is
+ *  saved and no check is running; "Use the app's indexer" while the field has text. */
+function syncRoomIndexerButtons() {
+  const panel = infoPanelEl();
+  const input = panel?.querySelector("[data-broadcast-indexer-input]");
+  if (!input || !activeChannel) return;
+  const text = String(input.value || "").trim();
+  const save = panel.querySelector("[data-broadcast-indexer-save]");
+  if (save) save.disabled = indexerCheck.state === "checking" || text === indexerOverrideFor(activeChannel);
+  const clear = panel.querySelector("[data-broadcast-indexer-clear]");
+  if (clear) clear.hidden = !text;
+}
+
 // Everything about one room that is not the messages (iOS BroadcastRoomInfoView): what it is,
 // what is in it, how to share it, who you have hidden, and which indexer it reads from.
 let indexerCheck = { state: "idle" }; // idle | checking | reachable(count) | failed(reason)
@@ -2236,7 +2367,9 @@ function renderRoomInfoPanel() {
   // days, which is what this device keeps too (iOS 21c480d).
   const keptDays = Math.round(BROADCAST_RETENTION_MS / 86_400_000);
   const keptFor = isIndexerTrackedBroadcastChannel(channel) ? (keptDays === 1 ? "1 day" : `${keptDays} days`) : "";
-  const rows = messageCache[channel] || [];
+  // What the room shows (iOS messages(forChannel:)): hidden senders are not counted.
+  const hidden = hiddenIn(channel);
+  const rows = (messageCache[channel] || []).filter((m) => !hidden.has(m.senderAddress));
   const people = new Set(rows.map((m) => m.senderAddress).filter(Boolean)).size;
   const times = rows.map((m) => Number(m.blockTime) || 0).filter(Boolean);
   const fmt = (ms) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
@@ -2294,11 +2427,12 @@ function renderRoomInfoPanel() {
       <input class="kaposts-reply-input" type="url" data-broadcast-indexer-input value="${deps.escapeHtml(override)}" placeholder="${deps.escapeHtml(appWide)}" autocomplete="off" spellcheck="false" />
       ${checkHtml}
       <div class="broadcast-info-buttons">
-        <button type="button" class="primary-button" data-broadcast-indexer-save ${indexerCheck.state === "checking" ? "disabled" : ""}>Save</button>
-        ${override ? `<button type="button" class="secondary-button danger" data-broadcast-indexer-clear>Use the app's indexer</button>` : ""}
+        <button type="button" class="primary-button" data-broadcast-indexer-save disabled>Save</button>
+        <button type="button" class="secondary-button danger" data-broadcast-indexer-clear ${override ? "" : "hidden"}>Use the app's indexer</button>
       </div>
-      <p class="broadcast-info-footer">A broadcast lives on the Kaspa blockDAG, so any indexer watching the same network serves the same room. Point this one wherever you like - your own, or someone else's - without changing the indexer every other room uses. Leave it blank to follow ${deps.escapeHtml(appWide || "the app's indexer")}.</p>
+      <p class="broadcast-info-footer">A public chat lives on the Kaspa blockDAG, so any indexer watching the same network serves the same room. Point this one wherever you like - your own, or someone else's - without changing the indexer every other room uses. Leave it blank to follow ${deps.escapeHtml(appWide || "the app's indexer")}.</p>
     </section>`;
+  syncRoomIndexerButtons();
 }
 
 // Saves the override, then asks the indexer for this room. A wrong URL is otherwise silent: the
@@ -2312,10 +2446,17 @@ async function saveRoomIndexer(value) {
   saveIndexerOverrides();
   deps.showToast?.(trimmed ? `Indexer updated for #${channel}.` : "This room follows the app's indexer again.");
   deepBackfilled.delete(channel);
+  // Whichever one the room now reads from. Nothing to check when that is no indexer at all
+  // (following the app-wide setting on a network without one).
+  const target = trimmed || String(deps.appWideBroadcastIndexer?.() || "").trim();
+  if (!target) {
+    indexerCheck = { state: "idle" };
+    renderRoomInfoPanel();
+    return;
+  }
   indexerCheck = { state: "checking" };
   renderRoomInfoPanel();
   try {
-    const target = trimmed || String(deps.appWideBroadcastIndexer?.() || "").trim() || null;
     const page = await fetchBroadcastHistory({ channel, limit: 1, baseUrl: target });
     indexerCheck = { state: "reachable", count: page.messages.length };
   } catch (error) {
@@ -2323,6 +2464,17 @@ async function saveRoomIndexer(value) {
   }
   if (activeChannel === channel) renderRoomInfoPanel();
   if (isIndexerTrackedBroadcastChannel(channel) || trimmed) backfillChannel(channel, { quiet: true });
+}
+
+/** "Share this room" (iOS ShareLink of the share text): the system share sheet where there is
+ *  one, else the text goes to the clipboard. */
+async function shareRoom(channel) {
+  const text = roomShareText(channel);
+  if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+    try { await navigator.share({ text }); return; }
+    catch (error) { if (error?.name === "AbortError") return; }
+  }
+  copyRoomLink(channel, { text: true });
 }
 
 async function copyRoomLink(channel, { text = false } = {}) {
@@ -2493,9 +2645,8 @@ export function initBroadcasts(dependencies) {
   sendBtn = document.querySelector("[data-broadcast-send]");
   joinInput = document.querySelector("[data-broadcast-join-input]");
   voicePanelEl = document.querySelector("[data-broadcast-voice-panel]");
-  voiceTimeEl = document.querySelector("[data-broadcast-voice-time]");
   voiceBtn = document.querySelector("[data-broadcast-voice]");
-  document.querySelector("[data-broadcast-reply-cancel]")?.addEventListener("click", cancelBroadcastReply);
+  document.querySelector("[data-broadcast-reply-cancel]")?.addEventListener("click", cancelBroadcastComposeBanner);
 
   loadState();
   renderChannelList();
@@ -2592,7 +2743,7 @@ export function initBroadcasts(dependencies) {
       renderChannelList();
     }
   });
-  composerInput?.addEventListener("input", () => scheduleBroadcastFeeEstimate({ typing: true }));
+  composerInput?.addEventListener("input", () => { syncComposerButtons(); scheduleBroadcastFeeEstimate({ typing: true }); });
   document.querySelector("[data-broadcast-fee]")?.addEventListener("click", editBroadcastFee);
   document.querySelector("[data-broadcast-funding-gate]")?.addEventListener("click", async (event) => {
     if (!event.target.closest("[data-broadcast-funding-gate-address], [data-broadcast-funding-gate-copy]")) return;
@@ -2602,11 +2753,10 @@ export function initBroadcasts(dependencies) {
   });
   // The room's header chip opens Room Info; the dead space beside it jumps to the first message.
   document.querySelector("[data-broadcast-room-info]")?.addEventListener("click", () => { indexerCheck = { state: "idle" }; renderRoomInfoPanel(); });
+  // Not animated and nothing lit up (iOS jumpToRoomStart): it lands on the first message.
   document.querySelector("[data-broadcast-room] .kaposts-thread-header")?.addEventListener("click", (event) => {
     if (event.target.closest("button") || !roomBodyEl) return;
-    roomBodyEl.scrollTo({ top: 0, behavior: "smooth" });
-    const first = roomBodyEl.querySelector("[data-broadcast-txid]");
-    if (first) { first.classList.add("message-highlight"); window.setTimeout(() => first.classList.remove("message-highlight"), 1200); }
+    roomBodyEl.scrollTop = 0;
   });
   // Scroll-to-latest, appearing once you have scrolled up.
   if (roomBodyEl?.parentElement) {
@@ -2650,8 +2800,8 @@ export function initBroadcasts(dependencies) {
     saveNotify();
     syncScanWanted();
     renderChannelList();
-    document.querySelector("[data-broadcast-room-bell]")?.classList.toggle("off", !notifyByChannel[name]);
-    deps.showToast?.(choice === "on" ? "Notifications are on for this room" : "Notifications are off for this room");
+    // No toast: the bell itself changes (iOS notifySheet just closes).
+    syncRoomBell();
   });
   document.querySelector("[data-broadcast-own-room-about]")?.addEventListener("click", () => {
     alertDialog({
@@ -2670,25 +2820,14 @@ export function initBroadcasts(dependencies) {
   });
 
   voiceBtn?.addEventListener("click", startVoiceRecording);
+  // The recording bar: the arrow stops and sends, the trash throws the recording away.
   voicePanelEl?.addEventListener("click", (event) => {
-    if (event.target.closest("[data-broadcast-voice-stop]")) { voiceRecorder?.stop(false); return; }
-    if (event.target.closest("[data-broadcast-voice-send]")) { sendBroadcastVoicePreview(); return; }
-    if (event.target.closest("[data-broadcast-voice-play]")) { deps.voicePreview?.toggle(voicePanelEl); return; }
-    if (event.target.closest("[data-broadcast-voice-cancel]")) {
-      if (voiceRecorder?.isRecording()) voiceRecorder.stop(true);
-      else { voicePreviewChannel = null; deps.voicePreview?.clear(voicePanelEl); if (voicePanelEl) voicePanelEl.hidden = true; }
-    }
+    if (event.target.closest("[data-broadcast-voice-stop]")) { if (voiceRecorder?.isRecording()) voiceRecorder.stop(false); return; }
+    if (event.target.closest("[data-broadcast-voice-cancel]")) { if (voiceRecorder?.isRecording()) voiceRecorder.stop(true); }
   });
 
   // The list lives in the chats sidebar and the room in the detail pane now; one handler on both.
   const screenClick = async (event) => {
-    const react = event.target.closest("[data-broadcast-react]");
-    if (react) {
-      event.stopPropagation();
-      sendBroadcastReaction(react.dataset.broadcastReact, react.dataset.emoji);
-      return;
-    }
-
     const leave = event.target.closest("[data-broadcast-leave]");
     if (leave) {
       event.stopPropagation();
@@ -2761,13 +2900,6 @@ export function initBroadcasts(dependencies) {
     }
     if (open) { openRoom(open.dataset.broadcastOpen); return; }
 
-    const sender = event.target.closest("[data-broadcast-sender]");
-    if (sender) {
-      event.stopPropagation();
-      openBroadcastSenderMenu(sender.dataset.broadcastSender, event.clientX, event.clientY);
-      return;
-    }
-
     const unhide = event.target.closest("[data-broadcast-unhide]");
     if (unhide) {
       hiddenByRoom[activeChannel] = (hiddenByRoom[activeChannel] || []).filter((a) => a !== unhide.dataset.broadcastUnhide);
@@ -2779,18 +2911,27 @@ export function initBroadcasts(dependencies) {
 
     if (event.target.closest("[data-broadcast-hidden-users]")) { renderHiddenUsersPanel(); return; }
     if (event.target.closest("[data-broadcast-info-open]")) { renderRoomInfoPanel(); return; }
-    if (event.target.closest("[data-broadcast-share-room]")) { copyRoomLink(activeChannel, { text: true }); return; }
+    if (event.target.closest("[data-broadcast-share-room]")) { shareRoom(activeChannel); return; }
     if (event.target.closest("[data-broadcast-indexer-save]")) {
       saveRoomIndexer(infoPanelEl()?.querySelector("[data-broadcast-indexer-input]")?.value || "");
       return;
     }
-    if (event.target.closest("[data-broadcast-indexer-clear]")) { saveRoomIndexer(""); return; }
+    if (event.target.closest("[data-broadcast-indexer-clear]")) {
+      const input = infoPanelEl()?.querySelector("[data-broadcast-indexer-input]");
+      if (input) input.value = "";
+      syncRoomIndexerButtons();
+      saveRoomIndexer("");
+      return;
+    }
 
     const hiddenClose = event.target.closest("[data-broadcast-hidden-close]");
     if (hiddenClose) closeRoomInfo();
   };
   document.querySelector("[data-broadcast-list-wrap]")?.addEventListener("click", screenClick);
   document.querySelector("[data-broadcast-room]")?.addEventListener("click", screenClick);
+  infoPanelEl()?.addEventListener("input", (event) => {
+    if (event.target.matches("[data-broadcast-indexer-input]")) syncRoomIndexerButtons();
+  });
   infoPanelEl()?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && event.target.matches("[data-broadcast-indexer-input]")) {
       event.preventDefault();

@@ -115,19 +115,27 @@ function dayText(ms) {
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-/** A length of time: "10 min", "1 hr 30 min", "10 days" (iOS KachatLive.duration). */
-function durationText(ms) {
+/** A unix-ms day without the time ("Oct 12, 2027"), however near it is (iOS
+ *  `.dateTime.year().month().day()`: the detail's "Expires", the Manage sheet's "Renewal opens on"). */
+function dateOnlyText(ms) {
+  if (ms == null) return "";
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+/** A length of time, abbreviated: "30d", "2h", "1h 30m", "10m" (iOS KachatLive.duration, a
+ *  DateComponentsFormatter with unitsStyle .abbreviated: days alone from a day, else hours and
+ *  minutes, else minutes). */
+export function durationText(ms) {
   const seconds = Math.max(0, Number(ms) / 1000);
-  if (seconds >= 86_400) {
-    const days = Math.round(seconds / 86_400);
-    return days === 1 ? "1 day" : `${days} days`;
-  }
+  if (seconds >= 86_400) return `${Math.round(seconds / 86_400)}d`;
   if (seconds >= 3_600) {
     const h = Math.floor(seconds / 3_600);
     const m = Math.round((seconds % 3_600) / 60);
-    return m ? `${h} hr ${m} min` : `${h} hr`;
+    return m ? `${h}h ${m}m` : `${h}h`;
   }
-  return `${Math.round(seconds / 60)} min`;
+  return `${Math.round(seconds / 60)}m`;
 }
 
 /** Time left until a moment, for a live countdown (iOS KachatLive.countdown, cb3c27d): "2d 5h"
@@ -245,13 +253,13 @@ function maxYears() { const m = params()?.maxYears; return m ? Number(m) : 2; }
 // Registry v4: a period is `periodMs` long - a year on mainnet, 24 hours on the testnet clock.
 /** Whether a period is a year (mainnet), not a short test clock. */
 function yearlyPeriods() { return (params()?.periodMs ?? yearMs) === yearMs; }
-/** `count` periods: "1 year" / "2 years", or on a short clock "10 min" / "20 min". */
+/** `count` periods: "1 year" / "2 years", or on a short clock "1d" / "2d" (iOS KachatLive.periods). */
 function periodsText(count) {
   const n = Number(count);
   if (yearlyPeriods()) return n === 1 ? "1 year" : `${n} years`;
   return durationText(n * Number(params()?.periodMs ?? yearMs));
 }
-/** "Price per year", or on a short clock "Price per 10 min". */
+/** "Price per year", or on a short clock "Price per 1d". */
 function pricePerPeriodTitle() { return yearlyPeriods() ? "Price per year" : `Price per ${periodsText(1)}`; }
 /** What registering `name` costs for its first period (sompi, BigInt; registry v4: fixed, baked
  *  into the pinned templates - the manifest's register table); null before any manifest. Each
@@ -287,7 +295,7 @@ function fillsPeriod(info, years, p = params()) {
 }
 /** "Renewal opens on Oct 2, 2027" (the day ActionError.renewalNotOpen names). */
 function renewalOpensText(info, p = params()) {
-  return p ? `Renewal opens on ${dayText(info.renewOpens(p))}` : "";
+  return p ? `Renewal opens on ${dateOnlyText(info.renewOpens(p))}` : "";
 }
 
 function myKey() { try { return kachatNames()?.actions.myKey ?? null; } catch { return null; } }
@@ -929,8 +937,7 @@ function registrationCardHtml(p) {
   }
   else if (p.stage === Stage.taken) buttons = cancel;
   else if (p.stage === Stage.failed) {
-    buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-retry="${id}">Try Again</button>${cancel}`
-      + `<button class="secondary-button accent kmkt-small-button" type="button" data-kl-reg-dismiss="${id}">Dismiss</button>`;
+    buttons = `<button class="primary-button kmkt-small-button" type="button" data-kl-reg-retry="${id}">Try Again</button>${cancel}`;
   }
   return `
     <section class="kmkt-card kl-reg-card">
@@ -979,8 +986,6 @@ function registrationActionClick(target) {
   if (view) { openTxDoneSheet({ txId: view.dataset.klRegView, title: "Name registered", owner: "kachat-registration", accepted: true, note: registrationLockedNote() }); return; }
   const done = target.closest("[data-kl-reg-done]");
   if (done) { kachatNames()?.actions.dismiss(done.dataset.klRegDone); return; }
-  const dismiss = target.closest("[data-kl-reg-dismiss]");
-  if (dismiss) { dismissFailedRegistration(dismiss.dataset.klRegDismiss); return; }
   const retry = target.closest("[data-kl-reg-retry]");
   if (retry) {
     registrationUi.delete(retry.dataset.klRegRetry);
@@ -1101,6 +1106,7 @@ async function cancelRegistration(id) {
     title: "Cancel the commit?",
     message: kasLabel("The registration stops and the commit's 0.2 KAS comes back to you, less the network fee."),
     confirmLabel: "Cancel Commit",
+    cancelLabel: "Keep",
     destructive: true,
   });
   if (!ok || !(await deviceLock())) return;
@@ -1108,30 +1114,14 @@ async function cancelRegistration(id) {
   renderRegistrationProgress();
   renderClaimsList();
   try {
-    const cancelTxId = await rt.actions.cancel(id);
+    // no receipt: a cancelled claim leaves the list, and its card with it (iOS KachatRegistrationCard)
+    await rt.actions.cancel(id);
     registrationUi.set(id, { working: false, error: null });
-    if (cancelTxId) openTxDoneSheet({ txId: cancelTxId, title: "Commit cancelled" });
   } catch (error) {
     registrationUi.set(id, { working: false, error: errorText(error) });
   }
   renderRegistrationProgress();
   renderClaimsList();
-}
-
-/** Drops a failed registration from the list (desktop addition: a commit that never reached the
- *  chain can't be cancelled). Warns first, since the record holds the commit's secret. */
-async function dismissFailedRegistration(id) {
-  const rt = kachatNames();
-  if (!rt) return;
-  const ok = await confirmAsk({
-    title: "Dismiss this registration?",
-    message: kasLabel("If its commit is still on chain, dismissing it loses the commit's 0.2 KAS: cancel the commit first to get it back."),
-    confirmLabel: "Dismiss",
-    destructive: true,
-  });
-  if (!ok) return;
-  registrationUi.delete(id);
-  rt.actions.dismiss(id);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1140,10 +1130,6 @@ async function dismissFailedRegistration(id) {
 
 function listCard(rowsHtml, inset = 62) {
   return `<div class="kmkt-card kmkt-list kl-list" style="--kmkt-inset:${Number(inset)}px">${rowsHtml}</div>`;
-}
-
-function loadErrorHtml() {
-  return hub.loadError ? `<p class="kl-note kl-red">${esc(hub.loadError)}</p>` : "";
 }
 
 /** A square tile for one name in the marketplace grids (iOS KachatNameTile, 27a4f39 / c488d1d):
@@ -1184,7 +1170,6 @@ function marketPageHtml() {
     : emptyCard(hubLoaded() ? "No names are listed right now." : null);
   return `
     <div class="kmkt-page">
-      ${loadErrorHtml()}
       ${kit.sectionHeader("For sale")}
       ${listings}
     </div>`;
@@ -1210,7 +1195,6 @@ function availablePageHtml() {
     : emptyCard(hubLoaded() ? "No expired names right now." : null);
   return `
     <div class="kmkt-page">
-      ${loadErrorHtml()}
       ${kit.sectionHeader("Available")}
       ${lapsed}
     </div>`;
@@ -1240,7 +1224,6 @@ function expiredPageHtml() {
     : emptyCard(hubLoaded() ? "No names are in their grace period right now." : null);
   return `
     <div class="kmkt-page">
-      ${loadErrorHtml()}
       ${kit.sectionHeader("Expired")}
       ${names}
     </div>`;
@@ -1265,7 +1248,6 @@ function activityPageHtml() {
     : emptyCard(hubLoaded() ? "Nothing yet." : null);
   return `
     <div class="kmkt-page">
-      ${loadErrorHtml()}
       ${kit.sectionHeader("Recent activity", "Every claim, renewal, listing, sale, offer, transfer and reclaim across the registry.")}
       ${list}
     </div>`;
@@ -1374,7 +1356,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
       formRow("Bio", socialSourceText(p.bio, SocialKind.bio)),
       formRow("Linktree", p.linktree ? String(p.linktree).replace(/^https:\/\//, "") : "None"),
       formRow("Primary name", p.primaryName ? `${p.primaryName}.kachat` : "None"),
-    ].join("") : formRow("Your Profile", "", { valueHtml: spinner() });
+    ].join("") : "";
     let cost = "";
     if (st.fee != null) {
       cost += formRow("Network fee", amountText(st.fee));
@@ -1396,7 +1378,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
     return `
       ${navHtml(title, { leading: { label: "Cancel" } })}
       <div class="kmkt-sheet-body kmkt-form kl-tx-body">
-        ${section(rows, { header: "Your Profile" })}
+        ${rows ? section(rows, { header: "Your Profile" }) : ""}
         ${section(cost, { footerHtml: costFoot })}
         ${section(button, { footerHtml: st.sendError ? errorFoot(st.sendError) : "" })}
       </div>`;
@@ -1628,7 +1610,7 @@ function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", o
         ${explorer
           ? `<a class="sk-card kl-receipt-txid" href="${esc(explorer)}" target="_blank" rel="noopener noreferrer" title="Open in the explorer">${txid}</a>`
           : `<span class="sk-card kl-receipt-txid">${txid}</span>`}
-        ${explorer ? `<p class="sk-caption kl-receipt-caption">Click the transaction to open it in the explorer.</p>` : ""}
+        <p class="sk-caption kl-receipt-caption">Click the transaction to open it in the explorer.</p>
         <button class="kl-receipt-done" type="button" data-kmkt-close>Done</button>
       </div>`;
   };
@@ -1761,9 +1743,13 @@ function openTxSheet(cfg) {
     if (payerKey) {
       const balance = sheet.payerBalance?.address === sheet.payer.address ? sheet.payerBalance.sompi : null;
       let out = pill(`From: ${payerLabel(sheet.payer.address)}`);
+      const change = balanceChange(sheet.plan, payerKey);
       if (balance != null) {
-        const after = balance + balanceChange(sheet.plan, payerKey);
+        const after = balance + change;
         out += pill(`Balance after: ${amountText(after > 0n ? after : 0n)}`);
+      } else {
+        // its balance not read (yet): what the transaction does to it (iOS KachatTxSheet)
+        out += pill(`Balance change: ${signedAmount(change)}`);
       }
       return out;
     }
@@ -1779,15 +1765,20 @@ function openTxSheet(cfg) {
   };
 
   const notesHtml = () => {
-    if (sheet.planError) return `<p class="kl-tx-note kl-red">${esc(sheet.planError)}</p>`;
+    // The plan error, else the footer; then, under it, the combine note (iOS KachatTxSheet).
+    let out = "";
+    if (sheet.planError) out = `<p class="kl-tx-note kl-red">${esc(sheet.planError)}</p>`;
+    else {
+      const text = cfg.footer?.() ?? null;
+      if (text) out = `<p class="kl-tx-note kmkt-muted">${esc(text)}</p>`;
+    }
     // The plan assumes the small coins combined first; the combine is sent only after the slide
     // and the device lock (iOS 778a8fc, IOS-075/DSK-047).
     if (sheet.combinesCoins && sheet.plan && !sheet.txId) {
-      return `<div class="kl-combine-note">${LI.merge}<span>${esc(
+      out += `<div class="kl-combine-note">${LI.merge}<span>${esc(
         "Your KAS is in many small coins. When you slide, KaChat first combines them into one (a separate transaction with its own small fee), then sends this.")}</span></div>`;
     }
-    const text = cfg.footer?.() ?? null;
-    return text ? `<p class="kl-tx-note kmkt-muted">${esc(text)}</p>` : "";
+    return out;
   };
 
   sheet.render = () => {
@@ -2167,24 +2158,60 @@ function openExtendSheet(info, owner) {
   });
 }
 
+/** checkmark.circle.fill, for a picked radio row: the circle in the row's text colour, the check
+ *  cut out in the accent. */
+const RADIO_ON = `<svg class="kmkt-ico kl-radio-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.6" fill="currentColor" stroke="none"/><path d="m8 12.3 2.7 2.7 5.3-5.6" fill="none" stroke="var(--kaspa)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
 /** `renew` (KachatRenewSheet, iOS 26bd5dc): the next period, from the current expiry, for 1 or 2
  *  periods - only once the renewal window is open (renewWindowMs before the expiry). Two steps:
- *  "How long?" first (the periods as full-width choices - 1 day / 2 days on testnet's clock,
- *  1 / 2 years on mainnet's - with what each costs), then the review with the fee and Renew; its
- *  Back leads to "How long?" again. Each period costs the renewal price (registry v4, iOS c8f1086). */
-async function openRenewSheet(info, owner) {
+ *  "How long?" first - the periods as full-width radio rows (1d / 2d on testnet's clock, 1 / 2
+ *  years on mainnet's) with what each costs on the right, nothing picked until one is clicked, and
+ *  Next - then the review with the fee and Renew; its Back leads to "How long?" again with the same
+ *  choice picked. Each period costs the renewal price (registry v4, iOS c8f1086). */
+function openRenewSheet(info, owner, chosen = null) {
+  if (!kit) return;
   const perYear = renewPriceOf(info.name) ?? 0n;
-  const choice = await chooseDialog({
-    kicker: "Renew",
-    title: "How long?",
-    message: "A renewal starts the next period at the current expiry, not from today.",
-    options: Array.from({ length: Math.max(1, maxYears()) }, (_, i) => ({
-      id: String(i + 1), title: yearsLabel(i + 1), subtitle: amountText(perYear * BigInt(i + 1)),
-    })),
+  const count = Math.max(1, maxYears());
+  let years = Number.isInteger(chosen) && chosen >= 1 && chosen <= count ? chosen : null;
+  const body = () => `
+    ${navHtml("Renew", { leading: { label: "Cancel" } })}
+    <div class="kmkt-sheet-body kl-renew-step">
+      <h3 class="kl-renew-title">How long?</h3>
+      <p class="kmkt-muted kl-renew-sub">A renewal starts the next period at the current expiry, not from today.</p>
+      <div class="kl-renew-choices" role="radiogroup" aria-label="How long?">
+        ${Array.from({ length: count }, (_, i) => {
+          const y = i + 1;
+          const on = years === y;
+          return `<button type="button" class="kl-renew-choice${on ? " on" : ""}" role="radio" aria-checked="${on}" data-kl-renew-years="${y}">
+            ${on ? RADIO_ON : LI.circle}
+            <span class="kl-renew-choice-label">${esc(yearsLabel(y))}</span>
+            <span class="kl-renew-choice-price">${esc(amountText(perYear * BigInt(y)))}</span>
+          </button>`;
+        }).join("")}
+      </div>
+      <button type="button" class="primary-button kl-renew-next" data-kl-renew-next ${years ? "" : "disabled"}>Next</button>
+    </div>`;
+  const layer = kit.openLayer({
+    owner,
+    kind: "sheet",
+    label: "Renew",
+    html: body(),
+    onClick(event, l) {
+      const pick = event.target.closest("[data-kl-renew-years]");
+      if (pick) {
+        years = Number(pick.dataset.klRenewYears);
+        const sheetEl = l.el.querySelector(".kmkt-sheet");
+        if (sheetEl) sheetEl.innerHTML = body();
+        return;
+      }
+      if (event.target.closest("[data-kl-renew-next]") && years) {
+        const picked = years;
+        kit.closeLayer(l);
+        openRenewReview(info, owner, picked);
+      }
+    },
   });
-  const years = Number(choice);
-  if (!choice || !Number.isInteger(years) || years < 1) return;
-  openRenewReview(info, owner, years);
+  return layer;
 }
 
 /** Renew, step 2: what the chosen period costs, and Renew. Before the renewal window opens nothing
@@ -2199,7 +2226,7 @@ function openRenewReview(info, owner, years) {
     title: "Renew",
     confirmTitle: "Renew",
     doneTitle: "Renewed",
-    back: () => { openRenewSheet(info, owner); },
+    back: () => { openRenewSheet(info, owner, years); },
     footer: () => (open()
       ? "A renewal starts the next period at the current expiry, not from today, so a name that expired a while ago gets less time. The price goes to the miners."
       : renewalOpensText(info, p)),
@@ -2955,22 +2982,9 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
 
   /** The name's art and, under it, what it is now: free to claim once it's gone (released or
    *  reclaimed) or expired past grace - the old record (its expiry, period, listing) is history;
-   *  iOS f420343 / eea52b2, with b799091's price line - else the live record. */
+   *  iOS f420343 / eea52b2 (the price line is the notification route's only) - else the live record. */
   const nameCard = () => {
-    if (isFree()) {
-      const price = priceOf(d.info.name);
-      const priceLine = price == null ? ""
-        : yearlyPeriods() ? `Available · ${amountText(price)} a year` : `Available · ${amountText(price)} per ${periodsText(1)}`;
-      return `
-        <section class="kmkt-card kmkt-name-card">
-          <div class="kmkt-name-art"><span class="kl-name-art-text">${esc(d.info.display)}</span></div>
-          <div class="kl-free-line">
-            <span class="kmkt-muted">Free to claim</span>
-            <span class="kl-available-pill">Available</span>
-          </div>
-          ${priceLine ? `<small class="kmkt-muted kl-free-price">${esc(priceLine)}</small>` : ""}
-        </section>`;
-    }
+    if (isFree()) return freeNameCardHtml(d.info.display);
     return recordCard();
   };
 
@@ -3005,7 +3019,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
           </div>
           <div class="kl-expiry">
             ${statusPill(s)}
-            <small class="kmkt-muted">${esc(`Expires ${dayText(d.info.expiresAt)}`)}</small>
+            <small class="kmkt-muted">${esc(`Expires ${dateOnlyText(d.info.expiresAt)}`)}</small>
           </div>
         </div>
         ${period}
@@ -3377,6 +3391,94 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
 }
 
 /** The name detail as a full sheet over whatever screen asked (Your Domains). */
+/** A free name's card (iOS: the detail's nameCard when free, and KachatNameRouteView.freeName):
+ *  the art, "Free to claim" with Available, and - the route's only - `priceLine` under them. */
+function freeNameCardHtml(display, priceLine = "") {
+  return `
+    <section class="kmkt-card kmkt-name-card">
+      <div class="kmkt-name-art"><span class="kl-name-art-text">${esc(display)}</span></div>
+      <div class="kl-free-line">
+        <span class="kmkt-muted">Free to claim</span>
+        <span class="kl-available-pill">Available</span>
+      </div>
+      ${priceLine ? `<small class="kmkt-muted kl-free-price">${esc(priceLine)}</small>` : ""}
+    </section>`;
+}
+
+/**
+ * The name a notification (or the bell, or the expired-name banner) pointed at, by name (iOS
+ * KachatNameRouteView): looked up with `claimLookup` - its live detail when it's registered; when it
+ * was released or reclaimed since, or expired past grace, the name as free to claim ("Available ·
+ * X a year") with Claim; "Couldn't look that name up." with Try Again when the lookup failed.
+ */
+export function openNameRouteLayer(rawName, owner = "market") {
+  const name = String(rawName || "").trim().toLowerCase().replace(/\.kachat$/, "");
+  if (!kit || !kachatNames() || !name) return null;
+  const display = `${name}.kachat`;
+  let detail = null;
+  let found = null; // null while looking | { kind: "free", gap } | { kind: "failed" }
+  let seq = 0;
+  let closed = false;
+  const layer = kit.openLayer({
+    owner,
+    kind: "cover",
+    label: display,
+    html: "",
+    onClick(event) {
+      if (detail) { detail.onClick(event); return; }
+      if (event.target.closest("[data-kl-route-retry]")) { load(); return; }
+      const claim = event.target.closest("[data-kl-route-claim]");
+      if (claim && !claim.disabled && found?.kind === "free" && found.gap) openClaimSheet({ name, gap: found.gap, owner });
+    },
+    onClose() { closed = true; detail?.destroy(); },
+  });
+  const sheetEl = layer.el.querySelector(".kmkt-sheet");
+  const bodyHtml = () => {
+    if (!found) return `<div class="kl-route-loading">${spinner()}</div>`;
+    if (found.kind === "failed") {
+      return `<div class="kl-route-failed">
+        <strong>${esc(display)}</strong>
+        <p class="kmkt-muted">Couldn't look that name up.</p>
+        <button class="secondary-button accent kmkt-small-button" type="button" data-kl-route-retry>Try Again</button>
+      </div>`;
+    }
+    const price = priceOf(name);
+    const priceLine = price == null ? ""
+      : yearlyPeriods() ? `Available · ${amountText(price)} a year` : `Available · ${amountText(price)} per ${periodsText(1)}`;
+    return `<div class="kl-route-body">
+      ${freeNameCardHtml(display, priceLine)}
+      <button class="primary-button kl-route-claim" type="button" data-kl-route-claim ${found.gap ? "" : "disabled"}>${kit.ICON.at}<span>Claim</span></button>
+    </div>`;
+  };
+  const paint = () => {
+    if (closed || detail || !sheetEl) return;
+    // no title until it's found (iOS: the inline bar without one)
+    sheetEl.innerHTML = `${navHtml("", { leading: { label: "Close" } })}<div class="kmkt-sheet-body">${bodyHtml()}</div>`;
+  };
+  const load = async () => {
+    const mine = ++seq;
+    found = null;
+    paint();
+    const rt = kachatNames();
+    let result = null;
+    try {
+      await rt?.registry.refreshIfStale();
+      result = await rt?.registry.claimLookup(name);
+    } catch { result = null; }
+    if (closed || mine !== seq) return;
+    if (result?.kind === "registered" && result.info) {
+      detail = createNameDetail(rememberName(result.info), { mode: "layer", owner, host: () => sheetEl, layer });
+      detail.render();
+      detail.attach();
+      return;
+    }
+    found = result?.kind === "free" ? { kind: "free", gap: result.gap ?? null } : { kind: "failed" };
+    paint();
+  };
+  load();
+  return layer;
+}
+
 export function openNameDetailLayer(info, owner = "domains") {
   if (!kit || !kachatNames()) return null;
   let detail = null;
@@ -3531,7 +3633,7 @@ export function onKachatRegistryChange(listener) {
   return kachatNames()?.registry?.onChange?.(() => listener()) || (() => {});
 }
 
-export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant = "domains" } = {}) {
+export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant = "domains", onLoaded = null } = {}) {
   if (!containerEl || !kit) return false;
   const rt = kachatNames();
   const address = String(walletAddress || "").toLowerCase();
@@ -3540,6 +3642,8 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   const previous = domainsRenders.get(containerEl);
   if (previous && previous.address === address && previous.variant === variant
     && containerEl.querySelector(`[data-kl-domains="${previous.token}"]`)) {
+    previous.onLoaded = onLoaded;
+    if (previous.loadedState) { try { onLoaded?.(previous.loadedState); } catch { /* caller's */ } }
     previous.load();
     return true;
   }
@@ -3547,7 +3651,9 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   if (!rt) {
     // Not launched here: the same tab, empty.
     containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}">${domainsEmptyHtml(variant)}</div>`;
-    domainsRenders.set(containerEl, { token, address, variant, load: () => {} });
+    const loadedState = { upgrading: false };
+    domainsRenders.set(containerEl, { token, address, variant, load: () => {}, onLoaded, loadedState });
+    try { onLoaded?.(loadedState); } catch { /* caller's */ }
     return true;
   }
   const shown = domainsShown.get(address);
@@ -3588,6 +3694,15 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         ${kachatNameGridHtml(shownOffers.map((o) => offerTileHtml(offerState({ offer: o, isBuyer: true, isOwner: false }), { showsName: true })).join(""))}
       </div>` : "";
     root.innerHTML = cards + offers;
+  };
+
+  /** The list has its answer (iOS KachatLiveDomainsTab `loaded`): Your Domains' Inscribe shows
+   *  only from then on, and not while the registry is being upgraded. */
+  const loaded = (state) => {
+    const entry = domainsRenders.get(containerEl);
+    if (!entry || entry.token !== token) return;
+    entry.loadedState = state;
+    try { entry.onLoaded?.(state); } catch { /* caller's */ }
   };
 
   const load = async () => {
@@ -3633,14 +3748,17 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         }
         const root = current();
         if (!root) return;
-        // The manifest is for the previous registry (v1): calm, no error (iOS d2e0673).
+        // The manifest is for the previous registry (v1): calm, no error (iOS d2e0673) - "Setting
+        // up" on Your Domains; an address's tab just shows its empty note (iOS
+        // KachatAddressLiveNamesList).
         if (rt.service.registryUpgrading || rt.registry.registryUpgrading) {
-          root.innerHTML = `
+          root.innerHTML = variant === "domains" ? `
             <div class="kl-domains-empty kl-domains-upgrading">
               <span class="kl-accent">${LI.hammer}</span>
               <strong>Setting up</strong>
               <p>${esc(registryUpgradingMessage)}</p>
-            </div>`;
+            </div>` : domainsEmptyHtml(variant);
+          loaded({ upgrading: true });
           continue;
         }
         domainsShown.delete(address);
@@ -3649,6 +3767,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
         shownNames = names;
         shownOffers = offers;
         paint(root);
+        loaded({ upgrading: false });
         // a name that lapses while this is open leaves right then (iOS aa36d2a)
         scheduleLapse(`tab:${token}`, names, () => { if (current()) load(); });
       } while (again);
@@ -3657,7 +3776,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
     }
   };
 
-  domainsRenders.set(containerEl, { token, address, variant, load });
+  domainsRenders.set(containerEl, { token, address, variant, load, onLoaded, loadedState: null });
   // This render's own subscriptions; each drops itself once its render is gone.
   const subs = [];
   const unsubscribeAll = () => { for (const u of subs.splice(0)) { try { u(); } catch { /* gone */ } } };
@@ -4398,7 +4517,7 @@ function missingText(kind, platformName) {
  * social profile link each - a platform from the picker plus the handle after its prefix; they can
  * be different accounts), a Linktree link, and which of your names labels you - written as a
  * `kchat:1:profile:` self-transfer. No free text and no uploads: what shows comes from a platform
- * that moderates it. A review card laid out like the profile header shows what others will see;
+ * that moderates it. Each field shows what its lookup found (the avatar, banner or bio, "From X");
  * only a malformed handle or Linktree username disables Save; links that couldn't be checked are
  * saved as entered, with a note saying so (iOS 5cac6af).
  * `owner` groups the layer (default "profile"). Saves on every network (iOS d36fc42): a profile is
@@ -4441,7 +4560,7 @@ export function openLiveProfileEditor(owner = "profile") {
    *  from here must never stop a profile (or a primary name) from saving; the link is saved as
    *  entered and every viewer's app looks it up itself. The editor just says so. */
   const notReviewed = (kind) => !isEmpty(kind) && fields[kind].lookup !== "found";
-  const hasUncheckedLinks = () => SOCIAL_KINDS.some((k) => !isBad(k) && notReviewed(k));
+  const hasUncheckedLinks = () => SOCIAL_KINDS.some((k) => notReviewed(k));
   /** The Linktree field holds just the username (`linktr.ee/` is shown in front of it). */
   const badLinktree = () => {
     const t = form.linktree.trim();
@@ -4467,54 +4586,22 @@ export function openLiveProfileEditor(owner = "profile") {
 
   const piece = (kind) => (fields[kind].lookup === "found" ? fields[kind].resolved?.piece(kind) ?? null : null);
 
-  /** One line per piece for the review card: where it came from, or why it is missing. */
-  const reviewNote = (kind) => {
-    const f = fields[kind];
-    const source = sourceOf(kind);
-    if (source) {
-      const name = SocialPlatform.displayName(source.platform);
-      switch (f.lookup) {
-        case "found": return { text: `${KIND_TITLE[kind]} from ${name}`, from: true };
-        case "empty": return { text: missingText(kind, name) };
-        case "unreachable": return { text: `${KIND_TITLE[kind]}: couldn't reach ${name}.` };
-        default: return { text: `${KIND_TITLE[kind]}: looking up ${name}...` };
-      }
-    }
-    if (!isEmpty(kind)) return null; // an invalid handle: its field says so
-    // an empty field the account used elsewhere can't fill: the platform never shares it
-    const other = SOCIAL_KINDS.map((k) => sourceOf(k)).find(Boolean);
-    if (other && !SocialPlatform.choices(kind).includes(other.platform)) {
-      return { text: `${SocialPlatform.displayName(other.platform)} doesn't share ${kind === SocialKind.banner ? "banners" : "bios"}.` };
-    }
-    return null;
-  };
-
-  /** The review card, laid out like the profile header: banner, avatar, bio. */
-  const reviewHtml = () => {
-    if (!SOCIAL_KINDS.some((k) => sourceOf(k))) return "";
-    const banner = piece(SocialKind.banner);
-    const avatar = piece(SocialKind.avatar);
-    const bio = piece(SocialKind.bio);
-    const notes = SOCIAL_KINDS.map(reviewNote).filter(Boolean);
-    return section(`
-      <div class="kl-review">
-        <div class="kl-review-banner">${banner ? socialImgHtml(banner, "kl-review-banner-img", sourceOf(SocialKind.banner)?.link) : ""}</div>
-        <div class="kl-review-avatar">${LI.person}${avatar ? socialImgHtml(avatar, "kl-review-avatar-img", sourceOf(SocialKind.avatar)?.link) : ""}</div>
-        <div class="kl-review-body">
-          ${bio ? `<p class="kl-review-bio">${esc(bio)}</p>` : ""}
-          ${notes.length ? `<ul class="kl-review-notes">${notes.map((n) => `<li class="${n.from ? "kl-review-from" : ""}">${esc(n.text)}</li>`).join("")}</ul>` : ""}
-        </div>
-      </div>`, { header: "Preview", footerHtml: footer("What others see: each device looks it up from the platform.") });
-  };
-
   /** Where one field's lookup stands (iOS KachatSocialPreview). */
   const statusHtml = (kind) => {
     const source = sourceOf(kind);
     if (!source) return "";
     const name = SocialPlatform.displayName(source.platform);
     switch (fields[kind].lookup) {
-      case "found":
-        return `<div class="kmkt-form-row kl-src-status"><span class="kl-green">${LI.checkCircle}</span><span>${esc(`From ${name}`)}</span></div>`;
+      case "found": {
+        // what was found, in the field itself (iOS KachatSocialPreview.found), then where from
+        const p = piece(kind);
+        const media = kind === SocialKind.avatar
+          ? `<div class="kl-src-found-avatar">${LI.person}${p ? socialImgHtml(p, "kl-src-found-avatar-img", source.link) : ""}</div>`
+          : kind === SocialKind.banner
+            ? `<div class="kl-src-found-banner">${p ? socialImgHtml(p, "kl-src-found-banner-img", source.link) : ""}</div>`
+            : `<p class="kl-src-found-bio">${esc(p || "")}</p>`;
+        return `<div class="kmkt-form-row kl-src-found">${media}<small class="kl-src-from">${esc(`From ${name}`)}</small></div>`;
+      }
       case "empty":
         return `<div class="kmkt-form-row kl-src-status">${LI.personExclaim}<span>${esc(missingText(kind, name))}</span></div>`;
       case "unreachable":
@@ -4579,7 +4666,6 @@ export function openLiveProfileEditor(owner = "profile") {
       </div>`, {
       footerHtml: footer("Each piece comes from a social profile you link, exactly as that platform shows it, so its moderation applies here too. You can use one account for all three, or mix them."),
     })}
-    <div data-kl-review-wrap>${reviewHtml()}</div>
     ${SOCIAL_KINDS.map(fieldHtml).join("")}
     ${section(`
       <label class="kmkt-form-row kl-src-handle-row">
@@ -4626,14 +4712,13 @@ export function openLiveProfileEditor(owner = "profile") {
     hydrateSocialImages(body);
   };
 
-  /** Everything but the inputs: lookups, footers, the review card, Save. */
+  /** Everything but the inputs: lookups (with what each found), footers, Save. */
   const renderLive = () => {
     if (closed || !layer || !loaded) return;
     for (const k of SOCIAL_KINDS) {
       put(`[data-kl-src-status="${k}"]`, statusHtml(k));
       put(`[data-kl-src-foot="${k}"]`, fieldFooter(k));
     }
-    put("[data-kl-review-wrap]", reviewHtml());
     put("[data-kl-linktree-foot]", linktreeFooter());
     put("[data-kl-profile-save-wrap]", saveHtml());
     hydrateSocialImages(layer.el);

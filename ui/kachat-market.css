@@ -332,6 +332,13 @@ button.kmkt-row:active { background-color: var(--row-pressed); }
   .kmkt-backdrop > .kmkt-sheet { overflow: hidden; }
 }
 
+/* The marketplace opened over Your Domains (iOS KachatLiveDomainsTab's Inscribe sheet): Close, the
+   Buy From pill in the middle of the bar, and the .kachat screen itself under it. */
+.kmkt-cover-bar .kmkt-cover-pill { display: flex; justify-content: center; min-width: 0; }
+.kmkt-cover-bar .kmkt-source-pill { position: static; transform: none; max-width: 100%; }
+.kmkt-cover-slot { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.kmkt-cover-slot > .profile-screen { max-width: none; padding-bottom: 24px; }
+
 /* Buy From (iOS eb9b027): the marketplace's balance pill at the top, in place of the chatting
    balance (KachatMarketSourcePill) - the balance and, under it, which address the marketplace buys
    with - and its sheet (KachatMarketSourceSheet). */

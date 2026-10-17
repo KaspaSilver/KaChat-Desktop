@@ -16,6 +16,7 @@ import {
 import { scanKaspaAddress } from "./qr-scan.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { onContextGesture } from "./touch.js";
+import { userFacingError } from "./dialogs.js";
 import { saveFile } from "./save-file.js";
 import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
 import { otherDomainsHtml, pickOtherDomain, nameNotFoundText } from "./send-kaspa-components.js";
@@ -61,7 +62,15 @@ let copiedTimer = 0;
 
 const esc = (value) => (deps?.escapeHtml ? deps.escapeHtml(String(value ?? "")) : String(value ?? "")
   .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])));
-const short = (address) => (deps?.shortAddress ? deps.shortAddress(address) : String(address || ""));
+/** iOS Contact.generateDefaultAlias: "kaspa:xxxx....xxxx" - the address line under a saved
+ *  address's name (AddressBookRow) and the name of one nobody named. */
+function defaultAlias(address) {
+  const text = String(address || "");
+  const colon = text.indexOf(":");
+  if (colon < 0) return text;
+  const body = text.slice(colon + 1);
+  return body.length > 12 ? `${text.slice(0, colon)}:${body.slice(0, 4)}....${body.slice(-4)}` : text;
+}
 
 /** The picture for an address: your assigned photo, else exactly its own profile avatar. */
 export function addressBookAvatarHtml(address, className = "chat-avatar", pendingPhoto) {
@@ -92,7 +101,7 @@ function entryName(entry) {
     const shown = deps?.displayNameFor?.(entry.address);
     if (shown) return shown;
   } catch { /* fall back to the address */ }
-  return short(entry.address);
+  return defaultAlias(entry.address);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -105,15 +114,14 @@ function rowHtml(entry) {
       ${addressBookAvatarHtml(entry.address, "chat-avatar ab-avatar ab-avatar-38")}
       <span class="ab-row-copy">
         <strong>${esc(entryName(entry))}</strong>
-        <small>${esc(short(entry.address))}</small>
+        <small>${esc(defaultAlias(entry.address))}</small>
       </span>
     </button>`;
 }
 
 function listRowsHtml() {
-  const shown = searchAddressBook(searchText);
-  if (!shown.length) return `<p class="ab-empty-line">No matches</p>`;
-  return shown.map(rowHtml).join("");
+  // No match shows an empty list, as iOS's searchable List does.
+  return searchAddressBook(searchText).map(rowHtml).join("");
 }
 
 function emptyStateHtml() {
@@ -381,7 +389,7 @@ function renderImportExportSheet() {
   ];
   body.innerHTML = `
     <div class="modal-header">
-      <div><p class="modal-kicker">Address Book</p><h2>Import or Export</h2></div>
+      <div><h2>Import or Export</h2></div>
       <button class="modal-close" type="button" data-ab-io-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">${rows.map(ioRowHtml).join("")}</div>
@@ -413,16 +421,19 @@ function onImportExportClick(event) {
   else if (action === "nc-export") exportToNextcloud();
 }
 
-const toast = (message) => { try { deps?.showToast?.(message); } catch { /* no toast */ } };
-const errorText = (error) => String(error?.message || error || "unknown error");
+// iOS shows failures as .error toasts; `style` asks the host for that look.
+const toast = (message, style = "success") => { try { deps?.showToast?.(message, { style }); } catch { /* no toast */ } };
+const errorToast = (message) => toast(message, "error");
+// Nextcloud failures read like iOS's UserFacingError.message(for:).
+const errorText = (error) => userFacingError(error);
 
 /** The export as { filename, json }, or null (with the toast said) when there is nothing to write. */
 function buildExport() {
-  if (addressBookIsEmpty()) { toast("Nothing to export yet. Add an address first."); return null; }
+  if (addressBookIsEmpty()) { errorToast("Nothing to export yet. Add an address first."); return null; }
   try {
     return { filename: addressBookExportFileName(), json: addressBookExportJson() };
   } catch {
-    toast("Export failed. Couldn't write the file.");
+    errorToast("Export failed. Couldn't write the file.");
     return null;
   }
 }
@@ -431,7 +442,7 @@ async function exportToFile() {
   const built = buildExport();
   if (!built) return;
   try { await saveFile(built.filename, "application/json", built.json); }
-  catch { toast("Export failed. Couldn't write the file."); }
+  catch { errorToast("Export failed. Couldn't write the file."); }
 }
 
 async function exportToNextcloud() {
@@ -441,7 +452,7 @@ async function exportToNextcloud() {
     const path = await uploadToKaChatFolder(new Blob([built.json], { type: "application/json" }), built.filename, "application/json", { keepSpaces: true });
     toast(`Saved to ${path} in Nextcloud.`);
   } catch (error) {
-    toast(`Export to Nextcloud failed: ${errorText(error)}`);
+    errorToast(`Export to Nextcloud failed: ${errorText(error)}`);
   }
 }
 
@@ -451,7 +462,7 @@ function importFromNextcloud() {
     onPicked: async (file) => {
       let text;
       try { text = await downloadNextcloudText(file.path, { maxBytes: 50_000_000 }); }
-      catch (error) { toast(`Import from Nextcloud failed: ${errorText(error)}`); return; }
+      catch (error) { errorToast(`Import from Nextcloud failed: ${errorText(error)}`); return; }
       runImport(text);
     },
   });
@@ -466,7 +477,7 @@ async function onImportFileChosen() {
     if (file.size > 50_000_000) throw new Error("too large");
     text = await file.text();
   } catch {
-    toast("Couldn't read that file.");
+    errorToast("Couldn't read that file.");
     return;
   }
   runImport(text);
@@ -481,7 +492,7 @@ function runImport(text) {
     if (skipped > 0) message += ` Skipped ${skipped} from the other network.`;
     toast(message);
   } catch (error) {
-    toast(errorText(error));
+    errorToast(String(error?.message || error || ""));
   }
 }
 
@@ -524,7 +535,7 @@ function editorEffectiveAddress() {
 function editorResolutionHtml() {
   const s = editorState;
   if (!s || s.address) return "";
-  if (s.resolving) return '<span class="create-chat-status-muted">Looking up domain…</span>';
+  if (s.resolving) return '<span class="create-chat-status-muted">Looking up domain...</span>';
   const others = otherDomainsHtml({ resolutions: s.nameResolutions || [], selectedTld: s.selectedTld ?? null });
   if (s.resolvedAddress) {
     return `<span class="create-chat-status-good">✓ Resolved: ${esc(s.resolvedName || "")}</span>`
@@ -601,25 +612,21 @@ function renderEditor() {
   const form = editorEl.querySelector("[data-ab-editor]");
   const existing = addressBookEntry(editorEffectiveAddress());
   const s = editorState;
-  const assigned = editorShowsAssignedPhoto();
   form.innerHTML = `
     <header class="create-chat-header">
       <button class="create-chat-nav-button" type="button" data-ab-editor-cancel>Cancel</button>
-      <h2>${esc(existing ? "Edit Address" : "Add to Address Book")}</h2>
+      <h2 data-ab-editor-title>${esc(editorTitle(existing))}</h2>
       <button class="create-chat-nav-button" type="submit" data-ab-editor-save${editorCanSave() ? "" : " disabled"}>Save</button>
     </header>
     <section class="create-chat-section ab-photo-section">
       <div class="ab-photo-avatar" data-ab-editor-avatar>${editorAvatarHtml()}</div>
-      <div class="ab-photo-buttons">
-        <button type="button" class="ab-link-button" data-ab-photo-choose>${ICONS.photo}<span>${esc(assigned ? "Change Photo" : "Choose Photo")}</span></button>
-        ${assigned ? `<button type="button" class="ab-link-button danger" data-ab-photo-remove>${ICONS.trash}<span>Remove Photo</span></button>` : ""}
-      </div>
+      <div class="ab-photo-buttons" data-ab-photo-buttons>${editorPhotoButtonsHtml()}</div>
       <input type="file" accept="image/*" hidden data-ab-photo-input />
       <p class="create-chat-help">Without a photo of your own, this shows the avatar they set on their profile.</p>
     </section>
     <section class="create-chat-section">
       <label class="create-chat-section-title ab-section-title" for="ab-editor-name">Name</label>
-      <input id="ab-editor-name" class="create-chat-name-input" type="text" data-ab-editor-name placeholder="Name" maxlength="80" autocomplete="off" value="${esc(s.name)}" />
+      <input id="ab-editor-name" class="create-chat-name-input" type="text" data-ab-editor-name placeholder="Name" autocomplete="off" value="${esc(s.name)}" />
     </section>
     <section class="create-chat-section">
       <p class="create-chat-section-title ab-section-title">Address</p>
@@ -645,11 +652,25 @@ function renderEditor() {
       </section>` : ""}`;
 }
 
+const editorTitle = (existing) => (existing ? "Edit Address" : "Add to Address Book");
+
+function editorPhotoButtonsHtml() {
+  const assigned = editorShowsAssignedPhoto();
+  return `<button type="button" class="ab-link-button" data-ab-photo-choose>${ICONS.photo}<span>${esc(assigned ? "Change Photo" : "Choose Photo")}</span></button>
+        ${assigned ? `<button type="button" class="ab-link-button danger" data-ab-photo-remove>${ICONS.trash}<span>Remove Photo</span></button>` : ""}`;
+}
+
+// The title, photo buttons, avatar and Save follow the typed address live, as iOS's computed
+// `existing` / `showsAssignedPhoto` do - without repainting the fields being typed in.
 function refreshEditorChrome() {
   const save = editorEl?.querySelector("[data-ab-editor-save]");
   if (save) save.disabled = !editorCanSave();
   const avatar = editorEl?.querySelector("[data-ab-editor-avatar]");
   if (avatar) avatar.innerHTML = editorAvatarHtml();
+  const title = editorEl?.querySelector("[data-ab-editor-title]");
+  if (title) title.textContent = editorTitle(addressBookEntry(editorEffectiveAddress()));
+  const photoButtons = editorEl?.querySelector("[data-ab-photo-buttons]");
+  if (photoButtons) photoButtons.innerHTML = editorPhotoButtonsHtml();
 }
 
 function onEditorInput(event) {
@@ -668,10 +689,8 @@ function setEditorAddressInput(value) {
   const field = editorEl?.querySelector("[data-ab-editor-address]");
   if (field) field.value = editorState.addressInput;
   resolveEditorName(editorState.addressInput);
-  // The title, Remove and photo buttons follow whether that address is already saved.
-  const existing = addressBookEntry(editorEffectiveAddress());
-  if (existing && !String(editorState.name || "").trim()) { editorState.name = existing.name; editorState.note = existing.note; }
-  renderEditor();
+  // Only the address changes (iOS Paste / Scan QR set addressInput alone).
+  refreshEditorChrome();
 }
 
 async function onEditorClick(event) {
@@ -865,9 +884,7 @@ function pickerShown() {
 }
 
 function pickerRowsHtml() {
-  const shown = pickerShown();
-  if (!shown.length) return `<p class="ab-empty-line">No matches</p>`;
-  return shown.map((entry) => {
+  return pickerShown().map((entry) => {
     const ticked = pickerState.ticked.has(entry.address);
     // The other network's address can't be chatted with or added to a group (iOS IOS-063).
     const otherNetwork = otherNetworkReason(entry.address);
@@ -876,7 +893,7 @@ function pickerRowsHtml() {
         ${addressBookAvatarHtml(entry.address, "create-chat-picker-avatar")}
         <span class="create-chat-picker-copy">
           <span class="create-chat-picker-name">${esc(entryName(entry))}</span>
-          <span class="create-chat-picker-sub">${esc(short(entry.address))}</span>
+          <span class="create-chat-picker-sub">${esc(defaultAlias(entry.address))}</span>
           ${otherNetwork ? `<span class="ab-other-network-note">${esc(otherNetwork)}</span>` : ""}
         </span>
         ${pickerState.multiple ? `<span class="ab-tick${ticked ? " on" : ""}" aria-hidden="true">${ticked ? ICONS.circleCheck : ICONS.circle}</span>` : ""}

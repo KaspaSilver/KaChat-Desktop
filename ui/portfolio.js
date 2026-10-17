@@ -29,8 +29,7 @@ import { getEndpoint } from "../engine/endpoints.js";
 import {
   fetchNetworkStats, peekNetworkStats, formatHashrate, estimateDailyKas,
 } from "../engine/network-stats.js";
-import { validateMainnetAddress } from "../engine/utils.js";
-import { ADDRESS_PREFIX, ADDRESS_HRP, KAS_UNIT } from "../engine/network.js";
+import { ADDRESS_PREFIX, ADDRESS_HRP, KAS_UNIT, isValidKaspaAddress } from "../engine/network.js";
 import { resolveDomain } from "../engine/kns.js";
 import { looksLikeName, resolveEverywhere, primary as primaryName, notFoundMessage } from "../engine/name-services.js";
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
@@ -107,7 +106,7 @@ let valuePoints = [];      // ledger replay of `history` — rebuilt every rende
 // the selected currency changes. Mirrors iOS PortfolioViewModel.priceHistoryCache.
 let historyByRange = {};
 let historyCurrency = null;
-let rangeDays = 7;
+let rangeDays = 1; // iOS PortfolioViewModel.priceRangeDays starts on 1D
 let loading = false;
 let editingTx = null;      // null = closed; { id } editing; { id: null } adding
 // null = closed; otherwise { busy, progress, input, resolving, resolvedAddress, resolvedDomain,
@@ -207,9 +206,15 @@ function refreshSelectionUi() {
   const total = rootEl ? rootEl.querySelectorAll("[data-portfolio-tx-select]").length : 0;
   const all = rootEl?.querySelector("[data-portfolio-select-all]");
   const del = rootEl?.querySelector("[data-portfolio-delete-selected]");
-  if (all) all.textContent = total > 0 && selectedTxIds.size === total ? "Deselect All" : "Select All";
+  if (all) {
+    const allPicked = total > 0 && selectedTxIds.size === total;
+    all.innerHTML = allPicked ? CHECK_FILLED_SVG : CHECK_OUTLINE_SVG;
+    all.setAttribute("aria-label", allPicked ? "Deselect all" : "Select all");
+    all.title = allPicked ? "Deselect all" : "Select all";
+  }
   if (del) {
-    del.textContent = `Delete Selected (${selectedTxIds.size})`;
+    const count = del.querySelector("[data-portfolio-delete-count]");
+    if (count) count.textContent = selectedTxIds.size ? String(selectedTxIds.size) : "";
     del.disabled = selectedTxIds.size === 0;
   }
 }
@@ -245,9 +250,6 @@ function currencySymbol() {
   return deps?.currencySymbol?.() || CURRENCY_SYMBOLS[currencyCode()] || "$";
 }
 
-// CoinMarketCap-style "what is Kaspa" blurb, paraphrased (not copied verbatim), shown on the
-// full-screen KAS price chart below the range selector.
-const KASPA_ABOUT = "Kaspa is a decentralized, open-source, proof-of-work cryptocurrency. It is built on the GHOSTDAG protocol - a generalization of Nakamoto consensus that, instead of discarding blocks created in parallel, orders them together in a blockDAG. This lets Kaspa reach very high block rates and near-instant transaction confirmation while keeping the security guarantees of proof of work. Kaspa launched in November 2021 with a fair release: no pre-mine, no pre-sale, and no coin allocations. Its native coin is KAS.";
 
 /** A new portfolio or row id: an uppercase UUID, as iOS writes them (the backup matches portfolio
  *  deletions by that string). */
@@ -519,35 +521,74 @@ try { amountsHidden = localStorage.getItem(HIDE_AMOUNTS_KEY) === "1"; } catch { 
 function setAmountsHidden(hidden) {
   amountsHidden = Boolean(hidden);
   try { localStorage.setItem(HIDE_AMOUNTS_KEY, amountsHidden ? "1" : "0"); } catch { /* fine */ }
+  // The toolbar balance above Portfolio masks with it (app.js renderToolbarBalance).
+  try { document.dispatchEvent(new CustomEvent("kachat:portfolio-amounts-hidden")); } catch { /* fine */ }
+}
+/** Whether Portfolio's eye is on - the toolbar balance over Portfolio masks with it. */
+export function portfolioAmountsHidden() {
+  return amountsHidden;
 }
 const MASKED_AMOUNT = "••••••";
+
+/** The symbol for a currency code; the app's own accessor for the selected one. */
+function symbolFor(code) {
+  if (code === "btc") return "₿";
+  if (code === currencyCode()) return currencySymbol();
+  return CURRENCY_SYMBOLS[code] || `${String(code || "").toUpperCase()} `;
+}
+
+/// iOS PortfolioFormat.bitcoin: a bitcoin amount in full - eight decimals at the least (a satoshi
+/// is the smallest unit), and more for a figure as small as one KAS in bitcoin, so at least four
+/// digits of it show rather than a row of zeros. Rounded to two places it read ₿0.00 for everything.
+function fmtBitcoin(value) {
+  const v = Number(value) || 0;
+  const sign = v < 0 ? "-" : "";
+  const magnitude = Math.abs(v);
+  let decimals = 8;
+  if (magnitude > 0 && magnitude < 0.0001) decimals = Math.min(12, Math.max(8, Math.ceil(-Math.log10(magnitude)) + 3));
+  return `${sign}₿${magnitude.toFixed(decimals)}`;
+}
+
+/// iOS PortfolioFormat.currency: symbol prefix, 2 grouped decimals - bitcoin in full.
+function currencyText(value, code = currencyCode()) {
+  if (code === "btc") return fmtBitcoin(value);
+  const v = Number(value) || 0;
+  const sign = v < 0 ? "-" : "";
+  const magnitude = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${sign}${symbolFor(code)}${magnitude}`;
+}
+
 function fmtFiat(value) {
   if (amountsHidden) return MASKED_AMOUNT;
-  const sign = value < 0 ? "-" : "";
-  const magnitude = Math.abs(Number(value) || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 2, maximumFractionDigits: 2,
-  });
-  return `${sign}${currencySymbol()}${magnitude}`;
+  return currencyText(value);
 }
 
-// iOS PortfolioFormat.compactCurrency: $2.4B rather than every digit of a market cap.
+/** An amount in the selected currency, never masked - for screens outside Portfolio (Add to
+ *  Portfolio's Total), which iOS formats with the same PortfolioFormat.currency. */
+export function formatPortfolioCurrency(value) {
+  return currencyText(value);
+}
+
+// iOS PortfolioFormat.compactCurrency: $2.4B rather than every digit of a market cap - two
+// decimals under 10, one under 100, none above. Never masked: it is Kaspa's figure, not yours.
 function fmtCompactFiat(value) {
-  if (amountsHidden) return MASKED_AMOUNT;
-  const v = Math.abs(Number(value) || 0);
-  const sign = Number(value) < 0 ? "-" : "";
+  const v = Number(value) || 0;
+  const magnitude = Math.abs(v);
   const units = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]];
-  for (const [size, suffix] of units) {
-    if (v >= size) return `${sign}${currencySymbol()}${(v / size).toLocaleString(undefined, { maximumFractionDigits: v / size >= 100 ? 0 : 1 })}${suffix}`;
+  let scaled = magnitude;
+  let suffix = "";
+  for (const [size, unit] of units) {
+    if (magnitude >= size) { scaled = magnitude / size; suffix = unit; break; }
   }
-  return fmtFiat(Number(value) || 0);
+  const decimals = scaled < 10 ? 2 : scaled < 100 ? 1 : 0;
+  return `${v < 0 ? "-" : ""}${symbolFor(currencyCode())}${scaled.toFixed(decimals)}${suffix}`;
 }
 
-// iOS PortfolioFormat.price: 5 decimals under a unit, else 2.
-function fmtPrice(value) {
+// iOS PortfolioFormat.price: 5 decimals under a unit, else 2 - bitcoin in full.
+function fmtPrice(value, code = currencyCode()) {
+  if (code === "btc") return fmtBitcoin(value);
   const v = Number(value) || 0;
-  return `${currencySymbol()}${v.toLocaleString(undefined, {
-    minimumFractionDigits: v < 1 ? 5 : 2, maximumFractionDigits: v < 1 ? 5 : 2,
-  })}`;
+  return `${symbolFor(code)}${v.toFixed(v < 1 ? 5 : 2)}`;
 }
 
 function fmtKas(value) {
@@ -581,7 +622,7 @@ function chartGeometry(points, height) {
  *  row - reads like a real price/value graph rather than a bare sparkline. Scrub overlay + the
  *  data-portfolio-chart hook are shared with attachScrub(). Intraday spans (<= ~2d) label the
  *  x-axis with hours; longer spans with month/day, so 1D labels don't crowd. */
-function bigChartSvg(points, { height = 240, stroke = "var(--kaspa)", chart = null, lineWidth = 2 } = {}) {
+function bigChartSvg(points, { height = 240, stroke = "var(--kaspa)", chart = null, lineWidth = 2, hideValues = false } = {}) {
   if (!points || points.length < 2) return `<div class="portfolio-chart-empty">No data yet</div>`;
   const width = 560;
   const values = points.map((p) => p[1]);
@@ -610,9 +651,18 @@ function bigChartSvg(points, { height = 240, stroke = "var(--kaspa)", chart = nu
       : new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     return `<span>${text}</span>`;
   }).join("");
+  // Value labels down the leading edge at the gridlines (iOS chartYAxis, four-ish ticks): three
+  // significant digits, so a bitcoin-scale series does not round every tick to the same figure.
+  // None with the eye on.
+  const yLabels = hideValues ? "" : Array.from({ length: gridCount + 1 }, (_, i) => {
+    const value = max - (span * i) / gridCount;
+    const top = ((pad + (usable * i) / gridCount) / height) * 100;
+    return `<span style="top:${top.toFixed(2)}%">${value.toLocaleString(undefined, { maximumSignificantDigits: 3 })}</span>`;
+  }).join("");
   return `
     <div class="portfolio-bigchart">
       <div class="portfolio-chart-wrap portfolio-chart-wrap-big"${scrubAttr} style="height:${height}px">
+        ${yLabels ? `<div class="portfolio-yaxis" aria-hidden="true">${yLabels}</div>` : ""}
         <svg class="portfolio-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
           ${gridLines}
           <polygon class="portfolio-chart-area" points="${area}" fill="${stroke}"/>
@@ -721,23 +771,6 @@ function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
   wrap.addEventListener("pointerleave", leave);
 }
 
-/** The header's reading for a selected span: the two dates, and the return across it. */
-function spanReadout(a, b, formatValue) {
-  const from = a[1], to = b[1];
-  const delta = to - from;
-  const percent = from ? (delta / from) * 100 : 0;
-  const sameDay = new Date(a[0]).toDateString() === new Date(b[0]).toDateString();
-  const dateOf = (ts) => (sameDay
-    ? new Date(ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
-    : new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }));
-  const sign = delta >= 0 ? "+" : "";
-  return {
-    dates: `${dateOf(a[0])} – ${dateOf(b[0])}`,
-    change: `${sign}${percent.toFixed(2)}% (${sign}${formatValue(delta)})`,
-    gain: delta >= 0,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -751,7 +784,7 @@ function pickerCard(portfolio) {
     <div class="portfolio-card${isActive ? " active" : ""}" data-portfolio-select="${portfolio.id}" role="button" tabindex="0">
       <div class="portfolio-card-top">
         <span class="portfolio-card-name">${deps.escapeHtml(portfolio.name)}</span>
-        <button class="portfolio-card-menu-btn" type="button" data-portfolio-card-menu="${portfolio.id}" aria-label="Portfolio options">⋯</button>
+        <button class="portfolio-card-menu-btn" type="button" data-portfolio-card-menu="${portfolio.id}" aria-label="Edit ${deps.escapeHtml(portfolio.name)}" title="Edit ${deps.escapeHtml(portfolio.name)}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
       </div>
       <div class="portfolio-card-value">${price ? fmtFiat(summary.currentValue) : "--"}</div>
       ${change
@@ -833,9 +866,9 @@ function transactionRowHtml(tx, { preview = false } = {}) {
       ${selectingRow ? `<span class="portfolio-tx-check${picked ? " on" : ""}" aria-hidden="true">${picked ? "✓" : ""}</span>` : ""}
       <span class="portfolio-tx-icon ${kind}">${TX_KIND_ICON[kind]}</span>
       <div class="portfolio-tx-main">
-        <span class="portfolio-tx-type ${kind}">${TX_KIND_TITLE[kind]}${needsPrice ? ' <span class="portfolio-tx-warn" title="Price is still loading, it will fill in automatically. Click to set it yourself.">⚠</span>' : ""}</span>
+        <span class="portfolio-tx-type ${kind}">${TX_KIND_TITLE[kind]}${needsPrice ? ' <span class="portfolio-tx-warn" title="Price still loading, tap to set manually" aria-label="Price still loading, tap to set manually">⚠</span>' : ""}</span>
         <span class="portfolio-tx-date">${fmtDate(tx.timestamp)}</span>
-        ${tx.notes && !needsPrice ? `<span class="portfolio-tx-notes">${deps.escapeHtml(tx.notes)}</span>` : ""}
+        ${tx.notes ? `<span class="portfolio-tx-notes">${deps.escapeHtml(tx.notes)}</span>` : ""}
       </div>
       <div class="portfolio-tx-amounts">
         <span class="portfolio-tx-amount">${fmtKas(tx.amountKas)}</span>
@@ -904,36 +937,38 @@ function renderCardModal() {
   const hasOthers = state.portfolios.length > 1;
   const head = (title) => `
     <div class="modal-header">
-      <div><p class="modal-kicker">Portfolio</p><h2>${deps.escapeHtml(title)}</h2></div>
+      <div><h2>${deps.escapeHtml(title)}</h2></div>
       <button class="modal-close" type="button" data-portfolio-card-close aria-label="Close">×</button>
     </div>`;
 
   if (cardModalMode === "rename") {
+    // iOS PortfolioActionsSheet .rename: "Rename", a Portfolio Name field, Save off while blank.
     body.innerHTML = `
-      ${head("Rename Portfolio")}
+      ${head("Rename")}
       <div class="portfolio-editor-body">
-        <label class="portfolio-editor-field">
-          <span>Name</span>
-          <input type="text" maxlength="40" data-portfolio-card-name value="${deps.escapeHtml(portfolio.name)}" />
-        </label>
+        <input class="field-input" type="text" maxlength="40" placeholder="Portfolio Name" aria-label="Portfolio Name" data-portfolio-card-name value="${deps.escapeHtml(portfolio.name)}" />
         <p class="field-hint">Only the name changes. Transactions stay where they are.</p>
       </div>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-portfolio-card-back>Back</button>
-        <button class="primary-button" type="button" data-portfolio-card-rename-save>Save</button>
+        <button class="primary-button" type="button" data-portfolio-card-rename-save ${portfolio.name.trim() ? "" : "disabled"}>Save</button>
       </div>`;
     body.querySelector("[data-portfolio-card-name]")?.focus();
     return;
   }
 
   if (cardModalMode === "delete") {
-    const count = (portfolio.transactions || []).length;
+    // iOS .confirmDelete: "Delete Portfolio", one destructive "Delete 'Name'", the footer below.
     body.innerHTML = `
-      ${head(`Delete ${portfolio.name}?`)}
-      <p class="field-hint">'${deps.escapeHtml(portfolio.name)}' and its ${count} transaction${count === 1 ? "" : "s"} will be deleted. This can't be undone.</p>
+      ${head("Delete Portfolio")}
+      <div class="cold-action-rows">
+        <button type="button" class="cold-action-row cold-action-row-danger" data-portfolio-card-delete-confirm>
+          <span class="cold-action-copy"><strong>Delete '${deps.escapeHtml(portfolio.name)}'</strong></span>
+        </button>
+      </div>
+      <p class="field-hint">'${deps.escapeHtml(portfolio.name)}' and its transactions will be deleted. This can't be undone.</p>
       <div class="modal-actions">
-        <button class="secondary-button" type="button" data-portfolio-card-back>Cancel</button>
-        <button class="primary-button danger" type="button" data-portfolio-card-delete-confirm>Delete</button>
+        <button class="secondary-button" type="button" data-portfolio-card-back>Back</button>
       </div>`;
     return;
   }
@@ -942,17 +977,17 @@ function renderCardModal() {
     ${head(portfolio.name)}
     <div class="cold-action-rows">
       <button type="button" class="cold-action-row" data-portfolio-card-mode="rename">
-        <span class="cold-action-copy"><strong>Rename</strong><small>Only the name changes. Transactions stay where they are.</small></span>
+        <span class="cold-action-copy"><strong>Rename</strong></span>
       </button>
       ${hasOthers ? `
       <button type="button" class="cold-action-row" data-portfolio-card-mode="reorder">
-        <span class="cold-action-copy"><strong>Reorder Portfolios</strong><small>Sets the order the cards appear in.</small></span>
+        <span class="cold-action-copy"><strong>Reorder Portfolios</strong></span>
       </button>
       <button type="button" class="cold-action-row cold-action-row-danger" data-portfolio-card-mode="delete">
-        <span class="cold-action-copy"><strong>Delete ${deps.escapeHtml(portfolio.name)}</strong><small>Removes it and everything recorded in it.</small></span>
-      </button>` : `
-      <p class="field-hint">This is your only portfolio, so it can't be deleted or reordered.</p>`}
-    </div>`;
+        <span class="cold-action-copy"><strong>Delete '${deps.escapeHtml(portfolio.name)}'</strong></span>
+      </button>` : ""}
+    </div>
+    ${hasOthers ? "" : `<p class="field-hint">This is your only portfolio, so it can't be deleted or reordered.</p>`}`;
 }
 
 /// Hold a transaction (or right-click it): move it to another portfolio (iOS b438f2d). The row
@@ -1048,25 +1083,24 @@ function settleConfirm(result) {
 
 /// Naming a new portfolio, in the app rather than in a browser prompt.
 let namePromptResolve = null;
-function namePromptOverlay({ title, label, initial = "", confirmLabel = "Create" }) {
+/// iOS portfolioNameSheet: one "Portfolio Name" field, and the confirm button stays off while it
+/// is blank.
+function namePromptOverlay({ title, placeholder = "Portfolio Name", initial = "", confirmLabel = "Create" }) {
   return new Promise((resolve) => {
     const body = modalsEl?.querySelector("[data-portfolio-name-body]");
     if (!body) { resolve(null); return; }
     namePromptResolve = resolve;
     body.innerHTML = `
       <div class="modal-header">
-        <div><p class="modal-kicker">Portfolio</p><h2>${deps.escapeHtml(title)}</h2></div>
+        <div><h2>${deps.escapeHtml(title)}</h2></div>
         <button class="modal-close" type="button" data-portfolio-name-cancel aria-label="Close">×</button>
       </div>
       <div class="portfolio-editor-body">
-        <label class="portfolio-editor-field">
-          <span>${deps.escapeHtml(label)}</span>
-          <input type="text" maxlength="40" data-portfolio-name-input value="${deps.escapeHtml(initial)}" />
-        </label>
+        <input class="field-input" type="text" maxlength="40" placeholder="${deps.escapeHtml(placeholder)}" aria-label="${deps.escapeHtml(placeholder)}" data-portfolio-name-input data-portfolio-name-required value="${deps.escapeHtml(initial)}" />
       </div>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-portfolio-name-cancel>Cancel</button>
-        <button class="primary-button" type="button" data-portfolio-name-ok>${deps.escapeHtml(confirmLabel)}</button>
+        <button class="primary-button" type="button" data-portfolio-name-ok ${String(initial).trim() ? "" : "disabled"}>${deps.escapeHtml(confirmLabel)}</button>
       </div>`;
     modalsEl.querySelector("[data-portfolio-name-modal]").hidden = false;
     const input = body.querySelector("[data-portfolio-name-input]");
@@ -1138,7 +1172,7 @@ function renderPortfolioActionSheet() {
       ];
   body.innerHTML = `
     <div class="modal-header">
-      <div><p class="modal-kicker">Portfolio</p><h2>${actionSheetMode === "add" ? "Add" : "Import or Export"}</h2></div>
+      <div><h2>${actionSheetMode === "add" ? "Add to Portfolio" : "Import or Export"}</h2></div>
       <button class="modal-close" type="button" data-portfolio-action-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">
@@ -1161,12 +1195,13 @@ function typedHashrateHs() {
 /// Stacked rather than side by side because the two numbers answer the same question in two
 /// currencies - putting them in separate columns invites reading them as separate figures.
 function payoutRowHtml(label, kas) {
-  const fiat = price && price.price > 0 ? fmtFiat(kas * price.price) : "";
+  // Never masked: an estimate of the network's payout, not your holdings (iOS payoutRow).
+  const fiat = price && price.price > 0 ? currencyText(kas * price.price) : "";
   return `
     <div class="portfolio-payout-row">
       <span class="portfolio-payout-label">${label}</span>
       <span class="portfolio-payout-values">
-        <span class="portfolio-payout-kas">${fmtKas(kas)}</span>
+        <span class="portfolio-payout-kas">${kasPlain(kas)}</span>
         ${fiat ? `<span class="portfolio-payout-fiat">${fiat}</span>` : ""}
       </span>
     </div>`;
@@ -1190,7 +1225,6 @@ function payoutBlockHtml(daily) {
       ${payoutRowHtml("Per week", daily * 7)}
       ${payoutRowHtml("Per month", daily * 30)}
     </div>
-    <p class="field-hint">Your share of the network times what the network pays out in a day, at the current reward.</p>
     ${stats?.blockRewardKas ? `<p class="field-hint">At ${formatHashrate(stats.currentHashrate)} network hashrate and a ${stats.blockRewardKas.toFixed(4)} ${KAS_UNIT} block reward. Before pool fees, power and luck, and both figures move.</p>` : ""}`;
 }
 
@@ -1252,22 +1286,24 @@ function rangeLabel() {
  *  silver by dividing KAS by the pair's price at each point (Yahoo, in dollars). */
 let pairLoadToken = 0;
 async function loadPairSeries() {
-  if (!chartPair) return;
+  const unit = pairUnit();
+  if (!unit) return;
   const base = baseDaysFor(rangeDays);
-  if (pairSeries?.pair === chartPair && pairSeries.baseDays === base) return;
+  const pair = unit.kind === "currency" ? `currency:${unit.code}` : unit.pair;
+  if (pairSeries?.pair === pair && pairSeries.baseDays === base) return;
   // A newer request (range or pair changed while this one was in flight) wins.
   const token = ++pairLoadToken;
-  const pair = chartPair;
   pairLoading = true;
   try {
     let kas = [];
     let latest = null;
-    if (pair === "bitcoin") {
-      kas = await fetchKasPriceHistory(base, { currency: "btc" });
+    if (unit.kind === "currency") {
+      // Bitcoin from CoinGecko's own series - or dollars, when the app counts in bitcoin.
+      kas = await fetchKasPriceHistory(base, { currency: unit.code });
       latest = kas.length ? kas[kas.length - 1][1] : null;
     } else {
       // Yahoo quotes the pair in dollars, so KAS is taken in dollars too (iOS PortfolioViewModel).
-      const [pairResult, kasBase] = await Promise.all([fetchMarketPairHistory(pair, base), fetchKasPriceHistory(base, { currency: "usd" })]);
+      const [pairResult, kasBase] = await Promise.all([fetchMarketPairHistory(unit.pair, base), fetchKasPriceHistory(base, { currency: "usd" })]);
       kas = dividePoints(kasBase, pairResult.points);
       const kasUsd = kasBase.length ? kasBase[kasBase.length - 1][1] : null;
       latest = pairResult.latest && kasUsd > 0 ? kasUsd / pairResult.latest : (kas.length ? kas[kas.length - 1][1] : null);
@@ -1279,42 +1315,77 @@ async function loadPairSeries() {
 }
 function pairHistory() {
   if (!pairActive || !pairSeries?.kas?.length) return null;
-  if (pairSeries.pair !== chartPair || pairSeries.baseDays !== baseDaysFor(rangeDays)) return null;
+  const unit = pairUnit();
+  const pair = unit?.kind === "currency" ? `currency:${unit.code}` : unit?.pair;
+  if (!unit || pairSeries.pair !== pair || pairSeries.baseDays !== baseDaysFor(rangeDays)) return null;
   return rangeDays === 0 ? pairSeries.kas : cutPoints(pairSeries.kas, rangeDays);
 }
-/** Bitcoin amounts are written out in full - eight decimals at least, more for a per-KAS figure;
- *  shares or ounces with at least four decimals and four significant digits. */
+/// What a flip shows (iOS PortfolioViewModel.alternateUnit): the pair picked under the gear -
+/// bitcoin, or US dollars when the app already counts in bitcoin - VOO, gold or silver.
+function pairUnit() {
+  if (!chartPair) return null;
+  if (chartPair === "bitcoin") return { kind: "currency", code: currencyCode() === "btc" ? "usd" : "btc" };
+  return { kind: "pair", pair: chartPair };
+}
+/** The code the chart counts in (iOS ChartUnit.code), for the chip beside the big number. */
+function chartUnitCode() {
+  const unit = pairActive ? pairUnit() : null;
+  if (!unit) return currencyCode().toUpperCase();
+  return unit.kind === "currency" ? unit.code.toUpperCase() : CHART_PAIRS[unit.pair].code;
+}
+/// iOS PortfolioFormat.price(_:unit:) / amount(_:unit:) for the flipped chart: a currency (bitcoin
+/// in full) or shares / ounces with at least four decimals, more for a tiny figure.
 function fmtPairAmount(value, { perKas = false } = {}) {
   if (amountsHidden && !perKas) return MASKED_AMOUNT;
+  const unit = pairUnit();
+  if (!unit) return perKas ? fmtPrice(value) : currencyText(value);
+  if (unit.kind === "currency") return perKas ? fmtPrice(value, unit.code) : currencyText(value, unit.code);
   const v = Number(value) || 0;
-  if (chartPair === "bitcoin") {
-    let decimals = 8;
-    if (perKas && v > 0 && v < 1e-6) decimals = Math.min(12, Math.ceil(-Math.log10(v)) + 3);
-    return `₿${v.toFixed(decimals)}`;
-  }
+  const magnitude = Math.abs(v);
   let decimals = 4;
-  if (v > 0 && v < 1) decimals = Math.max(4, Math.ceil(-Math.log10(v)) + 3);
-  const suffix = chartPair === "voo" ? " VOO" : " oz";
-  return `${v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}${suffix}`;
+  if (magnitude > 0 && magnitude < 0.001) decimals = Math.min(12, Math.max(4, Math.ceil(-Math.log10(magnitude)) + 3));
+  const suffix = unit.pair === "voo" ? " VOO" : " oz";
+  return `${v < 0 ? "-" : ""}${magnitude.toFixed(decimals)}${suffix}`;
 }
 function pairGearHtml() {
-  return `<button class="kaposts-icon-button portfolio-pair-gear" type="button" data-portfolio-pair-gear aria-label="Compare against" title="Compare against"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>`;
+  return `<button class="kaposts-icon-button portfolio-pair-gear" type="button" data-portfolio-pair-gear aria-label="Chart settings" title="Chart settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>`;
 }
-/** The gear: what a tap on the big number flips to - one pair at a time, or none. */
-async function openPairPicker() {
-  const choice = await deps.chooseDialog?.({
-    title: "Compare against",
-    message: "Tap the big number on a chart to see Kaspa in this instead.",
-    options: [
-      ...Object.entries(CHART_PAIRS).map(([id, p]) => ({ id, title: `${p.title}${chartPair === id ? " ✓" : ""}`, subtitle: p.subtitle })),
-      { id: "none", title: `None${chartPair ? "" : " ✓"}`, subtitle: "The tap does nothing." },
-    ],
-  });
-  if (!choice) return;
-  chartPair = choice === "none" ? null : choice;
+/// The gear: what a click on the big number flips to (iOS ChartPairSettingsSheet "Compare
+/// Against") - bitcoin, VOO, gold or silver, one at a time; turning one on turns the others off,
+/// and with none on the number is just a number.
+function openPairPicker() {
+  renderPairSheet();
+  const modal = modalsEl?.querySelector("[data-portfolio-pair-modal]");
+  if (modal) modal.hidden = false;
+}
+
+function renderPairSheet() {
+  const body = modalsEl?.querySelector("[data-portfolio-pair-body]");
+  if (!body) return;
+  body.innerHTML = `
+    <div class="modal-header">
+      <div><h2>Compare Against</h2></div>
+      <button class="modal-close" type="button" data-portfolio-pair-close aria-label="Close">×</button>
+    </div>
+    <p class="field-hint portfolio-pair-intro">Tap the price or your value to see it in the pair you pick here. One at a time.</p>
+    <div class="portfolio-pair-rows">
+      ${Object.entries(CHART_PAIRS).map(([id, pair]) => `
+        <div class="settings-toggle-row portfolio-pair-row">
+          <span><strong>${deps.escapeHtml(pair.title)}</strong><small>${deps.escapeHtml(pair.subtitle)}</small></span>
+          <label class="switch-control"><input type="checkbox" data-portfolio-pair-toggle="${id}" ${chartPair === id ? "checked" : ""} aria-label="${deps.escapeHtml(pair.title)}"><span></span></label>
+        </div>`).join("")}
+    </div>`;
+}
+
+/// iOS PortfolioViewModel.setChartPair: a new pick drops the old pair's series, and the flip stays
+/// on only while there is a pair to flip to.
+function setChartPair(pair) {
+  if (pair === chartPair) return;
+  chartPair = pair;
   try { localStorage.setItem(CHART_PAIR_KEY, chartPair || ""); } catch { /* fine */ }
-  pairActive = false;
   pairSeries = null;
+  if (!chartPair) pairActive = false;
+  else if (pairActive) loadPairSeries().then(() => render()).catch(() => {});
   render();
 }
 
@@ -1324,7 +1395,7 @@ function converterFiatOnOpen() {
   const amount = decimalInputValue(converterKas);
   const rate = price?.price;
   if (!Number.isFinite(amount) || amount <= 0 || !(rate > 0)) return "";
-  converterFiat = groupedFromCanonical((amount * rate).toFixed(2));
+  converterFiat = converterFormat(amount * rate);
   return converterFiat;
 }
 
@@ -1342,13 +1413,14 @@ function renderReorderModal() {
   if (!body) return;
   body.innerHTML = `
     <div class="modal-header">
-      <div><p class="modal-kicker">Portfolio</p><h2>Reorder Portfolios</h2></div>
+      <div><h2>Reorder</h2></div>
       <button class="modal-close" type="button" data-portfolio-reorder-close aria-label="Close">×</button>
     </div>
     <div class="portfolio-reorder-list">
       ${reorderDraft.map((p, i) => `
         <div class="portfolio-reorder-row">
           <span class="portfolio-reorder-name">${deps.escapeHtml(p.name)}</span>
+          <span class="portfolio-reorder-value">${deps.escapeHtml(reorderValueText(p.id))}</span>
           <span class="portfolio-reorder-buttons">
             <button type="button" data-portfolio-move="up" data-index="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
             <button type="button" data-portfolio-move="down" data-index="${i}" ${i === reorderDraft.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
@@ -1360,6 +1432,13 @@ function renderReorderModal() {
       <button class="secondary-button" type="button" data-portfolio-reorder-close>Cancel</button>
       <button class="primary-button" type="button" data-portfolio-reorder-save>Done</button>
     </div>`;
+}
+
+/// What each row of the reorder list shows beside the name (iOS reorderList: the card's value).
+function reorderValueText(id) {
+  const portfolio = state.portfolios.find((p) => p.id === id);
+  if (!portfolio || !price) return "--";
+  return fmtFiat(computeSummary(portfolio.transactions || [], price.price || 0).currentValue);
 }
 
 /// Rank and market cap (iOS `marketStatsCard`), from the same keyless CoinGecko source the price
@@ -1409,6 +1488,11 @@ function hashrateCardHtml() {
     </button>`;
 }
 
+const CHECK_OUTLINE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="m8 12.4 2.6 2.6L16 9.6"/></svg>`;
+const CHECK_FILLED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m8 12.4 2.6 2.6L16 9.6" stroke="var(--on-accent, #000)"/></svg>`;
+const TRASH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1.5 1.5 0 0 0 1.5 1.4h7A1.5 1.5 0 0 0 17 20l1-13M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2"/></svg>`;
+const PLUS_FILLED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="M12 7.5v9M7.5 12h9" stroke="var(--on-accent, #000)"/></svg>`;
+const IMPORT_EXPORT_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="8" width="13" height="12.5" rx="2"/><path d="M8 4.5h10.5a2 2 0 0 1 2 2V17"/><path d="M10 11V3.5m0 0L7.5 6M10 3.5 12.5 6"/></svg>`;
 const REALIZED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/><path d="m9 12 2 2 4-4"/></svg>`;
 const FUEL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 22h12"/><path d="M4 9h10"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 4 0V9.83a2 2 0 0 0-.59-1.42L18 5"/></svg>`;
 
@@ -1467,8 +1551,43 @@ function insightCardsHtml(portfolio) {
     </div>`;
 }
 
-/// Full-screen network hashrate screen: the chart, what a block currently pays, an estimate of
-/// what a given hashrate earns per day, and what the number actually means (iOS's hashrate view).
+/// A chart screen's top bar: back, the screen's title (iOS navigationTitle) and, on the two
+/// price-driven charts, the gear.
+function screenHeaderHtml(title, { gear = false } = {}) {
+  return `
+    <div class="portfolio-screen-header">
+      <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
+      <strong class="portfolio-screen-title">${deps.escapeHtml(title)}</strong>
+      ${gear ? pairGearHtml() : '<span class="portfolio-screen-header-spacer" aria-hidden="true"></span>'}
+    </div>`;
+}
+
+/// iOS ChartCurrencyChip: beside the big number, what it and the chart count in, and that a click
+/// flips it. Lit up while flipped to the pair; absent when no pair is picked.
+function chartChipHtml() {
+  if (!pairUnit()) return "";
+  return `<span class="portfolio-unit-chip${pairActive ? " flipped" : ""}">${deps.escapeHtml(chartUnitCode())}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h12m0 0-3.5-3.5M19 7l-3.5 3.5M17 17H5m0 0 3.5-3.5M5 17l3.5 3.5"/></svg></span>`;
+}
+
+/// The two lines a selected span reads above the big number (iOS ChartRangeSummary): the dates,
+/// then the return across it. Hidden until a span is dragged out.
+function rangeSummarySlotHtml() {
+  return `<div class="portfolio-range-summary" data-portfolio-range-summary hidden></div>`;
+}
+
+/// While a chart is loading its series (iOS ProgressView), rather than an empty frame.
+function chartSpinnerHtml(height) {
+  return `<div class="portfolio-chart-loading" style="height:${height}px"><span class="initial-sync-spinner" aria-hidden="true"></span></div>`;
+}
+
+/// iOS PortfolioFormat.kas: up to four decimals, grouped, never masked (network figures).
+function kasPlain(value) {
+  return `${(Number(value) || 0).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${KAS_UNIT}`;
+}
+
+/// Full-screen network hashrate screen (iOS HashrateChartScreen): the chart, what a block pays
+/// now and after the next step down, an estimate of what a given hashrate earns, and what the
+/// number actually means.
 function hashrateViewHtml() {
   const stats = peekNetworkStats();
   const daily = estimateDailyKas({
@@ -1476,47 +1595,38 @@ function hashrateViewHtml() {
     networkHashrateHs: stats?.currentHashrate,
     blockRewardKas: stats?.blockRewardKas,
   });
-  const halvingDate = stats?.nextHalving ? new Date(stats.nextHalving.at).toLocaleDateString() : null;
+  const halvingDate = stats?.nextHalving
+    ? new Date(stats.nextHalving.at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+    : null;
+  const ranged = hashrateVisiblePoints(stats);
   return `
-    <div class="portfolio-screen-header">
-      <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
-    </div>
+    ${screenHeaderHtml("Network Hashrate")}
     <div class="profile-card">
       <div class="portfolio-detail-head">
         <span class="portfolio-hashrate-ico" aria-hidden="true">${PICKAXE_SVG}</span>
         <span class="portfolio-detail-name">Kaspa Network</span>
       </div>
       <div class="portfolio-detail-date" data-portfolio-hashrate-date hidden></div>
+      ${rangeSummarySlotHtml()}
       <div class="portfolio-detail-price-row">
         <span class="portfolio-detail-price" data-portfolio-hashrate-value>${stats ? formatHashrate(stats.currentHashrate) : "--"}</span>
       </div>
-      ${(() => {
-        const ranged = hashrateVisiblePoints(stats);
-        return ranged.length >= 2
-          ? bigChartSvg(ranged, { height: 240, chart: "hashrate" })
-          : `<div class="portfolio-chart-empty">Network history is still loading.</div>`;
-      })()}
+      ${ranged.length >= 2 ? bigChartSvg(ranged, { height: 240, chart: "hashrate" }) : chartSpinnerHtml(240)}
       <div class="portfolio-ranges portfolio-ranges-wide">
         ${HASHRATE_RANGES.map((r) => `<button class="portfolio-range${r.days === hashrateRangeDays ? " active" : ""}" type="button" data-portfolio-hashrate-range="${r.days}">${r.label}</button>`).join("")}
       </div>
     </div>
 
-    ${stats?.blockRewardKas ? `
     <div class="profile-card portfolio-summary">
-      ${statRowHtml("Block Reward", fmtKas(stats.blockRewardKas))}
-      ${stats.nextHalving ? `
-        ${statRowHtml("Next Block Reward", fmtKas(stats.nextHalving.amountKas))}
-        ${statRowHtml("Next Block Reward Reduction", deps.escapeHtml(halvingDate))}` : ""}
-      ${stats.nextHalving ? `<p class="portfolio-about-text">Kaspa steps the reward down a little every month rather than cutting it in half every few years, so this is a reduction rather than a halving.</p>` : ""}
-    </div>` : ""}
+      ${statRowHtml("Block Reward", stats?.blockRewardKas ? kasPlain(stats.blockRewardKas) : "--")}
+      ${statRowHtml("Next Block Reward", stats?.nextHalving ? kasPlain(stats.nextHalving.amountKas) : "--")}
+      ${statRowHtml("Next Block Reward Reduction", halvingDate ? deps.escapeHtml(halvingDate) : "--")}
+    </div>
 
     <div class="profile-card">
-      <p class="profile-card-label">Mining Estimate</p>
+      <p class="portfolio-card-heading">Mining Estimate</p>
       <div class="portfolio-hashrate-entry">
-        <label class="portfolio-editor-field">
-          <span>Your hashrate</span>
-          <input type="text" inputmode="decimal" placeholder="e.g. 120" data-portfolio-hashrate-input value="${deps.escapeHtml(hashrateInput)}" />
-        </label>
+        <input class="field-input portfolio-hashrate-field" type="text" inputmode="decimal" placeholder="0" aria-label="Your hashrate" data-portfolio-hashrate-input value="${deps.escapeHtml(hashrateInput)}" />
         <div class="settings-segmented" role="group" aria-label="Hashrate unit">
           ${HASHRATE_UNITS.map((unit) => `
             <button type="button" class="settings-segmented-option ${hashrateUnit === unit.key ? "active" : ""}" data-portfolio-hashrate-unit="${unit.key}">${unit.label}</button>`).join("")}
@@ -1526,77 +1636,87 @@ function hashrateViewHtml() {
     </div>
 
     <div class="profile-card portfolio-about">
-      <p class="profile-card-label">About Hashrate</p>
+      <p class="portfolio-card-heading">About Hashrate</p>
       <p class="portfolio-about-text">Hashrate is how much computing power miners are pointing at Kaspa. A higher hashrate means more work securing the chain, and it moves with mining profitability rather than with the price directly. Figures come from the Kaspa REST API set in Connection Settings, at one sample per day.</p>
     </div>`;
 }
 
-// Full-screen KAS price chart screen.
+/// iOS KasConverterCard.format: eight decimals - Kaspa's own precision - with the trailing zeros
+/// dropped down to two, grouped.
+function converterFormat(value) {
+  let text = (Number(value) || 0).toFixed(8);
+  while (text.endsWith("0") && (text.split(".")[1]?.length || 0) > 2) text = text.slice(0, -1);
+  return groupedFromCanonical(text);
+}
+
+/// The price screen's big number: the chart's own latest point, in whatever the chart counts in.
+function priceBigNumber(inPair) {
+  if (pairActive && pairUnit()) return inPair ? fmtPairAmount(pairSeries.latest ?? inPair[inPair.length - 1][1], { perKas: true }) : "--";
+  return price ? fmtPrice(price.price) : "--";
+}
+
+// Full-screen KAS price chart screen (iOS KasPriceChartScreen).
 function priceViewHtml() {
-  // Over the range on screen, falling back to the 24h figure only when there is not enough
-  // history to compute one.
   const inPair = pairHistory();
-  const series = inPair || history;
+  const series = pairActive && pairUnit() ? (inPair || []) : history;
+  // Read off the series the chart is drawing, for whichever range button is selected (iOS
+  // chartPriceRangeChange). Percent only.
   const ranged = rangeChange(series);
-  const change = ranged ? ranged.percent : (inPair ? null : (price?.change24h ?? null));
-  const label = ranged ? rangeLabel() : "24h";
-  const pPos = (change ?? 0) >= 0;
-  const bigNumber = inPair
-    ? fmtPairAmount(pairSeries.latest ?? series[series.length - 1][1], { perKas: true })
-    : (price ? fmtPrice(price.price) : "--");
+  const pPos = (ranged?.amount ?? 0) >= 0;
+  const symbol = currencyCode() === "btc" ? "₿" : currencySymbol();
   return `
-    <div class="portfolio-screen-header">
-      <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
-      ${pairGearHtml()}
-    </div>
+    ${screenHeaderHtml("KAS Price", { gear: true })}
     <div class="profile-card">
       <div class="portfolio-detail-head">
         <img src="${kaspaLogoUrl}" alt="" class="portfolio-detail-logo"/>
         <span class="portfolio-detail-name">Kaspa</span>
       </div>
       <div class="portfolio-detail-date" data-portfolio-price-date hidden></div>
-      <div class="portfolio-detail-price-row">
-        <button class="portfolio-detail-price portfolio-pair-flip${chartPair ? "" : " static"}" type="button" data-portfolio-pair-flip title="${chartPair ? `Show in ${deps.escapeHtml(CHART_PAIRS[chartPair].title)}` : ""}" data-portfolio-price-value>${deps.escapeHtml(bigNumber)}${pairActive && pairLoading ? " …" : ""}</button>
-        ${change !== null ? `<span class="portfolio-detail-24h ${pPos ? "gain" : "loss"}" data-portfolio-price-24h>${pPos ? "↑" : "↓"} ${Math.abs(change).toFixed(2)}% (${deps.escapeHtml(label)})</span>` : ""}
+      ${rangeSummarySlotHtml()}
+      <div class="portfolio-detail-price-row${pairUnit() ? " portfolio-pair-flip" : ""}" ${pairUnit() ? 'data-portfolio-pair-flip role="button" tabindex="0"' : ""}>
+        <span class="portfolio-detail-price" data-portfolio-price-value>${deps.escapeHtml(priceBigNumber(inPair))}</span>
+        ${chartChipHtml()}
       </div>
-      ${bigChartSvg(series, { height: 240, chart: "price" })}
+      ${ranged ? `<div class="portfolio-detail-change ${pPos ? "gain" : "loss"}" data-portfolio-price-24h>
+          <span>${pPos ? "↑" : "↓"} ${Math.abs(ranged.percent).toFixed(2)}%</span>
+          <span class="portfolio-detail-change-range">${deps.escapeHtml(rangeLabel())}</span>
+        </div>` : ""}
+      ${series.length >= 2 ? bigChartSvg(series, { height: 260, chart: "price" }) : chartSpinnerHtml(260)}
       <div class="portfolio-ranges portfolio-ranges-wide">
         ${rangeButtonsHtml()}
       </div>
     </div>
     <div class="profile-card">
-      <p class="profile-card-label">Converter</p>
+      <p class="portfolio-card-heading">Converter</p>
       <div class="portfolio-converter">
-        <label class="portfolio-editor-field">
+        <label class="portfolio-converter-row">
           <span>KAS</span>
-          <input type="text" inputmode="decimal" data-portfolio-conv-kas value="${deps.escapeHtml(converterKas)}" />
+          <input type="text" inputmode="decimal" placeholder="0" data-portfolio-conv-kas value="${deps.escapeHtml(converterKas)}" />
+          <em>KAS</em>
         </label>
-        <label class="portfolio-editor-field">
-          <span>${deps.escapeHtml(deps.currencyCode?.() || "USD")}</span>
-          <input type="text" inputmode="decimal" data-portfolio-conv-fiat value="${deps.escapeHtml(converterFiatOnOpen())}" />
+        <label class="portfolio-converter-row">
+          <span>${deps.escapeHtml(currencyCode().toUpperCase())}</span>
+          <input type="text" inputmode="decimal" placeholder="0" data-portfolio-conv-fiat value="${deps.escapeHtml(converterFiatOnOpen())}" />
+          <em>${deps.escapeHtml(symbol)}</em>
         </label>
       </div>
-      <p class="field-hint">${price?.price > 0 ? `1 KAS = ${deps.escapeHtml(currencySymbol())}${deps.escapeHtml(Number(price.price).toFixed(8).replace(/0+$/, "").replace(/\.$/, ""))}` : "Waiting for a price..."}</p>
+      <p class="field-hint">${price?.price > 0 ? `1 KAS = ${deps.escapeHtml(symbol)}${deps.escapeHtml(converterFormat(price.price))}` : "Waiting for a price..."}</p>
     </div>
 
-    ${marketStatsHtml()}
-
-    <div class="profile-card portfolio-about">
-      <p class="profile-card-label">About Kaspa</p>
-      <p class="portfolio-about-text">${KASPA_ABOUT}</p>
-    </div>`;
+    ${marketStatsHtml()}`;
 }
 
-// Value-over-time stats (Holdings / Current Value / Invested / P&L / Avg. Buy Price).
+// Value-over-time stats (iOS statsCard): in the app currency, every amount masked by the eye.
 function valueStatsHtml(summary) {
+  const plText = amountsHidden
+    ? `${summary.totalPLPercent.toFixed(1)}%`
+    : `${currencyText(summary.totalPL)} (${summary.totalPLPercent.toFixed(1)}%)`;
   return `
     <div class="profile-card portfolio-summary">
       ${statRowHtml("Holdings", fmtKas(summary.holdingsKas))}
       ${statRowHtml("Current Value", fmtFiat(summary.currentValue))}
       ${statRowHtml("Total Invested", fmtFiat(summary.totalInvested))}
-      ${statRowHtml("Total P&amp;L",
-        `${summary.totalPL >= 0 ? "↗" : "↘"} ${fmtFiat(summary.totalPL)} (${summary.totalPLPercent.toFixed(1)}%)`,
-        summary.totalPL >= 0 ? "gain" : "loss")}
+      ${statRowHtml("Total P&amp;L", plText, summary.totalPL >= 0 ? "gain" : "loss")}
       ${summary.averageBuyPriceUsd !== null ? statRowHtml("Avg. Buy Price", fmtPrice(summary.averageBuyPriceUsd)) : ""}
     </div>`;
 }
@@ -1608,38 +1728,52 @@ function cutValueToFirstTransaction(points, scoped) {
   return Number.isFinite(firstTx) ? points.filter((p) => p[0] >= firstTx) : points;
 }
 
-// Full-screen Value Over Time chart screen.
+/// The value screen's amounts in whatever the chart counts in (iOS chartMoney), masked by the eye.
+function chartMoney(value) {
+  if (amountsHidden) return MASKED_AMOUNT;
+  return pairActive && pairUnit() ? fmtPairAmount(value) : currencyText(value);
+}
+
+// Full-screen Value Over Time chart screen (iOS PortfolioValueChartScreen).
 function valueViewHtml(summary) {
   // In a pair, the value is replayed over KAS-in-the-pair, so the amount reads in bitcoin,
   // shares or ounces and the percent is the move against the pair across the range.
-  if (pairHistory()) {
+  const flipped = pairActive && pairUnit();
+  const baseValuePoints = valuePoints;
+  if (flipped) {
     const scoped = activePortfolio().transactions || [];
-    valuePoints = cutValueToFirstTransaction(computeValueHistory(scoped, pairHistory()), scoped);
+    const inPair = pairHistory();
+    valuePoints = inPair ? cutValueToFirstTransaction(computeValueHistory(scoped, inPair), scoped) : [];
   }
-  const latest = valuePoints.length ? valuePoints[valuePoints.length - 1][1] : summary.currentValue;
-  // The move across the SELECTED range, so pressing 7D answers "how did this do this week" rather
-  // than repeating one figure under every button. Both the money and the percent, because on a
-  // portfolio the amount is the part people actually feel - iOS shows both here for that reason,
-  // and only the percent on the price screen, where an amount per KAS says very little.
+  const latest = flipped
+    ? (pairSeries?.latest != null && pairHistory() ? summary.holdingsKas * pairSeries.latest : null)
+    : summary.currentValue;
+  // The move across the SELECTED range: the amount and the percent (only the percent with the
+  // eye on).
   const ranged = rangeChange(valuePoints);
   const up = ranged ? ranged.amount >= 0 : true;
   return `
-    <div class="portfolio-screen-header">
-      <button class="portfolio-back-btn" type="button" data-portfolio-back aria-label="Back">‹ Portfolio</button>
-      ${pairGearHtml()}
-    </div>
+    ${screenHeaderHtml("Value Over Time", { gear: true })}
     <div class="profile-card">
-      <p class="profile-card-label" data-portfolio-value-label>Portfolio Value${pairHistory() ? ` in ${deps.escapeHtml(CHART_PAIRS[chartPair].title)}` : ""}</p>
+      <p class="portfolio-detail-name portfolio-value-title">Portfolio Value</p>
       <div class="portfolio-detail-date" data-portfolio-value-date hidden></div>
-      <button class="portfolio-detail-price portfolio-pair-flip${chartPair ? "" : " static"}" type="button" data-portfolio-pair-flip data-portfolio-value-readout>${pairHistory() ? deps.escapeHtml(fmtPairAmount(latest)) : fmtFiat(latest)}</button>
+      ${rangeSummarySlotHtml()}
+      <div class="portfolio-detail-price-row${pairUnit() ? " portfolio-pair-flip" : ""}" ${pairUnit() ? 'data-portfolio-pair-flip role="button" tabindex="0"' : ""}>
+        <span class="portfolio-detail-price" data-portfolio-value-readout>${latest === null ? "--" : deps.escapeHtml(chartMoney(latest))}</span>
+        ${chartChipHtml()}
+      </div>
       ${ranged ? `
         <div class="portfolio-detail-change ${up ? "gain" : "loss"}" data-portfolio-value-change>
-          <span>${up ? "\u2191" : "\u2193"} ${pairHistory() ? deps.escapeHtml(fmtPairAmount(Math.abs(ranged.amount))) : fmtFiat(Math.abs(ranged.amount))} (${Math.abs(ranged.percent).toFixed(2)}%)</span>
+          <span>${up ? "↗" : "↘"} ${amountsHidden
+            ? `${Math.abs(ranged.percent).toFixed(2)}%`
+            : `${deps.escapeHtml(chartMoney(Math.abs(ranged.amount)))} (${Math.abs(ranged.percent).toFixed(2)}%)`}</span>
           <span class="portfolio-detail-change-range">${deps.escapeHtml(rangeLabel())}</span>
         </div>` : ""}
       ${valuePoints.length >= 2
-        ? bigChartSvg(valuePoints, { height: 220, stroke: "var(--kaspa-ink)", chart: "value", lineWidth: 3 })
-        : `<div class="portfolio-chart-empty">Not enough history yet. Check back after a few days of activity.</div>`}
+        ? bigChartSvg(valuePoints, { height: 240, stroke: "var(--kaspa-ink)", chart: "value", lineWidth: 3, hideValues: amountsHidden })
+        : flipped && baseValuePoints.length >= 2
+          ? chartSpinnerHtml(240)
+          : `<div class="portfolio-chart-empty" style="height:240px">Not enough history yet - check back after a few days of activity.</div>`}
       <div class="portfolio-ranges portfolio-ranges-wide">
         ${rangeButtonsHtml()}
       </div>
@@ -1675,19 +1809,16 @@ function render() {
   }
 
   const transactions = [...scoped].sort((a, b) => b.timestamp - a.timestamp);
+  const allPicked = transactions.length > 0 && selectedTxIds.size === transactions.length;
   rootEl.innerHTML = `
     <div class="kaposts-header">
       <h1 class="kaposts-title">Portfolio</h1>
       <div class="kaposts-header-actions">
-        ${selecting ? `
-          <button class="cold-inline-link" type="button" data-portfolio-select-all>${selectedTxIds.size === transactions.length && transactions.length > 0 ? "Deselect All" : "Select All"}</button>
-          <button class="cold-inline-link portfolio-select-delete" type="button" data-portfolio-delete-selected ${selectedTxIds.size === 0 ? "disabled" : ""}>Delete Selected (${selectedTxIds.size})</button>` : ""}
         <button class="kaposts-icon-button${amountsHidden ? " active" : ""}" type="button" data-portfolio-eye title="${amountsHidden ? "Show amounts" : "Hide amounts"}" aria-label="${amountsHidden ? "Show amounts" : "Hide amounts"}">
           ${amountsHidden
             ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.1A10.9 10.9 0 0 1 12 5c5 0 9 4 10 7a11.8 11.8 0 0 1-2.6 3.9M6.6 6.6C4.4 8 2.9 10 2 12c1 3 5 7 10 7a9.7 9.7 0 0 0 3.4-.6"/></svg>`
             : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12c1-3 5-7 10-7s9 4 10 7c-1 3-5 7-10 7S3 15 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`}
         </button>
-        <button class="cold-inline-link" type="button" data-portfolio-select-toggle ${!selecting && transactions.length === 0 ? "disabled" : ""}>${selecting ? "Done" : "Select"}</button>
         <button class="kaposts-icon-button" type="button" data-portfolio-refresh title="Refresh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
         </button>
@@ -1710,11 +1841,18 @@ function render() {
     ${insightCardsHtml(portfolio)}
 
     <div class="profile-card">
+      <!-- iOS PortfolioTransactionsView's section header: Select, + and import/export, or while
+           selecting the select-all check, the trash with its count, and Done. -->
       <div class="portfolio-tx-header">
-        <p class="profile-card-label">Transactions</p>
+        <p class="portfolio-card-heading">Transactions</p>
         <div class="portfolio-tx-header-actions">
-          <button class="cold-inline-link" type="button" data-portfolio-add-menu>+ Add</button>
-          <button class="cold-inline-link" type="button" data-portfolio-io-menu>Import/Export</button>
+          ${selecting ? `
+            <button class="portfolio-tx-icon-btn" type="button" data-portfolio-select-all aria-label="${allPicked ? "Deselect all" : "Select all"}" title="${allPicked ? "Deselect all" : "Select all"}">${allPicked ? CHECK_FILLED_SVG : CHECK_OUTLINE_SVG}</button>
+            <button class="portfolio-tx-icon-btn portfolio-select-delete" type="button" data-portfolio-delete-selected aria-label="Delete selected" title="Delete selected" ${selectedTxIds.size === 0 ? "disabled" : ""}>${TRASH_SVG}<span data-portfolio-delete-count>${selectedTxIds.size || ""}</span></button>
+            <button class="cold-inline-link" type="button" data-portfolio-select-toggle>Done</button>` : `
+            <button class="cold-inline-link" type="button" data-portfolio-select-toggle ${transactions.length === 0 ? "disabled" : ""}>Select</button>
+            <button class="portfolio-tx-icon-btn" type="button" data-portfolio-add-menu aria-label="Add to this portfolio" title="Add to this portfolio">${PLUS_FILLED_SVG}</button>
+            <button class="portfolio-tx-icon-btn" type="button" data-portfolio-io-menu aria-label="Import or export" title="Import or export">${IMPORT_EXPORT_SVG}</button>`}
         </div>
       </div>
       ${transactions.length === 0
@@ -1724,93 +1862,96 @@ function render() {
     ${loading ? `<div class="portfolio-chart-empty">Refreshing…</div>` : ""}`;
 }
 
+/// iOS ChartRangeSummary: the span's two dates ("Oct 1, 2026 → Oct 9, 2026", times when both
+/// ends are the same day), then the return across it.
+function rangeSummaryHtml(a, b, valueText) {
+  const sameDay = new Date(a[0]).toDateString() === new Date(b[0]).toDateString();
+  const dateOf = (ts) => new Date(ts).toLocaleString(undefined, sameDay
+    ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", year: "numeric" });
+  const delta = b[1] - a[1];
+  const up = delta >= 0;
+  const percent = a[1] !== 0 ? (delta / Math.abs(a[1])) * 100 : null;
+  return `
+    <div class="portfolio-range-dates">${deps.escapeHtml(dateOf(a[0]))} → ${deps.escapeHtml(dateOf(b[0]))}</div>
+    <div class="portfolio-range-change ${up ? "gain" : "loss"}">${up ? "↗" : "↘"}${percent !== null ? ` <strong>${Math.abs(percent).toFixed(2)}%</strong>` : ""} (${up ? "+" : "-"}${deps.escapeHtml(valueText(Math.abs(delta)))})</div>`;
+}
+
+/// One chart screen's live readout: a scrubbed point puts its date and value up and hides the
+/// range's change; a dragged span shows its summary above the big number instead (iOS
+/// KasPriceChartScreen / PortfolioValueChartScreen / HashrateChartScreen headers).
+function wireChartReadout({ chart, points, dateAttr, valueAttr, changeAttr, current, valueText, dateOptions }) {
+  const wrap = rootEl.querySelector(`[data-portfolio-chart="${chart}"]`);
+  const el = (attr) => (attr ? rootEl.querySelector(`[${attr}]`) : null);
+  const summary = () => rootEl.querySelector("[data-portfolio-range-summary]");
+  const reset = () => {
+    const date = el(dateAttr), value = el(valueAttr), change = el(changeAttr), span = summary();
+    if (date) date.hidden = true;
+    if (span) span.hidden = true;
+    if (value) value.textContent = current();
+    if (change) change.style.visibility = "";
+  };
+  attachScrub(wrap, points, ([ts, v]) => {
+    const date = el(dateAttr), value = el(valueAttr), change = el(changeAttr), span = summary();
+    if (span) span.hidden = true;
+    if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, dateOptions); }
+    if (value) value.textContent = valueText(v);
+    // Hidden rather than removed: the range's change under a past value would read as that
+    // point's own move, and collapsing the row would shift the chart under the pointer.
+    if (change) change.style.visibility = "hidden";
+  }, reset, (a, b) => {
+    const date = el(dateAttr), value = el(valueAttr), change = el(changeAttr), span = summary();
+    if (date) date.hidden = true;
+    if (value) value.textContent = current();
+    if (change) change.style.visibility = "hidden";
+    if (span) { span.hidden = false; span.innerHTML = rangeSummaryHtml(a, b, valueText); }
+  });
+}
+
 function wireScrubbing() {
-  // Price screen: scrubbing shows the point's date + price and hides the 24h badge. The Kaspa
-  // logo + name stay put (they're separate elements the scrub never touches), matching iOS.
+  const withTime = { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" };
+  const dateOnly = { month: "short", day: "numeric", year: "numeric" };
   if (view === "price") {
-    const wrap = rootEl.querySelector('[data-portfolio-chart="price"]');
     // The chart, the big number and the scrub read the same series, so they can never disagree.
     const inPair = pairHistory();
-    const fmtPoint = (v) => (inPair ? fmtPairAmount(v, { perKas: true }) : fmtPrice(v));
-    attachScrub(wrap, inPair || history, ([ts, p]) => {
-      const date = rootEl.querySelector("[data-portfolio-price-date]");
-      const value = rootEl.querySelector("[data-portfolio-price-value]");
-      const change = rootEl.querySelector("[data-portfolio-price-24h]");
-      if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
-      if (value) value.textContent = fmtPoint(p);
-      if (change) change.style.visibility = "hidden";
-    }, () => {
-      const date = rootEl.querySelector("[data-portfolio-price-date]");
-      const value = rootEl.querySelector("[data-portfolio-price-value]");
-      const change = rootEl.querySelector("[data-portfolio-price-24h]");
-      if (date) date.hidden = true;
-      if (value) value.textContent = inPair ? fmtPairAmount(pairSeries.latest ?? inPair[inPair.length - 1][1], { perKas: true }) : (price ? fmtPrice(price.price) : "--");
-      if (change) change.style.visibility = "";
-    }, (a, b) => {
-      const reading = spanReadout(a, b, (delta) => fmtPoint(Math.abs(delta)));
-      const date = rootEl.querySelector("[data-portfolio-price-date]");
-      const value = rootEl.querySelector("[data-portfolio-price-value]");
-      const change = rootEl.querySelector("[data-portfolio-price-24h]");
-      if (date) { date.hidden = false; date.textContent = reading.dates; }
-      if (value) { value.textContent = reading.change; value.classList.toggle("gain", reading.gain); value.classList.toggle("loss", !reading.gain); }
-      if (change) change.style.visibility = "hidden";
+    const flipped = pairActive && pairUnit();
+    wireChartReadout({
+      chart: "price",
+      points: flipped ? (inPair || []) : history,
+      dateAttr: "data-portfolio-price-date",
+      valueAttr: "data-portfolio-price-value",
+      changeAttr: "data-portfolio-price-24h",
+      current: () => priceBigNumber(inPair),
+      valueText: (v) => (flipped ? fmtPairAmount(v, { perKas: true }) : fmtPrice(v)),
+      dateOptions: withTime,
     });
     return;
   }
-
-  // Hashrate screen: scrubbing shows the point's date and what the network was doing then.
   if (view === "hashrate") {
     const stats = peekNetworkStats();
-    const wrap = rootEl.querySelector('[data-portfolio-chart="hashrate"]');
-    attachScrub(wrap, hashrateVisiblePoints(stats), ([ts, hs]) => {
-      const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
-      const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
-      if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
-      if (value) value.textContent = formatHashrate(hs);
-    }, () => {
-      const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
-      const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
-      if (date) date.hidden = true;
-      if (value) value.textContent = stats ? formatHashrate(stats.currentHashrate) : "--";
-    }, (a, b) => {
-      const reading = spanReadout(a, b, (delta) => formatHashrate(Math.abs(delta)));
-      const date = rootEl.querySelector("[data-portfolio-hashrate-date]");
-      const value = rootEl.querySelector("[data-portfolio-hashrate-value]");
-      if (date) { date.hidden = false; date.textContent = reading.dates; }
-      if (value) value.textContent = reading.change;
+    wireChartReadout({
+      chart: "hashrate",
+      points: hashrateVisiblePoints(stats),
+      dateAttr: "data-portfolio-hashrate-date",
+      valueAttr: "data-portfolio-hashrate-value",
+      current: () => (stats ? formatHashrate(stats.currentHashrate) : "--"),
+      valueText: (v) => formatHashrate(v),
+      dateOptions: dateOnly,
     });
     return;
   }
-
-  // Value screen: scrubbing shows the point's date + value; the "Portfolio Value" label stays.
   if (view === "value") {
-    const wrap = rootEl.querySelector('[data-portfolio-chart="value"]');
-    const fmtValue = (v) => (pairHistory() ? fmtPairAmount(v) : fmtFiat(v));
-    attachScrub(wrap, valuePoints, ([ts, v]) => {
-      const date = rootEl.querySelector("[data-portfolio-value-date]");
-      const readout = rootEl.querySelector("[data-portfolio-value-readout]");
-      const change = rootEl.querySelector("[data-portfolio-value-change]");
-      if (date) { date.hidden = false; date.textContent = new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
-      if (readout) readout.textContent = fmtValue(v);
-      // Hidden rather than removed: the range's change under a past value would read as that
-      // point's own move, and collapsing the row would shift the chart under the finger.
-      if (change) change.style.visibility = "hidden";
-    }, () => {
-      const date = rootEl.querySelector("[data-portfolio-value-date]");
-      const readout = rootEl.querySelector("[data-portfolio-value-readout]");
-      const change = rootEl.querySelector("[data-portfolio-value-change]");
-      if (date) date.hidden = true;
-      if (readout) readout.textContent = fmtValue(valuePoints.length ? valuePoints[valuePoints.length - 1][1] : 0);
-      if (change) change.style.visibility = "";
-    }, (a, b) => {
-      // The amount is masked with the eye on; the percent still reads.
-      const reading = spanReadout(a, b, (delta) => fmtValue(Math.abs(delta)));
-      const date = rootEl.querySelector("[data-portfolio-value-date]");
-      const readout = rootEl.querySelector("[data-portfolio-value-readout]");
-      const change = rootEl.querySelector("[data-portfolio-value-change]");
-      if (date) { date.hidden = false; date.textContent = reading.dates; }
-      if (readout) readout.textContent = reading.change;
-      if (change) change.style.visibility = "hidden";
+    const readout = rootEl.querySelector("[data-portfolio-value-readout]");
+    const shown = readout?.textContent || "--";
+    wireChartReadout({
+      chart: "value",
+      points: valuePoints,
+      dateAttr: "data-portfolio-value-date",
+      valueAttr: "data-portfolio-value-readout",
+      changeAttr: "data-portfolio-value-change",
+      current: () => shown,
+      valueText: chartMoney,
+      dateOptions: dateOnly,
     });
   }
 }
@@ -1857,7 +1998,7 @@ function openTxEditor(txId) {
   modalsEl.querySelector("[data-portfolio-editor-date]").value = toDatetimeLocal(tx?.timestamp ?? Date.now());
   const notes = isPricePending(tx?.notes) ? "" : (tx?.notes || "");
   modalsEl.querySelector("[data-portfolio-editor-notes]").value = notes;
-  modalsEl.querySelectorAll("[data-portfolio-editor-symbol]").forEach((el) => { el.textContent = currencySymbol(); });
+  modalsEl.querySelectorAll("[data-portfolio-editor-symbol]").forEach((el) => { el.textContent = symbolFor(currencyCode()); });
   modalsEl.querySelector("[data-portfolio-editor-delete]").hidden = !tx;
   modalsEl.querySelector("[data-portfolio-editor-save]").textContent = tx ? "Save" : "Add";
   setEditorType(tx ? txKind(tx) : "buy");
@@ -1890,7 +2031,8 @@ function updateEditorHint() {
   const total = modalsEl.querySelector("[data-portfolio-editor-total]");
   const save = modalsEl.querySelector("[data-portfolio-editor-save]");
   if (label) label.textContent = v.type === "buy" ? "Total Spent" : v.type === "sell" ? "Total Received" : "Value at the Time";
-  if (total) total.textContent = fmtFiat(v.total ?? 0);
+  // Not masked by the eye - it is the figure being typed (iOS editor's Total).
+  if (total) total.textContent = currencyText(v.total ?? 0);
   if (save) save.disabled = !v.valid;
 }
 
@@ -2181,8 +2323,10 @@ function looksLikeRawAddress(input) {
   return lower.startsWith("kaspa:") || lower.startsWith("kaspatest:");
 }
 
+/// A checksum-valid address of the running network (iOS KaspaAddress.isValid).
 function isValidRawAddress(input) {
-  return new RegExp(`^${ADDRESS_HRP}:[a-z0-9]{50,90}$`).test(String(input || "").toLowerCase());
+  const text = String(input || "").trim();
+  return text.toLowerCase().startsWith(`${ADDRESS_HRP}:`) && isValidKaspaAddress(text);
 }
 
 function shortenAddress(address) {
@@ -2218,16 +2362,17 @@ function syncImportModal() {
   status.style.color = "";
   // Who the address resolves to (iOS ac0ef19): the create-chat card under the status.
   let cardHost = modalsEl.querySelector("[data-portfolio-import-card]");
-  if (!cardHost) { cardHost = document.createElement("div"); cardHost.dataset.portfolioImportCard = ""; status.insertAdjacentElement("afterend", cardHost); }
+  // iOS order: the field, who it resolves to, the status line, then Other domains.
+  if (!cardHost) { cardHost = document.createElement("div"); cardHost.dataset.portfolioImportCard = ""; status.insertAdjacentElement("beforebegin", cardHost); }
   const showCard = (address, domain) => { cardHost.innerHTML = address ? (deps.addressCardHtml?.(address, { domain, onLoaded: () => syncImportModal() }) || "") : ""; };
   showCard(null);
   // Other domains under the resolved name (iOS 6ac48a7): the same name on the other services.
   let othersHost = modalsEl.querySelector("[data-portfolio-import-other-domains]");
-  if (!othersHost) { othersHost = document.createElement("div"); othersHost.dataset.portfolioImportOtherDomains = ""; cardHost.insertAdjacentElement("afterend", othersHost); }
+  if (!othersHost) { othersHost = document.createElement("div"); othersHost.dataset.portfolioImportOtherDomains = ""; status.insertAdjacentElement("afterend", othersHost); }
   othersHost.innerHTML = addressImport && !addressImport.resolving && input
     ? otherDomainsHtml({ resolutions: addressImport.nameResolutions || [], selectedTld: addressImport.selectedTld ?? null })
     : "";
-  if (addressImport?.resolving) { status.textContent = "Looking up domain…"; return; }
+  if (addressImport?.resolving) { status.textContent = "Looking up domain..."; return; }
   if (!input) { status.textContent = ""; return; }
   if (addressImport.resolvedAddress) {
     status.textContent = `Resolved: ${addressImport.resolvedDomain || ""} ${shortenAddress(addressImport.resolvedAddress)}`;
@@ -2372,10 +2517,7 @@ async function fetchTransactionsResumable(address, onProgress) {
 
     let page = null;
     for (let attempt = 0; attempt < PAGE_RETRY_DELAYS_MS.length; attempt += 1) {
-      if (PAGE_RETRY_DELAYS_MS[attempt] > 0) {
-        onProgress(`Fetching transactions… (retrying, ${all.length} so far)`);
-        await sleep(PAGE_RETRY_DELAYS_MS[attempt]);
-      }
+      if (PAGE_RETRY_DELAYS_MS[attempt] > 0) await sleep(PAGE_RETRY_DELAYS_MS[attempt]);
       try {
         const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
         if (!response.ok) continue;
@@ -2402,16 +2544,28 @@ async function fetchTransactionsResumable(address, onProgress) {
  *  is handed to the background backfill, so a CoinGecko rate limit can never cost the user the
  *  ledger data itself. Mirrors iOS: PortfolioAddressImporter.importAddress returns rows and
  *  PortfolioViewModel.importAddress persists them before kicking off startPriceBackfillIfNeeded. */
+/// Ends an address import the way iOS does (AddPortfolioAddressSheet.startImport): the sheet
+/// closes, then one toast says how it went.
+function finishAddressImport(message) {
+  if (addressImport) addressImport.busy = false;
+  closeAddressImportSheet();
+  if (message) deps.showToast?.(message);
+}
+
+function closeAddressImportSheet() {
+  addressImport = null;
+  knsResolveSeq += 1; // any in-flight KNS lookup belongs to a sheet that's gone
+  closeActiveScanner(); // and so does any camera it opened
+  const modal = modalsEl?.querySelector("[data-portfolio-import-modal]");
+  if (modal) modal.hidden = true;
+}
+
 async function runAddressImport(addressRaw) {
   const address = String(addressRaw || "").trim();
-  try {
-    validateMainnetAddress(address);
-    // validateMainnetAddress only checks the prefix — also require a plausible bech32 payload
-    // so obvious typos fail here instead of as an opaque Kaspa API error. KNS domains never
-    // reach this check: the field resolves them to an address before Import is enabled.
-    if (!new RegExp(`^${ADDRESS_HRP}:[a-z0-9]{50,90}$`).test(address)) throw new Error("bad payload");
-  } catch {
-    setImportProgress(`That doesn't look like a valid ${ADDRESS_HRP === "kaspa" ? "mainnet" : "testnet"} Kaspa address.`);
+  // KNS domains never reach this check: the field resolves them to an address before Import is
+  // enabled.
+  if (!isValidRawAddress(address)) {
+    finishAddressImport("That doesn't look like a valid Kaspa address.");
     return;
   }
   addressImport.busy = true;
@@ -2460,7 +2614,7 @@ async function runAddressImport(addressRaw) {
       });
     }
     if (!candidates.length && !feeCandidates.length) {
-      setImportProgress(historyResult.complete
+      finishAddressImport(historyResult.complete
         ? "No new transactions found for this address."
         : "Couldn't fetch this address's transactions. Check your connection and try again.");
       return;
@@ -2509,18 +2663,18 @@ async function runAddressImport(addressRaw) {
     if (feeCandidates.length) saveFees();
     render();
 
-    setImportProgress(
-      `Imported ${candidates.length} transaction${candidates.length === 1 ? "" : "s"}.`
-      + (feeCandidates.length ? ` Network fees counted: ${feeCandidates.length}.` : "")
-      + (historyResult.complete ? "" : " Some pages couldn't be fetched, so this is partial - run it again later to pick up the rest.")
-      + (missingPriceCount ? ` Prices for ${missingPriceCount} of them are still loading and will fill in automatically.` : ""),
+    // iOS PortfolioTransactionsView's import toast, in its order.
+    finishAddressImport(
+      `Imported ${candidates.length} transaction${candidates.length === 1 ? "" : "s"}`
+      + (feeCandidates.length ? `. Network fees counted: ${feeCandidates.length}` : "")
+      + (missingPriceCount ? `. Prices for ${missingPriceCount} are still loading and will fill in automatically` : "")
+      + (historyResult.complete ? "" : ". Some history couldn't be fetched, re-add this address later to import the rest"),
     );
     startPriceBackfillIfNeeded();
-  } catch (error) {
-    setImportProgress(`Import failed: ${error.message}`);
+  } catch {
+    finishAddressImport("Import failed.");
   } finally {
-    if (addressImport) addressImport.busy = false;
-    syncImportModal();
+    if (addressImport) { addressImport.busy = false; syncImportModal(); }
   }
 }
 
@@ -2655,7 +2809,7 @@ function buildModals() {
           </label>
           <label class="portfolio-editor-field">
             <span>Notes (optional)</span>
-            <input type="text" maxlength="120" placeholder="Notes (optional)" data-portfolio-editor-notes />
+            <textarea rows="2" maxlength="120" placeholder="Notes (optional)" data-portfolio-editor-notes></textarea>
           </label>
           <div class="portfolio-editor-field portfolio-editor-total"><span data-portfolio-editor-total-label>Total Spent</span><strong data-portfolio-editor-total>$0.00</strong></div>
           <button class="danger-button subtle full" type="button" data-portfolio-editor-delete hidden>Delete Transaction</button>
@@ -2687,6 +2841,10 @@ function buildModals() {
       <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Move to Portfolio" data-portfolio-move-body></div>
     </div>
 
+    <div class="modal-backdrop" data-portfolio-pair-modal hidden>
+      <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Compare Against" data-portfolio-pair-body></div>
+    </div>
+
     <div class="modal-backdrop" data-portfolio-reorder-modal hidden>
       <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Reorder Portfolios" data-portfolio-reorder-body></div>
     </div>
@@ -2694,20 +2852,17 @@ function buildModals() {
     <div class="modal-backdrop" data-portfolio-import-modal hidden>
       <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Add Kaspa Address">
         <div class="modal-header">
-          <div><p class="modal-kicker">Portfolio</p><h2 data-portfolio-import-title>Add Kaspa Address</h2></div>
+          <div><h2 data-portfolio-import-title>Add Kaspa Address</h2></div>
           <button class="modal-close" type="button" data-portfolio-import-close aria-label="Close">×</button>
         </div>
         <div class="portfolio-editor-body">
-          <p class="portfolio-import-note" data-portfolio-import-manual>Enter a Kaspa address or a domain like name.kachat (.kachat names are looked up first). Imports that address's on-chain history: every received transaction becomes a buy and every sent one a sell, priced at that day's KAS price. Re-running later only adds new activity.</p>
-          <label class="portfolio-editor-field" data-portfolio-import-manual>
-            <span>Kaspa Address or KNS Domain</span>
-            <input type="text" placeholder="kaspa:qr… or domain" data-portfolio-import-address spellcheck="false" autocomplete="off" autocapitalize="off" />
-          </label>
+          <input class="field-input portfolio-import-address" type="text" placeholder="kaspa:qr... or domain" aria-label="Kaspa address or domain" data-portfolio-import-address data-portfolio-import-manual spellcheck="false" autocomplete="off" autocapitalize="off" />
           <p class="portfolio-editor-hint" data-portfolio-import-status data-portfolio-import-manual></p>
-          <div class="portfolio-tx-header-actions" data-portfolio-import-manual>
+          <div class="portfolio-import-buttons" data-portfolio-import-manual>
             <button class="cold-inline-link" type="button" data-portfolio-import-paste>Paste</button>
             <button class="cold-inline-link" type="button" data-portfolio-import-scan>Scan QR</button>
           </div>
+          <p class="portfolio-import-note" data-portfolio-import-manual>Enter a Kaspa address or a domain like name.kachat (.kachat names are looked up first). Every received transaction on this address becomes a buy, every sent transaction becomes a sell, priced at that day's historical KAS price. Re-adding the same address later only imports transactions found since the last import.</p>
           <p class="portfolio-import-progress" data-portfolio-import-progress></p>
         </div>
         <div class="modal-actions" data-portfolio-import-manual>
@@ -2716,7 +2871,7 @@ function buildModals() {
       </div>
     </div>
 
-    <input type="file" accept=".csv,text/csv" data-portfolio-csv-input hidden />`;
+    <input type="file" accept=".csv,.txt,text/csv,text/plain" data-portfolio-csv-input hidden />`;
   document.body.appendChild(modalsEl);
 
   modalsEl.addEventListener("click", async (event) => {
@@ -2747,6 +2902,12 @@ function buildModals() {
       else if (which === "import") modalsEl.querySelector("[data-portfolio-csv-input]")?.click();
       else if (which === "nc-export") exportToNextcloud();
       else if (which === "nc-import") importFromNextcloud();
+      return;
+    }
+
+    // --- Compare Against sheet ---
+    if (event.target.closest("[data-portfolio-pair-close]")) {
+      modalsEl.querySelector("[data-portfolio-pair-modal]").hidden = true;
       return;
     }
 
@@ -2847,12 +3008,7 @@ function buildModals() {
       return;
     }
     if (event.target.closest("[data-portfolio-import-close]")) {
-      if (!addressImport?.busy) {
-        addressImport = null;
-        knsResolveSeq += 1; // any in-flight KNS lookup belongs to a sheet that's gone
-        closeActiveScanner(); // and so does any camera it opened
-        modalsEl.querySelector("[data-portfolio-import-modal]").hidden = true;
-      }
+      if (!addressImport?.busy) closeAddressImportSheet();
       return;
     }
     // A pick under Other domains imports that service's address instead (iOS 6ac48a7).
@@ -2881,7 +3037,23 @@ function buildModals() {
     }
   });
 
+  modalsEl.addEventListener("change", (event) => {
+    const toggle = event.target.closest("[data-portfolio-pair-toggle]");
+    if (!toggle) return;
+    setChartPair(toggle.checked ? toggle.dataset.portfolioPairToggle : null);
+    renderPairSheet();
+  });
+
   modalsEl.addEventListener("input", (event) => {
+    // A name can't be saved blank (iOS disables Create / Save while the field is empty).
+    if (event.target.matches("[data-portfolio-name-input]")) {
+      const ok = modalsEl.querySelector("[data-portfolio-name-ok]");
+      if (ok) ok.disabled = !event.target.value.trim();
+    }
+    if (event.target.matches("[data-portfolio-card-name]")) {
+      const save = modalsEl.querySelector("[data-portfolio-card-rename-save]");
+      if (save) save.disabled = !event.target.value.trim();
+    }
     if (event.target.closest("[data-portfolio-editor-amount], [data-portfolio-editor-price], [data-portfolio-editor-fee]")) updateEditorHint();
     if (event.target.closest("[data-portfolio-import-address]")) handleImportInputChange(event.target.value);
   });
@@ -3175,7 +3347,7 @@ export function initPortfolio(dependencies) {
         return;
       }
       const derived = typingKas ? amount * rate : amount / rate;
-      const text = groupedFromCanonical(typingKas ? derived.toFixed(2) : derived.toFixed(8).replace(/0+$/, "").replace(/\.$/, ""));
+      const text = converterFormat(derived);
       if (other) other.value = text;
       if (typingKas) converterFiat = text; else converterKas = text;
       return;
@@ -3208,6 +3380,10 @@ export function initPortfolio(dependencies) {
   // does exactly this in PortfolioViewModel.handleSettingsChanged.
   document.addEventListener("kachat:currency-changed", () => {
     syncCurrencyState();
+    // Bitcoin flips to dollars when the app itself counts in bitcoin (iOS alternateUnit), so the
+    // pair's series has to follow the currency too.
+    pairSeries = null;
+    if (pairActive && pairUnit()) loadPairSeries().then(() => render()).catch(() => {});
     const fiatLabel = modalsEl?.querySelector("[data-portfolio-editor-fiat-label]");
     if (fiatLabel) fiatLabel.textContent = `Total Value (${currencyCode().toUpperCase()})`;
     render();
@@ -3233,11 +3409,7 @@ export function initPortfolio(dependencies) {
     }
     if (event.target.closest("[data-portfolio-add]")) {
       if (state.portfolios.length >= MAX_PORTFOLIOS) return;
-      const name = await namePromptOverlay({
-        title: "New Portfolio",
-        label: "Name",
-        initial: `Portfolio ${state.portfolios.length + 1}`,
-      });
+      const name = await namePromptOverlay({ title: "New Portfolio", confirmLabel: "Create" });
       if (name?.trim()) {
         const p = { id: nowId(), name: name.trim(), createdAt: Date.now(), transactions: [] };
         state.portfolios.push(p);
@@ -3276,7 +3448,7 @@ export function initPortfolio(dependencies) {
     const gear = event.target.closest("[data-portfolio-pair-gear]");
     if (gear) { openPairPicker(); return; }
     const flip = event.target.closest("[data-portfolio-pair-flip]");
-    if (flip && chartPair) {
+    if (flip && pairUnit()) {
       pairActive = !pairActive;
       if (pairActive) loadPairSeries().then(() => render()).catch(() => {});
       render();
@@ -3284,10 +3456,10 @@ export function initPortfolio(dependencies) {
     }
     const range = event.target.closest("[data-portfolio-range]");
     if (range) {
-      rangeDays = Number(range.dataset.portfolioRange) || 7;
+      rangeDays = Number(range.dataset.portfolioRange) || 0;
       render();       // repaints the tapped range from cache right away, even mid-refresh
       refreshData();  // no-op while a refresh is in flight; that one finishes into its own range
-      if (pairActive && chartPair) loadPairSeries().then(() => render()).catch(() => {});
+      if (pairActive && pairUnit()) loadPairSeries().then(() => render()).catch(() => {});
       return;
     }
 
@@ -3316,7 +3488,7 @@ export function initPortfolio(dependencies) {
       const count = selectedTxIds.size;
       if (count === 0) return;
       if (await confirmOverlay({
-        title: `Delete ${count} transaction${count === 1 ? "" : "s"}?`,
+        title: `Delete ${count} Transaction${count === 1 ? "" : "s"}?`,
         message: "This can't be undone.",
       })) {
         const portfolio = activePortfolio();
@@ -3365,7 +3537,7 @@ export function initPortfolio(dependencies) {
     }
     const txDelete = event.target.closest("[data-portfolio-tx-delete]");
     if (txDelete) {
-      if (await confirmOverlay({ title: "Delete transaction?", message: "This removes it from the portfolio. It cannot be undone." })) {
+      if (await confirmOverlay({ title: "Delete Transaction?", message: "This can't be undone." })) {
         const portfolio = activePortfolio();
         portfolio.transactions = (portfolio.transactions || []).filter((t) => t.id !== txDelete.dataset.portfolioTxDelete);
         saveState(); render();
