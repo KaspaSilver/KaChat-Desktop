@@ -17,15 +17,34 @@ KNOWN
   sha256 kaspa.js:      f481d7a0df21fc2557809c34891af2f2ecf4e5d69889591665c8937734db4075
 
 UNKNOWN (not recoverable from the repo or the binary)
-  rusty-kaspa commit / tag:  UNKNOWN - the zip was a "master" snapshot and was deleted; no commit hash
-                             is embedded. 2.0.1 narrows it to the 2.0.x line on master.
+  rusty-kaspa commit / tag:  not embedded (the zip was a "master" snapshot and was deleted); pinned by
+                             rebuild to the 98a4ccd8..7de0d4ac window - see PINNED SOURCE below.
   rustc release number:      UNKNOWN - only the commit hash above is known.
-  wasm-pack version:         UNKNOWN
-  reproducibility:           NOT verified - nobody has rebuilt this binary and matched the checksum.
+  wasm-pack version:         not recorded; 0.15.0 (binaryen 117) is the closest match found
+  reproducibility:           NOT byte-for-byte: the pinned rebuild differs by 92 bytes of code layout
+                             (see PINNED SOURCE below).
 
-TO CLOSE THE GAP
-  Rebuild from a pinned rusty-kaspa tag/commit, record it here with the wasm-pack and rustc
-  versions, and update kaspa/SHA256SUMS in the same commit (bash tools/check-wasm.sh --update).
+PINNED SOURCE (2026-10-16, audit EXT-014 / DSK-005: rebuilt in Docker, tools/build-kaspa-wasm.sh)
+  rusty-kaspa:  kaspanet/rusty-kaspa master between 98a4ccd8d2 (2026-06-24) and
+                7de0d4ac4013b2081f3c3c924109a8f2e7824432 (2026-07-27, the master head the day before
+                c60c96d) - pinned to 7de0d4ac. Evidence: the unpatched kaspa.js glue rebuilt from
+                these commits is byte-identical to the committed original (f481d7a0...), which pins
+                the exported API (the zk SDK bindings first appear on 2026-06-23; a8951cd406's glue
+                already differs), and every commit in that window builds the same kaspa_bg.wasm.
+  rustc:        1.95.0 (59807616e 2026-04-14), the embedded hash; toolchain dir
+                stable-x86_64-unknown-linux-gnu under /home/shudan, recreated in the container
+  wasm-pack:    0.15.0 -> wasm-bindgen 0.2.100, wasm-opt binaryen version_117 (-O --enable-bulk-memory)
+  rebuild:      kaspa_bg.wasm 98b507e78131ffd7eae3b49590b76c158a1b209399f58c3930f7529bfca40718
+                (11,705,039 bytes) vs committed c1768cd4... (11,704,947): imports, data (every
+                string and path), memory, globals and producers are identical; only the function
+                order and a few functions' code differ (92 bytes). Not the source (above), not
+                binaryen (116-123 tried on the same input, none matches) and not the checkout's
+                directory name; Cargo's crate hashes are what move (a build-only dependency change
+                alone gives another binary), so something in the original builder's unrecorded
+                setup differed.
+  decision:     the committed binary stays as is (owner, 2026-10-16: the extension targets the
+                Chrome Web Store / Brave, not Firefox Add-ons). Its source is pinned above and a
+                one-command rebuild (Docker) gives the same SDK with the same interface.
 
 Kasia cipher (cipher/) for comparison: built from vendor/kasia-cipher (in this repo; Cargo.lock pins
 rusty-kaspa v1.0.0 = eb71df4d284593fccd1342094c37edc8c000da85 for kaspa-addresses / kaspa-wallet-keys)

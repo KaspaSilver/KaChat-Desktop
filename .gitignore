@@ -11,3 +11,4 @@ vendor/kasia-cipher/target/
 .env
 .env.local
 .env.*.local
+.kaspa-wasm-build/
