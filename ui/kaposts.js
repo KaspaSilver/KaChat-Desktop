@@ -1621,8 +1621,14 @@ function quoteCardHeadHtml(quoted, { withTime = false } = {}) {
 // closes, then bars with percentages, your choice marked, the vote count and the time left.
 // When the post was made (iOS b31ff59): the full date and time, in its own row under the
 // actions, in the browser's locale. The name line carries only Follow / Following.
+// iOS DateFormatter (.medium date, .short time): in English that reads "Oct 17, 2026 at 7:54 AM",
+// where the browser's Intl writes a comma; other languages keep Intl's own joining.
 function postTimestamp(timestampMs) {
-  return new Date(Number(timestampMs) || Date.now()).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const date = new Date(Number(timestampMs) || Date.now());
+  if (/^en\b/i.test(navigator.language || "en")) {
+    return `${date.toLocaleDateString([], { dateStyle: "medium" })} at ${date.toLocaleTimeString([], { timeStyle: "short" })}`;
+  }
+  return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 function pollCardHtml(post) {

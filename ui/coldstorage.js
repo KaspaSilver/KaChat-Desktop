@@ -349,7 +349,7 @@ function renderList() {
     </div>
     ${accounts.length === 0
       ? `<div class="cold-empty">
-           <span class="cold-empty-icon">${LOCK_ICON}</span>
+           <span class="cold-empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8 19.6 5.7v5.8c0 4.6-3.2 8.3-7.6 9.7-4.4-1.4-7.6-5.1-7.6-9.7V5.7z"/><rect class="fill" x="9" y="10.8" width="6" height="4.9" rx=".9"/><path d="M10.2 10.8V9.3a1.8 1.8 0 0 1 3.6 0v1.5"/></svg></span>
            <strong>No Cold Storage Accounts</strong>
            <p>Scan or paste a kpub exported from your KasSigner device to watch its balance.</p>
          </div>`

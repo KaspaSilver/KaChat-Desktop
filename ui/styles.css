@@ -14234,3 +14234,108 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .diagnostics-export-note { flex: 0 0 100%; color: var(--muted); font-size: 15px; line-height: 1.35; text-align: left; }
 .settings-row-icon-red { color: var(--ios-red); }
 .danger-row .settings-row-copy strong { font-weight: 400; }
+/* Connection Status sheet (iOS inline title): title centred between the edges, no hairline. */
+.connection-overlay-header { position: relative; border-bottom: 0; box-shadow: none; justify-content: flex-end; }
+.connection-overlay-header .account-overlay-title { position: absolute; left: 72px; right: 72px; margin: 0; text-align: center; font-size: 17px; font-weight: 600; }
+.connection-status-value { font-weight: 400; color: var(--muted); }
+.node-choice-note-row { min-height: 0; padding-top: 10px; padding-bottom: 10px; }
+.node-choice-note-row small { font-size: 13px; margin: 0; }
+/* iOS 26 Form section headers everywhere: title case, semibold, secondary colour. */
+.settings-group-label { text-transform: none; letter-spacing: 0; font-size: 17px; font-weight: 600; padding-left: 16px; margin: 4px 0 10px; }
+.settings-menu-row .settings-row-copy { flex: 0 0 auto; white-space: nowrap; }
+.settings-menu-row .settings-menu-value { flex: 0 1 auto; min-width: 0; }
+[data-connection-last-sync] { color: var(--muted); }
+@media (max-width: 859px) {
+  /* iOS Portfolio: the eye sits in the toolbar's trailing glass circle (where Profile has its
+     bell); refreshing is pull-to-refresh there, the button stays here as the web's stand-in. */
+  [data-portfolio-root] [data-portfolio-eye] {
+    position: fixed; z-index: 301;
+    top: calc(10px + var(--safe-top, 0px)); right: calc(20px + var(--safe-right, 0px));
+    width: 40px; height: 40px; border-radius: 999px;
+    border: 1px solid var(--bar-separator, var(--line));
+    background: var(--fill-tertiary, rgba(255,255,255,.06));
+    color: var(--kaspa-ink);
+  }
+  [data-portfolio-root] [data-portfolio-eye] svg { width: 24px; height: 24px; }
+  /* The cards sit in an inset list: further in from the edges, with a section's gap between. */
+  [data-portfolio-root] > .portfolio-cards { padding-left: 16px; }
+  [data-portfolio-root] > .portfolio-hashrate-card { width: auto; box-sizing: border-box; }
+  [data-portfolio-root] > .portfolio-squares,
+  [data-portfolio-root] > .portfolio-hashrate-card,
+  [data-portfolio-root] > .portfolio-insights,
+  [data-portfolio-root] > .profile-card { margin-left: 12px; margin-right: 12px; }
+  [data-portfolio-root] > .portfolio-squares { margin-top: 30px; }
+  [data-portfolio-root] > .portfolio-hashrate-card,
+  [data-portfolio-root] > .portfolio-insights,
+  [data-portfolio-root] > .profile-card { margin-top: 26px; }
+  [data-portfolio-root] > .portfolio-insights { gap: 26px; }
+}
+/* iOS "Add" card: plus.circle.fill in the accent. */
+.portfolio-card-add-plus { width: 26px; height: 26px; border-radius: 999px; background: var(--kaspa); color: var(--bg-plain, #000); display: grid; place-items: center; font-size: 22px; font-weight: 500; line-height: 1; }
+@media (max-width: 859px) {
+  /* The app body already keeps the dock's strip clear (--dock-inset), so the screens' own 120px
+     tail only doubled it: Cold Storage's Paste kpub / Scan floated a dock-height above the dock
+     instead of resting on it as on iOS. */
+  .profile-screen { padding-bottom: 12px; }
+  /* iOS ColdStorageView empty state: lock.shield at 40pt, a headline and subheadline text;
+     the capsules are 17pt semibold. */
+  .cold-empty { padding-top: 64px; gap: 12px; }
+  .cold-empty strong { font-size: 17px; font-weight: 600; }
+  .cold-empty p { font-size: 15px; line-height: 1.35; }
+  .cold-capsule { font-size: 17px; font-weight: 600; padding: 15px 0; }
+}
+.cold-empty-icon svg { width: 46px; height: 46px; }
+.cold-empty-icon svg .fill { fill: var(--muted); stroke: none; }
+.kaposts-panel-done { display: none; }
+@media (max-width: 859px) {
+  /* iOS KaPostsView at phone size: the large "KaPosts" title, then the nine menu symbols spread
+     across the width in the label colour (each opens its own page, so none stays highlighted and
+     there is no Feed item - closing the page is the way back). */
+  .kaposts-rail { display: grid; grid-template-columns: repeat(9, 1fr); align-items: center; padding: 0 8px; border-bottom: 0; overflow: visible; }
+  .kaposts-rail > .kaposts-title { display: block; grid-column: 1 / -1; margin: 0 0 8px 8px; }
+  .kaposts-rail [data-kaposts-rail="feed"] { display: none; }
+  .kaposts-rail .kaposts-rail-item { min-width: 0; padding: 6px 0; justify-content: center; color: var(--text); background: none; border: 0; box-shadow: none; }
+  .kaposts-rail .kaposts-rail-item.active { color: var(--text); background: none; }
+  .kaposts-rail .kaposts-rail-item.active::after { display: none; }
+  .kaposts-rail .kaposts-rail-item svg { width: 26px; height: 26px; }
+  .kaposts-rail .kaposts-rail-item span:not(.kaposts-rail-badge) { display: none; }
+  /* A page from that menu covers the feed, as iOS's full-screen sheet does: no menu row, the
+     title centred and Done in a capsule on the right. */
+  .kaposts-screen:has(> .kaposts-content [data-kaposts-panel]:not([hidden])) > .kaposts-rail,
+  .kaposts-screen:has([data-kaposts-panel]:not([hidden])) > .kaposts-rail { display: none; }
+  [data-kaposts-panel] > .kaposts-thread-header { position: relative; justify-content: flex-end; min-height: 52px; border-bottom: 0; padding-right: 18px; }
+  [data-kaposts-panel] > .kaposts-thread-header [data-kaposts-panel-title] { position: absolute; left: 80px; right: 80px; text-align: center; font-size: 17px; font-weight: 600; }
+  [data-kaposts-panel] > .kaposts-thread-header [data-kaposts-panel-back] {
+    width: auto; height: 40px; padding: 0 18px; border-radius: 999px;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--fill-tertiary, rgba(255,255,255,.06));
+    color: var(--kaspa-ink); font-size: 17px;
+  }
+  [data-kaposts-panel] > .kaposts-thread-header [data-kaposts-panel-back] svg { display: none; }
+  [data-kaposts-panel] > .kaposts-thread-header .kaposts-panel-done { display: inline; }
+
+  /* Post cells at iOS's scale: the avatar near the edge, the text column wide, 17pt names,
+     20pt action symbols, and the time under the actions on the left. */
+  .kaposts-cell { padding-left: 4px; padding-right: 4px; }
+  .kaposts-cell .kaposts-cell-head .kaposts-follow { margin-left: 0; }
+  .kaposts-cell .kaposts-cell-head .kaposts-more { margin-left: auto; }
+  .kaposts-cell .kaposts-cell-name { min-width: 0; flex: 0 1 auto; }
+  .kaposts-cell .kaposts-cell-name { font-size: 17px; }
+  .kaposts-cell .kaposts-follow { font-size: 15px; }
+  .kaposts-cell .kaposts-actions { gap: 0; flex-wrap: nowrap; justify-content: space-between; max-width: 100%; }
+  .kaposts-cell .kaposts-actions > .kaposts-action { padding-left: 3px; padding-right: 3px; flex: 0 0 auto; }
+  .kaposts-cell .kaposts-action svg { width: 21px; height: 21px; }
+  .kaposts-cell .kaposts-action { font-size: 15px; }
+  .kaposts-cell .kaposts-cell-foot { justify-content: flex-start; }
+  .kaposts-cell .kaposts-cell-stamp { font-size: 15px; }
+  .kaposts-quote-embed, .kaposts-quote-embed > span:not(.kaposts-quote-head) { font-size: 17px; color: var(--text); }
+  .kaposts-quote-embed .kaposts-quote-head strong { font-size: 15px; }
+}
+/* iOS KaPosts Search: a capsule field with the magnifier inside, 17pt text, and a segmented
+   control whose selected half is a raised grey pill. */
+.kaposts-search-input {
+  border-radius: 999px; font-size: 17px; min-height: 46px; padding-left: 44px;
+  background: var(--fill-tertiary, rgba(255,255,255,.06)) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='m15.5 15.5 5 5'/%3E%3C/svg%3E") no-repeat 14px center / 20px 20px;
+}
+.kaposts-search-scope { border-radius: 999px; padding: 3px; }
+.kaposts-search-scope button { border-radius: 999px; font-size: 15px; font-weight: 500; color: var(--text); min-height: 34px; }
+.kaposts-search-scope button.active { background: color-mix(in srgb, var(--text) 26%, transparent); }

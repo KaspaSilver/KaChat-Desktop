@@ -10834,7 +10834,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 178;
+const APP_BUILD = 179;
 // "5.2 (176)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -13250,11 +13250,14 @@ function renderNodeChoice() {
     select.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join("");
     select.value = current;
   });
+  const currentLabel = options.find((o) => o.value === current)?.label || "";
+  document.querySelectorAll("[data-node-choice-current]").forEach((el) => { el.textContent = currentLabel; });
   // iOS: the note only when a specific node is chosen.
   document.querySelectorAll("[data-node-choice-note]").forEach((note) => {
     note.hidden = !custom;
     note.textContent = "Connected only to this node";
   });
+  document.querySelectorAll("[data-node-choice-note-row]").forEach((row) => { row.hidden = !custom; });
 }
 document.querySelectorAll("[data-node-choice]").forEach((select) => select.addEventListener("change", async (event) => {
   const quick = event.target.hasAttribute("data-node-choice-quick");
@@ -13558,6 +13561,14 @@ function renderConnectionStatus() {
   const connectedHost = primaryReady && connection.primaryEndpoint ? hostFromEndpoint(connection.primaryEndpoint) : "";
   if (primaryEl) primaryEl.textContent = connectedHost;
   if (nodeRow) nodeRow.hidden = !connectedHost;
+  // iOS "Protocol": the transport and whether it is encrypted.
+  const protocolEl = document.querySelector("[data-connection-protocol]");
+  const primaryUrl = String(connection.primaryEndpoint || registry.lastGoodEndpoint || "");
+  if (protocolEl) protocolEl.textContent = `wRPC (${/^ws:\/\//i.test(primaryUrl) ? "plaintext" : "secure"})`;
+  // iOS Actions footer: "Primary: host" whenever the pool has a primary endpoint.
+  const primaryFooter = document.querySelector("[data-connection-primary-footer]");
+  const primaryHost = hostFromEndpoint(primaryUrl);
+  if (primaryFooter) { primaryFooter.hidden = !primaryHost; primaryFooter.textContent = primaryHost ? `Primary: ${primaryHost}` : ""; }
 
   const lastGoodRecord = (registry.endpoints || []).find((entry) => entry.endpoint === (connection.primaryEndpoint || registry.lastGoodEndpoint));
   const latencyEl = document.querySelector("[data-connection-latency]");

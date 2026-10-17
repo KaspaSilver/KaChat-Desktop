@@ -640,6 +640,8 @@
             <div class="kaposts-thread-header">
               <button class="kaposts-icon-button" type="button" data-kaposts-panel-back aria-label="Back">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+                <!-- At phone width the page is iOS's full-screen sheet: centred title, Done on the right. -->
+                <span class="kaposts-panel-done">Done</span>
               </button>
               <strong data-kaposts-panel-title>Panel</strong>
             </div>
@@ -1457,7 +1459,7 @@
        the Kaspa Node picker (the same choices as Connection Settings). -->
   <div class="account-overlay" data-connection-overlay hidden role="dialog" aria-modal="true" aria-label="Connection Status">
     <div class="account-overlay-card">
-      <header class="account-overlay-header">
+      <header class="account-overlay-header connection-overlay-header">
         <h2 class="account-overlay-title">Connection Status</h2>
         <button class="settings-done-button" type="button" data-close-connection-overlay>Done</button>
       </header>
@@ -1468,6 +1470,11 @@
             <div class="settings-list-row settings-info-row">
               <span class="settings-row-copy"><strong>Status</strong></span>
               <span class="connection-status-value"><span class="connection-status-dot" data-connection-status-dot aria-hidden="true"></span><span data-connection-status-text>Connecting</span></span>
+            </div>
+            <!-- iOS: "Protocol  gRPC (secure)". The browser talks to nodes over wRPC. -->
+            <div class="settings-list-row settings-info-row">
+              <span class="settings-row-copy"><strong>Protocol</strong></span>
+              <span class="settings-row-value" data-connection-protocol>wRPC (secure)</span>
             </div>
             <div class="settings-list-row settings-info-row" data-connection-node-row hidden>
               <span class="settings-row-copy"><strong>Connected Node</strong></span>
@@ -1495,19 +1502,21 @@
         <section class="settings-group">
           <p class="settings-group-label">Actions</p>
           <div class="settings-list-card">
-            <button class="settings-list-row" type="button" data-connection-reconnect><span class="settings-row-copy"><strong>Reconnect</strong></span></button>
+            <button class="settings-list-row settings-action-row" type="button" data-connection-reconnect><span class="settings-row-copy"><strong>Reconnect</strong></span></button>
           </div>
+          <p class="settings-group-footer" data-connection-primary-footer hidden></p>
         </section>
 
         <section class="settings-group">
           <p class="settings-group-label">Kaspa Node</p>
           <div class="settings-list-card">
-            <div class="settings-page-form">
-              <label class="field-label compact">Kaspa Node
-                <select class="field-input" data-node-choice data-node-choice-quick></select>
-              </label>
-              <p class="field-hint accent" data-node-choice-note hidden>Connected only to this node</p>
-            </div>
+            <!-- iOS Picker("Kaspa Node") in menu style, then the note as its own row. -->
+            <label class="settings-list-row settings-menu-row">
+              <span class="settings-row-copy"><strong>Kaspa Node</strong></span>
+              <span class="settings-menu-value"><span data-node-choice-current></span><svg class="settings-menu-updown" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9.5 12 5.5l4 4M8 14.5l4 4 4-4"/></svg></span>
+              <select class="settings-menu-select" data-node-choice data-node-choice-quick aria-label="Kaspa Node"></select>
+            </label>
+            <div class="settings-list-row settings-info-row node-choice-note-row" data-node-choice-note-row hidden><small class="field-hint accent" data-node-choice-note>Connected only to this node</small></div>
           </div>
           <p class="settings-group-footer">Automatic Scan discovers and connects to the best available nodes. Choosing a specific node connects only to it, without falling back to others. Manage saved addresses in Settings &gt; Connection Settings &gt; IP Address Book.</p>
         </section>
