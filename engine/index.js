@@ -1685,7 +1685,7 @@ export class KaspaEngine {
     if (!this.address) throw new Error("Generate or import a wallet before payment sync.");
     // The decryptor reads the memo a payment carries in its payload (kchat:1:pay:), when it has one.
     const decryptMessage = this.privateKeyHex ? async (encryptedHex) => this.decryptKasiaMessage(encryptedHex) : null;
-    return syncIncomingPaymentsFromRest({ ...details, walletAddress: this.address, decryptMessage });
+    return syncIncomingPaymentsFromRest({ ...details, walletAddress: this.address, decryptMessage, log: (line) => this.log?.(line) });
   }
 
   async syncConversationFromIndexer(details) {

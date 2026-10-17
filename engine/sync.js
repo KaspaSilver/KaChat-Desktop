@@ -16,6 +16,7 @@ import {
 import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
 import { kasTextFromSompi } from "./amounts.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
+import { verifyRestTransactionSignatures } from "./payment-signatures.js";
 
 // Kept as a named export for callers, but the effective default now comes from
 // the configurable endpoint registry (Settings > Connectivity).
@@ -983,6 +984,77 @@ export async function syncConversationPreview({ conversationId, contact, walletA
 const paymentPageCache = new Map(); // url -> { at, promise }
 const PAYMENT_PAGE_TTL_MS = 4000;
 
+// --- Received-payment signature check (iOS 5806362, ChatService.verifyIncomingPaymentSignatures) ---
+// A payment read from the REST API is shown only once its signatures check out. One that cannot be
+// checked yet is HELD per wallet and read again by id on every payment sync for up to 7 days, then
+// given up (logged) - never shown unverified, never dropped on the first miss.
+const HELD_PAYMENTS_MAX_AGE_MS = 7 * 86_400_000;
+const heldPaymentsKey = (wallet) => `kachat-held-payments-v1:${String(wallet || "").toLowerCase()}`;
+function readHeldPayments(wallet) {
+  try { const parsed = JSON.parse(localStorage.getItem(heldPaymentsKey(wallet)) || "{}"); return parsed && typeof parsed === "object" ? parsed : {}; }
+  catch { return {}; }
+}
+function writeHeldPayments(wallet, held) {
+  try { localStorage.setItem(heldPaymentsKey(wallet), JSON.stringify(held)); } catch { /* storage full or blocked */ }
+}
+export function heldPaymentTxids(wallet, log = null) {
+  const held = readHeldPayments(wallet);
+  const now = Date.now();
+  let changed = false;
+  for (const [txid, since] of Object.entries(held)) {
+    if (now > Number(since) + HELD_PAYMENTS_MAX_AGE_MS) {
+      delete held[txid];
+      changed = true;
+      log?.(`Gave up on held payment ${txid.slice(0, 16)} - signatures still uncheckable after 7 days`);
+    }
+  }
+  if (changed) writeHeldPayments(wallet, held);
+  return Object.keys(held).sort().slice(0, 25);
+}
+function holdPayment(wallet, txid) {
+  const held = readHeldPayments(wallet);
+  const key = String(txid).toLowerCase();
+  if (held[key]) return;
+  held[key] = Date.now();
+  writeHeldPayments(wallet, held);
+}
+function releaseHeldPayment(wallet, txid) {
+  const held = readHeldPayments(wallet);
+  const key = String(txid).toLowerCase();
+  if (!(key in held)) return;
+  delete held[key];
+  writeHeldPayments(wallet, held);
+}
+
+// One sweep asks per contact, so the REST reads and the verdicts are shared for a few seconds.
+const restTxCache = new Map(); // url -> { at, promise }
+function fetchRestJsonCached(url) {
+  const cached = restTxCache.get(url);
+  if (cached && Date.now() - cached.at < 30_000) return cached.promise;
+  const promise = fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" })
+    .then((response) => (response.ok ? response.json() : null))
+    .catch(() => null);
+  restTxCache.set(url, { at: Date.now(), promise });
+  if (restTxCache.size > 400) restTxCache.delete(restTxCache.keys().next().value);
+  return promise;
+}
+/// The spent output of an input the REST API left unresolved, from its previous transaction.
+async function restSpentOutput(txid, index) {
+  const previous = await fetchRestJsonCached(`${getEndpoint("kaspaApi")}/transactions/${encodeURIComponent(txid)}?resolve_previous_outpoints=no`);
+  const outputs = Array.isArray(previous?.outputs) ? previous.outputs : [];
+  const spent = outputs.find((o) => Number(o?.index) === Number(index)) || outputs[Number(index)];
+  return spent ? { address: restOutputAddress(spent), amount: spent.amount ?? spent.value ?? null } : null;
+}
+const paymentVerdictCache = new Map(); // txid -> { at, promise }
+function verifyIncomingPayment(tx, txid) {
+  const cached = paymentVerdictCache.get(txid);
+  if (cached && Date.now() - cached.at < 30_000) return cached.promise;
+  const promise = verifyRestTransactionSignatures(tx, { resolveSpentOutput: restSpentOutput }).catch(() => "unknown");
+  paymentVerdictCache.set(txid, { at: Date.now(), promise });
+  if (paymentVerdictCache.size > 400) paymentVerdictCache.delete(paymentVerdictCache.keys().next().value);
+  return promise;
+}
+
 // The memo an incoming payment carries (iOS PaymentPayload.message), decrypted from its
 // kchat:1:pay: payload; "" when there is no payload, no memo, or it can't be read.
 async function paymentMemoFromPayload(payloadHex, decryptMessage) {
@@ -998,7 +1070,7 @@ async function paymentMemoFromPayload(payloadHex, decryptMessage) {
   }
 }
 
-export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null } = {}) {
+export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null, log = null } = {}) {
   if (!conversationId) throw new Error("conversationId is required for payment sync.");
   if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for payment sync.");
   if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing payments.");
@@ -1046,6 +1118,15 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     promise.catch(() => paymentPageCache.delete(pageKey));
     transactions = await promise;
   }
+  // Held payments are read again by id: the page may already be past them.
+  const present = new Set(transactions.map((tx) => String(tx?.transaction_id || tx?.transactionId || "").toLowerCase()));
+  const heldRows = [];
+  for (const txid of heldPaymentTxids(walletAddress, log)) {
+    if (present.has(txid) || known.has(txid)) continue;
+    const held = await fetchRestJsonCached(`${getEndpoint("kaspaApi")}/transactions/${encodeURIComponent(txid)}?inputs=true&outputs=true&resolve_previous_outpoints=light`);
+    if (held && typeof held === "object") heldRows.push(held);
+  }
+  transactions = [...transactions, ...heldRows];
   if (!transactions.length) return { messages: [], contractTxids: [], found: 0, nextCursor: Number(cursor || 0), note: "No new Kaspa payments." };
 
   const messages = [];
@@ -1072,6 +1153,19 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
       totalSompi += amountFromOutput(output);
     }
     if (totalSompi <= 0n) continue;
+
+    // Its signatures first (iOS 5806362): valid shows it, invalid drops it, unknown holds it.
+    const verdict = await verifyIncomingPayment(tx, txid);
+    if (verdict === "valid") releaseHeldPayment(walletAddress, txid);
+    else if (verdict === "invalid") {
+      releaseHeldPayment(walletAddress, txid);
+      log?.(`Skipping payment ${txid.slice(0, 16)} - its signature verification FAILED`);
+      continue;
+    } else {
+      holdPayment(walletAddress, txid);
+      log?.(`Payment ${txid.slice(0, 16)} held - its signatures can't be checked yet`);
+      continue;
+    }
 
     // Exact (BigInt) text: Number(totalSompi) / 1e8 loses sompi past 2^53.
     const amountKas = kasTextFromSompi(totalSompi);

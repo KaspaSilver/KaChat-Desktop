@@ -59,6 +59,7 @@ import {
 import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { KAS_UNIT } from "../engine/network.js";
+import { decodeAddress, AddressVersion } from "../engine/kachat-names/registry-state.js";
 import { kasTextFromSompi } from "../engine/amounts.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
 import {
@@ -2671,8 +2672,13 @@ function retryPost(post) {
           mentionedPubkeys: await mentionedPubkeysFor(post.text),
         });
         sessionReplyIds.add(txid);
-      } else if (post.quoted?.remoteId && post.quoted?.posterPubkey) {
+      } else if (post.quoted) {
+        // A failed quote goes out again as the quote it was, never as plain text (iOS f28f1dc).
+        if (!post.quoted.remoteId || !post.quoted.posterPubkey) throw new Error("The quoted post can't be found to quote it again.");
         txid = await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey });
+      } else if (post.poll) {
+        // And a failed poll as the poll: its options and closing time, not just the question.
+        txid = await submitKaPoll({ engine: deps.engine, question: post.text, options: post.poll.options, closesAtMs: post.poll.closesAt, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
       } else {
         txid = await submitKaPost({ engine: deps.engine, text: post.text, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
       }
@@ -3042,6 +3048,8 @@ function scheduleEdit(post, text) {
     } catch (error) {
       mutatePost(post.id, restore);
       deps.appendEngineLog?.(`KaPost edit failed: ${error.message}`);
+      // iOS fae6686: a failed edit says so in an alert (it used to be logged and nothing more).
+      deps.alertDialog?.({ title: "KaPosts", message: `Couldn't save the edit: ${actionErrorText(error)}`, confirmLabel: "OK" });
     }
     renderAll();
   }, () => {
@@ -3065,11 +3073,17 @@ function scheduleDelete(post) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.pendingDeletion = false; });
       deps.appendEngineLog?.(`KaPost delete failed: ${error.message}`);
+      deps.alertDialog?.({ title: "KaPosts", message: `Couldn't delete the post: ${actionErrorText(error)}`, confirmLabel: "OK" });
     }
     renderAll();
   }, () => {
     mutatePost(post.id, (p) => { p.pendingDeletion = false; });
   }, "Deleting post");
+}
+
+/// The reason a KaPosts action failed, in the words the app uses elsewhere (iOS UserFacingError).
+function actionErrorText(error) {
+  return userFacingError(error) || String(error?.message || error || "Something went wrong.");
 }
 
 function removePostEverywhere(post) {
@@ -3698,7 +3712,18 @@ function renderSearchResults(panel) {
   ).join("") + depthFooter;
 }
 
-async function openPosterProfile(address, pubkey) {
+/// The K pubkey a Schnorr address derives ("02" + its x-only key), as @mentions use it (iOS
+/// KaPostsAPIClient.kapostPubkey(fromAddress:)); null for anything else.
+function kapostPubkeyFromAddress(address) {
+  const decoded = decodeAddress(String(address || "").toLowerCase());
+  if (!decoded || decoded.version !== AddressVersion.pubKey || decoded.payload.length !== 32) return null;
+  return `02${Array.from(decoded.payload, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function openPosterProfile(address, passedPubkey) {
+  // No pubkey handed over: the one the address derives, so the profile still loads its posts and
+  // counts (iOS 2da301f) instead of opening empty.
+  const pubkey = passedPubkey || kapostPubkeyFromAddress(address);
   rememberFeedScroll();
   panelGeneration += 1;
   clearPanelPagerSentinels();
