@@ -596,10 +596,13 @@ const ICON_PEOPLE = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" 
 const ICON_TWO = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M2.5 19c.6-3.5 2.7-5.5 5.5-5.5s4.9 2 5.5 5.5"/><circle cx="16.5" cy="9" r="2.6"/><path d="M14.8 13.7c2.8.1 4.9 2 5.5 5.3"/></svg>`;
 const ICON_LOCK = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>`;
 const ICON_TROPHY = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4M12 14v3M8 20h8M9 17h6"/></svg>`;
+// person.2.fill / trophy.fill: the home screen's game cards draw their symbols filled (iOS gameCard).
+const ICON_TWO_FILLED = `<svg viewBox="0 0 24 24" aria-hidden="true" class="filled"><circle cx="8.5" cy="7.6" r="3.6"/><path d="M1.8 19.2c.5-4 3.2-6.3 6.7-6.3s6.2 2.3 6.7 6.3c.1.5-.3.8-.8.8H2.6c-.5 0-.9-.3-.8-.8Z"/><circle cx="17" cy="8.4" r="3"/><path d="M16.2 13.3c3.7-.3 5.7 2 6.1 5.4.1.6-.3 1.3-1 1.3h-4.5c.2-.5.2-1 .1-1.6-.2-1.9-.4-3.5-.7-5.1Z"/></svg>`;
+const ICON_TROPHY_FILLED = `<svg viewBox="0 0 24 24" aria-hidden="true" class="filled"><path d="M6.5 3.5h11v5.8a5.5 5.5 0 0 1-11 0Z"/><path d="M6.6 5.3H3.8a.8.8 0 0 0-.8.9 4.6 4.6 0 0 0 3.9 4.1l.4-1.6a3 3 0 0 1-2.4-1.9h1.7ZM17.4 5.3h2.8c.5 0 .9.4.8.9a4.6 4.6 0 0 1-3.9 4.1l-.4-1.6a3 3 0 0 0 2.4-1.9h-1.7Z"/><path d="M10.8 14.4h2.4v3.1h-2.4Z"/><rect x="7.5" y="17.5" width="9" height="3" rx="1"/></svg>`;
 const ICON_BACK = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>`;
 const ICON_CHEVRON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>`;
 const ICON_EYE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>`;
-const ICON_KEY = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M15 8l2 2M18 5l2 2"/></svg>`;
+const ICON_KEY = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg>`;
 const ICON_PLUS = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>`;
 const ICON_FLAG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4m0 0h11l-2 4 2 4H5"/></svg>`;
 // iOS SF Symbols hourglass / play.fill on the resume card.
@@ -640,18 +643,18 @@ function render() {
   }
 }
 
-function headerHtml(title, { back = null, trailing = "" } = {}) {
+function headerHtml(title, { back = null, trailing = "", home = false } = {}) {
   return `
-    <div class="kaposts-header chess-t-header">
+    <div class="kaposts-header chess-t-header${home ? " chess-t-header-home" : ""}${back ? " chess-t-header-pushed" : ""}">
       ${back ? `<button class="kaposts-icon-button" type="button" data-chess-t-back aria-label="Back">${ICON_BACK}</button>` : ""}
       <h1 class="kaposts-title">${esc(title)}</h1>
       ${trailing}
     </div>`;
 }
 
-function rowHtml({ icon, title, subtitle, action = "", attrs = "", trailing = "" }) {
+function rowHtml({ icon, title, subtitle, action = "", attrs = "", trailing = "", cls = "" }) {
   return `
-    <button class="chess-t-row" type="button" ${attrs}>
+    <button class="chess-t-row${cls ? ` ${cls}` : ""}" type="button" ${attrs}>
       ${icon ? `<span class="chess-t-row-icon">${icon}</span>` : ""}
       <span class="chess-t-row-main"><strong>${title}</strong>${subtitle ? `<small>${subtitle}</small>` : ""}</span>
       ${trailing}
@@ -667,7 +670,7 @@ function renderHome() {
   const mine = myActiveTournament();
   const waiting = mine && T.tournamentStatus(mine) === "open";
   return `
-    ${headerHtml("Chess Online")}
+    ${headerHtml("Chess Online", { home: true })}
     <div class="chess-t-body chess-t-home">
       <div class="chess-t-hero">
         <span class="chess-t-hero-icon">${ICON_CHESS}</span>
@@ -681,12 +684,12 @@ function renderHome() {
           <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
         </button>` : ""}
       <button class="chess-t-game-card" type="button" data-chess-t-mode="duel">
-        <span class="chess-t-game-card-icon">${ICON_TWO}</span>
+        <span class="chess-t-game-card-icon">${ICON_TWO_FILLED}</span>
         <span class="chess-t-row-main"><strong>1v1</strong><small>Play the next person who joins, or a friend by code. One game, winner takes the leaderboard point.</small></span>
         <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
       </button>
       <button class="chess-t-game-card" type="button" data-chess-t-mode="tournament">
-        <span class="chess-t-game-card-icon">${ICON_TROPHY}</span>
+        <span class="chess-t-game-card-icon">${ICON_TROPHY_FILLED}</span>
         <span class="chess-t-row-main"><strong>Tournament</strong><small>Eight players, single elimination: quarterfinals, semifinals, final. Public rooms fill as players arrive; private ones by code.</small></span>
         <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
       </button>
@@ -738,7 +741,7 @@ function publicRoomCardHtml() {
   return `
     <div class="chess-t-card">
       <div class="chess-t-card-top">
-        <span class="chess-t-row-icon">${duel ? ICON_TWO : ICON_PEOPLE}</span>
+        <span class="chess-t-row-icon">${duel ? ICON_TWO_FILLED : ICON_PEOPLE}</span>
         <span class="chess-t-row-main">${roomTitleHtml}</span>
       </div>
       <div class="chess-t-seats">${seats}</div>
@@ -763,8 +766,8 @@ function renderPlayTab() {
     <p class="screen-kicker">Private</p>
     <div class="chess-t-list">
       ${privates.map((t) => tournamentRowHtml(t, T.tournamentStatus(t) === "open" ? (duel ? "Waiting" : `${T.seatsLeft(t)} seat${T.seatsLeft(t) === 1 ? "" : "s"} left`) : "In play")).join("")}
-      ${rowHtml({ icon: ICON_KEY, title: "Join with a code", attrs: "data-chess-t-join-private" })}
-      ${rowHtml({ icon: ICON_PLUS, title: duel ? "Create a private 1v1" : "Create a private tournament", attrs: "data-chess-t-create" })}
+      ${rowHtml({ icon: ICON_KEY, title: "Join with a code", attrs: "data-chess-t-join-private", cls: "chess-t-action-row" })}
+      ${rowHtml({ icon: ICON_PLUS, title: duel ? "Create a private 1v1" : "Create a private tournament", attrs: "data-chess-t-create", cls: "chess-t-action-row" })}
     </div>
     <p class="field-hint">${duel
       ? "Play a friend: create a 1v1, share its code. Private 1v1s count on the leaderboard too."

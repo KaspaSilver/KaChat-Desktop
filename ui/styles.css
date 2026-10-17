@@ -14362,3 +14362,80 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
      principal item what is left between the leading and trailing items). */
   body:has([data-app-tab-screen="address-book"]:not([hidden]) .ab-toolbar-actions) .toolbar-balance { padding-right: 56px; }
 }
+.chess-t-game-card-icon svg.filled { fill: #fff; stroke: none; width: 30px; height: 30px; }
+.chess-t-game-card-icon:has(svg.filled) { color: #fff; }
+.chess-t-hero p, .chess-t-game-card .chess-t-row-main small { font-size: 15px; }
+@media (max-width: 859px) {
+  /* iOS Chess screens use inline titles: the home's sits under the balance (no large title), and
+     a pushed page shows its title centred with the round back chevron on the left. */
+  .chess-t-header-home > .kaposts-title { display: none; }
+  .chess-t-header-home { min-height: 0; margin: 0; padding: 0; }
+  /* A pushed Chess page: the back chevron takes the toolbar's leading slot (where the status
+     light sits) and the balance stays in the middle, so there is no title row. */
+  .chess-t-header-pushed > .kaposts-title { display: none; }
+  .chess-t-header-pushed { min-height: 0; margin: 0; padding: 0; }
+  .chess-t-header-pushed > [data-chess-t-back] {
+    position: fixed; z-index: 302; top: calc(10px + var(--safe-top, 0px)); left: calc(17px + var(--safe-left, 0px));
+    width: 40px; height: 40px; border-radius: 999px; padding: 0; display: grid; place-items: center;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--bar-bg, #1c1c1e); color: var(--text);
+  }
+  .chess-t-header-pushed > [data-chess-t-back] svg { display: none; }
+  .chess-t-header-pushed > [data-chess-t-back]::before { content: ""; width: 11px; height: 11px; border-left: 2.4px solid currentColor; border-bottom: 2.4px solid currentColor; transform: translateX(2px) rotate(45deg); border-radius: 1px; }
+}
+.chess-t-home .chess-t-hero { padding-top: 28px; }
+.chess-t-home .chess-t-hero-icon .chess-tab-glyph { font-size: 56px; }
+.chess-t-game-card-icon svg.filled { width: 36px; height: 36px; }
+/* iOS ChessTournamentsView play tab: Form-style "Public"/"Private" headers, the room's symbol
+   bare in the accent, body-size text, and the private actions as accent-coloured Button rows
+   with no chevron. */
+[data-app-tab-screen="chess"] .screen-kicker { text-transform: none; letter-spacing: 0; font-size: 17px; font-weight: 600; color: var(--muted); padding-left: 16px; margin: 14px 0 8px; }
+.chess-t-card-top .chess-t-row-icon { background: none; flex-basis: 36px; width: 36px; }
+.chess-t-row-icon svg.filled { fill: currentColor; stroke: none; width: 30px; height: 30px; }
+.chess-t-card .chess-t-row-main strong { font-size: 17px; }
+.chess-t-card .chess-t-row-main small { font-size: 15px; }
+[data-app-tab-screen="chess"] .chess-t-body > .field-hint { font-size: 15px; padding: 0 16px; }
+.chess-t-action-row .chess-t-row-icon { background: none; }
+.chess-t-action-row .chess-t-row-main strong { color: var(--kaspa-ink); font-weight: 400; font-size: 17px; }
+.chess-t-action-row .chess-t-row-chevron { display: none; }
+.chess-t-action-row .chess-t-row-icon svg { width: 26px; height: 26px; stroke-width: 1.5; }
+@media (max-width: 859px) {
+  /* iOS KachatMarketView: an inline title under the address pill, so no large title; the
+     claims and "How it works" buttons sit in the toolbar's trailing glass capsule. */
+  .kmkt-header > .kaposts-title { display: none; }
+  .kmkt-header { min-height: 0; margin: 0; padding: 0; }
+  .kmkt-header [data-kmkt-header-actions] {
+    position: fixed; z-index: 301; top: calc(10px + var(--safe-top, 0px)); right: calc(20px + var(--safe-right, 0px));
+    height: 40px; min-width: 40px; padding: 0 3px; gap: 0; display: flex; align-items: center; justify-content: center; border-radius: 999px;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+  .kmkt-header [data-kmkt-header-actions] .kaposts-icon-button { width: 34px; height: 36px; padding: 0; color: var(--kaspa-ink); background: none; border: 0; }
+  .kmkt-header [data-kmkt-header-actions] .kaposts-icon-button svg { width: 24px; height: 24px; }
+  /* The four pages share the width evenly, as iOS's tab strip does. */
+  .kmkt-tabs { display: flex; }
+  .kmkt-tabs > .kmkt-tab { flex: 1 1 0; min-width: 0; padding-left: 2px; padding-right: 2px; white-space: nowrap; }
+}
+@media (max-width: 859px) {
+  /* The address pill gets what is left between the status light and the trailing capsule (iOS
+     principal item); the address line truncates in the middle of that room. */
+  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) .kmkt-source-pill { flex: 0 1 auto; max-width: 196px; margin-left: auto; margin-right: 80px; transform: none; }
+  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) .kmkt-source-pill-copy { min-width: 0; max-width: 100%; }
+  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) .kmkt-source-pill-copy > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kmkt-tabs > .kmkt-tab { font-size: 14px; }
+}
+/* iOS KaChatStatsView hero: chart.bar.xaxis filled at 34pt, the total at 44pt heavy rounded. */
+.kstats-hero-icon svg.filled { fill: currentColor; stroke: none; width: 40px; height: 40px; }
+.kstats-hero-total { font-size: clamp(26px, 11.7vw, 44px); }
+@media (max-width: 859px) {
+  /* Inline title under the balance; refresh (the web's stand-in for pull to refresh) and
+     "What counts" in the toolbar's trailing capsule. */
+  .kstats-header > .kaposts-title { display: none; }
+  .kstats-header { min-height: 0; margin: 0; padding: 0; }
+  .kstats-toolbar-actions {
+    position: fixed; z-index: 301; top: calc(10px + var(--safe-top, 0px)); right: calc(20px + var(--safe-right, 0px));
+    height: 40px; padding: 0 3px; gap: 0; display: flex; align-items: center; border-radius: 999px;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+  .kstats-toolbar-actions .kaposts-icon-button { width: 34px; height: 36px; padding: 0; color: var(--kaspa-ink); background: none; border: 0; }
+  .kstats-toolbar-actions .kaposts-icon-button svg { width: 24px; height: 24px; }
+  body:has([data-app-tab-screen="kachat-stats"]:not([hidden]) .kstats-toolbar-actions) .toolbar-balance { padding-right: 56px; }
+}

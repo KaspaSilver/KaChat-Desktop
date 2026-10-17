@@ -296,7 +296,7 @@ function heroHtml() {
   else number = `<span class="kstats-redacted" aria-hidden="true">000,000</span>`;
   return `
     <div class="kstats-hero">
-      <span class="kstats-hero-icon">${ICONS.chart}</span>
+      <span class="kstats-hero-icon"><svg viewBox="0 0 24 24" aria-hidden="true" class="filled"><rect x="3.5" y="9" width="3.6" height="9.5" rx="1.2"/><rect x="8.4" y="4" width="3.6" height="14.5" rx="1.2"/><rect x="13.3" y="6.5" width="3.6" height="12" rx="1.2"/><rect x="18.2" y="10.5" width="3.3" height="8" rx="1.2"/><rect x="3" y="19.8" width="18.8" height="1.8" rx=".9"/></svg></span>
       <div class="kstats-hero-total">${number}</div>
       <p class="kstats-hero-caption">KaChat transactions on Kaspa, all time</p>
     </div>`;
@@ -407,7 +407,7 @@ function render() {
   screenEl.innerHTML = `
     <div class="kaposts-header kstats-header">
       <h1 class="kaposts-title">KaChat Stats</h1>
-      <div class="kaposts-header-actions">
+      <div class="kaposts-header-actions kstats-toolbar-actions">
         <button class="kaposts-icon-button kstats-refresh${isLoading ? " is-loading" : ""}" type="button" data-kstats-refresh aria-label="Refresh" title="Refresh"${isLoading ? " disabled" : ""}>${ICONS.refresh}</button>
         <button class="kaposts-icon-button" type="button" data-kstats-info aria-label="What counts" title="What counts">${ICONS.question}</button>
       </div>

@@ -16,7 +16,8 @@ export const KACHAT_BOT_ICONS = {
   // cube.transparent
   cube: svg('<path d="M12 2.8 20 7.3v9.4L12 21.2l-8-4.5V7.3Z"/><path d="m4 7.3 8 4.5 8-4.5M12 11.8v9.4"/><path d="M12 2.8v9M4 16.7l8-4.6 8 4.6" opacity=".45"/>'),
   // wallet.pass
-  wallet: svg('<rect x="3" y="6.5" width="18" height="13.5" rx="2.5"/><path d="M3 11h18"/><path d="M6 6.5V5.2A1.7 1.7 0 0 1 7.7 3.5h8.6A1.7 1.7 0 0 1 18 5.2v1.3"/>'),
+  // wallet.pass: an upright pass with the notch at the top and two lines of text.
+  wallet: svg('<path d="M9.5 3.5H7.2A2.2 2.2 0 0 0 5 5.7v13.1A2.2 2.2 0 0 0 7.2 21h9.6a2.2 2.2 0 0 0 2.2-2.2V5.7a2.2 2.2 0 0 0-2.2-2.2h-2.3"/><path d="M9.5 3.5a2.5 2.5 0 0 0 5 0"/><path d="M8.5 10h4M8.5 13.5h7"/>'),
   // chart.line.uptrend.xyaxis
   chart: svg('<path d="M3.5 3.5v17h17"/><path d="m7 15.5 4-4.5 3 3 6-7"/>'),
   // questionmark.bubble
