@@ -2182,7 +2182,7 @@ function schedulePoll(question, options, lengthMs) {
     renderAll();
   }, () => {
     localPosts = localPosts.filter((p) => p.id !== post.id);
-    restoreComposerDraft(question);
+    restoreComposerDraft(question, { pollOptions: options });
   }, "Posting poll");
 }
 
@@ -2803,13 +2803,20 @@ function renderComposerThreadUi() {
 
 /// Puts an undone draft back where it was written, so the five seconds are a chance to fix
 /// something rather than a chance to lose it (iOS restoreDraft).
-function restoreComposerDraft(text, { quoted = null, segments = [] } = {}) {
+function restoreComposerDraft(text, { quoted = null, segments = [], pollOptions = null } = {}) {
   const value = String(text || "");
   if (!value.trim()) return;
   // Straight back into the composer, as iOS restoreDraft does: the zero-balance gate guards the
   // create-post button, not the way back to writing already done.
   openComposer(quoted);
   composerThreadSegments = [...segments];
+  // An undone poll comes back as a poll, its options filled in (iOS 2c9e1ec); the length is not
+  // carried and starts again at the default 24 hours, as on iOS.
+  if (Array.isArray(pollOptions) && pollOptions.length) {
+    composerPoll = { options: [...pollOptions], lengthMs: 86400000 };
+    composerScheduleAt = null;
+    renderComposerExtras();
+  }
   composerInput.value = value;
   composerInput.dispatchEvent(new Event("input", { bubbles: true }));
   renderComposerThreadUi();
