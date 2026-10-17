@@ -14339,3 +14339,26 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .kaposts-search-scope { border-radius: 999px; padding: 3px; }
 .kaposts-search-scope button { border-radius: 999px; font-size: 15px; font-weight: 500; color: var(--text); min-height: 34px; }
 .kaposts-search-scope button.active { background: color-mix(in srgb, var(--text) 26%, transparent); }
+@media (max-width: 859px) {
+  /* iOS AddressBookView: an inline title the balance covers, so no large title; import/export
+     and + share one glass capsule in the toolbar's trailing slot. */
+  .ab-list-header > .kaposts-title { display: none; }
+  .ab-list-header { min-height: 0; margin: 0; padding: 0; }
+  .ab-toolbar-actions {
+    position: fixed; z-index: 301; top: calc(10px + var(--safe-top, 0px)); right: calc(20px + var(--safe-right, 0px));
+    height: 40px; padding: 0 3px; gap: 0; display: flex; align-items: center; border-radius: 999px;
+    border: 1px solid var(--bar-separator, var(--line)); background: var(--fill-tertiary, rgba(255,255,255,.06));
+  }
+  .ab-toolbar-actions .kaposts-icon-button { width: 34px; height: 36px; padding: 0; color: var(--kaspa-ink); background: none; border: 0; }
+  .ab-toolbar-actions .kaposts-icon-button svg { width: 22px; height: 22px; }
+}
+/* The always-visible search field: a capsule with the magnifier inside, as iOS draws it. */
+.ab-search {
+  border-radius: 999px; font-size: 17px; min-height: 46px; padding-left: 44px;
+  background: var(--fill-tertiary, rgba(255,255,255,.06)) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='m15.5 15.5 5 5'/%3E%3C/svg%3E") no-repeat 14px center / 20px 20px;
+}
+@media (max-width: 859px) {
+  /* With the two-button capsule on the right, the balance moves over to clear it (iOS gives the
+     principal item what is left between the leading and trailing items). */
+  body:has([data-app-tab-screen="address-book"]:not([hidden]) .ab-toolbar-actions) .toolbar-balance { padding-right: 56px; }
+}

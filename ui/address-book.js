@@ -137,9 +137,9 @@ function emptyStateHtml() {
 function listHtml() {
   const empty = addressBookIsEmpty();
   return `
-    <div class="kaposts-header ab-header">
+    <div class="kaposts-header ab-header ab-list-header">
       <h1 class="kaposts-title">Address Book</h1>
-      <div class="kaposts-header-actions">
+      <div class="kaposts-header-actions ab-toolbar-actions">
         <button class="kaposts-icon-button" type="button" data-ab-import-export aria-label="Import or export" title="Import or export">${ICONS.importExport}</button>
         <button class="kaposts-icon-button" type="button" data-ab-add aria-label="Add Address" title="Add Address">${ICONS.plus}</button>
       </div>
