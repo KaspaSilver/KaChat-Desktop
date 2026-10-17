@@ -10900,7 +10900,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 182;
+const APP_BUILD = 183;
 // "5.2 (176)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -29981,6 +29981,12 @@ async function syncGroupsNow({ catchUp = false } = {}) {
   if (!mgr || !engine.isKasiaCipherLoaded?.() || !currentIndexerUrl()) return 0;
   let result;
   try { result = await mgr.syncGroups(); } catch { return 0; }
+  return applyGroupSyncResult(result, { catchUp });
+}
+
+/// Stores what a group sync (or a group's Refresh Messages) brought back: messages, reactions and
+/// edits, then the control events' system lines. Returns how many things changed.
+function applyGroupSyncResult(result, { catchUp = false } = {}) {
   let changed = 0;
   const pendingGroupEdits = [];
   for (const decoded of result.messages || []) {
@@ -31176,21 +31182,40 @@ groupManageBody?.addEventListener("click", async (event) => {
         <div class="group-refresh-body">
           <span class="kaposts-spinner group-refresh-spinner" aria-hidden="true"></span>
           <h2>Rebuilding this group</h2>
-          <p class="field-hint">Re-reading roster and epoch keys, then every member's messages</p>
+          <p class="field-hint" data-group-refresh-phase>Starting</p>
           <p class="field-hint">Re-reading the whole group from the chain, the same way importing your seed phrase does. Leaving now would stop it partway.</p>
         </div>
       </section>`;
     document.body.appendChild(modal);
     try {
-      // Re-walk the control stream from the start too (iOS refreshGroup drops the gctl-recipient
-      // cursor): it is what re-acquires an epoch root this device missed (DSK-041).
-      getGroupManager()?.resetGroupControlCursor?.();
-      const changed = await syncGroupsNow({ catchUp: true });
-      const recovered = Number(changed) || 0;
+      // iOS forceRefresh: the control stream and this group's message streams from the start,
+      // with the phase on screen (GroupRefreshProgress.Phase.label).
+      const groupId = activeGroupId;
+      const mgr = getGroupManager();
+      if (!mgr?.forceRefresh || !groupId || !engine.isKasiaCipherLoaded?.() || !currentIndexerUrl()) throw new Error("unavailable");
+      const phaseEl = modal.querySelector("[data-group-refresh-phase]");
+      const phaseLabel = ({ phase, done, total }) => phase === "invites" ? "Re-reading your group invites"
+        : phase === "control" ? "Re-reading roster and epoch keys"
+          : phase === "messages" ? `Re-fetching messages (${done} of ${total} members)`
+            : phase === "rebuilding" ? "Decrypting history" : "Starting";
+      const before = groupMessages(groupId).length;
+      const result = await mgr.forceRefresh(groupId, (progress) => { if (phaseEl) phaseEl.textContent = phaseLabel(progress); });
+      applyGroupSyncResult(result, { catchUp: true });
+      const recovered = Math.max(0, groupMessages(groupId).length - before);
+      // Which wall the repair hit, so "nothing recovered" can be diagnosed (iOS rejections).
+      const r = result.rejections || {};
+      const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+      const lines = [
+        r.noRootForEpoch > 0 ? `${plural(r.noRootForEpoch, "message")} from an epoch this device holds no key for` : "",
+        r.senderNotInRoster > 0 ? `${r.senderNotInRoster} from someone no longer in the group` : "",
+        r.decryptFailed > 0 ? `${r.decryptFailed} that failed to decrypt` : "",
+        r.epochRootsArchived > 0 ? `Recovered ${r.epochRootsArchived} older epoch key${r.epochRootsArchived === 1 ? "" : "s"}` : "",
+      ].filter(Boolean);
       modal.querySelector(".group-refresh-body").innerHTML = `
         <span class="group-refresh-check" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></span>
         <h2>Refresh complete</h2>
         <p class="field-hint">${recovered > 0 ? `Recovered ${recovered} message${recovered === 1 ? "" : "s"} this device had not been able to read.` : "No new messages were recovered."}</p>
+        ${lines.length ? `<div class="group-refresh-rejections">${lines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}</div>` : ""}
         <div class="modal-actions"><button class="primary-button" type="button" data-group-refresh-done>Done</button></div>`;
       modal.querySelector("[data-group-refresh-done]")?.addEventListener("click", () => modal.remove());
     } catch {

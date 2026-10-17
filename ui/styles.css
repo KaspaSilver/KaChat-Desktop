@@ -14494,3 +14494,4 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .broadcast-room > .kaposts-thread-header > .mirror-health-button { margin-left: 6px; }
 .message-nextcloud-revoked { display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 14px; background: color-mix(in srgb, var(--text) 5%, transparent); color: var(--muted); font-size: 12px; }
 .message-nextcloud-revoked svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
+.group-refresh-rejections { width: 100%; text-align: left; font-size: 11px; color: var(--muted); display: grid; gap: 3px; margin-top: 2px; }

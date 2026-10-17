@@ -747,7 +747,10 @@ export class GroupManager {
   // Trial-matches the parsed message's blinded id against each local group's
   // roster; on a match, verifies roster membership + sender_id, then decrypts.
   // Returns a decoded message or null.
-  processMessage(parsed) {
+  /// `rejections` (optional, Group Info's Refresh Messages): counts why a message for one of our
+  /// groups was dropped, so "nothing recovered" says which wall the repair hit (iOS
+  /// GroupRefreshRejections).
+  processMessage(parsed, rejections = null) {
     if (!parsed) return null;
     for (const record of this.listGroups()) {
       const blindingKey = G.hexToBytes(record.blindingKeyHex);
@@ -755,7 +758,7 @@ export class GroupManager {
       if (expected !== G.bytesToHex(parsed.blindedGroupId)) continue;
       // Sender must be in the roster (matched by pubkey).
       const member = record.members.find((m) => m.xOnlyPubKeyHex === G.bytesToHex(parsed.senderPubKey));
-      if (!member) return null;
+      if (!member) { if (rejections) rejections.senderNotInRoster += 1; return null; }
       // sender_id must equal SHA256(sender_address).
       if (G.bytesToHex(G.deriveSenderId(member.address)) !== G.bytesToHex(parsed.senderId)) return null;
       // Need the epoch's root. Non-admins only hold the current epoch's root; the
@@ -765,10 +768,10 @@ export class GroupManager {
       else if (record.groupSeedHex) rootHex = G.bytesToHex(G.deriveGroupRootEpoch(G.hexToBytes(record.groupSeedHex), G.hexToBytes(record.groupId), parsed.epoch));
       // Last resort for a non-admin: a retired root archived when its rotation arrived.
       else rootHex = record.previousRootsHex?.[String(parsed.epoch)] || null;
-      if (!rootHex) return null;
+      if (!rootHex) { if (rejections) rejections.noRootForEpoch += 1; return null; }
       let plaintext;
       try { plaintext = G.openGroupMessage(parsed, { groupId: G.hexToBytes(record.groupId), groupRootEpoch: G.hexToBytes(rootHex) }); }
-      catch { return null; }
+      catch { if (rejections) rejections.decryptFailed += 1; return null; }
       return {
         groupId: record.groupId,
         senderAddress: member.address,
@@ -922,6 +925,58 @@ export class GroupManager {
     return { controls: events, messages };
   }
 }
+
+// Group Info > Refresh Messages (iOS GroupChatService.forceRefresh): re-reads everything this
+// device may see in ONE group from the beginning. Routine sync is cursor-based and never goes back
+// for a message a cursor already passed (an epoch it could not decrypt then, a roster it did not
+// know yet), so this drops the control cursor and this group's message cursors and walks them
+// again - control first, so the roster and epoch roots are in hand before the messages decrypt.
+// `onProgress` gets iOS's phases: invites, control, messages {done,total}, rebuilding.
+GroupManager.prototype.forceRefresh = async function forceRefresh(groupId, onProgress = () => {}) {
+  const rejections = { noRootForEpoch: 0, senderNotInRoster: 0, decryptFailed: 0, epochRootsArchived: 0 };
+  const archivedCount = () => Object.keys(this.getGroup(groupId)?.previousRootsHex || {}).length;
+  const archivedBefore = archivedCount();
+  const events = [];
+  onProgress({ phase: "invites" });
+  this.resetGroupControlCursor();
+  try { await this._catchUpControlByRecipient(events); } catch { /* the messages are still worth a try */ }
+  // By-recipient carries the admin's rotations too, so roster and epoch keys are applied by now.
+  onProgress({ phase: "control" });
+  const record = this.getGroup(groupId);
+  if (!record) return { controls: events, messages: [], rejections };
+  const blindingKey = G.hexToBytes(record.blindingKeyHex);
+  const scans = record.members
+    .filter((member) => member.xOnlyPubKeyHex)
+    .map((member) => G.bytesToHex(G.deriveBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)));
+  record.cursors = {};
+  let done = 0;
+  onProgress({ phase: "messages", done, total: scans.length });
+  let next = 0;
+  const results = new Array(scans.length);
+  await Promise.all(Array.from({ length: Math.min(4, scans.length) }, async () => {
+    while (next < scans.length) {
+      const i = next++;
+      try { results[i] = await this.engine.scanGroupMessages(scans[i], null); }
+      catch { results[i] = null; }
+      done += 1;
+      onProgress({ phase: "messages", done, total: scans.length });
+    }
+  }));
+  onProgress({ phase: "rebuilding" });
+  const messages = [];
+  results.forEach((rows, i) => {
+    if (!rows) return;
+    for (const row of rows) {
+      const parsed = G.parseGroupMessagePayload(row.payloadString);
+      const decoded = this.processMessage(parsed, rejections);
+      if (decoded && decoded.groupId === groupId) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+      if (row.cursor) record.cursors[scans[i]] = row.cursor;
+    }
+  });
+  this._put(record);
+  rejections.epochRootsArchived = Math.max(0, archivedCount() - archivedBefore);
+  return { controls: events, messages, rejections };
+};
 
 export function createGroupManager(engine) {
   return new GroupManager(engine);
