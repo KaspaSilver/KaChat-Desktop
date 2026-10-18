@@ -283,11 +283,19 @@ function loadHiddenCurated() {
   catch { hiddenCurated = new Set(); }
 }
 function curatedShown(name) { return !hiddenCurated.has(name); }
-/** Off: the room leaves the list and its bell goes off. On: it comes back - #kaspa and
+/** What a default room's switch in Public Chats settings reads (iOS d128773 isCuratedChannelOn):
+ *  on only when the room is in the list and the Chats circles row - joined (the featured rooms
+ *  always are) and not switched off. A language room never opened reads off. */
+function curatedChannelOn(name) {
+  return curatedShown(name) && (FEATURED_BROADCAST_CHANNELS.includes(name) || joinedChannels.includes(name));
+}
+/** Off: the room leaves the list and its bell goes off. On: it is joined if it wasn't, so it is
+ *  in the list and the circles row at once (iOS d128773), and comes back - #kaspa and
  *  #kachat-bugs with their bell on again, as they start; the language rooms as they were. */
 function setCuratedChannel(name, shown) {
   if (!isCuratedBroadcastChannel(name)) return;
   if (shown) hiddenCurated.delete(name); else hiddenCurated.add(name);
+  if (shown) addJoinedChannel(name);
   try { localStorage.setItem(deps.accountScopedKey(HIDDEN_CURATED_KEY), JSON.stringify([...hiddenCurated])); } catch { /* fine */ }
   const isJoined = joinedChannels.includes(name);
   if (!shown) {
@@ -308,7 +316,7 @@ function openPublicChatsSettings() {
   // its footer, and an Other Languages section; each room a toggle with its language under it.
   const row = (name) => {
     const language = broadcastLanguageDisplayName(name);
-    return `<label class="settings-toggle-row public-settings-row"><span class="settings-row-copy"><strong>#${deps.escapeHtml(name)}</strong>${language ? `<small>${deps.escapeHtml(language)}</small>` : ""}</span><span class="switch-control"><input type="checkbox" data-curated-room="${deps.escapeHtml(name)}" ${curatedShown(name) ? "checked" : ""}><span></span></span></label>`;
+    return `<label class="settings-toggle-row public-settings-row"><span class="settings-row-copy"><strong>#${deps.escapeHtml(name)}</strong>${language ? `<small>${deps.escapeHtml(language)}</small>` : ""}</span><span class="switch-control"><input type="checkbox" data-curated-room="${deps.escapeHtml(name)}" ${curatedChannelOn(name) ? "checked" : ""}><span></span></span></label>`;
   };
   const host = document.createElement("div");
   host.className = "modal-backdrop broadcast-settings-backdrop";
@@ -2124,6 +2132,15 @@ export function joinBroadcastChannelFromSheet(rawName) {
   return true;
 }
 
+/// Joins a room without opening it (the list, the circles row and syncing pick it up).
+function addJoinedChannel(name) {
+  if (joinedChannels.includes(name)) return;
+  joinedChannels.push(name);
+  saveChannels();
+  joinedAtByChannel[name] = Date.now();
+  saveJoinedAt();
+}
+
 function joinChannel(rawName) {
   const name = normalizeBroadcastChannel(rawName);
   const problem = broadcastJoinProblem(name);
@@ -2131,12 +2148,7 @@ function joinChannel(rawName) {
     alertDialog(problem);
     return;
   }
-  if (!joinedChannels.includes(name)) {
-    joinedChannels.push(name);
-    saveChannels();
-    joinedAtByChannel[name] = Date.now();
-    saveJoinedAt();
-  }
+  addJoinedChannel(name);
   const joinCard = document.querySelector("[data-broadcast-join-card]");
   if (joinCard) joinCard.hidden = true;
   if (joinInput) joinInput.value = "";
