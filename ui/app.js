@@ -10915,7 +10915,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 192;
+const APP_BUILD = 193;
 // "5.2.1 (191)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -26910,9 +26910,15 @@ queueMicrotask(async () => {
       recordGlobalNotification: (item) => recordGlobalNotification(item),
       // Your saved name for a contact wins over their KNS domain everywhere a poster is named
       // (matches iOS: alias -> domain -> short address).
+      // Only a name you gave them: an automatic one (your own chat's, a new contact's
+      // "kaspa:xxxx....xxxx", a handshake alias) is not a saved name, and putting it first showed
+      // the address over the poster's .kachat name - your own posts and profile included.
       contactAliasFor: (address) => {
-        const name = ((state.contacts || []).find((c) => c.address === address)?.name || "").trim();
-        return name || null;
+        const contact = (state.contacts || []).find((c) => c.address === address);
+        const name = String(contact?.name || "").trim();
+        if (!name || contact.nameIsCustom === false) return null;
+        if (isPlaceholderContactName(contact) || name === defaultAliasFor(address) || name === address) return null;
+        return name;
       },
       // @mention autocomplete source: your 1:1 chat contacts that have a KNS domain. Returns
       // [{ domain (bare, no .kas), address, name }]. Only these people can be @-mentioned.
