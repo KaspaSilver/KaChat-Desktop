@@ -68,8 +68,11 @@ function headerHtml(kicker, title) {
 /// window.confirm keep their paragraphing.
 function bodyHtml(message) {
   if (!message) return "";
-  return String(message).split("\n").filter((line) => line.trim())
+  // In their own scrolling area: a long text (a message's Show More) scrolls inside the dialog,
+  // with the title and the buttons staying in view, instead of running off the window.
+  const lines = String(message).split("\n").filter((line) => line.trim())
     .map((line) => `<p class="field-hint">${escape(line)}</p>`).join("");
+  return `<div class="app-dialog-message">${lines}</div>`;
 }
 
 function present(html, focusSelector, variantClass = "") {

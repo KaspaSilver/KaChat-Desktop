@@ -14495,3 +14495,12 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .message-nextcloud-revoked { display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 14px; background: color-mix(in srgb, var(--text) 5%, transparent); color: var(--muted); font-size: 12px; }
 .message-nextcloud-revoked svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
 .group-refresh-rejections { width: 100%; text-align: left; font-size: 11px; color: var(--muted); display: grid; gap: 3px; margin-top: 2px; }
+/* Every app dialog fits the window: the title and buttons stay put and the message between them
+   scrolls (a long message's Show More used to run past the bottom with no way to reach it). */
+.app-dialog { max-height: calc(100dvh - 32px); display: flex; flex-direction: column; overflow: hidden; }
+.app-dialog > .modal-header, .app-dialog > .modal-actions { flex: 0 0 auto; }
+.app-dialog-message { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.app-dialog-message .field-hint { overflow-wrap: anywhere; }
+.app-dialog-message .field-hint + .field-hint { margin-top: 8px; }
+.app-dialog > * { flex-shrink: 0; }
+.app-dialog > .app-dialog-message, .app-dialog > .app-dialog-sheet-body { flex: 1 1 auto; flex-shrink: 1; min-height: 0; }
