@@ -135,8 +135,44 @@ try {
   check("sidecar 400 on a bad target", bad.status === 400);
   const write = await request(sidecarPort, "/desktop/nc-proxy/https%3A%2F%2Fvictim.example/form", { method: "POST", headers: { authorization: "x" }, body: "a=1" });
   check("sidecar refuses an arbitrary write with a junk Authorization", write.status === 403, `got ${write.status}`);
+  // The hosted sidecar relays no Nextcloud traffic (refuseNextcloud on by default).
+  const NC = encodeURIComponent("https://cloud.example.org");
+  for (const [label, path, opts] of [
+    ["a sign-in check with Basic auth", `/${NC}/ocs/v2.php/cloud/user?format=json`, { headers: { authorization: "Basic dTpw", "ocs-apirequest": "true" } }],
+    ["a WebDAV upload", `/${NC}/remote.php/dav/files/u/KaChat/x.jpg`, { method: "PUT", headers: { authorization: "Basic dTpw", "x-kachat-nextcloud-origin": "https://cloud.example.org" }, body: "x" }],
+    ["a Talk guest request", `/${NC}/ocs/v2.php/apps/spreed/api/v4/room/abc/participants/active`, { method: "POST", headers: { "x-proxy-jar": "0123456789abcdef0123456789abcdef", "ocs-apirequest": "true" } }],
+    ["a share link's file check", `/${NC}/s/AbCdEfGhIjK123/download`, { headers: { range: "bytes=0-1" } }],
+    ["a share link's file check under index.php", `/${NC}/index.php/s/AbCdEfGhIjK123/download`, {}],
+    ["a Login Flow v2 start", `/${NC}/index.php/login/v2`, { method: "POST" }],
+    ["a status.php probe", `/${NC}/status.php`, {}],
+  ]) {
+    const r = await request(sidecarPort, `/desktop/nc-proxy${path}`, opts);
+    check(`sidecar refuses Nextcloud: ${label}`, r.status === 403 && r.body.includes("Kaspa Quick Start"), `got ${r.status} ${r.body}`);
+  }
 } finally {
   sidecar.kill();
+}
+
+// --- 2b. refuseNextcloud: indexer/API reads still pass, Nextcloud traffic does not ------------
+{
+  const { server: ncOff } = relayServer({ refuseNextcloud: true });
+  const ncOffPort = await listen(ncOff);
+  const plain = await request(ncOffPort, `/nc-proxy/${UP}/page`, { headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" } });
+  check("refuseNextcloud: a plain read still relays", plain.status === 200, `got ${plain.status}`);
+  const api = await request(ncOffPort, `/nc-proxy/${UP}/addresses/kaspa:qx/full-transactions?limit=1`);
+  check("refuseNextcloud: an API-shaped read still relays", api.status !== 403, `got ${api.status}`);
+  const article = await request(ncOffPort, `/nc-proxy/${UP}/index.php/topic/s/abc`);
+  check("refuseNextcloud: an ordinary index.php page still relays", article.status !== 403, `got ${article.status}`);
+  const authed = await request(ncOffPort, `/nc-proxy/${UP}/page`, { headers: { authorization: "Bearer t" } });
+  check("refuseNextcloud: anything carrying credentials is refused", authed.status === 403, `got ${authed.status}`);
+  const dav = await request(ncOffPort, `/nc-proxy/${UP}/remote.php/dav/files/u/`, { method: "PROPFIND" });
+  check("refuseNextcloud: WebDAV is refused without credentials too", dav.status === 403, `got ${dav.status}`);
+  ncOff.close();
+  const { server: ncOn } = relayServer({});
+  const ncOnPort = await listen(ncOn);
+  const share = await request(ncOnPort, `/nc-proxy/${UP}/s/AbCdEfGhIjK123/download`);
+  check("without refuseNextcloud (dev server, Kaspa Quick Start) a share link still relays", share.status !== 403, `got ${share.status}`);
+  ncOn.close();
 }
 
 // --- 3. Relayed responses + forwarded requests (local upstream) -------------------------------

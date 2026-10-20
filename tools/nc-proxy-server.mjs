@@ -21,6 +21,10 @@
 //                                     that proxy really sits behind Cloudflare)
 //   KACHAT_RELAY_RATE_MAX             requests per client per minute (default 600; an IPv6 client
 //                                     counts by its /64)
+//   KACHAT_RELAY_ALLOW_NEXTCLOUD=1    relay Nextcloud traffic too. Off by default: a site other
+//                                     people open must not see their Nextcloud logins, Talk calls or
+//                                     share links (relay-guard.mjs refuseNextcloud). Only for a
+//                                     static deployment the person runs for themselves.
 import http from "node:http";
 import { createRelay } from "./relay-guard.mjs";
 
@@ -33,6 +37,7 @@ const relay = createRelay({
   trustCfConnectingIp: String(process.env.KACHAT_TRUST_CF_CONNECTING_IP || "") === "1",
   readTimeoutMs: Number(process.env.NC_PROXY_UPSTREAM_TIMEOUT_MS || 30000),
   rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
+  refuseNextcloud: String(process.env.KACHAT_RELAY_ALLOW_NEXTCLOUD || "") !== "1",
   log: (line) => console.warn(line),
 });
 

@@ -74,6 +74,21 @@ const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^tnkach
 // Nextcloud's write roots: WebDAV (remote.php) and OCS (ocs/v1.php, ocs/v2.php incl. Talk/spreed).
 // ui/nextcloud.js and ui/talk.js write only under these; index.php (previews) is only ever read.
 const NEXTCLOUD_WRITE_PATH_RE = /^\/(?:remote\.php|ocs)\//i;
+// Paths only a Nextcloud serves for what KaChat does with it: WebDAV/OCS (files, backups, Talk),
+// sign-in and status, previews, and a public share's raw file (/s/TOKEN/download|preview).
+const NEXTCLOUD_PATH_RE = /^\/(?:index\.php\/)?(?:remote\.php\/|ocs\/|status\.php|login\/v2|login\/flow|core\/preview|apps\/(?:spreed|files_sharing)\/|s\/[A-Za-z0-9_-]{10,}\/(?:download|preview))/i;
+export const NEXTCLOUD_REFUSED_MESSAGE = "Nextcloud is not relayed by this site. Run KaChat and Nextcloud with Kaspa Quick Start.";
+
+/** Is this relay request Nextcloud traffic? Anything carrying credentials (Authorization), the
+ *  app's Nextcloud or Talk markers, or a Nextcloud-only path. Used by `refuseNextcloud`. */
+export function isNextcloudRelayRequest(headers, target) {
+  const h = headers || {};
+  if (String(h.authorization || "").trim()) return true;
+  if (String(h[NEXTCLOUD_ORIGIN_HEADER] || "").trim()) return true;
+  if (String(h["x-proxy-jar"] || "").trim()) return true;
+  if (String(h["ocs-apirequest"] || "").trim()) return true;
+  return NEXTCLOUD_PATH_RE.test(String(target?.pathname || ""));
+}
 const JAR_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 // The Nextcloud origin the app is talking to, sent by ui/nextcloud.js and ui/talk.js on every
 // relayed Nextcloud call. Writes to a non-API host must go to exactly this origin.
@@ -263,6 +278,11 @@ export function createRelay(options = {}) {
     ? options.resolveAllowed
     : (hostname) => resolveAllowed(hostname, { allowPrivate });
   const log = typeof options.log === "function" ? options.log : () => {};
+  // A relay run by a site other people open (desktop.kachat.app's sidecar) carries no Nextcloud
+  // traffic at all: logins, app passwords, Talk and share links stay between the person and their
+  // Nextcloud, through a KaChat they run themselves (Kaspa Quick Start). The app turns Nextcloud
+  // off on such sites too; this also stops an old, cached copy of the page from using the relay.
+  const refuseNextcloud = Boolean(options.refuseNextcloud);
   const MAX_REDIRECT_HOPS = 5;
 
   // Cookie jars for Nextcloud Talk. Cookies never travel between the browser and a target, but a
@@ -420,6 +440,10 @@ export function createRelay(options = {}) {
     try { target = new URL(`${match[2] || "/"}${match[3] || ""}`, origin.origin); } catch { target = null; }
     if (!target || target.origin !== origin.origin || isBlockedHost(target.hostname)) {
       refuse(res, 403, "Proxy target not allowed");
+      return;
+    }
+    if (refuseNextcloud && isNextcloudRelayRequest(req.headers, target)) {
+      refuse(res, 403, NEXTCLOUD_REFUSED_MESSAGE);
       return;
     }
     const method = String(req.method || "GET").toUpperCase();
