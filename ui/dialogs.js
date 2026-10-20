@@ -179,14 +179,16 @@ export const ACTION_TILE_ICONS = {
 /// with `subtitle` moved to the tooltip and the accessible description. The long-press menus use
 /// it; every other sheet keeps the default row form.
 /// `footer`: a line under the rows (iOS: Manage Addresses' discovery summary under its actions).
-export function chooseDialog({ title, message = "", kicker = null, options = [], layout = "rows", footer = "" } = {}) {
+// `messageHtml` (instead of `message`) is markup the caller wrote itself, for a link in the text;
+// never pass it anything from a message, a name or a server.
+export function chooseDialog({ title, message = "", messageHtml = "", kicker = null, options = [], layout = "rows", footer = "" } = {}) {
   const tiles = layout === "tiles";
   return new Promise((resolve) => {
     settle = resolve;
     const list = (options || []).filter(Boolean);
     present(`
       ${headerHtml(kicker, title)}
-      ${bodyHtml(message)}
+      ${messageHtml ? `<div class="app-dialog-message"><p class="field-hint">${messageHtml}</p></div>` : bodyHtml(message)}
       ${tiles ? `
       <div class="action-tiles">
         ${list.map((option) => `

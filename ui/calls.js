@@ -241,9 +241,10 @@ function callsOffOnThisSite() {
 }
 
 async function explainCallsOffOnThisSite() {
+  const link = `<a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>`;
   const choice = await deps.chooseDialog({
-    title: "Calls work when KaChat runs on your own computer",
-    message: "On this website a call would pass through the website's server. Install Kaspa Quick Start, switch on KaChat-Desktop in its control panel, and open KaChat from the address it gives you to make and answer calls.",
+    title: "Calls work when you run KaChat and Nextcloud with Kaspa Quick Start",
+    messageHtml: `On this website a call would pass through the website's server. Install ${link}, switch on KaChat-Desktop and Nextcloud in its control panel, and open KaChat from the address it gives you to make and answer calls.`,
     options: [
       { id: "quickstart", title: "Get Kaspa Quick Start", subtitle: "Opens its page on GitHub." },
       { id: "close", title: "Not now" },
@@ -384,7 +385,7 @@ export function handleIncomingCallEnvelope(envelope, message, contactAddress) {
       if (callsOffOnThisSite()) {
         // Can't join here: nothing rings and nothing is sent (the caller rings out); say so once.
         deps.appendEngineLog?.(`[Call] Invite ${envelope.callId.slice(0, 8)} not answered: calls are off on this website`);
-        deps.showToast?.(`${deps.displayNameFor(contactAddress)} is calling. Calls work when KaChat runs on your own computer with Kaspa Quick Start.`);
+        deps.showToast?.(`${deps.displayNameFor(contactAddress)} is calling. Calls work when you run KaChat and Nextcloud with Kaspa Quick Start.`);
         return;
       }
       const call = newSession({ id: envelope.callId, address: contactAddress, isOutgoing: false, hostsThisCall: false, server, token: envelope.token, video: envelope.video, phase: "ringingIn" });

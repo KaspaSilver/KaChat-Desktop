@@ -12707,6 +12707,7 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .nc-hosted-off .settings-page-form { display: grid; gap: 6px; }
 .nc-hosted-off .settings-page-form strong { font-weight: 600; }
 .nc-hosted-copy { margin: 0; font-size: 14px; line-height: 1.4; color: var(--muted); }
+.nc-hosted-off .settings-page-form a, .app-dialog-message a, .ab-io-note a { color: var(--accent); text-decoration: underline; }
 .nc-hosted-off a.settings-list-row { text-decoration: none; color: inherit; }
 .nc-hosted-off a.settings-list-row strong { color: var(--accent, var(--kaspa-ink)); }
 

@@ -1584,8 +1584,8 @@ function renderSettings() {
     settingsEl.innerHTML = `
       <div class="settings-list-card nc-hosted-off">
         <div class="settings-page-form">
-          <strong>Nextcloud works when KaChat runs on your own computer.</strong>
-          <p class="nc-hosted-copy">On this website your Nextcloud login would pass through the website's server. To keep it between you and your Nextcloud, install Kaspa Quick Start, switch on KaChat-Desktop in its control panel, and open KaChat from the address it gives you (like http://localhost:5173). Nextcloud is available there.</p>
+          <strong>Nextcloud works when you run KaChat and Nextcloud with <a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>.</strong>
+          <p class="nc-hosted-copy">On this website your Nextcloud login would pass through the website's server. To keep it between you and your Nextcloud, install <a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>, switch on KaChat-Desktop and Nextcloud in its control panel, and open KaChat from the address it gives you (like http://localhost:5173). Nextcloud is available there.</p>
         </div>
         <a class="settings-list-row" href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer" data-nc-quick-start>
           <span class="settings-row-copy"><strong>Get Kaspa Quick Start</strong></span>

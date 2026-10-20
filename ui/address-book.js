@@ -18,6 +18,7 @@ import { otherNetworkReason } from "../engine/network.js";
 import { onContextGesture } from "./touch.js";
 import { userFacingError } from "./dialogs.js";
 import { saveFile } from "./save-file.js";
+import { KASPA_QUICK_START_URL } from "./nextcloud-availability.js";
 import { isNextcloudConnected, nextcloudUnavailableReason, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
 import { otherDomainsHtml, pickOtherDomain, nameNotFoundText } from "./send-kaspa-components.js";
 
@@ -393,9 +394,9 @@ function renderImportExportSheet() {
       <button class="modal-close" type="button" data-ab-io-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">${rows.map(ioRowHtml).join("")}</div>
-    ${connected ? "" : `<p class="create-chat-help ab-io-note">${esc(nextcloudUnavailableReason() === "hosted"
-      ? "Running KaChat on your own computer with Kaspa Quick Start lets you also save it to your Nextcloud and import it on another device."
-      : "Connect Nextcloud in Settings > Storage to also save it there and import it on another device.")}</p>`}`;
+    ${connected ? "" : `<p class="create-chat-help ab-io-note">${nextcloudUnavailableReason() === "hosted"
+      ? `When you run KaChat and Nextcloud with <a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>, you can also save it to your Nextcloud and import it on another device.`
+      : esc("Connect Nextcloud in Settings > Storage to also save it there and import it on another device.")}</p>`}`;
 }
 
 function openImportExportSheet() {
