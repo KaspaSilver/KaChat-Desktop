@@ -5913,6 +5913,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
         knownTxids: (conversationEntry.messages || []).map((message) => message.txid).filter(Boolean),
         cursor: 0,
         limit: 100,
+        ownAddresses: ownWalletAddressSet(),
       });
       // Contract transactions the scan skipped stay suppressed on every path (iOS 32fdaa4).
       registerSuppressedPaymentTxIds(paymentResult.contractTxids || [], "kachat-contract");
@@ -6423,12 +6424,13 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   let added = 0;
   const contractTxids = [];
   const chatPaymentSenders = new Set();
+  const ownWallet = ownWalletAddressSet();
   for (const tx of txs) {
     const txid = String(tx?.transaction_id || tx?.transactionId || "").trim();
     if (!txid) continue;
     // .kachat registry/offer and other contract transactions are never payments (iOS 32fdaa4) -
     // checked before the processed set, so history an older build already read is suppressed too.
-    if (isKachatContractTransaction(tx)) { contractTxids.push(txid); processed.add(txid); continue; }
+    if (isKachatContractTransaction(tx, ownWallet)) { contractTxids.push(txid); processed.add(txid); continue; }
     if (processed.has(txid)) continue;
     if (isSuppressedPaymentTxId(txid)) { processed.add(txid); continue; }
     const blockTime = Number(tx?.block_time || tx?.blockTime || 0);
@@ -7656,6 +7658,15 @@ function saveChattingCatchUpFloor(address, ms) {
 // Every revealed spending address for the active account: the legacy chain (0...maxIndex) and the
 // quantum-safe one (iOS bba1b1e: the activity notifier's watch set, own-address checks and
 // internal-move detection all count both).
+/** Every address this wallet spends from, lowercased: the chatting address and every revealed
+ *  spending address, the quantum chain included (iOS 0b4e27e ownWalletAddressesLowercased). What
+ *  isKachatContractTransaction reads to tell this wallet's own sends from received payments. */
+function ownWalletAddressSet() {
+  const set = new Set(spendingWatchedAddressList().map((address) => String(address || "").toLowerCase()));
+  if (engine.address) set.add(String(engine.address).toLowerCase());
+  return set;
+}
+
 function spendingWatchedAddressList() {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
   const list = [];
@@ -11124,7 +11135,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 198;
+const APP_BUILD = 199;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");

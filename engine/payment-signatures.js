@@ -233,8 +233,8 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
   };
   let failedInput = null;
 
-  // iOS 8116ab9's order: the spent script is worked out first, so only key-address inputs need
-  // (and are held to) a well-formed signature script; P2SH covenant spends are skipped as before.
+  // iOS 8116ab9's order: the spent script is worked out first, so only key-address and KIP-22
+  // inputs need (and are held to) a well-formed signature script; P2SH covenant spends are skipped.
   for (let i = 0; i < inputs.length; i += 1) {
     const input = inputs[i];
     // 1. The spent UTXO's script and amount: without them this input can't be checked yet.
@@ -243,27 +243,55 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     const amount = num(input.amount, null);
     if (!utxoScript || amount == null) return "unknown";
 
-    // 2. Only standard P2PK Schnorr inputs are checked here: <0x20> <32-byte key> OP_CHECKSIG.
-    if (utxoScript.length !== 34 || utxoScript[0] !== 32 || utxoScript[33] !== 0xac) continue; // P2SH, ECDSA and the like
-
-    // 3. Such an input's signature script is 0x41 (push 65) + a 64-byte Schnorr signature + a
-    // sighash type byte. Anything else (blank, short, another push) can't be on chain: a failure
-    // (AND-042), judged with the others at the end.
-    const sigScript = hexToBytes(input.signatureScript);
-    if (!sigScript || sigScript.length !== 66 || sigScript[0] !== 0x41) {
-      if (failedInput == null) failedInput = i;
-      continue;
+    // 2. The input's kind, from the spent UTXO's script (iOS 54265bf). Standard P2PK Schnorr
+    // (<0x20> <32-byte key> OP_CHECKSIG) and KIP-22 quantum-address P2SH spends are both checked;
+    // any other P2SH spend is a covenant, not checked here - since iOS 0b4e27e such a transaction is
+    // a contract and never files as a payment, while a KIP-22 spend passes the contract filter, so
+    // skipping it here would leave a forged all-quantum "payment" with no signature checked at all.
+    let xOnlyKey;
+    let schnorrSig;
+    if (utxoScript.length === 34 && utxoScript[0] === 32 && utxoScript[33] === 0xac) {
+      // 3. A P2PK input's signature script is 0x41 (push 65) + a 64-byte Schnorr signature + a
+      // sighash type byte. Anything else (blank, short, another push) can't be on chain: a failure
+      // (AND-042), judged with the others at the end.
+      const sigScript = hexToBytes(input.signatureScript);
+      if (!sigScript || sigScript.length !== 66 || sigScript[0] !== 0x41) {
+        if (failedInput == null) failedInput = i;
+        continue;
+      }
+      // A sighash type this check doesn't hash (only SIGHASH_ALL is): can't be decided here.
+      if (sigScript[65] !== 0x01) return "unknown";
+      xOnlyKey = utxoScript.slice(1, 33);
+      schnorrSig = sigScript.slice(1, 65);
+    } else if (utxoScript.length === 35 && utxoScript[0] === 0xaa && utxoScript[1] === 0x20 && utxoScript[34] === 0x87) {
+      // 3b. P2SH. A KIP-22 spend's signature script is 0x41 <64-byte sig> <sighash byte> then the
+      // canonical push 0x22 of the 34-byte redeem 0x20 <x-only key> 0xac (101 bytes); any other
+      // shape is a covenant spend, skipped as before.
+      const sb = hexToBytes(input.signatureScript);
+      if (!sb) return "unknown";
+      if (sb.length !== 101 || sb[0] !== 0x41 || sb[66] !== 0x22 || sb[67] !== 0x20 || sb[100] !== 0xac) continue;
+      // The key is bound to the address by the redeem's hash: a KIP-22-shaped script whose redeem
+      // doesn't hash to this very address can't be on chain for it - a failure.
+      const redeemHash = blake2b(sb.slice(67, 101), { dkLen: 32 });
+      if (!redeemHash.every((byte, k) => byte === utxoScript[2 + k])) {
+        if (failedInput == null) failedInput = i;
+        continue;
+      }
+      if (sb[65] !== 0x01) return "unknown";
+      xOnlyKey = sb.slice(68, 100);
+      schnorrSig = sb.slice(1, 65);
+    } else {
+      continue; // ECDSA and the like: not checked here
     }
-    // A sighash type this check doesn't hash (only SIGHASH_ALL is): can't be decided here.
-    if (sigScript[65] !== 0x01) return "unknown";
 
-    // 4. The signature hash (v0 or v1).
+    // 4. The signature hash (v0 or v1), over the spent UTXO's own script (P2SH for a KIP-22
+    // spend - the same the signer uses).
     let sighash;
     try { sighash = computeSighash(model, i, utxoScript, amount); } catch { return "unknown"; }
 
     // 5. The Schnorr signature.
     let ok;
-    try { ok = schnorr.verify(sigScript.slice(1, 65), sighash, utxoScript.slice(1, 33)); } catch { return "unknown"; }
+    try { ok = schnorr.verify(schnorrSig, sighash, xOnlyKey); } catch { return "unknown"; }
     if (!ok && failedInput == null) failedInput = i;
   }
 

@@ -17,6 +17,7 @@ import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
 import { kasTextFromSompi } from "./amounts.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
 import { verifyRestTransactionSignatures, parseU32 } from "./payment-signatures.js";
+import { quantumAddressForRedeem } from "./quantum.js";
 
 // Kept as a named export for callers, but the effective default now comes from
 // the configurable endpoint registry (Settings > Connectivity).
@@ -68,20 +69,69 @@ function restInputAddress(input) {
 }
 
 /**
- * A `.kachat` registry or offer transaction, or any other contract spend (iOS 32fdaa4
- * isKachatContractTransaction): a REST transaction with a `kchat:1:name:` / `kchat:1:offer:`
- * payload, or one that pays to or from a script (P2SH) address - a name's commit and 1 KAS bond,
- * the gaps, an offer's locked KAS, a KNS commit/reveal. A chat partner is always a key address, so
- * such a transaction is never a chat payment (it still shows in the wallet history).
+ * A `.kachat` registry or offer transaction, or any other contract spend (iOS 32fdaa4, reworked in
+ * iOS 0b4e27e for quantum addresses): a REST transaction with a `kchat:1:name:` /
+ * `kchat:1:offer:` payload, or one that moves a covenant's P2SH coin - a name's 1 KAS bond, the
+ * gaps, an offer's locked KAS, a KNS reveal. Such a transaction is never a chat payment (it still
+ * shows in the wallet history).
+ *
+ * Since quantum (KIP-22) addresses, "P2SH" alone no longer means "contract": every spending-address
+ * send carries P2SH change, and a payment can be PAID from a P2SH address. So:
+ * - a P2SH input is a covenant spend UNLESS its signature script is a KIP-22 spend of its own
+ *   address (isKip22Spend);
+ * - a P2SH output by itself proves nothing on a received payment (it is the payer's change). The
+ *   one contract transaction without a payload is the commit, and it pays only the contract and the
+ *   committer's own change - so only on this wallet's OWN sends (an input from `ownAddresses`) does
+ *   "every outside output is P2SH" still mean the commit, never a chat (32fdaa4's "sent 0.2").
+ *
+ * `ownAddresses`: this wallet's chatting address and every revealed spending address, both chains
+ * (any case). Without it no send counts as ours, so only rules 1 and 2 apply.
  */
-export function isKachatContractTransaction(tx) {
+export function isKachatContractTransaction(tx, ownAddresses = null) {
   let payload = String(tx?.payload || "").replace(/^0x/i, "").trim().toLowerCase();
   if (payload.startsWith("6a") && payload.length >= 4) payload = payload.slice(4);
   if (payload && KACHAT_CONTRACT_PAYLOAD_PREFIXES.some((prefix) => payload.startsWith(prefix))) return true;
-  const outputs = Array.isArray(tx?.outputs) ? tx.outputs : [];
-  if (outputs.some((output) => isScriptAddress(restOutputAddress(output)))) return true;
   const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
-  return inputs.some((input) => isScriptAddress(restInputAddress(input)));
+  for (const input of inputs) {
+    if (isScriptAddress(restInputAddress(input)) && !isKip22Spend(input)) return true;
+  }
+  // No P2SH output at all: the own-send rule can never match, so the own set is never read
+  // (iOS d80c497 - on iOS that read froze launch; here the set is built once per sync pass, from
+  // memoized derivations, and this keeps the per-transaction cost at zero for plain payments).
+  const outputs = Array.isArray(tx?.outputs) ? tx.outputs : [];
+  if (!outputs.some((output) => isScriptAddress(restOutputAddress(output)))) return false;
+  const own = new Set([...(ownAddresses || [])].map((address) => String(address || "").trim().toLowerCase()).filter(Boolean));
+  if (!own.size) return false;
+  const paidByUs = inputs.some((input) => own.has(restInputAddress(input).toLowerCase()));
+  if (!paidByUs) return false;
+  const outside = outputs.filter((output) => {
+    const address = restOutputAddress(output).toLowerCase();
+    return !address || !own.has(address);
+  });
+  return outside.length > 0 && outside.every((output) => isScriptAddress(restOutputAddress(output)));
+}
+
+/**
+ * A KIP-22 (quantum address) spend of a P2SH input (iOS 0b4e27e isKip22Spend): the signature script
+ * is exactly `0x41 <64-byte sig> <sighash byte>` then the canonical push `0x22` of the 34-byte
+ * redeem `0x20 <x-only key> 0xac` (101 bytes in all), and the redeem hashes to the input's own P2SH
+ * address. Anything else spending P2SH (the registry's reveal, bond, gap and offer covenants) is a
+ * contract. The sighash byte is not checked (KaChat writes 0x01; the signature check is elsewhere).
+ */
+export function isKip22Spend(input) {
+  const scriptHex = String(input?.signature_script ?? input?.signatureScript ?? "").replace(/^0x/i, "").trim().toLowerCase();
+  if (scriptHex.length !== 202 || !/^[0-9a-f]+$/.test(scriptHex)) return false;
+  const b = new Uint8Array(101);
+  for (let i = 0; i < 101; i += 1) b[i] = parseInt(scriptHex.slice(i * 2, i * 2 + 2), 16);
+  if (b[0] !== 0x41 || b[66] !== 0x22 || b[67] !== 0x20 || b[100] !== 0xac) return false;
+  const address = restInputAddress(input).toLowerCase();
+  const hrp = address.includes(":") ? address.slice(0, address.indexOf(":")) : "";
+  if (!hrp) return false;
+  try {
+    return String(quantumAddressForRedeem(b.slice(67, 101), hrp)).toLowerCase() === address;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeBaseUrl(value) {
@@ -1080,7 +1130,7 @@ async function paymentMemoFromPayload(payloadHex, decryptMessage) {
  * 8116ab9 nodeConfirmsIncomingPayment). It settles a payment whose signatures the REST answer
  * can't (XP-033); without it such a payment is held as before.
  */
-export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null, confirmUnspentPayment = null, log = null } = {}) {
+export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null, confirmUnspentPayment = null, ownAddresses = null, log = null } = {}) {
   if (!conversationId) throw new Error("conversationId is required for payment sync.");
   if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for payment sync.");
   if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing payments.");
@@ -1157,7 +1207,7 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     if (known.has(txid) && !isHeld) continue;
     // .kachat registry/offer and other contract transactions are never chat payments (iOS 32fdaa4):
     // reported so the app keeps them suppressed on every path.
-    if (isKachatContractTransaction(tx)) { contractTxids.push(txid); continue; }
+    if (isKachatContractTransaction(tx, ownAddresses || [walletAddress])) { contractTxids.push(txid); continue; }
 
     const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
     const inputAddresses = inputs.map(addressFromInput).filter((value) => value.startsWith(ADDRESS_PREFIX));
