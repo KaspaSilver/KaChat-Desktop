@@ -10913,7 +10913,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 189;
+const APP_BUILD = 190;
 // "5.2 (176)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -24527,6 +24527,10 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   metadata[wallet.address] = { name, createdAt };
   saveAccountMetaMap(metadata);
 
+  // The device's password first, when there isn't one yet: then the new keys are encrypted from
+  // the moment they are saved, never written in plaintext while the prompt waits (a tab closed
+  // there used to leave the recovery phrase and private key readable in this browser).
+  await requireAppPasswordIfMissing();
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   state = { contacts: [], conversations: [] };
   persistState();
@@ -25841,6 +25845,9 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
   metadata[wallet.address] = { name: cleanName, createdAt };
   saveAccountMetaMap(metadata);
 
+  // As for a new account: the password before anything is saved, so the keys are never at rest
+  // unencrypted.
+  await requireAppPasswordIfMissing();
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   if (resetState) {
     state = { contacts: [], conversations: [] };
