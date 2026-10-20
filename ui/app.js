@@ -5496,8 +5496,21 @@ function appendEngineLog(message) {
   engineLog.textContent = `${line}\n${cut >= 0 ? previous.slice(0, cut) : previous}`.trim();
 }
 
+// A Kaspa address selected by hand and copied (Cmd/Ctrl+C, the context menu) goes to the clipboard
+// as the bare address: the selection often carries the spaces or line breaks around it - or inside
+// it, where a long address wraps - and that pastes as an invalid address elsewhere.
+document.addEventListener("copy", (event) => {
+  const selected = String(window.getSelection?.() ?? "");
+  const bare = selected.replace(/\s+/g, "");
+  if (!bare || bare === selected || !isValidKaspaAddressString(bare)) return;
+  event.clipboardData?.setData("text/plain", bare);
+  event.preventDefault();
+});
+
 async function copyTextToClipboard(value) {
-  const text = String(value ?? "");
+  // Trimmed on both ends: an address (or anything else) copied with a stray space or line break
+  // around it pastes as an invalid address in another wallet.
+  const text = String(value ?? "").trim();
   if (!text) throw new Error("Nothing to copy");
 
   if (navigator.clipboard?.writeText && window.isSecureContext) {
@@ -10900,7 +10913,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 187;
+const APP_BUILD = 188;
 // "5.2 (176)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
