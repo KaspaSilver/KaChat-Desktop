@@ -10915,7 +10915,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 191;
+const APP_BUILD = 192;
 // "5.2.1 (191)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -30201,12 +30201,12 @@ groupMembersList?.addEventListener("click", (event) => {
 // The Chats "New" sheet (iOS 5da8ccf..e6400d6). The floating + used to do something different per
 // tab (create chat, group builder, join room); it is now the same + on Chats, Group Chats and
 // Public Chats, opening one sheet of tiles: New Chat, New Group Chat, New Public Chat, Send Kaspa,
-// Receive Kaspa and Fund Chatting Address.
+// Receive Kaspa and Chatting Address.
 // - New Chat / New Group Chat swap the sheet for the existing create modals; their Cancel (or a
 //   backdrop click / Escape) comes back to this menu, and a chat or group made lands on its tab.
 // - New Public Chat swaps the sheet's content for the room-name field. Errors show in place;
 //   joining switches to Public Chats and opens the room there.
-// - Fund Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page; Send
+// - Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page; Send
 //   Kaspa closes it and opens Send Kaspa, From the chatting address or any other (iOS 6333dd3).
 // No state lives outside the DOM: the sheet is built per open (like the payment detail sheet), and
 // "came from the sheet" is a data attribute on the create modal, so nothing here is read at load.
@@ -30226,7 +30226,7 @@ function newChatSheetIcon(kind) {
 }
 
 // Square glass tiles, three to a row (iOS f81e8d6): New Chat, New Group Chat, New Public Chat /
-// Send Kaspa, Receive Kaspa, Request Payment (iOS c6851d6), Fund Chatting Address. Each one's old line is its tooltip and
+// Send Kaspa, Receive Kaspa, Request Payment (iOS c6851d6), Chatting Address. Each one's old line is its tooltip and
 // accessible description.
 function newChatSheetMenuHtml() {
   const rows = [
@@ -30237,7 +30237,8 @@ function newChatSheetMenuHtml() {
     { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from any of your addresses." },
     { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
     { id: "request", title: "Request Payment", subtitle: "A link asking for an exact amount, with what it's for." },
-    { id: "fund", title: "Fund Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
+    // "Chatting Address" (owner, 2026-10-20; iOS still says "Fund Chatting Address").
+    { id: "fund", title: "Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
   ];
   return `
     <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
