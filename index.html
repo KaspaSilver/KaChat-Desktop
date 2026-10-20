@@ -2359,25 +2359,27 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
         </button>
         <span class="chatting-address-balance">Your Domains</span>
-        <!-- Refresh: the platform's stand-in for iOS's pull-to-refresh on each tab. -->
-        <button class="chatting-address-back domains-refresh" type="button" data-domains-refresh aria-label="Refresh" title="Refresh">
+        <!-- Refresh: the platform's stand-in for iOS's pull-to-refresh on each service's list. -->
+        <button class="chatting-address-back domains-refresh" type="button" data-domains-refresh aria-label="Refresh" title="Refresh" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 12.6A7.5 7.5 0 1 1 17 6.6"/><path d="M19.6 3.8v4.6H15"/></svg>
         </button>
       </header>
-      <!-- A tab per name service (iOS df23b6f, f9a8750): .kachat, .kas, .k, .kaspa. -->
-      <nav class="domains-tabs" data-domains-tabs aria-label="Name services">
-        <button type="button" class="domains-tab" data-domains-tab="kachat">.kachat</button>
-        <button type="button" class="domains-tab" data-domains-tab="kas">.kas</button>
-        <button type="button" class="domains-tab" data-domains-tab="k">.k</button>
-        <button type="button" class="domains-tab" data-domains-tab="kaspa">.kaspa</button>
-      </nav>
       <div class="manage-address-body">
-        <div class="profile-domains-list" data-profile-domains-list></div>
+        <!-- One square card per name ending, KaChat's own first, each naming who runs it, in the
+             Kaspa Hub tile look (iOS debd6fd). Each opens that service's own screen, titled by
+             its ending, with the list that used to be its tab. -->
+        <div class="domains-service-grid" data-domains-services aria-label="Name services">
+          <button type="button" class="hub-tile domains-service-tile" data-domains-service="kachat"><span class="domains-service-suffix">.kachat</span><span class="domains-service-name">KaChat Names</span><span class="domains-service-count" data-domains-count="kachat">–</span></button>
+          <button type="button" class="hub-tile domains-service-tile" data-domains-service="kas"><span class="domains-service-suffix">.kas</span><span class="domains-service-name">KNS</span><span class="domains-service-count" data-domains-count="kas">–</span></button>
+          <button type="button" class="hub-tile domains-service-tile" data-domains-service="k"><span class="domains-service-suffix">.k</span><span class="domains-service-name">dotk</span><span class="domains-service-count" data-domains-count="k">–</span></button>
+          <button type="button" class="hub-tile domains-service-tile" data-domains-service="kaspa"><span class="domains-service-suffix">.kaspa</span><span class="domains-service-name">Kaspa Names</span><span class="domains-service-count" data-domains-count="kaspa">–</span></button>
+        </div>
+        <div class="profile-domains-list" data-profile-domains-list hidden></div>
         <div class="profile-domain-detail" data-domain-detail hidden></div>
       </div>
       <div class="manage-address-actions">
         <!-- Each outside service's "Get a domain" button (iOS 718724b); none on .kachat yet. -->
-        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe>Get a .kas domain at knsdomains.org</button>
+        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe hidden>Get a .kas domain at knsdomains.org</button>
       </div>
     </div>
   </div>

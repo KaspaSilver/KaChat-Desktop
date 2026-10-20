@@ -1,6 +1,8 @@
 import { NETWORK_ID, validateMainnetAddress, sompiToKaspaDisplay } from "./utils.js";
 import { kasToSompi, utxoAmountSompi, MAX_U64, checkedUtxoAnswer } from "./amounts.js";
 import { getEndpoint } from "./endpoints.js";
+import { hex } from "./kachat-names/codec.js";
+import { isP2shScript, quantumScriptPublicKey, kip22SignatureScript, sdkTransactionKip22ExtraMass, signedSdkTransactionComputeMass, verifyKip22Spend } from "./quantum.js";
 
 // Every real send (messages, handshakes, self-stash, KAS payments, KNS
 // commits) funnels through sendKaspa()'s UTXO-fetch-then-spend window below.
@@ -204,7 +206,10 @@ export function extraFeeSompiFrom(value) {
 // empty = automatic selection, as before.
 // `extraFeeSompi` (iOS extraFeeSompi): a priority fee in sompi paid on top of the minimum fee (the
 // Fast / Priority / custom extra), added to `feeKas`. 0 = unchanged behaviour.
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
+// `redeemScript` (iOS senderRedeemScript): a quantum-safe (KIP-22) source's redeem script, pushed
+// after each signature and priced into the fee (see "Quantum-safe sources" below). Null = a plain
+// Schnorr source, as before.
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, log = () => {} }) {
   const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : outpointKeysFrom(manualUtxos);
   // Coin control never falls back to coins the person didn't pick (iOS IOS-012): a non-empty pick
   // that names no readable coin is refused, not sent as an automatic selection.
@@ -212,21 +217,22 @@ export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, source
     throw new Error("Selected UTXOs are no longer available - please reselect.");
   }
   const extraFee = extraFeeSompiFrom(extraFeeSompi);
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, log }));
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, redeemScript, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
 // matching iOS's Compound UTXOs. A plain self-send that leaves a tiny change output gets rejected
 // by Kaspa's KIP-9 storage-mass rule, so the transaction is assembled by hand with exactly one
 // output of (total - fee); more than 80 coins are compounded in chunks of 80.
-export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, log }));
+export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, redeemScript = null, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, redeemScript, log }));
 }
 // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85 inputs.
 const MAX_INPUTS_PER_SWEEP = 80;
-async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, log }) {
+async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, redeemScript, log }) {
   let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Compound UTXO fetch" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs to compound.");
+  requireSigningScriptFor(entries, redeemScript);
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
   entries.sort(bySompiAsc);
@@ -242,7 +248,7 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
   for (const [index, chunk] of chunks.entries()) {
     const total = totalUtxoSompi(chunk);
     const draft = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n);
-    const floorFeeSompi = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
+    const floorFeeSompi = floorFeeSompiFor(kaspa, draft) ?? 0n;
     // The displayed policy fee is what the whole compound pays when it fits one transaction;
     // a chunked compound pays each chunk's own network floor.
     let fee = chunks.length === 1 && totalFeeSompi != null ? BigInt(totalFeeSompi) : floorFeeSompi;
@@ -250,7 +256,7 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
     const amount = total - fee;
     if (amount <= 0n) throw new Error("Balance too low to compound after network fees.");
     const tx = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount }], 0n);
-    const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+    const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
     const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
     let txid;
     try {
@@ -326,9 +332,10 @@ export function planMaxSend({ kaspa, entries, destinationAddress, payload = null
   // The exact network-floor fee for this shape (all inputs, ONE output, the payload), measured on
   // a draft. Undefined means the mass is over the standard limit.
   const draft = kaspa.createTransaction(chosen, [{ address: destinationAddress, amount: total - (total / 20n) }], 0n, payloadArg);
-  const floorRaw = kaspa.calculateTransactionFee(NETWORK_ID, draft, 1);
-  if (floorRaw == null) throw new Error(TOO_MANY_COINS_FOR_MAX);
-  const floorFeeSompi = BigInt(floorRaw);
+  // Quantum-safe (KIP-22) coins are priced with their bigger signature script (iOS
+  // signatureScriptSize: kip22SignatureScriptSize).
+  const floorFeeSompi = floorFeeSompiFor(kaspa, draft);
+  if (floorFeeSompi == null) throw new Error(TOO_MANY_COINS_FOR_MAX);
   let feeSompi;
   if (totalFeeSompi != null) {
     feeSompi = BigInt(totalFeeSompi);
@@ -410,13 +417,14 @@ export async function sendMaxWithPayload(args) {
   if (!args?.payload) throw new Error("Payload is required for a pay-max-with-payload send.");
   return sendMaxKaspa(args);
 }
-async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress: rawDestination, totalFeeSompi = null, extraFeeSompi = 0, selectedOutpoints = null, manualUtxos = null, payload = null, expectedAmountSompi = null, expectedOutpoints = null, log = () => {} }) {
+async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress: rawDestination, totalFeeSompi = null, extraFeeSompi = 0, selectedOutpoints = null, manualUtxos = null, payload = null, expectedAmountSompi = null, expectedOutpoints = null, redeemScript = null, log = () => {} }) {
   // Like sendKaspaNow: only an address of the running network (IOS-003) - the script is built
   // from the payload alone, so the other network's address would pay this chain's script.
   const destinationAddress = validateMainnetAddress(rawDestination);
   const picked = maxPickFrom(selectedOutpoints, manualUtxos);
   const fetched = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Max send UTXO fetch" });
   const entries = maxSendEntries(fetched, picked);
+  requireSigningScriptFor(entries, redeemScript);
 
   // Built by hand, never through the generator: the output is exactly (total - fee), so no change
   // output can ever exist (the generator's own change/dust handling is what kept tripping KIP-9 on
@@ -425,10 +433,10 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
   const { amountSompi: amount, feeSompi } = applyMaxPin(plan, { expectedAmountSompi, expectedOutpoints });
   const payloadArg = payload && payload.length ? payload : undefined;
   const tx = kaspa.createTransaction(plan.entries, [{ address: destinationAddress, amount }], 0n, payloadArg);
-  const finalFloor = kaspa.calculateTransactionFee(NETWORK_ID, tx, 1);
+  const finalFloor = floorFeeSompiFor(kaspa, tx);
   if (finalFloor == null) throw new Error(TOO_MANY_COINS_FOR_MAX);
-  if (BigInt(finalFloor) > feeSompi) throw new Error("Balance too low after network fees.");
-  const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+  if (finalFloor > feeSompi) throw new Error("Balance too low after network fees.");
+  const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
   const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
   const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Max send broadcast", log });
   log("Max send txid:", txid, `(${plan.entries.length} input${plan.entries.length === 1 ? "" : "s"}, one output, fee ${feeSompi} sompi)`);
@@ -544,7 +552,122 @@ function describeKey(privateKey) {
   return `key: ${privateKey.constructor?.name || typeof privateKey} ptr=${privateKey.__wbg_ptr ?? "n/a"}`;
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, log = () => {} }) {
+// --- Quantum-safe sources (KIP-22, iOS bba1b1e) ---------------------------------------------------
+//
+// A quantum-safe spending address is the P2SH of `<x-only key> OP_CHECKSIG` (engine/quantum.js).
+// Spending one signs exactly as a plain Schnorr input does - the sighash covers the spent UTXO's
+// (P2SH) scriptPublicKey, never the redeem script - and then pushes the redeem script after the
+// signature: `<push 65: sig + SIGHASH_ALL> <push 34: redeem>`, 101 bytes (iOS signTransaction(
+// redeemScript:), the KNS reveal's P2SH pattern). The SDK's own signer cannot do this (it finds keys
+// by P2PK address and leaves a P2SH input unsigned, refusing as "partially signed"), so these inputs
+// are signed one by one here, and every signed spend is checked offline before it may be submitted.
+//
+// Fees: the SDK prices every input with a 66-byte signature script. A KIP-22 input costs 35 bytes
+// more, so every floor and estimate here adds that mass (iOS kip22SignatureScriptSize = 66 + 35) at
+// the SDK's own rate.
+
+/** The SDK's fee rate: its generator and calculateTransactionFee charge 100 sompi per gram of
+ *  compute mass (pinned by tools/test-quantum-addresses.mjs). */
+const SDK_FEE_SOMPI_PER_GRAM = 100n;
+const STANDARD_MASS_LIMIT = 100_000n;
+
+/** The network floor fee of an unsigned SDK transaction, KIP-22 inputs priced with their bigger
+ *  signature script; null when the mass is over the standard limit. */
+export function floorFeeSompiFor(kaspa, tx) {
+  const raw = kaspa.calculateTransactionFee(NETWORK_ID, tx, 1);
+  if (raw == null) return null;
+  const extra = sdkTransactionKip22ExtraMass(tx);
+  if (extra > 0n) {
+    let mass = null;
+    try { mass = BigInt(kaspa.calculateTransactionMass(NETWORK_ID, tx, 1)); } catch { mass = null; }
+    if (mass == null || mass + extra > STANDARD_MASS_LIMIT) return null;
+  }
+  return BigInt(raw) + extra * SDK_FEE_SOMPI_PER_GRAM;
+}
+
+/** Coins at a P2SH address can only be spent with its redeem script, and a redeem script only
+ *  spends its own P2SH: refused up front, before anything is built. */
+function requireSigningScriptFor(entries, redeemScript) {
+  const p2sh = (entries || []).some((entry) => isP2shScript(entry?.scriptPublicKey));
+  if (!redeemScript) {
+    if (p2sh) throw new Error("These coins are on a quantum-safe address and need its redeem script to be spent.");
+    return;
+  }
+  const expected = hex(quantumScriptPublicKey(redeemScript));
+  for (const entry of entries || []) {
+    const spk = entry?.scriptPublicKey;
+    const script = String(typeof spk === "string" ? spk : spk?.script ?? "").toLowerCase();
+    if (script !== expected) throw new Error("A coin at this address does not belong to its quantum-safe script.");
+  }
+}
+
+function sdkPrivateKey(kaspa, privateKey) {
+  if (privateKey instanceof kaspa.PrivateKey) return privateKey;
+  return new kaspa.PrivateKey(String(signingKeyArg(privateKey)));
+}
+
+/** inputs - outputs of an SDK transaction whose inputs carry their UTXO entries. */
+function sdkTransactionFeeSompi(tx) {
+  let fee = 0n;
+  for (const input of tx.inputs) fee += BigInt(input.utxo.amount);
+  for (const output of tx.outputs) fee -= BigInt(output.value);
+  return fee;
+}
+
+/** A signed KIP-22 spend must pay at least the SDK rate on its real compute mass: a fee left short
+ *  by the 66-byte estimate is refused here rather than by the node. */
+function assertKip22FeeCovers(tx) {
+  const mass = signedSdkTransactionComputeMass(tx);
+  if (sdkTransactionFeeSompi(tx) < mass * SDK_FEE_SOMPI_PER_GRAM) throw new Error("The network fee does not cover this quantum-safe transaction.");
+}
+
+/** Signs a hand-built SDK transaction: through the SDK for a plain source; for a quantum-safe one
+ *  (`redeemScript`) every input gets the SDK's Schnorr signature with the redeem script pushed
+ *  after it, then the whole spend is verified offline (engine/quantum.js verifyKip22Spend). */
+export function signSdkTransaction(kaspa, tx, privateKey, redeemScript = null) {
+  if (!redeemScript) return kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+  const key = sdkPrivateKey(kaspa, privateKey);
+  const inputs = [...tx.inputs];
+  const scripts = inputs.map((_, i) => hex(kip22SignatureScript(kaspa.createInputSignature(tx, i, key, kaspa.SighashType.All), redeemScript)));
+  tx.inputs = inputs.map((input, i) => { input.signatureScript = scripts[i]; return input; });
+  if (typeof tx.finalize === "function") tx.finalize();
+  verifyKip22Spend(tx, redeemScript);
+  assertKip22FeeCovers(tx);
+  return tx;
+}
+
+/** The generator's PendingTransaction, signed the same way: each input's SDK signature with the
+ *  redeem script pushed after it (fillInput), then verified offline. */
+export function signPendingKip22(kaspa, pending, privateKey, redeemScript) {
+  const key = sdkPrivateKey(kaspa, privateKey);
+  const count = [...pending.transaction.inputs].length;
+  for (let i = 0; i < count; i += 1) {
+    const signatureScript = kip22SignatureScript(pending.createInputSignature(i, key, kaspa.SighashType.All), redeemScript);
+    pending.fillInput(i, hex(signatureScript));
+  }
+  const tx = pending.transaction;
+  verifyKip22Spend(tx, redeemScript);
+  assertKip22FeeCovers(tx);
+  return tx;
+}
+
+/** The generator run for a quantum-safe source: the priority fee is raised by the KIP-22 inputs'
+ *  extra mass (the generator priced them as plain Schnorr inputs) until it covers the coins it
+ *  picks, at most a few passes. One transaction only: a chained send's earlier transactions would
+ *  be priced short and their change returned to the revealed address. */
+async function createKip22Transactions(kaspa, settings, prioritySompi) {
+  let extra = 0n;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const result = await kaspa.createTransactions({ ...settings, priorityFee: prioritySompi + extra });
+    if (result.transactions.length !== 1) throw new Error("Too many coins for one transaction. Run Compound UTXOs first, then send.");
+    const needed = sdkTransactionKip22ExtraMass(result.transactions[0].transaction) * SDK_FEE_SOMPI_PER_GRAM;
+    if (needed <= extra) return result;
+    extra = needed;
+  }
+  throw new Error("Could not price this quantum-safe transaction. Try again.");
+}
+
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas ?? "").trim();
   // Exact sompi (engine/amounts.js, iOS IOS-010): "1,5" is 1.5 KAS, never NaN, and an absurd
@@ -560,6 +683,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
+  requireSigningScriptFor(entries, redeemScript);
 
   // Coin control: if the caller picked specific UTXOs, spend only those (mirrors
   // iOS's manualUtxos). An outpoint is keyed as "transactionId:index".
@@ -597,13 +721,13 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     const totalSompi = totalUtxoSompi(entries);
     if (totalSompi >= amountSompi / 2n) {
       const draft = kaspa.createTransaction(entries, [{ address: to, amount: totalSompi - (totalSompi / 20n) }], 0n, payload || undefined);
-      const floorFee = BigInt(kaspa.calculateTransactionFee(NETWORK_ID, draft, 1) ?? 0n);
+      const floorFee = floorFeeSompiFor(kaspa, draft) ?? 0n;
       const totalFee = floorFee + prioritySompi;
       if (totalSompi < amountSompi + totalFee && totalSompi > totalFee) {
         const reduced = totalSompi - totalFee;
         log(`Balance holds the amount but not the fee; sending ${reduced} sompi as one output (total minus fee).`);
         const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
-        const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
+        const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
         const submitReduced = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
         const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, label: "Transaction broadcast", log });
         log("Broadcast txid:", txid);
@@ -616,21 +740,24 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   // ui/app.js freshChangeForSpendingIndex) and otherwise back to the source.
   const changeTo = changeAddress ? validateMainnetAddress(changeAddress) : sourceAddress;
   log("Creating transaction from", sourceAddress, "to", to, "amount", amount, "KAS", changeTo !== sourceAddress ? `(change to ${changeTo})` : "");
-  const result = await kaspa.createTransactions({
+  const settings = {
     entries,
     outputs: [{ address: to, amount: amountSompi }],
-    priorityFee: prioritySompi,
     changeAddress: changeTo,
     networkId: NETWORK_ID,
     ...(payload ? { payload } : {}),
-  });
+  };
+  const result = redeemScript
+    ? await createKip22Transactions(kaspa, settings, prioritySompi)
+    : await kaspa.createTransactions({ ...settings, priorityFee: prioritySompi });
   log("Transaction summary:", result.summary);
 
   const txids = [];
   const signer = signingKeyArg(privateKey);
   for (const pending of result.transactions) {
     try {
-      await pending.sign([signer]);
+      if (redeemScript) signPendingKip22(kaspa, pending, privateKey, redeemScript);
+      else await pending.sign([signer]);
     } catch (error) {
       log("Signing failed:", describeKey(privateKey), String(error));
       throw error;
@@ -699,7 +826,17 @@ export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sou
   const feesSompi = result.summary?.fees;
   if (feesSompi == null) return null;
   const massGrams = result.summary?.mass;
-  return { feeSompi: BigInt(feesSompi), massGrams: massGrams != null ? BigInt(massGrams) : 0n };
+  // A quantum-safe (KIP-22) source's inputs carry 35 more signature-script bytes each than the
+  // generator priced (iOS estimatePaymentFee(signatureScriptSize:)); the send pays that on top
+  // (engine createKip22Transactions), so the estimate shows it too.
+  let extraMass = 0n;
+  if (entries.some((entry) => isP2shScript(entry?.scriptPublicKey))) {
+    for (const pending of result.transactions || []) extraMass += sdkTransactionKip22ExtraMass(pending.transaction);
+  }
+  return {
+    feeSompi: BigInt(feesSompi) + extraMass * SDK_FEE_SOMPI_PER_GRAM,
+    massGrams: (massGrams != null ? BigInt(massGrams) : 0n) + extraMass,
+  };
 }
 
 export async function estimateOnchainFee(opts) {

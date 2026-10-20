@@ -228,6 +228,12 @@
 .kl-src-handle-row { justify-content: flex-start; gap: 0; cursor: text; }
 .kl-src-prefix { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
 .kl-src-handle-row .kl-input { margin-left: 1px; }
+/* One-tap clear inside a filled handle / Linktree field (iOS 9638498 xmark.circle.fill). */
+.kl-input-clear { flex: 0 0 auto; display: inline-grid; place-items: center; width: 22px; height: 22px; margin-left: 6px; padding: 0; border: 0; background: none; cursor: pointer; }
+.kl-input-clear[hidden] { display: none; }
+.kl-input-clear svg { width: 18px; height: 18px; }
+.kl-input-clear .kl-clear-disc { fill: var(--label-tertiary); stroke: none; }
+.kl-input-clear .kl-clear-x { fill: none; stroke: var(--surface, #1c1c1e); stroke-width: 2; stroke-linecap: round; }
 
 /* Where a field's lookup stands. */
 .kl-src-status-wrap:empty { display: none; }

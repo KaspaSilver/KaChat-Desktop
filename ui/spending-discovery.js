@@ -170,3 +170,50 @@ export function applySpendingDiscovery({ maxIndex, hidden }, { lastMatchIndex, m
     hidden: [...next].sort((a, b) => a - b),
   };
 }
+
+// MARK: - The quantum-safe chain (KIP-22, iOS bba1b1e discoverQuantumAddresses)
+//
+// Restores scan both chains. The quantum chain is young and change rotation only ever extends it
+// one slot at a time, so a short window covers it: QUANTUM_SCAN_FLOOR slots from quantum index 0
+// (public QUANTUM_INDEX_BASE). Funded decides surfacing, as on the legacy chain; names are never
+// held by a quantum (P2SH) address, so there is no ownership probe. The bulk activity route
+// narrows the window first where the REST server offers it, straight to balances otherwise.
+
+/// The walk: `derive(start, end)` -> Map(public index -> address); `activity(addresses)` -> Map of
+/// touched addresses, or null; `fundedAmong(addresses)` -> Set of funded addresses (throws when
+/// balances are unavailable: nothing is found then). Returns { matchCount, matchedIndices }
+/// (public indices).
+export async function discoverQuantumMatches({ derive, activity, fundedAmong, base, floor }) {
+  const derived = (await derive(base, base + floor)) || new Map();
+  const ordered = [];
+  for (let i = base; i < base + floor; i += 1) {
+    const address = derived.get(i);
+    if (address) ordered.push([i, address]);
+  }
+  if (!ordered.length) return { matchCount: 0, matchedIndices: new Set() };
+  let candidates = ordered;
+  let touched = null;
+  try { touched = await activity(ordered.map(([, address]) => address)); } catch { touched = null; }
+  if (touched) candidates = ordered.filter(([, address]) => touched.has(address));
+  if (!candidates.length) return { matchCount: 0, matchedIndices: new Set() };
+  let funded;
+  try { funded = (await fundedAmong(candidates.map(([, address]) => address))) || new Set(); } catch { return { matchCount: 0, matchedIndices: new Set() }; }
+  const matchedIndices = new Set(candidates.filter(([, address]) => funded.has(address)).map(([i]) => i));
+  return { matchCount: matchedIndices.size, matchedIndices };
+}
+
+/// The stored state after the quantum scan: matches un-hidden, the quantum bound raised to the
+/// highest match (`qMaxIndex` is a quantum chain index, -1 before the first slot), the empty slots
+/// that raise sweeps in hidden. The bound only grows.
+export function applyQuantumDiscovery({ qMaxIndex, hidden }, { matchedIndices }, base) {
+  const matched = [...(matchedIndices || [])];
+  const next = new Set((hidden || []).map(Number));
+  for (const i of matched) next.delete(i);
+  const previous = Number.isInteger(qMaxIndex) ? qMaxIndex : -1;
+  const highest = matched.length ? Math.max(...matched) - base : -1;
+  if (highest > previous) {
+    const wanted = new Set(matched);
+    for (let n = previous + 1; n < highest; n += 1) if (!wanted.has(base + n)) next.add(base + n);
+  }
+  return { qMaxIndex: Math.max(previous, highest), hidden: [...next].sort((a, b) => a - b) };
+}

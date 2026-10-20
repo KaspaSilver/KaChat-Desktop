@@ -1236,7 +1236,7 @@ export class KaspaEngine {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
-    return sendMaxKaspa({
+    const result = await sendMaxKaspa({
       kaspa: this.kaspa,
       rpc: this.rpc,
       withRpc: this.withRpc.bind(this),
@@ -1246,8 +1246,11 @@ export class KaspaEngine {
       totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       selectedOutpoints,
       ...maxSendOptions(options),
+      redeemScript: spending.redeemScript || null,
       log: this.log,
     });
+    this.noteSpendingSpent(spending);
+    return result;
   }
 
   // What Max would send, without sending (DSK-042 / DSK-043): the coins at `sourceAddress` (default
@@ -1290,7 +1293,16 @@ export class KaspaEngine {
     });
   }
 
-  // --- Spending-address chain (m/44'/111111'/1'/0/<index>) ---
+  // A quantum-safe (KIP-22) address that spent has its key on chain for good: the app marks it the
+  // moment the node accepted the spend (iOS markQuantumAddressSpent), through this hook (set by
+  // ui/app.js). Self-sends (Compound) count too. Never lets a bookkeeping slip fail the send.
+  noteSpendingSpent(spending) {
+    if (!spending?.quantum) return;
+    try { this.onQuantumAddressSpent?.(spending.address, spending.index); } catch (error) { this.log?.(`Quantum spent mark failed: ${error?.message || error}`); }
+  }
+
+  // --- Spending-address chain (m/44'/111111'/1'/0/<index>; quantum-safe m/22'/111111'/0'/0/<n> at
+  // public index 1,000,000 + n, engine/quantum.js) ---
   // Derive a spending address/key from the account's recovery phrase. Does NOT
   // change the active (chatting) wallet. `passphrase` must match what the seed
   // was created with ("" for the common no-passphrase case), and `passphraseForm` the account's
@@ -1318,7 +1330,7 @@ export class KaspaEngine {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
-    return sendKaspa({
+    const result = await sendKaspa({
       kaspa: this.kaspa,
       rpc: this.rpc,
       withRpc: this.withRpc.bind(this),
@@ -1333,8 +1345,11 @@ export class KaspaEngine {
       changeAddress,
       payload,
       exactAmount: Boolean(exactAmount),
+      redeemScript: spending.redeemScript || null,
       log: this.log,
     });
+    this.noteSpendingSpent(spending);
+    return result;
   }
 
   // Fee estimate ({ sdkFeeKas, policyFeeKas }) for a send FROM an arbitrary address (spending
@@ -1359,15 +1374,25 @@ export class KaspaEngine {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
-    return sweepAllToSelf({
-      kaspa: this.kaspa,
-      rpc: this.rpc,
-      withRpc: this.withRpc.bind(this),
-      privateKey: spending.privateKey,
-      sourceAddress: spending.address,
-      totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
-      log: this.log,
-    });
+    let result;
+    try {
+      result = await sweepAllToSelf({
+        kaspa: this.kaspa,
+        rpc: this.rpc,
+        withRpc: this.withRpc.bind(this),
+        privateKey: spending.privateKey,
+        sourceAddress: spending.address,
+        totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
+        redeemScript: spending.redeemScript || null,
+        log: this.log,
+      });
+    } catch (error) {
+      // A chunked compound whose earlier transactions went out has spent already.
+      if (error?.submittedTxids?.length) this.noteSpendingSpent(spending);
+      throw error;
+    }
+    this.noteSpendingSpent(spending);
+    return result;
   }
 
   async drawQrFor(canvas, payload, colorOptions) {

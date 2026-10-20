@@ -1,4 +1,5 @@
 import { NETWORK_ID, validatePrivateKeyHex } from "./utils.js";
+import { QUANTUM_INDEX_BASE, isQuantumIndex, quantumDerivationPath, quantumRedeemScript, quantumAddressForRedeem } from "./quantum.js";
 
 export function getPrivateKeyHexFromKeypair(keypair) {
   const pk = keypair.privateKey || keypair.private_key || keypair.secretKey || keypair.secret_key;
@@ -241,29 +242,51 @@ export async function deriveIdentityAddressRange(kaspa, phrase, passphrase = "",
 // the same seed, so it's derivable from the recovery phrase and matches iOS
 // (WalletManager+SpendingAddresses) and Android (WalletManager.deriveSpendingAddress)
 // byte-for-byte — the identity/chatting address is m/44'/111111'/0'/0/0.
+//
+// Public indices from QUANTUM_INDEX_BASE (1,000,000) up are the quantum-safe chain (KIP-22, iOS
+// bba1b1e): m/22'/111111'/0'/0/<index - base>, its address the P2SH of `<x-only key> OP_CHECKSIG`
+// (engine/quantum.js). Same seed, same derivation code, so every caller that takes a spending index
+// works for both chains.
 export const SPENDING_ACCOUNT_INDEX = 1;
 export function spendingDerivationPath(index) {
   const i = Math.max(0, Math.floor(Number(index) || 0));
+  if (isQuantumIndex(i)) return quantumDerivationPath(i - QUANTUM_INDEX_BASE);
   return `m/44'/111111'/${SPENDING_ACCOUNT_INDEX}'/0/${i}`;
 }
+
+// The wallet at one spending index from its derived key. A quantum index's address is the P2SH of
+// its redeem script, never the key's own (P2PK) address, and the redeem script travels with it:
+// spends push it after each signature (engine/transactions.js).
+function spendingWalletFromKey(kaspa, key, index) {
+  const wallet = importPrivateKey(kaspa, key.toString());
+  if (!isQuantumIndex(index)) return wallet;
+  const xOnlyHex = String(key.toPublicKey().toXOnlyPublicKey().toString());
+  const redeemScript = quantumRedeemScript(xOnlyHex);
+  const address = quantumAddressForRedeem(redeemScript);
+  if (!address) throw new Error("Could not derive the quantum-safe address.");
+  return { ...wallet, address, quantum: true, redeemScript, xOnlyPublicKeyHex: xOnlyHex };
+}
+
 export function deriveSpendingWallet(kaspa, phrase, index, passphrase = "", { passphraseForm = "nfkd" } = {}) {
   if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (!cleanPhrase) throw new Error("A recovery phrase is required to derive spending addresses.");
-  const path = spendingDerivationPath(index);
+  const cleanIndex = Math.max(0, Math.floor(Number(index) || 0));
+  const path = spendingDerivationPath(cleanIndex);
   const seed = seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm);
   const master = new kaspa.XPrv(seed);
   const accountKey = master.derivePath(path).toPrivateKey();
-  const wallet = importPrivateKey(kaspa, accountKey.toString());
-  return { ...wallet, derivationPath: path, index: Math.max(0, Math.floor(Number(index) || 0)) };
+  const wallet = spendingWalletFromKey(kaspa, accountKey, cleanIndex);
+  return { ...wallet, derivationPath: path, index: cleanIndex };
 }
 
 // Batch spending derivation for Discover Addresses (iOS spendingAddresses(inRange:)): the
 // seed -> PBKDF2 -> master XPrv work is done ONCE for the whole range and only the per-index
 // path step repeats, so a thousand-address window is not a thousand seed derivations. Same paths
-// as deriveSpendingWallet. Returns [{ index, address }]; an index that fails is skipped.
+// as deriveSpendingWallet (a range from QUANTUM_INDEX_BASE up is the quantum chain). Returns
+// [{ index, address }]; an index that fails is skipped.
 export function deriveSpendingAddressRange(kaspa, phrase, passphrase = "", { start = 0, count = 100, passphraseForm = "nfkd" } = {}) {
   if (typeof kaspa.Mnemonic !== "function" || typeof kaspa.XPrv !== "function") {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
@@ -277,7 +300,7 @@ export function deriveSpendingAddressRange(kaspa, phrase, passphrase = "", { sta
   for (let index = first; index < first + total; index += 1) {
     try {
       const key = master.derivePath(spendingDerivationPath(index)).toPrivateKey();
-      results.push({ index, address: importPrivateKey(kaspa, key.toString()).address });
+      results.push({ index, address: spendingWalletFromKey(kaspa, key, index).address });
     } catch {
       // A single unusable index must not sink the whole batch.
     }

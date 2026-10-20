@@ -304,9 +304,12 @@ export class QrFrameAccumulator {
 // outputs, no payload -> mass 2036.
 // ---------------------------------------------------------------------------
 
-export function calculateMass(numInputs, outputScriptLens, payloadSize = 0, sigOpCountPerInput = 1) {
+// `sigScriptLen`: the signature-script size per input - 66 for a Schnorr input, 101 for a
+// quantum-safe (KIP-22) one that pushes its redeem script too (iOS estimateFee(signatureScriptSize:),
+// engine/quantum.js KIP22_SIGNATURE_SCRIPT_SIZE).
+export function calculateMass(numInputs, outputScriptLens, payloadSize = 0, sigOpCountPerInput = 1, sigScriptLen = SCHNORR_SIG_SCRIPT_LEN) {
   const n = BigInt(numInputs);
-  const totalSigScriptBytes = n * SCHNORR_SIG_SCRIPT_LEN;
+  const totalSigScriptBytes = n * BigInt(sigScriptLen);
 
   let byteSize = 2n; // version (u16)
   byteSize += 8n; // input count

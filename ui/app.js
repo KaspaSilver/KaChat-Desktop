@@ -9,6 +9,7 @@ import { chattingCatchUpLook } from "./address-activity.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
+import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, nextFreshQuantumIndex, spendingChangeIndex } from "../engine/quantum.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
@@ -34,7 +35,7 @@ import {
   initAddressBook, showAddressBook, hideAddressBook, resetAddressBookForAccount, openAddressBookEditor,
   pickFromAddressBook, pickManyFromAddressBook, refreshAddressBookStorageRow, ADDRESS_BOOK_ICONS,
 } from "./address-book.js";
-import { NAME_SERVICES, DEFAULT_TAB as DEFAULT_DOMAIN_TAB } from "../engine/name-services.js";
+import { NAME_SERVICES } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioArchive, importPortfolioArchive, portfolioAmountsHidden } from "./portfolio.js";
 import { mergePortfolioArchives } from "./portfolio-sync.js";
 import { initColdStorage, refreshColdStorage, refreshColdStorageOnActivity, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
@@ -93,7 +94,7 @@ import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, prom
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
-import { discoverSpendingMatches, applySpendingDiscovery, fetchAddressActivity } from "./spending-discovery.js";
+import { discoverSpendingMatches, applySpendingDiscovery, fetchAddressActivity, discoverQuantumMatches, applyQuantumDiscovery } from "./spending-discovery.js";
 import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -1678,12 +1679,13 @@ var ownPaymentAddressCache = null;
 function ownPaymentAddresses() {
   const wallet = String(engine.address || "").toLowerCase();
   if (!wallet) return new Set();
-  const maxIndex = activeAccountMnemonic() ? getSpendingState().maxIndex : -1;
-  const key = `${wallet}|${maxIndex}`;
+  const state = activeAccountMnemonic() ? getSpendingState() : null;
+  // Both chains count, and the key moves when either grows (iOS bba1b1e LinkPreviewService).
+  const key = `${wallet}|${state ? spendingBoundsKey(state) : "-1"}`;
   if (ownPaymentAddressCache?.key === key) return ownPaymentAddressCache.addresses;
   const addresses = new Set([wallet]);
   let complete = true;
-  for (let index = 0; index <= maxIndex; index += 1) {
+  for (const index of state ? spendingRevealedIndices(state) : []) {
     const address = deriveSpendingAddressAt(index);
     if (address) addresses.add(String(address).toLowerCase()); else complete = false;
   }
@@ -2110,10 +2112,11 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   amountInput?.focus();
   fetchKasPrice(selectedCurrency).then((value) => { price = value || null; renderAmount(); }).catch(() => {});
   // Derived, not reserved: opening the screen and cancelling uses no address up (iOS 3f5f79c).
+  // The fresh slot is quantum-safe (KIP-22, iOS bba1b1e), matching what reserving returns.
   if (activeAccountMnemonic()) {
     (async () => {
       try { await ensureRuntimes({ quiet: true }); } catch { /* the address stays loading */ }
-      const next = deriveSpendingAddressAt(getSpendingState().maxIndex + 1);
+      const next = deriveSpendingAddressAt(nextFreshQuantumIndex(getSpendingState().qMaxIndex));
       if (!next || !sheet.isConnected) return;
       nextFreshAddress = next;
       if (destination === "fresh" && !freshAddress) renderAddress();
@@ -3691,20 +3694,9 @@ function isPlaceholderContactName(contact) {
 // fills in contact.name itself (see applyKnsPrimaryDomainToContact) when no
 // custom name has been set, so this just reads contact.name normally.
 function displayNameForAddress(contact) {
-  return ownAddressSuffixed(baseDisplayNameForAddress(contact), contact?.address);
-}
-
-/// The chat with your own chatting address says so: "kaspero.kachat (Your address)" - whatever
-/// the name resolves to (your alias, Address Book, .kachat, the short address), everywhere that
-/// chat is named (iOS 2ccf3e1, ContactsManager.ownSuffixed). Never saved back: name fields and
-/// Address Book suggestions read baseDisplayNameForAddress.
-function ownAddressSuffixed(name, address) {
-  if (!name || !address || !engine.address || String(address).toLowerCase() !== String(engine.address).toLowerCase()) return name;
-  return `${name} (Your address)`;
-}
-
-function baseDisplayNameForAddress(contact) {
   if (!contact) return "";
+  // Your own chatting address goes by who you are on chain (iOS 7d11735).
+  if (isOwnChattingAddress(contact.address)) return onChainNameForAddress(contact.address);
   if (contact.nameIsCustom) return contact.name || defaultAliasFor(contact.address);
   // A name you gave the chat wins; then the address's Address Book name (iOS 00767a4); then who
   // it is on chain.
@@ -3722,15 +3714,25 @@ function baseDisplayNameForAddress(contact) {
 /// testnet its .kachat name, elsewhere its KNS domain (when .kas names are identity), else the
 /// short address. For an address with no contact record; with one, use displayNameForAddress.
 function identityNameForAddress(address) {
-  return ownAddressSuffixed(baseIdentityNameForAddress(address), address);
-}
-
-function baseIdentityNameForAddress(address) {
+  if (isOwnChattingAddress(address)) return onChainNameForAddress(address);
   // With no contact record, the Address Book name comes first (iOS displayName(for: address)).
   const savedName = addressBookName(address);
   if (savedName) return savedName;
+  return onChainNameForAddress(address);
+}
+
+/// Who an address is on chain: its .kachat name (else its KNS domain where .kachat names are not
+/// the identity), else the short address (iOS ContactsManager.identityName).
+function onChainNameForAddress(address) {
   if (kachatNamesUiEnabled()) return kachatCachedLabel(address) || defaultAliasFor(address);
   return knsDomainForAddress(address) || defaultAliasFor(address);
+}
+
+/// Your own chatting address goes by who you are on chain - your .kachat domain, else the short
+/// address - never a contact or Address Book name; the chat LIST names that chat "Your Address"
+/// itself (iOS 7d11735, which replaced 2ccf3e1's "(Your address)" suffix).
+function isOwnChattingAddress(address) {
+  return Boolean(address && engine.address) && String(address).toLowerCase() === String(engine.address).toLowerCase();
 }
 
 /// The KNS name to show for an address, matching iOS's ContactsManager.displayName.
@@ -6994,8 +6996,9 @@ let ownKnsProfileFields = null;
 // The .kas domain the profile editor is open for (iOS 09e0403: Your Domains > domain > Customize
 // Profile). Its own copy, so a background refresh of your profile can never retarget a save.
 let knsEditorTarget = null; // { assetId, name, fields }
-// Your Domains tab state, declared up here because the profile refresh reads it early.
-let activeDomainsTab = DEFAULT_DOMAIN_TAB;
+// The name service whose screen Your Domains has pushed (iOS debd6fd: a card per service), null
+// on the cards themselves. Declared up here because the profile refresh reads it early.
+let activeDomainsService = null;
 let otherServiceNames = { k: null, kaspa: null }; // { state, names: [{ name, display, settling }] }
 let otherServiceNamesFor = "";
 let otherServiceNamesAt = 0;
@@ -7356,32 +7359,84 @@ function loadAllSpendingState() {
   catch { return {}; }
 }
 
-// Per-wallet spending state, sanitized. maxIndex is always ≥ activeIndex so the
-// active address can never fall outside the revealed range.
+// Per-wallet spending state, sanitized (engine/quantum.js spendingStateFromRecord): the legacy
+// chain's maxIndex (always covering a legacy active index), the quantum-safe chain's own bound
+// qMaxIndex (-1 before its first slot, iOS maxQuantumAddressIndex), the primary activeIndex (a
+// public index on either chain), the hidden set and labels (by public index) and qSpent - the
+// quantum addresses whose key a spend put on chain (iOS bba1b1e).
 function getSpendingState(address = engine.address) {
   const raw = (loadAllSpendingState() || {})[address] || {};
-  const activeIndex = Math.max(0, Math.floor(Number(raw.activeIndex) || 0));
-  const maxIndex = Math.max(activeIndex, Math.floor(Number(raw.maxIndex) || 0));
-  const hidden = Array.isArray(raw.hidden)
-    ? Array.from(new Set(raw.hidden.map(Number).filter((n) => Number.isInteger(n) && n >= 0)))
-    : [];
-  const labels = raw.labels && typeof raw.labels === "object" ? { ...raw.labels } : {};
-  return { activeIndex, maxIndex, hidden, labels };
+  return spendingStateFromRecord(raw);
 }
 
 function saveSpendingState(patch, address = engine.address) {
   if (!address) return getSpendingState(address);
   const all = loadAllSpendingState();
-  const next = { ...getSpendingState(address), ...patch };
-  next.activeIndex = Math.max(0, Math.floor(Number(next.activeIndex) || 0));
-  next.maxIndex = Math.max(next.activeIndex, Math.floor(Number(next.maxIndex) || 0));
-  all[address] = next;
+  const previous = all[address] || {};
+  const record = spendingRecordFromState({ ...getSpendingState(address), ...patch }, previous);
+  all[address] = record;
   localStorage.setItem(SPENDING_STATE_KEY, JSON.stringify(all));
-  return next;
+  return spendingStateFromRecord(record);
 }
 
 function getActiveSpendingIndex() {
   return getSpendingState().activeIndex;
+}
+
+/** Every revealed spending index of the state, the legacy chain then the quantum-safe one (iOS
+ *  allSpendingAddresses covers both). */
+function spendingRevealedIndices(state = getSpendingState()) {
+  return revealedSpendingIndices(state);
+}
+
+/** The bounds key of a state for caches keyed on "how many addresses" (iOS
+ *  "\(maxSpendingAddressIndex)|q\(maxQuantumAddressIndex)"): it moves when either chain grows. */
+function spendingBoundsKey(state = getSpendingState()) {
+  return `${state.maxIndex}|q${state.qMaxIndex}`;
+}
+
+// --- The quantum-safe spent state (the shield, iOS bba1b1e) ---
+// Quantum addresses this wallet has spent FROM: the spend put their key on chain for good, so the
+// shield comes off (KIP-22). Marked the moment the node accepted a send from the app (the engine's
+// onQuantumAddressSpent hook), and by the on-chain probe for spends made elsewhere. Never unmarked.
+function markQuantumAddressSpent(address) {
+  const lowered = String(address || "").toLowerCase();
+  if (!lowered) return;
+  const state = getSpendingState();
+  if (state.qSpent.includes(lowered)) return;
+  saveSpendingState({ qSpent: [...state.qSpent, lowered] });
+}
+function isQuantumAddressSpentLocally(address) {
+  return getSpendingState().qSpent.includes(String(address || "").toLowerCase());
+}
+engine.onQuantumAddressSpent = (address) => {
+  markQuantumAddressSpent(address);
+  try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch { /* repaints on the next open */ }
+};
+
+/// Whether a quantum-safe address has ever SPENT - the one event that puts its key on chain
+/// (receiving reveals nothing; iOS ChatService.quantumAddressSpentState). true is marked locally and
+/// permanent; false means no spend in its history; null when the history can't be read right now.
+/// Quantum addresses are young, so one page covers them.
+// A "not spent" answer is reused for a minute: Manage Addresses repaints after every reveal, and
+// asking the REST server about every quantum row each time would trip its rate limit.
+const quantumUnspentSeenAt = new Map();
+async function quantumAddressSpentState(address) {
+  if (isQuantumAddressSpentLocally(address)) return true;
+  if (!String(address || "").trim()) return null;
+  if (Date.now() - (quantumUnspentSeenAt.get(address) || 0) < 60_000) return false;
+  try {
+    const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
+    const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) return null;
+    const txs = await response.json();
+    if (!Array.isArray(txs)) return null;
+    const lowered = String(address).toLowerCase();
+    const spent = txs.some((tx) => (tx?.inputs || []).some((input) => String(input?.previous_outpoint_address || "").toLowerCase() === lowered));
+    if (spent) markQuantumAddressSpent(address);
+    else quantumUnspentSeenAt.set(address, Date.now());
+    return spent;
+  } catch { return null; }
 }
 
 // Every send out of the PRIMARY spending address rotates it to a fresh one (iOS e53ea11): change
@@ -7390,33 +7445,50 @@ function getActiveSpendingIndex() {
 // same-address change. A compound is a self-send that moves nothing out and neither splits nor
 // rotates. When the fresh address cannot be derived, change stays on the source and the primary
 // stays with it: a pointer must never move to an address the funds did not reach.
-function freshChangeForSpendingIndex(index) {
-  if (index == null || index !== getActiveSpendingIndex()) return null;
+//
+// Quantum-safe addresses (KIP-22, iOS bba1b1e): the change of a spending-address send now lands on
+// a brand-new quantum-safe slot (engine/quantum.js spendingChangeIndex). A quantum source ALWAYS
+// rotates - its spend reveals its key, and change back to it would park funds on a revealed
+// address - and the legacy primary rotates as before; a legacy non-primary keeps same-address
+// change. `purpose` "kns": a KNS transfer, which rotates only the primary (iOS
+// KNSDomainTransferService).
+function freshChangeForSpendingIndex(index, { purpose = "withdraw", destination = null } = {}) {
+  if (index == null) return null;
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return null;
-  const freshIndex = getSpendingState().maxIndex + 1;
+  const state = getSpendingState();
+  // A send to the address itself moves nothing out: it consolidates in place (iOS isSelfSend).
+  const selfSend = destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressAt(index) || "").toLowerCase();
+  const freshIndex = spendingChangeIndex({ purpose, sourceIndex: index, primaryIndex: state.activeIndex, qMaxIndex: state.qMaxIndex, selfSend });
+  if (freshIndex == null) return null;
   const address = deriveSpendingAddressAt(freshIndex);
   return address ? { index: freshIndex, address } : null;
 }
 // A chat payment from a spending address picked on the Send KAS sheet (not the primary, iOS
-// dae8a01): its change still goes to a never-used index past the all-time max, but once the node
-// has the transaction that address is only REVEALED (maxIndex moves) - the primary stays put.
+// dae8a01): its change goes to a never-used slot - a fresh quantum-safe one (iOS bba1b1e) - but
+// once the node has the transaction that address is only REVEALED - the primary stays put.
 function freshSpendingChangeAddress() {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return null;
-  const freshIndex = getSpendingState().maxIndex + 1;
+  const freshIndex = spendingChangeIndex({ purpose: "payment", qMaxIndex: getSpendingState().qMaxIndex });
   const address = deriveSpendingAddressAt(freshIndex);
   return address ? { index: freshIndex, address } : null;
 }
+/** The bound patch that reveals `index` on its own chain (a quantum index extends qMaxIndex; the
+ *  legacy bound never sees base-space values). */
+function spendingBoundPatchFor(index, state = getSpendingState()) {
+  if (isQuantumIndex(index)) return { qMaxIndex: Math.max(state.qMaxIndex, chainLocalIndex(index)) };
+  return { maxIndex: Math.max(state.maxIndex, index) };
+}
 function revealSpendingChangeAddress(fresh) {
   if (!fresh || !Number.isInteger(fresh.index)) return;
-  saveSpendingState({ maxIndex: Math.max(getSpendingState().maxIndex, fresh.index) });
-  appendEngineLog(`Payment change went to spending #${fresh.index} (${shortAddress(fresh.address)}); primary unchanged.`);
+  saveSpendingState(spendingBoundPatchFor(fresh.index));
+  appendEngineLog(`Payment change went to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}); primary unchanged.`);
   try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
   try { refreshSpendingSummary?.(); } catch {}
 }
 function rotatePrimarySpendingTo(fresh) {
   if (!fresh || !Number.isInteger(fresh.index)) return;
-  saveSpendingState({ activeIndex: fresh.index, maxIndex: Math.max(getSpendingState().maxIndex, fresh.index) });
-  appendEngineLog(`Primary spending address rotated to #${fresh.index} (${shortAddress(fresh.address)}).`);
+  saveSpendingState({ activeIndex: fresh.index, ...spendingBoundPatchFor(fresh.index) });
+  appendEngineLog(`Primary spending address rotated to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}).`);
   try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
   try { refreshSpendingSummary?.(); } catch {}
   try { refreshSpendingDetailIfOpen?.(); } catch {}
@@ -7498,8 +7570,8 @@ function spendingLabelFor(state, index) {
   const trimmed = custom != null ? String(custom).trim() : "";
   if (trimmed) return trimmed;
   // "Address #N", as iOS names it (SpendingAddressEntry.displayLabel): no "primary" in the UI any
-  // more (iOS 6333dd3).
-  return `Address #${index}`;
+  // more (iOS 6333dd3). A quantum-safe row is numbered on its own chain, from 0 (iOS e001786).
+  return spendingIndexTitle(index);
 }
 
 // ---------------------------------------------------------------------------
@@ -7581,12 +7653,13 @@ function saveChattingCatchUpFloor(address, ms) {
   } catch {}
 }
 
-// Every revealed spending-chain address (0...maxIndex) for the active account.
+// Every revealed spending address for the active account: the legacy chain (0...maxIndex) and the
+// quantum-safe one (iOS bba1b1e: the activity notifier's watch set, own-address checks and
+// internal-move detection all count both).
 function spendingWatchedAddressList() {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
-  const spendingState = getSpendingState();
   const list = [];
-  for (let index = 0; index <= spendingState.maxIndex; index += 1) {
+  for (const index of spendingRevealedIndices()) {
     const address = deriveSpendingAddressAt(index);
     if (address) list.push(address);
   }
@@ -7655,14 +7728,17 @@ function ownInputAddressSet() {
 // Other saved accounts' spending addresses, derived from their own seed (account:index -> address).
 const otherAccountSpendingMemo = new Map();
 
-/** An unlocked saved account's revealed spending addresses (0...its maxIndex), derived from its
+/** An unlocked saved account's revealed spending addresses (both chains), derived from its
  *  seed - not only what its Manage Addresses happened to list (IOS-083 run 10). */
 function savedAccountSpendingAddresses(account) {
   const out = [];
   const mnemonic = account?.mnemonic;
   if (!mnemonic || account.locked || !engine.kaspa) return out;
-  const maxIndex = Math.min(500, Number(getSpendingState(account.address).maxIndex) || 0);
-  for (let index = 0; index <= maxIndex; index += 1) {
+  const accountState = getSpendingState(account.address);
+  const maxIndex = Math.min(500, Number(accountState.maxIndex) || 0);
+  // Both chains (iOS bba1b1e), each capped the same way.
+  const indices = revealedSpendingIndices({ maxIndex, qMaxIndex: Math.min(500, accountState.qMaxIndex) });
+  for (const index of indices) {
     const key = `${account.address}:${index}`;
     let address = otherAccountSpendingMemo.get(key);
     if (!address) {
@@ -7910,8 +7986,8 @@ function resolveOwnAddress(address) {
   if (!target) return null;
   if (engine.address && target === engine.address) return { kind: "chatting" };
   if (activeAccountMnemonic() && engine.kaspa) {
-    const maxIndex = Number(getSpendingState().maxIndex) || 0;
-    for (let index = 0; index <= maxIndex; index += 1) {
+    // Both chains (iOS bba1b1e OwnAddressHistorySheet).
+    for (const index of spendingRevealedIndices()) {
       if (deriveSpendingAddressAt(index) === target) return { kind: "spending", index };
     }
   }
@@ -8257,8 +8333,7 @@ function paymentNoticeForeignAddresses(contactAddress) {
   const own = String(contactAddress || "").toLowerCase();
   const addresses = allOwnAddressSet();
   try {
-    const maxIndex = Number(getSpendingState().maxIndex);
-    for (let index = 0; Number.isInteger(maxIndex) && index <= maxIndex; index += 1) addresses.add(String(deriveSpendingAddressAt(index) || "").toLowerCase());
+    for (const index of spendingRevealedIndices()) addresses.add(String(deriveSpendingAddressAt(index) || "").toLowerCase());
   } catch { /* no spending chain yet */ }
   for (const entry of state.contacts || []) addresses.add(String(entry?.address || "").toLowerCase());
   return [...addresses].filter((address) => address && address !== own);
@@ -8330,18 +8405,20 @@ function chatPaymentDestination(contact) {
 // index (bumping the persisted maxIndex, so they show in Manage Addresses like
 // any revealed address and no later payment-change address or reservation can
 // land on the same index). Request Payment's Fresh Address (iOS 6dee531).
+// Fresh addresses handed to someone else are exactly what the quantum-safe chain is for (KIP-22,
+// iOS bba1b1e reserveFreshSpendingAddresses): never revealed, never funded, key hidden until they
+// spend. So the slots come from past the quantum chain's bound.
 function reserveFreshSpendingAddresses(count) {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
-  const spendingState = getSpendingState();
-  const base = spendingState.maxIndex + 1;
+  const base = nextFreshQuantumIndex(getSpendingState().qMaxIndex);
   const results = [];
   for (let i = 0; i < count; i += 1) {
     const index = base + i;
     const address = deriveSpendingAddressAt(index);
-    if (!address) break;
+    if (!address) return []; // reserving nothing rather than part of the set (iOS)
     results.push({ index, address });
   }
-  if (results.length) saveSpendingState({ maxIndex: results[results.length - 1].index });
+  if (results.length) saveSpendingState({ qMaxIndex: chainLocalIndex(results[results.length - 1].index) });
   return results;
 }
 
@@ -8385,9 +8462,8 @@ function renderProfileAccountTotal() {
 let spendingTotalToken = 0;
 async function refreshSpendingTotal() {
   const token = ++spendingTotalToken;
-  const state = getSpendingState();
   const addresses = [];
-  for (let i = 0; i <= state.maxIndex; i += 1) {
+  for (const i of spendingRevealedIndices()) {
     const addr = deriveSpendingAddressAt(i);
     if (addr) addresses.push(addr);
   }
@@ -8435,8 +8511,22 @@ async function refreshSpendingSummary() {
 // "primary" here: no star, no Set as Primary, no Send All To Primary.
 // Each spending row: click the body to open the address's detail (transactions + send/receive);
 // the ⋯ button opens Rename / Copy / Show QR / Hide.
-function spendingRowHtml(index, address, state, balanceText, used, hasDomain = false) {
+// The quantum-safe (KIP-22) state of a row, told honestly (iOS bba1b1e quantumShield):
+// - shield: the key has never been on chain (receiving any number of times reveals nothing).
+// - slashed shield: this address SPENT once, so its key is public forever; orange when funds sit on
+//   it again (move them to a fresh address), gray when it is empty.
+const QUANTUM_SHIELD_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.2 4 5.3v6.2c0 5 3.4 9.3 8 10.5 4.6-1.2 8-5.5 8-10.5V5.3Z"/></svg>';
+// shield.slash.fill: the shield with a gap cut along the slash (the mask), then the slash itself.
+const QUANTUM_SHIELD_SLASH_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><defs><mask id="quantum-shield-cut"><rect width="24" height="24" fill="#fff"/><path d="M3.5 3.5 20.5 20.5" stroke="#000" stroke-width="5.4" stroke-linecap="round"/></mask></defs><path mask="url(#quantum-shield-cut)" d="M12 2.2 4 5.3v6.2c0 5 3.4 9.3 8 10.5 4.6-1.2 8-5.5 8-10.5V5.3Z"/><path class="quantum-shield-slash" d="M3.5 3.5 20.5 20.5"/></svg>';
+function quantumShieldHtml(index, spent, funded) {
+  if (spent) {
+    return `<span class="quantum-shield spent${funded ? " funded" : ""}" data-quantum-shield="${index}" role="img" aria-label="Key revealed by a spend" title="Key revealed by a spend">${QUANTUM_SHIELD_SLASH_SVG}</span>`;
+  }
+  return `<span class="quantum-shield safe" data-quantum-shield="${index}" role="img" aria-label="Quantum-safe" title="Quantum-safe">${QUANTUM_SHIELD_SVG}</span>`;
+}
+function spendingRowHtml(index, address, state, balanceText, used, hasDomain = false, { funded = false } = {}) {
   const label = spendingLabelFor(state, index);
+  const shield = isQuantumIndex(index) ? quantumShieldHtml(index, state.qSpent?.includes(String(address || "").toLowerCase()), funded) : "";
   // Three states (iOS): Used, Unused, and Checking while the history probe has not answered -
   // claiming "Unused" before it has could invite address reuse.
   const usage = used === true
@@ -8455,7 +8545,7 @@ function spendingRowHtml(index, address, state, balanceText, used, hasDomain = f
   return `
     <div class="spending-address-row" data-spending-row="${index}">
       <button type="button" class="spending-address-row-main" data-spending-open="${index}" aria-label="Open ${escapeHtml(label)}">
-        <span class="spending-address-label">${escapeHtml(label)}</span>
+        <span class="spending-address-label">${escapeHtml(label)}${shield}</span>
         <span class="spending-address-value">${escapeHtml(spendingShortAddress(address))}</span>
         <span class="spending-address-balance" data-spending-balance-cell="${index}">${escapeHtml(balanceText)}</span>
         <span class="spending-address-row-tags">${usage}${domainTag}</span>
@@ -8528,9 +8618,10 @@ async function renderSpendingList() {
   const token = ++spendingListToken;
   const hiddenSet = new Set(state.hidden);
   // Every revealed address counts in the total; only the visible ones are listed (Address
-  // Visibility hides any of them, the old primary included).
+  // Visibility hides any of them, the old primary included). Both chains: the quantum-safe rows
+  // (iOS bba1b1e) follow the legacy ones in number order, each with its shield.
   const all = [];
-  for (let i = 0; i <= state.maxIndex; i++) {
+  for (const i of spendingRevealedIndices(state)) {
     const address = deriveSpendingAddressAt(i);
     if (address) all.push({ index: i, address, hidden: hiddenSet.has(i) });
   }
@@ -8540,7 +8631,7 @@ async function renderSpendingList() {
   // instantly with real numbers instead of a wall of "…" — the live refresh replaces it below.
   const balCache = loadSpendingBalCache();
   spendingListEl.innerHTML = chattingRow + (items.length
-    ? items.map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${formatKasExact(balCache[it.address].kas)} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null)).join("")
+    ? items.map((it) => spendingRowHtml(it.index, it.address, state, balCache[it.address]?.kas != null ? `${formatKasExact(balCache[it.address].kas)} ${KAS_UNIT}` : "…", balCache[it.address]?.used ?? null, false, { funded: Number(balCache[it.address]?.kas) > 0 })).join("")
     : emptyHtml);
   updateSpendingTotalBalance(all.map((it) => ({ kas: balCache[it.address]?.kas != null ? Number(balCache[it.address].kas) : null })));
   if (!all.length) return;
@@ -8595,9 +8686,20 @@ async function renderSpendingList() {
   if (token !== spendingListToken) return;
   // In number order, #0 first (iOS 245a5d2).
   enriched.sort((a, b) => a.index - b.index);
+  const shownState = getSpendingState(); // the spent marks may have grown meanwhile
   spendingListEl.innerHTML = (engine.address ? chattingAddressRowHtml() : "") + (enriched.length
-    ? enriched.map((e) => spendingRowHtml(e.index, e.address, state, e.totalKas != null ? `${formatKasExact(e.totalKas)} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address))).join("")
+    ? enriched.map((e) => spendingRowHtml(e.index, e.address, shownState, e.totalKas != null ? `${formatKasExact(e.totalKas)} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address), { funded: e.kas > 0 })).join("")
     : emptyHtml);
+  // Quantum shields: the local spend marks are in already; the chain's word per row follows, for
+  // spends made on another device or before a restore (a spent mark is permanent - a revealed key
+  // cannot be unrevealed). One row at a time, as iOS does.
+  for (const e of enriched) {
+    if (!isQuantumIndex(e.index) || shownState.qSpent.includes(e.address.toLowerCase())) continue;
+    if (await quantumAddressSpentState(e.address) !== true) continue;
+    if (token !== spendingListToken) return;
+    const cell = spendingListEl.querySelector(`[data-quantum-shield="${e.index}"]`);
+    if (cell) cell.outerHTML = quantumShieldHtml(e.index, true, e.kas > 0);
+  }
 }
 
 function openSpendingManageScreen() {
@@ -8617,8 +8719,7 @@ function refreshChattingRowBalance() {
   if (cell) cell.textContent = `${formatKasExact(currentBalanceKas)} ${KAS_UNIT}`;
   const kasEntries = [];
   const cache = loadSpendingBalCache();
-  const state = getSpendingState();
-  for (let i = 0; i <= state.maxIndex; i += 1) {
+  for (const i of spendingRevealedIndices()) {
     const address = deriveSpendingAddressAt(i);
     if (address && cache[address]?.kas != null) kasEntries.push({ kas: Number(cache[address].kas) });
   }
@@ -8759,8 +8860,8 @@ document.querySelector("[data-spending-hide-all]")?.addEventListener("click", as
     destructive: true,
   });
   if (!ok) return;
-  const state = getSpendingState();
-  saveSpendingState({ hidden: Array.from({ length: Math.max(0, state.maxIndex) + 1 }, (_, i) => i) });
+  // Both chains (iOS bba1b1e hideAllSpendingAddresses).
+  saveSpendingState({ hidden: spendingRevealedIndices() });
   renderSpendingVisibilityPage();
 });
 spendingVisibilityDoneBtn?.addEventListener("click", closeSpendingVisibilityScreen);
@@ -8854,7 +8955,8 @@ spendingListEl?.addEventListener("click", async (event) => {
     ];
     // Its own label, else "Address N" (iOS addressRowActionsSheet), over the short address.
     const label = spendingCustomLabel(state, index);
-    const choice = await chooseDialog({ title: label || `Address ${index}`, message: address ? spendingShortAddress(address) : "", options });
+    // A quantum-safe row by its number on its own chain (e001786 numbers them from 0).
+    const choice = await chooseDialog({ title: label || `Address ${chainLocalIndex(index)}`, message: address ? spendingShortAddress(address) : "", options });
     if (choice) spendingListEl.querySelector(`[data-spending-action="${choice}"][data-index="${index}"]`)?.click();
     return;
   }
@@ -9304,7 +9406,8 @@ async function submitKnsTransfer() {
   const revealPriorityFeeSompi = knsTransferFeeSompi();
   let committed = false;
   try {
-    const fresh = spendingIndex != null ? freshChangeForSpendingIndex(spendingIndex) : null;
+    // The primary's change rotates onto a fresh quantum-safe slot (iOS bba1b1e KNSService).
+    const fresh = spendingIndex != null ? freshChangeForSpendingIndex(spendingIndex, { purpose: "kns" }) : null;
     const result = await engine.transferKnsDomain({
       domain,
       assetId,
@@ -9522,7 +9625,7 @@ async function openSpendingQrScreen(index, address) {
   if (!spendingQrScreen || !address) return;
   spendingQrAddress = address;
   const title = spendingQrScreen.querySelector("[data-spending-qr-title]");
-  if (title) title.textContent = `Address #${index}`;
+  if (title) title.textContent = spendingIndexTitle(index); // iOS bba1b1e entry.displayTitle
   const addressEl = spendingQrScreen.querySelector("[data-spending-qr-address]");
   if (addressEl) addressEl.textContent = address;
   spendingQrScreen.hidden = false;
@@ -9652,14 +9755,20 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
   updateSpendingActionsPill();
   try {
     const state = getSpendingState();
+    // Generate makes quantum-safe (KIP-22) slots from now on (iOS bba1b1e): recycling considers only
+    // hidden unused QUANTUM rows, and the fresh path extends the quantum chain - the legacy chain is
+    // never grown again from here.
     const addressByIndex = new Map();
-    for (let i = 0; i <= state.maxIndex; i++) {
+    for (const i of spendingRevealedIndices(state)) {
+      if (!isQuantumIndex(i)) continue;
       const address = deriveSpendingAddressAt(i);
       if (address) addressByIndex.set(i, address);
     }
     let balances = null;
-    try { balances = await spendingBalancesBatchSompi([...addressByIndex.values()]); }
-    catch { balances = null; } // node pool unreachable — fall back to per-address lookups
+    if (addressByIndex.size) {
+      try { balances = await spendingBalancesBatchSompi([...addressByIndex.values()]); }
+      catch { balances = null; } // node pool unreachable — fall back to per-address lookups
+    }
     let pick = null;
     const alreadyHidden = new Set(state.hidden.map(Number));
     for (const [i, address] of addressByIndex) {
@@ -9689,12 +9798,15 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
       saveSpendingState({ hidden: Array.from(hiddenSet) });
       readyIndex = pick;
     } else {
-      readyIndex = state.maxIndex + 1;
+      // A brand-new quantum slot (iOS generateNextQuantumAddress): always extends the chain - a
+      // never-spent-from address is the whole point.
+      readyIndex = nextFreshQuantumIndex(state.qMaxIndex);
       hiddenSet.delete(readyIndex);
-      saveSpendingState({ maxIndex: readyIndex, hidden: Array.from(hiddenSet) });
+      saveSpendingState({ qMaxIndex: chainLocalIndex(readyIndex), hidden: Array.from(hiddenSet) });
     }
     renderSpendingList();
-    if (toast) showCopyToast(`Spending address #${readyIndex} is ready.`);
+    // The chain-local number, never the raw public index 1000000+ (iOS e001786).
+    if (toast) showCopyToast(`Address #${chainLocalIndex(readyIndex)} is ready.`);
     return readyIndex;
   } finally {
     spendingGenerateBusy = false;
@@ -9737,13 +9849,33 @@ spendingScanBtn?.addEventListener("click", async () => {
     });
     if (engine.address === wallet) {
       saveSpendingState(applySpendingDiscovery(getSpendingState(), result));
+    }
+    // The quantum-safe chain too (iOS bba1b1e discoverQuantumAddresses): funded slots in its first
+    // QUANTUM_SCAN_FLOOR, shown again on a restored seed. Its count joins the summary.
+    let quantumCount = 0;
+    if (engine.address === wallet) {
+      const quantum = await discoverQuantumMatches({
+        derive: deriveSpendingAddressesInRange,
+        activity: (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" }),
+        fundedAmong: async (addresses) => {
+          const byAddress = await spendingBalancesBatchSompi(addresses);
+          return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
+        },
+        base: QUANTUM_INDEX_BASE,
+        floor: QUANTUM_SCAN_FLOOR,
+      });
+      quantumCount = quantum.matchCount;
+      if (engine.address === wallet && quantumCount) saveSpendingState(applyQuantumDiscovery(getSpendingState(), quantum, QUANTUM_INDEX_BASE));
+    }
+    if (engine.address === wallet) {
       if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
       refreshSpendingSummary();
     }
     // The count is addresses that hold a balance or a domain, every one, not only new ones.
-    summary = result.matchCount === 0
+    const matchCount = result.matchCount + quantumCount;
+    summary = matchCount === 0
       ? "No addresses with a balance or domain found."
-      : `Found ${result.matchCount} address${result.matchCount === 1 ? "" : "es"} with a balance or domain.`;
+      : `Found ${matchCount} address${matchCount === 1 ? "" : "es"} with a balance or domain.`;
   } catch (error) {
     appendEngineLog(`Spending discovery failed: ${error?.message || error}`);
     summary = userFacingError(error);
@@ -10312,10 +10444,10 @@ applyDockLayout();
 // spending-address Receive), just without the chat-fee note — the old inline
 // profile-qr-card toggle looked nothing like it.
 // Receive Kaspa resolves a fresh address before drawing the QR, so the code on screen is never
-// one that has already appeared on chain (iOS ReceiveKaspaQRView / freshReceiveAddress):
-//   1. the pointer from last time, if it is still untouched;
-//   2. the primary spending address, while it has seen nothing;
-//   3. a slot that has never been revealed, funded or offered.
+// one that has already appeared on chain (iOS ReceiveKaspaQRView / freshReceiveAddress), and is
+// quantum-safe (KIP-22, iOS bba1b1e):
+//   1. the pointer from last time, if it is still untouched and on the quantum chain;
+//   2. the lowest hidden quantum slot confirmed unused, else a brand-new quantum slot.
 const RECEIVE_INDEX_KEY = "kachat-receive-address-index-v1";
 // Receive is for everything except chatting and domains; the chatting address caption below is the
 // other half (iOS 492aa53). Both go through kasLabel like every amount string (the word "Kaspa" is
@@ -10340,32 +10472,61 @@ async function freshReceiveAddress({ revealing = true } = {}) {
     const current = getSpendingState();
     let hidden = current.hidden;
     const patch = {};
-    if (index > current.maxIndex) {
-      patch.maxIndex = index;
-      for (let i = current.maxIndex + 1; i < index; i += 1) if (!hidden.includes(i)) hidden = [...hidden, i];
+    // Each chain extends its own bound (a quantum slot never widens the legacy chain).
+    const quantum = isQuantumIndex(index);
+    const local = chainLocalIndex(index);
+    const bound = quantum ? current.qMaxIndex : current.maxIndex;
+    const publicOf = (n) => (quantum ? QUANTUM_INDEX_BASE + n : n);
+    if (local > bound) {
+      if (quantum) patch.qMaxIndex = local; else patch.maxIndex = local;
+      for (let n = bound + 1; n < local; n += 1) if (!hidden.includes(publicOf(n))) hidden = [...hidden, publicOf(n)];
     }
     if (hidden.includes(index)) hidden = hidden.filter((i) => i !== index);
     if (hidden !== current.hidden) patch.hidden = hidden;
     if (Object.keys(patch).length) saveSpendingState(patch);
   };
+  // Rule 1: the pointer from last time, while it is still untouched - and quantum-safe (iOS
+  // bba1b1e). A legacy pointer, even unused, carries its key in the address itself (P2PK), so the
+  // QR moves to the quantum chain the first time it is opened after the upgrade.
   let remembered = null;
   try { remembered = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY)) || "null"); } catch { remembered = null; }
-  if (Number.isInteger(remembered) && remembered >= 0) {
+  if (isQuantumIndex(remembered)) {
     const address = deriveSpendingAddressAt(remembered);
     if (await untouched(address)) { reveal(remembered); return address; }
   }
-  const primary = deriveSpendingAddressAt(state.activeIndex);
-  if (await untouched(primary)) {
-    try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(state.activeIndex)); } catch {}
-    reveal(state.activeIndex);
-    return primary;
-  }
-  const index = state.maxIndex + 1;
+  // Rule 2: the lowest quantum slot never used (recycling a hidden unused one), else a brand-new
+  // slot past the quantum chain's end.
+  const index = await lowestUnusedQuantumIndex();
   const address = deriveSpendingAddressAt(index);
-  if (!address) return primary;
+  if (!address) return deriveSpendingAddressAt(state.activeIndex);
   try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(index)); } catch {}
   reveal(index);
   return address;
+}
+
+/// The lowest hidden quantum-safe slot that is confirmed unused - not the primary, no balance, no
+/// history (recycling un-hides it) - else one past the quantum chain's end, which is always safe
+/// (iOS bba1b1e lowestUnusedQuantumAddress). An unknown balance or history never recycles.
+async function lowestUnusedQuantumIndex() {
+  const state = getSpendingState();
+  const hidden = new Set(state.hidden.map(Number));
+  const candidates = [];
+  for (const i of spendingRevealedIndices(state)) {
+    if (!isQuantumIndex(i) || !hidden.has(i) || i === state.activeIndex) continue;
+    const address = deriveSpendingAddressAt(i);
+    if (address) candidates.push([i, address]);
+  }
+  if (candidates.length) {
+    let balances = null;
+    try { balances = await spendingBalancesBatchSompi(candidates.map(([, address]) => address)); } catch { balances = null; }
+    if (balances) {
+      for (const [i, address] of candidates) {
+        if (Number(balances.get(address) || 0) > 0) continue;
+        if ((await spendingAddressHasHistory(address)) === false) return i;
+      }
+    }
+  }
+  return nextFreshQuantumIndex(state.qMaxIndex);
 }
 
 // Profile decides the Receive address on its way in (iOS warmReceiveAddress /
@@ -10541,9 +10702,10 @@ function knsDomainCardHtml(domain, { clickable = true } = {}) {
   </${clickable ? "button" : "div"}>`;
 }
 
-// Your Domains: a tab per name service (iOS df23b6f). .kas lists the KNS domains with their
-// detail; .k and .kaspa list the names this address owns there (read-only); .kachat waits for
-// KaChat's own names. Each outside service's tab pins its "Get a domain" button.
+// Your Domains: a card per name service (iOS debd6fd, formerly tabs, df23b6f), each pushing that
+// service's own screen. .kas lists the KNS domains with their detail; .k and .kaspa list the names
+// this address owns there (read-only); .kachat lists KaChat's own names. Each outside service's
+// screen pins its "Get a domain" button.
 async function refreshOtherServiceNames() {
   const address = engine.address;
   if (!address) return;
@@ -10667,12 +10829,13 @@ function syncDomainsGetButton() {
   const getButton = document.querySelector("[data-domains-inscribe]");
   if (!getButton) return;
   const detailEl = document.querySelector("[data-domain-detail]");
-  const service = NAME_SERVICES[activeDomainsTab];
+  // none on the cards (no service pushed): `service` is undefined there
+  const service = NAME_SERVICES[activeDomainsService];
   // .kachat: a pinned Inscribe button that opens the .kachat marketplace over Your Domains (iOS
   // e4da63d), on every network (iOS 7227d69).
-  const kachatInscribe = activeDomainsTab === "kachat" && kachatNamesUiEnabled()
+  const kachatInscribe = activeDomainsService === "kachat" && kachatNamesUiEnabled()
     && kachatDomainsListState?.address === engine.address && !kachatDomainsListState.upgrading;
-  getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || (activeDomainsTab === "kachat" && !kachatInscribe)
+  getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || (activeDomainsService === "kachat" && !kachatInscribe)
     || Boolean(detailEl && !detailEl.hidden);
   if (kachatInscribe) getButton.textContent = "Inscribe";
   else if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
@@ -10690,24 +10853,47 @@ function renderProfileDomains() {
   const total = knsCount + otherCount + kachatCount;
   const answered = Boolean(address) && (ownKnsDomainsFor === address || otherServiceNamesFor === address || kachatOwnedCountFor === address);
   if (countEl) countEl.textContent = answered ? String(total) : "";
+  // Each card says how many names you hold there, 0 included; a dash until that answer is in
+  // (first load, or the service unreachable) - iOS 2ee667c ownedCount.
+  const tileCounts = {
+    kas: ownKnsDomainsFor === address ? ownKnsDomains.length : null,
+    kachat: kachatOwnedCountFor === address ? kachatOwnedCount : null,
+  };
+  for (const tld of ["k", "kaspa"]) {
+    const owned = otherServiceNamesFor === address ? otherServiceNames[tld] : null;
+    tileCounts[tld] = owned && owned.state !== "unreachable" ? (owned.names?.length || 0) : null;
+  }
+  document.querySelectorAll("[data-domains-count]").forEach((el) => {
+    const value = tileCounts[el.dataset.domainsCount];
+    el.textContent = value == null ? "\u2013" : String(value);
+  });
   const listEl = document.querySelector("[data-profile-domains-list]");
   const detailEl = document.querySelector("[data-domain-detail]");
   if (!listEl) return;
-  document.querySelectorAll("[data-domains-tab]").forEach((tab) => tab.classList.toggle("active", tab.dataset.domainsTab === activeDomainsTab));
-  // another tab replaces the .kachat list: coming back, it loads (and earns Inscribe) again
-  if (activeDomainsTab !== "kachat") kachatDomainsListState = null;
+  // The cards, or one service's screen pushed from them (iOS debd6fd): no refresh on the cards
+  // (iOS: the grid has no pull-to-refresh, each service's list does).
+  const gridEl = document.querySelector("[data-domains-services]");
+  if (gridEl) gridEl.hidden = Boolean(activeDomainsService);
+  const refreshEl = document.querySelector("[data-domains-refresh]");
+  if (refreshEl) refreshEl.hidden = !activeDomainsService;
+  // another screen replaces the .kachat list: coming back, it loads (and earns Inscribe) again
+  if (activeDomainsService !== "kachat") kachatDomainsListState = null;
   syncDomainsGetButton();
-  const service = NAME_SERVICES[activeDomainsTab];
+  const service = NAME_SERVICES[activeDomainsService];
   if (detailEl && !detailEl.hidden && domainDetailTarget) {
     renderDomainDetail(domainDetailTarget);
     return;
   }
-  if (activeDomainsTab === "kachat") {
+  const title = document.querySelector("[data-domains-screen] .chatting-address-balance");
+  if (title) title.textContent = service ? service.suffix : "Your Domains";
+  listEl.hidden = !service;
+  if (!service) { listEl.innerHTML = ""; return; }
+  if (activeDomainsService === "kachat") {
     // Testnet: your .kachat names, live from the registry (iOS KachatLiveDomainsTab). Inscribe
     // waits for the list's answer.
     const kachatFor = engine.address;
     const onLoaded = (state) => {
-      if (engine.address !== kachatFor || activeDomainsTab !== "kachat") return;
+      if (engine.address !== kachatFor || activeDomainsService !== "kachat") return;
       kachatDomainsListState = { address: kachatFor, upgrading: Boolean(state?.upgrading) };
       syncDomainsGetButton();
     };
@@ -10720,13 +10906,13 @@ function renderProfileDomains() {
       </div>`;
     return;
   }
-  if (activeDomainsTab === "kas") {
+  if (activeDomainsService === "kas") {
     listEl.innerHTML = pendingKnsTransfersHtml() + (ownKnsDomains.length
       ? ownKnsDomains.map((domain) => knsDomainCardHtml(domain)).join("")
       : '<p class="spending-address-empty">No domains yet.</p>');
     return;
   }
-  const owned = otherServiceNamesFor === engine.address ? otherServiceNames[activeDomainsTab] : null;
+  const owned = otherServiceNamesFor === engine.address ? otherServiceNames[activeDomainsService] : null;
   const names = owned?.names || [];
   // iOS serviceNameList: the names; with none, a spinner while the first lookup runs, else
   // "Couldn't reach" (the refresh button stands in for pull-to-refresh) or "No .k names yet."
@@ -10734,7 +10920,7 @@ function renderProfileDomains() {
     : !owned ? '<div class="domains-loading"><span class="addr-domains-spinner" role="status" aria-label="Loading"></span></div>'
       : owned.state === "unreachable"
         ? `<p class="spending-address-empty">Couldn't reach ${escapeHtml(service.serviceName)}. Refresh to try again.</p>`
-        : `<p class="spending-address-empty">No ${escapeHtml(service.suffix || `.${activeDomainsTab}`)} names yet.</p>`;
+        : `<p class="spending-address-empty">No ${escapeHtml(service.suffix || `.${activeDomainsService}`)} names yet.</p>`;
   listEl.innerHTML = names.map((entry) => domainNameCardHtml(entry.display || entry.name, entry.settling ? "Settling" : "")).join("") + notice;
 }
 
@@ -10781,16 +10967,20 @@ function renderDomainDetail(domain) {
 }
 
 function closeDomainDetail() {
-  const listEl = document.querySelector("[data-profile-domains-list]");
   const detailEl = document.querySelector("[data-domain-detail]");
-  const inscribe = document.querySelector("[data-domains-inscribe]");
-  const title = document.querySelector("[data-domains-screen] .chatting-address-balance");
   domainDetailTarget = null;
   setPrimaryError = "";
   if (detailEl) { detailEl.hidden = true; detailEl.innerHTML = ""; }
-  if (listEl) listEl.hidden = false;
-  if (title) title.textContent = "Your Domains";
+  // back to the service's own screen: its list, titled by its ending
   renderProfileDomains();
+}
+
+/** Your Domains' screens (iOS debd6fd): the four cards (`null`), or one service's own screen,
+ *  titled by its ending, holding the list its tab used to show. */
+function showDomainsService(tld) {
+  activeDomainsService = NAME_SERVICES[tld] ? tld : null;
+  if (domainDetailTarget) closeDomainDetail(); else renderProfileDomains();
+  document.querySelector("[data-domains-screen] .manage-address-body")?.scrollTo?.(0, 0);
 }
 
 // iOS setPrimaryDomain: no message on success - the star moves the moment the write lands,
@@ -10838,12 +11028,8 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
       .finally(() => { customize.disabled = false; });
     return;
   }
-  const tab = event.target.closest("[data-domains-tab]");
-  if (tab) {
-    activeDomainsTab = tab.dataset.domainsTab;
-    if (domainDetailTarget) closeDomainDetail(); else renderProfileDomains();
-    return;
-  }
+  const card = event.target.closest("[data-domains-service]");
+  if (card) { showDomainsService(card.dataset.domainsService); return; }
   const finish = event.target.closest("[data-kns-finish-transfer]");
   if (finish) {
     const record = pendingKnsTransferFor(finish.dataset.knsFinishTransfer);
@@ -10861,7 +11047,7 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
     // .kachat: the marketplace as a sheet over Your Domains, whether or not it is in the dock or
     // Kaspa Hub; closing it comes back here and refreshes the registry, so a new name lands in the
     // list (iOS KachatLiveDomainsTab showMarketplace, onDismiss registry.refresh()).
-    if (activeDomainsTab === "kachat" && kachatNamesUiEnabled()) {
+    if (activeDomainsService === "kachat" && kachatNamesUiEnabled()) {
       openKachatMarketSheet({
         onClose: () => {
           Promise.resolve().then(() => kachatNames()?.registry?.refresh?.()).catch(() => { /* the list keeps what it has */ });
@@ -10870,17 +11056,17 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
       });
       return;
     }
-    const url = NAME_SERVICES[activeDomainsTab]?.websiteURL;
+    const url = NAME_SERVICES[activeDomainsService]?.websiteURL;
     if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
 });
 
-/** Your Domains' refresh button, the platform's stand-in for iOS's pull-to-refresh on each tab:
- *  .kachat re-reads the registry, .kas the KNS domains (iOS refreshKNSDomainsOnly), .k and .kaspa
- *  their services (NameServicesClient.refresh). */
+/** Your Domains' refresh button, the platform's stand-in for iOS's pull-to-refresh on each
+ *  service's screen: .kachat re-reads the registry, .kas the KNS domains (iOS
+ *  refreshKNSDomainsOnly), .k and .kaspa their services (NameServicesClient.refresh). */
 async function refreshYourDomains() {
   if (domainsRefreshing) return;
-  const tab = activeDomainsTab;
+  const tab = activeDomainsService;
   domainsRefreshing = true;
   paintDomainsRefresh();
   try {
@@ -10900,8 +11086,8 @@ function paintDomainsRefresh() {
 }
 
 document.querySelector("[data-open-domains-screen]")?.addEventListener("click", () => {
-  // A fresh screen every time, on the first tab (iOS: the list's @State starts on .defaultTab).
-  activeDomainsTab = DEFAULT_DOMAIN_TAB;
+  // A fresh screen every time, on the cards (iOS debd6fd: the screen opens on the grid).
+  activeDomainsService = null;
   if (domainDetailTarget) closeDomainDetail();
   renderProfileDomains();
   refreshOtherServiceNames();
@@ -10909,7 +11095,9 @@ document.querySelector("[data-open-domains-screen]")?.addEventListener("click", 
   if (domainsScreenEl) domainsScreenEl.hidden = false;
 });
 document.querySelector("[data-close-domains-screen]")?.addEventListener("click", () => {
+  // Back steps out one screen: a domain's detail, then its service's screen, then Your Domains.
   if (domainDetailTarget) { closeDomainDetail(); return; }
+  if (activeDomainsService) { showDomainsService(null); return; }
   if (domainsScreenEl) domainsScreenEl.hidden = true;
 });
 
@@ -10936,7 +11124,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 197;
+const APP_BUILD = 198;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -11719,7 +11907,10 @@ async function fillMaxAmountNow() {
   const inputCount = selection.length || (sendKaspaUtxos || []).length || 1;
   try {
     const feeRate = await fetchQuotedFeeRateSompiPerGram();
-    const mass = calculateMass(inputCount, [34, 34], 0);
+    // A quantum-safe source's inputs push their redeem script too: 101-byte signature scripts
+    // (iOS signatureScriptSize: kip22SignatureScriptSize).
+    const sigScriptLen = isQuantumIndex(source) ? KIP22_SIGNATURE_SCRIPT_SIZE : 66;
+    const mass = calculateMass(inputCount, [34, 34], 0, 1, sigScriptLen);
     const policyKas = Number(calculateFee(mass, feeRate)) / 1e8;
     if (isFinite(policyKas) && policyKas > 0) {
       sendKaspaBaseFeeKas = policyKas;
@@ -11909,7 +12100,7 @@ function spendingSourceLabel(index) {
   const st = getSpendingState();
   const custom = st.labels?.[index] ?? st.labels?.[String(index)];
   const trimmed = custom != null ? String(custom).trim() : "";
-  return trimmed || `Address #${index}`;
+  return trimmed || spendingIndexTitle(index); // quantum rows by their own chain's number (e001786)
 }
 const sendKaspaFrom = sendFromControls(sendKaspaModal, "send-kaspa", {
   onChatting: () => { if (!sendKaspaSlider.busy && !sendKaspaSourceLocked) switchSendKaspaSource(null); },
@@ -12000,7 +12191,9 @@ const sendKaspaController = makeSendController({
       return payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints, sourceSpendingIndex: sendKaspaSourceIndex });
     }
     if (sendKaspaSourceIndex != null) {
-      const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex);
+      // Change onto a fresh quantum-safe slot when the source is quantum or the primary, and the
+      // primary follows it there once the node has the send (iOS bba1b1e withdrawFromSpendingAddress).
+      const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex, { destination });
       return engine.sendFromSpending({
         mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
         destinationAddress: destination, amountKas, feeKas,
@@ -12080,7 +12273,8 @@ async function loadSpendingSourceEntries() {
   const st = getSpendingState();
   const hidden = new Set(st.hidden.map(Number));
   const rows = [];
-  for (let i = 0; i <= st.maxIndex; i += 1) {
+  // Both chains (iOS bba1b1e getSpendingAddressList); a picker can leave the quantum ones out.
+  for (const i of spendingRevealedIndices(st)) {
     const address = deriveSpendingAddressAt(i);
     if (address) rows.push({ index: i, address });
   }
@@ -12120,10 +12314,11 @@ async function ownAddressProbeUsed(address) {
 }
 /** Choose an Address over the current screen (a send's "Send From", Request Payment's "Choose an
  *  Address"): every address of the account, chatting first, each Used / Unused (iOS 6333dd3). */
-function openOwnAddressPickerFor({ title, selectedAddress, onPick }) {
+function openOwnAddressPickerFor({ title, selectedAddress, onPick, excludeQuantum = false }) {
   openOwnAddressPicker({
     title,
     selectedAddress,
+    excludeQuantum,
     loadEntries: async () => { await ensureRuntimes({ quiet: true }); return loadOwnAddressEntries(); },
     cachedUsed: ownAddressCachedUsed,
     probeUsed: ownAddressProbeUsed,
@@ -14957,11 +15152,12 @@ function ownAddressLabelFor(address) {
   if (!target || !wallet) return null;
   if (target === wallet) return "Chatting Address";
   if (!activeAccountMnemonic()) return null;
-  const maxIndex = Math.max(0, Number(getSpendingState().maxIndex) || 0);
-  const key = `${wallet}|${maxIndex}`;
+  // Both chains; the key moves when either grows (iOS bba1b1e ownAddressLabel).
+  const state = getSpendingState();
+  const key = `${wallet}|${spendingBoundsKey(state)}`;
   if (ownAddressIndexCache.key !== key) {
     const map = new Map();
-    for (let index = 0; index <= maxIndex; index += 1) {
+    for (const index of spendingRevealedIndices(state)) {
       const spending = deriveSpendingAddressAt(index);
       if (spending) map.set(String(spending).toLowerCase(), index);
     }
@@ -15419,7 +15615,7 @@ function conversationRowHtml(conversationEntry, { selecting = false, selected = 
           <span class="chat-row-time"><span class="chat-row-fetch-slot" data-chat-fetch-for="${escapeHtml(conversationEntry.id)}">${chatFetchIndicatorHtml(conversationEntry.id)}</span>${escapeHtml(time)}</span>
           ${avatarHtmlFor(contact)}
           <span class="chat-meta">
-            <strong>${escapeHtml(displayNameForAddress(contact))}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
+            <strong>${escapeHtml(isOwnChattingAddress(contact.address) ? "Your Address" /* iOS 7d11735: the list names the self chat for what it is; its header says who you are on chain */ : displayNameForAddress(contact))}${silenced ? `<svg class="chat-row-silenced" viewBox="0 0 24 24" aria-label="Silenced" role="img"><path d="M9.143 17.082a24.248 24.248 0 0 0 5.714 0m-5.714 0a3 3 0 1 0 5.714 0m-5.714 0a23.85 23.85 0 0 1-5.455-1.31 8.964 8.964 0 0 0 2.3-5.523M14.857 17.082a23.85 23.85 0 0 0 5.455-1.31A8.967 8.967 0 0 1 18 9.75v-.7M6 9v.75a8.967 8.967 0 0 0 .312 2.34M6 9a6 6 0 0 1 9.858-4.6M3 3l18 18"/></svg>` : ""}</strong>
             ${last
               ? `<span>${chatListDeliveryGlyphHtml(last)}${escapeHtml(preview)}</span>`
               : `<span class="chat-row-none">No messages yet</span>`}
@@ -16358,10 +16554,10 @@ function openChatInfoFor(contact, conversationEntry) {
   // custom one that would hide their .kachat name. Your own card's title is your .kachat name.
   if (kachatNamesUiEnabled() && chatInfoNameInput) {
     chatInfoNameInput.placeholder = "Name";
-    if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || baseDisplayNameForAddress(contact);
+    if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || displayNameForAddress(contact);
     else if (!contact.nameIsCustom) {
       chatInfoNameInput.value = addressBookGiven || "";
-      chatInfoNameInput.placeholder = baseDisplayNameForAddress(contact);
+      chatInfoNameInput.placeholder = displayNameForAddress(contact);
     }
   }
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
@@ -16483,8 +16679,8 @@ function paintChatInfoKachat(contact) {
   const names = label && allNames.includes(label) ? [label, ...allNames.filter((n) => n !== label)] : allNames;
 
   if (chatInfoNameInput) {
-    if (isSelf) chatInfoNameInput.value = label ? `${label}.kachat` : baseDisplayNameForAddress(contact);
-    else if (!contact.nameIsCustom) chatInfoNameInput.placeholder = baseDisplayNameForAddress(contact);
+    if (isSelf) chatInfoNameInput.value = label ? `${label}.kachat` : displayNameForAddress(contact);
+    else if (!contact.nameIsCustom) chatInfoNameInput.placeholder = displayNameForAddress(contact);
   }
 
   if (chatInfoAvatarImage && chatInfoAvatarInitials) {
@@ -16792,7 +16988,7 @@ document.querySelector("[data-chat-info-address-book]")?.addEventListener("click
   const contact = state.contacts.find((entry) => entry.address === address);
   const result = await openAddressBookEditor({
     address,
-    suggestedName: contact?.nameIsCustom ? contact.name : (contact ? baseDisplayNameForAddress(contact) : baseIdentityNameForAddress(address)),
+    suggestedName: contact?.nameIsCustom ? contact.name : (contact ? displayNameForAddress(contact) : identityNameForAddress(address)),
   });
   if (result === "saved") showCopyToast("Saved to Address Book.");
   else if (result === "removed") showCopyToast("Removed from Address Book.");
@@ -19392,7 +19588,7 @@ onContextGesture(chatList, async (event) => {
   });
   if (!choice) return;
   if (choice === "address-book") {
-    openAddressBookEditor({ address: contact.address, suggestedName: contact.nameIsCustom ? contact.name : baseDisplayNameForAddress(contact) });
+    openAddressBookEditor({ address: contact.address, suggestedName: contact.nameIsCustom ? contact.name : displayNameForAddress(contact) });
     return;
   }
   if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }
@@ -27184,7 +27380,8 @@ queueMicrotask(async () => {
         },
         spendingPrivateKey: (index) => {
           const mnemonic = activeAccountMnemonic();
-          if (!mnemonic || !Number.isInteger(index)) return null;
+          // .kachat inputs sign as plain P2PK, which a quantum-safe (KIP-22) address can't be.
+          if (!mnemonic || !Number.isInteger(index) || isQuantumIndex(index)) return null;
           try { return String(engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() })?.privateKeyHex || "") || null; } catch { return null; }
         },
         kasSignerAddresses: () => listColdWatchedAddresses().map((e) => ({ account: e.label, index: e.index, address: e.address })),
@@ -27273,7 +27470,7 @@ queueMicrotask(async () => {
       // Address, and Fund's QR code (the funding card's).
       addressBalanceSompi: async (address) => BigInt((await engine.balanceForAddress(address))?.totalSompi ?? 0),
       drawQr: (canvas, text) => engine.drawQrFor(canvas, text, { dark: "#06110f", light: "#ffffff" }),
-      openOwnAddressPicker: ({ title, selectedAddress, onPick }) => openOwnAddressPickerFor({ title, selectedAddress, onPick }),
+      openOwnAddressPicker: ({ title, selectedAddress, onPick, excludeQuantum = false }) => openOwnAddressPickerFor({ title, selectedAddress, onPick, excludeQuantum }),
     });
     // The startup tab restore can show .kachat before the runtime above existed, and that show
     // started nothing (no registry yet): the page sat on "Coming soon" with empty cards until it

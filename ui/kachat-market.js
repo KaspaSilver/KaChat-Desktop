@@ -771,6 +771,9 @@ function openBuyFromSheet() {
           deps?.openOwnAddressPicker?.({
             title: "Buy From",
             selectedAddress: sourceAddress(marketSource()),
+            // Its funding inputs sign as plain P2PK, which a quantum-safe (KIP-22) address can't
+            // be: those are left out (iOS bba1b1e excludeQuantum).
+            excludeQuantum: true,
             onPick: (picked) => actions.setMarketSource(picked?.kind === "spending" ? picked : null),
           });
         }

@@ -25,6 +25,7 @@ import { otherNetworkReason } from "../engine/network.js";
 
 import { sanitizeAmountInput, groupedAmountText } from "../engine/amounts.js";
 import { splitTypedName, notFoundMessage } from "../engine/name-services.js";
+import { isQuantumIndex, spendingIndexTitle } from "../engine/quantum.js";
 
 const KNOB_INSET = 4;
 
@@ -689,8 +690,11 @@ let activeOwnAddressPicker = null;
  * label, balanceSompi, hidden }] }. Picking a row calls `onPick({ kind: "chatting", address })` or
  * `onPick({ kind: "spending", index, address, label })` and closes; Cancel, Escape or the backdrop
  * leave things as they were.
+ *
+ * `excludeQuantum`: leave the quantum-safe (KIP-22) addresses out - the .kachat market signs its
+ * funding inputs as plain P2PK, which a quantum-safe address can't be (iOS bba1b1e OwnAddressPicker).
  */
-export function openOwnAddressPicker({ title = "Choose an Address", selectedAddress = null, loadEntries, cachedUsed, probeUsed, kasUnit = "KAS", onPick } = {}) {
+export function openOwnAddressPicker({ title = "Choose an Address", selectedAddress = null, loadEntries, cachedUsed, probeUsed, kasUnit = "KAS", onPick, excludeQuantum = false } = {}) {
   closeOwnAddressPicker();
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop sk-source-backdrop";
@@ -767,10 +771,11 @@ export function openOwnAddressPicker({ title = "Choose an Address", selectedAddr
       }] : [];
       const spending = (loaded?.spending || [])
         .filter((e) => !e.hidden || BigInt(e.balanceSompi || 0) > 0n)
+        .filter((e) => !excludeQuantum || !isQuantumIndex(e.index))
         .sort((a, b) => a.index - b.index)
         .map((e) => ({
-          key: `spending-${e.index}`, title: e.label || `Address #${e.index}`, address: e.address,
-          balanceSompi: e.balanceSompi || 0, source: { kind: "spending", index: e.index, address: e.address, label: e.label || `Address #${e.index}` },
+          key: `spending-${e.index}`, title: e.label || spendingIndexTitle(e.index), address: e.address,
+          balanceSompi: e.balanceSompi || 0, source: { kind: "spending", index: e.index, address: e.address, label: e.label || spendingIndexTitle(e.index) },
         }));
       rows = [...chatting, ...spending];
       // Used: a balance means used, else the cached answer; the rest are looked up below.

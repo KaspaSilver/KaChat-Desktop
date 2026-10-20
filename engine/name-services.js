@@ -100,13 +100,6 @@ export const NAME_SERVICES = Object.freeze(Object.fromEntries(NAME_SERVICE_TLDS.
 export const RESOLUTION_ORDER = Object.freeze(["kachat", "kas", "k", "kaspa"]);
 
 /**
- * The tab Your Domains opens on: `.kachat` - its UI is on for every network, live or not (iOS
- * 7227d69: mainnet opens on it too, empty, with its Inscribe button).
- * @type {NameServiceTLD}
- */
-export const DEFAULT_TAB = "kachat";
-
-/**
  * The read API this app calls for a service, shown in Connection Settings > Domains.
  * null for `.kas` (KNS has its own setting) and `.kachat` (not live), and for `.kaspa` off
  * mainnet (Kaspa Names publishes no testnet deployment).

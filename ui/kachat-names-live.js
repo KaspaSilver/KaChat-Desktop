@@ -4682,6 +4682,14 @@ export function openLiveProfileEditor(owner = "profile") {
     );
   };
 
+  // Clear Profile (iOS 9638498): the same review sheet, stamping the EMPTY profile record. The
+  // newest record is the whole profile, so the indexer and every app show nothing for the address.
+  // Same gate as saving: a clear IS a save, of the empty record.
+  const clearHtml = () => section(
+    `<button class="kmkt-form-button kl-destructive" type="button" data-kl-profile-clear ${saving || !loaded || !rt ? "disabled" : ""}>Clear Profile</button>`,
+    { footerHtml: footer("Clearing writes an empty profile to the chain from your address to itself, for a network fee, so KaChat shows nothing for your address again.") },
+  );
+
   /** Platform picker, the handle after the platform's prefix, and where its lookup stands. */
   const fieldHtml = (kind) => {
     const f = fields[kind];
@@ -4696,6 +4704,8 @@ export function openLiveProfileEditor(owner = "profile") {
         <span class="kl-src-prefix" data-kl-src-prefix="${kind}">${esc(SocialPlatform.prefix(f.platform))}</span>
         <input class="kl-input" type="text" value="${esc(f.handle)}" placeholder="${esc(placeholderFor(f.platform))}" autocomplete="off"
           autocapitalize="none" autocorrect="off" spellcheck="false" data-kl-src-handle="${kind}" aria-label="${esc(`${KIND_TITLE[kind]}: handle`)}" />
+        ${/* one tap empties the field; saving then writes the profile without it (iOS 9638498) */ ""}
+        <button type="button" class="kl-input-clear" data-kl-src-clear="${kind}" aria-label="Clear"${f.handle ? "" : " hidden"}><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="kl-clear-disc" cx="12" cy="12" r="10"/><path class="kl-clear-x" d="m9 9 6 6m0-6-6 6"/></svg></button>
       </label>
       <div class="kl-src-status-wrap" data-kl-src-status="${kind}">${statusHtml(kind)}</div>`, {
       header: KIND_TITLE[kind],
@@ -4717,6 +4727,7 @@ export function openLiveProfileEditor(owner = "profile") {
         <span class="kl-src-prefix">linktr.ee/</span>
         <input class="kl-input" type="text" value="${esc(form.linktree)}" placeholder="username" autocomplete="off" autocapitalize="none"
           autocorrect="off" spellcheck="false" data-kl-profile-linktree aria-label="Linktree username" />
+        <button type="button" class="kl-input-clear" data-kl-linktree-clear aria-label="Clear"${form.linktree ? "" : " hidden"}><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="kl-clear-disc" cx="12" cy="12" r="10"/><path class="kl-clear-x" d="m9 9 6 6m0-6-6 6"/></svg></button>
       </label>`, { header: "Links", footerHtml: `<div data-kl-linktree-foot>${linktreeFooter()}</div>` })}
     ${launched ? section(`
       <label class="kmkt-form-row kl-link-field">
@@ -4736,7 +4747,8 @@ export function openLiveProfileEditor(owner = "profile") {
       header: ".kachat Name",
       footerHtml: footer(".kachat names aren't on mainnet yet. Your avatar, banner, bio and links save now; you can pick a primary name once names launch."),
     })}
-    <div data-kl-profile-save-wrap>${saveHtml()}</div>`;
+    <div data-kl-profile-save-wrap>${saveHtml()}</div>
+    <div data-kl-profile-clear-wrap>${clearHtml()}</div>`;
 
   // MARK: rendering
 
@@ -4766,6 +4778,13 @@ export function openLiveProfileEditor(owner = "profile") {
     }
     put("[data-kl-linktree-foot]", linktreeFooter());
     put("[data-kl-profile-save-wrap]", saveHtml());
+    put("[data-kl-profile-clear-wrap]", clearHtml());
+    for (const k of SOCIAL_KINDS) {
+      const clear = layer.el.querySelector(`[data-kl-src-clear="${k}"]`);
+      if (clear) clear.hidden = !fields[k].handle;
+    }
+    const linktreeClear = layer.el.querySelector("[data-kl-linktree-clear]");
+    if (linktreeClear) linktreeClear.hidden = !form.linktree;
     hydrateSocialImages(layer.el);
   };
 
@@ -4883,6 +4902,15 @@ export function openLiveProfileEditor(owner = "profile") {
     });
   };
 
+  const clearProfile = () => {
+    if (!rt || saving || !loaded) return;
+    openProfileSaveSheet({
+      title: "Clear Profile", confirmTitle: "Clear Profile", doneTitle: "Profile cleared",
+      makeProfile: async () => new Profile({}),
+      onSaved: (txId) => { savedTx = txId; if (layer) kit.closeLayer(layer); },
+    });
+  };
+
   const onPlatform = (select) => {
     const kind = select.dataset.klSrcPlatform;
     if (!fields[kind] || !SocialPlatform.choices(kind).includes(select.value)) return;
@@ -4902,6 +4930,23 @@ export function openLiveProfileEditor(owner = "profile") {
       <div class="kmkt-sheet-body kmkt-form" data-kl-profile-body></div>`,
     onClick(event) {
       if (event.target.closest("[data-kl-profile-save]")) { save(); return; }
+      if (event.target.closest("[data-kl-profile-clear]")) { clearProfile(); return; }
+      const clearField = event.target.closest("[data-kl-src-clear]");
+      if (clearField && fields[clearField.dataset.klSrcClear]) {
+        const kind = clearField.dataset.klSrcClear;
+        fields[kind].handle = "";
+        syncInputs(kind);
+        lookUp(kind);
+        renderLive();
+        return;
+      }
+      if (event.target.closest("[data-kl-linktree-clear]")) {
+        form.linktree = "";
+        const input = layer.el.querySelector("[data-kl-profile-linktree]");
+        if (input) input.value = "";
+        renderLive();
+        return;
+      }
       const retry = event.target.closest("[data-kl-src-retry]");
       if (retry && fields[retry.dataset.klSrcRetry]) {
         const f = fields[retry.dataset.klSrcRetry];
