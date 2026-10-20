@@ -1592,7 +1592,7 @@ function renderSettings() {
           <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         </a>
       </div>
-      <p class="settings-group-footer">Backups, sync, media and calls through Nextcloud are off on this website. Files friends share with you from their Nextcloud still open.</p>
+      <p class="settings-group-footer">Backups, sync, media and calls through Nextcloud are off on this website. Files friends share with you still open, straight from their Nextcloud.</p>
       ${stored ? `<div class="settings-list-card danger-list-card">
         <button class="settings-list-row danger-row" type="button" data-nc-forget-hosted><span class="settings-row-copy"><strong>Remove Saved Nextcloud Login</strong></span></button>
       </div>

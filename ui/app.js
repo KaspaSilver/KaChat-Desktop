@@ -48,7 +48,7 @@ import {
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
   openSentConfirmation, closeSentConfirmation, fixedKas8,
 } from "./send-kaspa-components.js";
-import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup } from "./nextcloud.js";
+import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
@@ -2692,6 +2692,10 @@ function filenameFromContentDisposition(value) {
 /// the headers are readable - the type, the file's name, its size (Content-Range's total), or
 /// that the share is gone. null when there is no answer to go on.
 async function nextcloudShareInfo(downloadUrl) {
+  // On a site KaChat hosts the relay is that site's server, so the share link never goes through
+  // it: no answer here, and the media below loads straight from the sender's Nextcloud (a media
+  // element needs no CORS). Only a removed share then shows as a file card, not "no longer shared".
+  if (nextcloudUnavailableReason() === "hosted") return null;
   try {
     if (!(await isProxyAvailable())) return null;
     const response = await fetch(proxiedUrl(downloadUrl), { headers: { Range: "bytes=0-1" }, cache: "no-store" });
@@ -10932,7 +10936,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 195;
+const APP_BUILD = 196;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");

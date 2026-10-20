@@ -18,6 +18,8 @@
 // end is remembered (persisted, bounded) so a re-ingested invite never rings twice.
 
 import { NextcloudTalkClient, TalkError, FALLBACK_ICE_SERVERS } from "./talk.js";
+import { nextcloudUnavailableReason } from "./nextcloud.js";
+import { KASPA_QUICK_START_URL } from "./nextcloud-availability.js";
 
 const RING_TIMEOUT_MS = 35_000;
 const INCOMING_RING_TIMEOUT_MS = 30_000;
@@ -231,9 +233,29 @@ export async function primeCallPermissions() {
   }
 }
 
+// On a site KaChat hosts, calls are off: every Talk request - joining a friend's call as a guest
+// too - would go through that site's relay, which would see the room and could join it. Calls work
+// where KaChat runs on your own computer (Kaspa Quick Start), like the rest of Nextcloud.
+function callsOffOnThisSite() {
+  return nextcloudUnavailableReason() === "hosted";
+}
+
+async function explainCallsOffOnThisSite() {
+  const choice = await deps.chooseDialog({
+    title: "Calls work when KaChat runs on your own computer",
+    message: "On this website a call would pass through the website's server. Install Kaspa Quick Start, switch on KaChat-Desktop in its control panel, and open KaChat from the address it gives you to make and answer calls.",
+    options: [
+      { id: "quickstart", title: "Get Kaspa Quick Start", subtitle: "Opens its page on GitHub." },
+      { id: "close", title: "Not now" },
+    ],
+  });
+  if (choice === "quickstart") window.open(KASPA_QUICK_START_URL, "_blank", "noopener,noreferrer");
+}
+
 export async function requestCallFromHeader(address) {
   if (!deps || !address) return;
   if (session) { deps.showToast?.("You are already on a call."); return; }
+  if (callsOffOnThisSite()) { await explainCallsOffOnThisSite(); return; }
   const name = deps.displayNameFor(address);
   if (!deps.callsEnabledFor(address)) {
     // iOS ChatDetailView.enableCallsSheet.
@@ -266,6 +288,7 @@ export async function requestCallFromHeader(address) {
 export async function startCall(address, video) {
   if (!deps || session) return;
   if (!deps.callsEnabledFor(address)) return;
+  if (callsOffOnThisSite()) return;
   const callId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`).toLowerCase();
   const account = deps.nextcloudAccount();
   // A Desktop with Talk always hosts: with Talk not known to be there (never checked, or the last
@@ -358,6 +381,12 @@ export function handleIncomingCallEnvelope(envelope, message, contactAddress) {
       if (age >= INVITE_FRESHNESS_MS) return;
       if (session) return; // busy: silent, the caller rings out
       markHandled(envelope.callId);
+      if (callsOffOnThisSite()) {
+        // Can't join here: nothing rings and nothing is sent (the caller rings out); say so once.
+        deps.appendEngineLog?.(`[Call] Invite ${envelope.callId.slice(0, 8)} not answered: calls are off on this website`);
+        deps.showToast?.(`${deps.displayNameFor(contactAddress)} is calling. Calls work when KaChat runs on your own computer with Kaspa Quick Start.`);
+        return;
+      }
       const call = newSession({ id: envelope.callId, address: contactAddress, isOutgoing: false, hostsThisCall: false, server, token: envelope.token, video: envelope.video, phase: "ringingIn" });
       ringIncoming(call);
       return;
