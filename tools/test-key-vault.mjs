@@ -5,7 +5,7 @@ import { webcrypto, createHash } from "node:crypto";
 import {
   configureKeyVault, hasAppPassword, isVaultEnabled, isVaultUnlocked, isAppLocked,
   unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword, removeAppPassword,
-  resetForgottenAppPassword, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage,
+  resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage,
   readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutRemainingSeconds,
   writeKeyVaultHandoff, clearKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab,
   APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, SAVED_ACCOUNTS_KEY, PERSISTED_WALLET_KEY,
@@ -862,6 +862,28 @@ test("Nextcloud DSK-022: a stale tab cannot write it after another tab removed t
   assert.throws(() => writeNextcloudAccount(ncKeyA, { ...ncAccount, appPassword: "changed-in-A" }), /locked in another tab/);
   assert.equal(local.getItem(ncKeyA), plain);
   assert.equal(rawNc().appPassword, NC_SECRET);
+});
+
+test("a password with no account left is released; one still guarding an account is not", async () => {
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("correct horse");
+  lockKeyVault();
+  // Still guarding an account (locked): kept.
+  assert.equal(releaseAppPasswordIfUnused(), false);
+  assert.equal(hasAppPassword(), true);
+  // The last account deleted while locked (public fields only are rewritten): nothing left to guard.
+  writeAccountRecords([]);
+  assert.equal(isAppLocked(), true);
+  assert.equal(releaseAppPasswordIfUnused(), true);
+  assert.equal(hasAppPassword(), false);
+  assert.equal(isAppLocked(), false);
+  assert.equal(local.getItem(APP_PASSWORD_KEY), null);
+  // The next account starts with no password, as a first one (then is asked to set one).
+  writeAccountRecords([accountB]);
+  assert.ok(local.getItem(SAVED_ACCOUNTS_KEY).includes(accountB.address));
+  // Nothing to release when there is no password.
+  assert.equal(releaseAppPasswordIfUnused(), false);
 });
 
 let failed = 0;

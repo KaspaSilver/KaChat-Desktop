@@ -14504,3 +14504,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .app-dialog-message .field-hint + .field-hint { margin-top: 8px; }
 .app-dialog > * { flex-shrink: 0; }
 .app-dialog > .app-dialog-message, .app-dialog > .app-dialog-sheet-body { flex: 1 1 auto; flex-shrink: 1; min-height: 0; }
+/* The saved accounts screen says which KaChat this is, under its buttons. */
+.logged-out-content { grid-template-rows: minmax(20px,1fr) auto auto minmax(40px,1fr) auto auto auto; }
+.logged-out-version { grid-row: 7; margin: 18px 0 0; text-align: center; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }

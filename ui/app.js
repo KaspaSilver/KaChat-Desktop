@@ -94,7 +94,7 @@ import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { discoverSpendingMatches, applySpendingDiscovery, fetchAddressActivity } from "./spending-discovery.js";
-import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
+import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
@@ -1328,6 +1328,8 @@ function removeSavedAccountFromDevice(account) {
   const remaining = loadSavedAccounts().filter((entry) => entry.address !== address);
   persistSavedAccounts(remaining);
   removeAccountScopedLocalData(address);
+  // The last account gone: its password protects nothing now, and the next account sets its own.
+  if (!remaining.length && releaseAppPasswordIfUnused()) refreshPasswordStatus();
   renderSavedAccountsScreen();
 }
 
@@ -10911,13 +10913,14 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate opens Profile's Send screen
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
-const APP_VERSION = "5.2";
+const APP_VERSION = "5.2.1";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 190;
-// "5.2 (176)", as iOS appVersionDisplay writes it.
+const APP_BUILD = 191;
+// "5.2.1 (191)", as iOS appVersionDisplay writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
+{ const el = document.querySelector("[data-logged-out-version]"); if (el) el.textContent = `Version ${APP_VERSION_LABEL}`; }
 
 // Donate (iOS e7cc0d5): the Send screen, addressed to KaChat's donation address, pinned (iOS
 // 8bc86f8, IOS-067): a name is first-come, so resolving kachat.kachat would pay whoever registered
@@ -26491,6 +26494,10 @@ Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
 // With a password set the new account is saved encrypted, which takes the unlocked vault. A
 // forgotten password is reset from the lock ("Forgot password?"), and then this is not asked.
 async function unlockBeforeAddingAccount(open) {
+  // No account on this device: there is nothing to unlock. A password left over from deleted
+  // accounts is dropped, and the new account is asked to set one (finalizeNewAccount /
+  // importAndEnterAccount) instead of to unlock one that guards nothing.
+  if (isAppLocked() && releaseAppPasswordIfUnused()) refreshPasswordStatus();
   if (isAppLocked() && accountShellPrefs.saveAccount !== false) {
     if (!(await unlockAppWithPassword("Your saved accounts are encrypted with your password. Enter it to add another account to this device."))) return;
   }
@@ -27487,10 +27494,13 @@ queueMicrotask(async () => {
   //    that answered it for a prior account) -> replay from the top.
   // The stored run kind keeps an interrupted IMPORT run's import-only
   // affordances (the funding step's "Change Chatting Address" picker).
+  // Only once an account is open: on the locked sign-in screen the guide waited over it, in front
+  // of the password. Unlocking or signing in reloads into the open account, which resumes it here.
   const pendingRunKind = pendingOnboardingRunKind();
-  if (isUserTypePending()) {
+  const accountOpen = Boolean(engine.address) && !isAppLocked();
+  if (accountOpen && isUserTypePending()) {
     openSetupGuide({ onboardingRun: true, importRun: pendingRunKind === "import", startAtUserType: true });
-  } else if (isOnboardingRunPending()) {
+  } else if (accountOpen && isOnboardingRunPending()) {
     openSetupGuide({ onboardingRun: true, importRun: pendingRunKind === "import" });
   }
 

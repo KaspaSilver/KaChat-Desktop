@@ -920,6 +920,31 @@ export function removeAppPassword() {
  * Every Nextcloud connection with a sealed app password is removed too (the user reconnects).
  * Returns the number of accounts whose keys were removed.
  */
+/**
+ * With no saved account left on this device the password protects nothing - every key it sealed
+ * went with its account - yet it still stood in front of Create and Import as "Unlock KaChat".
+ * Then it is removed, so the next account starts fresh and is asked to SET a password. Only when
+ * nothing at all is sealed under it (no account, no pre-v2 wallet key); a sealed Nextcloud app
+ * password left behind by a deleted account goes with it (that connection is set up again).
+ * True when it was removed.
+ */
+export function releaseAppPasswordIfUnused() {
+  if (!hasAppPassword()) return false;
+  if (readRawAccounts().length > 0) return false;
+  if (ls().getItem(VAULT_LEGACY_WALLET_KEY)) return false;
+  for (const storageKey of nextcloudStorageKeys()) {
+    const record = readRawNextcloud(storageKey);
+    if (record && !hasPlainNextcloudPassword(record) && hasSealedNextcloudPassword(record)) ls().removeItem(storageKey);
+  }
+  ls().removeItem(APP_PASSWORD_KEY);
+  ls().removeItem(APP_PASSWORD_PENDING_KEY);
+  clearFailedAttempts();
+  const wasOpen = !!(vault.dataKey || vault.legacyVerified);
+  lockKeyVault();
+  if (!wasOpen) notifyStateListeners();
+  return true;
+}
+
 export function resetForgottenAppPassword() {
   const raw = readRawAccounts();
   const kept = raw.filter((entry) => !(entry?.sealed && !hasSecrets(entry)));
