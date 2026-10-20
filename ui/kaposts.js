@@ -2677,8 +2677,12 @@ function retryPost(post) {
         if (!post.quoted.remoteId || !post.quoted.posterPubkey) throw new Error("The quoted post can't be found to quote it again.");
         txid = await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey });
       } else if (post.poll) {
-        // And a failed poll as the poll: its options and closing time, not just the question.
-        txid = await submitKaPoll({ engine: deps.engine, question: post.text, options: post.poll.options, closesAtMs: post.poll.closesAt, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
+        // And a failed poll as the poll: its options, and its full length again from now, so a
+        // late retry never puts an already-closed poll on chain (iOS IOS-093).
+        const length = Math.max((Number(post.poll.closesAt) || 0) - (Number(post.timestamp) || 0), 60 * 1000);
+        const closesAt = Date.now() + length;
+        mutatePost(post.id, (p) => { if (p.poll) p.poll.closesAt = closesAt; });
+        txid = await submitKaPoll({ engine: deps.engine, question: post.text, options: post.poll.options, closesAtMs: closesAt, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
       } else {
         txid = await submitKaPost({ engine: deps.engine, text: post.text, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
       }
@@ -3720,16 +3724,34 @@ function kapostPubkeyFromAddress(address) {
   return `02${Array.from(decoded.payload, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
+/// The K pubkey behind an address: "02" or "03" + its x-only key, whichever the indexer has posts
+/// (or followers) for; null when neither has any (iOS resolveKaPostsPubkey, XP-034). About half of
+/// all users post with an 03 key, so the 02 guess alone showed them with no posts and 0 followers.
+async function resolveKaPostsPubkey(address) {
+  const even = kapostPubkeyFromAddress(address);
+  if (!even) return null;
+  const candidates = [even, `03${even.slice(2)}`];
+  for (const candidate of candidates) {
+    // iOS asks get-posts with replies included; here replies are their own endpoint
+    const posts = await fetchUserPosts({ engine: deps.engine, pubkey: candidate, limit: 1 }).catch(() => null);
+    if (posts?.posts?.length) return candidate;
+    const replies = await fetchUserReplies({ engine: deps.engine, pubkey: candidate, limit: 1 }).catch(() => null);
+    if (replies?.posts?.length) return candidate;
+  }
+  for (const candidate of candidates) {
+    const details = await fetchKaPostUserDetails({ engine: deps.engine, pubkey: candidate }).catch(() => null);
+    if ((Number(details?.followersCount) || 0) > 0 || (Number(details?.followingCount) || 0) > 0) return candidate;
+  }
+  return null;
+}
+
 async function openPosterProfile(address, passedPubkey) {
-  // No pubkey handed over: the one the address derives, so the profile still loads its posts and
-  // counts (iOS 2da301f) instead of opening empty.
-  const pubkey = passedPubkey || kapostPubkeyFromAddress(address);
   rememberFeedScroll();
   panelGeneration += 1;
   clearPanelPagerSentinels();
   const generation = panelGeneration;
   activePanel = beginPanel({
-    type: "profile", address, pubkey, tab: "posts", posts: [], replies: [], details: null, loading: true,
+    type: "profile", address, pubkey: passedPubkey || null, tab: "posts", posts: [], replies: [], details: null, loading: true,
     pagers: { posts: makePager(), replies: makePager() },
   });
   const panel = activePanel;
@@ -3738,6 +3760,12 @@ async function openPosterProfile(address, passedPubkey) {
   deps.engine.fetchKnsAddressInfo?.(address).catch(() => null)
     .then(() => deps.engine.fetchKnsAddressProfile?.(address).catch(() => null))
     .then(() => { if (activePanel === panel) renderPanel(); });
+  // No pubkey handed over: the address gives the x-only key, but a K key starts with 02 or 03 -
+  // try both and keep the one the indexer has data for (iOS XP-034). The panel's pubkey is what
+  // Follow and the counts use, so it is never a guess: null when neither has any.
+  const pubkey = passedPubkey || await resolveKaPostsPubkey(address);
+  if (activePanel !== panel || generation !== panelGeneration) return;
+  panel.pubkey = pubkey;
   if (!pubkey) {
     panel.loading = false;
     panel.pagers.posts.hasMore = false;

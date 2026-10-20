@@ -1874,6 +1874,18 @@ export const IndexerAPI = Object.freeze({
     return makeIdentity({ address: reqString(j, "address", w), label: optString(j, "label", w), names, profile });
   },
 
+  /** `POST /identity/batch` (iOS 710b78f) `{ identities: { <address>: <identity JSON> } }` -> Map of
+   *  lowercased address -> Identity. An unnamed address answers `label: null`; one the indexer
+   *  skipped (invalid) is simply not a key. One unreadable entry fails the whole answer, as Swift's
+   *  decode of the batch does. */
+  identities(j) {
+    const w = "identity batch";
+    const all = reqObject(j, "identities", w);
+    const out = new Map();
+    for (const [address, entry] of Object.entries(all)) out.set(address.toLowerCase(), IndexerAPI.identity(entry));
+    return out;
+  },
+
   /** `GET /names/status` -> `{ network, registryCovenantId, genesisTxId, indexedDaa, synced }`
    *  (registry v4: the indexer is matched on the registry id alone). */
   status(j) {

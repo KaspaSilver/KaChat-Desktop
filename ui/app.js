@@ -3687,6 +3687,19 @@ function isPlaceholderContactName(contact) {
 // fills in contact.name itself (see applyKnsPrimaryDomainToContact) when no
 // custom name has been set, so this just reads contact.name normally.
 function displayNameForAddress(contact) {
+  return ownAddressSuffixed(baseDisplayNameForAddress(contact), contact?.address);
+}
+
+/// The chat with your own chatting address says so: "kaspero.kachat (Your address)" - whatever
+/// the name resolves to (your alias, Address Book, .kachat, the short address), everywhere that
+/// chat is named (iOS 2ccf3e1, ContactsManager.ownSuffixed). Never saved back: name fields and
+/// Address Book suggestions read baseDisplayNameForAddress.
+function ownAddressSuffixed(name, address) {
+  if (!name || !address || !engine.address || String(address).toLowerCase() !== String(engine.address).toLowerCase()) return name;
+  return `${name} (Your address)`;
+}
+
+function baseDisplayNameForAddress(contact) {
   if (!contact) return "";
   if (contact.nameIsCustom) return contact.name || defaultAliasFor(contact.address);
   // A name you gave the chat wins; then the address's Address Book name (iOS 00767a4); then who
@@ -3705,6 +3718,10 @@ function displayNameForAddress(contact) {
 /// testnet its .kachat name, elsewhere its KNS domain (when .kas names are identity), else the
 /// short address. For an address with no contact record; with one, use displayNameForAddress.
 function identityNameForAddress(address) {
+  return ownAddressSuffixed(baseIdentityNameForAddress(address), address);
+}
+
+function baseIdentityNameForAddress(address) {
   // With no contact record, the Address Book name comes first (iOS displayName(for: address)).
   const savedName = addressBookName(address);
   if (savedName) return savedName;
@@ -9882,7 +9899,7 @@ sidebarTabButtons.forEach((button) => {
 
 const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -10913,14 +10930,14 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate opens Profile's Send screen
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
-const APP_VERSION = "5.2.1";
+const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 193;
-// "5.2.1 (191)", as iOS appVersionDisplay writes it.
+const APP_BUILD = 194;
+// "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
-{ const el = document.querySelector("[data-logged-out-version]"); if (el) el.textContent = `Version ${APP_VERSION_LABEL}`; }
+{ const el = document.querySelector("[data-logged-out-version]"); if (el) el.textContent = `KaChat ${APP_VERSION_LABEL}`; }
 
 // Donate (iOS e7cc0d5): the Send screen, addressed to KaChat's donation address, pinned (iOS
 // 8bc86f8, IOS-067): a name is first-come, so resolving kachat.kachat would pay whoever registered
@@ -16337,10 +16354,10 @@ function openChatInfoFor(contact, conversationEntry) {
   // custom one that would hide their .kachat name. Your own card's title is your .kachat name.
   if (kachatNamesUiEnabled() && chatInfoNameInput) {
     chatInfoNameInput.placeholder = "Name";
-    if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || displayNameForAddress(contact);
+    if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || baseDisplayNameForAddress(contact);
     else if (!contact.nameIsCustom) {
       chatInfoNameInput.value = addressBookGiven || "";
-      chatInfoNameInput.placeholder = displayNameForAddress(contact);
+      chatInfoNameInput.placeholder = baseDisplayNameForAddress(contact);
     }
   }
   if (chatInfoAddressCaption) chatInfoAddressCaption.textContent = shortAddress(contact.address);
@@ -16462,8 +16479,8 @@ function paintChatInfoKachat(contact) {
   const names = label && allNames.includes(label) ? [label, ...allNames.filter((n) => n !== label)] : allNames;
 
   if (chatInfoNameInput) {
-    if (isSelf) chatInfoNameInput.value = label ? `${label}.kachat` : displayNameForAddress(contact);
-    else if (!contact.nameIsCustom) chatInfoNameInput.placeholder = displayNameForAddress(contact);
+    if (isSelf) chatInfoNameInput.value = label ? `${label}.kachat` : baseDisplayNameForAddress(contact);
+    else if (!contact.nameIsCustom) chatInfoNameInput.placeholder = baseDisplayNameForAddress(contact);
   }
 
   if (chatInfoAvatarImage && chatInfoAvatarInitials) {
@@ -16771,7 +16788,7 @@ document.querySelector("[data-chat-info-address-book]")?.addEventListener("click
   const contact = state.contacts.find((entry) => entry.address === address);
   const result = await openAddressBookEditor({
     address,
-    suggestedName: contact?.nameIsCustom ? contact.name : (contact ? displayNameForAddress(contact) : identityNameForAddress(address)),
+    suggestedName: contact?.nameIsCustom ? contact.name : (contact ? baseDisplayNameForAddress(contact) : baseIdentityNameForAddress(address)),
   });
   if (result === "saved") showCopyToast("Saved to Address Book.");
   else if (result === "removed") showCopyToast("Removed from Address Book.");
@@ -19371,7 +19388,7 @@ onContextGesture(chatList, async (event) => {
   });
   if (!choice) return;
   if (choice === "address-book") {
-    openAddressBookEditor({ address: contact.address, suggestedName: contact.nameIsCustom ? contact.name : displayNameForAddress(contact) });
+    openAddressBookEditor({ address: contact.address, suggestedName: contact.nameIsCustom ? contact.name : baseDisplayNameForAddress(contact) });
     return;
   }
   if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }

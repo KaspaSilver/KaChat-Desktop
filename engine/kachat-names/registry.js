@@ -310,6 +310,10 @@ export class KachatNamesRegistry {
    *  the app walks the chain itself until it catches up (iOS 7aa6c6d `maxIndexerLagDaa`). */
   static get maxIndexerLagDaa() { return 600n; }
 
+  /** The most addresses one `POST /identity/batch` takes (the indexer answers 400 past it; iOS
+   *  710b78f chunks at the same). */
+  static get identityBatchMax() { return 200; }
+
   async _chooseSource(m) {
     const base = this.indexerBase();
     if (!base) return { kind: "chain" };
@@ -925,6 +929,35 @@ export class KachatNamesRegistry {
   }
 
   /**
+   * Everyone at once (iOS 710b78f `identitiesBatch`): `POST /identity/batch` with
+   * `{ addresses: [...] }` (one request and two set queries on the indexer, against one
+   * `GET /identity/{address}` each), in chunks of `identityBatchMax` (200, the indexer's cap: more
+   * answers 400). -> Map of lowercased address -> Identity (profile sanitized); an unnamed address
+   * answers `label: null`, and one the indexer left out (invalid) is not in the Map - the caller
+   * counts it as a miss. Null when the network has no registry (`isEnabled()` false), the source
+   * is the chain walker (each lookup is local anyway), or any chunk fails - an indexer without the
+   * endpoint yet among them: the caller falls back to per-address `identity()`. Never throws.
+   */
+  async identities(rawAddresses) {
+    const addresses = (rawAddresses ?? []).map((a) => String(a).trim().toLowerCase());
+    if (!this.deps.isEnabled() || addresses.length === 0) return null;
+    try { await this.prepare(); } catch { return null; }
+    if (this.source?.kind !== "indexer") return null;
+    const base = this.source.base;
+    const out = new Map();
+    const max = KachatNamesRegistry.identityBatchMax;
+    for (let i = 0; i < addresses.length; i += max) {
+      try {
+        const found = IndexerAPI.identities(await this._post(base, "/identity/batch", { addresses: addresses.slice(i, i + max) }));
+        for (const [address, identity] of found) out.set(address, identity);
+      } catch {
+        return null;
+      }
+    }
+    return out;
+  }
+
+  /**
    * An address's identity where the network has no registry yet (mainnet, iOS d36fc42
    * profileOnlyIdentity): `{ address, label: null, names: [], profile: Profile|null }`. This
    * device's own saved record for the address wins; else the indexer's `GET /profiles/{address}`
@@ -1091,6 +1124,29 @@ export class KachatNamesRegistry {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  /** A JSON POST to the names indexer (iOS 710b78f `post`), with `_get`'s status handling. */
+  async _post(base, path, body) {
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 25_000) : null;
+    let res;
+    try {
+      res = await this.deps.fetch(base + path, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        cache: "no-store",
+        ...(ctrl ? { signal: ctrl.signal } : {}),
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (res.status !== 200) {
+      if (res.status === 404) throw new Failure("not found");
+      throw new Failure(`the names indexer answered ${res.status}`);
+    }
+    return JSON.parse(await res.text());
   }
 
   async _get(base, path) {

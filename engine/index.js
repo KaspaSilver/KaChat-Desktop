@@ -1685,7 +1685,29 @@ export class KaspaEngine {
     if (!this.address) throw new Error("Generate or import a wallet before payment sync.");
     // The decryptor reads the memo a payment carries in its payload (kchat:1:pay:), when it has one.
     const decryptMessage = this.privateKeyHex ? async (encryptedHex) => this.decryptKasiaMessage(encryptedHex) : null;
-    return syncIncomingPaymentsFromRest({ ...details, walletAddress: this.address, decryptMessage, log: (line) => this.log?.(line) });
+    return syncIncomingPaymentsFromRest({
+      ...details, walletAddress: this.address, decryptMessage,
+      confirmUnspentPayment: (txid, walletAddress, amountSompi) => this.nodeConfirmsIncomingPayment(txid, walletAddress, amountSompi),
+      log: (line) => this.log?.(line),
+    });
+  }
+
+  /** Whether our node lists coins created by `txid` that pay `address` exactly `amountSompi` (the
+   *  payment's outputs to us, still unspent) - iOS 8116ab9 nodeConfirmsIncomingPayment, XP-033.
+   *  The node is a second source the REST API can't speak for; a coin already spent can't be seen
+   *  this way, so such a payment stays held. Any failure (no SDK, no node, a bad answer) is false. */
+  async nodeConfirmsIncomingPayment(txid, address, amountSompi) {
+    try {
+      const amount = BigInt(amountSompi);
+      const want = String(txid || "").toLowerCase();
+      if (amount <= 0n || !want || !address) return false;
+      const utxos = await this.getUtxosWithCovenants([address]);
+      let paid = 0n;
+      for (const utxo of utxos) if (utxo.outpoint.transactionId === want) paid += utxo.amount;
+      return paid === amount;
+    } catch {
+      return false;
+    }
   }
 
   async syncConversationFromIndexer(details) {

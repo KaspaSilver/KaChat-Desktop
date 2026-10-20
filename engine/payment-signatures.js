@@ -11,6 +11,16 @@
 // The answer is "valid", "invalid" (a signature is definitively wrong: drop the payment) or
 // "unknown" (an input's spent output is not resolved, or the data is incomplete: hold it and ask
 // again later - never show it unverified, never drop it on the first miss).
+//
+// The verdict rule, the same on every client (iOS 8116ab9, audits AND-042 and XP-033; MESSAGING.md
+// "Checking a received payment read from the REST API"): a standard key-address (P2PK Schnorr)
+// input must carry a well-formed signature script - a blank, short or wrongly pushed one cannot be
+// on chain, so it is a failure, not a skip (a lying REST server could otherwise file a payment
+// from any contact by blanking it). A failing (or malformed) signature makes the payment "invalid"
+// only when the REST fields rebuild the claimed transaction id, i.e. the API described the
+// transaction completely; otherwise a field the signature covers is missing (lock time,
+// sequences) and the answer is "unknown". A sighash type other than SIGHASH_ALL is "unknown" too,
+// never a silent pass.
 import { blake2b } from "@noble/hashes/blake2.js";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
@@ -105,11 +115,15 @@ export function computeSighash(tx, inputIndex, utxoScript, utxoAmount) {
   return hashKeyed(w.done());
 }
 
-/// The id the transaction would have if the REST fields were the whole transaction (v0: keyed
-/// BLAKE2b "TransactionID" without signature scripts; v1: the name core's TransactionV1Id). The
-/// REST API does not carry every field - sequence and lock time come back missing - so for a
-/// transaction that set one, the fields it does carry are not the transaction that was signed.
-function restModelTxIdHex(model) {
+/// The id the transaction would have if the REST fields were the whole transaction (iOS 8116ab9
+/// restTransactionId; rusty-kaspa consensus/core/src/hashing/tx.rs): v0 = keyed BLAKE2b
+/// "TransactionID" over the encoding with signature scripts (and mass commitments) excluded,
+/// payload included; v1 = the name core's TransactionV1Id(PayloadDigest(payload) ||
+/// TransactionRest(the same encoding, payload excluded too)), keyed BLAKE3. Output script version
+/// 0. The REST API does not carry every field - sequence and lock time come back missing - so for
+/// a transaction that set one, the fields it does carry are not the transaction that was signed
+/// (the time-locked .kachat registration 690315d4 is such a case: unknown, not forged).
+export function restModelTxIdHex(model) {
   if (model.version >= 1) {
     const tx = makeTx({
       version: model.version,
@@ -126,6 +140,17 @@ function restModelTxIdHex(model) {
   w.u64(model.lockTime).bytes(model.subnetworkId).u64(model.gas).u64(model.payload.length).bytes(model.payload);
   const id = blake2b(w.done(), { dkLen: 32, key: new TextEncoder().encode("TransactionID") });
   return Array.from(id, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// A u32 read strictly (iOS UInt32(_:) / UInt32(exactly:), IOS-092): a whole number in
+/// [0, 2^32), as a JS number, a bigint or a plain decimal string; anything else is null.
+export function parseU32(value) {
+  let n;
+  if (typeof value === "number") n = value;
+  else if (typeof value === "bigint") n = value <= 0xffffffffn && value >= 0n ? Number(value) : -1;
+  else if (typeof value === "string" && /^[0-9]{1,10}$/.test(value)) n = Number(value);
+  else return null;
+  return Number.isInteger(n) && n >= 0 && n <= 0xffffffff ? n : null;
 }
 
 // The REST API writes a missing covenant as the string "None".
@@ -151,9 +176,10 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     const txidHex = raw?.previous_outpoint_hash ?? raw?.previousOutpointHash ?? raw?.previous_outpoint?.transaction_id;
     const indexRaw = raw?.previous_outpoint_index ?? raw?.previousOutpointIndex ?? raw?.previous_outpoint?.index;
     const txid = hexToBytes(txidHex);
-    const index = Number(indexRaw);
-    // The outpoint itself is part of every input's signature hash.
-    if (!txid || txid.length !== 32 || indexRaw == null || !Number.isInteger(index) || index < 0) return "unknown";
+    const index = parseU32(indexRaw);
+    // The outpoint itself is part of every input's signature hash; a bad index is "unknown",
+    // never a throw (iOS 8116ab9, IOS-092).
+    if (!txid || txid.length !== 32 || index == null) return "unknown";
     let address = raw?.previous_outpoint_address ?? raw?.previousOutpointAddress ?? null;
     let amount = raw?.previous_outpoint_amount ?? raw?.previousOutpointAmount ?? null;
     if ((address == null || amount == null) && typeof resolveSpentOutput === "function") {
@@ -179,8 +205,10 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     let covenant = null;
     if (present(authorizing) && present(idHex)) {
       const id = hexToBytes(idHex);
-      if (!id || id.length !== 32) return "unknown";
-      covenant = { authorizingInput: Number(authorizing), id };
+      // the authorizing input is a u16 in both the signature hash and the id: read it strictly
+      const authorizingInput = parseU32(typeof authorizing === "string" ? authorizing.trim() : authorizing);
+      if (!id || id.length !== 32 || authorizingInput == null || authorizingInput > 0xffff) return "unknown";
+      covenant = { authorizingInput, id };
     }
     outputs.push({ amount, scriptVersion: 0, script, covenant });
   }
@@ -198,31 +226,49 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     outputs,
   };
 
+  // Whether the REST fields describe the transaction completely: they rebuild its claimed id.
+  const restFieldsRebuildId = () => {
+    const claimed = String(tx?.transaction_id ?? tx?.transactionId ?? "").toLowerCase();
+    try { return Boolean(claimed) && restModelTxIdHex(model) === claimed; } catch { return false; }
+  };
+  let failedInput = null;
+
+  // iOS 8116ab9's order: the spent script is worked out first, so only key-address inputs need
+  // (and are held to) a well-formed signature script; P2SH covenant spends are skipped as before.
   for (let i = 0; i < inputs.length; i += 1) {
     const input = inputs[i];
-    // 0x41 (push 65) + 64-byte Schnorr signature + 0x01 (SIGHASH_ALL); anything else (a covenant
-    // spend, another sighash type) is not checked here.
-    const sigScript = hexToBytes(input.signatureScript);
-    if (!sigScript || sigScript.length !== 66 || sigScript[0] !== 0x41 || sigScript[65] !== 0x01) continue;
+    // 1. The spent UTXO's script and amount: without them this input can't be checked yet.
     if (input.address == null || input.amount == null) return "unknown";
     const utxoScript = scriptPublicKeyFromAddress(input.address);
     const amount = num(input.amount, null);
     if (!utxoScript || amount == null) return "unknown";
-    // Schnorr P2PK only: <32> <x-only key> OP_CHECKSIG.
-    if (utxoScript.length < 34 || utxoScript[0] !== 32 || utxoScript[utxoScript.length - 1] !== 0xac) continue;
+
+    // 2. Only standard P2PK Schnorr inputs are checked here: <0x20> <32-byte key> OP_CHECKSIG.
+    if (utxoScript.length !== 34 || utxoScript[0] !== 32 || utxoScript[33] !== 0xac) continue; // P2SH, ECDSA and the like
+
+    // 3. Such an input's signature script is 0x41 (push 65) + a 64-byte Schnorr signature + a
+    // sighash type byte. Anything else (blank, short, another push) can't be on chain: a failure
+    // (AND-042), judged with the others at the end.
+    const sigScript = hexToBytes(input.signatureScript);
+    if (!sigScript || sigScript.length !== 66 || sigScript[0] !== 0x41) {
+      if (failedInput == null) failedInput = i;
+      continue;
+    }
+    // A sighash type this check doesn't hash (only SIGHASH_ALL is): can't be decided here.
+    if (sigScript[65] !== 0x01) return "unknown";
+
+    // 4. The signature hash (v0 or v1).
     let sighash;
     try { sighash = computeSighash(model, i, utxoScript, amount); } catch { return "unknown"; }
+
+    // 5. The Schnorr signature.
     let ok;
     try { ok = schnorr.verify(sigScript.slice(1, 65), sighash, utxoScript.slice(1, 33)); } catch { return "unknown"; }
-    if (!ok) {
-      // A wrong signature only proves forgery when the REST fields ARE the transaction: when they
-      // do not even reproduce its id, something the signature covers is missing from the answer
-      // (a sequence or lock time the API drops), so it cannot be judged from here.
-      const claimed = String(tx?.transaction_id ?? tx?.transactionId ?? "").toLowerCase();
-      let reproduced = false;
-      try { reproduced = Boolean(claimed) && restModelTxIdHex(model) === claimed; } catch { reproduced = false; }
-      return reproduced ? "invalid" : "unknown";
-    }
+    if (!ok && failedInput == null) failedInput = i;
   }
-  return "valid";
+
+  if (failedInput == null) return "valid";
+  // Forged only when the API described the whole transaction (XP-033); else something it left out
+  // (that the signature covers) is the likelier reason.
+  return restFieldsRebuildId() ? "invalid" : "unknown";
 }

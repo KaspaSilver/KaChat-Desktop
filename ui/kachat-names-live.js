@@ -34,7 +34,7 @@ import {
 } from "../engine/kachat-names/registry-state.js";
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
 import { ProfileIdentityStore } from "../engine/kachat-names/profile-cache.js";
-import { unnamedSweepDue, nextUnnamedAnswers } from "./kachat-unnamed-sweep.js";
+import { unnamedSweepDue, nextUnnamedAnswers, unnamedSweepPass } from "./kachat-unnamed-sweep.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
@@ -4145,6 +4145,37 @@ function identitySig(identity) {
   return JSON.stringify([identity.label, identity.names, profile]);
 }
 
+/** Files a fetched identity in the cache (iOS 710b78f `storeFetchedIdentity`: one copy for the
+ *  render-time lookup and the unnamed sweep's batch). `identity`: the registry's answer, `own`:
+ *  this device's saved profile for the address (it wins). Kept across launches when it changed or
+ *  a copy from the last run was confirmed. -> true when what the app shows changed; the caller
+ *  then tells the listeners - once per batch rather than per address. */
+function storeFetchedIdentity(registry, key, identity, own) {
+  const prev = cachedIdentities.get(key) ?? null;
+  const next = normalizedIdentity(key, identity, own);
+  const sig = identitySig(next);
+  const now = Date.now();
+  cachedIdentities.delete(key);
+  cachedIdentities.set(key, { identity: next, sig, revision: registry.revision, at: now, confirmedAt: now, fromDisk: false });
+  trimMap(cachedIdentities, IDENTITY_CACHE_MAX);
+  // kept across launches: written when it changed, or when a copy from the last run was confirmed
+  if (sig !== (prev?.sig ?? "") || prev?.fromDisk) { try { profileIdentityStore().schedule(); } catch { /* memory only */ } }
+  return sig !== (prev?.sig ?? "");
+}
+
+/** A lookup that got no answer: keep what we had (the copy loaded at launch too) and ask again in
+ *  a minute rather than on every render. `failed`: the unnamed sweep asks again on its next pass
+ *  (iOS cbb8a83; a batch that left the address out counts the same, iOS 710b78f). */
+function storeIdentityMiss(registry, key) {
+  const prev = cachedIdentities.get(key) ?? null;
+  const retryMs = registry.isLaunched === false ? profileMissPauseMs : IDENTITY_RETRY_MS;
+  cachedIdentities.set(key, {
+    identity: prev?.identity ?? null, sig: prev?.sig ?? "", revision: registry.revision,
+    at: Date.now() - IDENTITY_MAX_AGE_MS + retryMs,
+    confirmedAt: prev?.confirmedAt ?? 0, fromDisk: prev?.fromDisk === true, failed: true,
+  });
+}
+
 /** One background lookup for `key`; listeners hear about it only when the answer changed. */
 async function lookUpIdentity(registry, key) {
   identityLookups.add(key);
@@ -4155,27 +4186,9 @@ async function lookUpIdentity(registry, key) {
     try { identity = await registry.identity(key); } catch { failed = true; }
     let own = null;
     try { own = (await registry.ownProfile(key))?.profile ?? null; } catch { own = null; }
+    if (failed && !own) { storeIdentityMiss(registry, key); return; }
     const prev = cachedIdentities.get(key) ?? null;
-    if (failed && !own) {
-      // Keep what we had (the copy loaded at launch too); ask again in a minute rather than on
-      // every render. `failed`: the unnamed sweep asks again on its next pass (iOS cbb8a83).
-      const retryMs = registry.isLaunched === false ? profileMissPauseMs : IDENTITY_RETRY_MS;
-      cachedIdentities.set(key, {
-        identity: prev?.identity ?? null, sig: prev?.sig ?? "", revision: registry.revision,
-        at: Date.now() - IDENTITY_MAX_AGE_MS + retryMs,
-        confirmedAt: prev?.confirmedAt ?? 0, fromDisk: prev?.fromDisk === true, failed: true,
-      });
-      return;
-    }
-    const next = normalizedIdentity(key, failed ? prev?.identity : identity, own);
-    const sig = identitySig(next);
-    const now = Date.now();
-    cachedIdentities.delete(key);
-    cachedIdentities.set(key, { identity: next, sig, revision: registry.revision, at: now, confirmedAt: now, fromDisk: false });
-    trimMap(cachedIdentities, IDENTITY_CACHE_MAX);
-    // kept across launches: written when it changed, or when a copy from the last run was confirmed
-    if (sig !== (prev?.sig ?? "") || prev?.fromDisk) { try { profileIdentityStore().schedule(); } catch { /* memory only */ } }
-    if (sig !== (prev?.sig ?? "")) scheduleIdentityNotify();
+    if (storeFetchedIdentity(registry, key, failed ? prev?.identity : identity, own)) scheduleIdentityNotify();
   } finally {
     identityLookups.delete(key);
   }
@@ -4256,15 +4269,16 @@ export async function kachatRescanProfile(address) {
 
 // People shown as an address (iOS 3214a2b, KachatNamesRegistry.startUnnamedIdentitySweep): the
 // cache only re-asks when a render reads it, so while the app is open, once a minute, everyone with
-// no name you gave them and no .kachat name known may be asked again (most recent chats first, up
-// to 40 a pass); an answer updates every screen at once (onKachatIdentityChange). Never asked yet,
+// no name you gave them and no .kachat name known may be asked again - all of them in one
+// POST /identity/batch (iOS 710b78f; chunks of 200), or, without it (the chain walker, an indexer
+// without the endpoint), one at a time, most recent chats first, up to 40 a pass; the answers
+// update every screen at once (onKachatIdentityChange, one notify per pass). Never asked yet,
 // or the last lookup failed (the registry still loading at launch): this pass. A "no name" answer
 // backs off - asked again after 1, then 5, 15 and 60 minutes - and sooner (after a minute) only
 // once the registry's revision moved, since a name only appears through a registry transaction
 // (iOS cbb8a83, IOS-087; the rules are kachat-unnamed-sweep.js).
 const UNNAMED_SWEEP_FIRST_MS = 8_000;
 const UNNAMED_SWEEP_EVERY_MS = 60_000;
-const UNNAMED_SWEEP_MAX = 40;
 let unnamedSweepStarted = false;
 let unnamedSweepRunning = false;
 /** "No name" answers in a row, per address (in memory: a relaunch starts over at a minute). */
@@ -4293,21 +4307,52 @@ export function startKachatUnnamedIdentitySweep({ candidates } = {}) {
         if (!key || key === me || seen.has(key) || !isNetworkAddress(key)) continue;
         seen.add(key);
         if (!unnamedSweepDue(cachedIdentities.get(key) ?? null, unnamedAnswers.get(key) ?? 0, rt.registry.revision, now)) continue;
+        // one in flight already (a render asked): its answer lands anyway
+        if (identityLookups.has(key)) continue;
         targets.push(key);
-        if (targets.length >= UNNAMED_SWEEP_MAX) break;
       }
+      if (targets.length === 0) return;
       watchIdentitySources(rt.registry);
       profileIdentityStore();
-      // a few at a time, the people you talk to most recently first
-      for (const key of targets) {
-        if (!visible()) return;
-        if (identityLookups.has(key)) continue;
-        try { await lookUpIdentity(rt.registry, key); } catch { continue; /* asked again next minute */ }
+      const { registry } = rt;
+      await unnamedSweepPass(targets, {
+        batch: async (keys) => {
+          // the batch's addresses count as in flight, so a render doesn't ask for them one by one meanwhile
+          for (const key of keys) identityLookups.add(key);
+          try {
+            try { await registry.refreshIfStale({ maxAge: IDENTITY_MAX_AGE_MS / 1000 }); } catch { /* use what we have */ }
+            const found = await registry.identities(keys);
+            if (!found) return null;
+            // this device's own saved profile for an address still wins, as in lookUpIdentity
+            const out = new Map();
+            for (const key of keys) {
+              const identity = found.get(key);
+              if (!identity) continue;
+              let own = null;
+              try { own = (await registry.ownProfile(key))?.profile ?? null; } catch { own = null; }
+              out.set(key, { identity, own });
+            }
+            return out;
+          } finally {
+            for (const key of keys) identityLookups.delete(key);
+          }
+        },
+        store: (key, { identity, own }) => storeFetchedIdentity(registry, key, identity, own),
+        miss: (key) => storeIdentityMiss(registry, key),
+        notify: () => scheduleIdentityNotify(),
+        lookUp: async (key) => {
+          if (identityLookups.has(key)) return false;
+          await lookUpIdentity(registry, key);
+          return true;
+        },
         // one more "no name" in a row backs the next ask off further; a failed lookup changes nothing
-        const answers = nextUnnamedAnswers(unnamedAnswers.get(key) ?? null, cachedIdentities.get(key) ?? null);
-        if (answers == null) unnamedAnswers.delete(key);
-        else unnamedAnswers.set(key, answers);
-      }
+        answered: (key) => {
+          const answers = nextUnnamedAnswers(unnamedAnswers.get(key) ?? null, cachedIdentities.get(key) ?? null);
+          if (answers == null) unnamedAnswers.delete(key);
+          else unnamedAnswers.set(key, answers);
+        },
+        visible,
+      });
     } finally {
       unnamedSweepRunning = false;
     }

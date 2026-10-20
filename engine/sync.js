@@ -16,7 +16,7 @@ import {
 import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
 import { kasTextFromSompi } from "./amounts.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
-import { verifyRestTransactionSignatures } from "./payment-signatures.js";
+import { verifyRestTransactionSignatures, parseU32 } from "./payment-signatures.js";
 
 // Kept as a named export for callers, but the effective default now comes from
 // the configurable endpoint registry (Settings > Connectivity).
@@ -984,10 +984,12 @@ export async function syncConversationPreview({ conversationId, contact, walletA
 const paymentPageCache = new Map(); // url -> { at, promise }
 const PAYMENT_PAGE_TTL_MS = 4000;
 
-// --- Received-payment signature check (iOS 5806362, ChatService.verifyIncomingPaymentSignatures) ---
+// --- Received-payment signature check (iOS 5806362 + 8116ab9, ChatService.verifyIncomingPaymentSignatures) ---
 // A payment read from the REST API is shown only once its signatures check out. One that cannot be
-// checked yet is HELD per wallet and read again by id on every payment sync for up to 7 days, then
-// given up (logged) - never shown unverified, never dropped on the first miss.
+// checked yet is asked of our node (XP-033: unspent coins from that txid paying us the amount make
+// it real, filed without its memo); otherwise it is HELD per wallet and due on every payment sync
+// (on the first page or read again by id, IOS-091) for up to 7 days, then given up (logged) -
+// never shown unverified, never dropped on the first miss.
 const HELD_PAYMENTS_MAX_AGE_MS = 7 * 86_400_000;
 const heldPaymentsKey = (wallet) => `kachat-held-payments-v1:${String(wallet || "").toLowerCase()}`;
 function readHeldPayments(wallet) {
@@ -1042,7 +1044,9 @@ function fetchRestJsonCached(url) {
 async function restSpentOutput(txid, index) {
   const previous = await fetchRestJsonCached(`${getEndpoint("kaspaApi")}/transactions/${encodeURIComponent(txid)}?resolve_previous_outpoints=no`);
   const outputs = Array.isArray(previous?.outputs) ? previous.outputs : [];
-  const spent = outputs.find((o) => Number(o?.index) === Number(index)) || outputs[Number(index)];
+  // The output's own index read strictly (iOS 8116ab9 UInt32(exactly:), IOS-092): a bad one is
+  // ignored, never matched by coercion ("", null, 1.5) and never a throw.
+  const spent = outputs.find((o) => parseU32(o?.index) === index) || (Number.isInteger(index) && index >= 0 ? outputs[index] : null);
   return spent ? { address: restOutputAddress(spent), amount: spent.amount ?? spent.value ?? null } : null;
 }
 const paymentVerdictCache = new Map(); // txid -> { at, promise }
@@ -1070,7 +1074,13 @@ async function paymentMemoFromPayload(payloadHex, decryptMessage) {
   }
 }
 
-export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null, log = null } = {}) {
+/**
+ * `confirmUnspentPayment(txid, walletAddress, amountSompi)` (optional, async -> boolean): whether
+ * our node lists unspent coins from `txid` paying `walletAddress` exactly `amountSompi` (iOS
+ * 8116ab9 nodeConfirmsIncomingPayment). It settles a payment whose signatures the REST answer
+ * can't (XP-033); without it such a payment is held as before.
+ */
+export async function syncIncomingPaymentsFromRest({ conversationId, contact, walletAddress, knownTxids = [], cursor = 0, limit = 100, decryptMessage = null, confirmUnspentPayment = null, log = null } = {}) {
   if (!conversationId) throw new Error("conversationId is required for payment sync.");
   if (!contact?.address?.startsWith(ADDRESS_PREFIX)) throw new Error("A kaspa: contact address is required for payment sync.");
   if (!walletAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("Load a wallet before syncing payments.");
@@ -1118,11 +1128,14 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     promise.catch(() => paymentPageCache.delete(pageKey));
     transactions = await promise;
   }
-  // Held payments are read again by id: the page may already be past them.
+  // Held payments are read again by id: the page may already be past them. Every held txid is due
+  // on every sync, whether it is on this page or read by id, and whatever the known set says
+  // (iOS 8116ab9, IOS-091) - one is only ever skipped once a verdict releases it.
+  const held = new Set(heldPaymentTxids(walletAddress, log));
   const present = new Set(transactions.map((tx) => String(tx?.transaction_id || tx?.transactionId || "").toLowerCase()));
   const heldRows = [];
-  for (const txid of heldPaymentTxids(walletAddress, log)) {
-    if (present.has(txid) || known.has(txid)) continue;
+  for (const txid of held) {
+    if (present.has(txid)) continue;
     const held = await fetchRestJsonCached(`${getEndpoint("kaspaApi")}/transactions/${encodeURIComponent(txid)}?inputs=true&outputs=true&resolve_previous_outpoints=light`);
     if (held && typeof held === "object") heldRows.push(held);
   }
@@ -1137,7 +1150,11 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     const blockTimeRaw = Number(tx?.block_time || tx?.blockTime || tx?.accepting_block_time || tx?.acceptingBlockTime || 0);
     const createdAt = blockTimeRaw > 1e12 ? blockTimeRaw : (blockTimeRaw > 0 ? blockTimeRaw * 1000 : Date.now());
     if (createdAt > nextCursor) nextCursor = createdAt;
-    if (!txid || known.has(txid)) continue;
+    if (!txid) continue;
+    const isHeld = held.has(txid.toLowerCase());
+    // A known txid is already in the chat - unless it is held, which is due regardless (IOS-091):
+    // it is checked (and released) like the others, just not filed a second time.
+    if (known.has(txid) && !isHeld) continue;
     // .kachat registry/offer and other contract transactions are never chat payments (iOS 32fdaa4):
     // reported so the app keeps them suppressed on every path.
     if (isKachatContractTransaction(tx)) { contractTxids.push(txid); continue; }
@@ -1154,23 +1171,43 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
     }
     if (totalSompi <= 0n) continue;
 
-    // Its signatures first (iOS 5806362): valid shows it, invalid drops it, unknown holds it.
+    // Its signatures first (iOS 5806362 + 8116ab9): valid shows it, invalid drops it; unknown asks
+    // our node, else holds it.
     const verdict = await verifyIncomingPayment(tx, txid);
+    let confirmedByNodeOnly = false;
     if (verdict === "valid") releaseHeldPayment(walletAddress, txid);
     else if (verdict === "invalid") {
       releaseHeldPayment(walletAddress, txid);
       log?.(`Skipping payment ${txid.slice(0, 16)} - its signature verification FAILED`);
       continue;
     } else {
-      holdPayment(walletAddress, txid);
-      log?.(`Payment ${txid.slice(0, 16)} held - its signatures can't be checked yet`);
-      continue;
+      // The REST answer can't settle it (a field the signature covers is missing). Our node can:
+      // unspent coins from this txid paying this address the amount mean the payment is real
+      // (XP-033). A coin already spent can't be seen this way, so such a payment stays held.
+      let confirmed = false;
+      if (typeof confirmUnspentPayment === "function") {
+        try { confirmed = (await confirmUnspentPayment(txid, walletAddress, totalSompi)) === true; } catch { confirmed = false; }
+      }
+      if (confirmed) {
+        releaseHeldPayment(walletAddress, txid);
+        confirmedByNodeOnly = true;
+        log?.(`Payment ${txid.slice(0, 16)} confirmed by the node (signatures not checkable from REST)`);
+      } else {
+        holdPayment(walletAddress, txid);
+        log?.(`Payment ${txid.slice(0, 16)} held - its signatures can't be checked yet`);
+        continue;
+      }
     }
+    // Released above; already in the chat (a held txid that was known): not filed twice.
+    if (known.has(txid)) continue;
 
     // Exact (BigInt) text: Number(totalSompi) / 1e8 loses sompi past 2^53.
     const amountKas = kasTextFromSompi(totalSompi);
-    // "Received X KAS — memo" when the payer added one (iOS paymentContent).
-    const memo = await paymentMemoFromPayload(tx?.payload, decryptMessage);
+    // "Received X KAS — memo" when the payer added one (iOS paymentContent). Confirmed by the node
+    // only: the amount is proven, a memo from the REST answer is not (the payload is part of what
+    // could not be checked), so it is filed without one, as a plain payment (iOS 8116ab9 files it
+    // with no payload).
+    const memo = confirmedByNodeOnly ? "" : await paymentMemoFromPayload(tx?.payload, decryptMessage);
     messages.push({
       id: `payment-${txid}`, conversationId, contactId: contact.id, direction: "incoming",
       text: memo ? `Received ${amountKas} ${KAS_UNIT} — ${memo}` : `Received ${amountKas} ${KAS_UNIT}`, sender: contact.address, receiver: walletAddress,
@@ -1178,7 +1215,7 @@ export async function syncIncomingPaymentsFromRest({ conversationId, contact, wa
       paymentAmountKas: amountKas, transport: "kaspa-payment-rest", createdAt, updatedAt: Date.now(),
       // Sent from a chat (a kchat:1:pay: / tip payload), not a plain transfer: the chat's own news,
       // which notifies (iOS dcb329a "Sent you 1.5 KAS"); a plain transfer is Address Activity's.
-      chatPayment: Boolean(paymentPayloadEncryptedHex(tx?.payload)),
+      chatPayment: !confirmedByNodeOnly && Boolean(paymentPayloadEncryptedHex(tx?.payload)),
     });
     known.add(txid);
   }
