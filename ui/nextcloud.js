@@ -3,6 +3,7 @@ import { IS_TESTNET } from "../engine/network.js";
 import { cssUrlValue } from "./css-url.js";
 import { readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged } from "./key-vault.js";
 import { talkCallsFromCapabilities } from "./talk.js";
+import { nextcloudOffReason, KASPA_QUICK_START_URL } from "./nextcloud-availability.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -116,13 +117,24 @@ let pickerSharingPath = null;
 // State
 // ---------------------------------------------------------------------------
 
+// Off on testnet, and on a site KaChat hosts: there every request, the app password included,
+// would pass through that site's relay (see nextcloud-availability.js). Off means exactly what
+// testnet always meant here: nothing syncs, restores, uploads or rings, and every option hides as
+// if disconnected.
+const NC_OFF = nextcloudOffReason({ testnet: IS_TESTNET, hostname: typeof location !== "undefined" ? location.hostname : "" });
+
+/** Why Nextcloud is off on this page ("testnet" | "hosted"), or null when it can be used. */
+export function nextcloudUnavailableReason() {
+  return NC_OFF;
+}
+
 function loadState() {
   // Testnet: Nextcloud is off (iOS af8ec68). The backup archive, media folder and calls are one
   // per account across both networks, so testnet could otherwise overwrite the mainnet backup or
   // import mainnet history. Nothing syncs, restores, uploads or rings; every option hides as if
   // disconnected, and the mainnet connection is waiting, untouched, for the next mainnet load.
   ncLocked = null;
-  if (IS_TESTNET) { nc = null; return; }
+  if (NC_OFF) { nc = null; return; }
   let account = null;
   try { account = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { account = null; }
   // Locked (or a sealed password that does not open): nothing may run, and nothing is ever sent
@@ -135,7 +147,7 @@ function loadState() {
  *  vault refuses (locked, or a stale key after another tab's password change) writes nothing:
  *  logged, or thrown with `strict`. Never removes the stored connection; see clearStoredState. */
 function saveState({ strict = false } = {}) {
-  if (IS_TESTNET || !nc) return;
+  if (NC_OFF || !nc) return;
   try { writeNextcloudAccount(deps.accountScopedKey(NC_KEY), nc); }
   catch (error) {
     if (strict) throw error;
@@ -145,14 +157,16 @@ function saveState({ strict = false } = {}) {
 
 /** Disconnect: removes the stored connection (allowed while locked; nothing secret is written). */
 function clearStoredState() {
-  if (IS_TESTNET) return;
+  // Testnet leaves the mainnet connection untouched; on a hosted site the stored login may be
+  // forgotten (the "Remove" button there).
+  if (NC_OFF === "testnet") return;
   localStorage.removeItem(deps.accountScopedKey(NC_KEY));
 }
 
 /** The vault locked, unlocked or was reset: reload the connection when what can be used changed
  *  (a lock retires the opened password and stops everything; an unlock starts it as today). */
 function handleVaultStateChanged() {
-  if (!deps || IS_TESTNET) return;
+  if (!deps || NC_OFF) return;
   let next = null;
   try { next = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { next = null; }
   const state = (account, locked) => (account ? `open\u0000${account.server}\u0000${account.username}\u0000${account.appPassword}` : locked ? `locked\u0000${locked.unreadable ? 1 : 0}` : "none");
@@ -1563,7 +1577,36 @@ function refreshConnectFormState() {
 
 function renderSettings() {
   if (!settingsEl) return;
-  if (IS_TESTNET) {
+  if (NC_OFF === "hosted") {
+    // A login saved here before Nextcloud moved to self-run copies is never used again; it can be
+    // removed from this browser.
+    const stored = Boolean(localStorage.getItem(deps.accountScopedKey(NC_KEY)));
+    settingsEl.innerHTML = `
+      <div class="settings-list-card nc-hosted-off">
+        <div class="settings-page-form">
+          <strong>Nextcloud works when KaChat runs on your own computer.</strong>
+          <p class="nc-hosted-copy">On this website your Nextcloud login would pass through the website's server. To keep it between you and your Nextcloud, install Kaspa Quick Start, switch on KaChat-Desktop in its control panel, and open KaChat from the address it gives you (like http://localhost:5173). Nextcloud is available there.</p>
+        </div>
+        <a class="settings-list-row" href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer" data-nc-quick-start>
+          <span class="settings-row-copy"><strong>Get Kaspa Quick Start</strong></span>
+          <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </a>
+      </div>
+      <p class="settings-group-footer">Backups, sync, media and calls through Nextcloud are off on this website. Files friends share with you from their Nextcloud still open.</p>
+      ${stored ? `<div class="settings-list-card danger-list-card">
+        <button class="settings-list-row danger-row" type="button" data-nc-forget-hosted><span class="settings-row-copy"><strong>Remove Saved Nextcloud Login</strong></span></button>
+      </div>
+      <p class="settings-group-footer">A Nextcloud login saved in this browser earlier is no longer used. Removing it deletes it from this browser. Nothing changes on your Nextcloud server.</p>` : ""}`;
+    settingsEl.querySelector("[data-nc-forget-hosted]")?.addEventListener("click", async () => {
+      const ok = await confirmDialog({ title: "Remove Saved Login", message: "The Nextcloud login saved in this browser is deleted. Nothing changes on your Nextcloud server.", confirmLabel: "Remove", destructive: true });
+      if (!ok) return;
+      clearStoredState();
+      renderSettings();
+    });
+    updateComposerButton();
+    return;
+  }
+  if (NC_OFF === "testnet") {
     settingsEl.innerHTML = `
       <div class="settings-list-card nc-testnet-off">
         <div class="settings-page-form"><strong>Nextcloud is off while Testnet is on.</strong></div>
