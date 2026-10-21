@@ -111,6 +111,25 @@ export function isKachatContractTransaction(tx, ownAddresses = null) {
   return outside.length > 0 && outside.every((output) => isScriptAddress(restOutputAddress(output)));
 }
 
+const COINBASE_SUBNETWORK_ID = "0100000000000000000000000000000000000000";
+
+/** A block reward (iOS d194a38 isCoinbase): the coinbase subnetwork, or no inputs when the REST
+ *  answer leaves the subnetwork out. */
+export function isCoinbaseTransaction(tx) {
+  const subnetwork = String(tx?.subnetwork_id ?? tx?.subnetworkId ?? "").trim().toLowerCase();
+  if (subnetwork) return subnetwork === COINBASE_SUBNETWORK_ID;
+  return !(Array.isArray(tx?.inputs) && tx.inputs.length);
+}
+
+/** Whether an address's history lists it (iOS d194a38 belongsInHistory). A block reward counts
+ *  only once the chain accepted it: every block carries a coinbase paying its miner, but only those
+ *  the selected chain accepts are ever applied - the rest never paid anything (a live mining
+ *  address: 149 of its last 200 coinbases were not accepted). Everything else is listed as before:
+ *  a payment just sent is briefly unaccepted too, and must still show. */
+export function transactionBelongsInHistory(tx) {
+  return !isCoinbaseTransaction(tx) || (tx?.is_accepted ?? tx?.isAccepted) === true;
+}
+
 /**
  * A KIP-22 (quantum address) spend of a P2SH input (iOS 0b4e27e isKip22Spend): the signature script
  * is exactly `0x41 <64-byte sig> <sighash byte>` then the canonical push `0x22` of the 34-byte

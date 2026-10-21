@@ -25,6 +25,7 @@ import {
   fetchSpendableUtxos, utxoKey,
 } from "./kspt.js";
 import { closeActiveScanner, scanKaspaAddress, scanQrCode } from "./qr-scan.js";
+import { transactionBelongsInHistory } from "../engine/sync.js";
 import {
   recipientCardHtml, recipientStatusHtml, amountEntryHtml, layoutAmountEntry, sanitizeAmountText,
   availablePillInnerHtml, infoPillHtml, feeControlsHtml, coinControlSummaryText, sendActionButtonHtml,
@@ -1126,7 +1127,8 @@ async function loadAddrTxs(entry, token) {
     if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
     const txs = await response.json();
     if (addrToken !== token) return;
-    addrTxs = { state: "ready", txs: Array.isArray(txs) ? txs : [], error: null };
+    // block rewards the chain never accepted paid nothing: not history (iOS d194a38)
+    addrTxs = { state: "ready", txs: Array.isArray(txs) ? txs.filter(transactionBelongsInHistory) : [], error: null };
   } catch (error) {
     if (addrToken !== token) return;
     addrTxs = { state: "error", txs: [], error: error.message };

@@ -15,7 +15,7 @@ import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
-import { isScriptAddress, isKachatContractTransaction, legacyWireAliases } from "../engine/sync.js";
+import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
@@ -12439,7 +12439,9 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
     const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
     const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
     if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
-    const transactions = await response.json();
+    // block rewards the chain never accepted paid nothing: not history (iOS d194a38)
+    const fetched = await response.json();
+    const transactions = Array.isArray(fetched) ? fetched.filter(transactionBelongsInHistory) : fetched;
     if (!Array.isArray(transactions) || !transactions.length) {
       listEl.innerHTML = '<div class="manage-address-empty">No transactions yet.</div>';
       return;

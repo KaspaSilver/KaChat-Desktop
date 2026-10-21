@@ -35,6 +35,7 @@ import { looksLikeName, resolveEverywhere, primary as primaryName, notFoundMessa
 import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { otherDomainsHtml, pickOtherDomain } from "./send-kaspa-components.js";
 import { saveFile } from "./save-file.js";
+import { transactionBelongsInHistory } from "../engine/sync.js";
 import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker, noteMessageActivity } from "./nextcloud.js";
 import {
   PORTFOLIO_SEED_NAME, isPortfolioUuid, newPortfolioUuid, stampPortfolioChanges, mergePortfolioTombstones,
@@ -2530,7 +2531,9 @@ async function fetchTransactionsResumable(address, onProgress) {
 
     if (page === null) return { transactions: all, complete: false };
     if (!page.length) break;
-    all.push(...page);
+    // a block reward the chain never accepted paid nothing: not a ledger row (the page's full
+    // count still decides whether there is another page) - iOS d194a38
+    all.push(...page.filter(transactionBelongsInHistory));
     onProgress(`Fetching transactions… (${all.length})`);
     if (page.length < IMPORT_PAGE_SIZE) break;
     offset += IMPORT_PAGE_SIZE;
