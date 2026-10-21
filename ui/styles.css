@@ -14157,23 +14157,16 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
     background: var(--fill-tertiary, rgba(255,255,255,.06));
   }
 }
-@media all {
-  /* The tab bar draws its symbols filled, as iOS's does (lock.shield.fill, chart.pie.fill,
-     bubble.left.and.bubble.right.fill, person.crop.circle.fill); the inner details cut out in
-     the bar's colour. The Hub tiles keep the outline icons, as on iOS. Phones and the wide
-     screens' top pill alike. */
-  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > path:first-child { fill: currentColor; }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > rect,
-  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > path:last-child { stroke: var(--bar-bg); }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > rect { fill: var(--bar-bg); }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="portfolio"] svg > path { fill: currentColor; }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="portfolio"] svg > path:last-child { stroke: var(--bar-bg); stroke-width: 1.4; }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="chats"] svg > path { fill: currentColor; }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="chats"] svg > path:last-child { stroke: var(--bar-bg); stroke-width: 1.3; }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] svg > circle:first-child { fill: currentColor; }
-  .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] svg > circle:nth-child(2),
-  .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] svg > path { fill: var(--bar-bg); stroke: var(--bar-bg); }
-}
+/* The tab bar draws its symbols filled, as iOS's does: each dock button carries iOS's .fill
+   variant (lock.shield.fill, chart.pie.fill, bubble.left.and.bubble.right.fill,
+   person.crop.circle.fill, book.closed.fill; square.and.pencil has none) next to the outline glyph.
+   The dock shows the filled one; the Hub tiles and Customize Dock, which copy the dock button's
+   icon, keep the outline one, as on iOS. Cut-outs are SVG masks, so they are truly transparent
+   (the selected tab's capsule shows through them, as on iOS). */
+.tab-glyph-filled { display: none; }
+.sidebar-tabbar .sidebar-tab-icon:has(.tab-glyph-filled) .tab-glyph-outline { display: none; }
+.sidebar-tabbar .sidebar-tab-icon .tab-glyph-filled { display: block; fill: currentColor; stroke: none; }
+.sidebar-tabbar .sidebar-tab-icon .tab-glyph-filled.tab-glyph-stroked { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Kaspa Hub tiles at iOS's proportions: a 30pt symbol, a 15pt semibold title, the .kachat
    wordmark drawn large like iOS's text mark; the Customize Dock (sliders) button in a round glass

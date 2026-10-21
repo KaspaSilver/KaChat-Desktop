@@ -6708,6 +6708,11 @@ document.querySelector("[data-settings-balance]")?.addEventListener("click", asy
 
 function closeAccountOverlay() {
   accountOverlay.hidden = true;
+  // the next Settings visit starts at its own top level, never inside Customize Dock
+  if (customizeDockFromHub) {
+    customizeDockFromHub = false;
+    try { showSettingsCategory(null); } catch { /* not built yet */ }
+  }
 }
 
 document.querySelector("[data-close-account-overlay]").addEventListener("click", closeAccountOverlay);
@@ -10243,13 +10248,14 @@ hubGrid?.addEventListener("click", (event) => {
   setActiveAppTab("hub");
 });
 
-// Straight to the one screen that decides what is in the dock and what is in here, rather than
-// making the user find it three levels into Settings. The row is CLICKED rather than the
-// sub-screen opened directly, so the settings screen works out its own parent category and the
-// back bar leads where it would have if the user had walked there.
+// Straight to the one screen that decides what is in the dock and what is in here, as its own
+// screen: its back button says "Kaspa Hub" and closes it, so nobody has to back out through
+// Settings (iOS: the Hub's sliders button presents MenuVisibilityView by itself).
 document.querySelector("[data-open-customize-dock]")?.addEventListener("click", () => {
   openAccountOverlay();
-  document.querySelector('[data-settings-open-subscreen="dock"]')?.click();
+  showSettingsSubscreen("dock", null);
+  customizeDockFromHub = true;
+  setSettingsBackBar(true, "Kaspa Hub", "Customize Dock");
 });
 
 // --- Customize Dock ---------------------------------------------------------
@@ -11135,7 +11141,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 202;
+const APP_BUILD = 203;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -18513,6 +18519,8 @@ const settingsHubEl = (() => {
 // When a sub-screen (e.g. Storage > Nextcloud) is showing, back returns to its
 // parent category instead of the hub.
 let settingsSubscreenParentIndex = null;
+/** Customize Dock is on screen because Kaspa Hub's button opened it (not walked to in Settings). */
+let customizeDockFromHub = false;
 
 // iOS pushes each category as its own page: the toolbar swaps the connection dot, balance and
 // Done for a round back button and the page's inline title. The in-page back link stays hidden.
@@ -18532,6 +18540,9 @@ function setSettingsBackBar(visible, label, title = "") {
   if (titleEl) { titleEl.hidden = !visible; titleEl.textContent = visible ? title : ""; }
 }
 document.querySelector("[data-settings-nav-back]")?.addEventListener("click", () => {
+  // Customize Dock opened from Kaspa Hub's button is its own screen: back closes it, straight to
+  // the Hub, never into Settings (iOS: the Hub's sliders button presents MenuVisibilityView alone).
+  if (customizeDockFromHub) { closeAccountOverlay(); return; }
   showSettingsCategory(settingsSubscreenParentIndex != null ? settingsSubscreenParentIndex : null);
 });
 
@@ -18551,6 +18562,7 @@ function refreshSettingsCaptions() {
 }
 
 function showSettingsCategory(index) {
+  customizeDockFromHub = false; // any walk through Settings is Settings' own again
   if (!settingsScreenEl || !settingsHubEl) return;
   refreshSettingsCaptions();
   const inCategory = Number.isInteger(index);
@@ -18782,8 +18794,10 @@ function setSettingsAppOnlyMode(appOnly) {
   // Customization page has only Appearance, Language and Currency.
   const title = document.querySelector("[data-settings-overlay-title]");
   if (title) title.hidden = !appOnly;
+  // No connection light in Settings (owner's call, 2026-10-21; iOS SettingsView still has one):
+  // Connection Status opens from the main toolbar's light, and Settings > Connection lists it too.
   const healthButton = document.querySelector("[data-settings-health-button]");
-  if (healthButton) healthButton.hidden = appOnly;
+  if (healthButton) healthButton.hidden = true;
   const balance = document.querySelector("[data-settings-balance]");
   if (balance) balance.hidden = appOnly;
   const feeRow = document.querySelector("[data-fee-estimate-row]");
