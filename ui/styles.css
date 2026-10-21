@@ -14585,3 +14585,14 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   mask: url("./assets/kaspa-logo.png") center / 23px 23px no-repeat;
 }
 .sidebar-tabbar .sidebar-tab[data-app-tab="hub"] .sidebar-tab-logo { opacity: 0; }
+/* A picture is the whole avatar (iOS KNSAvatarView: the image OR the fallback glyph, clipped to a
+   circle, nothing behind it): no tinted circle and no glyph under a picture, so a transparent PNG
+   shows what is behind the avatar, as on iOS - not the person glyph through its holes. */
+.chat-avatar:has(> img:not([hidden])),
+.conversation-avatar:has(> img:not([hidden])),
+.message-avatar:has(> img:not([hidden])),
+.chat-info-avatar:has(> img:not([hidden])) { background: transparent !important; border: 0 !important; }
+.chat-avatar:has(> img:not([hidden])) > .avatar-person-glyph,
+.message-avatar:has(> img:not([hidden])) > .avatar-person-glyph,
+.conversation-avatar:has(> img:not([hidden])) > [data-conversation-avatar-initials],
+.chat-info-avatar:has(> img:not([hidden])) > [data-chat-info-avatar-initials] { display: none; }

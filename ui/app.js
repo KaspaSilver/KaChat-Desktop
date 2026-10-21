@@ -3142,6 +3142,22 @@ function selfAvatarHtml(className = "chat-avatar") {
 function updateAvatarElement(initialsEl, imageEl, contact) {
   if (initialsEl) initialsEl.innerHTML = personGlyphSvg();
   if (!imageEl) return;
+  // The glyph is the fallback, never a layer under the picture (iOS KNSAvatarView shows either
+  // the image or fallbackAvatar): a picture with transparent parts showed the person through them.
+  // A picture that won't load hands back to the glyph (the .kachat path retries first, then
+  // kachatImageFailed un-hides it the same way).
+  const showImage = (shown) => {
+    imageEl.hidden = !shown;
+    if (initialsEl) initialsEl.hidden = shown;
+  };
+  if (!imageEl.dataset.avatarFallbackWired) {
+    imageEl.dataset.avatarFallbackWired = "1";
+    imageEl.addEventListener("error", () => {
+      if (imageEl.hasAttribute("data-kachat-img")) return; // handleKachatImageError owns these
+      if (!imageEl.getAttribute("src")) return;
+      showImage(false);
+    });
+  }
   // The contact's photo, else their .kachat face - never the KNS one (every network, iOS 7227d69).
   if (kachatNamesUiEnabled()) {
     const photo = contact?.photo || "";
@@ -3150,10 +3166,10 @@ function updateAvatarElement(initialsEl, imageEl, contact) {
     if (next) {
       if (kachatSrc) { imageEl.referrerPolicy = "no-referrer"; imageEl.dataset.kachatImg = "element"; } else delete imageEl.dataset.kachatImg;
       if (imageEl.getAttribute("src") !== next) imageEl.src = next;
-      imageEl.hidden = false;
+      showImage(true);
     } else {
       delete imageEl.dataset.kachatImg;
-      imageEl.hidden = true;
+      showImage(false);
       imageEl.src = "";
     }
     return;
@@ -3162,9 +3178,9 @@ function updateAvatarElement(initialsEl, imageEl, contact) {
   const src = contact?.photo || engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
   if (src) {
     imageEl.src = src;
-    imageEl.hidden = false;
+    showImage(true);
   } else {
-    imageEl.hidden = true;
+    showImage(false);
     imageEl.src = "";
   }
 }
@@ -11302,7 +11318,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 205;
+const APP_BUILD = 206;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
