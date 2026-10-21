@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "bash tools/check-wasm.sh && vite --host 0.0.0.0",
-    "setup:wasm": "bash tools/setup-wasm-from-rusty-zip.sh",
+    "setup:wasm": "bash tools/build-kaspa-wasm.sh",
     "setup:cipher": "bash tools/setup-kasia-cipher.sh",
     "setup:all": "npm run setup:wasm && npm run setup:cipher",
     "build": "bash tools/check-wasm.sh && vite build",

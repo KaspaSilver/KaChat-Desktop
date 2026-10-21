@@ -21,6 +21,14 @@
 // transaction completely; otherwise a field the signature covers is missing (lock time,
 // sequences) and the answer is "unknown". A sighash type other than SIGHASH_ALL is "unknown" too,
 // never a silent pass.
+//
+// iOS 5a78d06 (IOS-094/097/106, owner's choices 2026-10-21): no inputs is "unknown" (the payment
+// sync drops such a transaction before it gets here); a signature script of a shape no accepted
+// transaction can carry (malformed P2PK, a P2SH script that isn't hex, a KIP-22 redeem that
+// doesn't hash to its address) is "invalid" outright, without the id-rebuild excuse, which stays
+// for a well-formed signature that fails to verify; every input is examined before any "can't
+// decide" answer; and a payment where not one input's signature was actually checked (all ECDSA,
+// or kinds this check doesn't model) is "unknown", never "valid".
 import { blake2b } from "@noble/hashes/blake2.js";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
@@ -167,9 +175,30 @@ const num = (value, fallback = 0) => {
  * `resolveSpentOutput(txid, index)` (optional, async) supplies `{ address, amount }` for an input
  * the API left unresolved, from the previous transaction. Returns "valid" | "invalid" | "unknown".
  */
-export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput = null } = {}) {
+export async function verifyRestTransactionSignatures(tx, options = {}) {
+  return (await checkRestTransaction(tx, options)).check;
+}
+
+/**
+ * verifyRestTransactionSignatures plus the payment's proven sender (iOS 5a78d06
+ * verifyIncomingPaymentSignatures, IOS-094): on "valid" every input's address is the one its
+ * signature was checked against, so the first that isn't `myAddress` (any case) is the sender -
+ * never a second, unchecked read. `sender` is null on any other verdict, or when every input is ours.
+ */
+export async function verifyRestTransactionSignaturesWithSender(tx, { resolveSpentOutput = null, myAddress = "" } = {}) {
+  const { check, inputs } = await checkRestTransaction(tx, { resolveSpentOutput });
+  if (check !== "valid") return { check, sender: null };
+  const me = String(myAddress || "").trim().toLowerCase();
+  const sender = (inputs || []).map((input) => String(input.address ?? "").trim()).find((address) => address && address.toLowerCase() !== me) || null;
+  return { check, sender };
+}
+
+async function checkRestTransaction(tx, { resolveSpentOutput = null } = {}) {
+  const verdict = (check) => ({ check, inputs: null });
   const rawInputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
-  if (!rawInputs.length) return "valid"; // a coinbase: no signatures to check
+  // No inputs (a coinbase): nothing was checked, so nothing is vouched for (IOS-094) - the
+  // received-payment paths drop such a transaction before it gets here.
+  if (!rawInputs.length) return verdict("unknown");
 
   const inputs = [];
   for (const raw of rawInputs) {
@@ -179,7 +208,7 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     const index = parseU32(indexRaw);
     // The outpoint itself is part of every input's signature hash; a bad index is "unknown",
     // never a throw (iOS 8116ab9, IOS-092).
-    if (!txid || txid.length !== 32 || index == null) return "unknown";
+    if (!txid || txid.length !== 32 || index == null) return verdict("unknown");
     let address = raw?.previous_outpoint_address ?? raw?.previousOutpointAddress ?? null;
     let amount = raw?.previous_outpoint_amount ?? raw?.previousOutpointAmount ?? null;
     if ((address == null || amount == null) && typeof resolveSpentOutput === "function") {
@@ -190,16 +219,16 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     }
     const sequence = num(raw?.sequence, 0n);
     const sigOpCount = Number(num(raw?.sig_op_count ?? raw?.sigOpCount, 1n));
-    if (sequence == null || !Number.isFinite(sigOpCount)) return "unknown";
+    if (sequence == null || !Number.isFinite(sigOpCount)) return verdict("unknown");
     inputs.push({ txid, index, sequence, sigOpCount, signatureScript: String(raw?.signature_script ?? raw?.signatureScript ?? ""), address, amount });
   }
 
   const outputs = [];
   for (const raw of Array.isArray(tx?.outputs) ? tx.outputs : []) {
     const script = hexToBytes(raw?.script_public_key ?? raw?.scriptPublicKey);
-    if (!script || !script.length) return "unknown"; // cannot verify without script data
+    if (!script || !script.length) return verdict("unknown"); // cannot verify without script data
     const amount = num(raw?.amount ?? raw?.value, null);
-    if (amount == null) return "unknown";
+    if (amount == null) return verdict("unknown");
     const authorizing = raw?.covenant_authorizing_input ?? raw?.covenantAuthorizingInput;
     const idHex = raw?.covenant_id ?? raw?.covenantId;
     let covenant = null;
@@ -207,7 +236,7 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
       const id = hexToBytes(idHex);
       // the authorizing input is a u16 in both the signature hash and the id: read it strictly
       const authorizingInput = parseU32(typeof authorizing === "string" ? authorizing.trim() : authorizing);
-      if (!id || id.length !== 32 || authorizingInput == null || authorizingInput > 0xffff) return "unknown";
+      if (!id || id.length !== 32 || authorizingInput == null || authorizingInput > 0xffff) return verdict("unknown");
       covenant = { authorizingInput, id };
     }
     outputs.push({ amount, scriptVersion: 0, script, covenant });
@@ -218,7 +247,7 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
   const version = Number(num(tx?.version, 0n));
   const lockTime = num(tx?.lock_time ?? tx?.lockTime, 0n);
   const gas = num(tx?.gas, 0n);
-  if (lockTime == null || gas == null || !Number.isFinite(version)) return "unknown";
+  if (lockTime == null || gas == null || !Number.isFinite(version)) return verdict("unknown");
   const model = {
     version, lockTime, gas, payload,
     subnetworkId: subnetworkId.length === 20 ? subnetworkId : new Uint8Array(20),
@@ -231,17 +260,27 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     const claimed = String(tx?.transaction_id ?? tx?.transactionId ?? "").toLowerCase();
     try { return Boolean(claimed) && restModelTxIdHex(model) === claimed; } catch { return false; }
   };
+  // A signature that fails to verify is forged only when the REST fields rebuild the claimed id
+  // (XP-033: else a field it covers is missing). A signature script of a shape no accepted
+  // transaction can carry needs no such excuse - it is invalid outright (IOS-097). Every input is
+  // looked at before any "can't decide" answer, so a malformed input later in the list is never
+  // hidden behind an earlier unknown.
   let failedInput = null;
+  let malformedInput = null;
+  let undecided = false;
+  // inputs whose signature was actually checked; a payment with none is not "valid" (IOS-106: an
+  // all-ECDSA or otherwise unmodelled payment had zero checks and passed)
+  let checkedInputs = 0;
 
   // iOS 8116ab9's order: the spent script is worked out first, so only key-address and KIP-22
   // inputs need (and are held to) a well-formed signature script; P2SH covenant spends are skipped.
   for (let i = 0; i < inputs.length; i += 1) {
     const input = inputs[i];
     // 1. The spent UTXO's script and amount: without them this input can't be checked yet.
-    if (input.address == null || input.amount == null) return "unknown";
+    if (input.address == null || input.amount == null) { undecided = true; continue; }
     const utxoScript = scriptPublicKeyFromAddress(input.address);
     const amount = num(input.amount, null);
-    if (!utxoScript || amount == null) return "unknown";
+    if (!utxoScript || amount == null) { undecided = true; continue; }
 
     // 2. The input's kind, from the spent UTXO's script (iOS 54265bf). Standard P2PK Schnorr
     // (<0x20> <32-byte key> OP_CHECKSIG) and KIP-22 quantum-address P2SH spends are both checked;
@@ -252,51 +291,58 @@ export async function verifyRestTransactionSignatures(tx, { resolveSpentOutput =
     let schnorrSig;
     if (utxoScript.length === 34 && utxoScript[0] === 32 && utxoScript[33] === 0xac) {
       // 3. A P2PK input's signature script is 0x41 (push 65) + a 64-byte Schnorr signature + a
-      // sighash type byte. Anything else (blank, short, another push) can't be on chain: a failure
-      // (AND-042), judged with the others at the end.
+      // sighash type byte. Anything else (blank, short, another push) can't be on chain: malformed
+      // (AND-042), invalid outright (IOS-097).
       const sigScript = hexToBytes(input.signatureScript);
       if (!sigScript || sigScript.length !== 66 || sigScript[0] !== 0x41) {
-        if (failedInput == null) failedInput = i;
+        if (malformedInput == null) malformedInput = i;
         continue;
       }
       // A sighash type this check doesn't hash (only SIGHASH_ALL is): can't be decided here.
-      if (sigScript[65] !== 0x01) return "unknown";
+      if (sigScript[65] !== 0x01) { undecided = true; continue; }
       xOnlyKey = utxoScript.slice(1, 33);
       schnorrSig = sigScript.slice(1, 65);
     } else if (utxoScript.length === 35 && utxoScript[0] === 0xaa && utxoScript[1] === 0x20 && utxoScript[34] === 0x87) {
       // 3b. P2SH. A KIP-22 spend's signature script is 0x41 <64-byte sig> <sighash byte> then the
       // canonical push 0x22 of the 34-byte redeem 0x20 <x-only key> 0xac (101 bytes); any other
-      // shape is a covenant spend, skipped as before.
+      // shape is a covenant spend, skipped as before. A script that is not even hex can't be on
+      // chain: malformed (IOS-097).
       const sb = hexToBytes(input.signatureScript);
-      if (!sb) return "unknown";
-      if (sb.length !== 101 || sb[0] !== 0x41 || sb[66] !== 0x22 || sb[67] !== 0x20 || sb[100] !== 0xac) continue;
-      // The key is bound to the address by the redeem's hash: a KIP-22-shaped script whose redeem
-      // doesn't hash to this very address can't be on chain for it - a failure.
-      const redeemHash = blake2b(sb.slice(67, 101), { dkLen: 32 });
-      if (!redeemHash.every((byte, k) => byte === utxoScript[2 + k])) {
-        if (failedInput == null) failedInput = i;
+      if (!sb) {
+        if (malformedInput == null) malformedInput = i;
         continue;
       }
-      if (sb[65] !== 0x01) return "unknown";
+      if (sb.length !== 101 || sb[0] !== 0x41 || sb[66] !== 0x22 || sb[67] !== 0x20 || sb[100] !== 0xac) continue;
+      // The key is bound to the address by the redeem's hash: a KIP-22-shaped script whose redeem
+      // doesn't hash to this very address can't be on chain for it - malformed (IOS-097).
+      const redeemHash = blake2b(sb.slice(67, 101), { dkLen: 32 });
+      if (!redeemHash.every((byte, k) => byte === utxoScript[2 + k])) {
+        if (malformedInput == null) malformedInput = i;
+        continue;
+      }
+      if (sb[65] !== 0x01) { undecided = true; continue; }
       xOnlyKey = sb.slice(68, 100);
       schnorrSig = sb.slice(1, 65);
     } else {
-      continue; // ECDSA and the like: not checked here
+      continue; // ECDSA and the like: not checked here (and not counted as checked, IOS-106)
     }
 
     // 4. The signature hash (v0 or v1), over the spent UTXO's own script (P2SH for a KIP-22
     // spend - the same the signer uses).
     let sighash;
-    try { sighash = computeSighash(model, i, utxoScript, amount); } catch { return "unknown"; }
+    try { sighash = computeSighash(model, i, utxoScript, amount); } catch { undecided = true; continue; }
 
     // 5. The Schnorr signature.
     let ok;
-    try { ok = schnorr.verify(schnorrSig, sighash, xOnlyKey); } catch { return "unknown"; }
+    try { ok = schnorr.verify(schnorrSig, sighash, xOnlyKey); } catch { undecided = true; continue; }
+    checkedInputs += 1;
     if (!ok && failedInput == null) failedInput = i;
   }
 
-  if (failedInput == null) return "valid";
+  if (malformedInput != null) return verdict("invalid");
   // Forged only when the API described the whole transaction (XP-033); else something it left out
   // (that the signature covers) is the likelier reason.
-  return restFieldsRebuildId() ? "invalid" : "unknown";
+  if (failedInput != null) return verdict(restFieldsRebuildId() ? "invalid" : "unknown");
+  if (undecided || checkedInputs === 0) return verdict("unknown");
+  return { check: "valid", inputs };
 }

@@ -3,6 +3,7 @@ import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
+import { contractPurgePlan, contractSuppressionRecovery } from "./contract-purge.js";
 import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { chattingCatchUpLook } from "./address-activity.js";
@@ -15,7 +16,7 @@ import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
 import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
-import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory } from "../engine/sync.js";
+import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
@@ -1299,7 +1300,7 @@ function removeAccountScopedLocalData(address) {
     const groupsAll = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
     for (const bucketKey of bucketKeys) for (const groupId of Object.keys(groupsAll?.[bucketKey] || {})) removedGroupIds.add(groupId);
   } catch { /* unreadable: no group ids to clear */ }
-  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
+  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", "kachat-group-msg-counter-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
     try {
       const all = JSON.parse(localStorage.getItem(key) || "null");
       if (!all || typeof all !== "object") continue;
@@ -5922,6 +5923,9 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
         if (belowDeletionFloor(incoming)) continue;
         if (isSuppressedPaymentTxId(incoming.txid)) continue;
         if ((conversationEntry.messages || []).some((message) => message.txid && message.txid === incoming.txid)) continue;
+        // Confirmed by the node only (no signature checked): it may never replace or shadow a
+        // message of ours with the same txid in any chat (iOS 5a78d06, IOS-096).
+        if (incoming.nodeOnlyConfirmed && paymentTxidShownInAnyChat(incoming.txid)) continue;
         const message = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
         applyMessagePatch(message, incoming);
         if (appendIncomingOrReactionMessage(conversationEntry, message)) {
@@ -6360,33 +6364,62 @@ function registerSuppressedPaymentTxIds(txIds, reason) {
   return removed;
 }
 
+/// The rows ui/contract-purge.js reads: who each chat is with, and what it holds or hid.
+function contractPurgeRows() {
+  return (state.conversations || []).map((conversationEntry) => ({
+    id: conversationEntry.id,
+    isSelf: isSelfConversation(conversationEntry),
+    contactAddress: contactForConversation(conversationEntry)?.address || "",
+    messages: conversationEntry.messages || [],
+    hiddenMessageKeys: conversationEntry.hiddenMessageKeys || [],
+  }));
+}
+
+/// DSK-055, once per account: older builds suppressed for good every payment bubble from or to a
+/// script address - since quantum (KIP-22) addresses that includes ordinary payments paid from a
+/// quantum-safe address ("Received X KAS / From: kaspa:p…" in Note to Self). The suppressed map
+/// keeps no reason, so contractSuppressionRecovery finds them by where they were hidden (the self
+/// chat or a chat whose contact is not a script address), drops them from the map and un-hides
+/// them; the self chat's ones are also forgotten by the stranger sweep, so its next pass reads
+/// them again. Every path that files a payment applies the narrowed contract rule
+/// (isKachatContractTransaction) first, so a real contract among them is suppressed again on sight.
+function recoverContractAddressChatSuppressions() {
+  const flagKey = accountScopedKey("kachat-contract-purge-recovery-v1");
+  try { if (localStorage.getItem(flagKey)) return 0; } catch { return 0; }
+  // Not before this account's chats are loaded: an empty state has nothing to read yet.
+  if (!(state.conversations || []).length) return 0;
+  const plan = contractSuppressionRecovery(contractPurgeRows(), loadSuppressedPaymentTxIds(), { isScriptAddress });
+  if (plan.txIds.length) {
+    const drop = new Set(plan.txIds);
+    const map = Object.fromEntries(Object.entries(loadSuppressedPaymentTxIds()).filter(([id]) => !drop.has(normalizePaymentTxId(id))));
+    saveSuppressedPaymentTxIds(map);
+    for (const { id, keys } of plan.unhide) {
+      const conversationEntry = (state.conversations || []).find((entry) => entry.id === id);
+      if (!conversationEntry) continue;
+      const gone = new Set(keys.map(String));
+      conversationEntry.hiddenMessageKeys = (conversationEntry.hiddenMessageKeys || []).filter((key) => !gone.has(String(key)));
+    }
+    for (const txId of plan.selfTxIds) forgetStrangerPaymentTxid(txId);
+    appendEngineLog(`Recovered ${plan.txIds.length} payment${plan.txIds.length === 1 ? "" : "s"} an older build hid as contract transactions (DSK-055).`);
+  }
+  try { localStorage.setItem(flagKey, String(Date.now())); } catch { /* retried on the next load */ }
+  return plan.txIds.length;
+}
+
 /// Removes what older builds made from contract transactions (iOS purgeContractAddressPaymentChats):
-/// a chat whose other side is a script address goes through the normal chat delete (tombstoned,
-/// so no backup, Nextcloud or archive restore brings it back), and its payments - with any other
-/// payment bubble from or to a script address, e.g. "Received … From: kaspatest:p…" in your own
-/// chat - are suppressed for good. Also sweeps bubbles of already-suppressed ids that a restore put
-/// back. Idempotent and cheap (a no-op when there is nothing): runs on every load.
+/// the payments of a chat whose CONTACT is a script address are suppressed for good, and a chat
+/// they empty goes through the normal chat delete (tombstoned, so no backup, Nextcloud or archive
+/// restore brings it back). A payment bubble is never judged by its sender's or receiver's address
+/// shape (DSK-055): since quantum (KIP-22) addresses a payment can be paid FROM a script address,
+/// and the narrowed isKachatContractTransaction already keeps contracts out on every path. Also
+/// sweeps bubbles of already-suppressed ids that a restore put back. Idempotent and cheap (a no-op
+/// when there is nothing): runs on every load.
 function purgeContractAddressPaymentChats() {
   if (!engine.address) return;
-  const txIds = [];
-  const doomedIds = [];
-  for (const conversationEntry of state.conversations || []) {
-    if (isSelfConversation(conversationEntry)) {
-      for (const message of conversationEntry.messages || []) {
-        if (isPaymentBubble(message) && message.txid && isScriptAddress(message.sender)) txIds.push(message.txid);
-      }
-      continue;
-    }
-    const contact = contactForConversation(conversationEntry);
-    const scriptChat = isScriptAddress(contact?.address);
-    if (scriptChat) doomedIds.push(conversationEntry.id);
-    for (const message of conversationEntry.messages || []) {
-      if (!isPaymentBubble(message) || !message.txid) continue;
-      if (scriptChat || isScriptAddress(message.sender) || isScriptAddress(message.receiver)) txIds.push(message.txid);
-    }
-  }
+  const recovered = recoverContractAddressChatSuppressions();
+  const { txIds, emptiedIds: doomedIds } = contractPurgePlan(contractPurgeRows(), { isScriptAddress });
   registerSuppressedPaymentTxIds(txIds, "contract-address-chat");
-  const swept = removeSuppressedPaymentMessages(new Set(Object.keys(loadSuppressedPaymentTxIds())));
+  const swept = removeSuppressedPaymentMessages(new Set(Object.keys(loadSuppressedPaymentTxIds()))) + recovered;
   if (doomedIds.length) {
     appendEngineLog(`Removed ${doomedIds.length} payment chat${doomedIds.length === 1 ? "" : "s"} with a contract (script) address.`);
     deleteConversationsByIds(doomedIds, { quiet: true });
@@ -6414,6 +6447,13 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     txs = await response.json();
   } catch { return 0; }
   if (!Array.isArray(txs)) return 0;
+  // A payment held for a later check (its signatures couldn't be settled yet, DSK-052) is due on
+  // every sweep: read again by id once the page is past it, as the per-contact sync does.
+  try {
+    const present = new Set(txs.map((tx) => String(tx?.transaction_id || tx?.transactionId || "").trim().toLowerCase()));
+    txs = [...txs, ...await fetchHeldPaymentRows(myAddress, present)];
+  } catch { /* the page alone this time */ }
+  if (engine.address !== myAddress) return 0;
 
   const processed = new Set(store.processedTxids);
   const contactAddresses = new Set((state.contacts || []).map((entry) => entry.address));
@@ -6440,18 +6480,33 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
     // we don't know yet has no sync of its own, though: it opens their chat (below).
     const chatPayment = isChatPaymentPayloadHex(tx?.payload);
     if (isKachatProtocolPayloadHex(tx?.payload) && !chatPayment) { processed.add(txid); continue; }
-    const receivedSompi = (Array.isArray(tx?.outputs) ? tx.outputs : [])
-      .filter((output) => (output?.script_public_key_address || output?.scriptPublicKeyAddress) === myAddress)
-      .reduce((sum, output) => sum + Number(output?.amount || 0), 0);
-    if (!(receivedSompi > 0)) { processed.add(txid); continue; }
-    const sender = (Array.isArray(tx?.inputs) ? tx.inputs : [])
-      .map((input) => input?.previous_outpoint_address || input?.previousOutpointAddress)
-      .find((address) => address && address !== myAddress) || "";
-    if (!sender) continue; // input may resolve on a later sweep — retry then
-    processed.add(txid);
+    // No inputs (a block reward): never a payment from anyone, and nothing in it can be checked
+    // (iOS 5a78d06, IOS-094) - dropped for good.
+    if (!(Array.isArray(tx?.inputs) && tx.inputs.length)) { processed.add(txid); continue; }
+    // What it pays us, read from the output scripts - the signed data - never the unsigned address
+    // labels (IOS-098).
+    const receivedSompiExact = restPaymentSompiTo(tx, myAddress);
+    if (!(receivedSompiExact > 0n)) { processed.add(txid); continue; }
+    const receivedSompi = Number(receivedSompiExact);
+    // The REST answer's own sender only routes it away early (a contact's own sync, or our own
+    // spending chain, owns those); the sender shown comes from the check below, never this label.
+    const restSender = restPaymentSender(tx, myAddress);
+    if (restSender && (contactAddresses.has(restSender) || ownSpending.has(restSender))) { processed.add(txid); continue; }
+    // Its signatures, the same check as the per-contact payment sync (DSK-052; iOS 5806362 +
+    // 8116ab9 + 5a78d06): valid files it from the sender its checked inputs prove; invalid drops it;
+    // unknown is filed only when our node confirms the coins and the KaChat indexer names the same
+    // sender (then without a memo, and never over a message of ours), else HELD - not marked
+    // processed, so the next sweep checks it again, until the 7-day hold lapses.
+    const decision = await engine.checkIncomingRestPayment(tx, { amountSompi: receivedSompiExact, restSender, blockTime });
+    if (engine.address !== myAddress) return 0; // the account changed mid-sweep: its state isn't ours to save
+    const step = strangerPaymentStep(decision, { blockTime });
+    if (step.markProcessed) processed.add(txid);
+    if (!step.file) continue;
+    const sender = step.sender;
     if (contactAddresses.has(sender)) continue; // that contact's own sync owns it
     if (ownSpending.has(sender)) continue; // internal move from the own spending chain
-    if (chatPayment) {
+    if (step.mustBeNew && paymentTxidShownInAnyChat(txid)) continue; // node-only: never over a message of ours
+    if (chatPayment && step.chatPaymentAllowed) {
       // Paid from a chat with us (iOS 1eb4708): their own chat opens - a Message Request until
       // accepted - and their messages are fetched from then on, the payment with its memo first.
       if (!isOnActiveNetwork(sender) || isChatBlocked(sender) || isContactDeletedAsOf(sender, txid, blockTime)) continue;
@@ -11141,7 +11196,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 203;
+const APP_BUILD = 204;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -23038,7 +23093,9 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       if (knownIds.has(id) || hidden.has(id)) continue;
       // Never a payment: a .kachat name transaction or other contract tx (iOS 32fdaa4).
       if (txid && isSuppressedPaymentTxId(txid)) continue;
-      if (isScriptAddress(archiveMessage?.senderAddress) || isScriptAddress(archiveMessage?.receiverAddress)) continue;
+      // No sender/receiver address-shape filter (DSK-055): a payment paid from a quantum-safe
+      // (P2SH) address is a payment. Contract chats are kept out above by their CONTACT address,
+      // the rule iOS's purge applies to an imported archive.
 
       const rawContent = String(archiveMessage?.content || "");
       // Pool envelopes in a phone archive are bookkeeping, never rendered: the phone

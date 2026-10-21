@@ -3733,24 +3733,32 @@ function kapostPubkeyFromAddress(address) {
   return `02${Array.from(decoded.payload, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
-/// The K pubkey behind an address: "02" or "03" + its x-only key, whichever the indexer has posts
-/// (or followers) for; null when neither has any (iOS resolveKaPostsPubkey, XP-034). About half of
-/// all users post with an 03 key, so the 02 guess alone showed them with no posts and 0 followers.
+/// The K pubkey behind an address: "02" or "03" + its x-only key, as the indexer's DATA names it -
+/// the key on the person's posts (or replies) - accepted only when its x-only half is the address's. Never the probe: the indexer answers a probe in either parity
+/// form (kachat-indexer 12543eb), so returning whichever probe "had data" handed back the 02 guess
+/// for an 03 user, and Follow posted it on chain (XP-034; iOS 0a0c914, IOS-099). Null when the data
+/// names no key: Follow then stays local-only.
 async function resolveKaPostsPubkey(address) {
   const even = kapostPubkeyFromAddress(address);
   if (!even) return null;
-  const candidates = [even, `03${even.slice(2)}`];
+  const xOnly = even.slice(2).toLowerCase();
+  const named = (key) => {
+    const k = String(key || "").trim().toLowerCase();
+    return k.length === 66 && (k.startsWith("02") || k.startsWith("03")) && k.slice(2) === xOnly ? k : null;
+  };
+  const keyIn = (rows) => (rows || []).map((row) => named(row?.userPublicKey)).find(Boolean) || null;
+  const candidates = [even.toLowerCase(), `03${xOnly}`];
   for (const candidate of candidates) {
     // iOS asks get-posts with replies included; here replies are their own endpoint
     const posts = await fetchUserPosts({ engine: deps.engine, pubkey: candidate, limit: 1 }).catch(() => null);
-    if (posts?.posts?.length) return candidate;
+    const fromPosts = keyIn(posts?.posts);
+    if (fromPosts) return fromPosts;
     const replies = await fetchUserReplies({ engine: deps.engine, pubkey: candidate, limit: 1 }).catch(() => null);
-    if (replies?.posts?.length) return candidate;
+    const fromReplies = keyIn(replies?.posts);
+    if (fromReplies) return fromReplies;
   }
-  for (const candidate of candidates) {
-    const details = await fetchKaPostUserDetails({ engine: deps.engine, pubkey: candidate }).catch(() => null);
-    if ((Number(details?.followersCount) || 0) > 0 || (Number(details?.followingCount) || 0) > 0) return candidate;
-  }
+  // No profile-details fallback (iOS 21e1c5d): get-user-details echoes back whichever key it was
+  // asked with, so it would hand back the probe again. No posts or replies: null.
   return null;
 }
 

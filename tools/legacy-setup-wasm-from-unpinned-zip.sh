@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# LEGACY, UNPINNED (audit DSK-054): this builds whatever rusty-kaspa snapshot sits in the zip you
+# pass and installs it into kaspa/, so the result's source is unknown. The supported way to rebuild
+# the SDK is the pinned, reproducible Docker build: `npm run setup:wasm` (tools/build-kaspa-wasm.sh,
+# rusty-kaspa pinned in kaspa/VERSION). This stays only for archaeology, and refuses to run unless
+# KACHAT_ALLOW_UNPINNED_WASM=1 is set.
+if [[ "${KACHAT_ALLOW_UNPINNED_WASM:-}" != "1" ]]; then
+  echo "Refusing: this installs an UNPINNED Kaspa SDK build into kaspa/ (audit DSK-054)." >&2
+  echo "Use the pinned, reproducible build instead:  npm run setup:wasm" >&2
+  echo "(Set KACHAT_ALLOW_UNPINNED_WASM=1 only if you really mean to bypass it.)" >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEFAULT_ZIP="$HOME/Downloads/rusty-kaspa-master-2.zip" # the vendored copy was removed from the repo (6.2 MB); pass a path explicitly
 ZIP="${1:-$DEFAULT_ZIP}"
@@ -33,7 +45,7 @@ fi
 if [[ ! -f "$ZIP" ]]; then
   echo "Could not find Rusty Kaspa ZIP at: $ZIP"
   echo "This project includes the expected source ZIP at: $DEFAULT_ZIP"
-  echo "Run: npm run setup:wasm"
+  echo "Run: KACHAT_ALLOW_UNPINNED_WASM=1 bash tools/legacy-setup-wasm-from-unpinned-zip.sh <zip>"
   exit 1
 fi
 
@@ -41,7 +53,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   echo "Rust/Cargo is required. Install Rust once, then rerun setup:"
   echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   echo "  source \"$HOME/.cargo/env\""
-  echo "  npm run setup:wasm"
+  echo "  KACHAT_ALLOW_UNPINNED_WASM=1 bash tools/legacy-setup-wasm-from-unpinned-zip.sh <zip>"
   exit 1
 fi
 

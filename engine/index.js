@@ -6,7 +6,7 @@ import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, e
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
-import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
+import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, checkIncomingRestPayment, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
 import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload, sealPaymentRecord } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
@@ -1713,6 +1713,20 @@ export class KaspaEngine {
     return syncIncomingPaymentsFromRest({
       ...details, walletAddress: this.address, decryptMessage,
       confirmUnspentPayment: (txid, walletAddress, amountSompi) => this.nodeConfirmsIncomingPayment(txid, walletAddress, amountSompi),
+      log: (line) => this.log?.(line),
+    });
+  }
+
+  /** The received-payment check of one REST transaction for this wallet (engine/sync.js
+   *  checkIncomingRestPayment, iOS 5806362 + 8116ab9 + 5a78d06), for a payment path outside the
+   *  per-contact sync - the UI's stranger-payment sweep (DSK-052). Signatures, then for an
+   *  "unknown" verdict our node (the coins) and the KaChat indexer (the sender); held on unknown.
+   *  Returns `{ action: "file" | "hold" | "drop", sender, nodeOnly, reason, check }`. */
+  async checkIncomingRestPayment(tx, { amountSompi, restSender = "", blockTime = 0 } = {}) {
+    if (!this.address) return { action: "hold", sender: null, nodeOnly: false, reason: "no-wallet", check: "unknown" };
+    return checkIncomingRestPayment(tx, {
+      walletAddress: this.address, amountSompi, restSender, blockTime,
+      confirmUnspentPayment: (txid, walletAddress, sompi) => this.nodeConfirmsIncomingPayment(txid, walletAddress, sompi),
       log: (line) => this.log?.(line),
     });
   }

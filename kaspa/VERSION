@@ -7,7 +7,8 @@ KNOWN
   committed in:       KaChat-Desktop c60c96d (2026-07-28), the only commit that touches kaspa_bg.wasm
   source at the time: a local "rusty-kaspa-master-2.zip" (a snapshot of rusty-kaspa master), vendored
                       as vendor/rusty-kaspa-master-2.zip and removed from the repo in 15d6d6d
-  build command:      tools/setup-wasm-from-rusty-zip.sh -> (cd rusty-kaspa/wasm && ./build-web --sdk),
+  build command:      tools/setup-wasm-from-rusty-zip.sh (now tools/legacy-setup-wasm-from-unpinned-zip.sh,
+                      disabled by default - DSK-054) -> (cd rusty-kaspa/wasm && ./build-web --sdk),
                       copying wasm/web/kaspa/{kaspa.js,kaspa_bg.wasm}
   build host:         Linux x86_64, rustup "stable-x86_64-unknown-linux-gnu" toolchain
                       (paths embedded in the binary), not the macOS flow the setup script documents

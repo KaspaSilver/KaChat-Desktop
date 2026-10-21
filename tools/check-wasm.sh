@@ -5,8 +5,8 @@ if [[ ! -f "$ROOT/kaspa/kaspa.js" || ! -f "$ROOT/kaspa/kaspa_bg.wasm" ]]; then
   echo "Missing kaspa/kaspa.js or kaspa/kaspa_bg.wasm."
   echo "These are normally committed to the repo, so this shouldn't happen."
   echo "  - If your clone is incomplete or shallow, re-clone the repo."
-  echo "  - If you deleted them intentionally, rebuild from source with:"
-  echo "      npm run setup:wasm"
+  echo "  - If you deleted them intentionally, rebuild the pinned source with:"
+  echo "      npm run setup:wasm   (Docker; builds into .kaspa-wasm-build/ - see tools/build-kaspa-wasm.sh)"
   exit 1
 fi
 

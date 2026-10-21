@@ -106,9 +106,10 @@ assert.equal(isKachatContractTransaction({
   assert.equal(await verifyRestTransactionSignatures(restTx(good)), "valid", "a real KIP-22 spend verifies");
   const tampered = `41${toHex(sig.map((b, k) => (k === 5 ? b ^ 1 : b)))}0122${toHex(redeem)}`;
   assert.notEqual(await verifyRestTransactionSignatures(restTx(tampered)), "valid", "a tampered KIP-22 signature never verifies");
-  assert.notEqual(await verifyRestTransactionSignatures(restTx(good, quantumB)), "valid", "a redeem that hashes to another address fails");
+  assert.equal(await verifyRestTransactionSignatures(restTx(good, quantumB)), "invalid", "IOS-097: a redeem that hashes to another address is invalid outright (the claimed id doesn't even rebuild)");
+  assert.equal(await verifyRestTransactionSignatures(restTx("zz")), "invalid", "IOS-097: a P2SH signature script that isn't hex is invalid");
   assert.equal(await verifyRestTransactionSignatures(restTx(`41${toHex(sig)}8122${toHex(redeem)}`)), "unknown", "a non-ALL sighash byte is unknown");
-  assert.equal(await verifyRestTransactionSignatures(restTx("ab".repeat(3795))), "valid", "a covenant-shaped P2SH spend is skipped here (it is a contract elsewhere)");
+  assert.equal(await verifyRestTransactionSignatures(restTx("ab".repeat(3795))), "unknown", "a covenant-shaped P2SH spend is skipped here (a contract elsewhere); nothing checked is unknown (IOS-106)");
 }
 
 console.log("quantum contract rule: ok");

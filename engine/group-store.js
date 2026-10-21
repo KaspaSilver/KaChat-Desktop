@@ -25,6 +25,22 @@ export const GROUP_CONTROL_CURSOR_KEY = "kachat-group-control-cursor-v1";
 // from the stored cursor on the next pass - never from the start.
 export const CONTROL_PAGE_LIMIT = 50;
 export const CONTROL_PAGE_BUDGET = 40;
+// Per-wallet high-water mark of the message counters this device has reserved (DSK-053):
+// { [wallet]: { [groupId]: { "<deviceIdHex>:<epoch>": highestReservedCounter } } }. The message
+// key and nonce derive only from (root, group, epoch, sender) and msg_id = device_id || counter,
+// so a counter used twice in one epoch is ChaCha20-Poly1305 key+nonce reuse on chain. The
+// record's msgCounter is the working value; this mark is kept apart from the record so that no
+// write of a group record - stale or not - can move it backwards: it is only ever raised, and a
+// reservation takes max(record.msgCounter, mark + 1). Keyed by device id and epoch because the
+// counter legitimately starts again at 0 in a new epoch (new root = new key). Bucketed by wallet
+// like the stores above; account removal must wipe it with them (handoff: ui/app.js list).
+export const GROUP_MSG_COUNTER_KEY = "kachat-group-msg-counter-v1";
+// Marks kept per group: older epochs are dropped. Only a stale write that rolled a record back
+// by more than this many rotations could get past it, and the merge-on-write rule below already
+// stops stale writes; this is the backstop, not the mechanism.
+const COUNTER_MARKS_KEPT = 16;
+// _commitRoot's answer on the quick path when the root does need its roster resolved.
+const NEEDS_ROSTER = Symbol("needs-roster");
 
 // Deep-ish clone via JSON is fine — records are plain data (hex strings, numbers).
 function loadAll() {
@@ -48,6 +64,15 @@ function loadControlCursorsAll() {
 function saveControlCursorsAll(all) {
   try { localStorage.setItem(GROUP_CONTROL_CURSOR_KEY, JSON.stringify(all)); } catch {}
 }
+function loadCounterMarksAll() {
+  try { return JSON.parse(localStorage.getItem(GROUP_MSG_COUNTER_KEY) || "{}") || {}; }
+  catch { return {}; }
+}
+// Returns whether the write landed: a reservation that could not be persisted must not be sent.
+function saveCounterMarksAll(all) {
+  try { localStorage.setItem(GROUP_MSG_COUNTER_KEY, JSON.stringify(all)); return true; }
+  catch { return false; }
+}
 
 export class GroupManager {
   constructor(engine) {
@@ -57,6 +82,93 @@ export class GroupManager {
     this._sincePasses = 0;
     this.engine = engine;
     this._selfPubHex = null;
+    // DSK-053: group-store mutations are serialised on one promise chain (see _withGroupLock).
+    this._lockTail = Promise.resolve();
+    // The routine sync pass in flight (forceRefresh waits for it), how many forceRefresh calls
+    // are running (the routine sync stands down meanwhile), and the chain that runs refreshes
+    // one at a time (two would reset and re-walk the same control stream on top of each other).
+    this._syncInFlight = null;
+    this._refreshing = 0;
+    this._refreshTail = Promise.resolve();
+  }
+
+  // --- serialising writers (DSK-053) ---
+  // Group sync, Refresh Messages, a send's counter reservation and control application all write
+  // the same records. The rule that actually prevents lost updates: no write puts back a record
+  // read before an await - every write re-reads the record and changes only the fields it owns,
+  // all in one synchronous step (_mutate). This lock adds ordering on top: those steps run one at
+  // a time, in call order. Rules that keep it deadlock-free:
+  //  - a locked section never awaits another locked section (or anything that takes the lock);
+  //  - locked sections are synchronous - network scans, sends, decryption and roster lookups all
+  //    run OUTSIDE the lock, and only the read-merge-write step is locked;
+  //  - a section that throws releases the lock (the tail swallows the error; the caller gets it).
+  _withGroupLock(fn) {
+    const run = this._lockTail.then(() => fn());
+    this._lockTail = run.then(() => {}, () => {});
+    return run;
+  }
+  // Re-read `groupId`, let `fn` change only the fields its caller owns, and write the fresh record.
+  // Synchronous on purpose: nothing can interleave between the read and the write. `fn` returning
+  // false skips the write. Returns the fresh record (null if the group is gone - e.g. deleted
+  // while a scan ran - in which case nothing is written and nothing is resurrected).
+  _mutate(groupId, fn) {
+    const fresh = this.getGroup(groupId);
+    if (!fresh) return null;
+    if (fn(fresh) === false) return fresh;
+    return this._put(fresh);
+  }
+  _mutateLocked(groupId, fn) {
+    return this._withGroupLock(() => this._mutate(groupId, fn));
+  }
+
+  // --- monotonic message counter (DSK-053) ---
+  _counterMark(groupId, deviceIdHex, epoch) {
+    const mark = loadCounterMarksAll()[this.walletAddress]?.[groupId]?.[`${deviceIdHex}:${epoch}`];
+    return Number.isSafeInteger(mark) && mark >= 0 ? mark : -1;
+  }
+  // Raise (never lower) the mark to `counter`. Returns false if it could not be persisted.
+  _raiseCounterMark(groupId, deviceIdHex, epoch, counter) {
+    const all = loadCounterMarksAll();
+    const wallet = this.walletAddress;
+    const byGroup = all[wallet] && typeof all[wallet] === "object" ? all[wallet] : {};
+    const marks = byGroup[groupId] && typeof byGroup[groupId] === "object" ? byGroup[groupId] : {};
+    const key = `${deviceIdHex}:${epoch}`;
+    const held = Number.isSafeInteger(marks[key]) ? marks[key] : -1;
+    if (held >= counter) return true;
+    marks[key] = counter;
+    const keys = Object.keys(marks);
+    if (keys.length > COUNTER_MARKS_KEPT) {
+      const epochOf = (k) => Number(k.slice(k.lastIndexOf(":") + 1)) || 0;
+      for (const old of keys.filter((k) => k !== key).sort((a, b) => epochOf(a) - epochOf(b)).slice(0, keys.length - COUNTER_MARKS_KEPT)) delete marks[old];
+    }
+    byGroup[groupId] = marks;
+    all[wallet] = byGroup;
+    return saveCounterMarksAll(all);
+  }
+  // A deleted group is tombstoned and can never come back, so its marks can go with it.
+  _dropCounterMarks(groupId) {
+    const all = loadCounterMarksAll();
+    const byGroup = all[this.walletAddress];
+    if (!byGroup || !Object.prototype.hasOwnProperty.call(byGroup, groupId)) return;
+    delete byGroup[groupId];
+    saveCounterMarksAll(all);
+  }
+  // Locked by the caller. Reads the record fresh, takes max(record.msgCounter, mark + 1), raises
+  // the mark FIRST (refusing to go on if it did not persist), then stores counter + 1 in the record.
+  _reserveCounter(groupId) {
+    const record = this.getGroup(groupId);
+    if (!record) throw new Error("Group not found.");
+    if (!record.groupRootEpochHex) throw new Error("No group key for the current epoch.");
+    const deviceIdHex = String(record.deviceIdHex || "");
+    const epoch = Number(record.currentEpoch || 0);
+    const stored = Math.max(0, Math.floor(Number(record.msgCounter) || 0));
+    const counter = Math.max(stored, this._counterMark(groupId, deviceIdHex, epoch) + 1);
+    if (!this._raiseCounterMark(groupId, deviceIdHex, epoch, counter)) {
+      throw new Error("Could not save the group message counter, so the message was not sent. Free up some storage and try again.");
+    }
+    record.msgCounter = counter + 1;
+    this._put(record);
+    return { record, counter };
   }
 
   get walletAddress() { return this.engine.address || ""; }
@@ -97,17 +209,20 @@ export class GroupManager {
     const root = String(rootHex || "");
     if (!root || !record) return;
     const key = String(epoch);
-    const roots = { ...(record.previousRootsHex || {}) };
-    if (roots[key] === root) return;
-    roots[key] = root;
-    record.previousRootsHex = roots;
-    // A key we did not have a moment ago just arrived, and the message scan has already walked
-    // past everything it could not read - the cursor advances on every row, decoded or not, so
-    // ciphertext skipped for want of this key would never be asked for again. Dropping the
-    // cursors makes the next sweep re-walk from the start and pick it all up. Re-reading is
-    // cheap and idempotent: the app dedupes on msg_id and txid.
-    record.cursors = {};
-    this._put(record);
+    // Written onto a fresh read of the record, never onto the caller's copy (DSK-053).
+    this._mutate(record.groupId, (fresh) => {
+      const roots = { ...(fresh.previousRootsHex || {}) };
+      if (roots[key] === root) return false;
+      roots[key] = root;
+      fresh.previousRootsHex = roots;
+      // A key we did not have a moment ago just arrived, and the message scan has already walked
+      // past everything it could not read - the cursor advances on every row, decoded or not, so
+      // ciphertext skipped for want of this key would never be asked for again. Dropping the
+      // cursors makes the next sweep re-walk from the start and pick it all up. Re-reading is
+      // cheap and idempotent: the app dedupes on msg_id and txid.
+      fresh.cursors = {};
+      return true;
+    });
   }
 
   deleteGroup(groupId) {
@@ -115,6 +230,7 @@ export class GroupManager {
     delete bucket[groupId];
     all[this.walletAddress] = bucket;
     saveAll(all);
+    this._dropCounterMarks(String(groupId));
     // Tombstone it so discovery/recovery never re-adds it, and publish an on-chain delete
     // marker (best-effort now, retried by syncGroups' backfill) so the delete survives a
     // seedless re-import too. Local intent is recorded synchronously; the chain write is async.
@@ -330,10 +446,12 @@ export class GroupManager {
     try {
       await this._distributeRoot(record, epoch);
     } catch (error) {
-      record.inviteWarning = error?.message || String(error);
-      this._put(record);
+      // After the sends: onto a fresh read, not the pre-send copy (DSK-053).
+      const inviteWarning = error?.message || String(error);
+      record.inviteWarning = inviteWarning;
+      await this._mutateLocked(record.groupId, (fresh) => { fresh.inviteWarning = inviteWarning; });
     }
-    return record;
+    return this.getGroup(record.groupId) || record;
   }
 
   // Build + encrypt + broadcast a gctl_root to every non-self member at `epoch`.
@@ -376,8 +494,15 @@ export class GroupManager {
         groupSeed, // the extra field ONLY the self copy carries
       });
       await this._sendControlToMember(selfMember, JSON.stringify(selfPayload));
-      record.selfInviteEpoch = epoch; // mark this epoch's recovery invite as published
-      this._put(record);
+      // Mark this epoch's recovery invite as published - on a fresh read, after every send above
+      // (writing `record` back here would undo whatever landed meanwhile, DSK-053), and only while
+      // it is still the current epoch (a later one needs its own).
+      record.selfInviteEpoch = epoch;
+      await this._mutateLocked(record.groupId, (fresh) => {
+        if (Number(fresh.currentEpoch || 0) !== Number(epoch)) return false;
+        fresh.selfInviteEpoch = epoch;
+        return true;
+      });
     } catch (error) {
       // Leave selfInviteEpoch unset so syncGroups' backfill retries.
       this.engine.log?.(`Group self-invite send failed: ${error?.message || error}`);
@@ -409,40 +534,66 @@ export class GroupManager {
   // `onProgress({ stage, done, total })` reports each on-chain step of the key rotation, so a
   // screen can show that real work (one transaction per member, twice) is happening.
   async addMember(groupId, address, { onProgress = null } = {}) {
-    const record = this._requireAdmin(groupId);
     const addr = String(address || "").trim();
-    if (record.members.some((m) => m.address === addr)) return record;
-    if (record.members.length >= 50) throw new Error("A group can have at most 50 members.");
+    {
+      const record = this._requireAdmin(groupId);
+      if (record.members.some((m) => m.address === addr)) return record;
+      if (record.members.length >= 50) throw new Error("A group can have at most 50 members.");
+    }
     onProgress?.({ stage: "Looking up the new member's key", done: 0, total: 1 });
     const xOnlyPubKeyHex = await this.engine.xOnlyPubKeyForAddress(addr);
-    record.members.push({ address: addr, xOnlyPubKeyHex, isAdmin: false });
+    // The lookup awaited: re-read the record and re-check before rotating (DSK-053), so a send or
+    // control applied meanwhile is not written over by the copy read above.
+    const record = await this._withGroupLock(() => {
+      const fresh = this._requireAdmin(groupId);
+      if (fresh.members.some((m) => m.address === addr)) return null;
+      if (fresh.members.length >= 50) throw new Error("A group can have at most 50 members.");
+      fresh.members.push({ address: addr, xOnlyPubKeyHex, isAdmin: false });
+      return this._bumpEpoch(fresh);
+    });
+    if (!record) return this.getGroup(groupId);
     return this._rotateEpoch(record, "add", onProgress);
   }
   async removeMember(groupId, address) {
-    const record = this._requireAdmin(groupId);
     const addr = String(address || "").trim();
-    if (addr === record.adminAddress) throw new Error("The admin can't be removed.");
-    record.members = record.members.filter((m) => m.address !== addr);
+    const record = await this._withGroupLock(() => {
+      const fresh = this._requireAdmin(groupId);
+      if (addr === fresh.adminAddress) throw new Error("The admin can't be removed.");
+      fresh.members = fresh.members.filter((m) => m.address !== addr);
+      return this._bumpEpoch(fresh);
+    });
     return this._rotateEpoch(record, "remove");
   }
   async renameGroup(groupId, name) {
-    const record = this._requireAdmin(groupId);
-    record.name = String(name || record.name);
-    record.updatedAt = 0;
-    this._put(record);
+    const record = await this._withGroupLock(() => {
+      const fresh = this._requireAdmin(groupId);
+      fresh.name = String(name || fresh.name);
+      fresh.updatedAt = 0;
+      return this._put(fresh);
+    });
     // Rename is not a forward-secrecy event — re-send the root at the SAME epoch.
     await this._distributeRoot(record, record.currentEpoch);
-    return record;
+    return this.getGroup(groupId) || record;
   }
 
-  async _rotateEpoch(record, reason, onProgress = null) {
+  // The state change of a rotation, on a record the caller just read inside the lock: next
+  // epoch, its root, counter back to 0 (a new root is a new key, so msg_id 0 is fresh again).
+  // Synchronous - the announcements and root sends follow in _rotateEpoch, outside the lock.
+  _bumpEpoch(record) {
     const groupSeed = G.hexToBytes(record.groupSeedHex);
     const groupId = G.hexToBytes(record.groupId);
-    const newEpoch = record.currentEpoch + 1;
+    const newEpoch = Number(record.currentEpoch || 0) + 1;
     record.currentEpoch = newEpoch;
     record.groupRootEpochHex = G.bytesToHex(G.deriveGroupRootEpoch(groupSeed, groupId, newEpoch));
     record.msgCounter = 0; // counter resets when the epoch advances
-    this._put(record);
+    return this._put(record);
+  }
+
+  // Sends for a rotation already applied by _bumpEpoch. `record` is only read here (roster, seed,
+  // photo of the epoch just rotated to); every later write goes onto a fresh read (DSK-053).
+  async _rotateEpoch(record, reason, onProgress = null) {
+    const groupId = G.hexToBytes(record.groupId);
+    const newEpoch = record.currentEpoch;
     // Announce, then hand out the new root (removed members never get it).
     const epochPayload = G.buildSignedEpochPayload({ groupId, epoch: newEpoch, reason, adminPrivateKey: this.engine.privateKeyHex });
     const epochJson = JSON.stringify(epochPayload);
@@ -469,7 +620,7 @@ export class GroupManager {
       done += others.length;
     }
     onProgress?.({ stage: "Done", done: total, total });
-    return record;
+    return this.getGroup(record.groupId) || record;
   }
 
   _requireAdmin(groupId) {
@@ -485,11 +636,11 @@ export class GroupManager {
   async resendInvites(groupId) {
     const record = this._requireAdmin(groupId);
     await this._distributeRoot(record, record.currentEpoch);
-    delete record.inviteWarning;
-    this._put(record);
+    // After the sends: onto a fresh read, not the copy read before them (DSK-053).
+    await this._mutateLocked(groupId, (fresh) => { delete fresh.inviteWarning; });
     // Also re-push the group photo so anyone who missed it (or a new device) catches up.
     if (record.photoHex) { try { await this._distributePhoto(record); } catch {} }
-    return record;
+    return this.getGroup(groupId) || record;
   }
 
   // Re-broadcast the current root to ONE member (admin) — a targeted retry of a single failed
@@ -515,11 +666,13 @@ export class GroupManager {
   // Admin: set (photoHex = hex of a compressed JPEG) or clear (photoHex = "") the group photo,
   // then push it to every member via a signed gctl_photo control message.
   async setGroupPhoto(groupId, photoHex) {
-    const record = this._requireAdmin(groupId);
-    record.photoHex = String(photoHex || "");
-    this._put(record);
+    const record = await this._withGroupLock(() => {
+      const fresh = this._requireAdmin(groupId);
+      fresh.photoHex = String(photoHex || "");
+      return this._put(fresh);
+    });
     await this._distributePhoto(record);
-    return record;
+    return this.getGroup(groupId) || record;
   }
 
   // Send the current group photo to every member (admin). Best-effort; throws with .failures set
@@ -545,13 +698,11 @@ export class GroupManager {
 
   // --- send a message ---
   async sendGroupMessage(groupId, plaintext, { feeKas = "0" } = {}) {
-    const record = this.getGroup(groupId);
-    if (!record) throw new Error("Group not found.");
-    if (!record.groupRootEpochHex) throw new Error("No group key for the current epoch.");
-    // Reserve the counter BEFORE sending so a retry never reuses a msg_id.
-    const counter = record.msgCounter;
-    record.msgCounter = counter + 1;
-    this._put(record);
+    // Reserve the counter BEFORE sending so a retry never reuses a msg_id. Under the group lock,
+    // on a fresh read, against the monotonic high-water mark (DSK-053): a scan that wrote back an
+    // older copy of the record can no longer hand the same counter out twice. The seal below uses
+    // the epoch, root and device id of that same read, so they match the mark just raised.
+    const { record, counter } = await this._withGroupLock(() => this._reserveCounter(groupId));
     const payload = G.sealGroupMessage({
       plaintext,
       groupId: G.hexToBytes(record.groupId),
@@ -586,11 +737,19 @@ export class GroupManager {
     let payload;
     try { payload = JSON.parse(json); } catch { return null; }
 
+    // Decryption above and the root's roster lookups run outside the group lock; the state change
+    // itself is one locked, synchronous read-decide-write (DSK-053).
     if (payload.type === "gctl_root") return this._applyRoot(payload, senderAddress);
     // gctl_epoch is a heads-up only; the real state change lands on the matching gctl_root.
     if (payload.type === "gctl_epoch") return { kind: "epoch-notice", groupId: payload.group_id, epoch: payload.epoch };
-    // A delete marker — honor ONLY our own (signed by, and addressed to, us). Record the
-    // tombstone (already on chain, so mark it published) and drop the group if we still hold it.
+    if (payload.type === "gctl_photo" || payload.type === "gctl_tombstone") {
+      return this._withGroupLock(() => this._applyPhotoOrTombstone(payload, blockTime));
+    }
+    return null;
+  }
+
+  // Locked by the caller; synchronous: the record is read and written with nothing in between.
+  _applyPhotoOrTombstone(payload, blockTime) {
     // A group photo set by the admin — apply only if signed by THIS group's known admin.
     if (payload.type === "gctl_photo") {
       const record = this.getGroup(payload.group_id);
@@ -614,15 +773,34 @@ export class GroupManager {
       const photoKey = newHex === "" ? "cleared" : `${newHex.length}:${newHex.slice(0, 16)}`;
       return { kind: "photo-updated", groupId: record.groupId, changed, cleared: newHex === "", photoKey, adminAddress: record.adminAddress };
     }
+    // A delete marker — honor ONLY our own (signed by, and addressed to, us). Record the
+    // tombstone (already on chain, so mark it published) and drop the group if we still hold it.
     if (payload.type === "gctl_tombstone") {
       if (payload.signing_pub !== this.selfPubHex() || !G.verifyTombstonePayload(payload)) return null;
       const id = String(payload.group_id);
       const had = this.getGroup(id) != null;
       this._recordTombstone(id, { published: true });
       if (had) { const { all, bucket } = this._bucket(); delete bucket[id]; all[this.walletAddress] = bucket; saveAll(all); }
+      this._dropCounterMarks(id);
       return had ? { kind: "deleted", groupId: id } : null;
     }
     return null;
+  }
+
+  // The same root seen again - a re-walk of the recipient control stream re-serves old roots -
+  // changes nothing: no member lookups, no write, no event, and so no re-render of the open
+  // thread (which also stopped a playing voice note). Anything that differs still applies.
+  _isSameRoot(existing, payload) {
+    if (!(existing && payload.epoch === existing.currentEpoch
+      && payload.group_root_epoch === existing.groupRootEpochHex
+      && payload.blinding_key === existing.blindingKeyHex
+      && payload.admin_signing_pub === existing.adminSigningPub
+      && (payload.name || existing.name || "Group") === existing.name
+      && !(payload.group_seed && !existing.groupSeedHex)
+      && (existing.members || []).every((m) => m.xOnlyPubKeyHex))) return false;
+    const incoming = [...new Set((payload.members || []).map((a) => String(a || "").trim()).filter(Boolean))].sort();
+    const held = (existing.members || []).map((m) => m.address).sort();
+    return incoming.length === held.length && incoming.every((a, i) => a === held[i]);
   }
 
   async _applyRoot(payload, senderAddress) {
@@ -631,30 +809,14 @@ export class GroupManager {
     // A tombstoned group must never be re-added — this is what makes a delete survive a
     // seedless re-import against the recovery invite.
     if (this.isGroupTombstoned(groupId)) return null;
-    const existing = this.getGroup(groupId);
-    // A root for an OLDER epoch is not an attack to drop on the floor - it is history this device
-    // may no longer hold. Archiving it is strictly additive: currentEpoch and the current root are
-    // untouched, so there is no downgrade. It is also what makes re-walking the control stream
-    // actually repair a thread - without it a refresh re-downloads pre-rotation ciphertext it
-    // still has no key for, which is why refreshing appeared to do nothing. iOS archives it in
-    // archivePreviousRoot; Android in completeJoin.
-    if (existing && payload.epoch < existing.currentEpoch) {
-      this._archivePreviousRoot(existing, payload.epoch, payload.group_root_epoch);
-      return null;
-    }
-    // The same root seen again - a re-walk of the recipient control stream re-serves old roots -
-    // changes nothing: no member lookups, no write, no event, and so no re-render of the open
-    // thread (which also stopped a playing voice note). Anything that differs still applies.
-    if (existing && payload.epoch === existing.currentEpoch
-      && payload.group_root_epoch === existing.groupRootEpochHex
-      && payload.blinding_key === existing.blindingKeyHex
-      && payload.admin_signing_pub === existing.adminSigningPub
-      && (payload.name || existing.name || "Group") === existing.name
-      && !(payload.group_seed && !existing.groupSeedHex)
-      && (existing.members || []).every((m) => m.xOnlyPubKeyHex)) {
-      const incoming = [...new Set((payload.members || []).map((a) => String(a || "").trim()).filter(Boolean))].sort();
-      const held = (existing.members || []).map((m) => m.address).sort();
-      if (incoming.length === held.length && incoming.every((a, i) => a === held[i])) return null;
+    // A first look, only to skip the work for a root that changes nothing. The decision and the
+    // write happen in _commitRoot on a record read AFTER the roster lookups below (DSK-053).
+    const before = this.getGroup(groupId);
+    if (before && (payload.epoch < before.currentEpoch || this._isSameRoot(before, payload))) {
+      const quick = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, null, null));
+      // The record moved between the two reads so that this root does apply after all: resolve
+      // the roster and commit it properly.
+      if (quick !== NEEDS_ROSTER) return quick;
     }
 
     // Admin self-recovery: a self-addressed root carries the group seed. Trust it only if it
@@ -682,6 +844,32 @@ export class GroupManager {
       const memberIsAdmin = isAdminRecord ? addr === this.walletAddress : addr === senderAddress;
       roster.push({ address: addr, xOnlyPubKeyHex, isAdmin: memberIsAdmin });
     }
+    const result = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, roster, recoveredSeedHex));
+    return result === NEEDS_ROSTER ? null : result;
+  }
+
+  // Locked by the caller; synchronous. Decides on, and writes, a record read right here - after
+  // the roster lookups, never before them (DSK-053): a counter reserved, a photo set or another
+  // root applied while those awaited is carried into the new record instead of being dropped.
+  // With `roster` null (the quick path) it only archives / skips, and returns NEEDS_ROSTER when
+  // the root turns out to need applying.
+  _commitRoot(payload, senderAddress, roster, recoveredSeedHex) {
+    const groupId = payload.group_id;
+    if (this.isGroupTombstoned(groupId)) return null;
+    const existing = this.getGroup(groupId);
+    // A root for an OLDER epoch is not an attack to drop on the floor - it is history this device
+    // may no longer hold. Archiving it is strictly additive: currentEpoch and the current root are
+    // untouched, so there is no downgrade. It is also what makes re-walking the control stream
+    // actually repair a thread - without it a refresh re-downloads pre-rotation ciphertext it
+    // still has no key for, which is why refreshing appeared to do nothing. iOS archives it in
+    // archivePreviousRoot; Android in completeJoin.
+    if (existing && payload.epoch < existing.currentEpoch) {
+      this._archivePreviousRoot(existing, payload.epoch, payload.group_root_epoch);
+      return null;
+    }
+    if (this._isSameRoot(existing, payload)) return null;
+    if (!roster) return NEEDS_ROSTER;
+    const isAdminRecord = recoveredSeedHex != null;
 
     const isNewEpoch = !existing || payload.epoch > existing.currentEpoch;
     const record = {
@@ -787,7 +975,21 @@ export class GroupManager {
   // --- sync: pull new controls (invites/rotations) then new messages ---
   // Returns { controls: [...events], messages: [...decoded] }. The app persists
   // decoded messages into its conversation state and renders control events.
+  //
+  // DSK-053: the routine pass stands down while a Refresh Messages runs (that walks the same
+  // streams from the start, and owns this group's cursors until it is done), and a second call
+  // while a pass is in flight does not start an overlapping one. Both return an empty result with
+  // `skipped` set, which the app applies as "nothing new"; the next tick syncs as usual.
   async syncGroups() {
+    if (this._refreshing > 0) return { controls: [], messages: [], skipped: "refreshing" };
+    if (this._syncInFlight) return { controls: [], messages: [], skipped: "in-flight" };
+    const pass = this._syncGroupsPass();
+    this._syncInFlight = pass;
+    try { return await pass; }
+    finally { if (this._syncInFlight === pass) this._syncInFlight = null; }
+  }
+
+  async _syncGroupsPass() {
     const events = [];
     // 0. Backfill recovery invites: publish a self-addressed root (with the group seed) for any
     // admin group that lacks one for its current epoch — i.e. every group created before this
@@ -807,8 +1009,14 @@ export class GroupManager {
           name: record.name, adminPrivateKey: this.engine.privateKeyHex, groupSeed,
         });
         await this._sendControlToMember({ address: this.walletAddress, xOnlyPubKeyHex: this.selfPubHex() }, JSON.stringify(selfPayload));
-        record.selfInviteEpoch = record.currentEpoch;
-        this._put(record);
+        // The send awaited: mark it on a fresh read, never by writing `record` back (DSK-053), and
+        // only if that epoch is still current (a rotation meanwhile needs its own invite).
+        const epoch = record.currentEpoch;
+        await this._mutateLocked(record.groupId, (fresh) => {
+          if (Number(fresh.currentEpoch || 0) !== Number(epoch)) return false;
+          fresh.selfInviteEpoch = epoch;
+          return true;
+        });
       } catch (error) {
         this.engine.log?.(`Group self-invite backfill failed: ${error?.message || error}`);
       }
@@ -892,8 +1100,11 @@ export class GroupManager {
     }
     const fullScan = !usedSince || this._sincePasses % 12 === 0;
     for (const record of fullScan ? records : []) {
+      // `record` is read once, before the scans, and only to know which streams to read and from
+      // where. It is never written back (DSK-053): a counter reserved, a rotation or a roster
+      // change landing while the scans await would be rolled back by it.
       const blindingKey = G.hexToBytes(record.blindingKeyHex);
-      record.cursors = record.cursors || {};
+      const startCursors = record.cursors || {};
       const scans = record.members
         .filter((member) => member.xOnlyPubKeyHex)
         .map((member) => G.bytesToHex(G.deriveBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)));
@@ -902,22 +1113,41 @@ export class GroupManager {
       await Promise.all(Array.from({ length: Math.min(4, scans.length) }, async () => {
         while (next < scans.length) {
           const i = next++;
-          try { results[i] = await this.engine.scanGroupMessages(scans[i], record.cursors[scans[i]] || null); }
+          try { results[i] = await this.engine.scanGroupMessages(scans[i], startCursors[scans[i]] || null); }
           catch { results[i] = null; }
         }
       }));
-      // Decode sequentially (processMessage mutates shared group state) in member order.
-      results.forEach((rows, i) => {
-        if (!rows) return;
-        const blindedHex = scans[i];
-        for (const row of rows) {
-          const parsed = G.parseGroupMessagePayload(row.payloadString);
-          const decoded = this.processMessage(parsed);
-          if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
-          if (row.cursor) record.cursors[blindedHex] = row.cursor;
-        }
+      // Decode and merge in one locked, synchronous step, so the keys the rows decode with are the
+      // ones in the record the cursors land in. Decode sequentially in member order. The pass owns
+      // only the cursors of the streams it read, and only where the stored cursor is still the one
+      // it started from: a cursor reset meanwhile (a key arrived - history must be re-walked from
+      // the start) or moved by another reader is left as it is.
+      await this._withGroupLock(() => {
+        const newest = {};
+        results.forEach((rows, i) => {
+          if (!rows) return;
+          for (const row of rows) {
+            const parsed = G.parseGroupMessagePayload(row.payloadString);
+            const decoded = this.processMessage(parsed);
+            if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+            if (row.cursor) newest[scans[i]] = row.cursor;
+          }
+        });
+        if (!Object.keys(newest).length) return;
+        this._mutate(record.groupId, (fresh) => {
+          const cursors = { ...(fresh.cursors || {}) };
+          let changed = false;
+          for (const [blindedHex, cursor] of Object.entries(newest)) {
+            if ((cursors[blindedHex] || null) !== (startCursors[blindedHex] || null)) continue;
+            if (cursors[blindedHex] === cursor) continue;
+            cursors[blindedHex] = cursor;
+            changed = true;
+          }
+          if (!changed) return false;
+          fresh.cursors = cursors;
+          return true;
+        });
       });
-      this._put(record);
     }
     // The first full read establishes "now"; the since reads take over from here.
     // A minute back: a computer clock running ahead must not skip the newest rows.
@@ -932,7 +1162,23 @@ export class GroupManager {
 // know yet), so this drops the control cursor and this group's message cursors and walks them
 // again - control first, so the roster and epoch roots are in hand before the messages decrypt.
 // `onProgress` gets iOS's phases: invites, control, messages {done,total}, rebuilding.
-GroupManager.prototype.forceRefresh = async function forceRefresh(groupId, onProgress = () => {}) {
+// DSK-053: the routine sync stands down while this runs (and an in-flight pass is waited for
+// first), refreshes run one at a time, and the record read for the scan list is never written
+// back - the rebuilt cursors are merged onto a fresh read at the end, so a counter reserved by a
+// send, or a rotation / roster change applied while the scans awaited, survives the refresh.
+GroupManager.prototype.forceRefresh = function forceRefresh(groupId, onProgress = () => {}) {
+  this._refreshing += 1;
+  const run = this._refreshTail.then(async () => {
+    // A routine pass already under way finishes first: its cursor merge must not land on top of
+    // this re-walk. It never waits on a refresh (it stands down instead), so this cannot deadlock.
+    if (this._syncInFlight) { try { await this._syncInFlight; } catch { /* its own problem */ } }
+    return this._forceRefreshPass(groupId, onProgress);
+  });
+  this._refreshTail = run.then(() => {}, () => {});
+  return run.finally(() => { this._refreshing -= 1; });
+};
+
+GroupManager.prototype._forceRefreshPass = async function _forceRefreshPass(groupId, onProgress) {
   const rejections = { noRootForEpoch: 0, senderNotInRoster: 0, decryptFailed: 0, epochRootsArchived: 0 };
   const archivedCount = () => Object.keys(this.getGroup(groupId)?.previousRootsHex || {}).length;
   const archivedBefore = archivedCount();
@@ -942,13 +1188,13 @@ GroupManager.prototype.forceRefresh = async function forceRefresh(groupId, onPro
   try { await this._catchUpControlByRecipient(events); } catch { /* the messages are still worth a try */ }
   // By-recipient carries the admin's rotations too, so roster and epoch keys are applied by now.
   onProgress({ phase: "control" });
+  // Read only for the list of streams to re-read; never written back (DSK-053).
   const record = this.getGroup(groupId);
   if (!record) return { controls: events, messages: [], rejections };
   const blindingKey = G.hexToBytes(record.blindingKeyHex);
   const scans = record.members
     .filter((member) => member.xOnlyPubKeyHex)
     .map((member) => G.bytesToHex(G.deriveBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)));
-  record.cursors = {};
   let done = 0;
   onProgress({ phase: "messages", done, total: scans.length });
   let next = 0;
@@ -964,16 +1210,25 @@ GroupManager.prototype.forceRefresh = async function forceRefresh(groupId, onPro
   }));
   onProgress({ phase: "rebuilding" });
   const messages = [];
-  results.forEach((rows, i) => {
-    if (!rows) return;
-    for (const row of rows) {
-      const parsed = G.parseGroupMessagePayload(row.payloadString);
-      const decoded = this.processMessage(parsed, rejections);
-      if (decoded && decoded.groupId === groupId) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
-      if (row.cursor) record.cursors[scans[i]] = row.cursor;
-    }
+  // Decode and merge in one locked, synchronous step: the rows decode with the keys of the very
+  // record the cursors are written into (a root that arrived during the scans is used, not lost).
+  // This pass owns this group's message cursors and nothing else: every stream was read from the
+  // start, so the rebuilt set replaces the old one (a stream that failed, or a member added
+  // meanwhile, has none and is read from the start by the next sweep). Every other field - the
+  // counter, epoch, roots, roster, photo - stays exactly as the fresh read has it.
+  await this._withGroupLock(() => {
+    const cursors = {};
+    results.forEach((rows, i) => {
+      if (!rows) return;
+      for (const row of rows) {
+        const parsed = G.parseGroupMessagePayload(row.payloadString);
+        const decoded = this.processMessage(parsed, rejections);
+        if (decoded && decoded.groupId === groupId) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+        if (row.cursor) cursors[scans[i]] = row.cursor;
+      }
+    });
+    this._mutate(groupId, (fresh) => { fresh.cursors = cursors; });
   });
-  this._put(record);
   rejections.epochRootsArchived = Math.max(0, archivedCount() - archivedBefore);
   return { controls: events, messages, rejections };
 };
