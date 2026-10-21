@@ -33,6 +33,11 @@ import {
 } from "./kns.js";
 import { sendKaspa } from "./transactions.js";
 import { checkedUtxoAnswer } from "./amounts.js";
+import { isScriptAddress } from "./sync.js";
+
+// Why a transfer is refused before anything is built (iOS 2a8ca5a's English strings, exactly).
+export const KNS_QUANTUM_SOURCE_MESSAGE = "KNS can't move a domain out of a quantum-safe address: KNS identifies a domain's owner by a public key, and a quantum-safe address keeps its key hidden.";
+export const KNS_SCRIPT_RECIPIENT_MESSAGE = "A .kas domain can't be sent to a quantum-safe or other script address: KNS could never move it out again. Send it to a regular address instead.";
 
 const KNS_TITLE_BYTES = new TextEncoder().encode("kns");
 const MAX_PAYLOAD_BYTES = 520;
@@ -653,6 +658,11 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   const privateKey = signer?.privateKey || engine?.privateKey;
   const sourceAddress = signer?.address || engine?.address;
   if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before transferring a domain.");
+  // KNS names a domain's owner by the public key in the reveal script, and a quantum-safe (KIP-22)
+  // address keeps its key hidden behind a hash - KNS cannot move a domain out of one. Said plainly
+  // here, before anything is built or spent (iOS 2a8ca5a; the commit would otherwise stop at the
+  // signer's bare "needs its redeem script").
+  if (isScriptAddress(sourceAddress)) throw new Error(KNS_QUANTUM_SOURCE_MESSAGE);
 
   const cleanAssetId = String(assetId || "").trim();
   if (!cleanAssetId) throw new Error("Missing domain asset id.");
@@ -689,6 +699,10 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   if (recipient.toLowerCase() === sourceAddress.toLowerCase()) {
     throw new Error("Recipient must be different from the sending address.");
   }
+  // A domain sent to a script (P2SH) address - a quantum-safe address among them - could never be
+  // moved again: KNS identifies an owner by a public key, which such an address doesn't show
+  // (iOS 2a8ca5a). Checked after a .kas recipient resolved, so its owner address counts too.
+  if (isScriptAddress(recipient)) throw new Error(KNS_SCRIPT_RECIPIENT_MESSAGE);
 
   // Ownership pre-check (best-effort — a resolver miss doesn't block; the
   // chain-side inscription rules are authoritative).

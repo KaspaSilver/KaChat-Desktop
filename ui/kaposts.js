@@ -1486,12 +1486,14 @@ async function mentionedPubkeysFor(text) {
 // token (the post's mentionedPubkeys, iOS e493c97 IOS-068), else the mention rule's answer
 // ("@bob.kas" stays the .kas name, iOS d0c5b09), at the resolved address (iOS 5316269) - anyone
 // with a name, contact or not; never-posted owners get an honest empty profile.
+// No key is handed over (iOS 474388a): the address gives only the x-only key, and a K key starts
+// with 02 or 03 - the profile resolves which (XP-034), so Follow never posts for a guessed key
+// (iOS 9fe4dd3). Search's open keeps its real key.
 async function openMentionProfile(domain, signed = []) {
   try {
     const address = await mentionAddress(domain, signed);
     if (!address) { deps.showToast?.(`Couldn't resolve @${domain}.`); return; }
-    const pubkey = deps.engine.kapostPubkeyForAddress?.(address) || null;
-    openPosterProfile(address, pubkey);
+    openPosterProfile(address, null);
   } catch (error) {
     deps.showToast?.(error?.message || `Couldn't resolve @${domain}.`);
   }
@@ -2170,6 +2172,10 @@ function schedulePoll(question, options, lengthMs) {
   const closesAt = pollClosesAt(lengthMs); // XP-008: the 7-day option closes 5 min short
   const poll = { options, counts: options.map(() => 0), total: 0, closesAt, myVote: null };
   const post = makeLocalPost(question, { poll });
+  // How long the author chose to keep it open (iOS df4aba6 KaPostPoll.length): a retry reopens it
+  // for exactly this long from the retry. Re-deriving it as closesAt minus the post's time grew it
+  // on every retry - the retry moves closesAt, the post's time stays.
+  poll.length = closesAt - post.timestamp;
   localPosts.unshift(post);
   scheduleUndoable(`post:${post.id}`, async () => {
     renderToasts();
@@ -2678,8 +2684,11 @@ function retryPost(post) {
         txid = await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey });
       } else if (post.poll) {
         // And a failed poll as the poll: its options, and its full length again from now, so a
-        // late retry never puts an already-closed poll on chain (iOS IOS-093).
-        const length = Math.max((Number(post.poll.closesAt) || 0) - (Number(post.timestamp) || 0), 60 * 1000);
+        // late retry never puts an already-closed poll on chain (iOS IOS-093). The length is the
+        // one chosen at compose time (iOS df4aba6), so a second retry is not longer than the first;
+        // a poll without one (read from the network) keeps the old derivation.
+        const chosen = Number(post.poll.length);
+        const length = Math.max(Number.isFinite(chosen) && chosen > 0 ? chosen : (Number(post.poll.closesAt) || 0) - (Number(post.timestamp) || 0), 60 * 1000);
         const closesAt = Date.now() + length;
         mutatePost(post.id, (p) => { if (p.poll) p.poll.closesAt = closesAt; });
         txid = await submitKaPoll({ engine: deps.engine, question: post.text, options: post.poll.options, closesAtMs: closesAt, mentionedPubkeys: await mentionedPubkeysFor(post.text) });
