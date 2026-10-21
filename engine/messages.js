@@ -247,8 +247,22 @@ export async function createSelfStashEnvelope({
   contactOnly = false,
   createdAt = Date.now(),
   encryptToSelf,
+  ownerAddress = null,
 } = {}) {
-  return buildSelfStash({ ourAlias, theirAlias, partnerAddress, isResponse, contactOnly, createdAt, encryptToSelf });
+  const envelope = await buildSelfStash({ ourAlias, theirAlias, partnerAddress, isResponse, contactOnly, createdAt, encryptToSelf });
+  // The account it was sealed to (and whose aliases it carries): only that account may send it.
+  return ownerAddress ? { ...envelope, ownerAddress: String(ownerAddress) } : envelope;
+}
+
+/** Why a self-stash is refused once the active account is no longer the one it was made for. */
+export const SELF_STASH_ACCOUNT_CHANGED = "The account changed before the recovery note was sent; it was not sent.";
+
+/** True when `envelope` was made for an account other than `activeAddress` (iOS dfaba68: a task
+ *  that started before an account switch never writes the old account's aliases into the new
+ *  one's saved handshakes). An envelope with no owner stamp is not checked. */
+export function selfStashAccountMismatch(envelope, activeAddress) {
+  const owner = String(envelope?.ownerAddress || "").trim();
+  return owner !== "" && owner !== String(activeAddress || "").trim();
 }
 
 // One self-output of (chosen inputs - fee) carrying the payload, no change (iOS
@@ -258,8 +272,11 @@ export async function createSelfStashEnvelope({
 export async function sendSelfStashOnchain({ engine, envelope, onStatus = () => {} }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load a wallet before saving conversation recovery data.");
   if (!envelope?.protocolBytes) throw new Error("The recovery note has no payload.");
+  if (selfStashAccountMismatch(envelope, engine.address)) throw new Error(SELF_STASH_ACCOUNT_CHANGED);
   onStatus({ status: "pending", note: "Stashing encrypted conversation recovery data on-chain.", messageType: "self_stash", transport: "onchain" });
   await engine.connect();
+  // The connect may have spanned a switch too: checked again right before the keys are used.
+  if (selfStashAccountMismatch(envelope, engine.address)) throw new Error(SELF_STASH_ACCOUNT_CHANGED);
   const sendResult = await sendPayloadToSelf({
     kaspa: engine.kaspa,
     rpc: engine.rpc,

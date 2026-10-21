@@ -190,8 +190,8 @@ export async function checkKachatNamesNews() {
     const graceMs = registry.graceMs;
     let owned;
     let myOpenOffers;
-    // every address of this wallet, not only the chatting one: a name claimed with Buy From gets
-    // its notices too (iOS d1026de, IOS-085 / XP-024)
+    // every address of this wallet, not only the chatting one: a name an earlier build's Buy
+    // From claimed on a spending address gets its notices too (iOS d1026de, IOS-085 / XP-024)
     try {
       ({ names: owned, offers: myOpenOffers } = await actions.ownNamesAndOffers({ heldOnly: false }));
     } catch {

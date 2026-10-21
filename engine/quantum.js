@@ -27,9 +27,21 @@ import { computeSighash } from "./payment-signatures.js";
 /** Public index of quantum chain index 0 (iOS WalletManager.quantumIndexBase). */
 export const QUANTUM_INDEX_BASE = 1_000_000;
 
-/** How deep Discover Addresses looks on the quantum chain (iOS quantumScanFloor): the chain is young
- *  and change rotation only ever extends it one slot at a time. */
+/** How many quantum slots one step of the restore sweep looks at (iOS quantumScanFloor). The sweep
+ *  keeps stepping while a window turns up any activity (iOS da2c8e2, IOS-101: a fixed 200 missed
+ *  funds past slot 199), up to QUANTUM_SCAN_LIMIT. */
 export const QUANTUM_SCAN_FLOOR = 200;
+/** Where the quantum restore sweep stops at the latest (iOS quantumScanLimit). */
+export const QUANTUM_SCAN_LIMIT = 10_000;
+/** How many used slots verifiedFreshQuantumIndex skips at most before it takes one (iOS: 20). */
+export const FRESH_QUANTUM_PROBE_LIMIT = 20;
+/** What a quantum-source send says when its fresh change slot can't be prepared (iOS da2c8e2,
+ *  IOS-104). */
+export const QUANTUM_CHANGE_UNAVAILABLE = "Couldn't prepare the next address. Try again.";
+/** The shield's spent-probe reads the history this many transactions a page, at most
+ *  QUANTUM_SPENT_PROBE_PAGES pages (iOS da2c8e2, IOS-105: up to 10,000 transactions). */
+export const QUANTUM_SPENT_PROBE_PAGE_SIZE = 200;
+export const QUANTUM_SPENT_PROBE_PAGES = 50;
 
 /** True for a public spending index on the quantum chain. */
 export function isQuantumIndex(index) {
@@ -194,6 +206,66 @@ export function spendingChangeIndex({ purpose, sourceIndex, primaryIndex, qMaxIn
   if (purpose === "kns") return sourceIndex != null && sourceIndex === primaryIndex ? fresh : null;
   if (selfSend || sourceIndex == null) return null;
   return isQuantumIndex(sourceIndex) || sourceIndex === primaryIndex ? fresh : null;
+}
+
+/**
+ * Whether a send must stop when its fresh change slot can't be derived (iOS da2c8e2, IOS-104): a
+ * quantum source's spend reveals its key, so change back to it would park funds on a revealed key -
+ * the send throws QUANTUM_CHANGE_UNAVAILABLE instead. Only where the change rule asked for a fresh
+ * slot (`freshIndex` from spendingChangeIndex) and only for a chat payment or a Manage Addresses send;
+ * a legacy source keeps its fallback to itself, and a KNS transfer is unchanged.
+ */
+export function freshChangeRequired({ purpose, sourceIndex, freshIndex }) {
+  return purpose !== "kns" && freshIndex != null && isQuantumIndex(sourceIndex);
+}
+
+/**
+ * `nextFreshQuantumIndex`, checked on chain first (iOS da2c8e2 verifiedFreshQuantumIndex, IOS-101):
+ * the chain's end on this device can sit below slots used elsewhere (another device, a restore that
+ * ran before the sweep looked far enough). While `usedState(address)` says the slot has history it is
+ * skipped and the end raised (`raiseBound(qMaxIndex)`), up to `limit` times; a check that can't be
+ * answered (null, or a throw) takes the slot as is, so an unreachable server never blocks a send.
+ * `addressAt(publicIndex)` derives an address (null when it can't). Returns the public index.
+ */
+export async function verifiedFreshQuantumIndex({ qMaxIndex, addressAt, usedState, raiseBound = () => {}, onSkip = null, limit = FRESH_QUANTUM_PROBE_LIMIT }) {
+  let bound = Math.max(-1, wholeOr(qMaxIndex, -1));
+  let index = nextFreshQuantumIndex(bound);
+  for (let i = 0; i < limit; i += 1) {
+    let address = null;
+    try { address = await addressAt(index); } catch { address = null; }
+    if (!address) return index;
+    let used = null;
+    try { used = await usedState(address); } catch { used = null; }
+    if (used !== true) return index;
+    try { onSkip?.(index); } catch { /* the log line never stops the check */ }
+    bound = Math.max(bound, index - QUANTUM_INDEX_BASE);
+    await raiseBound(bound);
+    index = nextFreshQuantumIndex(bound);
+  }
+  return index;
+}
+
+/**
+ * Whether a quantum-safe address has ever SPENT (iOS da2c8e2 quantumAddressSpentState, IOS-105): the
+ * whole history, a page at a time, since a spend buried under later activity still revealed the key.
+ * `fetchPage(offset, limit)` returns that page of full transactions (inputs carrying
+ * `previous_outpoint_address`), or null when it can't be read. true on the first spend found; false
+ * when the history ends without one; null when a page can't be read or the history goes deeper than
+ * the walk - never "not spent" then.
+ */
+export async function quantumSpentFromHistory(address, fetchPage, { pageSize = QUANTUM_SPENT_PROBE_PAGE_SIZE, maxPages = QUANTUM_SPENT_PROBE_PAGES } = {}) {
+  const lowered = String(address || "").toLowerCase();
+  if (!lowered) return null;
+  for (let offset = 0; offset < maxPages * pageSize; offset += pageSize) {
+    let txs = null;
+    try { txs = await fetchPage(offset, pageSize); } catch { txs = null; }
+    if (!Array.isArray(txs)) return null;
+    const spent = txs.some((tx) => (tx?.inputs || []).some((input) => String(input?.previous_outpoint_address || "").toLowerCase() === lowered));
+    if (spent) return true;
+    if (txs.length < pageSize) return false;
+  }
+  // deeper than the walk goes: say so rather than claim the key is hidden
+  return null;
 }
 
 // MARK: - Mass (iOS KasiaTransactionBuilder.estimateFee, signatureScriptSize)

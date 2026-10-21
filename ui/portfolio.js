@@ -3331,6 +3331,20 @@ export function initPortfolio(dependencies) {
   const initialFiatLabel = modalsEl?.querySelector("[data-portfolio-editor-fiat-label]");
   if (initialFiatLabel) initialFiatLabel.textContent = `Total Value (${historyCurrency.toUpperCase()})`;
 
+  // The converter's numbers sit at the right of wide fields, so a click usually lands left of the
+  // text and the caret started before the number ("|1"). Editing starts at the end instead (iOS
+  // c130dc1 KasConverterCard). After the click has placed its caret, and only if the field still
+  // has focus.
+  rootEl?.addEventListener("focusin", (event) => {
+    const target = event.target;
+    if (!target?.matches?.("[data-portfolio-conv-kas], [data-portfolio-conv-fiat]")) return;
+    window.setTimeout(() => {
+      if (document.activeElement !== target) return;
+      const end = String(target.value || "").length;
+      try { target.setSelectionRange(end, end); } catch { /* not a text field */ }
+    }, 0);
+  });
+
   // The converter and the mining estimate write into module state and refresh only the DERIVED
   // figure. Re-rendering the whole screen on each keystroke would take the caret with it.
   rootEl?.addEventListener("input", (event) => {

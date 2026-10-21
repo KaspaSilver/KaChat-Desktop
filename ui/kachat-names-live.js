@@ -1465,8 +1465,8 @@ function walletBalanceSompi() {
   } catch { return null; }
 }
 
-/** Any address's balance in sompi, read from a node (iOS eb9b027 KachatMarketSourceSheet.balance:
- *  the sum of its UTXOs), or null when it can't be read. */
+/** Any address's balance in sompi, read from a node (the sum of its UTXOs), or null when it can't
+ *  be read: the payer line's balance after, and Fund closing itself. */
 export async function addressBalanceSompi(address) {
   if (!address || typeof deps().addressBalanceSompi !== "function") return null;
   try {
@@ -1475,18 +1475,18 @@ export async function addressBalanceSompi(address) {
   } catch { return null; }
 }
 
-/** "Address #3" (or its name) for the marketplace's address, else the short address (iOS eb9b027
- *  KachatTxSheet.payerLabel). */
+/** "Address #3" (or its name) for one of your addresses, else the short address (iOS 6e938ff
+ *  KachatTxSheet.payerLabel: WalletManager.ownAddressLabel). */
 function payerLabel(address) {
-  const source = kachatNames()?.actions?.marketSource;
   const a = String(address ?? "").toLowerCase();
-  if (source?.kind === "spending" && source.address === a) return source.label;
-  return compactAddress(a);
+  let own = null;
+  try { own = deps().ownAddressLabel?.(a) ?? null; } catch { own = null; }
+  return own || compactAddress(a);
 }
 
 /**
- * Fund (iOS ZeroBalanceFundingCardView in a sheet: KachatAddressFundSheet, eb9b027, and the profile
- * save's "not enough funds" popup, 2b45d6e): the headline, the address's QR code, the address and a
+ * Fund (iOS ZeroBalanceFundingCardView in a sheet: the profile save's "not enough funds" popup,
+ * 2b45d6e): the headline, the address's QR code, the address and a
  * copy button - the zero-balance funding card's look. Closes by itself once the address holds
  * `dismissAtSompi` (any KAS by default). `onClose()` runs however it closed.
  */
@@ -1732,10 +1732,9 @@ function openTxSheet(cfg) {
     return cardHtml(`${rows}${rows && price ? `<div class="sk-divider" aria-hidden="true"></div>` : ""}${price}`, { cls: "kl-rows-card" });
   };
 
-  /** Spends from, and pays back to, the address that pays (iOS eb9b027): the chatting address (its
-   *  balance after, iOS 8ecc38c), the marketplace's chosen one, or the spending address holding the
-   *  name (iOS 881ada6) - "From: Address #N" (or the short address) and that address's balance
-   *  after. */
+  /** Spends from, and pays back to, the address that pays: the chatting address (its balance
+   *  after, iOS 8ecc38c), or the spending address holding the name (iOS 881ada6) - "From:
+   *  Address #N" (or the short address) and that address's balance after. */
   const pillsHtml = () => {
     if (!sheet.plan) return "";
     const pill = (text) => infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(text)}</span>` });
@@ -2732,12 +2731,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         ${cardNote("Every name from the old registry comes over with the same owner and expiry first.")}`)
     : "");
 
-  // the claim screen says when the marketplace's address is short (iOS eb9b027)
-  const fromSpending = () => rt.actions.marketSource?.kind === "spending";
   const footHtml = () => (quote && !quote.affordable
-    ? `<p class="kl-tx-note kl-red">${esc(kasLabel(fromSpending()
-      ? "Not enough KAS on this address for this name."
-      : "Not enough KAS on your chatting address for this name."))}</p>`
+    ? `<p class="kl-tx-note kl-red">${esc(kasLabel("Not enough KAS on your chatting address for this name."))}</p>`
     : `<p class="kl-tx-note kmkt-muted">The price goes to the miners - KaChat takes nothing. The bond and the deposit come back when you release the name.</p>`);
 
   const step = (n, text) => `
@@ -2759,11 +2754,7 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     const pills = q("[data-kl-claim-pills]");
     if (pills) {
       const pill = (text) => infoPillHtml({ innerHtml: `<span class="sk-pill-value">${esc(text)}</span>` });
-      // the marketplace's address pays, and the name will be on it (iOS eb9b027)
-      const source = rt.actions.marketSource;
-      pills.innerHTML = quote
-        ? `${source?.kind === "spending" ? pill(`From: ${source.label}`) : ""}${pill(`Available: ${amountText(quote.spendable)}`)}`
-        : "";
+      pills.innerHTML = quote ? pill(`Available: ${amountText(quote.spendable)}`) : "";
     }
     // many small coins: combined into one before registering, said up front (iOS f1c16ec)
     const combine = q("[data-kl-claim-combine]");
@@ -3722,7 +3713,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
           // (and the bell says so); expired names in grace stay, to be renewed. Your Domains and
           // each address's tab alike (iOS e26562e / aa36d2a / eea52b2).
           // Your own list (the chatting address's) holds the names and offers on every address of
-          // this wallet - one claimed with Buy From too, on any device restored from the seed
+          // this wallet - one an earlier build's Buy From claimed too, on any device restored from the seed
           // (iOS d1026de, IOS-085).
           let own = null;
           if (String(address).toLowerCase() === String(rt.actions.myAddress ?? "")) {

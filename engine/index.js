@@ -5,7 +5,7 @@ import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importM
 import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
-import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain } from "./messages.js";
+import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain, SELF_STASH_ACCOUNT_CHANGED } from "./messages.js";
 import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, checkIncomingRestPayment, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
 import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload, sealPaymentRecord } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
@@ -1629,12 +1629,20 @@ export class KaspaEngine {
     return sendHandshakeOnchain({ engine: this, ...details });
   }
 
-  async createSelfStashEnvelope(details) {
+  /** `forAddress` (optional): the account the caller derived the note's aliases for. The note is
+   *  sealed to - and stamped with - the account active NOW, never re-read after an await, and
+   *  sendSelfStashOnchain refuses it once another account is active (iOS dfaba68). */
+  async createSelfStashEnvelope(details = {}) {
+    const owner = this.address;
+    if (!owner) throw new Error("Load a wallet before saving conversation recovery data.");
+    const { forAddress, ...rest } = details || {};
+    if (forAddress && forAddress !== owner) throw new Error(SELF_STASH_ACCOUNT_CHANGED);
     return createSelfStashEnvelope({
-      ...details,
+      ...rest,
+      ownerAddress: owner,
       encryptToSelf: async (text) => {
         const result = await import("./kasia-cipher.js");
-        return result.encryptKasiaMessage(this.address, text);
+        return result.encryptKasiaMessage(owner, text);
       },
     });
   }

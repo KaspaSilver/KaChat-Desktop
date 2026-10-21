@@ -632,8 +632,8 @@ async function main() {
     r.check(sent[0]?.inputs.length >= 2 && sent[0].inputs[0].role === "gap.register" && sent[0].inputs[1].role === "commit" && sent[0].inputs.every((x) => x.role !== "price.use"),
       "register spends [gap, commit, funding] - no price shard");
     r.eq(going.registerTxId, sent[0] && T.txIdHex(sent[0].unsignedTx), "the record keeps the register txid");
-    // Buy From (iOS eb9b027): a claim started from a spending address registers with that
-    // address's key; its record stays with the wallet (the chatting address)
+    // A claim an earlier build's Buy From (iOS eb9b027, retired in 6e938ff) started from a spending
+    // address still registers with that address's key; its record stays with the wallet
     {
       const chatAddr = RS.addressOf(S.xonlyKey(other)).toLowerCase();
       const sp = regAt();
@@ -646,15 +646,15 @@ async function main() {
       sp._upsert(recordFor("reg-spend", price));
       // without the spending address in the wallet the claim isn't this wallet's to sign: it waits
       await sp._register(sp._find("reg-spend"), c0.utxo);
-      r.eq(signedWith.length, 0, "Buy From: a claim whose owner isn't one of the wallet's addresses is not signed");
-      r.eq(sp.pending.find((x) => x.id === "reg-spend").stage, A.Stage.waiting, "Buy From: and it keeps waiting");
+      r.eq(signedWith.length, 0, "earlier Buy From: a claim whose owner isn't one of the wallet's addresses is not signed");
+      r.eq(sp.pending.find((x) => x.id === "reg-spend").stage, A.Stage.waiting, "earlier Buy From: and it keeps waiting");
       sp.wallet = { spendingAddresses: () => [{ index: 3, address: s(v.deployer.address) }], spendingPrivateKey: (i) => (i === 3 ? C.hex(sk) : null) };
       await sp._register(sp._find("reg-spend"), c0.utxo);
       const spent = sp.pending.find((x) => x.id === "reg-spend");
-      r.eq(spent.stage, A.Stage.registering, () => `Buy From: a claim from a spending address registers (${spent.lastError})`);
-      r.eq(signedWith[0], C.hex(sk), "Buy From: signed with the spending address's key (ownerSigner)");
-      r.eq(sp._pendingWallet, chatAddr, "Buy From: the claim stays with the wallet's records");
-      r.check(await sp._ownsName("nope") === false, "Buy From: _ownsName is false for a free name");
+      r.eq(spent.stage, A.Stage.registering, () => `earlier Buy From: a claim from a spending address registers (${spent.lastError})`);
+      r.eq(signedWith[0], C.hex(sk), "earlier Buy From: signed with the spending address's key (ownerSigner)");
+      r.eq(sp._pendingWallet, chatAddr, "earlier Buy From: the claim stays with the wallet's records");
+      r.check(await sp._ownsName("nope") === false, "earlier Buy From: _ownsName is false for a free name");
     }
     r.eq(typeof A.Stage.priceChanged, "undefined", "registry v4: Stage.priceChanged is gone");
     r.eq(typeof ok.acceptNewPrice, "undefined", "registry v4: acceptNewPrice is gone");
@@ -1154,55 +1154,54 @@ async function main() {
     r.check(C.bytesEqual(wa.signerFor(A.Operation.decline(offer)).me, hx(o0.seller)), "signerFor(decline): signs with the seller key");
     r.eq(A.KachatNamesActions.heldBy(A.Operation.withdraw(offer)), null, "heldBy(withdraw): the chatting address");
 
-    // MARK: Buy From (iOS eb9b027): the marketplace's address pays and buys; the address an offer
-    // was made from withdraws it; bought-with addresses are remembered per wallet
+    // MARK: who buys (iOS 6e938ff, no Buy From): claims, buys, offers, extend and renew always pay
+    // from the chatting address. Names an earlier build bought on a spending address keep working:
+    // its owner actions sign with that address's key, the address an offer was made from
+    // withdraws it, and the remembered bought-with addresses still feed the wallet's own lists.
     const spendAddr = RS.addressOf(hx(o0.seller));
     const chatKey = S.xonlyKey(other);
     const chatAddr = RS.addressOf(chatKey);
     const buyMem = new Map();
     const buyStorage = { get: (k) => buyMem.get(k) ?? null, set: (k, val) => { buyMem.set(k, val); } };
+    // what an earlier build's Buy From left behind for this wallet
+    buyMem.set(A.marketAddressesStorageKey(chatAddr), JSON.stringify([spendAddr.toLowerCase()]));
     const ba = new A.KachatNamesActions({ engine: { ...actEngine, address: chatAddr, privateKeyHex: C.hex(other) }, service: dry, registry: registryStub, storage: buyStorage, wallet: spend });
+    r.eq(typeof ba.setMarketSource, "undefined", "no Buy From: setMarketSource is gone");
+    r.eq(ba.marketSource, undefined, "no Buy From: marketSource is gone");
+    r.eq(typeof A.chattingMarketSource, "undefined", "no Buy From: chattingMarketSource is gone");
     const someName = new RS.NameInfo({ name: "alice", key: new Uint8Array(32).fill(7), owner: new Uint8Array(32).fill(9), price: 5n, expiresAt: 0n, outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x57), 0) });
-    const buyOps = [A.Operation.buy(someName), A.Operation.offer(someName, 1, 2), A.Operation.extend(someName, 1), A.Operation.renew(someName, 1)];
-    r.eq(ba.marketSource.kind, "chatting", "Buy From: the chatting address by default");
-    r.check(C.bytesEqual(ba.buyerSigner().me, chatKey), "buyerSigner: the chatting address by default");
+    // a name an earlier build bought on the spending address
+    const heldName = new RS.NameInfo({ name: "bobby", key: new Uint8Array(32).fill(8), owner: hx(o0.seller), price: 5n, expiresAt: 0n, outpoint: T.makeOutpoint(new Uint8Array(32).fill(0x58), 0) });
+    const buyOps = [
+      A.Operation.buy(someName), A.Operation.offer(someName, 1, 2), A.Operation.extend(someName, 1), A.Operation.renew(someName, 1),
+      // anyone may pay extend / renew: the chatting address pays them for a spending address's name too
+      A.Operation.extend(heldName, 1), A.Operation.renew(heldName, 1),
+    ];
+    r.check(C.bytesEqual(ba.buyerSigner().me, chatKey), "buyerSigner: always the chatting address");
+    r.eq(ba.buyerSigner().address, chatAddr.toLowerCase(), "buyerSigner: its address");
     for (const op of buyOps) {
-      r.check(C.bytesEqual(ba.signerFor(op).me, chatKey), `signerFor(${op.kind}): the chatting address by default`);
-      r.eq(ba.payerFor(op), null, `payerFor(${op.kind}): the chatting address by default`);
+      r.check(C.bytesEqual(ba.signerFor(op).me, chatKey), `signerFor(${op.kind} ${(op.name ?? op.target)?.name}): the chatting address`);
+      r.eq(ba.payerFor(op), null, `payerFor(${op.kind} ${(op.name ?? op.target)?.name}): the chatting address`);
     }
-    // a wallet's names are on all its addresses (iOS d1026de): the revealed spending address's key
-    // counts before any pick
-    r.eq(ba.allOwnKeys.length, 2, "allOwnKeys: the chatting key and the revealed spending one before any pick");
-    let sourceEvents = 0;
-    const unsubSource = ba.subscribe(() => { sourceEvents += 1; });
-    ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "" });
-    unsubSource();
-    r.check(sourceEvents > 0, "setMarketSource: subscribers hear of it");
-    r.eq(ba.marketSource.kind, "spending", "setMarketSource: a spending address");
-    r.eq(ba.marketSource.label, "Address #3", "setMarketSource: an unnamed address is Address #N");
-    r.check(C.bytesEqual(ba.buyerSigner().me, hx(o0.seller)), "buyerSigner: the marketplace's spending address");
-    r.eq(ba.buyerSigner().address, spendAddr.toLowerCase(), "buyerSigner: its address");
-    for (const op of buyOps) {
-      r.check(C.bytesEqual(ba.signerFor(op).me, hx(o0.seller)), `signerFor(${op.kind}): paid from the marketplace's address`);
-      r.eq(ba.payerFor(op)?.index, 3, `payerFor(${op.kind}): the marketplace's address`);
+    // owner actions on the spending address's name sign - and pay - with its key
+    const ownerOps = [A.Operation.transfer(heldName, new Uint8Array(32).fill(3)), A.Operation.list(heldName, 9), A.Operation.release(heldName)];
+    for (const op of ownerOps) {
+      r.check(C.bytesEqual(ba.signerFor(op).me, hx(o0.seller)), `signerFor(${op.kind}): the spending address that holds the name`);
+      r.eq(ba.payerFor(op)?.index, 3, `payerFor(${op.kind}): that spending address`);
     }
     // everything else still pays from the chatting address
     r.check(C.bytesEqual(ba.signerFor(A.Operation.reclaim(someName)).me, chatKey), "signerFor(reclaim): the chatting address");
-    r.eq(ba.marketAddresses.join(","), spendAddr.toLowerCase(), "marketAddresses: the picked address is remembered");
-    r.eq(buyMem.get(A.marketAddressesStorageKey(chatAddr)), JSON.stringify([spendAddr.toLowerCase()]), "marketAddresses: stored per wallet");
+    // the remembered bought-with addresses: still read, never added to
+    r.eq(ba.marketAddresses.join(","), spendAddr.toLowerCase(), "marketAddresses: an earlier build's bought-with address is still read");
     r.eq(ba.allOwnKeys.length, 2, "allOwnKeys: the bought-with address is the revealed one, counted once");
     r.check(C.bytesEqual(ba.allOwnKeys[0], chatKey) && C.bytesEqual(ba.allOwnKeys[1], hx(o0.seller)), "allOwnKeys: chatting first");
-    ba.setMarketSource({ kind: "spending", index: 3, address: spendAddr, label: "Names" });
-    r.eq(ba.marketAddresses.length, 1, "marketAddresses: an address is remembered once");
-    // leaving the marketplace: back to the chatting address, the remembered address stays
-    ba.setMarketSource(null);
-    r.eq(ba.marketSource.kind, "chatting", "setMarketSource(null): the chatting address");
-    r.check(C.bytesEqual(ba.signerFor(A.Operation.buy(someName)).me, chatKey), "signerFor(buy): the chatting address again");
+    for (const op of buyOps) ba.signerFor(op);
+    r.eq(buyMem.get(A.marketAddressesStorageKey(chatAddr)), JSON.stringify([spendAddr.toLowerCase()]), "marketAddresses: buying adds nothing");
     const ba2 = new A.KachatNamesActions({ engine: { ...actEngine, address: chatAddr, privateKeyHex: C.hex(other) }, service: dry, registry: registryStub, storage: buyStorage, wallet: spend });
     r.eq(ba2.allOwnKeys.length, 2, "allOwnKeys: the same after a relaunch");
     const otherWallet = new A.KachatNamesActions({ engine: actEngine, service: dry, registry: registryStub, storage: buyStorage, wallet: spend });
     r.eq(otherWallet.marketAddresses.length, 0, "marketAddresses: another wallet has its own");
-    // an offer is withdrawn (or refunded) with the key it was made from, whatever the marketplace uses
+    // an offer is withdrawn (or refunded) with the key it was made from
     const myOffer = new RS.OfferInfo({ ...offer, outpoint: offer.outpoint, buyer: hx(o0.seller), seller: new Uint8Array(32).fill(4) });
     r.check(C.bytesEqual(ba.signerFor(A.Operation.withdraw(myOffer)).me, hx(o0.seller)), "signerFor(withdraw): the address the offer was made from");
     r.eq(ba.payerFor(A.Operation.withdraw(myOffer))?.index, 3, "payerFor(withdraw): the address the offer was made from");
@@ -1213,10 +1212,12 @@ async function main() {
     r.check(C.bytesEqual(ba.ownerSigner(chatKey).me, chatKey), "ownerSigner: the chatting address");
     r.check(C.bytesEqual(ba.ownerSigner(hx(o0.seller)).me, hx(o0.seller)), "ownerSigner: a spending address");
     r.check((() => { try { ba.ownerSigner(new Uint8Array(32).fill(5)); return false; } catch (e) { return e.code === "keyMismatch"; } })(), "ownerSigner: anyone else's key is refused");
-    // a spending source whose derived key isn't its address's
-    ba.setMarketSource({ kind: "spending", index: 4, address: RS.addressOf(new Uint8Array(32).fill(6)), label: "x" });
-    r.check((() => { try { ba.buyerSigner(); return false; } catch (e) { return e.code === "keyMismatch"; } })(), "buyerSigner: refuses a key that isn't the address's");
-    ba.setMarketSource(null);
+    // a spending address whose derived key isn't its address's is never signed for
+    const badAddr = RS.addressOf(new Uint8Array(32).fill(6));
+    const bad = new A.KachatNamesActions({ engine: { ...actEngine, address: chatAddr, privateKeyHex: C.hex(other) }, service: dry, registry: registryStub, storage: buyStorage,
+      wallet: { spendingAddresses: () => [{ index: 4, address: badAddr }], spendingPrivateKey: () => C.hex(sk) } });
+    const badName = new RS.NameInfo({ ...heldName, outpoint: heldName.outpoint, owner: new Uint8Array(32).fill(6) });
+    r.check((() => { try { bad.signerFor(A.Operation.transfer(badName, new Uint8Array(32).fill(3))); return false; } catch (e) { return e.code === "keyMismatch"; } })(), "signerFor(transfer): refuses a key that isn't the address's");
   }
 
   // MARK: a wallet's names are on all its addresses (iOS d1026de, IOS-085 / XP-024)
@@ -1280,12 +1281,12 @@ async function main() {
     r.eq(probes.join(","), a3, "ownNameKeys: after ten minutes only an unknown address is probed again (used is kept, unused for the session)");
     r.eq(keys2.length, 3, "ownNameKeys: the same keys");
     probes.length = 0;
-    // a bought-with address (the hint) counts as used without a probe
-    oa.setMarketSource({ kind: "spending", index: 0, address: a0, label: "" });
+    // a bought-with address an earlier build remembered (the hint) counts as used without a probe
+    ownMem.set(A.marketAddressesStorageKey(RS.addressOf(chatKey)), JSON.stringify([a0.toLowerCase()]));
     const keys3 = await oa.ownNameKeys();
     r.check(keys3.some((x) => C.bytesEqual(x, k(0x30))), "ownNameKeys: a bought-with address counts");
     r.check(!probes.includes(a0), "ownNameKeys: a bought-with address isn't probed");
-    oa.setMarketSource(null);
+    ownMem.delete(A.marketAddressesStorageKey(RS.addressOf(chatKey)));
     // ownNamesAndOffers: every key's names and offers
     lookups.length = 0;
     const all = await oa.ownNamesAndOffers({ heldOnly: false });

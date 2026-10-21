@@ -7,10 +7,12 @@ import { contractPurgePlan, contractSuppressionRecovery } from "./contract-purge
 import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { chattingCatchUpLook } from "./address-activity.js";
+import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder } from "./message-placeholders.js";
+import { accountGuard, accountScopedValue } from "./account-guard.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
-import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, nextFreshQuantumIndex, spendingChangeIndex } from "../engine/quantum.js";
+import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, nextFreshQuantumIndex, spendingChangeIndex, freshChangeRequired, verifiedFreshQuantumIndex, quantumSpentFromHistory } from "../engine/quantum.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
@@ -2009,7 +2011,7 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
     if (destination === "fresh") {
       if (!freshAddress) {
         try { await ensureRuntimes({ quiet: true }); } catch { /* checked just below */ }
-        const reserved = reserveFreshSpendingAddresses(1)[0]?.address || null;
+        const reserved = (await reserveFreshSpendingAddresses(1))[0]?.address || null;
         if (!reserved) { setError("Couldn't make a new address. Please try again."); return null; }
         freshAddress = reserved;
         renderAddress();
@@ -3349,6 +3351,8 @@ async function ensureNotificationPermission() {
 }
 function maybeNotifyIncoming(conversationEntry, contact, message) {
   if (!message || message.direction !== "incoming") return;
+  // nor for one the chat won't show (undecryptable / cross-device placeholder, iOS c130dc1)
+  if (isHiddenPlaceholderMessage(message)) return;
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   // Settings > Notifications > Chats master toggle, then this contact's own override on top of
   // the global default - the same three-way rule iOS applies (off / No Sound / Sound).
@@ -4949,6 +4953,15 @@ function handleChatStorageFlushError(error) {
 }
 
 function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
+  // Creating or importing an account while signed in keeps this page alive, so the chat, group or
+  // room open in the old account would stay open in the new one. Every account starts on its own
+  // list, nothing selected (iOS c130dc1 ChatListView). Rooms close in resetBroadcastsForAccount.
+  try { closeChatsForAccountSwitch(); } catch { /* not yet initialized */ }
+  // Profile's spending total belongs to the account it was read for (iOS c130dc1).
+  try { profileSpendingTotal.clear(); } catch { /* not yet initialized */ }
+  // A Manage Addresses render in flight is the old account's: its balances must not land (nor be
+  // cached) under the new one.
+  try { spendingListToken += 1; } catch { /* not yet initialized */ }
   // KaPosts state (follows/mutes/blocks + session posts) is per account too.
   try { resetKaPostsForAccount(); } catch { /* not yet initialized */ }
   try { reloadDockPrefsForAccount(); } catch { /* not yet initialized */ }
@@ -5083,18 +5096,12 @@ function syncLabel(conversationEntry) {
 }
 
 function lastMessageFor(conversationEntry) {
-  const messages = conversationEntry?.messages || [];
-  // The chat list previews the newest REAL message — cross-device placeholders are
-  // hidden everywhere (see renderMessages), so they must not claim the preview either.
-  // Newest by time, not by position (iOS newestRealMessage: the maximum timestamp, first among
-  // equals): a message merged in late can sit out of order until the next sort.
-  let newest = null;
-  for (const message of messages) {
-    if (!message || message.text === "📤 Sent via another device") continue;
-    if (newest && Number(message.createdAt || 0) <= Number(newest.createdAt || 0)) continue;
-    newest = message;
-  }
-  return newest;
+  // The chat list previews the newest REAL message — cross-device and undecryptable
+  // placeholders are hidden everywhere (see renderMessages, iOS c130dc1 isHiddenPlaceholder), so
+  // they must not claim the preview either. Newest by time, not by position (iOS
+  // newestRealMessage: the maximum timestamp, first among equals): a message merged in late can
+  // sit out of order until the next sort.
+  return newestVisibleMessage(conversationEntry?.messages || []);
 }
 
 function statusLabel(status) {
@@ -5419,6 +5426,9 @@ function webLinkPreviewLabel(text) {
 }
 function chatListPreviewText(message) {
   if (!message) return "";
+  // Backstop: lastMessageFor already skips placeholders; one reaching the preview by any other
+  // route still reads as nothing (iOS ConversationRow, c130dc1 isHiddenPlaceholder).
+  if (isHiddenPlaceholderMessage(message)) return "";
   if (message.edit?.text != null) message = { ...message, text: messageContent(message) };
   // As iOS ConversationRow.formatPreview: unwrap a reply first, so the reply's own text (or its
   // attachment) is what is previewed rather than the envelope.
@@ -5857,7 +5867,13 @@ async function syncOneConversation(conversationEntry, { quiet = true, catchUp = 
 }
 
 async function syncOneConversationWork(conversationEntry, { quiet, catchUp, contact }) {
-  const knownTxids = (conversationEntry.messages || []).map((message) => message.txid).filter(Boolean);
+  // A record holding only a placeholder is not "known": its real text, once this account can read
+  // it, replaces the body below (iOS c130dc1, preferMessage).
+  const knownTxids = (conversationEntry.messages || []).filter((message) => !isHiddenPlaceholderMessage(message)).map((message) => message.txid).filter(Boolean);
+  // A sweep that started for one account and finishes after an in-place switch (create / import
+  // while signed in) writes nothing: no bubbles, banners or cursors for the wrong account (iOS
+  // dfaba68 isActiveWallet).
+  const account = accountGuard(() => engine.address);
   const indexerUrl = indexerUrlInput?.value?.trim() || getEndpoint("kasiaIndexer");
   // Message retention also raises the IMPORT floor (mirrors iOS ChatService's retention-aware
   // fetch cursor): without it the payment scan below, which re-reads the last 100 transactions
@@ -5879,6 +5895,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
       cursor: conversationEntry.sync?.cursor || 0, indexerUrl,
     })
     : { messages: [], nextCursor: conversationEntry.sync?.cursor || 0, note: "No KaChat indexer on this network yet." };
+  if (!account.still()) return 0;
   let added = 0;
   let liveAdded = 0;
   // A chat reopened after a deletion keeps what came before it deleted: its deletion instant is a
@@ -5889,6 +5906,18 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     if (belowDeletionFloor(incoming)) continue;
     const hiddenKeys = new Set((conversationEntry.hiddenMessageKeys || []).map(String));
     if ((incoming.txid && hiddenKeys.has(String(incoming.txid))) || (incoming.id && hiddenKeys.has(String(incoming.id)))) continue;
+    // A stored placeholder for this transaction gives way to the readable copy, quietly: it was
+    // history already, never a new message (iOS c130dc1: the record stays, a later decrypt
+    // replaces it and it appears).
+    const placeholder = incoming.txid ? (conversationEntry.messages || []).find((m) => m.txid === incoming.txid && upgradesPlaceholder(m, incoming)) : null;
+    if (placeholder) {
+      conversationEntry.messages = conversationEntry.messages.filter((m) => m !== placeholder);
+      const replacement = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
+      applyMessagePatch(replacement, incoming);
+      replacement.id = placeholder.id;
+      if (appendIncomingOrReactionMessage(conversationEntry, replacement)) added += 1;
+      continue;
+    }
     if ((conversationEntry.messages || []).some((m) => m.txid && m.txid === incoming.txid)) continue;
     const message = createMessage({ ...incoming, conversationId: conversationEntry.id, contactId: contact.id });
     applyMessagePatch(message, incoming);
@@ -5916,6 +5945,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
         limit: 100,
         ownAddresses: ownWalletAddressSet(),
       });
+      if (!account.still()) return added;
       // Contract transactions the scan skipped stay suppressed on every path (iOS 32fdaa4).
       registerSuppressedPaymentTxIds(paymentResult.contractTxids || [], "kachat-contract");
       for (const incoming of paymentResult.messages || []) {
@@ -5942,6 +5972,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   }
 
   const paymentStatusChanged = await refreshPendingPaymentStatuses(conversationEntry, contact);
+  if (!account.still()) return added;
   if (paymentStatusChanged) persistState();
   if (added) promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { persist: false });
   conversationEntry.sync = {
@@ -6011,6 +6042,9 @@ function rememberLegacyIncomingAlias(contact, alias) {
 async function backfillLegacyIncomingAliases(contact, conversationEntry) {
   if (!contact || Array.isArray(contact.legacyIncomingAliases)) return false;
   if (typeof engine.decryptKasiaMessage !== "function") return false;
+  // The decrypts read whichever key is active: one that spans an account switch would record the
+  // next account's reading of this contact's handshakes (iOS dfaba68). Left for a later sweep.
+  const account = accountGuard(() => engine.address);
   const found = [];
   for (const message of conversationEntry?.messages || []) {
     if (message?.messageType !== "handshake" || message?.direction !== "incoming" || !message?.encryptedHex) continue;
@@ -6018,7 +6052,9 @@ async function backfillLegacyIncomingAliases(contact, conversationEntry) {
       const parsed = JSON.parse(String(await engine.decryptKasiaMessage(message.encryptedHex) || ""));
       if (parsed && typeof parsed === "object" && parsed.alias) found.push(String(parsed.alias));
     } catch {}
+    if (!account.still()) return false;
   }
+  if (!account.still()) return false;
   contact.legacyIncomingAliases = legacyWireAliases(found);
   return true;
 }
@@ -6030,11 +6066,17 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
   // brand-new wallet's incoming requests completely. Each wallet address (so each network) now
   // keeps its own record, loaded here (IOS-004).
   ensureHandshakeSyncStateForActiveWallet();
+  const account = accountGuard(() => engine.address);
   const result = await engine.syncIncomingHandshakesFromIndexer({
     knownTxids: handshakeSyncState.processedTxids,
     cursor: handshakeSyncState.cursor,
     indexerUrl: indexerUrlInput?.value || undefined,
   });
+  // The scan read this account's handshakes (indexer and REST payment rows alike) with its key: if
+  // the account changed while it ran, none of it - contacts, chats, the aliases they carry, the
+  // cursor and processed ids - may be written into the next account's (iOS dfaba68: the
+  // payment-handshake and saved-handshake alias writes re-check the active wallet).
+  if (!account.still()) return 0;
   let added = 0;
   const declined = new Set(handshakeSyncState.declinedTxids);
   for (const request of result.handshakes || []) {
@@ -6141,10 +6183,13 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
 async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
   if (!engine.address || typeof engine.syncOutgoingHandshakesFromIndexer !== "function") return 0;
   ensureHandshakeSyncStateForActiveWallet(); // never another wallet's (or network's) outCursor
+  const account = accountGuard(() => engine.address);
   const result = await engine.syncOutgoingHandshakesFromIndexer({
     cursor: handshakeSyncState.outCursor || 0,
     indexerUrl: indexerUrlInput?.value || undefined,
   });
+  // Same rule as the incoming scan: an account switch while it ran drops the result.
+  if (!account.still()) return 0;
   let added = 0;
   for (const hs of result.handshakes || []) {
     if (hs.receiver === engine.address) continue; // self-stash copies aren't a peer conversation
@@ -7479,7 +7524,10 @@ engine.onQuantumAddressSpent = (address) => {
 /// Whether a quantum-safe address has ever SPENT - the one event that puts its key on chain
 /// (receiving reveals nothing; iOS ChatService.quantumAddressSpentState). true is marked locally and
 /// permanent; false means no spend in its history; null when the history can't be read right now.
-/// Quantum addresses are young, so one page covers them.
+/// The whole history, a page at a time (iOS da2c8e2, IOS-105: engine/quantum.js
+/// quantumSpentFromHistory): a spend buried under later activity still revealed the key. A found
+/// spend is marked for good, so the walk runs once per address; a page that can't be read, or a
+/// history deeper than 10,000 transactions, answers unknown - never "not spent".
 // A "not spent" answer is reused for a minute: Manage Addresses repaints after every reveal, and
 // asking the REST server about every quantum row each time would trip its rate limit.
 const quantumUnspentSeenAt = new Map();
@@ -7487,18 +7535,44 @@ async function quantumAddressSpentState(address) {
   if (isQuantumAddressSpentLocally(address)) return true;
   if (!String(address || "").trim()) return null;
   if (Date.now() - (quantumUnspentSeenAt.get(address) || 0) < 60_000) return false;
-  try {
-    const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
+  const spent = await quantumSpentFromHistory(address, async (offset, limit) => {
+    const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=${limit}&offset=${offset}&resolve_previous_outpoints=light`;
     const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
     if (!response.ok) return null;
-    const txs = await response.json();
-    if (!Array.isArray(txs)) return null;
-    const lowered = String(address).toLowerCase();
-    const spent = txs.some((tx) => (tx?.inputs || []).some((input) => String(input?.previous_outpoint_address || "").toLowerCase() === lowered));
-    if (spent) markQuantumAddressSpent(address);
-    else quantumUnspentSeenAt.set(address, Date.now());
-    return spent;
-  } catch { return null; }
+    return response.json();
+  });
+  if (spent === true) markQuantumAddressSpent(address);
+  else if (spent === false) quantumUnspentSeenAt.set(address, Date.now());
+  return spent;
+}
+
+/// Whether a spending address already has history (iOS ChatService.spendingAddressUsedState): a
+/// persisted "used" answers at once (used is for good), otherwise the REST server is asked, bounded
+/// so a hung endpoint can't stall a send; true is remembered. null when it can't be answered.
+async function spendingAddressUsedState(address) {
+  if (!String(address || "").trim()) return null;
+  const cached = loadSpendingBalCache()[address];
+  if (cached?.used === true) return true;
+  const used = await spendingAddressHasHistory(address, { timeoutMs: 8000 });
+  if (used === true) saveSpendingBalCacheEntries({ [address]: { ...loadSpendingBalCache()[address], used: true } });
+  return used;
+}
+
+/// The next fresh quantum-safe slot, checked on chain first (iOS da2c8e2 verifiedFreshQuantumIndex,
+/// IOS-101; engine/quantum.js): a slot the REST server says already has history is skipped and the
+/// quantum chain's end raised past it (up to 20); a check that can't be answered takes the slot, so
+/// an unreachable server never blocks a send. Used by chat payments, Manage Addresses sends, KNS
+/// change, the Receive QR and Request Payment's fresh addresses.
+async function verifiedFreshQuantumSlot() {
+  const wallet = engine.address;
+  return verifiedFreshQuantumIndex({
+    qMaxIndex: getSpendingState().qMaxIndex,
+    addressAt: (index) => deriveSpendingAddressAt(index),
+    usedState: spendingAddressUsedState,
+    // the bound only grows, and only for the account that asked
+    raiseBound: (qMaxIndex) => { if (wallet) saveSpendingState({ qMaxIndex }, wallet); },
+    onSkip: (index) => appendEngineLog(`Quantum slot ${chainLocalIndex(index)} already has history - skipping it.`),
+  });
 }
 
 // Every send out of the PRIMARY spending address rotates it to a fresh one (iOS e53ea11): change
@@ -7514,25 +7588,38 @@ async function quantumAddressSpentState(address) {
 // address - and the legacy primary rotates as before; a legacy non-primary keeps same-address
 // change. `purpose` "kns": a KNS transfer, which rotates only the primary (iOS
 // KNSDomainTransferService).
-function freshChangeForSpendingIndex(index, { purpose = "withdraw", destination = null } = {}) {
+//
+// iOS da2c8e2: the fresh slot is checked on chain first (verifiedFreshQuantumSlot, IOS-101), and a
+// quantum source whose fresh change slot can't be derived throws QUANTUM_CHANGE_UNAVAILABLE instead
+// of parking change on the key the spend reveals (IOS-104; engine/quantum.js freshChangeRequired). A
+// legacy source keeps its fallback to itself; a KNS transfer is unchanged.
+async function freshChangeForSpendingIndex(index, { purpose = "withdraw", destination = null } = {}) {
   if (index == null) return null;
-  if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return null;
   const state = getSpendingState();
+  const ready = Boolean(engine.address && activeAccountMnemonic() && engine.kaspa);
   // A send to the address itself moves nothing out: it consolidates in place (iOS isSelfSend).
-  const selfSend = destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressAt(index) || "").toLowerCase();
-  const freshIndex = spendingChangeIndex({ purpose, sourceIndex: index, primaryIndex: state.activeIndex, qMaxIndex: state.qMaxIndex, selfSend });
-  if (freshIndex == null) return null;
-  const address = deriveSpendingAddressAt(freshIndex);
-  return address ? { index: freshIndex, address } : null;
+  const selfSend = ready && destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressAt(index) || "").toLowerCase();
+  const ruleIndex = spendingChangeIndex({ purpose, sourceIndex: index, primaryIndex: state.activeIndex, qMaxIndex: state.qMaxIndex, selfSend });
+  if (ruleIndex == null) return null;
+  const freshIndex = ready ? await verifiedFreshQuantumSlot() : ruleIndex;
+  const address = ready ? deriveSpendingAddressAt(freshIndex) : null;
+  if (address) return { index: freshIndex, address };
+  if (freshChangeRequired({ purpose, sourceIndex: index, freshIndex: ruleIndex })) throw new Error(QUANTUM_CHANGE_UNAVAILABLE);
+  return null;
 }
 // A chat payment from a spending address picked on the Send KAS sheet (not the primary, iOS
-// dae8a01): its change goes to a never-used slot - a fresh quantum-safe one (iOS bba1b1e) - but
-// once the node has the transaction that address is only REVEALED - the primary stays put.
-function freshSpendingChangeAddress() {
-  if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return null;
-  const freshIndex = spendingChangeIndex({ purpose: "payment", qMaxIndex: getSpendingState().qMaxIndex });
-  const address = deriveSpendingAddressAt(freshIndex);
-  return address ? { index: freshIndex, address } : null;
+// dae8a01): its change goes to a never-used slot - a fresh quantum-safe one (iOS bba1b1e), checked
+// on chain first (iOS da2c8e2) - but once the node has the transaction that address is only
+// REVEALED - the primary stays put. `sourceIndex` is the paying address: a quantum one whose fresh
+// slot can't be derived throws rather than take change back (IOS-104).
+async function freshSpendingChangeAddress(sourceIndex = null) {
+  const ruleIndex = spendingChangeIndex({ purpose: "payment", qMaxIndex: getSpendingState().qMaxIndex });
+  const ready = Boolean(engine.address && activeAccountMnemonic() && engine.kaspa);
+  const freshIndex = ready ? await verifiedFreshQuantumSlot() : ruleIndex;
+  const address = ready ? deriveSpendingAddressAt(freshIndex) : null;
+  if (address) return { index: freshIndex, address };
+  if (freshChangeRequired({ purpose: "payment", sourceIndex, freshIndex: ruleIndex })) throw new Error(QUANTUM_CHANGE_UNAVAILABLE);
+  return null;
 }
 /** The bound patch that reveals `index` on its own chain (a quantum index extends qMaxIndex; the
  *  legacy bound never sees base-space values). */
@@ -8478,10 +8565,12 @@ function chatPaymentDestination(contact) {
 // land on the same index). Request Payment's Fresh Address (iOS 6dee531).
 // Fresh addresses handed to someone else are exactly what the quantum-safe chain is for (KIP-22,
 // iOS bba1b1e reserveFreshSpendingAddresses): never revealed, never funded, key hidden until they
-// spend. So the slots come from past the quantum chain's bound.
-function reserveFreshSpendingAddresses(count) {
+// spend. So the slots come from past the quantum chain's bound - checked on chain first (iOS
+// da2c8e2 verifiedFreshQuantumIndex, IOS-101), so a slot used elsewhere is never handed out.
+async function reserveFreshSpendingAddresses(count) {
   if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
-  const base = nextFreshQuantumIndex(getSpendingState().qMaxIndex);
+  if (!(count > 0)) return [];
+  const base = await verifiedFreshQuantumSlot();
   const results = [];
   for (let i = 0; i < count; i += 1) {
     const index = base + i;
@@ -8515,13 +8604,16 @@ function saveSpendingBalCacheEntries(updates) {
 // disappears from the balance.
 // Every revealed spending address together (BigInt sompi), null until first known. A failed lookup
 // leaves the previous total in place rather than clearing it: a total a few seconds stale reads
-// better than a line that vanishes because one request timed out.
-let spendingTotalSompi = null;
+// better than a line that vanishes because one request timed out. It belongs to the account it
+// was read for: after an account switch it reads as unknown (the spinner) until the new account's
+// own total lands, and a read that finishes after the switch is dropped (iOS c130dc1).
+const profileSpendingTotal = accountScopedValue(() => engine.address, null);
 function renderProfileAccountTotal() {
   const el = document.querySelector("[data-manage-addresses-total]");
   if (!el) return;
   const chatting = sompiFromUserText(String(currentBalanceKas ?? ""));
   const needsSpending = Boolean(activeAccountMnemonic());
+  const spendingTotalSompi = profileSpendingTotal.get();
   if (chatting == null || (needsSpending && spendingTotalSompi == null)) {
     el.innerHTML = '<span class="sk-spinner" aria-hidden="true"></span>';
     return;
@@ -8533,6 +8625,7 @@ function renderProfileAccountTotal() {
 let spendingTotalToken = 0;
 async function refreshSpendingTotal() {
   const token = ++spendingTotalToken;
+  const account = accountGuard(() => engine.address);
   const addresses = [];
   for (const i of spendingRevealedIndices()) {
     const addr = deriveSpendingAddressAt(i);
@@ -8543,11 +8636,12 @@ async function refreshSpendingTotal() {
     // ONE batched UTXO call for every address - the same call the Manage Addresses list makes,
     // rather than a round trip per address.
     const byAddress = await spendingBalancesBatchSompi(addresses);
-    if (token !== spendingTotalToken) return;
+    if (token !== spendingTotalToken || !account.still()) return;
     let sompi = 0n;
     for (const value of byAddress.values()) sompi += BigInt(Math.round(Number(value) || 0));
-    spendingTotalSompi = sompi;
+    profileSpendingTotal.set(sompi, account.account);
   } catch { /* the previous total stays */ }
+  if (!account.still()) return;
   if (token === spendingTotalToken) renderProfileAccountTotal();
 }
 
@@ -8561,14 +8655,14 @@ function refreshSpendingSummaryOnShow() {
   refreshSpendingSummary();
   // only a known total counts; a keychain still unlocking is asked again on the next show
   st.key = key;
-  st.at = spendingTotalSompi != null ? Date.now() : 0;
+  st.at = profileSpendingTotal.get() != null ? Date.now() : 0;
 }
 
 async function refreshSpendingSummary() {
   if (refreshSpendingSummary.wallet !== engine.address) {
     // another account: its total starts unknown, never the previous account's number
     refreshSpendingSummary.wallet = engine.address;
-    spendingTotalSompi = null;
+    profileSpendingTotal.clear();
   }
   renderProfileAccountTotal();
   if (!activeAccountMnemonic() || !engine.kaspa) return;
@@ -9478,7 +9572,7 @@ async function submitKnsTransfer() {
   let committed = false;
   try {
     // The primary's change rotates onto a fresh quantum-safe slot (iOS bba1b1e KNSService).
-    const fresh = spendingIndex != null ? freshChangeForSpendingIndex(spendingIndex, { purpose: "kns" }) : null;
+    const fresh = spendingIndex != null ? await freshChangeForSpendingIndex(spendingIndex, { purpose: "kns" }) : null;
     const result = await engine.transferKnsDomain({
       domain,
       assetId,
@@ -9891,6 +9985,50 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
 // shown (un-hidden), the bound covers the highest one, and the empty rows it sweeps in stay hidden.
 let spendingDiscovering = false;
 let spendingDiscoveryProgress = null;
+/// The whole Discover Addresses sweep for `wallet` - the legacy chain, then the quantum-safe one -
+/// applied to its stored state while it is still the account on screen. Returns how many addresses
+/// hold a balance or a domain. Shared by the Discover button and a typed-in recovery phrase's
+/// background run (iOS da2c8e2 importWallet(phrase:)).
+async function discoverSpendingAddressesFor(wallet, { onProgress = null } = {}) {
+  const fundedAmong = async (addresses) => {
+    const byAddress = await spendingBalancesBatchSompi(addresses);
+    return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
+  };
+  const activity = (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" });
+  const result = await discoverSpendingMatches({
+    derive: deriveSpendingAddressesInRange,
+    activity,
+    fundedAmong,
+    ownersAmong: (addresses) => engine.addressesOwningAnyName(addresses),
+    onProgress,
+  });
+  if (engine.address === wallet) {
+    saveSpendingState(applySpendingDiscovery(getSpendingState(), result));
+  }
+  // The quantum-safe chain too (iOS bba1b1e / da2c8e2 discoverQuantumAddresses): QUANTUM_SCAN_FLOOR
+  // slots a step while a step shows activity, up to QUANTUM_SCAN_LIMIT. Funded slots are shown
+  // again, and the chain's end goes past every slot that ever saw activity (IOS-101). Its count
+  // joins the summary.
+  let quantumCount = 0;
+  if (engine.address === wallet) {
+    const quantum = await discoverQuantumMatches({
+      derive: deriveSpendingAddressesInRange,
+      activity,
+      fundedAmong,
+      base: QUANTUM_INDEX_BASE,
+      floor: QUANTUM_SCAN_FLOOR,
+      limit: QUANTUM_SCAN_LIMIT,
+    });
+    quantumCount = quantum.matchCount;
+    if (engine.address === wallet && (quantumCount || quantum.highestUsed >= 0)) saveSpendingState(applyQuantumDiscovery(getSpendingState(), quantum, QUANTUM_INDEX_BASE));
+  }
+  if (engine.address === wallet) {
+    if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
+    refreshSpendingSummary();
+  }
+  // The count is addresses that hold a balance or a domain, every one, not only new ones.
+  return result.matchCount + quantumCount;
+}
 spendingScanBtn?.addEventListener("click", async () => {
   closeSpendingActionsMenu();
   if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return; }
@@ -9901,14 +10039,7 @@ spendingScanBtn?.addEventListener("click", async () => {
   updateSpendingActionsPill();
   let summary;
   try {
-    const result = await discoverSpendingMatches({
-      derive: deriveSpendingAddressesInRange,
-      activity: (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" }),
-      fundedAmong: async (addresses) => {
-        const byAddress = await spendingBalancesBatchSompi(addresses);
-        return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
-      },
-      ownersAmong: (addresses) => engine.addressesOwningAnyName(addresses),
+    const matchCount = await discoverSpendingAddressesFor(wallet, {
       onProgress: (progress) => {
         spendingDiscoveryProgress = progress;
         if (spendingActionsSheet?.mode !== "progress") return;
@@ -9918,32 +10049,6 @@ spendingScanBtn?.addEventListener("click", async () => {
         if (found) found.textContent = spendingDiscoveryFoundText(progress.foundCount);
       },
     });
-    if (engine.address === wallet) {
-      saveSpendingState(applySpendingDiscovery(getSpendingState(), result));
-    }
-    // The quantum-safe chain too (iOS bba1b1e discoverQuantumAddresses): funded slots in its first
-    // QUANTUM_SCAN_FLOOR, shown again on a restored seed. Its count joins the summary.
-    let quantumCount = 0;
-    if (engine.address === wallet) {
-      const quantum = await discoverQuantumMatches({
-        derive: deriveSpendingAddressesInRange,
-        activity: (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" }),
-        fundedAmong: async (addresses) => {
-          const byAddress = await spendingBalancesBatchSompi(addresses);
-          return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
-        },
-        base: QUANTUM_INDEX_BASE,
-        floor: QUANTUM_SCAN_FLOOR,
-      });
-      quantumCount = quantum.matchCount;
-      if (engine.address === wallet && quantumCount) saveSpendingState(applyQuantumDiscovery(getSpendingState(), quantum, QUANTUM_INDEX_BASE));
-    }
-    if (engine.address === wallet) {
-      if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
-      refreshSpendingSummary();
-    }
-    // The count is addresses that hold a balance or a domain, every one, not only new ones.
-    const matchCount = result.matchCount + quantumCount;
     summary = matchCount === 0
       ? "No addresses with a balance or domain found."
       : `Found ${matchCount} address${matchCount === 1 ? "" : "es"} with a balance or domain.`;
@@ -10598,7 +10703,8 @@ async function lowestUnusedQuantumIndex() {
       }
     }
   }
-  return nextFreshQuantumIndex(state.qMaxIndex);
+  // past the chain's end, checked on chain first (iOS da2c8e2, IOS-101)
+  return verifiedFreshQuantumSlot();
 }
 
 // Profile decides the Receive address on its way in (iOS warmReceiveAddress /
@@ -11196,7 +11302,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 204;
+const APP_BUILD = 205;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -12265,13 +12371,15 @@ const sendKaspaController = makeSendController({
     if (sendKaspaSourceIndex != null) {
       // Change onto a fresh quantum-safe slot when the source is quantum or the primary, and the
       // primary follows it there once the node has the send (iOS bba1b1e withdrawFromSpendingAddress).
-      const fresh = freshChangeForSpendingIndex(sendKaspaSourceIndex, { destination });
-      return engine.sendFromSpending({
-        mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
+      // The slot is checked on chain first, and a quantum source with no fresh slot stops with an
+      // error rather than take its change back (iOS da2c8e2, IOS-101 / IOS-104).
+      const sourceIndex = sendKaspaSourceIndex;
+      return freshChangeForSpendingIndex(sourceIndex, { destination }).then((fresh) => engine.sendFromSpending({
+        mnemonic: activeAccountMnemonic(), index: sourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
-      }).then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh)); return result; });
+      }).then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh)); return result; }));
     }
     return engine.send(destination, amountKas, feeKas, outpoints ? { selectedOutpoints: outpoints } : {});
   },
@@ -15646,7 +15754,7 @@ function visibleChatConversations() {
     // find the chat. Media envelopes (multi-KB base64) are skipped by size, as on iOS.
     return (conversationEntry.messages || []).some((message) => {
       const text = messageContent(message);
-      if (!text || text === "📤 Sent via another device" || text.length > 4096) return false;
+      if (!text || isHiddenPlaceholder(text) || isHiddenPlaceholder(message?.text) || text.length > 4096) return false;
       return text.toLowerCase().includes(query);
     });
   });
@@ -16025,9 +16133,10 @@ function renderMessages(conversationEntry) {
   syncChatHeaderInsets();
   hydrateConversationMessages(conversationEntry);
   // Cross-device placeholders never render: they carry no readable content (an outgoing tx
-  // from another device whose text never synced into an archive this device has seen).
+  // from another device whose text never synced into an archive this device has seen). Messages
+  // this account can't decrypt ("[Encrypted message]") are hidden the same way (iOS c130dc1).
   const messages = (conversationEntry.messages || [])
-    .filter((m) => m?.text !== "📤 Sent via another device")
+    .filter((m) => !isHiddenPlaceholderMessage(m))
     // Invisible control envelopes (reactions, payment-pool envelopes) are applied or dropped
     // at ingest, never shown as bubbles. Filter them at render too, so any that slipped into storage
     // before interception existed — or via a history restore that didn't intercept — don't leak as
@@ -18045,7 +18154,7 @@ async function sendTipNow(tipSompi) {
     await ensureRuntimes({ quiet: true });
     // From a spending address the change goes to a never-used address, revealed rather than made
     // primary (iOS 6333dd3). A Max tip leaves no change, so no fresh change address is used.
-    const tipFresh = tip.fundingAddress && !max ? freshSpendingChangeAddress() : null;
+    const tipFresh = tip.fundingAddress && !max ? await freshSpendingChangeAddress(tip.fundingIndex) : null;
     // From the chatting address the memo rides sealed in the payload (iOS sendPayment(note:tip:)):
     // a tip that names the post is a signed kchat:1:tip: (iOS a6bd60a), one without a post the chat
     // payment's kchat:1:pay:. The fee card's extra goes as the priority fee and coin control limits
@@ -18356,7 +18465,14 @@ async function flushContactStashQueue() {
       s.known.add(address);
       saveContactStash(s);
       try {
-        const envelope = await engine.createSelfStashEnvelope({ partnerAddress: address, contactOnly: true });
+        const envelope = await engine.createSelfStashEnvelope({ forAddress: wallet, partnerAddress: address, contactOnly: true });
+        if (engine.address !== wallet) {
+          // switched while it was sealed: back in this account's queue, not sent from the next one
+          s.known.delete(address);
+          if (!s.pending.includes(address)) s.pending.unshift(address);
+          saveContactStash(s);
+          return;
+        }
         const result = await engine.sendSelfStashOnchain({ envelope });
         contactStashFailures = 0;
         contactStashRetryAt = 0;
@@ -18444,17 +18560,24 @@ async function readBackContactNotes() {
 // must never surface as a handshake failure to the user — the handshake
 // itself already succeeded.
 async function stashHandshakeForRecovery(contact, { isResponse = false, createdAt = Date.now() } = {}) {
+  // The note carries this account's aliases for the contact: derived, sealed and sent for the
+  // account active when it started, or not at all (iOS dfaba68 - a saved handshake must never
+  // hand one account's aliases to another; the engine refuses a note made for another account).
+  const account = accountGuard(() => engine.address);
   try {
     const aliases = await engine.deriveConversationAliases(contact.address);
+    if (!account.still()) return;
     const envelope = await engine.createSelfStashEnvelope({
+      forAddress: account.account,
       ourAlias: aliases.myAlias,
       theirAlias: aliases.theirAlias,
       partnerAddress: contact.address,
       isResponse,
       createdAt,
     });
+    if (!account.still()) return;
     const result = await engine.sendSelfStashOnchain({ envelope });
-    noteContactStashed(contact.address); // a handshake note covers the contact too
+    if (account.still()) noteContactStashed(contact.address); // a handshake note covers the contact too
     appendEngineLog(`Conversation recovery data stashed on-chain: ${result.txid || ""}`);
   } catch (error) {
     appendEngineLog(`Self-stash skipped (non-fatal): ${error.message}`);
@@ -19065,6 +19188,24 @@ function updatePublicChatsSettingsButton() {
   const gear = document.querySelector("[data-public-chats-settings]");
   if (gear) gear.hidden = !(currentAppTab === "chats" && !chatSelectionModeActive && !isChildModeEnabled());
 }
+/** An in-place account switch (iOS c130dc1, ChatListView onChange(publicAddress)): the chat, group
+ *  or room open in the old account closes and every selection clears, so nothing of it reopens in
+ *  the new account. The 1:1 itself closes in activateWalletDataScope (setActiveConversationId(null))
+ *  and the room in resetBroadcastsForAccount; this does the rest. Nothing is saved on the way out:
+ *  by now the per-account stores are the new account's. */
+function closeChatsForAccountSwitch() {
+  const step = (fn) => { try { fn(); } catch { /* that part not initialized yet */ } };
+  step(() => { if (messageSelectionMode) { messageSelectionMode = false; selectedMessageIds.clear(); updateSelectionUi(); } });
+  step(() => cancelReply());
+  step(() => closeMessageDetails());
+  step(() => closeChatInfoSheet());
+  step(() => closeChatInfo());
+  step(() => { if (paySheetConversationId) closePaymentSheet(); });
+  step(() => { if (composerInputField) { composerInputField.value = ""; autoGrowComposer(); } });
+  step(() => { if (activeGroupId) closeGroupChat({ keepDraft: false }); });
+  step(() => { if (chatSelectionModeActive) setChatSelectionMode(false); });
+}
+
 function setChatSelectionMode(active) {
   chatSelectionModeActive = active;
   if (!active) { selectedChatConversationIds.clear(); selectedGroupIds.clear(); selectedRoomNames.clear(); }
@@ -21164,7 +21305,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       // A spending address's change goes to a never-used address, revealed in Manage Addresses;
       // nothing rotates a "primary" (iOS 6333dd3). A Max payment leaves no change, so no fresh
       // change address is used.
-      const payFresh = spendingFunded && !max ? freshSpendingChangeAddress() : null;
+      const payFresh = spendingFunded && !max ? await freshSpendingChangeAddress(fundingIndex) : null;
       // Max: one output of exactly the shown amount from exactly its coins, the payment payload on
       // it, nothing left for change (DSK-042); the engine refuses if the coins changed (DSK-043).
       const maxPin = max ? { extraFeeSompi: extraSompi, manualUtxos: manualKeys, payload, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
@@ -22922,6 +23063,13 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
     try { Calls.handleIncomingCallEnvelope(callEnvelope, message, contact?.address || message.sender || ""); }
     catch (error) { appendEngineLog(`Call envelope handling failed: ${error.message}`); }
   }
+  // A placeholder body (another device's send, a message this account can't decrypt) is kept, so
+  // a later copy with real text can replace it, but it is never a visible bubble: no banner, no
+  // unread - a badge nobody could clear (iOS c130dc1).
+  if (isHiddenPlaceholderMessage(message)) {
+    addMessageToConversation(conversationEntry, message);
+    return null;
+  }
   return addMessageToConversation(conversationEntry, message);
 }
 
@@ -23073,7 +23221,10 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
     }
 
     const hidden = new Set((conversationEntry.hiddenMessageKeys || []).map(String));
-    const knownTxids = new Set((conversationEntry.messages || []).map((m) => m.txid).filter(Boolean).map(String));
+    // A stored placeholder ("📤 Sent via another device", "[Encrypted message]") is not "known": the
+    // archive's readable copy of the same transaction replaces it (iOS preferMessage, c130dc1).
+    const placeholderByTxid = new Map((conversationEntry.messages || []).filter((m) => m?.txid && isHiddenPlaceholderMessage(m)).map((m) => [String(m.txid), m]));
+    const knownTxids = new Set((conversationEntry.messages || []).filter((m) => !placeholderByTxid.has(String(m?.txid || ""))).map((m) => m.txid).filter(Boolean).map(String));
     const knownIds = new Set((conversationEntry.messages || []).map((m) => String(m.id)));
     const preLastActivityAt = Number(conversationEntry.lastActivityAt || 0);
     const preUpdatedAt = Number(conversationEntry.updatedAt || 0);
@@ -23090,6 +23241,15 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
       if (isContactDeletedAsOf(contactAddress, txid, phoneArchiveTimestampMs(archiveMessage))) continue;
       const id = String(archiveMessage?.id || "").trim() || nowId();
       if (txid && (knownTxids.has(txid) || hidden.has(txid))) continue;
+      const placeholder = txid ? placeholderByTxid.get(txid) : null;
+      if (placeholder) {
+        // Only real text replaces it; another placeholder copy changes nothing.
+        if (!upgradesPlaceholder(placeholder, { text: archiveMessage?.content })) continue;
+        conversationEntry.messages = conversationEntry.messages.filter((m) => m !== placeholder);
+        placeholderByTxid.delete(txid);
+        knownIds.delete(String(placeholder.id));
+        changed = true;
+      }
       if (knownIds.has(id) || hidden.has(id)) continue;
       // Never a payment: a .kachat name transaction or other contract tx (iOS 32fdaa4).
       if (txid && isSuppressedPaymentTxId(txid)) continue;
@@ -23418,7 +23578,7 @@ function archiveMessageKey(archiveMessage) {
 
 function isArchivePlaceholderContent(content) {
   const text = String(content || "");
-  return !text || text === "📤 Sent via another device" || text === "[Encrypted message]";
+  return !text || isHiddenPlaceholder(text);
 }
 
 /** Mirrors iOS's ChatService.preferMessage: a real body beats a placeholder,
@@ -26262,8 +26422,18 @@ async function commitImport(passphrase) {
   if (importAccountModal) importAccountModal.dataset.busy = "1";
   if (importPassphraseError) importPassphraseError.hidden = true;
   try {
-    await importAndEnterAccount({ ...pendingImport, passphrase });
+    const imported = await importAndEnterAccount({ ...pendingImport, passphrase });
     pendingImport = null;
+    // A restored seed finds its spending addresses by itself - legacy and quantum, the same sweep as
+    // Manage Addresses' Discover Addresses - in the background (iOS da2c8e2, owner's call
+    // 2026-10-21). Only this path, a typed-in recovery phrase: creating or switching accounts (the
+    // chatting-address switch also goes through importAndEnterAccount) doesn't scan.
+    const restoredWallet = imported?.address || engine.address;
+    if (restoredWallet) {
+      void discoverSpendingAddressesFor(restoredWallet)
+        .then((count) => appendEngineLog(`Restore: Discover Addresses found ${count} address${count === 1 ? "" : "es"} with a balance or domain.`))
+        .catch((error) => appendEngineLog(`Restore: Discover Addresses failed: ${error?.message || error}`));
+    }
     if (importAccountModal) importAccountModal.hidden = true;
     markUserTypePending();
     markOnboardingRunPending("import");
@@ -27550,11 +27720,12 @@ queueMicrotask(async () => {
       },
       explorerTxUrl, explorerAddressUrl, shortAddress,
       onIdentityChanged: () => { try { refreshKachatIdentity(); } catch { /* not ready yet */ } },
-      // Buy From (iOS eb9b027): the address the marketplace buys with - its balance, Choose an
-      // Address, and Fund's QR code (the funding card's).
+      // A paying address's balance (the payer line's "Balance after") and Fund's QR code (the
+      // funding card's). The marketplace always buys with the chatting address (iOS 6e938ff: no
+      // Buy From); the payer line names one of your own addresses (iOS ownAddressLabel).
       addressBalanceSompi: async (address) => BigInt((await engine.balanceForAddress(address))?.totalSompi ?? 0),
       drawQr: (canvas, text) => engine.drawQrFor(canvas, text, { dark: "#06110f", light: "#ffffff" }),
-      openOwnAddressPicker: ({ title, selectedAddress, onPick, excludeQuantum = false }) => openOwnAddressPickerFor({ title, selectedAddress, onPick, excludeQuantum }),
+      ownAddressLabel: (address) => ownAddressLabelFor(address),
     });
     // The startup tab restore can show .kachat before the runtime above existed, and that show
     // started nothing (no registry yet): the page sat on "Coming soon" with empty cards until it
@@ -28726,9 +28897,14 @@ function openGroupChat(groupId) {
   if (!isTouchDevice()) window.setTimeout(() => groupComposerInput?.focus(), 0);
   renderGroupList();
 }
-function closeGroupChat() {
+// `keepDraft: false` (an account switch): the drafts store is the NEW account's by then, so the old
+// account's text is not filed into it. Also a click handler: an event argument keeps the draft.
+function closeGroupChat({ keepDraft = true } = {}) {
   const wasOpen = Boolean(activeGroupId);
-  if (wasOpen && groupComposerInput) saveDraft(`group:${activeGroupId}`, groupComposerInput.value);
+  if (wasOpen && groupComposerInput) {
+    if (keepDraft !== false) saveDraft(`group:${activeGroupId}`, groupComposerInput.value);
+    else { groupComposerInput.value = ""; try { autoGrowGroupComposer(); } catch { /* fine */ } }
+  }
   if (groupSelectionMode) { groupSelectionMode = false; selectedGroupMessageKeys.clear(); updateGroupSelectionUi(); }
   try { cancelGroupVoice(); cancelGroupReply(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto(); } catch { /* not ready */ }
   activeGroupId = null;

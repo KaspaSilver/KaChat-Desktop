@@ -737,7 +737,9 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   }
 
   // Change goes where the caller says (a fresh spending address when the primary spends, see
-  // ui/app.js freshChangeForSpendingIndex) and otherwise back to the source.
+  // ui/app.js freshChangeForSpendingIndex) and otherwise back to the source. A quantum-safe source
+  // never gets here without one when its rule asked for a fresh slot: the app throws
+  // QUANTUM_CHANGE_UNAVAILABLE first (iOS da2c8e2, IOS-104).
   const changeTo = changeAddress ? validateMainnetAddress(changeAddress) : sourceAddress;
   log("Creating transaction from", sourceAddress, "to", to, "amount", amount, "KAS", changeTo !== sourceAddress ? `(change to ${changeTo})` : "");
   const settings = {

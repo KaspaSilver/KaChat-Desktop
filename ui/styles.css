@@ -14453,11 +14453,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   .kmkt-tabs > .kmkt-tab { flex: 1 1 0; min-width: 0; padding-left: 2px; padding-right: 2px; white-space: nowrap; }
 }
 @media (max-width: 859px) {
-  /* The address pill gets what is left between the status light and the trailing capsule (iOS
-     principal item); the address line truncates in the middle of that room. */
-  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) .kmkt-source-pill { flex: 0 1 auto; max-width: 196px; margin-left: auto; margin-right: 80px; transform: none; }
-  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) .kmkt-source-pill-copy { min-width: 0; max-width: 100%; }
-  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) .kmkt-source-pill-copy > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The chatting balance (iOS 6e938ff: no Buy From pill) keeps clear of the trailing capsule. */
+  body:has([data-app-tab-screen="kachat-names"]:not([hidden]) [data-kmkt-header-actions]) [data-toolbar-balance] { padding-right: 80px; }
   .kmkt-tabs > .kmkt-tab { font-size: 14px; }
 }
 /* iOS KaChatStatsView hero: chart.bar.xaxis filled at 34pt, the total at 44pt heavy rounded. */

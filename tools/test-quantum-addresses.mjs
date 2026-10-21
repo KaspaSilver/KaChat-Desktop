@@ -344,6 +344,171 @@ async function main() {
     r.eq([...noRoute.matchedIndices].join(), String(B + 150), "restore: without the bulk route, balances of the whole window decide");
   }
 
+  // MARK: Restore keeps sweeping while a window shows activity (iOS da2c8e2, IOS-101)
+  {
+    const addr = (i) => `kaspa:q${i}`;
+    const idx = (a) => Number(a.slice(7));
+    const derive = async (start, end) => { const m = new Map(); for (let i = start; i < end; i += 1) m.set(i, addr(i)); return m; };
+    const sweep = async ({ touched, funded, activityAvailable = true, limit = Q.QUANTUM_SCAN_LIMIT, fundedFails = false }) => {
+      const windows = [];
+      const result = await discoverQuantumMatches({
+        derive,
+        activity: async (list) => { windows.push(idx(list[0]) - B); return activityAvailable ? new Map(list.filter((a) => touched.has(idx(a))).map((a) => [a, 1])) : null; },
+        fundedAmong: async (list) => { if (fundedFails) throw new Error("node down"); return new Set(list.filter((a) => funded.has(idx(a)))); },
+        base: B,
+        floor: Q.QUANTUM_SCAN_FLOOR,
+        limit,
+      });
+      return { result, windows };
+    };
+    r.eq(Q.QUANTUM_SCAN_FLOOR, 200, "restore: a step is 200 slots (iOS quantumScanFloor)");
+    r.eq(Q.QUANTUM_SCAN_LIMIT, 10_000, "restore: the sweep stops at 10,000 at the latest (iOS quantumScanLimit)");
+
+    // Funds past slot 199 (the old fixed window's miss): activity in 0-199, 200-399 and 400-599 keeps
+    // the sweep going; the first quiet window (600-799) ends it.
+    const deep = await sweep({ touched: new Set([B + 5, B + 250, B + 450]), funded: new Set([B + 450]) });
+    r.eq(deep.windows.join(","), "0,200,400,600", "restore: steps on while a window shows activity, stops at the first quiet one");
+    r.eq([...deep.result.matchedIndices].join(","), String(B + 450), "restore: a funded slot past 199 is found");
+    r.eq(deep.result.highestUsed, 450, "restore: the chain's end comes from the deepest used slot");
+    // A used-but-empty slot past the deepest funded one still sets the end.
+    const usedPast = await sweep({ touched: new Set([B + 100, B + 330]), funded: new Set([B + 100]) });
+    r.eq(usedPast.result.highestUsed, 330, "restore: a used, unfunded slot counts toward the end, not only funded ones");
+    const appliedUsed = applyQuantumDiscovery({ qMaxIndex: -1, hidden: [] }, usedPast.result, B);
+    r.eq(appliedUsed.qMaxIndex, 330, "restore: the quantum bound goes past every used slot");
+    r.check(!appliedUsed.hidden.includes(B + 100), "restore: the funded slot is shown");
+    r.check(appliedUsed.hidden.includes(B + 330) && appliedUsed.hidden.includes(B + 0) && appliedUsed.hidden.length === 330,
+      "restore: every other slot swept in stays hidden, the used-but-empty end slot included");
+    r.eq(Q.nextFreshQuantumIndex(appliedUsed.qMaxIndex), B + 331, "restore: the next fresh slot is past the deepest used one");
+    // A quiet window ends it even when something sits further on (one window of gap, as iOS).
+    const gap = await sweep({ touched: new Set([B + 150, B + 1000]), funded: new Set([B + 1000]) });
+    r.eq(gap.windows.join(","), "0,200", "restore: a whole quiet window ends the sweep");
+    r.eq(gap.result.matchCount, 0, "restore: nothing past a quiet window is looked at");
+    r.eq(gap.result.highestUsed, 150, "restore: the end still covers the used slot before the gap");
+    // Without the bulk route only the first window's balances can be read, as before.
+    const noRoute = await sweep({ touched: new Set(), funded: new Set([B + 150, B + 300]), activityAvailable: false });
+    r.eq(noRoute.windows.join(","), "0", "restore: without the bulk route the sweep stops after the first window");
+    r.eq([...noRoute.result.matchedIndices].join(","), String(B + 150), "restore: without the bulk route, the first window's balances decide");
+    r.eq(noRoute.result.highestUsed, 150, "restore: without the bulk route the end comes from the funded slot");
+    // Balances unreadable: nothing is shown, but the end still goes past the used slots.
+    const noBalances = await sweep({ touched: new Set([B + 7, B + 260]), funded: new Set([B + 7]), fundedFails: true });
+    r.eq(noBalances.result.matchCount, 0, "restore: unreadable balances show nothing");
+    r.eq(noBalances.result.highestUsed, 260, "restore: unreadable balances still raise the end past used slots");
+    r.eq(noBalances.windows.join(","), "0,200,400", "restore: unreadable balances don't stop the activity sweep");
+    // Busy forever: the limit ends it.
+    const busy = await sweep({ touched: { has: () => true }, funded: new Set(), limit: 1000 });
+    r.eq(busy.windows.length, 5, "restore: the sweep never passes its limit");
+    r.eq(busy.result.highestUsed, 999, "restore: the end covers the whole swept range");
+    const busyFull = await sweep({ touched: { has: () => true }, funded: new Set() });
+    r.eq(busyFull.windows.length, 50, "restore: at most 10,000 slots (50 windows of 200)");
+    // The bound only grows.
+    r.eq(applyQuantumDiscovery({ qMaxIndex: 900, hidden: [] }, usedPast.result, B).qMaxIndex, 900, "restore: a lower end never lowers the bound");
+  }
+
+  // MARK: Fresh slots are checked on chain before use (iOS da2c8e2 verifiedFreshQuantumIndex)
+  {
+    const addr = (i) => `kaspa:q${i}`;
+    const run = async ({ qMaxIndex, used, unknown = new Set(), limit, failAddressAt = null }) => {
+      const asked = [];
+      const raised = [];
+      let bound = qMaxIndex;
+      const index = await Q.verifiedFreshQuantumIndex({
+        qMaxIndex,
+        addressAt: (i) => (i === failAddressAt ? null : addr(i)),
+        usedState: async (a) => { const i = Number(a.slice(7)); asked.push(i - B); if (unknown.has(i)) return null; return used.has(i); },
+        raiseBound: (q) => { raised.push(q); bound = Math.max(bound, q); },
+        ...(limit != null ? { limit } : {}),
+      });
+      return { index, asked, raised, bound };
+    };
+    const clean = await run({ qMaxIndex: 4, used: new Set() });
+    r.eq(clean.index, B + 5, "fresh: an unused next slot is taken as is");
+    r.eq(clean.asked.join(","), "5", "fresh: the slot is asked about before use");
+    r.eq(clean.raised.length, 0, "fresh: nothing raised for an unused slot");
+    const skip = await run({ qMaxIndex: 4, used: new Set([B + 5, B + 6]) });
+    r.eq(skip.index, B + 7, "fresh: used slots are skipped");
+    r.eq(skip.raised.join(","), "5,6", "fresh: the chain's end is raised past each used slot");
+    r.eq(skip.bound, 6, "fresh: the stored bound ends past the used slots");
+    const empty = await run({ qMaxIndex: -1, used: new Set([B + 0]) });
+    r.eq(empty.index, B + 1, "fresh: a chain with no slots yet still checks slot 0");
+    const unknownAnswer = await run({ qMaxIndex: 4, used: new Set([B + 5]), unknown: new Set([B + 5]) });
+    r.eq(unknownAnswer.index, B + 5, "fresh: a check that can't be answered takes the slot (a REST outage never blocks a send)");
+    const throwing = await Q.verifiedFreshQuantumIndex({ qMaxIndex: 2, addressAt: addr, usedState: async () => { throw new Error("offline"); } });
+    r.eq(throwing, B + 3, "fresh: a check that throws takes the slot");
+    const underivable = await run({ qMaxIndex: 4, used: new Set([B + 5]), failAddressAt: B + 5 });
+    r.eq(underivable.index, B + 5, "fresh: an underivable slot is returned unchecked (the caller decides)");
+    r.eq(underivable.asked.length, 0, "fresh: nothing to ask without an address");
+    const allUsed = await run({ qMaxIndex: 4, used: { has: () => true } });
+    r.eq(Q.FRESH_QUANTUM_PROBE_LIMIT, 20, "fresh: at most 20 skips (iOS)");
+    r.eq(allUsed.asked.length, 20, "fresh: the check stops after 20 used slots");
+    r.eq(allUsed.index, B + 25, "fresh: after 20 skips the next slot is taken");
+  }
+
+  // MARK: A quantum source never takes change back (iOS da2c8e2, IOS-104)
+  {
+    r.eq(Q.QUANTUM_CHANGE_UNAVAILABLE, "Couldn't prepare the next address. Try again.", "no-change-to-source: the iOS error text");
+    const rule = (args) => Q.freshChangeRequired({ ...args, freshIndex: Q.spendingChangeIndex({ qMaxIndex: 4, primaryIndex: 0, ...args }) });
+    r.eq(rule({ purpose: "payment", sourceIndex: B + 2 }), true, "no-change-to-source: a chat payment from a quantum source must have its fresh slot");
+    r.eq(rule({ purpose: "payment", sourceIndex: 3 }), false, "no-change-to-source: a chat payment from a legacy source may fall back to itself");
+    r.eq(rule({ purpose: "withdraw", sourceIndex: B + 2 }), true, "no-change-to-source: a Manage Addresses send from a quantum source must have its fresh slot");
+    r.eq(rule({ purpose: "withdraw", sourceIndex: B + 2, primaryIndex: B + 2 }), true, "no-change-to-source: a quantum primary too");
+    r.eq(rule({ purpose: "withdraw", sourceIndex: 0 }), false, "no-change-to-source: the legacy primary keeps its fallback");
+    r.eq(rule({ purpose: "withdraw", sourceIndex: 3 }), false, "no-change-to-source: a legacy non-primary keeps same-address change");
+    r.eq(rule({ purpose: "withdraw", sourceIndex: B + 2, selfSend: true }), false, "no-change-to-source: Compound (a self-send) still consolidates in place");
+    r.eq(rule({ purpose: "kns", sourceIndex: B + 2, primaryIndex: B + 2 }), false, "no-change-to-source: a KNS transfer is unchanged");
+    // The app's change helpers (ui/app.js freshChangeForSpendingIndex / freshSpendingChangeAddress),
+    // replayed on the pure parts: derivation fails -> a quantum source throws, a legacy one returns null.
+    const pick = async ({ purpose, sourceIndex, derivable }) => {
+      const ruleIndex = Q.spendingChangeIndex({ purpose, sourceIndex, primaryIndex: 0, qMaxIndex: 4 });
+      if (ruleIndex == null) return null;
+      const freshIndex = await Q.verifiedFreshQuantumIndex({ qMaxIndex: 4, addressAt: () => (derivable ? "kaspa:qfresh" : null), usedState: async () => false });
+      const address = derivable ? "kaspa:qfresh" : null;
+      if (address) return { index: freshIndex, address };
+      if (Q.freshChangeRequired({ purpose, sourceIndex, freshIndex: ruleIndex })) throw new Error(Q.QUANTUM_CHANGE_UNAVAILABLE);
+      return null;
+    };
+    await r.throws(() => pick({ purpose: "payment", sourceIndex: B + 1, derivable: false }), (e) => e.message === Q.QUANTUM_CHANGE_UNAVAILABLE, "no-change-to-source: a quantum payment with no fresh slot throws");
+    await r.throws(() => pick({ purpose: "withdraw", sourceIndex: B + 1, derivable: false }), (e) => e.message === Q.QUANTUM_CHANGE_UNAVAILABLE, "no-change-to-source: a quantum send with no fresh slot throws");
+    r.eq(await pick({ purpose: "withdraw", sourceIndex: 0, derivable: false }), null, "no-change-to-source: a legacy primary with no fresh slot falls back (change to source)");
+    r.eq((await pick({ purpose: "payment", sourceIndex: B + 1, derivable: true }))?.index, B + 5, "no-change-to-source: a derivable fresh slot is used");
+  }
+
+  // MARK: The shield reads the full history (iOS da2c8e2, IOS-105)
+  {
+    const me = "kaspa:pqme";
+    const history = (count, spendAt = -1) => Array.from({ length: count }, (_, i) => ({
+      inputs: i === spendAt ? [{ previous_outpoint_address: me.toUpperCase() }] : [{ previous_outpoint_address: "kaspa:qsomeoneelse" }],
+    }));
+    const probe = async (txs, { failAt = -1 } = {}) => {
+      const offsets = [];
+      const answer = await Q.quantumSpentFromHistory(me, async (offset, limit) => {
+        offsets.push(offset);
+        r.eq(limit, 200, "shield: pages of 200");
+        if (offset === failAt) return null;
+        return txs.slice(offset, offset + limit);
+      });
+      return { answer, offsets };
+    };
+    const buried = await probe(history(450, 320));
+    r.eq(buried.answer, true, "shield: a spend buried under later activity is found");
+    r.eq(buried.offsets.join(","), "0,200", "shield: the walk stops at the page with the spend");
+    const first = await probe(history(450, 3));
+    r.eq(first.offsets.join(","), "0", "shield: a spend on the first page is one request");
+    const never = await probe(history(450));
+    r.eq(never.answer, false, "shield: a full history without a spend is 'not spent'");
+    r.eq(never.offsets.join(","), "0,200,400", "shield: every page is read before saying 'not spent'");
+    const exact = await probe(history(400));
+    r.eq(exact.answer, false, "shield: a history that ends on a page boundary is read to the empty page");
+    r.eq(exact.offsets.join(","), "0,200,400", "shield: the empty page ends it");
+    const broken = await probe(history(450, 420), { failAt: 200 });
+    r.eq(broken.answer, null, "shield: an unreadable page answers unknown, never 'not spent'");
+    const deep = await probe(history(20_000, 15_000));
+    r.eq(deep.answer, null, "shield: a history deeper than 10,000 transactions answers unknown");
+    r.eq(deep.offsets.length, 50, "shield: at most 50 pages (10,000 transactions)");
+    r.eq(await Q.quantumSpentFromHistory(me, async () => { throw new Error("offline"); }), null, "shield: a failing request answers unknown");
+    r.eq(await Q.quantumSpentFromHistory(me, async () => ({ error: "bad" })), null, "shield: a malformed page answers unknown");
+    r.eq(await Q.quantumSpentFromHistory("", async () => []), null, "shield: no address, no answer");
+  }
+
   for (const f of r.failures) console.log(`FAIL ${f}`);
   console.log(`quantum addresses: ${r.pass} checks passed, ${r.fail} failed`);
   process.exit(r.fail ? 1 : 0);
