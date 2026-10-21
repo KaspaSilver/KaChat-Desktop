@@ -14157,10 +14157,11 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
     background: var(--fill-tertiary, rgba(255,255,255,.06));
   }
 }
-@media (max-width: 859px) {
+@media all {
   /* The tab bar draws its symbols filled, as iOS's does (lock.shield.fill, chart.pie.fill,
      bubble.left.and.bubble.right.fill, person.crop.circle.fill); the inner details cut out in
-     the bar's colour. The Hub tiles keep the outline icons, as on iOS. */
+     the bar's colour. The Hub tiles keep the outline icons, as on iOS. Phones and the wide
+     screens' top pill alike. */
   .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > path:first-child { fill: currentColor; }
   .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > rect,
   .sidebar-tabbar .sidebar-tab[data-app-tab="cold-storage"] svg > path:last-child { stroke: var(--bar-bg); }
@@ -14551,3 +14552,46 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* The saved accounts screen says which KaChat this is, under its buttons. */
 .logged-out-content { grid-template-rows: minmax(20px,1fr) auto auto minmax(40px,1fr) auto auto auto; }
 .logged-out-version { grid-row: 7; margin: 18px 0 0; text-align: center; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ==== Wide screens: the top pill draws each tab the way iOS's tab bar does ==================
+   Same place (fixed at the top centre), but each tab is its symbol over a small label, the symbols
+   filled as iOS draws them (the rules above), the selected tab in its tinted capsule. */
+@media (min-width: 860px) {
+  body .sidebar-tabbar,
+  body.chats-tab .sidebar-tabbar { top: calc(6px + var(--safe-top, 0px)); padding: 4px; gap: 2px; }
+  body .sidebar-tabbar .sidebar-tab,
+  body.chats-tab .sidebar-tabbar .sidebar-tab {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    min-width: 76px;
+    padding: 4px 14px 3px;
+    color: var(--text);
+  }
+  body .sidebar-tabbar .sidebar-tab-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 26px;
+    height: 24px;
+    border-radius: 0;
+    background: transparent;
+  }
+  body .sidebar-tabbar .sidebar-tab:hover .sidebar-tab-icon,
+  body .sidebar-tabbar .sidebar-tab.active .sidebar-tab-icon { background: transparent; }
+  body .sidebar-tabbar .sidebar-tab-icon svg { width: 23px; height: 23px; }
+  body .sidebar-tabbar .sidebar-tab-icon .sidebar-tab-logo { width: 23px; height: 23px; }
+  body .sidebar-tabbar .sidebar-tab > span:last-child,
+  body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child { font-size: 11px; font-weight: 500; line-height: 13px; }
+  /* The count rides on the symbol's top-right corner, as on iOS. */
+  body .sidebar-tabbar .sidebar-tab-badge { top: 0; right: auto; left: calc(50% + 6px); }
+}
+/* The Kaspa Hub tab's Kaspa mark is drawn as a template, as iOS's tab bar draws it
+   (dockKaspaLogo, .alwaysTemplate): the same colour as the symbols beside it, the accent when
+   selected - not the mark's own teal on every tab. */
+.sidebar-tabbar .sidebar-tab[data-app-tab="hub"] .sidebar-tab-icon {
+  background-color: currentColor !important;
+  -webkit-mask: url("./assets/kaspa-logo.png") center / 23px 23px no-repeat;
+  mask: url("./assets/kaspa-logo.png") center / 23px 23px no-repeat;
+}
+.sidebar-tabbar .sidebar-tab[data-app-tab="hub"] .sidebar-tab-logo { opacity: 0; }

@@ -15,7 +15,8 @@ const everyPlaced = ({ dock, hub }) => {
   assert.ok(!hub.some((t) => DOCK_PINNED.includes(t)), "the Hub never holds a pinned tab");
 };
 
-// A fresh install: the default dock and Hub, unchanged.
+// A fresh install: the default dock (Kaspa Hub, Portfolio, Chats, KaPosts, Profile) and Hub, unchanged.
+assert.deepEqual(DOCK_DEFAULT, ["hub", "portfolio", "chats", "kaposts", "profile"]);
 const fresh = norm({ dock: DOCK_DEFAULT, hub: HUB_DEFAULT });
 assert.deepEqual(fresh.dock, DOCK_DEFAULT);
 assert.deepEqual(fresh.hub, HUB_DEFAULT);
@@ -36,7 +37,7 @@ everyPlaced(moved);
 
 // Missing pinned ones are reinserted; duplicates and unknown tabs dropped; at most two picks.
 const messy = norm({ dock: ["kaposts", "kaposts", "nope", "apps", "chess", "address-book"], hub: ["chess", "chats"] });
-assert.deepEqual(messy.dock, ["kaposts", "apps", "chats", "hub", "profile"]);
+assert.deepEqual(messy.dock, ["hub", "kaposts", "apps", "chats", "profile"]);
 assert.equal(messy.hub[0], "chess", "the stored Hub order comes first");
 everyPlaced(messy);
 everyPlaced(norm({}));
@@ -44,7 +45,7 @@ everyPlaced(norm({ dock: "x", hub: null }));
 
 // Red minus: to the top of Kaspa Hub. Pinned tabs never leave.
 const minus = removeFromDock(fresh, "portfolio");
-assert.deepEqual(minus.dock, ["cold-storage", "chats", "hub", "profile"]);
+assert.deepEqual(minus.dock, ["hub", "chats", "kaposts", "profile"]);
 assert.deepEqual(minus.hub, ["portfolio", ...HUB_DEFAULT]);
 assert.equal(removeFromDock(fresh, "chats"), fresh);
 assert.equal(removeFromDock(fresh, "hub"), fresh);
@@ -53,11 +54,11 @@ everyPlaced(minus);
 
 // Green plus: onto the end of the dock, only while it has room.
 assert.equal(dockIsFull(fresh), true);
-assert.equal(addToDock(fresh, "kaposts"), fresh, "refused while the dock is full");
+assert.equal(addToDock(fresh, "apps"), fresh, "refused while the dock is full");
 assert.equal(dockIsFull(minus), false);
-const plus = addToDock(minus, "kaposts");
-assert.deepEqual(plus.dock, ["cold-storage", "chats", "hub", "profile", "kaposts"]);
-assert.ok(!plus.hub.includes("kaposts"));
+const plus = addToDock(minus, "apps");
+assert.deepEqual(plus.dock, ["hub", "chats", "kaposts", "profile", "apps"]);
+assert.ok(!plus.hub.includes("apps"));
 assert.equal(dockIsFull(plus), true);
 everyPlaced(plus);
 
@@ -65,8 +66,8 @@ everyPlaced(plus);
 // room, and adding a tab sends the hidden pick to the top of the Hub.
 const simple = (tab) => tab !== "kaposts";
 assert.equal(dockIsFull(plus, simple), false);
-const simplePlus = addToDock(plus, "apps", simple);
-assert.deepEqual(simplePlus.dock, ["cold-storage", "chats", "hub", "profile", "apps"]);
+const simplePlus = addToDock(plus, "chess", simple);
+assert.deepEqual(simplePlus.dock, ["hub", "chats", "profile", "apps", "chess"]);
 assert.equal(simplePlus.hub[0], "kaposts");
 everyPlaced(simplePlus);
 assert.deepEqual(norm(simplePlus), simplePlus, "a move's result is already legal");

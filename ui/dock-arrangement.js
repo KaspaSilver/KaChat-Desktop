@@ -16,9 +16,12 @@ export const DOCK_PINNED = ["chats", "hub", "profile"];
 // Address Book (iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
 // KaChat Bots (iOS 82ab31d AppTab.kachatBots) follows KaChat Stats in the Hub; Simple Mode keeps it.
 export const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book", "kachat-bots"]; // Public Chats live under Chats now (iOS a566da7)
-export const DOCK_DEFAULT_ORDER = ["cold-storage", "portfolio", "chats", "hub", "profile", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "kaposts", "apps", "chess"];
-export const DOCK_DEFAULT = ["cold-storage", "portfolio", "chats", "hub", "profile"];
-export const HUB_DEFAULT = ["address-book", "kachat-names", "kachat-stats", "kachat-bots", "kaposts", "apps", "chess"];
+// A fresh dock (owner's choice for Desktop, 2026-10-21; iOS's defaultDock is Storage, Portfolio,
+// Chats, Hub, Profile): Kaspa Hub, Portfolio, Chats, KaPosts, Profile. Storage leads the Hub. An
+// arrangement someone already made is theirs and is kept.
+export const DOCK_DEFAULT_ORDER = ["hub", "portfolio", "chats", "kaposts", "profile", "cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "apps", "chess"];
+export const DOCK_DEFAULT = ["hub", "portfolio", "chats", "kaposts", "profile"];
+export const HUB_DEFAULT = ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "apps", "chess"];
 /** Slots the person fills: the cap minus the pinned three (iOS assignableDockSlots). */
 export const DOCK_PICK_SLOTS = DOCK_MAX_ITEMS - DOCK_PINNED.length;
 
