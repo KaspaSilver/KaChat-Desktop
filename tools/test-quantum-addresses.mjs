@@ -162,6 +162,11 @@ async function main() {
     r.check(back.activeIndex === B + 4 && back.maxIndex === 7 && back.qMaxIndex === 4, "state: and reads back as public index base+4");
     const shrunk = Q.spendingRecordFromState({ ...back, qMaxIndex: 1, qSpent: [] }, rotated);
     r.eq(shrunk.qMaxIndex, 4, "state: the quantum bound only grows");
+    // iOS 28ecee0: a quantum-space value in a legacy field never widens the legacy chain.
+    const strayActive = Q.spendingStateFromRecord({ activeIndex: B + 3, maxIndex: 5 });
+    r.check(strayActive.maxIndex === 5 && strayActive.activeIndex === B + 3 && strayActive.qMaxIndex === 3, `state: a quantum primary stored in activeIndex is read as quantum, legacy bound untouched (${JSON.stringify(strayActive)})`);
+    const strayMax = Q.spendingStateFromRecord({ activeIndex: 2, maxIndex: B + 9 });
+    r.check(strayMax.maxIndex === 2 && Q.revealedSpendingIndices(strayMax).length === 3, `state: a stored legacy max in quantum space is ignored (${JSON.stringify(strayMax)})`);
     const marked = Q.spendingRecordFromState({ ...back, qSpent: ["KASPA:PABC"] }, rotated);
     r.eq(Q.spendingRecordFromState({ ...Q.spendingStateFromRecord(marked), qSpent: [] }, marked).qSpent.join(), "kaspa:pabc", "state: a spent mark is never unmarked");
     r.eq(Q.revealedSpendingIndices({ maxIndex: 1, qMaxIndex: 1 }).join(","), `0,1,${B},${B + 1}`, "state: revealed indices cover both chains");

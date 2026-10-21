@@ -123,10 +123,16 @@ const wholeOr = (value, fallback) => {
 
 /** The sanitized spending state of a stored record. */
 export function spendingStateFromRecord(raw = {}) {
-  const legacyActive = Math.max(0, Math.min(QUANTUM_INDEX_BASE - 1, wholeOr(raw.activeIndex, 0)));
-  const qActive = raw.qActive == null ? null : Math.max(0, wholeOr(raw.qActive, 0));
+  // A legacy field holding a quantum-space value (>= 1,000,000) never counts toward the legacy
+  // chain (iOS 28ecee0): clamping it to 999,999 would make every 0...maxIndex loop derive a million
+  // addresses. A primary pointer stored there instead of in qActive is read as the quantum primary.
+  const rawActive = Math.max(0, wholeOr(raw.activeIndex, 0));
+  const legacyActive = rawActive < QUANTUM_INDEX_BASE ? rawActive : 0;
+  const qActive = raw.qActive != null ? Math.max(0, wholeOr(raw.qActive, 0))
+    : rawActive >= QUANTUM_INDEX_BASE ? rawActive - QUANTUM_INDEX_BASE : null;
   const activeIndex = qActive == null ? legacyActive : QUANTUM_INDEX_BASE + qActive;
-  const maxIndex = Math.max(legacyActive, Math.min(QUANTUM_INDEX_BASE - 1, Math.max(0, wholeOr(raw.maxIndex, 0))));
+  const rawMax = Math.max(0, wholeOr(raw.maxIndex, 0));
+  const maxIndex = Math.max(legacyActive, rawMax < QUANTUM_INDEX_BASE ? rawMax : 0);
   const qMaxIndex = Math.max(qActive ?? -1, Math.max(-1, wholeOr(raw.qMaxIndex, -1)));
   const hidden = Array.isArray(raw.hidden)
     ? Array.from(new Set(raw.hidden.map(Number).filter((n) => Number.isInteger(n) && n >= 0)))
