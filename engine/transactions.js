@@ -506,31 +506,47 @@ async function sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAdd
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
-  const sorted = [...entries].sort(bySompiDesc);
+  return sendSelfPayloadFromEntries({ kaspa, rpc, withRpc, privateKey, sourceAddress, payload, entries, label: "Self-stash", log });
+}
 
+/**
+ * A payload carried back to the sender's own address as ONE output of (chosen inputs - fee), no
+ * change (iOS KaChatTransactionBuilder.buildContextualMessageTx / selectUtxosForContextualMessage,
+ * and its group, public-chat and KaPosts self-spends). Coins are taken largest first, one at a
+ * time, until the fee (plus any priority fee the person chose) is covered and the KIP-9 storage
+ * mass fits: with a single output that mass is C/out - sum(C/in), nil when out is the inputs less
+ * a fee. The old shape - a nominal 0.2 KAS output plus change, smallest coins first - left a tiny
+ * change output whenever the wallet held small coins, and the node refused the whole message with
+ * "Storage mass exceeds maximum". `useAll` spends exactly the given coins (coin control).
+ */
+async function sendSelfPayloadFromEntries({ kaspa, rpc, withRpc, privateKey, sourceAddress, payload, entries, prioritySompi = 0n, useAll = false, label = "Message", log = () => {} }) {
+  const priority = BigInt(prioritySompi || 0n);
+  const sorted = [...entries].sort(bySompiDesc);
   const chosen = [];
   let total = 0n;
-  for (const entry of sorted) {
+  for (let i = 0; i < sorted.length; i += 1) {
     if (chosen.length >= MAX_INPUTS_PER_SWEEP) break;
-    chosen.push(entry);
-    total += utxoAmountSompi(entry) ?? 0n;
+    chosen.push(sorted[i]);
+    total += utxoAmountSompi(sorted[i]) ?? 0n;
+    if (useAll && i < sorted.length - 1) continue;
     // Fee for this exact shape (these inputs, one output, the payload). Undefined means the mass
     // is over the standard limit: take another coin.
     const draft = kaspa.createTransaction(chosen, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n, payload);
     const draftFee = kaspa.calculateTransactionFee(NETWORK_ID, draft, 1);
     if (draftFee == null) continue;
-    const amount = total - BigInt(draftFee);
+    const fee = BigInt(draftFee) + priority;
+    const amount = total - fee;
     if (amount <= 0n) continue;
     const tx = kaspa.createTransaction(chosen, [{ address: sourceAddress, amount }], 0n, payload);
     const finalFee = kaspa.calculateTransactionFee(NETWORK_ID, tx, 1);
     if (finalFee == null || BigInt(finalFee) > BigInt(draftFee)) continue;
     const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
     const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
-    const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Self-stash broadcast", log });
-    log("Self-stash txid:", txid, `(${chosen.length} input${chosen.length === 1 ? "" : "s"}, one output, fee ${draftFee} sompi)`);
-    return { txids: [txid], amountSompi: amount, feeSompi: BigInt(draftFee) };
+    const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: `${label} broadcast`, log });
+    log(`${label} txid:`, txid, `(${chosen.length} input${chosen.length === 1 ? "" : "s"}, one output, fee ${fee} sompi)`);
+    return { txids: [txid], amountSompi: amount, feeSompi: fee };
   }
-  throw new Error("Balance too low to pay the self-stash network fee.");
+  throw new Error(useAll ? "The selected coins can't cover the network fee for this message." : "Balance too low to pay the network fee.");
 }
 
 // The SDK takes a private key as "a string or an instance of PrivateKey". The string form can
@@ -700,6 +716,17 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   if (singleInput && !selectedOutpoints?.length) {
     const one = singleInputFor(entries, amountSompi);
     if (one) entries = one;
+  }
+  // A payload sent back to the sender's own address (a chat message, a group or public-chat
+  // message, a KaPosts action): one output of (inputs - fee), largest coins first, as iOS builds
+  // them - never the nominal amount plus a change output, which KIP-9 storage mass refuses when
+  // the change comes out small. A chat payment (exactAmount), a quantum source and a send whose
+  // change goes elsewhere keep the generator path.
+  if (payload && to === sourceAddress && !exactAmount && !redeemScript && (!changeAddress || validateMainnetAddress(changeAddress) === sourceAddress)) {
+    return sendSelfPayloadFromEntries({
+      kaspa, rpc, withRpc, privateKey, sourceAddress, payload, entries,
+      prioritySompi, useAll: Boolean(selectedOutpoints?.length), log,
+    });
   }
   entries.sort(bySompiAsc);
 
