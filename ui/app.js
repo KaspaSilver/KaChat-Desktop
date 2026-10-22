@@ -1187,23 +1187,6 @@ async function unlockAppWithPassword(message, { allowForgot = true, autoBiometri
   return ok && !isAppLocked();
 }
 
-/** A new tab with a password set opens on the sign-in screen, locked. With "Keep me signed in" on
- *  it asks for the password straight away and then opens the active account (iOS: the app
- *  password gates the login screen). Nothing is imported before the vault is open. */
-async function promptUnlockAtLaunch() {
-  if ((accountShellPrefs.keepSignedIn ?? true) === false) return;
-  const active = readActiveAccountAddress();
-  const account = active ? loadSavedAccounts().find((entry) => sameStoredAccountAddress(entry?.address, active)) : null;
-  if (!account) return;
-  if (!(await unlockAppWithPassword(undefined, { autoBiometric: true }))) return;
-  try {
-    activateSavedAccount(account.address);
-    reloadKaChat();
-  } catch (error) {
-    showCopyToast(userFacingError(error));
-  }
-}
-
 let pendingSavedAccountRemoval = null;
 
 function renderSavedAccountsScreen() {
@@ -1242,8 +1225,10 @@ function renderSavedAccountsScreen() {
     signInButton.addEventListener("click", async () => {
       try {
         if (isAppLocked()) {
-          // The keys are encrypted: nothing signs in until the password opens them (DSK-007).
-          if (!(await unlockAppWithPassword())) return;
+          // The keys are encrypted: nothing signs in until the password opens them (DSK-007). Asked
+          // here, when an account is picked, never by itself when the page opens (owner,
+          // 2026-10-22); Face ID / Windows Hello offers itself where the browser allows.
+          if (!(await unlockAppWithPassword(undefined, { autoBiometric: true }))) return;
         } else if (accountShellPrefs.passwordForLogin && hasAppPassword()) {
           const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to sign in." });
           if (!ok) return;
@@ -11797,7 +11782,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 220;
+const APP_BUILD = 221;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -28016,9 +28001,9 @@ if (localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true" || !hasSavedAccounts
   localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
   showLoggedOutScreen();
 } else if (isAppLocked()) {
-  // Password set, new tab: the lock (sign-in screen + password), never an auto-restore (DSK-007).
+  // Password set, new tab or refresh: the sign-in screen, locked, never an auto-restore (DSK-007).
+  // No password prompt by itself: it comes when a saved account is picked (owner, 2026-10-22).
   showLoggedOutScreen();
-  promptUnlockAtLaunch();
 } else {
   hideLoggedOutScreen();
   // The account's chats come up from IndexedDB now, not after the SDK has loaded.

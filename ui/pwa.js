@@ -6,6 +6,8 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 // Dialogs as iOS sheets on a phone, and the left-edge swipe back.
 import "./sheets.js";
 import "./edge-back.js";
+// Conversations keep showing their newest message when the keyboard shortens them.
+import "./stick-to-latest.js";
 
 // The app is not always served from the root: the published site lives under /desktop/, so every
 // path the web-app plumbing uses is built on Vite's base rather than written as root-absolute.
