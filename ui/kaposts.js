@@ -3242,6 +3242,9 @@ function renderPanel() {
   if (refreshButton) refreshButton.hidden = !show || !panelHasRefresh(activePanel);
   if (!show || !panelBodyEl) return;
   const panel = activePanel;
+  // A Post Activity kind's list is a screen pushed inside the sheet: at phone width its header
+  // carries a back arrow, not the sheet's Done (iOS NavigationLink).
+  panelEl?.toggleAttribute("data-kaposts-panel-pushed", panel.type === "engagement" && Boolean(panel.tab));
   // Panels rebuild their body wholesale (hero, tab bar and rows share one template), so the
   // scroll position has to be carried over by hand when a page of rows lands.
   const previousTop = panelBodyEl.scrollTop || 0;
@@ -3368,17 +3371,28 @@ function renderPanel() {
 
   if (panel.type === "engagement") {
     const lists = panel.lists || { likes: [], dislikes: [], reposts: [], quotes: [] };
-    const tab = panel.tab || "likes";
+    // No kind picked: one square card per kind with its count (iOS 8ffa130). A card opens
+    // that kind's list in the same panel, titled with the kind's name; Back returns here.
+    if (!panel.tab) {
+      clearPagerSentinel("engagement");
+      clearPagerSentinel("engagement-tips");
+      const activityPost = findPost(panel.postId);
+      panelBodyEl.innerHTML = `
+        <div class="kaposts-activity-grid">
+          ${ENGAGEMENT_KINDS.map((kind) => `
+            <button type="button" class="hub-tile kaposts-activity-tile" data-kaposts-engagement-tab="${kind.key}">
+              <span class="kaposts-activity-icon kind-${kind.key}">${engagementKindIconHtml(kind.key)}</span>
+              <span class="kaposts-activity-count">${deps.escapeHtml(engagementCountText(panel, lists, activityPost, kind.key))}</span>
+              <span class="kaposts-activity-name">${kind.label}</span>
+            </button>`).join("")}
+        </div>
+        ${panel.postTxId ? `<a class="kaposts-view-link kaposts-post-tx-link kaposts-activity-tx-link" href="${deps.escapeHtml(deps.explorerTxUrl(panel.postTxId))}" target="_blank" rel="noopener">View Post Transaction in Explorer</a>` : ""}`;
+      restorePanelScroll();
+      return;
+    }
+    const tab = panel.tab;
+    panelTitleEl.textContent = ENGAGEMENT_KINDS.find((kind) => kind.key === tab)?.label || "Post Activity";
     const rows = lists[tab] || [];
-    const activityPost = findPost(panel.postId);
-    const tabLabel = (key, label) => {
-      const loaded = key === "tips" ? (panel.tips || []).length : (lists[key] || []).length;
-      const count = key === "likes" ? Math.max(activityPost?.likes || 0, loaded)
-        : key === "dislikes" ? Math.max(activityPost?.dislikes || 0, loaded)
-        : key === "tips" ? Math.max(activityPost?.tips || 0, loaded)
-        : loaded;
-      return count > 0 ? `${label} (${count})` : label;
-    };
     // Tips (iOS 8015069): who tipped, how much and when, from get-post-tippers on its own cursor.
     const listHtml = tab === "tips"
       ? tipperRowsHtml(panel, { showError: false })
@@ -3396,16 +3410,9 @@ function renderPanel() {
                   <a class="kaposts-view-link" href="${deps.escapeHtml(deps.explorerTxUrl(entry.actionTxId))}" target="_blank" rel="noopener">View</a>
                 </div>`).join("");
     panelBodyEl.innerHTML = `
-      <div class="kaposts-feed-tabs kaposts-profile-tabs">
-        ${["likes:Likes", "dislikes:Dislikes", "reposts:Reposts", "quotes:Quotes", "tips:Tips"].map((entry) => {
-          const [key, label] = entry.split(":");
-          return `<button class="kaposts-feed-tab${tab === key ? " active" : ""}" type="button" data-kaposts-engagement-tab="${key}">${tabLabel(key, label)}</button>`;
-        }).join("")}
-      </div>
       <div class="kaposts-panel-list" data-kaposts-panel-list>
         ${listHtml}
-      </div>
-      ${panel.postTxId ? `<a class="kaposts-view-link kaposts-post-tx-link" href="${deps.escapeHtml(deps.explorerTxUrl(panel.postTxId))}" target="_blank" rel="noopener">View Post Transaction in Explorer</a>` : ""}`;
+      </div>`;
     const listEl = panelBodyEl.querySelector("[data-kaposts-panel-list]");
     if (tab === "tips") {
       clearPagerSentinel("engagement");
@@ -4326,6 +4333,50 @@ function loadMoreNotifications() {
   });
 }
 
+/** Post Activity's kinds, in card order (iOS KaPostEngagementView.EngagementTab). */
+const ENGAGEMENT_KINDS = [
+  { key: "likes", label: "Likes" },
+  { key: "dislikes", label: "Dislikes" },
+  { key: "reposts", label: "Reposts" },
+  { key: "quotes", label: "Quotes" },
+  { key: "tips", label: "Tips" },
+];
+
+// The cards' marks, filled as iOS's heart.fill / hand.thumbsdown.fill / quote.bubble.fill; the
+// repost arrows as the action bar's; the Kaspa logo for tips.
+const ENGAGEMENT_KIND_ICONS = {
+  likes: `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z"/></svg>`,
+  dislikes: `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M15.73 5.5h1.035A7.465 7.465 0 0 1 18 9.625a7.465 7.465 0 0 1-1.235 4.125h-.148c-.806 0-1.534.446-2.031 1.08a9.04 9.04 0 0 1-2.861 2.4c-.723.384-1.35.956-1.653 1.715a4.499 4.499 0 0 0-.322 1.672v.633A.75.75 0 0 1 9 22a2.25 2.25 0 0 1-2.25-2.25c0-1.152.26-2.243.723-3.218.266-.558-.107-1.282-.725-1.282H3.622c-1.026 0-1.945-.694-2.054-1.715A12.137 12.137 0 0 1 1.5 12.25c0-2.848.992-5.464 2.649-7.521C4.537 4.247 5.136 4 5.754 4H9.77a4.5 4.5 0 0 1 1.423.23l3.114 1.04a4.5 4.5 0 0 0 1.423.23ZM21.669 14.023c.536-1.362.831-2.845.831-4.398 0-1.22-.182-2.398-.52-3.507-.26-.85-1.084-1.368-1.973-1.368H19.1c-.445 0-.72.498-.523.898.591 1.2.924 2.55.924 3.977a8.958 8.958 0 0 1-1.302 4.666c-.245.403.028.959.5.959h1.053c.832 0 1.612-.453 1.918-1.227Z"/></svg>`,
+  reposts: `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="stroke" d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3"/></svg>`,
+  quotes: `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" fill-rule="evenodd" d="M4.848 2.771A49.144 49.144 0 0 1 12 2.25c2.43 0 4.817.178 7.152.52 1.978.292 3.348 2.024 3.348 3.97v6.02c0 1.946-1.37 3.678-3.348 3.97a48.901 48.901 0 0 1-3.476.383.39.39 0 0 0-.297.17l-2.755 4.133a.75.75 0 0 1-1.248 0l-2.755-4.133a.39.39 0 0 0-.297-.17 48.9 48.9 0 0 1-3.476-.384c-1.978-.29-3.348-2.024-3.348-3.97V6.741c0-1.946 1.37-3.68 3.348-3.97ZM7.6 7h3.2v3.2c0 1.9-1 3.2-2.7 3.8l-.5-1.1c.8-.35 1.3-1 1.4-1.8H7.6ZM13.2 7h3.2v3.2c0 1.9-1 3.2-2.7 3.8l-.5-1.1c.8-.35 1.3-1 1.4-1.8h-1.4Z"/></svg>`,
+};
+
+function engagementKindIconHtml(key) {
+  return key === "tips" ? `<img src="${kaspaLogoUrl}" alt="" aria-hidden="true" />` : (ENGAGEMENT_KIND_ICONS[key] || "");
+}
+
+/**
+ * A card's number (iOS countText). Likes, dislikes and tips also have the post's own counters, so
+ * the larger of those and the people loaded so far; reposts and quotes are counted from the list,
+ * with a "+" while more pages are still to load. An en dash until the first page (or, for tips,
+ * the tips list) is in, unless the post's own counter already has a number.
+ */
+function engagementCountText(panel, lists, post, key) {
+  const dash = "–";
+  if (key === "tips") {
+    const counter = Math.max(0, Number(post?.tips) || 0);
+    return panel.tipsLoaded || counter > 0 ? String(Math.max(counter, (panel.tips || []).length)) : dash;
+  }
+  const loaded = (lists[key] || []).length;
+  const firstPageIn = !panel.loading || !panel.postTxId;
+  if (key === "likes" || key === "dislikes") {
+    const counter = Math.max(0, Number(post?.[key]) || 0);
+    return firstPageIn || counter > 0 ? String(Math.max(counter, loaded)) : dash;
+  }
+  if (!firstPageIn) return dash;
+  return panel.pager?.hasMore && loaded > 0 ? `${loaded}+` : String(loaded);
+}
+
 /** Distributes engagement rows into the four tab lists; returns how many landed per tab. */
 function absorbEngagementRows(lists, rows) {
   const counts = { likes: 0, dislikes: 0, reposts: 0, quotes: 0 };
@@ -4351,7 +4402,8 @@ async function openEngagementPanel(post) {
   // Post Activity opened from inside a thread presents OVER that thread and returns to it on
   // Back (iOS threadEngagementTarget); from the feed it takes the viewport as before.
   activePanel = beginPanel({
-    type: "engagement", postId: post.id, postTxId: post.remoteId, tab: "likes", lists: null, loading: true,
+    // tab: null = the count cards; a kind's key = that kind's list (iOS 8ffa130)
+    type: "engagement", postId: post.id, postTxId: post.remoteId, tab: null, lists: null, loading: true,
     pager: makePager({ pageSize: PAGER_THREAD_PAGE_SIZE }),
     // the Tips tab's own list (iOS 8015069)
     tips: [], tipsLoaded: false, tipsError: "", tipsPager: makePager({ pageSize: KAPOSTS_TIPPERS_PAGE_SIZE }),
@@ -5767,6 +5819,13 @@ export function initKaPosts(dependencies) {
       openPosterProfile(activePanel.parent.address, activePanel.parent.pubkey || null);
       return;
     }
+    // A Post Activity kind's list returns to the count cards, its loaded rows kept.
+    if (activePanel?.type === "engagement" && activePanel.tab) {
+      activePanel.tab = null;
+      if (panelBodyEl) panelBodyEl.scrollTop = 0;
+      renderPanel();
+      return;
+    }
     closePanel();
     syncRailActive();
   });
@@ -6112,6 +6171,7 @@ export function initKaPosts(dependencies) {
     const engagementTab = event.target.closest("[data-kaposts-engagement-tab]");
     if (engagementTab && activePanel?.type === "engagement") {
       activePanel.tab = engagementTab.dataset.kapostsEngagementTab;
+      if (panelBodyEl) panelBodyEl.scrollTop = 0; // a fresh screen opens at its top
       renderPanel();
       return;
     }
