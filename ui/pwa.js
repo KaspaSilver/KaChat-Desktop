@@ -51,18 +51,39 @@ coarseMedia.addEventListener?.("change", syncCoarse);
 // needs it and a resizing sidebar would fight it.
 const vv = window.visualViewport;
 let keyboardOpen = false;
+/// The full screen height in CSS px when the page owns the whole screen - an installed web app
+/// (standalone) whose window is as wide as the screen - else 0. iOS reports a home-screen app's
+/// visual viewport and innerHeight as the screen MINUS the status bar while the page is drawn under
+/// the status bar (black-translucent), so sizing the shell to them left a status-bar-tall gap under
+/// the dock on an iPhone 15 Pro. iOS's screen.width/height are the portrait values in every
+/// orientation, so the orientation picks which one is the height. iPad split view / Slide Over
+/// (narrower than the screen) keep the reported viewport.
+function standaloneScreenHeight() {
+  if (!root.classList.contains("standalone")) return 0;
+  const sw = Number(window.screen?.width) || 0;
+  const sh = Number(window.screen?.height) || 0;
+  if (!sw || !sh) return 0;
+  const landscape = window.innerWidth > window.innerHeight;
+  const screenW = landscape ? Math.max(sw, sh) : Math.min(sw, sh);
+  const screenH = landscape ? Math.min(sw, sh) : Math.max(sw, sh);
+  return Math.abs(window.innerWidth - screenW) <= 2 ? screenH : 0;
+}
 function applyViewportHeight() {
   if (!coarseMedia.matches) {
     root.classList.remove("app-h", "keyboard-open");
     root.style.removeProperty("--app-h");
     return;
   }
-  const height = Math.round(vv ? vv.height : window.innerHeight);
-  if (!height) return;
+  const visible = Math.round(vv ? vv.height : window.innerHeight);
+  if (!visible) return;
+  const full = standaloneScreenHeight();
+  // A viewport noticeably shorter than the window (or, installed, the screen) is the keyboard (or
+  // the URL bar mid-animation).
+  keyboardOpen = Math.max(window.innerHeight, full) - visible > 120;
+  // Installed and no keyboard: the app is the whole screen, status bar to home indicator.
+  const height = full && !keyboardOpen && full > visible ? full : visible;
   root.style.setProperty("--app-h", `${height}px`);
   root.classList.add("app-h");
-  // A viewport noticeably shorter than the window is the keyboard (or the URL bar mid-animation).
-  keyboardOpen = window.innerHeight - height > 120;
   root.classList.toggle("keyboard-open", keyboardOpen);
   if (keyboardOpen && (window.scrollY || (vv && vv.offsetTop))) window.scrollTo(0, 0);
 }
@@ -73,6 +94,11 @@ if (vv) {
 }
 window.addEventListener("resize", applyViewportHeight);
 window.addEventListener("orientationchange", () => window.setTimeout(applyViewportHeight, 250));
+// iOS can report a home-screen app's height wrong during the launch animation and send no resize
+// afterwards, so measure again once the page has settled and whenever it comes back to the front.
+window.addEventListener("load", () => window.setTimeout(applyViewportHeight, 300));
+window.addEventListener("pageshow", () => window.setTimeout(applyViewportHeight, 100));
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") window.setTimeout(applyViewportHeight, 100); });
 coarseMedia.addEventListener?.("change", applyViewportHeight);
 
 // A focused field must end up above the keyboard, inside the shrunken shell: once the viewport has
