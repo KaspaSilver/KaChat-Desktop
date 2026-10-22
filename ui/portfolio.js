@@ -705,9 +705,10 @@ function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
   const line = wrap.querySelector(".portfolio-scrub-line");
   const dot = wrap.querySelector(".portfolio-scrub-dot");
   const fractions = chartGeometry(points, wrap.clientHeight || 130);
-  // Press and drag along the line to select a span (iOS reads it between two fingers): the
-  // stretch is shaded green or red, both ends marked, and the header reads the dates and the
-  // return across it. The selection stays until the pointer leaves the chart.
+  // A span (the stretch shaded green or red, both ends marked, the header reading the dates and
+  // the return across it): with a mouse, press and drag along the line, and it stays until the
+  // pointer leaves the chart. On a touch screen it is two fingers, the span between them, as on
+  // iOS; one finger only ever scrubs, and lifting every finger ends the readout.
   let span = null;
   if (onSpan) {
     span = document.createElement("div");
@@ -718,6 +719,7 @@ function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
   let anchor = null;   // index where the press began
   let frozen = false;  // the button came up: keep the span until the pointer leaves
 
+  const touches = new Map(); // pointerId -> clientX of each finger on the chart
   const indexAt = (event) => {
     const rect = wrap.getBoundingClientRect();
     const x = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
@@ -738,7 +740,30 @@ function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
     if (dot) { dot.hidden = false; dot.style.left = `${right}px`; dot.style.top = `${fractions[to] * rect.height}px`; }
     onSpan(points[from], points[to]);
   };
+  // Two fingers down: the span between them (the first two, whichever lifted last stays).
+  const touchSpan = () => {
+    const [x1, x2] = [...touches.values()];
+    const a = indexAt({ clientX: x1 });
+    const b = indexAt({ clientX: x2 });
+    if (onSpan && a.clamped !== b.clamped) { showSpan(a.clamped, b.clamped, a.rect); return true; }
+    return false;
+  };
   const move = (event) => {
+    if (event.pointerType === "touch") {
+      if (!touches.has(event.pointerId)) return;
+      touches.set(event.pointerId, event.clientX);
+      if (touches.size >= 2 && touchSpan()) return;
+      if (touches.size >= 2) event = { clientX: [...touches.values()][0] };
+      // One finger: plain scrubbing, never a span.
+      const { rect, clamped } = indexAt(event);
+      const px = (clamped / (points.length - 1)) * rect.width;
+      const py = fractions[clamped] * rect.height;
+      if (span) span.hidden = true;
+      if (line) { line.hidden = false; line.style.left = `${px}px`; }
+      if (dot) { dot.hidden = false; dot.style.left = `${px}px`; dot.style.top = `${py}px`; }
+      onScrub(points[clamped]);
+      return;
+    }
     if (frozen) return;
     const { rect, clamped } = indexAt(event);
     if (anchor != null && onSpan && (event.buttons & 1) && clamped !== anchor) { showSpan(anchor, clamped, rect); return; }
@@ -750,15 +775,30 @@ function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
     onScrub(points[clamped]);
   };
   const down = (event) => {
+    if (event.pointerType === "touch") {
+      touches.set(event.pointerId, event.clientX);
+      move(event);
+      return;
+    }
     frozen = false;
     anchor = indexAt(event).clamped;
     move(event);
   };
-  const up = () => {
+  const up = (event) => {
+    if (event?.pointerType === "touch") {
+      touches.delete(event.pointerId);
+      // A finger lifted off a two-finger span: back to scrubbing under the one left.
+      if (touches.size) { const [[id, x]] = [...touches]; move({ pointerType: "touch", pointerId: id, clientX: x }); }
+      else leave();
+      return;
+    }
     if (span && !span.hidden) frozen = true;
     anchor = null;
   };
-  const leave = () => {
+  const leave = (event) => {
+    // A finger's pointerleave follows its own pointerup (handled there); one still down keeps going.
+    if (event?.pointerType === "touch") return;
+    touches.clear();
     frozen = false;
     anchor = null;
     if (span) span.hidden = true;
@@ -769,6 +809,7 @@ function attachScrub(wrap, points, onScrub, onEnd, onSpan = null) {
   wrap.addEventListener("pointermove", move);
   wrap.addEventListener("pointerdown", down);
   wrap.addEventListener("pointerup", up);
+  wrap.addEventListener("pointercancel", up);
   wrap.addEventListener("pointerleave", leave);
 }
 
