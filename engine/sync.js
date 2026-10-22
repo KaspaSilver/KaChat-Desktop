@@ -1128,7 +1128,7 @@ async function restSpentOutput(txid, index) {
 const paymentVerdictCache = new Map(); // txid|wallet -> { at, promise }
 /// The signature verdict of a received REST payment and its proven sender (iOS 5a78d06
 /// verifyIncomingPaymentSignatures): `{ check: "valid" | "invalid" | "unknown", sender }`, the
-/// sender only on "valid" and only from the checked inputs (IOS-094).
+/// sender only on "valid" and only from the inputs whose signature verified (IOS-094, DSK-056).
 export function verifyIncomingPayment(tx, txid, walletAddress) {
   const key = `${String(txid).toLowerCase()}|${String(walletAddress || "").toLowerCase()}`;
   const cached = paymentVerdictCache.get(key);
@@ -1196,8 +1196,9 @@ export async function indexerPaymentSender(txid, receiver, blockTime = 0, { inde
  * What to do with a received REST payment once its signatures are judged (iOS 5a78d06
  * fetchPaymentsFromKaspaAPI) - pure, so both payment paths (the per-contact sync and the UI's
  * stranger-payment sweep, DSK-052) decide alike:
- * - "valid": filed, the sender being the one proven by the checked inputs (IOS-094); none (every
- *   input ours) files nothing;
+ * - "valid": filed, the sender being the one proven by the inputs whose signature verified
+ *   (IOS-094); none (every verified input ours, the rest skipped unchecked) goes the "unknown"
+ *   way below, never filed under the REST label (iOS 2343e84, DSK-056);
  * - "invalid": dropped;
  * - "unknown": filed only when our node confirms the coins AND the KaChat indexer names a sender
  *   that agrees with the REST answer's (or names it when REST didn't) - the node proves the coins,
@@ -1206,10 +1207,10 @@ export async function indexerPaymentSender(txid, receiver, blockTime = 0, { inde
  * Returns `{ action: "file" | "hold" | "drop", sender, nodeOnly, reason }`.
  */
 export function decideIncomingPayment({ check, provenSender = null, restSender = null, nodeConfirmed = false, indexedSender = null } = {}) {
-  if (check === "valid") {
-    const sender = String(provenSender || "").trim();
-    return sender ? { action: "file", sender, nodeOnly: false, reason: "valid" } : { action: "drop", sender: null, nodeOnly: false, reason: "no-proven-sender" };
-  }
+  // valid with a proven sender (from a VERIFIED input) files under it; valid with none falls
+  // through to the unknown rule below - node + indexer - never the REST label (iOS 2343e84)
+  const proven = String(provenSender || "").trim();
+  if (check === "valid" && proven) return { action: "file", sender: proven, nodeOnly: false, reason: "valid" };
   if (check === "invalid") return { action: "drop", sender: null, nodeOnly: false, reason: "invalid" };
   const rest = String(restSender || "").trim();
   const indexed = String(indexedSender || "").trim().toLowerCase();
@@ -1234,7 +1235,12 @@ export async function checkIncomingRestPayment(tx, { walletAddress, amountSompi,
     releaseHeldPayment(walletAddress, txid);
     return { action: "drop", sender: null, nodeOnly: false, reason: "no-inputs", check: "unknown" };
   }
-  const { check, sender: provenSender } = await verifyIncomingPayment(tx, txid, walletAddress);
+  const verdict = await verifyIncomingPayment(tx, txid, walletAddress);
+  const provenSender = verdict.sender;
+  // valid but no VERIFIED input names a sender (every verified input ours; the others skipped
+  // unchecked): the REST label is all there is, so it goes the unknown way - node + indexer -
+  // never filed under the label (iOS 2343e84, IOS-094 / DSK-056)
+  const check = verdict.check === "valid" && !provenSender ? "unknown" : verdict.check;
   let nodeConfirmed = false;
   let indexedSender = null;
   if (check === "unknown") {
@@ -1261,7 +1267,7 @@ export async function checkIncomingRestPayment(tx, { walletAddress, amountSompi,
  * The UI stranger-payment sweep's step for one checked payment (DSK-052; Note to Self "Received X
  * KAS / From:" and chat-payment Message Requests), from checkIncomingRestPayment's decision - pure,
  * so it is tested offline:
- * - "drop" (invalid, no inputs, no proven sender): marked processed, never filed;
+ * - "drop" (invalid, no inputs): marked processed, never filed;
  * - "hold" (unknown, not settled by node + indexer): NOT marked processed, so the next sweep checks
  *   it again - until it is older than the 7-day hold, then given up (marked processed);
  * - "file": marked processed and filed under the verdict's sender (from the checked inputs, or the

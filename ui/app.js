@@ -12,7 +12,7 @@ import { accountGuard, accountScopedValue } from "./account-guard.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
-import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, nextFreshQuantumIndex, spendingChangeIndex, freshChangeRequired, verifiedFreshQuantumIndex, quantumSpentFromHistory } from "../engine/quantum.js";
+import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, spendingChangeIndex, freshChangeRequired, verifiedFreshQuantumIndex, quantumSpentFromHistory } from "../engine/quantum.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
@@ -97,7 +97,7 @@ import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, prom
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
-import { discoverSpendingMatches, applySpendingDiscovery, fetchAddressActivity, discoverQuantumMatches, applyQuantumDiscovery } from "./spending-discovery.js";
+import { fetchAddressActivity, runSpendingDiscovery } from "./spending-discovery.js";
 import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -2116,10 +2116,16 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   fetchKasPrice(selectedCurrency).then((value) => { price = value || null; renderAmount(); }).catch(() => {});
   // Derived, not reserved: opening the screen and cancelling uses no address up (iOS 3f5f79c).
   // The fresh slot is quantum-safe (KIP-22, iOS bba1b1e), matching what reserving returns.
+  // Checked on chain (iOS 2343e84 verifiedFreshQuantumIndex, IOS-101), so the preview never shows a
+  // slot already used.
   if (activeAccountMnemonic()) {
     (async () => {
       try { await ensureRuntimes({ quiet: true }); } catch { /* the address stays loading */ }
-      const next = deriveSpendingAddressAt(nextFreshQuantumIndex(getSpendingState().qMaxIndex));
+      const wallet = engine.address;
+      let freshIndex;
+      try { freshIndex = await verifiedFreshQuantumSlot(); } catch { return; } // the address stays loading
+      if (engine.address !== wallet) return; // the account changed: not this sheet's address
+      const next = deriveSpendingAddressAt(freshIndex);
       if (!next || !sheet.isConnected) return;
       nextFreshAddress = next;
       if (destination === "fresh" && !freshAddress) renderAddress();
@@ -10083,10 +10089,17 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
       readyIndex = pick;
     } else {
       // A brand-new quantum slot (iOS generateNextQuantumAddress): always extends the chain - a
-      // never-spent-from address is the whole point.
-      readyIndex = nextFreshQuantumIndex(state.qMaxIndex);
-      hiddenSet.delete(readyIndex);
-      saveSpendingState({ qMaxIndex: chainLocalIndex(readyIndex), hidden: Array.from(hiddenSet) });
+      // never-spent-from address is the whole point. Checked on chain first, like every other
+      // fresh quantum slot (iOS 2343e84 verifiedFreshQuantumIndex, IOS-101): a slot already used
+      // elsewhere is skipped, never handed out as new.
+      const wallet = engine.address;
+      readyIndex = await verifiedFreshQuantumSlot();
+      // the check's awaits can span an account switch: what it found is not the new account's
+      if (engine.address !== wallet) return null;
+      // re-read: the check may have raised the bound (and the hidden set is the latest)
+      const fresh = new Set(getSpendingState().hidden);
+      fresh.delete(readyIndex);
+      saveSpendingState({ qMaxIndex: chainLocalIndex(readyIndex), hidden: Array.from(fresh) });
     }
     renderSpendingList();
     // The chain-local number, never the raw public index 1000000+ (iOS e001786).
@@ -10114,39 +10127,37 @@ async function discoverSpendingAddressesFor(wallet, { onProgress = null } = {}) 
     return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
   };
   const activity = (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" });
-  const result = await discoverSpendingMatches({
+  // The sweep belongs to the account it started for (iOS 2343e84, IOS-107): every derivation and
+  // write resolves the CURRENT account, and its awaits can span an account switch - so it stops,
+  // writing nothing, the moment another account is active. A sweep asked for an account that is
+  // not the active one does not start.
+  const account = accountGuard(() => engine.address);
+  if (!wallet || account.account !== wallet) return 0;
+  // The legacy chain, then the quantum-safe one (iOS bba1b1e / da2c8e2 discoverQuantumAddresses):
+  // QUANTUM_SCAN_FLOOR slots a step while a step shows activity, up to QUANTUM_SCAN_LIMIT. Funded
+  // slots are shown again, and the chain's end goes past every slot that ever saw activity
+  // (IOS-101). Its count joins the summary.
+  const { matchCount, stopped } = await runSpendingDiscovery({
+    still: account.still,
     derive: deriveSpendingAddressesInRange,
     activity,
     fundedAmong,
     ownersAmong: (addresses) => engine.addressesOwningAnyName(addresses),
     onProgress,
+    readState: () => getSpendingState(wallet),
+    writeState: (state) => { if (account.still()) saveSpendingState(state, wallet); },
+    base: QUANTUM_INDEX_BASE,
+    floor: QUANTUM_SCAN_FLOOR,
+    limit: QUANTUM_SCAN_LIMIT,
   });
-  if (engine.address === wallet) {
-    saveSpendingState(applySpendingDiscovery(getSpendingState(), result));
+  if (stopped || !account.still()) {
+    appendEngineLog("Discover Addresses stopped: the account changed during the sweep.");
+    return 0;
   }
-  // The quantum-safe chain too (iOS bba1b1e / da2c8e2 discoverQuantumAddresses): QUANTUM_SCAN_FLOOR
-  // slots a step while a step shows activity, up to QUANTUM_SCAN_LIMIT. Funded slots are shown
-  // again, and the chain's end goes past every slot that ever saw activity (IOS-101). Its count
-  // joins the summary.
-  let quantumCount = 0;
-  if (engine.address === wallet) {
-    const quantum = await discoverQuantumMatches({
-      derive: deriveSpendingAddressesInRange,
-      activity,
-      fundedAmong,
-      base: QUANTUM_INDEX_BASE,
-      floor: QUANTUM_SCAN_FLOOR,
-      limit: QUANTUM_SCAN_LIMIT,
-    });
-    quantumCount = quantum.matchCount;
-    if (engine.address === wallet && (quantumCount || quantum.highestUsed >= 0)) saveSpendingState(applyQuantumDiscovery(getSpendingState(), quantum, QUANTUM_INDEX_BASE));
-  }
-  if (engine.address === wallet) {
-    if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
-    refreshSpendingSummary();
-  }
+  if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
+  refreshSpendingSummary();
   // The count is addresses that hold a balance or a domain, every one, not only new ones.
-  return result.matchCount + quantumCount;
+  return matchCount;
 }
 spendingScanBtn?.addEventListener("click", async () => {
   closeSpendingActionsMenu();
@@ -11421,7 +11432,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 207;
+const APP_BUILD = 208;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");

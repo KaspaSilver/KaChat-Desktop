@@ -286,13 +286,93 @@ assert.equal(Array.from(script, (b) => b.toString(16).padStart(2, "0")).join("")
   assert.deepEqual(await verifyRestTransactionSignaturesWithSender(t, { resolveSpentOutput: async () => spentOut, myAddress: "x" }), { check: "valid", sender: spentOut.address });
 }
 
+// iOS 2343e84 (IOS-094 narrowed, DSK-056): the sender comes only from inputs whose signature
+// VERIFIED. A forger lists an ECDSA input first (skipped unchecked) relabelled as a contact, and signs
+// a second, Schnorr P2PK input of their own: the sender is input 1's address, never the label. A
+// valid verdict whose verified inputs are all ours names no sender and goes the unknown way.
+{
+  const { verifyRestTransactionSignaturesWithSender, computeSighash } = await import("../engine/payment-signatures.js");
+  const { checkIncomingRestPayment, syncIncomingPaymentsFromRest, heldPaymentTxids } = await import("../engine/sync.js");
+  const { schnorr } = await import("@noble/curves/secp256k1.js");
+  const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const fromHex = (h) => Uint8Array.from(h.match(/../g), (b) => parseInt(b, 16));
+  const priv = new Uint8Array(32).fill(7); // a test key, never on chain
+  const forger = encodeAddress("kaspa", AddressVersion.pubKey, schnorr.getPublicKey(priv));
+  const contactEcdsa = encodeAddress("kaspa", AddressVersion.pubKeyECDSA, Uint8Array.of(0x02, ...new Uint8Array(32).fill(0x33)));
+  const wallet = FIXTURES.v0.outputs[0].script_public_key_address;
+  const walletScript = scriptPublicKeyFromAddress(wallet);
+  // A real-shaped two-input transaction, input 1 signed (SIGHASH_ALL) over the same model the
+  // checker rebuilds from the REST fields.
+  const mixed = (txid) => {
+    const tx = {
+      transaction_id: txid, version: 0, subnetwork_id: "00".repeat(20), payload: "", lock_time: 0, gas: 0,
+      inputs: [
+        { previous_outpoint_hash: "aa".repeat(32), previous_outpoint_index: "0", previous_outpoint_address: contactEcdsa, previous_outpoint_amount: 100000000, signature_script: "41" + "11".repeat(65), sig_op_count: "1" },
+        { previous_outpoint_hash: "bb".repeat(32), previous_outpoint_index: "1", previous_outpoint_address: forger, previous_outpoint_amount: 200000000, signature_script: "", sig_op_count: "1" },
+      ],
+      outputs: [{ index: 0, amount: 299990000, script_public_key: toHex(walletScript), script_public_key_address: wallet, covenant_authorizing_input: null, covenant_id: null }],
+    };
+    const model = {
+      version: 0, lockTime: 0n, gas: 0n, payload: new Uint8Array(0), subnetworkId: new Uint8Array(20),
+      inputs: tx.inputs.map((input) => ({ txid: fromHex(input.previous_outpoint_hash), index: Number(input.previous_outpoint_index), sequence: 0n, sigOpCount: 1 })),
+      outputs: [{ amount: 299990000n, scriptVersion: 0, script: walletScript, covenant: null }],
+    };
+    const sighash = computeSighash(model, 1, scriptPublicKeyFromAddress(forger), 200000000n);
+    tx.inputs[1].signature_script = "41" + toHex(schnorr.sign(sighash, priv, new Uint8Array(32))) + "01";
+    return tx;
+  };
+
+  const t = mixed("56".repeat(32));
+  assert.equal(await verifyRestTransactionSignatures(t), "valid", "fixture: input 1's signature verifies, input 0 (ECDSA) is skipped");
+  const verdict = await verifyRestTransactionSignaturesWithSender(t, { myAddress: wallet });
+  assert.deepEqual(verdict, { check: "valid", sender: forger }, "DSK-056: the sender is the VERIFIED input's address");
+  assert.notEqual(verdict.sender, contactEcdsa, "DSK-056: never the relabelled, unchecked input 0");
+  // A broken signature on input 1 is never valid: nothing names a sender then.
+  {
+    const broken = clone(t);
+    const sig = broken.inputs[1].signature_script;
+    broken.inputs[1].signature_script = sig.slice(0, 10) + (sig[10] === "0" ? "1" : "0") + sig.slice(11);
+    assert.notEqual(await verifyRestTransactionSignatures(broken), "valid", "the forger's own input must verify");
+  }
+
+  // Both payment paths: the stranger sweep's check files it under the forger, and the relabelled
+  // contact's own chat never gets it (the per-contact filing fence).
+  globalThis.localStorage = new MemoryStorage();
+  const decision = await checkIncomingRestPayment(t, { walletAddress: wallet, amountSompi: 299990000n, restSender: contactEcdsa });
+  assert.equal(decision.check, "valid");
+  assert.equal(decision.action, "file");
+  assert.equal(decision.sender, forger, "the sweep files it from the verified input, not the REST label");
+  globalThis.fetch = async () => ({ ok: true, json: async () => [mixed("57".repeat(32))] });
+  const contactSync = await syncIncomingPaymentsFromRest({ conversationId: "conv", contact: { id: "c", address: contactEcdsa }, walletAddress: wallet, confirmUnspentPayment: async () => true, lookupIndexerSender: async () => contactEcdsa });
+  assert.equal(contactSync.messages.length, 0, "DSK-056: never filed in the relabelled contact's chat");
+
+  // Every verified input is ours (here the wallet is the forger's address): valid, but no verified
+  // input names a sender - routed as unknown: the node is asked, the indexer names the sender.
+  assert.deepEqual(await verifyRestTransactionSignaturesWithSender(t, { myAddress: forger.toUpperCase() }), { check: "valid", sender: null }, "all verified inputs ours: no sender, though input 0 isn't ours");
+  globalThis.localStorage = new MemoryStorage();
+  let asked = 0;
+  const held = await checkIncomingRestPayment(mixed("58".repeat(32)), { walletAddress: forger, amountSompi: 1n, restSender: contactEcdsa, confirmUnspentPayment: async () => { asked += 1; return false; } });
+  assert.equal(held.check, "unknown", "all verified inputs ours: routed as unknown");
+  assert.equal(held.action, "hold", "not node-confirmed: held, never filed under the label");
+  assert.equal(asked, 1, "the node is asked, as for any unknown payment");
+  assert.deepEqual(heldPaymentTxids(forger), ["58".repeat(32)]);
+  const disagree = await checkIncomingRestPayment(mixed("59".repeat(32)), { walletAddress: forger, amountSompi: 1n, restSender: contactEcdsa, confirmUnspentPayment: async () => true, lookupIndexerSender: async () => wallet });
+  assert.equal(disagree.action, "hold", "the indexer names someone else: held");
+  const agreed = await checkIncomingRestPayment(mixed("5a".repeat(32)), { walletAddress: forger, amountSompi: 1n, restSender: contactEcdsa, confirmUnspentPayment: async () => true, lookupIndexerSender: async () => contactEcdsa });
+  assert.deepEqual([agreed.action, agreed.sender, agreed.nodeOnly], ["file", contactEcdsa, true], "node + indexer agree: filed node-only (no memo, never over a message of ours)");
+}
+
 // decideIncomingPayment (both payment paths) and strangerPaymentStep (the UI stranger sweep, DSK-052).
 {
   const { decideIncomingPayment, strangerPaymentStep, HELD_PAYMENTS_MAX_AGE_MS } = await import("../engine/sync.js");
   const alice = "kaspa:qqt9pdktna9dzf8u2rz6jnqvpcda8nxpreaxnspq0m5hnumsmvqnu6nxxclec";
   const bob = "kaspa:qzk2jrk7wq3zdw2n0260v87fglky82cg5u3pwy73wpktk3u864yecm5djll40";
   assert.deepEqual(decideIncomingPayment({ check: "valid", provenSender: alice, restSender: bob }), { action: "file", sender: alice, nodeOnly: false, reason: "valid" }, "valid: the proven sender, never the REST label");
-  assert.equal(decideIncomingPayment({ check: "valid", provenSender: null, restSender: bob }).action, "drop", "valid with no proven sender: nothing to file");
+  // iOS 2343e84 (IOS-094 / DSK-056): valid with no proven sender goes the unknown way - node +
+  // indexer - never filed under the REST label
+  assert.equal(decideIncomingPayment({ check: "valid", provenSender: null, restSender: bob }).action, "hold", "valid with no proven sender: held, like unknown");
+  assert.equal(decideIncomingPayment({ check: "valid", provenSender: null, restSender: bob, nodeConfirmed: true, indexedSender: alice }).action, "hold", "valid with no proven sender, the indexer names another: held");
+  assert.deepEqual(decideIncomingPayment({ check: "valid", provenSender: null, restSender: bob, nodeConfirmed: true, indexedSender: bob }), { action: "file", sender: bob, nodeOnly: true, reason: "node-and-indexer" }, "valid with no proven sender: filed only by node + indexer, node-only");
   assert.equal(decideIncomingPayment({ check: "invalid", provenSender: alice }).action, "drop");
   assert.equal(decideIncomingPayment({ check: "unknown", restSender: alice }).action, "hold", "unknown, no node: held");
   assert.equal(decideIncomingPayment({ check: "unknown", restSender: alice, nodeConfirmed: true }).action, "hold", "node only, no indexer sender: held");

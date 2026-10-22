@@ -76,11 +76,17 @@ async function requestActivityBatch(addresses, { base, fetchImpl, timeoutMs }) {
 /// - `fundedAmong(addresses)` -> Set of addresses holding a balance; throws when balances are unavailable
 /// - `ownersAmong(addresses)` -> Set of addresses owning a name on any service
 /// - `onProgress({ checkingIndex, foundCount })`, optional
-/// Returns { matchCount, lastMatchIndex, matchedIndices } - every match, not only new ones.
-export async function discoverSpendingMatches({ derive, activity, fundedAmong, ownersAmong, onProgress = null, gapLimit = SPENDING_DISCOVERY_GAP_LIMIT }) {
+/// - `still()`, optional: false once the account the sweep started for is no longer active (iOS
+///   2343e84, IOS-107) - checked before every derivation, which reads the CURRENT account's key, so
+///   the walk stops there and reports `stopped`
+/// Returns { matchCount, lastMatchIndex, matchedIndices, stopped } - every match, not only new ones.
+export async function discoverSpendingMatches({ derive, activity, fundedAmong, ownersAmong, onProgress = null, gapLimit = SPENDING_DISCOVERY_GAP_LIMIT, still = null }) {
   let lastMatchIndex = -1;
   let matchCount = 0;
   const matchedIndices = new Set();
+  const switched = () => typeof still === "function" && !still();
+  const stoppedResult = () => ({ matchCount: 0, lastMatchIndex: -1, matchedIndices: new Set(), stopped: true });
+  if (switched()) return stoppedResult();
   const report = (checkingIndex, foundCount) => { try { onProgress?.({ checkingIndex, foundCount }); } catch { /* the readout never stops the scan */ } };
   const owners = async (list) => {
     if (!list.length) return new Set();
@@ -124,6 +130,7 @@ export async function discoverSpendingMatches({ derive, activity, fundedAmong, o
       if (index >= SPENDING_DEEP_SCAN_FLOOR && consecutiveMisses >= gapLimit) break;
       const upper = Math.min(index + SPENDING_SCAN_BATCH_SIZE, MAX_SPENDING_SCAN_INDEX);
       report(index, matchCount);
+      if (switched()) return stoppedResult();
       const derived = (await derive(index, upper)) || new Map();
       if (!derived.size) break;
       const batch = [];
@@ -151,7 +158,8 @@ export async function discoverSpendingMatches({ derive, activity, fundedAmong, o
       index = upper;
     }
   }
-  return { matchCount, lastMatchIndex, matchedIndices };
+  if (switched()) return stoppedResult();
+  return { matchCount, lastMatchIndex, matchedIndices, stopped: false };
 }
 
 /// The stored state after a scan: every match un-hidden (hiding is a tidying choice about empty
@@ -185,11 +193,16 @@ export function applySpendingDiscovery({ maxIndex, hidden }, { lastMatchIndex, m
 /// The walk: `derive(start, end)` -> Map(public index -> address); `activity(addresses)` -> Map of
 /// touched addresses, or null; `fundedAmong(addresses)` -> Set of funded addresses (throws when
 /// balances are unavailable: that window shows nothing). Returns { matchCount, matchedIndices
-/// (public indices), highestUsed (quantum chain index of the deepest slot with activity, -1 for none) }.
-export async function discoverQuantumMatches({ derive, activity, fundedAmong, base, floor, limit = 10_000 }) {
+/// (public indices), highestUsed (quantum chain index of the deepest slot with activity, -1 for none),
+/// stopped }. `still()`, optional: the same account rule as the legacy walk (iOS 2343e84, IOS-107),
+/// checked before every window - so between windows too - and at the end.
+export async function discoverQuantumMatches({ derive, activity, fundedAmong, base, floor, limit = 10_000, still = null }) {
   const matched = new Set();
   let highestUsed = -1;
+  const switched = () => typeof still === "function" && !still();
+  const stoppedResult = () => ({ matchCount: 0, matchedIndices: new Set(), highestUsed: -1, stopped: true });
   for (let start = 0; start < limit; start += floor) {
+    if (switched()) return stoppedResult();
     const derived = (await derive(base + start, base + start + floor)) || new Map();
     const ordered = [];
     for (let i = base + start; i < base + start + floor; i += 1) {
@@ -208,8 +221,29 @@ export async function discoverQuantumMatches({ derive, activity, fundedAmong, ba
     }
     if (!touchedMap || !touched.length) break;
   }
+  if (switched()) return stoppedResult();
   if (matched.size) highestUsed = Math.max(highestUsed, Math.max(...matched) - base);
-  return { matchCount: matched.size, matchedIndices: matched, highestUsed };
+  return { matchCount: matched.size, matchedIndices: matched, highestUsed, stopped: false };
+}
+
+/// The whole Discover Addresses sweep - the legacy chain, then the quantum-safe one - tied to the
+/// account it started for (iOS 2343e84 discoverSpendingAddresses / discoverQuantumAddresses(owner:),
+/// IOS-107). `still()` (ui/account-guard.js accountGuard(...).still) is re-checked before every
+/// write (the legacy bound + hidden set, then the quantum bound + hidden set) and between windows;
+/// an account switch mid-sweep stops it, writing nothing more, and it returns 0. `readState()` /
+/// `writeState(state)`: that account's stored spending state ({ maxIndex, qMaxIndex, hidden }).
+/// Returns { matchCount, stopped }.
+export async function runSpendingDiscovery({ still, derive, activity, fundedAmong, ownersAmong, onProgress = null, readState, writeState, base, floor, limit }) {
+  const live = () => typeof still === "function" && still() === true;
+  const stopped = { matchCount: 0, stopped: true };
+  if (!live()) return stopped;
+  const legacy = await discoverSpendingMatches({ derive, activity, fundedAmong, ownersAmong, onProgress, still: live });
+  if (legacy.stopped || !live()) return stopped;
+  writeState(applySpendingDiscovery(readState(), legacy));
+  const quantum = await discoverQuantumMatches({ derive, activity, fundedAmong, base, floor, limit, still: live });
+  if (quantum.stopped || !live()) return stopped;
+  if (quantum.matchCount || quantum.highestUsed >= 0) writeState(applyQuantumDiscovery(readState(), quantum, base));
+  return { matchCount: legacy.matchCount + quantum.matchCount, stopped: false };
 }
 
 /// The stored state after the quantum scan: matches un-hidden, the quantum bound raised past every

@@ -180,21 +180,26 @@ export async function verifyRestTransactionSignatures(tx, options = {}) {
 }
 
 /**
- * verifyRestTransactionSignatures plus the payment's proven sender (iOS 5a78d06
- * verifyIncomingPaymentSignatures, IOS-094): on "valid" every input's address is the one its
- * signature was checked against, so the first that isn't `myAddress` (any case) is the sender -
- * never a second, unchecked read. `sender` is null on any other verdict, or when every input is ours.
+ * verifyRestTransactionSignatures plus the payment's proven sender (iOS 5a78d06 + 2343e84
+ * verifyIncomingPaymentSignatures, IOS-094 / DSK-056): the sender is the first input that isn't
+ * `myAddress` (any case) AMONG THOSE WHOSE SIGNATURE VERIFIED - never just the first input: ECDSA
+ * and covenant-shaped inputs are skipped unchecked, so their address is only the REST label, and a
+ * forger could list one first and sign a second input of their own. `sender` is null on any other
+ * verdict, or when no verified input names an address that isn't ours (the payment paths then send
+ * it the unknown way - node + indexer - never file it under the label).
  */
 export async function verifyRestTransactionSignaturesWithSender(tx, { resolveSpentOutput = null, myAddress = "" } = {}) {
-  const { check, inputs } = await checkRestTransaction(tx, { resolveSpentOutput });
+  const { check, inputs, verifiedInputs } = await checkRestTransaction(tx, { resolveSpentOutput });
   if (check !== "valid") return { check, sender: null };
   const me = String(myAddress || "").trim().toLowerCase();
-  const sender = (inputs || []).map((input) => String(input.address ?? "").trim()).find((address) => address && address.toLowerCase() !== me) || null;
+  const sender = (verifiedInputs || [])
+    .map((index) => String(inputs?.[index]?.address ?? "").trim())
+    .find((address) => address && address.toLowerCase() !== me) || null;
   return { check, sender };
 }
 
 async function checkRestTransaction(tx, { resolveSpentOutput = null } = {}) {
-  const verdict = (check) => ({ check, inputs: null });
+  const verdict = (check) => ({ check, inputs: null, verifiedInputs: null });
   const rawInputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
   // No inputs (a coinbase): nothing was checked, so nothing is vouched for (IOS-094) - the
   // received-payment paths drop such a transaction before it gets here.
@@ -271,6 +276,9 @@ async function checkRestTransaction(tx, { resolveSpentOutput = null } = {}) {
   // inputs whose signature was actually checked; a payment with none is not "valid" (IOS-106: an
   // all-ECDSA or otherwise unmodelled payment had zero checks and passed)
   let checkedInputs = 0;
+  // the index of every input whose signature VERIFIED, in input order (iOS 2343e84 onVerifiedInput):
+  // the only inputs a payment's sender may come from (IOS-094 / DSK-056)
+  const verifiedInputs = [];
 
   // iOS 8116ab9's order: the spent script is worked out first, so only key-address and KIP-22
   // inputs need (and are held to) a well-formed signature script; P2SH covenant spends are skipped.
@@ -336,7 +344,8 @@ async function checkRestTransaction(tx, { resolveSpentOutput = null } = {}) {
     let ok;
     try { ok = schnorr.verify(schnorrSig, sighash, xOnlyKey); } catch { undecided = true; continue; }
     checkedInputs += 1;
-    if (!ok && failedInput == null) failedInput = i;
+    if (!ok) { if (failedInput == null) failedInput = i; }
+    else verifiedInputs.push(i);
   }
 
   if (malformedInput != null) return verdict("invalid");
@@ -344,5 +353,5 @@ async function checkRestTransaction(tx, { resolveSpentOutput = null } = {}) {
   // (that the signature covers) is the likelier reason.
   if (failedInput != null) return verdict(restFieldsRebuildId() ? "invalid" : "unknown");
   if (undecided || checkedInputs === 0) return verdict("unknown");
-  return { check: "valid", inputs };
+  return { check: "valid", inputs, verifiedInputs };
 }

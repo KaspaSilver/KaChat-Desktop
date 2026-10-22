@@ -443,6 +443,37 @@ async function main() {
     r.eq(allUsed.index, B + 25, "fresh: after 20 skips the next slot is taken");
   }
 
+  // MARK: Generate New Address and the Request Payment preview check the slot too (iOS 2343e84,
+  // IOS-101 narrowed): ui/app.js revealNextSpendingAddress's fresh path and openCreatePaymentRequest's
+  // Fresh Address preview go through verifiedFreshQuantumSlot, never the unchecked next index.
+  {
+    const app = readFileSync(join(repo, "ui/app.js"), "utf8");
+    const body = (name) => {
+      const at = app.indexOf(`function ${name}(`);
+      if (at < 0) return "";
+      const next = app.slice(at + 10).search(/\n(?:async )?function /);
+      return next < 0 ? app.slice(at) : app.slice(at, at + 10 + next);
+    };
+    const generate = body("revealNextSpendingAddress");
+    const request = body("openCreatePaymentRequest");
+    r.check(generate.length > 0 && request.length > 0, "fresh-slot use: both functions found in ui/app.js");
+    r.check(/readyIndex = await verifiedFreshQuantumSlot\(\)/.test(generate), "fresh-slot use: Generate takes a checked slot");
+    r.check(!/nextFreshQuantumIndex\(/.test(generate), "fresh-slot use: Generate never takes the unchecked next index");
+    r.check(/await verifiedFreshQuantumSlot\(\)/.test(request), "fresh-slot use: the Request Payment preview shows a checked slot");
+    r.check(!/nextFreshQuantumIndex\(/.test(request), "fresh-slot use: the preview never shows the unchecked next index");
+    r.check(!/nextFreshQuantumIndex\(/.test(app), "fresh-slot use: no unchecked fresh slot anywhere in ui/app.js");
+    // Generate's write, replayed on the pure part: the bound lands on the checked slot, past the
+    // used ones, and that slot is shown (un-hidden).
+    let bound = 4;
+    const used = new Set([B + 5, B + 6]);
+    const readyIndex = await Q.verifiedFreshQuantumIndex({ qMaxIndex: bound, addressAt: (i) => `kaspa:q${i}`, usedState: async (a) => used.has(Number(a.slice(7))), raiseBound: (q) => { bound = Math.max(bound, q); } });
+    const hidden = new Set([B + 7, B + 3]);
+    hidden.delete(readyIndex);
+    r.eq(readyIndex, B + 7, "Generate: slots used elsewhere are skipped");
+    r.eq(Q.chainLocalIndex(readyIndex), 7, "Generate: the saved bound is the checked slot");
+    r.eq(hidden.has(B + 7), false, "Generate: the new slot is shown");
+  }
+
   // MARK: A quantum source never takes change back (iOS da2c8e2, IOS-104)
   {
     r.eq(Q.QUANTUM_CHANGE_UNAVAILABLE, "Couldn't prepare the next address. Try again.", "no-change-to-source: the iOS error text");
