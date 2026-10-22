@@ -14747,3 +14747,8 @@ html.touch :is(button, [role="button"], a, .action-tile):focus-visible { outline
 .boot-splash img { width: 96px; height: 96px; border-radius: 22px; }
 html.app-ready .boot-splash { display: none; }
 @keyframes boot-splash-out { to { opacity: 0; visibility: hidden; } }
+/* Keyboard up: the dock and the home indicator are both under the keyboard, so nothing may keep
+   room for them. Every screen reserves --dock-inset for the dock, and the conversation kept that
+   strip (84pt + the home-indicator inset) empty between its composer and the keyboard. */
+html.keyboard-open { --dock-inset: 0px; --safe-bottom: 0px; }
+html.keyboard-open .sidebar-tabbar { display: none !important; }
