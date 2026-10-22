@@ -31,7 +31,7 @@ const USER_TYPE_KEY = "kachat-user-type-choice-v1";
 
 /** Tabs removed everywhere while Simple Mode is on (dock, programmatic switches,
  * the Customize Dock page). */
-export const CHILD_HIDDEN_TABS = ["kaposts", "broadcasts", "chess", "kachat-names"]; // .kachat is a marketplace (iOS b064468); Stats stays (read-only)
+export const CHILD_HIDDEN_TABS = ["swaps", "kaposts", "broadcasts", "chess", "kachat-names"]; // .kachat is a marketplace (iOS b064468); Stats stays (read-only)
 
 let deps = {
   escapeHtml: (value) => String(value ?? ""),
@@ -277,7 +277,7 @@ export function renderUserTypeGuideStep(container) {
   if (isChildModeEnabled()) {
     // Replay with Simple Mode already on: informational only — offering "Full"
     // here would be a password-free way out.
-    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; KaPosts and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
+    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; Swaps, KaPosts and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
     return;
   }
   const rows = [
@@ -285,7 +285,7 @@ export function renderUserTypeGuideStep(container) {
     { key: "child", title: "Simple", sub: "Chats, Portfolio and Cold Storage only. A password unlocks the rest later." },
   ];
   container.innerHTML = `
-    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. KaPosts and Public Chats stay hidden until the password unlocks them.</p>
+    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. Swaps, KaPosts and Public Chats stay hidden until the password unlocks them.</p>
     <div class="setup-choice-list">
       ${rows.map((row) => `<button type="button" class="setup-node-row${guideChoice === row.key ? " selected" : ""}" data-cm-usertype="${row.key}"><span class="setup-node-dot"></span><span class="setup-node-copy"><strong>${row.title}</strong><small>${row.sub}</small></span></button>`).join("")}
     </div>
@@ -364,8 +364,7 @@ let pageWired = false;
 let changeSucceeded = false;
 
 // iOS ChildModeSettingsView aboutSection: header, the three rows, then the footer. Desktop has
-// no Swaps and no Face ID, so the iOS sentence names only what this app hides and drops the
-// Face ID clause.
+// no Face ID and no Chats-tab cycle, so the iOS sentence drops those clauses.
 const ABOUT_CARD_HTML = `
   <p class="settings-group-label">What stays available</p>
   <div class="settings-list-card">
@@ -373,7 +372,7 @@ const ABOUT_CARD_HTML = `
     <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Portfolio</strong></span></div>
     <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Cold Storage</strong></span></div>
   </div>
-  <p class="settings-group-footer">While Simple Mode is on, KaPosts and Public Chats are removed everywhere - the dock, links and notifications. Only the password unlocks Simple Mode.</p>`;
+  <p class="settings-group-footer">While Simple Mode is on, Swaps, KaPosts and Public Chats are removed everywhere - the dock, links and notifications. Only the password unlocks Simple Mode.</p>`;
 
 export function renderChildModeSettingsPage() {
   if (!pageEl) pageEl = document.querySelector("[data-child-mode-page]");

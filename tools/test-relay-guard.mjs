@@ -5,12 +5,13 @@
 //
 // Covers DSK-001 (scheme-relative SSRF, blocked ranges, redirect hops), DSK-002 (navigation
 // refusal, response sandboxing/stripping, request cookie stripping) and DSK-003 (rate-limit key and
-// eviction, IPv6 /64 buckets, write gate bound to the declared Nextcloud origin).
+// eviction, IPv6 /64 buckets, write gate bound to the declared Nextcloud origin), and the ChangeNOW
+// key gate (the server key only on the four swap calls, never a client's, its own rate limit).
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createRelay, ipBlocked, resolveAllowed } from "./relay-guard.mjs";
+import { createRelay, ipBlocked, resolveAllowed, CHANGENOW_KEY_HEADER, SWAP_UNAVAILABLE_MESSAGE } from "./relay-guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
@@ -63,6 +64,8 @@ const upstream = http.createServer((req, res) => {
     if (path === "/redirect-same") { res.writeHead(302, { location: "/echo?from=redirect" }); res.end(); return; }
     if (path === "/setcookie") { res.writeHead(200, { "set-cookie": "sid=abc123; Path=/; HttpOnly" }); res.end("{}"); return; }
     if (path === "/missing") { res.writeHead(404, { "content-type": "application/json" }); res.end("{}"); return; }
+    // A ChangeNOW call that redirects to another origin (the key must not follow it).
+    if (path === "/v2/exchange/by-id" && req.url.includes("id=hop")) { res.writeHead(302, { location: `http://other.test:${upstreamPort}/echo` }); res.end(); return; }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(lastSeen));
   });
@@ -72,7 +75,7 @@ const UP = encodeURIComponent(`http://upstream.test:${upstreamPort}`);
 
 // Name resolution for tests: "upstream.test" is the local server; every other name goes through
 // the real guard (so 127.0.0.1 etc. stay blocked, including on redirect hops).
-const testResolve = (hostname) => (hostname === "upstream.test"
+const testResolve = (hostname) => (hostname === "upstream.test" || hostname === "other.test"
   ? Promise.resolve({ address: "127.0.0.1", family: 4 })
   : resolveAllowed(hostname));
 
@@ -94,7 +97,7 @@ check("loopback never allowed even with allowPrivate", ipBlocked("127.0.0.1", { 
 
 // --- 2. The sidecar, as deployed (spawned with node) ------------------------------------------
 const sidecar = spawn(process.execPath, [join(here, "nc-proxy-server.mjs")], {
-  env: { ...process.env, NC_PROXY_PORT: "0", NC_PROXY_HOST: "127.0.0.1" },
+  env: { ...process.env, NC_PROXY_PORT: "0", NC_PROXY_HOST: "127.0.0.1", CHANGENOW_API_KEY: "", KACHAT_RELAY_ALLOW_NEXTCLOUD: "" },
   stdio: ["ignore", "pipe", "pipe"],
 });
 const sidecarPort = await new Promise((resolve, reject) => {
@@ -149,8 +152,44 @@ try {
     const r = await request(sidecarPort, `/desktop/nc-proxy${path}`, opts);
     check(`sidecar refuses Nextcloud: ${label}`, r.status === 403 && r.body.includes("Kaspa Quick Start"), `got ${r.status} ${r.body}`);
   }
+  // No CHANGENOW_API_KEY: the swap probe says off and the swap calls answer "not available" here,
+  // without anything going out.
+  const swapOff = await request(sidecarPort, "/desktop/nc-proxy/__swap");
+  check("sidecar without a key: __swap is off", swapOff.status === 200 && swapOff.body === "off", `${swapOff.status} ${swapOff.body}`);
+  const CN = encodeURIComponent("https://api.changenow.io");
+  const noKey = await request(sidecarPort, `/desktop/nc-proxy/${CN}/v2/exchange/min-amount?fromCurrency=usdc&fromNetwork=matic&toCurrency=kas&toNetwork=kas&flow=standard`, { headers: { host: "desktop.kachat.app", "sec-fetch-site": "same-origin", referer: "https://desktop.kachat.app/" } });
+  check("sidecar without a key: a swap call is 503 Swap is not available", noKey.status === 503 && noKey.headers["x-kachat-swap"] === "unavailable" && noKey.body === SWAP_UNAVAILABLE_MESSAGE, `${noKey.status} ${noKey.body}`);
 } finally {
   sidecar.kill();
+}
+
+// --- 2a. The sidecar WITH a key: swap is on, Nextcloud is still refused, and nothing reaches
+// ChangeNOW unless the call comes from the site's own page (no request here goes out). ----------
+{
+  const keyed = spawn(process.execPath, [join(here, "nc-proxy-server.mjs")], {
+    env: { ...process.env, NC_PROXY_PORT: "0", NC_PROXY_HOST: "127.0.0.1", CHANGENOW_API_KEY: "sidecar-test-key-not-real", KACHAT_RELAY_ALLOW_NEXTCLOUD: "" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const keyedPort = await new Promise((resolve, reject) => {
+    let out = "";
+    keyed.stdout.on("data", (d) => { out += d; const m = /listening on [^:]+:(\d+)/.exec(out); if (m) resolve(Number(m[1])); });
+    keyed.on("exit", (code) => reject(new Error(`sidecar exited ${code}`)));
+    setTimeout(() => reject(new Error("sidecar did not start")), 5000);
+  });
+  try {
+    const on = await request(keyedPort, "/desktop/nc-proxy/__swap");
+    check("sidecar with a key: __swap is on (the key itself is never shown)", on.status === 200 && on.body === "on", `${on.status} ${on.body}`);
+    const NC = encodeURIComponent("https://cloud.example.org");
+    const nc = await request(keyedPort, `/desktop/nc-proxy/${NC}/remote.php/dav/files/u/x`, { method: "PUT", headers: { authorization: "Basic dTpw", "x-kachat-nextcloud-origin": "https://cloud.example.org" }, body: "x" });
+    check("sidecar with a key: Nextcloud is still refused", nc.status === 403 && nc.body.includes("Kaspa Quick Start"), `${nc.status} ${nc.body}`);
+    const CN = encodeURIComponent("https://api.changenow.io");
+    const foreign = await request(keyedPort, `/desktop/nc-proxy/${CN}/v2/exchange`, { method: "POST", headers: { host: "desktop.kachat.app", "sec-fetch-site": "cross-site", origin: "https://evil.example", "content-type": "application/json" }, body: "{}" });
+    check("sidecar with a key: a cross-site create is refused before anything goes out", foreign.status === 403, `${foreign.status} ${foreign.body}`);
+    const noMeta = await request(keyedPort, `/desktop/nc-proxy/${CN}/v2/exchange/by-id?id=abc`, { headers: { host: "desktop.kachat.app" } });
+    check("sidecar with a key: a status call without Fetch Metadata is refused", noMeta.status === 403, `${noMeta.status} ${noMeta.body}`);
+  } finally {
+    keyed.kill();
+  }
 }
 
 // --- 2b. refuseNextcloud: indexer/API reads still pass, Nextcloud traffic does not ------------
@@ -272,7 +311,15 @@ check("reads unaffected: HEAD declaring another host", headRead.status === 200, 
 const apiHost = (hostname) => new URL(`https://${hostname}/v1/x`);
 const fakeReq = (headers = {}) => ({ socket: { remoteAddress: "127.0.0.1" }, headers });
 check("API host write needs no declared origin", relay.writeAllowed(fakeReq(), apiHost("api.kaspa.org")) && relay.writeAllowed(fakeReq(), apiHost("indexer.kasia.wtf")));
-check("ChangeNOW is no longer a write host", !relay.writeAllowed(fakeReq(), apiHost("api.changenow.io")));
+// ChangeNOW is a write host for creating an exchange only (POST /v2/exchange).
+const cnReq = (method) => ({ socket: { remoteAddress: "127.0.0.1" }, headers: {}, method });
+check("ChangeNOW: POST /v2/exchange may be written", relay.writeAllowed(cnReq("POST"), new URL("https://api.changenow.io/v2/exchange")));
+check("ChangeNOW: no other write there", !relay.writeAllowed(cnReq("POST"), new URL("https://api.changenow.io/v2/exchange/other"))
+  && !relay.writeAllowed(cnReq("DELETE"), new URL("https://api.changenow.io/v2/exchange"))
+  && !relay.writeAllowed(cnReq("PUT"), new URL("https://api.changenow.io/v2/exchange"))
+  && !relay.writeAllowed(cnReq("POST"), new URL("https://api.changenow.io/v1/transactions"))
+  && !relay.writeAllowed(cnReq("POST"), new URL("https://changenow.io/v2/exchange"))
+  && !relay.writeAllowed(cnReq("POST"), new URL("http://api.changenow.io/v2/exchange")));
 
 // Cookie jar for Talk.
 const jar = "talkJar_0123456789";
@@ -347,6 +394,117 @@ for (const addr of ["2001:db8:5:6::1", "2001:db8:5:6::2", "2001:db8:5:6:ffff:fff
 v6Statuses.push((await request(v6Port, "/nc-proxy/bad", { headers: { "x-forwarded-for": "2001:db8:5:7::1" } })).status);
 check("rotating addresses inside one /64 share a bucket; the next /64 does not", v6Statuses.join(",") === "400,400,429,400", v6Statuses.join(","));
 v6.server.close();
+
+// --- 6. ChangeNOW key gate ---------------------------------------------------------------------
+// The upstream plays api.changenow.io (changenowOrigin is a tests-only option). Nothing here talks
+// to the real ChangeNOW.
+{
+  const CN_ORIGIN = `http://upstream.test:${upstreamPort}`;
+  const CNE = encodeURIComponent(CN_ORIGIN);
+  const SERVER_KEY = "server-key-for-tests";
+  const page = { host: "kachat.test", "sec-fetch-site": "same-origin", referer: "https://kachat.test/desktop/" };
+  const pagePost = { host: "kachat.test", "sec-fetch-site": "same-origin", origin: "https://kachat.test", "content-type": "application/json" };
+  const quoteQ = "?fromCurrency=usdc&fromNetwork=matic&toCurrency=kas&toNetwork=kas&fromAmount=10&flow=standard";
+  const minQ = "?fromCurrency=usdc&fromNetwork=matic&toCurrency=kas&toNetwork=kas&flow=standard";
+  const { relay: cnRelay, server: cnServer } = relayServer({ changenowApiKey: () => SERVER_KEY, changenowOrigin: CN_ORIGIN, changenowRateMax: 100 });
+  const cnPort = await listen(cnServer);
+  const seen = async (path, opts) => {
+    lastSeen = null;
+    const r = await request(cnPort, `/nc-proxy/${CNE}${path}`, opts);
+    return { r, up: lastSeen };
+  };
+
+  for (const [label, path, opts] of [
+    ["GET estimated-amount", `/v2/exchange/estimated-amount${quoteQ}`, { headers: page }],
+    ["GET min-amount", `/v2/exchange/min-amount${minQ}`, { headers: page }],
+    ["GET by-id", "/v2/exchange/by-id?id=abc123", { headers: page }],
+    ["POST exchange", "/v2/exchange", { method: "POST", headers: pagePost, body: JSON.stringify({ fromCurrency: "usdc", fromAmount: "10", address: "kaspa:qz", flow: "standard" }) }],
+  ]) {
+    const { r, up } = await seen(path, opts);
+    check(`changenow: ${label} carries the server key`, r.status === 200 && up?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY, `${r.status} ${up?.headers?.[CHANGENOW_KEY_HEADER]}`);
+  }
+  const posted = await seen("/v2/exchange", { method: "POST", headers: pagePost, body: "{\"a\":1}" });
+  check("changenow: the create body reaches ChangeNOW", posted.up?.method === "POST" && posted.up?.body === "{\"a\":1}");
+  check("changenow: a trailing slash is the same route", (await seen(`/v2/exchange/min-amount/${minQ}`, { headers: page })).up?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY);
+
+  // A key the client sends is never passed on: replaced on the swap calls, dropped everywhere else.
+  const clientKey = await seen(`/v2/exchange/estimated-amount${quoteQ}`, { headers: { ...page, [CHANGENOW_KEY_HEADER]: "client-own-key" } });
+  check("changenow: a client key header is replaced by the server key", clientKey.up?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY);
+  const elsewhere = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { [CHANGENOW_KEY_HEADER]: "client-own-key" } });
+  check("changenow: a client key header is stripped on any other call", JSON.parse(elsewhere.body).headers[CHANGENOW_KEY_HEADER] === undefined);
+  const elsewhere2 = await seen("/echo", { headers: { ...page, [CHANGENOW_KEY_HEADER]: "client-own-key" } });
+  check("changenow: and on a non-swap path of the ChangeNOW origin", elsewhere2.up && elsewhere2.up.headers[CHANGENOW_KEY_HEADER] === undefined);
+
+  // No key on other ChangeNOW paths or methods.
+  const currencies = await seen("/v2/exchange/currencies?active=true", { headers: page });
+  check("changenow: no key on an unlisted path (currencies)", currencies.r.status === 200 && currencies.up?.headers[CHANGENOW_KEY_HEADER] === undefined);
+  const v1 = await seen("/v1/exchange-amount/10/usdc_kas", { headers: page });
+  check("changenow: no key on the v1 API", v1.up?.headers[CHANGENOW_KEY_HEADER] === undefined);
+  const head = await seen(`/v2/exchange/min-amount${minQ}`, { method: "HEAD", headers: page });
+  check("changenow: no key on a HEAD of a swap path", head.up?.headers[CHANGENOW_KEY_HEADER] === undefined);
+  const otherPost = await seen("/v2/exchange/other", { method: "POST", headers: pagePost, body: "{}" });
+  check("changenow: POST to another path is refused", otherPost.r.status === 403 && otherPost.up === null, `${otherPost.r.status}`);
+  const del = await seen("/v2/exchange", { method: "DELETE", headers: pagePost });
+  check("changenow: DELETE is refused", del.r.status === 403 && del.up === null, `${del.r.status}`);
+
+  // Only for the site's own pages.
+  for (const [label, headers] of [
+    ["no Fetch Metadata", { host: "kachat.test", referer: "https://kachat.test/desktop/" }],
+    ["cross-site", { ...page, "sec-fetch-site": "cross-site" }],
+    ["a foreign Origin", { ...pagePost, origin: "https://evil.example" }],
+    ["a foreign Referer", { ...page, referer: "https://evil.example/" }],
+    ["no Origin and no Referer", { host: "kachat.test", "sec-fetch-site": "same-origin" }],
+  ]) {
+    const { r, up } = await seen(`/v2/exchange/min-amount${minQ}`, { headers });
+    check(`changenow: refused with ${label}`, r.status === 403 && up === null, `${r.status}`);
+  }
+  check("changenow: X-Forwarded-Host counts from a trusted proxy", cnRelay.sameOriginCaller(fake("127.0.0.1", { host: "127.0.0.1:8790", "x-forwarded-host": "kachat.test", "sec-fetch-site": "same-origin", referer: "https://kachat.test/desktop/" })));
+  check("changenow: X-Forwarded-Host is ignored from anyone else", !cnRelay.sameOriginCaller(fake("203.0.113.5", { host: "127.0.0.1:8790", "x-forwarded-host": "kachat.test", "sec-fetch-site": "same-origin", referer: "https://kachat.test/desktop/" })));
+
+  // A redirect to another origin does not take the key along.
+  const hop = await request(cnPort, `/nc-proxy/${CNE}/v2/exchange/by-id?id=hop`, { headers: page });
+  check("changenow: the key does not follow a redirect to another origin", hop.status === 200 && JSON.parse(hop.body).headers[CHANGENOW_KEY_HEADER] === undefined, hop.body.slice(0, 120));
+
+  // Its own per-client limit (3 here): the 4th swap call in a minute is refused, another client
+  // (behind the trusted loopback proxy) still has its own, and ordinary relaying is unaffected.
+  const limited = relayServer({ changenowApiKey: SERVER_KEY, changenowOrigin: CN_ORIGIN, changenowRateMax: 3 });
+  const limitedPort = await listen(limited.server);
+  const statuses = [];
+  for (let i = 0; i < 4; i += 1) {
+    statuses.push((await request(limitedPort, `/nc-proxy/${CNE}/v2/exchange/min-amount${minQ}`, { headers: { ...page, "x-forwarded-for": "198.51.100.20" } })).status);
+  }
+  check("changenow: per-client swap limit", statuses.join(",") === "200,200,200,429", statuses.join(","));
+  const tooMany = await request(limitedPort, `/nc-proxy/${CNE}/v2/exchange/by-id?id=x`, { headers: { ...page, "x-forwarded-for": "198.51.100.20" } });
+  check("changenow: the limit answers 429 Too many swap requests with retry-after", tooMany.status === 429 && tooMany.body === "Too many swap requests" && tooMany.headers["retry-after"] === "60");
+  const otherClient = await request(limitedPort, `/nc-proxy/${CNE}/v2/exchange/min-amount${minQ}`, { headers: { ...page, "x-forwarded-for": "198.51.100.21" } });
+  check("changenow: another client has its own swap limit", otherClient.status === 200, `${otherClient.status}`);
+  const plainRead = await request(limitedPort, `/nc-proxy/${UP}/echo`, { headers: { "x-forwarded-for": "198.51.100.20" } });
+  check("changenow: the swap limit does not touch ordinary relaying", plainRead.status === 200, `${plainRead.status}`);
+  limited.server.close();
+
+  // No server key: the four calls answer "not available" and nothing goes out; the probe says off.
+  const off = relayServer({ changenowApiKey: "", changenowOrigin: CN_ORIGIN });
+  const offPort = await listen(off.server);
+  lastSeen = null;
+  const offQuote = await request(offPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: page });
+  check("changenow without a key: 503 Swap is not available", offQuote.status === 503 && offQuote.headers["x-kachat-swap"] === "unavailable" && offQuote.body === SWAP_UNAVAILABLE_MESSAGE && lastSeen === null, `${offQuote.status} ${offQuote.body}`);
+  const offProbe = await request(offPort, "/nc-proxy/__swap");
+  check("changenow without a key: __swap is off", offProbe.body === "off");
+  const onProbe = await request(cnPort, "/nc-proxy/__swap");
+  check("changenow with a key: __swap is on", onProbe.status === 200 && onProbe.body === "on" && !onProbe.body.includes(SERVER_KEY));
+  off.server.close();
+
+  // The hosted sidecar's setting (refuseNextcloud) does not get in the way of swaps.
+  const hosted = relayServer({ refuseNextcloud: true, changenowApiKey: SERVER_KEY, changenowOrigin: CN_ORIGIN });
+  const hostedPort = await listen(hosted.server);
+  lastSeen = null;
+  const hostedQuote = await request(hostedPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: page });
+  check("hosted relay: a swap quote still relays with the key", hostedQuote.status === 200 && lastSeen?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY, `${hostedQuote.status}`);
+  const hostedNc = await request(hostedPort, `/nc-proxy/${UP}/remote.php/dav/files/u/`, { method: "PROPFIND", headers: { authorization: "Basic dTpw" } });
+  check("hosted relay: still no Nextcloud", hostedNc.status === 403, `${hostedNc.status}`);
+  hosted.server.close();
+  cnServer.close();
+}
 
 server.close();
 upstream.close();

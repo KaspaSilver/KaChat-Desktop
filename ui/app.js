@@ -55,6 +55,8 @@ import {
 } from "./send-kaspa-components.js";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
 import * as Calls from "./calls.js";
+// Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
+import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
 import {
@@ -173,20 +175,6 @@ const STATE_BACKUP_KEY = "kachat-shell-state-backup-v1";
 const STATE_BACKUP_MIN_INTERVAL_MS = 60_000;
 let lastStateBackupWriteAt = 0;
 const ACCOUNT_DATA_PREFIX = "kachat-account-data-v1";
-// The Swap app was removed (iOS f94db5a). Its leftovers - the device-level API key override and,
-// per account, the terms consent and swap history - are swept at boot. Idempotent: once they are
-// gone this finds nothing, and it also clears them again if an old backup brings them back.
-(() => {
-  const SWAP_BASE_KEYS = ["kachat-swap-history-v1", "kachat-swap-disclaimer-agreed-v1", "kachat-changenow-api-key-v1"];
-  try {
-    const doomed = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i) || "";
-      if (SWAP_BASE_KEYS.some((base) => key === base || key.endsWith(`:${base}`))) doomed.push(key);
-    }
-    doomed.forEach((key) => localStorage.removeItem(key));
-  } catch { /* storage unavailable: nothing to sweep */ }
-})();
 const SESSION_LOGGED_OUT_KEY = "kachat-session-logged-out-v1";
 // Marks that an account is active in THIS page. Memory only (DSK-023): browsers keep
 // sessionStorage on disk and give it back on "Reopen closed tab", session restore and Duplicate
@@ -4998,6 +4986,7 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetChessTournamentsForAccount(); } catch { /* not yet initialized */ }
   try { resetPortfolioForAccount(); } catch { /* not yet initialized */ }
   try { resetColdStorageForAccount(); } catch { /* not yet initialized */ }
+  try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
   try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
   // The Address Book is per wallet: its screens go back to the list (the store reads the new
@@ -10336,8 +10325,6 @@ function setActiveAppTab(tab) {
   // Child Mode choke point: every tab switch (dock click, restore, deep link,
   // programmatic) funnels through here, so gated tabs simply become Chats.
   if (isChildModeEnabled() && CHILD_HIDDEN_TABS.includes(tab)) tab = "chats";
-  // Swap was removed: an old notification route or deep link naming it lands on Chats.
-  if (tab === "swaps") tab = "chats";
   // A tab that lives in the Hub is REACHED through the Hub, so asking for it directly - a deep
   // link, a notification tap, the restored spot - opens it there rather than failing.
   if (tab !== "hub" && !dockPrefs.dock.includes(tab) && dockPrefs.hub.includes(tab)) {
@@ -10406,6 +10393,7 @@ function setActiveAppTab(tab) {
   else { stopBroadcastPolling(); syncPublicChatsPane(); }
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
+  try { if (screenTab === "swaps") refreshSwaps(); } catch { /* not started */ }
   // Chess keeps the arena scanned only while its screen is up (iOS acquire/release).
   if (screenTab === "chess") showChessTournaments(); else hideChessTournaments();
   try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
@@ -10445,7 +10433,7 @@ sidebarTabButtons.forEach((button) => {
 
 const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -11545,7 +11533,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 216;
+const APP_BUILD = 217;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -27832,6 +27820,49 @@ queueMicrotask(async () => {
     });
   } catch (error) { appendEngineLog(`initColdStorage did not start: ${error?.message || error}`); }
   try {
+    initSwaps({
+      engine, escapeHtml, accountScopedKey, showToast: showCopyToast,
+      explorerAddressUrl, addressCopiedToastText, copyTextToClipboard,
+      currencySymbol: () => currencyMeta().symbol.trim(),
+      // Choose Address (iOS SwapAddressPickerView): every revealed spending address of either chain
+      // with its balance and used flag. Hidden ones are left out before anything is asked of the
+      // network, and the rest are checked a few at a time.
+      listSpendingAddresses: async () => {
+        if (!activeAccountMnemonic()) return [];
+        const state = getSpendingState();
+        const hidden = new Set(state.hidden.map(Number));
+        const rows = [];
+        for (const index of spendingRevealedIndices(state)) {
+          if (hidden.has(index) && index !== state.activeIndex) continue;
+          const address = deriveSpendingAddressAt(index);
+          if (address) rows.push({ index, address });
+        }
+        const entries = [];
+        for (let i = 0; i < rows.length; i += 8) {
+          const chunk = await Promise.all(rows.slice(i, i + 8).map(async ({ index, address }) => {
+            const usage = await spendingUsageFor(address);
+            return { index, address, label: spendingLabelFor(state, index), shortAddress: spendingShortAddress(address), kas: usage.kas, used: usage.used, hidden: false };
+          }));
+          entries.push(...chunk);
+        }
+        return entries;
+      },
+      // A swap payout takes the next LEGACY slot (iOS 28ecee0 SwapService.nextFreshSpendingIndex /
+      // generateNextSpendingAddress), never a quantum one: one past the legacy chain.
+      nextFreshSpendingIndex: () => (activeAccountMnemonic() ? getSpendingState().maxIndex + 1 : null),
+      spendingAddressAt: (index) => deriveSpendingAddressAt(index),
+      revealNextSwapAddress: async () => {
+        if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
+        const owner = engine.address;
+        const next = getSpendingState(owner).maxIndex + 1;
+        saveSpendingState({ maxIndex: next }, owner);
+        try { renderSpendingList(); } catch { /* the address screens are not up */ }
+        return next;
+      },
+      openSpendingAddresses: () => openSpendingManageScreen(),
+    });
+  } catch (error) { appendEngineLog(`initSwaps did not start: ${error?.message || error}`); }
+  try {
     initNextcloud({
       accountScopedKey, escapeHtml, appendEngineLog,
       showToast: showCopyToast,
@@ -28211,6 +28242,8 @@ queueMicrotask(async () => {
 
   if (wasmReady) {
     const restored = restorePersistedTestingWallet();
+    // Swap derived its payout preview before the wallet was back; derive it now.
+    if (restored) { try { resetSwapsForAccount(); } catch { /* not started */ } }
     updateWalletUi();
     updateServiceSummary();
     if (!restored && !engine.address && loggedOutScreen && loggedOutScreen.hidden) {

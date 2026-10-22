@@ -25,6 +25,13 @@
 //                                     people open must not see their Nextcloud logins, Talk calls or
 //                                     share links (relay-guard.mjs refuseNextcloud). Only for a
 //                                     static deployment the person runs for themselves.
+//   CHANGENOW_API_KEY                 the server's ChangeNOW key for the app's Swap (Kaspa Hub >
+//                                     ChangeNOW Swap). Unset: Swap says "not available right now".
+//                                     Attached only to the four swap calls, never sent to the page.
+//                                     The page must reach this server same-origin: have nginx pass
+//                                     the public Host (`proxy_set_header Host $host`) or send
+//                                     X-Forwarded-Host from a KACHAT_TRUSTED_PROXIES address.
+//   KACHAT_CHANGENOW_RATE_MAX         key-attached ChangeNOW calls per client per minute (default 30)
 import http from "node:http";
 import { createRelay } from "./relay-guard.mjs";
 
@@ -38,6 +45,9 @@ const relay = createRelay({
   readTimeoutMs: Number(process.env.NC_PROXY_UPSTREAM_TIMEOUT_MS || 30000),
   rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
   refuseNextcloud: String(process.env.KACHAT_RELAY_ALLOW_NEXTCLOUD || "") !== "1",
+  // Read per request, so a key added to the environment of a restarted process needs no code change.
+  changenowApiKey: () => process.env.CHANGENOW_API_KEY || "",
+  changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
   log: (line) => console.warn(line),
 });
 

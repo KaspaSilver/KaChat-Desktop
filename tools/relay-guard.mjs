@@ -10,6 +10,7 @@
 //   - KNS name resolution            (engine/kns.js)
 //   - link previews + preview images (ui/app.js, ui/kachat-names-live.js: x-preview, x-preview-image)
 //   - indexers, api.kaspa.org, node seeds ...  (engine/endpoints.js fetch wrapper)
+//   - ChangeNOW Swap                 (ui/swap-quote.js: quotes, minimum, create, status)
 //
 // What this module guarantees for every request:
 //   * The host actually connected to is the host that was checked: the target URL is built first
@@ -30,6 +31,11 @@
 //   * Rate limits key on the socket peer (an IPv6 client by its /64); forwarding headers count only
 //     from a trusted proxy. A flood of new addresses evicts expired and one-off entries, never
 //     everyone's counters at once.
+//   * The server's ChangeNOW API key (never in the page) rides only on the app's four swap calls -
+//     GET estimated-amount, GET min-amount, GET by-id, POST exchange on https://api.changenow.io -
+//     from a same-origin page, under its own per-client limit. A key header a client sends is
+//     dropped on every request, so nobody can route their own key through here either. Without a
+//     server key those four calls are answered "Swap is not available right now" (503).
 //
 // Node 20+, no dependencies: the sidecar copy runs as-is under node:20-alpine.
 import http from "node:http";
@@ -95,6 +101,23 @@ const JAR_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 export const NEXTCLOUD_ORIGIN_HEADER = "x-kachat-nextcloud-origin";
 // Rate-limit bookkeeping: at most this many client keys are tracked per limiter.
 const RATE_MAX_KEYS = 5000;
+
+// ChangeNOW: the server's API key is attached only to the swap calls ui/swap-quote.js makes (iOS
+// ChangeNowAPIClient: estimated-amount, min-amount, exchange, by-id), and api.changenow.io is a
+// write host for the one POST among them only.
+export const CHANGENOW_ORIGIN = "https://api.changenow.io";
+export const CHANGENOW_KEY_HEADER = "x-changenow-api-key";
+export const CHANGENOW_KEY_ROUTES = new Set([
+  "GET /v2/exchange/estimated-amount",
+  "GET /v2/exchange/min-amount",
+  "GET /v2/exchange/by-id",
+  "POST /v2/exchange",
+]);
+/** What the four swap calls are answered with when this server has no ChangeNOW key. The app shows
+ *  its own "not available" screen on it (the x-kachat-swap: unavailable header). */
+export const SWAP_UNAVAILABLE_MESSAGE = "Swap is not available right now.";
+/** The relay's own swap probe: "on" with a server key, "off" without (ui/swaps.js asks on open). */
+export const SWAP_PROBE_PATH = "/__swap";
 
 // --- Addresses -------------------------------------------------------------------------------
 
@@ -261,6 +284,10 @@ export function parseTrustedProxies(spec) {
  * @param {number}  [options.readTimeoutMs]   GET/HEAD/OPTIONS socket inactivity limit
  * @param {number}  [options.rateMax]          requests per client per minute
  * @param {number}  [options.rateMaxKeys]      client keys tracked by the limiter (default 5000)
+ * @param {string|function} [options.changenowApiKey] the server's ChangeNOW key (or a getter); empty
+ *                  means swaps are off on this server
+ * @param {number}  [options.changenowRateMax] key-attached ChangeNOW calls per client per minute (30)
+ * @param {string}  [options.changenowOrigin]  where the key routes live - tests only
  * @param {function} [options.resolveAllowed]  (hostname) => {address,family}|null - tests only
  * @param {function} [options.log]
  */
@@ -274,6 +301,9 @@ export function createRelay(options = {}) {
   const RATE_WINDOW_MS = 60_000;
   const rateMax = Number(options.rateMax) > 0 ? Number(options.rateMax) : 600;
   const rateMaxKeys = Number(options.rateMaxKeys) > 0 ? Number(options.rateMaxKeys) : RATE_MAX_KEYS;
+  const changenowKey = () => String((typeof options.changenowApiKey === "function" ? options.changenowApiKey() : options.changenowApiKey) || "").trim();
+  const changenowRateMax = Number(options.changenowRateMax) > 0 ? Number(options.changenowRateMax) : 30;
+  const changenowOrigin = String(options.changenowOrigin || CHANGENOW_ORIGIN).replace(/\/+$/, "").toLowerCase();
   const resolveTarget = typeof options.resolveAllowed === "function"
     ? options.resolveAllowed
     : (hostname) => resolveAllowed(hostname, { allowPrivate });
@@ -367,6 +397,7 @@ export function createRelay(options = {}) {
     };
   };
   const overRate = makeLimiter(rateMax);
+  const overChangenowRate = makeLimiter(changenowRateMax);
   let lastRateLog = 0;
   const noteRateLimited = (key, what) => {
     const now = Date.now();
@@ -384,8 +415,32 @@ export function createRelay(options = {}) {
     } catch { return ""; }
   };
 
+  /** The host this request was addressed to (the site the app is served from). */
+  const requestHost = (req) => {
+    const peerTrusted = isTrustedProxy(req.socket?.remoteAddress);
+    const forwarded = peerTrusted ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
+    return (forwarded || String(req.headers.host || "")).trim().toLowerCase();
+  };
+
+  /** A same-origin call from the page itself: Fetch Metadata says so AND the Origin (or, for a
+   *  GET, which carries none, the Referer) names the host the request was sent to. */
+  const sameOriginCaller = (req) => {
+    if (String(req.headers["sec-fetch-site"] || "").toLowerCase() !== "same-origin") return false;
+    const expected = requestHost(req);
+    if (!expected) return false;
+    const hostOf = (value) => { try { return new URL(String(value)).host.toLowerCase(); } catch { return ""; } };
+    if (req.headers.origin !== undefined) return hostOf(req.headers.origin) === expected;
+    return Boolean(req.headers.referer) && hostOf(req.headers.referer) === expected;
+  };
+
+  /** Is this one of the app's four ChangeNOW swap calls (the only ones the server key rides on)? */
+  const isChangenowKeyRoute = (method, target) => target.origin.toLowerCase() === changenowOrigin
+    && CHANGENOW_KEY_ROUTES.has(`${String(method || "GET").toUpperCase()} ${target.pathname.replace(/\/+$/, "")}`);
+
   /** May this write (non GET/HEAD/OPTIONS) go to `target`? */
   const writeAllowed = (req, target) => {
+    // ChangeNOW only for creating an exchange (POST /v2/exchange), never any other write there.
+    if (isChangenowKeyRoute(req.method, target)) return true;
     if (WRITE_API_HOST_RE.test(target.hostname)) return true;
     // Only to the Nextcloud the app is connected to, and only on its WebDAV/OCS roots.
     const declared = declaredNextcloudOrigin(req);
@@ -411,6 +466,13 @@ export function createRelay(options = {}) {
     if (probePath === "/__probe") {
       res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
       res.end("kachat-proxy");
+      return;
+    }
+    // "Can this site swap?" (ui/swaps.js): whether a server ChangeNOW key is configured. Says
+    // nothing about the key itself.
+    if (probePath === SWAP_PROBE_PATH) {
+      res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
+      res.end(changenowKey() ? "on" : "off");
       return;
     }
     // Never a page of this origin: a top-level or framed load of a relayed URL would render
@@ -453,6 +515,25 @@ export function createRelay(options = {}) {
     }
 
     const headers = { ...req.headers };
+    // A ChangeNOW key never comes from a client: only the server's, and only on the swap calls.
+    delete headers[CHANGENOW_KEY_HEADER];
+    if (isChangenowKeyRoute(method, target)) {
+      const serverKey = changenowKey();
+      if (!serverKey) {
+        refuse(res, 503, SWAP_UNAVAILABLE_MESSAGE, { "x-kachat-swap": "unavailable" });
+        return;
+      }
+      if (!sameOriginCaller(req)) {
+        refuse(res, 403, "Swap requests are only relayed for this site's own pages");
+        return;
+      }
+      if (overChangenowRate(who)) {
+        noteRateLimited(who, "ChangeNOW");
+        refuse(res, 429, "Too many swap requests", { "retry-after": "60" });
+        return;
+      }
+      headers[CHANGENOW_KEY_HEADER] = serverKey;
+    }
     // The browser's origin/referer would confuse some reverse-proxy setups, and its cookies
     // belong to THIS site. Nextcloud also mistakes a stray session cookie next to Basic auth
     // for a browser session without a CSRF token and answers 401.
@@ -521,13 +602,14 @@ export function createRelay(options = {}) {
         if (opts && opts.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
         else callback(null, pinned.address, pinned.family);
       };
-      // A redirect to another origin gets a clean request: Authorization and jar cookies belong
-      // to the origin that was asked for.
+      // A redirect to another origin gets a clean request: Authorization, jar cookies and the
+      // ChangeNOW key belong to the origin that was asked for.
       const sameOrigin = hopTarget.origin === origin.origin;
       const hopHeaders = { ...headers, host: hopTarget.host };
       if (!sameOrigin) {
         delete hopHeaders.authorization;
         delete hopHeaders.cookie;
+        delete hopHeaders[CHANGENOW_KEY_HEADER];
       }
       const client = hopTarget.protocol === "http:" ? http : https;
       const upstream = client.request({
@@ -592,5 +674,5 @@ export function createRelay(options = {}) {
     forward(target, 0).catch(() => fail(502, "Proxy error"));
   };
 
-  return { handle, clientKey, writeAllowed, overRate };
+  return { handle, clientKey, writeAllowed, overRate, isChangenowKeyRoute, sameOriginCaller };
 }

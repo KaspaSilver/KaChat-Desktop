@@ -32,6 +32,11 @@ services:
       # so list its address (e.g. 172.18.0.0/16 for its Docker network) or all readers share
       # one rate-limit bucket. Never list a range untrusted clients can connect from.
       KACHAT_TRUSTED_PROXIES: ${KACHAT_TRUSTED_PROXIES:-}
+      # Optional: the server's ChangeNOW key for Kaspa Hub > ChangeNOW Swap. The relay attaches it
+      # to the app's four swap calls only and it never reaches the browser. Unset, Swap says
+      # "Swap is not available right now". Set it in a .env next to this file, or export it.
+      CHANGENOW_API_KEY: ${CHANGENOW_API_KEY:-}
+      KACHAT_CHANGENOW_RATE_MAX: ${KACHAT_CHANGENOW_RATE_MAX:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

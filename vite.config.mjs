@@ -2,6 +2,14 @@ import { defineConfig } from "vite";
 import { createRelay } from "./tools/relay-guard.mjs";
 import { securityHeaders } from "./tools/security-headers.mjs";
 
+// ChangeNOW Swap: the server's key, read here once and kept in this process only. CHANGENOW_API_KEY
+// is the name; VITE_CHANGENOW_API_KEY (what older docker-compose files passed) is accepted as a
+// fallback. A VITE_ name is something Vite puts into the browser bundle (ui/origin-migration.js
+// reads import.meta.env whole), so it is taken out of the environment here and out of the resolved
+// env below - the key reaches the relay and never the page.
+let changenowApiKey = String(process.env.CHANGENOW_API_KEY || process.env.VITE_CHANGENOW_API_KEY || "").trim();
+delete process.env.VITE_CHANGENOW_API_KEY;
+
 // Same-origin relay. The desktop app runs in a browser, and stock Nextcloud (and several other
 // hosts the app talks to) send no CORS headers - so the app routes those calls through
 //   /nc-proxy/<encodeURIComponent(origin)>/<path>
@@ -9,7 +17,7 @@ import { securityHeaders } from "./tools/security-headers.mjs";
 // links are NOT proxied - recipients open those on the real server.
 //
 // The relay itself (SSRF guard with DNS pinning, navigation refusal, response sandboxing, cookie
-// jars for Nextcloud Talk, write and rate controls) lives in tools/relay-guard.mjs and is
+// jars for Nextcloud Talk, write/rate/ChangeNOW controls) lives in tools/relay-guard.mjs and is
 // shared with the standalone sidecar (tools/nc-proxy-server.mjs) that serves static deployments.
 function nextcloudProxy() {
   // One handler, mounted on BOTH the dev server and the preview server. `configureServer` alone
@@ -24,6 +32,9 @@ function nextcloudProxy() {
     trustedProxies: process.env.KACHAT_TRUSTED_PROXIES,
     trustCfConnectingIp: String(process.env.KACHAT_TRUST_CF_CONNECTING_IP || "") === "1",
     rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
+    // ChangeNOW: attached only to the app's own four swap calls, under its own per-client limit.
+    changenowApiKey: () => changenowApiKey,
+    changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
     // A seed or API that never answers must not hold the connection until the CDN in front gives
     // up (Cloudflare's 522): fifteen seconds for reads; writes get two minutes, long polls one.
     readTimeoutMs: 15000,
@@ -41,6 +52,13 @@ function nextcloudProxy() {
   };
   return {
     name: "kachat-nextcloud-proxy",
+    // A VITE_CHANGENOW_API_KEY in a .env file is loaded after this file runs: the relay takes it
+    // (when nothing above set a key) and the bundle's env loses it.
+    configResolved(config) {
+      if (!config.env || !("VITE_CHANGENOW_API_KEY" in config.env)) return;
+      if (!changenowApiKey) changenowApiKey = String(config.env.VITE_CHANGENOW_API_KEY || "").trim();
+      delete config.env.VITE_CHANGENOW_API_KEY;
+    },
     configureServer: mount,
     configurePreviewServer: mount,
   };

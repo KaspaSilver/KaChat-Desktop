@@ -516,12 +516,17 @@
           <div class="hub-empty" data-hub-empty hidden>
             <img src="./ui/assets/kaspa-logo.png" alt="" class="hub-empty-logo" />
             <h3>Nothing here right now</h3>
-            <p>KaPosts, Public Chats and Kaspa Websites appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
+            <p>KaPosts, Public Chats, ChangeNOW Swap and Kaspa Websites appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
           </div>
         </div>
 
         <div class="portfolio-screen profile-screen" data-app-tab-screen="cold-storage" hidden>
           <div data-cold-root></div>
+        </div>
+
+        <!-- Kaspa Hub > ChangeNOW Swap (iOS SwapView, ui/swaps.js). -->
+        <div class="portfolio-screen profile-screen" data-app-tab-screen="swaps" hidden>
+          <div data-swaps-root></div>
         </div>
 
         <div class="portfolio-screen profile-screen" data-app-tab-screen="portfolio" hidden>
@@ -906,6 +911,11 @@
         <!-- cpu (iOS AppTab.kachatBots, 82ab31d). -->
         <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/><rect x="9.6" y="9.6" width="4.8" height="4.8" rx=".8"/><path d="M9.5 3.5v3M14.5 3.5v3M9.5 17.5v3M14.5 17.5v3M3.5 9.5h3M3.5 14.5h3M17.5 9.5h3M17.5 14.5h3"/></svg></span>
         <span>Bots</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="swaps" hidden>
+        <!-- arrow.left.arrow.right (iOS AppTab.swap). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8h15M15 4l4 4-4 4"/><path d="M20 16H5M9 12l-4 4 4 4"/></svg></span>
+        <span>Swap</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
         <!-- A rook and a knight as text, tinted like a symbol (iOS ChessTabIcon renders "♜♞";
