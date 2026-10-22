@@ -457,7 +457,8 @@ async function main() {
     const generate = body("revealNextSpendingAddress");
     const request = body("openCreatePaymentRequest");
     r.check(generate.length > 0 && request.length > 0, "fresh-slot use: both functions found in ui/app.js");
-    r.check(/readyIndex = await verifiedFreshQuantumSlot\(\)/.test(generate), "fresh-slot use: Generate takes a checked slot");
+    // the probe for the account the press started on (iOS 6891935, IOS-109)
+    r.check(/readyIndex = await verifiedFreshQuantumIndexFor\(account\)/.test(generate), "fresh-slot use: Generate takes a checked slot");
     r.check(!/nextFreshQuantumIndex\(/.test(generate), "fresh-slot use: Generate never takes the unchecked next index");
     r.check(/await verifiedFreshQuantumSlot\(\)/.test(request), "fresh-slot use: the Request Payment preview shows a checked slot");
     r.check(!/nextFreshQuantumIndex\(/.test(request), "fresh-slot use: the preview never shows the unchecked next index");

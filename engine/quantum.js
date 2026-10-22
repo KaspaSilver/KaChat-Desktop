@@ -226,6 +226,8 @@ export function freshChangeRequired({ purpose, sourceIndex, freshIndex }) {
  * skipped and the end raised (`raiseBound(qMaxIndex)`), up to `limit` times; a check that can't be
  * answered (null, or a throw) takes the slot as is, so an unreachable server never blocks a send.
  * `addressAt(publicIndex)` derives an address (null when it can't). Returns the public index.
+ * `raiseBound` returning exactly `false` means the account the probe started for was removed (iOS
+ * 6891935, IOS-109): nothing was written, and the probe ends on the slot past the used one.
  */
 export async function verifiedFreshQuantumIndex({ qMaxIndex, addressAt, usedState, raiseBound = () => {}, onSkip = null, limit = FRESH_QUANTUM_PROBE_LIMIT }) {
   let bound = Math.max(-1, wholeOr(qMaxIndex, -1));
@@ -239,7 +241,7 @@ export async function verifiedFreshQuantumIndex({ qMaxIndex, addressAt, usedStat
     if (used !== true) return index;
     try { onSkip?.(index); } catch { /* the log line never stops the check */ }
     bound = Math.max(bound, index - QUANTUM_INDEX_BASE);
-    await raiseBound(bound);
+    if ((await raiseBound(bound)) === false) return nextFreshQuantumIndex(bound);
     index = nextFreshQuantumIndex(bound);
   }
   return index;

@@ -11,6 +11,8 @@
 // the batched sweep runs instead: the floor first, then on while matches keep turning up (a gap of
 // `gapLimit`), and never past MAX_SPENDING_SCAN_INDEX.
 
+import { verifiedFreshQuantumIndex, isQuantumIndex } from "../engine/quantum.js";
+
 /** Swept whatever the gaps. */
 export const SPENDING_DEEP_SCAN_FLOOR = 1000;
 /** Hard stop, so the fallback sweep always terminates. */
@@ -70,15 +72,147 @@ async function requestActivityBatch(addresses, { base, fetchImpl, timeoutMs }) {
   }
 }
 
+// MARK: - The account a spending task belongs to (iOS e571f45 SpendingSweepAccount, IOS-107; 6891935 /
+// fb2323e verifiedFreshQuantumSlot, IOS-109)
+//
+// The Discover sweep and the fresh quantum slot probe await the network between derivations, and the
+// person can switch accounts meanwhile. Each takes its account when it starts - the wallet address
+// and the seed material both chains derive from - and derives every address from THAT, whichever
+// account is active by the time an await returns. The secrets stay in memory on this object only:
+// never stored, never logged (they are not enumerable, and JSON.stringify gives the owner alone).
+
+/// The captured account, or null when `record` (a saved-account record) has no readable recovery
+/// phrase. `owner` defaults to the record's address; `passphraseForm` is the record's form
+/// (engine/wallet.js passphraseFormForRecord, "nfkd" or "raw").
+export function captureSpendingAccount(record, { owner = record?.address, passphraseForm = "nfkd" } = {}) {
+  const wallet = String(owner || "").trim();
+  const mnemonic = String(record?.mnemonic || "");
+  if (!wallet || !mnemonic || record?.locked) return null;
+  const account = {};
+  Object.defineProperties(account, {
+    owner: { value: wallet, enumerable: true },
+    mnemonic: { value: mnemonic, enumerable: false },
+    passphrase: { value: String(record?.passphrase || ""), enumerable: false },
+    passphraseForm: { value: passphraseForm === "raw" ? "raw" : "nfkd", enumerable: false },
+    toJSON: { value: () => ({ owner: wallet }), enumerable: false },
+  });
+  return Object.freeze(account);
+}
+
+/// One spending address (either chain: a public index from QUANTUM_INDEX_BASE up is the quantum one)
+/// of the captured `account`, through `memo` keyed by that account ("owner:index"). Null when it
+/// can't be derived. `log` gets the index only, never the seed.
+export function deriveSpendingAddressForAccount(engine, account, index, { memo = null, log = null } = {}) {
+  if (!account?.owner || !account.mnemonic || !engine?.kaspa) return null;
+  const key = `${account.owner}:${index}`;
+  const cached = memo?.get(key);
+  if (cached) return cached;
+  try {
+    const address = engine.deriveSpendingWallet(account.mnemonic, index, account.passphrase, { passphraseForm: account.passphraseForm })?.address || null;
+    if (address) memo?.set(key, address);
+    return address;
+  } catch (error) {
+    try { log?.(`Spending derive #${index} failed: ${error?.message || error}`); } catch { /* the log never stops a derive */ }
+    return null;
+  }
+}
+
+/// The captured account's spending addresses start..<end as a Map(index -> address): memo first, the
+/// misses through ONE seed derivation per chunk of 100 (iOS spendingAddresses(inRange:) /
+/// sweepAddresses(inRange:account:)), pausing between chunks so a thousand-address window doesn't
+/// freeze the page.
+export async function deriveSpendingAddressesForAccount(engine, account, start, end, { memo = null, log = null, pause = () => new Promise((resolve) => setTimeout(resolve, 0)) } = {}) {
+  const result = new Map();
+  if (!account?.owner || !account.mnemonic || !engine?.kaspa) return result;
+  const prefix = `${account.owner}:`;
+  for (let base = start; base < end; base += 100) {
+    const upper = Math.min(base + 100, end);
+    let missing = false;
+    for (let i = base; i < upper; i += 1) {
+      const cached = memo?.get(`${prefix}${i}`);
+      if (cached) result.set(i, cached); else missing = true;
+    }
+    if (!missing) continue;
+    try {
+      const derived = engine.deriveSpendingAddressRange(account.mnemonic, base, upper - base, account.passphrase, { passphraseForm: account.passphraseForm });
+      for (const { index, address } of derived || []) {
+        if (!address) continue;
+        memo?.set(`${prefix}${index}`, address);
+        result.set(index, address);
+      }
+    } catch (error) {
+      try { log?.(`Spending derive #${base}-#${upper - 1} failed: ${error?.message || error}`); } catch { /* never stops the walk */ }
+    }
+    await pause?.();
+  }
+  return result;
+}
+
+/// The fresh quantum slot probe for a captured account (iOS 6891935 verifiedFreshQuantumIndex(owner:
+/// chainKey:) and fb2323e verifiedFreshQuantumSlot, IOS-109, the sweep's rule from IOS-107): the
+/// slots are derived from THAT account's seed (`deriveAt(account, publicIndex)`), and a used slot
+/// raises THAT account's quantum chain end (`readQMaxIndex()` / `writeQMaxIndex(qMaxIndex)`, its
+/// stored state), even if another account is active when a probe returns. Once `stillSaved()` is
+/// false (the account was removed) nothing more is written and the probe ends past the used slot.
+/// `usedState(address)` as engine/quantum.js verifiedFreshQuantumIndex. Returns { index, address }:
+/// the slot and its address from the same account; `address` is null when it can't be derived.
+export async function probeFreshQuantumSlot({ account, deriveAt, readQMaxIndex, writeQMaxIndex, usedState, stillSaved, onSkip = null }) {
+  const index = await verifiedFreshQuantumIndex({
+    qMaxIndex: readQMaxIndex(),
+    addressAt: (publicIndex) => deriveAt(account, publicIndex),
+    usedState,
+    raiseBound: (qMaxIndex) => {
+      if (!stillSaved()) return false;
+      // the bound only grows
+      writeQMaxIndex(Math.max(readQMaxIndex(), qMaxIndex));
+      return true;
+    },
+    onSkip,
+  });
+  let address = null;
+  try { address = deriveAt(account, index) || null; } catch { address = null; }
+  return { index, address };
+}
+
+/// The Receive QR's fresh address (iOS freshReceiveAddress, quantum-safe since bba1b1e) for `owner`,
+/// the account active when it was asked (iOS fb2323e, IOS-109): an answer that comes back after a
+/// switch belongs to the other account and is dropped - null, nothing remembered or revealed.
+///   1. the pointer from last time (`rememberedIndex`), while it is still `untouched(address)` and on
+///      the quantum chain;
+///   2. `lowestUnusedIndex()` (a hidden unused quantum slot, else a probed brand-new one; null when
+///      no slot can be derived, which falls back like an underivable one).
+/// `deriveAt(index)`, `fallbackAddress()` (no derivable slot: the primary), `remember(index)` (the
+/// pointer for next time) and `reveal(index)` (onto the Manage Addresses list) are the caller's.
+export async function chooseReceiveAddress({ owner, activeAddress, rememberedIndex, deriveAt, untouched, lowestUnusedIndex, fallbackAddress, remember, reveal }) {
+  const switched = () => String(activeAddress() || "") !== String(owner || "") || !owner;
+  if (switched()) return null;
+  if (isQuantumIndex(rememberedIndex)) {
+    const address = deriveAt(rememberedIndex);
+    if (await untouched(address)) {
+      if (switched()) return null;
+      reveal(rememberedIndex);
+      return address;
+    }
+  }
+  const index = await lowestUnusedIndex();
+  if (switched()) return null;
+  const address = Number.isInteger(index) ? deriveAt(index) : null;
+  if (!address) return fallbackAddress();
+  remember(index);
+  reveal(index);
+  return address;
+}
+
 /// The walk. Dependencies:
 /// - `derive(start, end)` -> Map(index -> address) for start..<end (async allowed; missing = not derivable)
 /// - `activity(addresses)` -> Map(address -> time) of touched addresses, or null when unavailable
 /// - `fundedAmong(addresses)` -> Set of addresses holding a balance; throws when balances are unavailable
 /// - `ownersAmong(addresses)` -> Set of addresses owning a name on any service
 /// - `onProgress({ checkingIndex, foundCount })`, optional
-/// - `still()`, optional: false once the account the sweep started for is no longer active (iOS
-///   2343e84, IOS-107) - checked before every derivation, which reads the CURRENT account's key, so
-///   the walk stops there and reports `stopped`
+/// - `still()`, optional: false once the account the sweep started for was removed from the device
+///   (iOS e571f45 sweepAccountStillSaved, IOS-107; a mere switch is not a reason - `derive` reads the
+///   captured account's seed) - checked at the start, before every fallback batch and at the end, and
+///   the walk then reports `stopped`
 /// Returns { matchCount, lastMatchIndex, matchedIndices, stopped } - every match, not only new ones.
 export async function discoverSpendingMatches({ derive, activity, fundedAmong, ownersAmong, onProgress = null, gapLimit = SPENDING_DISCOVERY_GAP_LIMIT, still = null }) {
   let lastMatchIndex = -1;
@@ -194,8 +328,9 @@ export function applySpendingDiscovery({ maxIndex, hidden }, { lastMatchIndex, m
 /// touched addresses, or null; `fundedAmong(addresses)` -> Set of funded addresses (throws when
 /// balances are unavailable: that window shows nothing). Returns { matchCount, matchedIndices
 /// (public indices), highestUsed (quantum chain index of the deepest slot with activity, -1 for none),
-/// stopped }. `still()`, optional: the same account rule as the legacy walk (iOS 2343e84, IOS-107),
-/// checked before every window - so between windows too - and at the end.
+/// stopped }. `still()`, optional: the same account rule as the legacy walk (iOS e571f45, IOS-107:
+/// false once the account was removed), checked before every window - so between windows too - and
+/// at the end.
 export async function discoverQuantumMatches({ derive, activity, fundedAmong, base, floor, limit = 10_000, still = null }) {
   const matched = new Set();
   let highestUsed = -1;
@@ -226,24 +361,27 @@ export async function discoverQuantumMatches({ derive, activity, fundedAmong, ba
   return { matchCount: matched.size, matchedIndices: matched, highestUsed, stopped: false };
 }
 
-/// The whole Discover Addresses sweep - the legacy chain, then the quantum-safe one - tied to the
-/// account it started for (iOS 2343e84 discoverSpendingAddresses / discoverQuantumAddresses(owner:),
-/// IOS-107). `still()` (ui/account-guard.js accountGuard(...).still) is re-checked before every
-/// write (the legacy bound + hidden set, then the quantum bound + hidden set) and between windows;
-/// an account switch mid-sweep stops it, writing nothing more, and it returns 0. `readState()` /
-/// `writeState(state)`: that account's stored spending state ({ maxIndex, qMaxIndex, hidden }).
-/// Returns { matchCount, stopped }.
-export async function runSpendingDiscovery({ still, derive, activity, fundedAmong, ownersAmong, onProgress = null, readState, writeState, base, floor, limit }) {
-  const live = () => typeof still === "function" && still() === true;
-  const stopped = { matchCount: 0, stopped: true };
-  if (!live()) return stopped;
-  const legacy = await discoverSpendingMatches({ derive, activity, fundedAmong, ownersAmong, onProgress, still: live });
-  if (legacy.stopped || !live()) return stopped;
+/// The whole Discover Addresses sweep - the legacy chain, then the quantum-safe one - for the
+/// account it started for (iOS e571f45 discoverSpendingAddresses / discoverQuantumAddresses(account:),
+/// IOS-107, the owner's Go Fix choice). The caller captures that account at the start
+/// (captureSpendingAccount): `derive` derives from ITS seed, and `readState()` / `writeState(state)`
+/// read and write ITS stored spending state ({ maxIndex, qMaxIndex, hidden }), even if another
+/// account is active by the time an await returns. `stillSaved()` (ui/account-guard.js
+/// accountStillSaved) is false once that account was removed from the device: re-checked between
+/// fallback batches and quantum windows and before each write (the legacy bound + hidden set, then
+/// the quantum bound + hidden set), so a removed account gets nothing more written. As on iOS, a
+/// removal after the legacy write keeps that write and its count (the quantum part adds 0).
+/// Returns { matchCount, removed }.
+export async function runSpendingDiscovery({ stillSaved, derive, activity, fundedAmong, ownersAmong, onProgress = null, readState, writeState, base, floor, limit }) {
+  const saved = () => typeof stillSaved === "function" && stillSaved() === true;
+  if (!saved()) return { matchCount: 0, removed: true };
+  const legacy = await discoverSpendingMatches({ derive, activity, fundedAmong, ownersAmong, onProgress, still: saved });
+  if (legacy.stopped || !saved()) return { matchCount: 0, removed: true };
   writeState(applySpendingDiscovery(readState(), legacy));
-  const quantum = await discoverQuantumMatches({ derive, activity, fundedAmong, base, floor, limit, still: live });
-  if (quantum.stopped || !live()) return stopped;
+  const quantum = await discoverQuantumMatches({ derive, activity, fundedAmong, base, floor, limit, still: saved });
+  if (quantum.stopped || !saved()) return { matchCount: legacy.matchCount, removed: true };
   if (quantum.matchCount || quantum.highestUsed >= 0) writeState(applyQuantumDiscovery(readState(), quantum, base));
-  return { matchCount: legacy.matchCount + quantum.matchCount, stopped: false };
+  return { matchCount: legacy.matchCount + quantum.matchCount, removed: false };
 }
 
 /// The stored state after the quantum scan: matches un-hidden, the quantum bound raised past every

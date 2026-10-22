@@ -8,11 +8,11 @@ import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { chattingCatchUpLook } from "./address-activity.js";
 import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder } from "./message-placeholders.js";
-import { accountGuard, accountScopedValue } from "./account-guard.js";
+import { accountGuard, accountScopedValue, accountStillSaved } from "./account-guard.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
-import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, spendingChangeIndex, freshChangeRequired, verifiedFreshQuantumIndex, quantumSpentFromHistory } from "../engine/quantum.js";
+import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, spendingChangeIndex, freshChangeRequired, quantumSpentFromHistory } from "../engine/quantum.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
@@ -98,7 +98,7 @@ import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, prom
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
-import { fetchAddressActivity, runSpendingDiscovery } from "./spending-discovery.js";
+import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress } from "./spending-discovery.js";
 import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -2118,15 +2118,18 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   // Derived, not reserved: opening the screen and cancelling uses no address up (iOS 3f5f79c).
   // The fresh slot is quantum-safe (KIP-22, iOS bba1b1e), matching what reserving returns.
   // Checked on chain (iOS 2343e84 verifiedFreshQuantumIndex, IOS-101), so the preview never shows a
-  // slot already used.
+  // slot already used. Slot and address from the same account (iOS fb2323e verifiedFreshQuantumSlot,
+  // IOS-109): the probe's writes go to the account the sheet opened on, even after a switch.
   if (activeAccountMnemonic()) {
     (async () => {
       try { await ensureRuntimes({ quiet: true }); } catch { /* the address stays loading */ }
       const wallet = engine.address;
-      let freshIndex;
-      try { freshIndex = await verifiedFreshQuantumSlot(); } catch { return; } // the address stays loading
-      if (engine.address !== wallet) return; // the account changed: not this sheet's address
-      const next = deriveSpendingAddressAt(freshIndex);
+      let slot;
+      try { slot = await verifiedFreshQuantumSlot(); } catch { return; } // the address stays loading
+      // Display only: a sheet still up after a switch shows nothing of the account it opened on
+      // (iOS has no such sheet left - the switch rebuilds the screens).
+      if (engine.address !== wallet) return;
+      const next = slot?.address;
       if (!next || !sheet.isConnected) return;
       nextFreshAddress = next;
       if (destination === "fresh" && !freshAddress) renderAddress();
@@ -7577,30 +7580,66 @@ async function quantumAddressSpentState(address) {
 /// Whether a spending address already has history (iOS ChatService.spendingAddressUsedState): a
 /// persisted "used" answers at once (used is for good), otherwise the REST server is asked, bounded
 /// so a hung endpoint can't stall a send; true is remembered. null when it can't be answered.
-async function spendingAddressUsedState(address) {
+/// `owner`: whose last-known cache the "used" answer is read from and remembered in - the account
+/// a probe started for (IOS-109), the active one by default.
+async function spendingAddressUsedState(address, owner = engine.address) {
   if (!String(address || "").trim()) return null;
-  const cached = loadSpendingBalCache()[address];
-  if (cached?.used === true) return true;
+  const cacheKey = accountScopedKey(SPENDING_BAL_CACHE_KEY, owner);
+  const readCache = () => { try { return JSON.parse(localStorage.getItem(cacheKey) || "{}") || {}; } catch { return {}; } };
+  if (readCache()[address]?.used === true) return true;
   const used = await spendingAddressHasHistory(address, { timeoutMs: 8000 });
-  if (used === true) saveSpendingBalCacheEntries({ [address]: { ...loadSpendingBalCache()[address], used: true } });
+  if (used === true && spendingAccountStillSaved(owner)) {
+    try {
+      const map = readCache();
+      map[address] = { ...map[address], used: true };
+      localStorage.setItem(cacheKey, JSON.stringify(map));
+    } catch { /* cache is best-effort */ }
+  }
   return used;
 }
 
-/// The next fresh quantum-safe slot, checked on chain first (iOS da2c8e2 verifiedFreshQuantumIndex,
-/// IOS-101; engine/quantum.js): a slot the REST server says already has history is skipped and the
-/// quantum chain's end raised past it (up to 20); a check that can't be answered takes the slot, so
-/// an unreachable server never blocks a send. Used by chat payments, Manage Addresses sends, KNS
-/// change, the Receive QR and Request Payment's fresh addresses.
-async function verifiedFreshQuantumSlot() {
-  const wallet = engine.address;
-  return verifiedFreshQuantumIndex({
-    qMaxIndex: getSpendingState().qMaxIndex,
-    addressAt: (index) => deriveSpendingAddressAt(index),
-    usedState: spendingAddressUsedState,
-    // the bound only grows, and only for the account that asked
-    raiseBound: (qMaxIndex) => { if (wallet) saveSpendingState({ qMaxIndex }, wallet); },
+/// The next fresh quantum-safe slot of a captured account, checked on chain first (iOS 6891935
+/// verifiedFreshQuantumIndex(owner:chainKey:), IOS-109; da2c8e2, IOS-101; engine/quantum.js): a slot
+/// the REST server says already has history is skipped and THAT account's quantum chain end raised
+/// past it (up to 20), even if another account is active when a probe returns; a check that can't be
+/// answered takes the slot, so an unreachable server never blocks a send. Once the account has been
+/// removed it writes nothing more and the probe ends. The slots are derived from the captured seed
+/// (ui/spending-discovery.js probeFreshQuantumSlot). Returns { index, address }.
+function freshQuantumSlotFor(account) {
+  const owner = account.owner;
+  return probeFreshQuantumSlot({
+    account,
+    deriveAt: deriveSpendingAddressFor,
+    readQMaxIndex: () => getSpendingState(owner).qMaxIndex,
+    writeQMaxIndex: (qMaxIndex) => saveSpendingState({ qMaxIndex }, owner),
+    usedState: (address) => spendingAddressUsedState(address, owner),
+    stillSaved: () => spendingAccountStillSaved(owner),
     onSkip: (index) => appendEngineLog(`Quantum slot ${chainLocalIndex(index)} already has history - skipping it.`),
   });
+}
+async function verifiedFreshQuantumIndexFor(account) {
+  return (await freshQuantumSlotFor(account)).index;
+}
+
+/// iOS verifiedFreshQuantumIndex(): the probe for the account active now, captured at the call. Null
+/// without a readable seed - no slot could be derived or checked, so none is offered unchecked.
+async function verifiedFreshQuantumIndexActive() {
+  const account = captureActiveSpendingAccount();
+  if (!account) return null;
+  return verifiedFreshQuantumIndexFor(account);
+}
+
+/// A fresh quantum slot AND its address, both from the account active when this was called (iOS
+/// fb2323e verifiedFreshQuantumSlot, IOS-109): for change outputs, whose address must come from the
+/// same account the probe checked - a spend that started on that account keeps its change there
+/// even if another account is active by the time the probe returns. Null when the seed is
+/// unavailable. Used by chat payments, Manage Addresses sends, KNS change and Request Payment's
+/// preview.
+async function verifiedFreshQuantumSlot() {
+  const account = captureActiveSpendingAccount();
+  if (!account) return null;
+  const { index, address } = await freshQuantumSlotFor(account);
+  return address ? { index, address } : null;
 }
 
 // Every send out of the PRIMARY spending address rotates it to a fresh one (iOS e53ea11): change
@@ -7629,9 +7668,9 @@ async function freshChangeForSpendingIndex(index, { purpose = "withdraw", destin
   const selfSend = ready && destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressAt(index) || "").toLowerCase();
   const ruleIndex = spendingChangeIndex({ purpose, sourceIndex: index, primaryIndex: state.activeIndex, qMaxIndex: state.qMaxIndex, selfSend });
   if (ruleIndex == null) return null;
-  const freshIndex = ready ? await verifiedFreshQuantumSlot() : ruleIndex;
-  const address = ready ? deriveSpendingAddressAt(freshIndex) : null;
-  if (address) return { index: freshIndex, address };
+  // Slot and address from the account the source was derived from (iOS fb2323e, IOS-109).
+  const slot = ready ? await verifiedFreshQuantumSlot() : null;
+  if (slot) return slot;
   if (freshChangeRequired({ purpose, sourceIndex: index, freshIndex: ruleIndex })) throw new Error(QUANTUM_CHANGE_UNAVAILABLE);
   return null;
 }
@@ -7643,9 +7682,9 @@ async function freshChangeForSpendingIndex(index, { purpose = "withdraw", destin
 async function freshSpendingChangeAddress(sourceIndex = null) {
   const ruleIndex = spendingChangeIndex({ purpose: "payment", qMaxIndex: getSpendingState().qMaxIndex });
   const ready = Boolean(engine.address && activeAccountMnemonic() && engine.kaspa);
-  const freshIndex = ready ? await verifiedFreshQuantumSlot() : ruleIndex;
-  const address = ready ? deriveSpendingAddressAt(freshIndex) : null;
-  if (address) return { index: freshIndex, address };
+  // Slot and address from the account the source was derived from (iOS fb2323e, IOS-109).
+  const slot = ready ? await verifiedFreshQuantumSlot() : null;
+  if (slot) return slot;
   if (freshChangeRequired({ purpose: "payment", sourceIndex, freshIndex: ruleIndex })) throw new Error(QUANTUM_CHANGE_UNAVAILABLE);
   return null;
 }
@@ -7674,51 +7713,44 @@ function rotatePrimarySpendingTo(fresh) {
 // Memoized per (account, index): every derivation re-runs BIP39 seeding
 // (PBKDF2), so looped callers (address list, watched-set builders, payment
 // pool reservations) would otherwise pay that cost per call.
+// Keyed "account:index", so one memo serves every account: the active one and the account a sweep
+// or a probe captured (ui/spending-discovery.js deriveSpendingAddressForAccount).
 const spendingAddressMemo = new Map();
 
-function deriveSpendingAddressAt(index) {
-  const mnemonic = activeAccountMnemonic();
-  if (!mnemonic || !engine.kaspa) return null;
-  const memoKey = `${engine.address || ""}:${index}`;
-  const cached = spendingAddressMemo.get(memoKey);
-  if (cached) return cached;
-  try {
-    const address = engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() }).address;
-    if (address) spendingAddressMemo.set(memoKey, address);
-    return address;
-  }
-  catch (error) { appendEngineLog(`Spending derive #${index} failed: ${error.message}`); return null; }
+/// The active account, captured for a spending task that awaits (iOS e571f45 spendingSweepAccount /
+/// 6891935 owner + chain node, IOS-107 / IOS-109): its address and the seed material of both chains,
+/// in memory only. Null without a readable recovery phrase.
+function captureActiveSpendingAccount() {
+  const record = activeSavedAccountRecord();
+  if (!record) return null;
+  return captureSpendingAccount(record, { owner: engine.address || record.address, passphraseForm: passphraseFormForRecord(record) });
 }
 
-// Spending addresses start..<end as a Map(index -> address), memo first, the misses through ONE
-// seed derivation per chunk of 100 (iOS spendingAddresses(inRange:)), yielding between chunks so
-// a thousand-address Discover window doesn't freeze the page.
-async function deriveSpendingAddressesInRange(start, end) {
-  const result = new Map();
-  const mnemonic = activeAccountMnemonic();
-  if (!mnemonic || !engine.kaspa) return result;
-  const prefix = `${engine.address || ""}:`;
-  for (let base = start; base < end; base += 100) {
-    const upper = Math.min(base + 100, end);
-    let missing = false;
-    for (let i = base; i < upper; i += 1) {
-      const cached = spendingAddressMemo.get(`${prefix}${i}`);
-      if (cached) result.set(i, cached); else missing = true;
-    }
-    if (!missing) continue;
-    try {
-      const derived = engine.deriveSpendingAddressRange(mnemonic, base, upper - base, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() });
-      for (const { index, address } of derived) {
-        if (!address) continue;
-        spendingAddressMemo.set(`${prefix}${index}`, address);
-        result.set(index, address);
-      }
-    } catch (error) {
-      appendEngineLog(`Spending derive #${base}-#${upper - 1} failed: ${error.message}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  return result;
+/// False once `owner` is neither the active account nor a saved one (it was removed), or while its
+/// keys are locked in the key vault (iOS accountStillSaved, IOS-107 / IOS-109).
+function spendingAccountStillSaved(owner) {
+  let savedAccounts = [];
+  try { savedAccounts = loadSavedAccounts(); } catch { savedAccounts = []; }
+  return accountStillSaved(owner, { activeAddress: engine.address, savedAccounts });
+}
+
+/// One spending address of a captured account (either chain), memo first.
+function deriveSpendingAddressFor(account, index) {
+  return deriveSpendingAddressForAccount(engine, account, index, { memo: spendingAddressMemo, log: appendEngineLog });
+}
+
+/// The active account's spending address at `index`. Work that awaits between deriving and writing
+/// captures the account first and derives through deriveSpendingAddressFor instead.
+function deriveSpendingAddressAt(index) {
+  return deriveSpendingAddressFor(captureActiveSpendingAccount(), index);
+}
+
+// Spending addresses start..<end of a captured account as a Map(index -> address), memo first, the
+// misses through ONE seed derivation per chunk of 100 (iOS spendingAddresses(inRange:) /
+// sweepAddresses(inRange:account:)), yielding between chunks so a thousand-address Discover window
+// doesn't freeze the page.
+function deriveSpendingAddressesInRangeFor(account, start, end) {
+  return deriveSpendingAddressesForAccount(engine, account, start, end, { memo: spendingAddressMemo, log: appendEngineLog });
 }
 
 /** The short address form on the address screens: 14 characters, "...", the last 6 (iOS
@@ -8595,18 +8627,24 @@ function chatPaymentDestination(contact) {
 // iOS bba1b1e reserveFreshSpendingAddresses): never revealed, never funded, key hidden until they
 // spend. So the slots come from past the quantum chain's bound - checked on chain first (iOS
 // da2c8e2 verifiedFreshQuantumIndex, IOS-101), so a slot used elsewhere is never handed out.
+// Probe, addresses and the raised chain end all belong to the account active at the start (iOS
+// fb2323e, IOS-109); once that account has been removed nothing is reserved.
 async function reserveFreshSpendingAddresses(count) {
-  if (!engine.address || !activeAccountMnemonic() || !engine.kaspa) return [];
+  if (!engine.address || !engine.kaspa) return [];
   if (!(count > 0)) return [];
-  const base = await verifiedFreshQuantumSlot();
+  const account = captureActiveSpendingAccount();
+  if (!account) return [];
+  const base = await verifiedFreshQuantumIndexFor(account);
   const results = [];
   for (let i = 0; i < count; i += 1) {
     const index = base + i;
-    const address = deriveSpendingAddressAt(index);
+    const address = deriveSpendingAddressFor(account, index);
     if (!address) return []; // reserving nothing rather than part of the set (iOS)
     results.push({ index, address });
   }
-  if (results.length) saveSpendingState({ qMaxIndex: chainLocalIndex(results[results.length - 1].index) });
+  if (!spendingAccountStillSaved(account.owner)) return [];
+  const last = chainLocalIndex(results[results.length - 1].index);
+  saveSpendingState({ qMaxIndex: Math.max(getSpendingState(account.owner).qMaxIndex, last) }, account.owner);
   return results;
 }
 
@@ -10045,14 +10083,21 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
   spendingGenerateBusy = true;
   updateSpendingActionsPill();
   try {
-    const state = getSpendingState();
+    // The press belongs to the account it started on (iOS 6891935 generateNextQuantumAddress,
+    // IOS-109): its awaits can span an account switch, so the account is taken now and every
+    // derivation and write below goes to it - nothing once it has been removed. The toast and the
+    // repaint only while it is still the one on screen.
+    const account = captureActiveSpendingAccount();
+    if (!account) return null;
+    const owner = account.owner;
+    const state = getSpendingState(owner);
     // Generate makes quantum-safe (KIP-22) slots from now on (iOS bba1b1e): recycling considers only
     // hidden unused QUANTUM rows, and the fresh path extends the quantum chain - the legacy chain is
     // never grown again from here.
     const addressByIndex = new Map();
     for (const i of spendingRevealedIndices(state)) {
       if (!isQuantumIndex(i)) continue;
-      const address = deriveSpendingAddressAt(i);
+      const address = deriveSpendingAddressFor(account, i);
       if (address) addressByIndex.set(i, address);
     }
     let balances = null;
@@ -10082,26 +10127,30 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
       pick = i;
       break;
     }
-    const hiddenSet = new Set(state.hidden);
     let readyIndex;
     if (pick != null) {
+      // un-hide it in the owner's latest hidden set (re-read: the awaits above can be long)
+      if (!spendingAccountStillSaved(owner)) return null;
+      const hiddenSet = new Set(getSpendingState(owner).hidden);
       hiddenSet.delete(pick);
-      saveSpendingState({ hidden: Array.from(hiddenSet) });
+      saveSpendingState({ hidden: Array.from(hiddenSet) }, owner);
       readyIndex = pick;
     } else {
       // A brand-new quantum slot (iOS generateNextQuantumAddress): always extends the chain - a
       // never-spent-from address is the whole point. Checked on chain first, like every other
       // fresh quantum slot (iOS 2343e84 verifiedFreshQuantumIndex, IOS-101): a slot already used
-      // elsewhere is skipped, never handed out as new.
-      const wallet = engine.address;
-      readyIndex = await verifiedFreshQuantumSlot();
-      // the check's awaits can span an account switch: what it found is not the new account's
-      if (engine.address !== wallet) return null;
+      // elsewhere is skipped, never handed out as new. The slot, its bound and its un-hide are the
+      // owner's, even if another account is active when the probe returns (iOS 6891935, IOS-109).
+      readyIndex = await verifiedFreshQuantumIndexFor(account);
+      if (!spendingAccountStillSaved(owner)) return readyIndex;
       // re-read: the check may have raised the bound (and the hidden set is the latest)
-      const fresh = new Set(getSpendingState().hidden);
+      const current = getSpendingState(owner);
+      const fresh = new Set(current.hidden);
       fresh.delete(readyIndex);
-      saveSpendingState({ qMaxIndex: chainLocalIndex(readyIndex), hidden: Array.from(fresh) });
+      saveSpendingState({ qMaxIndex: Math.max(current.qMaxIndex, chainLocalIndex(readyIndex)), hidden: Array.from(fresh) }, owner);
     }
+    // written to the owner either way; the screen and the toast are the account on screen's
+    if (engine.address !== owner) return readyIndex;
     renderSpendingList();
     // The chain-local number, never the raw public index 1000000+ (iOS e001786).
     if (toast) showCopyToast(`Address #${chainLocalIndex(readyIndex)} is ready.`);
@@ -10119,42 +10168,47 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
 let spendingDiscovering = false;
 let spendingDiscoveryProgress = null;
 /// The whole Discover Addresses sweep for `wallet` - the legacy chain, then the quantum-safe one -
-/// applied to its stored state while it is still the account on screen. Returns how many addresses
-/// hold a balance or a domain. Shared by the Discover button and a typed-in recovery phrase's
-/// background run (iOS da2c8e2 importWallet(phrase:)).
+/// written to that account's stored state. Returns how many addresses hold a balance or a domain.
+/// Shared by the Discover button and a typed-in recovery phrase's background run (iOS da2c8e2
+/// importWallet(phrase:)).
 async function discoverSpendingAddressesFor(wallet, { onProgress = null } = {}) {
   const fundedAmong = async (addresses) => {
     const byAddress = await spendingBalancesBatchSompi(addresses);
     return new Set([...byAddress].filter(([, sompi]) => Number(sompi) > 0).map(([address]) => address));
   };
   const activity = (addresses) => fetchAddressActivity(addresses, { baseUrl: getEndpoint("kaspaApi") || "https://api.kaspa.org" });
-  // The sweep belongs to the account it started for (iOS 2343e84, IOS-107): every derivation and
-  // write resolves the CURRENT account, and its awaits can span an account switch - so it stops,
-  // writing nothing, the moment another account is active. A sweep asked for an account that is
-  // not the active one does not start.
-  const account = accountGuard(() => engine.address);
-  if (!wallet || account.account !== wallet) return 0;
+  // The sweep belongs to the account it started for (iOS e571f45, IOS-107, owner's choice): its
+  // address and seed are taken now, and every derivation and write below goes to THAT account even
+  // if another one is active by the time an await returns. Results are dropped only if the account
+  // was removed meanwhile (or its keys locked). A sweep asked for an account that is not the
+  // active one does not start.
+  if (!wallet || engine.address !== wallet) return 0;
+  const account = captureActiveSpendingAccount();
+  if (!account || account.owner !== wallet) return 0;
+  const stillSaved = () => spendingAccountStillSaved(wallet);
   // The legacy chain, then the quantum-safe one (iOS bba1b1e / da2c8e2 discoverQuantumAddresses):
   // QUANTUM_SCAN_FLOOR slots a step while a step shows activity, up to QUANTUM_SCAN_LIMIT. Funded
   // slots are shown again, and the chain's end goes past every slot that ever saw activity
   // (IOS-101). Its count joins the summary.
-  const { matchCount, stopped } = await runSpendingDiscovery({
-    still: account.still,
-    derive: deriveSpendingAddressesInRange,
+  const { matchCount, removed } = await runSpendingDiscovery({
+    stillSaved,
+    derive: (start, end) => deriveSpendingAddressesInRangeFor(account, start, end),
     activity,
     fundedAmong,
     ownersAmong: (addresses) => engine.addressesOwningAnyName(addresses),
     onProgress,
     readState: () => getSpendingState(wallet),
-    writeState: (state) => { if (account.still()) saveSpendingState(state, wallet); },
+    writeState: (state) => { if (stillSaved()) saveSpendingState(state, wallet); },
     base: QUANTUM_INDEX_BASE,
     floor: QUANTUM_SCAN_FLOOR,
     limit: QUANTUM_SCAN_LIMIT,
   });
-  if (stopped || !account.still()) {
-    appendEngineLog("Discover Addresses stopped: the account changed during the sweep.");
-    return 0;
+  if (removed) {
+    appendEngineLog("Discover Addresses dropped: its account was removed during the sweep.");
+    return matchCount;
   }
+  // Written either way; the screen is refreshed only while it shows the swept account.
+  if (engine.address !== wallet) return matchCount;
   if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList();
   refreshSpendingSummary();
   // The count is addresses that hold a balance or a domain, every one, not only new ones.
@@ -10764,6 +10818,10 @@ const RECEIVE_SUBTITLE = kasLabel("A fresh address, never used before. Kaspa sen
 const CHATTING_ADDRESS_SUBTITLE = kasLabel("This address should be for chatting and domains only. 1 Kaspa is enough for about 500 interactions in the app. Domains cost from 35 to 4,000 Kaspa, depending on the name.");
 async function freshReceiveAddress({ revealing = true } = {}) {
   if (!activeAccountMnemonic()) return null;
+  // The QR is for the account active now: an answer that comes back after a switch belongs to the
+  // other account and is dropped, nothing written (iOS fb2323e, IOS-109).
+  const owner = engine.address;
+  if (!owner) return null;
   const state = getSpendingState();
   const untouched = async (address) => {
     if (!address) return false;
@@ -10796,20 +10854,22 @@ async function freshReceiveAddress({ revealing = true } = {}) {
   // Rule 1: the pointer from last time, while it is still untouched - and quantum-safe (iOS
   // bba1b1e). A legacy pointer, even unused, carries its key in the address itself (P2PK), so the
   // QR moves to the quantum chain the first time it is opened after the upgrade.
-  let remembered = null;
-  try { remembered = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY)) || "null"); } catch { remembered = null; }
-  if (isQuantumIndex(remembered)) {
-    const address = deriveSpendingAddressAt(remembered);
-    if (await untouched(address)) { reveal(remembered); return address; }
-  }
   // Rule 2: the lowest quantum slot never used (recycling a hidden unused one), else a brand-new
-  // slot past the quantum chain's end.
-  const index = await lowestUnusedQuantumIndex();
-  const address = deriveSpendingAddressAt(index);
-  if (!address) return deriveSpendingAddressAt(state.activeIndex);
-  try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY), String(index)); } catch {}
-  reveal(index);
-  return address;
+  // slot past the quantum chain's end. Either answer is dropped after a switch
+  // (ui/spending-discovery.js chooseReceiveAddress).
+  let remembered = null;
+  try { remembered = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY, owner)) || "null"); } catch { remembered = null; }
+  return chooseReceiveAddress({
+    owner,
+    activeAddress: () => engine.address,
+    rememberedIndex: remembered,
+    deriveAt: deriveSpendingAddressAt,
+    untouched,
+    lowestUnusedIndex: lowestUnusedQuantumIndex,
+    fallbackAddress: () => deriveSpendingAddressAt(state.activeIndex),
+    remember: (index) => { try { localStorage.setItem(accountScopedKey(RECEIVE_INDEX_KEY, owner), String(index)); } catch {} },
+    reveal,
+  });
 }
 
 /// The lowest hidden quantum-safe slot that is confirmed unused - not the primary, no balance, no
@@ -10834,8 +10894,9 @@ async function lowestUnusedQuantumIndex() {
       }
     }
   }
-  // past the chain's end, checked on chain first (iOS da2c8e2, IOS-101)
-  return verifiedFreshQuantumSlot();
+  // past the chain's end, checked on chain first (iOS da2c8e2, IOS-101), for the account active now
+  // (iOS 6891935 verifiedFreshQuantumIndex(), IOS-109)
+  return verifiedFreshQuantumIndexActive();
 }
 
 // Profile decides the Receive address on its way in (iOS warmReceiveAddress /
@@ -11433,7 +11494,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 211;
+const APP_BUILD = 212;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");

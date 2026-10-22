@@ -40,3 +40,22 @@ export function accountScopedValue(readActiveAddress, fallback = null) {
     clear() { account = ""; value = fallback; },
   };
 }
+
+/**
+ * Whether an account a task captured at its start is still on this device (iOS e571f45 / 6891935
+ * accountStillSaved, IOS-107 / IOS-109): the active account, or one of the saved ones. Work that
+ * keeps writing to the account it started for (the Discover sweep, the fresh quantum slot probe)
+ * drops its results only once this is false - a mere switch is not a reason. Desktop also drops
+ * them while that account's keys are locked in the key vault (its saved record reads `locked`).
+ *
+ * @param {string} owner the captured account's address
+ * @param {{ activeAddress?: string, savedAccounts?: Array<{ address?: string, locked?: boolean }> }} where
+ */
+export function accountStillSaved(owner, { activeAddress = "", savedAccounts = [] } = {}) {
+  const clean = String(owner || "").trim();
+  if (!clean) return false;
+  const record = (Array.isArray(savedAccounts) ? savedAccounts : [])
+    .find((entry) => String(entry?.address || "").trim() === clean);
+  if (record?.locked) return false;
+  return String(activeAddress || "").trim() === clean || Boolean(record);
+}
