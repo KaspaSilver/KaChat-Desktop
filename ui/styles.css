@@ -13858,6 +13858,9 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 
 /* The password fields' show / hide button (owner, 2026-10-14). */
 .password-field { position: relative; display: block; }
+/* "Use Face ID" in the Unlock KaChat dialog: the first choice, the password field below it. */
+.password-biometric-button { display: block; width: 100%; margin: 4px 0 14px; padding: 12px 16px; border: 0; border-radius: 12px; font: inherit; font-weight: 600; font-size: 16px; cursor: pointer; }
+.password-biometric-button:disabled { opacity: .6; cursor: default; }
 .password-field .field-input { padding-right: 44px; width: 100%; box-sizing: border-box; }
 .password-reveal {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);

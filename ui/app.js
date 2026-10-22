@@ -99,7 +99,8 @@ import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
-import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
+import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, hasBiometricUnlock, biometricUnlockRetiredReason, loadBiometricRecord, removeBiometricUnlock, BIOMETRIC_UNLOCK_KEY } from "./key-vault.js";
+import { biometricName, biometricRowLabel, biometricButtonLabel, biometricEnvironmentProblem, canOfferBiometricUnlock, canAutoPromptBiometric, checkBiometricSupport, enrolBiometric, finishBiometricEnrolment, unlockWithBiometric, turnOffBiometricUnlock, BIOMETRIC_UNSUPPORTED_MESSAGE } from "./biometric-unlock.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
 
@@ -624,6 +625,7 @@ async function signOutLockedTab() {
 onKeyVaultLockedByAnotherTab(() => { handleLockedByAnotherTab(); });
 window.addEventListener("storage", (event) => {
   if (event.storageArea && event.storageArea !== localStorage) return;
+  if (event.key === BIOMETRIC_UNLOCK_KEY) { refreshBiometricRow(); return; } // turned on / off in another tab
   if (event.key !== null && event.key !== APP_PASSWORD_KEY && event.key !== APP_PASSWORD_PENDING_KEY) return;
   const wasUnlocked = keyVaultStorageChanged(event.key);
   if (wasUnlocked && !hasAppPassword()) showCopyToast("The app password was removed in another tab.");
@@ -632,6 +634,82 @@ window.addEventListener("storage", (event) => {
 function hasAppPassword() { return vaultHasAppPassword(); }
 async function setAppPassword(password) { await vaultSetAppPassword(password); }
 async function verifyAppPassword(password) { return unlockKeyVault(password); }
+
+// --- Face ID / Touch ID unlock (ui/biometric-unlock.js + key-vault.js). A passkey's PRF output
+// unwraps the same data key the password does, so it opens the vault; it never skips a check.
+// The password stays the fallback everywhere, and a failed or cancelled attempt is not a wrong
+// password (no lockout). WebKit only allows WebAuthn inside a tap, so the calls below run straight
+// from click handlers; only non-WebKit browsers are prompted by themselves, at launch.
+const biometricUi = { support: null, running: false };
+function refreshBiometricRow() {
+  const row = document.querySelector("[data-biometric-row]");
+  // A record outliving its password (removed by an older build): it opens nothing, drop it.
+  if (!hasAppPassword() && loadBiometricRecord()) { try { removeBiometricUnlock(); } catch { /* storage */ } }
+  if (!row) return;
+  row.hidden = !hasAppPassword();
+  const label = biometricRowLabel();
+  const labelEl = row.querySelector("[data-biometric-label]");
+  if (labelEl) labelEl.textContent = label;
+  const toggle = row.querySelector("[data-biometric-toggle]");
+  const on = hasBiometricUnlock();
+  if (toggle) { toggle.checked = on; toggle.setAttribute("aria-label", label); }
+  const status = row.querySelector("[data-biometric-status]");
+  if (status) {
+    const unsupported = biometricUi.support?.supported === false;
+    status.textContent = on
+      ? "On. Your password still works too."
+      : biometricUnlockRetiredReason() === "password-changed"
+        ? "Turned off because your password changed. Turn it on again to use it."
+        : unsupported ? "Not available on this browser or device." : "Unlock KaChat without typing your password.";
+  }
+}
+function biometricDisplayName() { const name = biometricName(); return name === "Biometrics" ? "biometric" : name; }
+// Best guess at support (no prompt): only changes the Settings caption.
+checkBiometricSupport().then((support) => { biometricUi.support = support; refreshBiometricRow(); }).catch(() => {});
+
+async function turnOnBiometricUnlock() {
+  const name = biometricDisplayName();
+  const problem = biometricEnvironmentProblem() || (biometricUi.support?.supported === false ? biometricUi.support.message : null);
+  if (problem) { await alertDialog({ title: biometricRowLabel(), message: problem }); return; }
+  if (!hasAppPassword() || isAppLocked()) return;
+  // A new way in: the password first, as for showing a seed phrase.
+  if (!(await requestPassword({ mode: "verify", title: "Enter Password", message: `Enter your password to turn on ${name} unlock.` }))) return;
+  if (isAppLocked()) return;
+  // This tap starts the passkey prompt (Safari allows WebAuthn only inside a tap).
+  const go = await confirmDialog({
+    title: biometricRowLabel(),
+    message: `KaChat will save a passkey on this device. ${name} then unlocks KaChat instead of your password. Your password still works, and you need it on other devices.`,
+    confirmLabel: "Continue",
+  });
+  if (!go) return;
+  let result = await enrolBiometric();
+  while (result.status === "needs-confirm") {
+    const again = await confirmDialog({ title: biometricRowLabel(), message: `Confirm with ${name} once more to finish.`, confirmLabel: "Continue" });
+    if (!again) { result = { status: "cancelled" }; break; }
+    result = await finishBiometricEnrolment(result.pending);
+  }
+  refreshBiometricRow();
+  if (result.status === "on") { showCopyToast(`${name} unlock is on.`); return; }
+  if (result.status === "unsupported") {
+    biometricUi.support = { supported: false, message: result.message || BIOMETRIC_UNSUPPORTED_MESSAGE };
+    refreshBiometricRow();
+    await alertDialog({ title: biometricRowLabel(), message: result.message || BIOMETRIC_UNSUPPORTED_MESSAGE });
+    return;
+  }
+  if (result.status === "failed") await alertDialog({ title: biometricRowLabel(), message: result.message || "It could not be turned on. Your password still works." });
+}
+function turnOffBiometricUnlockFromUi() {
+  const name = biometricDisplayName();
+  turnOffBiometricUnlock();
+  refreshBiometricRow();
+  showCopyToast(`${name} unlock is off. You can delete the KaChat passkey in your device's Passwords settings.`);
+}
+document.querySelector("[data-biometric-toggle]")?.addEventListener("change", (event) => {
+  const wantOn = event.target.checked;
+  event.target.checked = hasBiometricUnlock(); // shows the real state until it changes
+  if (!wantOn) { if (hasBiometricUnlock()) turnOffBiometricUnlockFromUi(); return; }
+  turnOnBiometricUnlock().catch((error) => { refreshBiometricRow(); showCopyToast(userFacingError(error)); });
+});
 
 // Promise-based password prompt. mode "verify" asks for the password; mode "set"
 // asks for a new password + confirmation. Resolves true on success, false if
@@ -672,6 +750,14 @@ function requestPassword({ mode = "verify", title, message, allowForgot = false,
     // "Forgot password?" only on the lock (signed out, vault locked): offered inside an unlocked
     // session it would be a way around the seed-reveal password.
     { const forgot = document.querySelector("[data-password-forgot]"); if (forgot) forgot.hidden = !(allowForgot && mode === "verify" && isAppLocked()); }
+    // "Use Face ID" first, only on the lock (the vault is locked and a passkey is enrolled).
+    {
+      const offerBiometric = mode === "verify" && isAppLocked() && canOfferBiometricUnlock();
+      const button = document.querySelector("[data-password-biometric]");
+      if (button) { button.hidden = !offerBiometric; button.disabled = false; button.textContent = biometricButtonLabel(); }
+      const off = document.querySelector("[data-password-biometric-off]");
+      if (off) off.hidden = true;
+    }
     if (passwordTitleEl) passwordTitleEl.textContent = title || (mode === "set" ? "Set Password" : "Enter Password");
     if (passwordMessageEl) { passwordMessageEl.textContent = message || ""; passwordMessageEl.hidden = !message; }
     if (passwordConfirmLabel) passwordConfirmLabel.hidden = mode !== "set";
@@ -679,9 +765,49 @@ function requestPassword({ mode = "verify", title, message, allowForgot = false,
     if (passwordInput) passwordInput.value = "";
     if (passwordConfirmInput) passwordConfirmInput.value = "";
     if (passwordModal) passwordModal.hidden = false;
-    queueMicrotask(() => passwordInput?.focus());
+    // Focusing the field would raise the keyboard over "Use Face ID" on a phone.
+    const biometricOffered = !document.querySelector("[data-password-biometric]")?.hidden;
+    if (!biometricOffered || !globalThis.matchMedia?.("(pointer: coarse)")?.matches) queueMicrotask(() => passwordInput?.focus());
   });
 }
+/** "Use Face ID" in the open password dialog. Runs straight from the tap (get() is the first
+ *  await), or by itself at launch where the browser allows (`auto`: a dismissed prompt says
+ *  nothing). A failure never counts as a wrong password. */
+async function runBiometricUnlockFromDialog({ auto = false } = {}) {
+  const button = document.querySelector("[data-password-biometric]");
+  if (biometricUi.running || !passwordResolver || !button || button.hidden) return;
+  biometricUi.running = true;
+  button.disabled = true;
+  if (passwordErrorEl) passwordErrorEl.hidden = true;
+  const name = biometricDisplayName();
+  let result;
+  try { result = await unlockWithBiometric(); }
+  catch { result = { status: "failed", reason: "error" }; }
+  finally { biometricUi.running = false; button.disabled = false; }
+  if (!passwordResolver || passwordMode !== "verify") return; // closed, or unlocked with the password meanwhile
+  if (result.status === "unlocked") { closePasswordModal(true); return; }
+  if (result.status === "cancelled") {
+    if (!auto) showPasswordError(`${name} didn't finish. Try again, or enter your password.`);
+    return;
+  }
+  if (result.reason === "no-prf") { showPasswordError("This browser didn't return the passkey's key. Enter your password."); return; }
+  if (result.reason === "wrong-key" || result.reason === "stale" || result.reason === "no-record") {
+    showPasswordError(`${name} couldn't unlock KaChat. The passkey may have been deleted or replaced. Enter your password.`);
+    const off = document.querySelector("[data-password-biometric-off]");
+    if (off && hasBiometricUnlock()) { off.textContent = `Turn off ${name} unlock`; off.hidden = false; }
+    return;
+  }
+  showPasswordError(`${name} isn't available right now. Enter your password.`);
+}
+document.querySelector("[data-password-biometric]")?.addEventListener("click", () => { runBiometricUnlockFromDialog(); });
+document.querySelector("[data-password-biometric-off]")?.addEventListener("click", (event) => {
+  event.currentTarget.hidden = true;
+  const button = document.querySelector("[data-password-biometric]");
+  if (button) button.hidden = true;
+  if (passwordErrorEl) passwordErrorEl.hidden = true;
+  turnOffBiometricUnlockFromUi();
+  passwordInput?.focus();
+});
 passwordForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const pw = String(passwordInput?.value || "");
@@ -768,6 +894,7 @@ async function requireAppPasswordIfMissing() {
 const passwordStatusEl = document.querySelector("[data-password-status]");
 function refreshPasswordStatus() {
   const hasPassword = hasAppPassword();
+  refreshBiometricRow();
   if (passwordStatusEl) passwordStatusEl.textContent = hasPassword ? "Password set. Keys on this device are encrypted." : "No password set. Keys on this device are not encrypted.";
   // Honest about what is at rest (DSK-006): no password = plaintext in this browser.
   const saveNote = document.querySelector("[data-save-account-note]");
@@ -794,8 +921,10 @@ document.querySelector("[data-change-password]")?.addEventListener("click", asyn
   }
   // Change only: the password can't be removed - it is what keeps the keys encrypted.
   if (!(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
+  const biometricWasOn = hasBiometricUnlock();
   if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. If you forget it, you'll need your recovery phrase.` })) {
-    showCopyToast("Password updated");
+    // A new password means a new data key: Face ID unlock was turned off with it (key-vault.js).
+    showCopyToast(biometricWasOn && !hasBiometricUnlock() ? `Password updated. Turn ${biometricDisplayName()} unlock on again below.` : "Password updated");
     refreshPasswordStatus();
   }
 });
@@ -1043,14 +1172,18 @@ function fileStoredWalletBeforeReplacing(newAddress, newPrivateKeyHex, { legacy 
 }
 
 /** The lock: asks for the app password and opens the key vault. True once unlocked. */
-async function unlockAppWithPassword(message, { allowForgot = true } = {}) {
+async function unlockAppWithPassword(message, { allowForgot = true, autoBiometric = false } = {}) {
   if (!isAppLocked()) return true;
-  const ok = await requestPassword({
+  const answer = requestPassword({
     mode: "verify",
     title: "Unlock KaChat",
     message: message || "Your saved accounts are encrypted on this device. Enter your password to unlock them.",
     allowForgot,
   });
+  // At launch, ask for Face ID / Windows Hello by itself where the browser allows it without a tap
+  // (not WebKit: there "Use Face ID" is a button).
+  if (autoBiometric && canOfferBiometricUnlock() && canAutoPromptBiometric()) runBiometricUnlockFromDialog({ auto: true });
+  const ok = await answer;
   if (ok) refreshPasswordStatus();
   return ok && !isAppLocked();
 }
@@ -1063,7 +1196,7 @@ async function promptUnlockAtLaunch() {
   const active = readActiveAccountAddress();
   const account = active ? loadSavedAccounts().find((entry) => sameStoredAccountAddress(entry?.address, active)) : null;
   if (!account) return;
-  if (!(await unlockAppWithPassword())) return;
+  if (!(await unlockAppWithPassword(undefined, { autoBiometric: true }))) return;
   try {
     activateSavedAccount(account.address);
     reloadKaChat();
@@ -27368,7 +27501,10 @@ document.querySelector("[data-export-local-state]")?.addEventListener("click", a
 });
 
 document.querySelector("[data-clear-local-state]")?.addEventListener("click", async () => {
-  if (!await confirmText("Clear local contacts and message previews? Wallet/private keys are not saved and will not be affected.")) return;
+  const biometricOn = !!loadBiometricRecord();
+  if (!await confirmText(`Clear local contacts and message previews? Wallet/private keys are not saved and will not be affected.${biometricOn ? ` ${biometricDisplayName()} unlock will be turned off.` : ""}`)) return;
+  // Face ID / Touch ID unlock goes too (the password and the encrypted keys stay).
+  if (biometricOn) { turnOffBiometricUnlock(); refreshBiometricRow(); }
   state = { contacts: [], conversations: [] };
   persistState();
   renderChats();

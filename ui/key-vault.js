@@ -26,6 +26,18 @@
 //     key + server + username). See "the Nextcloud app password" below.
 //   kachat-shell-testing-wallet-v2 - the active-wallet record keeps public fields only.
 //   kachat-vault-legacy-wallet-v1 - a sealed copy of the pre-v2 bare-hex wallet key, if any.
+//   kachat-biometric-unlock-v1 (localStorage, account-independent like the password record) -
+//     Face ID / Touch ID unlock: the same data key, wrapped a second time under a key only a
+//     WebAuthn passkey's PRF extension can produce (ui/biometric-unlock.js runs the ceremony):
+//     { version: 1, credentialId: base64url, userId: base64url, rpId, salt: hex(32),
+//       iv: hex(12), wrappedDataKey: hex(32 + 16), createdAt }
+//     wrappedDataKey = AES-256-GCM(HKDF-SHA256(prfOutput, salt = empty,
+//       info = "kachat-biometric-unlock-v1"), dataKey, AAD = "kachat-biometric-unlock-v1|" +
+//       credentialId). The PRF output is never stored, so the record opens nothing by itself. A
+//     password change makes a new data key, so it drops the wrapped key and keeps only
+//     { version, userId, rpId, retired: "password-changed" } (turning it on again reuses the
+//     passkey's user handle, so the OS replaces that passkey instead of adding another). Removing
+//     the password, the forgotten-password reset and releasing an unused password delete it.
 //   kachat-vault-handoff-v1 (sessionStorage) - a one-time hand-off { key: hex(32), expiresAt }
 //     written only just before a reload KaChat itself starts (sign-in, account switch, network
 //     switch), so those don't ask again. The next page load takes it once and deletes it at once;
@@ -56,6 +68,9 @@ export const VAULT_HANDOFF_TTL_MS = 15_000;
 export const LOCKED_IN_ANOTHER_TAB_MESSAGE = "KaChat was locked in another tab. Enter your password to continue.";
 export const VAULT_PBKDF2_ITERATIONS = 600_000;
 export const MIN_APP_PASSWORD_LENGTH = 8;
+export const BIOMETRIC_UNLOCK_KEY = "kachat-biometric-unlock-v1";
+export const BIOMETRIC_HKDF_INFO = "kachat-biometric-unlock-v1";
+const BIOMETRIC_WRAP_AAD_PREFIX = "kachat-biometric-unlock-v1|";
 const FAILED_ATTEMPTS_KEY = "kachat-app-password-failed-attempts";
 const LOCKED_UNTIL_KEY = "kachat-app-password-locked-until";
 const FREE_ATTEMPTS = 5;
@@ -757,6 +772,23 @@ function keyOpensStore(key) {
 }
 
 /**
+ * The one "unlocked" step both the password and Face ID / Touch ID take once they hold the data
+ * key (already checked to be the stored record's, or the pending record's when `fromPending`):
+ * lockout reset, an interrupted password change finished, the key in memory (listeners told; the
+ * session hand-off reads it from there), then any plaintext left over sealed.
+ */
+function openVaultWithDataKey(key, { pending = loadPendingRecord(), fromPending = false } = {}) {
+  clearFailedAttempts();
+  if (fromPending) {
+    ls().setItem(APP_PASSWORD_KEY, ls().getItem(APP_PASSWORD_PENDING_KEY));
+  }
+  if (pending && keyOpensStore(key)) ls().removeItem(APP_PASSWORD_PENDING_KEY);
+  setUnlocked(key);
+  try { migratePlaintextIntoVault(); } catch { /* plaintext copies stay until the next unlock */ }
+  try { sealPlaintextNextcloud(); } catch { /* the plaintext Nextcloud password stays until the next write or unlock */ }
+}
+
+/**
  * Checks `password` and unlocks the vault. Counts wrong answers toward the lockout. A pre-vault
  * record is verified the old way, then replaced by a vault record with every plaintext secret
  * sealed. An interrupted password change is finished here. Never throws for a wrong password.
@@ -795,14 +827,7 @@ export async function unlockKeyVault(password) {
     return true;
   }
   if (!key) { recordFailedAttempt(); return false; }
-  clearFailedAttempts();
-  if (fromPending) {
-    ls().setItem(APP_PASSWORD_KEY, ls().getItem(APP_PASSWORD_PENDING_KEY));
-  }
-  if (pending && keyOpensStore(key)) ls().removeItem(APP_PASSWORD_PENDING_KEY);
-  setUnlocked(key);
-  try { migratePlaintextIntoVault(); } catch { /* plaintext copies stay until the next unlock */ }
-  try { sealPlaintextNextcloud(); } catch { /* the plaintext Nextcloud password stays until the next write or unlock */ }
+  openVaultWithDataKey(key, { pending, fromPending });
   // A record from a weaker work factor: the password is known good right now, so re-wrap.
   const current = loadPasswordRecord();
   if (isVaultRecord(current) && Number(current.iterations) < VAULT_PBKDF2_ITERATIONS && vault.iterations >= VAULT_PBKDF2_ITERATIONS) {
@@ -851,6 +876,11 @@ async function writeNewVault(value) {
   const nextcloud = collectPlainNextcloud(oldKey);
   const recordJson = JSON.stringify(record);
   const accountsBefore = ls().getItem(SAVED_ACCOUNTS_KEY);
+  // Face ID / Touch ID wraps the old data key: it goes before anything is sealed under the new
+  // one, so no crash can leave it holding a key the store no longer opens. Put back if the
+  // change is undone (the old key then stays the store's).
+  const biometricBefore = ls().getItem(BIOMETRIC_UNLOCK_KEY);
+  retireBiometricUnlock("password-changed");
   ls().setItem(APP_PASSWORD_PENDING_KEY, recordJson);
   try {
     writeSealedVerified(dataKey, entries);
@@ -862,6 +892,7 @@ async function writeNewVault(value) {
     }
   } catch (error) {
     ls().removeItem(APP_PASSWORD_PENDING_KEY);
+    try { if (biometricBefore != null) ls().setItem(BIOMETRIC_UNLOCK_KEY, biometricBefore); } catch { /* it stays off */ }
     throw error;
   }
   ls().setItem(APP_PASSWORD_KEY, recordJson);
@@ -907,6 +938,7 @@ export function removeAppPassword() {
   }
   if (legacyHex) ls().setItem(LEGACY_PERSISTED_WALLET_KEY, legacyHex);
   ls().removeItem(VAULT_LEGACY_WALLET_KEY);
+  ls().removeItem(BIOMETRIC_UNLOCK_KEY);
   ls().removeItem(APP_PASSWORD_KEY);
   ls().removeItem(APP_PASSWORD_PENDING_KEY);
   clearFailedAttempts();
@@ -936,6 +968,7 @@ export function releaseAppPasswordIfUnused() {
     const record = readRawNextcloud(storageKey);
     if (record && !hasPlainNextcloudPassword(record) && hasSealedNextcloudPassword(record)) ls().removeItem(storageKey);
   }
+  ls().removeItem(BIOMETRIC_UNLOCK_KEY);
   ls().removeItem(APP_PASSWORD_KEY);
   ls().removeItem(APP_PASSWORD_PENDING_KEY);
   clearFailedAttempts();
@@ -961,6 +994,7 @@ export function resetForgottenAppPassword() {
     const record = readRawNextcloud(storageKey);
     if (record && !hasPlainNextcloudPassword(record) && hasSealedNextcloudPassword(record)) ls().removeItem(storageKey);
   }
+  ls().removeItem(BIOMETRIC_UNLOCK_KEY);
   ls().removeItem(APP_PASSWORD_KEY);
   ls().removeItem(APP_PASSWORD_PENDING_KEY);
   clearFailedAttempts();
@@ -968,4 +1002,136 @@ export function resetForgottenAppPassword() {
   lockKeyVault();
   if (!wasOpen) notifyStateListeners(); // the Nextcloud connection is gone: let it reload
   return raw.length - kept.length;
+}
+
+// --- Face ID / Touch ID unlock ------------------------------------------------------------------
+// The WebAuthn ceremony lives in ui/biometric-unlock.js; this half only ever sees the passkey's
+// PRF output (32 bytes the authenticator computes from a secret that never leaves it, after user
+// verification) and turns it into a wrapping key. It unlocks the vault cryptographically: the data
+// key comes out of the record or nothing does. Record format: see the top of this file.
+const BIOMETRIC_ID_PATTERN = /^[A-Za-z0-9_-]{1,1400}$/;
+
+function parseBiometricRecord(raw) {
+  try {
+    const parsed = JSON.parse(raw || "null");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Number(parsed.version) === 1) return parsed;
+  } catch { /* corrupted record = no record */ }
+  return null;
+}
+function isEnrolledBiometricRecord(record) {
+  return !!(record
+    && typeof record.credentialId === "string" && BIOMETRIC_ID_PATTERN.test(record.credentialId)
+    && typeof record.salt === "string" && /^[0-9a-f]{64}$/i.test(record.salt)
+    && typeof record.iv === "string" && /^[0-9a-f]{24}$/i.test(record.iv)
+    && typeof record.wrappedDataKey === "string" && /^[0-9a-f]{96}$/i.test(record.wrappedDataKey));
+}
+/** The stored Face ID / Touch ID record as it is (enrolled, retired by a password change, or
+ *  null). Holds nothing secret: the wrapped key opens only with the passkey's PRF output. */
+export function loadBiometricRecord() { return parseBiometricRecord(ls().getItem(BIOMETRIC_UNLOCK_KEY)); }
+/** Face ID / Touch ID unlock is on: an enrolled record and a password it belongs to. */
+export function hasBiometricUnlock() { return isVaultEnabled() && isEnrolledBiometricRecord(loadBiometricRecord()); }
+/** Why it is off, when a password change turned it off ("password-changed"), else null. */
+export function biometricUnlockRetiredReason() {
+  const record = loadBiometricRecord();
+  return record && !isEnrolledBiometricRecord(record) && typeof record.retired === "string" ? record.retired : null;
+}
+/** A password change: the wrapped (old) data key goes, the passkey's user handle stays. */
+function retireBiometricUnlock(reason) {
+  const record = loadBiometricRecord();
+  if (!record) return;
+  if (!isEnrolledBiometricRecord(record)) return; // already off
+  const kept = { version: 1, retired: String(reason || "off") };
+  if (typeof record.userId === "string" && BIOMETRIC_ID_PATTERN.test(record.userId)) kept.userId = record.userId;
+  if (typeof record.rpId === "string") kept.rpId = record.rpId;
+  ls().setItem(BIOMETRIC_UNLOCK_KEY, JSON.stringify(kept));
+}
+/** Turns Face ID / Touch ID unlock off (the record goes; the passkey stays in the OS keychain).
+ *  Allowed while locked: dropping a second way in never weakens anything. */
+export function removeBiometricUnlock() { ls().removeItem(BIOMETRIC_UNLOCK_KEY); }
+
+function prfBytes(prfOutput) {
+  if (prfOutput instanceof Uint8Array) return prfOutput;
+  if (prfOutput instanceof ArrayBuffer) return new Uint8Array(prfOutput);
+  if (ArrayBuffer.isView(prfOutput)) return new Uint8Array(prfOutput.buffer, prfOutput.byteOffset, prfOutput.byteLength);
+  return null;
+}
+async function biometricWrappingKey(prfOutput) {
+  const material = prfBytes(prfOutput);
+  // WebAuthn PRF outputs are 32 bytes; anything shorter is not one.
+  if (!material || material.length < 32) throw new Error("No usable PRF output.");
+  const base = await crypto.subtle.importKey("raw", material, "HKDF", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: enc.encode(BIOMETRIC_HKDF_INFO) }, base, 256);
+  return new Uint8Array(bits);
+}
+
+/**
+ * Turns Face ID / Touch ID unlock on: wraps this page's data key under HKDF(`prfOutput`) and
+ * stores the record (checked to unwrap again first). Needs a password and the vault unlocked with
+ * the current key. `credentialId` / `userId` are base64url, `salt` the 32-byte PRF input (hex or
+ * bytes) the passkey evaluated. Throws when anything is missing; nothing is written then.
+ */
+export async function enrolBiometricUnlock({ credentialId, userId, rpId, salt, prfOutput } = {}) {
+  if (!isVaultEnabled()) throw new Error("Set a password first.");
+  const key = vault.dataKey;
+  if (!key) throw new Error("KaChat is locked. Enter your password first.");
+  requireCurrentKey(key);
+  const id = String(credentialId || "");
+  if (!BIOMETRIC_ID_PATTERN.test(id)) throw new Error("The passkey has no usable ID.");
+  const saltHex = typeof salt === "string" ? salt.toLowerCase() : bytesToHex(prfBytes(salt) || []);
+  if (!/^[0-9a-f]{64}$/.test(saltHex)) throw new Error("The passkey salt must be 32 bytes.");
+  const wrappingKey = await biometricWrappingKey(prfOutput);
+  // The derivation awaited: another tab may have changed the password meanwhile.
+  if (vault.dataKey !== key) throw new Error("KaChat is locked. Enter your password first.");
+  requireCurrentKey(key);
+  const aad = BIOMETRIC_WRAP_AAD_PREFIX + id;
+  const sealed = sealBytes(wrappingKey, key, aad);
+  if (bytesToHex(openBytes(wrappingKey, sealed, aad)) !== bytesToHex(key)) throw new Error("Face ID key wrap failed verification.");
+  const record = {
+    version: 1,
+    credentialId: id,
+    salt: saltHex,
+    iv: sealed.iv,
+    wrappedDataKey: sealed.ct,
+    createdAt: new Date(vault.now()).toISOString(),
+  };
+  if (typeof userId === "string" && BIOMETRIC_ID_PATTERN.test(userId)) record.userId = userId;
+  if (typeof rpId === "string" && rpId) record.rpId = rpId;
+  ls().setItem(BIOMETRIC_UNLOCK_KEY, JSON.stringify(record));
+  return record;
+}
+
+/**
+ * Unlocks the vault with a passkey's PRF output: unwraps the data key, checks it is the stored
+ * password record's key (and opens what is stored), then takes exactly the step a correct password
+ * takes. Never counts toward the password lockout and never throws for a wrong output.
+ * Resolves { ok: true } or { ok: false, reason }:
+ *   "no-record"  nothing enrolled (or no password)
+ *   "wrong-key"  the output does not open the record (another passkey, a deleted and re-made one,
+ *                a tampered record, or no user verification)
+ *   "stale"      it opened, but to a key the password record no longer uses
+ */
+export async function unlockKeyVaultWithBiometric(prfOutput) {
+  const record = loadBiometricRecord();
+  if (!isVaultEnabled() || !isEnrolledBiometricRecord(record)) return { ok: false, reason: "no-record" };
+  let key = null;
+  try {
+    const wrappingKey = await biometricWrappingKey(prfOutput);
+    key = openBytes(wrappingKey, { iv: record.iv, ct: record.wrappedDataKey }, BIOMETRIC_WRAP_AAD_PREFIX + record.credentialId);
+  } catch { return { ok: false, reason: "wrong-key" }; }
+  if (!key || key.length !== 32) return { ok: false, reason: "wrong-key" };
+  if (vault.dataKey && bytesToHex(vault.dataKey) === bytesToHex(key) && checkKeyStillCurrent()) return { ok: true };
+  const current = loadPasswordRecord();
+  const pending = loadPendingRecord();
+  let fromPending = false;
+  const matchesCurrent = isVaultRecord(current) && (current.keyCheck ? keyMatchesRecord(key, current) : keyOpensStore(key));
+  if (matchesCurrent) {
+    // The store was already re-sealed under an interrupted change's new key: this one is stale.
+    if (pending && !keyOpensStore(key)) return { ok: false, reason: "stale" };
+  } else if (pending?.keyCheck && keyMatchesRecord(key, pending) && keyOpensStore(key)) {
+    fromPending = true;
+  } else {
+    return { ok: false, reason: "stale" };
+  }
+  openVaultWithDataKey(key, { pending, fromPending });
+  return { ok: true };
 }
