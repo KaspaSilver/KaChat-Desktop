@@ -75,8 +75,11 @@ function bodyHtml(message) {
   return `<div class="app-dialog-message">${lines}</div>`;
 }
 
-function present(html, focusSelector, variantClass = "") {
+/// `alert`: an iOS alert (confirm / prompt / message), kept centred on a phone; choices and info
+/// sheets rise from the bottom there instead (ui/sheets.js).
+function present(html, focusSelector, variantClass = "", { alert = false } = {}) {
   const el = ensureHost();
+  el.classList.toggle("is-alert", alert);
   const body = el.querySelector("[data-app-dialog-body]");
   // One host serves every dialog, so a variant (the tiles sheet) is set per presentation.
   body.classList.toggle("app-dialog-tiles", variantClass === "app-dialog-tiles");
@@ -98,7 +101,7 @@ export function confirmDialog({ title, message = "", kicker = null, confirmLabel
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-app-dialog-cancel>${escape(cancelLabel)}</button>
         <button class="primary-button${destructive ? " danger" : ""}" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
-      </div>`);
+      </div>`, null, "", { alert: true });
   });
 }
 
@@ -122,7 +125,7 @@ export function promptDialog({ title, label = "", message = "", kicker = null, i
         <button class="secondary-button" type="button" data-app-dialog-cancel>Cancel</button>
         ${extraLabel ? `<button class="secondary-button" type="button" data-app-dialog-extra>${escape(extraLabel)}</button>` : ""}
         <button class="primary-button" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
-      </div>`, "[data-app-dialog-input]");
+      </div>`, "[data-app-dialog-input]", "", { alert: true });
   });
 }
 
@@ -149,7 +152,7 @@ export function alertDialog({ title, message = "", kicker = null, confirmLabel =
       ${bodyHtml(message)}
       <div class="modal-actions">
         <button class="primary-button" type="button" data-app-dialog-ok>${escape(confirmLabel)}</button>
-      </div>`);
+      </div>`, null, "", { alert: true });
   });
 }
 

@@ -675,6 +675,9 @@ function requestPassword({ mode = "verify", title, message, allowForgot = false,
     if (passwordTitleEl) passwordTitleEl.textContent = title || (mode === "set" ? "Set Password" : "Enter Password");
     if (passwordMessageEl) { passwordMessageEl.textContent = message || ""; passwordMessageEl.hidden = !message; }
     if (passwordConfirmLabel) passwordConfirmLabel.hidden = mode !== "set";
+    // Lets the phone's password manager offer a strong password when one is set and fill the
+    // saved one in when it is asked for.
+    if (passwordInput) passwordInput.autocomplete = mode === "set" ? "new-password" : "current-password";
     if (passwordErrorEl) passwordErrorEl.hidden = true;
     if (passwordInput) passwordInput.value = "";
     if (passwordConfirmInput) passwordConfirmInput.value = "";
@@ -11542,7 +11545,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 215;
+const APP_BUILD = 216;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -32236,3 +32239,6 @@ document.addEventListener("keydown", (event) => {
   if (groupCreateModal && !groupCreateModal.hidden) { closeGroupCreate({ cancelled: true }); return; }
   if (groupChatScreen && !groupChatScreen.hidden) { closeGroupChat(); }
 });
+
+// The app has drawn its first screen: the launch screen in index.html can go.
+document.documentElement.classList.add("app-ready");
