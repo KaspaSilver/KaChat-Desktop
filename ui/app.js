@@ -7447,6 +7447,11 @@ const spendingVisibilityDoneBtn = document.querySelector("[data-done-spending-vi
 const spendingVisPrevBtn = document.querySelector("[data-spending-vis-prev]");
 const spendingVisNextBtn = document.querySelector("[data-spending-vis-next]");
 const spendingVisRangeEl = document.querySelector("[data-spending-vis-range]");
+const spendingVisChainsEl = document.querySelector("[data-spending-vis-chains]");
+const spendingVisPagerEl = document.querySelector("[data-spending-vis-pager]");
+const spendingVisBackBtn = document.querySelector("[data-spending-vis-back]");
+const spendingVisTitleEl = document.querySelector("[data-spending-vis-title]");
+const spendingVisHideAllBtn = document.querySelector("[data-spending-hide-all]");
 let spendingListToken = 0;
 const SPENDING_GAP_LIMIT = 20;
 
@@ -8918,15 +8923,81 @@ function closeAllSpendingMenus() {
 }
 
 // ---------------------------------------------------------------------------
-// Address Visibility (iOS parity: SpendingAddressVisibilityView). Paged 50 at a
-// time; the right arrow never runs out — future pages derive addresses beyond
-// the revealed bound on the fly, and toggling one on raises the bound while
-// keeping the intermediate indices hidden so they don't flood the main list.
+// Address Visibility (iOS parity: SpendingAddressVisibilityView, d7e6dd1). It opens
+// on a card per chain - Quantum Addresses and Non-Quantum Addresses - each saying
+// how many of its revealed addresses Manage Addresses shows; a card pushes that
+// chain's checklist (iOS AddressVisibilityChainList). One pager over raw indices
+// could never reach the quantum chain, which starts at QUANTUM_INDEX_BASE, so each
+// list pages from its own chain's start, numbered from #0. Paged 50 at a time; the
+// right arrow never runs out — future pages derive addresses beyond the revealed
+// bound on the fly, and toggling one on raises that chain's bound while keeping the
+// intermediate indices hidden so they don't flood the main list.
 // ---------------------------------------------------------------------------
 
 const SPENDING_VIS_PAGE_SIZE = 50;
 let spendingVisibilityPage = 0;
 let spendingVisibilityToken = 0;
+/** The chain whose checklist is pushed ("quantum" | "legacy"), or null on the cards. */
+let spendingVisibilityChain = null;
+
+/** True when `index` is revealed on its own chain (a quantum slot counts against qMaxIndex, a legacy
+ *  one against maxIndex). */
+function spendingIndexRevealed(index, state) {
+  return isQuantumIndex(index) ? chainLocalIndex(index) <= state.qMaxIndex : index <= state.maxIndex;
+}
+
+/** Per chain, how many revealed addresses there are and how many of them Manage Addresses shows
+ *  (iOS chainCard: entries of that chain, and those not hidden). */
+function spendingVisibilityChainCounts(state = getSpendingState()) {
+  const hiddenSet = new Set(state.hidden);
+  const counts = { quantum: { shown: 0, total: 0 }, legacy: { shown: 0, total: 0 } };
+  for (const index of spendingRevealedIndices(state)) {
+    const chain = isQuantumIndex(index) ? counts.quantum : counts.legacy;
+    chain.total += 1;
+    if (!hiddenSet.has(index)) chain.shown += 1;
+  }
+  return counts;
+}
+
+function renderSpendingVisibilityCards() {
+  const counts = spendingVisibilityChainCounts();
+  spendingVisibilityScreen?.querySelectorAll("[data-spending-vis-count]").forEach((el) => {
+    const c = counts[el.dataset.spendingVisCount];
+    if (c) el.textContent = `${c.shown} of ${c.total} shown`;
+  });
+}
+
+/** Shows the cards (`chain` null) or pushes that chain's checklist, with the header to match: the
+ *  cards carry Hide All and Done (iOS: the first screen's toolbar), a chain's list a back step and
+ *  the chain's name as its title. */
+function showSpendingVisibilityChain(chain) {
+  spendingVisibilityChain = chain === "quantum" || chain === "legacy" ? chain : null;
+  const onCards = !spendingVisibilityChain;
+  if (spendingVisChainsEl) spendingVisChainsEl.hidden = !onCards;
+  if (spendingVisibilityList) spendingVisibilityList.hidden = onCards;
+  if (spendingVisPagerEl) spendingVisPagerEl.hidden = onCards;
+  if (spendingVisHideAllBtn) spendingVisHideAllBtn.hidden = !onCards;
+  if (spendingVisBackBtn) spendingVisBackBtn.hidden = onCards;
+  // A chain's list has no Done (iOS); the button keeps its space so the title stays centred.
+  if (spendingVisibilityDoneBtn) {
+    spendingVisibilityDoneBtn.classList.toggle("spending-visibility-placeholder", !onCards);
+    spendingVisibilityDoneBtn.tabIndex = onCards ? 0 : -1;
+    if (onCards) spendingVisibilityDoneBtn.removeAttribute("aria-hidden");
+    else spendingVisibilityDoneBtn.setAttribute("aria-hidden", "true");
+  }
+  if (spendingVisTitleEl) {
+    spendingVisTitleEl.textContent = onCards ? "Address Visibility"
+      : spendingVisibilityChain === "quantum" ? "Quantum Addresses" : "Non-Quantum Addresses";
+  }
+  if (onCards) {
+    ++spendingVisibilityToken; // a page still filling in its usage stops writing
+    if (spendingVisibilityList) { spendingVisibilityList.innerHTML = ""; delete spendingVisibilityList.dataset.page; }
+    renderSpendingVisibilityCards();
+    return;
+  }
+  spendingVisibilityPage = 0;
+  renderSpendingVisibilityPage();
+}
 // Session cache (address → { kas, used }) so paging back and forth is instant.
 const spendingUsageCache = new Map();
 
@@ -8955,12 +9026,18 @@ function spendingVisibilityRowHtml(index, address, state, visible) {
   const checkSvg = visible
     ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path class="spending-vis-check" d="m7.5 12.5 3 3 6-6.5"/></svg>'
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.2"/></svg>';
+  // The chain-local number; the outline shield marks the quantum chain's rows apart from the legacy
+  // chain's same numbers (iOS AddressVisibilityChainList row).
+  const number = chainLocalIndex(index);
+  const shield = isQuantumIndex(index)
+    ? '<span class="spending-visibility-shield" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.2 4 5.3v6.2c0 5 3.4 9.3 8 10.5 4.6-1.2 8-5.5 8-10.5V5.3Z"/></svg></span>'
+    : "";
   return `
     <div class="spending-visibility-row${visible ? "" : " off"}" data-vis-row="${index}">
-      <button type="button" class="spending-visibility-toggle${visible ? " on" : ""}" data-spending-vis-toggle="${index}" aria-pressed="${visible}" aria-label="Toggle visibility of spending address #${index}">${checkSvg}</button>
+      <button type="button" class="spending-visibility-toggle${visible ? " on" : ""}" data-spending-vis-toggle="${index}" aria-pressed="${visible}" aria-label="Toggle visibility of spending address #${number}">${checkSvg}</button>
       <div class="spending-visibility-info">
         <div class="spending-visibility-head">
-          <span class="spending-address-index">#${index}</span>
+          <span class="spending-address-index">#${number}</span>${shield}
           ${customLabel ? `<span class="spending-visibility-label">${escapeHtml(customLabel)}</span>` : ""}
           <span class="spending-address-usage spending-visibility-usage" data-vis-usage="${index}">…</span>
         </div>
@@ -8970,23 +9047,32 @@ function spendingVisibilityRowHtml(index, address, state, visible) {
 }
 
 async function renderSpendingVisibilityPage() {
-  if (!spendingVisibilityList) return;
+  if (!spendingVisibilityList || !spendingVisibilityChain) return;
   const state = getSpendingState();
   const hiddenSet = new Set(state.hidden);
-  const start = spendingVisibilityPage * SPENDING_VIS_PAGE_SIZE;
-  const end = start + SPENDING_VIS_PAGE_SIZE - 1;
-  if (spendingVisRangeEl) spendingVisRangeEl.textContent = `#${start} - #${end}`;
+  // From the chain's own start (iOS d7e6dd1): the quantum chain at QUANTUM_INDEX_BASE, the legacy
+  // one at 0; the pager names chain-local numbers.
+  const localStart = spendingVisibilityPage * SPENDING_VIS_PAGE_SIZE;
+  const localEnd = localStart + SPENDING_VIS_PAGE_SIZE - 1;
+  const base = spendingVisibilityChain === "quantum" ? QUANTUM_INDEX_BASE : 0;
+  if (spendingVisRangeEl) spendingVisRangeEl.textContent = `#${localStart} - #${localEnd}`;
   if (spendingVisPrevBtn) spendingVisPrevBtn.disabled = spendingVisibilityPage === 0;
   const token = ++spendingVisibilityToken;
   const rows = [];
-  for (let i = start; i <= end; i++) {
+  for (let i = base + localStart; i <= base + localEnd; i++) {
     const address = deriveSpendingAddressAt(i);
-    const visible = i <= state.maxIndex && !hiddenSet.has(i);
+    const visible = spendingIndexRevealed(i, state) && !hiddenSet.has(i);
     rows.push({ index: i, address, visible });
   }
+  const scroller = spendingVisibilityList.closest(".manage-address-body");
+  const pageChanged = spendingVisibilityList.dataset.page !== `${spendingVisibilityChain}:${spendingVisibilityPage}`;
+  spendingVisibilityList.dataset.page = `${spendingVisibilityChain}:${spendingVisibilityPage}`;
   spendingVisibilityList.innerHTML = rows
     .map((r) => spendingVisibilityRowHtml(r.index, r.address, state, r.visible))
     .join("");
+  // Every page (and every chain) starts at its top, as iOS's list does (.id(page)); a toggle keeps
+  // the place.
+  if (pageChanged && scroller) scroller.scrollTop = 0;
   // Usage fill: funded rows show their balance, the rest Used/Unused. Chunked
   // like the discovery scan so a page can't burst the REST rate limiter.
   for (let base = 0; base < rows.length; base += 5) {
@@ -9020,7 +9106,8 @@ function openSpendingVisibilityScreen() {
   // landing, consolidate) may have changed balances/usage, and this cache never expired.
   spendingUsageCache.clear();
   spendingVisibilityScreen.hidden = false;
-  renderSpendingVisibilityPage();
+  // Always on the chain cards (iOS d7e6dd1).
+  showSpendingVisibilityChain(null);
 }
 
 function closeSpendingVisibilityScreen() {
@@ -9033,7 +9120,7 @@ spendingVisibilityOpenBtn?.addEventListener("click", openSpendingVisibilityScree
 // Hide All (iOS 245a5d2): every revealed address hidden, so Manage Addresses starts over with only
 // the chatting address. Nothing is lost: Address Visibility brings any back, and the totals still
 // count them.
-document.querySelector("[data-spending-hide-all]")?.addEventListener("click", async () => {
+spendingVisHideAllBtn?.addEventListener("click", async () => {
   const ok = await confirmDialog({
     title: "Hide All Addresses?",
     message: "Manage Addresses starts over with only your chatting address. Nothing is lost: bring any address back here, and its Kaspa still counts in your total.",
@@ -9041,11 +9128,21 @@ document.querySelector("[data-spending-hide-all]")?.addEventListener("click", as
     destructive: true,
   });
   if (!ok) return;
-  // Both chains (iOS bba1b1e hideAllSpendingAddresses).
+  // Both chains (iOS bba1b1e hideAllSpendingAddresses); the cards' counts follow.
   saveSpendingState({ hidden: spendingRevealedIndices() });
-  renderSpendingVisibilityPage();
+  renderSpendingVisibilityCards();
 });
-spendingVisibilityDoneBtn?.addEventListener("click", closeSpendingVisibilityScreen);
+spendingVisibilityDoneBtn?.addEventListener("click", () => {
+  if (spendingVisibilityChain) return; // only the cards have Done (iOS); there it is a placeholder
+  closeSpendingVisibilityScreen();
+});
+// A card pushes its chain's checklist; back returns to the cards with their counts refreshed (iOS
+// shares the loaded entries, so a toggle shows in the counts).
+spendingVisChainsEl?.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-spending-vis-chain]");
+  if (card) showSpendingVisibilityChain(card.dataset.spendingVisChain);
+});
+spendingVisBackBtn?.addEventListener("click", () => showSpendingVisibilityChain(null));
 spendingVisPrevBtn?.addEventListener("click", () => {
   if (spendingVisibilityPage === 0) return;
   spendingVisibilityPage -= 1;
@@ -9064,21 +9161,27 @@ spendingVisibilityList?.addEventListener("click", async (event) => {
   if (!Number.isInteger(index) || index < 0) return;
   const state = getSpendingState();
   const hiddenSet = new Set(state.hidden);
+  // Per chain (iOS toggle): a quantum slot counts against the quantum bound, a legacy one against
+  // the legacy bound, so neither chain's row is only unhidden while its bound never grows.
+  const revealed = spendingIndexRevealed(index, state);
   // Every row toggles both ways, funded ones and the old primary too (iOS 245a5d2).
-  const visible = index <= state.maxIndex && !hiddenSet.has(index);
+  const visible = revealed && !hiddenSet.has(index);
   if (visible) {
     hiddenSet.add(index);
     saveSpendingState({ hidden: Array.from(hiddenSet) });
-  } else if (index <= state.maxIndex) {
+  } else if (revealed) {
     hiddenSet.delete(index);
     saveSpendingState({ hidden: Array.from(hiddenSet) });
   } else {
-    // Revealing an index beyond the current bound: raise the bound but keep the
+    // Revealing an index beyond its chain's bound: raise that bound but keep the
     // intermediate indices hidden so they don't flood the main list (iOS parity:
-    // WalletManager.revealSpendingAddress).
-    for (let i = state.maxIndex + 1; i < index; i++) hiddenSet.add(i);
+    // WalletManager.revealSpendingAddress, both chains).
+    const quantum = isQuantumIndex(index);
+    const base = quantum ? QUANTUM_INDEX_BASE : 0;
+    const bound = quantum ? state.qMaxIndex : state.maxIndex;
+    for (let n = bound + 1; n < chainLocalIndex(index); n++) hiddenSet.add(base + n);
     hiddenSet.delete(index);
-    saveSpendingState({ maxIndex: index, hidden: Array.from(hiddenSet) });
+    saveSpendingState({ ...spendingBoundPatchFor(index, state), hidden: Array.from(hiddenSet) });
   }
   renderSpendingVisibilityPage();
 });
@@ -11318,7 +11421,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 206;
+const APP_BUILD = 207;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -13136,7 +13239,10 @@ document.addEventListener("keydown", (event) => {
   if (sendKaspaModal && !sendKaspaModal.hidden) { closeSendKaspaModal(); return; }
   if (manageAddressScreen && !manageAddressScreen.hidden) { closeManageAddressScreen(); return; }
   if (spendingDetailScreen && !spendingDetailScreen.hidden) closeSpendingDetailScreen();
-  else if (spendingVisibilityScreen && !spendingVisibilityScreen.hidden) closeSpendingVisibilityScreen();
+  else if (spendingVisibilityScreen && !spendingVisibilityScreen.hidden) {
+    // A chain's list steps back to the cards first, like its back button.
+    if (spendingVisibilityChain) showSpendingVisibilityChain(null); else closeSpendingVisibilityScreen();
+  }
   else if (spendingManageScreen && !spendingManageScreen.hidden) closeSpendingManageScreen();
 });
 

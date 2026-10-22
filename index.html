@@ -2533,22 +2533,41 @@
     </div>
   </div>
 
-  <!-- Address Visibility: compact checkmark list of EVERY spending address (paged 50 at a
-       time, endless forward paging derives future indices on the fly) so dozens can be
-       toggled off the main list in one sitting. iOS parity: SpendingAddressVisibilityView. -->
+  <!-- Address Visibility (iOS d7e6dd1): first a Kaspa Hub style card per chain - Quantum
+       Addresses and Non-Quantum Addresses - each with how many of its addresses Manage Addresses
+       shows; a card pushes that chain's compact checkmark list (paged 50 at a time from the
+       chain's own start, endless forward paging derives future indices on the fly) so dozens can
+       be toggled off the main list in one sitting. iOS parity: SpendingAddressVisibilityView +
+       AddressVisibilityChainList. -->
   <div class="chatting-address-screen spending-visibility-screen" data-spending-visibility-screen hidden role="dialog" aria-modal="true" aria-label="Address Visibility">
     <div class="manage-address-card">
       <header class="chatting-address-header">
-        <!-- Hide All (iOS 245a5d2): confirmed, then Manage Addresses starts over with only the
-             chatting address. Done closes. -->
+        <!-- On the cards: Hide All (iOS 245a5d2, both chains) confirmed, then Manage Addresses
+             starts over with only the chatting address; Done closes. On a chain's list: back to
+             the cards (iOS's toolbar items belong to the first screen only). -->
         <button class="chatting-address-back spending-visibility-done spending-visibility-hide-all" type="button" data-spending-hide-all>Hide All</button>
-        <span class="chatting-address-balance">Address Visibility</span>
+        <button class="chatting-address-back spending-visibility-back" type="button" data-spending-vis-back aria-label="Back" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
+        </button>
+        <span class="chatting-address-balance" data-spending-vis-title>Address Visibility</span>
         <button class="chatting-address-back spending-visibility-done" type="button" data-done-spending-visibility>Done</button>
       </header>
       <div class="manage-address-body">
-        <div class="manage-address-list spending-visibility-list" data-spending-visibility-list></div>
+        <div class="domains-service-grid spending-visibility-chains" data-spending-vis-chains aria-label="Address chains">
+          <button type="button" class="hub-tile spending-visibility-chain-tile" data-spending-vis-chain="quantum">
+            <span class="hub-tile-icon spending-visibility-chain-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.2 4 5.3v6.2c0 5 3.4 9.3 8 10.5 4.6-1.2 8-5.5 8-10.5V5.3Z"/></svg></span>
+            <span class="spending-visibility-chain-name">Quantum Addresses</span>
+            <span class="spending-visibility-chain-count" data-spending-vis-count="quantum"></span>
+          </button>
+          <button type="button" class="hub-tile spending-visibility-chain-tile" data-spending-vis-chain="legacy">
+            <span class="hub-tile-icon spending-visibility-chain-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="4.6"/><circle cx="17" cy="7" r="4.6"/><circle cx="7" cy="17" r="4.6"/><circle cx="17" cy="17" r="4.6"/></svg></span>
+            <span class="spending-visibility-chain-name">Non-Quantum Addresses</span>
+            <span class="spending-visibility-chain-count" data-spending-vis-count="legacy"></span>
+          </button>
+        </div>
+        <div class="manage-address-list spending-visibility-list" data-spending-visibility-list hidden></div>
       </div>
-      <div class="manage-address-actions spending-visibility-pager">
+      <div class="manage-address-actions spending-visibility-pager" data-spending-vis-pager hidden>
         <button type="button" class="spending-visibility-page-btn" data-spending-vis-prev aria-label="Previous page">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
         </button>
