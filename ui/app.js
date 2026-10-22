@@ -20,6 +20,7 @@ import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } 
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
+import { mediaFrameByteLength, mediaFrameForEnvelope } from "../engine/media-frame.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
@@ -11432,7 +11433,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 208;
+const APP_BUILD = 209;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -21567,7 +21568,9 @@ const COMPOSER_MEDIA_ROUTE_COPY = {
   },
   voice: {
     title: "Voice Message",
+    // Groups and public chats keep 10 s on chain; a 1:1 note runs to 25 s (iOS f5f6a11).
     chainTitle: "Record On-Chain", chainSubtitle: "Up to 10 seconds, sent on chain.",
+    directChainSubtitle: "Up to 25 seconds, sent on chain.",
     nextcloudTitle: "Record via Nextcloud", nextcloudSubtitle: "Up to 5 minutes. Uploads to your Nextcloud; the chat carries the link.",
   },
 };
@@ -21604,7 +21607,7 @@ function chooseComposerMedia(kind) {
   const set = (selector, text) => { const el = composerMediaRouteMenu.querySelector(selector); if (el) el.textContent = text; };
   set("[data-media-route-title]", copy.title);
   set("[data-media-route-chain-title]", copy.chainTitle);
-  set("[data-media-route-chain-subtitle]", copy.chainSubtitle);
+  set("[data-media-route-chain-subtitle]", copy.directChainSubtitle || copy.chainSubtitle);
   set("[data-media-route-nextcloud-title]", copy.nextcloudTitle);
   set("[data-media-route-nextcloud-subtitle]", copy.nextcloudSubtitle);
   if (composerPlusMenu) composerPlusMenu.hidden = true;
@@ -22277,11 +22280,15 @@ function setPhotoQualityPresetId(id) {
   if (!PHOTO_QUALITY_PRESETS.some((p) => p.id === id)) return;
   try { localStorage.setItem(PHOTO_QUALITY_KEY, id); } catch {}
 }
-// One size for on-chain photos: 15 KB (iOS ImagePrep.defaultChatTargetBytes). The Photo Quality
-// setting and its presets are gone (iOS d36a82f); a stored preset is ignored.
+// The on-chain photo budget of a GROUP photo: 15 KB. The Photo Quality setting and its presets
+// are gone (iOS d36a82f); a stored preset is ignored.
 function photoQualityTargetBytes() {
-  return 15000;
+  return PHOTO_DEFAULT_TARGET_BYTES;
 }
+// A 1:1 photo: 20 KB (iOS f5f6a11 ImagePrep.defaultChatTargetBytes). It goes out in the binary
+// media frame (engine/media-frame.js), one base64 layer instead of two, so a 20 KB photo costs
+// what a 15 KB one did (~27 KB of payload). iOS's "Higher quality photos" (32 KB) is not on Desktop.
+const CHAT_PHOTO_TARGET_BYTES = 20000;
 function photoQualitySummary(preset) {
   return `${preset.name} · ~${Math.round(preset.bytes / 1000)} KB`;
 }
@@ -22296,9 +22303,12 @@ function loadImageFromBlob(blob) {
   });
 }
 
+// The file's exact byte count (its "=" padding is not data), which is the "size" a media-file
+// JSON carries and what a receiver rebuilds from the binary media frame.
 function dataUrlByteLength(dataUrl) {
   const base64 = String(dataUrl || "").split(",")[1] || "";
-  return Math.ceil(base64.length * 3 / 4);
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(base64.length * 3 / 4) - padding);
 }
 
 function drawScaledCanvas(image, longestEdge) {
@@ -22448,7 +22458,7 @@ async function attachPhotoBlob(blob) {
   if (!canAcceptChatImageAttachment()) { photoViaNextcloud = false; return false; }
   setStatus("Compressing photo…");
   try {
-    const attachment = await compressImageBlob(blob);
+    const attachment = await compressImageBlob(blob, { targetBytes: CHAT_PHOTO_TARGET_BYTES });
     // Kept alongside the compressed envelope version so a photo sent via Nextcloud can
     // upload the ORIGINAL full-quality file instead of the payload-sized recompression.
     attachment.originalBlob = blob;
@@ -22488,16 +22498,22 @@ function buildImageEnvelopeJson(attachment, fileName = "photo.jpg") {
 // and play — the formats are wire-compatible even though this side doesn't
 // need a hand-rolled encoder to produce them.
 
-const VOICE_MAX_DURATION_SECONDS = 10; // on-chain payload cap
+// On-chain caps. A 1:1 voice note: up to 25 s / 31 KB, as long as one transaction carries with
+// margin in the binary media frame (iOS f5f6a11 ChatDetailView maxRecordingDuration /
+// maxAudioBytes). A group note keeps 10 s (iOS PublicChatAudioRecorder.maxDuration).
+const VOICE_MAX_DURATION_SECONDS = 10;
+const CHAT_VOICE_MAX_DURATION_SECONDS = 25;
+const CHAT_VOICE_MAX_BYTES = 31000;
 // Nextcloud-uploaded voice notes aren't payload-bound - the server carries them - so a "Record via
 // Nextcloud" note runs to the app-wide 5 minutes (iOS ComposerMediaLimits.nextcloudVoiceSeconds).
 function voiceMaxDurationSeconds() {
-  return voiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : VOICE_MAX_DURATION_SECONDS;
+  return voiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : CHAT_VOICE_MAX_DURATION_SECONDS;
 }
 function groupVoiceMaxDurationSeconds() {
   return groupVoiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : VOICE_MAX_DURATION_SECONDS;
 }
-const VOICE_AUDIO_BITS_PER_SECOND = 8000;
+// 6 kbps Opus, iOS's opusBitrate for 1:1 and group notes alike.
+const VOICE_AUDIO_BITS_PER_SECOND = 6000;
 
 const voiceRecordingPanel = document.querySelector("[data-voice-recording-panel]");
 const voiceRecordingTimeEl = document.querySelector("[data-voice-recording-time]");
@@ -22777,6 +22793,9 @@ async function sendChatVoicePreview() {
   const entry = voicePreviews.get(voiceRecordingPanel);
   if (!entry || !activeConversationId) return;
   const { blob, mimeType } = entry;
+  // On chain a note is capped at 31 KB (iOS maxAudioBytes); the recording stays to be discarded.
+  const voiceTooLargeForChain = "This voice message is too large to send on chain. Please record a shorter one.";
+  if (!(voiceViaNextcloud && isNextcloudConnected()) && blob.size > CHAT_VOICE_MAX_BYTES) { showFailedToSend(voiceTooLargeForChain); return; }
   // Back to the text composer once it is on its way (iOS sendAudio: switchMode(.message)).
   chatAudioMode = false;
   clearVoicePreview(voiceRecordingPanel);
@@ -22800,6 +22819,7 @@ async function sendChatVoicePreview() {
       showCopyToast("Nextcloud upload failed - sending on-chain instead");
     }
   }
+  if (blob.size > CHAT_VOICE_MAX_BYTES) { showFailedToSend(voiceTooLargeForChain); return; }
 
   const reader = new FileReader();
   const dataUrl = await new Promise((resolve, reject) => {
@@ -24472,7 +24492,12 @@ function updateHandshakeWarningBanner() {
 // then asks the engine for the real SDK-calculated fee for a payload that
 // size — an honest estimate built from the actual send path, not a guess.
 function estimateCommPayloadBytes(text) {
-  const cipherBytes = 12 + 33 + new TextEncoder().encode(text).length + 16;
+  return estimateCommPayloadBytesForPlaintext(new TextEncoder().encode(text).length);
+}
+// The same for a plaintext of `plaintextBytes` bytes - a binary media frame's, for a 1:1 photo
+// or voice note (engine/media-frame.js).
+function estimateCommPayloadBytesForPlaintext(plaintextBytes) {
+  const cipherBytes = 12 + 33 + plaintextBytes + 16;
   const base64Len = Math.ceil(cipherBytes / 3) * 4;
   const prefixLen = "kchat:1:comm:".length + 12 + 1;
   return prefixLen + base64Len;
@@ -24503,13 +24528,16 @@ function composerFeeSubject() {
       if (voiceViaNextcloud && isNextcloudConnected()) return { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 };
       const entry = voicePreviews.get(voiceRecordingPanel);
       const audioBytes = entry?.blob?.size ?? Math.ceil(voiceElapsedSeconds * VOICE_AUDIO_BITS_PER_SECOND / 8);
-      // The {type:"file"} envelope: the audio as base64 plus its few JSON fields.
-      const envelopeBytes = Math.ceil(audioBytes / 3) * 4 + 120;
-      return { payloadBytes: estimateCommPayloadBytes("x".repeat(envelopeBytes)), length: envelopeBytes };
+      // The binary media frame: the raw audio plus a small header (iOS f5f6a11).
+      const frameBytes = mediaFrameByteLength({ rawBytes: audioBytes, name: "voice-message.webm", mimeType: entry?.mimeType || "audio/webm;codecs=opus" });
+      return { payloadBytes: estimateCommPayloadBytesForPlaintext(frameBytes), length: frameBytes };
     }
     if (pendingPhotoAttachment) {
       if (photoViaNextcloud && isNextcloudConnected()) return { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 };
       const envelope = buildImageEnvelopeJson(pendingPhotoAttachment);
+      // What actually goes out: the binary media frame, or the JSON text if it cannot be framed.
+      const frameBytes = mediaFrameForEnvelope(envelope)?.length;
+      if (frameBytes) return { payloadBytes: estimateCommPayloadBytesForPlaintext(frameBytes), length: frameBytes };
       return { payloadBytes: estimateCommPayloadBytes(envelope), length: envelope.length };
     }
   } catch { /* voice / photo sections not evaluated yet */ }

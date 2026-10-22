@@ -7,7 +7,7 @@
 
 import { ADDRESS_PREFIX } from "./network.js";
 import { buildCommMessage, buildEncryptedCommMessage, buildEncryptedHandshake, buildSelfStash, parseKasiaPayloadHex, KASIA_INTEGRATION_STATUS } from "./kasia-protocol.js";
-import { encryptKasiaMessage } from "./kasia-cipher.js";
+import { encryptKasiaContextualMessage } from "./kasia-cipher.js";
 import { sendPayloadTransaction, sendPayloadToSelf } from "./transactions.js";
 
 function simpleHash(input) {
@@ -68,7 +68,9 @@ export async function createEncryptedMessageEnvelope({ conversationId, contactId
     conversationId,
     contactId,
     localNonce,
-    encryptMessage: encryptKasiaMessage,
+    // A photo or voice note is sealed as the binary media frame (iOS encryptContextualMessage);
+    // the envelope's text - the bubble and the stored record - stays the media-file JSON.
+    encryptMessage: encryptKasiaContextualMessage,
   });
   return {
     conversationId,
