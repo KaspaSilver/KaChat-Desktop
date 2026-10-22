@@ -208,9 +208,8 @@ function isHiddenAuthor(address) {
 // KaPosts' bell (iOS a6bd60a KaPostsWatchStore, PUSH_EXTENSIONS.md 3a): the people this account
 // wants to hear from whenever they post. Kept per account (each account is its own KaPosts
 // identity), and follows the current account by itself through the account-scoped key.
-// iOS sends the list to its push service as `kaposts_watch_authors` on every change. Desktop has
-// no push channel yet (no device registration with the push service at all), so the choice is
-// only kept here, ready for one; nothing is sent anywhere.
+// iOS sends the list to its push service as `kaposts_watch_authors` on every change; so does this
+// app's Web Push registration (ui/web-push.js, as author keys read from these addresses).
 const KAPOSTS_WATCH_KEY = "kachat-kaposts-watch-v1"; // [lowercased kaspa: address] - account-scoped
 let watchCache = null; // { key, addresses: Set }
 
@@ -225,6 +224,11 @@ function watchedAuthors() {
 
 function isWatchingAuthor(address) {
   return watchedAuthors().has(String(address || "").toLowerCase());
+}
+/** The bell list, for the push registration (ui/web-push.js). Empty before KaPosts has started. */
+export function kaPostsWatchedAuthorAddresses() {
+  if (!deps) return [];
+  try { return [...watchedAuthors()]; } catch { return []; }
 }
 
 /** Turns the bell on or off for `address`; returns whether it is now on. */
@@ -247,6 +251,7 @@ const bellNotes = new Map();
 
 function toggleBell(post) {
   const on = toggleWatchAuthor(post.posterAddress);
+  deps.onPushPreferencesChanged?.(); // the push registration carries the bell list
   const name = posterName(post.posterAddress);
   const note = on
     ? `You'll now be notified when ${name} posts.`
@@ -4130,6 +4135,9 @@ async function pollKaPostNotificationsForPings() {
       title: "KaPosts",
       body: `${posterName(actorAddress)} ${kaPostsNotificationAction(n, text)}`,
       tag: `kachat-kaposts-${n.id}`,
+      // A tap that comes back after the app was closed has no closure to call: the route opens
+      // the post (or the KaPosts tab) instead.
+      route: target ? { kind: "kapost", txId: target } : { kind: "tab", tab: "kaposts" },
       // Land on the exact post/comment: switch to the KaPosts tab first (the
       // notification can arrive while another tab is active), then deep-open.
       onClick: () => {
