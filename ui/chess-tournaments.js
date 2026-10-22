@@ -12,6 +12,7 @@ import { fetchBroadcastHistory, hasBroadcastIndexer, sendBroadcastMessage, broad
 import { confirmDialog, promptDialog, chooseDialog } from "./dialogs.js";
 import { setServiceScanWanted } from "./broadcasts.js";
 import { KAS_UNIT } from "../engine/network.js";
+import { getEndpoint } from "../engine/endpoints.js";
 
 const ARENA_CACHE_KEY = "kachat-chess-arena-v1";   // device-wide: the arena is the same for every wallet
 const ARENA_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -32,7 +33,21 @@ let rows = new Map();          // txId -> { txId, senderAddress, content, blockT
 /** Cached rows from a build before sender verification (DSK-045): held back until verified. */
 let unverifiedCachedRows = [];
 let tournaments = {};
+/** All time (since T.LEADERBOARD_FRESH_FROM_MS) and this UTC month: the indexer's boards (all
+ *  history) merged with what this device has read (the newest rows) - iOS 77d6038. The result
+ *  screen's record reads the all-time one. */
 let leaderboardRows = [];
+let monthlyLeaderboardRows = [];
+const boardFor = (period) => (period === "month" ? monthlyLeaderboardRows : leaderboardRows);
+/** This device's own replay per period, and the indexer's last matching answer per period. */
+let localBoards = { month: [], all: [] };
+let indexerBoards = {};
+let boardsMonthStart = 0;
+let lastIndexerLeaderboardFetch = 0;
+let indexerLeaderboardSerial = 0;
+const INDEXER_LEADERBOARD_MIN_MS = 20_000;
+/** The Leaderboard tab's period picker; This month whenever the tab comes up (iOS @State). */
+let leaderboardPeriod = "month";
 let active = false;            // the Chess screen is on
 let pollTimer = null;
 let fastPollTimer = null;
@@ -211,7 +226,7 @@ function reduceArenaNow() {
     if (message) events.push({ txId: r.txId, sender: r.senderAddress, blockTime: r.blockTime, message });
   }
   tournaments = T.reduce(events);
-  leaderboardRows = T.leaderboard(Object.values(tournaments));
+  recomputeLocalBoards();
   const my = me();
   // Asked to join a public room that filled first: queue into the next one, once.
   if (queuedPublicRoomId && my) {
@@ -239,6 +254,69 @@ function reduceArenaNow() {
     autoOpenMyGameIfNeeded();
     gameEndedIfNeeded();
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Leaderboards: this month and all time (iOS 77d6038, ONLINE_CHESS.md §6)
+// ---------------------------------------------------------------------------------------------
+
+function recomputeLocalBoards() {
+  const nowMs = Date.now();
+  boardsMonthStart = T.utcMonthStartMs(nowMs);
+  const all = Object.values(tournaments);
+  for (const period of T.LEADERBOARD_PERIODS) localBoards[period] = T.leaderboard(all, T.periodSinceMs(period, nowMs));
+  return publishBoards();
+}
+
+/** Both periods' boards from this device's replay and the indexer's (T.mergedLeaderboard: per
+ *  player the larger figure, an indexer board for another window ignored). True if either
+ *  changed. */
+function publishBoards() {
+  const nowMs = Date.now();
+  const all = T.mergedLeaderboard(localBoards.all, indexerBoards.all, "all", nowMs);
+  const month = T.mergedLeaderboard(localBoards.month, indexerBoards.month, "month", nowMs);
+  const changed = JSON.stringify(all) !== JSON.stringify(leaderboardRows) || JSON.stringify(month) !== JSON.stringify(monthlyLeaderboardRows);
+  leaderboardRows = all;
+  monthlyLeaderboardRows = month;
+  return changed;
+}
+
+/** GET /chess/leaderboard?period=month|all on the arena's indexer (ONLINE_CHESS.md §6). At most
+ *  every 20 s unless forced; any failure leaves this device's own boards in place. A newer call
+ *  supersedes one still in flight. */
+function refreshIndexerLeaderboards({ force = false } = {}) {
+  if (!force && lastIndexerLeaderboardFetch && Date.now() - lastIndexerLeaderboardFetch < INDEXER_LEADERBOARD_MIN_MS) return;
+  const base = String(getEndpoint("broadcastIndexer") || "").trim().replace(/\/+$/, "");
+  if (!base) return;
+  lastIndexerLeaderboardFetch = Date.now();
+  const serial = ++indexerLeaderboardSerial;
+  (async () => {
+    for (const period of T.LEADERBOARD_PERIODS) {
+      let board = null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const url = new URL(`${base}/chess/leaderboard`);
+        url.searchParams.set("period", period);
+        url.searchParams.set("limit", "1000");
+        const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: controller.signal });
+        if (response.ok) board = T.indexerLeaderboardBoard(await response.json(), period);
+      } catch { board = null; }
+      finally { clearTimeout(timer); }
+      if (serial !== indexerLeaderboardSerial) return;
+      if (!board) continue;
+      indexerBoards[period] = board;
+      if (publishBoards() && active) { rememberRecord(); render(); }
+    }
+  })().catch(() => {});
+}
+
+/** The 1st of the month (UTC) came while Chess was up: a new month board. */
+function checkMonthRollover() {
+  if (!T.monthRolledOver(boardsMonthStart, Date.now())) return;
+  recomputeLocalBoards();
+  refreshIndexerLeaderboards({ force: true });
+  if (active) render();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -834,14 +912,34 @@ function renderFinishedTab() {
   return `<p class="screen-kicker">Finished tournaments</p><div class="chess-t-list">${done.map((t) => tournamentRowHtml(t, T.champion(t) ? `Won by ${nameFor(T.champion(t))}` : "Finished")).join("")}</div>`;
 }
 
-/** One kind's leaderboard (iOS 784208f). */
+/** "Counted from October 22, 2026." - the fresh-start cutoff in the long month format. */
+function leaderboardPeriodNote(period) {
+  if (period === "month") return "Resets on the 1st of every month (UTC).";
+  const day = new Date(T.LEADERBOARD_FRESH_FROM_MS).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  return `Counted from ${day}.`;
+}
+
+/** One kind's leaderboard (iOS 784208f), for this UTC month or all time (iOS 77d6038): the
+ *  indexer's boards merged with what this device has read, both counted from
+ *  T.LEADERBOARD_FRESH_FROM_MS. */
 function renderLeaderboardRows() {
   const duel = modeIsDuel();
-  const board = duel ? T.duelLeaderboard(leaderboardRows) : T.tournamentLeaderboard(leaderboardRows);
+  const period = leaderboardPeriod;
+  const rowsOfPeriod = boardFor(period);
+  const board = duel ? T.duelLeaderboard(rowsOfPeriod) : T.tournamentLeaderboard(rowsOfPeriod);
   const my = me();
+  const month = period === "month";
+  const emptyText = duel
+    ? (month ? "No finished 1v1 games this month yet." : "No finished 1v1 games yet.")
+    : (month ? "No finished tournaments this month yet." : "No finished tournaments yet.");
+  const options = [["month", "This month"], ["all", "All time"]];
   return `
+    <div class="settings-segmented full chess-t-segment" role="radiogroup" aria-label="Leaderboard period">
+      ${options.map(([id, label]) => `<button class="settings-segmented-option${period === id ? " active" : ""}" type="button" role="radio" aria-checked="${period === id}" data-chess-t-period="${id}">${esc(label)}</button>`).join("")}
+    </div>
+    <p class="field-hint chess-t-period-note">${esc(leaderboardPeriodNote(period))}</p>
     <p class="screen-kicker">${duel ? "Games won and lost - 1v1s and tournament games alike" : "Tournaments won and lost"}</p>
-    ${board.length ? "" : `<p class="field-hint">${duel ? "No finished 1v1 games yet." : "No finished tournaments yet."}</p>`}
+    ${board.length ? "" : `<p class="field-hint">${emptyText}</p>`}
     <div class="chess-t-list">
       ${board.map((r, i) => `
         <button class="chess-t-row${r.address === my ? " me" : ""}" type="button" data-chess-t-user="${esc(r.address)}">
@@ -1299,6 +1397,7 @@ function renderResult() {
 
 function openKind(mode) {
   view = { name: "kind", mode, tab: "play", tournamentId: null, gameId: null };
+  leaderboardPeriod = "month";
   render();
   showWaitingRoomIfSeated();
 }
@@ -1452,7 +1551,19 @@ function onClick(event) {
   const mode = event.target.closest("[data-chess-t-mode]");
   if (mode) { openKind(mode.dataset.chessTMode); return; }
   const tab = event.target.closest("[data-chess-t-tab]");
-  if (tab) { view = { ...view, tab: tab.dataset.chessTTab }; render(); return; }
+  if (tab) {
+    const next = tab.dataset.chessTTab;
+    // The Leaderboard tab comes up on This month, and asks the indexer for fresh boards.
+    if (next === "leaderboard" && view.tab !== "leaderboard") { leaderboardPeriod = "month"; refreshIndexerLeaderboards(); }
+    view = { ...view, tab: next };
+    render();
+    return;
+  }
+  const period = event.target.closest("[data-chess-t-period]");
+  if (period) {
+    if (period.dataset.chessTPeriod !== leaderboardPeriod) { leaderboardPeriod = period.dataset.chessTPeriod; refreshIndexerLeaderboards(); render(); }
+    return;
+  }
   // A leaderboard row: the same User Info sheet a public chat opens from View Profile.
   const user = event.target.closest("[data-chess-t-user]");
   if (user) { deps.openUserInfo?.(user.dataset.chessTUser); return; }
@@ -1575,6 +1686,7 @@ export function showChessTournaments() {
   setServiceScanWanted([T.ARENA_CHANNEL]);
   unsubscribeHits = deps.engine.onBroadcastBlockHits?.(handleHits) || null;
   backfill({ full: true }).catch(() => {});
+  refreshIndexerLeaderboards();
   estimateJoinFee().catch(() => {});
   pollTimer = window.setInterval(() => { if (!document.hidden) backfill().catch(() => {}); }, POLL_MS);
   // Only while it matters: a seat held or a game on. Idle in the lobby, the poll is plenty.
@@ -1583,6 +1695,7 @@ export function showChessTournaments() {
     now = Date.now();
     if (!historyReady && Date.now() > historyDeadline) { historyReady = true; render(); }
     claimTimeoutsIfDue();
+    checkMonthRollover();
     if (document.hidden || !screenEl) return;
     checkWaitingRoom();
     if (view.name === "tournament" || view.name === "game") autoOpenMyGameIfNeeded();
@@ -1629,6 +1742,7 @@ export function resetChessTournamentsForAccount() {
   queuedPublicRoomId = null;
   joinFeeText = null;
   view = { name: "home", mode: "duel", tab: "play", tournamentId: null, gameId: null };
+  leaderboardPeriod = "month";
   selectedSquare = null;
   pendingPromotion = null;
   endOverlayFor = null;

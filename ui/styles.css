@@ -14453,6 +14453,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .chess-t-card .chess-t-row-main strong { font-size: 17px; }
 .chess-t-card .chess-t-row-main small { font-size: 15px; }
 [data-app-tab-screen="chess"] .chess-t-body > .field-hint { font-size: 15px; padding: 0 16px; }
+/* Leaderboard This month | All time (iOS 77d6038): the segmented picker with its footnote under it. */
+[data-app-tab-screen="chess"] .chess-t-body > .field-hint.chess-t-period-note { font-size: 13px; margin-top: -2px; }
 .chess-t-action-row .chess-t-row-icon { background: none; }
 .chess-t-action-row .chess-t-row-main strong { color: var(--kaspa-ink); font-weight: 400; font-size: 17px; }
 .chess-t-action-row .chess-t-row-chevron { display: none; }

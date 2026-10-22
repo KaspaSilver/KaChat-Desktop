@@ -496,14 +496,84 @@ export function positionKey(board) {
 // Leaderboard
 // ---------------------------------------------------------------------------------------------
 
+/** The leaderboards started fresh at this moment (2026-10-22 05:46 UTC; iOS 77d6038): anything
+ *  that started earlier never counts on either period. Must equal iOS
+ *  ChessTournamentEngine.leaderboardFreshFromMs and the indexer's chess::LEADERBOARD_FRESH_FROM_MS. */
+export const LEADERBOARD_FRESH_FROM_MS = 1_792_647_960_000;
+
+/** Which stretch a leaderboard covers, as the indexer's `period` names it. Both start at the
+ *  fresh-start cutoff; this month also starts on the 1st (UTC). */
+export const LEADERBOARD_PERIODS = Object.freeze(["month", "all"]);
+
+/** Start of the UTC calendar month containing `nowMs`, in ms. */
+export function utcMonthStartMs(nowMs) {
+  const d = new Date(Number(nowMs));
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+}
+
+/** The first counted start time: all time = the fresh-start cutoff; this month = the later of
+ *  the cutoff and the start of the current UTC month. */
+export function periodSinceMs(period, nowMs) {
+  return period === "month" ? Math.max(LEADERBOARD_FRESH_FROM_MS, utcMonthStartMs(nowMs)) : LEADERBOARD_FRESH_FROM_MS;
+}
+
+/** True when the boards were last computed in an earlier UTC month than `nowMs`'s: the 1st came
+ *  while Chess was up, so the month board is recomputed and refetched (iOS tick). */
+export function monthRolledOver(boardsMonthStart, nowMs) {
+  return boardsMonthStart !== 0 && utcMonthStartMs(nowMs) !== boardsMonthStart;
+}
+
+const LEADERBOARD_FIGURES = ["wins", "losses", "duelWins", "duelLosses", "tournamentGameWins", "tournamentGameLosses", "tournamentsPlayed", "tournamentsWon", "tournamentsLost", "lastPlayedAt"];
+
+/** The indexer's /chess/leaderboard answer for `period`, as `{ since, rows }` - or null when it
+ *  is for another period (an old indexer without `period` or `since`) or not a leaderboard. */
+export function indexerLeaderboardBoard(json, period) {
+  if (!json || typeof json !== "object" || !Array.isArray(json.players)) return null;
+  if (json.period !== period) return null;
+  const since = Number(json.since);
+  if (json.since == null || !Number.isFinite(since)) return null;
+  const rows = [];
+  for (const p of json.players) {
+    if (!p || typeof p.address !== "string" || !p.address) continue;
+    const row = { address: p.address };
+    for (const key of LEADERBOARD_FIGURES) row[key] = Number.isFinite(Number(p[key])) ? Number(p[key]) : 0;
+    rows.push(row);
+  }
+  return { since, rows };
+}
+
+/** One period's board: this device's replay merged with the indexer's. Per player, each figure
+ *  is the larger of the two sources: both count the same window, the indexer has the older
+ *  history and this device the newest blocks, so neither can be above the true count. An
+ *  indexer board for another window (`since` not what this device computes now, e.g. a month
+ *  that has since rolled over) is not used (iOS publishBoards). */
+export function mergedLeaderboard(local, remote, period, nowMs) {
+  const own = local || [];
+  if (!remote || remote.since !== periodSinceMs(period, nowMs)) return own;
+  const rows = new Map();
+  for (const r of remote.rows || []) if (!rows.has(r.address)) rows.set(r.address, { ...r });
+  for (const r of own) {
+    const m = rows.get(r.address);
+    if (!m) { rows.set(r.address, { ...r }); continue; }
+    for (const key of LEADERBOARD_FIGURES) m[key] = Math.max(m[key] || 0, r[key] || 0);
+  }
+  return [...rows.values()].sort((a, b) => {
+    if (a.wins !== b.wins) return b.wins - a.wins;
+    if (a.losses !== b.losses) return a.losses - b.losses;
+    return b.lastPlayedAt - a.lastPlayedAt;
+  });
+}
+
 /** One player's record. Two boards read it: 1v1 (duel games, public and private) and
  *  Tournaments (tournaments won, then the games inside them). `wins`/`losses` are the totals
- *  over both, the figures the indexer's /chess/leaderboard serves. */
-export function leaderboard(tournaments) {
+ *  over both, the figures the indexer's /chess/leaderboard serves. A tournament or 1v1 counts
+ *  in the period it STARTED in (startedAt >= since), with every one of its games, even ones
+ *  that end after the month rolls over (iOS 77d6038). */
+export function leaderboard(tournaments, since = LEADERBOARD_FRESH_FROM_MS) {
   const rows = dict();
   const row = (address) => (rows[address] ||= { address, wins: 0, losses: 0, duelWins: 0, duelLosses: 0, tournamentGameWins: 0, tournamentGameLosses: 0, tournamentsPlayed: 0, tournamentsWon: 0, tournamentsLost: 0, lastPlayedAt: 0 });
   for (const t of tournaments) {
-    if (t.startedAt == null) continue;
+    if (t.startedAt == null || t.startedAt < since) continue;
     const duel = isDuel(t);
     // A 1v1 is not a tournament: it counts on the 1v1 board only.
     if (!duel) {
