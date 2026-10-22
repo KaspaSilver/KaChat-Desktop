@@ -114,25 +114,47 @@ export function onContextGesture(el, handler, options) {
  * Double-tap on touch, calling `handler` with a contextmenu-shaped event (clientX/Y, target,
  * preventDefault). iPhone Safari does not raise `dblclick` for two taps on an ordinary element,
  * so the desktop double-click (quick reactions on a bubble) needs this to exist on a phone.
+ *
+ * The second tap is taken on `touchend` and cancelled there. Taken on `pointerup` it still let the
+ * browser emulate the mouse afterwards: that `mousedown` landed on the bubble once the quick bar
+ * was open and closed it again at once, and the emulated `dblclick` opened it a second time, so a
+ * double-tap only sometimes worked. Cancelling the touch also stops Safari's double-tap zoom.
  */
+const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_SLOP_PX = 30;
+const TAP_MOVE_PX = 12;
 export function attachDoubleTap(el, handler) {
   if (!el) return;
   let lastTap = 0;
   let lastX = 0;
   let lastY = 0;
-  el.addEventListener("pointerup", (event) => {
-    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
-    const now = performance.now();
-    const near = Math.abs(event.clientX - lastX) < 24 && Math.abs(event.clientY - lastY) < 24;
-    if (now - lastTap < 320 && near) {
+  let start = null;
+  el.addEventListener("touchstart", (event) => {
+    const touch = event.touches[0];
+    start = event.touches.length === 1 && touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }, { passive: true });
+  el.addEventListener("touchend", (event) => {
+    const touch = event.changedTouches[0];
+    // Two fingers, or a finger that moved (a scroll): not a tap, and it breaks a pending double.
+    if (!start || !touch || event.touches.length
+      || Math.abs(touch.clientX - start.x) > TAP_MOVE_PX || Math.abs(touch.clientY - start.y) > TAP_MOVE_PX) {
+      start = null;
       lastTap = 0;
-      handler({ clientX: event.clientX, clientY: event.clientY, target: event.target, pointerType: event.pointerType, preventDefault() {}, stopPropagation() {} });
+      return;
+    }
+    start = null;
+    const now = performance.now();
+    const near = Math.abs(touch.clientX - lastX) < DOUBLE_TAP_SLOP_PX && Math.abs(touch.clientY - lastY) < DOUBLE_TAP_SLOP_PX;
+    if (now - lastTap < DOUBLE_TAP_MS && near) {
+      lastTap = 0;
+      event.preventDefault(); // no emulated mousedown / click / dblclick, no zoom
+      handler({ clientX: touch.clientX, clientY: touch.clientY, target: event.target, pointerType: "touch", preventDefault() {}, stopPropagation() {} });
       return;
     }
     lastTap = now;
-    lastX = event.clientX;
-    lastY = event.clientY;
-  }, { passive: true });
+    lastX = touch.clientX;
+    lastY = touch.clientY;
+  }, { passive: false });
 }
 
 /** Double-click on a desktop, double-tap on touch, one handler. */

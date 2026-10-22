@@ -14755,3 +14755,8 @@ html.app-ready .boot-splash { display: none; }
    strip (84pt + the home-indicator inset) empty between its composer and the keyboard. */
 html.keyboard-open { --dock-inset: 0px; --safe-bottom: 0px; }
 html.keyboard-open .sidebar-tabbar { display: none !important; }
+/* Your own message: the time and delivery status go UNDER the bubble. The row-level `order`
+   rules above were written for a bubble sitting straight in the row; inside the bubble stack the
+   bubble's `order: 2` sorted it after the time line (and a link card), so "3:12 PM ✓ Sent" stood
+   above your message. In the stack everything keeps source order. */
+.message-row.local .message-bubble-stack > * { order: 0; }
