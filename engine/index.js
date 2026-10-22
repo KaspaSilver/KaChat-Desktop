@@ -1232,7 +1232,9 @@ export class KaspaEngine {
   }
 
   // True "Max" send from a spending address (same exact-fee, single-output build and options).
-  async sendMaxFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, totalFeeKas = null, selectedOutpoints = null, ...options }) {
+  // `owner` (here and in sendFromSpending / compoundSpending): the account the send started on,
+  // whose quantum spent mark it is (noteSpendingSpent); the active address at the call by default.
+  async sendMaxFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, totalFeeKas = null, selectedOutpoints = null, owner = this.address, ...options }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
@@ -1249,7 +1251,7 @@ export class KaspaEngine {
       redeemScript: spending.redeemScript || null,
       log: this.log,
     });
-    this.noteSpendingSpent(spending);
+    this.noteSpendingSpent(spending, owner);
     return result;
   }
 
@@ -1296,9 +1298,12 @@ export class KaspaEngine {
   // A quantum-safe (KIP-22) address that spent has its key on chain for good: the app marks it the
   // moment the node accepted the spend (iOS markQuantumAddressSpent), through this hook (set by
   // ui/app.js). Self-sends (Compound) count too. Never lets a bookkeeping slip fail the send.
-  noteSpendingSpent(spending) {
+  // `owner`: the account the send started on (taken when the send was called, before its awaits):
+  // the mark is that account's even if another is active by the time the node accepts (iOS
+  // ca09dd0 markQuantumAddressSpent(_:owner:), IOS-109).
+  noteSpendingSpent(spending, owner = this.address) {
     if (!spending?.quantum) return;
-    try { this.onQuantumAddressSpent?.(spending.address, spending.index); } catch (error) { this.log?.(`Quantum spent mark failed: ${error?.message || error}`); }
+    try { this.onQuantumAddressSpent?.(spending.address, spending.index, owner || null); } catch (error) { this.log?.(`Quantum spent mark failed: ${error?.message || error}`); }
   }
 
   // --- Spending-address chain (m/44'/111111'/1'/0/<index>; quantum-safe m/22'/111111'/0'/0/<n> at
@@ -1326,7 +1331,7 @@ export class KaspaEngine {
 
   // Send from a spending address, signing with its derived key.
   // `manualUtxos` / `extraFeeSompi`: coin control and a priority fee on top, as for send().
-  async sendFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false }) {
+  async sendFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false, owner = this.address }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
@@ -1348,7 +1353,7 @@ export class KaspaEngine {
       redeemScript: spending.redeemScript || null,
       log: this.log,
     });
-    this.noteSpendingSpent(spending);
+    this.noteSpendingSpent(spending, owner);
     return result;
   }
 
@@ -1370,7 +1375,7 @@ export class KaspaEngine {
   }
 
   // Compound: sweep every UTXO at a spending address into one (self-send, no change).
-  async compoundSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", totalFeeKas = null }) {
+  async compoundSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", totalFeeKas = null, owner = this.address }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
@@ -1388,10 +1393,10 @@ export class KaspaEngine {
       });
     } catch (error) {
       // A chunked compound whose earlier transactions went out has spent already.
-      if (error?.submittedTxids?.length) this.noteSpendingSpent(spending);
+      if (error?.submittedTxids?.length) this.noteSpendingSpent(spending, owner);
       throw error;
     }
-    this.noteSpendingSpent(spending);
+    this.noteSpendingSpent(spending, owner);
     return result;
   }
 

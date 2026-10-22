@@ -7,7 +7,10 @@ import { accountGuard, accountScopedValue, accountStillSaved } from "../ui/accou
 import {
   runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount,
   probeFreshQuantumSlot, chooseReceiveAddress,
+  postSendTarget, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor,
 } from "../ui/spending-discovery.js";
+import { spendingStateFromRecord, spendingRecordFromState } from "../engine/quantum.js";
+import { KaspaEngine } from "../engine/index.js";
 import { createSelfStashEnvelope, sendSelfStashOnchain, selfStashAccountMismatch, SELF_STASH_ACCOUNT_CHANGED } from "../engine/messages.js";
 
 let pass = 0;
@@ -458,6 +461,148 @@ test("Receive QR: a switch while the fresh slot is found drops the answer", asyn
   assert.equal(await world.run(), null);
   assert.deepEqual(world.reveals, [], "nothing revealed on either account");
   assert.deepEqual(world.remembers, [], "no pointer remembered");
+});
+
+// Writes after a send (iOS ca09dd0 revealSpendingAddress(at:owner:) / setActiveSpendingAddress(_:owner:)
+// / markQuantumAddressSpent(_:owner:), IOS-109 last part; ui/spending-discovery.js): a send started on
+// A that the node answers after a switch to B writes A's stored state, never B's, and nothing once A
+// was removed. The store is the per-account spending records ui/app.js keeps, run through the same
+// engine/quantum.js sanitizers as saveSpendingState.
+function postSendWorld() {
+  let active = A;
+  let saved = savedPair();
+  const records = { [A]: { maxIndex: 3, qMaxIndex: 1, activeIndex: 0 }, [B]: { maxIndex: 5, qMaxIndex: 2, activeIndex: 2 } };
+  const writes = [];
+  const notices = [];
+  const io = {
+    activeAddress: () => active,
+    stillSaved: (owner) => accountStillSaved(owner, { activeAddress: active, savedAccounts: saved }),
+    readState: (owner) => spendingStateFromRecord(records[owner] || {}),
+    writeState: (patch, owner) => {
+      writes.push(owner);
+      records[owner] = spendingRecordFromState({ ...spendingStateFromRecord(records[owner] || {}), ...patch }, records[owner] || {});
+    },
+  };
+  return {
+    io, records, writes, notices,
+    notify: (what) => () => notices.push(what),
+    state: (owner) => spendingStateFromRecord(records[owner] || {}),
+    switchTo: (next) => { active = next; },
+    remove: (owner) => { saved = saved.filter((entry) => entry.address !== owner); if (active === owner) active = B; },
+  };
+}
+const SPENT_A = "kaspa:qquantumaddressofaccounta0000000000000000000000000000000";
+
+test("After a send: no switch, A's bound, primary and spent mark are written and shown", () => {
+  const world = postSendWorld();
+  const B_BEFORE = JSON.stringify(world.records[B]);
+  assert.deepEqual(revealSpendingIndexFor(QBASE + 4, A, world.io, world.notify("reveal")), { owner: A, active: true });
+  assert.deepEqual(setPrimarySpendingIndexFor(QBASE + 5, A, world.io, world.notify("primary")), { owner: A, active: true });
+  assert.deepEqual(markQuantumSpentFor(SPENT_A.toUpperCase(), A, world.io, world.notify("spent")), { owner: A, active: true });
+  const a = world.state(A);
+  assert.equal(a.qMaxIndex, 5);
+  assert.equal(a.activeIndex, QBASE + 5);
+  assert.deepEqual(a.qSpent, [SPENT_A], "stored lowercased");
+  assert.deepEqual(world.notices, ["reveal", "primary", "spent"], "the account on screen repaints");
+  assert.equal(JSON.stringify(world.records[B]), B_BEFORE);
+});
+
+test("After a send: started on A, answered after a switch to B - A's bound, primary and qSpent, B untouched", () => {
+  const world = postSendWorld();
+  const B_BEFORE = JSON.stringify(world.records[B]);
+  const owner = A; // captured when the send started
+  world.switchTo(B); // the node answers after the switch
+  assert.deepEqual(revealSpendingIndexFor(7, owner, world.io, world.notify("reveal")), { owner: A, active: false });
+  assert.deepEqual(setPrimarySpendingIndexFor(QBASE + 6, owner, world.io, world.notify("primary")), { owner: A, active: false });
+  assert.deepEqual(markQuantumSpentFor(SPENT_A, owner, world.io, world.notify("spent")), { owner: A, active: false });
+  const a = world.state(A);
+  assert.equal(a.maxIndex, 7, "A's legacy bound covers the revealed change slot");
+  assert.equal(a.qMaxIndex, 6, "A's quantum bound covers its new primary");
+  assert.equal(a.activeIndex, QBASE + 6, "A's primary moved");
+  assert.deepEqual(a.qSpent, [SPENT_A], "the spent mark is A's");
+  assert.deepEqual([...new Set(world.writes)], [A], "every write went to A");
+  assert.equal(JSON.stringify(world.records[B]), B_BEFORE, "B's bounds, primary and spent marks are never touched");
+  assert.deepEqual(world.state(B).qSpent, []);
+});
+
+test("After a send: the primary-changed notice is skipped for an account that isn't active", () => {
+  const world = postSendWorld();
+  world.switchTo(B);
+  setPrimarySpendingIndexFor(QBASE + 2, A, world.io, world.notify("primary"));
+  revealSpendingIndexFor(QBASE + 3, A, world.io, world.notify("reveal"));
+  markQuantumSpentFor(SPENT_A, A, world.io, world.notify("spent"));
+  assert.deepEqual(world.notices, [], "B's screen shows nothing of A's move");
+  assert.equal(world.state(A).activeIndex, QBASE + 2, "but A's primary did move");
+  world.switchTo(A);
+  setPrimarySpendingIndexFor(QBASE + 3, A, world.io, world.notify("primary"));
+  assert.deepEqual(world.notices, ["primary"], "back on A, its own move is shown");
+});
+
+test("After a send: a removed owner gets nothing written, and nobody else does either", () => {
+  const world = postSendWorld();
+  const before = JSON.stringify(world.records);
+  world.remove(A); // A removed while its send was in flight; B is active now
+  assert.equal(revealSpendingIndexFor(QBASE + 4, A, world.io, world.notify("reveal")), null);
+  assert.equal(setPrimarySpendingIndexFor(QBASE + 4, A, world.io, world.notify("primary")), null);
+  assert.equal(markQuantumSpentFor(SPENT_A, A, world.io, world.notify("spent")), null);
+  assert.deepEqual(world.writes, []);
+  assert.deepEqual(world.notices, []);
+  assert.equal(JSON.stringify(world.records), before);
+});
+
+test("After a send: A's keys locked meanwhile counts as gone - nothing written", () => {
+  const world = postSendWorld();
+  world.switchTo(B);
+  world.io.stillSaved = (owner) => accountStillSaved(owner, { activeAddress: B, savedAccounts: [{ address: A, locked: true }, { address: B }] });
+  assert.equal(setPrimarySpendingIndexFor(QBASE + 4, A, world.io), null);
+  assert.deepEqual(world.writes, []);
+});
+
+test("After a send: no owner means the active account; no account at all writes nothing", () => {
+  const world = postSendWorld();
+  world.switchTo(B);
+  assert.deepEqual(postSendTarget("", world.io), { owner: B, active: true });
+  assert.deepEqual(revealSpendingIndexFor(QBASE + 9, null, world.io), { owner: B, active: true });
+  assert.equal(world.state(B).qMaxIndex, 9);
+  world.switchTo("");
+  assert.equal(postSendTarget(null, world.io), null);
+  assert.equal(markQuantumSpentFor(SPENT_A, undefined, world.io), null);
+  assert.equal(markQuantumSpentFor("", A, world.io), null, "no address, no mark");
+  assert.equal(revealSpendingIndexFor(-1, A, world.io), null);
+});
+
+test("After a send: a mark already there is not written twice; bounds only grow", () => {
+  const world = postSendWorld();
+  markQuantumSpentFor(SPENT_A, A, world.io);
+  const writes = world.writes.length;
+  markQuantumSpentFor(SPENT_A, A, world.io);
+  assert.equal(world.writes.length, writes);
+  revealSpendingIndexFor(1, A, world.io); // below A's legacy bound of 3
+  assert.equal(world.state(A).maxIndex, 3);
+});
+
+test("Engine: the quantum spent hook carries the account the send started on", () => {
+  const engine = new KaspaEngine({ log: () => {} });
+  const calls = [];
+  engine.onQuantumAddressSpent = (...args) => calls.push(args);
+  engine.address = B; // active by the time the node accepted
+  engine.noteSpendingSpent({ quantum: true, address: SPENT_A, index: QBASE + 1 }, A);
+  assert.deepEqual(calls, [[SPENT_A, QBASE + 1, A]], "the owner passed in, not the active account");
+  engine.noteSpendingSpent({ quantum: true, address: SPENT_A, index: QBASE + 1 });
+  assert.deepEqual(calls[1], [SPENT_A, QBASE + 1, B], "no owner: the active account");
+  engine.noteSpendingSpent({ quantum: false, address: "legacy", index: 3 }, A);
+  assert.equal(calls.length, 2, "a legacy spend reveals nothing");
+  engine.onQuantumAddressSpent = () => { throw new Error("bookkeeping slip"); };
+  assert.doesNotThrow(() => engine.noteSpendingSpent({ quantum: true, address: SPENT_A, index: QBASE + 1 }, A), "never fails the send");
+});
+
+test("Engine: a spending send takes its owner when it is called, before any await", () => {
+  // A destructured default is read at the call, so a switch during the connect does not move the
+  // mark (checked on the function text: the send itself needs a node).
+  for (const call of ["sendFromSpending", "sendMaxFromSpending", "compoundSpending"]) {
+    assert.match(String(KaspaEngine.prototype[call]), /owner = this\.address/, `${call} defaults its owner at the call`);
+    assert.match(String(KaspaEngine.prototype[call]), /noteSpendingSpent\(spending, owner\)/, `${call} hands the owner to the mark`);
+  }
 });
 
 for (const [name, fn] of tests) {

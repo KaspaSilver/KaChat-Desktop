@@ -11,7 +11,7 @@
 // the batched sweep runs instead: the floor first, then on while matches keep turning up (a gap of
 // `gapLimit`), and never past MAX_SPENDING_SCAN_INDEX.
 
-import { verifiedFreshQuantumIndex, isQuantumIndex } from "../engine/quantum.js";
+import { verifiedFreshQuantumIndex, isQuantumIndex, chainLocalIndex } from "../engine/quantum.js";
 
 /** Swept whatever the gaps. */
 export const SPENDING_DEEP_SCAN_FLOOR = 1000;
@@ -201,6 +201,70 @@ export async function chooseReceiveAddress({ owner, activeAddress, rememberedInd
   remember(index);
   reveal(index);
   return address;
+}
+
+// MARK: - Writes after a send (iOS ca09dd0 revealSpendingAddress(at:owner:),
+// setActiveSpendingAddress(_:owner:), markQuantumAddressSpent(_:owner:); IOS-109, last part)
+//
+// A send takes a second or more, and the person can switch accounts before the node answers. What
+// the app saves once it has - the change slot revealed, the primary moved onto it, a quantum
+// address marked spent - belongs to the account the send STARTED on (`owner`, taken at its start):
+// that account's stored state gets the write even if another account is active by then, and once
+// it has been removed (or its keys locked) nothing is written. The on-screen refresh (`notify`, the
+// "primary changed" repaint) runs only while `owner` is the active account. An empty `owner` means
+// the active account. `io`: { activeAddress(), stillSaved(owner), readState(owner),
+// writeState(patch, owner) }, readState giving engine/quantum.js spendingStateFromRecord's shape.
+
+/// Where a post-send write goes: { owner, active } (active: `owner` is the active account), or null
+/// when there is no account or it was removed.
+export function postSendTarget(owner, { activeAddress, stillSaved }) {
+  const active = String((typeof activeAddress === "function" ? activeAddress() : "") || "").trim();
+  const target = String(owner || "").trim() || active;
+  if (!target || !stillSaved(target)) return null;
+  return { owner: target, active: target === active };
+}
+
+/** The bound patch that reveals `index` on its own chain of `state` (a quantum index extends
+ *  qMaxIndex; the legacy bound never sees quantum-space values). Bounds only grow. */
+export function spendingBoundPatch(index, state) {
+  if (isQuantumIndex(index)) return { qMaxIndex: Math.max(state.qMaxIndex, chainLocalIndex(index)) };
+  return { maxIndex: Math.max(state.maxIndex, index) };
+}
+
+/// A send's change slot onto `owner`'s list (iOS revealSpendingAddress(at:owner:)): its chain's
+/// bound raised to cover it. Returns the target, or null when nothing was written.
+export function revealSpendingIndexFor(index, owner, io, notify = null) {
+  if (!Number.isInteger(index) || index < 0) return null;
+  const target = postSendTarget(owner, io);
+  if (!target) return null;
+  io.writeState(spendingBoundPatch(index, io.readState(target.owner)), target.owner);
+  if (target.active) { try { notify?.(); } catch { /* repaints on the next open */ } }
+  return target;
+}
+
+/// `owner`'s primary moved onto `index`, its chain's bound raised to cover it (iOS
+/// setActiveSpendingAddress(_:owner:)). Another account's primary moves without the on-screen notice.
+export function setPrimarySpendingIndexFor(index, owner, io, notify = null) {
+  if (!Number.isInteger(index) || index < 0) return null;
+  const target = postSendTarget(owner, io);
+  if (!target) return null;
+  io.writeState({ activeIndex: index, ...spendingBoundPatch(index, io.readState(target.owner)) }, target.owner);
+  if (target.active) { try { notify?.(); } catch { /* repaints on the next open */ } }
+  return target;
+}
+
+/// A quantum address `owner` spent from, marked for good (iOS markQuantumAddressSpent(_:owner:)):
+/// the spend put its key on chain. Returns the target, or null when nothing was written (no address,
+/// a removed owner).
+export function markQuantumSpentFor(address, owner, io, notify = null) {
+  const lowered = String(address || "").trim().toLowerCase();
+  if (!lowered) return null;
+  const target = postSendTarget(owner, io);
+  if (!target) return null;
+  const spent = io.readState(target.owner).qSpent || [];
+  if (!spent.includes(lowered)) io.writeState({ qSpent: [...spent, lowered] }, target.owner);
+  if (target.active) { try { notify?.(); } catch { /* repaints on the next open */ } }
+  return target;
 }
 
 /// The walk. Dependencies:

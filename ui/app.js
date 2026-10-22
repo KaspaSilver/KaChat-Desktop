@@ -98,7 +98,7 @@ import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, prom
 import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
-import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress } from "./spending-discovery.js";
+import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
 import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY } from "./key-vault.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -7517,6 +7517,16 @@ function saveSpendingState(patch, address = engine.address) {
   return spendingStateFromRecord(record);
 }
 
+// Any account's stored spending state, for the writes a send makes once the node accepted it: they
+// go to the account the send started on, even after a switch, and nowhere once it was removed
+// (ui/spending-discovery.js postSendTarget; iOS ca09dd0, IOS-109).
+const spendingStateIo = {
+  activeAddress: () => engine.address,
+  stillSaved: (owner) => spendingAccountStillSaved(owner),
+  readState: (owner) => getSpendingState(owner),
+  writeState: (patch, owner) => saveSpendingState(patch, owner),
+};
+
 function getActiveSpendingIndex() {
   return getSpendingState().activeIndex;
 }
@@ -7537,18 +7547,20 @@ function spendingBoundsKey(state = getSpendingState()) {
 // Quantum addresses this wallet has spent FROM: the spend put their key on chain for good, so the
 // shield comes off (KIP-22). Marked the moment the node accepted a send from the app (the engine's
 // onQuantumAddressSpent hook), and by the on-chain probe for spends made elsewhere. Never unmarked.
-function markQuantumAddressSpent(address) {
-  const lowered = String(address || "").toLowerCase();
-  if (!lowered) return;
-  const state = getSpendingState();
-  if (state.qSpent.includes(lowered)) return;
-  saveSpendingState({ qSpent: [...state.qSpent, lowered] });
+// `owner`: the account whose address spent - the one the send or the probe started on, even if
+// another account is active by now; nothing is marked once it was removed (iOS ca09dd0
+// markQuantumAddressSpent(_:owner:), IOS-109). Returns the write's target, or null.
+function markQuantumAddressSpent(address, owner = engine.address) {
+  return markQuantumSpentFor(address, owner, spendingStateIo);
 }
-function isQuantumAddressSpentLocally(address) {
-  return getSpendingState().qSpent.includes(String(address || "").toLowerCase());
+function isQuantumAddressSpentLocally(address, owner = engine.address) {
+  return getSpendingState(owner).qSpent.includes(String(address || "").toLowerCase());
 }
-engine.onQuantumAddressSpent = (address) => {
-  markQuantumAddressSpent(address);
+// `owner`: the account the engine's send started on (engine/index.js noteSpendingSpent). The list
+// repaints only when that is the account on screen.
+engine.onQuantumAddressSpent = (address, _index, owner) => {
+  const target = markQuantumAddressSpent(address, owner || engine.address);
+  if (!target?.active) return;
   try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch { /* repaints on the next open */ }
 };
 
@@ -7562,8 +7574,11 @@ engine.onQuantumAddressSpent = (address) => {
 // A "not spent" answer is reused for a minute: Manage Addresses repaints after every reveal, and
 // asking the REST server about every quantum row each time would trip its rate limit.
 const quantumUnspentSeenAt = new Map();
+// The account whose address this is is taken first: the pages below can span an account switch,
+// and a found spend is marked on THAT account (iOS ca09dd0, IOS-109).
 async function quantumAddressSpentState(address) {
-  if (isQuantumAddressSpentLocally(address)) return true;
+  const owner = engine.address;
+  if (isQuantumAddressSpentLocally(address, owner)) return true;
   if (!String(address || "").trim()) return null;
   if (Date.now() - (quantumUnspentSeenAt.get(address) || 0) < 60_000) return false;
   const spent = await quantumSpentFromHistory(address, async (offset, limit) => {
@@ -7572,7 +7587,7 @@ async function quantumAddressSpentState(address) {
     if (!response.ok) return null;
     return response.json();
   });
-  if (spent === true) markQuantumAddressSpent(address);
+  if (spent === true) markQuantumAddressSpent(address, owner);
   else if (spent === false) quantumUnspentSeenAt.set(address, Date.now());
   return spent;
 }
@@ -7635,8 +7650,9 @@ async function verifiedFreshQuantumIndexActive() {
 /// even if another account is active by the time the probe returns. Null when the seed is
 /// unavailable. Used by chat payments, Manage Addresses sends, KNS change and Request Payment's
 /// preview.
-async function verifiedFreshQuantumSlot() {
-  const account = captureActiveSpendingAccount();
+/// `account`: one a send captured at its start (iOS ca09dd0), so its change slot comes from the
+/// same account its keys and its later writes do.
+async function verifiedFreshQuantumSlot(account = captureActiveSpendingAccount()) {
   if (!account) return null;
   const { index, address } = await freshQuantumSlotFor(account);
   return address ? { index, address } : null;
@@ -7660,16 +7676,18 @@ async function verifiedFreshQuantumSlot() {
 // quantum source whose fresh change slot can't be derived throws QUANTUM_CHANGE_UNAVAILABLE instead
 // of parking change on the key the spend reveals (IOS-104; engine/quantum.js freshChangeRequired). A
 // legacy source keeps its fallback to itself; a KNS transfer is unchanged.
-async function freshChangeForSpendingIndex(index, { purpose = "withdraw", destination = null } = {}) {
+// `account`: the account the send started on (spendingSendAccount, iOS ca09dd0): the rule reads
+// its state and the slot comes from its seed, whichever account is active by now.
+async function freshChangeForSpendingIndex(index, { purpose = "withdraw", destination = null, account = captureActiveSpendingAccount() } = {}) {
   if (index == null) return null;
-  const state = getSpendingState();
-  const ready = Boolean(engine.address && activeAccountMnemonic() && engine.kaspa);
+  const state = getSpendingState(account?.owner);
+  const ready = Boolean(account && engine.kaspa);
   // A send to the address itself moves nothing out: it consolidates in place (iOS isSelfSend).
-  const selfSend = ready && destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressAt(index) || "").toLowerCase();
+  const selfSend = ready && destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressFor(account, index) || "").toLowerCase();
   const ruleIndex = spendingChangeIndex({ purpose, sourceIndex: index, primaryIndex: state.activeIndex, qMaxIndex: state.qMaxIndex, selfSend });
   if (ruleIndex == null) return null;
   // Slot and address from the account the source was derived from (iOS fb2323e, IOS-109).
-  const slot = ready ? await verifiedFreshQuantumSlot() : null;
+  const slot = ready ? await verifiedFreshQuantumSlot(account) : null;
   if (slot) return slot;
   if (freshChangeRequired({ purpose, sourceIndex: index, freshIndex: ruleIndex })) throw new Error(QUANTUM_CHANGE_UNAVAILABLE);
   return null;
@@ -7679,11 +7697,12 @@ async function freshChangeForSpendingIndex(index, { purpose = "withdraw", destin
 // on chain first (iOS da2c8e2) - but once the node has the transaction that address is only
 // REVEALED - the primary stays put. `sourceIndex` is the paying address: a quantum one whose fresh
 // slot can't be derived throws rather than take change back (IOS-104).
-async function freshSpendingChangeAddress(sourceIndex = null) {
-  const ruleIndex = spendingChangeIndex({ purpose: "payment", qMaxIndex: getSpendingState().qMaxIndex });
-  const ready = Boolean(engine.address && activeAccountMnemonic() && engine.kaspa);
+// `account`: the account the payment started on (iOS ca09dd0), as for freshChangeForSpendingIndex.
+async function freshSpendingChangeAddress(sourceIndex = null, account = captureActiveSpendingAccount()) {
+  const ruleIndex = spendingChangeIndex({ purpose: "payment", qMaxIndex: getSpendingState(account?.owner).qMaxIndex });
+  const ready = Boolean(account && engine.kaspa);
   // Slot and address from the account the source was derived from (iOS fb2323e, IOS-109).
-  const slot = ready ? await verifiedFreshQuantumSlot() : null;
+  const slot = ready ? await verifiedFreshQuantumSlot(account) : null;
   if (slot) return slot;
   if (freshChangeRequired({ purpose: "payment", sourceIndex, freshIndex: ruleIndex })) throw new Error(QUANTUM_CHANGE_UNAVAILABLE);
   return null;
@@ -7694,20 +7713,30 @@ function spendingBoundPatchFor(index, state = getSpendingState()) {
   if (isQuantumIndex(index)) return { qMaxIndex: Math.max(state.qMaxIndex, chainLocalIndex(index)) };
   return { maxIndex: Math.max(state.maxIndex, index) };
 }
-function revealSpendingChangeAddress(fresh) {
-  if (!fresh || !Number.isInteger(fresh.index)) return;
-  saveSpendingState(spendingBoundPatchFor(fresh.index));
-  appendEngineLog(`Payment change went to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}); primary unchanged.`);
-  try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
-  try { refreshSpendingSummary?.(); } catch {}
+// `owner`: the account the send started on (iOS ca09dd0 revealSpendingAddress(at:owner:) /
+// setActiveSpendingAddress(_:owner:), IOS-109). Its list and primary get the write even if another
+// account is active when the node answers - without the on-screen refresh, which belongs to the
+// account on screen - and nothing is written once it was removed.
+function spendingChangeLogTail(target) {
+  if (!target) return " Not saved: the account the send started on was removed.";
+  return target.active ? "" : " Saved to the account the send started on.";
 }
-function rotatePrimarySpendingTo(fresh) {
+function revealSpendingChangeAddress(fresh, owner = engine.address) {
   if (!fresh || !Number.isInteger(fresh.index)) return;
-  saveSpendingState({ activeIndex: fresh.index, ...spendingBoundPatchFor(fresh.index) });
-  appendEngineLog(`Primary spending address rotated to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}).`);
-  try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
-  try { refreshSpendingSummary?.(); } catch {}
-  try { refreshSpendingDetailIfOpen?.(); } catch {}
+  const target = revealSpendingIndexFor(fresh.index, owner, spendingStateIo, () => {
+    try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
+    try { refreshSpendingSummary?.(); } catch {}
+  });
+  appendEngineLog(`Payment change went to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}); primary unchanged.${spendingChangeLogTail(target)}`);
+}
+function rotatePrimarySpendingTo(fresh, owner = engine.address) {
+  if (!fresh || !Number.isInteger(fresh.index)) return;
+  const target = setPrimarySpendingIndexFor(fresh.index, owner, spendingStateIo, () => {
+    try { if (spendingManageScreen && !spendingManageScreen.hidden) renderSpendingList(); } catch {}
+    try { refreshSpendingSummary?.(); } catch {}
+    try { refreshSpendingDetailIfOpen?.(); } catch {}
+  });
+  appendEngineLog(`Primary spending address rotated to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}).${spendingChangeLogTail(target)}`);
 }
 
 // Memoized per (account, index): every derivation re-runs BIP39 seeding
@@ -7724,6 +7753,20 @@ function captureActiveSpendingAccount() {
   const record = activeSavedAccountRecord();
   if (!record) return null;
   return captureSpendingAccount(record, { owner: engine.address || record.address, passphraseForm: passphraseFormForRecord(record) });
+}
+
+/// A send from a spending address, taken when it starts (iOS ca09dd0: the key and `owner` are read
+/// before the first await): the account whose keys sign it, whose fresh slot takes its change and
+/// whose state its later writes go to. Throws without a readable recovery phrase.
+function spendingSendAccount() {
+  const account = captureActiveSpendingAccount();
+  if (!account) throw new Error("This account has no recovery phrase, so spending sends aren't available.");
+  return account;
+}
+/// The engine's signing arguments for `account` (engine/index.js sendFromSpending and the rest):
+/// its seed material and the owner its quantum spent mark goes to.
+function spendingSignerArgs(account) {
+  return { mnemonic: account.mnemonic, passphrase: account.passphrase, passphraseForm: account.passphraseForm, owner: account.owner };
 }
 
 /// False once `owner` is neither the active account nor a saved one (it was removed), or while its
@@ -9735,16 +9778,20 @@ async function submitKnsTransfer() {
   const revealPriorityFeeSompi = knsTransferFeeSompi();
   let committed = false;
   try {
+    // From a spending address: the account the transfer starts on signs, and the primary it
+    // rotates after the commit is that account's, even if another is active by then (iOS ca09dd0
+    // accountAddress, IOS-109).
+    const account = spendingIndex != null ? spendingSendAccount() : null;
     // The primary's change rotates onto a fresh quantum-safe slot (iOS bba1b1e KNSService).
-    const fresh = spendingIndex != null ? await freshChangeForSpendingIndex(spendingIndex, { purpose: "kns" }) : null;
+    const fresh = spendingIndex != null ? await freshChangeForSpendingIndex(spendingIndex, { purpose: "kns", account }) : null;
     const result = await engine.transferKnsDomain({
       domain,
       assetId,
       toAddress: recipient,
-      mnemonic: spendingIndex != null ? activeAccountMnemonic() : null,
+      mnemonic: account ? account.mnemonic : null,
       spendingIndex,
-      passphrase: spendingIndex != null ? activeAccountPassphrase() : "",
-      passphraseForm: activeAccountPassphraseForm(),
+      passphrase: account ? account.passphrase : "",
+      passphraseForm: account ? account.passphraseForm : activeAccountPassphraseForm(),
       changeAddress: fresh?.address || null,
       revealPriorityFeeSompi,
       onStatus: (patch) => {
@@ -9752,7 +9799,7 @@ async function submitKnsTransfer() {
         // The primary moves once the node has accepted the commit (the reveal's change follows it).
         if (patch?.status === "committed") {
           committed = true;
-          if (fresh) rotatePrimarySpendingTo(fresh);
+          if (fresh) rotatePrimarySpendingTo(fresh, account.owner);
         }
       },
     });
@@ -9864,7 +9911,10 @@ async function consolidateSpendingDetailUtxos() {
   const address = spendingDetailAddress;
   const index = spendingDetailIndex;
   if (!address || spendingConsolidateInFlight) return;
-  if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase, so consolidation isn't available."); return; }
+  // The account whose address this is, taken now (iOS ca09dd0, IOS-109): it signs, and the quantum
+  // spent mark is its, even if another account is active once the node answers.
+  const account = captureActiveSpendingAccount();
+  if (!account) { showCopyToast("This account has no recovery phrase, so consolidation isn't available."); return; }
   let balance;
   try { balance = await engine.balanceForAddress(address); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
@@ -9877,11 +9927,7 @@ async function consolidateSpendingDetailUtxos() {
     // Exact single-output sweep (total - fee, no change), audit DSK-019: a self-send of
     // "balance minus a fixed headroom" left the unspent headroom as a tiny change output that
     // KIP-9 storage mass rejects.
-    await engine.compoundSpending({
-      mnemonic: activeAccountMnemonic(),
-      index,
-      passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
-    });
+    await engine.compoundSpending({ ...spendingSignerArgs(account), index });
     showCopyToast("UTXOs consolidated.");
     if (spendingDetailAddress === address) loadSpendingDetailUtxos(address);
     refreshSpendingSummary?.();
@@ -10833,9 +10879,11 @@ async function freshReceiveAddress({ revealing = true } = {}) {
   // (the slots between stay hidden), and one the person had hidden (Hide All) comes back: money is
   // about to land there (iOS 245a5d2 showIfHidden, revealSpendingAddress). Profile's warm-up only
   // decides, it reveals nothing (iOS freshReceiveAddress(revealing: false)).
+  // Onto the owner's list (iOS ca09dd0 revealSpendingAddress(at:owner:), IOS-109): the account the
+  // QR was asked for, never one removed meanwhile.
   const reveal = (index) => {
-    if (!revealing) return;
-    const current = getSpendingState();
+    if (!revealing || !spendingAccountStillSaved(owner)) return;
+    const current = getSpendingState(owner);
     let hidden = current.hidden;
     const patch = {};
     // Each chain extends its own bound (a quantum slot never widens the legacy chain).
@@ -10849,7 +10897,7 @@ async function freshReceiveAddress({ revealing = true } = {}) {
     }
     if (hidden.includes(index)) hidden = hidden.filter((i) => i !== index);
     if (hidden !== current.hidden) patch.hidden = hidden;
-    if (Object.keys(patch).length) saveSpendingState(patch);
+    if (Object.keys(patch).length) saveSpendingState(patch, owner);
   };
   // Rule 1: the pointer from last time, while it is still untouched - and quantum-safe (iOS
   // bba1b1e). A legacy pointer, even unused, carries its key in the address itself (P2PK), so the
@@ -11494,7 +11542,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 212;
+const APP_BUILD = 213;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -12385,7 +12433,7 @@ async function sendKaspaPinnedMax(destination, selectedOutpoints) {
     return sendKaspaSourceIndex == null
       ? await engine.sendMax(destination, totalFeeKas, outpoints, pinned)
       : await engine.sendMaxFromSpending({
-        mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
+        ...spendingSignerArgs(spendingSendAccount()), index: sendKaspaSourceIndex,
         destinationAddress: destination, totalFeeKas, selectedOutpoints: outpoints, ...pinned,
       });
   } catch (error) {
@@ -12551,7 +12599,7 @@ const sendKaspaController = makeSendController({
       const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
       return sendKaspaSourceIndex == null
         ? engine.compoundUtxos({ totalFeeKas })
-        : engine.compoundSpending({ mnemonic: activeAccountMnemonic(), index: sendKaspaSourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(), totalFeeKas });
+        : engine.compoundSpending({ ...spendingSignerArgs(spendingSendAccount()), index: sendKaspaSourceIndex, totalFeeKas });
     }
     if (sendKaspaMaxMode) return sendKaspaPinnedMax(destination, selectedOutpoints);
     // A payment request to someone's chatting address goes as a chat payment, its memo inside,
@@ -12565,13 +12613,16 @@ const sendKaspaController = makeSendController({
       // primary follows it there once the node has the send (iOS bba1b1e withdrawFromSpendingAddress).
       // The slot is checked on chain first, and a quantum source with no fresh slot stops with an
       // error rather than take its change back (iOS da2c8e2, IOS-101 / IOS-104).
+      // The account is taken now: its keys sign, its fresh slot takes the change and its primary
+      // moves, even if another account is active when the node answers (iOS ca09dd0, IOS-109).
       const sourceIndex = sendKaspaSourceIndex;
-      return freshChangeForSpendingIndex(sourceIndex, { destination }).then((fresh) => engine.sendFromSpending({
-        mnemonic: activeAccountMnemonic(), index: sourceIndex, passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
+      const account = spendingSendAccount();
+      return freshChangeForSpendingIndex(sourceIndex, { destination, account }).then((fresh) => engine.sendFromSpending({
+        ...spendingSignerArgs(account), index: sourceIndex,
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
-      }).then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh)); return result; }));
+      }).then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh, account.owner)); return result; }));
     }
     return engine.send(destination, amountKas, feeKas, outpoints ? { selectedOutpoints: outpoints } : {});
   },
@@ -18261,6 +18312,10 @@ async function sendTipNow(tipSompi) {
   const tip = tipState;
   if (!tip || tip.sending) return;
   if (!(typeof tipSompi === "bigint" && tipSompi > 0n)) { tipSetError("Enter an amount."); return; }
+  // From a spending address: the account the tip starts on (iOS ca09dd0, IOS-109) signs, takes the
+  // change on its fresh slot and gets that slot on its list, even after a switch.
+  const tipAccount = tip.fundingAddress ? captureActiveSpendingAccount() : null;
+  if (tip.fundingAddress && !tipAccount) { tipSetError("This account has no recovery phrase, so spending sends aren't available."); return; }
   const amountKas = kasTextFromSompi(tipSompi);
   // Max (DSK-042 / DSK-043): exactly the amount shown, from exactly the coins it was computed from.
   const max = activeTipMax();
@@ -18349,7 +18404,7 @@ async function sendTipNow(tipSompi) {
     await ensureRuntimes({ quiet: true });
     // From a spending address the change goes to a never-used address, revealed rather than made
     // primary (iOS 6333dd3). A Max tip leaves no change, so no fresh change address is used.
-    const tipFresh = tip.fundingAddress && !max ? await freshSpendingChangeAddress(tip.fundingIndex) : null;
+    const tipFresh = tip.fundingAddress && !max ? await freshSpendingChangeAddress(tip.fundingIndex, tipAccount) : null;
     // From the chatting address the memo rides sealed in the payload (iOS sendPayment(note:tip:)):
     // a tip that names the post is a signed kchat:1:tip: (iOS a6bd60a), one without a post the chat
     // payment's kchat:1:pay:. The fee card's extra goes as the priority fee and coin control limits
@@ -18360,18 +18415,16 @@ async function sendTipNow(tipSompi) {
     const result = maxPin
       ? (tip.fundingAddress
         ? await engine.sendMaxFromSpending({
-            mnemonic: activeAccountMnemonic(),
+            ...spendingSignerArgs(tipAccount),
             index: tip.fundingIndex,
-            passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
             destinationAddress,
             ...maxPin,
           })
         : await engine.sendMax(destinationAddress, null, null, maxPin))
       : tip.fundingAddress
       ? await engine.sendFromSpending({
-          mnemonic: activeAccountMnemonic(),
+          ...spendingSignerArgs(tipAccount),
           index: tip.fundingIndex,
-          passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
           destinationAddress,
           amountKas,
           feeKas: "0",
@@ -18382,7 +18435,7 @@ async function sendTipNow(tipSompi) {
       : await engine.send(destinationAddress, amountKas, "0", payload
         ? { payload, exactAmount: true, extraFeeSompi, manualUtxos: manualKeys }
         : { extraFeeSompi, manualUtxos: manualKeys });
-    if (tipFresh) runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(tipFresh));
+    if (tipFresh) runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(tipFresh, tipAccount.owner));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -21419,8 +21472,11 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
     // (null, the default) - change back to it - or one of their spending addresses, whose change
     // goes to a never-used address. The balance guard checks the same source the send will use.
     const fundingIndex = Number.isInteger(sourceSpendingIndex) ? sourceSpendingIndex : null;
-    if (fundingIndex != null && !activeAccountMnemonic()) throw new Error("This account has no recovery phrase, so spending sends aren't available.");
-    const fundingAddress = fundingIndex != null ? deriveSpendingAddressAt(fundingIndex) : null;
+    // The account the payment starts on (iOS ca09dd0 wallet.publicAddress): its keys sign, its
+    // fresh slot takes the change and its list gets that slot, even if another account is active
+    // by the time the node answers (IOS-109).
+    const spendingAccount = fundingIndex != null ? spendingSendAccount() : null;
+    const fundingAddress = fundingIndex != null ? deriveSpendingAddressFor(spendingAccount, fundingIndex) : null;
     if (fundingIndex != null && !fundingAddress) throw new Error("That spending address isn't ready yet.");
     const spendingFunded = Boolean(fundingAddress);
     const balance = spendingFunded ? await engine.balanceForAddress(fundingAddress) : await engine.balance();
@@ -21500,25 +21556,23 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       // A spending address's change goes to a never-used address, revealed in Manage Addresses;
       // nothing rotates a "primary" (iOS 6333dd3). A Max payment leaves no change, so no fresh
       // change address is used.
-      const payFresh = spendingFunded && !max ? await freshSpendingChangeAddress(fundingIndex) : null;
+      const payFresh = spendingFunded && !max ? await freshSpendingChangeAddress(fundingIndex, spendingAccount) : null;
       // Max: one output of exactly the shown amount from exactly its coins, the payment payload on
       // it, nothing left for change (DSK-042); the engine refuses if the coins changed (DSK-043).
       const maxPin = max ? { extraFeeSompi: extraSompi, manualUtxos: manualKeys, payload, expectedAmountSompi: max.amountSompi, expectedOutpoints: max.outpoints } : null;
       const result = maxPin
         ? (spendingFunded
           ? await engine.sendMaxFromSpending({
-              mnemonic: activeAccountMnemonic(),
+              ...spendingSignerArgs(spendingAccount),
               index: fundingIndex,
-              passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
               destinationAddress,
               ...maxPin,
             })
           : await engine.sendMax(destinationAddress, null, null, maxPin))
         : spendingFunded
         ? await engine.sendFromSpending({
-            mnemonic: activeAccountMnemonic(),
+            ...spendingSignerArgs(spendingAccount),
             index: fundingIndex,
-            passphrase: activeAccountPassphrase(), passphraseForm: activeAccountPassphraseForm(),
             destinationAddress,
             amountKas,
             feeKas: "0",
@@ -21531,7 +21585,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
         : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys });
       if (payFresh) {
         // The node has the payment by now: a bookkeeping slip here must not mark it failed.
-        runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(payFresh));
+        runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(payFresh, spendingAccount.owner));
       }
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
