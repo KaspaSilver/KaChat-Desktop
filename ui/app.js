@@ -30,6 +30,12 @@ import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedId
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab, openKachatMarketSheet } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
+// Closed-app notifications (Web Push) and the app icon's badge.
+import { initWebPush, scheduleWebPushSync, webPushStatus, webPushStatusText, webPushSignOut, webPushForgetAccount, setAppIconBadge, takePendingNotificationClick, needsHomeScreenInstall } from "./web-push.js";
+import { authorKeyFromAddress, compressedPubkeyHex } from "./web-push-core.js";
+import { deriveBlindedGroupId as pushBlindedGroupId, bytesToHex as pushBytesToHex, hexToBytes as pushHexToBytes } from "../engine/group.js";
+import { broadcastPushWatch, activeBroadcastChannelName } from "./broadcasts.js";
+import { kaPostsWatchedAuthorAddresses } from "./kaposts.js";
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
 import {
   configureAddressBook, addressBookName, addressBookEntry, addressBookIsEmpty, archiveAddressBook,
@@ -55,6 +61,8 @@ import {
 } from "./send-kaspa-components.js";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
 import * as Calls from "./calls.js";
+// Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
+import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
 import {
@@ -174,20 +182,6 @@ const STATE_BACKUP_KEY = "kachat-shell-state-backup-v1";
 const STATE_BACKUP_MIN_INTERVAL_MS = 60_000;
 let lastStateBackupWriteAt = 0;
 const ACCOUNT_DATA_PREFIX = "kachat-account-data-v1";
-// The Swap app was removed (iOS f94db5a). Its leftovers - the device-level API key override and,
-// per account, the terms consent and swap history - are swept at boot. Idempotent: once they are
-// gone this finds nothing, and it also clears them again if an old backup brings them back.
-(() => {
-  const SWAP_BASE_KEYS = ["kachat-swap-history-v1", "kachat-swap-disclaimer-agreed-v1", "kachat-changenow-api-key-v1"];
-  try {
-    const doomed = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i) || "";
-      if (SWAP_BASE_KEYS.some((base) => key === base || key.endsWith(`:${base}`))) doomed.push(key);
-    }
-    doomed.forEach((key) => localStorage.removeItem(key));
-  } catch { /* storage unavailable: nothing to sweep */ }
-})();
 const SESSION_LOGGED_OUT_KEY = "kachat-session-logged-out-v1";
 // Marks that an account is active in THIS page. Memory only (DSK-023): browsers keep
 // sessionStorage on disk and give it back on "Reopen closed tab", session restore and Duplicate
@@ -295,6 +289,8 @@ function setGroupNotify(groupId, value) {
   if (!groupId || !GROUP_NOTIFY_MODES.includes(value)) return;
   groupPrefs[groupId] = { ...(groupPrefs[groupId] || {}), notify: value };
   saveGroupPrefs();
+  // A muted group is not watched by the push service at all (iOS collectWatchedGroupIds).
+  try { scheduleWebPushSync(); } catch { /* not started yet */ }
 }
 
 // Photos revealed when a photo bubble is held back (per-contact "manual", or the global approval
@@ -761,6 +757,9 @@ function requestPassword({ mode = "verify", title, message, allowForgot = false,
     if (passwordTitleEl) passwordTitleEl.textContent = title || (mode === "set" ? "Set Password" : "Enter Password");
     if (passwordMessageEl) { passwordMessageEl.textContent = message || ""; passwordMessageEl.hidden = !message; }
     if (passwordConfirmLabel) passwordConfirmLabel.hidden = mode !== "set";
+    // Lets the phone's password manager offer a strong password when one is set and fill the
+    // saved one in when it is asked for.
+    if (passwordInput) passwordInput.autocomplete = mode === "set" ? "new-password" : "current-password";
     if (passwordErrorEl) passwordErrorEl.hidden = true;
     if (passwordInput) passwordInput.value = "";
     if (passwordConfirmInput) passwordConfirmInput.value = "";
@@ -1465,6 +1464,8 @@ function removeSavedAccountFromDevice(account) {
   if (!address) throw new Error("Saved account address is missing.");
   const remaining = loadSavedAccounts().filter((entry) => entry.address !== address);
   persistSavedAccounts(remaining);
+  // Its closed-app notifications stop with it (the device key removes the registration).
+  webPushForgetAccount(address).catch(() => {});
   removeAccountScopedLocalData(address);
   // The last account gone: its password protects nothing now, and the next account sets its own.
   if (!remaining.length && releaseAppPasswordIfUnused()) refreshPasswordStatus();
@@ -3456,6 +3457,8 @@ function applyChatInfoStagedPrefs() {
   if (address && chatInfoStagedNotify != null) {
     const choice = chatInfoStagedNotify;
     setContactPref(address, "notify", choice === "default" ? undefined : choice);
+    // An Off chat leaves the push registration; No Sound reaches the worker's mirror.
+    try { scheduleWebPushSync(); } catch { /* not started yet */ }
     // The browser has to allow notifications at all; asked once, quietly.
     if (choice !== "off") ensureNotificationPermission().catch(() => {});
   }
@@ -3468,9 +3471,9 @@ function applyChatInfoStagedPrefs() {
   chatInfoStagedNotify = null;
   chatInfoStagedPhotos = null;
 }
-// Best-effort permission request at load (browsers that require a gesture will
-// no-op; the Chat Info toggle also requests it on demand).
-ensureNotificationPermission();
+// No permission request at load: Safari (and so every iPhone home-screen app) only shows the
+// prompt from a tap, and Chrome quietly blocks sites that ask on arrival. The ask waits for a
+// gesture (requestNotificationPermissionIfNeeded) or a switch being turned on.
 
 // Browser notifications for incoming messages. Best-effort: requests permission on
 // a user gesture; fires only when the message's chat isn't the focused active one.
@@ -3484,12 +3487,32 @@ ensureNotificationPermission();
 /// not notify me when cold storage receives Kaspa".
 ///
 /// `default` only. A reader who has already said no is not asked again.
+///
+/// Only from a gesture: called at boot (or after an await) there is none, and Safari - every iPhone
+/// home-screen app - then refuses to show the prompt at all. Without one, the ask waits for the
+/// next tap or key press anywhere in the app (iOS asks at first launch; this is the closest a web
+/// app may get).
+let notificationAskArmed = false;
 function requestNotificationPermissionIfNeeded() {
   if (typeof Notification === "undefined" || Notification.permission !== "default") return;
   const wantsNotifications = (accountShellPrefs.chatNotifications ?? true) !== false
     || (accountShellPrefs.addressActivityNotifications ?? true) !== false;
   if (!wantsNotifications) return;
-  ensureNotificationPermission().catch(() => { /* asking is best-effort */ });
+  if (navigator.userActivation?.isActive) {
+    ensureNotificationPermission().catch(() => { /* asking is best-effort */ });
+    return;
+  }
+  if (notificationAskArmed) return;
+  notificationAskArmed = true;
+  const ask = () => {
+    document.removeEventListener("click", ask, true);
+    document.removeEventListener("keydown", ask, true);
+    notificationAskArmed = false;
+    if (typeof Notification === "undefined" || Notification.permission !== "default" || !engine.address) return;
+    ensureNotificationPermission().catch(() => { /* asking is best-effort */ });
+  };
+  document.addEventListener("click", ask, true);
+  document.addEventListener("keydown", ask, true);
 }
 
 // Why a notification could not be enabled, in the reader's situation. On an iPhone or iPad,
@@ -3506,7 +3529,11 @@ async function ensureNotificationPermission() {
   if (typeof Notification === "undefined") return false;
   if (Notification.permission === "granted") return true;
   if (Notification.permission === "denied") return false;
-  try { return (await Notification.requestPermission()) === "granted"; } catch { return false; }
+  let granted = false;
+  try { granted = (await Notification.requestPermission()) === "granted"; } catch { granted = false; }
+  // Allowed just now: subscribe for closed-app notifications straight away (ui/web-push.js).
+  try { renderWebPushStatus(); scheduleWebPushSync({ force: granted, delayMs: 300 }); } catch { /* not started yet */ }
+  return granted;
 }
 function maybeNotifyIncoming(conversationEntry, contact, message) {
   if (!message || message.direction !== "incoming") return;
@@ -3533,18 +3560,22 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
     if (!key || s.notified.has(key)) return;
     s.notified.add(key);
     saveChatRequestState(s);
+    // iOS wording (NotificationService "%@ wants to chat with you."); the tag is the one a closed-app
+    // push for the same request uses (public/sw-push.js), so the two never stack.
     showAppNotification({
       title: "New message request",
-      body: `${shortAddress(contact.address)} wants to chat with you`,
+      body: `${shortAddress(contact.address)} wants to chat with you.`,
       tag: `kachat-request-${key}`,
+      key: notificationKeyForMessage(message),
       silent: mode !== "sound",
       route: { kind: "chat", conversationId: conversationEntry.id },
       onClick: () => { setActiveAppTab("chats"); openConversation(conversationEntry.id); },
     }).catch(() => { /* best-effort */ });
     return;
   }
-  // Don't notify for the conversation you're already looking at in a focused window.
-  if (activeConversationId === conversationEntry.id && !document.hidden) return;
+  // Don't notify for the conversation you're already looking at in a focused window (iOS: the
+  // active conversation while the app is active - a visible window behind another app still rings).
+  if (activeConversationId === conversationEntry.id && appIsInFront()) return;
   // Who sent it - the name you gave them, else their .kachat name, else the short address - and a
   // chat payment says what: "Sent you 1.5 KAS" (iOS dcb329a). A notice still reads "Received
   // payment", never the amount it claims.
@@ -3553,49 +3584,104 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   if (poolEnvelope) body = "Received payment";
   else if (isPaymentBubble(message)) body = chatPaymentNotificationBody({ amountKas: message.paymentAmountKas, unit: KAS_UNIT });
   else body = displayTextForMessage(message) || "New message";
+  // One notification per chat (iOS groups a chat's banners under its thread): the tag is the
+  // sender's address, the same one a closed-app push for this chat uses (public/sw-push.js), so a
+  // push's "New message" and this one's real text replace each other instead of stacking.
   showAppNotification({
     title,
     body,
-    tag: `kachat-${conversationEntry.id}`,
+    tag: `kachat-chat-${String(contact?.address || conversationEntry.id).toLowerCase()}`,
+    key: notificationKeyForMessage(message),
     silent: mode !== "sound",
-    route: { kind: "chat", conversationId: conversationEntry.id },
+    route: { kind: "chat", conversationId: conversationEntry.id, address: contact?.address || "" },
     onClick: () => { setActiveAppTab("chats"); openConversation(conversationEntry.id); },
   }).catch(() => { /* best-effort */ });
 }
 
-// One way to show an OS notification, for both places that need one. A desktop browser
-// constructs it directly. A home-screen web app on iOS (16.4+) holds the same permission but
-// `new Notification()` throws there - the notification has to be shown by the service worker
-// (public/sw.js), and its tap comes back as a message the worker posts to the page. The tap is
-// routed by `route` (survives the app being closed and reopened) and, while this page is alive,
-// by the closure registered under a click id.
+/** The app is what you are looking at: its window is visible and has the focus (iOS
+ *  applicationState == .active). A window left visible behind another app does not count. */
+function appIsInFront() {
+  if (document.hidden) return false;
+  try { return document.hasFocus(); } catch { return true; }
+}
+/** What makes two notifications "the same message": its transaction, else its local id. */
+function notificationKeyForMessage(message) {
+  return String(message?.txid || message?.txId || message?.id || "");
+}
+// Several tabs or windows each run their own sync and would each ring for the same message: the
+// first one to claim the message's key shows it, the rest stay quiet. localStorage is shared by every
+// tab of this site and written synchronously, which is what makes it the arbiter.
+const NOTIFIED_KEYS_STORAGE = "kachat-notified-keys-v1";
+function claimNotificationKey(key) {
+  if (!key) return true;
+  const now = Date.now();
+  let seen = {};
+  try { seen = JSON.parse(localStorage.getItem(NOTIFIED_KEYS_STORAGE) || "{}") || {}; } catch { seen = {}; }
+  if (seen[key] && now - Number(seen[key]) < 24 * 3600 * 1000) return false;
+  seen[key] = now;
+  const entries = Object.entries(seen).filter(([, at]) => now - Number(at) < 24 * 3600 * 1000).sort((a, b) => b[1] - a[1]).slice(0, 400);
+  try { localStorage.setItem(NOTIFIED_KEYS_STORAGE, JSON.stringify(Object.fromEntries(entries))); } catch { /* still shown once in this tab */ }
+  return true;
+}
+let notificationWorker = null;
+/** The service worker that can show notifications, when this page has one running. */
+async function notificationWorkerRegistration() {
+  if (notificationWorker?.active) return notificationWorker;
+  try {
+    const registration = await navigator.serviceWorker?.getRegistration?.();
+    notificationWorker = registration?.active && registration.showNotification ? registration : null;
+  } catch { notificationWorker = null; }
+  return notificationWorker;
+}
+
+// One way to show an OS notification, for every place that needs one. Through the service worker
+// when the page has one: a home-screen web app on iOS (16.4+) and Android Chrome hold the
+// permission but `new Notification()` throws there, and a worker-shown notification is one the
+// worker (a closed-app push) and the other tabs can see, so a message is never shown twice. A
+// plain browser tab without a worker constructs it directly. The tap is routed by `route`
+// (survives the app being closed and reopened) and, while this page is alive, by the closure
+// registered under a click id. `key` names the message: one notification per key, across tabs.
 const pendingNotificationClicks = new Map();
 let nextNotificationClickId = 1;
-async function showAppNotification({ title, body, tag, silent = false, route = null, onClick = null } = {}) {
+async function showAppNotification({ title, body, tag, key = "", silent = false, renotify = true, route = null, onClick = null } = {}) {
   // Push Notifications off silences every OS notification (iOS NotificationsHubPage footer).
-  if (!pushNotificationsEnabled()) return;
+  if (!pushNotificationsEnabled()) return false;
+  if (key && !claimNotificationKey(`${tag || ""}|${key}`)) return false;
   const options = { body: body || "", tag: tag || undefined, icon: kachatLogoUrl, silent: Boolean(silent) };
-  try {
-    const note = new Notification(title || "KaChat", options);
-    note.onclick = () => {
-      try { window.focus(); } catch {}
-      try { onClick?.(); } catch {}
-      note.close();
-    };
-    return true;
-  } catch { /* iOS home-screen apps: fall through to the worker */ }
-  const registration = await navigator.serviceWorker?.ready?.catch?.(() => null);
-  if (!registration?.showNotification) throw new Error("No notification path");
-  const clickId = nextNotificationClickId++;
-  if (onClick) {
-    pendingNotificationClicks.set(clickId, onClick);
-    if (pendingNotificationClicks.size > 200) pendingNotificationClicks.delete(pendingNotificationClicks.keys().next().value);
+  const registration = await notificationWorkerRegistration();
+  if (registration) {
+    // A closed-app push already put this very message up (its generic "New message"): this
+    // replaces it with the real text, without ringing a second time.
+    let alreadyUp = false;
+    if (tag && key) {
+      try { alreadyUp = (await registration.getNotifications({ tag })).some((note) => note.data?.key === key); } catch { alreadyUp = false; }
+    }
+    if (tag && renotify && !alreadyUp) options.renotify = true;
+    if (alreadyUp) options.silent = true;
+    const clickId = nextNotificationClickId++;
+    if (onClick) {
+      pendingNotificationClicks.set(clickId, onClick);
+      if (pendingNotificationClicks.size > 200) pendingNotificationClicks.delete(pendingNotificationClicks.keys().next().value);
+    }
+    try {
+      await registration.showNotification(title || "KaChat", { ...options, data: { clickId, route, key } });
+      return true;
+    } catch { /* fall back to a page notification */ }
   }
-  await registration.showNotification(title || "KaChat", { ...options, data: { clickId, route } });
+  const note = new Notification(title || "KaChat", options); // throws where only the worker may notify
+  note.onclick = () => {
+    try { window.focus(); } catch {}
+    try { onClick?.(); } catch {}
+    note.close();
+  };
   return true;
 }
 window.addEventListener("kachat:notification-click", (event) => {
-  const data = event.detail || {};
+  routeNotificationClick(event.detail || {});
+});
+/** Open what a tapped notification was about. A worker-shown push carries only an address, a group
+ *  id, a room, a post or a tab (it cannot know this device's chat ids). */
+function routeNotificationClick(data) {
   const handler = data.clickId ? pendingNotificationClicks.get(data.clickId) : null;
   if (handler) {
     pendingNotificationClicks.delete(data.clickId);
@@ -3604,27 +3690,54 @@ window.addEventListener("kachat:notification-click", (event) => {
   }
   const route = data.route || {};
   try {
-    if (route.kind === "chat" && route.conversationId) { setActiveAppTab("chats"); openConversation(route.conversationId); }
+    if (route.kind === "chat" && route.conversationId && state.conversations.some((entry) => entry.id === route.conversationId)) { setActiveAppTab("chats"); openConversation(route.conversationId); }
+    else if ((route.kind === "chat" || route.kind === "chatAddress") && route.address) openChatFromNotificationAddress(route.address);
+    else if (route.kind === "requests") { setActiveAppTab("chats"); openMessageRequestsSheet(); }
+    else if (route.kind === "kapost" && route.txId) { setActiveAppTab("kaposts"); openKaPostFromNotification(route.txId); }
     else if (route.kind === "group" && route.groupId) { setActiveAppTab("chats"); openGroupChat(route.groupId); }
     // A public room's ping opens that room straight in the detail pane (iOS a062577).
     else if (route.kind === "room" && route.channel) { if (openPublicChatsTab()) openBroadcastChannelFromNotification(route.channel); }
+    else if (route.kind === "tab" && route.tab === "kachat-names" && route.name) openKachatNameFromBell(route.name, { showTab: () => setActiveAppTab("kachat-names") });
     else if (route.kind === "tab" && route.tab) setActiveAppTab(route.tab);
     // A "Received" / "Balance increased" for one address opens that address's History (iOS 13046ad).
     else if (route.kind === "address" && route.address) routeToOwnAddress(route.address);
   } catch { /* the page may still be booting */ }
-});
+}
+/** A push named a sender: their chat if you have one (a pending request opens Message Requests);
+ *  never a new chat created just because a notification was tapped. */
+function openChatFromNotificationAddress(address) {
+  const clean = String(address || "").trim().toLowerCase();
+  const contact = (state.contacts || []).find((entry) => String(entry.address || "").toLowerCase() === clean);
+  const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
+  setActiveAppTab("chats");
+  if (!conversationEntry) return;
+  if (isMessageRequest(conversationEntry)) { openMessageRequestsSheet(); return; }
+  openConversation(conversationEntry.id);
+}
+// A tap that had to open the app (the worker could not hand it to a running page): taken once the
+// account's chats are in, tried for a minute while the app boots or waits to be unlocked.
+async function routePendingNotificationClick(attempt = 0) {
+  if (!engine.address || !state.conversations) {
+    if (attempt < 180) window.setTimeout(() => routePendingNotificationClick(attempt + 1), 1000);
+    return;
+  }
+  let data = null;
+  try { data = await takePendingNotificationClick(); } catch { data = null; }
+  if (data) routeNotificationClick(data);
+}
 
 // Generic desktop notification helper for non-chat pings (wallet address
 // activity, KaPosts). Honors the Play sound preference; falls back to the
-// in-app toast when browser notifications are unavailable/denied.
-function postDesktopNotification({ title, body, tag, onClick, route = null } = {}) {
+// in-app toast when browser notifications are unavailable/denied. `key` (default: the tag) keeps one
+// notification per event across tabs.
+function postDesktopNotification({ title, body, tag, key = null, onClick, route = null } = {}) {
   if (!pushNotificationsEnabled()) return;
   if (typeof Notification === "undefined" || Notification.permission !== "granted") {
     showCopyToast(body ? `${title}: ${body}` : title);
     return;
   }
   showAppNotification({
-    title, body, tag, route, onClick,
+    title, body, tag, route, onClick, key: key ?? tag ?? "",
     silent: (accountShellPrefs.notificationSound ?? true) === false,
   }).catch(() => showCopyToast(body ? `${title}: ${body}` : title));
 }
@@ -5128,12 +5241,15 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetChessTournamentsForAccount(); } catch { /* not yet initialized */ }
   try { resetPortfolioForAccount(); } catch { /* not yet initialized */ }
   try { resetColdStorageForAccount(); } catch { /* not yet initialized */ }
+  try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
   try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
   // The Address Book is per wallet: its screens go back to the list (the store reads the new
   // wallet's book on its next read).
   try { resetAddressBookForAccount(); } catch { /* not yet initialized */ }
   try { loadNotifCenter(); } catch { /* not yet initialized */ }
+  // Closed-app notifications move to this account (and the badge to its counts).
+  try { scheduleWebPushSync({ force: true, delayMs: 5000 }); scheduleAppBadgeUpdate(); } catch { /* not yet initialized */ }
   // .kachat registrations in flight (testnet) pick up again for this wallet (iOS resume()).
   try { refreshKachatIdentity.at = 0; window.setTimeout(() => { try { kachatNames()?.actions.resume(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
   // An imported or switched-to wallet's own profile comes from the chain (iOS 5d4ce87): a fresh
@@ -6862,8 +6978,15 @@ function startSweepLoop() {
   if (sweepLoopRunning) return;
   sweepLoopRunning = true;
   let interval = MESSAGE_REFRESH_MS;
+  let lastHiddenSweepAt = 0;
   const tick = async () => {
-    if (!document.hidden) {
+    // A hidden tab or minimised window still sweeps once a minute while it may notify: a message
+    // arriving then is exactly what a notification is for (a closed app has Web Push for that).
+    const hiddenSweepDue = document.hidden && pushNotificationsEnabled()
+      && typeof Notification !== "undefined" && Notification.permission === "granted"
+      && Date.now() - lastHiddenSweepAt >= 60_000;
+    if (hiddenSweepDue) lastHiddenSweepAt = Date.now();
+    if (!document.hidden || hiddenSweepDue) {
       await refreshAllConversations({ quiet: true });
       if (lastSweepFailed) {
         const next = Math.min(interval * 2, MESSAGE_REFRESH_MAX_MS);
@@ -10466,8 +10589,6 @@ function setActiveAppTab(tab) {
   // Child Mode choke point: every tab switch (dock click, restore, deep link,
   // programmatic) funnels through here, so gated tabs simply become Chats.
   if (isChildModeEnabled() && CHILD_HIDDEN_TABS.includes(tab)) tab = "chats";
-  // Swap was removed: an old notification route or deep link naming it lands on Chats.
-  if (tab === "swaps") tab = "chats";
   // A tab that lives in the Hub is REACHED through the Hub, so asking for it directly - a deep
   // link, a notification tap, the restored spot - opens it there rather than failing.
   if (tab !== "hub" && !dockPrefs.dock.includes(tab) && dockPrefs.hub.includes(tab)) {
@@ -10536,6 +10657,7 @@ function setActiveAppTab(tab) {
   else { stopBroadcastPolling(); syncPublicChatsPane(); }
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
+  try { if (screenTab === "swaps") refreshSwaps(); } catch { /* not started */ }
   // Chess keeps the arena scanned only while its screen is up (iOS acquire/release).
   if (screenTab === "chess") showChessTournaments(); else hideChessTournaments();
   try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
@@ -10575,7 +10697,7 @@ sidebarTabButtons.forEach((button) => {
 
 const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", chess: "Chess Online", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -11675,7 +11797,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 215;
+const APP_BUILD = 219;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -16197,6 +16319,8 @@ function renderChats() {
   if (activeConversationId && !state.conversations.some((entry) => entry.id === activeConversationId)) setActiveConversationId(null);
   // One list (iOS a062577): the group chats and public rooms are the circles above the chats.
   renderChatCircles();
+  // The app icon's badge follows the same counts (iOS ChatService.updateAppBadge).
+  scheduleAppBadgeUpdate();
   // The bots' cards carry their chats' unread counts (iOS d576941).
   try { refreshKachatBots(); } catch { /* not started */ }
   setChatToolRowsForGroupsTab(false);
@@ -27058,6 +27182,9 @@ document.querySelectorAll('[data-shell-action="logout"]').forEach((button) => bu
 async function performLogout() {
   try {
     persistState();
+    // Signed out: no more closed-app notifications for this account on this browser. Signed with
+    // the wallet key while it is still here; not waited for (the device key can finish it later).
+    if (engine.privateKeyHex && engine.address) webPushSignOut({ privateKeyHex: engine.privateKeyHex, address: engine.address }).catch(() => {});
     if (engine.privateKeyHex) persistTestingWallet();
     localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
     clearSessionActive();
@@ -27408,6 +27535,22 @@ function renderPushNotificationsFooter() {
   footer.textContent = pushNotificationsEnabled()
     ? "Everything you have switched on below can reach you, even when the app is closed. Turning this off silences all of it."
     : "Turn this on to receive anything you have switched on below, even when the app is closed.";
+  renderWebPushStatus();
+}
+/// The line under it: whether notifications reach you with KaChat closed (ui/web-push.js), and an
+/// Allow button while the browser has not been asked - asking needs a tap (Safari shows no prompt
+/// otherwise), and with the switch on by default there is no switch to flip.
+function renderWebPushStatus() {
+  const line = document.querySelector("[data-web-push-status]");
+  const allow = document.querySelector("[data-web-push-allow]");
+  let value = webPushStatus();
+  // Answer at once for the cases the page can judge itself, before the first sync has run.
+  if (!pushNotificationsEnabled()) value = { state: "off" };
+  else if (needsHomeScreenInstall()) value = { state: "needs-install" };
+  else if (typeof Notification !== "undefined" && Notification.permission === "denied") value = { state: "denied" };
+  else if (typeof Notification !== "undefined" && Notification.permission === "default") value = { state: "ask" };
+  if (line) line.textContent = webPushStatusText(value);
+  if (allow) allow.hidden = value.state !== "ask";
 }
 
 // Settings > Customization > Show Fee Estimate, default ON (iOS AppSettings.showFeeEstimate).
@@ -27446,6 +27589,11 @@ prefBindings.forEach(([selector, key, fallback]) => {
     persistAccountShellPreferences();
     if (key === "estimateFees") scheduleFeeEstimate();
     if (key === "chatNotifications") renderPushNotificationsFooter();
+    // What the push service sends this browser follows these (registration lists, KaPosts kinds,
+    // Address Activity, the sound the worker plays).
+    if (key === "chatNotifications" || key === "notificationSound" || key === "addressActivityNotifications" || key.startsWith("kaPostsNotify")) {
+      scheduleWebPushSync({ force: key === "chatNotifications" });
+    }
     if (key === "verboseApiLogging") setVerboseApiLogging(input.checked, appendEngineLog);
     if (key === "photoApprovalForNewContacts") {
       // Apply to the open thread immediately, and re-sync the Chat Info toggle that mirrors it.
@@ -27463,11 +27611,217 @@ prefBindings.forEach(([selector, key, fallback]) => {
 renderPushNotificationsFooter();
 // The Notifications page tells a phone reader what it takes (a Safari tab cannot notify at all).
 {
+  // Only where it applies: an iPhone/iPad browser tab. The home-screen app already has what it takes.
   const hint = document.querySelector("[data-notif-phone-hint]");
-  const ua = navigator.userAgent || "";
-  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  if (hint) hint.hidden = !ios;
+  if (hint) hint.hidden = !needsHomeScreenInstall();
+  document.querySelector("[data-web-push-allow]")?.addEventListener("click", () => {
+    ensureNotificationPermission().then((granted) => {
+      renderWebPushStatus();
+      if (!granted) showCopyToast(notificationsUnavailableMessage());
+    });
+  });
 }
+
+// ---- Web Push: notifications while KaChat is closed (ui/web-push.js) ---------------------------
+// What this browser registers with the push service is what iOS registers
+// (PushNotificationManager.registerWithIndexer), read from this app's own state.
+
+/** The chats the list shows (iOS isConversationVisibleInChatList), newest first: no requests, no
+ *  blocked or declined chats, no bots. The badge counts these; the push watches those that may ring. */
+function chatListConversationsForPush() {
+  return sortedConversations().filter((conversationEntry) => {
+    const contact = contactForConversation(conversationEntry);
+    if (!contact?.address) return false;
+    if (isMessageRequest(conversationEntry) || isChatBlocked(contact.address)) return false;
+    if (contact.relationshipState === "declined") return false;
+    if (isKachatBot(contact.address)) return false;
+    return true;
+  });
+}
+
+// The app icon's badge: unread 1:1 chats the list shows plus unread group messages (iOS
+// ChatService.updateAppBadge - requests and blocked chats never count).
+// (The timer lives on the function: renderChats runs during boot, before a `let` here would exist.)
+function scheduleAppBadgeUpdate() {
+  if (scheduleAppBadgeUpdate.timer) return;
+  scheduleAppBadgeUpdate.timer = window.setTimeout(() => {
+    scheduleAppBadgeUpdate.timer = 0;
+    let total = 0;
+    try {
+      if (engine.address) {
+        for (const conversationEntry of chatListConversationsForPush()) total += Math.max(0, Number(conversationEntry.unreadCount || 0));
+        total += totalGroupUnread();
+      }
+    } catch { /* counted again on the next render */ }
+    setAppIconBadge(total);
+  }, 250);
+}
+
+// Each chat's receiving alias, cached per account: the push service only rings for messages
+// carrying one of them (iOS collectAliases / knownIncomingAliases).
+const pushAliasCache = new Map();
+async function pushIncomingAliasesFor(contact) {
+  const out = [];
+  const key = `${engine.address}|${contact.address}`;
+  let alias = pushAliasCache.get(key);
+  if (alias === undefined) {
+    try { alias = (await engine.deriveConversationAliases(contact.address))?.myAlias || ""; } catch { alias = null; }
+    if (alias !== null) pushAliasCache.set(key, alias);
+  }
+  if (alias) out.push(alias);
+  for (const legacy of Array.isArray(contact.legacyIncomingAliases) ? contact.legacyIncomingAliases : []) out.push(String(legacy));
+  return out;
+}
+
+/** Every group stream to watch (iOS collectWatchedGroupIds): each OTHER member's blinded id in
+ *  each group that isn't muted, skipping muted members - and, for the worker, which group and
+ *  member each id stands for (names only). */
+function webPushGroupStreams() {
+  const me = engine.address || "";
+  const ids = [];
+  const mirror = {};
+  const memberNames = {};
+  for (const group of getGroupManager()?.listGroups?.() || []) {
+    if (getGroupNotify(group.groupId) === "muted") continue;
+    let blindingKey;
+    try { blindingKey = pushHexToBytes(group.blindingKeyHex); } catch { continue; }
+    for (const member of group.members || []) {
+      if (!member?.xOnlyPubKeyHex || !member.address || member.address === me) continue;
+      if (isGroupMemberMuted(group.groupId, member.address)) continue;
+      let id;
+      try { id = pushBytesToHex(pushBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)); } catch { continue; }
+      ids.push(id);
+      mirror[id] = { g: group.groupId, n: String(group.name || "Group").slice(0, 80), m: member.address.toLowerCase() };
+      try { memberNames[member.address.toLowerCase()] = String(groupNotificationSenderName(member.address) || "").slice(0, 64); } catch { /* the worker shortens the address */ }
+    }
+  }
+  return { ids, mirror, memberNames };
+}
+
+async function collectWebPushRegistration() {
+  const me = engine.address || "";
+  const childMode = isChildModeEnabled();
+  // 1:1: chats the list shows whose notifications aren't off (iOS pushEligibleConversationAddresses),
+  // your own address first - handshakes and payments to you are keyed on it.
+  const watched = [];
+  const aliases = [];
+  if (me) watched.push(me);
+  for (const conversationEntry of chatListConversationsForPush()) {
+    const contact = contactForConversation(conversationEntry);
+    if (!contact?.address || !isOnActiveNetwork(contact.address)) continue;
+    if (effectiveNotifyMode(contact.address) === "off") continue;
+    if (watched.some((address) => address.toLowerCase() === contact.address.toLowerCase())) continue;
+    if (watched.length >= 256) break;
+    const contactAliases = await pushIncomingAliasesFor(contact);
+    // With no alias at all the service would ring for everything this contact sends to anyone
+    // (an empty list means "any alias"): wait until the chat keys are loaded instead.
+    // (A contact whose alias cannot be derived even with the keys loaded is left out.)
+    if (!contactAliases.length) {
+      if (engine.isKasiaCipherLoaded?.()) continue;
+      throw Object.assign(new Error("chat keys are still loading"), { notReady: true });
+    }
+    watched.push(contact.address);
+    aliases.push(...contactAliases);
+  }
+  const groups = webPushGroupStreams();
+  let rooms = { channels: [], hidden: {} };
+  try { if (!childMode) rooms = broadcastPushWatch(); } catch { /* rooms not started */ }
+  // KaPosts: the account's K identity and its per-kind switches (iOS collectKaPostsPubkey); none in
+  // Simple Mode.
+  let kaposts = null;
+  if (!childMode && engine.privateKeyHex) {
+    let pubkey = "";
+    try { pubkey = requesterPubkeyFor(engine); } catch { try { pubkey = compressedPubkeyHex(engine.privateKeyHex); } catch { pubkey = ""; } }
+    if (pubkey) {
+      kaposts = {
+        pubkey,
+        likes: accountShellPrefs.kaPostsNotifyLikes ?? true,
+        dislikes: accountShellPrefs.kaPostsNotifyDislikes ?? true,
+        comments: accountShellPrefs.kaPostsNotifyComments ?? true,
+        reposts: accountShellPrefs.kaPostsNotifyReposts ?? true,
+        follows: accountShellPrefs.kaPostsNotifyFollows ?? true,
+      };
+    }
+  }
+  let watchAuthors = [];
+  try { watchAuthors = kaPostsWatchedAuthorAddresses().map(authorKeyFromAddress).filter(Boolean); } catch { watchAuthors = []; }
+  // Address Activity while closed: your spending and cold-storage addresses that may notify. Not
+  // the chatting address - its payments already arrive as chat payments.
+  let watchOnly = [];
+  try {
+    if (addressActivityFeatureEnabled()) watchOnly = [...addressActivityWatchedMap().entries()].filter(([, kind]) => kind !== "chatting").map(([address]) => address);
+  } catch { watchOnly = []; }
+  return {
+    watchedAddresses: watched,
+    watchedGroupIds: groups.ids,
+    aliases,
+    broadcastChannels: rooms.channels,
+    hiddenBroadcastSenders: rooms.hidden,
+    kaposts,
+    kapostsWatchAuthors: watchAuthors,
+    watchOnlyAddresses: watchOnly,
+  };
+}
+
+/** What the worker may know to word a push (public/sw-push.js): names, flags, labels. */
+function webPushMirror() {
+  const names = {};
+  const quiet = [];
+  let count = 0;
+  for (const contact of state.contacts || []) {
+    if (!contact?.address || count >= 3000) continue;
+    const address = contact.address.toLowerCase();
+    const name = isOwnChattingAddress(contact.address) ? "" : String(displayNameForAddress(contact) || "").trim();
+    if (name) { names[address] = name.slice(0, 64); count += 1; }
+    if (getContactNotifyOverride(contact.address) === "noSound") quiet.push(address);
+  }
+  const groups = webPushGroupStreams();
+  for (const [address, name] of Object.entries(groups.memberNames)) if (name && !names[address]) names[address] = name;
+  const addressLabels = {};
+  try { for (const [address, kind] of addressActivityWatchedMap()) addressLabels[address.toLowerCase()] = describeActivityAddress(kind, address); } catch { /* no labels */ }
+  let blocked = [];
+  try { blocked = [...chatRequestState().blocked]; } catch { blocked = []; }
+  return {
+    account: (engine.address || "").toLowerCase(),
+    unit: KAS_UNIT,
+    sound: (accountShellPrefs.notificationSound ?? true) !== false,
+    childMode: isChildModeEnabled(),
+    names, quiet, blocked, groups: groups.mirror, addressLabels,
+  };
+}
+
+/** What is on screen, in the worker's terms (sw-push.js routeKey): it keeps quiet for it. */
+function webPushFocusKey() {
+  if (!engine.address || !appIsInFront()) return "";
+  if (activeGroupId) return `group:${activeGroupId}`;
+  try { const room = activeBroadcastChannelName(); if (room && currentAppTab === "broadcasts") return `room:${String(room).toLowerCase()}`; } catch { /* rooms not started */ }
+  const conversationEntry = activeConversationId ? state.conversations.find((entry) => entry.id === activeConversationId) : null;
+  const address = conversationEntry ? contactForConversation(conversationEntry)?.address : "";
+  return address ? `chat:${address.toLowerCase()}` : "";
+}
+
+// A push arrived while this page is open (perhaps hidden): fetch now, so the real message replaces
+// the push's "New message" and the chat is up to date when you look.
+let pushFetchTimer = 0;
+initWebPush({
+  network: () => (IS_TESTNET ? "testnet" : "mainnet"),
+  endpoint: () => getEndpoint("pushIndexer"),
+  enabled: () => pushNotificationsEnabled(),
+  wallet: () => (engine.privateKeyHex && engine.address ? { privateKeyHex: engine.privateKeyHex, address: engine.address } : null),
+  collect: collectWebPushRegistration,
+  mirror: webPushMirror,
+  focusKey: webPushFocusKey,
+  log: (text) => appendEngineLog(text),
+  onStatus: () => renderWebPushStatus(),
+  onPush: () => {
+    if (pushFetchTimer || !engine.address) return;
+    pushFetchTimer = window.setTimeout(() => {
+      pushFetchTimer = 0;
+      refreshAllConversations({ quiet: true }).catch(() => { /* the sweep catches up */ });
+    }, 1200);
+  },
+});
+routePendingNotificationClick();
 
 document.querySelector("[data-generate-wallet]")?.addEventListener("click", openCreateAccountModal);
 
@@ -27752,6 +28106,8 @@ queueMicrotask(async () => {
       // Background activity pings (Settings > Notifications > KaPosts).
       shouldNotifyKaPostsAction,
       postDesktopNotification,
+      // The bell beside Follow changed: the push registration carries the list.
+      onPushPreferencesChanged: () => scheduleWebPushSync(),
       // OS-notification clicks land on the exact post — the KaPosts tab must be
       // fronted first since the ping can arrive while another tab is active.
       openKaPostsTab: () => setActiveAppTab("kaposts"),
@@ -27924,6 +28280,8 @@ queueMicrotask(async () => {
       daySeparatorLabel,
       // Per-channel bell: OS pings for live messages in notify-enabled channels.
       postDesktopNotification,
+      // A bell, a joined room or a hidden sender changed: the push registration follows.
+      onPushPreferencesChanged: () => scheduleWebPushSync(),
       // Fresh incoming broadcast messages feed the global notification center (gated to LIVE
       // arrivals so the initial history backfill doesn't flood it).
       // Rooms no longer feed the profile bell (iOS 2010124): the Public Chats tab counts them.
@@ -27964,6 +28322,49 @@ queueMicrotask(async () => {
       formatFiatValue,
     });
   } catch (error) { appendEngineLog(`initColdStorage did not start: ${error?.message || error}`); }
+  try {
+    initSwaps({
+      engine, escapeHtml, accountScopedKey, showToast: showCopyToast,
+      explorerAddressUrl, addressCopiedToastText, copyTextToClipboard,
+      currencySymbol: () => currencyMeta().symbol.trim(),
+      // Choose Address (iOS SwapAddressPickerView): every revealed spending address of either chain
+      // with its balance and used flag. Hidden ones are left out before anything is asked of the
+      // network, and the rest are checked a few at a time.
+      listSpendingAddresses: async () => {
+        if (!activeAccountMnemonic()) return [];
+        const state = getSpendingState();
+        const hidden = new Set(state.hidden.map(Number));
+        const rows = [];
+        for (const index of spendingRevealedIndices(state)) {
+          if (hidden.has(index) && index !== state.activeIndex) continue;
+          const address = deriveSpendingAddressAt(index);
+          if (address) rows.push({ index, address });
+        }
+        const entries = [];
+        for (let i = 0; i < rows.length; i += 8) {
+          const chunk = await Promise.all(rows.slice(i, i + 8).map(async ({ index, address }) => {
+            const usage = await spendingUsageFor(address);
+            return { index, address, label: spendingLabelFor(state, index), shortAddress: spendingShortAddress(address), kas: usage.kas, used: usage.used, hidden: false };
+          }));
+          entries.push(...chunk);
+        }
+        return entries;
+      },
+      // A swap payout takes the next LEGACY slot (iOS 28ecee0 SwapService.nextFreshSpendingIndex /
+      // generateNextSpendingAddress), never a quantum one: one past the legacy chain.
+      nextFreshSpendingIndex: () => (activeAccountMnemonic() ? getSpendingState().maxIndex + 1 : null),
+      spendingAddressAt: (index) => deriveSpendingAddressAt(index),
+      revealNextSwapAddress: async () => {
+        if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
+        const owner = engine.address;
+        const next = getSpendingState(owner).maxIndex + 1;
+        saveSpendingState({ maxIndex: next }, owner);
+        try { renderSpendingList(); } catch { /* the address screens are not up */ }
+        return next;
+      },
+      openSpendingAddresses: () => openSpendingManageScreen(),
+    });
+  } catch (error) { appendEngineLog(`initSwaps did not start: ${error?.message || error}`); }
   try {
     initNextcloud({
       accountScopedKey, escapeHtml, appendEngineLog,
@@ -28101,8 +28502,8 @@ queueMicrotask(async () => {
         canNotify: () => typeof Notification !== "undefined" && Notification.permission === "granted",
         notify: ({ id, title, body, name }) => {
           showAppNotification({
-            title, body, tag: id, silent: (accountShellPrefs.notificationSound ?? true) === false,
-            route: { kind: "tab", tab: "kachat-names" },
+            title, body, tag: id, key: id, silent: (accountShellPrefs.notificationSound ?? true) === false,
+            route: { kind: "tab", tab: "kachat-names", name },
             onClick: () => openKachatNameFromBell(name, { showTab: () => setActiveAppTab("kachat-names") }),
           }).catch(() => { /* best-effort */ });
         },
@@ -28287,8 +28688,13 @@ queueMicrotask(async () => {
         if (!conversationEntry) throw new Error("No chat with this contact.");
         queueConversationMessage(conversationEntry.id, json);
       },
+      // A tag per caller (a missed call replaces that caller's earlier one) and a route, so a tap
+      // that reopens a closed app still lands in the chat.
       notify: ({ title, body, route }) => postDesktopNotification({
         title, body,
+        tag: route?.address ? `kachat-call-${String(route.address).toLowerCase()}` : undefined,
+        key: `${route?.address || ""}|${title || ""}|${Math.floor(Date.now() / 60_000)}`,
+        route: route?.address ? { kind: "chatAddress", address: route.address } : null,
         onClick: () => { if (route?.address) openChatWithAddress({ address: route.address }); },
       }),
     });
@@ -28344,6 +28750,8 @@ queueMicrotask(async () => {
 
   if (wasmReady) {
     const restored = restorePersistedTestingWallet();
+    // Swap derived its payout preview before the wallet was back; derive it now.
+    if (restored) { try { resetSwapsForAccount(); } catch { /* not started */ } }
     updateWalletUi();
     updateServiceSummary();
     if (!restored && !engine.address && loggedOutScreen && loggedOutScreen.hidden) {
@@ -28549,7 +28957,7 @@ function isReplyToMyGroupMessage(text) {
 // available while it is on, exactly as the existing 1:1 and mention paths behave.
 function groupOsPingAllowed(groupId) {
   if ((accountShellPrefs.chatNotifications ?? true) === false) return false;
-  if (activeGroupId === groupId && !document.hidden) return false;
+  if (activeGroupId === groupId && appIsInFront()) return false;
   return true;
 }
 
@@ -28594,7 +29002,9 @@ function maybeNotifyGroupIncoming(groupId, senderAddress, text, id, createdAt) {
   postDesktopNotification({
     title: group?.name || "Group",
     body: `${groupNotificationSenderName(senderAddress)}: ${groupPreviewText(text) || "New message"}`,
+    // One per group (the tag a closed-app push for this group uses too); one per message across tabs.
     tag: `kachat-group-${groupId}`,
+    key: String(id || createdAt || ""),
     route: { kind: "group", groupId },
     onClick: () => { setActiveAppTab("chats"); try { openGroupChat(groupId); } catch {} },
   });
@@ -28996,6 +29406,7 @@ function setGroupUnread(groupId, count) {
   if (!all[wallet]) all[wallet] = {};
   all[wallet][groupId] = Math.max(0, count | 0);
   try { localStorage.setItem(GROUP_UNREAD_KEY, JSON.stringify(all)); } catch {}
+  scheduleAppBadgeUpdate();
 }
 /** What a group's row shows: a non-admin group never opened reads at least 1 (iOS). */
 function groupDisplayUnread(g, opened = openedGroupIds()) {
@@ -32372,3 +32783,6 @@ document.addEventListener("keydown", (event) => {
   if (groupCreateModal && !groupCreateModal.hidden) { closeGroupCreate({ cancelled: true }); return; }
   if (groupChatScreen && !groupChatScreen.hidden) { closeGroupChat(); }
 });
+
+// The app has drawn its first screen: the launch screen in index.html can go.
+document.documentElement.classList.add("app-ready");

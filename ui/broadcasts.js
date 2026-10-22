@@ -455,15 +455,37 @@ function migrateCachedReactionRows() {
 
 function saveChannels() {
   localStorage.setItem(deps.accountScopedKey(CHANNELS_KEY), JSON.stringify(joinedChannels));
+  deps.onPushPreferencesChanged?.();
 }
 
+// Hidden senders and the bells are part of what the push service is told (broadcastPushWatch).
 function saveHidden() {
   localStorage.setItem(deps.accountScopedKey(HIDDEN_KEY), JSON.stringify(hiddenByRoom));
+  deps.onPushPreferencesChanged?.();
 }
 
 function saveNotify() {
   localStorage.setItem(deps.accountScopedKey(NOTIFY_KEY), JSON.stringify(notifyByChannel));
+  deps.onPushPreferencesChanged?.();
 }
+
+/** What the push service needs for closed-app room notifications (iOS
+ *  collectWatchedPublicChatChannels / collectHiddenPublicChatSenders): the indexer-tracked rooms
+ *  whose bell is on, and per room the senders hidden there. */
+export function broadcastPushWatch() {
+  if (!deps) return { channels: [], hidden: {} };
+  const channels = joinedChannels
+    .filter((name) => notifyByChannel[name] && isIndexerTrackedBroadcastChannel(name) && curatedShown(name))
+    .sort();
+  const hidden = {};
+  for (const name of channels) {
+    const list = [...hiddenIn(name)];
+    if (list.length) hidden[name] = list.sort();
+  }
+  return { channels, hidden };
+}
+/** The room on screen, if any (the push worker keeps quiet for it while the app is in front). */
+export function activeBroadcastChannelName() { return activeChannel || null; }
 
 function saveRetention() {
   localStorage.setItem(deps.accountScopedKey(RETENTION_KEY), JSON.stringify(retentionByChannel));
@@ -846,7 +868,8 @@ function mergeMessages(channel, rows) {
   const hiddenHere = hiddenIn(channel);
   const pingable = freshIncoming.filter((row) =>
     notifyByChannel[row.channel]
-    && row.channel !== activeChannel
+    // The room you are reading stays quiet only while the app is in front (iOS isViewing + active).
+    && (row.channel !== activeChannel || document.hidden || !document.hasFocus())
     && !hiddenHere.has(row.senderAddress)
     && Number(row.blockTime || 0) >= broadcastSessionStartMs);
   for (const row of pingable.slice(0, 3)) {

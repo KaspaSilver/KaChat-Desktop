@@ -5939,6 +5939,8 @@ body.session-logged-out [data-account-rename-modal] {
   .initial-sync-spinner { animation-duration: 2.4s; }
 }
 .initial-sync-modal .linklike-button { margin-top: 16px; }
+/* "You're all set": the Done button sat flush against the line above it. */
+.initial-sync-modal .modal-actions { margin-top: 20px; }
 .initial-sync-check svg {
   width: 44px; height: 44px; fill: none;
   stroke: var(--ios-green); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
@@ -14385,7 +14387,9 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
      across the width in the label colour (each opens its own page, so none stays highlighted and
      there is no Feed item - closing the page is the way back). */
   .kaposts-rail { display: grid; grid-template-columns: repeat(9, 1fr); align-items: center; padding: 0 8px; border-bottom: 0; overflow: visible; }
-  .kaposts-rail > .kaposts-title { display: block; grid-column: 1 / -1; margin: 0 0 8px 8px; }
+  /* The rail's own 8px side padding already insets the row, so the title takes none of its own:
+     it lines up with every other tab's large title. */
+  .kaposts-rail > .kaposts-title { display: block; grid-column: 1 / -1; margin: 0 0 8px; }
   .kaposts-rail [data-kaposts-rail="feed"] { display: none; }
   .kaposts-rail .kaposts-rail-item { min-width: 0; padding: 6px 0; justify-content: center; color: var(--text); background: none; border: 0; box-shadow: none; }
   .kaposts-rail .kaposts-rail-item.active { color: var(--text); background: none; }
@@ -14660,3 +14664,94 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .message-avatar:has(> img:not([hidden])) > .avatar-person-glyph,
 .conversation-avatar:has(> img:not([hidden])) > [data-conversation-avatar-initials],
 .chat-info-avatar:has(> img:not([hidden])) > [data-chat-info-avatar-initials] { display: none; }
+
+/* ---- Phone sheets ----------------------------------------------------------------------------
+   On a phone a dialog is an iOS sheet, not a card floating in the middle of the screen: it rises
+   from the bottom edge, spans the width, carries a grabber, and a downward drag closes it (see
+   ui/sheets.js). Alerts, blocking progress and the onboarding guide stay centred, as iOS centres
+   its alerts. Touch phones only - a narrow desktop window keeps the cards. */
+@media (max-width: 620px) {
+  html.touch .modal-backdrop.as-sheet {
+    place-items: end center;
+    padding: calc(10px + var(--safe-top)) 0 0;
+  }
+  html.touch .modal-backdrop.as-sheet > * {
+    position: relative;
+    width: 100%;
+    max-width: none;
+    max-height: 100%;
+    margin: 0;
+    border-radius: 14px 14px 0 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-right: 0;
+    padding-top: 26px;
+    padding-bottom: calc(20px + var(--safe-bottom));
+  }
+  html.touch .modal-backdrop.as-sheet.sheet-enter > * { animation: phone-sheet-up .32s cubic-bezier(.2, .9, .25, 1); }
+  html.touch.keyboard-open .modal-backdrop.as-sheet > * { padding-bottom: 16px; }
+  /* The grabber (iOS .presentationDragIndicator). */
+  html.touch .modal-backdrop.as-sheet > *::before {
+    content: "";
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    width: 36px;
+    height: 5px;
+    margin-left: -18px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--text) 28%, transparent);
+  }
+  html.touch .modal-backdrop.as-sheet.sheet-dragging > * { transition: none; }
+  html.touch .modal-backdrop.as-sheet.sheet-settling > * { transition: transform .22s ease; }
+}
+@keyframes phone-sheet-up { from { transform: translateY(100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  html.touch .modal-backdrop.as-sheet.sheet-enter > * { animation: none; }
+}
+/* With the keyboard up the layout viewport keeps its height on iOS, so anything pinned to the
+   bottom of a fixed full-screen layer sits behind the keyboard. Overlays shrink to the visible
+   part instead (--app-h, ui/pwa.js), keeping a sheet's field and buttons above the keys. */
+html.keyboard-open .modal-backdrop,
+html.keyboard-open .account-overlay { bottom: auto; height: var(--app-h); }
+/* Sheets put focus on their first control when they open (for keyboards on a desktop); on a
+   touch screen Safari then draws the keyboard focus ring around a tile nobody pressed. A phone
+   app never shows that ring, so touch devices drop it on buttons and button-like rows. */
+html.touch :is(button, [role="button"], a, .action-tile):focus-visible { outline: none; }
+/* The password form's username for password managers (index.html): present, never seen. */
+.password-username { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; overflow: hidden; }
+/* The left-edge back swipe's chevron (ui/edge-back.js): slides in with the finger, fills in once
+   letting go would go back. */
+.edge-back-indicator {
+  position: fixed; left: 0; z-index: 6000;
+  width: 40px; height: 40px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--glass-fill, rgba(40,40,44,.9));
+  border: .8px solid var(--glass-stroke, rgba(255,255,255,.12));
+  -webkit-backdrop-filter: var(--glass-blur, blur(20px)); backdrop-filter: var(--glass-blur, blur(20px));
+  color: var(--text);
+  pointer-events: none;
+  transition: background-color .12s ease, color .12s ease;
+}
+.edge-back-indicator[hidden] { display: none; }
+.edge-back-indicator svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.edge-back-indicator.armed { background: var(--kaspa); color: #fff; border-color: transparent; }
+/* Launch screen (index.html). Gone the moment the app is ready - no fade: a transition does not
+   run while the page is in the background, and a launch that finishes there would come to the
+   front still covered. The delayed animation is the backstop, so a start that fails part-way
+   never leaves the logo over an app that did draw. */
+.boot-splash {
+  position: fixed; inset: 0; z-index: 9000;
+  display: grid; place-items: center;
+  background: #000;
+  pointer-events: none;
+  animation: boot-splash-out .3s ease 12s forwards;
+}
+.boot-splash img { width: 96px; height: 96px; border-radius: 22px; }
+html.app-ready .boot-splash { display: none; }
+@keyframes boot-splash-out { to { opacity: 0; visibility: hidden; } }
+/* Keyboard up: the dock and the home indicator are both under the keyboard, so nothing may keep
+   room for them. Every screen reserves --dock-inset for the dock, and the conversation kept that
+   strip (84pt + the home-indicator inset) empty between its composer and the keyboard. */
+html.keyboard-open { --dock-inset: 0px; --safe-bottom: 0px; }
+html.keyboard-open .sidebar-tabbar { display: none !important; }

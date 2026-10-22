@@ -3,6 +3,9 @@
 import { shouldRegisterServiceWorker } from "./origin-migration.js";
 // The KaChat logo the sign-in screen shows (the install card matches it).
 import kachatLogoUrl from "./assets/kachat-logo.png";
+// Dialogs as iOS sheets on a phone, and the left-edge swipe back.
+import "./sheets.js";
+import "./edge-back.js";
 
 // The app is not always served from the root: the published site lives under /desktop/, so every
 // path the web-app plumbing uses is built on Vite's base rather than written as root-absolute.
@@ -33,6 +36,9 @@ const standaloneMedia = window.matchMedia("(display-mode: standalone)");
 function syncStandalone() {
   const standalone = standaloneMedia.matches || window.navigator.standalone === true;
   root.classList.toggle("standalone", standalone);
+  // Installed, it is simply the KaChat app: the app switcher and share sheet show this title, and
+  // "KaChat Desktop" read wrong on a phone.
+  if (standalone && document.title === "KaChat Desktop") document.title = "KaChat";
 }
 syncStandalone();
 standaloneMedia.addEventListener?.("change", syncStandalone);

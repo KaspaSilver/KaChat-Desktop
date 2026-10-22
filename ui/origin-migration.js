@@ -548,6 +548,8 @@ function oldAddressLabel(cfg) { return `${hostOf(cfg.from)}${cfg.fromPath}`.repl
 function mountScreen(title) {
   ensureStyle();
   document.title = title;
+  // This card is the first screen on the old address: the launch screen must not cover it.
+  document.documentElement.classList.add("app-ready");
   for (const child of [...document.body.children]) {
     if (child.id === "kom-root") continue;
     child.inert = true;

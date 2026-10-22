@@ -78,4 +78,24 @@ assert.deepEqual(reorderVisible(["a", "kaposts", "b", "c"], ["c", "b", "a"], sim
 const list = ["a", "b"];
 assert.equal(reorderVisible(list, ["a"]), list, "a partial order is ignored");
 
+// ChangeNOW Swap is back (owner, 2026-10-22): assignable, and in the Hub by default right after
+// KaChat Bots, where iOS defaultHub has it.
+assert.ok(DOCK_ASSIGNABLE.includes("swaps"));
+assert.ok(!DOCK_DEFAULT.includes("swaps"), "Swap starts in the Hub, not the dock");
+assert.equal(HUB_DEFAULT.indexOf("swaps"), HUB_DEFAULT.indexOf("kachat-bots") + 1);
+// An arrangement saved while Swap was gone gets it back, at the end of the Hub; nothing else moves.
+const beforeSwap = { dock: ["hub", "portfolio", "chats", "kaposts", "profile"], hub: ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "apps", "chess"] };
+const restoredSwap = norm(beforeSwap);
+assert.deepEqual(restoredSwap.dock, beforeSwap.dock);
+assert.deepEqual(restoredSwap.hub, [...beforeSwap.hub, "swaps"]);
+everyPlaced(restoredSwap);
+// It can be put in the dock like any other pick, and sent back.
+const swapInDock = addToDock(removeFromDock(restoredSwap, "kaposts"), "swaps");
+assert.deepEqual(swapInDock.dock, ["hub", "portfolio", "chats", "profile", "swaps"]);
+assert.deepEqual(removeFromDock(swapInDock, "swaps").hub[0], "swaps");
+// Simple Mode hides it (ui/childmode.js CHILD_HIDDEN_TABS) without writing it out.
+const noSwap = (tab) => tab !== "swaps";
+assert.equal(dockIsFull(swapInDock, noSwap), false);
+everyPlaced(swapInDock);
+
 console.log("dock arrangement: ok");
