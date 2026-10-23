@@ -11896,7 +11896,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 230;
+const APP_BUILD = 231;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -20377,6 +20377,10 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
   );
   // A deleted chat is no longer one you accepted (or made Private): if they start a new one, it is
   // a Message Request like any stranger's. A block stays (iOS 4b00a5f forgetChatAcceptance).
+  // Nor one you already introduced yourself in: writing to them again starts over, so your first
+  // message carries their inbox tag again (kchat:1:dm:, firstContactInboxTag) and reaches them as a
+  // new request even if they deleted the chat too - not a plain comm message only an open chat
+  // would pick up. Their old messages stay out (the deletion tombstone), so it is first contact.
   {
     const s = chatRequestState();
     let changed = false;
@@ -20384,6 +20388,7 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
       const key = String(contact.address || "").toLowerCase();
       if (s.accepted.delete(key)) changed = true;
       if (s.privateChats.delete(key)) changed = true;
+      if (s.inboxTagged.delete(key)) changed = true;
     }
     if (changed) saveChatRequestState(s);
   }
