@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import { createRelay } from "./tools/relay-guard.mjs";
 import { securityHeaders } from "./tools/security-headers.mjs";
@@ -64,8 +65,27 @@ function nextcloudProxy() {
   };
 }
 
+// The launch screen (index.html .boot-splash) shows "KaChat 5.2.2 (231)" under the Kaspa logo
+// before any script has run, so the label is written into the HTML here - read from ui/app.js's
+// APP_VERSION / APP_BUILD each time, so it can never disagree with the one Settings shows.
+function appVersionLabel() {
+  return {
+    name: "kachat-app-version-label",
+    transformIndexHtml(html) {
+      let label = "";
+      try {
+        const source = readFileSync(new URL("./ui/app.js", import.meta.url), "utf8");
+        const version = source.match(/^const APP_VERSION = "([^"]+)";/m)?.[1];
+        const build = source.match(/^const APP_BUILD = (\d+);/m)?.[1];
+        if (version && build) label = `KaChat ${version} (${build})`;
+      } catch { /* the label stays empty */ }
+      return html.replace("%KACHAT_VERSION_LABEL%", label);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [nextcloudProxy()],
+  plugins: [nextcloudProxy(), appVersionLabel()],
   // The Kaspa SDK is wasm-bindgen output, and its generated glue checks that an object handed
   // across the boundary is an instance of the expected class - reporting the constructor's NAME
   // when it is not. Minification renames classes, so on the built site `new Resolver()` arrived as

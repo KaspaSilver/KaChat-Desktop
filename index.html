@@ -26,10 +26,11 @@
   <meta name="apple-mobile-web-app-title" content="KaChat" />
 </head>
 <body class="chats-tab">
-  <!-- Launch screen: the logo on black from the first paint until the app has drawn its first
-       screen (html.app-ready, set at the end of ui/app.js), so opening the home-screen app is not a
-       plain black screen while it loads. Pure CSS: shows before any script has run. -->
-  <div class="boot-splash" aria-hidden="true"><img src="./ui/assets/kachat-logo.png" alt="" /></div>
+  <!-- Launch screen: the Kaspa logo and the version on black from the first paint until the app
+       has drawn its first screen (html.app-ready, set at the end of ui/app.js), as the iOS app shows
+       it, so opening the home-screen app is not a plain black screen while it loads. Pure CSS:
+       shows before any script has run; the version is written in at build time (vite.config.mjs). -->
+  <div class="boot-splash" aria-hidden="true"><img src="./ui/assets/kaspa-logo.png" alt="" /><span class="boot-splash-version">%KACHAT_VERSION_LABEL%</span></div>
   <section class="logged-out-screen" data-logged-out-screen hidden aria-label="KaChat saved accounts">
     <!-- App-wide settings without an account (iOS accounts-screen App Settings cog):
          opens the same settings overlay limited to app-wide categories. -->

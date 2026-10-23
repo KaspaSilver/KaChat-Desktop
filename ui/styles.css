@@ -14748,7 +14748,13 @@ html.touch :is(button, [role="button"], a, .action-tile):focus-visible { outline
   pointer-events: none;
   animation: boot-splash-out .3s ease 12s forwards;
 }
-.boot-splash img { width: 96px; height: 96px; border-radius: 22px; }
+/* The Kaspa logo with the version just under it, together in the middle of the screen (iOS
+   launch). A flex column centred both ways: a grid gave each of the two items half the screen, so
+   the logo sat high and the version low. */
+.boot-splash { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; }
+.boot-splash img { width: 72px; height: 72px; }
+.boot-splash-version { color: rgba(235, 235, 245, .55); font: 500 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.boot-splash-version:empty { display: none; }
 html.app-ready .boot-splash { display: none; }
 @keyframes boot-splash-out { to { opacity: 0; visibility: hidden; } }
 /* Keyboard up: the dock and the home indicator are both under the keyboard, so nothing may keep
