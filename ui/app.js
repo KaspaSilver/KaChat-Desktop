@@ -596,6 +596,18 @@ async function withVaultTarget(address, fn) {
   try { return await fn(); } finally { vaultTargetOverride = previous; }
 }
 configureKeyVault({ canonicalize: canonicalAccountAddress, target: currentVaultTarget });
+// Every KAS you send asks first (owner, 2026-10-23): Face ID where it is set up (the prompt's
+// "Use Face ID"), else the account's password. engine.confirmSpend calls this before any send,
+// sweep or .kachat transfer is built, so no screen can skip it; chat messages are not KAS sends.
+async function authorizeKasSpend({ to = "", amountKas = null, max = false, amountSompi = null, domain = "" } = {}) {
+  if (!hasAppPassword()) return true; // nothing to confirm with (every account sets one at creation)
+  let what;
+  if (domain) what = `${domain} to ${shortAddress(to)}`;
+  else if (max) what = amountSompi != null ? `${trimKas8(Number(amountSompi) / 1e8)} ${KAS_UNIT} (Max) to ${shortAddress(to)}` : `your full balance to ${shortAddress(to)}`;
+  else what = `${trimKas8(Number(amountKas))} ${KAS_UNIT} to ${shortAddress(to)}`;
+  return requestPassword({ mode: "verify", title: "Confirm Send", message: `Confirm sending ${what}.` });
+}
+engine.authorizeSpend = authorizeKasSpend;
 unlockKeyVaultFromSession(); // only after KaChat's own reload (reloadKaChat's 15 s one-time hand-off)
 // Signed in until Log Out, as the iOS app is (owner, 2026-10-22): the account that was open opens
 // again at launch with no password or Face ID; picking another saved account, and showing a seed
@@ -10121,6 +10133,7 @@ async function submitKnsTransfer() {
   } catch (error) {
     setKnsTransferBusy(false);
     showKnsTransferProgress(null);
+    if (error?.code === "SEND_CANCELLED") return; // asked before anything was built: nothing sent
     // Once a commit is out (or one from an earlier attempt is unfinished), Send must not come
     // back: pressing it would commit another 2 KAS. The button becomes Retry reveal (EXT-005).
     // A commit whose broadcast ended unclear (a timeout) also left a record: Finish transfer
@@ -11852,7 +11865,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 227;
+const APP_BUILD = 228;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -12219,6 +12232,8 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       try { onSent?.({ txid, destination, amountKas: sentKas }); } catch { /* chat bookkeeping must never break the send UI */ }
       refreshBalanceOnly({ quiet: true }).catch(() => {});
     } catch (error) {
+      // Face ID / the password was cancelled: nothing was sent, the sheet stays as it was.
+      if (error?.code === "SEND_CANCELLED") { if (els.progress) els.progress.hidden = true; return; }
       // WASM helpers sometimes throw plain strings — surface those too, never a bare
       // "Send failed." when the SDK actually said why.
       const message = String(error?.message || error || "").trim() || "Send failed.";
@@ -18192,6 +18207,13 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null) {
     appendEngineLog(`Instant tip sent: ${explorerTxUrl(finalTxid)}`);
     return finalTxid;
   } catch (error) {
+    // Cancelled at Face ID / the password: nothing was sent, so no failed bubble is left.
+    if (error?.code === "SEND_CANCELLED") {
+      conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry !== liveMessage && entry.id !== liveMessage?.id);
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      throw error;
+    }
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
     conversationEntry.updatedAt = Date.now();
     persistState();
@@ -18781,6 +18803,14 @@ async function sendTipNow(tipSompi) {
       onDone: () => { if (tipState === tip) closeTipModal({ force: true }); },
     });
   } catch (error) {
+    if (error?.code === "SEND_CANCELLED") {
+      // Cancelled at Face ID / the password: nothing was sent, no failed bubble, the sheet stays.
+      conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      tip.sending = false;
+      return;
+    }
     if (error?.code === MAX_AMOUNT_CHANGED) {
       // Nothing was sent: no failed bubble, and the new Max goes in the field.
       conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
@@ -21479,6 +21509,7 @@ async function submitPaymentSheet() {
       onSubmitted: () => { closePaymentSheet({ force: true }); resetPaymentSheetFields(); },
     });
   } catch (error) {
+    if (error?.code === "SEND_CANCELLED") return; // nothing sent; the sheet is still up as it was
     if (error?.code === MAX_AMOUNT_CHANGED && isPaySheetOpen()) {
       // The coins changed under the Max: the new one goes in the field, and nothing was sent.
       await fillPaymentMax();
@@ -21902,8 +21933,9 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     } catch (error) {
-      if (error?.code === MAX_AMOUNT_CHANGED) {
-        // Nothing was sent: the Max is recomputed on the sheet, so no failed bubble is left.
+      if (error?.code === "SEND_CANCELLED" || error?.code === MAX_AMOUNT_CHANGED) {
+        // Nothing was sent (cancelled at Face ID / the password, or the Max is recomputed on the
+        // sheet), so no failed bubble is left.
         conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
         persistState();
         if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -28184,6 +28216,7 @@ queueMicrotask(async () => {
             .then(() => { try { onTipped?.(); } catch { /* the feed moved on */ } })
             // iOS: "Tip didn't send: <why>", then the amount screen so it can go by hand.
             .catch(async (error) => {
+              if (error?.code === "SEND_CANCELLED") return; // cancelled at Face ID / the password
               const why = `Tip didn't send: ${userFacingError(error) || "Send failed."}`;
               await openTipModal({ address, name, tip, onTipped, error: why });
             });
@@ -28572,10 +28605,10 @@ queueMicrotask(async () => {
       escapeHtml, showToast: showCopyToast, confirmDialog, chooseDialog, alertDialog, promptDialog, infoSheet,
       openChat: (address) => openChatWithAddress({ address }),
       // The device lock in front of every .kachat transaction: iOS uses the gate the seed phrase and
-      // private keys use (DeviceAuth), so the desktop asks for the app password when that is on.
+      // private keys use (DeviceAuth); here Face ID where it is set up, else the password.
       deviceLock: async (reason) => {
-        if (!(accountShellPrefs.passwordForSeed && hasAppPassword())) return true;
-        return requestPassword({ mode: "verify", title: "Enter Password", message: reason || "Enter your password to confirm this transaction." });
+        if (!hasAppPassword()) return true;
+        return requestPassword({ mode: "verify", title: "Confirm Transaction", message: reason || "Confirm this transaction." });
       },
       walletAddress: () => engine.address || "",
       // The chatting address's balance in sompi (iOS currentWallet.balanceSompi), or null while unknown.

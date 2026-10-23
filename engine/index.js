@@ -1185,8 +1185,20 @@ export class KaspaEngine {
 
   // options.manualUtxos: coin control (outpoints the build may pick from; null = automatic).
   // options.extraFeeSompi: a priority fee in sompi on top of the minimum (Fast / Priority / custom).
+  /** Every KAS this wallet sends is confirmed first (owner, 2026-10-23: Face ID for every
+   *  transaction): the app sets `authorizeSpend` ({ to, amountKas, max }) => Promise<boolean>.
+   *  Unset (tests, tools), sends go ahead as before. A refusal throws SEND_CANCELLED. */
+  async confirmSpend(details) {
+    if (typeof this.authorizeSpend !== "function") return;
+    if (await this.authorizeSpend(details)) return;
+    const error = new Error("Send cancelled.");
+    error.code = "SEND_CANCELLED";
+    throw error;
+  }
+
   async send(destinationAddress, amountKas, feeKas = "0", options = {}) {
     this.requireWallet();
+    await this.confirmSpend({ to: destinationAddress, amountKas });
     await this.connect();
     return sendKaspa({
       kaspa: this.kaspa,
@@ -1216,6 +1228,7 @@ export class KaspaEngine {
   // feeSompi, outpoints }.
   async sendMax(destinationAddress, totalFeeKas = null, selectedOutpoints = null, options = {}) {
     this.requireWallet();
+    await this.confirmSpend({ to: destinationAddress, max: true, amountSompi: options?.expectedAmountSompi ?? null });
     await this.connect();
     return sendMaxKaspa({
       kaspa: this.kaspa,
@@ -1236,6 +1249,7 @@ export class KaspaEngine {
   // whose quantum spent mark it is (noteSpendingSpent); the active address at the call by default.
   async sendMaxFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, totalFeeKas = null, selectedOutpoints = null, owner = this.address, ...options }) {
     this.requireSdk();
+    await this.confirmSpend({ to: destinationAddress, max: true, amountSompi: options?.expectedAmountSompi ?? null });
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
     const result = await sendMaxKaspa({
@@ -1333,6 +1347,7 @@ export class KaspaEngine {
   // `manualUtxos` / `extraFeeSompi`: coin control and a priority fee on top, as for send().
   async sendFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false, owner = this.address }) {
     this.requireSdk();
+    await this.confirmSpend({ to: destinationAddress, amountKas });
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
     const result = await sendKaspa({
@@ -2043,6 +2058,7 @@ export class KaspaEngine {
   // the chatting identity transfers its own domain.
   // `revealPriorityFeeSompi`: the Send Domain sheet's fee (iOS KNSDomainSendView priorityFeeSompi).
   async transferKnsDomain({ domain, assetId, toAddress, mnemonic = null, spendingIndex = null, passphrase = "", passphraseForm = "nfkd", changeAddress = null, revealPriorityFeeSompi = undefined, onStatus = () => {} }) {
+    await this.confirmSpend({ to: toAddress, domain });
     this.requireWallet();
     await this.connect();
     let signer = null;
