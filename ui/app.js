@@ -4536,7 +4536,10 @@ async function firstContactInboxTag(contact, conversationEntry) {
   if (key === String(engine.address || "").toLowerCase()) return null;
   const s = chatRequestState();
   if (s.privateChats.has(key) || s.inboxTagged.has(key)) return null;
-  const wroteToUs = (m) => m?.direction === "incoming" && m?.messageType !== "payment";
+  // Only a real message counts as them writing first. A payment - even one sent from their chat
+  // with a memo (its kchat:1:pay: payload can come back through the message sync too) - doesn't
+  // mean they opened a chat with us, so the first reply still goes to their inbox.
+  const wroteToUs = (m) => m?.direction === "incoming" && !isPaymentLikeMessage(m);
   if ((conversationEntry?.messages || []).some(wroteToUs)) return null;
   // Addresses compare case-insensitively like the checks above (iOS IOS-008): an address typed or
   // scanned in upper case is still the established conversation, wherever its thread lives.
@@ -4546,6 +4549,13 @@ async function firstContactInboxTag(contact, conversationEntry) {
   if (heardFrom) return null;
   if (!(await inboxSupported())) return null;
   return engine.inboxTagFor(address);
+}
+function isPaymentLikeMessage(m) {
+  return m?.messageType === "payment"
+    || Boolean(m?.chatPayment)
+    || Boolean(m?.paymentAmountKas)
+    || String(m?.transport || "").startsWith("kaspa-payment")
+    || isChatPaymentPayloadHex(m?.payloadHex);
 }
 function noteInboxTagged(address) {
   const s = chatRequestState();
@@ -11896,7 +11906,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 233;
+const APP_BUILD = 234;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");

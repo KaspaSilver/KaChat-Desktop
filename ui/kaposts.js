@@ -1679,11 +1679,17 @@ function pollCardHtml(post) {
 // The bell beside Follow (iOS "bell" / "bell.fill"): outlined off, filled on (.kaposts-bell.on).
 const KAPOSTS_BELL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>`;
 
-function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false, showReply = true } = {}) {
+function sameAddress(a, b) {
+  return Boolean(a) && String(a).toLowerCase() === String(b || "").toLowerCase();
+}
+
+function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false, showReply = true, profileOf = "" } = {}) {
   const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
   const isMine = post.posterAddress === deps.engine.address;
   const isFollowing = prefs.following.includes(post.posterAddress);
+  // On that poster's own profile the header already has Follow: the rows keep their name whole.
+  const showFollow = !isMine && !(profileOf && sameAddress(post.posterAddress, profileOf));
   // The bell beside Follow, and what it just did (iOS a6bd60a).
   const isWatching = !isMine && isWatchingAuthor(post.posterAddress);
   const bellNote = bellNotes.get(post.id) || "";
@@ -1735,8 +1741,8 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
       <div class="kaposts-cell-main">
         <div class="kaposts-cell-head">
           <strong class="kaposts-cell-name" data-kaposts-profile="${pid}">${deps.escapeHtml(name)}</strong>
-          ${!isMine ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${pid}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
-          ${!isMine ? `<button class="kaposts-bell${isWatching ? " on" : ""}" type="button" data-kaposts-bell="${pid}" aria-label="${isWatching ? "Stop post notifications" : "Notify me when they post"}" title="${isWatching ? "Stop post notifications" : "Notify me when they post"}">${KAPOSTS_BELL_SVG}</button>` : ""}
+          ${showFollow ? `<button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-follow="${pid}">${isFollowing ? "Following" : "Follow"}</button>` : ""}
+          ${showFollow ? `<button class="kaposts-bell${isWatching ? " on" : ""}" type="button" data-kaposts-bell="${pid}" aria-label="${isWatching ? "Stop post notifications" : "Notify me when they post"}" title="${isWatching ? "Stop post notifications" : "Notify me when they post"}">${KAPOSTS_BELL_SVG}</button>` : ""}
           <button class="kaposts-action kaposts-more" type="button" data-kaposts-more="${pid}" aria-label="More">
             <svg viewBox="0 0 24 24"><path d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/></svg>
           </button>
@@ -3274,7 +3280,7 @@ function renderPanel() {
       ? `<img class="kaposts-profile-banner-img" alt="" decoding="async" referrerpolicy="no-referrer" data-banner-fit data-kaposts-kachat-img="banner" src="${deps.escapeHtml(profile.bannerUrl)}" />`
       : "";
     const knsBanner = profile.kachat ? "" : safeCssUrl(profile.bannerUrl);
-    const isMine = address === deps.engine.address;
+    const isMine = sameAddress(address, deps.engine.address);
     const isFollowing = prefs.following.includes(address);
     // Your own profile merges session posts the indexer has not stamped yet (still pending, or
     // too fresh), newest first - a post you just made belongs on your own Posts tab.
@@ -3322,7 +3328,7 @@ function renderPanel() {
                 panel.tab === "replies" ? "No replies yet" : "No posts yet",
                 isMine ? (panel.tab === "replies" ? "Replies you post will show up here." : "Your posts will show up here.") : null,
               )
-            : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true })).join("")}
+            : feedItems.map((post) => postCellHtml(post, { inThread: true, openByRemote: true, profileOf: address })).join("")}
       </div>`;
     // The whole banner at the full width, at its own proportions (iOS c66bfc7).
     // A .kachat <img> banner sizes its box itself when it loads (banner-fit.js data-banner-fit).
