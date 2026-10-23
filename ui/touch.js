@@ -18,6 +18,15 @@ function swallowRelease() {
 
 export const isTouchDevice = () => window.matchMedia("(hover: none) and (pointer: coarse)").matches;
 
+/** On a phone, switching chats (or leaving one) lets go of the message field, so the keyboard
+ *  comes down. Mobile Safari doesn't move focus to a tapped button: the field from the last chat
+ *  stayed focused, and the next chat - which reuses it - opened with the keyboard already up. */
+export function releaseTypingFocus() {
+  if (!isTouchDevice()) return;
+  const el = document.activeElement;
+  if (el instanceof HTMLElement && el.matches('input, textarea, [contenteditable="true"]')) el.blur();
+}
+
 /**
  * Long-press on `el` (or, with `selector`, on a matching descendant - for lists that delegate)
  * calls `onLongPress` with an object shaped like the contextmenu event the desktop handler

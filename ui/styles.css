@@ -14817,3 +14817,11 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
   .chat-funding-gate canvas, .chat-funding-gate-address { display: none; }
   .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px 14px; }
 }
+/* The Seed Phrase sheet's title and close sit on their own above the content (iOS navigation
+   bar). As a phone sheet its top padding fell to the sheets' 26px and the title landed on the
+   Security Warning card - the content starts under the title row again. */
+@media (max-width: 620px) {
+  html.touch .modal-backdrop.as-sheet > .recovery-hold-modal { padding-top: 76px; justify-content: flex-start; }
+  html.touch .modal-backdrop.as-sheet > .recovery-hold-modal .recovery-title { top: 30px; }
+  html.touch .modal-backdrop.as-sheet > .recovery-hold-modal .recovery-close { top: 20px; right: 16px; }
+}

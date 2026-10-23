@@ -21,7 +21,7 @@ import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paym
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { mediaFrameByteLength, mediaFrameForEnvelope } from "../engine/media-frame.js";
-import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, kaPostsUnseenCount, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
+import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave } from "./chess-tournaments.js";
@@ -103,7 +103,7 @@ import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
 import addressExplainerUrl from "./assets/address-explainer.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
-import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
+import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
@@ -3893,6 +3893,7 @@ function updateActiveRowHighlight() {
 }
 
 function setActiveConversationId(id) {
+  if (id !== activeConversationId) releaseTypingFocus();
   // A chat and a public room share the detail pane too: opening a chat closes the room.
   if (id && publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
   activeConversationId = id;
@@ -10947,7 +10948,9 @@ const hubEmpty = document.querySelector("[data-hub-empty]");
 function tabUnreadCount(tab) {
   try {
     if (tab === "profile") return unreadNotifCount();
-    if (tab === "kaposts") return kaPostsUnseenCount();
+    // KaPosts has no count on its dock tab or Hub tile: its unseen notifications show only on the
+    // bell inside KaPosts (owner, 2026-10-23). It stays in refreshTabBadges' list so an old badge
+    // is taken off.
     if (tab === "broadcasts") return broadcastUnreadTotal();
   } catch {}
   return 0;
@@ -11908,7 +11911,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 239;
+const APP_BUILD = 240;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -20184,12 +20187,12 @@ async function openChatCircleSheet(id) {
     if (choice === "delete") {
       const ok = await confirmDialog({
         title: "Delete Group?",
-        message: "This removes this group and its messages from this device. This cannot be undone, and other members won't be notified.",
+        message: `This removes this group and its messages from this device. This cannot be undone. ${groupDeleteMembersLine([g.groupId])}`,
         confirmLabel: "Delete", destructive: true,
       });
       if (!ok) return;
-      if (activeGroupId === g.groupId) closeGroupChat();
-      try { mgr.deleteGroup(g.groupId); } catch { /* already gone */ }
+      const done = await deleteGroupsWithOwnerNotice([g.groupId]);
+      if (!done.length) return;
       dropChatCirclePins([id]);
       renderChatCircles();
       showCopyToast("Group deleted.");
@@ -20357,7 +20360,7 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   else title = `Delete ${total} Selected?`;
   const parts = [];
   if (chats) parts.push("This permanently deletes every message in each selected chat from this device. This cannot be undone.");
-  if (groups) parts.push("This removes each selected group and its messages from this device. This cannot be undone, and other members won't be notified.");
+  if (groups) parts.push(`This removes each selected group and its messages from this device. This cannot be undone. ${groupDeleteMembersLine([...selectedGroupIds])}`);
   if (rooms) parts.push("Rooms you added are removed with their messages. Default rooms are only switched off - turn them back on any time in Public Chats settings (the gear).");
   if (!await confirmDialog({ title, message: parts.join("\n\n"), confirmLabel: "Delete", destructive: true })) return;
   const chatIds = [...selectedChatConversationIds];
@@ -20365,11 +20368,7 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   const roomNames = [...selectedRoomNames];
   // iOS shows the chats toast, then the groups one over it; rooms have none.
   if (chatIds.length) deleteConversationsByIds(chatIds, { quiet: groupIds.length > 0 });
-  if (groupIds.length) {
-    const mgr = getGroupManager();
-    if (activeGroupId && groupIds.includes(activeGroupId)) closeGroupChat();
-    if (mgr) for (const id of groupIds) { try { mgr.deleteGroup(id); } catch { /* already gone */ } }
-  }
+  if (groupIds.length) await deleteGroupsWithOwnerNotice(groupIds);
   if (roomNames.length) { try { removeBroadcastRooms(roomNames); } catch { /* rooms not started */ } }
   dropChatCirclePins([...groupIds.map((id) => `g:${id}`), ...roomNames.map((name) => `r:${name}`)]);
   setChatSelectionMode(false);
@@ -29302,6 +29301,51 @@ function dedupeStoredGroupMessages(groupId) {
 function groupOtherMemberCount(record) {
   return (record?.members || []).filter((m) => m.address !== engine.address).length;
 }
+
+// Deleting a group you own tells the members first: one message in the group, so they know the
+// owner left and can keep talking or delete it too (owner, 2026-10-23). A member deleting only
+// removes it from their own device, as before.
+const GROUP_DELETED_BY_OWNER_TEXT = "Group was deleted by owner. You may continue using it or delete it as well.";
+/** True when deleting `groupId` posts the owner's notice: you are its admin and someone else is in it. */
+function groupDeleteNotifiesMembers(groupId) {
+  let g = null;
+  try { g = getGroupManager()?.getGroup(groupId); } catch { g = null; }
+  return Boolean(g?.isAdmin) && groupOtherMemberCount(g) > 0;
+}
+/** The confirm line about the other members for the groups about to be deleted. */
+function groupDeleteMembersLine(groupIds) {
+  return groupIds.some(groupDeleteNotifiesMembers)
+    ? "Members of a group you own get a message that you deleted it; they can keep using it."
+    : "Other members won't be notified.";
+}
+/** Posts the owner's notice in each group you own, then removes the groups from this device. A
+ *  notice that can't be sent (no KAS for the fee, offline) asks before deleting anyway. Returns
+ *  the ids actually deleted. */
+async function deleteGroupsWithOwnerNotice(groupIds) {
+  const mgr = getGroupManager();
+  if (!mgr) return [];
+  const deleted = [];
+  for (const id of groupIds) {
+    if (groupDeleteNotifiesMembers(id)) {
+      setStatus("Telling the group's members…");
+      try { await mgr.sendGroupMessage(id, GROUP_DELETED_BY_OWNER_TEXT); }
+      catch (error) {
+        const name = mgr.getGroup(id)?.name || "this group";
+        const anyway = await confirmDialog({
+          title: "Couldn't Tell the Members",
+          message: `The message that you deleted "${name}" wasn't sent: ${userFacingError(error)}\n\nDelete it from this device anyway?`,
+          confirmLabel: "Delete Anyway", destructive: true,
+        });
+        if (!anyway) continue;
+      }
+    }
+    if (activeGroupId === id) closeGroupChat();
+    try { mgr.deleteGroup(id); } catch { /* already gone */ }
+    deleted.push(id);
+  }
+  setStatus(deleted.length ? "Group deleted" : "");
+  return deleted;
+}
 // Estimate the total on-chain network fee for a group control operation and return a short line
 // to append to a await confirmText() prompt so the user sees the cost before committing. Best-effort — on
 // any failure it falls back to just the transaction count and never blocks the action.
@@ -29843,6 +29887,7 @@ function openGroupChat(groupId) {
   const mgr = getGroupManager();
   const g = mgr && mgr.getGroup(groupId);
   if (!g) return;
+  if (groupId !== activeGroupId) releaseTypingFocus();
   // A group and a public room share the detail pane: opening the group closes the room.
   if (publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
   markGroupOpened(groupId);
@@ -29885,6 +29930,7 @@ function openGroupChat(groupId) {
 // account's text is not filed into it. Also a click handler: an event argument keeps the draft.
 function closeGroupChat({ keepDraft = true } = {}) {
   const wasOpen = Boolean(activeGroupId);
+  if (wasOpen) releaseTypingFocus();
   if (wasOpen && groupComposerInput) {
     if (keepDraft !== false) saveDraft(`group:${activeGroupId}`, groupComposerInput.value);
     else { groupComposerInput.value = ""; try { autoGrowGroupComposer(); } catch { /* fine */ } }
@@ -32921,16 +32967,15 @@ groupManageBody?.addEventListener("click", async (event) => {
       const groupName = mgr.getGroup(activeGroupId)?.name || "Group";
       if (!await confirmDialog({
         title: `Delete "${groupName}"`,
-        message: "This removes the group and its messages from this device. This cannot be undone, and other members won't be notified.",
+        message: `This removes the group and its messages from this device. This cannot be undone. ${groupDeleteMembersLine([activeGroupId])}`,
         confirmLabel: "Delete",
         destructive: true,
       })) return;
       const id = activeGroupId;
       closeGroupManage();
-      closeGroupChat();
-      mgr.deleteGroup(id);
+      const done = await deleteGroupsWithOwnerNotice([id]);
+      if (!done.length) { openGroupChat(id); return; }
       renderGroupList();
-      setStatus("Group deleted");
     }
   } catch (error) {
     setStatus(`Group action failed: ${error.message}`);

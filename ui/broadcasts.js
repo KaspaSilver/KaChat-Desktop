@@ -26,7 +26,7 @@ import {
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, PROMPT_EXTRA, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
-import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
+import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
 const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
@@ -2060,6 +2060,7 @@ function cancelVoiceRecordingIfActive() {
 // ---------------------------------------------------------------------------
 
 function openRoom(channel) {
+  if (normalizeBroadcastChannel(channel) !== activeChannel) releaseTypingFocus();
   activeChannel = normalizeBroadcastChannel(channel);
   // Curated language rooms are not auto-joined, so opening one is what creates its row.
   if (activeChannel && isCuratedBroadcastChannel(activeChannel) && !joinedChannels.includes(activeChannel)) {
@@ -2119,6 +2120,7 @@ function handleTrackedRoomsChanged() {
 }
 
 function closeRoom() {
+  releaseTypingFocus();
   cancelVoiceRecordingIfActive();
   cancelBroadcastReply();
   if (activeChannel && composerInput) deps.saveDraft?.(`room:${activeChannel}`, composerInput.value);
