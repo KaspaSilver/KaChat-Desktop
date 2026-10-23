@@ -14265,7 +14265,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .settings-hub .settings-hub-row { background-size: calc(100% - 76px) .5px; background-position: left 60px bottom; }
 .settings-hub .settings-list-card > :last-child { background-image: none; }
 .settings-done-button { font-size: 17px; font-weight: 400; }
-@media (max-width: 859px) { .settings-hub { margin-top: 40px; } }
+/* Just under the toolbar: at 40px the list floated a hand's width below Done on a phone. */
+@media (max-width: 859px) { .settings-hub { margin-top: 12px; } }
 /* Pushed Settings page toolbar (iOS inline navigation title): round glass back button on the
    left, the page title centred, nothing else. */
 .settings-overlay-header.settings-pushed > .settings-health-button,
@@ -14769,3 +14770,7 @@ html.keyboard-open .sidebar-tabbar { display: none !important; }
 .kaposts-settings-modal .settings-page-form > .settings-toggle-row:not(:has(~ .settings-toggle-row:not([hidden]))) { background-image: none; }
 .kaposts-settings-modal .settings-list-card + .settings-list-card { margin-top: 24px; }
 .kaposts-settings-modal .settings-group-label { margin-top: 8px; }
+/* The Settings balance is centred on the toolbar's row (with Done), not on the whole header: on a
+   phone the header's top padding is the status bar's height, and centring on all of it put the
+   balance up in the status bar, half under the clock, while Done sat below it. */
+.settings-overlay-balance { top: calc(var(--safe-top, 0px) + (100% - var(--safe-top, 0px)) / 2); }

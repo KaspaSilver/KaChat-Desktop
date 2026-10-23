@@ -9,12 +9,25 @@
 const EDGE_PX = 24;          // the swipe must start this close to the left edge
 const TRIGGER_PX = 72;       // and travel this far right
 const BACK_SELECTOR = 'button[aria-label="Back"], button[aria-label^="Back to"]';
+// A full-screen panel (Settings, Connection Status, Notifications, User Info) at its top level has
+// no back button, only Done / Close / Cancel: with no back button showing, the swipe closes it, as
+// swiping a pushed screen away does on iOS.
+const CLOSE_SELECTOR = [
+  "[data-close-account-overlay]",
+  "[data-close-connection-overlay]",
+  "[data-close-notif-center]",
+  "[data-chat-info-cancel]",
+].map((sel) => `.account-overlay:not([hidden]) ${sel}`).join(", ");
 const phone = window.matchMedia("(hover: none) and (pointer: coarse)");
 
-/// The back button a tap could reach right now, or null: rendered, enabled, and the element at
-/// its centre is the button itself (not a sheet or overlay drawn over it).
+/// The back button a tap could reach right now - else a full-screen panel's Done - or null:
+/// rendered, enabled, and the element at its centre is the button itself (not a sheet or overlay
+/// drawn over it).
 function reachableBackButton() {
-  const candidates = [...document.querySelectorAll(BACK_SELECTOR)].reverse();
+  return reachable(BACK_SELECTOR) || reachable(CLOSE_SELECTOR);
+}
+function reachable(selector) {
+  const candidates = [...document.querySelectorAll(selector)].reverse();
   for (const button of candidates) {
     if (button.disabled || button.hidden || !button.getClientRects().length) continue;
     const rect = button.getBoundingClientRect();
