@@ -141,23 +141,39 @@ document.addEventListener("focusin", (event) => {
   }, 350);
 });
 
-// ---- "Add to Home Screen" nudge on iPhone/iPad Safari ---------------------------------------
-// Safari has no install prompt: the only way to get the app-like version (full screen, its own
-// icon, notifications) is Share > Add to Home Screen. Shown once, on iOS Safari, in a browser tab.
+// ---- "Add to Home Screen" nudge on iPhone / iPad ----------------------------------------------
+// iOS has no install prompt: the only way to get the app-like version (full screen, its own icon,
+// notifications) is Share > Add to Home Screen - in Safari, or in Chrome (iOS 16.4+). A link opened
+// inside another app (Telegram, X, Discord, Facebook, Instagram, Messages...) shows the page in that
+// app's own browser, whose Share sheet has no Add to Home Screen at all - the commonest reason
+// someone "can't add it" (their sheet offers "Open in Safari" instead). Some of those browsers say
+// who they are in the user agent and get told to open Safari; the rest look exactly like Safari, so
+// the Safari hint says what to do when the option is not there.
 const IOS_HINT_KEY = "kachat.pwa.iosHintDismissed";
-function isIosSafariTab() {
+const SHARE_GLYPH = `<svg viewBox="0 0 24 24" aria-label="Share"><path d="M12 3v13"/><path d="m7 8 5-5 5 5"/><path d="M5 12v8h14v-8"/></svg>`;
+/** Where this iPhone / iPad page is open, for the hint: "safari", "chrome", "in-app" (another
+ *  app's own browser), "other" (a browser without Add to Home Screen), or null (not iOS, or
+ *  already installed). */
+function iosInstallContext() {
   const ua = navigator.userAgent || "";
   const iosDevice = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  if (!iosDevice) return false;
-  if (root.classList.contains("standalone")) return false;
-  // Chrome/Firefox/Edge on iOS are Safari underneath but have no Add to Home Screen in Share.
-  if (/CriOS|FxiOS|EdgiOS|OPiOS/.test(ua)) return false;
-  return /Safari/.test(ua);
+  if (!iosDevice || root.classList.contains("standalone")) return null;
+  if (/FBAN|FBAV|FB_IAB|Instagram|LinkedInApp|Snapchat|musical_ly|TikTok|BytedanceWebview|Line\/|GSA\/|MicroMessenger|Pinterest/i.test(ua)) return "in-app";
+  if (/CriOS/.test(ua)) return "chrome";
+  if (/FxiOS|EdgiOS|OPiOS|DuckDuckGo|Brave/i.test(ua)) return "other";
+  return /Safari/.test(ua) ? "safari" : "in-app";
 }
 function showIosInstallHint() {
   let dismissed = false;
   try { dismissed = localStorage.getItem(IOS_HINT_KEY) === "1"; } catch { /* storage blocked */ }
-  if (dismissed || !isIosSafariTab()) return;
+  const where = iosInstallContext();
+  if (dismissed || !where) return;
+  const steps = {
+    safari: `Tap ${SHARE_GLYPH} then <b>Add to Home Screen</b> (scroll down, or under Edit Actions). Not there? Tap <b>Open in Safari</b> first - a link opened inside another app can't be added.`,
+    chrome: `Tap ${SHARE_GLYPH} in the address bar, then <b>Add to Home Screen</b>.`,
+    "in-app": `This page is open inside another app, which can't add it. Tap <b>…</b> or ${SHARE_GLYPH} and choose <b>Open in Safari</b>, then Share &gt; <b>Add to Home Screen</b>.`,
+    other: `Open this page in <b>Safari</b>, then tap ${SHARE_GLYPH} and <b>Add to Home Screen</b>.`,
+  }[where];
   const hint = document.createElement("div");
   hint.className = "ios-install-hint";
   hint.setAttribute("role", "status");
@@ -165,7 +181,7 @@ function showIosInstallHint() {
     <span class="ios-install-hint-icon" aria-hidden="true"><img src="${kachatLogoUrl}" alt="" /></span>
     <div class="ios-install-hint-copy">
       <strong>Get KaChat as an app</strong>
-      <span>Tap <svg viewBox="0 0 24 24" aria-label="Share"><path d="M12 3v13"/><path d="m7 8 5-5 5 5"/><path d="M5 12v8h14v-8"/></svg> then <b>Add to Home Screen</b>. It opens full screen and can notify you.</span>
+      <span>${steps} It opens full screen and can notify you.</span>
     </div>
     <button type="button" class="ios-install-hint-close" aria-label="Dismiss">×</button>`;
   hint.querySelector(".ios-install-hint-close").addEventListener("click", () => {
