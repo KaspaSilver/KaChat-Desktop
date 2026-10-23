@@ -11906,7 +11906,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 237;
+const APP_BUILD = 238;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -26608,8 +26608,9 @@ function updateImportSeedState() {
     input.classList.toggle("invalid", Boolean(word) && !isBip39Word(word) && i !== importActiveSlot);
     input.classList.toggle("active", i === importActiveSlot);
   });
-  const name = String(importNameInput?.value || "").trim();
-  if (importContinueBtn) importContinueBtn.disabled = !(name && importSeedAllValid());
+  // Continue stays tappable: a tap with a word missing or wrong says which, instead of a greyed
+  // button that silently does nothing (people pressed it and thought the import was broken).
+  if (importContinueBtn) importContinueBtn.disabled = false;
   renderImportSeedSuggestions();
 }
 function renderImportSeedSuggestions() {
@@ -26720,6 +26721,16 @@ importSeedGrid?.addEventListener("input", (event) => {
     }
     renderImportSeedGrid();
     focusImportSlot(Math.min(importWordCount - 1, i + parts.length));
+    return;
+  }
+  // A space or return typed after the word moves on. A phone keyboard sends it as text, not as
+  // a keydown the handler below can read (Android reports "Unidentified"; iOS suggestion taps add
+  // "word "), so without this the next word's letters landed in the same box and were dropped.
+  if (/[^a-z]$/.test(raw)) {
+    const current = parts[0] || "";
+    if (!current) { input.value = ""; importWords[i] = ""; updateImportSeedState(); return; }
+    importActiveSlot = i;
+    commitImportWord(isBip39Word(current) ? current : (bip39Matches(current, 1)[0] || current));
     return;
   }
   let clean = raw.replace(/[^a-z]/g, "");
@@ -27045,7 +27056,15 @@ importContinueBtn?.addEventListener("click", async () => {
   const words = phrase.split(" ").filter(Boolean);
   if (importAccountError) importAccountError.hidden = true;
   if (!name) { importShowNameStep(); return; } // the name is its own step now (iOS dd0aab1)
-  if (words.length !== importWordCount || !importSeedAllValid()) { showImportError(`Enter all ${importWordCount} recovery words.`); return; }
+  if (words.length !== importWordCount || !importSeedAllValid()) {
+    const bad = importSeedSlots().map((w, i) => (isBip39Word(w) ? -1 : i)).filter((i) => i >= 0);
+    importSeedGrid?.querySelectorAll("[data-import-slot]").forEach((input) => input.classList.toggle("invalid", bad.includes(Number(input.dataset.importSlot))));
+    const missing = bad.filter((i) => !String(importWords[i] || "").trim()).length;
+    showImportError(missing === bad.length
+      ? `Enter all ${importWordCount} recovery words - ${bad.length === 1 ? `word ${bad[0] + 1} is` : `${bad.length} words are`} still empty.`
+      : `Word ${bad.map((i) => i + 1).join(", ")} ${bad.length === 1 ? "isn't a" : "aren't"} recovery word${bad.length === 1 ? "" : "s"}. Check the highlighted box${bad.length === 1 ? "" : "es"}.`);
+    return;
+  }
   importContinueBtn.disabled = true;
   try {
     if (!engine.kaspa) await ensureRuntimes();
