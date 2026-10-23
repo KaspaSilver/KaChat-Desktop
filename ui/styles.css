@@ -14242,10 +14242,20 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   border-radius: 999px;
   background: var(--fill-tertiary, rgba(255,255,255,.06));
 }
-/* One line per title, shrinking with the screen the way iOS's minimum scale factor does. */
-.hub-tile { padding: 8px 4px; }
-.hub-tile-label { white-space: nowrap; font-size: min(15px, 3.15vw); letter-spacing: -0.01em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-@media (max-width: 859px) { .hub-grid { gap: 12px; } .hub-tile { padding: 8px 2px; } }
+/* Titles shrink a little with the screen and wrap onto a second line at a space rather than being
+   cut off ("ChangeNOW Swap", ".kachat Domains", "Kaspa Websites" lost their ends on a phone). */
+.hub-tile { padding: 8px 6px; }
+.hub-tile-label {
+  font-size: min(15px, 3.7vw); letter-spacing: -0.01em; line-height: 1.2; max-width: 100%;
+  white-space: normal; overflow-wrap: normal; word-break: normal; hyphens: none; text-wrap: balance;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+/* On a phone the tiles line up with the screen title (the same 16px gutter) instead of sitting a
+   gutter further in, which also gives each title more room. */
+@media (max-width: 859px) {
+  .hub-grid { gap: 12px; padding-left: 0; padding-right: 0; }
+  .hub-tile { padding: 8px 6px; gap: 10px; }
+}
 
 /* Settings at iOS's scale: 26pt category symbols, 17pt row titles, rows ~52pt tall; Done in a
    glass capsule; no hairline under the toolbar. */
