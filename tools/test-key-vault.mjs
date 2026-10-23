@@ -12,6 +12,7 @@ import {
   LEGACY_PERSISTED_WALLET_KEY, VAULT_LEGACY_WALLET_KEY, VAULT_SESSION_KEY, VAULT_HANDOFF_KEY,
   VAULT_HANDOFF_TTL_MS, VAULT_PBKDF2_ITERATIONS,
   readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged, NEXTCLOUD_STORAGE_KEY,
+  ACCOUNT_PASSWORDS_KEY,
 } from "../ui/key-vault.js";
 // A second tab: the same module loaded again is a separate vault (its own memory and
 // sessionStorage) on the same localStorage.
@@ -884,6 +885,129 @@ test("a password with no account left is released; one still guarding an account
   assert.ok(local.getItem(SAVED_ACCOUNTS_KEY).includes(accountB.address));
   // Nothing to release when there is no password.
   assert.equal(releaseAppPasswordIfUnused(), false);
+});
+
+// --- each account its own password (owner, 2026-10-22) --------------------------------------
+const A = accountA.address;
+const B = accountB.address;
+const C = "kaspa:qpcccccccccccc";
+
+test("per-account: a new account gets its own password, and adding it needs no other account's", async () => {
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("alice-pass-1"); // the shared password every older account has
+  lockKeyVault();
+  assert.equal(hasAppPassword(A), true);
+  assert.equal(hasAppPassword(B), false, "a new account has no password yet - not the shared one");
+  assert.equal(isAppLocked(B), false);
+  await setAppPassword("bob-pass-11", B);
+  writeAccountRecords([...readAccountRecords(), accountB]);
+  assertNoPlaintextSecrets();
+  assert.equal(isAppLocked(A), true, "Alice stays locked");
+  assert.equal(isAppLocked(B), false);
+  assert.equal(byAddress(B).mnemonic, MNEMONIC_B);
+  assert.equal(byAddress(A).locked, true);
+  assert.equal(byAddress(A).mnemonic, undefined);
+  reload();
+  assert.equal(isAppLocked(B), true);
+  assert.equal(await unlockKeyVault("alice-pass-1", B), false, "the shared password does not open Bob");
+  assert.equal(await unlockKeyVault("bob-pass-11", B), true);
+  assert.equal(isAppLocked(A), true, "Bob's password does not open Alice");
+  assert.equal(byAddress(A).locked, true);
+  assert.equal(await unlockKeyVault("alice-pass-1", A), true);
+  assert.equal(byAddress(A).mnemonic, MNEMONIC_A);
+  assert.equal(byAddress(B).mnemonic, MNEMONIC_B);
+});
+
+test("per-account: changing one account's password moves only it out of the shared vault", async () => {
+  fresh();
+  writeAccountRecords([accountA, accountB]);
+  await setAppPassword("shared-pass");
+  await setAppPassword("alice-own-1", A);
+  assertNoPlaintextSecrets();
+  assert.ok(local.getItem(APP_PASSWORD_KEY), "Bob still uses the shared password");
+  reload();
+  assert.equal(await unlockKeyVault("shared-pass", A), false);
+  assert.equal(await unlockKeyVault("alice-own-1", A), true);
+  assert.equal(isAppLocked(B), true);
+  assert.equal(await unlockKeyVault("alice-own-1", B), false);
+  assert.equal(await unlockKeyVault("shared-pass", B), true);
+  assert.equal(byAddress(A).mnemonic, MNEMONIC_A);
+  assert.equal(byAddress(B).mnemonic, MNEMONIC_B);
+  // The last account leaves the shared vault: the shared password goes with it.
+  await setAppPassword("bob-own-11", B);
+  assert.equal(local.getItem(APP_PASSWORD_KEY), null);
+  assertNoPlaintextSecrets();
+  reload();
+  assert.equal(await unlockKeyVault("bob-own-11", B), true);
+  assert.equal(isAppLocked(A), true);
+  assert.equal(byAddress(B).mnemonic, MNEMONIC_B);
+});
+
+test("per-account: a forgotten password resets only that account", async () => {
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("alice-own-1", A);
+  await setAppPassword("bob-own-11", B);
+  writeAccountRecords([...readAccountRecords(), accountB]);
+  lockKeyVault();
+  assert.equal(resetForgottenAppPassword(B), 1);
+  assert.equal(hasAppPassword(B), false);
+  assert.equal(hasAppPassword(A), true);
+  const stored = JSON.parse(local.getItem(SAVED_ACCOUNTS_KEY));
+  assert.equal(stored.find((entry) => entry.address === B), undefined, "Bob's saved keys are gone (imported again from his phrase)");
+  assert.ok(stored.find((entry) => entry.address === A)?.sealed, "Alice's stay sealed");
+  assert.equal(await unlockKeyVault("alice-own-1", A), true);
+  assert.equal(byAddress(A).mnemonic, MNEMONIC_A);
+});
+
+test("per-account: KaChat's own reload hands every open vault over", async () => {
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("alice-own-1", A);
+  await setAppPassword("bob-own-11", B);
+  writeAccountRecords([...readAccountRecords(), accountB]);
+  reload({ handoff: true });
+  assert.equal(unlockKeyVaultFromSession(), true);
+  assert.equal(byAddress(A).mnemonic, MNEMONIC_A);
+  assert.equal(byAddress(B).mnemonic, MNEMONIC_B);
+  assert.ok(!session.dump().includes(KEY_A));
+});
+
+test("per-account DSK-022: another account's new password elsewhere leaves this tab open; a change to its own locks it", async () => {
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("alice-own-1", A);
+  await tabB.setAppPassword("carol-pass-1", C); // another account set up in tab B
+  assert.equal(keyVaultStorageChanged(ACCOUNT_PASSWORDS_KEY), false);
+  assert.equal(isAppLocked(A), false);
+  assert.equal(byAddress(A).mnemonic, MNEMONIC_A);
+  assert.equal(await tabB.unlockKeyVault("alice-own-1", A), true);
+  await tabB.setAppPassword("alice-own-2", A); // Alice's own password changed in tab B
+  assert.equal(keyVaultStorageChanged(ACCOUNT_PASSWORDS_KEY), true);
+  assert.equal(isAppLocked(A), true);
+  assert.equal(await unlockKeyVault("alice-own-1", A), false);
+  assert.equal(await unlockKeyVault("alice-own-2", A), true);
+  assert.equal(byAddress(A).mnemonic, MNEMONIC_A);
+});
+
+test("per-account: the target account is what the address-less calls mean", async () => {
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("alice-own-1", A);
+  lockKeyVault();
+  configureKeyVault({ target: () => A });
+  try {
+    assert.equal(hasAppPassword(), true);
+    assert.equal(isAppLocked(), true);
+    assert.equal(await unlockKeyVault("alice-own-1"), true);
+    assert.equal(isAppLocked(), false);
+    configureKeyVault({ target: () => B });
+    assert.equal(hasAppPassword(), false, "Bob is new: no password to ask for");
+    assert.equal(isAppLocked(), false);
+  } finally {
+    configureKeyVault({ target: null });
+  }
 });
 
 let failed = 0;

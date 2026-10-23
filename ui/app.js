@@ -107,7 +107,7 @@ import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
-import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, hasBiometricUnlock, biometricUnlockRetiredReason, loadBiometricRecord, removeBiometricUnlock, BIOMETRIC_UNLOCK_KEY } from "./key-vault.js";
+import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, isPasswordStorageKey, isBiometricStorageKey, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, hasBiometricUnlock, biometricUnlockRetiredReason, loadBiometricRecord, removeBiometricUnlock, BIOMETRIC_UNLOCK_KEY } from "./key-vault.js";
 import { biometricName, biometricRowLabel, biometricButtonLabel, biometricEnvironmentProblem, canOfferBiometricUnlock, canAutoPromptBiometric, checkBiometricSupport, enrolBiometric, finishBiometricEnrolment, unlockWithBiometric, turnOffBiometricUnlock, BIOMETRIC_UNSUPPORTED_MESSAGE } from "./biometric-unlock.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -578,7 +578,22 @@ function persistAccountShellPreferences() {
 // keys stay unencrypted in this browser, and Settings says so. The password also gates revealing
 // the seed phrase / private key and signing in, when the matching toggle is on. Wrong answers back
 // off like Simple Mode's. ---
-configureKeyVault({ canonicalize: canonicalAccountAddress });
+// Each account its own password (owner, 2026-10-22): the vault's address-less calls are about the
+// account in question - the one being picked on the sign-in screen while its password is asked
+// (withVaultTarget), else the signed-in account, else the last active one.
+let vaultTargetOverride = null;
+function currentVaultTarget() {
+  return vaultTargetOverride || engine.address || readActiveAccountAddress() || "";
+}
+/** Runs `fn` with the vault's calls about `address` (a saved account picked on the sign-in screen),
+ *  so its password, Face ID and "Forgot password?" are that account's. */
+async function withVaultTarget(address, fn) {
+  if (!address) return fn();
+  const previous = vaultTargetOverride;
+  vaultTargetOverride = address;
+  try { return await fn(); } finally { vaultTargetOverride = previous; }
+}
+configureKeyVault({ canonicalize: canonicalAccountAddress, target: currentVaultTarget });
 unlockKeyVaultFromSession(); // only after KaChat's own reload (reloadKaChat's 15 s one-time hand-off)
 // A password change (or removal, or a first password) in another tab replaces the data key this
 // tab holds: lock at once and ask for the password over the current screen (DSK-022). The vault
@@ -621,10 +636,10 @@ async function signOutLockedTab() {
 onKeyVaultLockedByAnotherTab(() => { handleLockedByAnotherTab(); });
 window.addEventListener("storage", (event) => {
   if (event.storageArea && event.storageArea !== localStorage) return;
-  if (event.key === BIOMETRIC_UNLOCK_KEY) { refreshBiometricRow(); return; } // turned on / off in another tab
-  if (event.key !== null && event.key !== APP_PASSWORD_KEY && event.key !== APP_PASSWORD_PENDING_KEY) return;
+  if (isBiometricStorageKey(event.key)) { refreshBiometricRow(); return; } // turned on / off in another tab
+  if (event.key !== null && !isPasswordStorageKey(event.key)) return;
   const wasUnlocked = keyVaultStorageChanged(event.key);
-  if (wasUnlocked && !hasAppPassword()) showCopyToast("The app password was removed in another tab.");
+  if (wasUnlocked && !hasAppPassword()) showCopyToast("This account's password was removed in another tab.");
   handleLockedByAnotherTab();
 });
 function hasAppPassword() { return vaultHasAppPassword(); }
@@ -818,7 +833,8 @@ passwordForm?.addEventListener("submit", async (event) => {
     if (pw !== String(passwordConfirmInput?.value || "")) { showPasswordError("Passwords do not match."); return; }
     if (submitButton) submitButton.disabled = true;
     try {
-      // Encrypts every saved account's keys with the new password (re-encrypts on a change).
+      // Encrypts this account's keys with its own new password (re-encrypts on a change; moves it
+      // out of the password older accounts share).
       await setAppPassword(pw);
     } catch (error) {
       showPasswordError(userFacingError(error));
@@ -840,15 +856,17 @@ passwordForm?.addEventListener("submit", async (event) => {
 // Forgotten password: the encrypted keys cannot be opened, so the way back is the recovery phrase.
 document.querySelector("[data-password-forgot]")?.addEventListener("click", async () => {
   if (!isAppLocked() || engine.privateKeyHex) return;
+  // The account whose password was being asked for: closing the prompt ends that scope.
+  const forgotFor = currentVaultTarget();
   closePasswordModal(false);
   const confirmed = await confirmDialog({
     title: "Forgot your password?",
-    message: "Your saved accounts' keys on this device are encrypted with your password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys of every saved account from this browser, along with the encrypted Nextcloud app password (connect Nextcloud again afterwards). Your chats and settings stay. Afterwards, import each account again with its recovery phrase. Without the recovery phrase, an account cannot be restored.",
+    message: "This account's keys on this device are encrypted with its password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys from this browser (any other saved account that still shares this password too), along with the encrypted Nextcloud app password (connect Nextcloud again afterwards). Your chats and settings stay. Afterwards, import the account again with its recovery phrase. Without the recovery phrase, an account cannot be restored.",
     confirmLabel: "Reset Password",
     destructive: true,
   });
   if (!confirmed) return;
-  const removed = resetForgottenAppPassword();
+  const removed = resetForgottenAppPassword(forgotFor);
   refreshPasswordStatus();
   renderSavedAccountsScreen();
   showCopyToast(removed ? "Password reset. Import your account with its recovery phrase." : "Password reset.");
@@ -880,7 +898,7 @@ async function requireAppPasswordIfMissing() {
         mode: "set",
         required: true,
         title: "Set a Password",
-        message: `Create a password for this device, at least ${MIN_APP_PASSWORD_LENGTH} characters. Your keys are encrypted with it, and KaChat asks for it to open, to switch accounts and to show a seed phrase or private key. If you forget it, you'll need your recovery phrase.`,
+        message: `Create a password for this account, at least ${MIN_APP_PASSWORD_LENGTH} characters. Its keys are encrypted with it, and KaChat asks for it to open this account and to show its seed phrase or private key. Other accounts keep their own passwords. If you forget it, you'll need your recovery phrase.`,
       });
       if (ok) { refreshPasswordStatus(); showCopyToast("Password set. Your keys are now encrypted."); }
     }
@@ -894,12 +912,12 @@ const passwordStatusEl = document.querySelector("[data-password-status]");
 function refreshPasswordStatus() {
   const hasPassword = hasAppPassword();
   refreshBiometricRow();
-  if (passwordStatusEl) passwordStatusEl.textContent = hasPassword ? "Password set. Keys on this device are encrypted." : "No password set. Keys on this device are not encrypted.";
+  if (passwordStatusEl) passwordStatusEl.textContent = hasPassword ? "Password set. This account's keys are encrypted." : "No password set. This account's keys are not encrypted.";
   // Honest about what is at rest (DSK-006): no password = plaintext in this browser.
   const saveNote = document.querySelector("[data-save-account-note]");
   if (saveNote) {
     saveNote.textContent = hasPassword
-      ? "Keys are encrypted with your password. If you forget it, you'll need your recovery phrase."
+      ? "Keys are encrypted with each account's password. If you forget one, you'll need that account's recovery phrase."
       : "Without a password, keys are stored unencrypted in this browser. Set a password to encrypt them.";
   }
   const keepNote = document.querySelector("[data-keep-signed-in-note]");
@@ -912,7 +930,7 @@ function refreshPasswordStatus() {
 refreshPasswordStatus();
 document.querySelector("[data-change-password]")?.addEventListener("click", async () => {
   if (!hasAppPassword()) {
-    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Your saved accounts' keys will be encrypted with it, and KaChat will ask for it each time it opens, including after you close the tab or refresh the page. If you forget it, you'll need your recovery phrase.` })) {
+    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. This account's keys will be encrypted with it, and KaChat will ask for it when you open this account, including after you close the tab or refresh the page. If you forget it, you'll need your recovery phrase.` })) {
       showCopyToast("Password set. Your keys are now encrypted.");
       refreshPasswordStatus();
     }
@@ -921,9 +939,9 @@ document.querySelector("[data-change-password]")?.addEventListener("click", asyn
   // Change only: the password can't be removed - it is what keeps the keys encrypted.
   if (!(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
   const biometricWasOn = hasBiometricUnlock();
-  if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. If you forget it, you'll need your recovery phrase.` })) {
+  if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Only this account's password changes; your other accounts keep theirs. If you forget it, you'll need your recovery phrase.` })) {
     // A new password means a new data key: Face ID unlock was turned off with it (key-vault.js).
-    showCopyToast(biometricWasOn && !hasBiometricUnlock() ? `Password updated. Turn ${biometricDisplayName()} unlock on again below.` : "Password updated");
+    showCopyToast(biometricWasOn && !hasBiometricUnlock() ? `Password updated. Turn ${biometricDisplayName()} unlock on again below.` : "Password updated for this account");
     refreshPasswordStatus();
   }
 });
@@ -1171,12 +1189,13 @@ function fileStoredWalletBeforeReplacing(newAddress, newPrivateKeyHex, { legacy 
 }
 
 /** The lock: asks for the app password and opens the key vault. True once unlocked. */
-async function unlockAppWithPassword(message, { allowForgot = true, autoBiometric = false } = {}) {
+async function unlockAppWithPassword(message, { allowForgot = true, autoBiometric = false, address = null } = {}) {
+  if (address) return withVaultTarget(address, () => unlockAppWithPassword(message, { allowForgot, autoBiometric }));
   if (!isAppLocked()) return true;
   const answer = requestPassword({
     mode: "verify",
     title: "Unlock KaChat",
-    message: message || "Your saved accounts are encrypted on this device. Enter your password to unlock them.",
+    message: message || "This account's keys are encrypted on this device. Enter its password to unlock it.",
     allowForgot,
   });
   // At launch, ask for Face ID / Windows Hello by itself where the browser allows it without a tap
@@ -1224,13 +1243,14 @@ function renderSavedAccountsScreen() {
     }
     signInButton.addEventListener("click", async () => {
       try {
-        if (isAppLocked()) {
-          // The keys are encrypted: nothing signs in until the password opens them (DSK-007). Asked
-          // here, when an account is picked, never by itself when the page opens (owner,
-          // 2026-10-22); Face ID / Windows Hello offers itself where the browser allows.
-          if (!(await unlockAppWithPassword(undefined, { autoBiometric: true }))) return;
-        } else if (accountShellPrefs.passwordForLogin && hasAppPassword()) {
-          const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to sign in." });
+        // Each account its own password: this account's, asked here when it is picked - never by
+        // itself when the page opens (owner, 2026-10-22). Nothing signs in until it opens the keys
+        // (DSK-007); Face ID / Windows Hello offers itself where the browser allows.
+        const address = account.address;
+        if (isAppLocked(address)) {
+          if (!(await unlockAppWithPassword(undefined, { autoBiometric: true, address }))) return;
+        } else if (accountShellPrefs.passwordForLogin && hasAppPassword(address)) {
+          const ok = await withVaultTarget(address, () => requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to sign in." }));
           if (!ok) return;
         }
         activateSavedAccount(account.address);
@@ -11782,7 +11802,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 223;
+const APP_BUILD = 224;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -26830,6 +26850,14 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
   // As for a new account: the password before anything is saved, so the keys are never at rest
   // unencrypted.
   await requireAppPasswordIfMissing();
+  // Already saved on this device under a password (its own, or the one older accounts share):
+  // that password opens it - importing it again asks for no new one and no other account's.
+  if (isAppLocked() && accountShellPrefs.saveAccount !== false) {
+    if (!(await unlockAppWithPassword("This account is already saved on this device. Enter its password to import it again."))) {
+      engine.clearSession();
+      throw new Error("Enter this account's password to import it again.");
+    }
+  }
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   if (resetState) {
     state = { contacts: [], conversations: [] };
@@ -27483,16 +27511,11 @@ Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
 });
 
 
-// With a password set the new account is saved encrypted, which takes the unlocked vault. A
-// forgotten password is reset from the lock ("Forgot password?"), and then this is not asked.
+// Each account has its own password (owner, 2026-10-22): a new or imported account sets its own
+// (finalizeNewAccount / importAndEnterAccount), so adding one never asks for another account's.
+// A password left over from deleted accounts is dropped on the way.
 async function unlockBeforeAddingAccount(open) {
-  // No account on this device: there is nothing to unlock. A password left over from deleted
-  // accounts is dropped, and the new account is asked to set one (finalizeNewAccount /
-  // importAndEnterAccount) instead of to unlock one that guards nothing.
-  if (isAppLocked() && releaseAppPasswordIfUnused()) refreshPasswordStatus();
-  if (isAppLocked() && accountShellPrefs.saveAccount !== false) {
-    if (!(await unlockAppWithPassword("Your saved accounts are encrypted with your password. Enter it to add another account to this device."))) return;
-  }
+  if (releaseAppPasswordIfUnused()) refreshPasswordStatus();
   open();
 }
 document.querySelector("[data-logged-out-create]")?.addEventListener("click", () => unlockBeforeAddingAccount(openCreateAccountModal));
