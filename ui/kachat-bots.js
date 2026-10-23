@@ -2,8 +2,9 @@
 // One card per bot; clicking a card opens (or starts) the 1:1 chat with it, accepted and named
 // after the bot. A bot is a Kaspa address that answers in an ordinary chat (the KaChat-Bot repo, run
 // from the Kaspa Quick Start panel); it asks its setup questions in the chat. Bots run on mainnet
-// only. Bot chats never sit in the chat list: once you have written to one it is a circle in the
-// row above it (app.js visibleChatCircles), and each card here carries the chat's unread count.
+// only. Bot chats never sit in the chat list: once the chat holds a message (yours or the bot's) it
+// is a circle in the row above it (app.js visibleChatCircles), and each card here carries the
+// chat's unread count.
 
 import { isNetworkAddress, isValidKaspaAddress } from "../engine/network.js";
 
@@ -69,7 +70,7 @@ export function kachatBotFor(address) {
 }
 
 /** True for a bot's address. Bot chats never sit in the chat list: they are circles in the row
- *  above it (with groups and rooms), once you have written to the bot (iOS d576941 / 5fcf755). */
+ *  above it (with groups and rooms), once the chat holds a message (iOS d576941 / 5fcf755). */
 export function isKachatBot(address) {
   return BOT_ADDRESSES.has(String(address || "").toLowerCase());
 }

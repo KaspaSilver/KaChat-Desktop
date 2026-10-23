@@ -4406,6 +4406,8 @@ function isPrivateChat(address) { return Boolean(address) && chatRequestState().
 function isMessageRequest(conversationEntry) {
   const contact = contactForConversation(conversationEntry);
   if (!contact?.address || !engine.address || contact.address === engine.address) return false;
+  // A KaChat bot that wrote first is its circle in the row, never a request.
+  if (isKachatBot(contact.address)) return false;
   const key = contact.address.toLowerCase();
   const s = chatRequestState();
   if (s.accepted.has(key) || s.privateChats.has(key) || s.blocked.has(key)) return false;
@@ -11906,7 +11908,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 238;
+const APP_BUILD = 239;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -16356,7 +16358,7 @@ function visibleChatConversations() {
     if (isMessageRequest(conversationEntry) || isChatBlocked(contact.address)) return false;
     if (contact.relationshipState === "declined") return false;
     // Bot chats never sit in the list or its search: Kaspa Hub > KaChat Bots, and their circle
-    // once you have written to the bot (iOS d576941 / 5fcf755).
+    // once the chat holds a message (iOS d576941 / 5fcf755).
     if (isKachatBot(contact.address)) return false;
     if (!query) return true;
     if (displayNameForAddress(contact).toLowerCase().includes(query)) return true;
@@ -19993,17 +19995,20 @@ function visibleChatCircles() {
 }
 
 // --- KaChat Bots in the circles row (iOS 5fcf755) -------------------------------------------------
-// A bot chat is a circle (the bot's icon and name, its unread count) once you have written to the
-// bot; just opening it from Kaspa Hub leaves no circle, and deleting the chat takes it away until
-// you open the bot from Kaspa Hub and write to it again. Pins are "b:<address>".
+// A bot chat is a circle (the bot's icon and name, its unread count) as soon as it holds a message
+// either way - yours, or the bot's (a bot that wrote first, or history restored after an import
+// without your own side). It used to wait for a message from you, and a chat with only the bot's
+// messages then showed nowhere, since bot chats never sit in the chat list. Just opening a bot from
+// Kaspa Hub (no messages yet) leaves no circle, and deleting the chat takes it away until you open
+// the bot from Kaspa Hub and write to it again. Pins are "b:<address>".
 
-/** Bot chats you have written to, not deleted. */
+/** Bot chats with any message, not deleted. */
 function botCircleConversations() {
   const deleted = loadDeletedContactAddresses();
   return (state.conversations || []).filter((entry) => {
     const contact = contactForConversation(entry);
     if (!contact?.address || !isKachatBot(contact.address) || deleted.has(contact.address)) return false;
-    return (entry.messages || []).some((message) => message?.direction === "outgoing");
+    return (entry.messages || []).some((message) => message?.direction === "outgoing" || message?.direction === "incoming");
   });
 }
 
