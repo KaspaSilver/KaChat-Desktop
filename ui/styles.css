@@ -14807,3 +14807,13 @@ html.keyboard-open .sidebar-tabbar { display: none !important; }
   .kaposts-profile-row > .kaposts-profile-meta { order: 2; flex: 1 1 100%; padding-top: 0; }
   .kaposts-profile-meta strong { overflow-wrap: anywhere; }
 }
+/* The zero-balance funding card when the screen is short (keyboard up, a phone sideways): the QR
+   code and the address line give way, so the card stays a single line plus Copy Address and the
+   message box under it stays in view. */
+html.keyboard-open .chat-funding-gate canvas,
+html.keyboard-open .chat-funding-gate-address { display: none; }
+html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px 14px; }
+@media (max-height: 560px) {
+  .chat-funding-gate canvas, .chat-funding-gate-address { display: none; }
+  .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px 14px; }
+}
