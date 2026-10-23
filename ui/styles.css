@@ -14760,3 +14760,12 @@ html.keyboard-open .sidebar-tabbar { display: none !important; }
    bubble's `order: 2` sorted it after the time line (and a link card), so "3:12 PM ✓ Sent" stood
    above your message. In the stack everything keeps source order. */
 .message-row.local .message-bubble-stack > * { order: 0; }
+/* KaPosts Settings sheet (iOS KaPostsSettingsView: two Form sections). Its rows sit in a
+   .settings-page-form wrapper whose own padding and grid gap doubled the rows' inset - the text sat
+   far in from the "Tipping" header - and the switch row kept its hairline with nothing under it
+   while the amount row was hidden. The rows go edge to edge in their card, the last one shown has
+   no hairline, and the two sections are apart, as iOS spaces Form sections. */
+.kaposts-settings-modal .settings-page-form { display: block; padding: 0; }
+.kaposts-settings-modal .settings-page-form > .settings-toggle-row:not(:has(~ .settings-toggle-row:not([hidden]))) { background-image: none; }
+.kaposts-settings-modal .settings-list-card + .settings-list-card { margin-top: 24px; }
+.kaposts-settings-modal .settings-group-label { margin-top: 8px; }
