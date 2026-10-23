@@ -249,7 +249,7 @@ function amountCard({ label, coin, value, field, quoting }) {
     : `<button type="button" class="swap-coin-badge pickable" data-swap-pick-coin>${coinIcon(coin)}<span>${esc(coin.displayName)}</span>${ICONS.chevronDown}</button>`;
   const input = quoting
     ? `<span class="swap-amount-quoting"><span class="kaposts-spinner small" aria-hidden="true"></span></span>`
-    : `<input class="swap-amount-input" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" aria-label="${esc(label)}" data-swap-field="${field}" value="${esc(value)}" />`;
+    : `<input class="swap-amount-input" type="text" inputmode="decimal" autocomplete="transaction-amount" placeholder="0.00" aria-label="${esc(label)}" data-swap-field="${field}" value="${esc(value)}" />`;
   return `<div class="profile-card swap-card"><p class="profile-card-label">${esc(label)}</p><div class="swap-card-row">${input}${badge}</div></div>`;
 }
 
@@ -327,17 +327,44 @@ function renderHistory() {
     </div>`).join("")}</div>`;
 }
 
-/** Redraws without losing what is being typed: the focused field keeps its value, focus and caret. */
+/** Redraws without touching what is being typed in: the screen is drawn off-page and swapped in
+ *  around the focused field, which stays the same element (value, caret, keyboard). Rebuilding
+ *  it on every keystroke - and focusing the new copy - made the page jump on phones each time
+ *  Safari scrolled the new field into view. */
 function renderFormLight() {
   const active = document.activeElement;
   const field = rootEl?.contains(active) ? active.dataset?.swapField || (active.matches?.("[data-swap-payout]") ? "payout" : null) : null;
-  const caret = field ? active.selectionStart : null;
-  render();
-  if (!field) return;
-  const target = field === "payout" ? rootEl.querySelector("[data-swap-payout]") : rootEl.querySelector(`[data-swap-field="${field}"]`);
-  if (!target) return;
-  target.focus();
-  if (caret != null) { try { target.setSelectionRange(caret, caret); } catch { /* not a text field */ } }
+  if (!field) { render(); return; }
+  const live = rootEl;
+  const draft = document.createElement("div");
+  rootEl = draft;
+  try { render(); } finally { rootEl = live; }
+  const twin = field === "payout" ? draft.querySelector("[data-swap-payout]") : draft.querySelector(`[data-swap-field="${field}"]`);
+  if (!twin) { render(); return; }
+  patchAround(live, draft, active, twin, { root: true });
+}
+/** Makes `oldNode` match `newNode` except along the path to `keep`, which stays in the page. The
+ *  screen root keeps its own attributes: the draft is a bare <div>. */
+function patchAround(oldNode, newNode, keep, newKeep, { root = false } = {}) {
+  if (!root) syncAttributes(oldNode, newNode, oldNode === keep);
+  if (oldNode === keep) return;
+  const oldPath = [...oldNode.childNodes].find((n) => n === keep || n.contains?.(keep));
+  const newKids = [...newNode.childNodes];
+  const newPath = newKids.find((n) => n === newKeep || n.contains?.(newKeep));
+  if (!oldPath || !newPath) { oldNode.replaceChildren(...newKids); return; }
+  for (const n of [...oldNode.childNodes]) if (n !== oldPath) n.remove();
+  const at = newKids.indexOf(newPath);
+  for (const n of newKids.slice(0, at)) oldNode.insertBefore(n, oldPath);
+  for (const n of newKids.slice(at + 1)) oldNode.appendChild(n);
+  patchAround(oldPath, newPath, keep, newKeep);
+}
+function syncAttributes(oldEl, newEl, isKept) {
+  if (oldEl.nodeType !== 1) return;
+  for (const { name } of [...oldEl.attributes]) if (!newEl.hasAttribute(name)) oldEl.removeAttribute(name);
+  for (const { name, value } of [...newEl.attributes]) {
+    if (isKept && name === "value") continue; // the typed text is the field's own
+    if (oldEl.getAttribute(name) !== value) oldEl.setAttribute(name, value);
+  }
 }
 
 // ---------------------------------------------------------------------------
