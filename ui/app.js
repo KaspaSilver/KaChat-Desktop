@@ -711,7 +711,12 @@ async function turnOnBiometricUnlock() {
     confirmLabel: "Continue",
   });
   if (!go) return;
-  let result = await enrolBiometric();
+  await runBiometricEnrolment(name);
+}
+/** The passkey ceremony after the tap that allowed it (Safari allows WebAuthn only inside a tap):
+ *  a second confirm when the platform needs one, then the Settings row, a toast, or why not. */
+async function runBiometricEnrolment(name = biometricDisplayName()) {
+  let result = await enrolBiometric({ accountLabel: engine.address ? activeAccountMetadata().name : "" });
   while (result.status === "needs-confirm") {
     const again = await confirmDialog({ title: biometricRowLabel(), message: `Confirm with ${name} once more to finish.`, confirmLabel: "Continue" });
     if (!again) { result = { status: "cancelled" }; break; }
@@ -726,6 +731,28 @@ async function turnOnBiometricUnlock() {
     return;
   }
   if (result.status === "failed") await alertDialog({ title: biometricRowLabel(), message: result.message || "It could not be turned on. Your password still works." });
+}
+/** Right after a new or imported account sets its password: offer Face ID / Touch ID for it at
+ *  once, rather than leaving it to be found in Settings > Security. The password was just typed,
+ *  so it is not asked again; the "Turn On" tap is what lets Safari show the passkey prompt. Only
+ *  where it can work (a platform authenticator with PRF, not already on), and "Not Now" leaves it
+ *  for Settings. */
+async function offerBiometricAfterPasswordSet() {
+  try {
+    if (!hasAppPassword() || isAppLocked() || hasBiometricUnlock() || biometricEnvironmentProblem()) return;
+    const support = biometricUi.support || await checkBiometricSupport().catch(() => null);
+    if (support) biometricUi.support = support;
+    if (support?.supported === false) return;
+    const name = biometricDisplayName();
+    const go = await confirmDialog({
+      title: `Use ${biometricName()}?`,
+      message: `Unlock this account and confirm what you send with ${name} instead of typing your password. KaChat saves a passkey on this device; your password still works.`,
+      confirmLabel: `Turn On ${biometricName()}`,
+      cancelLabel: "Not Now",
+    });
+    if (!go) return;
+    await runBiometricEnrolment(name);
+  } catch { /* Settings > Security still has it */ }
 }
 function turnOffBiometricUnlockFromUi() {
   const name = biometricDisplayName();
@@ -920,7 +947,11 @@ async function requireAppPasswordIfMissing() {
         title: "Set a Password",
         message: `Create a password for this account, at least ${MIN_APP_PASSWORD_LENGTH} characters. Its keys are encrypted with it, and KaChat asks for it to open this account and to show its seed phrase or private key. Other accounts keep their own passwords. If you forget it, you'll need your recovery phrase.`,
       });
-      if (ok) { refreshPasswordStatus(); showCopyToast("Password set. Your keys are now encrypted."); }
+      if (ok) {
+        refreshPasswordStatus();
+        showCopyToast("Password set. Your keys are now encrypted.");
+        await offerBiometricAfterPasswordSet();
+      }
     }
   } finally {
     requiredPasswordPrompting = false;
@@ -11865,7 +11896,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 229;
+const APP_BUILD = 230;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");

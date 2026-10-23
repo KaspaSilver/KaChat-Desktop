@@ -203,7 +203,13 @@ async function assertPrf({ rpId, credentialId, saltBytes }) {
  *   { status: "cancelled" }              the user closed the prompt
  *   { status: "failed", message }
  */
-export async function enrolBiometric() {
+// `accountLabel`: the account's name, so each account's passkey is told apart in the keychain
+// ("KaChat (Alice)") now that every account has its own password and its own Face ID record.
+function passkeyLabel(accountLabel) {
+  const clean = String(accountLabel || "").replace(/\s+/g, " ").trim().slice(0, 40);
+  return clean ? `KaChat (${clean})` : "KaChat";
+}
+export async function enrolBiometric({ accountLabel = "" } = {}) {
   const problem = biometricEnvironmentProblem();
   if (problem) return { status: "unsupported", message: problem };
   // Checked before any passkey is made (synchronous, so the tap still counts for create()).
@@ -222,7 +228,7 @@ export async function enrolBiometric() {
     credential = await credentialsApi().create({
       publicKey: {
         rp: { id: rpId, name: "KaChat" },
-        user: { id: userId, name: "KaChat", displayName: "KaChat" },
+        user: { id: userId, name: passkeyLabel(accountLabel), displayName: passkeyLabel(accountLabel) },
         challenge: randomBytes(32),
         pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
         authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "required", requireResidentKey: true },
