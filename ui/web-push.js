@@ -26,6 +26,7 @@ import {
   nextDeviceCounter, normalizeWebDeviceToken,
 } from "./web-push-core.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { shouldRegisterServiceWorker } from "./origin-migration.js";
 
 const REG_KEY_PREFIX = "kachat-web-push-registration-v1";
 const CONFIG_CACHE_KEY = "kachat-web-push-config-v1";
@@ -263,6 +264,16 @@ async function workerRegistration() {
   try { registration = await navigator.serviceWorker.getRegistration(scope); } catch { registration = null; }
   if (!registration) {
     try { registration = await navigator.serviceWorker.getRegistration(); } catch { registration = null; }
+  }
+  if (!registration && shouldRegisterServiceWorker()) {
+    // Not registered yet: ui/pwa.js registers on the page's load event, which this can run ahead
+    // of - or that registration failed and nothing would ever try again. Start it here, and say
+    // why when the browser refuses.
+    try {
+      registration = await navigator.serviceWorker.register(`${appBase()}sw.js`, { scope: appBase() });
+    } catch (error) {
+      throw new Error(`the app's service worker couldn't start (${error?.message || error})`);
+    }
   }
   if (registration && !registration.active) {
     // Installing right now (first visit): wait a little for it to activate.
