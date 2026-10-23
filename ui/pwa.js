@@ -50,6 +50,25 @@ function syncCoarse() { root.classList.toggle("touch", coarseMedia.matches); }
 syncCoarse();
 coarseMedia.addEventListener?.("change", syncCoarse);
 
+// ---- An app icon that matches dark mode -----------------------------------------------------
+// The home-screen icon is read when the app is added, so the page offers the dark one (a near-black
+// tile behind the same teal bubble) while the device is in dark mode, and the light one otherwise:
+// apple-touch-icon for iPhone / iPad, the manifest (manifest-dark.json) for Android. A web app can't
+// switch its installed icon later, as a native app's dark icon does; re-adding it picks up the
+// current mode.
+const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
+function syncInstallIcons() {
+  const dark = darkScheme.matches;
+  const touch = document.querySelector('link[rel="apple-touch-icon"]');
+  if (touch) touch.setAttribute("href", touch.getAttribute("href").replace(/apple-touch-icon(-dark)?\.png/, dark ? "apple-touch-icon-dark.png" : "apple-touch-icon.png"));
+  const manifest = document.querySelector('link[rel="manifest"]');
+  if (manifest) manifest.setAttribute("href", manifest.getAttribute("href").replace(/manifest(-dark)?\.json/, dark ? "manifest-dark.json" : "manifest.json"));
+}
+syncInstallIcons();
+darkScheme.addEventListener?.("change", syncInstallIcons);
+// Also when Safari comes back to the front (dark mode switched meanwhile, then Share > Add).
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") syncInstallIcons(); });
+
 // ---- Viewport height that follows the keyboard ----------------------------------------------
 // On a phone, `100vh`/`100dvh` is the window, not the part of it you can see: when the keyboard
 // comes up on iOS the layout viewport keeps its height and the page is scrolled instead, which
