@@ -85,8 +85,12 @@ let keyboardOpen = false;
 /// the dock on an iPhone 15 Pro. iOS's screen.width/height are the portrait values in every
 /// orientation, so the orientation picks which one is the height. iPad split view / Slide Over
 /// (narrower than the screen) keep the reported viewport.
+/// iPhone / iPad only: an installed Android app really is drawn between the status bar and the
+/// navigation bar, so its viewport is the honest height - sizing it to the screen made the shell
+/// that much taller than the window and slid the composer under the dock.
+const IOS_DEVICE = /iPhone|iPad|iPod/.test(navigator.userAgent || "") || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 function standaloneScreenHeight() {
-  if (!root.classList.contains("standalone")) return 0;
+  if (!IOS_DEVICE || !root.classList.contains("standalone")) return 0;
   const sw = Number(window.screen?.width) || 0;
   const sh = Number(window.screen?.height) || 0;
   if (!sw || !sh) return 0;

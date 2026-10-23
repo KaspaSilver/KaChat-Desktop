@@ -14285,7 +14285,10 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .settings-nav-back[hidden], .settings-nav-title[hidden] { display: none; }
 .settings-nav-back svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .settings-nav-title {
-  position: absolute; left: 64px; right: 64px; top: 50%; transform: translateY(-50%);
+  /* Centred on the back button's row, not the whole bar: the bar's top padding carries the
+     status-bar inset, and plain 50% put the title half a status bar up, under iOS's blurred
+     status-bar strip. */
+  position: absolute; left: 64px; right: 64px; top: calc(50% + var(--safe-top, 0px) / 2); transform: translateY(-50%);
   margin: 0; text-align: center; font-size: 17px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
 }
