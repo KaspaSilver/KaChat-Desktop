@@ -11,7 +11,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createRelay, ipBlocked, resolveAllowed, CHANGENOW_KEY_HEADER, SWAP_UNAVAILABLE_MESSAGE } from "./relay-guard.mjs";
+import { createRelay, ipBlocked, resolveAllowed, CHANGENOW_KEY_HEADER, CHANGENOW_CLIENT_KEY_HEADER, SWAP_UNAVAILABLE_MESSAGE } from "./relay-guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
@@ -503,6 +503,39 @@ v6.server.close();
   const hostedNc = await request(hostedPort, `/nc-proxy/${UP}/remote.php/dav/files/u/`, { method: "PROPFIND", headers: { authorization: "Basic dTpw" } });
   check("hosted relay: still no Nextcloud", hostedNc.status === 403, `${hostedNc.status}`);
   hosted.server.close();
+
+  // A KaChat someone runs for themselves (acceptClientChangenowKey): with no server key the swap
+  // calls use the key pasted in the app, sent under our own header and never forwarded under it.
+  const PASTED = "pasted0key0for0tests0000000000000000000000000000000000000000000";
+  const own = relayServer({ acceptClientChangenowKey: true, changenowApiKey: "", changenowOrigin: CN_ORIGIN });
+  const ownPort = await listen(own.server);
+  check("own KaChat without a server key: __swap is bring-your-own", (await request(ownPort, "/nc-proxy/__swap")).body === "bring-your-own");
+  lastSeen = null;
+  const ownQuote = await request(ownPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: { ...page, [CHANGENOW_CLIENT_KEY_HEADER]: PASTED } });
+  check("own KaChat: a swap call carries the pasted key", ownQuote.status === 200 && lastSeen?.headers[CHANGENOW_KEY_HEADER] === PASTED, `${ownQuote.status} ${lastSeen?.headers?.[CHANGENOW_KEY_HEADER]}`);
+  check("own KaChat: the pasted key is not forwarded under our header", lastSeen && lastSeen.headers[CHANGENOW_CLIENT_KEY_HEADER] === undefined);
+  lastSeen = null;
+  const ownNoKey = await request(ownPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: page });
+  check("own KaChat: no pasted key is still 503 not available", ownNoKey.status === 503 && ownNoKey.headers["x-kachat-swap"] === "unavailable" && lastSeen === null, `${ownNoKey.status}`);
+  lastSeen = null;
+  const ownBad = await request(ownPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: { ...page, [CHANGENOW_CLIENT_KEY_HEADER]: "short; key=1" } });
+  check("own KaChat: a malformed pasted key is not used", ownBad.status === 503 && lastSeen === null, `${ownBad.status}`);
+  lastSeen = null;
+  const ownCross = await request(ownPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: { ...page, "sec-fetch-site": "cross-site", [CHANGENOW_CLIENT_KEY_HEADER]: PASTED } });
+  check("own KaChat: still only for the site's own pages", ownCross.status === 403 && lastSeen === null, `${ownCross.status}`);
+  const ownElsewhere = await request(ownPort, `/nc-proxy/${UP}/echo`, { headers: { [CHANGENOW_CLIENT_KEY_HEADER]: PASTED } });
+  check("own KaChat: the pasted key is stripped on any other call", JSON.parse(ownElsewhere.body).headers[CHANGENOW_CLIENT_KEY_HEADER] === undefined && JSON.parse(ownElsewhere.body).headers[CHANGENOW_KEY_HEADER] === undefined);
+  own.server.close();
+  // A server key wins over a pasted one; a relay without the option ignores pasted keys.
+  lastSeen = null;
+  await request(cnPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: { ...page, [CHANGENOW_CLIENT_KEY_HEADER]: PASTED } });
+  check("a server key wins over a pasted key", lastSeen?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY);
+  const plain = relayServer({ changenowApiKey: "", changenowOrigin: CN_ORIGIN });
+  const plainPort = await listen(plain.server);
+  lastSeen = null;
+  const plainQuote = await request(plainPort, `/nc-proxy/${CNE}/v2/exchange/estimated-amount${quoteQ}`, { headers: { ...page, [CHANGENOW_CLIENT_KEY_HEADER]: PASTED } });
+  check("a hosted relay never takes a pasted key", plainQuote.status === 503 && lastSeen === null && (await request(plainPort, "/nc-proxy/__swap")).body === "off", `${plainQuote.status}`);
+  plain.server.close();
   cnServer.close();
 }
 

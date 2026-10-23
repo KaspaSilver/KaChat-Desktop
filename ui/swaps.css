@@ -222,3 +222,9 @@
   .swap-disclaimer-overlay { padding-top: 8vh; }
   .swap-disclaimer-card { top: 8vh; }
 }
+
+/* Your own KaChat with no server key: the ChangeNOW API key is pasted here. */
+.swap-own-key .swap-own-key-input { width: 100%; max-width: 360px; margin-top: 4px; }
+.swap-own-key .field-error { margin: 0; }
+.swap-own-key .primary-button { min-width: 160px; }
+.swap-own-key-change { display: block; margin: 6px auto 0; border: 0; background: none; font: inherit; font-size: 13px; cursor: pointer; }

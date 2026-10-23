@@ -76,7 +76,25 @@ let started = false;
 // ---------------------------------------------------------------------------
 // State (iOS SwapService)
 // ---------------------------------------------------------------------------
-let availability = "checking";    // "checking" | "on" | "off": does this site have a ChangeNOW key?
+let availability = "checking";    // "checking" | "on" | "off" | "needs-key": can this site swap?
+// A KaChat someone runs for themselves (localhost, Kaspa Quick Start) whose relay has no key of its
+// own takes the ChangeNOW API key they paste here ("bring-your-own" from the relay probe). The key
+// stays in this browser only and rides on the four swap calls to this KaChat's own relay, which
+// passes it to ChangeNOW. A site other people open never asks for one (its relay answers "off").
+let ownKeyMode = false;
+const PASTED_KEY_STORAGE = "kachat-changenow-own-key-v1";
+const PASTED_KEY_HEADER = "x-kachat-changenow-key"; // tools/relay-guard.mjs CHANGENOW_CLIENT_KEY_HEADER
+const PASTED_KEY_RE = /^[A-Za-z0-9_-]{16,128}$/;
+let pastedKeyError = "";
+function pastedKey() {
+  try { return String(localStorage.getItem(PASTED_KEY_STORAGE) || "").trim(); } catch { return ""; }
+}
+function savePastedKey(key) {
+  try {
+    if (key) localStorage.setItem(PASTED_KEY_STORAGE, key);
+    else localStorage.removeItem(PASTED_KEY_STORAGE);
+  } catch { /* storage blocked: the key then lasts as long as the page */ }
+}
 let history = [];
 let agreed = false;
 let termsChecked = false;          // iOS hasReadChangeNowTerms
@@ -96,7 +114,10 @@ let estimateTimer = null;
 let estimateToken = 0;
 
 const client = createChangeNowClient({
-  fetchImpl: (url, init) => window.fetch(url, init),
+  fetchImpl: (url, init) => {
+    const key = ownKeyMode ? pastedKey() : "";
+    return window.fetch(url, key ? { ...init, headers: { ...(init?.headers || {}), [PASTED_KEY_HEADER]: key } } : init);
+  },
   urlFor: (url) => proxiedUrl(url),
 });
 const quoter = createSwapQuoter(client);
@@ -120,7 +141,8 @@ function probeAvailability() {
     try {
       const response = await window.fetch(`${relayRoot()}__swap`, { cache: "no-store" });
       const body = (await response.text()).trim();
-      availability = response.ok && body === "on" ? "on" : "off";
+      ownKeyMode = response.ok && body === "bring-your-own";
+      availability = response.ok && body === "on" ? "on" : ownKeyMode ? (pastedKey() ? "on" : "needs-key") : "off";
     } catch {
       availability = "off";
     }
@@ -130,9 +152,16 @@ function probeAvailability() {
   return probing;
 }
 /** A call came back "no key here": the screen says so instead of a failed quote. */
+/** What a failed swap call says. On your own KaChat a refused key is named as such: the way out is
+ *  "Use a different key" under the form. */
+function swapErrorText(error, fallback) {
+  if (ownKeyMode && (error?.status === 401 || error?.status === 403)) return "ChangeNOW didn't accept your API key. Use a different key below.";
+  return error?.message || fallback;
+}
 function noteUnavailable(error) {
   if (!error?.unavailable) return false;
-  availability = "off";
+  // On your own KaChat the relay had no usable key from this page: ask for it again.
+  availability = ownKeyMode ? "needs-key" : "off";
   render();
   return true;
 }
@@ -201,6 +230,18 @@ function refreshToAddress() {
 function render() {
   if (!rootEl || !deps) return;
   const header = `<div class="kaposts-header"><h1 class="kaposts-title">ChangeNOW Swap</h1></div>`;
+  if (availability === "needs-key") {
+    rootEl.innerHTML = `<div class="swap-root">${header}<div class="hub-empty swap-unavailable swap-own-key">
+      <span class="swap-unavailable-icon" aria-hidden="true">${ICONS.swap}</span>
+      <h3>Add Your ChangeNOW API Key</h3>
+      <p>This KaChat runs on your own computer, so swaps use your own ChangeNOW API key. Create a free ChangeNOW partner account, copy its API key and paste it here. It stays in this browser and goes only to ChangeNOW, through this KaChat.</p>
+      <input class="field-input swap-own-key-input" type="password" data-swap-own-key placeholder="ChangeNOW API key" autocomplete="off" autocapitalize="none" spellcheck="false" />
+      ${pastedKeyError ? `<p class="field-error">${esc(pastedKeyError)}</p>` : ""}
+      <button type="button" class="primary-button" data-swap-own-key-save>Save Key</button>
+      <a class="swap-link" href="https://changenow.io/affiliate" target="_blank" rel="noopener noreferrer">Get a ChangeNOW API key</a>
+    </div></div>`;
+    return;
+  }
   if (availability !== "on") {
     rootEl.innerHTML = `<div class="swap-root">${header}${availability === "checking"
       ? `<div class="swap-checking"><span class="kaposts-spinner" aria-hidden="true"></span></div>`
@@ -286,7 +327,8 @@ function renderSwapForm() {
     </div>` : ""}
     <div class="profile-card swap-rate-card"><small>Rate</small><span class="${estimateState.status === "failed" ? "bad" : ""}">${esc(rateText())}</span></div>
     ${result ? renderResultCard(result) : ""}
-    <a class="swap-powered" href="https://changenow.io/terms-of-use/changenow-terms" target="_blank" rel="noopener noreferrer">Powered by ChangeNOW</a>`;
+    <a class="swap-powered" href="https://changenow.io/terms-of-use/changenow-terms" target="_blank" rel="noopener noreferrer">Powered by ChangeNOW</a>
+    ${ownKeyMode ? `<button type="button" class="swap-link swap-own-key-change" data-swap-own-key-change>Using your own API key · Use a different key</button>` : ""}`;
 }
 
 function renderResultCard(result) {
@@ -405,7 +447,7 @@ function rescheduleEstimate() {
     } catch (error) {
       if (token !== estimateToken) return;
       if (noteUnavailable(error)) return;
-      estimateState = { status: "failed", fromAmount: null, toAmount: null, errorMessage: error?.message || "Unavailable" };
+      estimateState = { status: "failed", fromAmount: null, toAmount: null, errorMessage: swapErrorText(error, "Unavailable") };
     }
     renderFormLight();
   }, 500);
@@ -476,7 +518,7 @@ async function executeSwap() {
     deps.showToast?.("Swap started");
   } catch (error) {
     if (noteUnavailable(error)) { createState = { status: "idle", result: null, errorMessage: null }; return; }
-    createState = { status: "failed", result: null, errorMessage: error?.message || "Swap failed" };
+    createState = { status: "failed", result: null, errorMessage: swapErrorText(error, "Swap failed") };
     deps.showToast?.(createState.errorMessage);
   }
   render();
@@ -781,6 +823,23 @@ export function initSwaps(dependencies) {
   });
   rootEl.addEventListener("click", async (event) => {
     if (event.target.closest("[data-swap-retry]")) { availability = "checking"; render(); probeAvailability(); return; }
+    if (event.target.closest("[data-swap-own-key-save]")) {
+      const key = String(rootEl.querySelector("[data-swap-own-key]")?.value || "").trim();
+      if (!PASTED_KEY_RE.test(key)) { pastedKeyError = "That doesn't look like a ChangeNOW API key - copy it again from your ChangeNOW account."; render(); return; }
+      pastedKeyError = "";
+      savePastedKey(key);
+      availability = "on";
+      render();
+      rescheduleEstimate();
+      return;
+    }
+    if (event.target.closest("[data-swap-own-key-change]")) {
+      savePastedKey("");
+      pastedKeyError = "";
+      availability = "needs-key";
+      render();
+      return;
+    }
     const tabButton = event.target.closest("[data-swap-tab]");
     if (tabButton) { tab = tabButton.dataset.swapTab; render(); return; }
     if (event.target.closest("[data-swap-agree]")) {

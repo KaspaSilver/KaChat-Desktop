@@ -116,8 +116,14 @@ export const CHANGENOW_KEY_ROUTES = new Set([
 /** What the four swap calls are answered with when this server has no ChangeNOW key. The app shows
  *  its own "not available" screen on it (the x-kachat-swap: unavailable header). */
 export const SWAP_UNAVAILABLE_MESSAGE = "Swap is not available right now.";
-/** The relay's own swap probe: "on" with a server key, "off" without (ui/swaps.js asks on open). */
+/** The relay's own swap probe: "on" with a server key, "bring-your-own" on a KaChat someone runs
+ *  for themselves that takes the key they paste in the app, "off" otherwise (ui/swaps.js asks). */
 export const SWAP_PROBE_PATH = "/__swap";
+/** The key a person pasted into their own KaChat (Kaspa Hub > ChangeNOW Swap). Taken only by a
+ *  relay created with acceptClientChangenowKey and only when it has no key of its own; never
+ *  forwarded under this name. */
+export const CHANGENOW_CLIENT_KEY_HEADER = "x-kachat-changenow-key";
+const CHANGENOW_CLIENT_KEY_RE = /^[A-Za-z0-9_-]{16,128}$/;
 
 // --- Addresses -------------------------------------------------------------------------------
 
@@ -286,6 +292,10 @@ export function parseTrustedProxies(spec) {
  * @param {number}  [options.rateMaxKeys]      client keys tracked by the limiter (default 5000)
  * @param {string|function} [options.changenowApiKey] the server's ChangeNOW key (or a getter); empty
  *                  means swaps are off on this server
+ * @param {boolean} [options.acceptClientChangenowKey] a KaChat someone runs for themselves (the dev /
+ *                  preview server, a personal deployment): with no server key, the swap calls use
+ *                  the key the person pasted in the app (CHANGENOW_CLIENT_KEY_HEADER). Never on a
+ *                  site other people open.
  * @param {number}  [options.changenowRateMax] key-attached ChangeNOW calls per client per minute (30)
  * @param {string}  [options.changenowOrigin]  where the key routes live - tests only
  * @param {function} [options.resolveAllowed]  (hostname) => {address,family}|null - tests only
@@ -303,6 +313,7 @@ export function createRelay(options = {}) {
   const rateMaxKeys = Number(options.rateMaxKeys) > 0 ? Number(options.rateMaxKeys) : RATE_MAX_KEYS;
   const changenowKey = () => String((typeof options.changenowApiKey === "function" ? options.changenowApiKey() : options.changenowApiKey) || "").trim();
   const changenowRateMax = Number(options.changenowRateMax) > 0 ? Number(options.changenowRateMax) : 30;
+  const acceptClientChangenowKey = Boolean(options.acceptClientChangenowKey);
   const changenowOrigin = String(options.changenowOrigin || CHANGENOW_ORIGIN).replace(/\/+$/, "").toLowerCase();
   const resolveTarget = typeof options.resolveAllowed === "function"
     ? options.resolveAllowed
@@ -472,7 +483,7 @@ export function createRelay(options = {}) {
     // nothing about the key itself.
     if (probePath === SWAP_PROBE_PATH) {
       res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
-      res.end(changenowKey() ? "on" : "off");
+      res.end(changenowKey() ? "on" : (acceptClientChangenowKey ? "bring-your-own" : "off"));
       return;
     }
     // Never a page of this origin: a top-level or framed load of a relayed URL would render
@@ -515,10 +526,13 @@ export function createRelay(options = {}) {
     }
 
     const headers = { ...req.headers };
-    // A ChangeNOW key never comes from a client: only the server's, and only on the swap calls.
+    // A key under ChangeNOW's own header never comes from a client. The person's pasted key
+    // (their own KaChat only) rides under ours and is taken off here; it goes out only below.
     delete headers[CHANGENOW_KEY_HEADER];
+    const pastedKey = String(headers[CHANGENOW_CLIENT_KEY_HEADER] || "").trim();
+    delete headers[CHANGENOW_CLIENT_KEY_HEADER];
     if (isChangenowKeyRoute(method, target)) {
-      const serverKey = changenowKey();
+      const serverKey = changenowKey() || (acceptClientChangenowKey && CHANGENOW_CLIENT_KEY_RE.test(pastedKey) ? pastedKey : "");
       if (!serverKey) {
         refuse(res, 503, SWAP_UNAVAILABLE_MESSAGE, { "x-kachat-swap": "unavailable" });
         return;

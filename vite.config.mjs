@@ -35,6 +35,9 @@ function nextcloudProxy() {
     rateMax: Number(process.env.KACHAT_RELAY_RATE_MAX || 600),
     // ChangeNOW: attached only to the app's own four swap calls, under its own per-client limit.
     changenowApiKey: () => changenowApiKey,
+    // The dev / preview server is a KaChat someone runs for themselves: without a server key, Swap
+    // takes the ChangeNOW key they paste in the app (Kaspa Hub > ChangeNOW Swap).
+    acceptClientChangenowKey: true,
     changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
     // A seed or API that never answers must not hold the connection until the CDN in front gives
     // up (Cloudflare's 522): fifteen seconds for reads; writes get two minutes, long polls one.
