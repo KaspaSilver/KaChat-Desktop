@@ -472,15 +472,31 @@ export function unlockKeyVaultFromSession() {
   const left = Number(handoff.expiresAt) - vault.now();
   if (!Number.isFinite(left) || left < 0 || left > VAULT_HANDOFF_TTL_MS) return false;
   const offered = handoff.keys && typeof handoff.keys === "object" && !Array.isArray(handoff.keys)
-    ? Object.entries(handoff.keys)
-    : (typeof handoff.key === "string" ? [[SHARED, handoff.key]] : []);
-  let opened = false;
-  for (const [id, hex] of offered) {
+    ? handoff.keys
+    : (typeof handoff.key === "string" ? { [SHARED]: handoff.key } : {});
+  return unlockWithVaultKeys(offered) > 0;
+}
+
+/** The data keys this page holds, as { vaultId: hex } ({} while locked). For remembering the
+ *  signed-in account across app launches (ui/vault-remember.js), never for anything shown. */
+export function exportOpenVaultKeys() {
+  if (!vault.keys.size || !checkKeyStillCurrent()) return {};
+  const out = {};
+  for (const [id, key] of vault.keys) out[id] = bytesToHex(key);
+  return out;
+}
+/** Opens every vault whose key in `keys` ({ vaultId: hex }) is well-formed and still that vault's
+ *  key; anything else is ignored. Returns how many it opened. */
+export function unlockWithVaultKeys(keys) {
+  if (!keys || typeof keys !== "object" || Array.isArray(keys)) return 0;
+  let opened = 0;
+  for (const [id, hex] of Object.entries(keys)) {
     if (typeof hex !== "string" || !/^[0-9a-f]{64}$/i.test(hex) || !vaultEnabled(id)) continue;
     const key = hexToBytes(hex);
     if (!keyIsCurrent(key, id)) continue;
+    if (heldKey(id) && bytesToHex(heldKey(id)) === hex) continue;
     setUnlocked(key, id);
-    opened = true;
+    opened += 1;
   }
   return opened;
 }

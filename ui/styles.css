@@ -14774,3 +14774,18 @@ html.keyboard-open .sidebar-tabbar { display: none !important; }
    phone the header's top padding is the status bar's height, and centring on all of it put the
    balance up in the status bar, half under the clock, while Done sat below it. */
 .settings-overlay-balance { top: calc(var(--safe-top, 0px) + (100% - var(--safe-top, 0px)) / 2); }
+/* Message Requests (and the group's hidden users, which share it). The shared .create-chat-header
+   pulls itself 18px past the sheet's gutters to bleed edge to edge, but this sheet has no gutters
+   (padding 0): the bar stuck out past both edges - Done cut off at the right, a dark slab with a
+   23px title. Here it is iOS's inline navigation bar: in the sheet, transparent, a 17pt semibold
+   title and Done. On a phone it is a full-height sheet (iOS .large), not a short card. */
+.message-requests-modal > .create-chat-header {
+  margin: 0; padding: 0 16px; min-height: 52px;
+  position: static; background: transparent; border-bottom: 0;
+}
+.message-requests-modal > .create-chat-header h2 { font-size: 17px; font-weight: 600; letter-spacing: 0; line-height: 22px; }
+.message-requests-modal > .create-chat-header .create-chat-nav-button { font-size: 17px; font-weight: 600; }
+.message-requests-checking { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 56px 16px; color: var(--muted); font-size: 15px; }
+@media (max-width: 620px) {
+  html.touch .modal-backdrop.as-sheet > .message-requests-modal { height: 100%; max-height: 100%; }
+}

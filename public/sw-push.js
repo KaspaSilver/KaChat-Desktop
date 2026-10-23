@@ -87,7 +87,8 @@
         out.title = "New message request";
         out.options.body = `${shortAddress(p.sender)} wants to chat with you.`;
         out.options.tag = `kachat-request-${sender}`;
-        out.options.data.route = { kind: "requests" };
+        // The sender rides along, so the tap opens their request (Accept / Reject), not just the list.
+        out.options.data.route = { kind: "requests", address: sender };
         return out;
       }
       out.title = nameFor(m, p.sender);

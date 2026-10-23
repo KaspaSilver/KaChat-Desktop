@@ -281,12 +281,13 @@ test("unknown sender: short address; No Sound contact: silent; sound off: silent
   assert.equal(plain(notificationFromPush({ type: "handshake", sender: ALICE }, mirror)).options.body, "Started a conversation");
 });
 
-test("message request (inbox push): iOS wording, one tag per sender, opens Message Requests, no badge", () => {
+test("message request (inbox push): iOS wording, one tag per sender, opens that request, no badge", () => {
   const n = plain(notificationFromPush({ type: "contextual", inbox: "true", sender: BOB }, mirror));
   assert.equal(n.title, "New message request");
   assert.equal(n.options.body, "kaspa:qpbob0...000000 wants to chat with you.");
   assert.equal(n.options.tag, `kachat-request-${BOB}`);
-  assert.deepEqual(n.options.data.route, { kind: "requests" });
+  // The sender rides along so the tap opens their request, not just the list.
+  assert.deepEqual(n.options.data.route, { kind: "requests", address: "kaspa:qpbob0000000000000000000000000000000000000000000000000000" });
   assert.equal(n.badge, null);
 });
 

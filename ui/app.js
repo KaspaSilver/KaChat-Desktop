@@ -107,6 +107,7 @@ import { onContextGesture, onDoubleGesture, isTouchDevice } from "./touch.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
+import { restoreRememberedVaults } from "./vault-remember.js";
 import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, isPasswordStorageKey, isBiometricStorageKey, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, hasBiometricUnlock, biometricUnlockRetiredReason, loadBiometricRecord, removeBiometricUnlock, BIOMETRIC_UNLOCK_KEY } from "./key-vault.js";
 import { biometricName, biometricRowLabel, biometricButtonLabel, biometricEnvironmentProblem, canOfferBiometricUnlock, canAutoPromptBiometric, checkBiometricSupport, enrolBiometric, finishBiometricEnrolment, unlockWithBiometric, turnOffBiometricUnlock, BIOMETRIC_UNSUPPORTED_MESSAGE } from "./biometric-unlock.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
@@ -572,9 +573,10 @@ function persistAccountShellPreferences() {
 
 // --- App password (replaces the mockup "biometrics" toggles). With a password set, every saved
 // account's private key, recovery phrase and passphrase is encrypted at rest (ui/key-vault.js:
-// PBKDF2-SHA256 600k wraps a random AES-256-GCM data key) and KaChat opens locked until the
-// password is entered (DSK-006/007): in each new tab, after closing and reopening a tab, and after
-// a manual refresh, since the data key lives only in this page's memory (DSK-023). Without one,
+// PBKDF2-SHA256 600k wraps a random AES-256-GCM data key) and nothing signs in until the
+// password opens it (DSK-006/007). The open account then stays signed in across launches until
+// Log Out, as on iOS (ui/vault-remember.js keeps its data key under a non-extractable device key;
+// owner, 2026-10-22 - this replaces DSK-023's lock on every new tab and refresh). Without one,
 // keys stay unencrypted in this browser, and Settings says so. The password also gates revealing
 // the seed phrase / private key and signing in, when the matching toggle is on. Wrong answers back
 // off like Simple Mode's. ---
@@ -595,6 +597,10 @@ async function withVaultTarget(address, fn) {
 }
 configureKeyVault({ canonicalize: canonicalAccountAddress, target: currentVaultTarget });
 unlockKeyVaultFromSession(); // only after KaChat's own reload (reloadKaChat's 15 s one-time hand-off)
+// Signed in until Log Out, as the iOS app is (owner, 2026-10-22): the account that was open opens
+// again at launch with no password or Face ID; picking another saved account, and showing a seed
+// phrase or private key, still ask (ui/vault-remember.js).
+await restoreRememberedVaults({ keepSignedIn: () => (accountShellPrefs.keepSignedIn ?? true) !== false });
 // A password change (or removal, or a first password) in another tab replaces the data key this
 // tab holds: lock at once and ask for the password over the current screen (DSK-022). The vault
 // also locks by itself, and tells us, when a read or write finds the key stale first.
@@ -761,9 +767,11 @@ function requestPassword({ mode = "verify", title, message, allowForgot = false,
     // "Forgot password?" only on the lock (signed out, vault locked): offered inside an unlocked
     // session it would be a way around the seed-reveal password.
     { const forgot = document.querySelector("[data-password-forgot]"); if (forgot) forgot.hidden = !(allowForgot && mode === "verify" && isAppLocked()); }
-    // "Use Face ID" first, only on the lock (the vault is locked and a passkey is enrolled).
+    // "Use Face ID" first, wherever the password is checked and a passkey is enrolled.
     {
-      const offerBiometric = mode === "verify" && isAppLocked() && canOfferBiometricUnlock();
+      // Also while signed in (seed phrase, private key, a transaction), as iOS gates those with Face
+      // ID: the passkey must unwrap this account's current key, so it proves the same as the password.
+      const offerBiometric = mode === "verify" && canOfferBiometricUnlock();
       const button = document.querySelector("[data-password-biometric]");
       if (button) { button.hidden = !offerBiometric; button.disabled = false; button.textContent = biometricButtonLabel(); }
       const off = document.querySelector("[data-password-biometric-off]");
@@ -923,7 +931,7 @@ function refreshPasswordStatus() {
   const keepNote = document.querySelector("[data-keep-signed-in-note]");
   if (keepNote) {
     keepNote.textContent = hasPassword
-      ? "Restore the active account when KaChat opens, after you enter your password. Closing the tab locks KaChat, and a manual refresh asks for the password again."
+      ? "KaChat opens straight into your account and stays signed in on this device until you log out. Signing in to another saved account, and showing a seed phrase or private key, ask for the password."
       : "Restore the active account when KaChat opens.";
   }
 }
@@ -3697,7 +3705,7 @@ function routeNotificationClick(data) {
   try {
     if (route.kind === "chat" && route.conversationId && state.conversations.some((entry) => entry.id === route.conversationId)) { setActiveAppTab("chats"); openConversation(route.conversationId); }
     else if ((route.kind === "chat" || route.kind === "chatAddress") && route.address) openChatFromNotificationAddress(route.address);
-    else if (route.kind === "requests") { setActiveAppTab("chats"); openMessageRequestsSheet(); }
+    else if (route.kind === "requests") openMessageRequestFromNotification(route.address);
     else if (route.kind === "kapost" && route.txId) { setActiveAppTab("kaposts"); openKaPostFromNotification(route.txId); }
     else if (route.kind === "group" && route.groupId) { setActiveAppTab("chats"); openGroupChat(route.groupId); }
     // A public room's ping opens that room straight in the detail pane (iOS a062577).
@@ -3708,15 +3716,15 @@ function routeNotificationClick(data) {
     else if (route.kind === "address" && route.address) routeToOwnAddress(route.address);
   } catch { /* the page may still be booting */ }
 }
-/** A push named a sender: their chat if you have one (a pending request opens Message Requests);
- *  never a new chat created just because a notification was tapped. */
+/** A push named a sender: their chat if you have one - a pending request opens on its Accept /
+ *  Reject bar, so you see who it is; never a new chat created just because a notification was
+ *  tapped. */
 function openChatFromNotificationAddress(address) {
   const clean = String(address || "").trim().toLowerCase();
   const contact = (state.contacts || []).find((entry) => String(entry.address || "").toLowerCase() === clean);
   const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
   setActiveAppTab("chats");
   if (!conversationEntry) return;
-  if (isMessageRequest(conversationEntry)) { openMessageRequestsSheet(); return; }
   openConversation(conversationEntry.id);
 }
 // A tap that had to open the app (the worker could not hand it to a running page): taken once the
@@ -4593,11 +4601,18 @@ function messageRequestsSheetEl() {
   document.body.appendChild(el);
   return el;
 }
+// While a tapped "New message request" push is looked up (a cold open has not asked the inbox yet),
+// the sheet says so rather than "No message requests".
+let messageRequestsChecking = false;
 function renderMessageRequestsSheet() {
   const el = document.querySelector("[data-message-requests-modal]");
   if (!el || el.hidden) return;
   const listEl = el.querySelector("[data-message-requests-list]");
   const requests = messageRequestConversations();
+  if (!requests.length && messageRequestsChecking) {
+    listEl.innerHTML = `<div class="message-requests-checking"><span class="initial-sync-spinner" aria-hidden="true"></span><span>Checking for new requests…</span></div>`;
+    return;
+  }
   if (!requests.length) {
     listEl.innerHTML = `<div class="message-requests-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.2 6.3A2 2 0 0 1 8.1 5h7.8a2 2 0 0 1 1.9 1.3L20 13.5h-4.2a1 1 0 0 0-.9.6l-.6 1.3a1 1 0 0 1-.9.6h-2.8a1 1 0 0 1-.9-.6l-.6-1.3a1 1 0 0 0-.9-.6Z"/></svg><strong>No message requests</strong></div>`;
     return;
@@ -4609,6 +4624,41 @@ function openMessageRequestsSheet() {
   const el = messageRequestsSheetEl();
   el.hidden = false;
   renderMessageRequestsSheet();
+}
+/** The requester's own chat (Accept / Reject at the bottom), when it is on this device. */
+function openRequestChatFor(address) {
+  const clean = String(address || "").trim().toLowerCase();
+  if (!clean) return false;
+  const contact = (state.contacts || []).find((entry) => String(entry.address || "").toLowerCase() === clean);
+  const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
+  if (!conversationEntry) return false;
+  const sheet = document.querySelector("[data-message-requests-modal]");
+  if (sheet) sheet.hidden = true;
+  setActiveAppTab("chats");
+  openConversation(conversationEntry.id);
+  return true;
+}
+/** A tapped "New message request" push names its sender: open their request. After a cold open the
+ *  app has not asked the inbox about them yet, so it asks now (a few times, while the indexer may
+ *  still be filing it) and shows "Checking for new requests…" until then; without a sender, or if
+ *  they never turn up, Message Requests as it is. */
+async function openMessageRequestFromNotification(address) {
+  setActiveAppTab("chats");
+  if (openRequestChatFor(address)) return;
+  messageRequestsChecking = true;
+  openMessageRequestsSheet();
+  const wallet = engine.address;
+  try {
+    for (let attempt = 0; attempt < 6 && engine.address === wallet; attempt += 1) {
+      try { await syncInbox({ catchUp: true }); } catch { /* tried again below */ }
+      if (openRequestChatFor(address)) return;
+      if (!address && messageRequestConversations().length) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 2500));
+    }
+  } finally {
+    messageRequestsChecking = false;
+    renderMessageRequestsSheet();
+  }
 }
 
 /** In a request, Accept / Reject replace the composer; a Private chat that hasn't heard back says
@@ -11802,7 +11852,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 226;
+const APP_BUILD = 227;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
