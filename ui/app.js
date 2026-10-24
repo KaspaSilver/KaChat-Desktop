@@ -7361,12 +7361,50 @@ document.querySelector("[data-notif-list]")?.addEventListener("click", (event) =
 });
 loadNotifCenter();
 
-document.querySelector("[data-connection-reconnect]")?.addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  button.disabled = true;
-  try { await connectAndRefresh(); }
-  finally { button.disabled = false; renderConnectionStatus(); }
-});
+// Reconnect always drops the current node and connects again (a plain connect kept a node that
+// still answered, so pressing it - or choosing your own node first - seemed to do nothing), says
+// it is working, and ends with where it connected or why it could not.
+let connectionAttemptNote = "";
+async function reconnectWithFeedback(button = null) {
+  const label = button?.querySelector("strong");
+  if (button) button.disabled = true;
+  if (label) label.textContent = "Reconnecting…";
+  connectionAttemptNote = "";
+  renderConnectionStatus();
+  try {
+    await engine.connect({ force: true });
+    await connectAndRefresh({ quiet: true });
+    const host = hostFromEndpoint(engine.connectionSnapshot?.()?.primaryEndpoint || "");
+    showCopyToast(host ? `Connected to ${host}` : "Reconnected");
+    return true;
+  } catch (error) {
+    connectionAttemptNote = `Couldn't connect: ${connectFailureText(error)}`;
+    appendEngineLog(`Could not connect: ${describeConnectError(error)}`);
+    showCopyToast("Couldn't connect to the node");
+    return false;
+  } finally {
+    if (button) button.disabled = false;
+    if (label) label.textContent = "Reconnect";
+    renderConnectionStatus();
+  }
+}
+/** The reason, plus what to do when the chosen node is one a browser can never reach. */
+function connectFailureText(error) {
+  const reason = describeConnectError(error);
+  const node = getEndpointOverride("trustedNode").trim();
+  let host = "";
+  let port = "";
+  try { const url = new URL(node.replace(/^ws/i, "http")); host = url.hostname; port = url.port; } catch { /* scan mode */ }
+  const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
+  if (node && ip && (port === "17110" || port === "18110" || /^wss:/i.test(node))) {
+    return `${reason.replace(/\.?\s*$/, ".")} ${host}:${port || "443"} looks like a node's own wRPC port, which has no TLS certificate. A browser can only reach a node over wss:// with a certificate for its domain name - put the node behind a TLS proxy and use that address (KaChat's own: node.kachat.duckdns.org).`;
+  }
+  if (/^ws:\/\//i.test(node) && typeof location !== "undefined" && location.protocol === "https:") {
+    return `${reason.replace(/\.?\s*$/, ".")} Browsers block plain ws:// nodes on the internet from an https page - use the node's wss:// address.`;
+  }
+  return reason;
+}
+document.querySelector("[data-connection-reconnect]")?.addEventListener("click", (event) => { reconnectWithFeedback(event.currentTarget); });
 
 // Node-selection cards: the automatic public-node scan vs a specific wRPC URL of the user's. Those are the only two; the selection is staged
 // in the UI and only committed to the trustedNode endpoint on Apply. An empty trustedNode has
@@ -11913,7 +11951,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 244;
+const APP_BUILD = 245;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
@@ -14324,10 +14362,15 @@ function nodeChoiceLooksValid(value) {
 // Automatic Scan = the public resolver picks the node (kaspa-ng's web behaviour), KaChat's node
 // as the fallback. A saved or custom address connects only to that node.
 const NODE_CHOICE_SCAN = "__scan__";
-// A bare host or host:port from the address book is a wRPC endpoint over TLS.
+// A bare host or host:port from the address book is a wRPC endpoint over TLS - except a node's own
+// plain Borsh wRPC port (17110) on a KaChat opened over http (localhost, a LAN copy), which can
+// reach it as ws:// as it is. An https page cannot (the browser blocks it) and keeps wss://, whose
+// failure Connection Status explains.
 function nodeChoiceUrl(value) {
   const v = String(value || "").trim();
-  return v && !/^wss?:\/\//i.test(v) ? `wss://${v}` : v;
+  if (!v || /^wss?:\/\//i.test(v)) return v;
+  const plainPage = typeof location !== "undefined" && location.protocol === "http:";
+  return plainPage && /:17110$/.test(v) ? `ws://${v}` : `wss://${v}`;
 }
 // Both pickers - Connection Settings and the Connection Status sheet (iOS
 // KaspaNodeQuickAccessSections, "a quick-select surface over that same underlying list").
@@ -14379,9 +14422,8 @@ document.querySelectorAll("[data-node-choice]").forEach((select) => select.addEv
   // The status sheet's picker says what it did (iOS KaspaNodeQuickAccessSections.apply); the
   // Connection Settings one does not.
   if (quick) showCopyToast(scan ? "Automatic scan enabled." : "Node updated.");
-  try { await engine.connect({ force: true }); await connectAndRefresh({ quiet: true }); }
-  catch (error) { appendEngineLog(`Could not connect: ${describeConnectError(error)}`); }
-  renderConnectionStatus();
+  // Connects at once and says how it went (the reason under Reconnect when it can't).
+  await reconnectWithFeedback(document.querySelector("[data-connection-reconnect]"));
 }));
 
 // No "Reset to Defaults" (iOS ConnectionSettingsView has none: a blank field saves as the default).
@@ -14667,7 +14709,13 @@ function renderConnectionStatus() {
   // iOS Actions footer: "Primary: host" whenever the pool has a primary endpoint.
   const primaryFooter = document.querySelector("[data-connection-primary-footer]");
   const primaryHost = hostFromEndpoint(primaryUrl);
-  if (primaryFooter) { primaryFooter.hidden = !primaryHost; primaryFooter.textContent = primaryHost ? `Primary: ${primaryHost}` : ""; }
+  if (primaryFooter) {
+    // A failed Reconnect / node choice says why here until the next attempt.
+    const note = connectionAttemptNote;
+    primaryFooter.hidden = !note && !primaryHost;
+    primaryFooter.textContent = note || (primaryHost ? `Primary: ${primaryHost}` : "");
+    primaryFooter.classList.toggle("bad", Boolean(note));
+  }
 
   const lastGoodRecord = (registry.endpoints || []).find((entry) => entry.endpoint === (connection.primaryEndpoint || registry.lastGoodEndpoint));
   const latencyEl = document.querySelector("[data-connection-latency]");

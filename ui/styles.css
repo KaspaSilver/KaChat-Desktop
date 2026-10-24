@@ -14910,3 +14910,5 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
   body.chats-tab .sidebar-scroll { padding-bottom: 88px; }
   body.chats-tab .new-chat-fab { bottom: 16px; right: 20px; }
 }
+/* Connection Status: why a Reconnect or node choice failed, under the Reconnect button. */
+.settings-group-footer.bad { color: var(--ios-red, #ff453a); }
