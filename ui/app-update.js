@@ -33,6 +33,9 @@ function somethingUnderWay() {
   try { if (busy()) return true; } catch { return true; }
   const el = document.activeElement;
   if (el instanceof HTMLElement && el.matches("input, textarea, [contenteditable='true']") && String(el.value ?? el.textContent ?? "").trim()) return true;
+  // An unsent message in any composer, focused or not (resuming lets go of the focused field,
+  // ui/pwa.js): a reload would throw it away.
+  if ([...document.querySelectorAll("textarea, [contenteditable='true']")].some((node) => String(node.value ?? node.textContent ?? "").trim())) return true;
   return [...document.querySelectorAll(".modal-backdrop:not([hidden]), .account-overlay:not([hidden])")]
     .some((node) => getComputedStyle(node).display !== "none");
 }

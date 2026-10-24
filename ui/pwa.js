@@ -99,6 +99,12 @@ function standaloneScreenHeight() {
   const screenH = landscape ? Math.min(sw, sh) : Math.max(sw, sh);
   return Math.abs(window.innerWidth - screenW) <= 2 ? screenH : 0;
 }
+/// A field the keyboard could be up for. No such field, no keyboard - whatever the viewport says.
+function typingFieldFocused() {
+  const el = document.activeElement;
+  return el instanceof HTMLElement
+    && el.matches('input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="range"]):not([type="file"]), textarea, select, [contenteditable="true"]');
+}
 function applyViewportHeight() {
   if (!coarseMedia.matches) {
     root.classList.remove("app-h", "keyboard-open");
@@ -109,10 +115,14 @@ function applyViewportHeight() {
   if (!visible) return;
   const full = standaloneScreenHeight();
   // A viewport noticeably shorter than the window (or, installed, the screen) is the keyboard (or
-  // the URL bar mid-animation).
-  keyboardOpen = Math.max(window.innerHeight, full) - visible > 120;
-  // Installed and no keyboard: the app is the whole screen, status bar to home indicator.
-  const height = full && !keyboardOpen && full > visible ? full : visible;
+  // the URL bar mid-animation) - but only while a field is focused. An iPhone home-screen app
+  // brought back from the background can report the height it had with the keyboard up (or mid
+  // the resume animation) and send no resize after: read as a keyboard, that sized the app to the
+  // top half and hid the dock until the next tap.
+  keyboardOpen = Math.max(window.innerHeight, full) - visible > 120 && typingFieldFocused();
+  // Installed and no keyboard: the app is the whole screen, status bar to home indicator. No
+  // keyboard and a short viewport otherwise: the window's own height, not the stale viewport's.
+  const height = keyboardOpen ? visible : (full && full > visible ? full : Math.max(visible, Math.round(window.innerHeight) || 0));
   root.style.setProperty("--app-h", `${height}px`);
   root.classList.add("app-h");
   root.classList.toggle("keyboard-open", keyboardOpen);
@@ -129,7 +139,16 @@ window.addEventListener("orientationchange", () => window.setTimeout(applyViewpo
 // afterwards, so measure again once the page has settled and whenever it comes back to the front.
 window.addEventListener("load", () => window.setTimeout(applyViewportHeight, 300));
 window.addEventListener("pageshow", () => window.setTimeout(applyViewportHeight, 100));
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") window.setTimeout(applyViewportHeight, 100); });
+// Coming back to the front: measured again as the resume animation settles - iOS may only have the
+// real height after it. A field still focused from before the app was put away has no keyboard any
+// more (iOS dropped it), so it is let go: a later tap brings the keyboard back with a true height.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (coarseMedia.matches && typingFieldFocused()) { try { document.activeElement.blur(); } catch { /* fine */ } }
+  for (const delay of [100, 400, 1000]) window.setTimeout(applyViewportHeight, delay);
+});
+// The keyboard going away with its field: measured once it has gone.
+document.addEventListener("focusout", () => { if (coarseMedia.matches) window.setTimeout(applyViewportHeight, 300); });
 coarseMedia.addEventListener?.("change", applyViewportHeight);
 
 // A focused field must end up above the keyboard, inside the shrunken shell: once the viewport has
