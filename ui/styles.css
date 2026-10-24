@@ -14912,3 +14912,21 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
 }
 /* Connection Status: why a Reconnect or node choice failed, under the Reconnect button. */
 .settings-group-footer.bad { color: var(--ios-red, #ff453a); }
+/* Wide screens: the lists run to the bottom of the window and scroll under the floating dock, as
+   on a phone, instead of stopping above an empty strip. Each scroller ends with room for the dock
+   so its last row can come clear of it; an open thread / group / room keeps its composer above it. */
+@media (min-width: 860px) {
+  body .app-body,
+  body.chats-tab .app-body { padding-bottom: 0; }
+  body.chats-tab .sidebar-scroll { padding-bottom: calc(var(--dock-inset) + 24px); }
+  .kaposts-screen { padding-bottom: 0; }
+  .kaposts-content,
+  .kaposts-panel-body { padding-bottom: calc(var(--dock-inset) + 24px); }
+  .profile-screen { padding-bottom: calc(var(--dock-inset) + 24px); }
+  .app-detail > .conversation-view,
+  .app-detail > .group-chat-screen,
+  .app-detail > .broadcast-room { padding-bottom: var(--dock-inset); }
+  /* The compose button sits just above the dock's line, as on a phone: on a window narrow enough
+     for the dock to reach under the list it would otherwise land on it. */
+  body.chats-tab .new-chat-fab { bottom: calc(var(--dock-inset) + 8px); }
+}
