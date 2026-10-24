@@ -6996,12 +6996,141 @@ async function syncStrangerPaymentsIntoSelfChat({ catchUp = false } = {}) {
   return added;
 }
 
+// One pass over the chatting address's past transactions per wallet (iOS fetchAllPayments on the
+// first sync after a new wallet, ChatService+Fetching.swift): the chats a payment is the only
+// on-chain proof of. A KAS payment you sent opens a chat with whoever you paid (as
+// recordOutgoingPaymentChat does live), with its bubble; one that carried a handshake opens the chat
+// without one; a chat payment someone sent you opens theirs once its signatures check out (the
+// stranger sweep's rule). The indexer knows none of these when the transaction carried no KaChat
+// message, so a restored account lost every such chat. Plain payments from strangers stay out.
+const PAYMENT_HISTORY_RESTORE_KEY = "kachat-payment-history-restore-v1";
+const PAYMENT_HISTORY_PAGE = 500;
+const PAYMENT_HISTORY_MAX_PAGES = 20; // 10,000 transactions, as iOS
+async function restoreChatsFromPaymentHistory() {
+  const wallet = engine.address;
+  if (!wallet || restoreChatsFromPaymentHistory.inFlight) return 0;
+  if (Date.now() < (restoreChatsFromPaymentHistory.retryAt || 0)) return 0;
+  try { if (localStorage.getItem(accountScopedKey(PAYMENT_HISTORY_RESTORE_KEY))) return 0; } catch { return 0; }
+  restoreChatsFromPaymentHistory.inFlight = true;
+  try {
+    const ownWallet = ownWalletAddressSet();
+    const own = new Set([...allOwnAddressSet(), ...ownWallet, wallet].map((address) => String(address || "").toLowerCase()));
+    const outgoing = new Map(); // recipient -> [{ txid, sompi, blockTime, bubble }]
+    const chatPayers = new Set();
+    for (let page = 0; page < PAYMENT_HISTORY_MAX_PAGES; page += 1) {
+      const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(wallet)}/full-transactions?limit=${PAYMENT_HISTORY_PAGE}&offset=${page * PAYMENT_HISTORY_PAGE}&resolve_previous_outpoints=light`;
+      const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error(`history read failed (${response.status})`);
+      const txs = await response.json();
+      if (engine.address !== wallet) return 0;
+      if (!Array.isArray(txs)) throw new Error("unexpected history response");
+      for (const tx of txs) {
+        const txid = String(tx?.transaction_id || tx?.transactionId || "").trim();
+        if (!txid || isSuppressedPaymentTxId(txid) || isKachatContractTransaction(tx, ownWallet)) continue;
+        const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
+        if (!inputs.length) continue; // a block reward
+        const blockTime = Number(tx?.block_time || tx?.blockTime || 0);
+        const payload = String(tx?.payload || "");
+        const chatPayment = isChatPaymentPayloadHex(payload);
+        const protocol = isKachatProtocolPayloadHex(payload);
+        const sentByUs = inputs.some((input) => String(input?.previous_outpoint_address || input?.previousOutpointAddress || "").toLowerCase() === wallet.toLowerCase());
+        if (sentByUs) {
+          for (const output of Array.isArray(tx?.outputs) ? tx.outputs : []) {
+            const to = String(output?.script_public_key_address || output?.scriptPublicKeyAddress || "").trim();
+            if (!to || own.has(to.toLowerCase()) || isScriptAddress(to) || !isOnActiveNetwork(to)) continue;
+            let sompi = 0n;
+            try { sompi = BigInt(output?.amount ?? 0); } catch { continue; }
+            const list = outgoing.get(to) || [];
+            const row = list.find((entry) => entry.txid === txid);
+            if (row) row.sompi += sompi;
+            // A message-carrying transaction (a handshake) proves the chat; only a payment is a bubble.
+            else list.push({ txid, sompi, blockTime, bubble: !protocol || chatPayment });
+            outgoing.set(to, list);
+          }
+          continue;
+        }
+        if (!chatPayment) continue;
+        const received = restPaymentSompiTo(tx, wallet);
+        if (!(received > 0n)) continue;
+        const restSender = restPaymentSender(tx, wallet);
+        if (!restSender || own.has(restSender.toLowerCase())) continue;
+        if (chatPayers.has(restSender) || state.contacts.some((entry) => entry.address === restSender)) continue;
+        const decision = await engine.checkIncomingRestPayment(tx, { amountSompi: received, restSender, blockTime });
+        if (engine.address !== wallet) return 0;
+        const step = strangerPaymentStep(decision, { blockTime });
+        if (step.file && step.chatPaymentAllowed && step.sender) chatPayers.add(step.sender);
+      }
+      if (txs.length < PAYMENT_HISTORY_PAGE) break;
+    }
+    let opened = 0;
+    const deleted = loadDeletedContactAddresses();
+    const openChat = (address, createdAt) => {
+      if (address === wallet || isChatBlocked(address) || deleted.has(address)) return null;
+      let contact = state.contacts.find((entry) => entry.address === address);
+      if (!contact) {
+        contact = {
+          id: nowId(), name: "", nameIsCustom: false, address, avatar: initialsFor(shortAddress(address)),
+          createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "",
+        };
+        state.contacts.push(contact);
+        opened += 1;
+      }
+      let conversationEntry = state.conversations.find((entry) => entry.contactId === contact.id);
+      if (!conversationEntry) {
+        conversationEntry = createConversation({ contactId: contact.id, createdAt });
+        state.conversations.push(conversationEntry);
+      }
+      return { contact, conversationEntry };
+    };
+    let bubbles = 0;
+    for (const [address, rows] of outgoing) {
+      const first = Math.min(...rows.map((row) => row.blockTime || Date.now()));
+      const chat = openChat(address, first);
+      if (!chat) continue;
+      for (const row of rows) {
+        if (!row.bubble || !(row.sompi > 0n) || isContactDeletedAsOf(address, row.txid, row.blockTime)) continue;
+        if ((chat.conversationEntry.messages || []).some((m) => m.txid === row.txid)) continue;
+        const amountKas = kasTextFromSompi(row.sompi);
+        const message = createMessage({
+          conversationId: chat.conversationEntry.id, contactId: chat.contact.id, direction: "outgoing",
+          text: `Sent ${amountKas} ${KAS_UNIT}`, sender: wallet, receiver: address,
+          status: MESSAGE_STATUSES.CONFIRMED, transport: "kaspa-payment", createdAt: row.blockTime || Date.now(),
+        });
+        applyMessagePatch(message, { messageType: "payment", paymentAmountKas: amountKas, txid: row.txid });
+        if (appendIncomingOrReactionMessage(chat.conversationEntry, message)) bubbles += 1;
+      }
+    }
+    for (const sender of chatPayers) {
+      if (state.contacts.some((entry) => entry.address === sender)) continue;
+      const chat = openChat(sender, Date.now());
+      if (chat) chat.contact.inboxDiscovered = true; // a request until accepted, as a live chat payment
+    }
+    try { localStorage.setItem(accountScopedKey(PAYMENT_HISTORY_RESTORE_KEY), JSON.stringify({ at: Date.now() })); } catch { /* read again next session */ }
+    appendEngineLog(`Payment history read back: ${opened} chat${opened === 1 ? "" : "s"} restored, ${bubbles} payment${bubbles === 1 ? "" : "s"} filed.`);
+    if (opened || bubbles) {
+      pendingInitialCatchUp = true; // their history arrives as a silent backfill, not new mail
+      refreshSubscriptionAddresses({ restart: true });
+      persistState();
+      renderChats();
+      renderMessageRequestsSheet();
+    }
+    return opened;
+  } catch (error) {
+    restoreChatsFromPaymentHistory.retryAt = Date.now() + 5 * 60_000;
+    appendEngineLog(`Payment history read-back failed (tried again in 5 minutes): ${error.message}`);
+    return 0;
+  } finally {
+    restoreChatsFromPaymentHistory.inFlight = false;
+  }
+}
+
 async function refreshAllConversations({ quiet = true } = {}) {
   if (messageRefreshInFlight || !engine.address || !engine.isKasiaCipherLoaded?.()) return 0;
   messageRefreshInFlight = true;
   // The first real sweep after a load/switch/restore is a history backfill, not live
   // traffic — suppress its notifications and unread badges (see pendingInitialCatchUp).
   const catchUp = pendingInitialCatchUp;
+  const sweepWallet = engine.address;
   let added = 0;
   // Every section swallows its own error so one bad endpoint cannot stop the rest of the sweep.
   // Counting them is what lets the caller back off instead of hammering a dead indexer every 5s.
@@ -7014,6 +7143,12 @@ async function refreshAllConversations({ quiet = true } = {}) {
     catch (error) { sweepFailures += 1; appendEngineLog(`Incoming handshake sync failed: ${error.message}`); }
     if (hasIndexer) try { added += await syncOutgoingHandshakeEvidence({ quiet }); }
     catch (error) { sweepFailures += 1; appendEngineLog(`Outgoing handshake sync failed: ${error.message}`); }
+    // Saved contacts are read back now, beside the handshakes (iOS's handshake bootstrap), not
+    // after a first sweep that on a big imported account takes minutes: the chats they bring back
+    // join the next sweep. Not awaited - it pages the whole history.
+    if (contactNotesReadBackFor !== (engine.address || "") && Date.now() >= contactNotesRetryAt) readBackContactNotes().catch(() => {});
+    // Chats a past payment is the only proof of: once per wallet, alongside (see the function).
+    restoreChatsFromPaymentHistory().catch(() => {});
     // People writing to us for the first time, without a handshake (Message Requests).
     if (hasIndexer) try { added += await syncInbox({ catchUp }); }
     catch (error) { appendEngineLog(`Inbox sync failed: ${error.message}`); }
@@ -7060,8 +7195,9 @@ async function refreshAllConversations({ quiet = true } = {}) {
   } finally {
     messageRefreshInFlight = false;
     // Only the sweep that actually ran as the backfill clears the flag, so a restore
-    // that arms it mid-sweep still gets its own silent sweep next time.
-    if (catchUp) pendingInitialCatchUp = false;
+    // that arms it mid-sweep still gets its own silent sweep next time - and only for the wallet
+    // it ran for: an import that lands mid-sweep keeps its own catch-up.
+    if (catchUp && engine.address === sweepWallet) pendingInitialCatchUp = false;
     // Read by the self-scheduling sweep loop: a failing indexer doubles the pause up to a
     // minute, a success snaps it back (this used to sit after the return and never ran).
     lastSweepFailed = sweepFailures > 0;
@@ -11952,7 +12088,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 248;
+const APP_BUILD = 249;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -19211,17 +19347,24 @@ async function readBackContactNotes() {
     const s = contactStash();
     const deleted = loadDeletedContactAddresses();
     let recovered = 0;
+    let aliasesLearned = 0;
     for (const stash of stashes) {
       const address = stash.partnerAddress;
       if (!address || address === wallet) continue;
       s.known.add(address);
-      if (deleted.has(address) || state.contacts.some((entry) => entry.address === address)) continue;
+      // The note's alias for their side is one their messages may come under - an old random
+      // alias above all, which nothing else can tell us (iOS adds it as a conversation alias).
+      const theirAlias = String(stash.theirAlias || "").trim();
+      const existing = state.contacts.find((entry) => entry.address === address);
+      if (existing && theirAlias && rememberLegacyIncomingAlias(existing, theirAlias)) aliasesLearned += 1;
+      if (deleted.has(address) || existing) continue;
       if (!isValidKaspaAddressString(address)) continue;
       const createdAt = Number(stash.timestamp || stash.blockTime || Date.now());
       const displayName = shortAddress(address);
       const contact = {
         id: nowId(), name: displayName, nameIsCustom: false, address, avatar: initialsFor(displayName),
         createdAt, updatedAt: createdAt, relationshipState: "legacy-manual", handshakeTxid: "",
+        ...(theirAlias ? { legacyIncomingAliases: legacyWireAliases([theirAlias]) } : {}),
       };
       state.contacts.push(contact);
       state.conversations.push(createConversation({ contactId: contact.id, createdAt }));
@@ -19229,6 +19372,7 @@ async function readBackContactNotes() {
     }
     if (complete) s.complete = true;
     saveContactStash();
+    if (aliasesLearned && !recovered) persistState();
     if (recovered > 0) {
       appendEngineLog(`Saved contacts read back: ${recovered} chat${recovered === 1 ? "" : "s"} recovered.`);
       refreshSubscriptionAddresses({ restart: true });
@@ -27065,6 +27209,15 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
     state = { contacts: [], conversations: [] };
     persistState();
     resetHandshakeSyncStateFor(wallet.address); // empty chats: the handshakes are read again (IOS-004)
+    // The same wallet removed and imported again without a reload: what this page already read
+    // for it (saved contacts, the inbox cursor, the group stream position) is read again too.
+    contactNotesReadBackFor = null;
+    contactNotesRetryAt = 0;
+    contactStashState = null;
+    chatRequestState.cache = null;
+    groupManager = null;
+    groupManagerForAddress = null;
+    try { localStorage.removeItem(accountScopedKey(PAYMENT_HISTORY_RESTORE_KEY)); } catch { /* not stored */ }
   }
   persistTestingWallet({
     mnemonic: wallet.mnemonic,
