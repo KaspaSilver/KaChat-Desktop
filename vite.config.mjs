@@ -71,18 +71,34 @@ function nextcloudProxy() {
 // The launch screen (index.html .boot-splash) shows "KaChat 5.2.2 (231)" under the Kaspa logo
 // before any script has run, so the label is written into the HTML here - read from ui/app.js's
 // APP_VERSION / APP_BUILD each time, so it can never disagree with the one Settings shows.
+function readAppVersion() {
+  try {
+    const source = readFileSync(new URL("./ui/app.js", import.meta.url), "utf8");
+    const version = source.match(/^const APP_VERSION = "([^"]+)";/m)?.[1];
+    const build = Number(source.match(/^const APP_BUILD = (\d+);/m)?.[1]);
+    return version && build ? { version, build } : null;
+  } catch { return null; }
+}
 function appVersionLabel() {
   return {
     name: "kachat-app-version-label",
     transformIndexHtml(html) {
-      let label = "";
-      try {
-        const source = readFileSync(new URL("./ui/app.js", import.meta.url), "utf8");
-        const version = source.match(/^const APP_VERSION = "([^"]+)";/m)?.[1];
-        const build = source.match(/^const APP_BUILD = (\d+);/m)?.[1];
-        if (version && build) label = `KaChat ${version} (${build})`;
-      } catch { /* the label stays empty */ }
-      return html.replace("%KACHAT_VERSION_LABEL%", label);
+      const v = readAppVersion();
+      return html.replace("%KACHAT_VERSION_LABEL%", v ? `KaChat ${v.version} (${v.build})` : "");
+    },
+    // version.json: what the open app compares itself with to update in place (ui/app-update.js).
+    // Written next to index.html on build; the dev server answers it from the source.
+    generateBundle() {
+      const v = readAppVersion();
+      if (v) this.emitFile({ type: "asset", fileName: "version.json", source: JSON.stringify(v) });
+    },
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (!/\/version\.json(\?|$)/.test(String(req.url || ""))) return next();
+        res.setHeader("content-type", "application/json");
+        res.setHeader("cache-control", "no-store");
+        res.end(JSON.stringify(readAppVersion() || {}));
+      });
     },
   };
 }

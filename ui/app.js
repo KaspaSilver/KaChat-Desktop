@@ -104,6 +104,7 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import addressExplainerUrl from "./assets/address-explainer.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
+import { startAppUpdateChecks } from "./app-update.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
@@ -11951,9 +11952,16 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 246;
+const APP_BUILD = 247;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
+// Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
+// yours is still being built, signed or sent.
+startAppUpdateChecks({
+  build: APP_BUILD,
+  isBusy: () => (state.conversations || []).some((entry) => (entry.messages || []).some((m) =>
+    m?.status === MESSAGE_STATUSES.BUILDING || m?.status === MESSAGE_STATUSES.SIGNING || m?.status === MESSAGE_STATUSES.BROADCASTING)),
+});
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 { const el = document.querySelector("[data-logged-out-version]"); if (el) el.textContent = `KaChat ${APP_VERSION_LABEL}`; }
@@ -19523,7 +19531,8 @@ function showSettingsSubscreen(name, parentIndex) {
   const parentLabel = settingsSubscreenParentIndex != null
     ? settingsGroupsEls[settingsSubscreenParentIndex]?.querySelector(".settings-group-label")?.textContent?.trim()
     : null;
-  setSettingsBackBar(true, parentLabel || "Settings", target.querySelector(".settings-group-label")?.textContent?.trim() || "");
+  // A page whose first heading is not its name says it (data-settings-title).
+  setSettingsBackBar(true, parentLabel || "Settings", target.dataset.settingsTitle || target.querySelector(".settings-group-label")?.textContent?.trim() || "");
   settingsScreenEl.scrollTop = 0;
 }
 

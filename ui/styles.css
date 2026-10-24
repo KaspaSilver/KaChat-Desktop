@@ -14930,3 +14930,72 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
      for the dock to reach under the list it would otherwise land on it. */
   body.chats-tab .new-chat-fab { bottom: calc(var(--dock-inset) + 8px); }
 }
+/* A newer build is out and the app could not move to it on its own (ui/app-update.js). */
+.app-update-pill {
+  position: fixed; left: 50%; top: calc(10px + var(--safe-top, 0px)); transform: translateX(-50%); z-index: 3200;
+  display: inline-flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px; border-radius: 999px;
+  border: 1px solid var(--bar-separator, var(--line)); background: var(--bar-bg, #1c1c1e); color: var(--text);
+  -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
+  box-shadow: 0 8px 28px var(--shadow, rgba(0,0,0,.4)); font: inherit; font-size: 14px; cursor: pointer;
+}
+.app-update-pill strong { padding: 6px 14px; border-radius: 999px; background: var(--kaspa-ink, #70c7ba); color: #06110f; font-size: 13px; }
+/* Phones too: the dock is an overlay. Screens run to the bottom of the display and scroll under
+   it (no band behind the pill); each scroller ends with room for it, and an open thread / group /
+   room keeps its composer above it. An invisible shield around the pill takes taps in the dock's
+   strip, so nothing behind the dock is ever pressed by a tap meant for it. */
+@media (max-width: 859px) {
+  body .app-body,
+  body.chats-tab .app-body { padding-bottom: 0; }
+  /* The list already reaches the bottom of the screen now; pulling it a dock's height further
+     (the old way of running it under the dock) put it - and the compose button measured from its
+     bottom - below the screen. */
+  body .app-sidebar,
+  body.chats-tab .app-sidebar { margin-bottom: 0; padding-bottom: 0; }
+  body.chats-tab .sidebar-scroll { padding-bottom: calc(var(--dock-inset) + 24px); }
+  .kaposts-screen { padding-bottom: 0; }
+  .kaposts-content,
+  .kaposts-panel-body,
+  .profile-screen { padding-bottom: calc(var(--dock-inset) + 24px); }
+  .app-detail > .conversation-view,
+  .app-detail > .group-chat-screen,
+  .app-detail > .broadcast-room { padding-bottom: var(--dock-inset); }
+  body .sidebar-tabbar::before {
+    content: "";
+    position: absolute;
+    left: -12px; right: -12px;
+    top: -6px; bottom: calc(-8px - env(safe-area-inset-bottom, 0px));
+    z-index: -1;
+    background: transparent;
+  }
+}
+/* Chat toolbar buttons stand out over the messages that scroll under them: the back chevron and
+   the call button are the dock's frosted glass (opaque enough to read over any bubble), with its
+   border and soft shadow, 44px round. */
+.conversation-header .back-button,
+.conversation-header .conversation-call-button {
+  width: 44px; height: 44px; border-radius: 999px; padding: 0;
+  display: grid; place-items: center;
+  border: 1px solid var(--bar-separator, var(--line));
+  background: var(--bar-bg, rgba(28,28,30,.92));
+  -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
+  box-shadow: 0 4px 16px var(--shadow, rgba(0,0,0,.45));
+  opacity: 1;
+}
+.conversation-header .back-button { font-size: 0; color: var(--text); }
+.conversation-header .back-button::before { content: ""; width: 12px; height: 12px; border-left: 2.6px solid currentColor; border-bottom: 2.6px solid currentColor; transform: translateX(2px) rotate(45deg); border-radius: 1px; }
+.conversation-header .conversation-call-button { color: var(--kaspa-ink); }
+.conversation-header .conversation-call-button svg { width: 21px; height: 21px; }
+.conversation-header .back-button:hover,
+.conversation-header .conversation-call-button:hover { opacity: 1; filter: brightness(1.15); }
+/* Connection Settings: Save alone on the right (the bar already says "Connection Settings"); the
+   five tabs fit a phone - sized to the screen, scrolling sideways only if they still cannot; the
+   empty IP Address Book line sits inside its card like a row. */
+.connection-settings-head { justify-content: flex-end; }
+.connection-tabs { display: flex; flex-wrap: nowrap; gap: 2px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.connection-tabs::-webkit-scrollbar { display: none; }
+.connection-tabs .domains-tab { flex: 1 0 auto; padding: 8px 6px; white-space: nowrap; font-size: min(15px, 3.6vw); letter-spacing: -0.01em; }
+.saved-node-empty { margin: 0; padding: 12px 16px; font-style: normal; font-size: 15px; color: var(--muted); }
+/* The chatting-address / receive QR sits in the middle of its white frame (the frame is as wide as
+   the card on a phone, and the 240px code was flush left in it). */
+.chatting-address-qr-frame canvas,
+.cold-qr-frame canvas { margin-left: auto; margin-right: auto; }
