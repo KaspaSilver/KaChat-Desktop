@@ -14835,3 +14835,78 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
   html.touch .modal-backdrop.as-sheet > .recovery-hold-modal .recovery-title { top: 30px; }
   html.touch .modal-backdrop.as-sheet > .recovery-hold-modal .recovery-close { top: 20px; right: 16px; }
 }
+
+/* ==== Wide screens laid out like the phone (owner, 2026-10-23) ===============================
+   No bar across the whole window any more: the dock is the phone's floating pill at the bottom
+   centre (symbol over label), and the toolbar's pieces sit where a phone puts them - on Chats as
+   the chats list's own header, exactly the list's width (status light and balance leading, the
+   gear and Select trailing), so the conversation runs to the top of the window; on every other tab
+   as the top of that screen. Every screen keeps the dock's strip at the bottom clear. Overrides the
+   earlier wide-screen blocks (the top-centre pill, the list-bottom dock), which stay above. */
+@media (min-width: 860px) {
+  :root { --dock-inset: calc(88px + env(safe-area-inset-bottom, 0px)); --topbar-h: calc(64px + var(--safe-top, 0px)); }
+
+  body .sidebar-tabbar,
+  body.chats-tab .sidebar-tabbar {
+    position: fixed;
+    top: auto;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    z-index: 410;
+    width: auto;
+    max-width: calc(100vw - 24px);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid var(--bar-separator, var(--line));
+    border-radius: 999px;
+    background: var(--bar-bg);
+    -webkit-backdrop-filter: var(--material-blur);
+    backdrop-filter: var(--material-blur);
+    box-shadow: 0 8px 28px var(--shadow, rgba(0,0,0,.4));
+  }
+  body .sidebar-tabbar .sidebar-tab,
+  body.chats-tab .sidebar-tabbar .sidebar-tab {
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 84px;
+    width: auto;
+    padding: 6px 12px 5px;
+    border-radius: 999px;
+  }
+  body .sidebar-tabbar .sidebar-tab-icon,
+  body.chats-tab .sidebar-tabbar .sidebar-tab-icon { display: grid; }
+  body .sidebar-tabbar .sidebar-tab > span:last-child,
+  body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child {
+    font-size: 12px; font-weight: 500; max-width: none; overflow: visible; white-space: nowrap;
+  }
+
+  /* The toolbar: the list's header on Chats, the screen's top elsewhere - never across the window. */
+  body .app-topbar { left: 0; right: 0; width: auto; border-bottom: 0; box-shadow: none; justify-content: flex-start; }
+  body.chats-tab .app-topbar { right: auto; width: var(--sidebar-w); border-bottom: 0; border-right: 1px solid var(--line); padding-left: 16px; padding-right: 16px; }
+  /* Off Chats the screens are a centred column (560px; KaPosts 900px): the status light and balance
+     sit right above that screen's title, as on a phone, not out at the window's edge. */
+  body:not(.chats-tab) .app-topbar {
+    left: 50%; right: auto; transform: translateX(-50%);
+    width: min(100%, 560px); padding-left: 16px; padding-right: 16px;
+  }
+  body[data-app-tab="kaposts"]:not(.chats-tab) .app-topbar { width: min(100%, 900px); padding-left: 32px; padding-right: 32px; }
+  .app-topbar .toolbar-balance { flex: 1 1 auto; min-width: 0; max-width: none; justify-content: flex-start; }
+  .app-topbar .topbar-select-cluster,
+  .app-topbar .topbar-profile-cluster { margin-left: auto; flex: 0 0 auto; }
+
+  body .app-body { padding-top: var(--topbar-h); padding-bottom: var(--dock-inset); }
+  body.chats-tab .app-body { padding-top: 0; padding-bottom: var(--dock-inset); }
+  body .app-sidebar,
+  body.chats-tab .app-sidebar { margin-bottom: 0; padding-bottom: 0; }
+  body.chats-tab .app-sidebar { padding-top: var(--topbar-h); }
+  body.chats-tab .sidebar-scroll { padding-bottom: 88px; }
+  body.chats-tab .new-chat-fab { bottom: 16px; right: 20px; }
+}

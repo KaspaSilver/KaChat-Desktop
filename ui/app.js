@@ -10734,6 +10734,8 @@ function setActiveAppTab(tab) {
   // On Chats the topbar narrows to the chats list and the conversation takes the full height
   // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
   document.body.classList.toggle("chats-tab", isChats);
+  // The wide layout lines the toolbar up with the open screen's column (ui/styles.css).
+  document.body.dataset.appTab = screenTab;
   publishDockHeight();
   appTabScreens.forEach((screen) => {
     screen.hidden = screen.dataset.appTabScreen !== screenTab;
@@ -11911,7 +11913,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 243;
+const APP_BUILD = 244;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 const profileVersionEl = document.querySelector("[data-profile-version]");
