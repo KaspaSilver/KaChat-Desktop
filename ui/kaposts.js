@@ -5,6 +5,7 @@
 // the indexer feed until their txids round-trip; post/quote/like/dislike submits are held
 // behind a 5-second undo countdown — cancel and nothing ever touches the network.
 
+import { guessLanguage, OTHER_LANGUAGE } from "./language-guess.js";
 import { fitBackgroundBanner } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { userFacingError } from "./dialogs.js";
@@ -5182,6 +5183,9 @@ function detectLanguageSoon(post) {
   kapostDetecting.add(stripped);
   ensureLanguageDetector().then(async (detector) => {
     let code = "";
+    // No detector in this browser (Safari, Chrome on Android): a script / common-word guess, so a
+    // phone is offered Translate too. The service's answer corrects a wrong guess (see translatePost).
+    if (!detector) code = guessLanguage(stripped, readerLanguage());
     if (detector) {
       try {
         const results = await detector.detect(stripped);
@@ -5276,6 +5280,8 @@ function canOfferTranslation(post) {
 function detectedLanguageIsOfferable(detected) {
   const target = readerLanguage();
   if (!detected || detected === target) return false;
+  // "Not the reader's language, not sure which": offered, and the service decides.
+  if (detected === OTHER_LANGUAGE) return true;
   const languages = kapostLanguages;
   if (!languages || kapostLanguagesUrl !== translationServiceUrl()) return true;
   return languages.source.has(detected) && languages.target.has(target);
