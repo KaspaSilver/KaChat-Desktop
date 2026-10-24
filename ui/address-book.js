@@ -140,11 +140,8 @@ function listHtml() {
   return `
     <div class="kaposts-header ab-header ab-list-header">
       <h1 class="kaposts-title">Address Book</h1>
-      <div class="kaposts-header-actions ab-toolbar-actions">
-        <button class="kaposts-icon-button" type="button" data-ab-import-export aria-label="Import or export" title="Import or export">${ICONS.importExport}</button>
-        <button class="kaposts-icon-button" type="button" data-ab-add aria-label="Add Address" title="Add Address">${ICONS.plus}</button>
-      </div>
     </div>
+    <button class="new-chat-fab ab-fab" type="button" data-ab-import-export aria-label="Address Book actions" title="Address Book actions">${ICONS.plus}</button>
     ${empty ? emptyStateHtml() : `
       <div class="ab-body">
         <input class="ab-search" type="search" data-ab-search placeholder="Search names and addresses" autocomplete="off" spellcheck="false" value="${esc(searchText)}" aria-label="Search names and addresses" />
@@ -337,10 +334,10 @@ export function resetAddressBookForAccount() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Import or Export sheet (iOS AddressBookView importExportSheet, 87b2a0b)
+// Address Book + sheet (was iOS AddressBookView importExportSheet, 87b2a0b, behind a toolbar button)
 // ---------------------------------------------------------------------------------------------
 //
-// Import File / Export File, and with Nextcloud connected Import from Nextcloud / Export to
+// The list's glass + opens it, as the Chats + opens New (owner, 2026-10-24): Add Address, Import File / Export File, and with Nextcloud connected Import from Nextcloud / Export to
 // Nextcloud (else a line saying where to connect it). The file is the store's export JSON; Export
 // to Nextcloud puts it in the KaChat folder with its spaces kept, one new file per tap
 // (NEXTCLOUD_SYNC.md §1), and Import from Nextcloud picks a .json starting in that folder.
@@ -353,7 +350,7 @@ function ensureImportExportSheet() {
   ioSheetEl = document.createElement("div");
   ioSheetEl.className = "modal-backdrop ab-backdrop ab-io-backdrop";
   ioSheetEl.hidden = true;
-  ioSheetEl.innerHTML = `<div class="contact-modal portfolio-editor-modal ab-io-sheet" role="dialog" aria-modal="true" aria-label="Import or Export" data-ab-io-body></div>`;
+  ioSheetEl.innerHTML = `<div class="contact-modal portfolio-editor-modal ab-io-sheet" role="dialog" aria-modal="true" aria-label="Address Book" data-ab-io-body></div>`;
   document.body.appendChild(ioSheetEl);
   ioSheetEl.addEventListener("mousedown", (event) => { if (event.target === ioSheetEl) closeImportExportSheet(); });
   ioSheetEl.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeImportExportSheet(); } });
@@ -381,6 +378,7 @@ function renderImportExportSheet() {
   if (!body) return;
   const connected = isNextcloudConnected();
   const rows = [
+    { action: "add", icon: ICONS.plus, title: "Add Address", subtitle: "Save a Kaspa address with a name you'll recognize." },
     { action: "import", icon: ICONS.fileIn, title: "Import File", subtitle: "Add addresses from an Address Book export." },
     { action: "export", icon: ICONS.fileOut, title: "Export File", subtitle: "Save this Address Book, with its photos, to a file." },
     ...(connected ? [
@@ -390,7 +388,7 @@ function renderImportExportSheet() {
   ];
   body.innerHTML = `
     <div class="modal-header">
-      <div><h2>Import or Export</h2></div>
+      <div><h2>Address Book</h2></div>
       <button class="modal-close" type="button" data-ab-io-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">${rows.map(ioRowHtml).join("")}</div>
@@ -418,7 +416,8 @@ function onImportExportClick(event) {
   if (!row) return;
   closeImportExportSheet();
   const action = row.getAttribute("data-ab-io");
-  if (action === "import") { ioFileInput.value = ""; ioFileInput.click(); }
+  if (action === "add") openAddressBookEditor({ address: null });
+  else if (action === "import") { ioFileInput.value = ""; ioFileInput.click(); }
   else if (action === "export") exportToFile();
   else if (action === "nc-import") importFromNextcloud();
   else if (action === "nc-export") exportToNextcloud();
