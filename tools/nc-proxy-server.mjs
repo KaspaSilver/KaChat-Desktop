@@ -2,9 +2,10 @@
 // Standalone /nc-proxy server for STATIC (nginx-served) deployments: kachat.app/desktop and
 // kachatdesktoptest.duckdns.org, where there is no Vite server to provide the relay.
 //
-// All relay behaviour lives in ./relay-guard.mjs, shared with vite.config.mjs, so the two can no
-// longer drift apart. DEPLOY BOTH FILES side by side (e.g. /opt/kachat-ncproxy/nc-proxy-server.mjs
-// and /opt/kachat-ncproxy/relay-guard.mjs); this file alone will not start. Node 20+, no packages.
+// All relay behaviour lives in ./relay-guard.mjs (and its rules in ./relay-rules.mjs), shared with
+// vite.config.mjs, so the two can no longer drift apart. DEPLOY ALL THREE FILES side by side (e.g.
+// /opt/kachat-ncproxy/nc-proxy-server.mjs, relay-guard.mjs and relay-rules.mjs); this file alone
+// will not start. Node 20+, no packages.
 //
 // This server is PUBLIC-facing, so private/LAN addresses are never reachable from it (unlike a
 // private dev server with KACHAT_RELAY_ALLOW_PRIVATE=1).

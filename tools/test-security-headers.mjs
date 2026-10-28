@@ -68,5 +68,11 @@ for (const [name, value] of Object.entries(headers)) {
   check(`docs nginx line for ${name}`, docs.includes(`add_header ${name} "${value}" always;`));
 }
 
+// Cloudflare Pages (desktop.kachat.app) reads public/_headers.
+const pagesHeaders = readFileSync(join(root, "public", "_headers"), "utf8");
+for (const [name, value] of Object.entries(headers)) {
+  check(`public/_headers sends ${name}`, pagesHeaders.includes(`\n  ${name}: ${value}\n`));
+}
+
 console.log(`\n${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

@@ -1,0 +1,15 @@
+# Response headers on Cloudflare Pages (desktop.kachat.app). Pages applies this file to the page and
+# every built asset and does not serve it. The values are tools/security-headers.mjs's https policy
+# (DSK-014, docs/SECURITY_HEADERS.md); tools/test-security-headers.mjs checks they stay in step.
+# The /nc-proxy relay is a Pages Function, which this file does not touch: it sends its own
+# content-security-policy: sandbox.
+
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https: wss:; font-src 'self' data:; worker-src 'self'; manifest-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# Built files carry a content hash in their name, so they never change.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
