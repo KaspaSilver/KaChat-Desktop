@@ -131,6 +131,12 @@ export default defineConfig({
   },
   preview: {
     host: "0.0.0.0",
+    // Any host name: the preview server (what the Docker image and Kaspa Quick Start run) sits
+    // behind whatever domain someone publishes it on, and Vite refuses a Host it doesn't know
+    // ("Blocked request. This host (...) is not allowed"). It serves only the built files and the
+    // public /nc-proxy relay, so the DNS-rebinding guard behind that check protects nothing here.
+    // `npm run dev` keeps the guard: it serves source files.
+    allowedHosts: true,
     // DSK-014: CSP (no inline script, wasm allowed, framing refused), X-Frame-Options, nosniff and
     // Referrer-Policy on the page and every built asset. Vite applies these to static files and
     // index.html only, never to the /nc-proxy relay above, which sends its own sandbox CSP. This
