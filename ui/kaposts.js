@@ -70,7 +70,17 @@ import {
   kapostsEditWindowText,
   kapostsLongRelativeTime,
   kapostsNamedRelativeTime,
+  KAPOSTS_FEED_MENU,
+  kapostsAxisLock,
+  kapostsPagerOffset,
+  kapostsProjectedTranslation,
+  kapostsPagerTarget,
+  kapostsDrawerWidth,
+  kapostsDrawerShouldClose,
+  kapostsDrawerDim,
 } from "./kaposts-format.js";
+// The phone header's hamburger, its slide-out card and the swipeable feeds (iOS 865c9ab).
+import "./kaposts-drawer.css";
 // Who a poster is: their .kachat name, avatar, banner and bio (iOS 3d6fb7c, KachatLive.identityName /
 // profileBanner / profileBio). Profiles are on every network (mainnet: profile-only identities).
 import { kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, kachatRetryImage, onKachatIdentityChange } from "./kachat-names-live.js";
@@ -3252,6 +3262,10 @@ function renderPanel() {
   if (!show) clearPanelPagerSentinels();
   const refreshButton = ensurePanelRefreshButton();
   if (refreshButton) refreshButton.hidden = !show || !panelHasRefresh(activePanel);
+  // Notifications' cog, top left (iOS d37f64d): what notifies you.
+  const cog = ensureNotificationSettingsButton();
+  if (cog) cog.hidden = !show || activePanel?.type !== "notifications";
+  panelEl?.toggleAttribute("data-kaposts-panel-notifications", show && activePanel?.type === "notifications");
   if (!show || !panelBodyEl) return;
   const panel = activePanel;
   // A Post Activity kind's list is a screen pushed inside the sheet: at phone width its header
@@ -3305,7 +3319,8 @@ function renderPanel() {
               <button type="button" class="kaposts-count-link" data-kaposts-follow-list="followers"${panel.pubkey ? "" : " disabled"}><b>${panel.details?.followersCount ?? 0}</b> Followers</button>
             </span>
             ${profile.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
-            ${isMine ? `<button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.idCard}"/></svg>Edit KaChat Profile</button>` : ""}
+            ${isMine ? `<span class="kaposts-profile-buttons"><button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.idCard}"/></svg>Edit KaChat Profile</button>${/* Beside it, Wallet (iOS 865c9ab): the chatting address's balance, history and coins -
+                 Desktop's Manage Address screen. */ ""}${deps.openChattingWallet && deps.engine.address ? `<button class="kaposts-edit-kns kaposts-wallet-button" type="button" data-kaposts-wallet>${WALLET_SVG}Wallet</button>` : ""}</span>` : ""}
           </div>
           ${!isMine ? `<span class="kaposts-profile-actions">
             <button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-profile-follow>${isFollowing ? "Following" : "Follow"}</button>
@@ -4047,19 +4062,21 @@ export function kaPostsUnseenCount() {
   return deps ? loadUnseenKaPostsCount() : 0;
 }
 function syncRailBadge() {
-  const button = document.querySelector('[data-kaposts-rail="notifications"]');
-  if (!button || !deps) return;
+  if (!deps) return;
   const count = loadUnseenKaPostsCount();
-  let badge = button.querySelector("[data-kaposts-rail-badge]");
-  if (!count) { badge?.remove(); button.setAttribute("aria-label", "Notifications"); return; }
-  if (!badge) {
-    badge = document.createElement("span");
-    badge.className = "kaposts-rail-badge";
-    badge.setAttribute("data-kaposts-rail-badge", "");
-    button.appendChild(badge);
-  }
-  badge.textContent = count > 99 ? "99+" : String(count);
-  button.setAttribute("aria-label", `Notifications, ${count} unseen`);
+  // The rail's bell, and the phone header's (where iOS's Notifications dock tab carries it).
+  document.querySelectorAll('[data-kaposts-rail="notifications"], [data-kaposts-phone-section="notifications"]').forEach((button) => {
+    let badge = button.querySelector("[data-kaposts-rail-badge]");
+    if (!count) { badge?.remove(); button.setAttribute("aria-label", "Notifications"); return; }
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "kaposts-rail-badge";
+      badge.setAttribute("data-kaposts-rail-badge", "");
+      button.appendChild(badge);
+    }
+    badge.textContent = count > 99 ? "99+" : String(count);
+    button.setAttribute("aria-label", `Notifications, ${count} unseen`);
+  });
 }
 
 function loadSeenKaPostNotificationIds() {
@@ -5475,6 +5492,9 @@ export function kaPostsFollowingAddresses() {
 /// view. Exported so the tab switch can call it the way it already calls stopBroadcastPolling.
 export function stopKaPostsPolling() {
   stopNewPostsCheck();
+  // Leaving KaPosts (a notification tap, a link, another tab) takes the drawer with it, so it
+  // never stays over the next screen.
+  closeFeedDrawer();
 }
 
 /** No KaPost indexer on this network (testnet has none yet, iOS 0bda85e): say so, rather than
@@ -5517,6 +5537,7 @@ export function refreshKaPostsFeed() {
 }
 
 export function resetKaPostsForAccount() {
+  closeFeedDrawer(); // the card was the old account's menu
   syncRailBadge();
   loadPrefs();
   loadDrafts();
@@ -5699,6 +5720,372 @@ function attachMentionAutocomplete(textarea) {
   });
 }
 
+/** Following, Feed or Popular on screen - from the tab bar or a swipe across the feed. */
+function selectFeedTab(tab) {
+  // Re-selecting the tab on screen changes nothing (iOS onChange(of: selectedFeed)).
+  if (!tab || tab === activeFeedTab) return;
+  activeFeedTab = tab;
+  tabsEl?.querySelectorAll("[data-kaposts-feed-tab]").forEach((b) => b.classList.toggle("active", b.dataset.kapostsFeedTab === tab));
+  // Feed <-> Popular share the global feed: keep every page already scrolled in (Popular is a
+  // re-sort of the same set) and only deepen Popular's window. Only a real source change - to
+  // or from Following - starts a new paginated feed.
+  if (feedSourceFor(tab) === loadedFeedSource && remotePosts.length > 0) {
+    renderFeed({ resetScroll: true });
+    if (tab === "popular") deepenPopularRanking();
+    return;
+  }
+  // Retire the outgoing tab's cursor before anything can repaint: its sentinel must not
+  // fire a "load more" that would page the tab the user just left.
+  feedPager = null;
+  clearPagerSentinel("feed");
+  renderFeed();
+  loadFeed().then(() => { if (activeFeedTab === "popular") deepenPopularRanking(); });
+}
+
+/** One of KaPosts' sections, from the rail, the phone header or the hamburger's card. */
+function openKaPostsSection(key) {
+  // KaPosts Settings, the last rail item as on iOS: its own window over whatever is open.
+  if (key === "settings") { deps.openKaPostsSettings?.(); return; }
+  threadStack = [];
+  threadGeneration += 1; // drops any reply page still in flight for the thread we left
+  // The rail always leaves the thread, so nothing here is an over-thread panel.
+  panelOverThread = false;
+  pendingThreadScrollRemoteId = null;
+  if (key === "feed") closePanel();
+  else if (key === "search") openSearchPanel();
+  else if (key === "notifications") openNotificationsPanel();
+  else if (key === "profile") openPosterProfile(deps.engine.address, safeRequesterPubkey());
+  else {
+    rememberFeedScroll();
+    panelGeneration += 1;
+    clearPanelPagerSentinels();
+    activePanel = beginPanel({ type: "list", kind: key });
+    renderPanel();
+  }
+  renderThread();
+  renderFeed();
+  syncRailActive();
+}
+
+// --- Phone header, the hamburger's card and swipeable feeds (iOS 865c9ab) --------------------------
+// At phone width the row of section icons above the feed tabs is gone (iOS 494751a): a hamburger
+// sits before the KaPosts title and slides out a card over most of the screen (KaPostsFeedDrawer)
+// with Search, Drafts, Bookmarks, Muted, Blocked and Scheduled. On iOS, Profile, Notifications and
+// Settings are dock tabs; Desktop's dock is the whole app's, so they stay one tap away as icons at
+// the right of the same header. Wide windows keep the X-style rail (ui/kaposts-drawer.css).
+
+const MENU_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>`;
+const XMARK_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>`;
+const GEAR_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>`;
+const PERSON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>`;
+// wallet.bifold, for the Wallet button beside Edit Profile (iOS 865c9ab).
+const WALLET_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h11.5A1.5 1.5 0 0 1 19 6.5V8"/><path d="M3.5 7.5v10A2.5 2.5 0 0 0 6 20h12.5a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 18.5 8H6a2.5 2.5 0 0 1-2.5-2.5"/><path d="M16.5 14h.01"/></svg>`;
+// The card's rows carry iOS's own symbols (SideMenuItem.icon): magnifyingglass, square.and.pencil,
+// bookmark, speaker.slash, hand.raised, clock.
+const FEED_MENU_ICONS = {
+  search: "m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z",
+  drafts: PANEL_ICONS.compose,
+  bookmarks: PANEL_ICONS.bookmark,
+  muted: PANEL_ICONS.speakerSlash,
+  blocked: PANEL_ICONS.handRaised,
+  scheduled: PANEL_ICONS.clock,
+};
+const DRAWER_SLIDE_MS = 220; // iOS slideDuration 0.22
+const PAGER_SETTLE_MS = 300; // iOS .spring(response: 0.3, dampingFraction: 0.9)
+
+let phoneBarEl = null;
+let drawerEl = null;
+let drawerCardEl = null;
+let drawerOpen = false;
+let drawerClosing = false;
+
+/** The header iOS draws above the feed tabs at phone width: ☰, the large KaPosts title, and (the
+ *  Desktop stand-in for iOS's dock tabs) Notifications, Profile and Settings on the right. */
+function mountPhoneBar() {
+  const screen = document.querySelector('[data-app-tab-screen="kaposts"]');
+  if (!screen || screen.querySelector("[data-kaposts-phone-bar]")) return;
+  phoneBarEl = document.createElement("div");
+  phoneBarEl.className = "kaposts-phone-bar";
+  phoneBarEl.setAttribute("data-kaposts-phone-bar", "");
+  phoneBarEl.innerHTML = `
+    <button class="kaposts-menu-button" type="button" data-kaposts-menu aria-label="Menu" aria-haspopup="dialog" aria-expanded="false">${MENU_SVG}</button>
+    <h1 class="kaposts-title">KaPosts</h1>
+    <span class="kaposts-phone-bar-actions">
+      <button class="kaposts-phone-bar-item" type="button" data-kaposts-phone-section="notifications" aria-label="Notifications" title="Notifications"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.bell}"/></svg></button>
+      <button class="kaposts-phone-bar-item" type="button" data-kaposts-phone-section="profile" aria-label="Profile" title="Profile">${PERSON_SVG}</button>
+      <button class="kaposts-phone-bar-item" type="button" data-kaposts-phone-section="settings" aria-label="Settings" title="Settings">${GEAR_SVG}</button>
+    </span>`;
+  screen.prepend(phoneBarEl);
+  phoneBarEl.addEventListener("click", (event) => {
+    if (event.target.closest("[data-kaposts-menu]")) { openFeedDrawer(); return; }
+    const section = event.target.closest("[data-kaposts-phone-section]");
+    if (section) openKaPostsSection(section.dataset.kapostsPhoneSection);
+  });
+}
+
+function buildFeedDrawer() {
+  drawerEl = document.createElement("div");
+  drawerEl.className = "kaposts-drawer";
+  drawerEl.setAttribute("data-kaposts-drawer", "");
+  drawerEl.hidden = true;
+  drawerEl.innerHTML = `
+    <div class="kaposts-drawer-dim" data-kaposts-drawer-dim role="button" tabindex="-1" aria-label="Close menu"></div>
+    <section class="kaposts-drawer-card" data-kaposts-drawer-card role="dialog" aria-modal="true" aria-label="KaPosts menu">
+      <header class="kaposts-drawer-header">
+        <h2 class="kaposts-drawer-title">KaPosts</h2>
+        <button class="kaposts-drawer-close" type="button" data-kaposts-drawer-close aria-label="Close menu">${XMARK_SVG}</button>
+      </header>
+      <div class="kaposts-drawer-divider" aria-hidden="true"></div>
+      <nav class="kaposts-drawer-rows" aria-label="KaPosts sections">
+        ${KAPOSTS_FEED_MENU.map(({ key, title }) => `<button class="kaposts-drawer-row" type="button" data-kaposts-drawer-item="${key}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${FEED_MENU_ICONS[key]}"/></svg><span>${title}</span></button>`).join("")}
+      </nav>
+    </section>`;
+  document.body.appendChild(drawerEl);
+  drawerCardEl = drawerEl.querySelector("[data-kaposts-drawer-card]");
+  drawerEl.addEventListener("click", (event) => {
+    if (drawerSuppressClick) { drawerSuppressClick = false; return; }
+    if (event.target.closest("[data-kaposts-drawer-close]") || event.target.closest("[data-kaposts-drawer-dim]")) { closeFeedDrawer(); return; }
+    const row = event.target.closest("[data-kaposts-drawer-item]");
+    if (!row) return;
+    // The card slides away while the row's screen comes up behind it (iOS opens it once the card
+    // has gone, because a cover cannot present the next one while it is still up).
+    closeFeedDrawer();
+    openKaPostsSection(row.dataset.kapostsDrawerItem);
+  });
+  drawerEl.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeFeedDrawer(); return; }
+    if (event.key !== "Tab") return;
+    // Focus stays in the card while it is up (a modal).
+    const focusable = [...drawerCardEl.querySelectorAll("button")];
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
+  attachDrawerDrag();
+}
+
+function setDrawerPosition(offsetPx, { animate = true, open = drawerOpen } = {}) {
+  if (!drawerEl || !drawerCardEl) return;
+  const width = drawerCardEl.offsetWidth || kapostsDrawerWidth(window.innerWidth);
+  const x = open ? Math.min(0, offsetPx) : -width - 16;
+  drawerEl.classList.toggle("dragging", !animate);
+  drawerEl.classList.toggle("kaposts-drawer-open", open);
+  drawerCardEl.style.transform = `translate3d(${x}px, 0, 0)`;
+  drawerEl.style.setProperty("--kaposts-drawer-dim", String(open ? kapostsDrawerDim(offsetPx, width) : 0));
+}
+
+function openFeedDrawer() {
+  if (drawerOpen) return;
+  if (!drawerEl) buildFeedDrawer();
+  drawerOpen = true;
+  drawerClosing = false;
+  window.clearTimeout(openFeedDrawer.hideTimer);
+  drawerEl.hidden = false;
+  // From off-screen (committed by the forced layout), then slid in.
+  setDrawerPosition(0, { animate: false, open: false });
+  void drawerCardEl.offsetWidth;
+  setDrawerPosition(0);
+  phoneBarEl?.querySelector("[data-kaposts-menu]")?.setAttribute("aria-expanded", "true");
+  drawerEl.querySelector("[data-kaposts-drawer-close]")?.focus({ preventScroll: true });
+}
+
+function closeFeedDrawer() {
+  if (!drawerOpen || drawerClosing || !drawerEl) return;
+  drawerClosing = true;
+  drawerOpen = false;
+  setDrawerPosition(0, { open: false });
+  const menuButton = phoneBarEl?.querySelector("[data-kaposts-menu]");
+  menuButton?.setAttribute("aria-expanded", "false");
+  openFeedDrawer.hideTimer = window.setTimeout(() => {
+    drawerClosing = false;
+    if (!drawerOpen && drawerEl) drawerEl.hidden = true;
+  }, DRAWER_SLIDE_MS);
+  // Back to the button that opened it - unless a row moved focus to the screen it opened.
+  if (drawerEl.contains(document.activeElement)) menuButton?.focus({ preventScroll: true });
+}
+
+/** Velocity over the last ~100 ms of samples, in px/ms - what a flick is judged on. */
+function recentVelocity(samples) {
+  const last = samples[samples.length - 1];
+  if (!last) return 0;
+  let first = last;
+  for (let i = samples.length - 1; i >= 0 && last.t - samples[i].t <= 100; i -= 1) first = samples[i];
+  const dt = last.t - first.t;
+  return dt > 0 ? (last.x - first.x) / dt : 0;
+}
+function pushSample(samples, t, x) {
+  samples.push({ t, x });
+  while (samples.length > 2 && t - samples[0].t > 150) samples.shift();
+}
+
+let drawerSuppressClick = false;
+/** Drag the card back to the left to close it (iOS DragGesture(minimumDistance: 10)). */
+function attachDrawerDrag() {
+  let drag = null;
+  const end = (event, cancelled) => {
+    if (!drag || event.pointerId !== drag.id) return;
+    const current = drag;
+    drag = null;
+    if (!current.moving) return;
+    drawerSuppressClick = true;
+    window.setTimeout(() => { drawerSuppressClick = false; }, 0);
+    const width = drawerCardEl.offsetWidth || kapostsDrawerWidth(window.innerWidth);
+    const predicted = kapostsProjectedTranslation(current.dx, recentVelocity(current.samples));
+    if (!cancelled && kapostsDrawerShouldClose({ dx: current.dx, predicted, panelWidth: width })) closeFeedDrawer();
+    else setDrawerPosition(0); // springs back
+  };
+  drawerEl.addEventListener("pointerdown", (event) => {
+    if (!drawerOpen || drawerClosing || (event.pointerType === "mouse" && event.button !== 0)) return;
+    drag = { id: event.pointerId, x0: event.clientX, y0: event.clientY, dx: 0, moving: false, samples: [] };
+    pushSample(drag.samples, event.timeStamp, 0);
+  });
+  drawerEl.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.id || drawerClosing) return;
+    const dx = event.clientX - drag.x0;
+    const dy = event.clientY - drag.y0;
+    if (!drag.moving) {
+      if (Math.hypot(dx, dy) < 10) return;
+      drag.moving = true;
+      try { drawerEl.setPointerCapture(event.pointerId); } catch { /* the pointer already went */ }
+    }
+    drag.dx = Math.min(0, dx);
+    pushSample(drag.samples, event.timeStamp, dx);
+    setDrawerPosition(drag.dx, { animate: false });
+  });
+  drawerEl.addEventListener("pointerup", (event) => end(event, false));
+  drawerEl.addEventListener("pointercancel", (event) => end(event, true));
+  // The card does not scroll the page behind it.
+  drawerEl.addEventListener("touchmove", (event) => { if (event.cancelable) event.preventDefault(); }, { passive: false });
+}
+
+/**
+ * Following, Feed and Popular swiped between with a finger (iOS 865c9ab KaPostsFeedPager). A touch
+ * commits to one direction on its first 12 px: up and down is the list scrolling and never moves
+ * the feed; sideways moves it, a third as far past the first or last tab. Let go past a third of
+ * the width, or flick it past half, and the next tab comes in; otherwise it springs back. iOS lays
+ * the three feeds side by side; Desktop holds one feed's posts at a time, so the one on screen
+ * slides out and the next one slides in from the other side.
+ *
+ * Touch and pen only: a mouse drag selects text, and the tab bar is right there.
+ */
+function attachFeedPager() {
+  if (!feedEl || feedEl.dataset.kapostsPager) return;
+  feedEl.dataset.kapostsPager = "1";
+  const tabs = () => [...(tabsEl?.querySelectorAll("[data-kaposts-feed-tab]") || [])].map((b) => b.dataset.kapostsFeedTab);
+  let drag = null;
+  let suppressClick = false;
+  let settleTimer = 0;
+  // `ms`: how long the move takes (0 = follow the finger); the curve is the spring's
+  // (ui/kaposts-drawer.css).
+  const place = (x, ms = PAGER_SETTLE_MS, leaving = false) => {
+    feedEl.classList.toggle("kaposts-pager-dragging", !ms);
+    feedEl.classList.toggle("kaposts-pager-leaving", Boolean(ms && leaving));
+    feedEl.style.transitionDuration = ms ? `${ms}ms` : "";
+    feedEl.style.transform = x ? `translate3d(${x}px, 0, 0)` : "";
+  };
+  const scrollsSideways = (target) => {
+    for (let el = target; el && el !== feedEl; el = el.parentElement) {
+      if (el.scrollWidth > el.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(el).overflowX)) return true;
+    }
+    return false;
+  };
+  const finish = (event, cancelled) => {
+    if (!drag || event.pointerId !== drag.id) return;
+    const current = drag;
+    drag = null;
+    if (current.axis !== "x") return;
+    suppressClick = true;
+    window.setTimeout(() => { suppressClick = false; }, 0);
+    const order = tabs();
+    const selection = Math.max(0, order.indexOf(activeFeedTab));
+    const width = feedEl.clientWidth || window.innerWidth;
+    const next = cancelled ? selection : kapostsPagerTarget({
+      selection, pageCount: order.length, dx: current.dx, dy: current.dy,
+      predicted: kapostsProjectedTranslation(current.dx, recentVelocity(current.samples)), width,
+    });
+    if (next === selection) { place(0); return; }
+    // Out the way the finger was going, the next tab's posts in from the other side: the two
+    // halves of one 0.3 s settle.
+    const direction = next > selection ? -1 : 1;
+    const half = PAGER_SETTLE_MS / 2;
+    place(direction * width, half, true);
+    window.clearTimeout(settleTimer);
+    settleTimer = window.setTimeout(() => {
+      selectFeedTab(order[next]);
+      place(-direction * width, 0);
+      void feedEl.offsetWidth;
+      place(0, half);
+    }, half);
+  };
+  feedEl.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" || drag) return;
+    if (threadStack.length || activePanel || feedEl.hidden) return;
+    if (event.target.closest("input, textarea, select, video, audio, [contenteditable]") || scrollsSideways(event.target)) return;
+    drag = { id: event.pointerId, x0: event.clientX, y0: event.clientY, dx: 0, dy: 0, axis: null, samples: [] };
+    pushSample(drag.samples, event.timeStamp, 0);
+  });
+  feedEl.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.id) return;
+    const dx = event.clientX - drag.x0;
+    const dy = event.clientY - drag.y0;
+    drag.dx = dx;
+    drag.dy = dy;
+    if (!drag.axis) {
+      drag.axis = kapostsAxisLock(dx, dy);
+      if (!drag.axis) return;
+      // Up and down is the list's: this touch never moves the pages.
+      if (drag.axis === "y") { drag = null; return; }
+      try { feedEl.setPointerCapture(event.pointerId); } catch { /* the pointer already went */ }
+    }
+    pushSample(drag.samples, event.timeStamp, dx);
+    const order = tabs();
+    place(kapostsPagerOffset(Math.max(0, order.indexOf(activeFeedTab)), order.length, dx), 0);
+  });
+  feedEl.addEventListener("pointerup", (event) => finish(event, false));
+  // The browser took the touch (it started scrolling the list): back to the page it was on.
+  feedEl.addEventListener("pointercancel", (event) => finish(event, true));
+  // Once a touch is sideways the list must not scroll under it (iOS Safari can still start a
+  // vertical scroll from a diagonal move without this).
+  feedEl.addEventListener("touchmove", (event) => {
+    if (drag?.axis === "x" && event.cancelable) event.preventDefault();
+  }, { passive: false });
+  // A swipe that ends over a post is not a tap on it.
+  feedEl.addEventListener("click", (event) => {
+    if (!suppressClick) return;
+    suppressClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+}
+
+/** The notification settings, behind the cog at the top left of Notifications (iOS d37f64d,
+ *  NotificationsHubPage). Desktop keeps the KaPosts switches in KaPosts Settings > Notifications,
+ *  so that page opens. */
+function openKaPostsNotificationSettings() {
+  if (deps.openKaPostsNotificationSettings) { deps.openKaPostsNotificationSettings(); return; }
+  deps.openKaPostsSettings?.();
+  document.querySelector("[data-kaposts-settings-modal] [data-kaposts-open-notifications]")?.click();
+}
+
+let panelCogEl = null;
+function ensureNotificationSettingsButton() {
+  if (panelCogEl || !panelEl) return panelCogEl;
+  const header = panelEl.querySelector(".kaposts-thread-header");
+  if (!header) return null;
+  panelCogEl = document.createElement("button");
+  panelCogEl.type = "button";
+  panelCogEl.className = "kaposts-icon-button kaposts-panel-cog";
+  panelCogEl.setAttribute("aria-label", "Notification Settings");
+  panelCogEl.title = "Notification Settings";
+  panelCogEl.hidden = true;
+  panelCogEl.innerHTML = GEAR_SVG;
+  panelCogEl.addEventListener("click", () => openKaPostsNotificationSettings());
+  const back = header.querySelector("[data-kaposts-panel-back]");
+  if (back) back.after(panelCogEl); else header.prepend(panelCogEl);
+  return panelCogEl;
+}
+
 export function initKaPosts(dependencies) {
   deps = dependencies;
   startKaPostsNotificationPolling();
@@ -5747,29 +6134,10 @@ export function initKaPosts(dependencies) {
   window.setInterval(() => { if (!document.hidden) sendDueScheduled().catch(() => {}); }, 60_000);
   loadTranslationVerdicts();
 
-  // Feed tab switching
+  // Feed tab switching: a tap on the tab bar, or a swipe across the feed (attachFeedPager).
   tabsEl?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-kaposts-feed-tab]");
-    if (!button) return;
-    const tab = button.dataset.kapostsFeedTab;
-    // Re-selecting the tab on screen changes nothing (iOS onChange(of: selectedFeed)).
-    if (tab === activeFeedTab) return;
-    activeFeedTab = tab;
-    tabsEl.querySelectorAll("[data-kaposts-feed-tab]").forEach((b) => b.classList.toggle("active", b === button));
-    // Feed <-> Popular share the global feed: keep every page already scrolled in (Popular is a
-    // re-sort of the same set) and only deepen Popular's window. Only a real source change - to
-    // or from Following - starts a new paginated feed.
-    if (feedSourceFor(tab) === loadedFeedSource && remotePosts.length > 0) {
-      renderFeed({ resetScroll: true });
-      if (tab === "popular") deepenPopularRanking();
-      return;
-    }
-    // Retire the outgoing tab's cursor before anything can repaint: its sentinel must not
-    // fire a "load more" that would page the tab the user just left.
-    feedPager = null;
-    clearPagerSentinel("feed");
-    renderFeed();
-    loadFeed().then(() => { if (activeFeedTab === "popular") deepenPopularRanking(); });
+    if (button) selectFeedTab(button.dataset.kapostsFeedTab);
   });
 
   document.querySelector("[data-kaposts-refresh]")?.addEventListener("click", () => loadFeed());
@@ -5787,31 +6155,13 @@ export function initKaPosts(dependencies) {
   });
   // X-style persistent rail: the sections are always visible on the left.
   document.querySelectorAll("[data-kaposts-rail]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const key = button.dataset.kapostsRail;
-      // KaPosts Settings, the last rail item as on iOS: its own window over whatever is open.
-      if (key === "settings") { deps.openKaPostsSettings?.(); return; }
-      threadStack = [];
-      threadGeneration += 1; // drops any reply page still in flight for the thread we left
-      // The rail always leaves the thread, so nothing here is an over-thread panel.
-      panelOverThread = false;
-      pendingThreadScrollRemoteId = null;
-      if (key === "feed") closePanel();
-      else if (key === "search") openSearchPanel();
-      else if (key === "notifications") openNotificationsPanel();
-      else if (key === "profile") openPosterProfile(deps.engine.address, safeRequesterPubkey());
-      else {
-        rememberFeedScroll();
-        panelGeneration += 1;
-        clearPanelPagerSentinels();
-        activePanel = beginPanel({ type: "list", kind: key });
-        renderPanel();
-      }
-      renderThread();
-      renderFeed();
-      syncRailActive();
-    });
+    button.addEventListener("click", () => openKaPostsSection(button.dataset.kapostsRail));
   });
+  // Phone width: the hamburger header and its card instead of the rail, and the feeds swipe
+  // (iOS 865c9ab).
+  mountPhoneBar();
+  attachFeedPager();
+  syncRailBadge();
   panelBodyEl?.addEventListener("input", (event) => {
     if (!event.target.matches("[data-kaposts-search-input]") || activePanel?.type !== "search") return;
     activePanel.query = event.target.value;
@@ -6158,6 +6508,7 @@ export function initKaPosts(dependencies) {
       return;
     }
     if (event.target.closest("[data-kaposts-edit-kns]")) { deps.editKnsProfile?.(); return; }
+    if (event.target.closest("[data-kaposts-wallet]")) { deps.openChattingWallet?.(); return; }
     if (event.target.closest("[data-kaposts-bio-more]") && activePanel?.type === "profile") {
       const bio = posterProfilePieces(activePanel.address).bio || "";
       deps.alertDialog?.({ title: "Bio", message: bio, confirmLabel: "Done" });

@@ -34,13 +34,14 @@ import {
 } from "../engine/kachat-names/registry-state.js";
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
 import { ProfileIdentityStore } from "../engine/kachat-names/profile-cache.js";
+import { KachatOwnedNamesCache } from "../engine/kachat-names/owned-names-cache.js";
 import { unnamedSweepDue, nextUnnamedAnswers, unnamedSweepPass } from "./kachat-unnamed-sweep.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
 import {
   SEND_ICONS, feeControlsHtml, feeControls, sendActionButtonHtml, createSendActionButton, infoPillHtml,
-  otherDomainsHtml, pickOtherDomain,
+  otherDomainsHtml, pickOtherDomain, createSwipeUpScreen, SWIPE_UP_LABELS, NOT_CONFIRMED_ON_DEVICE,
 } from "./send-kaspa-components.js";
 import { looksLikeName, notFoundMessage } from "../engine/name-services.js";
 import { pickFromAddressBook } from "./address-book.js";
@@ -1574,6 +1575,18 @@ function txStepHtml(title, { done = false, active = false } = {}) {
   return `<div class="kl-receipt-step${done || active ? " on" : ""}"><span class="kl-receipt-step-icon">${icon}</span><span>${esc(title)}</span></div>`;
 }
 
+/** A name transaction's progress, followed on a node (iOS KachatTxStageSteps): sent, in a block,
+ *  showing in KaChat. On the receipt and on the swipe-up screen after a purchase (iOS 5bab351). */
+function txStageStepsHtml(stage) {
+  const inBlock = stage === TxStage.accepted || stage === TxStage.shown;
+  return `
+    <div class="sk-card kl-receipt-steps">
+      ${txStepHtml("Sent to the network", { done: true })}
+      ${txStepHtml("In a block", { done: inBlock, active: !inBlock && stage !== TxStage.dropped })}
+      ${txStepHtml("Updated in KaChat", { done: stage === TxStage.shown, active: stage === TxStage.accepted })}
+    </div>`;
+}
+
 /**
  * The receipt every name transaction ends on (iOS KachatTxDoneSheet, e426432), in the Send
  * receipt's style: what it does, its progress followed on a node (actions.follow) - a spinner
@@ -1591,7 +1604,6 @@ function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", o
   const stage = () => actions?.txStage?.(txId) ?? (accepted ? TxStage.shown : TxStage.sent);
   const body = () => {
     const st = stage();
-    const inBlock = st === TxStage.accepted || st === TxStage.shown;
     const icon = st === TxStage.shown ? `<span class="kl-receipt-icon kl-green">${LI.checkCircle}</span>`
       : st === TxStage.dropped ? `<span class="kl-receipt-icon kl-orange">${LI.exclamation}</span>`
         : `<span class="kl-receipt-icon">${spinner("kl-receipt-spinner")}</span>`;
@@ -1602,11 +1614,7 @@ function openTxDoneSheet({ txId, title = "Transaction sent", owner = "market", o
         <strong class="kl-receipt-title">${esc(title)}</strong>
         <p class="kmkt-muted kl-receipt-note">${esc(txStageText(st))}</p>
         ${note ? `<div class="sk-card kl-receipt-locked">${LI.lockFill}<span>${esc(note)}</span></div>` : ""}
-        <div class="sk-card kl-receipt-steps">
-          ${txStepHtml("Sent to the network", { done: true })}
-          ${txStepHtml("In a block", { done: inBlock, active: !inBlock && st !== TxStage.dropped })}
-          ${txStepHtml("Updated in KaChat", { done: st === TxStage.shown, active: st === TxStage.accepted })}
-        </div>
+        ${txStageStepsHtml(st)}
         ${explorer
           ? `<a class="sk-card kl-receipt-txid" href="${esc(explorer)}" target="_blank" rel="noopener noreferrer" title="Open in the explorer">${txid}</a>`
           : `<span class="sk-card kl-receipt-txid">${txid}</span>`}
@@ -1685,7 +1693,12 @@ function warningCardHtml(text) {
  *
  * cfg: { owner, title, confirmTitle, warning?, footer?: () => string|null, rows?: () => [{title, value}],
  *        inputsHtml?: string (cards), operation: () => op|null, operationKey: () => string, back?: () => void,
- *        onInput?(event, sheet), onClick?(event, sheet), onOpen?(sheet), onDone?(txId), onClose?(txId|null) }
+ *        onInput?(event, sheet), onClick?(event, sheet), onOpen?(sheet), onDone?(txId), onClose?(txId|null),
+ *        swipeUp?: { screenTitle, bar, labels, recipient } }
+ *
+ * `swipeUp` (iOS 5bab351 KachatSwipeUp): confirmed with a swipe up, like Send Kaspa, instead of the
+ * slider - the screen goes up into the BlockDAG, then shows the transaction and its progress, or
+ * Failed with Try Again.
  */
 function openTxSheet(cfg) {
   const rt = kachatNames();
@@ -1876,15 +1889,31 @@ function openTxSheet(cfg) {
     sheet.update();
   };
 
+  /** What leaves the wallet: everything the transaction spends from the paying address less what
+   *  comes back (iOS KachatTxSheet.spentSompi) - the swipe-up screen's amount. */
+  const spentSompi = () => {
+    if (!sheet.plan) return null;
+    const payerKey = sheet.payer ? keyOf(sheet.payer.address) : myKey();
+    if (!payerKey) return null;
+    const change = balanceChange(sheet.plan, payerKey);
+    return change < 0n ? -change : 0n;
+  };
+
   const confirm = async () => {
     if (!sheet.plan || !sheet.op || sheet.sending || sheet.txId) return;
     const op = sheet.op;
     const key = sheet.key;
     const fee = feeChoice();
+    // The swipe-up screen is already sending: busy at once, through the device check (iOS 5bab351
+    // authorize), and a check turned down is its failure.
+    if (sheet.swipe) { sheet.sendError = null; sheet.swipe.setBusy(true); }
     // The slide is the confirmation: no second prompt, even for the destructive ones - their
     // warning is the red card above (iOS e67074c).
-    if (!(await deviceLock())) return;
-    if (sheet.closed || op !== sheet.op || key !== sheet.key) return;
+    if (!(await deviceLock())) {
+      if (sheet.swipe) { sheet.sendError = NOT_CONFIRMED_ON_DEVICE; sheet.swipe.setBusy(false); sheet.render(); }
+      return;
+    }
+    if (sheet.closed || op !== sheet.op || key !== sheet.key) { sheet.swipe?.setBusy(false); return; }
     sheet.sending = true;
     sheet.sendError = null;
     sheet.slide?.setBusy(true);
@@ -1897,6 +1926,17 @@ function openTxSheet(cfg) {
       const txId = await rt.actions.perform(op, { maxPrice, fee, exactFeerate: sheet.planFeerate ?? null, maxNetworkFee });
       sheet.txId = txId;
       try { cfg.onDone?.(txId); } catch { /* the sheet still shows it */ }
+      if (sheet.swipe) {
+        // The swipe-up screen shows the transaction and its progress until Done (iOS 5bab351).
+        const explorer = typeof deps().explorerTxUrl === "function" ? deps().explorerTxUrl(txId) : null;
+        const stage = () => rt.actions.txStage?.(txId) ?? TxStage.sent;
+        let last = stage();
+        sheet.swipe.setSent({ txid: txId, amountSompi: spentSompi(), recipient: cfg.swipeUp.recipient ?? null, explorerUrl: explorer || null }, txStageStepsHtml(last));
+        sheet.unsubscribe = rt.actions.subscribe?.(() => {
+          const st = stage();
+          if (st !== last && !sheet.closed) { last = st; sheet.swipe.setOutcome(txStageStepsHtml(st)); }
+        }) ?? null;
+      } else
       // Every name transaction ends on the receipt; closing it closes the action (iOS 0870fcc).
       openTxDoneSheet({
         txId,
@@ -1924,8 +1964,11 @@ function openTxSheet(cfg) {
     owner: cfg.owner || "market",
     kind: "tall",
     label: cfg.title,
+    // A swipe-up screen closes with its Cancel or Done, never mid-send (iOS interactiveDismissDisabled).
+    dismissOnBackdrop: !cfg.swipeUp,
+    closable: cfg.swipeUp ? () => !sheet.swipe?.sending : null,
     html: `
-      ${navFor()}
+      ${cfg.swipeUp ? "" : navFor()}
       <div class="kmkt-sheet-body kl-tx-body kl-send-sheet">
         <div data-kl-rows></div>
         ${cfg.inputsHtml ? `<fieldset class="kl-fieldset kl-cards" data-kl-inputs>${cfg.inputsHtml}</fieldset>` : ""}
@@ -1963,12 +2006,29 @@ function openTxSheet(cfg) {
     onClose() {
       sheet.closed = true;
       clearTimeout(sheet.timer);
+      try { sheet.unsubscribe?.(); } catch { /* gone */ }
       // after the layer is gone: what comes next, if anything
       try { cfg.onClose?.(sheet.txId); } catch { /* optional */ }
     },
   });
   sheet.feeCtl = feeControls(sheet.layer.el, "kltx");
-  sheet.slide = createSendActionButton(sheet.layer.el.querySelector("[data-kl-tx-slide]"), { onAction: () => { confirm(); }, busyLabel: "Sending…" });
+  if (cfg.swipeUp) {
+    sheet.swipe = createSwipeUpScreen(sheet.layer.el.querySelector(".kmkt-sheet"), {
+      screenTitle: cfg.swipeUp.screenTitle,
+      barTitle: cfg.swipeUp.bar,
+      labels: cfg.swipeUp.labels,
+      kasUnit: KAS_UNIT,
+      getPreview: () => ({ amountSompi: spentSompi(), recipient: cfg.swipeUp.recipient ?? null }),
+      getFailureMessage: () => sheet.sendError,
+      onCancel: () => { if (!sheet.closed) kit.closeLayer(sheet.layer); },
+      onDone: () => { if (!sheet.closed) kit.closeLayer(sheet.layer); },
+      onAction: () => { confirm(); },
+    });
+    // The bar stands in for the slider: enabled once there is a plan, busy while it sends.
+    sheet.slide = { setEnabled: (on) => sheet.swipe.setEnabled(on), setBusy: (on) => sheet.swipe.setBusy(on) };
+  } else {
+    sheet.slide = createSendActionButton(sheet.layer.el.querySelector("[data-kl-tx-slide]"), { onAction: () => { confirm(); }, busyLabel: "Sending…" });
+  }
   sheet.layer.el.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && event.target.closest?.("[data-kltx-fee-custom]")) { event.preventDefault(); commitCustomFee(); }
   });
@@ -2026,6 +2086,9 @@ function openBuySheet(info, owner) {
     ],
     operation: () => Operation.buy(info),
     operationKey: () => `buy-${txKey(info)}`,
+    // Swipe up to Buy (iOS 5bab351 KachatLiveBuySheet): the BlockDAG while it goes out, then Name
+    // Bought with the transaction's progress.
+    swipeUp: { screenTitle: "Buy Name", bar: "Swipe up to Buy", labels: SWIPE_UP_LABELS.buy, recipient: info.display },
   });
 }
 
@@ -2682,7 +2745,9 @@ function openOfferDetailSheet(args, owner = "market") {
 /** The claim sheet, in the Send screens' style (iOS KachatClaimSheet, e426432): the name and its
  *  years, the cost, a fee speed for both transactions (the commit now, the register about a minute
  *  later; a busy network starts on Fast unless the person chose), what's available, how claiming
- *  works, and slide to claim - then the device lock. */
+ *  works, and swipe up to claim (iOS 5bab351) - busy at once, then the device lock, then the commit;
+ *  the screen goes up into the BlockDAG and shows Claim Started with the registration's progress,
+ *  or Failed with Try Again. */
 function openClaimSheet({ name, gap, owner = "market" }) {
   const rt = kachatNames();
   if (!rt || !kit) return;
@@ -2701,6 +2766,8 @@ function openClaimSheet({ name, gap, owner = "market" }) {
   let seq = 0;
   let closed = false;
   let slide = null;
+  let swipe = null;
+  let unsubscribe = null;
 
   const costHtml = () => {
     let rows;
@@ -2794,35 +2861,55 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     render();
   };
 
+  /** Under Claim Started (iOS 5bab351 KachatClaimOutcome): the registration's own card, and why
+   *  the app should stay open until the name registers. */
+  const outcomeHtml = (p) => `
+    <div class="kl-claim-outcome">
+      ${registrationCardHtml(p)}
+      ${needsDriving(p) ? `<p class="kmkt-muted kl-progress-note">${esc(KEEP_OPEN_NOTE)}</p>` : ""}
+    </div>`;
+
   const start = async () => {
     if (starting || quote?.affordable !== true) return;
     // the price shown is the most the registration will ever pay (iOS 4f5d95e, IOS-054), at the
     // speed it was quoted at
     const q = quote;
     const tier = quoteTier;
-    if (q.years !== BigInt(years) || tier !== feeTier) return;
-    if (!(await deviceLock())) return;
-    if (closed || quote !== q) return;
+    // The swipe let go: busy at once (its screen is already sending), then the device check, then
+    // the commit (iOS 5bab351 authorizeAndStart).
     starting = true;
     startError = null;
     slide?.setBusy(true);
     render();
+    const fail = (message) => {
+      startError = message;
+      starting = false;
+      slide?.setBusy(false);
+      render();
+    };
+    const priceChanged = "The price changed. Check it and swipe again.";
+    if (q.years !== BigInt(years) || tier !== feeTier) { fail(priceChanged); return; }
+    if (!(await deviceLock())) { fail(NOT_CONFIRMED_ON_DEVICE); return; }
+    if (closed) return;
+    if (quote !== q) { fail(priceChanged); return; }
     try {
       const commitTxId = await rt.actions.startRegistration({ name, years: q.years, maxPrice: q.price, feeTier: tier });
       starting = false;
-      slide?.setBusy(false);
-      // the claim becomes its progress half sheet; closing that leaves the claim running (iOS b219bb0)
       const started = rt.actions.pending.find((x) => x.commitTxId === commitTxId)
         ?? [...rt.actions.pending].reverse().find((x) => x.name === name && isOpen(x));
-      kit.closeLayer(layer);
-      if (started) openRegistrationProgress(started.id);
+      // no registration to follow (it finished at once): nothing left to show
+      if (!started) { slide?.setBusy(false); kit.closeLayer(layer); return; }
+      // The screen shows its progress; closing it leaves the claim running (iOS b219bb0).
+      swipe?.setSucceeded(outcomeHtml(started));
+      slide?.setBusy(false);
+      unsubscribe = rt.actions.subscribe?.(() => {
+        const p = rt.actions.pending.find((x) => x.id === started.id);
+        if (p && !closed) swipe?.setOutcome(outcomeHtml(p));
+      }) ?? null;
       return;
     } catch (error) {
-      startError = errorText(error);
+      fail(errorText(error));
     }
-    starting = false;
-    slide?.setBusy(false);
-    render();
   };
 
   const tierOptions = [
@@ -2835,8 +2922,10 @@ function openClaimSheet({ name, gap, owner = "market" }) {
     owner,
     kind: "tall",
     label: "Claim Name",
+    // closes with its Cancel or Done, never mid-claim (iOS interactiveDismissDisabled)
+    dismissOnBackdrop: false,
+    closable: () => !swipe?.sending,
     html: `
-      ${navHtml("Claim Name", { leading: { label: "Cancel" } })}
       <div class="kmkt-sheet-body kl-tx-body kl-send-sheet">
         <fieldset class="kl-fieldset kl-cards" data-kl-claim-inputs>
           ${cardHtml(`
@@ -2861,11 +2950,14 @@ function openClaimSheet({ name, gap, owner = "market" }) {
           { title: "How claiming works" },
         )}
         <div data-kl-claim-foot></div>
-        <div class="kl-tx-action">${sendActionButtonHtml({ attr: "kl-claim-slide", title: `Claim ${name}.kachat`, disabled: true })}</div>
         <div data-kl-claim-error></div>
       </div>`,
     onClick(event, l) {
-      if (event.target.closest("[data-kl-claim-slide]")) return;
+      // the registration card under Claim Started: View, Retry, Cancel, Done
+      if (event.target.closest("[data-kl-reg-view], [data-kl-reg-done], [data-kl-reg-retry], [data-kl-reg-cancel]")) {
+        registrationActionClick(event.target);
+        return;
+      }
       const chosen = segmentedClick(event, l.el);
       if (!chosen || starting) return;
       if (chosen.group === "years" && Number(chosen.id) !== years) { years = Number(chosen.id); loadQuote(); }
@@ -2874,9 +2966,24 @@ function openClaimSheet({ name, gap, owner = "market" }) {
         if (chosen.id !== feeTier) { feeTier = chosen.id; loadQuote(); }
       }
     },
-    onClose() { closed = true; },
+    onClose() {
+      closed = true;
+      try { unsubscribe?.(); } catch { /* gone */ }
+    },
   });
-  slide = createSendActionButton(layer.el.querySelector("[data-kl-claim-slide]"), { onAction: () => { start(); }, busyLabel: "Claiming…" });
+  swipe = createSwipeUpScreen(layer.el.querySelector(".kmkt-sheet"), {
+    screenTitle: "Claim Name",
+    barTitle: "Swipe up to Claim",
+    labels: SWIPE_UP_LABELS.claim,
+    kasUnit: KAS_UNIT,
+    getPreview: () => ({ amountSompi: quote?.total ?? null, recipient: `${name}.kachat` }),
+    getFailureMessage: () => startError,
+    onCancel: () => { if (!closed) kit.closeLayer(layer); },
+    onDone: () => { if (!closed) kit.closeLayer(layer); },
+    onAction: () => { start(); },
+  });
+  // The bar stands in for the slider: enabled once the quote is affordable, busy while it claims.
+  slide = { setEnabled: (on) => swipe.setEnabled(on), setBusy: (on) => swipe.setBusy(on) };
   render();
   loadQuote();
   // A busy network starts on Fast unless the person already chose (iOS e426432).
@@ -3499,6 +3606,22 @@ const domainsRenders = new WeakMap();
 /** lowercased address -> the names last shown for it, so a re-rendered tab (Cold Storage repaints
  *  its whole screen) shows them at once and reloads behind them instead of flashing a spinner. */
 const domainsShown = new Map();
+/** Your Domains' saved list per wallet address and network (iOS f4f5c0f KachatOwnedNamesCache,
+ *  engine/kachat-names/owned-names-cache.js): shown at once, minus lapsed names, while the registry
+ *  read runs behind it; only an answer replaces it. Made on first use. */
+let ownedNamesCacheInstance = null;
+function ownedNamesCache() {
+  if (!ownedNamesCacheInstance) ownedNamesCacheInstance = new KachatOwnedNamesCache();
+  return ownedNamesCacheInstance;
+}
+
+/** How many .kachat names Your Domains' saved list holds for `walletAddress` (iOS f4f5c0f: the
+ *  Profile count and the Your Domains card start from it; the read corrects them when it answers).
+ *  null where the registry isn't launched or nothing is saved for the address. */
+export function kachatCachedOwnedNameCount(walletAddress) {
+  if (!kachatNames() || !walletAddress) return null;
+  return ownedNamesCache().count(String(walletAddress).toLowerCase());
+}
 
 /** The card badge for a name: Listed, or Expired (in grace) (iOS KachatLiveDomainsTab.badge). Your
  *  Domains and the per-address lists show only held names (`heldNames`), so "Available" (past
@@ -3647,10 +3770,16 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
     try { onLoaded?.(loadedState); } catch { /* caller's */ }
     return true;
   }
-  const shown = domainsShown.get(address);
-  containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}">${shown?.length
-    ? domainCardsHtml(shown, { footnote: variant === "domains" })
-    : `<div class="kl-domains-loading">${spinner()}</div>`}</div>`;
+  // Your Domains: the names this wallet had last time, straight away - they rarely change - minus
+  // any that lapsed since; load() then checks the registry and replaces them when it answers (iOS
+  // f4f5c0f showCachedIfNeeded). Not while the registry is being upgraded: load() says "Setting up".
+  const cached = variant === "domains" && !(rt.service.registryUpgrading || rt.registry.registryUpgrading)
+    ? ownedNamesCache().shown(address, graceMs()) : null;
+  const shown = cached ? cached.names : domainsShown.get(address);
+  // (the saved list is painted, offers too, once paint() exists below)
+  const shownHtml = cached ? ""
+    : shown?.length ? domainCardsHtml(shown, { footnote: variant === "domains" }) : `<div class="kl-domains-loading">${spinner()}</div>`;
+  containerEl.innerHTML = `<div class="kl-domains" data-kl-domains="${token}">${shownHtml}</div>`;
   if (!containerEl.dataset.klDomainsBound) {
     containerEl.dataset.klDomainsBound = "1";
     containerEl.addEventListener("click", (event) => {
@@ -3673,7 +3802,7 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   let again = false;
   /** what this render shows, for repaints that don't reload (an offer going back to you) */
   let shownNames = shown ?? [];
-  let shownOffers = [];
+  let shownOffers = cached ? cached.offers : [];
   const paint = (root) => {
     const cards = shownNames.length ? domainCardsHtml(shownNames, { footnote: variant === "domains" }) : domainsEmptyHtml(variant);
     // The offers this wallet made, under its names (iOS 0765ce0: moved here from the
@@ -3715,26 +3844,37 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
           // Your own list (the chatting address's) holds the names and offers on every address of
           // this wallet - one an earlier build's Buy From claimed too, on any device restored from the seed
           // (iOS d1026de, IOS-085).
+          const isOwn = String(address).toLowerCase() === String(rt.actions.myAddress ?? "");
           let own = null;
-          if (String(address).toLowerCase() === String(rt.actions.myAddress ?? "")) {
+          if (isOwn) {
             try { own = await rt.actions.ownNamesAndOffers({ heldOnly: true }); } catch { own = null; }
           }
-          if (own) {
-            names = own.names;
-          } else {
-            try { names = await rt.registry.heldNames(key); } catch { names = []; /* none read */ }
-          }
           if (variant === "domains") {
-            if (own) offers = own.offers;
-            else {
-              try { offers = await rt.registry.myOffers(key); } catch { offers = []; /* none read */ }
+            // Only an answer replaces what is shown (and the saved copy); a failed read keeps it
+            // (iOS f4f5c0f) - minus a name that lapsed meanwhile.
+            let answer = null;
+            if (isOwn) {
+              if (own) answer = { names: own.names, offers: own.offers };
+            } else {
+              let held = null;
+              try { held = await rt.registry.heldNames(key); } catch { held = null; }
+              if (held) {
+                let mine = shownOffers;
+                try { mine = await rt.registry.myOffers(key); } catch { /* the offers shown stay */ }
+                answer = { names: held, offers: mine };
+              }
             }
+            ({ names, offers } = ownedNamesCache().afterRead(address, { names: shownNames, offers: shownOffers }, answer, graceMs()));
             if (offers.length) {
               // expired offers, and ones made to an earlier owner, come back on their own
               await rt.actions.refreshVirtualDaa().catch(() => null);
               await rt.actions.returnExpiredOffers(offers).catch(() => null);
               await rt.actions.withdrawDeclinedOffers(offers).catch(() => null);
             }
+          } else if (own) {
+            names = own.names;
+          } else {
+            try { names = await rt.registry.heldNames(key); } catch { names = []; /* none read */ }
           }
         }
         const root = current();
@@ -3768,6 +3908,13 @@ export function renderKachatLiveDomainsTab(containerEl, walletAddress, { variant
   };
 
   domainsRenders.set(containerEl, { token, address, variant, load, onLoaded, loadedState: null });
+  if (cached) {
+    // the saved list is the answer for now: Inscribe shows with it (iOS f4f5c0f: `loaded = true`)
+    const root = current();
+    if (root) paint(root);
+    loaded({ upgrading: false });
+    scheduleLapse(`tab:${token}`, shownNames, () => { if (current()) load(); });
+  }
   // This render's own subscriptions; each drops itself once its render is gone.
   const subs = [];
   const unsubscribeAll = () => { for (const u of subs.splice(0)) { try { u(); } catch { /* gone */ } } };

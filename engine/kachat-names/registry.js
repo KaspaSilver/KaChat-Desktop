@@ -150,7 +150,7 @@ function isUpgradingError(error) {
  * deps:
  *  - `fetch`: WHATWG fetch (default globalThis.fetch)
  *  - `restBase()`: Kaspa REST API base URL (desktop: getEndpoint("kaspaApi"))
- *  - `indexerBase()`: names indexer base URL, "" for none (desktop: getEndpoint("kasiaIndexer"))
+ *  - `indexerBase()`: names indexer base URL, "" for none (desktop: getEndpoint("kachatNamesIndexer"))
  *  - `getUtxosByAddresses(addresses: string[])` -> Promise<Array<{ outpoint: { transactionId: hex string,
  *      index: number }, covenantId: hex string | Uint8Array | null, ... }>>: a node's UTXOs at those
  *      addresses. Only `outpoint.transactionId`, `outpoint.index` and `covenantId` are read; the rest

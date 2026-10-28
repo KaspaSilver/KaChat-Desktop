@@ -7,6 +7,15 @@ import {
   kapostsEditWindowText,
   kapostsLongRelativeTime,
   kapostsNamedRelativeTime,
+  KAPOSTS_FEED_MENU,
+  KAPOSTS_PAGER_LOCK_PX,
+  kapostsAxisLock,
+  kapostsPagerOffset,
+  kapostsProjectedTranslation,
+  kapostsPagerTarget,
+  kapostsDrawerWidth,
+  kapostsDrawerShouldClose,
+  kapostsDrawerDim,
 } from "../ui/kaposts-format.js";
 
 // Code points, not UTF-16 units.
@@ -42,5 +51,48 @@ assert.equal(kapostsLongRelativeTime(now, now), "0 seconds");
 assert.equal(kapostsNamedRelativeTime(now - 5 * 60000, now, "en"), "5 minutes ago");
 assert.equal(kapostsNamedRelativeTime(now - 86400000, now, "en"), "yesterday");
 assert.equal(kapostsNamedRelativeTime(now, now, "en"), "now");
+
+// The hamburger's card (iOS 865c9ab SideMenuItem.feedMenu): exactly these rows, in this order.
+assert.deepEqual(KAPOSTS_FEED_MENU.map((item) => item.title), ["Search", "Drafts", "Bookmarks", "Muted", "Blocked", "Scheduled"]);
+assert.deepEqual(KAPOSTS_FEED_MENU.map((item) => item.key), ["search", "drafts", "bookmarks", "muted", "blocked", "scheduled"]);
+
+// The card: 86% of the width up to 440 px; closes past a third, or on a flick past half.
+assert.equal(kapostsDrawerWidth(390), 390 * 0.86);
+assert.equal(kapostsDrawerWidth(1200), 440);
+assert.equal(kapostsDrawerShouldClose({ dx: -120, panelWidth: 330 }), true, "dragged past a third");
+assert.equal(kapostsDrawerShouldClose({ dx: -100, panelWidth: 330 }), false, "short of a third");
+assert.equal(kapostsDrawerShouldClose({ dx: -40, predicted: -200, panelWidth: 330 }), true, "flicked past half");
+assert.equal(kapostsDrawerShouldClose({ dx: 80, predicted: 300, panelWidth: 330 }), false, "rightward never closes");
+assert.equal(kapostsDrawerDim(0, 330), 0.45, "45% while open");
+assert.equal(kapostsDrawerDim(-165, 330), 0.225, "half as dim half way out");
+assert.equal(kapostsDrawerDim(60, 330), 0.45, "a rightward drag does not lighten it");
+assert.equal(kapostsDrawerDim(-400, 330), 0, "never below zero");
+
+// Axis lock: nothing until 12 px, then whichever way it went further.
+assert.equal(KAPOSTS_PAGER_LOCK_PX, 12);
+assert.equal(kapostsAxisLock(8, 8), null, "11.3 px is not yet 12");
+assert.equal(kapostsAxisLock(12, 3), "x");
+assert.equal(kapostsAxisLock(-3, 12), "y");
+assert.equal(kapostsAxisLock(9, 9), "y", "a tie is the list's (iOS: width > height)");
+
+// Rubber band at the ends only.
+assert.equal(kapostsPagerOffset(0, 3, 90), 30, "past the first page");
+assert.equal(kapostsPagerOffset(2, 3, -90), -30, "past the last page");
+assert.equal(kapostsPagerOffset(1, 3, 90), 90, "between pages");
+assert.equal(kapostsPagerOffset(0, 3, -90), -90, "toward the next page from the first");
+
+// Projection (UIKit normal deceleration): standing still coasts nowhere.
+assert.equal(kapostsProjectedTranslation(40, 0), 40);
+assert.ok(Math.abs(kapostsProjectedTranslation(0, 1) - 499) < 1e-9);
+
+// Which page a release settles on.
+const W = 390;
+assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: -140, width: W }), 2, "past a third: next");
+assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: -120, width: W }), 1, "short of a third: stays");
+assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: -40, predicted: -200, width: W }), 2, "flick past half: next");
+assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: 140, width: W }), 0, "past a third right: previous");
+assert.equal(kapostsPagerTarget({ selection: 0, pageCount: 3, dx: 300, width: W }), 0, "nothing before the first");
+assert.equal(kapostsPagerTarget({ selection: 2, pageCount: 3, dx: -300, width: W }), 2, "nothing after the last");
+assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: -140, dy: 200, width: W }), 1, "ended more vertical than sideways");
 
 console.log("kaposts-format: ok");

@@ -6,6 +6,9 @@
 //   kaspaApi     — Kaspa REST API (api.kaspa.org): balances, tx history, fees
 //   kasiaIndexer — Kasia message indexer (COMM message query)
 //   pushIndexer  — Kasia push/notification indexer
+//   kachatNamesIndexer — where .kachat names and profiles are read (iOS 7abc06e8 kachatNamesIndexerURL,
+//                  Connection Settings > Domains): its own field, apart from the message indexer, so
+//                  anyone can run the names indexer themselves
 //   knsApi       — KNS domain/profile API
 //   trustedNode  — wRPC node endpoint ("" = auto-discover via the resolver)
 import { IS_TESTNET } from "./network.js";
@@ -24,6 +27,7 @@ const MAINNET_ENDPOINT_DEFAULTS = Object.freeze({
   kapostIndexer: "https://kachat.duckdns.org",
   broadcastIndexer: "https://kachat.duckdns.org",
   pushIndexer: "https://kachat.duckdns.org",
+  kachatNamesIndexer: "https://kachat.duckdns.org",
   knsApi: "https://api.knsdomains.org/mainnet/api/v1",
   translationService: "https://kachat.duckdns.org",
   trustedNode: "",
@@ -44,6 +48,7 @@ const TESTNET_ENDPOINT_DEFAULTS = Object.freeze({
   kapostIndexer: DEFAULT_TESTNET_INDEXER,
   broadcastIndexer: DEFAULT_TESTNET_INDEXER,
   pushIndexer: DEFAULT_TESTNET_INDEXER,
+  kachatNamesIndexer: DEFAULT_TESTNET_INDEXER,
   knsApi: "https://api.knsdomains.org/tn10/api/v1",
   // Translating text has nothing to do with the chain: testnet uses the same service (iOS 2ca41aa).
   translationService: "https://kachat.duckdns.org",
@@ -86,6 +91,29 @@ let overrides = loadStored();
     delete overrides.kasiaIndexer;
     try { localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(overrides)); } catch {}
   }
+})();
+
+// The .kachat names indexer got its own field (iOS 7abc06e8). Settings saved before it existed read
+// names from the message indexer, so a custom one is copied over once; neither old default host
+// serves names, so one of those goes back to the default.
+(function migrateNamesIndexer() {
+  const flag = `${ENDPOINTS_KEY}-names-indexer`;
+  let changed = false;
+  try {
+    if (!localStorage.getItem(flag)) {
+      if (overrides.kachatNamesIndexer == null && overrides.kasiaIndexer != null && String(overrides.kasiaIndexer).trim()) {
+        overrides.kachatNamesIndexer = String(overrides.kasiaIndexer).trim();
+        changed = true;
+      }
+      localStorage.setItem(flag, "1");
+    }
+  } catch { /* storage blocked: nothing to carry over */ }
+  const names = overrides.kachatNamesIndexer;
+  if (names != null && RETIRED_INDEXER_URLS.includes(String(names).trim().replace(/\/+$/, ""))) {
+    delete overrides.kachatNamesIndexer;
+    changed = true;
+  }
+  if (changed) { try { localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(overrides)); } catch {} }
 })();
 
 // Someone who picked "Kasia Public Node" goes back to Automatic Node Scan: that node is retired.

@@ -87,7 +87,8 @@ assert.equal(HUB_DEFAULT.indexOf("swaps"), HUB_DEFAULT.indexOf("kachat-bots") + 
 const beforeSwap = { dock: ["hub", "portfolio", "chats", "kaposts", "profile"], hub: ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "apps", "chess"] };
 const restoredSwap = norm(beforeSwap);
 assert.deepEqual(restoredSwap.dock, beforeSwap.dock);
-assert.deepEqual(restoredSwap.hub, [...beforeSwap.hub, "swaps"]);
+// (Settings, added after Swap, follows it - iOS d54ea87c.)
+assert.deepEqual(restoredSwap.hub, [...beforeSwap.hub, "swaps", "settings"]);
 everyPlaced(restoredSwap);
 // It can be put in the dock like any other pick, and sent back.
 const swapInDock = addToDock(removeFromDock(restoredSwap, "kaposts"), "swaps");
@@ -99,3 +100,16 @@ assert.equal(dockIsFull(swapInDock, noSwap), false);
 everyPlaced(swapInDock);
 
 console.log("dock arrangement: ok");
+
+// Settings is a tab like the rest (iOS d54ea87c / KaPay 040f91a): last in a fresh Hub, appended to an
+// existing arrangement, and it can go in the dock.
+{
+  const fresh = norm(null);
+  assert.equal(fresh.hub.at(-1), "settings");
+  assert.ok(!fresh.dock.includes("settings"));
+  const docked = norm({ dock: ["hub", "chats", "profile", "settings"], hub: [] });
+  assert.ok(docked.dock.includes("settings"));
+  assert.ok(!docked.hub.includes("settings"));
+}
+console.log("dock arrangement: settings ok");
+

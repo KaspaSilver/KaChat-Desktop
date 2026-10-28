@@ -1059,3 +1059,481 @@ export function openSentConfirmation({ txid, amountSompi = null, recipient = nul
 export function closeSentConfirmation() {
   if (activeSentSheet) activeSentSheet();
 }
+
+// --- Swipe up to send (iOS 59593af / 7abc06e8 SwipeUpToSendScrollView) --------------------------
+// The send screens' bottom bar: press "Swipe up to Send" and drag it up. The whole screen rises
+// with the finger and the sending screen comes up from below in its place. Let go past halfway and
+// it sends: the sending screen takes the whole sheet, a BlockDAG runs across it while the
+// transaction goes out, then it shows Sent (or the screen's own outcome) with Done, or Failed with
+// the screen's error and Try Again, which brings the form back as it was. Let go sooner and it
+// springs back. Only the bar answers, so scrolling the form never sends. A keyboard press or a
+// screen reader's activation is the plain action (iOS accessibilityAction).
+
+/** The words a swipe-up screen uses (iOS SwipeUpLabels): a Kaspa send, a .kachat buy or claim. */
+export const SWIPE_UP_LABELS = {
+  send: {
+    release: "Release to Send", working: "Sending", workingDetail: "Broadcasting to the Kaspa BlockDAG...",
+    done: "Sent", hint: "Let go past halfway to send.", recipientWord: "to", failedFallback: "The send didn't go out.",
+  },
+  buy: {
+    release: "Release to Buy", working: "Buying", workingDetail: "Sending the purchase to the Kaspa BlockDAG...",
+    done: "Name Bought", hint: "Let go past halfway to buy.", recipientWord: "for", failedFallback: "The purchase didn't go out.",
+  },
+  claim: {
+    release: "Release to Claim", working: "Claiming", workingDetail: "Committing to the Kaspa BlockDAG...",
+    done: "Claim Started", hint: "Let go past halfway to claim.", recipientWord: "for", failedFallback: "The claim didn't start.",
+  },
+};
+/** A send whose device check (Face ID / the password) was turned down (iOS KachatNamesLiveViews). */
+export const NOT_CONFIRMED_ON_DEVICE = "Not confirmed on this device, so nothing was sent.";
+
+const SWIPE_BAR_ICONS = {
+  up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
+  check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4.2 4.2 8.8-9.2"/></svg>',
+};
+const SWIPE_MARKS = {
+  done: '<svg viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="34" class="sk-swipe-mark-fill"/><path d="m22 37 9.5 9.5L51 27" class="sk-swipe-mark-ink"/></svg>',
+  failed: '<svg viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="34" class="sk-swipe-mark-fill"/><path d="M25 25l22 22M47 25 25 47" class="sk-swipe-mark-ink"/></svg>',
+};
+const SWIPE_OPEN_ICON = '<svg class="sk-sent-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></svg>';
+const SWIPE_FAIL_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 10v4.5M12 17.2v.1"/></svg>';
+/** iOS settle: spring(response 0.45, damping 0.86). */
+const SWIPE_SETTLE_MS = 450;
+
+/**
+ * Turns a sheet (`card`, a `.contact-modal`) into a swipe-up send screen. Its `.modal-header` is
+ * replaced by the screen's own header - a Cancel capsule and the title - which moves up with the
+ * rest of the form (iOS draws it in place of the navigation bar); everything else in the card
+ * becomes the scrolling form, with the bar pinned under it.
+ *
+ * The screen drives it like iOS's bindings: `setBusy(true)` once the send really started,
+ * `setSent({ txid, amountSompi, recipient, explorerUrl })` when it went out, or `setSucceeded(html)`
+ * for an action that ends without one transaction (a claim; `html` is shown under the title; a send
+ * can carry one too, `setSent(sent, html)`, and `setOutcome(html)` updates it), and
+ * `setBusy(false)` without either is a failure, shown with `getFailureMessage()` (the screen's
+ * error line) or the labels' fallback. `onAction` starts the send; `getPreview()` says what is being
+ * sent ({ amountSompi, recipient }) for the rising screen. `reset()` puts the form back at once, for
+ * a screen opened again.
+ */
+export function createSwipeUpScreen(card, {
+  screenTitle = "Send Kaspa", barTitle = "Swipe up to Send", labels = SWIPE_UP_LABELS.send, kasUnit = "KAS",
+  getPreview, getFailureMessage, onCancel, onDone, onAction,
+} = {}) {
+  const noop = { setBusy() {}, setEnabled() {}, setSent() {}, setOutcome() {}, setSucceeded() {}, setScreenTitle() {}, setBarTitle() {}, setLabels() {}, setKasUnit() {}, reset() {}, get sending() { return false; } };
+  if (!card) return noop;
+  card.querySelector(":scope > .modal-header")?.remove();
+  card.classList.add("sk-swipe-host");
+  const form = document.createElement("div");
+  form.className = "sk-swipe-form";
+  form.innerHTML = `
+    <div class="sk-swipe-header"><div class="sk-swipe-header-row">
+      <button type="button" class="sk-swipe-cancel" data-sk-swipe-cancel>Cancel</button>
+      <h2 class="sk-swipe-title" data-sk-swipe-title></h2>
+    </div></div>
+    <div class="sk-swipe-scroll" data-sk-swipe-scroll></div>
+    <div class="sk-swipe-barwrap">
+      <button type="button" class="sk-swipe-bar" data-sk-swipe-bar>
+        <span class="sk-swipe-bar-icon" data-sk-swipe-bar-icon></span>
+        <span class="sk-swipe-bar-text" data-sk-swipe-bar-text></span>
+      </button>
+    </div>`;
+  const scroll = form.querySelector("[data-sk-swipe-scroll]");
+  while (card.firstChild) scroll.appendChild(card.firstChild);
+  const progress = document.createElement("div");
+  progress.className = "sk-swipe-progress";
+  progress.hidden = true;
+  progress.innerHTML = `
+    <div class="sk-swipe-dag"><canvas data-sk-swipe-dag></canvas><span class="sk-swipe-mark" data-sk-swipe-mark></span></div>
+    <div class="sk-swipe-lines">
+      <h3 class="sk-swipe-big" data-sk-swipe-big></h3>
+      <p class="sk-swipe-amount" data-sk-swipe-amount hidden></p>
+      <p class="sk-swipe-to" data-sk-swipe-to hidden></p>
+      <p class="sk-swipe-detail" data-sk-swipe-detail hidden></p>
+    </div>
+    <div class="sk-swipe-failure" data-sk-swipe-failure hidden>${SWIPE_FAIL_ICON}<span data-sk-swipe-failure-text></span></div>
+    <div class="sk-swipe-tx" data-sk-swipe-tx hidden></div>
+    <div class="sk-swipe-outcome" data-sk-swipe-outcome hidden></div>
+    <div class="sk-swipe-spacer"></div>
+    <button type="button" class="sk-swipe-final" data-sk-swipe-final hidden></button>`;
+  card.append(form, progress);
+
+  const q = (root, attr) => root.querySelector(`[data-${attr}]`);
+  const titleEl = q(form, "sk-swipe-title");
+  const bar = q(form, "sk-swipe-bar");
+  const barIcon = q(form, "sk-swipe-bar-icon");
+  const barText = q(form, "sk-swipe-bar-text");
+  const canvas = q(progress, "sk-swipe-dag");
+  const els = {
+    mark: q(progress, "sk-swipe-mark"), big: q(progress, "sk-swipe-big"), amount: q(progress, "sk-swipe-amount"),
+    to: q(progress, "sk-swipe-to"), detail: q(progress, "sk-swipe-detail"), failure: q(progress, "sk-swipe-failure"),
+    failureText: q(progress, "sk-swipe-failure-text"), tx: q(progress, "sk-swipe-tx"), outcome: q(progress, "sk-swipe-outcome"),
+    final: q(progress, "sk-swipe-final"),
+  };
+
+  let title = barTitle;
+  let words = labels;
+  let unit = kasUnit;
+  let enabled = false;
+  let busy = false;
+  // iOS state: how far the screen is pushed up, past halfway (armed), form / sending, the DAG's
+  // moment on screen, whether the send really started, and how it ended.
+  let lift = 0;
+  let armed = false;
+  let phase = "form";
+  let dagShown = false;
+  let sendStarted = false;
+  let confirmed = false;
+  let failed = false;
+  let sent = null;
+  let succeeded = false;
+  let outcomeHtml = "";
+  let preview = {};
+  let dragging = false;
+  let pointerId = null;
+  let startY = 0;
+  const timers = new Set();
+  const later = (ms, fn) => { const t = setTimeout(() => { timers.delete(t); fn(); }, ms); timers.add(t); };
+  const clearTimers = () => { for (const t of timers) clearTimeout(t); timers.clear(); };
+  const active = () => enabled && !busy;
+  const height = () => card.clientHeight || window.innerHeight;
+  const threshold = () => Math.max(160, height() * 0.5);
+  const finished = () => (dagShown && (sent || succeeded)) || (failed && dagShown);
+  const failureText = () => (failed && dagShown ? (String(getFailureMessage?.() || "").trim() || words.failedFallback) : null);
+  const dag = blockDagAnimation(canvas);
+
+  function paintBar() {
+    barIcon.innerHTML = armed ? SWIPE_BAR_ICONS.check : SWIPE_BAR_ICONS.up;
+    barText.textContent = armed ? words.release : title;
+    bar.setAttribute("aria-label", title);
+    bar.setAttribute("aria-disabled", enabled ? "false" : "true");
+    bar.classList.toggle("disabled", !enabled);
+  }
+  function place(animate) {
+    card.classList.toggle("sk-swipe-animating", Boolean(animate));
+    const h = height();
+    form.style.transform = lift ? `translateY(${-lift}px)` : "";
+    progress.style.transform = `translateY(${Math.max(0, h - lift)}px)`;
+    card.classList.toggle("sk-swipe-sending", phase === "sending");
+    const showing = () => lift > 0 || phase === "sending";
+    if (showing()) { progress.hidden = false; dag.start(); }
+    // Springing back: the sending screen slides down out of sight before it goes.
+    else if (animate) later(SWIPE_SETTLE_MS, () => { if (!showing()) { progress.hidden = true; dag.stop(); } });
+    else { progress.hidden = true; dag.stop(); }
+  }
+  function paintProgress() {
+    const done = dagShown && Boolean(sent || succeeded);
+    const failure = failureText();
+    const sending = phase === "sending";
+    dag.setHighlight(sending && !failure);
+    dag.setDimmed(Boolean(done || failure));
+    els.mark.innerHTML = done ? SWIPE_MARKS.done : (failure ? SWIPE_MARKS.failed : "");
+    els.mark.className = `sk-swipe-mark${done ? " done" : failure ? " failed" : ""}`;
+    els.big.textContent = done ? words.done : failure ? "Failed" : (sending ? words.working : (armed ? words.release : "Keep Swiping"));
+    const amount = sent?.amountSompi ?? preview.amountSompi;
+    els.amount.hidden = amount == null;
+    if (amount != null) els.amount.textContent = `${formatSompiPlain(amount)} ${unit}`;
+    const to = String(sent?.recipient ?? preview.recipient ?? "").trim();
+    els.to.hidden = !to;
+    if (to) { els.to.title = to; els.to.innerHTML = `<span class="sk-sent-to-word">${esc(words.recipientWord)}&nbsp;</span>${middleTruncatedHtml(to, 8)}`; }
+    const showDetail = !(done || failure);
+    els.detail.hidden = !showDetail;
+    if (showDetail) els.detail.textContent = sending ? words.workingDetail : words.hint;
+    els.failure.hidden = !failure;
+    if (failure) els.failureText.textContent = failure;
+    const id = done && sent ? String(sent.txid || "").trim() : "";
+    els.tx.hidden = !id;
+    if (id) {
+      const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+      els.tx.innerHTML = sent.explorerUrl
+        ? `<a class="sk-sent-txid sk-swipe-txid" href="${esc(sent.explorerUrl)}" target="_blank" rel="noopener noreferrer" title="${esc(id)}"><span class="sk-sent-txid-text">${middleTruncatedHtml(id, 12)}</span>${SWIPE_OPEN_ICON}</a>
+           <p class="sk-swipe-tx-hint">${touch ? "Tap" : "Click"} the transaction to open it in the explorer.</p>`
+        : `<p class="sk-sent-txid plain" title="${esc(id)}"><span class="sk-sent-txid-text">${middleTruncatedHtml(id, 12)}</span></p>`;
+    }
+    const showOutcome = done && Boolean(outcomeHtml);
+    els.outcome.hidden = !showOutcome;
+    if (showOutcome && els.outcome.dataset.html !== outcomeHtml) { els.outcome.innerHTML = outcomeHtml; els.outcome.dataset.html = outcomeHtml; }
+    els.final.hidden = !(done || failure);
+    els.final.textContent = done ? "Done" : "Try Again";
+    els.final.dataset.kind = done ? "done" : "retry";
+    progress.classList.toggle("finished", Boolean(finished()));
+  }
+  function paint(animate = false) { paintBar(); place(animate); paintProgress(); }
+
+  function startSending() {
+    armed = false;
+    dagShown = false;
+    sendStarted = busy;
+    confirmed = false;
+    failed = false;
+    sent = null;
+    succeeded = false;
+    outcomeHtml = "";
+    preview = getPreview?.() || preview;
+    phase = "sending";
+    lift = height() * 2;
+    paint(true);
+    try { onAction?.(); } catch { /* the screen reports its own errors */ }
+    later(1800, () => { dagShown = true; paintProgress(); });
+    // A send that never started (a check failed before it went busy) fails too.
+    later(600, () => { if (!sendStarted) showFailure(); });
+  }
+  function showFailure() {
+    if (phase !== "sending" || confirmed || failed) return;
+    failed = true;
+    paintProgress();
+  }
+  function returnToForm() {
+    if (phase !== "sending" || confirmed) return;
+    lift = 0;
+    place(true);
+    // After the screen is back down, so the sending screen doesn't change on its way out.
+    later(SWIPE_SETTLE_MS, () => { phase = "form"; failed = false; paint(false); });
+  }
+  function springBack() {
+    armed = false;
+    lift = 0;
+    paint(true);
+  }
+
+  bar.addEventListener("pointerdown", (event) => {
+    if (!active() || phase !== "form") return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    dragging = true;
+    pointerId = event.pointerId;
+    startY = event.clientY;
+    preview = getPreview?.() || {};
+    try { bar.setPointerCapture(event.pointerId); } catch { /* fine */ }
+    dag.restart();
+  });
+  bar.addEventListener("pointermove", (event) => {
+    if (!dragging || event.pointerId !== pointerId) return;
+    lift = Math.max(0, startY - event.clientY);
+    armed = lift >= threshold();
+    paint(false);
+  });
+  const end = (event, cancelled) => {
+    if (!dragging || event.pointerId !== pointerId) return;
+    dragging = false;
+    pointerId = null;
+    if (!cancelled && armed && active() && phase === "form") startSending();
+    else springBack();
+  };
+  bar.addEventListener("pointerup", (event) => end(event, false));
+  bar.addEventListener("pointercancel", (event) => end(event, true));
+  bar.addEventListener("lostpointercapture", (event) => end(event, true));
+  bar.addEventListener("contextmenu", (event) => event.preventDefault());
+  bar.addEventListener("click", (event) => {
+    // Pointer clicks end a drag the handlers above already judged.
+    if (event.detail !== 0 || !active() || phase !== "form") return;
+    dag.restart();
+    startSending();
+  });
+  form.querySelector("[data-sk-swipe-cancel]").addEventListener("click", () => { if (phase === "form") onCancel?.(); });
+  els.final.addEventListener("click", () => {
+    if (els.final.dataset.kind === "done") { try { onDone?.(); } catch { /* the screen tidies up on its own */ } }
+    else returnToForm();
+  });
+  // While it sends, Escape doesn't close the sheet under it (iOS interactiveDismissDisabled).
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || phase !== "sending" || !card.isConnected || !card.offsetParent) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  window.addEventListener("resize", () => { if (phase === "sending") { lift = height() * 2; place(false); } else if (!dragging && lift) springBack(); });
+
+  const api = {
+    setScreenTitle(text) { titleEl.textContent = String(text || ""); },
+    setBarTitle(text) { title = String(text || ""); paintBar(); },
+    setLabels(next) { words = next || SWIPE_UP_LABELS.send; paintBar(); paintProgress(); },
+    setKasUnit(next) { unit = String(next || "KAS"); },
+    setEnabled(on) { enabled = Boolean(on); paintBar(); },
+    setBusy(on) {
+      const was = busy;
+      busy = Boolean(on);
+      if (busy) { sendStarted = true; return; }
+      // The screen says how it went as it stops being busy; give that a moment to land.
+      if (was) later(300, () => { if (!confirmed) showFailure(); });
+    },
+    /** `outcome` (trusted markup) shows under the transaction, like a name's progress steps. */
+    setSent(next, outcome = "") {
+      if (!next) return;
+      sent = next;
+      outcomeHtml = String(outcome || "");
+      confirmed = true;
+      paintProgress();
+    },
+    /** Replaces the outcome shown once it worked (its progress moved on). */
+    setOutcome(html = "") { outcomeHtml = String(html || ""); paintProgress(); },
+    setSucceeded(html = "") {
+      outcomeHtml = String(html || "");
+      succeeded = true;
+      confirmed = true;
+      paintProgress();
+    },
+    reset() {
+      clearTimers();
+      dragging = false;
+      pointerId = null;
+      armed = false;
+      lift = 0;
+      phase = "form";
+      dagShown = false;
+      sendStarted = false;
+      confirmed = false;
+      failed = false;
+      sent = null;
+      succeeded = false;
+      outcomeHtml = "";
+      busy = false;
+      scroll.scrollTop = 0;
+      paint(false);
+    },
+    get sending() { return phase === "sending"; },
+  };
+  api.setScreenTitle(screenTitle);
+  paint(false);
+  return api;
+}
+
+/** A stable pseudo-random number for (column, salt) - iOS BlockDAGAnimationView.hash, the same
+ *  64-bit mix, so the picture is the one iOS draws. */
+const dagHashCache = new Map();
+const DAG_M64 = (1n << 64n) - 1n;
+export function blockDagHash(column, salt) {
+  const key = `${column}:${salt}`;
+  const cached = dagHashCache.get(key);
+  if (cached !== undefined) return cached;
+  if (dagHashCache.size > 6000) dagHashCache.clear();
+  const a = BigInt.asIntN(64, BigInt(column) * 73856093n);
+  const b = BigInt.asIntN(64, BigInt(salt) * 19349663n);
+  let x = BigInt.asUintN(64, a ^ b);
+  x ^= x >> 33n;
+  x = (x * 0xff51afd7ed558ccdn) & DAG_M64;
+  x ^= x >> 33n;
+  const value = Number(x % 1000003n);
+  dagHashCache.set(key, value);
+  return value;
+}
+const dagCount = (column) => 1 + (blockDagHash(column, 1) % 3);
+/** Block `row` of `column`'s centre height, as a fraction of the view. */
+function dagY(column, row) {
+  const n = dagCount(column);
+  const jitter = ((blockDagHash(column, 10 + row) % 100) / 100) * 0.12 - 0.06;
+  return (row + 1) / (n + 1) + jitter;
+}
+/** The parents of block `row` in `column`: rows of `column - 1` (several parents, not a chain). */
+function dagParents(column, row) {
+  const previous = dagCount(column - 1);
+  const first = blockDagHash(column, 20 + row) % previous;
+  const result = [first];
+  if (previous > 1 && blockDagHash(column, 30 + row) % 2 === 0) result.push((first + 1) % previous);
+  return result;
+}
+
+/**
+ * Kaspa's BlockDAG drifting right to left on `canvas` (iOS BlockDAGAnimationView): columns 54px
+ * apart at 60px/s, 18px blocks each pointing back at one or two blocks of the column before. With
+ * the highlight on, the block entering on the right then is the transaction's: filled in the
+ * accent with a pulsing glow, and the blocks after it point back at it in the same colour.
+ */
+function blockDagAnimation(canvas) {
+  const SPACING = 54;
+  const SPEED = 60;
+  const BLOCK = 18;
+  let start = performance.now();
+  let highlightStart = null;
+  let highlight = false;
+  let frame = 0;
+  let running = false;
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+  }
+  function draw(now) {
+    frame = 0;
+    if (!running || !canvas.isConnected) { running = false; return; }
+    const ratio = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const heightPx = canvas.clientHeight;
+    if (width && heightPx) {
+      if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(heightPx * ratio)) {
+        canvas.width = Math.round(width * ratio);
+        canvas.height = Math.round(heightPx * ratio);
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, heightPx);
+      const style = getComputedStyle(canvas);
+      const accent = style.getPropertyValue("--accent").trim() || "#70c7ba";
+      const primary = style.color || "#000";
+      const elapsed = (now - start) / 1000;
+      const scroll = elapsed * SPEED;
+      const firstVisible = Math.floor(scroll / SPACING) - 1;
+      const visibleColumns = Math.floor(width / SPACING) + 3;
+      // The column just off the right edge when the send started is the transaction's.
+      const highlightScroll = (((highlightStart ?? start) - start) / 1000) * SPEED;
+      const txColumn = Math.floor((highlightScroll + width) / SPACING) + 1;
+      const x = (column) => column * SPACING - scroll;
+      const point = (column, row) => [x(column), dagY(column, row) * heightPx];
+      // Edges first, under the blocks.
+      for (let column = firstVisible; column <= firstVisible + visibleColumns; column += 1) {
+        for (let row = 0; row < dagCount(column); row += 1) {
+          for (const parent of dagParents(column, row)) {
+            const lit = highlight && column - 1 === txColumn && parent === 0;
+            const [x1, y1] = point(column, row);
+            const [x2, y2] = point(column - 1, parent);
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = lit ? accent : primary;
+            ctx.globalAlpha = lit ? 0.8 : 0.28;
+            ctx.lineWidth = lit ? 2 : 1;
+            ctx.stroke();
+          }
+        }
+      }
+      for (let column = firstVisible; column <= firstVisible + visibleColumns; column += 1) {
+        for (let row = 0; row < dagCount(column); row += 1) {
+          const [cx, cy] = point(column, row);
+          const left = cx - BLOCK / 2;
+          const top = cy - BLOCK / 2;
+          if (highlight && column === txColumn && row === 0) {
+            ctx.globalAlpha = 0.25 + 0.2 * Math.sin(elapsed * 4);
+            ctx.fillStyle = accent;
+            roundRect(ctx, left - 7, top - 7, BLOCK + 14, BLOCK + 14, 9);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            roundRect(ctx, left, top, BLOCK, BLOCK, 5);
+            ctx.fill();
+          } else {
+            ctx.fillStyle = primary;
+            ctx.globalAlpha = 0.16;
+            roundRect(ctx, left, top, BLOCK, BLOCK, 5);
+            ctx.fill();
+            ctx.strokeStyle = primary;
+            ctx.globalAlpha = 0.45;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    frame = requestAnimationFrame(draw);
+  }
+  return {
+    start() { if (running) return; running = true; frame = requestAnimationFrame(draw); },
+    stop() { running = false; if (frame) cancelAnimationFrame(frame); frame = 0; },
+    /** The view appearing again (iOS onAppear): the DAG starts over. */
+    restart() { start = performance.now(); highlightStart = highlight ? start : null; },
+    setHighlight(on) {
+      if (Boolean(on) === highlight) return;
+      highlight = Boolean(on);
+      highlightStart = highlight ? performance.now() : null;
+    },
+    setDimmed(on) { canvas.classList.toggle("dimmed", Boolean(on)); },
+  };
+}

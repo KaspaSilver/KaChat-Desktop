@@ -6,7 +6,7 @@ import { installGroupedAmountInputs } from "./grouped-amount.js";
 import { contractPurgePlan, contractSuppressionRecovery } from "./contract-purge.js";
 import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
-import { chattingCatchUpLook } from "./address-activity.js";
+import { catchUpCandidates, spendsOwnFunds } from "./address-activity.js";
 import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder } from "./message-placeholders.js";
 import { accountGuard, accountScopedValue, accountStillSaved } from "./account-guard.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
@@ -26,7 +26,7 @@ import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave } from "./chess-tournaments.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
-import { kachatHeroProfile, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
+import { kachatHeroProfile, kachatCachedOwnedNameCount, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab, openKachatMarketSheet } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -58,6 +58,7 @@ import {
   otherDomainsHtml, pickOtherDomain, nameNotFoundText,
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
   openSentConfirmation, closeSentConfirmation, fixedKas8,
+  createSwipeUpScreen, SWIPE_UP_LABELS, NOT_CONFIRMED_ON_DEVICE,
 } from "./send-kaspa-components.js";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
 import * as Calls from "./calls.js";
@@ -1745,10 +1746,13 @@ function parseKaChatInternalLink(raw) {
     const request = parsePaymentRequestLinkCached(text);
     return request ? { kind: "pay", request } : null;
   }
-  const custom = text.match(/^kachat:\/\/(kapost|broadcast|profile)\/([^/?#]+)\/?$/i);
+  // A query after the path is allowed and ignored here: KaPosts' Chat button sends a profile link
+  // with `?chat=1` (iOS 724d477e), which opens the chat only when it comes from outside the app;
+  // inside it, it is the person's profile link like any other.
+  const custom = text.match(/^kachat:\/\/(kapost|broadcast|profile)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
   if (custom) { target = custom[1].toLowerCase(); payload = custom[2]; }
   else {
-    const universal = text.match(/^https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(post|broadcast|u)\/([^/?#]+)\/?$/i);
+    const universal = text.match(/^https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(post|broadcast|u)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
     if (!universal) return null;
     const path = universal[1].toLowerCase();
     target = path === "post" ? "kapost" : path === "u" ? "profile" : "broadcast";
@@ -7337,6 +7341,11 @@ document.querySelector("[data-settings-balance]")?.addEventListener("click", asy
 });
 
 function closeAccountOverlay() {
+  // As a tab it stays up (no Done there); Done from inside a category comes back to the top.
+  if (document.body.classList.contains("settings-tab") && currentAppTab && (currentAppTab === "settings" || hubSection === "settings")) {
+    try { showSettingsCategory(null); } catch { /* not built yet */ }
+    return;
+  }
   accountOverlay.hidden = true;
   // the next Settings visit starts at its own top level, never inside Customize Dock
   if (customizeDockFromHub) {
@@ -8376,8 +8385,11 @@ function spendingLabelFor(state, index) {
 // source. Wallet events only, never chat: no conversation, no bubble, just the
 // app's standard desktop notification. The chatting address counts plain
 // transfers only (iOS 56b75c8): a payload tx (chat payment, message,
-// handshake) is the chat's own news, and its catch-up only counts plain
-// transfers newer than its last look (ui/address-activity.js).
+// handshake) is the chat's own news. Every address's catch-up counts only
+// receives newer than its floor, newest first, up to the balance increase
+// (KaPay 34f4b45), and a receive that spends any of our coins - read from the
+// API, or looked up when the API hasn't resolved its inputs yet - is our own
+// (KaPay 42470af; ui/address-activity.js).
 //
 // Detection is the balance-diff catch-up model (iOS's runCatchUpIfNeeded):
 // per-account persisted baselines are diffed against live balances (one
@@ -8398,8 +8410,9 @@ function spendingLabelFor(state, index) {
 const ADDR_ACTIVITY_BASELINES_KEY = "kachat-addr-activity-baselines-v1"; // account-scoped { address: sompi string }
 const ADDR_ACTIVITY_HANDLED_KEY = "kachat-addr-activity-handled-txids-v1"; // account-scoped [txid]
 const ADDR_ACTIVITY_HANDLED_CAP = 500;
-// account-scoped { chatting address: ms } - the newest block time the chatting address's catch-up
-// has looked at: older receives were before it was watched, or already notified (iOS 56b75c8)
+// account-scoped { address: ms } - the newest block time each address's catch-up has looked at:
+// older receives were before it was watched, or already notified (iOS 56b75c8, every address since
+// KaPay 34f4b45; the key's name is from when only the chatting address had one)
 const ADDR_ACTIVITY_CHAT_FLOOR_KEY = "kachat-addr-activity-chat-floor-v1";
 let addressActivityRunning = false;
 let addressActivityCheckTimer = 0;
@@ -8430,7 +8443,7 @@ function saveAddrActivityHandled(list) {
   } catch {}
 }
 
-function loadChattingCatchUpFloor(address) {
+function loadActivityFloor(address) {
   try {
     const map = JSON.parse(localStorage.getItem(accountScopedKey(ADDR_ACTIVITY_CHAT_FLOOR_KEY)) || "{}") || {};
     const value = Number(map[address] || 0);
@@ -8438,7 +8451,7 @@ function loadChattingCatchUpFloor(address) {
   } catch { return 0; }
 }
 
-function saveChattingCatchUpFloor(address, ms) {
+function saveActivityFloor(address, ms) {
   try {
     const key = accountScopedKey(ADDR_ACTIVITY_CHAT_FLOOR_KEY);
     const map = JSON.parse(localStorage.getItem(key) || "{}") || {};
@@ -8602,17 +8615,6 @@ async function fetchRecentFullTransactionsFor(address, limit = 10) {
   return Array.isArray(txs) ? txs : [];
 }
 
-function txInputAddresses(tx) {
-  const inputs = Array.isArray(tx?.inputs) ? tx.inputs : [];
-  return inputs
-    .map((input) => String(
-      input?.previous_outpoint_address || input?.previousOutpointAddress ||
-      input?.previous_outpoint_resolved?.script_public_key_address ||
-      input?.previousOutpointResolved?.scriptPublicKeyAddress || "",
-    ).trim())
-    .filter(Boolean);
-}
-
 function scheduleAddressActivityCheck(delayMs = 1200) {
   if (addressActivityCheckTimer) window.clearTimeout(addressActivityCheckTimer);
   addressActivityCheckTimer = window.setTimeout(() => {
@@ -8658,10 +8660,10 @@ async function runAddressActivityCheck() {
       const previous = baselines[address];
       if (previous === undefined) {
         // Never-tracked address (feature install, newly revealed slot, fresh
-        // cold import): seed silently — its history predates our tracking.
+        // cold import): seed silently — its history predates our tracking, and its receives
+        // count from now on (iOS 56b75c8, every address since KaPay 34f4b45).
         baselines[address] = balanceText;
-        // the chatting address's receives count from now on (iOS 56b75c8)
-        if (address === walletAtStart) saveChattingCatchUpFloor(address, Date.now());
+        saveActivityFloor(address, Date.now());
         changed = true;
         continue;
       }
@@ -8683,25 +8685,54 @@ async function runAddressActivityCheck() {
   }
 }
 
+/** The address a transaction output went to, for an input the REST API left unresolved (KaPay
+ *  42470af): read from the transaction that created it, cached for the run. */
+function makeOutputAddressLookup() {
+  const cache = new Map();
+  const base = String(getEndpoint("kaspaApi") || "https://api.kaspa.org").replace(/\/+$/, "");
+  return async (txid, index) => {
+    if (!cache.has(txid)) {
+      cache.set(txid, fetch(`${base}/transactions/${encodeURIComponent(txid)}`, { headers: { Accept: "application/json" }, cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null));
+    }
+    const tx = await cache.get(txid);
+    const outputs = Array.isArray(tx?.outputs) ? tx.outputs : [];
+    const output = outputs.find((entry) => Number(entry?.index) === index) ?? outputs[index];
+    return output ? (kaspaOutputAddress(output) || null) : null;
+  };
+}
+
+/** With "notifications when KaChat is closed" on, the push service announces a receive to these
+ *  addresses while the app is away (KaPay 34f4b45 pushShowsReceive): the app's own "Balance
+ *  increased" then stays quiet. A "Received" for one transaction shares the push's tag, so the
+ *  two replace each other. */
+function pushShowsReceive() {
+  try { return webPushStatus()?.state === "on" && document.visibilityState !== "visible"; } catch { return false; }
+}
+
 async function attributeAndNotifyAddressActivity(increases) {
   const own = ownInputAddressSet();
   const handled = loadAddrActivityHandled();
   const handledSet = new Set(handled);
+  const outputAddress = makeOutputAddressLookup();
   for (const { address, delta, kind } of increases) {
     let attributed = false;
     let recentTxs = [];
     try { recentTxs = await fetchRecentFullTransactionsFor(address, 10); } catch {}
     const isChatting = kind === "chatting";
-    if (isChatting) {
-      // The chatting address (iOS 56b75c8): only plain transfers newer than what was already
-      // looked at - never a burst of old payments, and a payload tx (chat payment, message,
-      // handshake) is the chat's own news. The first look only sets where it starts.
-      const look = chattingCatchUpLook(recentTxs, loadChattingCatchUpFloor(address), Date.now());
-      saveChattingCatchUpFloor(address, look.nextFloor);
-      if (look.firstLook) continue;
-      recentTxs = look.counted;
-    }
-    for (const tx of recentTxs) {
+    // Only receives newer than what an earlier catch-up already looked at (or than when the address
+    // started being tracked); the chatting address counts plain transfers only (iOS 56b75c8).
+    const { nextFloor, candidates } = catchUpCandidates(recentTxs, loadActivityFloor(address), { chatting: isChatting });
+    if (nextFloor) saveActivityFloor(address, nextFloor);
+    // The neutral fallback: not for the chatting address, whose balance moves with every chat
+    // payment too (iOS 56b75c8), nor while the push announces receives (KaPay 34f4b45).
+    const mayFallBack = !isChatting && !pushShowsReceive();
+    // Newest first, and only as many receives as the balance grew by: anything older was already
+    // in the baseline. Own change doesn't count against the increase (KaPay 34f4b45).
+    let remaining = delta;
+    for (const tx of candidates) {
+      if (remaining <= 0n) break;
       const txid = String(tx?.transaction_id || tx?.transactionId || "").trim();
       if (!txid) continue;
       let toAddress = 0n;
@@ -8709,43 +8740,45 @@ async function attributeAndNotifyAddressActivity(increases) {
         if (kaspaOutputAddress(output) === address) toAddress += kaspaOutputAmount(output);
       }
       if (toAddress <= 0n) continue;
-      if (handledSet.has(txid)) { attributed = true; continue; }
       attributed = true;
+      if (handledSet.has(txid)) { remaining -= toAddress < remaining ? toAddress : remaining; continue; }
+      // Any input from our addresses: our own (change, a consolidation, another app on this seed).
+      // An input that can't be placed at all counts as someone else's - missing real funds is worse
+      // than a rare stray ping (KaPay 42470af).
+      const isSelfSend = (await spendsOwnFunds(tx, own, { outputAddress })) === true;
+      if (handledSet.has(txid)) continue;
       handledSet.add(txid);
       handled.push(txid);
-      const inputAddresses = txInputAddresses(tx);
-      const isSelfSend = inputAddresses.length > 0 && inputAddresses.some((input) => own.has(input));
-      if (!isSelfSend) {
-        postDesktopNotification({
-          title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
-          body: describeActivityAddress(kind, address),
-          tag: `kachat-addr-activity-${txid}`,
-          // Clicking used to focus the window and stop there, which tells you a payment arrived
-          // and then makes you go and find it. It now opens the address the money landed on, on
-          // its History tab (iOS 13046ad): a spending address's detail, or the Cold Storage
-          // address. The route carries the address for a click that comes back via the worker.
-          route: addressActivityRoute(kind, address),
-          onClick: () => openAddressActivityTarget(kind, address),
-        });
-        // Also record it in the global notifications bell (Profile), alongside KaPosts/mentions.
-        recordGlobalNotification({
-          id: `wallet-${txid}`,
-          source: "wallet",
-          title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
-          body: describeActivityAddress(kind, address),
-          timestamp: Date.now(),
-          ...addressActivityCenterTarget(kind, address),
-        });
-        appendEngineLog(`Address activity: external receive ${txid.slice(0, 12)}… on ${shortAddress(address)}`);
-      } else {
+      if (isSelfSend) {
         appendEngineLog(`Address activity: suppressed self-send ${txid.slice(0, 12)}…`);
+        continue;
       }
+      remaining -= toAddress < remaining ? toAddress : remaining;
+      postDesktopNotification({
+        title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
+        body: describeActivityAddress(kind, address),
+        tag: `kachat-addr-activity-${txid}`,
+        // Clicking used to focus the window and stop there, which tells you a payment arrived
+        // and then makes you go and find it. It now opens the address the money landed on, on
+        // its History tab (iOS 13046ad): a spending address's detail, or the Cold Storage
+        // address. The route carries the address for a click that comes back via the worker.
+        route: addressActivityRoute(kind, address),
+        onClick: () => openAddressActivityTarget(kind, address),
+      });
+      // Also record it in the global notifications bell (Profile), alongside KaPosts/mentions.
+      recordGlobalNotification({
+        id: `wallet-${txid}`,
+        source: "wallet",
+        title: `Received ${formatSompiForNotification(toAddress)} ${KAS_UNIT}`,
+        body: describeActivityAddress(kind, address),
+        timestamp: Date.now(),
+        ...addressActivityCenterTarget(kind, address),
+      });
+      appendEngineLog(`Address activity: external receive ${txid.slice(0, 12)}… on ${shortAddress(address)}`);
     }
-    if (!attributed && !isChatting) {
+    if (!attributed && mayFallBack) {
       // Balance grew but no fetched recent tx pays this address (deep history
-      // page or indexer lag) — neutral fallback rather than staying silent (not
-      // for the chatting address, whose balance moves with every chat payment
-      // too - iOS 56b75c8).
+      // page or indexer lag) — neutral fallback rather than staying silent.
       postDesktopNotification({
         title: `Balance increased by ${formatSompiForNotification(delta)} ${KAS_UNIT}`,
         body: describeActivityAddress(kind, address),
@@ -9500,8 +9533,16 @@ async function renderSpendingList() {
   // .kachat names count too (iOS 881ada6 ownersOfNames; empty where the registry isn't launched).
   for (const address of await kachatOwnersOfNames(enriched.map((e) => e.address))) domainOwning.add(address);
   if (token !== spendingListToken) return;
-  // In number order, #0 first (iOS 245a5d2).
-  enriched.sort((a, b) => a.index - b.index);
+  // Unused ones first, newest first - so a freshly generated address lands right under the
+  // Chatting Address - then the used ones in number order (iOS 7abc06e8 / KaPay 59593af, owner's
+  // call 2026-10-27). "Used" is ever used or holding KAS; one still unknown counts as unused.
+  const isUsedRow = (e) => e.used === true || e.kas > 0;
+  enriched.sort((a, b) => {
+    const aUsed = isUsedRow(a);
+    const bUsed = isUsedRow(b);
+    if (aUsed !== bUsed) return aUsed ? 1 : -1;
+    return aUsed ? a.index - b.index : b.index - a.index;
+  });
   const shownState = getSpendingState(); // the spent marks may have grown meanwhile
   spendingListEl.innerHTML = (engine.address ? chattingAddressRowHtml() : "") + (enriched.length
     ? enriched.map((e) => spendingRowHtml(e.index, e.address, shownState, e.totalKas != null ? `${formatKasExact(e.totalKas)} ${KAS_UNIT}` : `-- ${KAS_UNIT}`, e.used, domainOwning.has(e.address), { funded: e.kas > 0 })).join("")
@@ -10953,6 +10994,21 @@ function setActiveAppTab(tab) {
   try { if (screenTab === "kachat-stats") showKachatStats(); else hideKachatStats(); } catch { /* not started */ }
   try { if (screenTab === "address-book") showAddressBook(); else hideAddressBook(); } catch { /* not started */ }
   try { if (screenTab === "kachat-bots") showKachatBots(); else hideKachatBots(); } catch { /* not started */ }
+  syncSettingsTab(screenTab === "settings");
+}
+
+// Settings as a tab (iOS d54ea87c, KaPay 040f91a: a dock tab with no Done button): picking it opens
+// the Settings page in place, under the dock, and picking any other tab closes it again.
+function syncSettingsTab(on) {
+  const was = document.body.classList.contains("settings-tab");
+  if (on === was) { if (on && accountOverlay?.hidden) openAccountOverlay(); return; }
+  document.body.classList.toggle("settings-tab", on);
+  if (on) {
+    try { showSettingsCategory(null); } catch { /* not built yet */ }
+    openAccountOverlay();
+  } else if (accountOverlay && !accountOverlay.hidden) {
+    closeAccountOverlay();
+  }
 }
 
 sidebarTabButtons.forEach((button) => {
@@ -11706,6 +11762,15 @@ async function refreshKachatOwnedCount() {
   if (!kachatOwnedCountUnsubscribe && kachatNames()) {
     kachatOwnedCountUnsubscribe = onKachatRegistryChange(() => refreshKachatOwnedCount());
   }
+  // the saved list's count at once; the read below corrects it when it answers (iOS f4f5c0f)
+  if (kachatOwnedCountFor !== address) {
+    const cached = kachatCachedOwnedNameCount(address);
+    if (cached != null) {
+      kachatOwnedCount = cached;
+      kachatOwnedCountFor = address;
+      renderProfileDomains();
+    }
+  }
   try {
     // the names Your Domains lists (no lapsed ones); one that lapses meanwhile comes off the count
     // right then (iOS aa36d2a)
@@ -12088,7 +12153,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 251;
+const APP_BUILD = 252;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -12229,7 +12294,7 @@ function recordOutgoingPaymentChat({ destination, amountKas, txid }) {
   if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
 }
 
-function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent, slideToSend = false, onBusyChange = null, onRecipientChange = null } = {}) {
+function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountKas, getFeeKas, sendFn, getBalance, onSent, slideToSend = false, onBusyChange = null, onRecipientChange = null, onSuccess = null, cancelledMessage = null } = {}) {
   let resolvedAddress = null;
   // The domain the recipient resolved from (the Sent sheet's "to" line), null for an address.
   let resolvedDomain = null;
@@ -12303,6 +12368,8 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
   // Every send finishes on the shared Sent sheet (iOS SentConfirmationSheet): check, "Sent", the
   // amount, "to <domain or address>", the txid as an explorer link, Done - which closes the screen.
   function showSendSuccess(txid, amountSompi, recipient) {
+    // A swipe-up screen shows it on its own sending screen (iOS 59593af SendProgressScreen).
+    if (onSuccess) { onSuccess({ txid, amountSompi, recipient, explorerUrl: txid ? explorerTxUrl(txid) : null }); return; }
     openSentConfirmation({
       txid,
       amountSompi,
@@ -12463,7 +12530,13 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       refreshBalanceOnly({ quiet: true }).catch(() => {});
     } catch (error) {
       // Face ID / the password was cancelled: nothing was sent, the sheet stays as it was.
-      if (error?.code === "SEND_CANCELLED") { if (els.progress) els.progress.hidden = true; return; }
+      // On a swipe-up screen the swipe already left the form, so it says so there (iOS: the device
+      // check's error under Failed, then Try Again).
+      if (error?.code === "SEND_CANCELLED") {
+        if (els.progress) els.progress.hidden = true;
+        if (cancelledMessage && els.error) { els.error.textContent = cancelledMessage; els.error.hidden = false; }
+        return;
+      }
       // WASM helpers sometimes throw plain strings — surface those too, never a bare
       // "Send failed." when the SDK actually said why.
       const message = String(error?.message || error || "").trim() || "Send failed.";
@@ -12481,7 +12554,13 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
   // A slide-to-send button calls submit() itself once slid (a click on its track is not a send).
   if (!slideToSend) els.submit?.addEventListener("click", submit);
 
-  return { open, submit };
+  // What a swipe-up screen's rising sheet names as the recipient: the domain when one resolved,
+  // otherwise the address (iOS `resolvedDomain ?? effectiveAddress`).
+  function recipientText() {
+    return resolvedDomain || resolvedAddress || String(els.recipient?.value || "").trim() || null;
+  }
+
+  return { open, submit, recipientText };
 }
 
 // Send Kaspa (Chats > + > Send Kaspa, Donate, the Address Book, an address's Send, paying a payment
@@ -12500,8 +12579,41 @@ mountSendPieces(sendKaspaModal, {
   pills: `<div class="sk-pills" data-send-kaspa-pills hidden>${infoPillHtml({ attr: "send-kaspa-source-pill" })}</div>`,
   // Coin Control opens the shared picker (iOS CoinControlView), like the chat's Send KAS sheet.
   fee: feeControlsHtml({ prefix: "send-kaspa" }),
-  action: sendActionButtonHtml({ attr: "send-kaspa-submit", title: "Slide to Send" }),
+  action: "",
 });
+// Swipe up to Send / Swipe up to Consolidate (iOS 59593af / 7abc06e8 WithdrawKaspaView,
+// SpendingAddressWithdrawView): the screen's own Cancel + title header, the bar at the bottom, and
+// the sending screen - BlockDAG, then Sent with the transaction and Done, or Failed with Try Again.
+const sendKaspaErrorEl = document.querySelector("[data-send-kaspa-error]");
+const sendKaspaSwipe = createSwipeUpScreen(sendKaspaModal?.querySelector(".send-kaspa-modal"), {
+  screenTitle: "Send Kaspa",
+  barTitle: "Swipe up to Send",
+  kasUnit: KAS_UNIT,
+  getPreview: () => {
+    let amountSompi = null;
+    try { amountSompi = kasToSompi(normalizeKasAmount(sendKaspaResolveAmountKas())); } catch { /* no amount yet */ }
+    return { amountSompi, recipient: sendKaspaCompound ? null : sendKaspaController.recipientText() };
+  },
+  getFailureMessage: () => (sendKaspaErrorEl && !sendKaspaErrorEl.hidden ? sendKaspaErrorEl.textContent : null),
+  onCancel: () => closeSendKaspaModal(),
+  onDone: () => closeSendKaspaModal(),
+  onAction: () => sendKaspaController.submit(),
+});
+// What the old slide button did for the screen: busy (which the From and Coin Control guards read)
+// and the title; whether it can send comes in through `submit.disabled` below.
+const sendKaspaSlider = {
+  busy: false,
+  setBusy(on) { this.busy = Boolean(on); sendKaspaSwipe.setBusy(on); },
+  setTitle(text) { sendKaspaSwipe.setBarTitle(text); },
+};
+// The controller enables and disables its submit button as the recipient and amount change; on
+// the swipe screen that is the bar.
+const sendKaspaSwipeSubmit = {
+  _disabled: true,
+  get disabled() { return this._disabled; },
+  set disabled(value) { this._disabled = Boolean(value); sendKaspaSwipe.setEnabled(!this._disabled); },
+  addEventListener() {},
+};
 const sendKaspaFeeCtl = feeControls(sendKaspaModal, "send-kaspa");
 
 const sendKaspaAmountInput = document.querySelector("[data-send-kaspa-amount]");
@@ -13103,12 +13215,13 @@ function renderSendKaspaSourcePill(balanceText) {
 // merges every UTXO into one.
 let sendKaspaCompound = false;
 function applySendKaspaCompoundUi() {
-  const titleEl = document.querySelector("[data-send-kaspa-title]");
   // iOS WithdrawKaspaView: "Compound UTXOs", "Payment Request" while paying one (iOS c6851d6), else
-  // "Send Kaspa" - which address pays is the From section's to say (iOS 6333dd3).
-  if (titleEl) titleEl.textContent = sendKaspaCompound
+  // "Send Kaspa" - which address pays is the From section's to say (iOS 6333dd3). An address's own
+  // Send is "Send Kaspa from Address #N" (iOS 59593af SpendingAddressWithdrawView).
+  sendKaspaSwipe.setScreenTitle(sendKaspaCompound
     ? "Compound UTXOs"
-    : (sendKaspaPaymentRequest ? "Payment Request" : "Send Kaspa");
+    : (sendKaspaPaymentRequest ? "Payment Request"
+      : (sendKaspaSourceLocked && sendKaspaSourceIndex != null ? `Send Kaspa from ${spendingIndexTitle(sendKaspaSourceIndex)}` : "Send Kaspa")));
   // From on every send but Compound UTXOs, whose balance shows in the Available pill instead.
   const from = sendKaspaModal?.querySelector("[data-send-kaspa-from]");
   if (from) from.hidden = sendKaspaCompound;
@@ -13117,7 +13230,7 @@ function applySendKaspaCompoundUi() {
   // The shared recipient card, locked to this address for Compound UTXOs, and to a payment
   // request's address while paying one (iOS c6851d6 lockedAddress: activeRequest?.address).
   setRecipientLocked(sendKaspaModal, "send-kaspa", sendKaspaCompound ? sendKaspaSourceAddress() : (sendKaspaPaymentRequest?.address || null));
-  sendKaspaSlider.setTitle(sendKaspaCompound ? "Slide to Consolidate" : "Slide to Send");
+  sendKaspaSlider.setTitle(sendKaspaCompound ? "Swipe up to Consolidate" : "Swipe up to Send");
 }
 function applySendKaspaCompoundPrefill() {
   const recipient = document.querySelector("[data-send-kaspa-recipient]");
@@ -13134,10 +13247,12 @@ const sendKaspaController = makeSendController({
   addressBook: sendKaspaModal ? { root: sendKaspaModal, prefix: "send-kaspa" } : null,
   amount: sendKaspaAmountInput,
   error: document.querySelector("[data-send-kaspa-error]"),
-  submit: document.querySelector("[data-send-kaspa-submit]"),
+  submit: sendKaspaSwipeSubmit,
 }, {
   slideToSend: true,
   onBusyChange: (busy) => sendKaspaSlider.setBusy(busy),
+  onSuccess: (sent) => sendKaspaSwipe.setSent(sent),
+  cancelledMessage: NOT_CONFIRMED_ON_DEVICE,
   onRecipientChange: onSendKaspaRecipientChange,
   onOpen: () => { if (sendKaspaModal) sendKaspaModal.hidden = false; },
   onClose: closeSendKaspaModal,
@@ -13210,7 +13325,9 @@ function openSendKaspaModal(options = {}) {
   sendKaspaPaidAsChatPayment = false;
   renderSendKaspaPaymentRequest();
   closeOwnAddressPicker();
-  sendKaspaSlider.setBusy(false);
+  sendKaspaSwipe.reset();
+  sendKaspaSwipe.setKasUnit(KAS_UNIT);
+  sendKaspaSlider.busy = false;
   applySendKaspaCompoundUi();
   resetSendKaspaExtras();
   const opened = sendKaspaController.open();
@@ -13237,11 +13354,6 @@ document.querySelector("[data-send-kaspa-recipient]")?.addEventListener("input",
   if (link?.kind === "pay") applyPaymentRequestToSendKaspa(link.request);
 });
 
-// Slide to Send / Slide to Consolidate (iOS SendActionButton, afaad34): the send goes once the
-// knob reaches the right end; Return / Space or a screen reader's activation is the plain action.
-const sendKaspaSlider = createSendActionButton(sendKaspaModal?.querySelector("[data-send-kaspa-submit]"), {
-  onAction: () => sendKaspaController.submit(),
-});
 
 // Every spending address Choose an Address can list (iOS getSpendingAddressList): the revealed range
 // with each one's label, balance (one batched lookup) and hidden flag.
@@ -13351,6 +13463,27 @@ const manageAddressUtxosList = document.querySelector("[data-manage-address-utxo
 
 function closeManageAddressScreen() {
   if (manageAddressScreen) manageAddressScreen.hidden = true;
+  manageAddressShownBalance = null;
+}
+
+// The chatting address's Wallet screen follows the live balance (iOS Chess 7a65fab): when it
+// changes while the screen is up, the coins are read again, then the history - and the history
+// once more 4 s later, as the REST index can trail the node that told us.
+var manageAddressShownBalance = null;
+function syncManageAddressBalance() {
+  if (!manageAddressScreen || manageAddressScreen.hidden || !engine.address) return;
+  if (manageAddressBalanceEl) manageAddressBalanceEl.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  if (currentBalanceKas === "--" || manageAddressShownBalance === currentBalanceKas) return;
+  const first = manageAddressShownBalance == null;
+  manageAddressShownBalance = currentBalanceKas;
+  if (first) return;
+  const address = engine.address;
+  loadManageAddressUtxos()
+    .then(() => loadManageAddressTransactions(address))
+    .catch(() => { /* the lists keep what they show */ });
+  setTimeout(() => {
+    if (!manageAddressScreen.hidden && engine.address === address) loadManageAddressTransactions(address).catch(() => {});
+  }, 4000);
 }
 
 // The network fee a history transaction paid: inputs minus outputs, known only when the API
@@ -13625,6 +13758,7 @@ async function openManageAddressScreen() {
   manageAddressScreen.hidden = false;
   showManageView("list");
   if (manageAddressBalanceEl) manageAddressBalanceEl.textContent = `${currentBalanceKas} ${KAS_UNIT}`;
+  manageAddressShownBalance = currentBalanceKas === "--" ? null : currentBalanceKas;
   if (manageAddressExplorerLink) manageAddressExplorerLink.href = explorerAddressUrl(engine.address);
   // A .kachat tab left open repaints for this (possibly switched) wallet.
   if (document.querySelector("[data-manage-address-panel=\"kachat\"]:not([hidden])")) paintKachatAddressDomains("[data-manage-address-panel=\"kachat\"]", engine.address);
@@ -14484,9 +14618,19 @@ document.querySelector("[data-connection-save]")?.addEventListener("click", () =
     showCopyToast(HTTPS_REQUIRED_ERROR);
     return;
   }
+  const namesIndexerBefore = getEndpoint("kachatNamesIndexer");
   for (const input of inputs) {
     endpointFieldError(input.dataset.endpoint, "");
     setEndpoint(input.dataset.endpoint, normalizedHttpsEndpoint(input.value));
+  }
+  // A new names indexer is checked right away - the manifest read again and the refresh re-picks
+  // indexer or chain - so names show from it as soon as Save is clicked (iOS 7abc06e8).
+  if (getEndpoint("kachatNamesIndexer") !== namesIndexerBefore) {
+    try {
+      const runtime = kachatNames();
+      runtime?.service.resetManifest?.();
+      runtime?.registry.refresh?.();
+    } catch { /* names not running here */ }
   }
   loadEndpointInputs();
   showSettingsCategory(settingsSubscreenParentIndex != null ? settingsSubscreenParentIndex : null);
@@ -15911,6 +16055,7 @@ function updateWalletUi() {
   // sheet's warning follows the balance (iOS 710fdc0, IOS-086).
   observeChattingBalanceForNotices();
   try { renderPaymentFromWarning(); } catch { /* the pay sheet isn't wired yet during early init */ }
+  try { syncManageAddressBalance(); } catch { /* not yet wired during early init */ }
   installTestnetFaucetButton.render?.(); // Claim Testnet Kaspa follows the loaded account
   // Only while the QR screen shows the chatting address itself - a Receive or spending QR keeps
   // its own address's balance.
@@ -16547,6 +16692,7 @@ function updateChatsListTabBadges() {
 // renderChats and the Select All action so both agree.
 function visibleChatConversations() {
   const query = searchInput.value.trim().toLowerCase();
+  const pinnedChatIds = new Set(chatCirclePins().filter((id) => id.startsWith("c:")));
   return sortedConversations().filter((conversationEntry) => {
     const contact = contactForConversation(conversationEntry);
     if (!contact) return false;
@@ -16557,7 +16703,9 @@ function visibleChatConversations() {
     // Bot chats never sit in the list or its search: Kaspa Hub > KaChat Bots, and their circle
     // once the chat holds a message (iOS d576941 / 5fcf755).
     if (isKachatBot(contact.address)) return false;
-    if (!query) return true;
+    // A chat pinned to the top row lives in the circles above, not the list - except while
+    // searching, when the results are the whole match, pinned or not (iOS 7abc06e8).
+    if (!query) return !pinnedChatIds.has(chatCirclePinId(contact.address));
     if (displayNameForAddress(contact).toLowerCase().includes(query)) return true;
     if (contact.name.toLowerCase().includes(query)) return true;
     if (contact.address.toLowerCase().includes(query)) return true;
@@ -19519,7 +19667,15 @@ const settingsHubEl = (() => {
       ${chevron}
     </button>`);
   });
-  hub.innerHTML = `<div class="settings-list-card">${rows.join("")}</div>`;
+  // Log Out (iOS 84f9bb02): back in Settings from Profile, its own card at the very bottom, apart
+  // from the category rows, so it is easy to find and hard to hit by accident.
+  hub.innerHTML = `<div class="settings-list-card">${rows.join("")}</div>
+    <div class="settings-list-card danger-list-card settings-logout-card">
+      <button class="settings-list-row settings-hub-row danger settings-logout-row" type="button" data-shell-action="logout">
+        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10 4H5.75A1.75 1.75 0 0 0 4 5.75v12.5C4 19.22 4.78 20 5.75 20H10"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg></span>
+        <span class="settings-hub-label">Log Out</span>
+      </button>
+    </div>`;
   settingsScreenEl.prepend(hub);
 
   const backBar = document.createElement("button");
@@ -19625,7 +19781,7 @@ renderTestnetToggle();
 // name services only .k has a testnet API.
 if (IS_TESTNET) {
   // The testnet-10 indexer is the default for chat, push, KaPosts and public chats (iOS 5463ab7).
-  for (const key of ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer"]) {
+  for (const key of ["kasiaIndexer", "kapostIndexer", "broadcastIndexer", "pushIndexer", "kachatNamesIndexer"]) {
     document.querySelectorAll(`[data-endpoint="${key}"]`).forEach((input) => { input.placeholder = ENDPOINT_DEFAULTS[key]; });
   }
   // Translation is the same service on both networks (iOS 2ca41aa).
@@ -19634,11 +19790,6 @@ if (IS_TESTNET) {
   const readonly = document.querySelectorAll(".connection-readonly code:not([data-kns-url])");
   if (readonly[0]) readonly[0].textContent = "https://api-tn10.dotk.name/v1";
   if (readonly[1]) { const em = document.createElement("em"); em.textContent = "Not available on this network"; readonly[1].replaceWith(em); }
-  // .kachat is live on both networks (iOS ef6b21e; index.html says Live on Mainnet): read through
-  // the chat indexer when it serves names, else straight from the chain (iOS 5df42b4).
-  document.querySelectorAll(".connection-readonly em").forEach((em) => {
-    if (em.textContent.trim() === "Live on Mainnet") em.textContent = "Live on Testnet (testnet-10 registry)";
-  });
   document.querySelectorAll('[data-node-mode="official"]').forEach((card) => { card.hidden = true; });
 }
 
@@ -20125,8 +20276,9 @@ function openPublicChatsTab() {
 // count of messages from others since it was last opened. Click opens it in the detail pane;
 // right-click (long-press on touch) opens its half sheet; in Select mode a click selects it.
 // Pinned circles come first, newest pin first, then the rest by latest activity. Pins are saved
-// per wallet as "g:<groupId>" / "r:<room>". Everything here reads the DOM and module state at call
-// time: the boot-time renderChats reaches it before the code below has run.
+// per wallet as "g:<groupId>" / "r:<room>", and a 1:1 chat pinned up into the row (Pin to Top Row,
+// iOS 7abc06e8) as "c:<address>". Everything here reads the DOM and module state at call time: the
+// boot-time renderChats reaches it before the code below has run.
 const CHAT_CIRCLE_CHECK_SVG = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.1 10.1 3.1 3.1 6.7-7"/></svg>';
 const CHAT_CIRCLE_PIN_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3.5 20.5 9l-2.2 1.1-3.6 3.6.4 4.6-1.6 1.6-3.9-3.9-4.8 4.8-.8-.8 4.8-4.8-3.9-3.9 1.6-1.6 4.6.4 3.6-3.6Z"/></svg>';
 
@@ -20143,10 +20295,14 @@ function toggleChatCirclePin(id) {
   const pins = chatCirclePins();
   const index = pins.indexOf(id);
   if (index >= 0) { pins.splice(index, 1); showCopyToast("Unpinned"); }
-  else { pins.unshift(id); showCopyToast("Pinned to the front"); }
+  else { pins.unshift(id); showCopyToast(id.startsWith("c:") ? "Pinned to the top row" : "Pinned to the front"); }
   saveChatCirclePins(pins);
-  renderChatCircles();
+  // A chat moves between the list and the row.
+  if (id.startsWith("c:")) renderChats();
+  else renderChatCircles();
 }
+/** A 1:1 chat's id in the row's pins (iOS chatPinId). */
+function chatCirclePinId(address) { return `c:${String(address || "").toLowerCase()}`; }
 /** A deleted group or room takes its pin with it. */
 function dropChatCirclePins(ids) {
   const gone = new Set(ids);
@@ -20193,8 +20349,24 @@ function visibleChatCircles() {
     const at = Number(lastMessageFor(entry)?.createdAt || 0);
     items.push({ id: `b:${contact.address.toLowerCase()}`, kind: "bot", key: entry.id, title, unread: Number(entry.unreadCount || 0), at, conversation: entry, contact });
   }
+  // The chats pinned up into the row (iOS 7abc06e8). Not while searching: the results list them. A
+  // deleted chat's pin finds nothing and shows nothing.
+  const pinIds = chatCirclePins();
+  if (!query && pinIds.some((id) => id.startsWith("c:"))) {
+    const wanted = new Set(pinIds.filter((id) => id.startsWith("c:")));
+    const deleted = loadDeletedContactAddresses();
+    for (const entry of state.conversations || []) {
+      const contact = contactForConversation(entry);
+      if (!contact?.address || deleted.has(contact.address) || isKachatBot(contact.address)) continue;
+      const id = chatCirclePinId(contact.address);
+      if (!wanted.has(id)) continue;
+      // As its list row names it: "Your Address" for your own chat.
+      const title = isOwnChattingAddress(contact.address) ? "Your Address" : displayNameForAddress(contact);
+      items.push({ id, kind: "chat", key: entry.id, title, unread: Number(entry.unreadCount || 0), at: Number(lastMessageFor(entry)?.createdAt || 0), conversation: entry, contact });
+    }
+  }
   const byId = new Map(items.map((item) => [item.id, item]));
-  const pinned = chatCirclePins().map((id) => byId.get(id)).filter(Boolean);
+  const pinned = pinIds.map((id) => byId.get(id)).filter(Boolean);
   const pinnedIds = new Set(pinned.map((item) => item.id));
   const rest = items.filter((item) => !pinnedIds.has(item.id)).sort((a, b) => b.at - a.at);
   return [...pinned, ...rest];
@@ -20298,8 +20470,9 @@ function renderChatCircles() {
 function chatCirclesHtml(items, pins, selecting) {
   return items.map((item) => {
     // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755).
-    const selected = item.kind === "group" ? selectedGroupIds.has(item.key) : item.kind === "bot" ? false : selectedRoomNames.has(item.key);
-    const active = item.kind === "group" ? item.key === activeGroupId : item.kind === "bot" ? item.key === activeConversationId : Boolean(item.room?.open);
+    const isChat = item.kind === "bot" || item.kind === "chat";
+    const selected = item.kind === "group" ? selectedGroupIds.has(item.key) : isChat ? false : selectedRoomNames.has(item.key);
+    const active = item.kind === "group" ? item.key === activeGroupId : isChat ? item.key === activeConversationId : Boolean(item.room?.open);
     const pinned = pins.has(item.id);
     let avatar;
     if (item.kind === "group") {
@@ -20309,6 +20482,8 @@ function chatCirclesHtml(items, pins, selecting) {
         : `<span class="chat-circle-glyph">${GROUP_AVATAR_SVG || ""}</span>`;
     } else if (item.kind === "bot") {
       avatar = `<span class="chat-circle-glyph chat-circle-bot">${kachatBotIconHtml(kachatBotFor(item.contact?.address))}</span>`;
+    } else if (item.kind === "chat") {
+      avatar = avatarHtmlFor(item.contact, "chat-circle-person");
     } else {
       avatar = `<span class="chat-circle-hash">#</span>`;
     }
@@ -20318,7 +20493,7 @@ function chatCirclesHtml(items, pins, selecting) {
     const pin = pinned && !selecting ? `<span class="chat-circle-pin" aria-hidden="true">${CHAT_CIRCLE_PIN_SVG || ""}</span>` : "";
     const label = `${item.title}${item.unread > 0 ? `, ${item.unread} unread` : ""}${pinned ? ", pinned" : ""}`;
     const classes = `chat-circle${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active && !selecting ? " active" : ""}`;
-    const conversationAttr = item.kind === "bot" ? ` data-conversation-id="${escapeHtml(item.key)}"` : "";
+    const conversationAttr = isChat ? ` data-conversation-id="${escapeHtml(item.key)}"` : "";
     return `<button type="button" class="${classes}" data-circle-id="${escapeHtml(item.id)}"${conversationAttr} aria-label="${escapeHtml(label)}" title="${escapeHtml(`${item.title} - right-click for options`)}"${selecting ? ` aria-pressed="${selected ? "true" : "false"}"` : ""}>
       <span class="chat-circle-avatar">${avatar}${corner}${pin}</span>
       <span class="chat-circle-title">${escapeHtml(item.title)}</span>
@@ -20494,8 +20669,9 @@ async function openBotCircleSheet(id, pinOption) {
     const id = circle.dataset.circleId || "";
     const key = id.slice(2);
     if (chatSelectionModeActive) {
-      // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755).
-      if (id.startsWith("b:")) return;
+      // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755); so is a chat
+      // pinned to the row.
+      if (id.startsWith("b:") || id.startsWith("c:")) return;
       const set = id.startsWith("g:") ? selectedGroupIds : selectedRoomNames;
       if (set.has(key)) set.delete(key);
       else set.add(key);
@@ -20509,8 +20685,9 @@ async function openBotCircleSheet(id, pinOption) {
       openGroupChat(key);
     } else if (id.startsWith("r:")) {
       openRoomFromCircle(key);
-    } else if (id.startsWith("b:")) {
-      // A bot chat from its circle, like a chat row: clicking the open one again closes it.
+    } else if (id.startsWith("b:") || id.startsWith("c:")) {
+      // A bot chat or a pinned chat from its circle, like a chat row: clicking the open one again
+      // closes it.
       const conversationId = circle.dataset.conversationId || "";
       if (conversationId && conversationId === activeConversationId) { setActiveConversationId(null); renderChats(); return; }
       if (conversationId) openConversation(conversationId);
@@ -20520,7 +20697,14 @@ async function openBotCircleSheet(id, pinOption) {
     const circle = event.target.closest("[data-circle-id]");
     if (!circle || chatSelectionModeActive) return;
     event.preventDefault();
-    openChatCircleSheet(circle.dataset.circleId || "");
+    // A pinned chat's hold is its chat row's own half sheet, with Unpin (iOS 7abc06e8).
+    const circleId = circle.dataset.circleId || "";
+    if (circleId.startsWith("c:")) {
+      const conversationEntry = state.conversations.find((entry) => entry.id === circle.dataset.conversationId);
+      if (conversationEntry) openChatRowSheet(conversationEntry);
+      return;
+    }
+    openChatCircleSheet(circleId);
   });
 }
 
@@ -20621,14 +20805,21 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
 // Right-click on a chat row (iOS long-press): Read/Unread show contextually (the relevant one
 // only, matching Mail) and reuse the same paths as the Select-mode bulk bar; Delete routes
 // through its own confirmation. Nothing while Select mode is active - the bulk bar owns actions.
-onContextGesture(chatList, async (event) => {
+onContextGesture(chatList, (event) => {
   const row = event.target.closest("[data-conversation-id]");
   if (!row || chatSelectionModeActive) return;
   event.preventDefault();
   const conversationEntry = state.conversations.find((entry) => entry.id === row.dataset.conversationId);
+  if (conversationEntry) openChatRowSheet(conversationEntry);
+});
+
+/** A chat row's half sheet - also a pinned chat's circle's (iOS 7abc06e8). */
+async function openChatRowSheet(conversationEntry) {
   const contact = contactForConversation(conversationEntry);
   if (!conversationEntry || !contact) return;
   const isSilent = getContactNotifyOverride(contact.address) === "off";
+  const pinId = chatCirclePinId(contact.address);
+  const isPinned = chatCirclePins().includes(pinId);
   // Square tiles, three to a row (iOS cdac6d0): every long-press half sheet uses them.
   const choice = await chooseDialog({
     title: displayNameForAddress(contact),
@@ -20637,6 +20828,10 @@ onContextGesture(chatList, async (event) => {
       conversationEntry.unreadCount > 0
         ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this chat.", icon: ACTION_TILE_ICONS.envelopeOpen }
         : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
+      // Up into the circles row above the list, out of the list itself (iOS 7abc06e8).
+      isPinned
+        ? { id: "pin", title: "Unpin", subtitle: "Moves it back into your chats list.", icon: ACTION_TILE_ICONS.unpin }
+        : { id: "pin", title: "Pin to Top Row", subtitle: "Moves it into the row above your chats.", icon: ACTION_TILE_ICONS.pin },
       {
         id: "silence",
         title: isSilent ? "Unsilence" : "Silence",
@@ -20659,6 +20854,7 @@ onContextGesture(chatList, async (event) => {
   }
   if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }
   if (choice === "unread") { conversationEntry.unreadCount = Math.max(1, Number(conversationEntry.unreadCount || 0)); persistState(); renderChats(); return; }
+  if (choice === "pin") { toggleChatCirclePin(pinId); return; }
   if (choice === "silence") {
     // Silencing is the existing per-contact notification override set to "off" - the one the
     // notification path already consults - not a second, parallel mute flag.
@@ -20675,7 +20871,7 @@ onContextGesture(chatList, async (event) => {
     });
     if (confirmed) deleteConversationsByIds([conversationEntry.id]);
   }
-});
+}
 
 document.querySelector("[data-back-to-chats]").addEventListener("click", () => {
   setActiveConversationId(null);
@@ -21219,7 +21415,7 @@ mountSendPieces(paySheet, {
   // iOS 62c2773: the shared SendFeeControls card in place of the fee pill. Prefix "pay-kas" so its
   // data-pay-kas-fee="tier" buttons never collide with the sheet's other data-pay-* lookups.
   fee: feeControlsHtml({ prefix: "pay-kas" }),
-  action: sendActionButtonHtml({ attr: "pay-hold", labelAttr: "pay-hold-label", title: "Slide to Send" }),
+  action: "",
 });
 const payFeeCtl = feeControls(paySheet, "pay-kas");
 const payTitleEl = paySheet?.querySelector("[data-pay-title]");
@@ -21233,8 +21429,33 @@ const payMemoInput = paySheet?.querySelector("[data-pay-memo]");
 const payFeeCustomInput = paySheet?.querySelector("[data-pay-kas-fee-custom]");
 const payNoteEl = paySheet?.querySelector("[data-pay-note]");
 const payFromWarningEl = paySheet?.querySelector("[data-pay-from-warning]");
-const payHoldButton = paySheet?.querySelector("[data-pay-hold]");
-const paySlider = createSendActionButton(payHoldButton, { onAction: () => submitPaymentSheet() });
+// Swipe up to Send (iOS 7abc06e8 paymentSheet: the swipe-up screen Send Kaspa uses, from KaChat
+// Wallet): the screen's Cancel + "Send KAS" header in place of the sheet's, "to <name>" first in the
+// form, and the sending screen - BlockDAG, then Sent with the transaction and Done, or Failed with
+// Try Again.
+paySheet?.querySelector("[data-pay-close]")?.remove();
+payTitleEl?.remove();
+const paySwipe = createSwipeUpScreen(paySheet?.querySelector(".pay-sheet"), {
+  screenTitle: `Send ${KAS_UNIT}`,
+  barTitle: "Swipe up to Send",
+  kasUnit: KAS_UNIT,
+  getPreview: () => {
+    const conversationEntry = state.conversations.find((entry) => entry.id === (paySheetConversationId || activeConversationId));
+    const contact = contactForConversation(conversationEntry);
+    return { amountSompi: paymentSompiFromInput(), recipient: contact ? (displayNameForAddress(contact) || contact.address) : null };
+  },
+  getFailureMessage: () => paySheetError || null,
+  onCancel: () => closePaymentSheet(),
+  onDone: () => closePaymentSheet({ force: true }),
+  onAction: () => submitPaymentSheet(),
+});
+// What the slide button did for the sheet: busy, and whether it can send.
+const paySlider = {
+  busy: false,
+  setBusy(on) { this.busy = Boolean(on); paySwipe.setBusy(on); },
+  setEnabled(on) { paySwipe.setEnabled(on); },
+  reset() {},
+};
 // Where this payment comes from (the sheet's From, iOS 6333dd3): null = the chatting address, else
 // the spending address picked under Choose an Address. Back to the chatting address each time the
 // sheet opens; nothing about it changes which address is "primary".
@@ -21629,7 +21850,10 @@ function openPaymentSheet() {
   paymentSourceIndex = null;
   paymentSourceLabel = null;
   resetPaymentSheetFields();
-  if (payTitleEl) payTitleEl.textContent = `Send ${KAS_UNIT}`;
+  paySwipe.reset();
+  paySwipe.setKasUnit(KAS_UNIT);
+  paySwipe.setScreenTitle(`Send ${KAS_UNIT}`);
+  paySlider.busy = false;
   if (payRecipientEl) payRecipientEl.textContent = `to ${displayNameForAddress(contact) || shortAddress(contact.address)}`;
   paySheet.hidden = false;
   refreshPaymentUnitUi();
@@ -21645,7 +21869,7 @@ function openPaymentSheet() {
 function closePaymentSheet({ force = false } = {}) {
   if (!paySheet || paySheet.hidden) return;
   // A payment on its way can't be walked away from mid-send (iOS interactiveDismissDisabled).
-  if (paymentSendInFlight && !force) return;
+  if ((paymentSendInFlight || paySwipe.sending) && !force) return;
   cancelPaymentHold();
   closeOwnAddressPicker();
   closeCoinControlPicker();
@@ -21731,14 +21955,9 @@ async function submitPaymentSheet() {
   let amountKas;
   try { amountKas = normalizeKasAmount(kasTextFromSompi(amountSompi)); }
   catch (error) { paySheetError = error.message; refreshPaymentSheetState(); return; }
-  if (amountSompi < 10_000_001n) {
-    const proceed = await confirmDialog({
-      title: "Small Amount",
-      message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
-      confirmLabel: "Send Anyway",
-    });
-    if (!proceed || !isPaySheetOpen()) return;
-  }
+  // An amount under the network dust limit (0.10000001 KAS) is not asked about again (iOS 7abc06e8):
+  // the form already says it may fail, and the swipe is deliberate - a dialog here would stop the
+  // send the swipe screen is already showing.
   const memo = currentPaymentMemo();
   // Max (DSK-042 / DSK-043): exactly the amount shown, from exactly the coins it was computed from.
   // Settings changed since (memo, source, coins, fee) and it is recomputed and this slide refused.
@@ -21758,11 +21977,23 @@ async function submitPaymentSheet() {
       extraFeeSompi: max ? max.extraFeeSompi : paymentExtraFeeSompi(),
       manualUtxos: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
       max,
-      // Down as soon as a node has the transaction; the bubble in the chat is the confirmation.
-      onSubmitted: () => { closePaymentSheet({ force: true }); resetPaymentSheetFields(); },
+      // As soon as a node has the transaction the swipe-up screen shows Sent with it until Done
+      // (iOS 7abc06e8 sentPayment); the form behind is cleared for the next one.
+      onSubmitted: (txid) => {
+        const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
+        const contact = contactForConversation(conversationEntry);
+        paySwipe.setSent({
+          txid,
+          amountSompi,
+          recipient: contact ? (displayNameForAddress(contact) || contact.address) : null,
+          explorerUrl: txid ? explorerTxUrl(txid) : null,
+        });
+        resetPaymentSheetFields();
+      },
     });
   } catch (error) {
-    if (error?.code === "SEND_CANCELLED") return; // nothing sent; the sheet is still up as it was
+    // Nothing sent: the swipe-up screen says so under Failed, and Try Again brings the form back.
+    if (error?.code === "SEND_CANCELLED") { paySheetError = NOT_CONFIRMED_ON_DEVICE; refreshPaymentSheetState(); return; }
     if (error?.code === MAX_AMOUNT_CHANGED && isPaySheetOpen()) {
       // The coins changed under the Max: the new one goes in the field, and nothing was sent.
       await fillPaymentMax();
@@ -22202,8 +22433,8 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       setStatus(`Payment failed: ${error.message}`);
       throw error;
     }
-    try { onSubmitted?.(); } catch { /* the sheet closing must not fail the payment */ }
     const txid = submittedTxids.at(-1) || submittedTxids[0];
+    try { onSubmitted?.(txid); } catch { /* the sheet's confirmation must not fail the payment */ }
     // From a spending address: right after the node accepted it, the chatting address names the
     // payment in the chat (iOS 927322b). The last txid is the one paying the contact (any earlier
     // ones only gathered coins). A node that already had the transaction counts as accepted in the
@@ -23071,6 +23302,8 @@ async function compressImageBlob(blob, { targetBytes = photoQualityTargetBytes()
 
 function clearPendingPhoto() {
   pendingPhotoAttachment = null;
+  // Removing it cancels its Nextcloud upload: whatever comes back is ignored.
+  nextcloudStaged = null;
   // A discarded photo drops the route it was picked with; a send snapshots it first.
   photoViaNextcloud = false;
   setPendingPhotoSending(false);
@@ -23087,18 +23320,123 @@ function clearPendingPhoto() {
 let pendingPhotoSending = false;
 function setPendingPhotoSending(sending) {
   pendingPhotoSending = Boolean(sending);
+  renderPendingPhotoRow();
+}
+
+// --- Nextcloud staged media (iOS 7abc06e8 NextcloudStagedMedia) ----------------------------------
+// A photo or video picked "via Nextcloud" waits in the composer and starts uploading the moment it
+// is staged, not when Send is pressed; Send waits until the share link is back, then sends the
+// link. A photo that fails to upload goes on chain when sent; a video that fails is dropped, as
+// nothing else carries one. Removing the pending media cancels the upload. Shared shape for 1:1
+// and group chats: { id, kind: "image" | "video", phase: "uploading" | "ready" | "failed", url }.
+var nextcloudStaged = null; // var: clearPendingPhoto can run before this line at boot
+const NEXTCLOUD_STAGED_ICONS = {
+  ready: '<svg class="pending-photo-state ready" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7.5 9 4.75 4.75 0 0 0 7 18.5Z"/><path d="m9.5 13.6 2 2 3.5-3.7"/></svg>',
+  failed: '<svg class="pending-photo-state failed" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7.5 9 4.75 4.75 0 0 0 7 18.5Z"/><path d="M12 10.5v3.2M12 16v.1"/></svg>',
+};
+/** The pending row's label (iOS pendingPhotoRow): "Sending…" while it goes; with a Nextcloud
+ *  upload, a spinner and "Uploading to Nextcloud…", then a check and "Photo" / "Video", or
+ *  "Upload failed. Sends on chain." */
+function stagedMediaLabel(staged, sending, { group = false } = {}) {
+  if (sending) return { spinner: true, html: escapeHtml("Sending…"), cls: "sending" };
+  if (!staged) return { spinner: false, html: escapeHtml(group ? "Photo ready to send" : "Photo") };
+  if (staged.phase === "uploading") return { spinner: true, html: escapeHtml("Uploading to Nextcloud…"), cls: "uploading" };
+  if (staged.phase === "ready") {
+    const word = staged.kind === "video" ? "Video" : "Photo";
+    return { spinner: false, html: `${NEXTCLOUD_STAGED_ICONS.ready}${escapeHtml(group ? `${word} ready to send` : word)}` };
+  }
+  return { spinner: false, html: `${NEXTCLOUD_STAGED_ICONS.failed}${escapeHtml("Upload failed. Sends on chain.")}`, cls: "failed" };
+}
+function renderPendingPhotoRow() {
+  const label = stagedMediaLabel(nextcloudStaged, pendingPhotoSending);
   const spinner = pendingPhotoPreview?.querySelector("[data-pending-photo-spinner]");
-  if (spinner) spinner.hidden = !pendingPhotoSending;
+  if (spinner) spinner.hidden = !label.spinner;
+  const play = pendingPhotoPreview?.querySelector("[data-pending-photo-play]");
+  if (play) play.hidden = nextcloudStaged?.kind !== "video";
   if (pendingPhotoMeta) {
-    pendingPhotoMeta.textContent = pendingPhotoSending ? "Sending…" : "Photo";
-    pendingPhotoMeta.classList.toggle("sending", pendingPhotoSending);
+    pendingPhotoMeta.innerHTML = label.html;
+    pendingPhotoMeta.classList.toggle("sending", label.cls === "sending" || label.cls === "uploading");
+    pendingPhotoMeta.classList.toggle("failed", label.cls === "failed");
   }
   syncComposerSlots();
+}
+/** Uploads `blob` while it waits in a composer. `getStaged` / `setStaged` read and write that
+ *  composer's slot; `onFailed(error)` is the composer's say on a failure (a photo goes on chain, a
+ *  video is dropped). */
+function startNextcloudStagedUpload({ kind, blob, filename, contentType, getStaged, setStaged, onChange, onFailed }) {
+  const staged = { id: nowId(), kind, phase: "uploading", url: null };
+  setStaged(staged);
+  onChange();
+  uploadNextcloudMedia(blob, filename, contentType).then((url) => {
+    if (getStaged()?.id !== staged.id) return;
+    setStaged({ ...staged, phase: "ready", url });
+    onChange();
+  }, (error) => {
+    if (getStaged()?.id !== staged.id) return;
+    appendEngineLog(`Nextcloud ${kind === "video" ? "video" : "photo"} upload failed: ${userFacingError(error)}`);
+    onFailed(error, staged);
+  });
+  return staged;
+}
+/** The first frame of a picked video, for the composer's thumbnail (iOS VideoThumbnail). */
+function videoThumbnailDataUrl(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    let settled = false;
+    const done = (value) => { if (settled) return; settled = true; URL.revokeObjectURL(url); resolve(value); };
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.addEventListener("loadeddata", () => {
+      try {
+        const scale = Math.min(1, 300 / Math.max(video.videoWidth || 1, video.videoHeight || 1));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round((video.videoWidth || 1) * scale));
+        canvas.height = Math.max(1, Math.round((video.videoHeight || 1) * scale));
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        done(canvas.toDataURL("image/jpeg", 0.8));
+      } catch { done(null); }
+    }, { once: true });
+    video.addEventListener("error", () => done(null), { once: true });
+    setTimeout(() => done(null), 5000);
+    video.src = url;
+  });
+}
+const VIDEO_PLACEHOLDER_THUMB = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect width="48" height="48" rx="8" fill="#3a3a3c"/><path d="M19 15v18l14-9Z" fill="#fff"/></svg>')}`;
+/** Video "via Nextcloud" for a file name and type (iOS: .mov / .mp4). */
+function nextcloudVideoUploadName(file) {
+  const mime = String(file?.type || "video/mp4");
+  const named = /\.([a-z0-9]{2,5})$/i.exec(String(file?.name || ""));
+  const ext = (named ? named[1] : (mime.split("/")[1] || "mp4")).toLowerCase().replace("quicktime", "mov");
+  return { filename: `video_${Math.floor(Date.now() / 1000)}.${ext}`, contentType: mime };
+}
+/** The 1:1 composer's upload, started as the photo or video is staged. */
+function startChatNextcloudUpload(kind, blob, filename, contentType) {
+  startNextcloudStagedUpload({
+    kind, blob, filename, contentType,
+    getStaged: () => nextcloudStaged,
+    setStaged: (value) => { nextcloudStaged = value; },
+    onChange: () => { renderPendingPhotoRow(); scheduleFeeEstimate(); },
+    onFailed: (error, staged) => {
+      if (kind === "video") {
+        clearPendingPhoto();
+        showCopyToast(`Couldn't send that video. (${userFacingError(error)})`);
+        return;
+      }
+      nextcloudStaged = { ...staged, phase: "failed" };
+      photoViaNextcloud = false;
+      renderPendingPhotoRow();
+      scheduleFeeEstimate();
+      showCopyToast("Nextcloud upload failed. Send puts the photo on chain instead.");
+    },
+  });
 }
 function setPendingPhoto(attachment) {
   // Only when the composer can take one (iOS canAcceptImageAttachment).
   if (!canAcceptChatImageAttachment()) return false;
   pendingPhotoAttachment = attachment;
+  nextcloudStaged = null;
   if (pendingPhotoThumb) pendingPhotoThumb.src = attachment.dataUrl;
   if (pendingPhotoPreview) pendingPhotoPreview.hidden = false;
   setPendingPhotoSending(false);
@@ -23159,8 +23497,11 @@ function syncComposerSlots() {
       if (svg && composerSendIconState !== icon) { svg.innerHTML = COMPOSER_SEND_ICONS[icon]; composerSendIconState = icon; }
       send.classList.toggle("composer-send-stop", icon === "stop");
       send.classList.toggle("composer-send-mic", icon === "mic");
-      // A photo can't be sent twice while it goes (iOS canSend); nor a recording still encoding.
-      send.disabled = (hasPhoto && pendingPhotoSending) || voiceState === "encoding";
+      // A photo can't be sent twice while it goes (iOS canSend), nor before its Nextcloud upload
+      // is back (iOS 7abc06e8); nor a recording still encoding.
+      const uploading = hasPhoto && nextcloudStaged?.phase === "uploading";
+      send.disabled = (hasPhoto && pendingPhotoSending) || uploading || voiceState === "encoding";
+      send.classList.toggle("composer-send-busy", uploading);
       send.setAttribute("aria-label", icon === "stop" ? "Stop recording" : icon === "mic" ? "Record" : "Send message");
     }
   } catch { /* the composer section may not be evaluated yet */ }
@@ -23177,6 +23518,8 @@ async function attachPhotoBlob(blob) {
     attachment.originalName = blob.name || "photo.jpg";
     if (!setPendingPhoto(attachment)) { photoViaNextcloud = false; return false; }
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB`);
+    // "Via Nextcloud": the full-quality original starts uploading now (iOS 7abc06e8).
+    if (photoViaNextcloud && isNextcloudConnected()) startChatNextcloudUpload("image", blob, attachment.originalName, blob.type || "image/jpeg");
     return true;
   } catch (error) {
     photoViaNextcloud = false;
@@ -25001,20 +25344,16 @@ async function sendReaction(conversationEntry, targetMessage, emoji) {
 
 pendingPhotoRemove?.addEventListener("click", clearPendingPhoto);
 
-// Uploads a video picked "via Nextcloud" (camera or library) and sends its share link straight
-// away, the way a camera clip goes on iOS (sendNextcloudVideo); there is no on-chain video.
-async function sendNextcloudVideoFile(file, sendLink) {
-  const mime = String(file?.type || "video/mp4");
-  const named = /\.([a-z0-9]{2,5})$/i.exec(String(file?.name || ""));
-  const ext = (named ? named[1] : (mime.split("/")[1] || "mp4")).toLowerCase().replace("quicktime", "mov");
-  setStatus("Uploading video to Nextcloud…");
-  try {
-    const url = await uploadNextcloudMedia(file, `video_${Math.floor(Date.now() / 1000)}.${ext}`, mime);
-    await sendLink(url);
-    setStatus("Video sent via Nextcloud.");
-  } catch (error) {
-    showCopyToast(`Couldn't send that video. (${userFacingError(error)})`);
-  }
+// A video picked "via Nextcloud" (camera or library) waits in the composer like a photo - its first
+// frame as the thumbnail - and starts uploading right away; Send sends the link (iOS 7abc06e8
+// stageNextcloudVideo; it used to send on its own the moment it was picked). No on-chain video.
+async function stageChatNextcloudVideo(file) {
+  if (!canAcceptChatImageAttachment()) return;
+  const thumbnail = await videoThumbnailDataUrl(file);
+  if (!setPendingPhoto({ dataUrl: thumbnail || VIDEO_PLACEHOLDER_THUMB, bytes: 0, isVideo: true })) return;
+  photoViaNextcloud = true; // what goes is the link (the fee estimate prices that)
+  const { filename, contentType } = nextcloudVideoUploadName(file);
+  startChatNextcloudUpload("video", file, filename, contentType);
 }
 
 // The "+" sheet's Camera and Photo both land here, on chain or via Nextcloud as chosen there.
@@ -25026,9 +25365,8 @@ async function handleComposerMediaFile(input) {
     const via = photoViaNextcloud && isNextcloudConnected();
     photoViaNextcloud = false;
     if (!via) { showCopyToast("Videos go via Nextcloud only. Pick a photo to send it on chain."); return; }
-    const conversationId = activeConversationId;
-    if (!conversationId) return;
-    await sendNextcloudVideoFile(file, (url) => queueConversationMessage(conversationId, url));
+    if (!activeConversationId) return;
+    await stageChatNextcloudVideo(file);
     return;
   }
   await attachPhotoBlob(file);
@@ -25366,36 +25704,21 @@ composer.addEventListener("submit", async (event) => {
     if (pendingPhotoSending) return;
     const attachment = pendingPhotoAttachment;
     const conversationId = activeConversationId;
-    // "Via Nextcloud" chosen in the "+" sheet.
-    const viaNextcloud = photoViaNextcloud && isNextcloudConnected();
+    const staged = nextcloudStaged;
+    // Still uploading to Nextcloud: Send waits for the link (iOS 7abc06e8).
+    if (staged?.phase === "uploading") return;
     hideFeeEstimateBanner();
     // What was typed stays in the composer under the photo row and comes back once the photo is
     // sent (iOS: the photo is its own message, the text is never dropped or sent with it).
-    // Via Nextcloud: upload the full-quality original and send its share link (renders as a
-    // media bubble on the recipient's side). Any failure falls back to the on-chain envelope so
-    // the message never silently vanishes.
-    if (viaNextcloud && attachment.originalBlob) {
-      setPendingPhotoSending(true);
-      setStatus("Uploading photo to Nextcloud…");
-      let url = null;
-      try {
-        url = await uploadNextcloudMedia(
-          attachment.originalBlob,
-          attachment.originalName || "photo.jpg",
-          attachment.originalBlob.type || "image/jpeg"
-        );
-      } catch (error) {
-        appendEngineLog(`Nextcloud photo upload failed, sending on-chain: ${userFacingError(error)}`);
-        showCopyToast("Nextcloud upload failed - sending on-chain instead");
-      }
-      if (pendingPhotoAttachment !== attachment) return; // removed or replaced meanwhile
-      if (url) {
-        queueConversationMessage(conversationId, url);
-        setStatus("Photo sent via Nextcloud.");
-        clearPendingPhoto();
-        return;
-      }
+    // Via Nextcloud: the share link the upload brought back (it renders as a media bubble on the
+    // recipient's side). A photo whose upload failed goes on chain, so it never silently vanishes.
+    if (staged?.phase === "ready" && staged.url) {
+      queueConversationMessage(conversationId, staged.url);
+      setStatus(staged.kind === "video" ? "Video sent via Nextcloud." : "Photo sent via Nextcloud.");
+      clearPendingPhoto();
+      return;
     }
+    if (attachment.isVideo) { clearPendingPhoto(); return; }
     queueConversationMessage(conversationId, buildImageEnvelopeJson(attachment));
     clearPendingPhoto();
     return;
@@ -28508,6 +28831,8 @@ queueMicrotask(async () => {
       // Routes to the Profile tab's KNS editor rather than a second copy of it.
       // KaPosts' profile button edits your .kachat profile too (iOS 09e0403).
       editKnsProfile: () => openKachatProfileEditor(),
+      // Wallet beside Edit Profile (iOS 865c9ab): the chatting address's balance, history and coins.
+      openChattingWallet: () => openManageAddressScreen(),
       showFeeEstimate: () => feeEstimateEnabled(),
       // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
       // signature of the right width, so the estimate is for the bytes that will actually go.
@@ -31926,14 +32251,14 @@ groupMembersList?.addEventListener("click", (event) => {
 
 // The Chats "New" sheet (iOS 5da8ccf..e6400d6). The floating + used to do something different per
 // tab (create chat, group builder, join room); it is now the same + on Chats, Group Chats and
-// Public Chats, opening one sheet of tiles: New Chat, New Group Chat, New Public Chat, Send Kaspa,
-// Receive Kaspa and Chatting Address.
+// Public Chats, opening one sheet of tiles: New Chat, New Group Chat, New Public Chat and Chatting
+// Address. Send Kaspa, Receive Kaspa and Request Payment moved to Profile's Send and Receive button
+// (iOS 7abc06e8); Desktop keeps New Group Chat and New Public Chat here, having no Groups tab.
 // - New Chat / New Group Chat swap the sheet for the existing create modals; their Cancel (or a
 //   backdrop click / Escape) comes back to this menu, and a chat or group made lands on its tab.
 // - New Public Chat swaps the sheet's content for the room-name field. Errors show in place;
 //   joining switches to Public Chats and opens the room there.
-// - Chatting Address and Receive Kaspa close the sheet and bring up Profile's QR page; Send
-//   Kaspa closes it and opens Send Kaspa, From the chatting address or any other (iOS 6333dd3).
+// - Chatting Address closes the sheet and brings up Profile's QR page.
 // No state lives outside the DOM: the sheet is built per open (like the payment detail sheet), and
 // "came from the sheet" is a data attribute on the create modal, so nothing here is read at load.
 function newChatSheetIcon(kind) {
@@ -31951,24 +32276,25 @@ function newChatSheetIcon(kind) {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[kind] || ""}</svg>`;
 }
 
-// Square glass tiles, three to a row (iOS f81e8d6): New Chat, New Group Chat, New Public Chat /
-// Send Kaspa, Receive Kaspa, Request Payment (iOS c6851d6), Chatting Address. Each one's old line is its tooltip and
-// accessible description.
+// Square glass tiles, three to a row (iOS f81e8d6): New Chat, New Group Chat, New Public Chat,
+// Chatting Address. Each one's old line is its tooltip and accessible description.
 function newChatSheetMenuHtml() {
   const rows = [
     { id: "chat", title: "New Chat", subtitle: "Message someone by their address or name." },
     { id: "group", title: "New Group Chat", subtitle: "Start an encrypted group with several people." },
     // Simple Mode hides Public Chats, so it has no tile here either.
     ...(isChildModeEnabled() ? [] : [{ id: "public", title: "New Public Chat", subtitle: "Join a public room, or create one." }]),
-    { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from any of your addresses." },
-    { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
-    { id: "request", title: "Request Payment", subtitle: "A link asking for an exact amount, with what it's for." },
     // "Chatting Address" (owner, 2026-10-20; iOS still says "Fund Chatting Address").
     { id: "fund", title: "Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
   ];
+  return actionTilesSheetHtml("New", rows);
+}
+
+/** A sheet of square tiles under a title (the Chats New sheet, Profile's Send and Receive). */
+function actionTilesSheetHtml(title, rows) {
   return `
     <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
-    <h2 class="new-chat-sheet-title">New</h2>
+    <h2 class="new-chat-sheet-title">${escapeHtml(title)}</h2>
     <div class="action-tiles new-chat-sheet-tiles">
       ${rows.map((row) => `
         <button type="button" class="action-tile" data-new-chat-choice="${escapeHtml(row.id)}" title="${escapeHtml(row.subtitle)}" aria-description="${escapeHtml(row.subtitle)}">
@@ -32061,13 +32387,6 @@ function openNewChatSheet() {
       if (openGroupCreate() && groupCreateModal) groupCreateModal.dataset.fromNewSheet = "1";
     } else if (choice === "fund") {
       openChattingAddressScreen();
-    } else if (choice === "request") {
-      openCreatePaymentRequest();
-    } else if (choice === "receive") {
-      openReceiveKaspaScreen();
-    } else if (choice === "send") {
-      // Send Kaspa From the chatting address, or any address under Choose an Address (iOS 6333dd3).
-      openSendKaspaModal();
     }
   });
   sheet.addEventListener("input", (event) => {
@@ -32095,6 +32414,50 @@ function settleNewChatSheetCreate(kind, cancelled) {
 
 document.querySelectorAll("[data-new-chat-fab]").forEach((button) => {
   button.addEventListener("click", openNewChatSheet);
+});
+
+// Profile's Send and Receive (iOS 7abc06e8 walletActionsSheet): the floating up/down arrow opens a
+// half sheet of three tiles - Send Kaspa, Receive Kaspa, Request Payment - and the one picked opens
+// once the sheet has closed.
+function openSendReceiveSheet() {
+  closeNewChatSheet();
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop new-chat-sheet-backdrop";
+  backdrop.setAttribute("data-new-chat-sheet", "");
+  backdrop.innerHTML = `<section class="contact-modal new-chat-sheet" role="dialog" aria-modal="true" aria-label="Send and Receive"></section>`;
+  const sheet = backdrop.querySelector(".new-chat-sheet");
+  sheet.innerHTML = actionTilesSheetHtml("Send and Receive", [
+    { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from any of your addresses." },
+    { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
+    { id: "request", title: "Request Payment", subtitle: "A link asking for an exact amount, with what it's for." },
+  ]);
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
+  function close() {
+    backdrop.remove();
+    document.removeEventListener("keydown", onKey, true);
+  }
+  backdrop.closeSheet = close;
+  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+  sheet.addEventListener("click", (event) => {
+    if (event.target.closest("[data-new-chat-sheet-close]")) { close(); return; }
+    const choice = event.target.closest("[data-new-chat-choice]")?.dataset.newChatChoice;
+    if (!choice) return;
+    close();
+    if (choice === "send") openSendKaspaModal(); // From the chatting address or any other (iOS 6333dd3)
+    else if (choice === "receive") openReceiveKaspaScreen();
+    else if (choice === "request") openCreatePaymentRequest();
+  });
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(backdrop);
+  sheet.querySelector("[data-new-chat-choice]")?.focus();
+}
+document.querySelector("[data-profile-send-receive]")?.addEventListener("click", () => {
+  if (engine.address) openSendReceiveSheet();
 });
 groupMemberPicker?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-group-member-toggle]");
@@ -32473,20 +32836,13 @@ groupComposer?.addEventListener("submit", async (event) => {
     if (groupPendingPhotoSending) return;
     const pending = groupPendingPhoto;
     const { attachment, fileName } = pending;
-    // "Via Nextcloud" chosen in the "+" sheet: the full-quality original goes to the server and
-    // the group gets its share link; any upload failure falls back to the on-chain envelope.
-    const viaNextcloud = groupPhotoViaNextcloud && isNextcloudConnected();
+    // "Via Nextcloud" chosen in the "+" sheet: the upload started as it was staged and Send waits
+    // for its share link (iOS 7abc06e8); a photo whose upload failed goes on chain.
+    const staged = groupNextcloudStaged;
+    if (staged?.phase === "uploading") return;
+    if (attachment.isVideo && !(staged?.phase === "ready" && staged.url)) { clearGroupPendingPhoto(); return; }
     setGroupPendingPhotoSending(true);
-    let url = null;
-    if (viaNextcloud && attachment.originalBlob) {
-      try {
-        url = await uploadNextcloudMedia(attachment.originalBlob, attachment.originalName || fileName || "photo.jpg", attachment.originalBlob.type || "image/jpeg");
-      } catch (error) {
-        appendEngineLog(`Nextcloud photo upload failed, sending on-chain: ${userFacingError(error)}`);
-        showCopyToast("Nextcloud upload failed - sending on-chain instead");
-      }
-    }
-    await sendGroupWire(url || buildImageEnvelopeJson(attachment, fileName));
+    await sendGroupWire(staged?.phase === "ready" && staged.url ? staged.url : buildImageEnvelopeJson(attachment, fileName));
     if (groupPendingPhoto === pending) clearGroupPendingPhoto();
     return;
   }
@@ -32652,23 +33008,64 @@ const groupPendingPhotoMeta = document.querySelector("[data-group-pending-photo-
 const groupPendingPhotoRemove = document.querySelector("[data-group-pending-photo-remove]");
 let groupPendingPhoto = null;
 let groupPendingPhotoSending = false;
+/** The staged media's Nextcloud upload (iOS 7abc06e8; see startNextcloudStagedUpload). */
+var groupNextcloudStaged = null; // var: read by the slot sync, which can run before this line
 function clearGroupPendingPhoto() {
   groupPendingPhoto = null;
+  // Removing it cancels its upload: whatever comes back is ignored.
+  groupNextcloudStaged = null;
   groupPhotoViaNextcloud = false;
   setGroupPendingPhotoSending(false);
   if (groupPendingPhotoPreview) groupPendingPhotoPreview.hidden = true;
   syncGroupComposerSlots();
   try { scheduleGroupFeeEstimate(); } catch { /* fee section not evaluated yet */ }
 }
-// iOS photoPreviewRow: "Photo ready to send", then "Sending photo…" while it goes.
+// iOS photoPreviewRow: "Photo ready to send", then "Sending photo…" while it goes; with a
+// Nextcloud upload, "Uploading to Nextcloud…", then "Photo ready to send" / "Video ready to send",
+// or "Upload failed. Sends on chain." (iOS 7abc06e8).
 function setGroupPendingPhotoSending(sending) {
   groupPendingPhotoSending = Boolean(sending);
-  if (groupPendingPhotoMeta) groupPendingPhotoMeta.textContent = groupPendingPhotoSending ? "Sending photo…" : "Photo ready to send";
+  renderGroupPendingPhotoRow();
+}
+function renderGroupPendingPhotoRow() {
+  const label = groupPendingPhotoSending
+    ? { spinner: false, html: escapeHtml(groupNextcloudStaged?.kind === "video" ? "Sending video…" : "Sending photo…") }
+    : stagedMediaLabel(groupNextcloudStaged, false, { group: true });
+  if (groupPendingPhotoMeta) {
+    groupPendingPhotoMeta.innerHTML = label.html;
+    groupPendingPhotoMeta.classList.toggle("failed", label.cls === "failed");
+  }
+  const spinner = document.querySelector("[data-group-pending-photo-spinner]");
+  if (spinner) spinner.hidden = !label.spinner;
+  const play = document.querySelector("[data-group-pending-photo-play]");
+  if (play) play.hidden = groupNextcloudStaged?.kind !== "video";
   if (groupPendingPhotoRemove) groupPendingPhotoRemove.disabled = groupPendingPhotoSending;
   syncGroupComposerSlots();
 }
+/** The group composer's upload, started as the photo or video is staged. */
+function startGroupNextcloudUpload(kind, blob, filename, contentType) {
+  startNextcloudStagedUpload({
+    kind, blob, filename, contentType,
+    getStaged: () => groupNextcloudStaged,
+    setStaged: (value) => { groupNextcloudStaged = value; },
+    onChange: () => { renderGroupPendingPhotoRow(); try { scheduleGroupFeeEstimate(); } catch { /* not ready */ } },
+    onFailed: (error, staged) => {
+      if (kind === "video") {
+        clearGroupPendingPhoto();
+        showCopyToast(`Couldn't send that video. (${userFacingError(error)})`);
+        return;
+      }
+      groupNextcloudStaged = { ...staged, phase: "failed" };
+      groupPhotoViaNextcloud = false;
+      renderGroupPendingPhotoRow();
+      try { scheduleGroupFeeEstimate(); } catch { /* not ready */ }
+      showCopyToast("Nextcloud upload failed. Send puts the photo on chain instead.");
+    },
+  });
+}
 function setGroupPendingPhoto(attachment, fileName) {
   groupPendingPhoto = { attachment, fileName };
+  groupNextcloudStaged = null;
   if (groupPendingPhotoThumb) groupPendingPhotoThumb.src = attachment.dataUrl;
   if (groupPendingPhotoPreview) groupPendingPhotoPreview.hidden = false;
   setGroupPendingPhotoSending(false);
@@ -32690,7 +33087,9 @@ function syncGroupComposerSlots() {
     groupComposer.classList.toggle("composer-field-replaced", recording || hasPhoto);
     groupComposer.classList.toggle("composer-has-content", recording || hasPhoto || hasText);
     const send = groupComposer.querySelector(".composer-send");
-    if (send) send.disabled = groupVoiceEncoding || (hasPhoto && groupPendingPhotoSending);
+    // Not before a staged photo's Nextcloud upload is back (iOS 7abc06e8).
+    const uploading = hasPhoto && groupNextcloudStaged?.phase === "uploading";
+    if (send) { send.disabled = groupVoiceEncoding || (hasPhoto && groupPendingPhotoSending) || uploading; send.classList.toggle("composer-send-busy", uploading); }
   } catch { /* group section not evaluated yet */ }
 }
 groupPendingPhotoRemove?.addEventListener("click", clearGroupPendingPhoto);
@@ -32702,11 +33101,14 @@ async function handleGroupMediaFile(input) {
     const via = groupPhotoViaNextcloud && isNextcloudConnected();
     groupPhotoViaNextcloud = false;
     if (!via) { showCopyToast("Videos go via Nextcloud only. Pick a photo to send it on chain."); return; }
-    const gid = activeGroupId;
-    await sendNextcloudVideoFile(file, async (url) => {
-      if (activeGroupId === gid) await sendGroupWire(url);
-      else throw new Error("The group was closed before the video was sent.");
-    });
+    // Waits in the composer, uploading, like a photo (iOS 7abc06e8).
+    if (!canAcceptGroupImageAttachment()) return;
+    const thumbnail = await videoThumbnailDataUrl(file);
+    if (!canAcceptGroupImageAttachment()) return;
+    const { filename, contentType } = nextcloudVideoUploadName(file);
+    setGroupPendingPhoto({ dataUrl: thumbnail || VIDEO_PLACEHOLDER_THUMB, bytes: 0, isVideo: true }, filename);
+    groupPhotoViaNextcloud = true; // what goes is the link (the fee estimate prices that)
+    startGroupNextcloudUpload("video", file, filename, contentType);
     return;
   }
   try {
@@ -32720,6 +33122,8 @@ async function handleGroupMediaFile(input) {
     setGroupPendingPhoto(attachment, file.name || "photo.jpg");
     groupPhotoViaNextcloud = via;
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB · press Send`);
+    // "Via Nextcloud": the full-quality original starts uploading now (iOS 7abc06e8).
+    if (via && isNextcloudConnected()) startGroupNextcloudUpload("image", file, attachment.originalName, file.type || "image/jpeg");
   } catch (error) {
     groupPhotoViaNextcloud = false;
     appendEngineLog(`Group photo attach failed: ${userFacingError(error)}`);

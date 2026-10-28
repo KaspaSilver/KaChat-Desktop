@@ -1,0 +1,147 @@
+/* KaPosts' phone header, the hamburger's slide-out card and the swipeable feeds (iOS 865c9ab
+   KaPostsFeedDrawer / KaPostsFeedPager, 494751a), plus the Notifications cog (d37f64d) and the
+   Wallet button beside Edit Profile (865c9ab). Imported from ui/kaposts.js, which builds the
+   elements. The older KaPosts rules live in ui/styles.css; the ones overridden here are written
+   one class more specific, so they win wherever this sheet lands in the cascade. */
+
+/* --- Phone header: ☰, the large title, and the sections iOS keeps in its dock -------------------- */
+
+.kaposts-screen > .kaposts-phone-bar { display: none; }
+
+@media (max-width: 859px) {
+  /* The rail's icon strip gives way to the header (iOS 494751a): its title and items are hidden.
+     The rail itself stays for its Post button, which floats over the feed. */
+  .kaposts-screen.kaposts-screen { flex-direction: column; gap: 6px; }
+  .kaposts-screen > .kaposts-rail {
+    display: block; width: auto; height: 0; min-height: 0; margin: 0; padding: 0;
+    border: 0; overflow: visible; position: static;
+  }
+  .kaposts-screen > .kaposts-rail > .kaposts-title,
+  .kaposts-screen > .kaposts-rail > .kaposts-rail-item { display: none; }
+  .kaposts-screen > .kaposts-rail > .kaposts-rail-post {
+    position: fixed; z-index: 350;
+    right: 20px; bottom: calc(var(--dock-inset, 80px) + 16px);
+    width: 56px; height: 56px; margin: 0; padding: 0; border-radius: 50%;
+    display: grid; place-items: center;
+  }
+  .kaposts-screen > .kaposts-rail > .kaposts-rail-post span { display: none; }
+  .kaposts-screen > .kaposts-rail > .kaposts-rail-post svg { width: 24px; height: 24px; }
+
+  /* iOS: HStack(spacing: 12) { ☰ (40 pt), "KaPosts" large title, Spacer }, 6 pt under it. */
+  .kaposts-screen > .kaposts-phone-bar {
+    display: flex; align-items: center; gap: 12px; flex-shrink: 0; align-self: stretch;
+    padding: 0 8px 6px; min-width: 0;
+  }
+  .kaposts-phone-bar > .kaposts-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A page from the menu covers the feed, as iOS's full-screen sheet does: no header row. */
+  .kaposts-screen:has([data-kaposts-panel]:not([hidden])) > .kaposts-phone-bar { display: none; }
+}
+
+.kaposts-menu-button,
+.kaposts-phone-bar-item {
+  position: relative; flex: 0 0 auto;
+  display: inline-grid; place-items: center; width: 40px; height: 40px; padding: 0;
+  border: 0; border-radius: 10px; background: none; color: var(--text); cursor: pointer;
+}
+.kaposts-menu-button svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+.kaposts-phone-bar-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.kaposts-phone-bar-item svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-phone-bar-item .kaposts-rail-badge { position: absolute; top: 1px; right: 0; margin: 0; }
+.kaposts-menu-button:focus-visible,
+.kaposts-phone-bar-item:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 1px; }
+
+/* --- The card (iOS KaPostsFeedDrawer) ------------------------------------------------------------- */
+
+/* Over the whole screen, the dock included, as iOS's full-screen cover is; under the app's
+   modal sheets. */
+.kaposts-drawer { position: fixed; inset: 0; z-index: 1400; --kaposts-drawer-dim: 0; }
+.kaposts-drawer[hidden] { display: none; }
+/* The feed beside the card, dimmed 45% while it is open (iOS `0.45 * progress`). Tapping it closes. */
+.kaposts-drawer-dim {
+  position: absolute; inset: 0; touch-action: none;
+  background: rgba(0, 0, 0, var(--kaposts-drawer-dim));
+  transition: background-color .22s ease;
+}
+/* min(86% of the screen, 440 px); square on the left where it meets the edge, rounded on the
+   right; it slides in and out in 0.22 s (iOS slideDuration). */
+.kaposts-drawer-card {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  width: min(86vw, 440px); box-sizing: border-box;
+  display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
+  padding-top: calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 8px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--ios-system-bg, var(--bg-plain, #000));
+  color: var(--text);
+  border-radius: 0 24px 24px 0;
+  box-shadow: 4px 0 12px rgba(0, 0, 0, .25);
+  transform: translate3d(calc(-100% - 16px), 0, 0);
+  transition: transform .22s cubic-bezier(.42, 0, 1, 1); /* easeIn, closing */
+  touch-action: pan-y;
+}
+.kaposts-drawer.kaposts-drawer-open .kaposts-drawer-card { transition-timing-function: cubic-bezier(.22, .9, .32, 1); }
+.kaposts-drawer.dragging .kaposts-drawer-card,
+.kaposts-drawer.dragging .kaposts-drawer-dim { transition: none; }
+
+.kaposts-drawer-header { display: flex; align-items: center; gap: 12px; padding: 0 20px 16px; }
+.kaposts-drawer-title { flex: 1; min-width: 0; margin: 0; font-size: 34px; font-weight: 700; line-height: 1.2; letter-spacing: 0; color: var(--text); }
+/* xmark, 17 pt semibold in secondary, on a 36 pt secondarySystemBackground circle. */
+.kaposts-drawer-close {
+  flex: 0 0 auto; display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--ios-gray6, var(--surface-2)); color: var(--muted); cursor: pointer;
+}
+.kaposts-drawer-close svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
+.kaposts-drawer-divider { height: .5px; background: var(--line); margin-bottom: 8px; flex-shrink: 0; }
+.kaposts-drawer-rows { display: flex; flex-direction: column; }
+/* HStack(spacing: 16): the teal symbol (22 pt semibold, 30 pt wide), the title in title3
+   semibold; 20 pt in from the sides, at least 56 pt tall. */
+.kaposts-drawer-row {
+  display: flex; align-items: center; gap: 16px; width: 100%; min-height: 56px; padding: 0 20px;
+  border: 0; background: none; color: var(--text); font: inherit; font-size: 20px; font-weight: 600;
+  text-align: left; cursor: pointer;
+}
+.kaposts-drawer-row svg {
+  width: 30px; height: 24px; flex: 0 0 30px; fill: none;
+  stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+.kaposts-drawer-row:hover { background: var(--surface-1); }
+.kaposts-drawer-row:active { background: var(--surface-2); }
+.kaposts-drawer-close:focus-visible,
+.kaposts-drawer-row:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: -2px; }
+
+/* --- Swipeable feeds (iOS KaPostsFeedPager) -------------------------------------------------------- */
+
+/* Up and down stays the browser's scroll; sideways is the pager's. */
+.kaposts-screen [data-kaposts-feed] {
+  touch-action: pan-y pinch-zoom;
+  transition: transform .3s cubic-bezier(.25, .9, .3, 1); /* ≈ spring(response: 0.3, dampingFraction: 0.9) */
+}
+.kaposts-screen [data-kaposts-feed].kaposts-pager-dragging { transition: none; }
+.kaposts-screen [data-kaposts-feed].kaposts-pager-leaving { transition-timing-function: cubic-bezier(.42, 0, 1, 1); }
+/* The feed moving sideways never widens the page. */
+.kaposts-screen > .kaposts-content { overflow-x: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kaposts-drawer-card, .kaposts-drawer-dim, .kaposts-screen [data-kaposts-feed] { transition-duration: 1ms; }
+}
+
+/* --- Notifications' cog (iOS d37f64d): top left of the screen ------------------------------------ */
+
+.kaposts-panel-cog[hidden] { display: none; }
+@media (max-width: 859px) {
+  [data-kaposts-panel] > .kaposts-thread-header > .kaposts-panel-cog {
+    position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    width: 40px; height: 40px; border: 0; background: none; color: var(--kaspa-ink);
+  }
+  [data-kaposts-panel] > .kaposts-thread-header > .kaposts-panel-cog svg { width: 22px; height: 22px; }
+  /* With the cog on the left, Done goes back to the right, where every other KaPosts sheet has it,
+     and the refresh button sits beside the cog (the refresh's own `margin-left: auto` would
+     otherwise leave Done on the left, under the cog). */
+  [data-kaposts-panel][data-kaposts-panel-notifications] > .kaposts-thread-header > .kaposts-panel-refresh {
+    position: absolute; left: 52px; top: 50%; transform: translateY(-50%); margin: 0;
+  }
+}
+
+/* --- Edit Profile and Wallet side by side (iOS 865c9ab, HStack(spacing: 10)) --------------------- */
+
+.kaposts-profile-buttons { display: flex; flex-wrap: wrap; gap: 10px; align-self: flex-start; margin-top: 4px; }
+.kaposts-profile-buttons > .kaposts-edit-kns { margin: 0; }

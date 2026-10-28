@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=392" />
+  <link rel="stylesheet" href="./ui/styles.css?v=393" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -397,7 +397,7 @@
                   <div class="composer-field-wrap">
                     <textarea class="composer-input" name="message" placeholder="Message" autocomplete="off" rows="1"></textarea>
                     <div class="pending-photo-preview composer-field-row" data-pending-photo-preview hidden>
-                      <img data-pending-photo-thumb alt="" />
+                      <span class="pending-photo-thumb-wrap"><img data-pending-photo-thumb alt="" /><span class="pending-photo-play" data-pending-photo-play hidden aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5Z"/></svg></span></span>
                       <span class="composer-field-spinner" data-pending-photo-spinner hidden aria-hidden="true"></span>
                       <span class="pending-photo-meta" data-pending-photo-meta>Photo</span>
                       <button type="button" class="pending-photo-remove" data-pending-photo-remove aria-label="Remove photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg></button>
@@ -486,7 +486,8 @@
                   <div class="composer-field-wrap">
                     <textarea class="composer-input" name="message" placeholder="Message" autocomplete="off" rows="1" data-group-composer-input></textarea>
                     <div class="pending-photo-preview composer-field-row" data-group-pending-photo-preview hidden>
-                      <img data-group-pending-photo-thumb alt="" />
+                      <span class="pending-photo-thumb-wrap"><img data-group-pending-photo-thumb alt="" /><span class="pending-photo-play" data-group-pending-photo-play hidden aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5Z"/></svg></span></span>
+                      <span class="composer-field-spinner" data-group-pending-photo-spinner hidden aria-hidden="true"></span>
                       <span class="pending-photo-meta sending" data-group-pending-photo-meta>Photo ready to send</span>
                       <button type="button" class="pending-photo-remove group-photo-remove" data-group-pending-photo-remove aria-label="Remove photo"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m9 9 6 6M15 9l-6 6"/></svg></button>
                     </div>
@@ -543,6 +544,9 @@
         <div class="profile-screen" data-app-tab-screen="address-book" data-address-book hidden></div>
         <!-- Kaspa Hub > KaChat Bots (iOS 82ab31d): the four bots as cards (ui/kachat-bots.js). -->
         <div class="profile-screen" data-app-tab-screen="kachat-bots" data-kachat-bots hidden></div>
+        <!-- Settings as a tab (iOS d54ea87c): the Settings page itself comes up in place (ui/app.js
+             syncSettingsTab), so this screen stays empty under it. -->
+        <div class="profile-screen" data-app-tab-screen="settings" hidden></div>
         <div class="profile-screen apps-tab-screen" data-app-tab-screen="apps" hidden>
           <div class="kaposts-header">
             <h1 class="kaposts-title">Kaspa Websites</h1>
@@ -743,6 +747,11 @@
         </div>
 
         <div class="profile-screen" data-app-tab-screen="profile" hidden>
+          <!-- Send and Receive (iOS 7abc06e8): the floating up/down arrow, bottom right, opening Send
+               Kaspa, Receive Kaspa and Request Payment - which left the Chats + sheet for it. -->
+          <button class="new-chat-fab ab-fab profile-send-receive-fab" type="button" data-profile-send-receive aria-label="Send and Receive" title="Send and Receive">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M7.5 19.5v-15M3.5 8.5l4-4 4 4M16.5 4.5v15M12.5 15.5l4 4 4-4"/></svg>
+          </button>
           <div class="profile-screen-header" hidden aria-hidden="true">
             <button class="profile-gear-button" type="button" data-open-account-view="settings" aria-label="Settings" title="Settings">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -853,11 +862,6 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M9.7 9.4a2.4 2.4 0 0 1 4.66.8c0 1.6-2.36 2-2.36 3.3"/><circle cx="12" cy="16.8" r=".2"/></svg>
           </button>
 
-          <button class="profile-card profile-logout-row" type="button" data-shell-action="logout">
-            <span>Log Out</span>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H5.75A1.75 1.75 0 0 0 4 5.75v12.5C4 19.22 4.78 20 5.75 20H10"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg>
-          </button>
-
           <p class="profile-section-label">About</p>
           <div class="profile-card profile-about-card">
             <div class="profile-about-row"><strong>Created</strong><span data-profile-created>--</span></div>
@@ -923,6 +927,12 @@
              SF Symbols has no chess pieces). U+FE0E keeps each a text glyph, never an emoji. -->
         <span class="sidebar-tab-icon" aria-hidden="true"><b class="chess-tab-glyph">&#x265C;&#xFE0E;&#x265E;&#xFE0E;</b></span>
         <span>Chess</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="settings" hidden>
+        <!-- gearshape (iOS AppTab.settings, d54ea87c): Settings as a tab, opening the Settings page
+             in place with no Done. -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-gear" viewBox="0 0 24 24"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.369-.491l1.217.456c.355.133.75.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z"/> <path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg></span>
+        <span>Settings</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="hub">
         <span class="sidebar-tab-icon" aria-hidden="true"><img class="sidebar-tab-logo" src="./ui/assets/kaspa-logo.png" alt="" width="24" height="24" /></span>
@@ -1163,11 +1173,17 @@
             <!-- .kachat first: it is what every address field resolves before anything else (iOS 6ac48a7). -->
             <p class="settings-group-label">.kachat Names</p>
             <div class="settings-list-card">
-              <div class="settings-page-form connection-readonly-list">
-                <div class="connection-readonly"><span>KaChat Names (.kachat)</span><em>Live on Mainnet</em></div>
+              <div class="settings-page-form">
+                  <!-- Its own field, apart from the message indexer, so anyone can run the names
+                       indexer themselves (iOS 7abc06e8). Names come from here when it serves this
+                       network's registry and is caught up, else straight from the chain. -->
+                  <label class="field-label compact">KaChat Names Indexer URL
+                    <input class="field-input" type="url" data-endpoint="kachatNamesIndexer" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <p class="field-hint danger" data-endpoint-error="kachatNamesIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">Resolved first, everywhere you can type an address.</p>
+            <p class="settings-group-footer">Where .kachat names and profiles are read. Point it at your own indexer if you run one. If it can't serve names, they are read straight from the chain. Resolved first, everywhere you can type an address.</p>
             <p class="settings-group-label">Other Domains</p>
             <div class="settings-list-card">
               <!-- Shown, not editable (iOS domainsSections): .kas follows the network. -->
@@ -1370,6 +1386,7 @@
             <div class="settings-list-card danger-list-card">
               <button class="settings-list-row danger-row" type="button" data-shell-action="resync"><span class="settings-row-icon settings-row-icon-accent settings-row-icon-red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5.2 10a7 7 0 0 1 12.6-2.6"/><path class="fill" d="m19.6 5.2-.2 4.6-4.3-1.6z"/><path d="M18.8 14a7 7 0 0 1-12.6 2.6"/><path class="fill" d="m4.4 18.8.2-4.6 4.3 1.6z"/></svg></span><span class="settings-row-copy"><strong>Wipe and re-sync incoming messages</strong></span></button>            </div>
           </section>
+
 
           <details class="diagnostics-panel">
             <summary>Engineering diagnostics</summary>

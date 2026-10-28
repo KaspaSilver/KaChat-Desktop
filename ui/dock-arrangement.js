@@ -18,13 +18,15 @@ export const DOCK_PINNED = ["chats", "hub", "profile"];
 // ChangeNOW Swap (iOS AppTab.swap) is back (owner, 2026-10-22: KaChat is Desktop/PWA only, so the
 // app-store rule that turned it off on iOS, f94db5a, does not apply): assignable, and in the Hub
 // by default after KaChat Bots, where iOS defaultHub has it.
-export const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book", "kachat-bots"]; // Public Chats live under Chats now (iOS a566da7)
+// Settings (iOS d54ea87c / KaPay 040f91a, where it is a dock tab): assignable like the rest, last in
+// the Hub by default (owner, 2026-10-27: the default dock stays as it is).
+export const DOCK_ASSIGNABLE = ["chats", "portfolio", "cold-storage", "swaps", "kaposts", "apps", "chess", "kachat-names", "kachat-stats", "address-book", "kachat-bots", "settings"]; // Public Chats live under Chats now (iOS a566da7)
 // A fresh dock (owner's choice for Desktop, 2026-10-21; iOS's defaultDock is Storage, Portfolio,
 // Chats, Hub, Profile): Kaspa Hub, Portfolio, Chats, KaPosts, Profile. Storage leads the Hub. An
 // arrangement someone already made is theirs and is kept.
-export const DOCK_DEFAULT_ORDER = ["hub", "portfolio", "chats", "kaposts", "profile", "cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "swaps", "apps", "chess"];
+export const DOCK_DEFAULT_ORDER = ["hub", "portfolio", "chats", "kaposts", "profile", "cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "swaps", "apps", "chess", "settings"];
 export const DOCK_DEFAULT = ["hub", "portfolio", "chats", "kaposts", "profile"];
-export const HUB_DEFAULT = ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "swaps", "apps", "chess"];
+export const HUB_DEFAULT = ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "swaps", "apps", "chess", "settings"];
 /** Slots the person fills: the cap minus the pinned three (iOS assignableDockSlots). */
 export const DOCK_PICK_SLOTS = DOCK_MAX_ITEMS - DOCK_PINNED.length;
 

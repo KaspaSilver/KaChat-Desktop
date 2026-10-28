@@ -41,10 +41,12 @@ import {
   PORTFOLIO_SEED_NAME, isPortfolioUuid, newPortfolioUuid, stampPortfolioChanges, mergePortfolioTombstones,
   mergePortfolioSync, portfolioSyncFromDesktop, portfolioSyncToDesktop, portfolioSyncFromArchive,
   portfolioSyncToArchive, portfolioSyncForArchive, isPortfolioSyncEmpty,
+  portfolioCsvText, importPortfolioCsv, portfolioCsvImportMessage,
 } from "./portfolio-sync.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
+import "./portfolio-actions.css";
 
 const PORTFOLIO_KEY = "kachat-portfolios-v1"; // account-scoped: { activeId, portfolios: [{id, name, transactions: [...] }] }
 // Network fees the portfolios' imported addresses paid (iOS PortfolioFeeRecord), stored per
@@ -186,8 +188,6 @@ let hashrateUnit = "th";
 /// Which card's settings overlay is open, and which step of it.
 let cardModalId = null;
 let cardModalMode = "menu"; // "menu" | "rename" | "delete"
-/// Which of the two header overlays is open.
-let actionSheetMode = "add"; // "add" | "io"
 /// Multi-select over the transaction list (iOS's EditMode on PortfolioTransactionsView).
 ///
 /// Deleting one transaction has always been a row-level x. Deleting the forty rows a bad CSV
@@ -1185,44 +1185,69 @@ function openAddressImport(presetAddress = null) {
   if (preset) runAddressImport(presetAddress);
 }
 
-/// The two header buttons open overlays rather than dropdowns.
-///
-/// Add offers both ways of getting a transaction in - typing one, or importing an address's whole
-/// history - because those are the same intent and hiding one of them under Import/Export meant
-/// looking for it in the wrong place. Import/Export is then exactly what its name says.
+// The floating +'s sheet (iOS 59593af PortfolioTransactionsView.actionsSheet): every way to add to,
+// import into or export this portfolio, in one place. A sheet rather than a popup menu so each row
+// can say what it does - "Add Kaspa Address" reads as a contact until you learn otherwise. Laid out
+// as the Address Book's + sheet is (ui/address-book.js renderImportExportSheet).
+const ACTION_ICON = (paths) => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
+const PORTFOLIO_ACTION_ICONS = {
+  // SF Symbols pencil, arrow.left.arrow.right, bubble.left.and.bubble.right, square.and.arrow.down/up,
+  // icloud.and.arrow.down/up - the iOS rows' images.
+  pencil: ACTION_ICON('<path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'),
+  arrows: ACTION_ICON('<path d="M4 8h15m0 0-3.5-3.5M19 8l-3.5 3.5"/><path d="M20 16H5m0 0 3.5-3.5M5 16l3.5 3.5"/>'),
+  bubbles: ACTION_ICON('<path d="M14.5 4h-9A2.5 2.5 0 0 0 3 6.5v5A2.5 2.5 0 0 0 5.5 14H6v3l3.5-3h5a2.5 2.5 0 0 0 2.5-2.5v-5A2.5 2.5 0 0 0 14.5 4z"/><path d="M17 8.5h1.5A2.5 2.5 0 0 1 21 11v4.5a2.5 2.5 0 0 1-2.5 2.5H18v2.5L15 18h-3.5a2.5 2.5 0 0 1-2.4-1.8"/>'),
+  fileIn: ACTION_ICON('<path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 15v3.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V15"/>'),
+  fileOut: ACTION_ICON('<path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/>'),
+  cloudIn: ACTION_ICON('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.8 8.6 4.2 4.2 0 0 1 17.5 17"/><path d="M12 11v9"/><path d="m9 17 3 3 3-3"/>'),
+  cloudOut: ACTION_ICON('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.8 8.6 4.2 4.2 0 0 1 17.5 17"/><path d="M12 20v-9"/><path d="m9 14 3-3 3 3"/>'),
+};
+const FAB_PLUS_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`;
+
+function portfolioActionRowHtml({ action, icon, title, subtitle }) {
+  return `
+    <button type="button" class="cold-action-row" data-portfolio-action="${action}">
+      <span class="cold-action-icon" aria-hidden="true">${PORTFOLIO_ACTION_ICONS[icon]}</span>
+      <span class="cold-action-copy"><strong>${title}</strong><small>${subtitle}</small></span>
+    </button>`;
+}
+
 function renderPortfolioActionSheet() {
   const body = modalsEl?.querySelector("[data-portfolio-action-body]");
   if (!body) return;
-  const rows = actionSheetMode === "add"
-    ? [
-        { action: "tx", title: "Add Transaction", subtitle: "Record a buy or a sell by hand." },
-        { action: "address", title: "Add Kaspa Address", subtitle: "Track an address's balance as part of this portfolio." },
-        // One click for the address KaChat itself spends from: its buys and sells, and every
-        // network fee it paid (messages, handshakes, payments) for the Fees Spent card.
-        ...(chattingAddress() ? [
-          { action: "chatting", title: "Add Chatting Address", subtitle: "Your chatting address's buys and sells, and every network fee it has paid." },
-        ] : []),
-      ]
-    : [
-        { action: "import", title: "Import CSV", subtitle: "Read transactions in from a file." },
-        { action: "export", title: "Export CSV", subtitle: "Write this portfolio's transactions out to a file." },
-        // With a Nextcloud account connected (iOS aa5d783).
-        ...(isNextcloudConnected() ? [
-          { action: "nc-import", title: "Import from Nextcloud", subtitle: "Pick a CSV file from your Nextcloud." },
-          { action: "nc-export", title: "Export to Nextcloud", subtitle: "Save the CSV to the KaChat folder in your Nextcloud." },
-        ] : []),
-      ];
+  const add = [
+    { action: "tx", icon: "pencil", title: "Add Transaction", subtitle: "Record a buy or a sell by hand." },
+    { action: "address", icon: "arrows", title: "Add Kaspa Address", subtitle: "Track an address's balance as part of this portfolio." },
+    // One click for the address KaChat itself spends from: its buys and sells, and every
+    // network fee it paid (messages, handshakes, payments) for the Fees Spent card.
+    ...(chattingAddress() ? [
+      { action: "chatting", icon: "bubbles", title: "Add Chatting Address", subtitle: "Your chatting address's buys and sells, and every network fee it has paid." },
+    ] : []),
+  ];
+  const io = [
+    { action: "import", icon: "fileIn", title: "Import CSV", subtitle: "Read transactions in from a file." },
+    { action: "export", icon: "fileOut", title: "Export CSV", subtitle: "Write this portfolio's transactions out to a file." },
+    // With a Nextcloud account connected (iOS aa5d783).
+    ...(isNextcloudConnected() ? [
+      { action: "nc-import", icon: "cloudIn", title: "Import from Nextcloud", subtitle: "Pick a CSV file from your Nextcloud." },
+      { action: "nc-export", icon: "cloudOut", title: "Export to Nextcloud", subtitle: "Save the CSV to the KaChat folder in your Nextcloud." },
+    ] : []),
+  ];
   body.innerHTML = `
     <div class="modal-header">
-      <div><h2>${actionSheetMode === "add" ? "Add to Portfolio" : "Import or Export"}</h2></div>
+      <div><h2>Portfolio</h2></div>
       <button class="modal-close" type="button" data-portfolio-action-close aria-label="Close">×</button>
     </div>
-    <div class="cold-action-rows">
-      ${rows.map((row) => `
-        <button type="button" class="cold-action-row" data-portfolio-action="${row.action}">
-          <span class="cold-action-copy"><strong>${row.title}</strong><small>${row.subtitle}</small></span>
-        </button>`).join("")}
-    </div>`;
+    <p class="ab-section-title portfolio-actions-section">Add</p>
+    <div class="cold-action-rows">${add.map(portfolioActionRowHtml).join("")}</div>
+    <p class="ab-section-title portfolio-actions-section">Import &amp; Export</p>
+    <div class="cold-action-rows">${io.map(portfolioActionRowHtml).join("")}</div>`;
+}
+
+function openPortfolioActionSheet() {
+  renderPortfolioActionSheet();
+  const modal = modalsEl.querySelector("[data-portfolio-action-modal]");
+  modal.hidden = false;
+  window.setTimeout(() => modal.querySelector("[data-portfolio-action]")?.focus(), 0);
 }
 
 /// What was typed, in H/s, using the unit the picker has selected.
@@ -1533,8 +1558,6 @@ function hashrateCardHtml() {
 const CHECK_OUTLINE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="m8 12.4 2.6 2.6L16 9.6"/></svg>`;
 const CHECK_FILLED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m8 12.4 2.6 2.6L16 9.6" stroke="var(--on-accent, #000)"/></svg>`;
 const TRASH_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1.5 1.5 0 0 0 1.5 1.4h7A1.5 1.5 0 0 0 17 20l1-13M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2"/></svg>`;
-const PLUS_FILLED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="M12 7.5v9M7.5 12h9" stroke="var(--on-accent, #000)"/></svg>`;
-const IMPORT_EXPORT_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="8" width="13" height="12.5" rx="2"/><path d="M8 4.5h10.5a2 2 0 0 1 2 2V17"/><path d="M10 11V3.5m0 0L7.5 6M10 3.5 12.5 6"/></svg>`;
 const REALIZED_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/><path d="m9 12 2 2 4-4"/></svg>`;
 const FUEL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 22h12"/><path d="M4 9h10"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 4 0V9.83a2 2 0 0 0-.59-1.42L18 5"/></svg>`;
 
@@ -1883,8 +1906,9 @@ function render() {
     ${insightCardsHtml(portfolio)}
 
     <div class="profile-card">
-      <!-- iOS PortfolioTransactionsView's section header: Select, + and import/export, or while
-           selecting the select-all check, the trash with its count, and Done. -->
+      <!-- iOS PortfolioTransactionsView's section header: Select, or while selecting the select-all
+           check, the trash with its count, and Done. Adding, importing and exporting are under the
+           floating + (iOS 59593af). -->
       <div class="portfolio-tx-header">
         <p class="portfolio-card-heading">Transactions</p>
         <div class="portfolio-tx-header-actions">
@@ -1892,16 +1916,18 @@ function render() {
             <button class="portfolio-tx-icon-btn" type="button" data-portfolio-select-all aria-label="${allPicked ? "Deselect all" : "Select all"}" title="${allPicked ? "Deselect all" : "Select all"}">${allPicked ? CHECK_FILLED_SVG : CHECK_OUTLINE_SVG}</button>
             <button class="portfolio-tx-icon-btn portfolio-select-delete" type="button" data-portfolio-delete-selected aria-label="Delete selected" title="Delete selected" ${selectedTxIds.size === 0 ? "disabled" : ""}>${TRASH_SVG}<span data-portfolio-delete-count>${selectedTxIds.size || ""}</span></button>
             <button class="cold-inline-link" type="button" data-portfolio-select-toggle>Done</button>` : `
-            <button class="cold-inline-link" type="button" data-portfolio-select-toggle ${transactions.length === 0 ? "disabled" : ""}>Select</button>
-            <button class="portfolio-tx-icon-btn" type="button" data-portfolio-add-menu aria-label="Add to this portfolio" title="Add to this portfolio">${PLUS_FILLED_SVG}</button>
-            <button class="portfolio-tx-icon-btn" type="button" data-portfolio-io-menu aria-label="Import or export" title="Import or export">${IMPORT_EXPORT_SVG}</button>`}
+            <button class="cold-inline-link" type="button" data-portfolio-select-toggle ${transactions.length === 0 ? "disabled" : ""}>Select</button>`}
         </div>
       </div>
       ${transactions.length === 0
         ? `<div class="portfolio-chart-empty portfolio-empty-state"><strong>No Transactions Yet</strong><span>Add a buy or sell to start tracking your portfolio</span></div>`
         : transactions.map(transactionRowHtml).join("")}
     </div>
-    ${loading ? `<div class="portfolio-chart-empty">Refreshing…</div>` : ""}`;
+    ${loading ? `<div class="portfolio-chart-empty">Refreshing…</div>` : ""}
+    <!-- The floating glass + (iOS 59593af actionsButton; the Address Book's + here), hidden while
+         selecting. Fixed to the window, so the screen keeps room to scroll the last row out from
+         under it (ui/portfolio-actions.css). -->
+    ${selecting ? "" : `<button class="new-chat-fab ab-fab portfolio-fab" type="button" data-portfolio-actions aria-label="Add, import or export" title="Add, import or export">${FAB_PLUS_SVG}</button>`}`;
 }
 
 /// iOS ChartRangeSummary: the span's two dates ("Oct 1, 2026 → Oct 9, 2026", times when both
@@ -2110,84 +2136,13 @@ function saveTxEditor() {
 // CSV import/export (CoinMarketCap "Transaction History" format — matches iOS)
 // ---------------------------------------------------------------------------
 
-/** Splits a CSV document into records of fields (RFC 4180, iOS parseCsvRecords): commas and
- *  line breaks inside double quotes belong to the field, "" inside quotes is one literal quote,
- *  and a line break outside quotes - LF, CRLF or CR - ends the record. Blank lines yield no
- *  record. Whole records rather than lines, because a note can hold line breaks, which the
- *  export writes inside its quotes - splitting the file on every newline first cut such a row
- *  in two. */
-function parseCsvRecords(content) {
-  const text = String(content ?? "");
-  const records = [];
-  let fields = [];
-  let current = "";
-  let inQuotes = false;
-  const endRecord = () => {
-    fields.push(current);
-    if (!(fields.length === 1 && !fields[0].trim())) records.push(fields);
-    fields = [];
-    current = "";
-  };
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { current += '"'; i += 1; }
-        else inQuotes = false;
-      } else {
-        current += c;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      fields.push(current);
-      current = "";
-    } else if (c === "\r" || c === "\n") {
-      if (c === "\r" && text[i + 1] === "\n") i += 1; // CRLF is one line ending
-      endRecord();
-    } else {
-      current += c;
-    }
-  }
-  if (current || fields.length) endRecord();
-  return records;
-}
-
-function parseLenientDouble(raw) {
-  const value = Number(String(raw ?? "").trim().replace(/,/g, ""));
-  return Number.isFinite(value) ? value : null;
-}
-
-/** CoinMarketCap bakes the exporter's UTC offset into the date column header, e.g.
- *  "Date (UTC-4:00)" — parsed once so every row's timestamp is interpreted correctly. */
-function parseHeaderUtcOffsetMinutes(header) {
-  const match = /UTC([+-]?\d+):(\d+)/i.exec(header || "");
-  if (!match) return 0;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const sign = hours < 0 || match[1].startsWith("-") ? -1 : 1;
-  return sign * (Math.abs(hours) * 60 + minutes);
-}
-
 /** The export as { filename, csv }, or null (with the toast said) when there is nothing to export. */
 function buildCsvExport() {
   const portfolio = activePortfolio();
-  const rows = [...(portfolio.transactions || [])].sort((a, b) => a.timestamp - b.timestamp);
-  if (!rows.length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return null; }
-  const pad = (n) => String(n).padStart(2, "0");
-  let csv = "Date (UTC+0:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes\n";
-  for (const tx of rows) {
-    const d = new Date(tx.timestamp);
-    const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
-    const amount = Number(tx.amountKas) || 0;
-    const fiat = Number(tx.fiatValue) || 0;
-    const perKas = amount !== 0 ? fiat / amount : 0;
-    const notes = String(tx.notes || "").replace(/"/g, '""');
-    csv += `"${date}","KAS","${txKind(tx)}","${perKas}","${amount}","${fiat}","0.00","USD","${notes}"\n`;
-  }
+  if (!(portfolio.transactions || []).length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return null; }
   // iOS's file-name time: ISO 8601 in UTC, whole seconds, "Z", with ":" made "-".
   const stamp = `${new Date().toISOString().slice(0, 19)}Z`.replace(/:/g, "-");
-  return { filename: `${portfolioExportBaseName(portfolio)} ${stamp}.csv`, csv };
+  return { filename: `${portfolioExportBaseName(portfolio)} ${stamp}.csv`, csv: portfolioCsvText(portfolio) };
 }
 
 /** The export's file name: the name the portfolio has in the app ("Long Term 2026-10-08T...Z.csv"),
@@ -2226,74 +2181,36 @@ function importFromNextcloud() {
   openNextcloudFilePicker({
     allowedExtensions: ["csv", "txt"],
     onPicked: async (file) => {
-      let imported = 0;
-      try { imported = importCsvText(await downloadNextcloudText(file.path)); }
-      catch (error) { deps.showToast?.(`Import from Nextcloud failed: ${error?.message || "unknown error"}`); return; }
-      deps.showToast?.(imported > 0 ? `Imported ${imported} transaction${imported === 1 ? "" : "s"}` : "Import failed. Check the CSV format");
+      let result;
+      try { result = importCsvText(await downloadNextcloudText(file.path)); }
+      catch (error) { deps.showToast?.(`Import from Nextcloud failed: ${error?.message || "unknown error"}`, { style: "error" }); return; }
+      showImportToast(result);
     },
   });
 }
 
-/** Same replace-by-timestamp dedup as iOS: a row whose timestamp exactly matches an existing
- *  transaction in the active portfolio replaces it in place rather than piling up copies. */
+/** Reads a CSV in (importPortfolioCsv in ui/portfolio-sync.js): each row goes to the portfolio its
+ *  `Portfolio` column names - found by name, made, or the untouched "Portfolio 1" renamed - and
+ *  rows without one to the active portfolio, which then becomes the first portfolio imported into.
+ *  { count, portfolioNames }. */
 function importCsvText(content) {
-  const records = parseCsvRecords(content);
-  if (!records.length) return 0;
-  const header = records.shift().join(",");
-  const offsetMinutes = parseHeaderUtcOffsetMinutes(header);
-
-  const portfolio = activePortfolio();
-  portfolio.transactions ||= [];
-  const indexByTimestamp = new Map();
-  portfolio.transactions.forEach((tx, index) => indexByTimestamp.set(tx.timestamp, index));
-
-  let imported = 0;
-  for (const fields of records) {
-    if (fields.length < 6) continue;
-    if (String(fields[1]).trim().toUpperCase() !== "KAS") continue;
-    const typeRaw = String(fields[2]).trim().toLowerCase();
-    // CoinMarketCap writes "Transfer In" / "Transfer Out"; both are a transfer here.
-    const type = typeRaw === "buy" || typeRaw === "sell" ? typeRaw : typeRaw.startsWith("transfer") ? "transfer" : null;
-    if (!type) continue;
-    const dateMatch = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(fields[0]).trim());
-    if (!dateMatch) continue;
-    const [, y, mo, d, h, mi, s] = dateMatch.map(Number);
-    const timestamp = Date.UTC(y, mo - 1, d, h, mi, s) - offsetMinutes * 60_000;
-    const kas = parseLenientDouble(fields[4]);
-    const totalValue = parseLenientDouble(fields[5]);
-    if (kas === null || totalValue === null) continue;
-
-    // Fee folded into total when USD-denominated: added for buys, subtracted for sells.
-    let fiatValue = totalValue;
-    if (fields.length > 7 && String(fields[7]).trim().toUpperCase() === "USD") {
-      const fee = parseLenientDouble(fields[6]);
-      if (fee !== null) {
-        if (type === "buy") fiatValue += fee;
-        else if (type === "sell") fiatValue = Math.max(fiatValue - fee, 0);
-        // transfer: no fee - it counts for nothing anyway.
-      }
-    }
-    const notes = fields.length > 8 && fields[8] ? fields[8] : null;
-
-    const existingIndex = indexByTimestamp.get(timestamp);
-    if (existingIndex !== undefined) {
-      const existing = portfolio.transactions[existingIndex];
-      portfolio.transactions[existingIndex] = { ...existing, type, amountKas: kas, fiatValue, timestamp, notes };
-    } else {
-      portfolio.transactions.push({ id: nowId(), type, amountKas: kas, fiatValue, timestamp, notes });
-      indexByTimestamp.set(timestamp, portfolio.transactions.length - 1);
-    }
-    imported += 1;
-  }
-
-  if (imported > 0) {
+  ensureDefaultPortfolio();
+  const before = state.activeId;
+  const result = importPortfolioCsv(state, content, { fees, maxPortfolios: MAX_PORTFOLIOS, newId: nowId });
+  if (result.count > 0) {
+    if (state.activeId !== before) exitSelectMode();
     saveState();
     render();
     // A re-imported export can carry rows whose price was still loading when it was written -
     // price them by their date like any other.
     startPriceBackfillIfNeeded();
   }
-  return imported;
+  return result;
+}
+
+/** The import's toast, in iOS's error style when nothing came in. */
+function showImportToast(result) {
+  deps.showToast?.(portfolioCsvImportMessage(result), result.count > 0 ? undefined : { style: "error" });
 }
 
 // ---------------------------------------------------------------------------
@@ -2874,7 +2791,7 @@ function buildModals() {
     </div>
 
     <div class="modal-backdrop" data-portfolio-action-modal hidden>
-      <div class="contact-modal portfolio-editor-modal" role="dialog" aria-modal="true" aria-label="Portfolio actions" data-portfolio-action-body></div>
+      <div class="contact-modal portfolio-editor-modal ab-io-sheet portfolio-actions-sheet" role="dialog" aria-modal="true" aria-label="Portfolio" data-portfolio-action-body></div>
     </div>
 
     <div class="modal-backdrop" data-portfolio-card-modal hidden>
@@ -2927,7 +2844,7 @@ function buildModals() {
       return;
     }
 
-    // --- Add and Import / Export sheet ---
+    // --- The floating +'s Portfolio sheet ---
     // These route into the same actions the old dropdown items ran. They belong here rather than
     // on the pane's own listener: modalsEl is appended to document.body, so a click inside the
     // sheet never bubbles through [data-portfolio-root] and nothing in it can be reached from there.
@@ -3113,10 +3030,10 @@ function buildModals() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    let imported = 0;
-    try { imported = importCsvText(await file.text()); }
-    catch { deps.showToast?.("Import failed. Check the CSV format"); return; }
-    deps.showToast?.(imported > 0 ? `Imported ${imported} transaction${imported === 1 ? "" : "s"}` : "Import failed. Check the CSV format");
+    let result;
+    try { result = importCsvText(await file.text()); }
+    catch { deps.showToast?.("Import failed. Check the CSV format", { style: "error" }); return; }
+    showImportToast(result);
   });
 }
 
@@ -3569,30 +3486,7 @@ export function initPortfolio(dependencies) {
       return;
     }
 
-    if (event.target.closest("[data-portfolio-add-menu]")) {
-      actionSheetMode = "add";
-      renderPortfolioActionSheet();
-      modalsEl.querySelector("[data-portfolio-action-modal]").hidden = false;
-      return;
-    }
-
-    if (event.target.closest("[data-portfolio-io-menu]")) {
-      actionSheetMode = "io";
-      renderPortfolioActionSheet();
-      modalsEl.querySelector("[data-portfolio-action-modal]").hidden = false;
-      return;
-    }
-    if (event.target.closest("[data-portfolio-export-csv]")) { closeCardMenus(); exportCsv(); return; }
-    if (event.target.closest("[data-portfolio-import-csv]")) {
-      closeCardMenus();
-      modalsEl.querySelector("[data-portfolio-csv-input]")?.click();
-      return;
-    }
-    if (event.target.closest("[data-portfolio-io-address]")) {
-      closeCardMenus();
-      openAddressImport();
-      return;
-    }
+    if (event.target.closest("[data-portfolio-actions]")) { openPortfolioActionSheet(); return; }
     const txDelete = event.target.closest("[data-portfolio-tx-delete]");
     if (txDelete) {
       if (await confirmOverlay({ title: "Delete Transaction?", message: "This can't be undone." })) {

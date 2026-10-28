@@ -407,7 +407,8 @@ export class KachatNamesService {
 
   async _manifestData() {
     if (this.bundledManifest != null) return [this.bundledManifest, "bundle"];
-    const base = trimSlash(getEndpoint("kasiaIndexer"));
+    // the names indexer (iOS 7abc06e8 kachatNamesIndexerURL), apart from the message indexer
+    const base = trimSlash(getEndpoint("kachatNamesIndexer"));
     if (!base) throw ServiceError.noManifest("none in the app and no indexer is configured");
     const url = `${base}/names/manifest`;
     let response;

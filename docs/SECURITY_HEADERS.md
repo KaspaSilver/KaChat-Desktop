@@ -63,7 +63,7 @@ curl -sI https://kachat.app/desktop/nc-proxy/__probe | grep -iE 'content-securit
 | `style-src` | `'self' 'unsafe-inline'` | The UI uses `style=""` attributes and injects style text in many places. Styles cannot run script. |
 | `img-src`, `media-src` | `'self' data: blob: https:` | Avatars, banners and link-preview images come from any host a KNS or .kachat profile or a pasted link names. Relayed pictures and Nextcloud thumbnails are `blob:` URLs, and broadcast images and voice notes are `data:` URLs. |
 | `connect-src` | `'self' https: wss:` | **Broad on purpose.** Every API base can be changed in Settings > Connectivity: the Kaspa REST API, the chat/KaPosts/broadcast/push indexers, KNS, translation and the custom wRPC node. The public-node resolver hands out arbitrary `wss://` nodes, and the price and name APIs are third-party hosts. `'self'` covers the `/nc-proxy` relay (Nextcloud, Talk signalling, link previews, CORS-less hosts). WebRTC media (Talk calls) is not governed by CSP. |
-| `worker-src` | `'self'` | The service worker (`sw.js`). The app starts no other workers. |
+| `worker-src` | `'self'` | The service worker (`sw.js`) and Chess Online's bot search (`engine/chess-bot-worker.js`). |
 | `frame-src` | `'none'` | The app embeds no frames. |
 | `frame-ancestors` | `'none'` | Nobody may frame the app. |
 | `object-src`, `base-uri`, `form-action` | `'none'`, `'self'`, `'self'` | No plugins. A `<base>` tag cannot repoint relative URLs. Forms only submit (and only in-page) to this origin. |

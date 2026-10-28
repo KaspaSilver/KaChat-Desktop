@@ -29,6 +29,9 @@ r.check(!isValidBroadcastChannel(""), "empty is not");
 r.check(!isValidBroadcastChannel("two words"), "a space is not");
 r.check(!isValidBroadcastChannel("a:b"), "a colon is not");
 r.check(isValidBroadcastChannel("chess-arena") && isServiceBroadcastChannel("chess-arena"), "chess-arena is a valid service room");
+r.check(isValidBroadcastChannel("chess-bots") && isServiceBroadcastChannel("chess-bots"), "chess-bots is a valid service room");
+r.check(isServiceBroadcastChannel("  Chess-Bots "), "service rooms match after normalizing");
+r.check(!isServiceBroadcastChannel("kaspa"), "a public room is not a service room");
 
 // The language rooms in iOS order (alphabetical by display name, Latin scripts first).
 const iosOrder = [

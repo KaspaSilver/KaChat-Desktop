@@ -15002,3 +15002,135 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
 @media (min-width: 860px) {
   .ab-fab { right: max(20px, calc(50% - 264px)); }
 }
+
+/* ==== Swipe up to send (iOS 59593af / 7abc06e8 SwipeUpToSendScrollView, SendProgressScreen) ====
+   Send Kaspa, the chat's Send KAS and .kachat Claim / Buy. The sheet is a fixed-height frame: the
+   form (its own Cancel + title header, the scrolling fields, the bar) moves up with the drag and
+   the sending screen rises from below in its place. Full screen on a phone, as on iOS. */
+.contact-modal.sk-swipe-host, .kmkt-sheet.sk-swipe-host {
+  position: relative; display: flex; flex-direction: column; padding: 0; overflow: hidden;
+  height: min(780px, calc(100dvh - 44px)); max-height: none; width: min(100%, 460px);
+}
+/* A .kachat sheet (Claim, Buy): the market's grouped surface, and its body brings its own padding. */
+.kmkt-sheet.sk-swipe-host .sk-swipe-form, .kmkt-sheet.sk-swipe-host .sk-swipe-progress { background: var(--grouped-bg-elevated, var(--sheet-bg)); }
+.kmkt-sheet.sk-swipe-host .sk-swipe-scroll { padding: 0; }
+.kmkt-sheet.sk-swipe-host .sk-swipe-scroll > .kmkt-sheet-body { overflow: visible; }
+.kmkt-sheet.sk-swipe-host .sk-swipe-barwrap { background: color-mix(in srgb, var(--grouped-bg-elevated, var(--sheet-bg)) 82%, transparent); }
+.sk-swipe-form { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--sheet-bg, var(--panel)); }
+.sk-swipe-host.sk-swipe-animating .sk-swipe-form,
+.sk-swipe-host.sk-swipe-animating .sk-swipe-progress { transition: transform .45s cubic-bezier(.2,.9,.25,1); }
+.sk-swipe-header { flex: 0 0 auto; padding: 14px 16px 6px; }
+.sk-swipe-header-row { position: relative; display: flex; align-items: center; justify-content: center; min-height: 40px; }
+.sk-swipe-title { margin: 0; padding: 0 96px; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sk-swipe-cancel {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%); padding: 9px 16px; border-radius: 999px; border: 0;
+  background: var(--glass-fill, var(--fill-tertiary)); color: var(--kaspa-ink); font: inherit; font-size: 16px; cursor: pointer;
+}
+.sk-swipe-cancel:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.sk-swipe-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 20px 20px; }
+/* The screen's own header replaces the sheet's: the form's slide button is gone. */
+.sk-swipe-scroll [data-sk-mount="action"], .sk-swipe-scroll .sk-slide { display: none; }
+.sk-swipe-barwrap {
+  flex: 0 0 auto; padding: 8px 20px calc(8px + var(--sk-swipe-safe-bottom, 0px));
+  background: color-mix(in srgb, var(--sheet-bg, var(--panel)) 82%, transparent); backdrop-filter: blur(20px);
+}
+.sk-swipe-bar {
+  width: 100%; height: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 0; border-radius: 999px; background: var(--kaspa); color: #000; font: inherit; font-size: 17px; font-weight: 600;
+  cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.sk-swipe-bar.disabled { opacity: .4; cursor: default; }
+.sk-swipe-bar:active:not(.disabled) { cursor: grabbing; }
+.sk-swipe-bar:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+.sk-swipe-bar-icon { display: inline-flex; }
+.sk-swipe-bar-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.sk-swipe-progress {
+  position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: stretch;
+  padding: 70px 0 0; background: var(--sheet-bg, var(--panel)); color: var(--text); overflow: hidden;
+}
+.sk-swipe-dag { position: relative; flex: 0 0 200px; height: 200px; display: grid; place-items: center; }
+.sk-swipe-dag canvas { position: absolute; inset: 0; width: 100%; height: 100%; color: var(--text); transition: opacity .35s ease; }
+.sk-swipe-dag canvas.dimmed { opacity: .35; }
+.sk-swipe-mark { position: relative; z-index: 1; width: 72px; height: 72px; display: none; }
+.sk-swipe-mark.done, .sk-swipe-mark.failed { display: block; animation: sk-swipe-pop .35s ease; }
+.sk-swipe-mark svg { width: 72px; height: 72px; }
+.sk-swipe-mark-ink { fill: none; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+.sk-swipe-mark.done .sk-swipe-mark-fill { fill: var(--kaspa); }
+.sk-swipe-mark.done .sk-swipe-mark-ink { stroke: #000; }
+.sk-swipe-mark.failed .sk-swipe-mark-fill { fill: var(--ios-red); }
+.sk-swipe-mark.failed .sk-swipe-mark-ink { stroke: #fff; }
+@keyframes sk-swipe-pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.sk-swipe-lines { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px 0 0; text-align: center; }
+.sk-swipe-big { margin: 0; font-size: 34px; font-weight: 700; line-height: 1.15; }
+.sk-swipe-amount { margin: 0; font-size: 20px; font-weight: 600; color: var(--kaspa-ink); font-variant-numeric: tabular-nums; }
+.sk-swipe-to { margin: 0; padding: 0 32px; max-width: 100%; box-sizing: border-box; display: flex; justify-content: center; font-size: 15px; color: var(--muted); white-space: nowrap; }
+.sk-swipe-detail { margin: 8px 0 0; padding: 0 24px; font-size: 13px; color: var(--muted); }
+.sk-swipe-failure {
+  margin: 24px 24px 0; display: flex; align-items: flex-start; gap: 8px; padding: 14px; border-radius: 14px;
+  background: var(--glass-fill, var(--fill-tertiary)); border: .8px solid var(--glass-stroke, transparent);
+  color: var(--ios-red); font-size: 15px; line-height: 1.35; animation: sk-swipe-fade .35s ease;
+}
+.sk-swipe-failure svg { flex: 0 0 18px; width: 18px; height: 18px; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sk-swipe-tx { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px 24px 0; animation: sk-swipe-fade .35s ease; }
+.sk-swipe-tx .sk-sent-txid { margin: 0; }
+.sk-swipe-tx-hint { margin: 0; font-size: 12px; color: var(--muted); }
+.sk-swipe-outcome { flex: 0 1 auto; min-height: 0; overflow-y: auto; padding: 20px 20px 0; animation: sk-swipe-fade .35s ease; }
+.sk-swipe-spacer { flex: 1 1 0; min-height: 12px; }
+.sk-swipe-final {
+  flex: 0 0 auto; height: 56px; margin: 0 20px calc(32px + var(--sk-swipe-safe-bottom, 0px)); border: 0; border-radius: 999px;
+  background: var(--kaspa); color: #000; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer; animation: sk-swipe-rise .35s ease;
+}
+.sk-swipe-final:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+@keyframes sk-swipe-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sk-swipe-rise { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .sk-swipe-host.sk-swipe-animating .sk-swipe-form,
+  .sk-swipe-host.sk-swipe-animating .sk-swipe-progress { transition-duration: .2s; }
+}
+/* A phone: the whole screen, as iOS presents it, clear of the status bar and home indicator. */
+@media (max-width: 859px) {
+  .modal-backdrop:has(> .sk-swipe-host) { padding: 0; }
+  .contact-modal.sk-swipe-host, .kmkt-sheet.sk-swipe-host {
+    width: 100%; height: 100dvh; border: 0; border-radius: 0; box-shadow: none;
+    --sk-swipe-safe-bottom: var(--safe-bottom, env(safe-area-inset-bottom, 0px));
+  }
+  .sk-swipe-host .sk-swipe-header { padding-top: calc(14px + var(--safe-top, env(safe-area-inset-top, 0px))); }
+  .sk-swipe-host .sk-swipe-progress { padding-top: calc(70px + var(--safe-top, env(safe-area-inset-top, 0px))); }
+}
+/* The chat's Send KAS on the swipe-up screen: its fields keep the sheet's spacing, "to <name>" first. */
+.pay-sheet.sk-swipe-host { gap: 0; }
+.pay-sheet .sk-swipe-scroll { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
+.pay-sheet.sk-swipe-host .pay-sheet-head { padding: 0 12px; }
+.pay-sheet.sk-swipe-host .pay-sheet-head p { margin: 0; text-align: center; }
+/* Profile's Send and Receive (iOS 7abc06e8): the up/down arrow in Address Book's + spot, and room
+   under the screen so its last row clears it. */
+.profile-send-receive-fab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-screen[data-app-tab-screen="profile"] { padding-bottom: calc(var(--dock-inset, 124px) + 96px); }
+.settings-logout-card { margin-top: 20px; }
+/* Settings as a dock tab (iOS d54ea87c, KaPay 040f91a): the Settings page in place - under the dock,
+   on the app's own background, a column like the other tabs - with no Done (it closes by picking
+   another tab). */
+body.settings-tab .account-overlay[data-account-overlay] {
+  z-index: 395; align-items: stretch; background: var(--ios-system-bg, var(--bg));
+  padding: var(--safe-top, 0px) var(--safe-right, 0px) var(--dock-inset, 124px) var(--safe-left, 0px);
+}
+body.settings-tab [data-account-overlay] .account-overlay-card {
+  height: 100%; max-height: none; width: min(100%, 560px); border: 0; border-radius: 0; box-shadow: none; background: transparent;
+}
+body.settings-tab [data-account-overlay] .settings-done-button { visibility: hidden; pointer-events: none; }
+.sidebar-tab-icon .tab-glyph-gear { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+/* A chat pinned to the top row (iOS 7abc06e8): its own avatar, filling the circle. */
+.chat-circle-person { width: 100%; height: 100%; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }
+.chat-circle-person img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.chat-circle-person.avatar-fallback { background: rgba(112,199,186,.2); color: var(--kaspa-ink); }
+.chat-circle-person.avatar-fallback svg { width: 55%; height: 55%; }
+/* Nextcloud media waiting in the composer (iOS 7abc06e8): a play mark on a video's first frame,
+   the upload's state beside it, and Send held back until the link is back. */
+.pending-photo-thumb-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.pending-photo-play { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.pending-photo-play svg { width: 14px; height: 14px; fill: #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+.pending-photo-meta { display: inline-flex; align-items: center; gap: 5px; }
+.pending-photo-state { flex: 0 0 18px; width: 18px; height: 18px; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.pending-photo-state.ready { stroke: var(--kaspa-ink); }
+.pending-photo-state.failed { stroke: var(--ios-orange, #ff9f0a); }
+.composer-send.composer-send-busy { opacity: .5; }

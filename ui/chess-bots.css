@@ -1,0 +1,121 @@
+/* Chess Online > Bots (iOS c3c04a1 ChessBotsView / ChessBotGameView). The board, the header,
+   the hero, the cards and the end overlay are Chess Online's own (.chess-board, .chess-t-*, in
+   styles.css); what is here is only what the bots add: their faces, stars, records, the Play as
+   picker, the on-chain bar and the move list. */
+
+/* --- A bot's face: initials on its gradient, its level in a badge (ChessBotAvatar) --- */
+.chess-bot-avatar {
+  --size: 44px;
+  position: relative; flex: 0 0 var(--size); width: var(--size); height: var(--size);
+  border-radius: 50%; display: grid; place-items: center;
+  background: linear-gradient(to bottom, var(--from), var(--to));
+}
+.chess-bot-initials {
+  font-size: calc(var(--size) * .36); font-weight: 900; line-height: 1; color: #fff;
+  text-shadow: 0 1px 1px rgba(0,0,0,.25); letter-spacing: 0;
+}
+.chess-bot-badge {
+  position: absolute; right: 0; bottom: 0;
+  width: calc(var(--size) * .36); height: calc(var(--size) * .36); border-radius: 50%;
+  display: grid; place-items: center; box-sizing: border-box;
+  font-size: calc(var(--size) * .2); font-weight: 900; line-height: 1;
+  color: var(--text); background: var(--panel, #1c1c1e); border: 1.5px solid var(--to);
+}
+
+/* Five stars, `level` of them filled (ChessBotLevelStars). */
+.chess-bot-stars { display: inline-flex; gap: 2px; }
+.chess-bot-stars svg { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linejoin: round; opacity: .5; }
+.chess-bot-stars svg.on { fill: var(--ios-orange); stroke: var(--ios-orange); opacity: 1; }
+
+/* "3 W  1 L  0 D" (ChessBotRecordLine). */
+.chess-bot-record { display: inline-flex; gap: 8px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chess-bot-record .w { color: var(--ios-green); }
+.chess-bot-record .l { color: var(--ios-red); }
+.chess-bot-record .d { color: var(--muted); }
+
+/* --- The ladder --- */
+.chess-bot-body { align-items: stretch; }
+.chess-bot-card {
+  display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px;
+  border: 1px solid var(--card-border, rgba(255,255,255,.08)); border-radius: 20px;
+  background: var(--surface-1, rgba(255,255,255,.04)); color: inherit; text-align: left; cursor: pointer; font: inherit;
+}
+.chess-bot-card:not(:disabled):hover { background: var(--surface-2, rgba(255,255,255,.07)); }
+.chess-bot-card:disabled { cursor: default; opacity: .6; }
+.chess-bot-card:disabled .chess-bot-avatar { filter: grayscale(1); }
+.chess-bot-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.chess-bot-card-main strong { max-width: 100%; font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chess-bot-card-main small { font-size: 15px; color: var(--muted); }
+.chess-bot-card-main .chess-bot-unlock { font-size: 12px; font-weight: 600; color: var(--muted); }
+.chess-bot-card-trailing svg { width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* --- One bot before a game --- */
+.chess-bot-hero { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 20px 16px 0; }
+.chess-bot-hero h2 { margin: 0; font-size: 22px; }
+.chess-bot-hero .chess-bot-level { font-size: 15px; font-weight: 600; color: var(--muted); }
+.chess-bot-hero p { margin: 4px 0 0; padding: 0 8px; max-width: 420px; font-size: 15px; color: var(--muted); }
+.chess-bot-panel {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px; border-radius: 16px;
+  background: var(--surface-1, rgba(255,255,255,.04)); border: 1px solid var(--card-border, rgba(255,255,255,.08));
+}
+.chess-bot-panel.row { flex-direction: row; align-items: center; justify-content: space-between; }
+.chess-bot-panel > strong { font-size: 15px; font-weight: 600; }
+.chess-bot-fee { display: flex; align-items: flex-start; gap: 10px; padding: 0 8px; margin: 0; font-size: 13px; color: var(--muted); }
+.chess-bot-fee svg, .chess-bot-chain svg.link { flex: 0 0 18px; width: 18px; height: 18px; fill: none; stroke: var(--kaspa-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.chess-bot-play { width: 100%; padding: 14px 0; border-radius: 16px; font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- The game --- */
+.chess-bot-game-head { display: flex; align-items: center; gap: 12px; }
+.chess-bot-game-head .chess-bot-card-main strong { font-size: 17px; }
+.chess-bot-game-head .chess-bot-card-main small { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chess-bot-status { margin: 0; font-size: 15px; font-weight: 600; }
+.chess-bot-status.muted { color: var(--muted); }
+.chess-bot-status.error { color: var(--ios-red); }
+.chess-bot-spinner {
+  flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid var(--line); border-top-color: var(--muted);
+  animation: chess-bot-spin .8s linear infinite;
+}
+.chess-bot-spinner.small { width: 14px; height: 14px; }
+@keyframes chess-bot-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chess-bot-spinner { animation-duration: 2.4s; } }
+
+/* The king in check, tinted red (iOS checkedKing); the last move and the selection draw over it. */
+.chess-bot-board .chess-sq.check { background-image: linear-gradient(rgba(255, 59, 48, .45), rgba(255, 59, 48, .45)); }
+.chess-bot-board.locked .chess-sq { cursor: default; }
+
+/* How much of the game is on chain (chainBar). */
+.chess-bot-chain {
+  display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: 12px;
+  background: var(--surface-1, rgba(255,255,255,.04)); border: 1px solid var(--card-border, rgba(255,255,255,.08));
+}
+.chess-bot-chain-row { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; }
+.chess-bot-chain-label { flex: 1; min-width: 0; }
+.chess-bot-chain-row svg.ok { width: 18px; height: 18px; color: var(--ios-green); }
+.chess-bot-retry { border: 0; background: transparent; color: var(--kaspa-ink); font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; padding: 2px 4px; }
+.chess-bot-chain-error { margin: 0; font-size: 11px; color: var(--ios-red); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* The moves in short notation, numbered in pairs, following the newest (moveList). */
+.chess-bot-moves {
+  display: flex; gap: 14px; overflow-x: auto; scrollbar-width: none; padding: 0 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.chess-bot-moves::-webkit-scrollbar { display: none; }
+.chess-bot-moves .pair { display: inline-flex; gap: 5px; }
+.chess-bot-moves .num, .chess-bot-moves .empty { color: var(--muted); }
+.chess-bot-moves .empty { font-family: inherit; }
+
+/* End of game: Chess Online's overlay, with the bots' buttons (endOverlay). */
+.chess-bot-end .chess-t-end-card { padding: 24px; gap: 10px; max-width: 340px; }
+.chess-bot-end .chess-t-end-card > small { font-size: 15px; }
+.chess-bot-end.won .chess-t-end-icon svg { stroke: var(--ios-orange); }
+.chess-bot-end.drawn .chess-t-end-icon svg { stroke: rgba(255,255,255,.7); }
+.chess-bot-unlocked { font-size: 15px; font-weight: 600; color: var(--ios-orange); }
+.chess-bot-end-actions { display: flex; gap: 10px; width: 100%; margin-top: 6px; }
+.chess-bot-end-actions button { flex: 1; padding: 10px 0; border-radius: 12px; font-size: 15px; font-weight: 600; }
+.chess-bot-end-actions .chess-bot-done { color: #fff; background: rgba(255,255,255,.2); }
+.chess-bot-see { border: 0; background: transparent; color: rgba(255,255,255,.8); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; padding: 4px 8px; }
+
+/* The promotion card closes when the board around it is clicked (iOS sheet swiped away). */
+.chess-bot-promo { cursor: pointer; }
+.chess-bot-promo .chess-promo-card { cursor: default; }

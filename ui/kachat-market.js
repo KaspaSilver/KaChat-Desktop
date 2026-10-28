@@ -596,6 +596,9 @@ function screen() {
       marketEl.dataset.kmktBound = "1";
       marketEl.addEventListener("click", onMarketClick);
       marketEl.addEventListener("input", onMarketInput);
+      marketEl.addEventListener("touchstart", onMarketTouchStart, { passive: true });
+      marketEl.addEventListener("touchend", onMarketTouchEnd, { passive: true });
+      marketEl.addEventListener("touchcancel", () => { pageSwipe = null; }, { passive: true });
     }
   }
   return marketEl;
@@ -652,6 +655,64 @@ function goHome() {
   if (marketEl) marketEl.scrollTop = state.homeScroll;
 }
 
+/** Shows one of the home's tabs (Marketplace, Available, Expired, Activity): its tab button
+ *  selected and its page under the tabs. */
+function selectPage(page) {
+  if (!marketEl || page === state.page || !PAGES.some((p) => p.id === page)) return;
+  state.page = page;
+  marketEl.querySelectorAll("[data-kmkt-page]").forEach((button) => {
+    const on = button.dataset.kmktPage === page;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-selected", String(on));
+  });
+  const body = marketEl.querySelector("[data-kmkt-page-body]");
+  if (body) body.innerHTML = pageHtml();
+}
+
+// Swipe left / right anywhere on the screen to the next / previous tab (iOS 040f91a
+// KachatMarketView.pageSwipe, "as on the Chess screen"): judged when the finger lifts, on a move
+// more than 50 px across and more than 1.5 times as far across as up or down. The touch is only
+// measured, never claimed (passive listeners, nothing prevented - iOS's simultaneousGesture), so
+// the page keeps scrolling up and down under it and a tap stays a tap. Touch only: a mouse drag
+// selects text, and the tabs are right there. Not from a text field or from a row that scrolls
+// sideways itself (the featured strip), whose drags are their own.
+const PAGE_SWIPE_MIN_PX = 50;
+const PAGE_SWIPE_RATIO = 1.5;
+/** the touch a page swipe is following: { id, x, y } */
+let pageSwipe = null;
+
+function scrollsSideways(target) {
+  for (let el = target; el && el !== marketEl; el = el.parentElement) {
+    if (el.scrollWidth > el.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(el).overflowX)) return true;
+  }
+  return false;
+}
+
+function onMarketTouchStart(event) {
+  pageSwipe = null;
+  // one finger, on the home's tabs (a name's detail or a listing has no tabs)
+  if (event.touches.length !== 1 || state.view !== "home") return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || target.closest("input, textarea, select, [contenteditable]") || scrollsSideways(target)) return;
+  const t = event.touches[0];
+  pageSwipe = { id: t.identifier, x: t.clientX, y: t.clientY };
+}
+
+function onMarketTouchEnd(event) {
+  const start = pageSwipe;
+  pageSwipe = null;
+  if (!start || state.view !== "home" || event.touches.length) return;
+  const t = [...event.changedTouches].find((touch) => touch.identifier === start.id);
+  if (!t) return;
+  const dx = t.clientX - start.x;
+  const dy = t.clientY - start.y;
+  if (!(Math.abs(dx) > PAGE_SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy) * PAGE_SWIPE_RATIO)) return;
+  const index = PAGES.findIndex((p) => p.id === state.page);
+  if (index < 0) return;
+  if (dx < 0 && index + 1 < PAGES.length) selectPage(PAGES[index + 1].id);
+  else if (dx > 0 && index > 0) selectPage(PAGES[index - 1].id);
+}
+
 function onMarketClick(event) {
   const target = event.target;
   if (target.closest("[data-kmkt-back]")) { goHome(); return; }
@@ -661,19 +722,7 @@ function onMarketClick(event) {
   if (target.closest("[data-kl-claims]")) { openClaimsList("market"); return; }
 
   const tab = target.closest("[data-kmkt-page]");
-  if (tab) {
-    const page = tab.dataset.kmktPage;
-    if (page === state.page) return;
-    state.page = page;
-    marketEl.querySelectorAll("[data-kmkt-page]").forEach((button) => {
-      const on = button.dataset.kmktPage === page;
-      button.classList.toggle("active", on);
-      button.setAttribute("aria-selected", String(on));
-    });
-    const body = marketEl.querySelector("[data-kmkt-page-body]");
-    if (body) body.innerHTML = pageHtml();
-    return;
-  }
+  if (tab) { selectPage(tab.dataset.kmktPage); return; }
 
   if (liveHubIsLive() && liveHubClick(event)) return;
 

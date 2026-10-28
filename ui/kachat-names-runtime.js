@@ -64,7 +64,8 @@ export function initKachatNamesRuntime(engine, { wallet = null, onSubmitted = nu
     isEnabled: () => KachatNamesService.isLaunched,
     getUtxosByAddresses: (addresses) => engine.utxosForRegistry(addresses),
     restBase: () => getEndpoint("kaspaApi"),
-    indexerBase: () => getEndpoint("kasiaIndexer"),
+    // Connection Settings > Domains' own field, apart from the message indexer (iOS 7abc06e8).
+    indexerBase: () => getEndpoint("kachatNamesIndexer"),
     // An indexer more than ~1 minute behind the network is skipped (iOS 7aa6c6d).
     virtualDaaScore: async () => (await engine.currentDagPoint()).virtualDaaScore,
     // the walker's cache is per network (registryCacheKeyFor the manifest's network, iOS ef6b21e)
@@ -108,7 +109,7 @@ function initProfilesOnly(engine) {
     isEnabled: () => false,
     getUtxosByAddresses: null,
     restBase: () => "",
-    indexerBase: () => getEndpoint("kasiaIndexer"),
+    indexerBase: () => getEndpoint("kachatNamesIndexer"),
     storage: localStorageAdapter,
   });
   const actions = new KachatNamesActions({ engine, service, registry });

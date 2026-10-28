@@ -13,6 +13,10 @@ import { confirmDialog, promptDialog, chooseDialog } from "./dialogs.js";
 import { setServiceScanWanted } from "./broadcasts.js";
 import { KAS_UNIT } from "../engine/network.js";
 import { getEndpoint } from "../engine/endpoints.js";
+import {
+  initChessBots, openChessBots, renderChessBots, afterChessBotsRender, chessBotsClick, chessBotsMayLeave,
+  resetChessBotsForAccount, ICON_CPU,
+} from "./chess-bots.js";
 
 const ARENA_CACHE_KEY = "kachat-chess-arena-v1";   // device-wide: the arena is the same for every wallet
 const ARENA_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -70,6 +74,7 @@ let queuedPublicRoomId = null;
 let joinFeeText = null;               // "0.0017 KAS" once estimated this session
 
 // Navigation. mode: "duel" | "tournament". tab: play | active | finished | leaderboard.
+// name "bots": Play > Bots (ui/chess-bots.js paints and drives its own screens).
 let view = { name: "home", mode: "duel", tab: "play", tournamentId: null, gameId: null };
 let autoOpenedGameId = null;
 let spectatorSwitchedFor = null;  // the player's game the board-watching spectator was sent to the bracket for
@@ -699,6 +704,7 @@ function render() {
     case "game": html = renderGame(); break;
     case "tournament": html = renderTournament(); break;
     case "kind": html = renderKind(); break;
+    case "bots": html = renderChessBots(); break;
     default: html = renderHome();
   }
   // The chat composer survives a repaint: its draft, focus and caret come back on the new node.
@@ -708,6 +714,7 @@ function render() {
   screenEl.innerHTML = html;
   const body = screenEl.querySelector(".chess-t-body");
   if (body) body.scrollTop = y;
+  if (view.name === "bots") afterChessBotsRender(screenEl);
   for (const [key, text] of Object.entries(drafts)) {
     const input = screenEl.querySelector(`[data-chess-t-chat-input="${key}"]`);
     if (input && !input.value) input.value = text;
@@ -769,6 +776,11 @@ function renderHome() {
       <button class="chess-t-game-card" type="button" data-chess-t-mode="tournament">
         <span class="chess-t-game-card-icon">${ICON_TROPHY_FILLED}</span>
         <span class="chess-t-row-main"><strong>Tournament</strong><small>Eight players, single elimination: quarterfinals, semifinals, final. Public rooms fill as players arrive; private ones by code.</small></span>
+        <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
+      </button>
+      <button class="chess-t-game-card" type="button" data-chess-t-bots>
+        <span class="chess-t-game-card-icon">${ICON_CPU}</span>
+        <span class="chess-t-row-main"><strong>Bots</strong><small>Five bots, level 1 to 5, from Kaspa Silver to Yonatan Sompolinsky. Beat one to unlock the next. Every move on Kaspa.</small></span>
         <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
       </button>
       ${errorHtml()}
@@ -1535,6 +1547,16 @@ function tapSquare(file, rank) {
 }
 
 function onClick(event) {
+  // The bots' screens are their own (ui/chess-bots.js), Back included.
+  if (view.name === "bots") { chessBotsClick(event); return; }
+  if (event.target.closest("[data-chess-t-bots]")) {
+    view = { ...view, name: "bots", tournamentId: null, gameId: null };
+    selectedSquare = null;
+    pendingPromotion = null;
+    openChessBots();
+    render();
+    return;
+  }
   const withBusy = (task) => { if (busy) return; busy = true; render(); task().catch(() => {}).finally(() => { busy = false; render(); }); };
   if (event.target.closest("[data-chess-t-back]")) {
     // While a player's game is on, leaving means resigning - and it asks.
@@ -1668,6 +1690,11 @@ export function initChessTournaments(dependencies) {
   deps = dependencies;
   screenEl = document.querySelector("[data-chess-tournaments]");
   if (!screenEl) return;
+  initChessBots({
+    deps,
+    render: () => { if (view.name === "bots") render(); },
+    exit: () => { view = { ...view, name: "home", tournamentId: null, gameId: null }; render(); },
+  });
   loadCache();
   reduceArena();
   screenEl.addEventListener("click", onClick);
@@ -1713,6 +1740,8 @@ export function showChessTournaments() {
  */
 export async function chessTournamentsMayLeave() {
   if (!active) return true;
+  // A bot game on: leaving means resigning, and it asks (ui/chess-bots.js).
+  if (view.name === "bots") return chessBotsMayLeave();
   if (view.name === "waiting") return false;
   if (view.name === "game" && isLockedIn()) {
     const t = tournaments[view.tournamentId];
@@ -1735,6 +1764,7 @@ export function hideChessTournaments() {
 }
 
 export function resetChessTournamentsForAccount() {
+  resetChessBotsForAccount();
   pendingMoveGames.clear();
   claimedGames.clear();
   pendingChat = [];

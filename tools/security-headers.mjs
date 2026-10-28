@@ -17,7 +17,7 @@
 //               price APIs and the public-node resolver are all user-configurable (Settings >
 //               Connectivity), and the wRPC node is any wss:// the resolver hands out or the user
 //               types. Same-origin covers the /nc-proxy relay (Nextcloud, Talk, link previews).
-//   worker-src  'self': the service worker (public/sw.js). The app starts no other workers.
+//   worker-src  'self': the service worker (public/sw.js) and Chess Online's bot search (engine/chess-bot-worker.js).
 //   frame-src   'none': the app embeds no frames.
 //   frame-ancestors 'none' + X-Frame-Options: DENY: nobody may frame the wallet (clickjacking).
 //

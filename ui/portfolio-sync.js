@@ -458,3 +458,217 @@ export function stampPortfolioChanges(previous, current, now) {
   ];
   return { changed: stamped || tombstones.length > 0, tombstones };
 }
+
+// ---------------------------------------------------------------------------------------------
+// CSV import/export (CoinMarketCap "Transaction History" format, iOS PortfolioViewModel 59593af)
+// ---------------------------------------------------------------------------------------------
+//
+// Column order matches CoinMarketCap's export exactly:
+// `Date (UTC±H:MM),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes`, so a
+// CoinMarketCap file imports unmodified. An export from here adds one last column, `Portfolio`,
+// with the portfolio's name on every row, so an import puts the rows back into the portfolio of
+// that name. Here rather than in ui/portfolio.js so tools/test-portfolio-csv.mjs runs it under
+// node; it works on Desktop's own store shape ({ activeId, portfolios: [{ id, name, createdAt,
+// updatedAt?, transactions: [...] }] }, rows in KAS).
+
+export const PORTFOLIO_CSV_COLUMN = "Portfolio";
+const CSV_HEADER = `Date (UTC+0:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes,${PORTFOLIO_CSV_COLUMN}`;
+
+/** Splits a CSV document into records of fields (RFC 4180, iOS parseCsvRecords): commas and
+ *  line breaks inside double quotes belong to the field, "" inside quotes is one literal quote,
+ *  and a line break outside quotes - LF, CRLF or CR - ends the record. Blank lines yield no
+ *  record. Whole records rather than lines, because a note can hold line breaks, which the
+ *  export writes inside its quotes - splitting the file on every newline first cut such a row
+ *  in two. */
+export function parsePortfolioCsvRecords(content) {
+  const text = String(content ?? "");
+  const records = [];
+  let fields = [];
+  let current = "";
+  let inQuotes = false;
+  const endRecord = () => {
+    fields.push(current);
+    if (!(fields.length === 1 && !fields[0].trim())) records.push(fields);
+    fields = [];
+    current = "";
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { current += '"'; i += 1; }
+        else inQuotes = false;
+      } else {
+        current += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      fields.push(current);
+      current = "";
+    } else if (c === "\r" || c === "\n") {
+      if (c === "\r" && text[i + 1] === "\n") i += 1; // CRLF is one line ending
+      endRecord();
+    } else {
+      current += c;
+    }
+  }
+  if (current || fields.length) endRecord();
+  return records;
+}
+
+/** CoinMarketCap writes thousands separators ("10,597.25"). */
+function parseLenientDouble(raw) {
+  const value = Number(String(raw ?? "").trim().replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+/** CoinMarketCap bakes the exporter's UTC offset into the date column header, e.g.
+ *  "Date (UTC-4:00)" — parsed once so every row's timestamp is interpreted correctly. */
+function parseHeaderUtcOffsetMinutes(header) {
+  const match = /UTC([+-]?\d+):(\d+)/i.exec(header || "");
+  if (!match) return 0;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const sign = hours < 0 || match[1].startsWith("-") ? -1 : 1;
+  return sign * (Math.abs(hours) * 60 + minutes);
+}
+
+const csvQuoted = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+
+/** One portfolio's rows as the CSV text, oldest first, its name in the last column. */
+export function portfolioCsvText(portfolio) {
+  const rows = [...(portfolio?.transactions || [])].sort((a, b) => a.timestamp - b.timestamp);
+  const pad = (n) => String(n).padStart(2, "0");
+  let csv = `${CSV_HEADER}\n`;
+  for (const tx of rows) {
+    const d = new Date(tx.timestamp);
+    const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+    const amount = Number(tx.amountKas) || 0;
+    const fiat = Number(tx.fiatValue) || 0;
+    const perKas = amount !== 0 ? fiat / amount : 0;
+    const kind = tx?.type === "sell" || tx?.type === "transfer" ? tx.type : "buy";
+    csv += `"${date}","KAS","${kind}","${perKas}","${amount}","${fiat}","0.00","USD",${csvQuoted(tx.notes)},${csvQuoted(portfolio?.name)}\n`;
+  }
+  return csv;
+}
+
+/** Desktop's untouched seed (rows live inside their portfolio here). */
+function isPristineDesktopSeed(p, fees) {
+  return isPristinePortfolioSeed(p, (p.transactions || []).map(() => ({ portfolioId: p.id })), fees);
+}
+
+/**
+ * Reads a CSV into `state` (in place). A row whose timestamp exactly matches an existing row of
+ * the portfolio it goes into replaces that row (same id, new data), so re-importing a corrected
+ * export updates the ledger instead of piling up copies. A fee in USD is folded into the total:
+ * added for buys, subtracted for sells.
+ *
+ * Which portfolio (iOS importCsv / resolveImportPortfolio): a row's `Portfolio` column names it.
+ * The portfolio of that name is used (any case), else the untouched "Portfolio 1" takes the name,
+ * else a new one is made - unless the account is at `maxPortfolios`, when the active portfolio
+ * gets the rows. A row with no name (a CoinMarketCap file, or an export from before the column)
+ * goes into the active portfolio. The first portfolio imported into becomes the active one.
+ *
+ * Returns { count, portfolioIds, portfolioNames } - the portfolios in file order.
+ */
+export function importPortfolioCsv(state, content, { fees = [], maxPortfolios = 5, newId = newPortfolioUuid, now = Date.now() } = {}) {
+  const empty = { count: 0, portfolioIds: [], portfolioNames: [] };
+  const active = state?.portfolios?.find((p) => p.id === state.activeId);
+  if (!active) return empty;
+  const records = parsePortfolioCsvRecords(content);
+  if (!records.length) return empty;
+  const headerFields = records.shift();
+  const offsetMinutes = parseHeaderUtcOffsetMinutes(headerFields.join(","));
+  const nameColumnIndex = headerFields.findIndex((f) => String(f).trim().toLowerCase() === PORTFOLIO_CSV_COLUMN.toLowerCase());
+  const nameColumn = nameColumnIndex >= 0 ? nameColumnIndex : null;
+
+  const resolve = (name) => {
+    const wanted = name.toLowerCase();
+    const existing = state.portfolios.find((p) => String(p.name ?? "").trim().toLowerCase() === wanted);
+    if (existing) return existing;
+    if (state.portfolios.length === 1 && isPristineDesktopSeed(state.portfolios[0], fees)) {
+      state.portfolios[0].name = name;
+      return state.portfolios[0];
+    }
+    if (state.portfolios.length >= maxPortfolios) return null;
+    // Added without switching to it; the import picks the active portfolio at the end.
+    const created = { id: newId(), name, createdAt: now, transactions: [] };
+    state.portfolios.push(created);
+    return created;
+  };
+  // Per named portfolio, where its rows go; resolved once per name.
+  const targetByName = new Map();
+  const target = (fields) => {
+    if (nameColumn === null || fields.length <= nameColumn) return active;
+    const name = String(fields[nameColumn]).trim();
+    if (!name) return active;
+    const key = name.toLowerCase();
+    if (!targetByName.has(key)) targetByName.set(key, resolve(name) || active);
+    return targetByName.get(key);
+  };
+
+  const indexByTimestamp = new Map(); // portfolio id -> Map(timestamp -> index in its rows)
+  const indexFor = (portfolio) => {
+    if (!indexByTimestamp.has(portfolio.id)) {
+      const index = new Map();
+      (portfolio.transactions || []).forEach((tx, i) => index.set(tx.timestamp, i));
+      indexByTimestamp.set(portfolio.id, index);
+    }
+    return indexByTimestamp.get(portfolio.id);
+  };
+
+  let count = 0;
+  const targets = [];
+  for (const fields of records) {
+    if (fields.length < 6) continue;
+    if (String(fields[1]).trim().toUpperCase() !== "KAS") continue;
+    const typeRaw = String(fields[2]).trim().toLowerCase();
+    // CoinMarketCap writes "Transfer In" / "Transfer Out"; both are a transfer here.
+    const type = typeRaw === "buy" || typeRaw === "sell" ? typeRaw : typeRaw.startsWith("transfer") ? "transfer" : null;
+    if (!type) continue;
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(String(fields[0]).trim());
+    if (!dateMatch) continue;
+    const [, y, mo, d, h, mi, s] = dateMatch.map(Number);
+    const timestamp = Date.UTC(y, mo - 1, d, h, mi, s) - offsetMinutes * 60_000;
+    const kas = parseLenientDouble(fields[4]);
+    const totalValue = parseLenientDouble(fields[5]);
+    if (kas === null || totalValue === null) continue;
+
+    let fiatValue = totalValue;
+    if (fields.length > 7 && String(fields[7]).trim().toUpperCase() === "USD") {
+      const fee = parseLenientDouble(fields[6]);
+      if (fee !== null) {
+        if (type === "buy") fiatValue += fee;
+        else if (type === "sell") fiatValue = Math.max(fiatValue - fee, 0);
+        // transfer: no fee - it counts for nothing anyway.
+      }
+    }
+    const notes = fields.length > 8 && fields[8] && nameColumn !== 8 ? fields[8] : null;
+    const portfolio = target(fields);
+    if (!targets.includes(portfolio)) targets.push(portfolio);
+    portfolio.transactions ||= [];
+    const index = indexFor(portfolio);
+    const existingIndex = index.get(timestamp);
+    if (existingIndex !== undefined) {
+      const existing = portfolio.transactions[existingIndex];
+      portfolio.transactions[existingIndex] = { ...existing, type, amountKas: kas, fiatValue, timestamp, notes };
+    } else {
+      portfolio.transactions.push({ id: newId(), type, amountKas: kas, fiatValue, timestamp, notes });
+      index.set(timestamp, portfolio.transactions.length - 1);
+    }
+    count += 1;
+  }
+  // Show where the rows went.
+  if (count > 0 && targets.length) state.activeId = targets[0].id;
+  return { count, portfolioIds: targets.map((p) => p.id), portfolioNames: targets.map((p) => p.name) };
+}
+
+/** The toast after a CSV import (iOS importMessage): how many rows, and into which portfolios. */
+export function portfolioCsvImportMessage(result) {
+  const count = result?.count || 0;
+  if (count <= 0) return "Import failed. Check the CSV format";
+  const rows = count === 1 ? "1 transaction" : `${count} transactions`;
+  const names = result.portfolioNames || [];
+  return names.length ? `Imported ${rows} into ${names.join(", ")}` : `Imported ${rows}`;
+}

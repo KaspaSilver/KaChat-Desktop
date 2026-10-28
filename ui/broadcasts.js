@@ -1,7 +1,8 @@
 // Broadcasts tab UI — desktop port of the iOS/Android 4.0 broadcast rooms. Channel list
-// (featured rooms pinned + joinable customs), room view with indexer backfill (once on open +
-// 8s polling while open), per-room hidden users, the "Other Languages" disclosure of curated
-// language rooms, and a live connection dot in the room header. Feature parity with mobile:
+// (featured rooms pinned, then every other default room and the joinable customs), room view with
+// indexer backfill (once on open + 8s polling while open), per-room hidden users, the Public Chats
+// settings sheet (a switch per default room, and the Languages switch), and a live connection dot
+// in the room header. Feature parity with mobile:
 // link previews in bubbles (same progressive Nextcloud probe as 1:1), reactions (same
 // cross-platform JSON payload as 1:1, sent as normal broadcast messages), and voice notes
 // via Nextcloud media upload.
@@ -80,9 +81,6 @@ let listenByChannel = {};
 // True while the Broadcasts tab is the visible tab. An open room only counts as "wanted"
 // (and only polls) while its screen is actually on screen.
 let tabVisible = false;
-// "Other Languages" disclosure under Popular. Collapsed by default: eleven language rooms
-// would bury the two Popular rooms and the user's own channels under a wall of list.
-let languagesExpanded = false;
 // Only messages arriving AFTER app launch may ping — backfilled history never notifies.
 const broadcastSessionStartMs = Date.now();
 let messageCache = {}; // { [channel]: [{ txId, senderAddress, content, blockTime, status? }] }
@@ -191,6 +189,17 @@ export function deleteSelectedRooms() {
 function listedChannels() {
   return [...new Set([...FEATURED_BROADCAST_CHANNELS, ...joinedChannels])].filter((name) => curatedShown(name) && !isServiceBroadcastChannel(name));
 }
+/** A room's place in the list (iOS 865c9ab PublicChatService.listedChannels sortKey): its newest
+ *  message; a language room nobody has written in yet keeps its place in LANGUAGE_BROADCAST_CHANNELS,
+ *  after every room with messages (they are all joined at the same moment, so their join times would
+ *  order them at random); anything else by when it was joined. */
+function roomActivityAt(name) {
+  const latest = Number(lastVisibleMessage(name)?.blockTime || 0);
+  if (latest) return latest;
+  const languageIndex = LANGUAGE_BROADCAST_CHANNELS.indexOf(name);
+  if (languageIndex >= 0) return -(languageIndex + 1);
+  return Number(joinedAtByChannel[name] || 0);
+}
 
 // --- The Chats circles row (iOS a062577 / f90a70a) ---------------------------------------------
 // The rooms show as circles above the Chats list, beside the group chats; the app draws them and
@@ -205,7 +214,7 @@ export function chatCircleRooms() {
   return listedChannels().map((name) => ({
     name,
     unread: unreadFor(name),
-    lastAt: Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0),
+    lastAt: roomActivityAt(name),
     notify: Boolean(notifyByChannel[name]),
     indexed: isCuratedBroadcastChannel(name), // a default room: switched off, not deleted
     // the indexer keeps it, so the bell covers it with the room closed (iOS 21c480d)
@@ -275,7 +284,7 @@ export function setServiceScanWanted(channels) {
 }
 
 // Default (curated) rooms switched off in Public Chats settings (iOS d5c7613): gone from the
-// list and from Other Languages, never notifying, not counted. Per wallet.
+// list, never notifying, not counted. Per wallet.
 const HIDDEN_CURATED_KEY = "kachat-broadcast-hidden-curated-v1";
 let hiddenCurated = new Set();
 function loadHiddenCurated() {
@@ -284,8 +293,9 @@ function loadHiddenCurated() {
 }
 function curatedShown(name) { return !hiddenCurated.has(name); }
 /** What a default room's switch in Public Chats settings reads (iOS d128773 isCuratedChannelOn):
- *  on only when the room is in the list and the Chats circles row - joined (the featured rooms
- *  always are) and not switched off. A language room never opened reads off. */
+ *  on only when the room is in the list and the Chats circles row - joined and not switched off.
+ *  Every default room is joined (loadState, iOS 865c9ab), so in practice this is "not switched
+ *  off". */
 function curatedChannelOn(name) {
   return curatedShown(name) && (FEATURED_BROADCAST_CHANNELS.includes(name) || joinedChannels.includes(name));
 }
@@ -310,13 +320,35 @@ function setCuratedChannel(name, shown) {
   renderChannelList();
 }
 
+/** The Languages switch in Public Chats settings (iOS d37f64d anyLanguageChannelOn): on while at
+ *  least one language room is. */
+export function anyLanguageRoomOn() {
+  return LANGUAGE_BROADCAST_CHANNELS.some((name) => curatedChannelOn(name));
+}
+/** Every language room off at once (out of the list, bells off), or all back on - each then
+ *  switched off one by one if only some are wanted (iOS d37f64d setAllLanguageChannels). */
+export function setAllLanguageRooms(shown) {
+  if (!deps) return;
+  for (const name of LANGUAGE_BROADCAST_CHANNELS) {
+    if (curatedChannelOn(name) !== Boolean(shown)) setCuratedChannel(name, Boolean(shown));
+  }
+}
+
 /** Public Chats settings, behind the gear at the top right of the tab. */
 function openPublicChatsSettings() {
-  // iOS PublicChatsSettingsView: a Form titled "Public Chats" with Done, a Popular section with
-  // its footer, and an Other Languages section; each room a toggle with its language under it.
+  // iOS PublicChatsSettingsView (d37f64d): a Form titled "Public Chats" with Done, a Popular
+  // section with its footer, then the Languages switch - every language room off at once, and
+  // while it is on, each language with its own switch. Each room a toggle with its language under
+  // it. (It replaced the "Other Languages" section, and the list's Other Languages folder went in
+  // 865c9ab: every default room is listed.)
   const row = (name) => {
     const language = broadcastLanguageDisplayName(name);
     return `<label class="settings-toggle-row public-settings-row"><span class="settings-row-copy"><strong>#${deps.escapeHtml(name)}</strong>${language ? `<small>${deps.escapeHtml(language)}</small>` : ""}</span><span class="switch-control"><input type="checkbox" data-curated-room="${deps.escapeHtml(name)}" ${curatedChannelOn(name) ? "checked" : ""}><span></span></span></label>`;
+  };
+  const languagesCardHtml = () => {
+    const on = anyLanguageRoomOn();
+    return `<label class="settings-toggle-row public-settings-row"><span class="settings-row-copy"><strong>Languages</strong></span><span class="switch-control"><input type="checkbox" data-public-languages ${on ? "checked" : ""}><span></span></span></label>`
+      + (on ? LANGUAGE_BROADCAST_CHANNELS.map(row).join("") : "");
   };
   const host = document.createElement("div");
   host.className = "modal-backdrop broadcast-settings-backdrop";
@@ -334,8 +366,8 @@ function openPublicChatsSettings() {
           <p class="settings-group-footer">A room that is switched off no longer appears in Public Chats and never sends a notification. Switch it back on at any time.</p>
         </section>
         <section class="settings-group">
-          <p class="settings-group-label">Other Languages</p>
-          <div class="settings-list-card">${LANGUAGE_BROADCAST_CHANNELS.map(row).join("")}</div>
+          <div class="settings-list-card" data-public-languages-card>${languagesCardHtml()}</div>
+          <p class="settings-group-footer">Off takes every language room out of Public Chats. On, switch off the ones you don't want.</p>
         </section>
       </div>
     </section>`;
@@ -344,9 +376,21 @@ function openPublicChatsSettings() {
   host.addEventListener("click", (event) => {
     if (event.target === host || event.target.closest("[data-public-settings-close]")) close();
   });
+  const languagesCard = host.querySelector("[data-public-languages-card]");
   host.addEventListener("change", (event) => {
+    if (event.target.closest("[data-public-languages]")) {
+      setAllLanguageRooms(event.target.checked);
+      languagesCard.innerHTML = languagesCardHtml();
+      return;
+    }
     const input = event.target.closest("[data-curated-room]");
-    if (input) setCuratedChannel(input.dataset.curatedRoom, input.checked);
+    if (!input) return;
+    setCuratedChannel(input.dataset.curatedRoom, input.checked);
+    // The last language switched off turns Languages off and folds the list away, as iOS's
+    // `if anyLanguageChannelOn` does.
+    if (LANGUAGE_BROADCAST_CHANNELS.includes(input.dataset.curatedRoom) && !anyLanguageRoomOn()) {
+      languagesCard.innerHTML = languagesCardHtml();
+    }
   });
   host.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
 }
@@ -418,19 +462,48 @@ function loadState({ caches = true } = {}) {
     } catch { editsCache = {}; }
     cachesLoaded = true;
   }
-  // The two featured rooms are always present for every account (matches iOS/Android). The
-  // curated LANGUAGE rooms are deliberately NOT auto-joined - they are joined on first open or
-  // bell tap, so a user who wants none of them pays for none of them.
+  // Every default room is in Public Chats from the start (iOS 865c9ab ensureDefaultChannelsJoined):
+  // the two featured rooms always, and each language room unless it was switched off in Public
+  // Chats settings. They join with notifications off, which is what keeps them cheap: the
+  // closed-room sweep, the block scan and the push registration only cover rooms whose bell is
+  // on. (Desktop used to leave the language rooms unjoined, behind an "Other Languages" row.)
   // Like iOS PublicChatStore (joinedAt = Date() when a room is first stored), an auto-joined
-  // featured room is stamped too, so Room Info shows its "Joined" row.
+  // room is stamped too, so Room Info shows its "Joined" row.
   let stamped = false;
-  for (const name of FEATURED_BROADCAST_CHANNELS) {
+  for (const name of [...FEATURED_BROADCAST_CHANNELS, ...LANGUAGE_BROADCAST_CHANNELS]) {
+    if (!FEATURED_BROADCAST_CHANNELS.includes(name) && !curatedShown(name)) continue;
     if (!joinedChannels.includes(name)) joinedChannels.push(name);
     if (!joinedAtByChannel[name]) { joinedAtByChannel[name] = Date.now(); stamped = true; }
   }
   if (stamped) { try { saveJoinedAt(); } catch {} }
+  applyDefaultBellsOnce();
   migrateCachedReactionRows();
   pruneCache();
+}
+
+// #kaspa and #kachat-bugs start with notifications on, once per wallet (iOS 865c9ab
+// applyDefaultNotificationsOnce, key kaposts_broadcast_default_bells_<address>), so a bell the
+// user later switches off stays off. The owner's call: this deliberately overrides Desktop's
+// earlier "rooms quiet by default" (Build 51, 91fcc71, porting iOS 1ea3c45), which iOS itself
+// reversed in 865c9ab. The key is new, so every wallet - including one that had the bells on
+// before 91fcc71 and switched them off since - gets them on once more. A room switched off in
+// Public Chats settings is left alone.
+const DEFAULT_BELLS_APPLIED_KEY = "kaposts_broadcast_default_bells";
+function applyDefaultBellsOnce() {
+  // No wallet yet: accountScopedKey would fall back to the bare, unscoped key.
+  if (!deps?.engine?.address) return;
+  const key = deps.accountScopedKey(DEFAULT_BELLS_APPLIED_KEY);
+  try { if (localStorage.getItem(key) === "1") return; } catch { return; }
+  let changed = false;
+  for (const name of FEATURED_BROADCAST_CHANNELS) {
+    if (!curatedShown(name) || !joinedChannels.includes(name) || notifyByChannel[name]) continue;
+    notifyByChannel[name] = true;
+    changed = true;
+  }
+  try {
+    if (changed) saveNotify();
+    localStorage.setItem(key, "1");
+  } catch { /* fine: tried again on the next load */ }
 }
 
 /** Older caches stored reaction payload rows as normal messages — lift them into the
@@ -1042,14 +1115,11 @@ function bellButtonHtml(name) {
   return `<button class="broadcast-card-icon${on ? " active" : ""}" type="button" data-broadcast-notify="${deps.escapeHtml(name)}" title="${on ? "Notifications on" : "Notifications off"}" aria-label="Toggle notifications">${on ? BELL_ON_SVG : BELL_OFF_SVG}</button>`;
 }
 
-const GLOBE_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z"/></svg>`;
-const CHEVRON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
-
 // The rooms tab is a plain list of chat-style rows (iOS 83286b3): a # avatar, the room name,
 // the newest message with its sender and time, a bell-off mark, and an unread badge - #kaspa
-// and #kachat-bugs pinned on top, every other joined room below by latest activity. Language
-// rooms not opened yet sit behind an "Other Languages" row. Joining or creating a room is the
-// floating button's job on this tab (iOS 6639a0b).
+// and #kachat-bugs pinned on top, every other room below by latest activity (roomActivityAt).
+// Every default room is listed, so there is no "Other Languages" row any more (iOS 865c9ab).
+// Joining or creating a room is the floating button's job on this tab (iOS 6639a0b).
 function roomRowTime(ts) {
   if (!ts) return "";
   const date = new Date(ts);
@@ -1104,26 +1174,14 @@ function renderChannelList() {
   // The rooms are circles above the Chats list now (iOS a062577), drawn by the app: with no list
   // mounted, this only tells the app that a room's state changed, so the circles redraw.
   if (!listEl) { deps?.onUnreadChanged?.(); return; }
-  const latest = (name) => Number(lastVisibleMessage(name)?.blockTime || joinedAtByChannel[name] || 0);
   const others = joinedChannels
     .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name) && curatedShown(name) && !isServiceBroadcastChannel(name))
-    .sort((a, b) => latest(b) - latest(a));
-  const unopenedLanguages = LANGUAGE_BROADCAST_CHANNELS.filter((name) => !joinedChannels.includes(name) && curatedShown(name));
+    .sort((a, b) => roomActivityAt(b) - roomActivityAt(a));
   listEl.innerHTML = `
     ${FEATURED_BROADCAST_CHANNELS.filter(curatedShown).map((name) => roomRowHtml(name)).join("")}
     ${others.map((name) => roomRowHtml(name, isCuratedBroadcastChannel(name)
       ? { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` }
       : {})).join("")}
-    ${unopenedLanguages.length ? `
-      <button class="broadcast-room-row broadcast-languages-toggle${languagesExpanded ? " expanded" : ""}" type="button"
-              data-broadcast-languages-toggle aria-expanded="${languagesExpanded ? "true" : "false"}">
-        <span class="broadcast-room-row-avatar globe" aria-hidden="true">${GLOBE_SVG}</span>
-        <span class="broadcast-room-row-main">
-          <span class="broadcast-room-row-top"><strong>Other Languages</strong><span class="broadcast-room-row-time">${unopenedLanguages.length}</span></span>
-          <span class="broadcast-room-row-bottom"><span class="broadcast-room-row-preview">Rooms in other languages. Opening one adds it to your list.</span><span class="broadcast-languages-chevron">${CHEVRON_SVG}</span></span>
-        </span>
-      </button>
-      ${languagesExpanded ? unopenedLanguages.map((name) => roomRowHtml(name, { title: broadcastLanguageDisplayName(name) || `#${name}`, subtitle: `#${name}` })).join("") : ""}` : ""}
   `;
   deps.onUnreadChanged?.();
 }
@@ -2062,7 +2120,8 @@ function cancelVoiceRecordingIfActive() {
 function openRoom(channel) {
   if (normalizeBroadcastChannel(channel) !== activeChannel) releaseTypingFocus();
   activeChannel = normalizeBroadcastChannel(channel);
-  // Curated language rooms are not auto-joined, so opening one is what creates its row.
+  // Every default room is joined at load (iOS 865c9ab) unless it was switched off; a link or a
+  // notification can still open one that isn't, and opening it is what creates its row.
   if (activeChannel && isCuratedBroadcastChannel(activeChannel) && !joinedChannels.includes(activeChannel)) {
     joinedChannels.push(activeChannel);
     saveChannels();
@@ -2879,22 +2938,14 @@ export function initBroadcasts(dependencies) {
       return;
     }
 
-    // "Other Languages": the collapsed category of curated language rooms under Popular.
-    const languagesToggle = event.target.closest("[data-broadcast-languages-toggle]");
-    if (languagesToggle) {
-      event.stopPropagation();
-      languagesExpanded = !languagesExpanded;
-      renderChannelList();
-      return;
-    }
-
     // The bell: OS notifications for new messages in this channel.
     const notify = event.target.closest("[data-broadcast-notify]");
     if (notify) {
       event.stopPropagation();
       const name = notify.dataset.broadcastNotify;
-      // Curated language rooms are not auto-joined - the bell creates the row on demand, so
-      // the very first tap turns notifications ON rather than silently creating an off row.
+      // A default room that is not joined (switched off, or loaded before its wallet) gets its
+      // row from the bell, so the very first tap turns notifications ON rather than silently
+      // creating an off row.
       if (isCuratedBroadcastChannel(name) && !joinedChannels.includes(name)) {
         joinedChannels.push(name);
         saveChannels();

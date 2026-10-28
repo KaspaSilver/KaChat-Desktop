@@ -476,3 +476,8 @@ a.kl-receipt-txid:hover { background: var(--primary-08, var(--row-hover)); }
 .kl-route-failed strong { font-size: 17px; font-weight: 600; color: var(--text); }
 .kl-route-failed p { margin: 0; font-size: 15px; }
 .kl-route-loading { display: flex; justify-content: center; padding: 48px 0; }
+
+/* Under Claim Started on the swipe-up screen (iOS 5bab351 KachatClaimOutcome): the registration's
+   card, then why the app should stay open. */
+.kl-claim-outcome { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.kl-claim-outcome .kl-progress-note { margin: 0; text-align: center; }

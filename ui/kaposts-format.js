@@ -1,5 +1,5 @@
-// Pure text/time helpers for the KaPosts screens, kept out of ui/kaposts.js so they can be tested
-// in node (tools/test-kaposts-format.mjs). Each one names the iOS piece it mirrors.
+// Pure text/time and gesture helpers for the KaPosts screens, kept out of ui/kaposts.js so they can
+// be tested in node (tools/test-kaposts-format.mjs). Each one names the iOS piece it mirrors.
 
 /** Characters as the composer counts them: code points, so an emoji is one, not two UTF-16
  *  units (iOS counts `text.count`). */
@@ -81,4 +81,75 @@ export function kapostsNamedRelativeTime(timestampMs, now = Date.now(), locale =
   } catch {
     return `${Math.abs(value)} ${unit}${Math.abs(value) === 1 ? "" : "s"} ago`;
   }
+}
+
+// --- Feed menu, drawer and pager (iOS 865c9ab KaPostsFeedDrawer / KaPostsFeedPager) ---------------
+// The gesture arithmetic, kept here with the other pure helpers so node can test it; ui/kaposts.js
+// feeds it pointer positions and applies what comes back.
+
+/** What the feed's hamburger card lists, in iOS order (865c9ab SideMenuItem.feedMenu). Profile,
+ *  Notifications and Settings are dock tabs on iOS, so the card leaves them out. `key` is the
+ *  KaPosts section ui/kaposts.js opens for the row. */
+export const KAPOSTS_FEED_MENU = Object.freeze([
+  { key: "search", title: "Search" },
+  { key: "drafts", title: "Drafts" },
+  { key: "bookmarks", title: "Bookmarks" },
+  { key: "muted", title: "Muted" },
+  { key: "blocked", title: "Blocked" },
+  { key: "scheduled", title: "Scheduled" },
+]);
+
+/** How far a touch travels before it commits to one direction (iOS DragGesture(minimumDistance:
+ *  12), measured as a straight-line distance as SwiftUI does). */
+export const KAPOSTS_PAGER_LOCK_PX = 12;
+
+/** The axis a touch locks to: null until it has moved `threshold` px, then "x" when it went more
+ *  sideways than up or down (iOS `abs(t.width) > abs(t.height)`), else "y" - the list scrolling. */
+export function kapostsAxisLock(dx, dy, threshold = KAPOSTS_PAGER_LOCK_PX) {
+  if (Math.hypot(Number(dx) || 0, Number(dy) || 0) < threshold) return null;
+  return Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+}
+
+/** Where the pages sit under the finger: the finger's own offset, or a third of it past the first
+ *  or the last page, so the edge gives a little and then resists (iOS `t.width / 3`). */
+export function kapostsPagerOffset(selection, pageCount, dx) {
+  const pastEdge = (selection === 0 && dx > 0) || (selection === pageCount - 1 && dx < 0);
+  return pastEdge ? dx / 3 : dx;
+}
+
+/** Where a released drag would coast to - UIKit's projection at the normal deceleration rate
+ *  (0.998 per ms), the figure SwiftUI's `predictedEndTranslation` gives. `velocity` in px/ms. */
+export function kapostsProjectedTranslation(dx, velocity) {
+  const rate = 0.998;
+  return (Number(dx) || 0) + (Number(velocity) || 0) * (rate / (1 - rate));
+}
+
+/** The page a released drag settles on (iOS KaPostsFeedPager onEnded): one page on, past a third of
+ *  the width or on a flick that would coast past half of it; otherwise back where it was. A drag
+ *  that ended more up-and-down than sideways never changes the page. */
+export function kapostsPagerTarget({ selection, pageCount, dx, dy = 0, predicted = dx, width }) {
+  if (!(Math.abs(dx) > Math.abs(dy)) || !(width > 0)) return selection;
+  if ((dx < -width / 3 || predicted < -width / 2) && selection < pageCount - 1) return selection + 1;
+  if ((dx > width / 3 || predicted > width / 2) && selection > 0) return selection - 1;
+  return selection;
+}
+
+/** The card's width: most of the screen, with enough of the feed left showing to tap it closed
+ *  (iOS `min(width * 0.86, 440)`). */
+export function kapostsDrawerWidth(viewportWidth) {
+  return Math.min((Number(viewportWidth) || 0) * 0.86, 440);
+}
+
+/** Whether a drag on the open card closes it (iOS KaPostsFeedDrawer onEnded): dragged left by a
+ *  third of its width, or flicked so it would coast past half. Rightward drags never count. */
+export function kapostsDrawerShouldClose({ dx, predicted = dx, panelWidth }) {
+  return -dx > panelWidth / 3 || predicted < -panelWidth / 2;
+}
+
+/** The dim over the feed beside the card (iOS `0.45 * progress`): full while the card is open,
+ *  fading as it is dragged closed. */
+export function kapostsDrawerDim(dx, panelWidth) {
+  if (!(panelWidth > 0)) return 0;
+  const progress = Math.max(0, 1 + Math.min(0, Number(dx) || 0) / panelWidth);
+  return 0.45 * progress;
 }
